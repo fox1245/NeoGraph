@@ -1347,6 +1347,29 @@ json step_limited_program_document() {
         {"declared_budget_requirements", budget_requirements()}};
 }
 
+// #443: a Core graph of two nodes, the second of which runs a subgraph. The
+// subgraph's step counts toward the run's Core steps, so the run takes three
+// steps although the outer graph needs two.
+json subgraph_step_program_document() {
+    json definition{
+        {"schema_version", 1},
+        {"name", "main"},
+        {"channels", json{{"value", json{{"reducer", "runtime-overwrite"}, {"initial", ""}}}}},
+        {"nodes", json{{"first", json{{"type", "runtime-completed"}}},
+                       {"work", json{{"type", "runtime-subgraph-member"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "first"}},
+                               json{{"from", "first"}, {"to", "work"}},
+                               json{{"from", "work"}, {"to", "__end__"}}})},
+        {"conditional_edges", json::array()}};
+    return json{
+        {"program_schema_version", 1},
+        {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+        {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+        {"root",
+         json{{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
+        {"declared_budget_requirements", budget_requirements()}};
+}
+
 class LifecycleHookTool final : public Tool {
 public:
     explicit LifecycleHookTool(std::string value, bool block = false)
@@ -8267,10 +8290,50 @@ TEST(ProgramRuntimeTest, CoreStepLimitMapsToBudgetExhausted) {
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted);
     EXPECT_EQ(result.usage().core_steps, 1U);
     EXPECT_EQ(result.remaining_budget().max_core_steps, 0U);
+    // #443: the engine stopped the run at its grant, and the record says so.
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CORE_STEP_BUDGET");
+    EXPECT_EQ(result.failure()->witness["core_steps"],
+              (json{{"granted", 1}, {"used", 1}, {"over_by", 0}}));
     EXPECT_EQ(completed_calls.load(), 1U);
     const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
     ASSERT_TRUE(journal.has_value());
     EXPECT_EQ(journal->continuation.state, ContinuationState::BudgetExhausted);
+}
+
+TEST(ProgramRuntimeTest, ARunThatCompletesOverItsCoreStepGrantNamesTheBudget) {
+    completed_calls.store(0);
+
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit_document(subgraph_step_program_document());
+    auto            budget  = grant();
+    budget.max_core_steps   = 2;  // the outer graph needs two; its subgraph takes a third
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-step-overrun", {}});
+
+    // Both nodes ran, the second through its subgraph: the plan completed, and
+    // the grant was passed on the way.
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_detail(result);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_CORE_STEP_BUDGET");
+    EXPECT_EQ(result.failure()->witness["core_steps"],
+              (json{{"granted", 2}, {"used", 3}, {"over_by", 1}}));
+    EXPECT_EQ(result.usage().core_steps, 3U);
+    EXPECT_EQ(result.remaining_budget().max_core_steps, 0U);
+    const auto journal = fixture.journal->latest("tenant:runtime", result.run_id());
+    ASSERT_TRUE(journal.has_value());
+    EXPECT_EQ(journal->continuation.state, ContinuationState::BudgetExhausted);
+
+    // A grant that covers the three steps lets the same run complete.
+    budget.max_core_steps = 3;
+    const auto within = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-step-within", {}});
+    EXPECT_EQ(within.status(), ProgramTerminalStatus::Completed) << failure_detail(within);
+    EXPECT_FALSE(within.failure());
 }
 
 TEST(ProgramRuntimeTest, RejectsCoreStepBudgetThatCannotFitCoreRunConfig) {

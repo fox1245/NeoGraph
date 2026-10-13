@@ -1414,6 +1414,62 @@ TEST(ProgramProviderBinding, TheOvershootRecordSaysHowFarTheLastReplyWentOver) {
     EXPECT_EQ(peer->transport.load(), 2) << "the run stops at the step boundary after the overshoot";
 }
 
+// ---------------------------------------------------------------------------
+// #443: a run that goes over several budgets names every one of them
+//
+// The witness has an entry for each budget the run is over; the status and the
+// code are those of the first of them in the order of the RunBudget fields:
+// wall time, model tokens, money, Core steps.
+// ---------------------------------------------------------------------------
+
+TEST(ProgramProviderBinding, ARunThatCompletesOverItsTokensAndItsMoneyNamesBoth) {
+    // One call reserves 300 tokens and `hold` microunits, and is sent. Its
+    // reply is 1,200 tokens and costs 600 microunits more than the hold.
+    const auto hold = expected_hold(kModel, 100, 200);
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = [hold](int, const ProviderRequest&) {
+        return neograph::test::success("answer",
+                                       with_cost(final_usage(1'100, 100), (hold + 600) * 1'000));
+    };
+    auto options     = token_budget_options();
+    options.monetary = hold + 500;
+    Host       h(peer, options);
+    const auto result = h.run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "NG.BudgetExhausted") << "tokens come before money";
+    EXPECT_EQ(result.failure()->witness["model_tokens"],
+              (json{{"granted", 1'000}, {"used", 1'200}, {"over_by", 200}}));
+    EXPECT_EQ(result.failure()->witness["monetary"],
+              (json{{"granted", hold + 500}, {"used", hold + 600}, {"over_by", 100}}));
+    EXPECT_EQ(peer->transport.load(), 1);
+}
+
+TEST(ProgramProviderBinding, ARunStoppedOverItsTokensAndItsMoneyNamesBoth) {
+    // Two replies of 600 tokens and hold + 500 microunits each, with a budget of
+    // 1,000 tokens and 2 * hold + 500 microunits: the second call fits both
+    // (its reservation is made against what the first call was charged), and its
+    // reply takes the run over both, so the third call is never sent.
+    const auto hold = expected_hold(kModel, 100, 200);
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = [hold](int, const ProviderRequest&) {
+        return neograph::test::success("answer",
+                                       with_cost(final_usage(500, 100), (hold + 500) * 1'000));
+    };
+    auto options     = token_budget_options();
+    options.monetary = 2 * hold + 500;
+    Host       h(peer, options);
+    const auto result = h.run(Shape::ThreeLlmsInARow);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "NG.BudgetExhausted");
+    EXPECT_EQ(result.failure()->witness["model_tokens"],
+              (json{{"granted", 1'000}, {"used", 1'200}, {"over_by", 200}}));
+    EXPECT_EQ(result.failure()->witness["monetary"],
+              (json{{"granted", 2 * hold + 500}, {"used", 2 * hold + 1'000}, {"over_by", 500}}));
+    EXPECT_EQ(peer->transport.load(), 2);
+}
+
 TEST_P(Priced, AReportedCostAboveTheCeilingExhaustsTheRun) {
     auto peer   = std::make_shared<Peer>();
     const auto ceiling = expected_hold();
@@ -1430,6 +1486,25 @@ TEST_P(Priced, AReportedCostAboveTheCeilingExhaustsTheRun) {
     EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
     EXPECT_EQ(result.usage().monetary_microunits, ceiling + 10);
     EXPECT_EQ(result.remaining_budget().monetary_microunits, 0U);
+    // #443: the run ends with the record of the budget it is over.
+    ASSERT_TRUE(result.failure()) << "a money overshoot carries its failure record";
+    EXPECT_EQ(result.failure()->code, "P_MONEY_BUDGET");
+    EXPECT_EQ(result.failure()->witness["monetary"],
+              (json{{"granted", ceiling}, {"used", ceiling + 10}, {"over_by", 10}}));
+    EXPECT_FALSE(result.failure()->witness.contains("model_tokens"));
+    EXPECT_EQ(result.failure()->operation_id, "root");
+    EXPECT_NE(result.failure()->message.find(std::to_string(ceiling + 10)), std::string::npos)
+        << failure_text(result);
+}
+
+TEST_P(Priced, ACostWithinTheCeilingLeavesNoFailureRecord) {
+    auto peer = std::make_shared<Peer>();
+    HostOptions options;
+    options.monetary  = expected_hold();
+    auto       h      = host(peer, options);
+    const auto result = h->run(Shape::Llm);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_FALSE(result.failure());
 }
 
 // ---------------------------------------------------------------------------

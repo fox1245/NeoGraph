@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=b8df513a502705cefaf6a8a6bc7c07fb3e050b5bdd03f35706aa09affac052fe -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -452,7 +452,7 @@ dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 des
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 요청에 출력 토큰 cap이 없다 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 그 모델의 입력 한도를 알 수 없다 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias처럼 aggregator 항목에 route ceiling이 없거나, 그 ceiling을 `provider.max_price`로 고정할 수 없다 |
-| `P_MONEY_BUDGET` | `BudgetExhausted` | hold가 남은 `monetary_microunits`에 들어가지 않는다 |
+| `P_MONEY_BUDGET` | `BudgetExhausted` | hold가 남은 `monetary_microunits`에 들어가지 않는다(청구액이 예산을 넘긴 채 끝난 실행도 같은 코드를 쓰며, 이때 `failure.witness["monetary"]`에 `granted`, `used`, `over_by`가 있다) |
 
 결과가 나오면 hold는 정확히 한 번 정산되고, attempt의 `ProgramResult::monetary_records()`(Python `result.monetary_records`)에 호출마다 `ProgramMonetaryRecord` 하나가 생긴다. 필드는 `call_id`(journal의 논리 호출 slot), `operation_id`, `node`, `origin`, `model`, `evidence`, `microunits`, `reserved_microunits`, `basis`, `catalog_version`, `catalog_digest`, `conservative`, `may_undercount`, `replayed`, `reason`이다. `ProgramUsage::monetary_microunits`는 attempt의 청구액과 아직 열린 hold의 합이다.
 
@@ -462,7 +462,7 @@ dispatch 전에 broker는 준비된 요청에 가격을 매긴다. origin은 des
 | `estimated` | 보고 비용이 없는 최종·일관 usage. | 카탈로그 요율 × 보고된 토큰 구간, 호출당 한 번 올림. 기록에 카탈로그 version과 digest가 남는다. |
 | `held` | 결과를 모른다(transport 예외, 취소, timeout), 호출이 이미 시작된 작업 뒤에 실패했을 수 있다(HTTP 408·425·429·5xx 응답, 끊긴 스트림, 요청이 나간 뒤의 transport 실패), SDK가 transport 시도를 다시 보냈다, 또는 usage가 부분적이거나 일관되지 않다. | hold. |
 
-provider가 아무것도 받아들이지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. 요청을 보내지 않았거나, provider가 완료된 HTTP 4xx 응답(408, 425, 429 제외)으로 요청을 거절한 경우다. 금액 hold도 모델 토큰 reservation도 청구되지 않는다. hold보다 큰 청구액(BYOK upstream 비용처럼 고정값이 제한하지 않는 비용이 보고 비용에 포함될 때 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
+provider가 아무것도 받아들이지 않았음을 증명하는 실패는 hold를 풀고 기록을 남기지 않는다. 요청을 보내지 않았거나, provider가 완료된 HTTP 4xx 응답(408, 425, 429 제외)으로 요청을 거절한 경우다. 금액 hold도 모델 토큰 reservation도 청구되지 않는다. hold보다 큰 청구액(BYOK upstream 비용처럼 고정값이 제한하지 않는 비용이 보고 비용에 포함될 때 가능)은 보고된 대로 청구되며, 청구액이 예산을 넘은 실행은 `P_MONEY_BUDGET`과 함께 `BudgetExhausted`로 끝난다. 동시 호출(`ng.all`, `ng.race`, `ng.quorum`, 병렬 노드)은 한 계정에 예약하므로 들어가지 않는 member는 거부된다. 노드 재시도는 자기 effect namespace(`task#a<k>`)로 호출하므로 attempt마다의 호출은 새 호출이며 다시 청구된다.
 
 `bind_priced`는 호출의 기록을 journal 행에 쓴다. dispatched marker와 함께 held 기록을, 결과와 함께 정산된 기록을 쓴다. 같은 Program attempt가 프로세스가 멈추기 전에 기록한 호출은, 복구된 attempt가 그 operation을 바인딩할 때 Core가 다시 호출하든 아니든 한 번 청구되고 `replayed`로 표시된다. execution lease 만료로 복구되는 define() 전용 실행도 포함된다. 이전 attempt가 기록한 호출은 그 attempt의 결과가 남은 예산에 이미 정산했으므로, 이후 attempt가 결과를 재생해도 다시 청구되지 않는다. recorded replay는 금액을 쓰지 않는다.
 

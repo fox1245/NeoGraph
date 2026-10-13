@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=2c09ae713ad764ab622bf8682a2997a8c324a5ecd366f913d5249ae4b44d7a9a -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=f6877fa2edea4b8e4bebe30ec03143b3d82f0d970761d08e32839b95ea0a8daa -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -340,15 +340,27 @@ python restart.py state resume run-...
 | `Completed` | `main()`이 값을 반환했거나 그래프가 종료 노드에 도달했습니다. `result.output`에 그 값이 있습니다. |
 | `Interrupted` | 실행이 답을 기다립니다. `result.interrupt`가 위치를 알려 줍니다. `resume`이나 `fork`로 이어 갑니다. |
 | `Failed` | 그래프가 라우팅하지 않은 실패, 실패 종료, 또는 `main()`이 던진 예외. `result.failure.code`가 이를 알려 줍니다. |
-| `BudgetExhausted` | 예산이 걸린 자원이 바닥났습니다. 예: `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET`, `P_CONCURRENCY_BUDGET`. 모델 토큰은 응답이 예산을 넘겼을 때도, 다음 호출이 전송 전에 거부되었을 때도 `NG.BudgetExhausted`로 끝납니다. |
-| `TimedOut` | 실행의 `wall_time_ms`나 `ng.await` 마감이 지났습니다. |
+| `BudgetExhausted` | 예산이 걸린 자원이 바닥났습니다. 예: `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET`, `P_CONCURRENCY_BUDGET`. 모델 토큰은 응답이 예산을 넘겼을 때도, 다음 호출이 전송 전에 거부되었을 때도 `NG.BudgetExhausted`로 끝납니다. 금액과 Core 스텝은 실행이 얼마나 넘겼는지 알려 주는 기록과 함께 끝나며([예산](#budgets)), 실행이 예산을 넘긴 채 끝난 경우도 같습니다. |
+| `TimedOut` | 실행의 `wall_time_ms`나 `ng.await` 마감이 지났습니다. `wall_time_ms`가 지난 뒤에 끝난 실행도 `TimedOut`입니다([예산](#budgets)). |
 | `Cancelled` | `ng.cancelScope`나 핸들의 `cancel()`이 실행을 멈췄습니다. |
 
 `AmbiguousEffect`와 `CheckpointIncompatible`도 있습니다. `include/neograph/program/result.h`를 보세요.
 
+<a id="budgets"></a>
 ## 예산
 
 `ProgramRunBudget`에는 필드가 열 개 있습니다. `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_concurrency`, `max_program_operations`, `max_core_steps`, `max_dynamic_compiles`, `max_child_depth`, `max_total_children`, `max_node_retries`입니다. `result.usage`는 실행이 쓴 양을, `result.remaining_budget`은 남은 양을 알려 줍니다. 0은 아무것도 허용하지 않는다는 뜻입니다. `model_tokens = 0`인 실행이 모델을 호출하면 `BudgetExhausted`로 끝납니다. 상한, 승인된 예산, 모델 비용 규칙은 [Python 바인딩 가이드](python-binding.md#budgets)에 있습니다.
+
+예산을 넘겨 끝난 실행에는 어느 예산인지 알려 주는 failure 기록이 있고, witness가 얼마나 넘겼는지 알려 줍니다. `failure.witness`에는 예산의 키로 `granted`, `used`, `over_by`가 들어 있습니다. 실행이 허용량에서 멈췄거나 모델 호출이 전송 전에 거부된 경우 `over_by`는 0입니다.
+
+| 예산 | 상태 | `failure.code` | witness 키 |
+|---|---|---|---|
+| `wall_time_ms` | `TimedOut` | `P_RUNTIME_TIMEOUT` | `wall_time_ms` |
+| `model_tokens` | `BudgetExhausted` | `NG.BudgetExhausted` | `model_tokens` |
+| `monetary_microunits` | `BudgetExhausted` | `P_MONEY_BUDGET` | `monetary` |
+| `max_core_steps` | `BudgetExhausted` | `P_CORE_STEP_BUDGET` | `core_steps` |
+
+예산이 실행을 도중에 멈췄든 실행이 예산을 넘긴 채 끝났든 기록은 같습니다. 사용량은 plan이 끝난 뒤에 정산되므로 plan이 허용량을 넘겨 끝날 수 있습니다. 응답의 비용이 그 호출에 예약한 금액보다 클 수 있고, 취소를 무시하는 노드가 마감 뒤에 반환할 수 있으며, 서브그래프 노드의 스텝은 그 노드를 담은 그래프를 멈추지 않으면서 실행의 Core 스텝에 더해집니다. 실행이 예산 여러 개를 넘기면 witness에 각각의 항목이 들어가고, status와 코드는 표에서 가장 앞에 있는 예산(예산 필드의 순서)을 따릅니다. 마감은 다른 사용량과 상관없이 실행을 `TimedOut`으로 끝내므로 wall time이 맨 앞에 있습니다. 가격이 매겨지는 호출이 전송 전에 거부되면 거부의 증거가 `monetary` 아래에 남습니다. 예약액, `ceiling`, `used`입니다.
 
 ## 동작을 검증하는 테스트
 

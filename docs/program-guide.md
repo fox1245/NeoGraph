@@ -339,8 +339,8 @@ The last argument of each command is a label for the call site. A paused member 
 | `Completed` | `main()` returned, or the graph reached its exit. `result.output` holds the value. |
 | `Interrupted` | The run waits for an answer; `result.interrupt` says where. `resume` or `fork` continues it. |
 | `Failed` | A failure the graph did not route, a failure exit, or `main()` threw. `result.failure.code` names it. |
-| `BudgetExhausted` | A budgeted resource ran out, for example `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET` or `P_CONCURRENCY_BUDGET`. Model tokens end the run with `NG.BudgetExhausted`, whether a reply took the run over the budget or the next call was refused before it was sent. |
-| `TimedOut` | The run's `wall_time_ms` or an `ng.await` deadline passed. |
+| `BudgetExhausted` | A budgeted resource ran out, for example `P_PROGRAM_OPERATION_BUDGET`, `P_CORE_STEP_BUDGET` or `P_CONCURRENCY_BUDGET`. Model tokens end the run with `NG.BudgetExhausted`, whether a reply took the run over the budget or the next call was refused before it was sent. Money and Core steps end it with a record of how far the run went over ([Budgets](#budgets)), also when the run finishes over its grant. |
+| `TimedOut` | The run's `wall_time_ms` or an `ng.await` deadline passed. A run that completes after its `wall_time_ms` is `TimedOut` too ([Budgets](#budgets)). |
 | `Cancelled` | `ng.cancelScope` or the handle's `cancel()` stopped the run. |
 
 `AmbiguousEffect` and `CheckpointIncompatible` also exist; see `include/neograph/program/result.h`.
@@ -348,6 +348,17 @@ The last argument of each command is a label for the call site. A paused member 
 ## Budgets
 
 A `ProgramRunBudget` has ten fields: `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_concurrency`, `max_program_operations`, `max_core_steps`, `max_dynamic_compiles`, `max_child_depth`, `max_total_children` and `max_node_retries`. `result.usage` counts what a run used and `result.remaining_budget` is what is left. Zero grants nothing: a run with `model_tokens = 0` that calls a model ends `BudgetExhausted`. The ceiling, the admitted budget and the model-cost rules are in the [Python binding guide](python-binding.md#budgets).
+
+A run that ends over a budget carries a failure record that names the budget, and the witness says how far over it went. `failure.witness` has an entry under the budget's key with `granted`, `used` and `over_by`; `over_by` is 0 when the run was stopped at its grant, or when a model call was refused before it was sent.
+
+| Budget | Status | `failure.code` | Witness key |
+|---|---|---|---|
+| `wall_time_ms` | `TimedOut` | `P_RUNTIME_TIMEOUT` | `wall_time_ms` |
+| `model_tokens` | `BudgetExhausted` | `NG.BudgetExhausted` | `model_tokens` |
+| `monetary_microunits` | `BudgetExhausted` | `P_MONEY_BUDGET` | `monetary` |
+| `max_core_steps` | `BudgetExhausted` | `P_CORE_STEP_BUDGET` | `core_steps` |
+
+The record is the same whether the budget stopped the run on the way or the run finished over it. Usage is settled once the plan has completed, and a plan can finish over a grant: a reply can cost more than was reserved for its call, a node that ignores cancellation can return after the deadline, and the steps of a subgraph node count toward the run's Core steps without stopping the graph that contains it. When a run is over several budgets, the witness has an entry for each, and the status and code are those of the first in the order of the table (the order of the budget fields). Wall time comes first because the deadline ends a run `TimedOut` whatever else the run used. A priced call that is refused before it is sent keeps the evidence of the refusal under `monetary`: the reservation, the `ceiling` and what was `used`.
 
 ## Where the behaviour is tested
 

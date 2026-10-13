@@ -968,6 +968,12 @@ TEST(NativeProgramRuntimeTest, GrantedDeadlineIncludesBlockingInvokeCallback) {
                              : "no failure detail");
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_RUNTIME_TIMEOUT");
+    // #443: the record says how far past its grant the run was when it ended.
+    const auto wall = result.failure()->witness["wall_time_ms"];
+    EXPECT_EQ(wall["granted"], json(400));
+    EXPECT_GE(wall["used"].get<std::uint64_t>(), 800U);
+    EXPECT_EQ(wall["over_by"].get<std::uint64_t>(), wall["used"].get<std::uint64_t>() - 400U);
+    EXPECT_EQ(wall["used"].get<std::uint64_t>(), result.usage().wall_time_ms);
     EXPECT_EQ(fixture.state.invocation_calls.load(), 1U);
     EXPECT_EQ(fixture.state.output_releases.load(), 1U);
 }

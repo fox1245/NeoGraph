@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=bf3a0fc91c038eb15990431ba05111781017b3a926b38e3f45cd235f633546e0 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=a99715bb81db399544918988ad01ba271599c369707e6c9f0eb677e1de3e5b51 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -109,13 +109,14 @@ worker_countのデフォルトは `1` で、エンジンが所有するプール
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 挙げられた上限のフィールドが0です | 正の値にします。Programがモデルを一切呼び出さない場合も同じです |
 | `ng.ProgramAdmissionError` の中の `P_ADMIT_PROVIDER` | `llm_call` ノードが、ホストが結び付けていないプロバイダーを必要としています。または、`llm_call` か `intent_classifier` のノードが、`provider=` なしで登録されています | `add_provider(...)` と `add_registered_node("llm_call", ..., provider=...)` を登録し、`LocalProgramHost` に `node_context=` と `binding_label=` を渡します |
 | `P_MONEY_BUDGET`（`BudgetExhausted`）、または別の `P_MONEY_*` コード（`Failed`）が出て、プロバイダーにリクエストが届いていない | 上限を決めた呼び出しの予約額が `monetary_microunits` に収まりません（0は何も許可しません）。または、呼び出しの上限を決められません。原因は、未知のモデルやorigin、ルートの上限がないルーターのエイリアス、出力の上限がないこと、入力の上限が分からないこと、価格カタログが扱っていない機能の使用のいずれかです | `monetary_microunits` を増やすか、`provider_controls.max_output_tokens` を設定するか、カタログに載っているモデルを使います。詳しくは[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)を参照してください |
+| `P_MONEY_BUDGET`（`BudgetExhausted`）が出て、`failure.witness["monetary"]` に `granted`、`used`、`over_by` がある | プロバイダーがリクエストを受け取り、その応答が予約額を上回る費用を報告したため、実行の請求額が `monetary_microunits` を超えました | `monetary_microunits` を増やすか、呼び出しの費用を下げます |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 実行時の予算が、`compile_admit` に渡した予算と異なります | 同じ予算を渡すか、コンパイルとadmissionをやり直します |
 | `ng.spawn` が出す `P_CHILD_BINDING` | `LocalProgramHost` に、子のバインディングを解決するリゾルバーがありません | 子Programは、C++のホストで実行します |
 | `resume()` が出す `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | その実行は、別の、または破棄済みの `LocalProgramHost` のものです | その実行を開始したホストを通して再開します |
 | `reconnect()` が出す `P_RUN_LEASE_HELD` | 子の予算なしで始めた `define()` だけの Program は、`wall_time_ms` の間、実行リースを保持します。所有者がまだ生きているかもしれない実行を、別のランタイムが続行しないようにするためです | 診断の witness にある `retry_after_ms` の後で再試行します。その後、実行は `TimedOut` で終わります。止まった実行を最後のチェックポイントから続行するには、`main()` を使うか、子の予算（`max_child_depth` と `max_total_children` を 0 より大きく）を付けて Program を開始します |
 | `fork()` が出す `P_FORK_SOURCE_BUDGET` | フォークの予算が、一時停止した実行に残っている `wall_time_ms` または `max_core_steps` をすべて取るため、その実行が再開できなくなります | フォークには `paused.remaining_budget` の一部（たとえば半分）を渡します。`max_concurrency` はそのまま渡して構いません |
 | `P_CORE_BARRIER_STALLED` | バリアのメンバーが、joinにつながらないルートを取ったため、joinはもう発火できません | すべてのメンバーを、joinか `__end__` にルーティングします。そうしたルートは、コンパイル時に `P_CORE_E15` が警告します |
-| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 実行が `wall_time_ms` を使い切りました。中断された操作のテキストは、`failure.witness["cause_message"]` にあります | `wall_time_ms` を大きくして、コンパイルとadmissionをやり直します |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 実行が `wall_time_ms` を使い切ったか、その後に完了しました。`failure.witness["wall_time_ms"]` がどれだけ超えたかを示し、中断された操作のテキストは `failure.witness["cause_message"]` にあります | `wall_time_ms` を大きくして、コンパイルとadmissionをやり直します |
 
 `callCore` が失敗すると、実行はその失敗で終わります。`main()` で `try`/`catch` を使っても捕捉できません。Python側で `result.status` と `result.failure` を確認してください。
 

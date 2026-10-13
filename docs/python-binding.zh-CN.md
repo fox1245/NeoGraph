@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=ebd8fdad35b488e92eb3e307692eebd70b9373303927fa9c68173a635dc5318d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=a59f41ed236e52e37f9dfde0999b346c60a33b1b22a8b88f100b5321a4580bb3 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -557,7 +557,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入策略的上限。除了 `max_child_depth` 和 `max_total_children`，其余每个字段都必须为正数，包括 `model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles`，即使 Program 从不调用模型也是如此。否则构造函数会抛出 `ValueError`，并指出为零的字段。这两个与子 Program 相关的字段必须同为零，或同为正数。
 
-`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 封存进 bundle，作为每个字段的最小值，同时也是最大值；封存的预算超过上限的 bundle，准入时会被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用，都必须逐个字段传入相同的值。预算比封存值大或小，都会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，消息会指出第一个不一致的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。想用不同的预算，需要重新编译并准入，得到的是一个新的 `ProgramVersion`。运行预算要求 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示什么都不授予：`model_tokens = 0` 时，用到模型 token 的运行会以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每一次需要计价的 provider 调用都会在发出之前被拒绝（参见[调用模型的节点](#model-calling-nodes)）。模型 token 预算使运行停下时，无论是模型的响应超出了预算，还是下一次调用在发送前被拒绝，`status` 都是 `BudgetExhausted`，`failure.code` 都是 `NG.BudgetExhausted`；`failure.witness["model_tokens"]` 含有 `granted`、`used` 和 `over_by`。
+`compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 封存进 bundle，作为每个字段的最小值，同时也是最大值；封存的预算超过上限的 bundle，准入时会被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用，都必须逐个字段传入相同的值。预算比封存值大或小，都会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，消息会指出第一个不一致的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。想用不同的预算，需要重新编译并准入，得到的是一个新的 `ProgramVersion`。运行预算要求 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示什么都不授予：`model_tokens = 0` 时，用到模型 token 的运行会以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每一次需要计价的 provider 调用都会在发出之前被拒绝（参见[调用模型的节点](#model-calling-nodes)）。模型 token 预算使运行停下时，无论是模型的响应超出了预算，还是下一次调用在发送前被拒绝，`status` 都是 `BudgetExhausted`，`failure.code` 都是 `NG.BudgetExhausted`；`failure.witness["model_tokens"]` 含有 `granted`、`used` 和 `over_by`。其他预算也以同样的形式结束运行，运行在超出额度后才结束时也一样：金额以 `P_MONEY_BUDGET` 和 `failure.witness["monetary"]` 结束，Core 步骤以 `P_CORE_STEP_BUDGET` 和 `failure.witness["core_steps"]` 结束，wall time 则以 `TimedOut`、`P_RUNTIME_TIMEOUT` 和 `failure.witness["wall_time_ms"]` 结束。超出多项预算的运行会把每一项都列在 witness 里，status 和错误码取自 wall time、模型 token、金额、Core 步骤中排在最前的那一项；参见 [Program 指南中的预算](program-guide.md#budgets)。
 
 ### 失败路由
 
@@ -573,7 +573,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 在 Program 运行期间，Python 节点的函数体不占用调度线程。它运行在 binding 自己持有的 worker 线程池上，默认 32 个线程；要修改，在第一次运行 Program 之前，把 `NEOGRAPH_PYTHON_NODE_THREADS` 设为 1 到 1024 之间的值。即使调度线程保持默认的 1 个，宿主的多个运行、`ng.all`、`ng.race` 和 `ng.quorum` 的各成员，以及同一个 Core 运行的 fan-out 分支，也会同时推进，而且节点运行期间截止时间照样会触发。`ng.race` 返回最先完成的成员，`ng.quorum` 在凑够所需的成功数后返回。Python 代码仍然在 GIL 下运行，所以 CPU 密集的节点不会并行；只有节点释放 GIL 时（例如在 `time.sleep`、I/O 或原生调用中），它们才会重叠。普通的 `GraphEngine` 运行仍然在调用线程上执行 Python 节点函数体。
 
-这两个限制都不会打断正在运行的 Python 节点；取消是协作式的。运行的 `wall_time_ms` 用完时，运行时会取消该运行，等正在运行的节点返回后才给出结果，其中 `status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`，消息为 `Program wall-time budget (N ms) expired`。被超时打断的那个操作的文本，在 `failure.witness["cause_message"]` 里。`ng.await(command, timeoutMs, sourceSite)` 的截止时间一过，运行就以 `TimedOut` 和 `P_AWAIT_TIMEOUT` 结束，截止时间之后才到达的完成结果不会被接受。两种情况下，子 Core 运行都会被取消；检查 `input.ctx.cancel_token.is_cancelled()` 的节点会提前停止，忽略它的节点则会让结果推迟到它返回为止。`TimedOut` 和 `Cancelled` 的结果会在 `execution_trace` 里列出已完成的 Core 节点。
+这两个限制都不会打断正在运行的 Python 节点；取消是协作式的。运行的 `wall_time_ms` 用完时，运行时会取消该运行，等正在运行的节点返回后才给出结果，其中 `status` 为 `TimedOut`，`failure.code` 为 `P_RUNTIME_TIMEOUT`，消息为 `Program wall-time budget (N ms) expired`。`failure.witness["wall_time_ms"]` 含有 `granted`、`used` 和 `over_by`；被超时打断的那个操作的文本，在 `failure.witness["cause_message"]` 里。`ng.await(command, timeoutMs, sourceSite)` 的截止时间一过，运行就以 `TimedOut` 和 `P_AWAIT_TIMEOUT` 结束，截止时间之后才到达的完成结果不会被接受。两种情况下，子 Core 运行都会被取消；检查 `input.ctx.cancel_token.is_cancelled()` 的节点会提前停止，忽略它的节点则会让结果推迟到它返回为止。`TimedOut` 和 `Cancelled` 的结果会在 `execution_trace` 里列出已完成的 Core 节点。
 
 Program 的引擎不会向 stderr 输出 lint 信息，也不会输出 fan-out 提示。推荐设置 `EngineConfig::worker_count` 的那条提示，只会出现在自行构建的 `GraphEngine` 上。
 

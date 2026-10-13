@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=bf3a0fc91c038eb15990431ba05111781017b3a926b38e3f45cd235f633546e0 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=a99715bb81db399544918988ad01ba271599c369707e6c9f0eb677e1de3e5b51 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -109,13 +109,14 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的某个上限字段为零 | 改成正数，即使 Program 从不调用模型 |
 | `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 某个 `llm_call` 节点需要的 provider 没有在宿主中绑定，或者 `llm_call`、`intent_classifier` 节点注册时没带 `provider=` | 注册 `add_provider(...)` 和 `add_registered_node("llm_call", ..., provider=...)`，并给 `LocalProgramHost` 传入 `node_context=` 和 `binding_label=` |
 | `P_MONEY_BUDGET`（`BudgetExhausted`），或其他 `P_MONEY_*` 错误码（`Failed`），且 provider 没有收到任何请求 | 该次调用的预留额度超出了 `monetary_microunits`（0 表示什么都不授予），或者调用无法确定上限：模型或 origin 未知、路由别名没有路由上限、没有输出上限、不知道输入上限，或者用到了价格目录没有建模的功能 | 调高 `monetary_microunits`，设置 `provider_controls.max_output_tokens`，或者改用价格目录中有条目的模型；参见[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog) |
+| 出现 `P_MONEY_BUDGET`（`BudgetExhausted`），且 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by` | provider 收到了请求，其响应报告的费用高于预留额，使运行的收费超出了 `monetary_microunits` | 调高 `monetary_microunits`，或降低调用的费用 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
 | `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |
 | `reconnect()` 抛出 `P_RUN_LEASE_HELD` | 没有子预算的、只有 `define()` 的 Program 会在其 `wall_time_ms` 内持有执行租约，以免别的运行时接着运行一个所有者可能仍然存活的运行 | 等过了诊断 witness 里的 `retry_after_ms` 后重试，运行随后以 `TimedOut` 结束。要让崩溃的运行从最近的检查点继续，请使用 `main()`，或为 Program 设置子预算（`max_child_depth` 和 `max_total_children` 大于 0）后再启动 |
 | `fork()` 抛出 `P_FORK_SOURCE_BUDGET` | 分叉的预算拿走了已暂停运行剩下的全部 `wall_time_ms` 或全部 `max_core_steps`，该运行将无法恢复 | 只给分叉 `paused.remaining_budget` 的一部分，例如一半；`max_concurrency` 可以原样给 |
 | `P_CORE_BARRIER_STALLED` | 屏障的某个成员走了不通向 join 的路由，join 再也无法触发 | 让每个成员都路由到 join 或 `__end__`；`P_CORE_E15` 会在编译时对这类路由发出警告 |
-| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`；被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`，或者在它之后才完成；`failure.witness["wall_time_ms"]` 说明超出了多少，被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |
 
 `callCore` 失败会让运行带着该失败结束；`main()` 无法用 `try`/`catch` 捕获它。请在 Python 中检查 `result.status` 和 `result.failure`。
 

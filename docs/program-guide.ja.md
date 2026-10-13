@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=2c09ae713ad764ab622bf8682a2997a8c324a5ecd366f913d5249ae4b44d7a9a -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=f6877fa2edea4b8e4bebe30ec03143b3d82f0d970761d08e32839b95ea0a8daa -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -340,15 +340,27 @@ python restart.py state resume run-...
 | `Completed` | `main()` が値を返したか、グラフが終了ノードに達しました。`result.output` にその値が入ります。 |
 | `Interrupted` | 実行が答えを待っています。`result.interrupt` が場所を示します。`resume` か `fork` で続けます。 |
 | `Failed` | グラフがルーティングしなかった失敗、失敗終了、または `main()` が投げた例外。`result.failure.code` が内容を示します。 |
-| `BudgetExhausted` | 予算のかかった資源が尽きました。例: `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET`、`P_CONCURRENCY_BUDGET`。モデルトークンは、応答が予算を超えた場合も、次の呼び出しが送信前に拒否された場合も、`NG.BudgetExhausted` で終わります。 |
-| `TimedOut` | 実行の `wall_time_ms` か `ng.await` の期限を過ぎました。 |
+| `BudgetExhausted` | 予算のかかった資源が尽きました。例: `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET`、`P_CONCURRENCY_BUDGET`。モデルトークンは、応答が予算を超えた場合も、次の呼び出しが送信前に拒否された場合も、`NG.BudgetExhausted` で終わります。金額とCoreのステップは、実行がどれだけ超えたかを示す記録とともに終わります（[予算](#budgets)）。実行が予算を超えたまま終わった場合も同じです。 |
+| `TimedOut` | 実行の `wall_time_ms` か `ng.await` の期限を過ぎました。`wall_time_ms` を過ぎてから完了した実行も `TimedOut` です（[予算](#budgets)）。 |
 | `Cancelled` | `ng.cancelScope` かハンドルの `cancel()` が実行を止めました。 |
 
 `AmbiguousEffect` と `CheckpointIncompatible` もあります。`include/neograph/program/result.h` を参照してください。
 
+<a id="budgets"></a>
 ## 予算
 
 `ProgramRunBudget` にはフィールドが10個あります。`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_concurrency`、`max_program_operations`、`max_core_steps`、`max_dynamic_compiles`、`max_child_depth`、`max_total_children`、`max_node_retries` です。`result.usage` は実行が使った量を、`result.remaining_budget` は残りを示します。0 は何も許可しないという意味です。`model_tokens = 0` の実行がモデルを呼ぶと、`BudgetExhausted` で終わります。上限、承認された予算、モデルのコストに関するルールは、[Python バインディングガイド](python-binding.md#budgets)にあります。
+
+予算を超えて終わった実行には、どの予算かを示す failure の記録が付き、witness がどれだけ超えたかを示します。`failure.witness` には、予算のキーの下に `granted`、`used`、`over_by` が入ります。実行が許可量のところで止まった場合や、モデル呼び出しが送信前に拒否された場合、`over_by` は 0 です。
+
+| 予算 | ステータス | `failure.code` | witness のキー |
+|---|---|---|---|
+| `wall_time_ms` | `TimedOut` | `P_RUNTIME_TIMEOUT` | `wall_time_ms` |
+| `model_tokens` | `BudgetExhausted` | `NG.BudgetExhausted` | `model_tokens` |
+| `monetary_microunits` | `BudgetExhausted` | `P_MONEY_BUDGET` | `monetary` |
+| `max_core_steps` | `BudgetExhausted` | `P_CORE_STEP_BUDGET` | `core_steps` |
+
+予算が実行を途中で止めた場合も、実行が予算を超えたまま終わった場合も、記録は同じです。使用量は plan の完了後に精算されるため、plan が許可量を超えて終わることがあります。応答のコストが、その呼び出しに予約した額を上回ることがあります。キャンセルを無視するノードが期限の後に戻ることがあります。サブグラフノードのステップは、そのノードを含むグラフを止めずに、実行の Core ステップに加算されます。実行が複数の予算を超えた場合、witness にはそれぞれの項目が入り、ステータスとコードは表で最初に来る予算（予算フィールドの並び順）のものになります。期限は、ほかに何を使っていても実行を `TimedOut` で終わらせるため、wall time が先頭です。料金のかかる呼び出しが送信前に拒否された場合、拒否の証拠は `monetary` の下に残ります。予約額、`ceiling`、`used` です。
 
 ## 動作を確認しているテスト
 

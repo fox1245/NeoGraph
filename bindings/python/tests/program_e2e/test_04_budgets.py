@@ -50,6 +50,17 @@ def test_host_compile_limits_bound_define_without_a_budget():
     _timeout_diagnostic(raised.value)
 
 
+def assert_wall_time_witness(result, granted):
+    """The timeout's witness says how far past its wall-time grant the run was when it ended."""
+    wall = result.failure.witness["wall_time_ms"]
+    assert set(wall) == {"granted", "used", "over_by"}, wall
+    assert wall["granted"] == granted
+    assert wall["used"] >= granted
+    assert wall["over_by"] == wall["used"] - granted
+    assert wall["used"] == result.usage.wall_time_ms
+    return wall
+
+
 def test_nonterminating_main_times_out_at_run_time():
     text = with_main(define_graph('g.node("w", {type: "e2e.step"}); g.entry("w"); g.exit("w");'),
                      "let i = 0;\nwhile (true) { i++; }")
@@ -60,6 +71,7 @@ def test_nonterminating_main_times_out_at_run_time():
 
     assert result.status == ng.ProgramTerminalStatus.TimedOut, describe(result)
     assert result.failure.code == "P_RUNTIME_TIMEOUT"
+    assert_wall_time_witness(result, granted=300)
     assert elapsed < 3.0
     assert result.output is None
 
@@ -78,6 +90,8 @@ def test_runaway_loop_exhausts_the_core_step_budget():
 
     assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
     assert result.failure.code == "P_CORE_STEP_BUDGET"
+    # The engine stopped the run at its grant: it used all of it, and is over by nothing (#443).
+    assert result.failure.witness["core_steps"] == {"granted": 7, "used": 7, "over_by": 0}
     assert result.usage.core_steps == 7
     assert result.remaining_budget.max_core_steps == 0
     assert len(result.execution_trace) == 7
@@ -159,6 +173,91 @@ def test_run_wall_time_with_a_node_that_ignores_cancellation():
     assert result.status == ng.ProgramTerminalStatus.TimedOut, describe(result)
     assert result.failure.code == "P_RUNTIME_TIMEOUT"
     assert "after" not in JOURNAL.names("started")
+
+
+# ---------------------------------------------------------------------------
+# A run that completes over a budget ends with the record of that budget (#443)
+#
+# Usage is settled once the plan has completed, so a run can finish over its
+# grant: wall time, when its last node returns after the deadline, and Core
+# steps, when Core runs that were started together each began with the steps
+# that were left. Each ends with a failure record whose witness has granted,
+# used and over_by under the budget's key, as a model-token overshoot does.
+# ---------------------------------------------------------------------------
+
+# The Core steps of a run include the inner steps of a subgraph node. The outer
+# graph has three nodes and runs in three super-steps; the review subgraph adds
+# two more, so the run takes five. Core stops a graph at the steps left when it
+# starts, and the outer graph needs only three of them, so a grant of three or
+# four lets the run reach its end and leaves it over its grant.
+REVIEWED_DRAFT = """
+export function define() {
+  const inner = {
+    schema_version: 1,
+    name: "review",
+    channels: {trace: {reducer: "append"}},
+    nodes: {critique: {type: "e2e.step"}, revise: {type: "e2e.step"}},
+    edges: [
+      {from: "__start__", to: "critique"},
+      {from: "critique", to: "revise"},
+      {from: "revise", to: "__end__"}
+    ]
+  };
+  return ng.graph("outer")
+    .channel("trace", {reducer: "append", initial: []})
+    .node("draft", {type: "e2e.step"})
+    .node("review", {type: "subgraph", definition: inner,
+                     input_map: {trace: "trace"}, output_map: {trace: "trace"}})
+    .node("publish", {type: "e2e.step"})
+    .entry("draft").edge("draft", "review").edge("review", "publish").exit("publish");
+}
+"""
+
+
+def run_reviewed_draft(steps):
+    host = make_host(registry=build_registry(extra_node_types=("subgraph",)))
+    return run_program(REVIEWED_DRAFT, host=host, run_budget=budget(max_core_steps=steps))
+
+
+@pytest.mark.parametrize("granted", [3, 4])
+def test_a_run_that_completes_over_its_core_step_grant_names_the_budget(granted):
+    _host, _version, result = run_reviewed_draft(granted)
+
+    # Every node ran: the plan completed, and the grant was passed on the way.
+    assert result.execution_trace == ["draft", "review", "publish"]
+    assert JOURNAL.names("ran") == ["draft", "critique", "revise", "publish"]
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.code == "P_CORE_STEP_BUDGET", describe(result)
+    assert result.failure.witness["core_steps"] == {
+        "granted": granted, "used": 5, "over_by": 5 - granted}
+    assert result.usage.core_steps == 5
+    assert "5" in result.failure.message and str(granted) in result.failure.message
+    assert result.remaining_budget.max_core_steps == 0
+
+
+def test_the_same_run_completes_within_a_grant_that_covers_its_steps():
+    _host, _version, result = run_reviewed_draft(5)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.failure is None
+    assert result.usage.core_steps == 5
+
+
+def test_a_run_that_completes_after_its_wall_time_grant_ends_timed_out_with_the_witness():
+    """The last node returns at about 900 ms, past the 300 ms granted; it cannot be preempted."""
+    text = define_graph("""
+        g.node("stuck", {type: "e2e.step", blocking_sleep_ms: 900});
+        g.entry("stuck");
+        g.exit("stuck");
+    """)
+    _host, _version, result = run_program(text, run_budget=budget(wall_time_ms=300))
+
+    # The deadline ends the run TimedOut, and the record says how far over it went.
+    assert result.status == ng.ProgramTerminalStatus.TimedOut, describe(result)
+    assert result.failure.code == "P_RUNTIME_TIMEOUT"
+    assert result.failure.message == "Program wall-time budget (300 ms) expired"
+    wall = assert_wall_time_witness(result, granted=300)
+    assert wall["used"] >= 900, wall
 
 
 def test_run_budget_must_equal_the_admitted_budget():

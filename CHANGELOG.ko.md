@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=27dd005b8bd4b2b779458ec8ee2ad6ddc3d05f9524af0ed55ce52d03d4aabc70 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=c8b736ad3a4d51e6bbd5cefc73eae4a116cec4f84edd7c426cf20456c2348b44 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program: 금액, Core 스텝, wall time 허용량을 넘긴 채 끝난 실행은 그 예산의 기록과 함께 끝납니다 (#443).** 사용량은 plan이 끝난 뒤에 정산되는데, Core 스텝, 금액, wall time 허용량을 넘긴 것으로 확인된 실행은 `failure` 없이 `BudgetExhausted`로 끝났습니다. 그래서 호출자는 어느 예산인지, 얼마나 넘겼는지 알 수 없었습니다. wall time을 넘긴 실행도 마감에 멈춘 실행은 `TimedOut`으로 끝나는데 `BudgetExhausted`로 끝났습니다. 이제 예산을 넘겨 끝나는 모든 경우에 failure 기록이 있고, witness에는 모델 토큰 기록(#420)처럼 예산의 키 아래 `granted`, `used`, `over_by`가 들어 있습니다. 금액은 `P_MONEY_BUDGET`과 `failure.witness["monetary"]`, Core 스텝은 `P_CORE_STEP_BUDGET`과 `failure.witness["core_steps"]`, wall time은 `P_RUNTIME_TIMEOUT`과 `failure.witness["wall_time_ms"]`입니다. wall time은 두 경로 모두 `TimedOut`으로 끝납니다. 예산을 여러 개 넘긴 실행은 witness에 각각을 나열하고, status와 코드는 wall time, 모델 토큰, 금액, Core 스텝 중 가장 앞에 있는 예산을 따릅니다. Core 엔진이 Core 스텝 허용량에서 멈춘 실행과 마감이 멈춘 실행의 기록에도 witness가 붙습니다(허용량에서 멈추면 `over_by`는 0). **동작 변경:** 금액이나 Core 스텝 허용량을 넘긴 채 끝난 실행에는 이제 `failure`가 있고, wall time 허용량을 넘긴 채 끝난 실행은 `BudgetExhausted`가 아니라 `TimedOut`으로 끝나며, 타임아웃의 failure에는 `witness["wall_time_ms"]`가 있습니다.
 - **Send로 실행된 노드가 Send를 돌려주면, 그 Send를 잃는 대신 실행이 실패합니다 (#432).** Send로 시작된 노드가 돌려준 Send는 버려졌고, 그 대상은 실행되지 않았으며 아무 알림도 없었습니다. 이제 슈퍼스텝의 결과를 하나도 반영하기 전에 노드와 대상을 밝힌 오류로 실행이 실패합니다. **동작 변경:** Send 대상이 Send를 돌려주는 그래프는 그 대상을 실행하지 않은 채 끝나던 대신 이제 실패합니다. 항목을 채널에 쓰고 일반 노드가 Send를 보내게 하세요.
 - **실패한 Program 시도가 Send 실행을 엔진 트레이스와 같은 이름으로 적습니다 (#433).** 실패한 Core는 엔진 트레이스 없이 예외를 다시 던지므로, 실패한 시도는 `NODE_END` 이벤트로 트레이스를 만들고, Send 실행을 노드 이름만으로 적었습니다. 이제 Send 실행의 `NODE_END` 이벤트에 `"send": true`가 실리고, 시도의 트레이스는 이를 끝난 순서대로 `<대상>[send]`로 적습니다. **동작 변경:** 실패한 Program 시도의 트레이스가 Send 실행을 `<대상>[send]`로 적고, Send 실행의 `NODE_END` 이벤트에 `send` 필드가 생깁니다.
 - **Python에서도 빌드 시점 lint를 끌 수 있습니다 (#415).** `GraphEngine.compile`에 키워드 `stderr_notices`가 추가되었습니다. 기본값은 `True`이며 C++ `EngineConfig::stderr_notices`와 같습니다. `stderr_notices=False`이면 strict 그래프의 lint(예: `Send`나 `Command.goto`로만 시작되는 노드에 대한 E7)와, fan-out이 직렬로 실행됐다는 일회성 알림을 출력하지 않습니다. 검증 오류는 그대로 예외로 발생합니다. E7 자체는 바뀌지 않았습니다. 그래프 정의에는 동적 대상을 선언하는 곳이 없어서, 검증기는 Send로 시작되는 노드와 아무도 도달하지 않는 노드를 구분할 수 없으며, 문서에 이를 명시했습니다. 문서는 Send 대상으로 가는 정적 엣지가 lint를 잠재우는 방법이 아니라는 점도 설명합니다. 대상이 Send가 모두 끝난 뒤 공유 상태로 한 번 더 실행됩니다. 키워드를 넘기지 않는 코드의 동작은 그대로이고, 그래프 실행 방식도 그대로입니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b8df513a502705cefaf6a8a6bc7c07fb3e050b5bdd03f35706aa09affac052fe -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -423,7 +423,7 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | そのモデルの入力上限が分からない |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias のように aggregator の項目に route ceiling がない、またはその ceiling を `provider.max_price` として固定できない |
-| `P_MONEY_BUDGET` | `BudgetExhausted` | hold が残りの `monetary_microunits` に収まらない |
+| `P_MONEY_BUDGET` | `BudgetExhausted` | hold が残りの `monetary_microunits` に収まらない（請求額が予算を超えて終わった実行も同じコードで、その場合は `failure.witness["monetary"]` に `granted`、`used`、`over_by` が入る） |
 
 結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason` です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
 
@@ -433,7 +433,7 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 | `estimated` | 報告費用のない最終で一貫した usage。 | カタログ料金 × 報告されたトークン帯、呼び出しごとに 1 回切り上げ。記録にカタログの version と digest が残ります。 |
 | `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、すでに始まった処理の後に失敗した可能性がある（HTTP 408、425、429、5xx の応答、途中で切れたストリーム、リクエストが出た後の transport 失敗）、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
 
-プロバイダーが何も受け付けなかったことを証明する失敗は hold を解放し、記録を残しません。リクエストが送られなかった場合と、プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く）でリクエストを拒否した場合です。金額の hold もモデルトークンの reservation も請求されません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
+プロバイダーが何も受け付けなかったことを証明する失敗は hold を解放し、記録を残しません。リクエストが送られなかった場合と、プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く）でリクエストを拒否した場合です。金額の hold もモデルトークンの reservation も請求されません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `P_MONEY_BUDGET` とともに `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
 
 `bind_priced` は呼び出しの記録を journal 行に書きます。dispatched marker と一緒に held 記録を、結果と一緒に精算済み記録を書きます。同じ Program attempt がプロセス停止前に記録した呼び出しは、復旧した attempt がその operation をバインドしたときに、Core が再び呼び出すかどうかにかかわらず 1 回だけ請求され、`replayed` と記されます。execution lease の期限切れで復旧する define() のみの実行も含みます。以前の attempt が記録した呼び出しは、その attempt の結果が残り予算にすでに精算しているので、後の attempt が結果を再生しても再び請求されません。recorded replay は金額を使いません。
 

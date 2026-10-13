@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=27dd005b8bd4b2b779458ec8ee2ad6ddc3d05f9524af0ed55ce52d03d4aabc70 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=c8b736ad3a4d51e6bbd5cefc73eae4a116cec4f84edd7c426cf20456c2348b44 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Program: 金額、Coreのステップ、wall time の許可量を超えたまま終わった実行は、その予算の記録とともに終わります (#443)。** 使用量は plan が完了した後に精算されますが、Coreのステップ、金額、wall time の許可量を超えていると分かった実行は、`failure` のないまま `BudgetExhausted` で終わっていました。そのため、呼び出し側はどの予算を、どれだけ超えたのか分かりませんでした。wall time を超えた実行も、期限に止められた実行は `TimedOut` で終わるのに、`BudgetExhausted` で終わっていました。今は予算を超えて終わるすべての場合に failure の記録があり、witness には、モデルトークンの記録（#420）と同じように、予算のキーの下に `granted`、`used`、`over_by` が入ります。金額は `P_MONEY_BUDGET` と `failure.witness["monetary"]`、Coreのステップは `P_CORE_STEP_BUDGET` と `failure.witness["core_steps"]`、wall time は `P_RUNTIME_TIMEOUT` と `failure.witness["wall_time_ms"]` です。wall time はどちらの経路でも `TimedOut` で終わります。複数の予算を超えた実行は witness にそれぞれを並べ、ステータスとコードは wall time、モデルトークン、金額、Coreのステップのうち最初のものに従います。Core エンジンが Core ステップの許可量で止めた実行の記録と、期限が止めた実行の記録にも witness が付きます（許可量で止まった場合 `over_by` は 0）。**動作の変更:** 金額または Core ステップの許可量を超えたまま終わった実行には `failure` が付きます。wall time の許可量を超えたまま終わった実行は `BudgetExhausted` ではなく `TimedOut` で終わり、タイムアウトの failure には `witness["wall_time_ms"]` が付きます。
 - **Send による実行が Send を返すと、それを失う代わりに実行が失敗します（#432）。** Send で始まったノードが返した Send は捨てられ、その送り先は実行されず、何も知らされませんでした。今後は、スーパーステップの結果を一つも反映する前に、ノードと送り先を示すエラーで実行が失敗します。**動作の変更:** Send の送り先が Send を返すグラフは、これまで送り先を実行せずに終わっていましたが、今後は失敗します。項目をチャネルに書き、通常のノードから Send を出してください。
 - **失敗した Program の試行が、Send による実行をエンジンのトレースと同じ名前で記録します（#433）。** 失敗した Core はエンジンのトレースなしで例外を投げ直すため、失敗した試行は `NODE_END` イベントからトレースを作り、Send による実行をノード名だけで記録していました。今後は Send による実行の `NODE_END` イベントに `"send": true` が入り、試行のトレースはそれを完了した順に `<対象>[send]` と記録します。**動作の変更:** 失敗した Program の試行のトレースは Send による実行を `<対象>[send]` と記録し、Send による実行の `NODE_END` イベントには `send` フィールドが入ります。
 - **Python でもビルド時の lint を止められます (#415)。** `GraphEngine.compile` にキーワード `stderr_notices` を追加しました。デフォルトは `True` で、C++ の `EngineConfig::stderr_notices` と同じです。`stderr_notices=False` にすると、strict なグラフの lint（`Send` や `Command.goto` だけが開始するノードに対する E7 など）と、fan-out が直列で実行されたことを知らせる 1 回限りの通知を出力しません。検証エラーは従来どおり例外になります。E7 自体は変えていません。グラフ定義には動的な対象を宣言する場所がないため、検証器は Send が開始するノードと、どこからも到達されないノードを区別できません。ドキュメントにこのことを明記しました。ドキュメントは、Send の対象への静的エッジが lint を黙らせる手段にならないことも説明しています。対象は、Send がすべて終わったあとに共有状態でもう一度実行されます。キーワードを渡さないコードの動作は従来どおりで、グラフの実行方法も変わりません。

@@ -3,6 +3,7 @@
 #include <neograph/program/diagnostic.h>
 #include <neograph/program/sqlite_provider_call_broker.h>
 
+#include "budget_overrun.h"
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "core_progress.h"
@@ -1472,31 +1473,6 @@ RunOutcome failed_outcome(const std::shared_ptr<RunControl>& control,
                                      "root", std::move(core_node), attempts, json::object()};
     return outcome;
 }
-// #420: how a run that the model-token budget stopped stands against it.
-// `over_by` is how far the last reply took the run over the budget, and 0
-// when the next call was refused before it was sent.
-json model_token_budget_witness(std::uint64_t granted, std::uint64_t used) {
-    return json{{"granted", granted},
-                {"used", used},
-                {"over_by", used > granted ? used - granted : std::uint64_t{0}}};
-}
-
-// #420: the failure record of a run that the model-token budget stopped and
-// that no node reported, because the last reply took it over the budget.
-// Its code is the one the failure classifier gives budget exhaustion, which
-// is what a call refused before it was sent already ends with, so a caller
-// reads one shape (and the protocol hosts report one class) for both.
-ProgramFailure model_token_budget_failure(std::uint64_t granted, std::uint64_t used) {
-    auto message = used > granted
-        ? "Model-token budget exceeded by the last reply: " + std::to_string(used) +
-              " tokens used of " + std::to_string(granted)
-        : "Model-token budget exhausted: " + std::to_string(used) + " tokens used of " +
-              std::to_string(granted) + ", and the next call does not fit";
-    return ProgramFailure{graph::node_failure_code(graph::NodeFailureClass::BudgetExhausted),
-                          std::move(message), "root", "", 0,
-                          json{{"model_tokens", model_token_budget_witness(granted, used)}}};
-}
-
 std::uint64_t model_tokens(const std::shared_ptr<UsageAccumulator>& usage) noexcept {
     const auto total = usage->total_tokens_wide();
     return total <= 0 ? 0 : static_cast<std::uint64_t>(total);
@@ -1522,18 +1498,23 @@ bool apply_terminal_cause(const std::shared_ptr<RunControl>& control,
                                          std::move(provider_outcome), std::move(provider_cause)};
         return true;
     }
-    outcome.status  = cause == CancellationCause::Timeout ? ProgramTerminalStatus::TimedOut
-                                                          : ProgramTerminalStatus::Cancelled;
-    // A timeout names the budget that expired; the text of whatever the
-    // cancellation interrupted stays in the witness (#370).
     auto failure_message = safe_failure_message(std::string(message));
     if (cause == CancellationCause::Timeout) {
+        // A timeout names the budget that expired and how far the run took it
+        // (#443); the text of whatever the cancellation interrupted stays in
+        // the witness (#370). A run that completes past its deadline ends the
+        // same way (see completed_run_overrun()).
         causal_witness["cause_message"] = std::move(failure_message);
-        failure_message = "Program wall-time budget (" +
-            std::to_string(control->granted_budget.wall_time_ms) + " ms) expired";
+        outcome.status  = ProgramTerminalStatus::TimedOut;
+        outcome.failure = wall_time_failure(control->granted_budget.wall_time_ms,
+                                            outcome.usage.wall_time_ms, std::move(causal_witness));
+        outcome.failure->provider_outcome = std::move(provider_outcome);
+        outcome.failure->provider_cause   = std::move(provider_cause);
+        return true;
     }
+    outcome.status  = ProgramTerminalStatus::Cancelled;
     outcome.failure = ProgramFailure{
-        cause == CancellationCause::Timeout ? "P_RUNTIME_TIMEOUT" : "P_RUNTIME_CANCELLED",
+        "P_RUNTIME_CANCELLED",
         std::move(failure_message),
         "root",
         "",
@@ -1953,6 +1934,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::optional<CoreCheckpointIdentity> resume_checkpoint;
     std::optional<std::string>            resume_checkpoint_content_id;
     RunOutcome                            outcome;
+    // #443: the plan completed over a budget, and `outcome` has the record of it.
+    bool                                  completed_over_budget = false;
     try {
         const auto control_source = control->materialized->bundle.control_source();
         if (checkpoint_id) {
@@ -6421,23 +6404,24 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 ? plan_result.failure->message
                 : std::string("Program attempt was cancelled");
         outcome.failure = std::move(plan_result.failure);
-        const bool model_tokens_over =
-            !control->recorded_replay &&
-            outcome.usage.model_tokens > control->granted_budget.model_tokens;
+        // #420, #443: a plan that completed can still be over a budget, because
+        // usage is only settled once it has. The run ends with the failure
+        // record of the budget it is over, in the shape of a run that the
+        // budget stopped on the way (see budget_overrun.h): wall time ends it
+        // TimedOut, as the deadline does, and the other budgets
+        // BudgetExhausted. A grant of 0 allows nothing.
+        auto overrun = plan_result.status == ProgramTerminalStatus::Completed
+            ? completed_run_overrun(control->granted_budget, outcome.usage,
+                                    !control->recorded_replay, monetary && monetary->exceeded())
+            : std::optional<BudgetOverrun>{};
         if (apply_terminal_cause(control, outcome, terminal_cause, cancellation_message)) {
         } else if (plan_result.status != ProgramTerminalStatus::Completed) {
             outcome.status    = plan_result.status;
             outcome.interrupt = std::move(plan_result.interrupt);
-        } else if (outcome.usage.core_steps > control->granted_budget.max_core_steps ||
-                   model_tokens_over || (monetary && monetary->exceeded()) ||
-                   outcome.usage.wall_time_ms > control->granted_budget.wall_time_ms) {
-            outcome.status = ProgramTerminalStatus::BudgetExhausted;
-            // #420: a run completed against a model-token grant it exceeded
-            // (a grant of 0 allows nothing) has the same failure record as a
-            // run that a reply took over its budget.
-            if (model_tokens_over)
-                outcome.failure = model_token_budget_failure(control->granted_budget.model_tokens,
-                                                             outcome.usage.model_tokens);
+        } else if (overrun) {
+            outcome.status        = overrun->status;
+            outcome.failure       = std::move(overrun->failure);
+            completed_over_budget = true;
         } else {
             try {
                 validate_contract_value(outcome.output,
@@ -6609,8 +6593,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     // of its own, and a call whose reservation does not fit is refused before it
     // is sent with a failure that carries the provider's evidence. Both end the
     // run BudgetExhausted with the code of the failure classifier's budget class.
+    // A run that completed over a budget already has its record, with every
+    // budget it exceeded (#443): it is not rewritten, and a run that completed
+    // past its deadline stays TimedOut.
     if (control->budget_exhausted->load(std::memory_order_acquire) &&
-        control->cancellation_cause() == CancellationCause::None) {
+        control->cancellation_cause() == CancellationCause::None && !completed_over_budget) {
         const auto granted = control->granted_budget.model_tokens;
         const auto used    = outcome.usage.model_tokens;
         if (!(outcome.failure && outcome.failure->provider_outcome)) {
@@ -6621,7 +6608,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             outcome.status = ProgramTerminalStatus::BudgetExhausted;
             auto& witness  = outcome.failure->witness;
             if (!witness.is_object()) witness = json::object();
-            witness["model_tokens"] = model_token_budget_witness(granted, used);
+            witness["model_tokens"] = budget_witness(granted, used);
         }
     }
     if (!outcome.checkpoint && checkpoint_id) {
@@ -6668,6 +6655,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     } else if (control->recorded_replay) {
         outcome.remaining_budget.monetary_microunits = control->granted_budget.monetary_microunits;
     }
+    // #443: the record of a run that a budget stopped on the way says how the
+    // run stands against every budget it is over.
+    if ((outcome.status == ProgramTerminalStatus::BudgetExhausted ||
+         outcome.status == ProgramTerminalStatus::TimedOut) &&
+        outcome.failure)
+        complete_budget_record(*outcome.failure, control->granted_budget, outcome.usage,
+                               !control->recorded_replay, monetary && monetary->exceeded());
     outcome.provider_budget_authority = usage->authority_snapshot();
     cancel_deadline_timer(control->deadline_executor, std::move(timer));
     control->complete(std::move(outcome));

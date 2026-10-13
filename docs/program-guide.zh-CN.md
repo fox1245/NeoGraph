@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=2c09ae713ad764ab622bf8682a2997a8c324a5ecd366f913d5249ae4b44d7a9a -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=f6877fa2edea4b8e4bebe30ec03143b3d82f0d970761d08e32839b95ea0a8daa -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -340,15 +340,27 @@ python restart.py state resume run-...
 | `Completed` | `main()` 返回了值，或图到达了出口。`result.output` 中是该值。 |
 | `Interrupted` | 运行在等待回答；`result.interrupt` 指出位置。用 `resume` 或 `fork` 继续。 |
 | `Failed` | 图没有路由的失败、失败退出，或 `main()` 抛出了异常。`result.failure.code` 给出具体原因。 |
-| `BudgetExhausted` | 某项有预算的资源耗尽，例如 `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET` 或 `P_CONCURRENCY_BUDGET`。模型 token 无论是因某次响应使运行超出预算，还是因下一次调用在发送前被拒绝，都以 `NG.BudgetExhausted` 结束。 |
-| `TimedOut` | 运行的 `wall_time_ms` 或某个 `ng.await` 的截止时间已过。 |
+| `BudgetExhausted` | 某项有预算的资源耗尽，例如 `P_PROGRAM_OPERATION_BUDGET`、`P_CORE_STEP_BUDGET` 或 `P_CONCURRENCY_BUDGET`。模型 token 无论是因某次响应使运行超出预算，还是因下一次调用在发送前被拒绝，都以 `NG.BudgetExhausted` 结束。金额和 Core 步骤会带着一条说明运行超出多少的记录结束（见[预算](#budgets)），运行在超出预算后才结束时也是如此。 |
+| `TimedOut` | 运行的 `wall_time_ms` 或某个 `ng.await` 的截止时间已过。在 `wall_time_ms` 之后才完成的运行同样是 `TimedOut`（见[预算](#budgets)）。 |
 | `Cancelled` | `ng.cancelScope` 或句柄的 `cancel()` 停止了运行。 |
 
 另外还有 `AmbiguousEffect` 和 `CheckpointIncompatible`，见 `include/neograph/program/result.h`。
 
+<a id="budgets"></a>
 ## 预算
 
 `ProgramRunBudget` 有十个字段：`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_concurrency`、`max_program_operations`、`max_core_steps`、`max_dynamic_compiles`、`max_child_depth`、`max_total_children` 和 `max_node_retries`。`result.usage` 统计一次运行用掉的量，`result.remaining_budget` 是剩余的量。零表示什么都不授予：`model_tokens = 0` 的运行如果调用模型，会以 `BudgetExhausted` 结束。上限、已准入的预算以及模型成本规则，见 [Python 绑定指南](python-binding.md#budgets)。
+
+运行超出预算而结束时，会带有一条指明是哪项预算的 failure 记录，witness 则说明超出了多少。`failure.witness` 在该预算的键下有一项，含 `granted`、`used` 和 `over_by`；运行恰好停在额度上，或模型调用在发送前被拒绝时，`over_by` 为 0。
+
+| 预算 | 状态 | `failure.code` | witness 键 |
+|---|---|---|---|
+| `wall_time_ms` | `TimedOut` | `P_RUNTIME_TIMEOUT` | `wall_time_ms` |
+| `model_tokens` | `BudgetExhausted` | `NG.BudgetExhausted` | `model_tokens` |
+| `monetary_microunits` | `BudgetExhausted` | `P_MONEY_BUDGET` | `monetary` |
+| `max_core_steps` | `BudgetExhausted` | `P_CORE_STEP_BUDGET` | `core_steps` |
+
+无论是预算在中途停下了运行，还是运行在超出预算后才结束，记录都是一样的。用量在 plan 完成之后才结算，所以 plan 可能超出额度才结束：响应的费用可能高于为该调用预留的金额，忽略取消的节点可能在截止时间之后才返回，子图节点的步骤会计入运行的 Core 步骤，却不会让包含它的图停下来。运行同时超出多项预算时，witness 为每一项各有一条，status 和错误码取自表中排在最前的那一项（即预算字段的顺序）。无论运行还用了什么，截止时间都会使运行以 `TimedOut` 结束，所以 wall time 排在最前。需要计价的调用在发送前被拒绝时，拒绝的证据保存在 `monetary` 之下：预留额、`ceiling` 和 `used`。
 
 ## 行为在哪里测试
 

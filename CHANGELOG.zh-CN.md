@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=27dd005b8bd4b2b779458ec8ee2ad6ddc3d05f9524af0ed55ce52d03d4aabc70 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c8b736ad3a4d51e6bbd5cefc73eae4a116cec4f84edd7c426cf20456c2348b44 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program：超出金额、Core 步骤或 wall time 额度才结束的运行，会带着该项预算的记录结束 (#443)。** 用量在 plan 完成之后才结算，而被发现超出 Core 步骤、金额或 wall time 额度的运行，曾以 `BudgetExhausted` 结束且没有 `failure`，调用方无从知道是哪项预算、超出多少。超出 wall time 的运行也是如此：被截止时间停下的运行以 `TimedOut` 结束，它却以 `BudgetExhausted` 结束。现在，每一种超出预算的结束都有 failure 记录，witness 在该预算的键下含有 `granted`、`used` 和 `over_by`，与模型 token 的记录 (#420) 相同：金额是 `P_MONEY_BUDGET` 和 `failure.witness["monetary"]`，Core 步骤是 `P_CORE_STEP_BUDGET` 和 `failure.witness["core_steps"]`，wall time 是 `P_RUNTIME_TIMEOUT` 和 `failure.witness["wall_time_ms"]`。wall time 在两条路径上都以 `TimedOut` 结束。超出多项预算的运行会把每一项都列在 witness 里，status 和错误码取自 wall time、模型 token、金额、Core 步骤中排在最前的那一项。Core 引擎在 Core 步骤额度处停下的运行，以及被截止时间停下的运行，其记录也带上了 witness（停在额度处时 `over_by` 为 0）。**行为变更：** 超出金额或 Core 步骤额度才结束的运行现在有 `failure`；超出 wall time 额度才结束的运行以 `TimedOut` 而不是 `BudgetExhausted` 结束；超时的 failure 带有 `witness["wall_time_ms"]`。
 - **由 Send 启动的执行返回 Send 时，运行会失败，而不是丢掉它们（#432）。** 由 Send 启动的节点返回的 Send 过去会被丢弃，其目标从未运行，也没有任何提示。现在运行会在应用该超步的任何结果之前失败，错误信息会指出节点和目标。**行为变更：** Send 目标返回 Send 的图过去会在不运行这些目标的情况下结束，现在会失败；请把条目写入通道，由普通节点发出 Send。
 - **失败的 Program 尝试用与引擎追踪相同的名称记录 Send 执行（#433）。** 失败的 Core 会在没有引擎追踪的情况下重新抛出异常，因此失败的尝试根据 `NODE_END` 事件构建追踪，过去只用节点名记录 Send 执行。现在 Send 执行的 `NODE_END` 事件带有 `"send": true`，尝试的追踪按完成顺序把它记为 `<目标>[send]`。**行为变更：** 失败的 Program 尝试的追踪把 Send 执行记为 `<目标>[send]`，Send 执行的 `NODE_END` 事件多了 `send` 字段。
 - **Python 也能关闭构建时的 lint（#415）。** `GraphEngine.compile` 新增关键字 `stderr_notices`，默认值为 `True`，与 C++ 的 `EngineConfig::stderr_notices` 相同。设为 `stderr_notices=False` 后，不再输出 strict 图的 lint（例如针对只由 `Send` 或 `Command.goto` 启动的节点的 E7），也不再输出 fan-out 串行执行的一次性提示；校验错误仍然会抛出。E7 本身没有变化：图定义里没有声明动态目标的地方，校验器无法区分由 Send 启动的节点和没有任何入口的节点，文档现已写明这一点。文档还说明，指向 Send 目标的静态边不能用来消除 lint：目标会在所有 Send 结束后，在共享状态上再多运行一次。不传这个关键字的代码行为不变，图的运行方式也不变。

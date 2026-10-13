@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b8df513a502705cefaf6a8a6bc7c07fb3e050b5bdd03f35706aa09affac052fe -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -453,7 +453,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 不知道该模型的输入限制 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | aggregator 条目没有 route ceiling，例如 router alias，或其 ceiling 无法作为 `provider.max_price` 固定 |
-| `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits` |
+| `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits`（收费超出预算而结束的运行也用同一个错误码，此时 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by`） |
 
 得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed` 与 `reason`。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
 
@@ -463,7 +463,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 | `estimated` | 没有报告费用的最终且一致的 usage。 | 目录费率乘以报告的 token 档，每次调用向上取整一次。记录写明目录的 version 与 digest。 |
 | `held` | 结果未知（transport 异常、取消、超时）、调用失败时可能已有工作开始（HTTP 408、425、429 或 5xx 响应、被切断的流、请求发出后的 transport 失败）、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
-证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
+证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
 
 `bind_priced` 把调用的记录写入其 journal 行：随 dispatched marker 写入 held 记录，随结果写入结算后的记录。同一 Program attempt 在进程停止前记录的调用，会在恢复后的 attempt 绑定该 operation 时收费一次并标记为 `replayed`，无论 Core 是否再次调用它；这也包括通过 execution lease 过期而恢复的仅 define() 运行。较早 attempt 记录的调用已由该 attempt 的结果结算进剩余预算，后续 attempt 重放其结果时不会再次收费。recorded replay 从不花钱。
 

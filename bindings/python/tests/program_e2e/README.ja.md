@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=0d905e4f74f709d13c602dc998ce44c80e59274742fe7481e4d4dad02652303a -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=76b292dbdaebc0e300c9c939e569845c546cea947e8e2fcdb7373e08e5125ea1 -->
 # Program APIのエンドツーエンドのシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,12 +12,12 @@
 | `test_01_quickstart.py` | ドキュメントのサンプル、Pythonのノードと条件を持つ `define()` のグラフ、プロセスをまたいだID、アクティベーションとロールバック |
 | `test_02_hitl.py` | `interruptBefore`、`NodeInterrupt`、デフォルトと明示指定の保留ID、`main()` の中での割り込み、プロセスの再起動後の再開 |
 | `test_03_failures.py` | ノードの例外、fan-outの分岐の失敗、`main()` の例外、失敗した `callCore`、プロバイダーのない `llm_call` |
-| `test_04_budgets.py` | コンパイル時と実行時のJavaScriptのタイムアウト、ステップ数と操作数の予算、実時間によるキャンセル、admission済みの予算、元の実行の予算から切り分けたフォークの取り分（#414） |
+| `test_04_budgets.py` | コンパイル時と実行時のJavaScriptのタイムアウト、ステップ数と操作数の予算、実時間によるキャンセル、admission済みの予算、Core のステップ数や実時間の許可量を超えたまま終わった実行の記録（#443）、元の実行の予算から切り分けたフォークの取り分（#414） |
 | `test_05_diagnostics.py` | 構文エラーとビルダーのエラーのソース位置、レジストリのミス、lintのスパン、制御文字、admissionのエラー |
 | `test_06_graph_shapes.py` | バリアのjoin、条件付きルーティング、`Send` によるmap-reduce、サブグラフ、不正なグラフの形状 |
 | `test_07_main_programs.py` | `callCore`、`all`、`race`、`quorum`、`await` のタイムアウト、`cancelScope`、外部からのキャンセル、`spawn` |
 | `test_08_live_llm.py` | ノードがモデルを呼び出すProgram。デフォルトではローカルのpeerを使い、有効にするとOpenRouterを使う。Pythonのノードと、バインド済みの `llm_call` |
-| `test_09_bound_llm.py` | `node_context` を通してバインドした `llm_call`（#372）：報告されたコストと推定のコスト、`provider.max_price` として固定したルートの上限、送信前の拒否（予算、未知のモデル、ルーターのエイリアス）、完了した HTTP 4xx 応答は hold を解放して何も課金せず、429 や 503 は hold を維持する動作、予算0、プロバイダーのないID、1つの予算に対する `all` と `quorum`、呼び出しがジャーナルに記録された後のクラッシュと、それを1回だけ課金する復旧、モデルトークン予算が尽きたときの1つの終了の形（#420）、実行リースに保持された実行のエラー（#421）、途中で切れたストリーム（#426）：失敗した run が terminal 状態を公開して再接続でき、native archive のないホストでは可搬な証拠を、archive のあるホストでは native の証拠を保持 |
+| `test_09_bound_llm.py` | `node_context` を通してバインドした `llm_call`（#372）：報告されたコストと推定のコスト、`provider.max_price` として固定したルートの上限、送信前の拒否（予算、未知のモデル、ルーターのエイリアス）、完了した HTTP 4xx 応答は hold を解放して何も課金せず、429 や 503 は hold を維持する動作、予算0、プロバイダーのないID、1つの予算に対する `all` と `quorum`、呼び出しがジャーナルに記録された後のクラッシュと、それを1回だけ課金する復旧、モデルトークン予算が尽きたときの1つの終了の形（#420）、金額の許可量を超えたまま終わった実行や、トークンと金額の両方を超えた実行の記録（#443）、実行リースに保持された実行のエラー（#421）、途中で切れたストリーム（#426）：失敗した run が terminal 状態を公開して再接続でき、native archive のないホストでは可搬な証拠を、archive のあるホストでは native の証拠を保持 |
 | `test_10_failure_routing.py` | 失敗時のルーティング（#364）：失敗したTESTを、そのレコードとともに `interruptBefore` のハンドラーへルーティングする、リトライと中止のルートに沿った再開、作成者のコード、秘匿したエラーテキスト、`max_visits`、`max_node_retries` の上限と、`main()` がある場合とない場合の残り（#419）、上限と `main()` を併用しても、再試行を終えた失敗がハンドラーで止まること（#418）、ノード内のProgramの診断、SQLiteを使った新しいプロセスでの再開 |
 | `test_11_attempt_timeout.py` | 試行のタイムアウト（#364）：タイムアウトしてリトライで回復する遅いPythonのノード、常にタイムアウトして `NG.Timeout` としてハンドラーにルーティングされるノード（ハンドラーがなければ実行が失敗する）、結果にもトレースにも届かない遅れた完了、停止のデッドラインを過ぎてもキャンセルを無視するノード（`NG.EffectUncertain`）、`wall_time_ms` を超えることになるバックオフが、kind `deadline` で止まること |
 | `test_12_send_interrupts.py` | `NodeInterrupt` を投げる `Send` のターゲット（#385）：Programがそこで一時停止し、再開するとmapノードと完了済みのSendがリプレイされる。SQLiteでの再起動後の再開。バインド済みの `llm_call` を呼んだ完了済みのSendは、再送信も再課金もされない |

@@ -914,3 +914,83 @@ def test_reconnect_of_a_leased_run_names_the_lease_and_the_child_budget_exit(pee
     assert 0 < witness["retry_after_ms"] <= 60_000, witness
     assert witness["expires_at_ms"] > 0
     assert peer.request_count() == 1, "the held run was not dispatched again"
+
+
+# ---------------------------------------------------------------------------
+# A run that finishes over its money grant ends with the record of that budget (#443)
+#
+# A reply can report a cost above the reservation made for its call (a BYOK
+# upstream charge, a fee that max_price does not cap). The call was sent
+# within the budget, so the run completes, and finishes over its grant. It ends
+# BudgetExhausted with P_MONEY_BUDGET, the code of a call that does not fit,
+# and failure.witness["monetary"] holds granted, used and over_by.
+# ---------------------------------------------------------------------------
+
+OVERSHOOT = 500
+
+
+def reported_cost(microunits):
+    """A reply cost in USD that settles as `microunits`: the half microunit rounds up."""
+    return (microunits - 0.5) / 1_000_000
+
+
+def test_a_reported_cost_above_the_money_grant_ends_the_run_with_the_record(peer):
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD + OVERSHOOT)}
+    run_budget = priced_budget(monetary_microunits=HOLD)
+    _host, _version, result = run_bound(peer, run_budget=run_budget)
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure is not None, "a money overshoot carries its failure record"
+    assert result.failure.code == "P_MONEY_BUDGET"
+    assert result.failure.witness["monetary"] == {
+        "granted": HOLD, "used": HOLD + OVERSHOOT, "over_by": OVERSHOOT}
+    assert "model_tokens" not in result.failure.witness
+    assert str(HOLD + OVERSHOOT) in result.failure.message
+    assert peer.request_count() == 1
+    assert result.usage.monetary_microunits == HOLD + OVERSHOOT
+    assert result.remaining_budget.monetary_microunits == 0
+    [record] = result.monetary_records
+    assert record.microunits == HOLD + OVERSHOOT
+
+
+def test_a_reported_cost_within_the_money_grant_leaves_no_failure(peer):
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD)}
+    _host, _version, result = run_bound(peer, run_budget=priced_budget(monetary_microunits=HOLD))
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.failure is None
+    assert result.usage.monetary_microunits == HOLD
+
+
+@pytest.mark.parametrize("calls", [
+    pytest.param(2, id="the-last-reply-takes-the-run-over"),
+    pytest.param(3, id="the-run-stops-before-the-third-call"),
+])
+def test_a_run_over_its_tokens_and_its_money_names_both(peer, calls):
+    """Each reply is 600 tokens and costs hold + OVERSHOOT microunits.
+
+    The budget is 1,000 tokens and 2 * hold + OVERSHOOT microunits, where hold is the
+    reservation of one call. A call is sent while its reservation fits, so the second
+    call is sent, and its reply takes the run over both budgets. The code is the first
+    budget's in the order of the budget fields (tokens before money), and the witness
+    has an entry for each.
+    """
+    hold = route_ceiling_hold(input_tokens=TOKEN_INPUT_LIMIT, output_tokens=TOKEN_OUTPUT_CAP)
+    cost = hold + OVERSHOOT
+    peer.usage = {"prompt_tokens": 500, "completion_tokens": 100, "total_tokens": 600,
+                  "cost": reported_cost(cost)}
+    money = 2 * hold + OVERSHOOT
+    run_budget = priced_budget(model_tokens=TOKEN_BUDGET, monetary_microunits=money)
+    _host, _version, result = run_bound(
+        peer, llm_chain(calls), run_budget, controls=token_controls(),
+        input_limits={PRICED_MODEL: TOKEN_INPUT_LIMIT})
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.code == "NG.BudgetExhausted", describe(result)
+    assert peer.request_count() == 2
+    assert result.failure.witness["model_tokens"] == {
+        "granted": TOKEN_BUDGET, "used": 1_200, "over_by": 200}
+    assert result.failure.witness["monetary"] == {
+        "granted": money, "used": 2 * cost, "over_by": OVERSHOOT}

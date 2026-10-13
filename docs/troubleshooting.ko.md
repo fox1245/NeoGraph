@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=bf3a0fc91c038eb15990431ba05111781017b3a926b38e3f45cd235f633546e0 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=a99715bb81db399544918988ad01ba271599c369707e6c9f0eb677e1de3e5b51 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -109,13 +109,14 @@ worker_count의 기본값은 `1`이므로 엔진이 소유하는 풀이 만들�
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 나열된 상한 필드 중 0인 것이 있다 | 양수로 바꾼다. Program이 모델을 호출하지 않아도 마찬가지다 |
 | `ng.ProgramAdmissionError`의 `P_ADMIT_PROVIDER` | `llm_call` 노드가 필요로 하는 provider를 호스트가 바인딩하지 않았거나, `llm_call` 또는 `intent_classifier` 노드를 `provider=` 없이 등록했다 | `add_provider(...)`와 `add_registered_node("llm_call", ..., provider=...)`를 등록하고, `LocalProgramHost`에 `node_context=`와 `binding_label=`을 넘긴다 |
 | `P_MONEY_BUDGET`(`BudgetExhausted`) 또는 다른 `P_MONEY_*` 코드(`Failed`)가 나오고 provider가 요청을 받지 못함 | 바인딩된 호출의 예약액이 `monetary_microunits`에 맞지 않거나(0은 아무것도 허용하지 않음), 호출의 상한을 정할 수 없다. 모델이나 origin을 알 수 없음, route 상한이 없는 router 별칭, 출력 상한 없음, 알려진 입력 한도 없음, 가격 카탈로그가 다루지 않는 기능 중 하나이다 | `monetary_microunits`를 올리거나 `provider_controls.max_output_tokens`를 설정하거나 카탈로그에 항목이 있는 모델을 쓴다. [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)를 참고한다 |
+| `P_MONEY_BUDGET`(`BudgetExhausted`)이 나오고 `failure.witness["monetary"]`에 `granted`, `used`, `over_by`가 있음 | provider가 요청을 받았고, 응답이 예약액보다 큰 비용을 보고해서 실행의 청구액이 `monetary_microunits`를 넘겼다 | `monetary_microunits`를 올리거나 호출 비용을 낮춘다 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 실행 예산이 `compile_admit`에 넘긴 예산과 다르다 | 같은 예산을 넘기거나, 다시 컴파일하고 승인(admission)한다 |
 | `ng.spawn`에서 발생하는 `P_CHILD_BINDING` | `LocalProgramHost`에 자식 바인딩 resolver가 없다 | 자식 Program은 C++ 호스트에서 실행한다 |
 | `resume()`에서 발생하는 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | 그 실행이 다른 `LocalProgramHost`나 이미 소멸한 호스트의 것이다 | 그 실행을 시작한 호스트로 재개한다 |
 | `reconnect()`에서 발생하는 `P_RUN_LEASE_HELD` | 자식 예산 없이 시작한 `define()`만 있는 Program은 `wall_time_ms` 동안 실행 lease를 잡으므로, 소유자가 아직 살아 있을 수 있는 실행을 다른 런타임이 이어 가지 못한다 | 진단의 witness에 있는 `retry_after_ms`가 지난 뒤에 다시 시도한다. 그러면 실행은 `TimedOut`으로 끝난다. 멈춘 실행을 마지막 체크포인트에서 이어 가려면 `main()`을 쓰거나 자식 예산(`max_child_depth`와 `max_total_children`을 0보다 크게)으로 Program을 시작한다 |
 | `fork()`에서 발생하는 `P_FORK_SOURCE_BUDGET` | 포크의 예산이 일시 정지한 실행에 남은 `wall_time_ms`나 `max_core_steps`를 전부 가져가서, 그 실행이 재개할 수 없게 된다 | 포크에는 `paused.remaining_budget`의 일부(예: 절반)를 준다. `max_concurrency`는 그대로 줘도 된다 |
 | `P_CORE_BARRIER_STALLED` | barrier 멤버가 join으로 이어지지 않는 경로를 택해서 join이 더는 발동할 수 없다 | 모든 멤버를 join이나 `__end__`로 라우팅한다. `P_CORE_E15`가 컴파일 시점에 이런 경로를 경고한다 |
-| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 실행이 `wall_time_ms`를 모두 썼다. 중단된 연산의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 컴파일하고 승인(admission)한다 |
+| `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 실행이 `wall_time_ms`를 모두 썼거나 그 뒤에 끝났다. `failure.witness["wall_time_ms"]`가 얼마나 넘겼는지 알려 주고, 중단된 연산의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 컴파일하고 승인(admission)한다 |
 
 `callCore`가 실패하면 실행은 그 실패로 끝납니다. `main()`은 `try`/`catch`로 이를 잡을 수 없습니다. Python에서 `result.status`와 `result.failure`를 확인합니다.
 
