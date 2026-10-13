@@ -946,9 +946,12 @@ TEST(NativeProgramRuntimeTest, AdmittedHostCapabilityRoundTripsAndReleasesOutput
 
 TEST(NativeProgramRuntimeTest, GrantedDeadlineIncludesBlockingInvokeCallback) {
     NativeAdmittedRuntime fixture;
-    fixture.state.block_before_return = std::chrono::milliseconds(200);
+    // The budget has to outlast the start of the run on a loaded host: when the
+    // deadline passed before the callback was dispatched, the run timed out
+    // without calling it.
+    fixture.state.block_before_return = std::chrono::milliseconds(800);
     auto short_budget                 = native_runtime_budget();
-    short_budget.wall_time_ms         = 100;
+    short_budget.wall_time_ms         = 400;
     const auto version                = fixture.admit(42, short_budget);
 
     const auto started = std::chrono::steady_clock::now();
@@ -958,7 +961,7 @@ TEST(NativeProgramRuntimeTest, GrantedDeadlineIncludesBlockingInvokeCallback) {
             json{{"left", 3}, {"right", 4}}, short_budget, "trace-native-blocking-dispatch", {}});
     const auto elapsed = std::chrono::steady_clock::now() - started;
 
-    EXPECT_GE(elapsed, std::chrono::milliseconds(200));
+    EXPECT_GE(elapsed, std::chrono::milliseconds(800));
     ASSERT_EQ(result.status(), ProgramTerminalStatus::TimedOut)
         << (result.failure() ? result.failure()->code + ": " + result.failure()->message + " " +
                                    result.failure()->witness.dump()

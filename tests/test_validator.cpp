@@ -767,8 +767,9 @@ TEST(ValidatorEngine, ASendOnlyNodeIsReportedUnreachableAndTheSwitchSilencesIt) 
 
     // A definition holds no Send or Command target, only the nodes that
     // return them at run time, so the lint sees `worker` as unreachable.
-    auto cg = GraphCompiler::compile(def, NodeContext{});
-    auto e7 = by_code(GraphValidator::validate(cg), "E7");
+    auto       cg     = GraphCompiler::compile(def, NodeContext{});
+    const auto report = GraphValidator::validate(cg);  // by_code points into it
+    auto       e7     = by_code(report, "E7");
     ASSERT_EQ(e7.size(), 1u);
     EXPECT_EQ(e7[0]->witness["unreachable"], json::array({"worker"}));
 
@@ -795,8 +796,9 @@ TEST(ValidatorEngine, AStaticEdgeToASendTargetAddsARunWithTheSendersState) {
     const auto def = send_target_graph(true);
 
     // The edge quiets the lint ...
-    auto cg = GraphCompiler::compile(def, NodeContext{});
-    EXPECT_TRUE(by_code(GraphValidator::validate(cg), "E7").empty());
+    auto       cg     = GraphCompiler::compile(def, NodeContext{});
+    const auto report = GraphValidator::validate(cg);
+    EXPECT_TRUE(by_code(report, "E7").empty());
 
     // ... and changes the run: `worker` runs once more after the Sends, on
     // the shared state, where no Send payload ever landed.

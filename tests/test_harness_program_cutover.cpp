@@ -1961,16 +1961,24 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneWinnerAndOneDis
         ASSERT_EQ(second.get(run_id).at("status"), "input_required");
 
         std::promise<void> ready;
-        auto               gate        = ready.get_future().share();
+        auto               gate = ready.get_future().share();
+        std::mutex         seen_mutex;
+        std::string        seen;  // what each side answered, for the failure message
         const auto         resume_once = [&](neograph::mcp::HarnessService& service, bool approved) {
             gate.wait();
+            const auto note = [&](const std::string& what) {
+                std::lock_guard lock(seen_mutex);
+                seen += (approved ? "[approve: " : "[reject: ") + what + "] ";
+            };
             try {
                 const auto accepted = service.resume({{"run_id", run_id},
                                                       {"call_id", "resume-race-1"},
                                                       {"result", {{"approved", approved}}}});
+                note(accepted.dump());
                 return accepted.at("accepted").get<bool>() ? 1 : -1;
             } catch (const neograph::program::ProgramDiagnosticError& error) {
                 const auto& code = error.diagnostic().code;
+                note(code + ": " + error.diagnostic().message);
                 return code == "P_RESUME_CONFLICT" || code == "P_RESUME_STATE" ? 0 : -2;
             }
         };
@@ -1979,8 +1987,8 @@ TEST(HarnessProgramCutover, ConcurrentSqliteReconnectResumeHasOneWinnerAndOneDis
         ready.set_value();
         const int first_result  = first_resume.get();
         const int second_result = second_resume.get();
-        EXPECT_EQ(first_result + second_result, 1);
-        ASSERT_TRUE(first_result == 1 || second_result == 1);
+        EXPECT_EQ(first_result + second_result, 1) << seen;
+        ASSERT_TRUE(first_result == 1 || second_result == 1) << seen;
         auto&      winner    = first_result == 1 ? first : second;
         const auto completed = await_terminal(winner, run_id);
         EXPECT_EQ(completed.at("status"), "completed") << completed.dump();
