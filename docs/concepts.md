@@ -383,7 +383,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 `RunResult.execution_trace` has one entry per node execution that completed. A Send execution is listed as `<target>[send]`, so a node that runs by Send and by an edge shows two kinds of entry. The entries follow the order in which the engine applied the results: super-steps in order, and within a step the ready nodes in ready order, then the Sends in the order they were emitted (the ready nodes' order, then each node's own), whatever order the executions finished in. The shape above gives `["planner", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "summarizer"]`.
 
-A step that paused on a `NodeInterrupt` lists nothing, and the run that resumes it lists the whole step, replayed executions included. A subgraph is one entry; its inner nodes are not listed.
+A step that paused on a `NodeInterrupt` lists nothing, and the run that resumes it lists the whole step, replayed executions included. A subgraph is one entry; its inner nodes are not listed. A Program attempt that fails reports the executions that completed before the failure, in the order they completed, with the same names: a Send execution is `<target>[send]`, from the `"send": true` that its `NODE_END` event carries.
 
 ### A Send target needs no edge into it
 

@@ -154,6 +154,38 @@ TEST_P(ExecutionTraceEntryPoints, SendFanOutListsThePlannerAndEveryWorker) {
 INSTANTIATE_TEST_SUITE_P(WithAndWithoutAWorkerPool, ExecutionTraceEntryPoints,
                          testing::Values(std::size_t{1}, std::size_t{3}));
 
+// #433: an observer that builds a trace from events (a failed Program attempt
+// does) can name a Send execution as the engine's trace does: the NODE_END
+// event of a Send execution carries "send": true, an ordinary node's does not.
+TEST(ExecutionTrace, TheNodeEndEventOfASendExecutionSaysSo) {
+    auto engine = build(fanout_graph(), 3);
+
+    std::mutex       mutex;
+    std::vector<json> ends;
+    RunConfig         events;
+    events.stream_mode = StreamMode::EVENTS;
+    (void)engine->run_stream(events, [&](const GraphEvent& event) {
+        if (event.type != GraphEvent::Type::NODE_END) return;
+        std::lock_guard lock(mutex);
+        ends.push_back(json{{"node", event.node_name}, {"data", event.data}});
+    });
+
+    ASSERT_EQ(ends.size(), 4u);
+    int sends = 0;
+    for (const auto& end : ends) {
+        const auto& data    = end["data"];
+        const bool  is_send = data.is_object() && data.value("send", false);
+        if (end["node"] == "worker") {
+            EXPECT_TRUE(is_send) << end.dump();
+            ++sends;
+        } else {
+            EXPECT_EQ(end["node"], "planner");
+            EXPECT_FALSE(is_send) << end.dump();
+        }
+    }
+    EXPECT_EQ(sends, 3);
+}
+
 TEST(ExecutionTrace, SendsAreListedInTheOrderTheyWereEmittedWhateverFinishesFirst) {
     json def{{"channels", channels()},
              {"nodes", {{"planner", {{"type", "trace.fanout"}}},

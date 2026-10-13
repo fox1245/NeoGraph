@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=f2c5a7179bf0b37883c585fe17f01891b3e13e5b4b40399cbd1990ab8acfc29c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -928,7 +928,7 @@ struct GraphEvent {
 | Type | `data` contents |
 |------|-----------------|
 | `NODE_START` | `{}` or node metadata |
-| `NODE_END` | Channel writes produced by the node |
+| `NODE_END` | 기본은 `null`이고, 노드가 Command를 돌려주면 `command_goto`, Send를 돌려주면 `sends`(개수), Send로 시작된 실행이면 `send: true`가 든 객체입니다 |
 | `LLM_TOKEN` | `{"token": "..."}` |
 | `CHANNEL_WRITE` | `{"channel": "...", "value": ...}` |
 | `INTERRUPT` | `{"reason": "...", "node": "..."}` |

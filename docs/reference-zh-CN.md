@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=f2c5a7179bf0b37883c585fe17f01891b3e13e5b4b40399cbd1990ab8acfc29c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -922,7 +922,7 @@ struct GraphEvent {
 | 类型 | `data` 内容 |
 |------|-----------------|
 | `NODE_START` | `{}` 或节点元数据 |
-| `NODE_END` | 节点产生的通道写入 |
+| `NODE_END` | 默认为 `null`；节点返回 Command 时含 `command_goto`，返回 Send 时含 `sends`（数量），由 Send 启动的执行含 `send: true` |
 | `LLM_TOKEN` | `{"token": "..."}` |
 | `CHANNEL_WRITE` | `{"channel": "...", "value": ...}` |
 | `INTERRUPT` | `{"reason": "...", "node": "..."}` |

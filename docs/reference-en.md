@@ -933,7 +933,7 @@ struct GraphEvent {
 | Type | `data` contents |
 |------|-----------------|
 | `NODE_START` | `{}` or node metadata |
-| `NODE_END` | Channel writes produced by the node |
+| `NODE_END` | `null`, or an object with `command_goto` when the node returned a Command, `sends` (a count) when it returned Sends, and `send: true` when the execution was started by a Send |
 | `LLM_TOKEN` | `{"token": "..."}` |
 | `CHANNEL_WRITE` | `{"channel": "...", "value": ...}` |
 | `INTERRUPT` | `{"reason": "...", "node": "..."}` |

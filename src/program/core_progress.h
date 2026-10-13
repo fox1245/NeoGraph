@@ -22,7 +22,8 @@ public:
 
     std::uint64_t steps() const noexcept { return steps_.load(std::memory_order_relaxed); }
 
-    /** Nodes that completed during this attempt, in completion order. */
+    /** Nodes that completed during this attempt, in completion order; a Send
+     *  execution is named "<target>[send]", as in the engine's trace. */
     std::vector<std::string> completed_nodes() const;
 
 private:

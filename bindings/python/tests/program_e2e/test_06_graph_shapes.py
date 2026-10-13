@@ -125,6 +125,33 @@ export function define() {
     assert program.execution_trace == core.execution_trace
 
 
+def test_a_failed_program_attempt_names_its_send_executions_as_the_core_trace_does():
+    # #433: a failing Core rethrows without its engine trace, so a failed attempt
+    # builds its trace from node-end events. It lists the executions that
+    # completed before the failure, in the order they completed, and names a Send
+    # execution "<target>[send]" as the engine's trace does.
+    text = """
+export function define() {
+  const g = ng.graph("map_reduce");
+  g.channel("items", {reducer: "overwrite", initial: []});
+  g.channel("item", {reducer: "overwrite", initial: 0});
+  g.channel("results", {reducer: "append", initial: []});
+  g.node("fan", {type: "e2e.fan"});
+  g.node("square", {type: "e2e.square"});
+  g.entry("fan");
+  g.exit("square");
+  return g;
+}
+"""
+    _host, _version, program = run_program(text, {"items": [1, 2, -3]})
+    assert program.status == ng.ProgramTerminalStatus.Failed, describe(program)
+
+    trace = list(program.execution_trace)
+    assert trace[0] == "fan", trace
+    assert trace[1:] and all(entry == "square[send]" for entry in trace[1:]), trace
+    assert len(trace) <= 3, trace
+
+
 def test_subgraph_node_runs_an_inline_child_graph():
     registry = build_registry(extra_node_types=("subgraph",))
     host = make_host(registry=registry)

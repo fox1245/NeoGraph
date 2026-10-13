@@ -332,6 +332,8 @@ struct InvocationSlot {
     int* interrupted_attempt = nullptr;
     /// #364: this activation is past the node's max_visits; it does not run.
     bool visit_limited = false;
+    /// The invocation is a Send execution; its NODE_END event says so.
+    bool send = false;
 };
 
 std::vector<std::string> paused_task_ids(int step, const std::string& paused_node,
@@ -1230,6 +1232,10 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
                     json end_data;
                     if (nr.command) end_data["command_goto"] = nr.command->goto_node;
                     if (!nr.sends.empty()) end_data["sends"] = (int)nr.sends.size();
+                    // A Send execution is named "<target>[send]" in the execution
+                    // trace; the event carries the same fact for observers that
+                    // build a trace from events (a failed Program attempt does).
+                    if (slot && slot->send) end_data["send"] = true;
                     cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, std::move(end_data)});
                 }
             }
@@ -1865,6 +1871,7 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
         detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id,
                                     &interrupted_attempts[si]};
         slot.visit_limited = visit_limited[si] != 0;
+        slot.send          = true;
         NodeResult nr;
         {
             std::optional<BranchTimer> timer;

@@ -280,6 +280,8 @@ class Square(ng.GraphNode):
     def run(self, input):
         item = input.state.get("item")
         JOURNAL.add("ran", f"{self._name}:{item}")
+        if item is not None and item < 0:
+            raise ValueError("negative item")  # a failing Send execution (#433)
         return [ng.ChannelWrite("results", [item * item])]
 
 

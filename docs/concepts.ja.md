@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=3a56bff864cc1479bff6c89a51b006b8e7d90cd339f0aec6e4f2fda21f7a97cd -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=825eb1e938efc450ca761d9555bc4ecea1579b8d25dbe2c936bae1e5ebbb4943 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -334,7 +334,7 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 
 `RunResult.execution_trace` には、完了したノード実行ごとに 1 件の項目が入ります。Send で実行されたノードは `<対象>[send]` と記録されるので、同じノードを Send とエッジの両方で実行すると、2 種類の項目が並びます。項目の並びは、エンジンが結果を反映した順です。スーパーステップは順番どおりに並び、1 つのスーパーステップの中では、実行可能なノードが ready の順に先に並び、そのあとに Send が送出された順（ready ノードの順、その中ではノードが返した順）で並びます。実行が終わった順は関係ありません。上の構成では `["planner", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "summarizer"]` になります。
 
-`NodeInterrupt` で一時停止したスーパーステップは、何も記録しません。それを再開した実行が、リプレイされた実行も含めてスーパーステップ全体を記録します。サブグラフは 1 件で、内側のノードは記録しません。
+`NodeInterrupt` で一時停止したスーパーステップは、何も記録しません。それを再開した実行が、リプレイされた実行も含めてスーパーステップ全体を記録します。サブグラフは 1 件で、内側のノードは記録しません。 失敗した Program の試行は、失敗までに完了した実行を、完了した順に同じ名前で報告します。Send による実行は、その `NODE_END` イベントが持つ `"send": true` から `<対象>[send]` と記録されます。
 
 ### Send の対象ノードに入ってくるエッジは不要です
 

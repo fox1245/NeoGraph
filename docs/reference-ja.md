@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=f2c5a7179bf0b37883c585fe17f01891b3e13e5b4b40399cbd1990ab8acfc29c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=414969423d12daa67520b6602a6ad7e575826becd72c9db3df6678107bd72374 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -838,7 +838,7 @@ struct GraphEvent {
 | 型 | `data` の内容 |
 |------|-----------------|
 | `NODE_START` | `{}` またはノードメタデータ |
-| `NODE_END` | ノードが生成したチャネル書き込み |
+| `NODE_END` | 既定は `null`。ノードが Command を返したときは `command_goto`、Send を返したときは `sends`（件数）、Send で始まった実行なら `send: true` が入ります |
 | `LLM_TOKEN` | `{"token": "..."}` |
 | `CHANNEL_WRITE` | `{"channel": "...", "value": ...}` |
 | `INTERRUPT` | `{"reason": "...", "node": "..."}` |

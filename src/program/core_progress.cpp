@@ -15,8 +15,12 @@ bool is_synthetic_start(const graph::GraphEvent& event) {
 void AttemptCoreProgress::observe(const graph::GraphEvent& event) noexcept {
     if (event.type == graph::GraphEvent::Type::NODE_END) {
         try {
+            // Named as the engine's own trace names them: a Send execution is
+            // "<target>[send]".
+            const bool send = event.data.is_object() && event.data.contains("send") &&
+                              event.data["send"].is_boolean() && event.data["send"].get<bool>();
             std::lock_guard lock(completed_mutex_);
-            completed_.push_back(event.node_name);
+            completed_.push_back(send ? event.node_name + "[send]" : event.node_name);
         } catch (...) {
             // The trace is diagnostic; an allocation failure must not fail the run.
         }
