@@ -463,7 +463,7 @@ JavaScriptのProgramは、`define()` をエクスポートする必要があり�
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels` には、各チャネルの `value` と `version` が入ります。各チャネルの値は、同名のキーがまだなければ、そのチャネル名のトップレベルのキーにもコピーされます。そのため、`main()` は `result.value` を読めます。`channels` または `global_version` という名前のチャネルには、`channels` の下からしか到達できません。バリアのリストは、ソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])` は、`bundle.sealed_core_definitions` では `{"wait_for": ["alpha", "zeta"]}` になります。順序は動作に影響しません。
+`channels` には、各チャネルの `value` と `version` が入ります。`version` は、すべてのチャネルが共有する書き込みカウンターが、そのチャネルへの最後の書き込み時点で持っていた値です。`global_version` は、実行の最後の書き込み後のカウンターです。どちらも書き込みの順序を表すだけで、チャネルが受けた書き込みの回数でもスーパーステップの番号でもありません。一度も書き込まれていないチャネルのバージョンは0です（[バージョン](concepts.md#versions)を参照）。各チャネルの値は、同名のキーがまだなければ、そのチャネル名のトップレベルのキーにもコピーされます。そのため、`main()` は `result.value` を読めます。`channels` または `global_version` という名前のチャネルには、`channels` の下からしか到達できません。バリアのリストは、ソートして保存されます。`graph.barrier("join", ["zeta", "alpha"])` は、`bundle.sealed_core_definitions` では `{"wait_for": ["alpha", "zeta"]}` になります。順序は動作に影響しません。
 
 ### コマンドが失敗すると実行が終わる
 

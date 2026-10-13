@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 - **Python 也能关闭构建时的 lint（#415）。** `GraphEngine.compile` 新增关键字 `stderr_notices`，默认值为 `True`，与 C++ 的 `EngineConfig::stderr_notices` 相同。设为 `stderr_notices=False` 后，不再输出 strict 图的 lint（例如针对只由 `Send` 或 `Command.goto` 启动的节点的 E7），也不再输出 fan-out 串行执行的一次性提示；校验错误仍然会抛出。E7 本身没有变化：图定义里没有声明动态目标的地方，校验器无法区分由 Send 启动的节点和没有任何入口的节点，文档现已写明这一点。文档还说明，指向 Send 目标的静态边不能用来消除 lint：目标会在所有 Send 结束后，在共享状态上再多运行一次。不传这个关键字的代码行为不变，图的运行方式也不变。
 - **明确了 `RunResult::execution_trace` 的契约（#424）。** 只改了文档和测试，行为没有变化。关于由 `Send` 启动的节点缺失于轨迹的报告，未能复现：`run`、`run_stream`、`run_async`、`run_stream_async` 和 `resume`，无论有没有 worker 线程池，都会把每次 Send 执行记为 `<目标>[send]`。`types.h`、`engine.h` 和文档现在写明了顺序：超步按先后排列，一个超步内先列就绪节点，再按发出顺序列 Send，与各次执行结束的先后无关。暂停的超步不记录任何内容，恢复后的运行会记录重新进入的整个超步，子图只算一项。
+- **文档：通道的 `version` 是所有通道共用的同一个写入计数器的值（#416）。** `RunResult` 的文档、头文件和指南曾把 `output["channels"][name]["version"]` 说成该通道被写入的次数，把 `output["global_version"]` 说成超步计数器，Python 的 `global_version()` docstring 则说它是各通道版本之和。实际上它们是同一个计数器的值：向任何通道写入（包括运行输入的写入）都会让它加 1。通道的版本是该通道最后一次写入时的计数器，`global_version` 是运行最后一次写入之后的计数器。版本随每次写入递增，任意两个通道不会有相同的版本，但两者都既不是写入次数，也不是超步序号。从未写入过的通道，版本为 0，即使它有 `initial` 值也一样。检查点保存这两个数（引擎不设置 `Checkpoint::channel_versions`），恢复或 fork 出来的运行接着这些值继续计数。数值没有变化，测试把它们固定了下来（`ChannelVersions.*`、`test_channel_versions.py`）。
 
 ## [0.14.0] - 2026-10-13
 

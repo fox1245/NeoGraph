@@ -141,15 +141,23 @@ public:
     void apply_writes(const std::vector<ChannelWrite>& writes);
 
     /**
-     * @brief Get the version counter of a specific channel.
+     * @brief Get the version of a specific channel.
+     *
+     * The version is the value of the state's write counter (global_version())
+     * at the channel's last write. All channels share that counter, so it
+     * orders writes but does not count the writes of this channel.
      * @param channel Channel name.
-     * @return The channel's version counter (incremented on each write).
+     * @return The channel's version; 0 if it was never written or does not exist.
      */
     uint64_t channel_version(const std::string& channel) const;
 
     /**
-     * @brief Get the global version counter across all channels.
-     * @return The global version counter.
+     * @brief Get the state's write counter.
+     *
+     * Every write to any channel adds 1 to it and stamps the written channel
+     * with the new value. It starts at 0, is restored from a checkpoint, and
+     * counts the writes of the run input as well as those of the nodes.
+     * @return The counter's current value, the version of the latest write.
      */
     uint64_t global_version() const;
 

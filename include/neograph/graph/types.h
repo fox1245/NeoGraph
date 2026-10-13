@@ -116,7 +116,10 @@ struct Channel {
     ReducerFn                reducer; ///< Custom reducer (when type == CUSTOM).
     ChannelLifecyclePolicy   lifecycle; ///< Retention and persistence policy.
     json                     value; ///< Current channel value.
-    uint64_t                 version = 0; ///< Version counter (incremented on each write).
+    /// Value of the state's single write counter (GraphState::global_version) at
+    /// this channel's last write; 0 until the channel is written. Every channel
+    /// shares the counter, so this is not a count of this channel's writes.
+    uint64_t                 version = 0;
 };
 
 /**

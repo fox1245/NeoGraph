@@ -142,7 +142,10 @@ struct Checkpoint {
     std::string id;                ///< Unique checkpoint ID (UUID v4).
     std::string thread_id;         ///< Conversation/session identifier.
     json        channel_values;    ///< Serialized channel data.
-    json        channel_versions;  ///< Per-channel version counters.
+    /// The engine does not set this field. Its checkpoints hold each channel's
+    /// version at channel_values["channels"][name]["version"] and the shared
+    /// write counter at channel_values["global_version"].
+    json        channel_versions;
     std::string parent_id;         ///< Previous checkpoint ID (for time-travel chain).
     std::string current_node;      ///< Node that was active at checkpoint time.
     /// Nodes to execute on resume. With signal dispatch, a super-step can

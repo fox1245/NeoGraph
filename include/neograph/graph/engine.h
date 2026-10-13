@@ -385,9 +385,24 @@ enum class RunStatus {
  *
  * The canonical shape of ``output`` is **channels-wrapped**: each
  * channel value lives at ``output["channels"][<name>]["value"]``,
- * with sibling metadata such as ``["version"]`` recording how many
- * times the channel was written. ``output["global_version"]`` carries
- * the super-step counter.
+ * with sibling metadata such as ``["version"]``.
+ *
+ * ## ``version`` and ``global_version``
+ *
+ * A run has one write counter, shared by all its channels, that starts
+ * at 0. Every channel write adds 1 to it and stamps the written channel
+ * with the new value: the writes of the run input (one per input key that
+ * names a declared channel), of the nodes and of a ``Command``'s updates
+ * all count, and a write that leaves the value unchanged counts too.
+ * ``output["channels"][<name>]["version"]`` is the counter's value at that
+ * channel's last write, and ``output["global_version"]`` is its value
+ * after the run's last write. So versions rise with every write and no two
+ * channels share one, but a version is neither the number of writes the
+ * channel received nor a super-step number (``Checkpoint::step`` is the
+ * super-step). A channel that was never written has version 0, even when
+ * it has an ``initial`` value. Checkpoints keep both numbers: a resumed
+ * or forked run restores them and goes on counting from there, so the
+ * numbers continue across a pause instead of starting over.
  *
  * Some compiled flows project additional **flat top-level keys** for
  * ergonomic access — e.g. ``react_graph`` exposes a synthetic

@@ -147,9 +147,25 @@ chat messages, `state.get_messages()` returns `list[ChatMessage]`
 
 ### Versions
 
-Each channel carries a monotonic `version` number. The engine uses
-this for checkpoint diffing and for the `state.channel_version(name)`
-inspection API. You usually don't read it directly.
+A run keeps one write counter, and all channels share it. Every write
+to a channel adds 1 to the counter and stamps that channel's `version`
+with the new value, so a channel's `version` is the counter's value at
+its last write. The writes of the run input count as well as those of
+the nodes, and a write that leaves the value unchanged counts too.
+Versions therefore rise with every write and no two channels share one,
+but a `version` is not the number of writes the channel received. Three
+nodes that each write `last` (overwrite) and `all` (append) leave `last`
+at version 5 and `all` at version 6, and `output["global_version"]`, the
+counter after the last write, at 6. Neither number is a super-step
+count (`Checkpoint.step` holds the super-step). A channel that was never
+written has version 0, also when it has an `initial` value.
+
+Checkpoints store each channel's version and the counter. A resumed or
+forked run restores them and goes on counting, so the numbers continue
+across the pause instead of starting over. Checkpoint stores key a saved
+channel value by `(thread, channel, version)`, and
+`state.channel_version(name)` and `state.global_version()` read the
+numbers. You usually don't read them directly.
 
 ---
 

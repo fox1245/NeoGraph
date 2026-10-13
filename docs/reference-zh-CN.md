@@ -671,7 +671,7 @@ struct Channel {
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
     ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
-    uint64_t    version = 0;                       // Write counter
+    uint64_t    version = 0;                       // Shared write counter at the last write
 };
 ```
 
@@ -1049,8 +1049,8 @@ public:
 | `get_messages()` | 便利方法：读取 `"messages"` 通道并将其反序列化为 `std::vector<ChatMessage>` |
 | `write(channel, value)` | 通过其 reducer 向单个通道写入值。线程安全（独占锁） |
 | `apply_writes(writes)` | 原子地应用批量 `ChannelWrite` 操作。所有写入在单个独占锁下应用 |
-| `channel_version(channel)` | 返回特定通道的写入计数 |
-| `global_version()` | 返回全局版本计数（每次向任何通道写入时递增） |
+| `channel_version(channel)` | 返回指定通道的版本：该通道最后一次写入时共享写入计数器的值，从未写入过则为 0 |
+| `global_version()` | 返回共享的写入计数器（向任何通道写入时都会递增，运行输入的写入也包括在内） |
 | `serialize()` | 将 checkpoint-persistent 通道值与 version 序列化为 JSON |
 | `restore(data)` | 从序列化的 JSON 恢复通道值和版本 |
 | `channel_names()` | 返回所有已初始化通道的名称 |
@@ -1517,6 +1517,8 @@ struct RunResult {
 ```
 
 `RunResult::usage` 是 nullable provider 报告，不是支出 bank。`native_messages` 保留真实 typed 历史，`provider_outcomes` 保留每个拥有所有权的 Completion/Failure。JSON `output` 仅是 portable projection。完整历史输入用 `RunConfig::provider_messages`，typed event 观察用 `on_provider_event`。持久 native checkpoint/receipt custody 必须使用 `native_history_archive`，内存 sidecar 无需 archive。
+
+`output` 中的 `channels.<name>.version` 和 `global_version` 来自所有通道共用的同一个写入计数器。通道的版本是它最后一次写入时计数器的值，所以版本表示写入的先后顺序，不是该通道收到的写入次数；`global_version` 也不是超步序号。参见[版本](concepts.md#versions)。
 
 resume 或 continuation 时，`provider_outcomes` 保留原始结果，再依次追加新产生的结果，形成有序列表。`usage` 也可能保留恢复 bank 中的先前报告。调用方必须维持已完成 provider effect 不被重新 dispatch、不被重复计费的不变量；结果列表为空或重置、`usage=None` 均不是 resume 不变量。
 
@@ -2192,7 +2194,7 @@ struct Checkpoint {
     std::string id;                // UUID v4
     std::string thread_id;         // Conversation/session identifier
     json        channel_values;    // Serialized channel data
-    json        channel_versions;  // Per-channel version counters
+    json        channel_versions;  // Not set by the engine (see below)
     std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
@@ -2217,7 +2219,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `id` | `std::string` | 唯一标识符（UUID v4） |
 | `thread_id` | `std::string` | 按对话/会话分组检查点 |
 | `channel_values` | `json` | 所有通道的序列化状态 |
-| `channel_versions` | `json` | 每个通道的版本计数 |
+| `channel_versions` | `json` | 引擎不设置该字段。引擎的检查点把每个通道的版本放在 `channel_values["channels"][name]["version"]`，把共享的写入计数器放在 `channel_values["global_version"]` |
 | `parent_id` | `std::string` | 前一个检查点的 ID（形成时间旅行的链表） |
 | `current_node` | `std::string` | 检查点被拍摄时正在执行的节点 |
 | `next_nodes` | `std::vector<std::string>` | 为下一个超级步骤调度的所有节点（由 `resume()` 使用）。在信号分发下，一个超级步骤可能同时使几个节点就绪（并行扇出、条件分支同时激活），必须持久化每个节点 — 存储单个节点会在崩溃时静默丢弃兄弟节点 |

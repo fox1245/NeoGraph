@@ -139,7 +139,9 @@ def run(self, input):
 
 ### 版本
 
-每个通道都带一个单调递增的 `version` 编号。引擎用它做检查点的差异比较，也用它提供 `state.channel_version(name)` 这个检查接口。一般不需要直接读它。
+一次运行只有一个写入计数器，所有通道共用。每次写入某个通道，计数器加 1，并把新值记为该通道的 `version`，所以通道的 `version` 就是它最后一次写入时计数器的值。节点的写入要计数，运行输入的写入也要计数，值没有变化的写入同样计数。因此版本随每次写入递增，任意两个通道不会有相同的版本，但 `version` 不是该通道收到的写入次数。三个节点各自写入 `last`（overwrite）和 `all`（append）后，`last` 的版本是 5，`all` 的版本是 6，最后一次写入后的计数器 `output["global_version"]` 也是 6。这两个数都不是超步序号（超步序号在 `Checkpoint.step` 中）。从未写入过的通道，版本为 0，即使它有 `initial` 值也一样。
+
+检查点保存每个通道的版本和计数器。恢复或 fork 出来的运行会还原它们并接着计数，所以编号在暂停前后连续，不会从头开始。检查点存储以 `(thread, channel, version)` 作为键区分已保存的通道值，`state.channel_version(name)` 和 `state.global_version()` 可以读取这些编号。一般不需要直接读它们。
 
 ---
 

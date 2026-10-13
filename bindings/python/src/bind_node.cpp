@@ -676,10 +676,13 @@ void init_node(py::module_& m) {
             "definition.")
         .def("channel_version", &GraphState::channel_version,
             py::arg("channel"),
-            "Per-channel version counter (incremented on each write).")
+            "Version of a channel: the value of the state's write counter at the "
+            "channel's last write, 0 if it was never written. All channels share the "
+            "counter, so versions order writes; they do not count a channel's writes.")
         .def("global_version", &GraphState::global_version,
-            "Sum of all channel versions; useful for detecting any "
-            "change since a given snapshot.");
+            "The state's write counter: every write to any channel adds 1 and stamps "
+            "the written channel with the new value. Useful for detecting any change "
+            "since a given snapshot.");
 
     // ── NodeResult (Command + Send + writes union) ──────────────────────
     py::class_<NodeResult>(m, "NodeResult",

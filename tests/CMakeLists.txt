@@ -75,6 +75,7 @@ add_executable(neograph_tests
     test_run_context_store.cpp
     test_runtime_context.cpp
     test_run_result_channel.cpp
+    test_channel_versions.cpp
     test_typed_events.cpp
     test_error_messages_friendly.cpp
     test_schema_provider_extra_fields_temperature.cpp

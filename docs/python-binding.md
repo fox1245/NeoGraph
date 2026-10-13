@@ -469,7 +469,7 @@ A completed `callCore` returns the Core's output object to `main()`. The quickst
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels` holds each channel's `value` and `version`. Each channel's value is also copied to a top-level key with the channel's name unless that key already exists, so `main()` can read `result.value`; a channel named `channels` or `global_version` is reachable only under `channels`. Barrier lists are stored sorted: `graph.barrier("join", ["zeta", "alpha"])` appears as `{"wait_for": ["alpha", "zeta"]}` in `bundle.sealed_core_definitions`, and the order has no effect.
+`channels` holds each channel's `value` and `version`. `version` is the value of one write counter, shared by all channels, at the channel's last write, and `global_version` is that counter after the run's last write. They order writes; they are not the number of writes a channel received or a super-step number, and a channel never written has version 0 (see [Versions](concepts.md#versions)). Each channel's value is also copied to a top-level key with the channel's name unless that key already exists, so `main()` can read `result.value`; a channel named `channels` or `global_version` is reachable only under `channels`. Barrier lists are stored sorted: `graph.barrier("join", ["zeta", "alpha"])` appears as `{"wait_for": ["alpha", "zeta"]}` in `bundle.sealed_core_definitions`, and the order has no effect.
 
 ### Failed commands end the run
 

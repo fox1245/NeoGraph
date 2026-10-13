@@ -462,7 +462,7 @@ JavaScript Program은 그래프 빌더 하나를 반환하는 `define()`을 expo
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels`에는 채널마다 `value`와 `version`이 들어 있습니다. 각 채널의 값은 같은 이름의 최상위 키로도 복사됩니다. 그 키가 이미 있으면 복사하지 않습니다. 그래서 `main()`은 `result.value`를 읽을 수 있습니다. `channels`나 `global_version`이라는 이름의 채널은 `channels` 아래에서만 접근할 수 있습니다. barrier 목록은 정렬해서 저장됩니다. `graph.barrier("join", ["zeta", "alpha"])`는 `bundle.sealed_core_definitions`에 `{"wait_for": ["alpha", "zeta"]}`로 나타나며, 순서는 동작에 영향을 주지 않습니다.
+`channels`에는 채널마다 `value`와 `version`이 들어 있습니다. `version`은 모든 채널이 공유하는 쓰기 카운터가 그 채널을 마지막으로 쓴 시점에 가졌던 값이고, `global_version`은 실행의 마지막 쓰기 뒤의 카운터입니다. 둘은 쓰기의 순서를 나타낼 뿐, 채널이 받은 쓰기 횟수나 슈퍼스텝 번호가 아닙니다. 한 번도 쓰지 않은 채널의 버전은 0입니다([버전](concepts.md#versions) 참고). 각 채널의 값은 같은 이름의 최상위 키로도 복사됩니다. 그 키가 이미 있으면 복사하지 않습니다. 그래서 `main()`은 `result.value`를 읽을 수 있습니다. `channels`나 `global_version`이라는 이름의 채널은 `channels` 아래에서만 접근할 수 있습니다. barrier 목록은 정렬해서 저장됩니다. `graph.barrier("join", ["zeta", "alpha"])`는 `bundle.sealed_core_definitions`에 `{"wait_for": ["alpha", "zeta"]}`로 나타나며, 순서는 동작에 영향을 주지 않습니다.
 
 ### command가 실패하면 실행이 끝납니다
 

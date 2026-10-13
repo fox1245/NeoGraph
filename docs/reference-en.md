@@ -667,7 +667,7 @@ struct Channel {
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
     ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
-    uint64_t    version = 0;                       // Write counter
+    uint64_t    version = 0;                       // Shared write counter at the last write
 };
 ```
 
@@ -1062,8 +1062,8 @@ public:
 | `get_messages()` | Convenience method: reads the `"messages"` channel and deserializes it as `std::vector<ChatMessage>` |
 | `write(channel, value)` | Write a value to a single channel through its reducer. Thread-safe (exclusive lock) |
 | `apply_writes(writes)` | Atomically apply a batch of `ChannelWrite` operations. All writes are applied under a single exclusive lock |
-| `channel_version(channel)` | Returns the write counter for a specific channel |
-| `global_version()` | Returns the global version counter (incremented on every write to any channel) |
+| `channel_version(channel)` | Returns the channel's version: the value of the shared write counter at the channel's last write, or 0 if it was never written |
+| `global_version()` | Returns the shared write counter, which every write to any channel increments (the run input's writes included) |
 | `serialize()` | Serializes checkpoint-persistent channel values and versions |
 | `restore(data)` | Restores channel values and versions from serialized JSON |
 | `channel_names()` | Returns the names of all initialized channels |
@@ -1581,6 +1581,8 @@ struct RunResult {
 ```
 
 `RunResult::usage` is the nullable provider report, not the spending bank. `native_messages` retains genuine typed history and `provider_outcomes` retains every owned Completion/Failure. JSON `output` is only a portable projection. For full history input use `RunConfig::provider_messages`; observe typed events with `on_provider_event`. Durable native checkpoint/receipt custody must use `native_history_archive`; in-memory sidecars do not require one.
+
+In `output`, `channels.<name>.version` and `global_version` come from one write counter that all channels share. A channel's version is the counter's value at its last write, so versions order writes; a version is not the number of writes the channel received, and `global_version` is not a super-step number. See [Versions](concepts.md#versions).
 
 On resume or continuation, `provider_outcomes` retains the original outcomes followed by newly produced outcomes in an ordered list. `usage` can retain prior reports from the restored bank. Consumers must preserve the no-redispatch and no-double-charge invariants for completed provider effects; an empty/reset outcome list or `usage=None` is not a resume invariant.
 | Field | Type | Description |
@@ -2278,7 +2280,7 @@ struct Checkpoint {
     std::string id;                // UUID v4
     std::string thread_id;         // Conversation/session identifier
     json        channel_values;    // Serialized channel data
-    json        channel_versions;  // Per-channel version counters
+    json        channel_versions;  // Not set by the engine (see below)
     std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
@@ -2303,7 +2305,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `id` | `std::string` | Unique identifier (UUID v4) |
 | `thread_id` | `std::string` | Groups checkpoints by conversation/session |
 | `channel_values` | `json` | Serialized state of all channels |
-| `channel_versions` | `json` | Version counter for each channel |
+| `channel_versions` | `json` | The engine does not set it. Its checkpoints hold each channel's version at `channel_values["channels"][name]["version"]` and the shared write counter at `channel_values["global_version"]` |
 | `parent_id` | `std::string` | ID of the preceding checkpoint (forms a linked list for time-travel) |
 | `current_node` | `std::string` | Node that was executing when the checkpoint was taken |
 | `next_nodes` | `std::vector<std::string>` | All nodes scheduled for the next super-step (used by `resume()`). Under signal dispatch a super-step can leave several nodes simultaneously ready (parallel fan-out, conditional branches activating together), and every one of them must be persisted — storing a single node would silently drop siblings across a crash |

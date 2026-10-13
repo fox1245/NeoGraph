@@ -463,7 +463,7 @@ JavaScript Program 必须导出 `define()`，它返回一个图构建器。这�
 {"channels": {"value": {"value": 1, "version": 1}}, "global_version": 1, "value": 1}
 ```
 
-`channels` 保存每个通道的 `value` 和 `version`。每个通道的值还会复制到一个以通道名命名的顶层键下，除非这个键已经存在，所以 `main()` 可以直接读 `result.value`；名为 `channels` 或 `global_version` 的通道，只能通过 `channels` 访问。屏障列表是排好序保存的：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，传入的顺序没有影响。
+`channels` 保存每个通道的 `value` 和 `version`。`version` 是所有通道共用的写入计数器在该通道最后一次写入时的值，`global_version` 是运行最后一次写入之后的计数器。它们只表示写入的先后顺序，既不是通道收到的写入次数，也不是超步序号；从未写入过的通道，版本为 0（参见[版本](concepts.md#versions)）。每个通道的值还会复制到一个以通道名命名的顶层键下，除非这个键已经存在，所以 `main()` 可以直接读 `result.value`；名为 `channels` 或 `global_version` 的通道，只能通过 `channels` 访问。屏障列表是排好序保存的：`graph.barrier("join", ["zeta", "alpha"])` 在 `bundle.sealed_core_definitions` 中显示为 `{"wait_for": ["alpha", "zeta"]}`，传入的顺序没有影响。
 
 ### 命令失败会结束运行
 

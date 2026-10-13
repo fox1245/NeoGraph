@@ -670,7 +670,7 @@ struct Channel {
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
     ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
-    uint64_t    version = 0;                       // Write counter
+    uint64_t    version = 0;                       // Shared write counter at the last write
 };
 ```
 
@@ -1057,8 +1057,8 @@ public:
 | `get_messages()` | Convenience method: reads the `"messages"` channel and deserializes it as `std::vector<ChatMessage>` |
 | `write(channel, value)` | Write a value to a single channel through its reducer. Thread-safe (exclusive lock) |
 | `apply_writes(writes)` | Atomically apply a batch of `ChannelWrite` operations. All writes are applied under a single exclusive lock |
-| `channel_version(channel)` | Returns the write counter for a specific channel |
-| `global_version()` | Returns the global version counter (incremented on every write to any channel) |
+| `channel_version(channel)` | 해당 채널의 버전을 반환한다. 마지막으로 쓴 시점의 공유 쓰기 카운터 값이며, 한 번도 쓰지 않았으면 0이다 |
+| `global_version()` | 공유 쓰기 카운터를 반환한다. 어느 채널에 쓰든(실행 입력의 쓰기 포함) 쓸 때마다 1씩 늘어난다 |
 | `serialize()` | Serializes checkpoint-persistent channel values and versions |
 | `restore(data)` | Restores channel values and versions from serialized JSON |
 | `channel_names()` | Returns the names of all initialized channels |
@@ -1537,6 +1537,8 @@ struct RunResult {
 ```
 
 `RunResult::usage`는 nullable provider 보고이며 지출 bank가 아니다. `native_messages`는 실제 typed 기록을, `provider_outcomes`는 각 소유 Completion/Failure를 보존한다. JSON `output`은 portable projection이다. 전체 입력 기록은 `RunConfig::provider_messages`, typed 이벤트는 `on_provider_event`를 사용한다. 영속 native checkpoint/receipt custody에는 `native_history_archive`가 필요하지만 메모리 sidecar에는 필요하지 않다.
+
+`output`의 `channels.<name>.version`과 `global_version`은 모든 채널이 공유하는 쓰기 카운터 하나에서 나온다. 채널의 버전은 그 채널을 마지막으로 쓴 시점의 카운터 값이므로 쓰기의 순서를 나타낼 뿐, 채널이 받은 쓰기 횟수가 아니다. `global_version`도 슈퍼스텝 번호가 아니다. [버전](concepts.md#versions)을 참고한다.
 
 resume이나 continuation에서 `provider_outcomes`는 원래 결과 뒤에 새로 생성된 결과를 이어 순서 있는 목록으로 보존한다. `usage`에도 복원한 bank의 이전 보고가 남을 수 있다. 소비자는 완료된 provider effect를 재dispatch하거나 이중 차감하지 않아야 한다. 비어 있거나 초기화된 결과 목록, `usage=None`은 resume 불변 조건이 아니다.
 | Field | Type | Description |
@@ -2233,7 +2235,7 @@ struct Checkpoint {
     std::string id;                // UUID v4
     std::string thread_id;         // Conversation/session identifier
     json        channel_values;    // Serialized channel data
-    json        channel_versions;  // Per-channel version counters
+    json        channel_versions;  // Not set by the engine (see below)
     std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
@@ -2258,7 +2260,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `id` | `std::string` | Unique identifier (UUID v4) |
 | `thread_id` | `std::string` | Groups checkpoints by conversation/session |
 | `channel_values` | `json` | Serialized state of all channels |
-| `channel_versions` | `json` | Version counter for each channel |
+| `channel_versions` | `json` | 엔진은 이 필드를 채우지 않는다. 엔진의 체크포인트는 채널별 버전을 `channel_values["channels"][name]["version"]`에, 공유 쓰기 카운터를 `channel_values["global_version"]`에 담는다 |
 | `parent_id` | `std::string` | ID of the preceding checkpoint (forms a linked list for time-travel) |
 | `current_node` | `std::string` | Node that was executing when the checkpoint was taken |
 | `next_nodes` | `std::vector<std::string>` | All nodes scheduled for the next super-step (used by `resume()`). Under signal dispatch a super-step can leave several nodes simultaneously ready (parallel fan-out, conditional branches activating together), and every one of them must be persisted — storing a single node would silently drop siblings across a crash |

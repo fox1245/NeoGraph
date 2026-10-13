@@ -623,7 +623,7 @@ struct Channel {
     ReducerFn   reducer;                           // Custom reducer (when type == CUSTOM)
     ChannelLifecyclePolicy lifecycle;
     json        value;                             // Current value
-    uint64_t    version = 0;                       // Write counter
+    uint64_t    version = 0;                       // Shared write counter at the last write
 };
 ```
 
@@ -946,8 +946,8 @@ public:
 | `get_messages()` | 便利メソッドです。`"messages"` チャネルを読み、`std::vector<ChatMessage>` としてデシリアライズします |
 | `write(channel, value)` | reducer を通じて単一チャネルに値を書き込みます。スレッドセーフです (排他ロック) |
 | `apply_writes(writes)` | `ChannelWrite` 操作のまとまりをアトミックに適用します。すべての書き込みは 1 つの排他ロック下で適用されます |
-| `channel_version(channel)` | 指定チャネルの書き込みカウンターを返します |
-| `global_version()` | グローバルバージョンカウンターを返します (任意のチャネルへの書き込みごとに増加) |
+| `channel_version(channel)` | 指定チャネルのバージョンを返します。最後に書き込んだ時点の共有書き込みカウンターの値で、一度も書き込まれていなければ 0 です |
+| `global_version()` | 共有の書き込みカウンターを返します (任意のチャネルへの書き込みごとに増加し、実行入力の書き込みも含みます) |
 | `serialize()` | checkpoint-persistent なチャネル値と version を JSON にシリアライズします |
 | `restore(data)` | シリアライズ済み JSON からチャネル値とバージョンを復元します |
 | `channel_names()` | 初期化済みの全チャネル名を返します |
@@ -1374,6 +1374,8 @@ struct RunResult {
 ```
 
 `RunResult::usage` は nullable provider 報告であり支出 bank ではありません。`native_messages` は真正 typed 履歴、`provider_outcomes` は各所有 Completion/Failure を保持します。JSON `output` は portable projection です。全履歴入力には `RunConfig::provider_messages`、typed event 観測には `on_provider_event` を使います。永続 native checkpoint/receipt custody には `native_history_archive` が必要ですがメモリ内 sidecar には不要です。
+
+`output` の `channels.<name>.version` と `global_version` は、すべてのチャネルが共有する1つの書き込みカウンターから来ます。チャネルのバージョンは、最後に書き込んだ時点のカウンターの値なので、書き込みの順序を表します。チャネルが受けた書き込みの回数ではなく、`global_version` もスーパーステップの番号ではありません。[バージョン](concepts.md#versions)を参照してください。
 
 resume や continuation では、`provider_outcomes` は元の結果に新しく生成した結果を続けた順序付きリストを保持します。`usage` にも復元した bank の以前の報告が残ることがあります。利用側は完了済み provider effect の再 dispatch と二重計上を防ぐ不変条件を保ってください。空またはリセットされた結果リストや `usage=None` は resume の不変条件ではありません。
 
@@ -1964,7 +1966,7 @@ struct Checkpoint {
     std::string id;                // UUID v4
     std::string thread_id;         // Conversation/session identifier
     json        channel_values;    // Serialized channel data
-    json        channel_versions;  // Per-channel version counters
+    json        channel_versions;  // Not set by the engine (see below)
     std::string parent_id;         // Previous checkpoint ID (for time-travel chain)
     std::string current_node;      // Node that was active at checkpoint time
     std::vector<std::string> next_nodes;  // Nodes to execute on resume
@@ -1989,7 +1991,7 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `id` | `std::string` | 一意の識別子 (UUID v4) |
 | `thread_id` | `std::string` | 会話/セッションごとにチェックポイントをまとめます |
 | `channel_values` | `json` | 全チャネルのシリアライズ済み状態 |
-| `channel_versions` | `json` | 各チャネルのバージョンカウンター |
+| `channel_versions` | `json` | エンジンはこのフィールドを設定しません。エンジンのチェックポイントは、チャネルごとのバージョンを `channel_values["channels"][name]["version"]` に、共有の書き込みカウンターを `channel_values["global_version"]` に保持します |
 | `parent_id` | `std::string` | 直前のチェックポイント ID (タイムトラベル用の連結リストを形成します) |
 | `current_node` | `std::string` | チェックポイント取得時に実行中だったノード |
 | `next_nodes` | `std::vector<std::string>` | 次のスーパーステップに予定されている全ノード (`resume()` が使用)。signal dispatch では、1 つのスーパーステップ後に複数ノードが同時に ready になることがあります (並列 fan-out や条件分岐の同時活性化)。その全てを永続化する必要があり、単一ノードだけを保存するとクラッシュをまたいで兄弟ノードが黙って失われます |
