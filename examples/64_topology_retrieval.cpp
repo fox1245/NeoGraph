@@ -43,6 +43,10 @@ using namespace neograph::program;
 
 std::atomic<unsigned> work_calls{0};
 std::atomic<unsigned> followup_calls{0};
+// Set just before main() asks for the migration. The work node holds its
+// super-step until then, so the request reaches a source run that is still
+// running, however long the run took to start on a slow host.
+std::atomic<bool> migration_requested{false};
 
 std::string digest(char value) { return "sha256:" + std::string(64, value); }
 
@@ -62,6 +66,10 @@ public:
     asio::awaitable<NodeOutput> run(NodeInput) override {
         ++work_calls;
         auto timer = asio::steady_timer(co_await asio::this_coro::executor);
+        for (int waited = 0; !migration_requested.load() && waited < 2000; ++waited) {
+            timer.expires_after(std::chrono::milliseconds(5));
+            co_await timer.async_wait(asio::use_awaitable);
+        }
         timer.expires_after(std::chrono::milliseconds(100));
         co_await timer.async_wait(asio::use_awaitable);
         co_return NodeOutput{{ChannelWrite{"value", "source-work-completed"}}};
@@ -191,6 +199,7 @@ int main(int argc, char** argv) {
         }
         work_calls = 0;
         followup_calls = 0;
+        migration_requested = false;
         const auto registry = registry_snapshot();
         const auto admission_profile = profile(registry);
         const auto admission_policy = policy(admission_profile);
@@ -258,6 +267,7 @@ int main(int argc, char** argv) {
         auto source = runtime.start(
             "topology-retrieval", source_version,
             ProgramInvocation{json::object(), runtime_budget(), "topology-retrieval-source", {}});
+        migration_requested = true;
         auto target = runtime.migrate_graph(
             source, ProgramGraphMigrationTarget{candidate->id(), "topology-retrieval-target", {}, adapter});
         const auto result = target.wait();
