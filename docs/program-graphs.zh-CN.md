@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=ca511a2202153d10cd6eae7d3747c97d14de5984171708d264fa048b1ed2dc1b -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=zh-CN source_sha256=20ebf915c22aaeffcbcc7afba46518d5b2fb7ce055c18326867f940fb8670d0c -->
 # Program 图功能
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -56,7 +56,7 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 
 - 槽位中只要有任何一个备选节点向 join 发出信号，这个槽位就算填满。所有槽位都填满后 join 才运行，之后所有信号清空，与普通屏障一样。
 - 槽位之外的节点发来的信号会被记录，但永远不计数。`Command.goto` 和 `Send` 仍然绕过 join，与以前一样。
-- 同一个超步里，或者 join 运行之前，有两个备选节点到达，不会产生任何变化。join 运行之后才到达的备选节点，会开启一个永远无法完成的新一轮，运行因此以 `P_CORE_BARRIER_STALLED` 结束（失败时关闭）。所以各备选节点的路由应当互斥；如果其中两个都可能运行，`P_CORE_E17` 会发出警告。
+- 同一个超步里，或者 join 运行之前，有两个备选节点到达，不会产生任何变化。join 运行之后才到达的备选节点会开启新一轮。如果 join 还有其他槽位，这一轮永远无法完成，运行因此以 `P_CORE_BARRIER_STALLED` 结束（失败时关闭）。如果 join 只有一个槽位，迟到的备选节点会立即填满新一轮，join 会再运行一次。所以各备选节点的路由应当互斥；如果其中两个都可能运行，`P_CORE_E17` 会发出警告。
 - 在 Core 定义中，槽位写成 `{"any_of": [...]}`，其中的名称按 UTF-8 字节排序，槽位之间按各自最小的名称排序。只有一个名称的槽位直接写成该名称，所以 `[{any_of: ["B"]}, "C"]` 与 `["B", "C"]` 的字节和 id 完全相同。
 - 停滞的槽位 join 会在 witness 里列出槽位：`wait_for` 和 `missing` 里既有名称，也有 `{"any_of": [...]}` 对象。
 - 验证器会逐个检查槽位：没有任何备选节点路由到 join 时是 `P_CORE_E8`；某个成员可以路由到别处时是 `P_CORE_E15`；路由到同一槽位的另一个备选节点，不算绕过。

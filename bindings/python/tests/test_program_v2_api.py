@@ -277,6 +277,22 @@ def test_slot_join_interrupt_before_then_resume():
     assert resumed.execution_trace[-1] == "D"
 
 
+def test_a_one_slot_join_runs_again_for_a_late_alternative():
+    # A one-slot any_of is an XOR merge: every arrival opens and fills a new
+    # round, so an alternative that arrives after the join ran runs it again.
+    _host, _version, result = _run(
+        _graph(
+            '.node("A", {type: "v2.task"}).node("B", {type: "v2.task"})'
+            '.node("X", {type: "v2.task"}).node("C", {type: "v2.task"})'
+            '.node("D", {type: "v2.task"})'
+            '.entry("A").edge("A", "B").edge("A", "X").edge("X", "C")'
+            '.edge("B", "D").edge("C", "D").barrier("D", [{any_of: ["B", "C"]}]).exit("D")'
+        )
+    )
+    assert result.status == ng.ProgramTerminalStatus.Completed, result.failure
+    assert result.execution_trace.count("D") == 2
+
+
 def test_singleton_slot_hashes_like_the_legacy_member():
     legacy = _compile(_issue_357("v2.always_pass", wait_for='["B", "C"]'))
     wrapped = _compile(_issue_357("v2.always_pass", wait_for='[{any_of: ["B"]}, "C"]'))

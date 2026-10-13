@@ -54,7 +54,7 @@ An entry of `barrier(node, waitFor)` is a node name or a slot `{any_of: [...]}`.
 
 - A slot is filled when any of its alternatives signals the join. The join runs when every slot is filled, and then all signals clear, as for a plain barrier.
 - Signals from nodes outside the slots are recorded and never count. `Command.goto` and `Send` bypass the join, as before.
-- Two alternatives that arrive in the same super-step, or before the join runs, change nothing. An alternative that arrives after the join ran opens a new round that can never complete, so the run ends `P_CORE_BARRIER_STALLED` (fail-closed). Alternatives should therefore be route-exclusive; `P_CORE_E17` warns when two of them can both run.
+- Two alternatives that arrive in the same super-step, or before the join runs, change nothing. An alternative that arrives after the join ran opens a new round. When the join has other slots, that round can never complete, so the run ends `P_CORE_BARRIER_STALLED` (fail-closed). When the join has one slot, the late alternative fills the new round at once and the join runs again. Alternatives should therefore be route-exclusive; `P_CORE_E17` warns when two of them can both run.
 - In the Core definition a slot prints as `{"any_of": [...]}` with its names sorted by UTF-8 bytes, and slots are ordered by their smallest name. A slot with one name prints as that name, so `[{any_of: ["B"]}, "C"]` has the same bytes and ids as `["B", "C"]`.
 - A stalled slot join lists slots in its witness: `wait_for` and `missing` hold names and `{"any_of": [...]}` objects.
 - The validator checks each slot: `P_CORE_E8` when no alternative routes into the join, and `P_CORE_E15` when a member can route elsewhere; a route to another alternative of the same slot is not a bypass.

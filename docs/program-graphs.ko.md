@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=ca511a2202153d10cd6eae7d3747c97d14de5984171708d264fa048b1ed2dc1b -->
+<!-- neograph-i18n: source=docs/program-graphs.md locale=ko source_sha256=20ebf915c22aaeffcbcc7afba46518d5b2fb7ce055c18326867f940fb8670d0c -->
 # Program 그래프 기능
 
 **Languages:** [English](program-graphs.md) | [한국어](program-graphs.ko.md) | [日本語](program-graphs.ja.md) | [简体中文](program-graphs.zh-CN.md)
@@ -56,7 +56,7 @@ graph.conditionalEdge("B", "t.check", {pass: "D", fail: "FIX"})
 
 - 슬롯은 대안 중 하나라도 join에 신호를 보내면 채워집니다. join은 모든 슬롯이 채워지면 실행되고, 그 뒤 모든 신호가 지워집니다. 일반 barrier와 같습니다.
 - 슬롯에 없는 노드가 보낸 신호는 기록되지만 계산에 들어가지 않습니다. `Command.goto`와 `Send`는 이전처럼 join을 우회합니다.
-- 같은 슈퍼스텝이나 join이 실행되기 전에 대안 두 개가 도착해도 달라지는 것은 없습니다. join이 실행된 뒤에 대안이 도착하면 끝날 수 없는 새 라운드가 열리므로, 실행은 `P_CORE_BARRIER_STALLED`로 끝납니다(실패 시 차단). 그러므로 대안은 서로 배타적인 경로여야 하며, 두 대안이 모두 실행될 수 있으면 `P_CORE_E17` 경고가 나옵니다.
+- 같은 슈퍼스텝이나 join이 실행되기 전에 대안 두 개가 도착해도 달라지는 것은 없습니다. join이 실행된 뒤에 대안이 도착하면 새 라운드가 열립니다. join에 다른 슬롯이 있으면 이 라운드는 끝날 수 없으므로 실행은 `P_CORE_BARRIER_STALLED`로 끝납니다(실패 시 차단). 슬롯이 하나뿐이면 늦게 온 대안이 새 라운드를 바로 채우므로 join이 한 번 더 실행됩니다. 그러므로 대안은 서로 배타적인 경로여야 하며, 두 대안이 모두 실행될 수 있으면 `P_CORE_E17` 경고가 나옵니다.
 - Core 정의에서 슬롯은 `{"any_of": [...]}`로 출력되고 이름은 UTF-8 바이트 순으로 정렬됩니다. 슬롯끼리는 가장 작은 이름 순으로 정렬됩니다. 이름이 하나뿐인 슬롯은 그 이름 하나로 출력되므로, `[{any_of: ["B"]}, "C"]`는 `["B", "C"]`와 바이트도 id도 같습니다.
 - 슬롯이 있는 join이 정체되면 witness에 슬롯이 나열됩니다. `wait_for`와 `missing`에는 이름과 `{"any_of": [...]}` 객체가 들어 있습니다.
 - 검증기는 슬롯마다 검사합니다. 어떤 대안도 join으로 라우팅되지 않으면 `P_CORE_E8`이고, 멤버가 다른 곳으로 라우팅될 수 있으면 `P_CORE_E15`입니다. 같은 슬롯의 다른 대안으로 가는 경로는 우회가 아닙니다.
