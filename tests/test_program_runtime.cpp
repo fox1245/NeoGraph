@@ -583,11 +583,13 @@ private:
 std::mutex                      join_member_mutex;
 std::map<std::string, unsigned> join_member_runs;
 std::atomic<unsigned>           join_member_active{0};
+std::atomic<unsigned>           join_member_peak{0};
 
 void reset_join_member_runs() {
     std::lock_guard lock(join_member_mutex);
     join_member_runs.clear();
     join_member_active.store(0);
+    join_member_peak.store(0);
 }
 
 unsigned join_member_runs_of(const std::string& value) {
@@ -611,7 +613,11 @@ public:
             std::lock_guard lock(join_member_mutex);
             ++join_member_runs[value];
         }
-        join_member_active.fetch_add(1, std::memory_order_relaxed);
+        const auto running = join_member_active.fetch_add(1, std::memory_order_relaxed) + 1;
+        for (auto peak = join_member_peak.load(std::memory_order_relaxed);
+             peak < running &&
+             !join_member_peak.compare_exchange_weak(peak, running, std::memory_order_relaxed,
+                                                     std::memory_order_relaxed);) {}
         ActiveCallGuard active(join_member_active);
         // Every way out through an exception leaves the count first, by
         // ordinary code: a test that checks the run waited for the body must
@@ -6726,7 +6732,6 @@ TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileACppNodeBlocksIt
 TEST(ProgramRuntimeTest, JavaScriptAllOfBlockingCppNodesRunsTheirBodiesSideBySide) {
     reset_join_member_runs();
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
-    const auto      started = std::chrono::steady_clock::now();
     const auto      result  = run_join(fixture, R"JS(
     const values = yield ng.all([
         ng.callCore("main", {value: "block"}, "all:first"),
@@ -6734,13 +6739,14 @@ TEST(ProgramRuntimeTest, JavaScriptAllOfBlockingCppNodesRunsTheirBodiesSideBySid
     ], {max_in_flight: 2}, "all:blocking");
     return {values: values.map((member) => member.value)};
 )JS");
-    const auto elapsed = std::chrono::steady_clock::now() - started;
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
     EXPECT_EQ(result.output(), (json{{"values", json::array({"done:block", "done:block"})}}));
     EXPECT_EQ(join_member_runs_of("block"), 2U);
-    // Two 800 ms bodies on one scheduler thread: side by side, not in turn.
-    EXPECT_LT(elapsed, std::chrono::milliseconds(1400));
+    // Two 800 ms bodies on one scheduler thread: side by side, not in turn. The
+    // peak number of bodies running at once says so without a wall-clock bound,
+    // which a loaded or sanitized machine can exceed.
+    EXPECT_EQ(join_member_peak.load(), 2U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptRaceIsWonByTheFastMemberWhileASubgraphNodeBlocks) {
