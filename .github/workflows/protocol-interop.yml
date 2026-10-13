@@ -36,7 +36,7 @@ concurrency:
 jobs:
   official-sdks:
     name: Official A2A and ACP SDKs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
       NEOGRAPH_INTEROP_REQUIRE: '1'

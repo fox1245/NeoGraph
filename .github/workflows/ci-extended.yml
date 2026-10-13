@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   grpc-graph-contract:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -98,7 +98,7 @@ jobs:
     uses: ./.github/workflows/windows-asan.yml
 
   bench-regression:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +111,7 @@ jobs:
         run: python scripts/verify_ci.py benchmark --work-dir build-bench --jobs auto
 
   quickjs-performance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -134,7 +134,7 @@ jobs:
   # Observed 76-108 minutes on hosted runners (build and serial ctest both vary by about 40%
   # between days); the limit keeps headroom for a slow day without failing the nightly run.
   sanitizer-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     services:
       postgres:
@@ -188,7 +188,7 @@ jobs:
           key: ccache-asan-${{ runner.os }}-${{ github.sha }}
 
   tsan-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -225,7 +225,7 @@ jobs:
           key: ccache-tsan-${{ runner.os }}-${{ github.sha }}
 
   fuzz-canary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -242,10 +242,10 @@ jobs:
     uses: ./.github/workflows/install-consumable.yml
     with:
       matrix: >-
-        [{"name":"linux-static","os":"ubuntu-latest","args":""},
-         {"name":"linux-core-shared","os":"ubuntu-latest","args":"--core-only --shared"},
-         {"name":"linux-program-static","os":"ubuntu-latest","args":"--program --quickjs"},
-         {"name":"linux-program-shared","os":"ubuntu-latest","args":"--program --quickjs --shared"},
+        [{"name":"linux-static","os":"ubuntu-24.04","args":""},
+         {"name":"linux-core-shared","os":"ubuntu-24.04","args":"--core-only --shared"},
+         {"name":"linux-program-static","os":"ubuntu-24.04","args":"--program --quickjs"},
+         {"name":"linux-program-shared","os":"ubuntu-24.04","args":"--program --quickjs --shared"},
          {"name":"macos-shared","os":"macos-latest","args":"--shared"},
          {"name":"macos-program-shared","os":"macos-latest","args":"--program --quickjs --shared"},
          {"name":"windows-shared","os":"windows-2022","args":"--shared"},

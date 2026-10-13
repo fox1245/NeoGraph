@@ -1,0 +1,37 @@
+name: Cache prune
+# The compiler-cache jobs save one entry per commit (ccache-...-<sha>) and
+# restore the newest one by prefix, so older entries only take up the
+# repository's cache quota. After those workflows finish, this keeps the newest
+# entry for each prefix and ref and deletes the rest. Other caches (vcpkg,
+# CodeQL) are left alone.
+
+on:
+  workflow_run:
+    workflows: ["CI", "CI extended", "Protocol interop"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Delete superseded compiler caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api --paginate "repos/$REPO/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | test("^ccache-.*-[0-9a-f]{40}$")) | [.id, (.key | sub("[0-9a-f]{40}$"; "")), .ref, .created_at] | @tsv' \
+            | sort -t$'\t' -k2,2 -k3,3 -k4,4r \
+            | awk -F'\t' 'seen[$2 FS $3]++ { print $1 }' \
+            | while read -r id; do
+                gh api -X DELETE "repos/$REPO/actions/caches/$id" >/dev/null && echo "deleted cache $id"
+              done

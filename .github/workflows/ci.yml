@@ -36,7 +36,7 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
       postgres:
@@ -145,5 +145,5 @@ jobs:
     uses: ./.github/workflows/install-consumable.yml
     with:
       matrix: >-
-        [{"name":"linux-shared","os":"ubuntu-latest","args":"--shared"},
-         {"name":"linux-core-static","os":"ubuntu-latest","args":"--core-only"}]
+        [{"name":"linux-shared","os":"ubuntu-24.04","args":"--shared"},
+         {"name":"linux-core-static","os":"ubuntu-24.04","args":"--core-only"}]
