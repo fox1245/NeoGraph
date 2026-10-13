@@ -8,11 +8,14 @@ is tested. The examples run with no API key against the installed `neograph_engi
 """
 
 import importlib.util
+import os
 import shutil
 import sys
 from pathlib import Path
 
 import pytest
+
+from sanitizer_env import without_leak_detection
 
 ROOT = Path(__file__).resolve().parents[3]
 EXAMPLES = ROOT / "bindings" / "python" / "examples"
@@ -28,6 +31,14 @@ def _load_runner():
     sys.modules["run_example_smoke"] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def examples_do_not_check_leaks(monkeypatch):
+    """An example ends with its engine alive, which LeakSanitizer may report (see sanitizer_env)."""
+    for name, value in without_leak_detection().items():
+        if os.environ.get(name) != value:
+            monkeypatch.setenv(name, value)
 
 
 @pytest.fixture(scope="module")

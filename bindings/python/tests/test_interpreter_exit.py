@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 
 import neograph_engine as ng
+from sanitizer_env import without_leak_detection
 
 PARALLEL = 8
 MAX_RUNS = 120
@@ -66,7 +67,7 @@ CHILD = textwrap.dedent('''
 
 
 def _child_env():
-    env = os.environ.copy()
+    env = without_leak_detection()
     package_root = str(Path(ng.__file__).resolve().parents[1])
     env["PYTHONPATH"] = os.pathsep.join(
         [package_root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))

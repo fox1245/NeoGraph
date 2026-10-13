@@ -4,6 +4,7 @@ For the tests of the port contract (server_ports.py): the decoy answers like a s
 its own and counts who comes, so a test can show that nobody talked to it.
 """
 
+import contextlib
 import socket
 import threading
 
@@ -21,7 +22,8 @@ class Decoy:
         self.port = self.socket.getsockname()[1]
         self.connections = 0
         self.requests = 0
-        threading.Thread(target=self._serve, daemon=True).start()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
 
     def _serve(self):
         while True:
@@ -41,7 +43,13 @@ class Decoy:
                     pass
 
     def close(self):
+        # Closing a listening socket does not wake a thread blocked in accept()
+        # on Linux; shutting it down first does, so the thread ends here and not
+        # at the exit of the test process.
+        with contextlib.suppress(OSError):
+            self.socket.shutdown(socket.SHUT_RDWR)
         self.socket.close()
+        self.thread.join(2)
 
 
 def take_the_first_number(monkeypatch):

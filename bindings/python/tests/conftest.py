@@ -12,6 +12,7 @@ import pytest
 
 import neograph_engine as ng
 import neograph_engine.llm as nglm
+from neograph_engine import _neograph
 
 
 def _logical_chat_messages(messages):
@@ -305,3 +306,18 @@ def typed_peer(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def registered_node_types_do_not_outlive_the_session():
+    """Drop the Python factories that tests registered, once the last test has run.
+
+    A node type stays registered for the life of the process, and its factory
+    keeps whatever the test's closure captured (an engine, say). Such objects
+    are still alive when the interpreter exits, and a leak check on the test
+    process (the sanitizer job) then reports C++ allocations that only those
+    objects point to. Clearing the registry here lets them be freed while the
+    interpreter is whole.
+    """
+    yield
+    _neograph._python_factories.clear()
