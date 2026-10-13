@@ -1932,10 +1932,12 @@ TEST(ProgramTransitionStoreTest, ForkPublicationLeavesTheSourcesConcurrencyAlone
     exercise_fork_leaves_concurrency_alone(store);
 }
 
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramTransitionStoreTest, SQLiteForkPublicationLeavesTheSourcesConcurrencyAlone) {
     SQLiteProgramTransitionStore store(":memory:");
     exercise_fork_leaves_concurrency_alone(store);
 }
+#endif
 
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
 TEST(ProgramTransitionStoreTest, PostgreSQLForkPublicationLeavesTheSourcesConcurrencyAlone) {
