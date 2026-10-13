@@ -686,6 +686,11 @@ target_link_libraries(neograph_runtime_turn_tests PRIVATE
     SchemaProvider::transport
     GTest::gtest_main
 )
+if(TARGET neograph::llm)
+    # llm::Agent runs the same tool loop outside a graph (#444).
+    target_link_libraries(neograph_runtime_turn_tests PRIVATE neograph::llm)
+    target_compile_definitions(neograph_runtime_turn_tests PRIVATE NEOGRAPH_RUNTIME_TURN_TESTS_HAVE_LLM)
+endif()
 neograph_discover_tests(neograph_runtime_turn_tests)
 
 if(TARGET neograph::llm)

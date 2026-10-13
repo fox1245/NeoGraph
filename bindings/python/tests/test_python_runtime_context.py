@@ -373,3 +373,50 @@ def test_native_raw_record_roundtrip_requires_its_archive_and_owner(provider_pee
     replay = ng.make_provider_request(
         provider, "local-model", list(request.messages) + [restored.message])
     assert provider.invoke(replay).failure is None
+
+
+def _presented(*roles_and_text):
+    return [ng.ProviderMessage(role, [ng.Text(text)]) for role, text in roles_and_text]
+
+
+def test_strict_profile_is_host_stepped_and_refuses_a_turn_the_caller_advanced(
+        tmp_path, provider_peer):
+    # Issue #444: a loop inside one run presents assistant or tool messages the
+    # epoch cannot carry. The profile refuses that call instead of resending the
+    # first turn's context, and names the host-stepped contract.
+    provider = provider_peer.provider()
+    contexts = ng.SQLiteContextStore(str(tmp_path / "stepped-context.sqlite3"))
+    receipts = ng.SQLiteProviderDispatchReceiptStore(str(tmp_path / "stepped-dispatch.sqlite3"))
+    profile = ng.StrictRuntimeProfile(
+        provider, contexts, receipts, ng.create_hook_runtime([], {}), _sha("a"), 1024)
+    epoch = _epoch(contexts, ng.RuntimeGuaranteeProfile.Strict)
+    profile.activate("owner", epoch)
+
+    first = _presented((ng.ProviderRole.User, "hello-1"))
+    advanced = first + _presented(
+        (ng.ProviderRole.Assistant, "an answer"), (ng.ProviderRole.User, "more"))
+
+    assert profile.invoke(ng.make_provider_request(provider, "model", first)).failure is None
+    with pytest.raises(RuntimeError, match="host appends RAW records and activates a new "
+                                           "epoch for every provider call"):
+        profile.invoke(ng.make_provider_request(provider, "model", advanced))
+    assert len(provider_peer.requests) == 1
+
+    # A retry of the same turn still works.
+    assert profile.invoke(ng.make_provider_request(provider, "model", first)).failure is None
+    assert len(provider_peer.requests) == 2
+
+    # Activating the next epoch is the host stepping to the next turn.
+    next_data = ng.ContextEpochData()
+    next_data.run_id = "run"
+    next_data.sequence = 2
+    next_data.predecessor_id = epoch.id
+    next_data.feed_id = "feed"
+    next_data.raw_from_sequence = 1
+    next_data.raw_through_sequence = 1
+    next_data.raw_window_digest = contexts.snapshot_history(
+        ng.ContextStoreFeed("owner", "feed"), 1, 1).digest
+    next_data.guarantee_profile = ng.RuntimeGuaranteeProfile.Strict
+    profile.activate("owner", ng.ContextEpoch.create(next_data))
+    assert profile.invoke(ng.make_provider_request(provider, "model", advanced)).failure is None
+    assert len(provider_peer.requests) == 3

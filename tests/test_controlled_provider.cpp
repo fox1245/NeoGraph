@@ -6,6 +6,13 @@
 #include <neograph/strict_runtime.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/engine.h>
+#include <neograph/graph/plan_execute_graph.h>
+#include <neograph/graph/react_graph.h>
+#include <neograph/tool.h>
+#ifdef NEOGRAPH_RUNTIME_TURN_TESTS_HAVE_LLM
+#include <neograph/llm/agent.h>
+#endif
 #include "fixtures/typed_provider.h"
 #include <neograph/provider_outcome_codec.h>
 #include <atomic>
@@ -14,7 +21,10 @@
 #include <vector>
 
 #include <condition_variable>
+#include <deque>
+#include <functional>
 #include <future>
+#include <map>
 #include <mutex>
 
 using namespace neograph;
@@ -726,3 +736,481 @@ TEST(StrictRuntimeProfile, RequiresDurableDependenciesAndStrictEpoch) {
                                        empty_hook_runtime(), sha('f'), 0, {}}),
                  std::invalid_argument);
 }
+
+// ---------------------------------------------------------------------------
+// The host-stepped contract (#444): the host appends RAW records and activates
+// a new epoch for every provider call. A call that presents assistant or tool
+// messages added since its epoch's first dispatch is refused instead of
+// silently resending the first turn's context.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr const char* kHostStepped =
+    "the host appends RAW records and activates a new epoch for every provider call";
+
+sp::Message lookup_call(std::string id) {
+    sp::Message message;
+    message.role = sp::Role::Assistant;
+    message.parts.emplace_back(sp::ToolCall{std::move(id), "lookup", sp::ToolCallKind::ClientExecuted,
+                                            test::document(R"({"q":"x"})")});
+    return message;
+}
+
+sp::Message lookup_result(std::string id, std::string text = "found") {
+    sp::Message message;
+    message.role = sp::Role::Tool;
+    message.parts.emplace_back(sp::ToolResult{std::move(id), std::move(text)});
+    return message;
+}
+
+sp::runtime::Result lookup_reply(std::string id) {
+    sp::Completion completion;
+    completion.messages = {lookup_call(std::move(id))};
+    completion.stop = {sp::StopKind::ToolUse, "tool_calls"};
+    return std::make_shared<const sp::Outcome>(std::move(completion));
+}
+
+// Keeps every dispatch of a multi-call run, keyed by its dispatch id.
+class JournalingStore final : public DurableProviderDispatchReceiptStore {
+public:
+    ProviderDispatchReceiptPutResult persist(const ProviderDispatchReceipt& value) override {
+        std::lock_guard lock(mutex_);
+        const auto [it, inserted] = receipts_.try_emplace(value.dispatch_id(), value.serialize_canonical());
+        if (inserted) return ProviderDispatchReceiptPutResult::Stored;
+        return it->second == value.serialize_canonical()
+                   ? ProviderDispatchReceiptPutResult::AlreadyPresent
+                   : ProviderDispatchReceiptPutResult::Conflict;
+    }
+    ProviderDispatchOutcomePutResult settle(
+        std::string_view, const ProviderDispatchOutcomeReceipt& value) override {
+        std::lock_guard lock(mutex_);
+        const auto [it, inserted] = outcomes_.try_emplace(value.dispatch_id(), value.serialize_canonical());
+        if (inserted) return ProviderDispatchOutcomePutResult::Stored;
+        return it->second == value.serialize_canonical()
+                   ? ProviderDispatchOutcomePutResult::AlreadyPresent
+                   : ProviderDispatchOutcomePutResult::Conflict;
+    }
+    std::optional<ProviderDispatchOutcomeReceipt> outcome(
+        std::string_view, std::string_view dispatch_id) const override {
+        std::lock_guard lock(mutex_);
+        const auto found = outcomes_.find(std::string(dispatch_id));
+        if (found == outcomes_.end()) return std::nullopt;
+        return ProviderDispatchOutcomeReceipt::parse(found->second);
+    }
+    std::size_t dispatches() const {
+        std::lock_guard lock(mutex_);
+        return receipts_.size();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, std::string> receipts_;
+    std::map<std::string, std::string> outcomes_;
+};
+
+struct ToolLoopState {
+    std::mutex mutex;
+    int calls = 0;
+    /// Replies to give first, in order; afterwards the flags below apply.
+    std::deque<sp::runtime::Result> script;
+    /// Ask for the lookup tool on the first call, otherwise answer at once.
+    bool call_tool_first = true;
+    /// Fail the first call with a typed transport failure.
+    bool fail_first = false;
+    /// Message count of every request as the provider received it.
+    std::vector<std::size_t> received;
+};
+
+class ToolLoopProvider final : public test::LocalProvider {
+public:
+    ToolLoopProvider() : ToolLoopProvider(std::make_shared<ToolLoopState>()) {}
+    std::shared_ptr<ToolLoopState> state;
+private:
+    explicit ToolLoopProvider(std::shared_ptr<ToolLoopState> probe)
+        : LocalProvider(
+            [probe](ProviderRequest request, const PreparedProviderRequest&,
+                    const EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                int call = 0;
+                bool tool = false;
+                bool fail = false;
+                sp::runtime::Result scripted;
+                {
+                    std::lock_guard lock(probe->mutex);
+                    call = ++probe->calls;
+                    probe->received.push_back(
+                        std::get<sp::chat::Request>(request.payload).canonical_messages.size());
+                    tool = probe->call_tool_first && call == 1;
+                    fail = probe->fail_first && call == 1;
+                    if (!probe->script.empty()) {
+                        scripted = std::move(probe->script.front());
+                        probe->script.pop_front();
+                    }
+                }
+                if (scripted) co_return scripted;
+                if (fail) co_return test::failure(sp::ErrorKind::Transport);
+                if (!tool) co_return test::success("done");
+                co_return lookup_reply("call-1");
+            }, "tool-loop-provider"), state(std::move(probe)) {}
+};
+
+class LookupTool final : public Tool {
+public:
+    explicit LookupTool(std::shared_ptr<std::atomic<int>> executed) : executed_(std::move(executed)) {}
+    ChatTool get_definition() const override {
+        return ChatTool{"lookup", "lookup fixture", json{{"type", "object"}}};
+    }
+    std::string execute(const json&) override {
+        ++*executed_;
+        return "found";
+    }
+    std::string get_name() const override { return "lookup"; }
+private:
+    std::shared_ptr<std::atomic<int>> executed_;
+};
+
+// The host's side of the contract: append RAW records, then build an epoch that
+// covers every record so far.
+class HostStepper {
+public:
+    explicit HostStepper(ContextStore& store) : store_(store) {}
+
+    void append(sp::Message message, RuntimeTrustClass trust) {
+        RuntimeHistoryRecordData data;
+        data.feed_id = feed_.feed_id;
+        data.sequence = ++records_;
+        data.message_id = "message-" + std::to_string(records_);
+        data.trust = trust;
+        data.message = std::move(message);
+        data.predecessor_id = head_;
+        const auto record = RuntimeHistoryRecord::create(std::move(data));
+        EXPECT_EQ(store_.append_history(feed_, record, head_), ContextStoreAppendResult::Appended);
+        head_ = record.id();
+    }
+
+    ContextEpoch next_epoch() {
+        ContextEpochData data;
+        data.run_id = "run";
+        data.sequence = ++epochs_;
+        data.predecessor_id = previous_epoch_;
+        data.feed_id = feed_.feed_id;
+        data.raw_from_sequence = 1;
+        data.raw_through_sequence = records_;
+        data.raw_window_digest = store_.snapshot_history(feed_, 1, records_).digest;
+        data.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+        auto epoch = ContextEpoch::create(std::move(data));
+        previous_epoch_ = epoch.id();
+        return epoch;
+    }
+
+private:
+    ContextStore& store_;
+    ContextStoreFeed feed_{"owner", "feed"};
+    std::uint64_t records_ = 0;
+    std::uint64_t epochs_ = 0;
+    std::optional<std::string> head_;
+    std::optional<std::string> previous_epoch_;
+};
+
+struct StrictFixture {
+    std::shared_ptr<ToolLoopProvider> provider = std::make_shared<ToolLoopProvider>();
+    std::shared_ptr<DurableMemoryContextStore> contexts = std::make_shared<DurableMemoryContextStore>();
+    std::shared_ptr<JournalingStore> receipts = std::make_shared<JournalingStore>();
+    StrictRuntimeProfile profile{{provider, contexts, receipts, empty_hook_runtime(), sha('f'), 100000, {}}};
+    HostStepper host{contexts->inner};
+
+    StrictFixture() {
+        host.append(test::message("hello", sp::Role::User), RuntimeTrustClass::UntrustedInput);
+        profile.activate("owner", host.next_epoch());
+    }
+
+    // What a graph or agent presents: the conversation it holds so far.
+    ProviderRequest presenting(std::vector<sp::Message> conversation) const {
+        return make_provider_request(*provider, "model", std::move(conversation));
+    }
+    sp::runtime::Result invoke(std::vector<sp::Message> conversation,
+                               graph::ProviderCallIdentity identity = {}) {
+        return async::run_sync(profile.interposition()->invoke_async(
+            presenting(std::move(conversation)), {}, {}, std::move(identity)));
+    }
+    // The host records a model reply and the tool result that answers it, then
+    // steps to an epoch that covers both.
+    void step_after_tool_call(const std::string& id) {
+        host.append(lookup_call(id), RuntimeTrustClass::ModelOutput);
+        host.append(lookup_result(id), RuntimeTrustClass::ToolOutput);
+        profile.activate("owner", host.next_epoch());
+    }
+};
+
+sp::Message hello() { return test::message("hello", sp::Role::User); }
+
+bool asks_for_lookup(const sp::runtime::Result& result) {
+    return !pending_client_tool_calls(test::completion(result).messages).empty();
+}
+
+void expect_host_stepped_refusal(const std::function<void()>& call) {
+    try {
+        call();
+        FAIL() << "the call must be refused";
+    } catch (const std::logic_error& error) {
+        EXPECT_NE(std::string(error.what()).find(kHostStepped), std::string::npos) << error.what();
+    }
+}
+
+}  // namespace
+
+TEST(StrictRuntimeProfile, ReActLoopOnAPlainEngineFailsFastOnTheSecondLlmCall) {
+    StrictFixture fixture;
+    auto executed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<LookupTool>(executed));
+    auto engine = graph::create_react_graph(fixture.provider, std::move(tools), "", "model");
+    fixture.profile.attach(*engine);
+
+    graph::RunConfig config;
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hello"}}})}};
+    graph::RunMetadata metadata;
+    metadata.owner_scope = "owner";
+    metadata.run_id = "run-1";
+    try {
+        (void)engine->run(config, metadata);
+        FAIL() << "the second LLM call must be refused";
+    } catch (const graph::NodeExecutionError& error) {
+        EXPECT_NE(std::string(error.what()).find(kHostStepped), std::string::npos) << error.what();
+        EXPECT_EQ(error.node_name(), "llm");
+        // A violated contract is deterministic: the node is not retried.
+        EXPECT_EQ(error.attempts(), 1);
+    }
+    // The first call ran, its tool ran, and the second call never left.
+    EXPECT_EQ(fixture.provider->state->calls, 1);
+    EXPECT_EQ(executed->load(), 1);
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1}));
+}
+
+TEST(StrictRuntimeProfile, SingleTurnRunOnAPlainEngineStillWorks) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    auto engine = graph::create_react_graph(fixture.provider, {}, "", "model");
+    fixture.profile.attach(*engine);
+
+    graph::RunConfig config;
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hello"}}})}};
+    graph::RunMetadata metadata;
+    metadata.owner_scope = "owner";
+    metadata.run_id = "run-1";
+    const auto result = engine->run(config, metadata);
+    EXPECT_FALSE(result.interrupted);
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1}));
+}
+
+TEST(StrictRuntimeProfile, HostSteppedLoopAppendsRecordsAndActivatesAnEpochPerCall) {
+    StrictFixture fixture;
+    ASSERT_TRUE(asks_for_lookup(fixture.invoke({hello()})));
+    fixture.step_after_tool_call("call-1");
+    // The conversation the graph now holds is exactly the RAW range of the new
+    // epoch, so the provider receives all of it.
+    const auto second = fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1")});
+    EXPECT_EQ(test::text(second), "done");
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1, 3}));
+
+    // A further step works the same way.
+    fixture.host.append(test::message("done", sp::Role::Assistant), RuntimeTrustClass::ModelOutput);
+    fixture.host.append(test::message("again", sp::Role::User), RuntimeTrustClass::UntrustedInput);
+    fixture.profile.activate("owner", fixture.host.next_epoch());
+    EXPECT_EQ(test::text(fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1"),
+                                         test::message("done"), test::message("again", sp::Role::User)})),
+              "done");
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1, 3, 5}));
+    // Each epoch of the run dispatched under its own id; none reused another's.
+    EXPECT_EQ(fixture.receipts->dispatches(), 3u);
+}
+
+TEST(StrictRuntimeProfile, RetryOfTheSameTurnStillWorks) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    fixture.provider->state->fail_first = true;
+    // The first attempt fails at the provider; the retry presents the same turn.
+    const auto failed = fixture.invoke({hello()});
+    ASSERT_TRUE(failed);
+    EXPECT_TRUE(std::holds_alternative<sp::Failure>(*failed));
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+    EXPECT_EQ(fixture.provider->state->calls, 3);
+}
+
+TEST(StrictRuntimeProfile, RetryOfATurnThatAlreadyHoldsEarlierRepliesStillWorks) {
+    // A conversation whose earlier assistant and tool messages were presented
+    // at the first dispatch is the baseline, not an advance.
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    const std::vector<sp::Message> earlier{hello(), lookup_call("call-0"), lookup_result("call-0")};
+    EXPECT_EQ(test::text(fixture.invoke(earlier)), "done");
+    EXPECT_EQ(test::text(fixture.invoke(earlier)), "done");
+    EXPECT_EQ(fixture.provider->state->calls, 2);
+}
+
+TEST(StrictRuntimeProfile, RefusesToolMessagesAddedSinceTheEpochsFirstDispatch) {
+    StrictFixture fixture;
+    ASSERT_TRUE(asks_for_lookup(fixture.invoke({hello()})));
+    expect_host_stepped_refusal([&] {
+        (void)fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1")});
+    });
+    EXPECT_EQ(fixture.provider->state->calls, 1);
+    // The refused call left nothing behind: the same epoch still serves the
+    // turn it was activated for.
+    fixture.provider->state->call_tool_first = false;
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+}
+
+TEST(StrictRuntimeProfile, RefusesAnAssistantReplyAloneAndAToolResultAlone) {
+    {
+        StrictFixture fixture;
+        ASSERT_TRUE(asks_for_lookup(fixture.invoke({hello()})));
+        expect_host_stepped_refusal([&] {
+            (void)fixture.invoke({hello(), test::message("an answer")});
+        });
+    }
+    {
+        StrictFixture fixture;
+        ASSERT_TRUE(asks_for_lookup(fixture.invoke({hello()})));
+        expect_host_stepped_refusal([&] {
+            (void)fixture.invoke({hello(), lookup_result("call-1")});
+        });
+    }
+}
+
+TEST(StrictRuntimeProfile, GrowthByUserMessagesAloneIsNotAnAdvance) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+    EXPECT_EQ(test::text(fixture.invoke({hello(), test::message("more", sp::Role::User)})), "done");
+}
+
+TEST(StrictRuntimeProfile, ANewEpochOrClearForgetsTheFirstDispatch) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+    fixture.step_after_tool_call("call-1");
+    // The grown conversation is the first dispatch of the new epoch.
+    EXPECT_EQ(test::text(fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1")})), "done");
+    expect_host_stepped_refusal([&] {
+        (void)fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1"),
+                              lookup_call("call-2"), lookup_result("call-2")});
+    });
+    // Activating again (the host's decision) starts over, and so does clear().
+    fixture.profile.activate("owner", fixture.host.next_epoch());
+    EXPECT_EQ(test::text(fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1"),
+                                         lookup_call("call-2"), lookup_result("call-2")})), "done");
+    fixture.profile.clear();
+    fixture.profile.activate("owner", fixture.host.next_epoch());
+    EXPECT_EQ(test::text(fixture.invoke({hello()})), "done");
+}
+
+TEST(StrictRuntimeProfile, CallSitesAreJudgedIndependently) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    graph::ProviderCallIdentity classifier;
+    classifier.node_name = "classifier";
+    graph::ProviderCallIdentity llm;
+    llm.node_name = "llm";
+    EXPECT_EQ(test::text(fixture.invoke({hello()}, classifier)), "done");
+    // Another node presenting a longer conversation of its own is not growth
+    // of the classifier's presentation.
+    EXPECT_EQ(test::text(fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1")}, llm)),
+              "done");
+    // A node that moves its own conversation on is refused.
+    expect_host_stepped_refusal([&] {
+        (void)fixture.invoke({hello(), lookup_call("call-1"), lookup_result("call-1"),
+                              lookup_call("call-2"), lookup_result("call-2")}, llm);
+    });
+}
+
+TEST(StrictRuntimeProfile, GrowthCarriedByTrustedSupplementalInputIsNotAnAdvance) {
+    // Built-in loop nodes (plan executor, researcher) pass their growing
+    // conversation as trusted supplemental input, which is receipt-bound and
+    // reaches the provider; they keep working.
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    const auto first = async::run_sync(fixture.profile.interposition()->invoke_async(
+        fixture.presenting({hello()}), {}, {hello()}));
+    EXPECT_EQ(test::text(first), "done");
+    const auto second = async::run_sync(fixture.profile.interposition()->invoke_async(
+        fixture.presenting({hello(), lookup_call("call-1"), lookup_result("call-1")}), {},
+        {hello(), lookup_call("call-1"), lookup_result("call-1")}));
+    EXPECT_EQ(test::text(second), "done");
+    // Supplemental input that restates the RAW user message is not duplicated;
+    // the assistant and tool messages follow it.
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1, 3}));
+}
+
+TEST(StrictRuntimeProfile, RememberedFirstDispatchesStayBounded) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    // Many distinct presentations: beyond the remembered limit they are simply
+    // not tracked, and none of them is refused.
+    for (int index = 0; index < 40; ++index) {
+        graph::ProviderCallIdentity identity;
+        identity.node_name = "node-" + std::to_string(index);
+        EXPECT_EQ(test::text(fixture.invoke({hello()}, identity)), "done");
+    }
+    EXPECT_EQ(fixture.provider->state->calls, 40);
+}
+
+TEST(StrictRuntimeProfile, BuiltInPlanExecuteLoopKeepsWorkingBecauseItCarriesItsConversation) {
+    // The plan executor runs LLM call, tool, LLM call inside one run too, but it
+    // passes its growing conversation as trusted supplemental input, so every
+    // reply and tool result reaches the provider and is bound in the receipt.
+    StrictFixture fixture;
+    fixture.provider->state->script = {
+        test::success(R"(["look it up"])"),  // planner
+        lookup_reply("call-1"),               // executor, first turn
+        test::success("found it"),            // executor, after the tool result
+        test::success("FINAL"),               // responder
+    };
+    auto executed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<LookupTool>(executed));
+    auto engine = graph::create_plan_execute_graph(
+        fixture.provider, std::move(tools), "plan", "execute", "respond", "model", 3);
+    fixture.profile.attach(*engine);
+
+    graph::RunConfig config;
+    config.max_steps = 20;
+    config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hello"}}})}};
+    graph::RunMetadata metadata;
+    metadata.owner_scope = "owner";
+    metadata.run_id = "run-1";
+    const auto result = engine->run(config, metadata);
+    EXPECT_FALSE(result.interrupted);
+    EXPECT_EQ(fixture.provider->state->calls, 4);
+    EXPECT_EQ(executed->load(), 1);
+    // planner, executor, executor after the tool, responder: each is the RAW
+    // user message, its host instruction, and what the node carries.
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{2, 3, 5, 3}));
+}
+
+#ifdef NEOGRAPH_RUNTIME_TURN_TESTS_HAVE_LLM
+TEST(StrictRuntimeProfile, AgentToolLoopFailsFastOnTheSecondProviderCall) {
+    StrictFixture fixture;
+    auto executed = std::make_shared<std::atomic<int>>(0);
+    std::vector<std::unique_ptr<Tool>> tools;
+    tools.push_back(std::make_unique<LookupTool>(executed));
+    llm::Agent agent(fixture.provider, std::move(tools), "", "model");
+    agent.set_runtime_interposition(fixture.profile.interposition());
+
+    std::vector<sp::Message> messages{hello()};
+    expect_host_stepped_refusal([&] { (void)agent.run(messages, 5); });
+    EXPECT_EQ(fixture.provider->state->calls, 1);
+    EXPECT_EQ(executed->load(), 1);
+}
+
+TEST(StrictRuntimeProfile, AgentThatSteppedTheHostBetweenTurnsKeepsWorking) {
+    StrictFixture fixture;
+    fixture.provider->state->call_tool_first = false;
+    llm::Agent agent(fixture.provider, {}, "", "model");
+    agent.set_runtime_interposition(fixture.profile.interposition());
+    std::vector<sp::Message> messages{hello()};
+    EXPECT_EQ(test::text(agent.run(messages, 5)), "done");
+    EXPECT_EQ(fixture.provider->state->received, (std::vector<std::size_t>{1}));
+}
+#endif

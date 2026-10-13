@@ -2,10 +2,131 @@
 
 #include <neograph/async/run_sync.h>
 
+#include "canonical_json.h"
+
+#include <algorithm>
 #include <mutex>
 #include <stdexcept>
+#include <type_traits>
+#include <variant>
 
 namespace neograph {
+namespace {
+
+// The strict path is host-stepped: the epoch's RAW range is fixed, so a graph
+// or agent loop that keeps going inside one run (LLM call, tool dispatch, LLM
+// call) would resend the first turn's context and silently drop everything the
+// loop produced since (#444). The controller cannot append records or
+// activate an epoch on the host's behalf, so it refuses such a call instead.
+constexpr const char* kHostSteppedViolation =
+    "Strict provider dispatch is host-stepped: the host appends RAW records and "
+    "activates a new epoch for every provider call. This call presents assistant "
+    "or tool messages added since the active epoch's first dispatch, so the graph "
+    "or agent loop advanced inside one run and the provider would not receive "
+    "them. Append those messages to the context feed and activate a new epoch "
+    "before this call.";
+
+// Distinct first presentations remembered per epoch. Past the cap a new
+// presentation is simply not tracked, so the memory an epoch holds stays
+// bounded; the epoch's own activation forgets all of them.
+constexpr std::size_t kMaxFirstPresentations = 16;
+
+// The conversation a call site showed the controller on its first dispatch
+// under the active epoch: how many messages, and a digest chain over them.
+struct FirstPresentation {
+    std::string call_site;
+    std::size_t count = 0;
+    std::string chain;
+    bool operator==(const FirstPresentation&) const = default;
+};
+
+// An assistant reply or a tool result moves a conversation forward. Counted
+// per assistant message and per ToolResult part, because the Anthropic and
+// Gemini families merge adjacent tool results into one message and relabel the
+// role, while the number of results stays the same.
+std::size_t advance_units(const sp::Message& message) {
+    std::size_t results = 0;
+    for (const auto& part : message.parts)
+        if (std::holds_alternative<sp::ToolResult>(part)) ++results;
+    std::size_t units = results;
+    if (message.role == sp::Role::Assistant) ++units;
+    if (message.role == sp::Role::Tool && results == 0) ++units;
+    return units;
+}
+
+// chain[i] identifies the first i messages; chain[0] is the empty presentation.
+std::vector<std::string> presentation_chain(const std::vector<sp::Message>& messages) {
+    std::vector<std::string> chain;
+    chain.reserve(messages.size() + 1);
+    chain.emplace_back();
+    for (const auto& message : messages) {
+        chain.push_back(detail::sha256_identity(
+            "NeoGraph provider presentation v1", "prefix-chain/v1",
+            chain.back() + message_digest(message)));
+    }
+    return chain;
+}
+
+// The conversation the caller put on the request, before the controller
+// replaces it with the epoch's RAW range. Null when the request carries the
+// legacy typed Chat form, which has no portable message view.
+const std::vector<sp::Message>* presented_messages(const ProviderRequest& request) {
+    return std::visit([](const auto& payload) -> const std::vector<sp::Message>* {
+        if constexpr (std::is_same_v<std::decay_t<decltype(payload)>, sp::chat::Request>)
+            return payload.messages.empty() ? &payload.canonical_messages : nullptr;
+        else
+            return &payload.messages;
+    }, request.payload);
+}
+
+struct PresentationVerdict {
+    /// The presentation grew past a first presentation of the same call site
+    /// by assistant or tool messages that this dispatch does not carry.
+    bool advanced = false;
+    /// Set when no remembered presentation relates to this one.
+    std::optional<FirstPresentation> first;
+};
+
+// Pure and lock-free: `known` is a snapshot. An identical presentation is a
+// retry of the same turn. A presentation that extends a remembered one is the
+// same conversation moving on; it is a violation only when the added assistant
+// or tool messages are not also carried by the host slots or the trusted
+// supplemental input (built-in loop nodes such as the plan executor carry
+// their growing conversation there, and that is receipt-bound).
+PresentationVerdict judge_presentation(
+    const std::vector<FirstPresentation>& known, const std::string& call_site,
+    const std::vector<sp::Message>& presented,
+    const std::vector<sp::Message>& host_instructions,
+    const std::vector<sp::Message>& trusted_supplemental) {
+    PresentationVerdict verdict;
+    // An empty presentation says nothing about a conversation.
+    if (presented.empty()) return verdict;
+    const auto chain = presentation_chain(presented);
+    bool related = false;
+    std::optional<std::size_t> carried;
+    for (const auto& first : known) {
+        if (first.call_site != call_site || first.count > presented.size() ||
+            chain[first.count] != first.chain) continue;
+        related = true;
+        std::size_t grown = 0;
+        for (auto index = first.count; index < presented.size(); ++index)
+            grown += advance_units(presented[index]);
+        if (grown == 0) continue;
+        if (!carried) {
+            carried = 0;
+            for (const auto& message : host_instructions) *carried += advance_units(message);
+            for (const auto& message : trusted_supplemental) *carried += advance_units(message);
+        }
+        if (grown > *carried) {
+            verdict.advanced = true;
+            return verdict;
+        }
+    }
+    if (!related) verdict.first = FirstPresentation{call_site, presented.size(), chain.back()};
+    return verdict;
+}
+
+}  // namespace
 
 struct RuntimeInterpositionController::Impl {
     std::shared_ptr<ContextStore> store;
@@ -19,6 +140,8 @@ struct RuntimeInterpositionController::Impl {
     std::uint64_t generation = 0;
     std::uint64_t dispatch_sequence = 0;
     std::shared_ptr<HookRuntime> hooks;
+    /// First presentations under the active epoch; reset with every activation.
+    std::vector<FirstPresentation> first_presentations;
 
     Impl(std::shared_ptr<ContextStore> store_, std::shared_ptr<Provider> provider,
           std::shared_ptr<ProviderDispatchReceiptStore> receipts, std::string binding,
@@ -69,6 +192,7 @@ void RuntimeInterpositionController::activate(std::string owner_id, ContextEpoch
     impl_->epoch = std::move(epoch);
     ++impl_->generation;
     impl_->dispatch_sequence = 0;
+    impl_->first_presentations.clear();
 }
 void RuntimeInterpositionController::clear() noexcept {
     std::lock_guard lock(impl_->mutex);
@@ -76,6 +200,7 @@ void RuntimeInterpositionController::clear() noexcept {
     impl_->epoch.reset();
     ++impl_->generation;
     impl_->dispatch_sequence = 0;
+    impl_->first_presentations.clear();
 }
 bool RuntimeInterpositionController::active() const noexcept {
     std::lock_guard lock(impl_->mutex);
@@ -101,6 +226,7 @@ asio::awaitable<sp::runtime::Result> RuntimeInterpositionController::invoke_asyn
     std::string owner_id;
     std::uint64_t generation;
     std::shared_ptr<HookRuntime> hooks;
+    std::vector<FirstPresentation> known_presentations;
     ContextEpoch epoch = [&] {
         std::lock_guard lock(impl->mutex);
         if (!impl->epoch) {
@@ -109,8 +235,23 @@ asio::awaitable<sp::runtime::Result> RuntimeInterpositionController::invoke_asyn
         owner_id = impl->owner_id;
         generation = impl->generation;
         hooks = impl->hooks;
+        known_presentations = impl->first_presentations;
         return *impl->epoch;
     }();
+    // Refuse a turn the graph already advanced before anything is assembled.
+    if (const auto* presented = presented_messages(request)) {
+        auto verdict = judge_presentation(known_presentations, identity.node_name, *presented,
+                                          host_instructions, trusted_supplemental);
+        if (verdict.advanced) throw std::logic_error(kHostSteppedViolation);
+        if (verdict.first) {
+            std::lock_guard lock(impl->mutex);
+            if (impl->generation == generation &&
+                impl->first_presentations.size() < kMaxFirstPresentations &&
+                std::find(impl->first_presentations.begin(), impl->first_presentations.end(),
+                          *verdict.first) == impl->first_presentations.end())
+                impl->first_presentations.push_back(std::move(*verdict.first));
+        }
+    }
     // The admitted RAW feed is authoritative; explicit instruction/task slots
     // are supplied by the host, never recovered from caller presentation state.
     clear_provider_request_messages(request);
@@ -144,7 +285,14 @@ asio::awaitable<sp::runtime::Result> RuntimeInterpositionController::invoke_asyn
             impl->owner_id != owner_id || impl->epoch->id() != epoch.id()) {
             throw std::runtime_error("Context epoch changed before provider dispatch admission");
         }
-        dispatch_id = epoch.run_id() + "-dispatch-" + std::to_string(++impl->dispatch_sequence);
+        // The sequence restarts with every activation, so a later epoch of the
+        // same run needs its own prefix or its first dispatch would reuse the
+        // id of the earlier epoch's first dispatch. A run's first epoch keeps
+        // the original id format.
+        const auto prefix = epoch.sequence() > 1
+            ? epoch.run_id() + "-epoch-" + std::to_string(epoch.sequence())
+            : epoch.run_id();
+        dispatch_id = prefix + "-dispatch-" + std::to_string(++impl->dispatch_sequence);
     }
     if (hooks) {
         // GCC 13 ICEs when the returned awaitable is consumed as a temporary.

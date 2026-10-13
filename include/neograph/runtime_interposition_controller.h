@@ -46,6 +46,14 @@ public:
     void set_hook_runtime(std::shared_ptr<HookRuntime> hooks);
 
     /// Assemble, journal, and dispatch. Active epoch history is authoritative.
+    ///
+    /// Host-stepped: the prompt comes from the epoch's fixed RAW range, so the
+    /// host appends RAW records and activates a new epoch for every provider
+    /// call. A call that presents assistant or tool messages added since the
+    /// epoch's first dispatch (a graph or agent loop that advanced inside one
+    /// run) throws std::logic_error naming this contract. The same presented
+    /// messages again (a retry of the turn) are accepted; activate() and
+    /// clear() forget what was presented.
     asio::awaitable<sp::runtime::Result> invoke_async(
         ProviderRequest request,
         std::vector<sp::Message> host_instructions = {},
