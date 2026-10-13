@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=19c234158e09885ff4fb5bc8e8882e0e7b88c44a47398dab835822e3c65e466e -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=05a405c99f388774993482b2cb175a7c22343d727442659756368bae50402791 -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -139,7 +139,7 @@ bundle에 봉인되는 진단에는 `help`가 없으므로 bundle id는 그 영�
 | <a id="p_core_e4"></a>`P_CORE_E4` | 노드의 효과 계약이 선언되지 않은 채널에 쓰거나(오류) 읽는다(경고). 그 채널을 선언한다. |
 | <a id="p_core_e5"></a>`P_CORE_E5` | fan-out 형제 노드가 같은 overwrite 채널에 쓴다. 마지막으로 쓴 값이 남는데 어느 노드일지 비결정적이다. append 리듀서를 쓴다. |
 | <a id="p_core_e6"></a>`P_CORE_E6` | 채널을 읽지도 쓰지도 않거나, 쓰기만 하고 읽지 않거나, 읽기만 하고 쓰지 않으면서 초기값도 없다. |
-| <a id="p_core_e7"></a>`P_CORE_E7` | 엣지와 라우트로 `__start__`에서 도달할 수 없는 노드가 있다. |
+| <a id="p_core_e7"></a>`P_CORE_E7` | 엣지와 라우트로 `__start__`에서 도달할 수 없는 노드가 있다. `Send`나 `Command.goto`로만 시작되는 노드도 여기에 나온다. 그래프 정의에 동적 대상을 선언하는 곳이 없기 때문이며, 이때는 경고가 정상이다. 경고를 없애려고 엣지를 추가하지 않는다. 노드가 한 번 더 실행된다. |
 | <a id="p_core_e8"></a>`P_CORE_E8` | barrier가 기다리는 노드(또는 `any_of` 슬롯의 대안 중 어느 것)가 barrier로 라우팅되지 않아서 join이 발동할 수 없다. |
 | <a id="p_core_e9"></a>`P_CORE_E9` | 노드에 일반 들어오는 엣지가 여럿 있는데 barrier가 없다. 이 노드는 도착하는 슈퍼스텝마다 한 번씩 실행된다. AND join이 필요하면 barrier를 추가하고, XOR 병합이면 무시한다. |
 | <a id="p_core_e10"></a>`P_CORE_E10` | 조건부 엣지에 routes가 없거나, 조건이 반환하지 않는 레이블을 라우팅하거나, 반환할 수 있는 레이블에 라우트가 없다. |

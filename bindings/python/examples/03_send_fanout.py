@@ -9,15 +9,17 @@ Branches run on the engine's fan-out worker pool (see `set_worker_count`).
 Python callbacks still obey the CPython GIL: I/O may overlap, but this small
 pure-Python square calculation does not demonstrate CPU-core parallelism.
 
-Expect one `[neograph] lint [E7]` line on stderr: the topology check cannot see that
-`worker` is started by a Send, so it reports the node as unreachable. That is expected for
-a node that only Send starts (the Python binding has no switch to silence it).
+No edge leads to `worker`: only `Send` starts it. The topology check cannot see that, so it
+would report `worker` as unreachable (lint E7) on stderr. `compile(..., stderr_notices=False)`
+turns that notice off. Do not add an edge to quiet the lint: a static edge to a Send target
+makes the target run one more time, with the sender's state.
 
 Run:
     pip install neograph-engine
     python 03_send_fanout.py
 
 smoke-expect: squares: [0, 1, 4, 9, 16, 25, 36, 49]
+smoke-forbid: [neograph] lint
 """
 
 import neograph_engine as ng
@@ -81,7 +83,8 @@ definition = {
     ],
 }
 
-engine = ng.GraphEngine.compile(definition, ng.NodeContext())
+# `worker` is reached only by Send, which the reachability lint cannot see.
+engine = ng.GraphEngine.compile(definition, ng.NodeContext(), stderr_notices=False)
 # Use four fan-out workers. Python callbacks still share the CPython GIL;
 # parallel CPU-bound Python work requires a process or a GIL-releasing extension.
 engine.set_worker_count(4)

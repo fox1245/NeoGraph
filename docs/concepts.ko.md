@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=5887bf65ebef51dad0e0395fb7ddbee82b35352f199c95da837679906ec2a925 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -335,6 +335,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 ```
 
 `researcher`에서 나가는 엣지는 `{"from": "researcher", "to": "summarizer"}` 하나면 충분합니다. 정적 엣지와 같은 중복 제거 규칙이 적용되므로 summarizer는 한 번만 실행됩니다.
+
+### Send 대상 노드에는 들어오는 엣지가 필요 없습니다
+
+`Send`로만 시작되는 노드에는 들어오는 엣지가 없으며, 이 구조는 지원됩니다. 다만 검증기는 이를 알아볼 수 없습니다. 그래프 정의에는 `Send`나 `Command.goto`가 어떤 노드를 가리킬지 선언하는 곳이 없어서, `schema_version`이 1인 그래프를 빌드하면 lint E7(노드가 `__start__`에서 도달할 수 없음)이 stderr에 출력됩니다. 이런 노드에서는 이 알림이 정상입니다. C++에서는 `EngineConfig::stderr_notices = false`, Python에서는 `GraphEngine.compile(..., stderr_notices=False)`로 끌 수 있습니다. 이 스위치는 빌드 시점의 다른 lint와, fan-out이 직렬로 실행됐다는 일회성 알림도 함께 끕니다. 검증 오류는 그대로 예외로 던져집니다.
+
+lint를 없애려고 엣지를 추가하지 마세요. 송신 노드에서 Send 대상으로 정적 엣지를 걸면, Send가 모두 끝난 뒤에 대상이 공유 상태로 한 번 더 실행됩니다. 공유 상태에는 Send 페이로드가 쓰인 적이 없습니다. `fan` 노드가 `worker`로 Send를 세 번 보내고 `worker`로 가는 엣지도 있다면 트레이스는 `["fan", "worker[send]", "worker[send]", "worker[send]", "worker"]`이고, 마지막 `worker`는 `item`을 `None`으로 읽습니다.
 
 ### 워커 수 조정
 

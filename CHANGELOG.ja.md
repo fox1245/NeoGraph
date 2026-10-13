@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=b88b82338fc0390feb51efb35056a626d95e4cf6d65160f7821e6ac42fa90e51 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 修正
+
+- **Python でもビルド時の lint を止められます (#415)。** `GraphEngine.compile` にキーワード `stderr_notices` を追加しました。デフォルトは `True` で、C++ の `EngineConfig::stderr_notices` と同じです。`stderr_notices=False` にすると、strict なグラフの lint（`Send` や `Command.goto` だけが開始するノードに対する E7 など）と、fan-out が直列で実行されたことを知らせる 1 回限りの通知を出力しません。検証エラーは従来どおり例外になります。E7 自体は変えていません。グラフ定義には動的な対象を宣言する場所がないため、検証器は Send が開始するノードと、どこからも到達されないノードを区別できません。ドキュメントにこのことを明記しました。ドキュメントは、Send の対象への静的エッジが lint を黙らせる手段にならないことも説明しています。対象は、Send がすべて終わったあとに共有状態でもう一度実行されます。キーワードを渡さないコードの動作は従来どおりで、グラフの実行方法も変わりません。
 
 ## [0.14.0] - 2026-10-13
 

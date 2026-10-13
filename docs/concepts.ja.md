@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=5887bf65ebef51dad0e0395fb7ddbee82b35352f199c95da837679906ec2a925 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -327,6 +327,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 ```
 
 `researcher` から出るエッジは、`{"from": "researcher", "to": "summarizer"}` の1本だけです。静的エッジと同じ重複排除のルールが働くので、summarizerは1回だけ実行されます。
+
+### Send の対象ノードに入ってくるエッジは不要です
+
+`Send` だけが開始するノードには入ってくるエッジがありませんが、この形はサポートされています。ただし、検証器にはそれがわかりません。グラフ定義には、`Send` や `Command.goto` がどのノードを指すかを宣言する場所がないため、`schema_version` が 1 のグラフをビルドすると、lint E7（ノードが `__start__` から到達できない）が標準エラー出力に出ます。このようなノードでは、この通知は想定どおりです。C++ では `EngineConfig::stderr_notices = false`、Python では `GraphEngine.compile(..., stderr_notices=False)` で止められます。このスイッチは、ビルド時のほかの lint と、fan-out が直列で実行されたことを知らせる 1 回限りの通知もまとめて止めます。検証エラーは従来どおり例外になります。
+
+lint を黙らせるためにエッジを足さないでください。送信側から Send の対象へ静的エッジを張ると、Send がすべて終わったあとに、対象が共有状態でもう一度実行されます。共有状態には、Send のペイロードが書き込まれたことがありません。`fan` ノードが `worker` に Send を 3 回送り、`worker` へのエッジも持つ場合、トレースは `["fan", "worker[send]", "worker[send]", "worker[send]", "worker"]` になり、最後の `worker` は `item` を `None` として読みます。
 
 ### ワーカー数の調整
 

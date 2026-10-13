@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b88b82338fc0390feb51efb35056a626d95e4cf6d65160f7821e6ac42fa90e51 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 수정됨
+
+- **Python에서도 빌드 시점 lint를 끌 수 있습니다 (#415).** `GraphEngine.compile`에 키워드 `stderr_notices`가 추가되었습니다. 기본값은 `True`이며 C++ `EngineConfig::stderr_notices`와 같습니다. `stderr_notices=False`이면 strict 그래프의 lint(예: `Send`나 `Command.goto`로만 시작되는 노드에 대한 E7)와, fan-out이 직렬로 실행됐다는 일회성 알림을 출력하지 않습니다. 검증 오류는 그대로 예외로 발생합니다. E7 자체는 바뀌지 않았습니다. 그래프 정의에는 동적 대상을 선언하는 곳이 없어서, 검증기는 Send로 시작되는 노드와 아무도 도달하지 않는 노드를 구분할 수 없으며, 문서에 이를 명시했습니다. 문서는 Send 대상으로 가는 정적 엣지가 lint를 잠재우는 방법이 아니라는 점도 설명합니다. 대상이 Send가 모두 끝난 뒤 공유 상태로 한 번 더 실행됩니다. 키워드를 넘기지 않는 코드의 동작은 그대로이고, 그래프 실행 방식도 그대로입니다.
 
 ## [0.14.0] - 2026-10-13
 

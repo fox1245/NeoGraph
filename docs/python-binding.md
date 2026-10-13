@@ -297,6 +297,12 @@ Changing the list later only affects a subsequent compile. Native MCP tools
 keep their asynchronous execution path; there is no post-compile transfer or
 per-dispatch ownership allocation.
 
+### Lint notices on stderr
+
+A graph with `schema_version` 1 prints its validation warnings to stderr when `GraphEngine.compile` builds it, for example `[neograph] lint [E7] $: node(s) unreachable from __start__ ...`. `GraphEngine.compile(..., stderr_notices=False)` turns them off, together with the one-time notice that a fan-out ran serially. It is the Python form of C++ `EngineConfig::stderr_notices`; the default is `True`, and validation errors still raise.
+
+A node that only `Send` or `Command.goto` starts is reported as unreachable, because a definition does not declare dynamic targets. The notice is expected there. Do not add an edge to quiet it: a static edge to a Send target makes the target run once more, with the sender's state (see [Send](concepts.md#5-send--dynamic-fan-out)).
+
 ## Core API parity
 
 Python exposes the C++ execution abilities rather than a separate Python scheduler:

@@ -908,7 +908,8 @@ void init_graph(py::module_& m) {
                py::object ctx_obj,
                py::object store_obj,
                std::shared_ptr<GraphRegistry> registry,
-               py::object failure_text_redactor) {
+               py::object failure_text_redactor,
+               bool stderr_notices) {
                 // Take the Python wrapper as py::object (rather than
                 // const NodeContext&) so we can read the `_pytools`
                 // dynamic attr carrying user-defined Python Tool
@@ -928,20 +929,17 @@ void init_graph(py::module_& m) {
                     ? std::shared_ptr<CheckpointStore>{}
                     : store_obj.cast<std::shared_ptr<CheckpointStore>>();
                 auto j = py_to_json(definition);
-                std::unique_ptr<GraphEngine> unique;
-                if (registry || !failure_text_redactor.is_none()) {
-                    EngineConfig config;
-                    config.node_context = ctx;
-                    config.checkpoint_store = std::move(store);
-                    config.failure_text_redactor =
-                        neograph::pybind::python_failure_text_redactor(failure_text_redactor);
-                    EngineResources resources;
-                    resources.registry = registry;
-                    unique = GraphEngine::build(j, std::move(config), std::move(resources));
-                } else {
-                    // GIL held: compile is fast (just walks the JSON).
-                    unique = GraphEngine::compile(j, ctx, std::move(store));
-                }
+                // GIL held: compile is fast (just walks the JSON).
+                EngineConfig config;
+                config.node_context = ctx;
+                config.checkpoint_store = std::move(store);
+                config.failure_text_redactor =
+                    neograph::pybind::python_failure_text_redactor(failure_text_redactor);
+                config.stderr_notices = stderr_notices;
+                EngineResources resources;
+                resources.registry = registry;
+                std::unique_ptr<GraphEngine> unique =
+                    GraphEngine::build(j, std::move(config), std::move(resources));
                 // Destroying an engine joins its fan-out workers, and a worker
                 // still unwinding a failed branch may need the GIL to release
                 // the Python exception the branch holds. A thread that holds
@@ -967,6 +965,7 @@ void init_graph(py::module_& m) {
             py::arg("store") = py::none(),
             py::arg("registry") = nullptr,
             py::arg("failure_text_redactor") = py::none(),
+            py::arg("stderr_notices") = true,
             "Compile a graph from a JSON-shaped Python dict.\n\n"
             "Args:\n"
             "    definition: JSON graph definition (nodes, edges, "
@@ -982,7 +981,12 @@ void init_graph(py::module_& m) {
             "#364 failure records, for nodes whose retry policy sets "
             "error_text. It receives {'node', 'code', 'kind', 'attempts', "
             "'retryable', 'public_message'} and returns the text to keep "
-            "(str) or None; without it no text is written.\n\n"
+            "(str) or None; without it no text is written.\n"
+            "    stderr_notices: Print validation lint (for example E7 for a node "
+            "that only Send or Command starts) and the one-time notice that "
+            "fan-out runs serially to stderr. Default True, as "
+            "``EngineConfig::stderr_notices``; pass False to silence them. "
+            "Validation errors still raise.\n\n"
             "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",

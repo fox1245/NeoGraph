@@ -363,6 +363,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 `researcher`'s outgoing edge is just `{"from": "researcher", "to": "summarizer"}`
 — same dedup rule as static edges, so summarizer runs once.
 
+### A Send target needs no edge into it
+
+A node that only `Send` starts has no incoming edge, and that is a supported shape. The validator cannot tell: a graph definition does not declare which nodes a `Send` or `Command.goto` will target, so a graph with `schema_version` 1 prints lint E7 (the node is unreachable from `__start__`) to stderr when it is built. For such a node the notice is expected. Turn it off with `EngineConfig::stderr_notices = false` in C++ or `GraphEngine.compile(..., stderr_notices=False)` in Python. The switch also covers the other build-time lint and the one-time notice that a fan-out ran serially; validation errors still throw.
+
+Do not add an edge to quiet the lint. A static edge from the sender to a Send target makes the target run once more after the Sends, on the shared state, where no Send payload ever landed. A `fan` node that sends `worker` three times and also has an edge to `worker` gives the trace `["fan", "worker[send]", "worker[send]", "worker[send]", "worker"]`, and the last `worker` reads `item` as `None`.
+
 ### Worker-count tuning
 
 `build()` defaults to `EngineConfig::worker_count == 1`, so it creates no engine-owned thread pool and dispatches branches on the caller's coroutine executor. Coroutine I/O can overlap; CPU-bound work may serialize on a single-thread executor. A multi-thread caller executor or concurrent runs still require safe node member state.

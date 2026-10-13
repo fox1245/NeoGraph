@@ -133,7 +133,7 @@ These analyze what the graph means. Warnings are returned only; a bundle seals t
 | <a id="p_core_e4"></a>`P_CORE_E4` | A node's effect contract writes (error) or reads (warning) an undeclared channel. Declare the channel. |
 | <a id="p_core_e5"></a>`P_CORE_E5` | Fan-out siblings write the same overwrite channel; the last writer wins nondeterministically. Use an append reducer. |
 | <a id="p_core_e6"></a>`P_CORE_E6` | A channel is never read or written, written but never read, or read but never written and has no initial value. |
-| <a id="p_core_e7"></a>`P_CORE_E7` | Nodes cannot be reached from `__start__` through edges and routes. |
+| <a id="p_core_e7"></a>`P_CORE_E7` | Nodes cannot be reached from `__start__` through edges and routes. A node that only `Send` or `Command.goto` starts is listed too, because a definition does not declare dynamic targets; the warning is expected there. Do not add an edge to silence it: the node would run once more. |
 | <a id="p_core_e8"></a>`P_CORE_E8` | A barrier waits for a node, or an `any_of` slot none of whose alternatives, routes to it, so the join can never fire. |
 | <a id="p_core_e9"></a>`P_CORE_E9` | A node has several plain in-edges and no barrier; it runs once per arriving super-step. Add a barrier for an AND join, or ignore it for an XOR merge. |
 | <a id="p_core_e10"></a>`P_CORE_E10` | A conditional edge has no routes, routes a label its condition never returns, or leaves a label unrouted. |

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d8e99cf88b8a8203b09c7390c1474d631c9f24671d2be045446c79de071e497a -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=4434b02696524a933271d8471743f6e54ad5fd892032338b07a6d99913b02e78 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -290,6 +290,12 @@ print(result.output["channels"]["messages"]["value"])
 ### コンパイル時のツールの所有権
 
 Pythonの `Tool` インスタンス、ネイティブのC++ツール、`MCPClient.get_tools()` の結果は、まとめて `ng.NodeContext(tools=[...])` に渡します。コンパイル時には、グラフのノードを構築する**前**に、このリストがネイティブ側の `ToolSet` としてスナップショットされ、エンジンが所有します。コンパイル済みのエンジンは、コンテキストの `tools` のリストを置き換えたり、外部の参照を手放したりした後でも、`run()` と `resume()` を通じて、まったく同じツールを保持し続けます。後からリストを変更しても、影響するのはその後のコンパイルだけです。ネイティブのMCPツールは、非同期の実行経路をそのまま使います。コンパイル後に所有権を移す処理や、ディスパッチごとに所有権のための確保を行うことはありません。
+
+### 標準エラー出力の lint 通知
+
+`schema_version` が 1 のグラフを `GraphEngine.compile` でビルドすると、検証の警告が標準エラー出力に出ます。たとえば `[neograph] lint [E7] $: node(s) unreachable from __start__ ...` です。`GraphEngine.compile(..., stderr_notices=False)` は、この警告と、fan-out が直列で実行されたことを知らせる 1 回限りの通知をまとめて止めます。C++ の `EngineConfig::stderr_notices` に当たる Python 側のスイッチで、デフォルトは `True` です。検証エラーは従来どおり例外になります。
+
+`Send` または `Command.goto` だけが開始するノードは、到達できないノードとして報告されます。グラフ定義に動的な対象を宣言する場所がないためで、この場合は通知が想定どおりです。通知を消すためにエッジを足さないでください。Send の対象への静的エッジは、対象を送信側の状態でもう一度実行させます（[Send](concepts.md#5-send--dynamic-fan-out) を参照）。
 
 ## Core APIの同等性（parity）
 

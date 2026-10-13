@@ -148,7 +148,9 @@ public:
      *        sources and route targets, interrupt names, barrier
      *        wait_for members must name existing nodes (errors).
      *  - E7  reachability from __start__ (warning — Command.goto/Send
-     *        can reach nodes the static edge set cannot).
+     *        can reach nodes the static edge set cannot). A definition
+     *        declares no dynamic targets, so a node that only Send or
+     *        Command.goto starts is reported too.
      *  - E8  barrier liveness: every wait_for member must have a
      *        static edge/route into the barrier node, else the AND-join
      *        can never satisfy (error). Self-wait is E3.

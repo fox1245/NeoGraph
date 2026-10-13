@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=d04e2bb5b3178026e6d389f15b7265e1b10ad28a59895232f992f08a992b6982 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=5887bf65ebef51dad0e0395fb7ddbee82b35352f199c95da837679906ec2a925 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -329,6 +329,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 ```
 
 `researcher` 的出边就是 `{"from": "researcher", "to": "summarizer"}`，与静态边适用同样的去重规则，所以 summarizer 只运行一次。
+
+### 只由 Send 启动的节点不需要入边
+
+只由 `Send` 启动的节点没有入边，这是受支持的结构。但校验器看不出这一点：图定义里没有地方声明 `Send` 或 `Command.goto` 会指向哪些节点，所以 `schema_version` 为 1 的图在构建时会向 stderr 输出 lint E7（节点从 `__start__` 不可达）。对这样的节点，这条通知是预期内的。C++ 用 `EngineConfig::stderr_notices = false`，Python 用 `GraphEngine.compile(..., stderr_notices=False)` 关闭它。这个开关同时关闭构建时的其他 lint，以及 fan-out 串行执行的一次性提示；校验错误仍然会抛出。
+
+不要为了消除这条 lint 而加边。从发送方到 Send 目标加一条静态边，目标会在所有 Send 结束后，在共享状态上再多运行一次，而共享状态里从未写入过任何 Send 载荷。若 `fan` 节点向 `worker` 发出三次 Send，并且还有一条指向 `worker` 的边，轨迹为 `["fan", "worker[send]", "worker[send]", "worker[send]", "worker"]`，最后那次 `worker` 读到的 `item` 是 `None`。
 
 ### 调整 worker 数量
 

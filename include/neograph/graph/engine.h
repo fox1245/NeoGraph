@@ -125,7 +125,9 @@ struct EngineConfig {
     /// Print engine notices to stderr: validation lint from build() and link(),
     /// and the one-time "fan-out is executing serially" notice. Hosts that
     /// report through their own diagnostics, such as Program admission and
-    /// runs, turn this off; validation errors still throw.
+    /// runs, turn this off; validation errors still throw. A graph with a node
+    /// that only Send or Command.goto starts gets lint E7 for it, because a
+    /// definition declares no dynamic targets; turn this off there as well.
     bool stderr_notices = true;
 
     /// Pure, context-independent nodes whose results may be reused across

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d8e99cf88b8a8203b09c7390c1474d631c9f24671d2be045446c79de071e497a -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=4434b02696524a933271d8471743f6e54ad5fd892032338b07a6d99913b02e78 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -289,6 +289,12 @@ print(result.output["channels"]["messages"]["value"])
 ### 컴파일 시점의 도구 소유권
 
 Python `Tool` 인스턴스, 네이티브 C++ 도구, `MCPClient.get_tools()` 결과는 `ng.NodeContext(tools=[...])`로 한꺼번에 넘깁니다. 컴파일할 때 그래프 노드를 만들기 **전에** 이 목록을 스냅샷으로 떠서 네이티브 `ToolSet`이 소유하게 합니다. 컴파일된 엔진은 컨텍스트의 `tools` 리스트를 바꾸거나 외부 참조를 놓은 뒤에도 `run()`과 `resume()`에 걸쳐 같은 도구를 그대로 유지합니다. 목록을 나중에 바꾸면 그 이후의 컴파일에만 영향을 줍니다. 네이티브 MCP 도구는 비동기 실행 경로를 그대로 유지하며, 컴파일 이후에 소유권을 넘기거나 디스패치마다 소유권을 새로 할당하는 일은 없습니다.
+
+### stderr lint 알림
+
+`schema_version`이 1인 그래프를 `GraphEngine.compile`로 빌드하면 검증 경고가 stderr에 출력됩니다. 예를 들면 `[neograph] lint [E7] $: node(s) unreachable from __start__ ...`입니다. `GraphEngine.compile(..., stderr_notices=False)`는 이 경고와, fan-out이 직렬로 실행됐다는 일회성 알림을 함께 끕니다. C++ `EngineConfig::stderr_notices`에 해당하는 Python 스위치이고 기본값은 `True`입니다. 검증 오류는 그대로 예외로 발생합니다.
+
+`Send`나 `Command.goto`로만 시작되는 노드는 도달할 수 없는 노드로 보고됩니다. 그래프 정의에 동적 대상을 선언하는 곳이 없기 때문이며, 이때는 이 알림이 정상입니다. 알림을 없애려고 엣지를 추가하지 마세요. Send 대상으로 가는 정적 엣지를 걸면 대상이 송신 노드의 상태로 한 번 더 실행됩니다([Send](concepts.md#5-send--dynamic-fan-out) 참고).
 
 ## Core API 동등성
 

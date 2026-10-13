@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d8e99cf88b8a8203b09c7390c1474d631c9f24671d2be045446c79de071e497a -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=4434b02696524a933271d8471743f6e54ad5fd892032338b07a6d99913b02e78 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -290,6 +290,12 @@ print(result.output["channels"]["messages"]["value"])
 ### 编译时的工具所有权
 
 把 Python 的 `Tool` 实例、原生 C++ 工具和 `MCPClient.get_tools()` 的结果，一起作为 `ng.NodeContext(tools=[...])` 传入。编译时会在**构造图节点之前**，把这个列表快照成一个持有所有权的原生 `ToolSet`。编译好的引擎在 `run()` 和 `resume()` 中始终使用这批确切的工具，即使之后替换了 context 的 `tools` 列表，或者放掉了外部引用，也不受影响。之后再改这个列表，只会影响下一次编译。原生 MCP 工具保留异步执行路径；编译之后没有所有权转移，每次分发也不会再分配所有权。
+
+### stderr 上的 lint 提示
+
+用 `GraphEngine.compile` 构建 `schema_version` 为 1 的图时，校验警告会输出到 stderr，例如 `[neograph] lint [E7] $: node(s) unreachable from __start__ ...`。`GraphEngine.compile(..., stderr_notices=False)` 会同时关闭这些警告和 fan-out 串行执行的一次性提示。它是 C++ `EngineConfig::stderr_notices` 在 Python 中的对应开关，默认值为 `True`；校验错误仍然会抛出。
+
+只由 `Send` 或 `Command.goto` 启动的节点会被报告为不可达，因为图定义里没有声明动态目标的地方，此时这条提示是预期内的。不要为了消除它而加边：指向 Send 目标的静态边会让目标带着发送方的状态再多运行一次（见 [Send](concepts.md#5-send--dynamic-fan-out)）。
 
 ## Core API 对等性
 

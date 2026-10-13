@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=19c234158e09885ff4fb5bc8e8882e0e7b88c44a47398dab835822e3c65e466e -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=05a405c99f388774993482b2cb175a7c22343d727442659756368bae50402791 -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -139,7 +139,7 @@ Program 编译会返回诊断信息：编译失败时通过 `ProgramCompileError
 | <a id="p_core_e4"></a>`P_CORE_E4` | 节点的副作用契约写入（错误）或读取（警告）了未声明的通道。请声明该通道。 |
 | <a id="p_core_e5"></a>`P_CORE_E5` | fan-out 的兄弟节点写入同一个 overwrite 通道；最后写入者胜出，结果不确定。请使用 append reducer。 |
 | <a id="p_core_e6"></a>`P_CORE_E6` | 某个通道从未被读取或写入、只写不读，或者只读不写且没有初始值。 |
-| <a id="p_core_e7"></a>`P_CORE_E7` | 从 `__start__` 出发，沿边和路由无法到达某些节点。 |
+| <a id="p_core_e7"></a>`P_CORE_E7` | 从 `__start__` 出发，沿边和路由无法到达某些节点。只由 `Send` 或 `Command.goto` 启动的节点也会列出，因为图定义里没有声明动态目标的地方，此时这条警告是预期内的。不要为了消除它而加边，否则该节点会多运行一次。 |
 | <a id="p_core_e8"></a>`P_CORE_E8` | 屏障等待的某个节点没有路由到它，或者某个 `any_of` 槽位的备选节点都没有路由到它，所以 join 永远不会触发。 |
 | <a id="p_core_e9"></a>`P_CORE_E9` | 节点有多条普通入边却没有屏障；每个到达的超步它都会运行一次。要实现 AND join，请添加屏障；如果是 XOR 汇合，可以忽略这条警告。 |
 | <a id="p_core_e10"></a>`P_CORE_E10` | 条件边没有路由，路由了条件永远不会返回的标签，或者有标签没有被路由。 |

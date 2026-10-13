@@ -694,3 +694,117 @@ TEST(ValidatorEngine, CoreBuildStillPrintsLintUnlessNoticesAreOff) {
     (void)GraphEngine::build(def, std::move(quiet));
     EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
 }
+
+// =========================================================================
+// #415: a node that only Send starts
+// =========================================================================
+
+namespace {
+
+// Sends "worker" three payloads.
+class VFanNode final : public GraphNode {
+public:
+    explicit VFanNode(std::string n) : name_(std::move(n)) {}
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        for (int item = 0; item < 3; ++item) out.sends.push_back(Send{"worker", json{{"item", item}}});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// Records the "item" it sees.
+class VSeenNode final : public GraphNode {
+public:
+    explicit VSeenNode(std::string n) : name_(std::move(n)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"seen", json::array({in.state.get("item")})});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+void ensure_send_types_registered() {
+    static const bool registered = [] {
+        NodeFactory::instance().register_type(
+            "vsend_fan", [](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<VFanNode>(name);
+            });
+        NodeFactory::instance().register_type(
+            "vsend_worker", [](const std::string& name, const json&, const NodeContext&) {
+                return std::make_unique<VSeenNode>(name);
+            });
+        return true;
+    }();
+    (void)registered;
+}
+
+// fan Sends to worker; no edge leads to worker unless static_edge is set.
+json send_target_graph(bool static_edge) {
+    json edges = json::array({{{"from", "__start__"}, {"to", "fan"}},
+                              {{"from", "worker"}, {"to", "__end__"}}});
+    if (static_edge) edges.push_back({{"from", "fan"}, {"to", "worker"}});
+    return json{{"schema_version", 1},
+                {"channels",
+                 {{"item", {{"reducer", "overwrite"}}},
+                  {"seen", {{"reducer", "append"}, {"initial", json::array()}}}}},
+                {"nodes", {{"fan", {{"type", "vsend_fan"}}}, {"worker", {{"type", "vsend_worker"}}}}},
+                {"edges", edges}};
+}
+
+}  // namespace
+
+TEST(ValidatorEngine, ASendOnlyNodeIsReportedUnreachableAndTheSwitchSilencesIt) {
+    ensure_send_types_registered();
+    const auto def = send_target_graph(false);
+
+    // A definition holds no Send or Command target, only the nodes that
+    // return them at run time, so the lint sees `worker` as unreachable.
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    auto e7 = by_code(GraphValidator::validate(cg), "E7");
+    ASSERT_EQ(e7.size(), 1u);
+    EXPECT_EQ(e7[0]->witness["unreachable"], json::array({"worker"}));
+
+    testing::internal::CaptureStderr();
+    (void)GraphEngine::build(def, EngineConfig{});
+    const auto printed = testing::internal::GetCapturedStderr();
+    EXPECT_NE(printed.find("[neograph] lint [E7]"), std::string::npos) << printed;
+
+    EngineConfig quiet;
+    quiet.stderr_notices = false;
+    testing::internal::CaptureStderr();
+    auto engine = GraphEngine::build(def, std::move(quiet));
+    EXPECT_EQ(testing::internal::GetCapturedStderr(), "");
+
+    // The switch only decides what is printed: the graph runs the same.
+    const auto result = engine->run(RunConfig{});
+    EXPECT_EQ(result.execution_trace,
+              (std::vector<std::string>{"fan", "worker[send]", "worker[send]", "worker[send]"}));
+    EXPECT_EQ(result.output["channels"]["seen"]["value"], json::array({0, 1, 2}));
+}
+
+TEST(ValidatorEngine, AStaticEdgeToASendTargetAddsARunWithTheSendersState) {
+    ensure_send_types_registered();
+    const auto def = send_target_graph(true);
+
+    // The edge quiets the lint ...
+    auto cg = GraphCompiler::compile(def, NodeContext{});
+    EXPECT_TRUE(by_code(GraphValidator::validate(cg), "E7").empty());
+
+    // ... and changes the run: `worker` runs once more after the Sends, on
+    // the shared state, where no Send payload ever landed.
+    EngineConfig quiet;
+    quiet.stderr_notices = false;
+    auto       result    = GraphEngine::build(def, std::move(quiet))->run(RunConfig{});
+    EXPECT_EQ(result.execution_trace,
+              (std::vector<std::string>{"fan", "worker[send]", "worker[send]", "worker[send]",
+                                        "worker"}));
+    EXPECT_EQ(result.output["channels"]["seen"]["value"], json::array({0, 1, 2, nullptr}));
+}

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=b88b82338fc0390feb51efb35056a626d95e4cf6d65160f7821e6ac42fa90e51 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 修复
+
+- **Python 也能关闭构建时的 lint（#415）。** `GraphEngine.compile` 新增关键字 `stderr_notices`，默认值为 `True`，与 C++ 的 `EngineConfig::stderr_notices` 相同。设为 `stderr_notices=False` 后，不再输出 strict 图的 lint（例如针对只由 `Send` 或 `Command.goto` 启动的节点的 E7），也不再输出 fan-out 串行执行的一次性提示；校验错误仍然会抛出。E7 本身没有变化：图定义里没有声明动态目标的地方，校验器无法区分由 Send 启动的节点和没有任何入口的节点，文档现已写明这一点。文档还说明，指向 Send 目标的静态边不能用来消除 lint：目标会在所有 Send 结束后，在共享状态上再多运行一次。不传这个关键字的代码行为不变，图的运行方式也不变。
 
 ## [0.14.0] - 2026-10-13
 
