@@ -52,11 +52,13 @@
 
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -85,6 +87,12 @@ class AttemptQuiescence;
 /// #385: the super-step a batch of Sends belongs to. Defined in
 /// run_context_runtime.h.
 struct SendStep;
+/// The mediated Tool effects of one node attempt (#364). Defined in
+/// run_context_runtime.h.
+class AttemptEffectLog;
+/// The retry loop shared by run_one_async and the fan-out paths. Defined in
+/// graph_executor.cpp.
+struct AttemptsAccess;
 }  // namespace detail
 
 /**
@@ -241,6 +249,7 @@ public:
 
 private:
     friend class GraphEngine;
+    friend struct detail::AttemptsAccess;
 
     /// run_sends_async, also reporting which Sends failed as handled (#364):
     /// `failure_records[i]` is the failure record when Send i routes along
@@ -271,6 +280,26 @@ private:
         StreamMode stream_mode,
         const RunContext& ctx,
         detail::InvocationSlot* slot);
+
+    /// One attempt run as a dispatched unit (an attempt timeout, or a shared
+    /// host scheduler): the body runs off the calling coroutine's executor. The
+    /// attempt's outcome is left in the out parameters, which belong to the
+    /// caller.
+    asio::awaitable<void> run_dispatched_attempt_async(
+        GraphNode* node,
+        GraphState& state,
+        const GraphStreamCallback& cb,
+        const RunContext& ctx,
+        detail::InvocationSlot* slot,
+        std::string_view effect_namespace,
+        const std::optional<int>& attempt_timeout,
+        const std::string& node_name,
+        int attempt,
+        std::optional<NodeResult>& ok_result,
+        std::exception_ptr& failure,
+        std::shared_ptr<detail::AttemptEffectLog>& effects,
+        bool& attempt_stopped,
+        bool& attempt_timed_out);
 
     /// Initialize a clean GraphState using the engine's channel defs.
     /// Used by the Send path to build each target's isolated copy.

@@ -40,6 +40,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <type_traits>
 
 namespace neograph::graph {
 
@@ -51,7 +52,11 @@ namespace {
 
 // #393: gives `context`, the RunContext of the invocation `slot`, the run's
 // resume value when the resume answers that invocation, and none otherwise.
-// Defined after InvocationSlot.
+// `parent` is the context the invocation's context was made from, `runtime`
+// the run-wide state it is bound to (null: bound to none). Defined after
+// InvocationSlot.
+void bind_resume_value(const detail::RunContextRuntime* runtime, RunContext& context,
+                       const detail::InvocationSlot& slot);
 void bind_resume_value(const RunContext& parent, RunContext& context,
                        const detail::InvocationSlot& slot);
 
@@ -139,7 +144,7 @@ public:
     ScopedInvocationContext(const RunContext& parent, std::string_view invocation_id,
                             const detail::InvocationSlot* slot)
         : context_(parent), runtime_scope_(parent, context_, invocation_id, true) {
-        if (slot) bind_resume_value(parent, context_, *slot);
+        if (slot) bind_resume_value(runtime_scope_.run(), context_, *slot);
     }
 
     const RunContext& context() const { return context_; }
@@ -381,6 +386,11 @@ namespace {
 void bind_resume_value(const RunContext& parent, RunContext& context,
                        const detail::InvocationSlot& slot) {
     const auto runtime = detail::runtime_for(parent);
+    bind_resume_value(runtime ? runtime.operator->() : nullptr, context, slot);
+}
+
+void bind_resume_value(const detail::RunContextRuntime* runtime, RunContext& context,
+                       const detail::InvocationSlot& slot) {
     // An executor driven without a run binding keeps what its caller set.
     if (!runtime) return;
     context.resume_value.reset();
@@ -890,6 +900,393 @@ void NodeExecutor::apply_input(GraphState& state, const json& input) const {
 // retry loop bit-for-bit; the GCC-13-safe shape (no co_await inside a
 // catch block) requires capturing the result/error into std::optional
 // inside try, then deciding what to do outside.
+//
+// The coroutine below holds only what the common attempt (no failure, no
+// timeout) needs across its suspension points. Its frame is allocated for every
+// node invocation, and Asio recycles a frame only up to 1020 bytes; everything
+// the failure and timeout paths need lives in the helpers above it, whose
+// locals sit on the stack.
+
+namespace {
+
+// What the failure paths of one invocation act on: the node's failure policy,
+// the run's failure routing and the event sink. Built where it is used.
+struct AttemptFailureEnv {
+    const std::string&             node_name;
+    const detail::FailureRouting*  routing;
+    const detail::NodeFailurePlan* plan;
+    const GraphStreamCallback&     cb;
+    StreamMode                     stream_mode;
+    int                            record_step;
+};
+
+// Give up on the node. A routable failure of a node with a failure edge
+// is handled: the invocation yields the failure record (in its
+// error_channel and in the marker write) and routes to the edge's target.
+// Anything else is reported and thrown as the NodeExecutionError that
+// carries the classified record (graph::node_failure_of).
+NodeResult give_up_node(const AttemptFailureEnv& env, std::exception_ptr cause, int attempts,
+                        const ::neograph::detail::NodeFailureVerdict& verdict,
+                        NodeFailureKind kind,
+                        const std::shared_ptr<detail::AttemptEffectLog>& effects) {
+    const std::string&             node_name    = env.node_name;
+    const GraphStreamCallback&     cb           = env.cb;
+    const StreamMode               stream_mode  = env.stream_mode;
+    const detail::NodeFailurePlan* failure_plan = env.plan;
+
+    auto record            = std::make_shared<NodeFailure>();
+    record->node           = node_name;
+    record->code           = verdict.code;
+    record->public_message = verdict.public_message;
+    record->failure_class  = verdict.failure_class;
+    record->kind           = kind;
+    record->retryable      = verdict.retryable;
+    record->routable       = verdict.routable;
+    record->attempts       = attempts;
+    if (effects) {
+        for (auto& entry : effects->entries())
+            record->effects.push_back(NodeFailureEffect{
+                std::move(entry.tool), entry.ordinal, std::string(to_string(entry.status))});
+    }
+
+    std::string what = "unknown";
+    try {
+        std::rethrow_exception(cause);
+    } catch (const std::exception& e) {
+        what = safe_exception_message(e);
+    } catch (...) {}
+
+    if (record->routable && failure_plan && !failure_plan->target.empty()) {
+        // Free text only on opt-in, only from typed safe sources, and only
+        // what the host's redactor keeps.
+        std::string text;
+        if (failure_plan->error_text && env.routing->redactor &&
+            !record->public_message.empty()) {
+            try {
+                text = ::neograph::detail::sanitize_untrusted_text(
+                    env.routing->redactor(*record), detail::kFailureTextMaxBytes);
+            } catch (...) {
+                text.clear();
+            }
+        }
+        const auto failure_record =
+            detail::failure_record_json(*record, env.record_step, failure_plan->target, text);
+        if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                          json{{"error", what},
+                               {"attempts", attempts},
+                               {"handled", true},
+                               {"routed_to", failure_plan->target}}});
+        }
+        // Failed attempts write nothing; the record is the only write.
+        NodeResult handled;
+        if (failure_plan->error_channel)
+            handled.writes.push_back(
+                ChannelWrite{*failure_plan->error_channel, json::array({failure_record})});
+        handled.writes.push_back(
+            ChannelWrite{std::string(detail::kFailureRouteChannel), failure_record});
+        return handled;
+    }
+
+    std::shared_ptr<const NodeFailure> failure = std::move(record);
+
+    // A subgraph may fail inside this node. The outer retry policy has now
+    // been honored; keep the innermost dispatch context (node name,
+    // attempts, cause) as before, now with this node's record.
+    std::string error_node = node_name;
+    int         error_attempts = attempts;
+    std::exception_ptr error_cause = cause;
+    try {
+        std::rethrow_exception(cause);
+    } catch (const NodeExecutionError& inner) {
+        // An inner error that nests a secondary failure keeps its exact
+        // shape; it is rethrown as it was.
+        if (const auto* nested = dynamic_cast<const std::nested_exception*>(&inner);
+            nested && nested->nested_ptr())
+            error_cause = nullptr;
+        else {
+            error_node     = inner.node_name();
+            error_attempts = inner.attempts();
+            error_cause    = inner.cause();
+        }
+    } catch (...) {}
+
+    if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
+        try {
+            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                          json{{"error", what}, {"attempts", attempts}, {"handled", false}}});
+        } catch (...) {
+            if (!has_provider_outcome(cause)) throw;
+            // Keep provider evidence as the primary node cause; a failing
+            // terminal observer remains inspectable as a nested exception.
+            std::throw_with_nested(::neograph::detail::ClassifiedNodeExecutionError(
+                node_name, attempts, std::move(cause), std::move(failure)));
+        }
+    }
+    if (!error_cause) std::rethrow_exception(cause);
+    throw ::neograph::detail::ClassifiedNodeExecutionError(
+        std::move(error_node), error_attempts, std::move(error_cause), std::move(failure));
+}
+
+// The failure paths' view of one invocation.
+AttemptFailureEnv failure_env_of(const std::string& node_name,
+                                 const detail::FailureRouting* routing,
+                                 const GraphStreamCallback& cb, StreamMode stream_mode,
+                                 const detail::InvocationSlot* slot, const RunContext& ctx) {
+    const detail::NodeFailurePlan* plan =
+        routing && !routing->nodes.empty() ? routing->plan(node_name) : nullptr;
+    return {node_name, routing, plan, cb, stream_mode, slot ? slot->step : ctx.step};
+}
+
+// The effect namespace of an attempt (#364): the task id for attempt 0, the
+// attempt's own namespace after it.
+std::string_view effect_namespace_of(const detail::InvocationSlot* slot,
+                                     const std::string*            later_attempt_namespace) {
+    if (!slot) return {};
+    return later_attempt_namespace ? std::string_view(*later_attempt_namespace) : slot->task_id;
+}
+
+// #364: an activation past the node's max_visits does not run. It is a
+// routable failure with code NG.VisitLimit and no attempts.
+NodeResult give_up_visit_limit(const AttemptFailureEnv& env) {
+    const auto limit = env.plan && env.plan->max_visits ? *env.plan->max_visits : 0;
+    auto cause = std::make_exception_ptr(std::runtime_error(
+        "Node '" + env.node_name + "' reached its visit limit (max_visits " +
+        std::to_string(limit) + ")"));
+    ::neograph::detail::NodeFailureVerdict verdict;
+    verdict.failure_class = NodeFailureClass::Ordinary;
+    verdict.code          = kVisitLimitCode;
+    verdict.retryable     = false;
+    verdict.routable      = true;
+    return give_up_node(env, std::move(cause), 0, verdict, NodeFailureKind::VisitLimit, nullptr);
+}
+
+// A node literally named "<node>#a<k>" would share the effect namespace of
+// retry attempt k in the same super-step; refuse instead.
+NodeResult give_up_namespace_collision(const AttemptFailureEnv& env,
+                                       const std::string& later_attempt_namespace, int attempt,
+                                       std::size_t colon) {
+    auto collision = std::make_exception_ptr(std::logic_error(
+        "Node '" + later_attempt_namespace.substr(colon + 1) + "' is named like retry attempt " +
+        std::to_string(attempt) + " of node '" + env.node_name + "'; rename it"));
+    return give_up_node(env, collision, attempt,
+                        ::neograph::detail::classify_node_failure(collision, nullptr),
+                        NodeFailureKind::NonRetryable, nullptr);
+}
+
+// The key a node-cache lookup used, kept for the store after the node ran.
+struct NodeCacheKey {
+    std::string state_hash;
+    std::string scope_key;
+};
+
+// Node-level cache: opt-in per node, only consulted when caller is not
+// streaming (cached hits cannot replay LLM_TOKEN events). Hash is computed
+// once per call so retries reuse the same lookup key. Stores a hit in `hit`.
+bool lookup_node_cache(NodeCache& node_cache, const std::string& node_name,
+                       const GraphState& state, const RunContext& ctx, NodeCacheKey& key,
+                       std::optional<NodeResult>& hit) {
+    key.state_hash    = hash_state_for_cache(state.serialize_cache());
+    const auto policy = node_cache.policy_for(node_name);
+    if (policy.scope == CacheScope::Execution) {
+        key.scope_key = "execution:" + std::to_string(ctx.cache_execution_id);
+    } else if (policy.context_key) {
+        key.scope_key = "reusable:" + policy.context_key(ctx);
+    } else {
+        key.scope_key = "reusable";
+    }
+    hit = node_cache.lookup(node_name, key.state_hash, key.scope_key);
+    return hit.has_value();
+}
+
+// The first attempt of a resumed invocation: the latest attempt whose start was
+// recorded. Its effects replay from the broker; only the attempts after it are
+// new.
+int resumed_first_attempt(const detail::InvocationSlot* slot) {
+    int first_attempt = 0;
+    if (slot && slot->replay && !slot->replay->empty()) {
+        while (first_attempt < std::numeric_limits<int>::max() &&
+               slot->replay->count(detail::attempt_effect_namespace(slot->task_id, first_attempt + 1)))
+            ++first_attempt;
+    }
+    return first_attempt;
+}
+
+void emit_node_start(const GraphStreamCallback& cb, const std::string& node_name, int step,
+                     int attempt) {
+    json data;
+    data["step"] = step;
+    if (attempt > 0) data["retry_attempt"] = attempt;
+    cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, std::move(data)});
+}
+
+void emit_node_end(const GraphStreamCallback& cb, StreamMode stream_mode,
+                   const std::string& node_name, const NodeResult& nr,
+                   const detail::InvocationSlot* slot) {
+    if (has_mode(stream_mode, StreamMode::UPDATES)) {
+        for (const auto& w : nr.writes) {
+            cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
+                          json{{"channel", w.channel}, {"value", w.value}}});
+        }
+    }
+    if (has_mode(stream_mode, StreamMode::EVENTS)) {
+        json end_data;
+        if (nr.command) end_data["command_goto"] = nr.command->goto_node;
+        if (!nr.sends.empty()) end_data["sends"] = (int)nr.sends.size();
+        // A Send execution is named "<target>[send]" in the execution
+        // trace; the event carries the same fact for observers that
+        // build a trace from events (a failed Program attempt does).
+        if (slot && slot->send) end_data["send"] = true;
+        cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, std::move(end_data)});
+    }
+}
+
+// Acts on a failed attempt. Control flow leaves unwrapped, as before: an
+// interrupt pauses the run, a cancellation stops it, and OOM is not a node
+// failure. Otherwise either the invocation ends here, or it retries.
+//
+// Returns the milliseconds to wait before the next attempt. When the failure is
+// handled (routed along its failure edge) the invocation's result is stored in
+// `handled` and 0 is returned; every other end throws.
+int settle_failed_attempt(const AttemptFailureEnv& env, const RetryPolicy& policy, int delay_ms,
+                          int attempt, int last_attempt, std::exception_ptr failure,
+                          bool attempt_stopped,
+                          const std::shared_ptr<detail::AttemptEffectLog>& effects,
+                          std::string_view effect_namespace, const RunContext& ctx,
+                          const detail::InvocationSlot* slot, std::optional<NodeResult>& handled) {
+    const std::string&         node_name   = env.node_name;
+    const GraphStreamCallback& cb          = env.cb;
+    const StreamMode           stream_mode = env.stream_mode;
+
+    try {
+        std::rethrow_exception(failure);
+    } catch (const NodeInterrupt&) {
+        // Resume continues this attempt.
+        if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
+        throw;
+    } catch (const CancelledException&) {
+        throw;
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (const asio::system_error& error) {
+        // Socket/timer cancellation enters node code as
+        // operation_aborted. Once this operation's token is set, that is
+        // cancellation control flow, not a retryable transport failure.
+        if (ctx.cancel_token && ctx.cancel_token->is_cancelled() &&
+            error.code() == asio::error::operation_aborted) {
+            throw CancelledException("node " + node_name + " operation aborted");
+        }
+    } catch (...) {}
+
+    // A Hook block stops the run with the HookBoundaryBlocked itself, and
+    // a cancellation with the CancelledException, wherever they sit in the
+    // failure's cause chain: the same type, invocation id and state as the
+    // tool paths and llm::Agent give (tool_failure.h). They win over an
+    // uncertain effect, as they do in a tool batch.
+    if (const auto control = ::neograph::detail::classify_tool_failure(
+            failure, ctx.cancel_token.get());
+        control == ::neograph::detail::ToolFailureClass::HookBlocked ||
+        control == ::neograph::detail::ToolFailureClass::Cancelled)
+        ::neograph::detail::rethrow_run_stop(failure, control);
+
+    // An effect of this attempt whose outcome is unknown is never retried
+    // or routed: the run pauses for reconciliation, as mediated dispatch
+    // does when it sees one, even if the node turned that into an error.
+    // An attempt still running past its stop deadline does not pause: its
+    // effects are uncertain as a whole and the run fails (below).
+    if (attempt_stopped && effects && effects->uncertain()) {
+        if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
+        throw NodeInterrupt("Mediated Tool effect requires reconciliation",
+                            json{{"kind", "tool_effect_reconciliation"},
+                                 {"thread_id", ctx.thread_id},
+                                 {"task_id", std::string(effect_namespace)}});
+    }
+
+    // Every other decision is the shared classifier's (tool_failure.h):
+    // ordinary failures are retried unless the author said otherwise;
+    // nothing else is. An attempt that committed a non-idempotent effect
+    // is not retried either, or the next attempt would repeat the effect.
+    auto verdict = ::neograph::detail::classify_node_failure(failure, ctx.cancel_token.get());
+    if (effects && effects->committed() &&
+        verdict.failure_class < NodeFailureClass::EffectCommitted) {
+        verdict.failure_class = NodeFailureClass::EffectCommitted;
+        verdict.code          = node_failure_code(NodeFailureClass::EffectCommitted);
+        verdict.public_message.clear();
+        verdict.retryable = false;
+        verdict.routable  = node_failure_routable(NodeFailureClass::EffectCommitted);
+    }
+    // #364: a code the node's policy lists as non_retryable is not retried.
+    if (verdict.retryable && env.plan && env.plan->non_retryable.count(verdict.code))
+        verdict.retryable = false;
+    if (!verdict.retryable || attempt >= last_attempt) {
+        const auto kind = verdict.failure_class == NodeFailureClass::EffectCommitted
+                              ? NodeFailureKind::EffectCommitted
+                          : verdict.retryable ? NodeFailureKind::Exhausted
+                                              : NodeFailureKind::NonRetryable;
+        handled = give_up_node(env, std::move(failure), attempt + 1, verdict, kind, effects);
+        return 0;
+    }
+
+    // Apply jitter to break thundering-herd lockstep when N
+    // parallel branches retry against the same upstream. The
+    // policy default is jitter_pct=0 (deterministic, back-compat);
+    // callers configuring fan-out workloads should set ~0.2.
+    int actual_delay = delay_ms;
+    if (policy.jitter_pct > 0.0f && delay_ms > 0) {
+        // Per-thread RNG so concurrent branches don't share state.
+        thread_local std::mt19937             rng{std::random_device{}()};
+        float                                 pct = std::min(1.0f, policy.jitter_pct);
+        std::uniform_real_distribution<float> dist(-pct, pct);
+        const double scaled = static_cast<double>(delay_ms) * (1.0 + dist(rng));
+        actual_delay = static_cast<int>(std::clamp(
+            scaled, 0.0, static_cast<double>(std::numeric_limits<int>::max())));
+    }
+
+    // #364: a backoff that would cross the run's deadline (a Program's
+    // wall-time budget) stops retrying now, instead of sleeping until the
+    // budget stops the run.
+    if (ctx.deadline &&
+        AttemptClock::now() + std::chrono::milliseconds(actual_delay) >= *ctx.deadline) {
+        handled = give_up_node(env, std::move(failure), attempt + 1, verdict,
+                               NodeFailureKind::Deadline, effects);
+        return 0;
+    }
+
+    // #364: the run-level retry ceiling. Reaching it stops retrying.
+    if (const auto run_runtime = detail::runtime_for(ctx);
+        run_runtime && run_runtime->node_retry_ceiling &&
+        !run_runtime->node_retry_ceiling->try_take()) {
+        handled = give_up_node(env, std::move(failure), attempt + 1, verdict,
+                               NodeFailureKind::Ceiling, effects);
+        return 0;
+    }
+
+    if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
+        std::string what;
+        try {
+            std::rethrow_exception(failure);
+        } catch (const std::exception& e) {
+            what = safe_exception_message(e);
+        } catch (...) {
+            what = "unknown";
+        }
+        cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
+                      json{{"retry", attempt + 1},
+                           {"max_retries", policy.max_retries},
+                           {"delay_ms", delay_ms},
+                           {"error", what}}});
+    }
+    return actual_delay;
+}
+
+asio::awaitable<void> retry_backoff(int delay_ms) {
+    auto               ex = co_await asio::this_coro::executor;
+    asio::steady_timer timer(ex);
+    timer.expires_after(std::chrono::milliseconds(delay_ms));
+    co_await timer.async_wait(asio::use_awaitable);
+}
+
+}  // namespace
 
 asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     const std::string&         node_name,
@@ -900,6 +1297,395 @@ asio::awaitable<NodeResult> NodeExecutor::execute_node_with_retry_async(
     co_return co_await execute_attempts_async(node_name, state, cb, stream_mode, ctx, nullptr);
 }
 
+// One attempt on a worker strand of attempt_pool() (see "Dispatched attempts"
+// above). Leaves the attempt's outcome in the out parameters, which belong to
+// the awaiting coroutine.
+asio::awaitable<void> NodeExecutor::run_dispatched_attempt_async(
+    GraphNode*                                 node,
+    GraphState&                                state,
+    const GraphStreamCallback&                 cb,
+    const RunContext&                          ctx,
+    detail::InvocationSlot*                    slot,
+    std::string_view                           effect_namespace,
+    const std::optional<int>&                  attempt_timeout,
+    const std::string&                         node_name,
+    int                                        attempt,
+    std::optional<NodeResult>&                 ok_result,
+    std::exception_ptr&                        failure,
+    std::shared_ptr<detail::AttemptEffectLog>& effects,
+    bool&                                      attempt_stopped,
+    bool&                                      attempt_timed_out) {
+    auto ex = co_await asio::this_coro::executor;
+
+    // A dispatched unit: the body runs off this coroutine's executor.
+    auto unit  = std::make_shared<DispatchedAttempt>();
+    unit->node = node;
+    if (attempt_timeout) {
+        unit->owned_state = std::make_unique<GraphState>();
+        init_state(*unit->owned_state);
+        unit->owned_state->copy_provider_history_from(state);
+        unit->owned_state->restore_runtime(state.serialize_runtime());
+        unit->state = unit->owned_state.get();
+    } else {
+        unit->state = &state;
+    }
+    // The attempt's own token: run cancellation cascades into it, and
+    // a timeout cancels it alone.
+    const auto run_token =
+        ctx.cancel_token ? ctx.cancel_token : std::make_shared<CancelToken>();
+    unit->context              = ctx;
+    unit->token                = run_token->fork();
+    unit->execution            = unit->token->fork();
+    unit->context.cancel_token = unit->token;
+    if (slot) bind_resume_value(ctx, unit->context, *slot);
+    if (slot) {
+        unit->scope.emplace(ctx, unit->context, effect_namespace, true);
+    } else {
+        const auto parent = detail::runtime_for(ctx);
+        unit->scope.emplace(ctx, unit->context,
+                            parent ? parent.invocation_id() : std::string_view{});
+    }
+    effects = unit->scope->effects();
+    if (cb) {
+        unit->events       = std::make_shared<EventFence>();
+        unit->events->sink = &cb;
+        unit->fenced_sink  = [events = unit->events](const GraphEvent& event) {
+            events->deliver(event);
+        };
+    }
+    if (attempt_quiescence_) {
+        attempt_quiescence_->enter();
+        unit->quiescence.owner = attempt_quiescence_;
+    }
+    if (attempt_timeout)
+        unit->timeout_at = AttemptClock::now() + std::chrono::milliseconds(*attempt_timeout);
+    start_dispatched_body(unit);
+    const auto stop_grace = std::max(std::chrono::milliseconds(attempt_timeout.value_or(0)),
+                                     kMinAttemptStopGrace);
+    // Run cancellation reaches the body through its token; the wait
+    // itself is not cancelled, so a cancelled run still waits for
+    // the body to stop, as an inline body would be waited for.
+    co_await asio::co_spawn(
+        asio::make_strand(ex), await_dispatched(unit, stop_grace),
+        asio::bind_cancellation_slot(asio::cancellation_slot(), asio::use_awaitable));
+    {
+        std::lock_guard lock(unit->mutex);
+        attempt_timed_out = unit->timed_out;
+        attempt_stopped   = !unit->detached;
+        if (!attempt_timed_out) {
+            ok_result = std::move(unit->result);
+            failure   = std::move(unit->error);
+        }
+    }
+    if (attempt_timed_out) {
+        // The late completion, if any, is discarded.
+        ok_result.reset();
+        failure = std::make_exception_ptr(NodeAttemptTimeout(
+            node_name, attempt, std::chrono::milliseconds(*attempt_timeout), attempt_stopped));
+        // Run control wins over the attempt's own timeout.
+        if (ctx.cancel_token && ctx.cancel_token->is_cancelled())
+            throw CancelledException("node " + node_name +
+                                     " cancelled after its attempt timed out");
+    } else if (!ok_result && !failure) {
+        failure = std::make_exception_ptr(
+            std::logic_error("Node '" + node_name + "' attempt finished without an outcome"));
+    }
+}
+
+// A node of the step interrupted: NodeInterrupt pauses this specific node,
+// and resume must re-enter exactly here. Saves a phase=NodeInterrupt checkpoint
+// with next_nodes={node_name} so load_for_resume restarts the super step at
+// this step with only this node ready, then throws the interrupt.
+namespace {
+
+asio::awaitable<void> pause_on_node_interrupt(const CheckpointCoordinator& coord,
+                                              GraphState&              state,
+                                              const std::string&       node_name,
+                                              const std::string&       task_id,
+                                              int                      step,
+                                              const std::string&       parent_cp_id,
+                                              const BarrierState&      barrier_state,
+                                              const RunContext&        ctx,
+                                              int                      interrupted_attempt,
+                                              NodeInterrupt&           interrupt) {
+    // GCC-13 ICE workaround: build the next_nodes vector outside
+    // the co_await arg list (nested brace-init in a coroutine
+    // body trips build_special_member_call).
+    std::vector<std::string> next_nodes;
+    next_nodes.push_back(node_name);
+    std::vector<PendingInterrupt> pending;
+    pending.push_back(pending_interrupt(task_id, node_name, interrupt));
+    const auto metadata        = record_step_interrupts(ctx, std::move(pending));
+    const auto interrupt_cp_id = co_await coord.save_super_step_async(
+        state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
+        barrier_state, metadata);
+    // Without a parent checkpoint the attempt's start was not recorded;
+    // record it under the interrupt's own checkpoint so resume continues it.
+    if (parent_cp_id.empty())
+        co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
+                                      interrupted_attempt, step);
+    // The executor is the only layer that knows the graph's name for
+    // this node — the node body does not.
+    interrupt.set_node(node_name);
+    record_interrupt_checkpoint(ctx, interrupt_cp_id);
+    throw interrupt;
+}
+
+}  // namespace
+
+namespace detail {
+
+// What run_one_async adds around the attempts of one node of a super-step: the
+// result a resumed step replays, the pending write, the NodeInterrupt
+// checkpoint, applying the writes and the trace entry. `slot` carries the step,
+// the replayed results, the coordinator and the parent checkpoint.
+struct SingleNode {
+    InvocationSlot            slot;
+    const BarrierState&       barrier_state;
+    std::vector<std::string>& trace;
+};
+
+/// What a SingleNode keeps across the attempts.
+struct SingleNodeState {
+    std::string                    task_id;
+    int                            interrupted_attempt = 0;
+    std::unique_ptr<NodeInterrupt> interrupt;
+};
+
+/// Stand in for SingleNode and SingleNodeState when the attempts run without
+/// them (a fan-out branch, a Send): the invocation's slot, if it has one.
+struct NoSingleNode {
+    InvocationSlot* slot;
+};
+struct NoSingleNodeState {};
+
+// The attempts of one node invocation, with or without the single-node steps
+// around them. One coroutine either way: a node of a plain super-step runs two
+// coroutine frames (this, and the node's own) instead of three.
+//
+// Keep this frame under 1020 bytes, which is all Asio recycles (the thread's
+// small cache, ASIO_RECYCLING_ALLOCATOR_CACHE_SIZE, holds two frames). A larger
+// one takes a heap allocation per node and pushes a cached frame of the caller
+// or the node out of the cache (#442). What the common attempt does not need
+// across a suspension point therefore lives on the heap or in a helper above:
+// the attempt's RunContext copy, the failure and timeout paths, the node cache
+// key and the retry namespace. A new local here adds to the frame whatever its
+// scope, so check the size after changing it (the size passed to Asio's
+// awaitable_frame_base::operator new).
+struct AttemptsAccess {
+    template <class Single>
+    static asio::awaitable<NodeResult> run(NodeExecutor& self, const std::string& node_name,
+                                           GraphState& state, const GraphStreamCallback& cb,
+                                           StreamMode stream_mode, const RunContext& ctx,
+                                           Single single);
+};
+
+template <class Single>
+asio::awaitable<NodeResult> AttemptsAccess::run(NodeExecutor& self, const std::string& node_name,
+                                                GraphState& state, const GraphStreamCallback& cb,
+                                                StreamMode stream_mode, const RunContext& ctx,
+                                                Single single) {
+    constexpr bool kSingle = std::is_same_v<Single, SingleNode>;
+    InvocationSlot* slot   = nullptr;
+    if constexpr (!kSingle) slot = single.slot;
+    // Dispatch through the unified ``run(NodeInput)`` virtual. ``ctx``
+    // and the optional streaming callback reach the user-overridable
+    // surface directly.
+
+    // GCC-13-safe outcome capture: collect the result, or the NodeInterrupt
+    // of a single node, inside try and decide outside. Other exceptions
+    // propagate out of the coroutine untouched.
+    std::optional<NodeResult> ok_result;
+    [[maybe_unused]] std::conditional_t<kSingle, SingleNodeState, NoSingleNodeState> own;
+    if constexpr (kSingle) {
+        own.task_id                       = make_static_task_id(single.slot.step, node_name);
+        single.slot.task_id               = own.task_id;
+        single.slot.interrupted_attempt   = &own.interrupted_attempt;
+        single.slot.visit_limited =
+            self.failure_routing_ && !take_activation(self.failure_routing_, ctx, node_name);
+        slot = &single.slot;
+    }
+    // False when a resumed step replays the node's recorded result.
+    [[maybe_unused]] bool ran = false;
+
+    try {
+        // Leaving the block with `break` leaves with the invocation's result.
+        do {
+            if constexpr (kSingle) {
+                if (const auto replayed = single.slot.replay->find(own.task_id);
+                    replayed != single.slot.replay->end()) {
+                    // Replayed from a previous partial run — do NOT re-execute,
+                    // do NOT re-record. Just apply the recorded writes.
+                    ok_result.emplace(replayed->second);
+                    break;
+                }
+            }
+            ran = true;
+
+            GraphNode* const node = [&] {
+                const auto found = self.nodes_.find(node_name);
+                if (found == self.nodes_.end())
+                    throw std::runtime_error("Node not found: " + node_name);
+                return found->second.get();
+            }();
+
+            // #364: an activation past the node's max_visits does not run.
+            if (slot && slot->visit_limited) {
+                ok_result.emplace(give_up_visit_limit(failure_env_of(
+                    node_name, self.failure_routing_, cb, stream_mode, slot, ctx)));
+                break;
+            }
+
+            std::unique_ptr<NodeCacheKey> cache_key;
+            if (self.node_cache_ && !cb && self.node_cache_->is_enabled(node_name)) {
+                cache_key = std::make_unique<NodeCacheKey>();
+                if (lookup_node_cache(*self.node_cache_, node_name, state, ctx, *cache_key,
+                                      ok_result))
+                    break;
+            }
+
+            auto policy = self.retry_policy_for_(node_name);
+            // #364: each attempt may run this long (milliseconds); none without one.
+            const std::optional<int> attempt_timeout =
+                self.attempt_timeout_for_ ? self.attempt_timeout_for_(node_name) : std::nullopt;
+
+            const int first_attempt = resumed_first_attempt(slot);
+            const int last_attempt  = std::max(policy.max_retries, first_attempt);
+            int       delay_ms      = policy.initial_delay_ms;
+            for (int waited = 0; waited < first_attempt; ++waited)
+                delay_ms = next_delay_ms(delay_ms, policy);
+
+            // The outcome of one attempt, captured without co_await inside a catch
+            // block (GCC 13 ICEs on that shape).
+            std::exception_ptr                        failure;
+            std::shared_ptr<detail::AttemptEffectLog> effects;
+            for (int attempt = first_attempt; attempt <= last_attempt; ++attempt) {
+                // Every attempt has its own effect namespace (#364): attempt 0 the
+                // task id itself, attempt k "task#a<k>". A new attempt first records
+                // that it started, so a crash-resume continues it instead of starting
+                // over in an earlier attempt's slots.
+                std::unique_ptr<std::string> later_attempt_namespace;
+                if (slot) {
+                    if (attempt > 0) {
+                        later_attempt_namespace = std::make_unique<std::string>(
+                            detail::attempt_effect_namespace(slot->task_id, attempt));
+                        // A node literally named "<node>#a<k>" would share this
+                        // namespace in the same super-step; refuse instead.
+                        const auto colon = later_attempt_namespace->find(':');
+                        if (colon != std::string::npos &&
+                            self.nodes_.count(later_attempt_namespace->substr(colon + 1))) {
+                            ok_result.emplace(give_up_namespace_collision(
+                                failure_env_of(node_name, self.failure_routing_, cb, stream_mode,
+                                               slot, ctx),
+                                *later_attempt_namespace, attempt, colon));
+                            break;
+                        }
+                    }
+                    if (attempt > first_attempt && slot->coord && slot->parent_cp_id)
+                        co_await record_attempt_start(*slot->coord, *slot->parent_cp_id,
+                                                      slot->task_id, node_name, attempt,
+                                                      slot->step);
+                }
+
+                if (cb && has_mode(stream_mode, StreamMode::EVENTS))
+                    emit_node_start(cb, node_name, ctx.step, attempt);
+
+                ok_result.reset();
+                failure = nullptr;
+                effects.reset();
+                // False only for a timed-out attempt that did not stop by its stop
+                // deadline: it may still be running.
+                bool attempt_stopped   = true;
+                bool attempt_timed_out = false;
+                if (attempt_timeout || ctx.shared_scheduler) {
+                    co_await self.run_dispatched_attempt_async(
+                        node, state, cb, ctx, slot,
+                        effect_namespace_of(slot, later_attempt_namespace.get()), attempt_timeout,
+                        node_name, attempt, ok_result, failure, effects, attempt_stopped,
+                        attempt_timed_out);
+                } else {
+                    std::unique_ptr<ScopedInvocationContext> scope;
+                    if (slot)
+                        scope = std::make_unique<ScopedInvocationContext>(
+                            ctx, effect_namespace_of(slot, later_attempt_namespace.get()), slot);
+                    if (scope) effects = scope->effects();
+                    try {
+                        // Single dispatch point. NodeInput bundles state, per-run
+                        // context, and the optional streaming callback.
+                        NodeInput in{state, scope ? scope->context() : ctx, cb ? &cb : nullptr};
+                        ok_result.emplace(co_await node->run(in));
+                    } catch (...) {
+                        failure = std::current_exception();
+                    }
+                }
+
+                if (ok_result) {
+                    if (cb) emit_node_end(cb, stream_mode, node_name, *ok_result, slot);
+                    if (cache_key)
+                        self.node_cache_->store(node_name, cache_key->state_hash,
+                                                cache_key->scope_key, *ok_result);
+                    break;
+                }
+
+                const int wait_ms = settle_failed_attempt(
+                    failure_env_of(node_name, self.failure_routing_, cb, stream_mode, slot, ctx),
+                    policy, delay_ms, attempt, last_attempt, failure, attempt_stopped, effects,
+                    effect_namespace_of(slot, later_attempt_namespace.get()), ctx, slot,
+                    ok_result);
+                // A failure routed along its failure edge is the invocation's result.
+                if (ok_result) break;
+
+                co_await retry_backoff(wait_ms);
+                // A run cancelled during the backoff starts no further attempt.
+                if (ctx.cancel_token)
+                    ctx.cancel_token->throw_if_cancelled("node " + node_name + " retry");
+
+                delay_ms = next_delay_ms(delay_ms, policy);
+            }
+            if (!ok_result)
+                throw std::runtime_error(
+                    "Unreachable: async retry loop exited without return or throw");
+        } while (false);
+
+        if constexpr (kSingle) {
+            // Record BEFORE apply_writes so a crash between the two
+            // still leaves a durable log for resume to replay.
+            if (ran && single.slot.coord->records_pending_writes(*single.slot.parent_cp_id))
+                co_await single.slot.coord->record_pending_write_async(
+                    *single.slot.parent_cp_id, own.task_id, own.task_id, node_name, *ok_result,
+                    single.slot.step);
+        }
+    } catch (const NodeInterrupt& ni) {
+        if constexpr (kSingle) {
+            // Copy the whole interrupt, not just the fact that one happened.
+            // This used to record a bool and rethrow `NodeInterrupt(node_name)`,
+            // which silently replaced the node's reason (and, later, its payload)
+            // with the node's own name — so a caller asking "why did you stop?"
+            // got back "risky" (issue #94).
+            own.interrupt = std::make_unique<NodeInterrupt>(ni);
+        } else {
+            throw;
+        }
+    }
+
+    if constexpr (kSingle) {
+        if (own.interrupt)
+            co_await pause_on_node_interrupt(*single.slot.coord, state, node_name, own.task_id,
+                                             single.slot.step, *single.slot.parent_cp_id,
+                                             single.barrier_state, ctx, own.interrupted_attempt,
+                                             *own.interrupt);
+
+        auto& nr = *ok_result;
+        capture_step_start(ctx, state, !nr.sends.empty());
+        apply_node_result(state, nr, ctx, self.failure_routing_ && self.failure_routing_->routes());
+
+        single.trace.push_back(node_name);
+    }
+    co_return std::move(*ok_result);
+}
+
+}  // namespace detail
+
 asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
     const std::string&         node_name,
     GraphState&                state,
@@ -907,470 +1693,8 @@ asio::awaitable<NodeResult> NodeExecutor::execute_attempts_async(
     StreamMode                 stream_mode,
     const RunContext&          ctx,
     detail::InvocationSlot*    slot) {
-    // Dispatch through the unified ``run(NodeInput)`` virtual. ``ctx``
-    // and the optional streaming callback reach the user-overridable
-    // surface directly.
-
-    auto node_it = nodes_.find(node_name);
-    if (node_it == nodes_.end()) {
-        throw std::runtime_error("Node not found: " + node_name);
-    }
-
-    // #364: the node's failure policy (non_retryable codes, failure edge,
-    // error_text) and the run's retry ceiling.
-    const detail::NodeFailurePlan* failure_plan =
-        failure_routing_ && !failure_routing_->nodes.empty() ? failure_routing_->plan(node_name)
-                                                             : nullptr;
-    const int record_step = slot ? slot->step : ctx.step;
-
-    // Give up on the node. A routable failure of a node with a failure edge
-    // is handled: the invocation yields the failure record (in its
-    // error_channel and in the marker write) and routes to the edge's target.
-    // Anything else is reported and thrown as the NodeExecutionError that
-    // carries the classified record (graph::node_failure_of).
-    auto give_up = [&](std::exception_ptr cause, int attempts,
-                       const ::neograph::detail::NodeFailureVerdict& verdict,
-                       NodeFailureKind kind,
-                       const std::shared_ptr<detail::AttemptEffectLog>& effects) -> NodeResult {
-        auto record            = std::make_shared<NodeFailure>();
-        record->node           = node_name;
-        record->code           = verdict.code;
-        record->public_message = verdict.public_message;
-        record->failure_class  = verdict.failure_class;
-        record->kind           = kind;
-        record->retryable      = verdict.retryable;
-        record->routable       = verdict.routable;
-        record->attempts       = attempts;
-        if (effects) {
-            for (auto& entry : effects->entries())
-                record->effects.push_back(NodeFailureEffect{
-                    std::move(entry.tool), entry.ordinal, std::string(to_string(entry.status))});
-        }
-
-        std::string what = "unknown";
-        try {
-            std::rethrow_exception(cause);
-        } catch (const std::exception& e) {
-            what = safe_exception_message(e);
-        } catch (...) {}
-
-        if (record->routable && failure_plan && !failure_plan->target.empty()) {
-            // Free text only on opt-in, only from typed safe sources, and only
-            // what the host's redactor keeps.
-            std::string text;
-            if (failure_plan->error_text && failure_routing_->redactor &&
-                !record->public_message.empty()) {
-                try {
-                    text = ::neograph::detail::sanitize_untrusted_text(
-                        failure_routing_->redactor(*record), detail::kFailureTextMaxBytes);
-                } catch (...) {
-                    text.clear();
-                }
-            }
-            const auto failure_record =
-                detail::failure_record_json(*record, record_step, failure_plan->target, text);
-            if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                              json{{"error", what},
-                                   {"attempts", attempts},
-                                   {"handled", true},
-                                   {"routed_to", failure_plan->target}}});
-            }
-            // Failed attempts write nothing; the record is the only write.
-            NodeResult handled;
-            if (failure_plan->error_channel)
-                handled.writes.push_back(
-                    ChannelWrite{*failure_plan->error_channel, json::array({failure_record})});
-            handled.writes.push_back(
-                ChannelWrite{std::string(detail::kFailureRouteChannel), failure_record});
-            return handled;
-        }
-
-        std::shared_ptr<const NodeFailure> failure = std::move(record);
-
-        // A subgraph may fail inside this node. The outer retry policy has now
-        // been honored; keep the innermost dispatch context (node name,
-        // attempts, cause) as before, now with this node's record.
-        std::string error_node = node_name;
-        int         error_attempts = attempts;
-        std::exception_ptr error_cause = cause;
-        try {
-            std::rethrow_exception(cause);
-        } catch (const NodeExecutionError& inner) {
-            // An inner error that nests a secondary failure keeps its exact
-            // shape; it is rethrown as it was.
-            if (const auto* nested = dynamic_cast<const std::nested_exception*>(&inner);
-                nested && nested->nested_ptr())
-                error_cause = nullptr;
-            else {
-                error_node     = inner.node_name();
-                error_attempts = inner.attempts();
-                error_cause    = inner.cause();
-            }
-        } catch (...) {}
-
-        if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-            try {
-                cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                              json{{"error", what}, {"attempts", attempts}, {"handled", false}}});
-            } catch (...) {
-                if (!has_provider_outcome(cause)) throw;
-                // Keep provider evidence as the primary node cause; a failing
-                // terminal observer remains inspectable as a nested exception.
-                std::throw_with_nested(::neograph::detail::ClassifiedNodeExecutionError(
-                    node_name, attempts, std::move(cause), std::move(failure)));
-            }
-        }
-        if (!error_cause) std::rethrow_exception(cause);
-        throw ::neograph::detail::ClassifiedNodeExecutionError(
-            std::move(error_node), error_attempts, std::move(error_cause), std::move(failure));
-    };
-
-    // #364: an activation past the node's max_visits does not run. It is a
-    // routable failure with code NG.VisitLimit and no attempts.
-    if (slot && slot->visit_limited) {
-        const auto limit = failure_plan && failure_plan->max_visits ? *failure_plan->max_visits : 0;
-        auto cause = std::make_exception_ptr(std::runtime_error(
-            "Node '" + node_name + "' reached its visit limit (max_visits " +
-            std::to_string(limit) + ")"));
-        ::neograph::detail::NodeFailureVerdict verdict;
-        verdict.failure_class = NodeFailureClass::Ordinary;
-        verdict.code          = kVisitLimitCode;
-        verdict.retryable     = false;
-        verdict.routable      = true;
-        co_return give_up(std::move(cause), 0, verdict, NodeFailureKind::VisitLimit, nullptr);
-    }
-
-    // Node-level cache: opt-in per node, only consulted when caller is
-    // not streaming (cached hits cannot replay LLM_TOKEN events). Hash
-    // is computed once per call so retries reuse the same lookup key.
-    const bool  cache_eligible = node_cache_ && !cb && node_cache_->is_enabled(node_name);
-    std::string cache_state_hash;
-    std::string cache_scope_key;
-    if (cache_eligible) {
-        cache_state_hash = hash_state_for_cache(state.serialize_cache());
-        const auto policy = node_cache_->policy_for(node_name);
-        if (policy.scope == CacheScope::Execution) {
-            cache_scope_key = "execution:" + std::to_string(ctx.cache_execution_id);
-        } else if (policy.context_key) {
-            cache_scope_key = "reusable:" + policy.context_key(ctx);
-        } else {
-            cache_scope_key = "reusable";
-        }
-        if (auto cached = node_cache_->lookup(node_name, cache_state_hash, cache_scope_key);
-            cached) {
-            co_return std::move(*cached);
-        }
-    }
-
-    auto policy = retry_policy_for_(node_name);
-    // #364: each attempt may run this long (milliseconds); none without one.
-    const std::optional<int> attempt_timeout =
-        attempt_timeout_for_ ? attempt_timeout_for_(node_name) : std::nullopt;
-
-    // A resumed invocation continues the attempt that was in flight: the
-    // latest attempt whose start was recorded. Its effects replay from the
-    // broker; only the attempts after it are new.
-    int first_attempt = 0;
-    if (slot && slot->replay && !slot->replay->empty()) {
-        while (first_attempt < std::numeric_limits<int>::max() &&
-               slot->replay->count(detail::attempt_effect_namespace(slot->task_id, first_attempt + 1)))
-            ++first_attempt;
-    }
-    const int last_attempt = std::max(policy.max_retries, first_attempt);
-    int       delay_ms     = policy.initial_delay_ms;
-    for (int waited = 0; waited < first_attempt; ++waited) delay_ms = next_delay_ms(delay_ms, policy);
-
-    auto ex = co_await asio::this_coro::executor;
-
-    for (int attempt = first_attempt; attempt <= last_attempt; ++attempt) {
-        // Every attempt has its own effect namespace (#364): attempt 0 the
-        // task id itself, attempt k "task#a<k>". A new attempt first records
-        // that it started, so a crash-resume continues it instead of starting
-        // over in an earlier attempt's slots.
-        std::string      later_attempt_namespace;
-        std::string_view effect_namespace;
-        if (slot) {
-            effect_namespace = slot->task_id;
-            if (attempt > 0) {
-                later_attempt_namespace = detail::attempt_effect_namespace(slot->task_id, attempt);
-                effect_namespace        = later_attempt_namespace;
-                // A node literally named "<node>#a<k>" would share this
-                // namespace in the same super-step; refuse instead.
-                const auto colon = later_attempt_namespace.find(':');
-                if (colon != std::string::npos &&
-                    nodes_.count(later_attempt_namespace.substr(colon + 1))) {
-                    auto collision = std::make_exception_ptr(std::logic_error(
-                        "Node '" + later_attempt_namespace.substr(colon + 1) +
-                        "' is named like retry attempt " + std::to_string(attempt) + " of node '" +
-                        node_name + "'; rename it"));
-                    co_return give_up(collision, attempt,
-                                      ::neograph::detail::classify_node_failure(collision, nullptr),
-                                      NodeFailureKind::NonRetryable, nullptr);
-                }
-            }
-            if (attempt > first_attempt && slot->coord && slot->parent_cp_id)
-                co_await record_attempt_start(*slot->coord, *slot->parent_cp_id, slot->task_id,
-                                              node_name, attempt, slot->step);
-        }
-
-        if (cb && has_mode(stream_mode, StreamMode::EVENTS)) {
-            json data;
-            data["step"] = ctx.step;
-            if (attempt > 0) data["retry_attempt"] = attempt;
-            cb(GraphEvent{GraphEvent::Type::NODE_START, node_name, std::move(data)});
-        }
-
-        // Capture the outcome of one attempt without co_await inside a
-        // catch block (GCC 13 ICEs on that shape).
-        std::optional<NodeResult>                 ok_result;
-        std::exception_ptr                        failure;
-        std::shared_ptr<detail::AttemptEffectLog> effects;
-        // False only for a timed-out attempt that did not stop by its stop
-        // deadline: it may still be running.
-        bool attempt_stopped   = true;
-        bool attempt_timed_out = false;
-        if (attempt_timeout || ctx.shared_scheduler) {
-            // A dispatched unit: the body runs off this coroutine's executor
-            // (see "Dispatched attempts" above).
-            auto unit  = std::make_shared<DispatchedAttempt>();
-            unit->node = node_it->second.get();
-            if (attempt_timeout) {
-                unit->owned_state = std::make_unique<GraphState>();
-                init_state(*unit->owned_state);
-                unit->owned_state->copy_provider_history_from(state);
-                unit->owned_state->restore_runtime(state.serialize_runtime());
-                unit->state = unit->owned_state.get();
-            } else {
-                unit->state = &state;
-            }
-            // The attempt's own token: run cancellation cascades into it, and
-            // a timeout cancels it alone.
-            const auto run_token =
-                ctx.cancel_token ? ctx.cancel_token : std::make_shared<CancelToken>();
-            unit->context              = ctx;
-            unit->token                = run_token->fork();
-            unit->execution            = unit->token->fork();
-            unit->context.cancel_token = unit->token;
-            if (slot) bind_resume_value(ctx, unit->context, *slot);
-            if (slot) {
-                unit->scope.emplace(ctx, unit->context, effect_namespace, true);
-            } else {
-                const auto parent = detail::runtime_for(ctx);
-                unit->scope.emplace(ctx, unit->context,
-                                    parent ? parent.invocation_id() : std::string_view{});
-            }
-            effects = unit->scope->effects();
-            if (cb) {
-                unit->events       = std::make_shared<EventFence>();
-                unit->events->sink = &cb;
-                unit->fenced_sink  = [events = unit->events](const GraphEvent& event) {
-                    events->deliver(event);
-                };
-            }
-            if (attempt_quiescence_) {
-                attempt_quiescence_->enter();
-                unit->quiescence.owner = attempt_quiescence_;
-            }
-            if (attempt_timeout)
-                unit->timeout_at = AttemptClock::now() + std::chrono::milliseconds(*attempt_timeout);
-            start_dispatched_body(unit);
-            const auto stop_grace = std::max(std::chrono::milliseconds(attempt_timeout.value_or(0)),
-                                             kMinAttemptStopGrace);
-            // Run cancellation reaches the body through its token; the wait
-            // itself is not cancelled, so a cancelled run still waits for
-            // the body to stop, as an inline body would be waited for.
-            co_await asio::co_spawn(
-                asio::make_strand(ex), await_dispatched(unit, stop_grace),
-                asio::bind_cancellation_slot(asio::cancellation_slot(), asio::use_awaitable));
-            {
-                std::lock_guard lock(unit->mutex);
-                attempt_timed_out = unit->timed_out;
-                attempt_stopped   = !unit->detached;
-                if (!attempt_timed_out) {
-                    ok_result = std::move(unit->result);
-                    failure   = std::move(unit->error);
-                }
-            }
-            if (attempt_timed_out) {
-                // The late completion, if any, is discarded.
-                ok_result.reset();
-                failure = std::make_exception_ptr(NodeAttemptTimeout(
-                    node_name, attempt, std::chrono::milliseconds(*attempt_timeout), attempt_stopped));
-                // Run control wins over the attempt's own timeout.
-                if (ctx.cancel_token && ctx.cancel_token->is_cancelled())
-                    throw CancelledException("node " + node_name +
-                                             " cancelled after its attempt timed out");
-            } else if (!ok_result && !failure) {
-                failure = std::make_exception_ptr(
-                    std::logic_error("Node '" + node_name + "' attempt finished without an outcome"));
-            }
-        } else {
-            std::optional<ScopedInvocationContext> scope;
-            if (slot) scope.emplace(ctx, effect_namespace, slot);
-            if (scope) effects = scope->effects();
-            try {
-                // Single dispatch point. NodeInput bundles state, per-run
-                // context, and the optional streaming callback.
-                NodeInput in{state, scope ? scope->context() : ctx, cb ? &cb : nullptr};
-                ok_result.emplace(co_await node_it->second->run(in));
-            } catch (...) {
-                failure = std::current_exception();
-            }
-        }
-
-        if (ok_result) {
-            auto& nr = *ok_result;
-            if (cb) {
-                if (has_mode(stream_mode, StreamMode::UPDATES)) {
-                    for (const auto& w : nr.writes) {
-                        cb(GraphEvent{GraphEvent::Type::CHANNEL_WRITE, node_name,
-                                      json{{"channel", w.channel}, {"value", w.value}}});
-                    }
-                }
-                if (has_mode(stream_mode, StreamMode::EVENTS)) {
-                    json end_data;
-                    if (nr.command) end_data["command_goto"] = nr.command->goto_node;
-                    if (!nr.sends.empty()) end_data["sends"] = (int)nr.sends.size();
-                    // A Send execution is named "<target>[send]" in the execution
-                    // trace; the event carries the same fact for observers that
-                    // build a trace from events (a failed Program attempt does).
-                    if (slot && slot->send) end_data["send"] = true;
-                    cb(GraphEvent{GraphEvent::Type::NODE_END, node_name, std::move(end_data)});
-                }
-            }
-            if (cache_eligible) {
-                node_cache_->store(node_name, cache_state_hash, cache_scope_key, nr);
-            }
-            co_return std::move(nr);
-        }
-
-        // Control flow leaves unwrapped, as before: an interrupt pauses the
-        // run, a cancellation stops it, and OOM is not a node failure.
-        try {
-            std::rethrow_exception(failure);
-        } catch (const NodeInterrupt&) {
-            // Resume continues this attempt.
-            if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
-            throw;
-        } catch (const CancelledException&) {
-            throw;
-        } catch (const std::bad_alloc&) {
-            throw;
-        } catch (const asio::system_error& error) {
-            // Socket/timer cancellation enters node code as
-            // operation_aborted. Once this operation's token is set, that is
-            // cancellation control flow, not a retryable transport failure.
-            if (ctx.cancel_token && ctx.cancel_token->is_cancelled() &&
-                error.code() == asio::error::operation_aborted) {
-                throw CancelledException("node " + node_name + " operation aborted");
-            }
-        } catch (...) {}
-
-        // A Hook block stops the run with the HookBoundaryBlocked itself, and
-        // a cancellation with the CancelledException, wherever they sit in the
-        // failure's cause chain: the same type, invocation id and state as the
-        // tool paths and llm::Agent give (tool_failure.h). They win over an
-        // uncertain effect, as they do in a tool batch.
-        if (const auto control = ::neograph::detail::classify_tool_failure(
-                failure, ctx.cancel_token.get());
-            control == ::neograph::detail::ToolFailureClass::HookBlocked ||
-            control == ::neograph::detail::ToolFailureClass::Cancelled)
-            ::neograph::detail::rethrow_run_stop(failure, control);
-
-        // An effect of this attempt whose outcome is unknown is never retried
-        // or routed: the run pauses for reconciliation, as mediated dispatch
-        // does when it sees one, even if the node turned that into an error.
-        // An attempt still running past its stop deadline does not pause: its
-        // effects are uncertain as a whole and the run fails (below).
-        if (attempt_stopped && effects && effects->uncertain()) {
-            if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
-            throw NodeInterrupt("Mediated Tool effect requires reconciliation",
-                                json{{"kind", "tool_effect_reconciliation"},
-                                     {"thread_id", ctx.thread_id},
-                                     {"task_id", std::string(effect_namespace)}});
-        }
-
-        // Every other decision is the shared classifier's (tool_failure.h):
-        // ordinary failures are retried unless the author said otherwise;
-        // nothing else is. An attempt that committed a non-idempotent effect
-        // is not retried either, or the next attempt would repeat the effect.
-        auto verdict = ::neograph::detail::classify_node_failure(failure, ctx.cancel_token.get());
-        if (effects && effects->committed() &&
-            verdict.failure_class < NodeFailureClass::EffectCommitted) {
-            verdict.failure_class = NodeFailureClass::EffectCommitted;
-            verdict.code          = node_failure_code(NodeFailureClass::EffectCommitted);
-            verdict.public_message.clear();
-            verdict.retryable = false;
-            verdict.routable  = node_failure_routable(NodeFailureClass::EffectCommitted);
-        }
-        // #364: a code the node's policy lists as non_retryable is not retried.
-        if (verdict.retryable && failure_plan && failure_plan->non_retryable.count(verdict.code))
-            verdict.retryable = false;
-        if (!verdict.retryable || attempt >= last_attempt) {
-            const auto kind = verdict.failure_class == NodeFailureClass::EffectCommitted
-                                  ? NodeFailureKind::EffectCommitted
-                              : verdict.retryable ? NodeFailureKind::Exhausted
-                                                  : NodeFailureKind::NonRetryable;
-            co_return give_up(std::move(failure), attempt + 1, verdict, kind, effects);
-        }
-
-        // Apply jitter to break thundering-herd lockstep when N
-        // parallel branches retry against the same upstream. The
-        // policy default is jitter_pct=0 (deterministic, back-compat);
-        // callers configuring fan-out workloads should set ~0.2.
-        int actual_delay = delay_ms;
-        if (policy.jitter_pct > 0.0f && delay_ms > 0) {
-            // Per-thread RNG so concurrent branches don't share state.
-            thread_local std::mt19937             rng{std::random_device{}()};
-            float                                 pct = std::min(1.0f, policy.jitter_pct);
-            std::uniform_real_distribution<float> dist(-pct, pct);
-            const double scaled = static_cast<double>(delay_ms) * (1.0 + dist(rng));
-            actual_delay = static_cast<int>(std::clamp(
-                scaled, 0.0, static_cast<double>(std::numeric_limits<int>::max())));
-        }
-
-        // #364: a backoff that would cross the run's deadline (a Program's
-        // wall-time budget) stops retrying now, instead of sleeping until the
-        // budget stops the run.
-        if (ctx.deadline &&
-            AttemptClock::now() + std::chrono::milliseconds(actual_delay) >= *ctx.deadline)
-            co_return give_up(std::move(failure), attempt + 1, verdict, NodeFailureKind::Deadline,
-                              effects);
-
-        // #364: the run-level retry ceiling. Reaching it stops retrying.
-        if (const auto run_runtime = detail::runtime_for(ctx);
-            run_runtime && run_runtime->node_retry_ceiling &&
-            !run_runtime->node_retry_ceiling->try_take())
-            co_return give_up(std::move(failure), attempt + 1, verdict, NodeFailureKind::Ceiling,
-                              effects);
-
-        if (cb && has_mode(stream_mode, StreamMode::DEBUG)) {
-            std::string what;
-            try {
-                std::rethrow_exception(failure);
-            } catch (const std::exception& e) {
-                what = safe_exception_message(e);
-            } catch (...) {
-                what = "unknown";
-            }
-            cb(GraphEvent{GraphEvent::Type::ERROR, node_name,
-                          json{{"retry", attempt + 1},
-                               {"max_retries", policy.max_retries},
-                               {"delay_ms", delay_ms},
-                               {"error", what}}});
-        }
-
-        asio::steady_timer timer(ex);
-        timer.expires_after(std::chrono::milliseconds(actual_delay));
-        co_await timer.async_wait(asio::use_awaitable);
-        // A run cancelled during the backoff starts no further attempt.
-        if (ctx.cancel_token) ctx.cancel_token->throw_if_cancelled("node " + node_name + " retry");
-
-        delay_ms = next_delay_ms(delay_ms, policy);
-    }
-
-    throw std::runtime_error("Unreachable: async retry loop exited without return or throw");
+    return detail::AttemptsAccess::run(*this, node_name, state, cb, stream_mode, ctx,
+                                       detail::NoSingleNode{slot});
 }
 
 // =========================================================================
@@ -1389,76 +1713,11 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     const GraphStreamCallback&                         cb,
     StreamMode                                         stream_mode,
     const RunContext&                                  ctx) {
-    const std::string task_id = make_static_task_id(step, node_name);
-
-    // GCC-13-safe outcome capture: collect result or NodeInterrupt
-    // marker inside try, decide outside. Other exceptions propagate
-    // out of the coroutine untouched.
-    std::optional<NodeResult>    ok_result;
-    std::optional<NodeInterrupt> interrupt;
-    int                          interrupted_attempt = 0;
-    detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, &interrupted_attempt};
-    slot.visit_limited = failure_routing_ && !take_activation(failure_routing_, ctx, node_name);
-
-    try {
-        auto replay_it = replay.find(task_id);
-        if (replay_it != replay.end()) {
-            // Replayed from a previous partial run — do NOT re-execute,
-            // do NOT re-record. Just apply the recorded writes.
-            ok_result.emplace(replay_it->second);
-        } else {
-            ok_result.emplace(co_await execute_attempts_async(
-                node_name, state, cb, stream_mode, ctx, &slot));
-
-            // Record BEFORE apply_writes so a crash between the two
-            // still leaves a durable log for resume to replay.
-            if (coord.records_pending_writes(parent_cp_id))
-                co_await coord.record_pending_write_async(parent_cp_id, task_id, task_id, node_name,
-                                                          *ok_result, step);
-        }
-    } catch (const NodeInterrupt& ni) {
-        // Copy the whole interrupt, not just the fact that one happened.
-        // This used to record a bool and rethrow `NodeInterrupt(node_name)`,
-        // which silently replaced the node's reason (and, later, its payload)
-        // with the node's own name — so a caller asking "why did you stop?"
-        // got back "risky" (issue #94).
-        interrupt = ni;
-    }
-
-    if (interrupt) {
-        // NodeInterrupt pauses this specific node — resume must
-        // re-enter exactly here. Save a phase=NodeInterrupt cp with
-        // next_nodes={node_name} so load_for_resume restarts the super
-        // step at this step with only this node ready.
-        // GCC-13 ICE workaround: build the next_nodes vector outside
-        // the co_await arg list (nested brace-init in a coroutine
-        // body trips build_special_member_call).
-        std::vector<std::string> next_nodes;
-        next_nodes.push_back(node_name);
-        std::vector<PendingInterrupt> pending;
-        pending.push_back(pending_interrupt(task_id, node_name, *interrupt));
-        const auto metadata        = record_step_interrupts(ctx, std::move(pending));
-        const auto interrupt_cp_id = co_await coord.save_super_step_async(
-            state, node_name, next_nodes, CheckpointPhase::NodeInterrupt, step, parent_cp_id,
-            barrier_state, metadata);
-        // Without a parent checkpoint the attempt's start was not recorded;
-        // record it under the interrupt's own checkpoint so resume continues it.
-        if (parent_cp_id.empty())
-            co_await record_attempt_start(coord, interrupt_cp_id, task_id, node_name,
-                                          interrupted_attempt, step);
-        // The executor is the only layer that knows the graph's name for
-        // this node — the node body does not.
-        interrupt->set_node(node_name);
-        record_interrupt_checkpoint(ctx, interrupt_cp_id);
-        throw *interrupt;
-    }
-
-    auto& nr = *ok_result;
-    capture_step_start(ctx, state, !nr.sends.empty());
-    apply_node_result(state, nr, ctx, failure_routing_ && failure_routing_->routes());
-
-    trace.push_back(node_name);
-    co_return std::move(nr);
+    return detail::AttemptsAccess::run(
+        *this, node_name, state, cb, stream_mode, ctx,
+        detail::SingleNode{detail::InvocationSlot{std::string_view{}, step, &replay, &coord,
+                                                  &parent_cp_id},
+                           barrier_state, trace});
 }
 
 // =========================================================================

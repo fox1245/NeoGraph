@@ -497,6 +497,7 @@ ScopedInvocationRuntime::ScopedInvocationRuntime(
     // The parent's scope is alive for the whole call, so its binding cannot go
     // away between this lookup and the install below.
     std::shared_ptr<const RunContextRuntime> run = registry().run_of(&parent);
+    parent_bound_ = run != nullptr;
     if (!run) run = empty_runtime();
     if (record_effects && run->tool_effect_broker) {
         // The attempt sees the run-wide state with its broker recorded; the

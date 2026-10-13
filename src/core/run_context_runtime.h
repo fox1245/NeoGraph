@@ -338,10 +338,17 @@ public:
     /// recorded and the run has a ToolEffectBroker.
     const std::shared_ptr<AttemptEffectLog>& effects() const noexcept { return effects_; }
 
+    /// The run-wide state the context is bound to; null when `parent` was
+    /// bound to none. Read-only, like runtime_for(parent), without a lookup.
+    const RunContextRuntime* run() const noexcept {
+        return parent_bound_ ? binding_.run.get() : nullptr;
+    }
+
 private:
     const RunContext* context_ = nullptr;
     RuntimeBinding binding_;
     std::shared_ptr<AttemptEffectLog> effects_;
+    bool parent_bound_ = false;
 };
 
 }  // namespace neograph::graph::detail
