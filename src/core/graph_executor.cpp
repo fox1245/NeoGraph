@@ -1571,16 +1571,21 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // returns. If a future change introduces opportunistic
     // cancellation that abandons the parallel_group early, switch
     // these captures to by-value copies first.
-    // The attempt each branch was in when it paused; written by that branch
-    // only, read after the group has finished.
-    std::vector<int> interrupted_attempts(ready.size(), 0);
-    // Activations are counted in ready order before any branch starts.
-    std::vector<char> visit_limited(ready.size(), 0);
+    // Per branch: the attempt it was in when it paused (written by that branch
+    // only, read after the group has finished), and whether its activation is
+    // past max_visits (counted in ready order before any branch starts).
+    struct BranchState {
+        int  interrupted_attempt = 0;
+        bool visit_limited       = false;
+    };
+    std::vector<BranchState> branch_state(ready.size());
     for (std::size_t index = 0; index < ready.size(); ++index)
-        visit_limited[index] =
+        branch_state[index].visit_limited =
             failure_routing_ && !take_activation(failure_routing_, ctx, ready[index]);
-    // When each branch's node body ran, to tell whether they overlapped.
-    std::vector<BranchSpan> spans(fan_out_pool_ ? 0 : ready.size());
+    // When each branch's node body ran, to tell whether they overlapped. Only
+    // the one-shot serial fan-out notice asks, so none once it has been given.
+    std::vector<BranchSpan> spans(
+        fan_out_pool_ || warned_serial_fanout_.load(std::memory_order_relaxed) ? 0 : ready.size());
     auto worker = [&, this](std::size_t index) -> asio::awaitable<NodeResult> {
         const std::string& node_name = ready[index];
         const std::string task_id   = make_static_task_id(step, node_name);
@@ -1589,8 +1594,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
             co_return replay_it->second;
         }
         detail::InvocationSlot slot{task_id,       step, &replay, &coord, &parent_cp_id,
-                                    &interrupted_attempts[index]};
-        slot.visit_limited = visit_limited[index] != 0;
+                                    &branch_state[index].interrupted_attempt};
+        slot.visit_limited = branch_state[index].visit_limited;
         NodeResult nr;
         {
             std::optional<BranchTimer> timer;
@@ -1706,7 +1711,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
                                                               step);
                 else
                     co_await record_attempt_start(coord, interrupt_cp_id, branch_task_id,
-                                                  ready[i], interrupted_attempts[i], step);
+                                                  ready[i], branch_state[i].interrupted_attempt,
+                                                  step);
             }
         }
         // Throw a fresh NodeInterrupt — see the comment above. The fresh
