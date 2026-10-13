@@ -363,6 +363,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 `researcher`'s outgoing edge is just `{"from": "researcher", "to": "summarizer"}`
 — same dedup rule as static edges, so summarizer runs once.
 
+### The execution trace
+
+`RunResult.execution_trace` has one entry per node execution that completed. A Send execution is listed as `<target>[send]`, so a node that runs by Send and by an edge shows two kinds of entry. The entries follow the order in which the engine applied the results: super-steps in order, and within a step the ready nodes in ready order, then the Sends in the order they were emitted (the ready nodes' order, then each node's own), whatever order the executions finished in. The shape above gives `["planner", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "summarizer"]`.
+
+A step that paused on a `NodeInterrupt` lists nothing, and the run that resumes it lists the whole step, replayed executions included. A subgraph is one entry; its inner nodes are not listed.
+
 ### A Send target needs no edge into it
 
 A node that only `Send` starts has no incoming edge, and that is a supported shape. The validator cannot tell: a graph definition does not declare which nodes a `Send` or `Command.goto` will target, so a graph with `schema_version` 1 prints lint E7 (the node is unreachable from `__start__`) to stderr when it is built. For such a node the notice is expected. Turn it off with `EngineConfig::stderr_notices = false` in C++ or `GraphEngine.compile(..., stderr_notices=False)` in Python. The switch also covers the other build-time lint and the one-time notice that a fan-out ran serially; validation errors still throw.

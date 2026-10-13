@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - **Python can silence the build-time lint (#415).** `GraphEngine.compile` gained the keyword `stderr_notices` (default `True`, as `EngineConfig::stderr_notices` in C++). With `stderr_notices=False` it prints neither the lint of a strict graph, such as E7 for a node that only `Send` or `Command.goto` starts, nor the one-time notice that a fan-out ran serially; validation errors still raise. E7 itself is unchanged: a graph definition declares no dynamic targets, so the validator cannot tell a node that Send starts from one nothing reaches, and the docs now say so. They also say that a static edge to a Send target is not a way to quiet the lint: the target runs once more, after the Sends, on the shared state. Code that does not pass the keyword behaves as before, and graphs run as before.
+- **`RunResult::execution_trace` has a stated contract (#424).** Documentation and tests only, no behavior change. The report that nodes started by `Send` are missing from the trace could not be reproduced: `run`, `run_stream`, `run_async`, `run_stream_async` and `resume`, with and without a worker pool, list each Send execution as `<target>[send]`. `types.h`, `engine.h` and the docs now state the order: super-steps in order, and within a step the ready nodes, then the Sends in the order they were emitted, whatever order they finished in. A step that paused lists nothing, a resumed run lists the whole re-entered step, and a subgraph is one entry.
 
 ## [0.14.0] - 2026-10-13
 

@@ -608,6 +608,14 @@ inline constexpr const char* kAbortedCode = "NG.Aborted";
  * thread-safe or scoped per-invocation; a shared provider handle alone
  * does not establish that a custom implementation is concurrency-safe.
  *
+ * ## Execution trace
+ *
+ * Each Send execution is listed in RunResult::execution_trace as
+ * "<target_node>[send]", so a node that runs by Send and by an edge shows two
+ * kinds of entry. A step lists its ready nodes first, then its Sends in the
+ * order they were emitted (the ready nodes' order, then each node's own), not
+ * in the order they finished.
+ *
  * @code
  * NodeResult result;
  * for (auto& item : work_items) {

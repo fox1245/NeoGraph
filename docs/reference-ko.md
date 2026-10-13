@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fa85f188dc05ad28a79d255b8aca3a5ad336af40e3d436e7ba662b206aebf586 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1546,7 +1546,7 @@ resume이나 continuation에서 `provider_outcomes`는 원래 결과 뒤에 새�
 | `interrupt_node` | `std::string` | 인터럽트를 발생시킨 노드 이름 |
 | `interrupt_value` | `json` | 인터럽트의 이유 또는 페이로드 |
 | `checkpoint_id` | `std::string` | 마지막으로 저장된 체크포인트의 UUID |
-| `execution_trace` | `std::vector<std::string>` | 실행 순서대로 기록된 노드 이름 목록 |
+| `execution_trace` | `std::vector<std::string>` | 끝난 노드 실행마다 항목 하나. 엔진이 결과를 반영한 순서대로 적는다. 슈퍼스텝은 차례대로, 한 슈퍼스텝 안에서는 ready 노드를 먼저, 그다음 Send를 내보낸 순서대로 적으며 끝난 순서와는 무관하다. Send로 실행된 노드는 `<대상>[send]`로 적힌다. [Send](concepts.md#5-send--dynamic-fan-out) 참고 |
 
 `provider_messages`는 전체 typed 기록을 제공하고 messages 채널만 대체한다. `on_provider_event`는 typed SDK 이벤트를 관측한다. `provider_outcomes`, `provider_loop_history`는 결과와 task-local continuation을 inner turn 사이에 보존한다. `native_history_archive`는 영속 native custody를 결합하며 모델 예산을 주지 않는다. 선택적 `model_token_budget` 상한과 `budget_exhausted` 신호는 예산 인식 dispatch에 사용한다. Python과 C++은 모두 `RunResult.native_messages`로 전체 기록을, `provider_outcomes`로 소유 결과를 반환한다. 입력은 계속 `RunConfig.provider_messages`이며 `RunResult.provider_messages`나 `provider_history` alias는 없다.
 

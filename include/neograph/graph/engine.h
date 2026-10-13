@@ -409,7 +409,15 @@ struct RunResult {
     std::string interrupt_node;                     ///< Name of the node that triggered the interrupt.
     json        interrupt_value;                    ///< Value associated with the interrupt.
     std::string checkpoint_id;                      ///< ID of the last checkpoint saved.
-    std::vector<std::string> execution_trace;       ///< Ordered list of executed node names.
+    /// One entry per node execution that completed, in the order the engine
+    /// applied the results. Super-steps come in order; within a step the ready
+    /// nodes come in ready order, then the Sends in the order they were emitted
+    /// (the ready nodes' order, then each node's own), whatever order the
+    /// executions finished in. A Send execution is listed as "<target>[send]".
+    /// A step that paused lists nothing. A resumed run lists the steps after
+    /// its checkpoint, the re-entered step whole with its replayed executions.
+    /// A subgraph is one entry; its inner nodes are not listed.
+    std::vector<std::string> execution_trace;
 
     /// Token usage for the whole run, subgraphs included (issue #88). Zero for
     /// a graph that made no LLM calls — not an error, just nothing to count.

@@ -95,6 +95,36 @@ export function define() {
     assert sorted(JOURNAL.names()) == ["fan", "square:1", "square:2", "square:3", "square:4"]
 
 
+def test_a_completed_program_run_reports_the_core_trace_of_its_sends():
+    text = """
+export function define() {
+  const g = ng.graph("map_reduce");
+  g.channel("items", {reducer: "overwrite", initial: []});
+  g.channel("item", {reducer: "overwrite", initial: 0});
+  g.channel("results", {reducer: "append", initial: []});
+  g.node("fan", {type: "e2e.fan"});
+  g.node("square", {type: "e2e.square"});
+  g.entry("fan");
+  g.exit("square");
+  return g;
+}
+"""
+    _host, _version, program = run_program(text, {"items": [1, 2, 3, 4]})
+    assert program.status == ng.ProgramTerminalStatus.Completed, describe(program)
+
+    core = ng.GraphEngine.compile({
+        "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
+        "channels": {"items": {"reducer": "overwrite", "initial": []},
+                     "item": {"reducer": "overwrite", "initial": 0},
+                     "results": {"reducer": "append", "initial": []}},
+        "nodes": {"fan": {"type": "e2e.fan"}, "square": {"type": "e2e.square"}},
+        "edges": [{"from": ng.START_NODE, "to": "fan"}, {"from": "square", "to": ng.END_NODE}],
+    }, ng.NodeContext(), stderr_notices=False).run(ng.RunConfig(input={"items": [1, 2, 3, 4]}))
+
+    assert core.execution_trace == ["fan"] + ["square[send]"] * 4
+    assert program.execution_trace == core.execution_trace
+
+
 def test_subgraph_node_runs_an_inline_child_graph():
     registry = build_registry(extra_node_types=("subgraph",))
     host = make_host(registry=registry)

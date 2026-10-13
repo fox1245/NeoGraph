@@ -1590,7 +1590,7 @@ On resume or continuation, `provider_outcomes` retains the original outcomes fol
 | `interrupt_node` | `std::string` | Name of the node that triggered the interrupt |
 | `interrupt_value` | `json` | Reason or payload from the interrupt |
 | `checkpoint_id` | `std::string` | UUID of the last saved checkpoint |
-| `execution_trace` | `std::vector<std::string>` | Ordered list of node names in execution order |
+| `execution_trace` | `std::vector<std::string>` | One entry per completed node execution, in the order the engine applied the results: super-steps in order, and within a step the ready nodes, then the Sends in the order they were emitted, whatever order they finished in. A Send execution is listed as `<target>[send]`. See [Send](concepts.md#5-send--dynamic-fan-out) |
 
 `provider_messages` supplies full typed history and replaces only the messages channel; `on_provider_event` observes typed SDK events. `provider_outcomes` and `provider_loop_history` retain outcomes and task-local continuations across inner turns. `native_history_archive` binds durable native custody, not a model budget. The optional `model_token_budget` ceiling and `budget_exhausted` signal belong to budget-aware dispatch. Python and C++ both return full history as `RunResult.native_messages`, with owned results in `provider_outcomes`. Input remains `RunConfig.provider_messages`; there is no `RunResult.provider_messages` or `provider_history` alias.
 

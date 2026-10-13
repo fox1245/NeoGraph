@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=5887bf65ebef51dad0e0395fb7ddbee82b35352f199c95da837679906ec2a925 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=de6434bd93ce40ffe04ea7ea949f437f1b43a30b409e2f64a12f094f049d22b2 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -329,6 +329,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 ```
 
 `researcher` 的出边就是 `{"from": "researcher", "to": "summarizer"}`，与静态边适用同样的去重规则，所以 summarizer 只运行一次。
+
+### 执行轨迹
+
+`RunResult.execution_trace` 为每次完成的节点执行记录一项。由 Send 启动的执行记为 `<目标>[send]`，所以同一个节点既被 Send 又被边运行时，会出现两种条目。条目的顺序就是引擎应用结果的顺序：超步按先后排列；一个超步内先列就绪节点（按就绪顺序），再列 Send（按发出顺序，即先按就绪节点的顺序，再按各节点自己返回的顺序），与各次执行结束的先后无关。上面的结构得到 `["planner", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "summarizer"]`。
+
+因 `NodeInterrupt` 暂停的超步不记录任何内容；恢复它的那次运行会记录整个超步，重放的执行也包括在内。子图只算一项，其内部节点不会列出。
 
 ### 只由 Send 启动的节点不需要入边
 

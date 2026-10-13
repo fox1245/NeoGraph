@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fa85f188dc05ad28a79d255b8aca3a5ad336af40e3d436e7ba662b206aebf586 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -1528,7 +1528,7 @@ resume 或 continuation 时，`provider_outcomes` 保留原始结果，再依次
 | `interrupt_node` | `std::string` | 触发中断的节点名称 |
 | `interrupt_value` | `json` | 中断的原因或 payload |
 | `checkpoint_id` | `std::string` | 最后保存的检查点的 UUID |
-| `execution_trace` | `std::vector<std::string>` | 按执行顺序排列的节点名称有序列表 |
+| `execution_trace` | `std::vector<std::string>` | 每次完成的节点执行记录一项，顺序为引擎应用结果的顺序：超步按先后排列，一个超步内先列就绪节点，再按发出顺序列 Send，与各次执行结束的先后无关。由 Send 启动的执行记为 `<目标>[send]`。见 [Send](concepts.md#5-send--dynamic-fan-out) |
 
 `max_steps_exhausted()` 仅在步骤上限停止运行且仍有可运行工作时返回
 `true`。一个恰好在最后一步允许时到达 `__end__` 的图返回 `false`。

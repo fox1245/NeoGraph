@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=5887bf65ebef51dad0e0395fb7ddbee82b35352f199c95da837679906ec2a925 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=de6434bd93ce40ffe04ea7ea949f437f1b43a30b409e2f64a12f094f049d22b2 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -335,6 +335,12 @@ planner ─┬─ Send("researcher", {topic: "A"})  ─┐
 ```
 
 `researcher`에서 나가는 엣지는 `{"from": "researcher", "to": "summarizer"}` 하나면 충분합니다. 정적 엣지와 같은 중복 제거 규칙이 적용되므로 summarizer는 한 번만 실행됩니다.
+
+### 실행 트레이스
+
+`RunResult.execution_trace`에는 끝난 노드 실행마다 항목이 하나씩 들어갑니다. Send로 실행된 노드는 `<대상>[send]`로 적히므로, 같은 노드를 Send와 엣지로 모두 실행하면 두 종류의 항목이 보입니다. 항목의 순서는 엔진이 결과를 반영한 순서입니다. 슈퍼스텝은 차례대로 나열하고, 한 슈퍼스텝 안에서는 ready 노드를 ready 순서대로 먼저 적은 다음 Send를 내보낸 순서(ready 노드의 순서, 그 안에서는 노드가 반환한 순서)대로 적습니다. 실행이 끝난 순서와는 관계가 없습니다. 위의 구조에서는 `["planner", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "researcher[send]", "summarizer"]`가 됩니다.
+
+`NodeInterrupt`로 멈춘 슈퍼스텝은 아무것도 적지 않습니다. 그 슈퍼스텝을 이어받는 실행이 재생된 실행까지 포함해 슈퍼스텝 전체를 적습니다. 서브그래프는 항목 하나이고, 안쪽 노드는 적지 않습니다.
 
 ### Send 대상 노드에는 들어오는 엣지가 필요 없습니다
 

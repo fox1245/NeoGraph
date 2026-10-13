@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=02aa0420d6411279c4b6c9bc6dca39056c66c53c94ff7fa922a4342831a6b03b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fa85f188dc05ad28a79d255b8aca3a5ad336af40e3d436e7ba662b206aebf586 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -1385,7 +1385,7 @@ resume や continuation では、`provider_outcomes` は元の結果に新しく
 | `interrupt_node` | `std::string` | 中断を発生させたノードの名前 |
 | `interrupt_value` | `json` | 中断に関連する理由またはペイロード |
 | `checkpoint_id` | `std::string` | 最後に保存したチェックポイントの UUID |
-| `execution_trace` | `std::vector<std::string>` | 実行順に並んだノード名の一覧 |
+| `execution_trace` | `std::vector<std::string>` | 完了したノード実行ごとに 1 件。エンジンが結果を反映した順に並ぶ。スーパーステップは順番どおり、1 つのスーパーステップの中では実行可能なノードが先、そのあとに Send が送出された順で並び、実行が終わった順は関係ない。Send で実行されたノードは `<対象>[send]` と記録される。[Send](concepts.md#5-send--dynamic-fan-out) を参照 |
 `max_steps_exhausted()` は、実行可能な作業が残っている状態でステップ上限に達して実行が停止した場合にのみ `true` を返します。
 許可された最後のステップで `__end__` に到達したグラフは
 `false` を返します。
