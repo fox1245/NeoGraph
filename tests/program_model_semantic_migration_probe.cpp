@@ -28,9 +28,11 @@ using namespace neograph::program;
 std::atomic<unsigned> work_calls{0};
 std::atomic<unsigned> followup_calls{0};
 // Set just before the probe asks for the migration. The work node holds its
-// super-step until then, so the request is armed while the source still runs
-// however long the run took to start (on a loaded, sanitized host the run took
-// longer than the node's 100 ms to reach it and ended before the request came).
+// super-step until then, and for one more second, so the request is armed
+// while the source still runs, however long the run took to start and
+// migrate_graph() took to check and load the target before arming (on a
+// loaded, sanitized host each took longer than 100 ms). migrate_graph() then
+// waits for the node to reach its safe point.
 std::atomic<bool> migration_requested{false};
 
 std::string digest(char value) { return "sha256:" + std::string(64, value); }
@@ -54,7 +56,7 @@ public:
             timer.expires_after(std::chrono::milliseconds(5));
             co_await timer.async_wait(asio::use_awaitable);
         }
-        timer.expires_after(std::chrono::milliseconds(300));
+        timer.expires_after(std::chrono::seconds(1));
         co_await timer.async_wait(asio::use_awaitable);
         co_return NodeOutput{{ChannelWrite{"value", "source-work-completed"}}};
     }
