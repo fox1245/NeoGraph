@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a9740099fa203fd81c41a5fd7ad2918e2ee6bd623b8963ac3f20d7d650c98785 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=510727ee50df79cbb1f09ee1e31c6997b2c7e7bd5c712ee7fd32be2d158ad5d6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)

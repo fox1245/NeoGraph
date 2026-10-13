@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=de6434bd93ce40ffe04ea7ea949f437f1b43a30b409e2f64a12f094f049d22b2 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=3a56bff864cc1479bff6c89a51b006b8e7d90cd339f0aec6e4f2fda21f7a97cd -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)

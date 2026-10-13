@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fa85f188dc05ad28a79d255b8aca3a5ad336af40e3d436e7ba662b206aebf586 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=f2c5a7179bf0b37883c585fe17f01891b3e13e5b4b40399cbd1990ab8acfc29c -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
