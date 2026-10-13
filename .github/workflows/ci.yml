@@ -94,7 +94,7 @@ jobs:
           if-no-files-found: ignore
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4

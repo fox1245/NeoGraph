@@ -89,8 +89,10 @@ AlmaLinux source RPMs, checked against repository primary-metadata SHA-256
 values. It also retains applicable downstream file notices. The hosted build log of run 37459723655 shows `openssl 3.5.8-1.el9_8`,
 `libpq 13.23-3.el9_8`, `libnghttp2 1.43.0-6.el9_8.2` and `sqlite 3.34.1-11.el9_8`,
 consistent with this table; the other rows were already installed in the build image,
-so their versions are not in the log, and the `manylinux_2_34` image is referenced
-without a digest and can change. libcurl is built from source by `before-all`, not
+so their versions are not in the log. Since 0.14.1 the `manylinux_2_34` images are
+pinned by digest in `pyproject.toml` (the images that built 0.14.0); packages that
+`before-all` installs with `dnf` still come from the current AlmaLinux 9
+repositories. libcurl is built from source by `before-all`, not
 installed from an RPM. The table does not describe the macOS or Windows closure
 (see the two sections below).
 

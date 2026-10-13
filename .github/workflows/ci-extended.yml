@@ -246,7 +246,7 @@ jobs:
          {"name":"linux-core-shared","os":"ubuntu-24.04","args":"--core-only --shared"},
          {"name":"linux-program-static","os":"ubuntu-24.04","args":"--program --quickjs"},
          {"name":"linux-program-shared","os":"ubuntu-24.04","args":"--program --quickjs --shared"},
-         {"name":"macos-shared","os":"macos-latest","args":"--shared"},
-         {"name":"macos-program-shared","os":"macos-latest","args":"--program --quickjs --shared"},
+         {"name":"macos-shared","os":"macos-26","args":"--shared"},
+         {"name":"macos-program-shared","os":"macos-26","args":"--program --quickjs --shared"},
          {"name":"windows-shared","os":"windows-2022","args":"--shared"},
          {"name":"windows-program-shared","os":"windows-2022","args":"--program --shared"}]

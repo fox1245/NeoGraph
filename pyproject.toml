@@ -119,8 +119,11 @@ test-skip = ""
 [tool.cibuildwheel.linux]
 # OpenSSL 3 requires the AlmaLinux 9 image (glibc >=2.34). Its system curl
 # predates the SDK's minimum version, so before-all builds a pinned HTTP/2 curl.
-manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
-manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64"
+# The images are pinned by digest (the ones that built 0.14.0): the wheels bundle
+# LGPL libraries from the image, and their published source must keep matching.
+# Refresh both digests deliberately, together with THIRD_PARTY_LICENSES.md.
+manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64@sha256:3cb61cd981757b4ed54bc658f8bd0f4e829af49372cf8cf6c237268dacf168d0"
+manylinux-aarch64-image = "quay.io/pypa/manylinux_2_34_aarch64@sha256:c6a53d1238a6610d465f415a2a81ccc862eec0bff60fe44dd907fa015168e703"
 before-all = 'bash "{package}/cmake/build-wheel-curl.sh"'
 environment = { CMAKE_PREFIX_PATH = "/opt/neograph-wheel-deps", LD_LIBRARY_PATH = "/opt/neograph-wheel-deps/lib:$LD_LIBRARY_PATH" }
 # Preserve the full installed-wheel suite before the native cold-loader gate.
