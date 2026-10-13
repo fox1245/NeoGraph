@@ -303,7 +303,9 @@ private:
     NodeCache*         node_cache_   = nullptr;
     mutable std::atomic<bool> warned_serial_fanout_{false};
     /// #364: the engine's failure routing; null for an executor built
-    /// outside an engine. Owned by the engine, which outlives this executor.
+    /// outside an engine, and for a graph that has none (no per-node failure
+    /// policy, failure edge or failure exit), whose runs then never read it.
+    /// Owned by the engine, which outlives this executor.
     const detail::FailureRouting* failure_routing_ = nullptr;
     /// #364: each node's attempt timeout; empty means none for every node.
     AttemptTimeoutLookup attempt_timeout_for_;

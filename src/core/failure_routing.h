@@ -69,6 +69,9 @@ struct FailureRouting {
     bool routes() const noexcept { return !targets.empty(); }
     /// True when some node declares max_visits, i.e. a run keeps counters.
     bool counts_visits() const noexcept { return visit_limits; }
+    /// False for a graph with no per-node failure policy, failure edge or
+    /// failure exit: nothing here can matter to its runs.
+    bool active() const noexcept { return !nodes.empty() || !targets.empty() || !exits.empty(); }
 
     bool visit_limits = false;
 

@@ -1398,7 +1398,7 @@ asio::awaitable<NodeResult> NodeExecutor::run_one_async(
     std::optional<NodeInterrupt> interrupt;
     int                          interrupted_attempt = 0;
     detail::InvocationSlot slot{task_id, step, &replay, &coord, &parent_cp_id, &interrupted_attempt};
-    slot.visit_limited = !take_activation(failure_routing_, ctx, node_name);
+    slot.visit_limited = failure_routing_ && !take_activation(failure_routing_, ctx, node_name);
 
     try {
         auto replay_it = replay.find(task_id);
@@ -1502,7 +1502,7 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
         auto                         replay_it = replay.find(task_id);
         NodeResult                   nr;
         std::optional<NodeInterrupt> interrupt;
-        const bool visit_limited = !take_activation(failure_routing_, ctx, node_name);
+        const bool visit_limited = failure_routing_ && !take_activation(failure_routing_, ctx, node_name);
         if (replay_it != replay.end()) {
             nr = replay_it->second;
         } else {
@@ -1577,7 +1577,8 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
     // Activations are counted in ready order before any branch starts.
     std::vector<char> visit_limited(ready.size(), 0);
     for (std::size_t index = 0; index < ready.size(); ++index)
-        visit_limited[index] = !take_activation(failure_routing_, ctx, ready[index]);
+        visit_limited[index] =
+            failure_routing_ && !take_activation(failure_routing_, ctx, ready[index]);
     // When each branch's node body ran, to tell whether they overlapped.
     std::vector<BranchSpan> spans(fan_out_pool_ ? 0 : ready.size());
     auto worker = [&, this](std::size_t index) -> asio::awaitable<NodeResult> {
@@ -1802,7 +1803,8 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
     // Activations are counted in Send order before any Send runs (#364).
     std::vector<char> visit_limited(sends.size(), 0);
     for (std::size_t si = 0; si < sends.size(); ++si)
-        visit_limited[si] = !take_activation(failure_routing_, ctx, sends[si].target_node);
+        visit_limited[si] =
+            failure_routing_ && !take_activation(failure_routing_, ctx, sends[si].target_node);
 
     // #385: a Send that interrupts pauses the run like a ready node: a
     // NodeInterrupt checkpoint that re-enters the step, then the interrupt.

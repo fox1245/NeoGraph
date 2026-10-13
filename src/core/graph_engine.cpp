@@ -577,7 +577,8 @@ std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
     engine->executor_ = std::make_unique<NodeExecutor>(
         engine->nodes_, engine->channel_defs_, std::move(retry_lookup),
         std::move(resources.registry), nullptr, &engine->node_cache_);
-    engine->executor_->failure_routing_ = engine->failure_routing_.get();
+    engine->executor_->failure_routing_ =
+        engine->failure_routing_->active() ? engine->failure_routing_.get() : nullptr;
     engine->attempt_quiescence_ = std::make_shared<detail::AttemptQuiescence>();
     engine->executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
         return self->resolved_attempt_timeout_ms(node_name);
@@ -767,7 +768,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
         destroy_pool(std::move(pool_));
         executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                    std::move(registry), nullptr, &node_cache_);
-        executor_->failure_routing_ = failure_routing_.get();
+        executor_->failure_routing_ = failure_routing_->active() ? failure_routing_.get() : nullptr;
         executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
             return self->resolved_attempt_timeout_ms(node_name);
         };
@@ -780,7 +781,7 @@ void GraphEngine::set_worker_count(std::size_t n) {
     pool_ = std::make_unique<asio::thread_pool>(n);
     executor_ = std::make_unique<NodeExecutor>(nodes_, channel_defs_, std::move(retry_lookup),
                                                std::move(registry), pool_.get(), &node_cache_);
-    executor_->failure_routing_ = failure_routing_.get();
+    executor_->failure_routing_ = failure_routing_->active() ? failure_routing_.get() : nullptr;
     executor_->attempt_timeout_for_ = [self](const std::string& node_name) {
         return self->resolved_attempt_timeout_ms(node_name);
     };
@@ -2002,8 +2003,10 @@ GraphEngine::execute_graph_async(
     runtime->is_resume = is_resume;
     // #364: the run-level retry ceiling, and this run's visit counters.
     runtime->node_retry_ceiling = metadata.node_retry_ceiling;
+    // Null for a graph without failure routing: its steps then never read it.
+    const detail::FailureRouting* const failure_routing = executor_->failure_routing_;
     std::shared_ptr<detail::FailureRunState> failure_state;
-    if (failure_routing_->counts_visits()) {
+    if (failure_routing && failure_routing->counts_visits()) {
         failure_state          = std::make_shared<detail::FailureRunState>();
         runtime->failure_state = failure_state;
     }
@@ -2450,7 +2453,7 @@ GraphEngine::execute_graph_async(
         // failure edge. The first record per target is the interrupt payload
         // if the target has interruptBefore.
         std::vector<bool> handled;
-        if (failure_routing_->routes()) {
+        if (failure_routing && failure_routing->routes()) {
             handled.assign(unified_routings.size(), false);
             for (std::size_t i = 0; i < unified_routings.size(); ++i) {
                 const json* record = i < step_results.size()
@@ -2467,15 +2470,16 @@ GraphEngine::execute_graph_async(
         }
         // #364: a completed failure target resets the visit counters of the
         // nodes routed to it; a completed failure-exit node ends the run.
-        for (std::size_t i = 0; (failure_state || !failure_routing_->exits.empty()) &&
-                                i < unified_routings.size();
+        for (std::size_t i = 0;
+             (failure_state || (failure_routing && !failure_routing->exits.empty())) &&
+             i < unified_routings.size();
              ++i) {
             if (!handled.empty() && handled[i]) continue;
             const auto& completed = unified_routings[i].node_name;
-            if (failure_state) failure_state->target_completed(*failure_routing_, completed);
+            if (failure_state) failure_state->target_completed(*failure_routing, completed);
             if (!failure_exit) {
-                const auto exit = failure_routing_->exits.find(completed);
-                if (exit != failure_routing_->exits.end())
+                const auto exit = failure_routing->exits.find(completed);
+                if (exit != failure_routing->exits.end())
                     failure_exit = json{{"node", completed}, {"code", exit->second}};
             }
         }
