@@ -295,6 +295,139 @@ TEST(ProgramCommandRecovery, AForkOfAPausedPlanCallReplaysItsProviderCall) {
     EXPECT_EQ(forked.remaining_budget().monetary_microunits, paused.remaining_budget().monetary_microunits);
 }
 
+// #431: a fork replays the paused invocation's provider calls from a durable
+// provider-call journal. A host without one sends and charges a call that the
+// fork runs again, and the fork's handle says so (ProgramHandle::notices()).
+namespace {
+
+ProgramNotice only_notice(const ProgramHandle& handle) {
+    auto notices = handle.notices();
+    EXPECT_EQ(notices.size(), 1u);
+    return notices.empty() ? ProgramNotice{} : std::move(notices.front());
+}
+
+}  // namespace
+
+#if defined(NEOGRAPH_PROGRAM_RESUME_MODEL_HAVE_QUICKJS)
+TEST(ProgramForkNotice, AForkWithoutAProviderJournalSendsTheCallAgainAndSaysSo) {
+    World world(next_world_id());
+    auto  peer = std::make_shared<Peer>(&world.crash.alive);
+    Host  host(world, peer, std::nullopt);
+    const auto version = host.admit(ProgramSource::from_javascript(
+        "fork.js", javascript_program(R"JS(
+  const reply = yield ng.callCore("main", {value: "llm-ask:a"}, "only");
+  return {out: [reply.out]};)JS")));
+    const auto paused = host.run(version, world.run_id(), json::object());
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_EQ(sent_to(*peer, "a"), 1);
+
+    const auto handle = host.start_fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                        paused.interrupt()->pending_input->call_id());
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(forked.output(), (json{{"out", json::array({"reply-a/d1"})}}));
+    EXPECT_EQ(sent_to(*peer, "a"), 2) << "the call is sent again; the host has nothing to replay it from";
+    EXPECT_LT(forked.remaining_budget().model_tokens, paused.remaining_budget().model_tokens);
+    EXPECT_LT(forked.remaining_budget().monetary_microunits, paused.remaining_budget().monetary_microunits);
+
+    const auto notice = only_notice(handle);
+    EXPECT_EQ(notice.code, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED");
+    EXPECT_FALSE(notice.message.empty());
+    EXPECT_EQ(notice.witness.at("source_run_id"), json(paused.run_id()));
+    EXPECT_EQ(notice.witness.at("source_attempt"), json(paused.attempt()));
+    EXPECT_EQ(notice.witness.at("operation_id"), json(paused.interrupt()->pending_input->operation_id()));
+    ASSERT_EQ(notice.witness.at("calls").size(), 1u);
+    EXPECT_EQ(notice.witness.at("calls")[0].at("node"), json("work"));
+    EXPECT_EQ(notice.witness.at("microunits"), json(paused.usage().monetary_microunits));
+}
+
+TEST(ProgramForkNotice, AForkWithAProviderJournalReplaysTheCallAndSaysNothing) {
+    TempDir live("fork-notice-live");
+    World   world(next_world_id());
+    auto    peer = std::make_shared<Peer>(&world.crash.alive);
+    Host    host(world, peer, live.path);
+    const auto version = host.admit(ProgramSource::from_javascript(
+        "fork.js", javascript_program(R"JS(
+  const reply = yield ng.callCore("main", {value: "llm-ask:a"}, "only");
+  return {out: [reply.out]};)JS")));
+    const auto paused = host.run(version, world.run_id(), json::object());
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+
+    const auto handle = host.start_fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                        paused.interrupt()->pending_input->call_id());
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(forked.output(), (json{{"out", json::array({"reply-a/d1"})}}));
+    EXPECT_EQ(sent_to(*peer, "a"), 1);
+    EXPECT_EQ(forked.remaining_budget().model_tokens, paused.remaining_budget().model_tokens);
+    EXPECT_TRUE(handle.notices().empty());
+}
+
+TEST(ProgramForkNotice, ACallOfAnEarlierCommandIsNotNamedBecauseItIsReplayed) {
+    // The provider call belongs to the first command, which finished and replays
+    // from the command journal; the paused command made none. Nothing is sent
+    // again, so nothing is said.
+    World world(next_world_id());
+    auto  peer = std::make_shared<Peer>(&world.crash.alive);
+    Host  host(world, peer, std::nullopt);
+    const auto version = host.admit(ProgramSource::from_javascript(
+        "fork.js", javascript_program(R"JS(
+  const first = yield ng.callCore("main", {value: "llm:a"}, "first");
+  const second = yield ng.callCore("main", {value: "ask:b"}, "second");
+  return {out: [first.out, second.out]};)JS")));
+    const auto paused = host.run(version, world.run_id(), json::object());
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_EQ(sent_to(*peer, "a"), 1);
+    ASSERT_FALSE(paused.monetary_records().empty()) << "the paused attempt did record the first command's call";
+
+    const auto handle = host.start_fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                        paused.interrupt()->pending_input->call_id());
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(sent_to(*peer, "a"), 1) << "the finished command replays";
+    EXPECT_TRUE(handle.notices().empty());
+}
+#endif
+
+TEST(ProgramForkNotice, AForkOfAPausedPlanCallWithoutAProviderJournalSaysSo) {
+    World world(next_world_id());
+    auto  peer = std::make_shared<Peer>(&world.crash.alive);
+    Host  host(world, peer, std::nullopt);
+    const auto version = host.admit(ProgramSource::from_cpp_builder(
+        "fork-plan", 2, plan_program(json{{"op", "call_core"}})));
+    const auto paused = host.run(version, world.run_id(), json{{"value", "llm-ask:a"}});
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_EQ(sent_to(*peer, "a"), 1);
+
+    const auto handle = host.start_fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                        paused.interrupt()->pending_input->call_id());
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
+    EXPECT_EQ(sent_to(*peer, "a"), 2);
+
+    const auto notice = only_notice(handle);
+    EXPECT_EQ(notice.code, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED");
+    EXPECT_EQ(notice.witness.at("operation_id"), json(paused.interrupt()->pending_input->operation_id()));
+    ASSERT_EQ(notice.witness.at("calls").size(), 1u);
+}
+
+TEST(ProgramForkNotice, ARunThatMadeNoProviderCallGivesNoNotice) {
+    World world(next_world_id());
+    auto  peer = std::make_shared<Peer>(&world.crash.alive);
+    Host  host(world, peer, std::nullopt);
+    const auto version = host.admit(ProgramSource::from_cpp_builder(
+        "fork-plan", 2, plan_program(json{{"op", "call_core"}})));
+    const auto paused = host.run(version, world.run_id(), json{{"value", "ask:a"}});
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << describe(paused);
+    ASSERT_TRUE(paused.monetary_records().empty());
+
+    const auto handle = host.start_fork(version, paused, world.run_id("run-fork"), json{{"decision", "d1"}},
+                                        paused.interrupt()->pending_input->call_id());
+    ASSERT_EQ(handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(handle.notices().empty());
+    EXPECT_EQ(sent_to(*peer, "a"), 0);
+}
+
 TEST(ProgramCommandRecovery, APlanStoppedBeforeItsFirstCheckpointAsksToReconcile) {
     // #404: a plan sequence stops after it started, before its first call
     // saved a checkpoint. Reconnect returns the run for reconciliation of that

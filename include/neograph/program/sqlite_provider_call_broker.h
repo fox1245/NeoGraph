@@ -53,6 +53,9 @@ public:
 /** Host-owned SQLite dispatch journal. Share the journal across resolver calls/runs.
  * A marker means transport MAY have occurred; it does not prove provider receipt
  * or exactly-once execution. Pending/uncertain calls require external reconciliation.
+ * A runtime whose resolver returns this journal's brokers should set
+ * RuntimeConfig::core_provider_calls_journaled, because only a durable journal lets
+ * a fork replay the provider calls of the paused invocation.
  */
 class NEOGRAPH_PROGRAM_API SQLiteProgramProviderCallJournal final {
 public:

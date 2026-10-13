@@ -13,6 +13,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ## [未リリース]
 
+### 変更
+
+- **C++ の利用側を再ビルドしてください。`RuntimeConfig` に member が、`ProgramHandle` に関数が追加されました（#431）。** `RuntimeConfig` に `core_provider_calls_journaled` が、`ProgramHandle` に `notices()` が追加され、`ProgramNotice` が新しく加わりました。NeoGraph、C++ の利用側、Python 拡張を一緒に再ビルドしてください([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
+- **永続的なプロバイダー呼び出しのジャーナルがないホストでのフォークは、そのことを知らせます（#431）。** フォークは、一時停止した呼び出しのプロバイダー呼び出しを、永続的なプロバイダー呼び出しのジャーナル（`SQLiteProgramProviderCallJournal`。`LocalProgramHost` は `sqlite_directory` があると持ちます）からだけリプレイします。プロセス内のブローカーにはジャーナルがないため、フォークで再び実行されるノードは先に行った呼び出しを再送し、再課金します。この点は変わっていません。**動作の変更:** `RuntimeConfig::core_provider_calls_journaled` が `false`（既定値）で、一時停止した試行が、止まっているオペレーションで価格付きのプロバイダー呼び出しを記録していた場合、`ProgramRuntime::fork` が返すハンドルに、コードが `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` の `ProgramNotice` が付くようになりました（`ProgramHandle::notices()`、Pythonでは `handle.notices`）。`witness` には、それらの呼び出し（`call_id`、`node`、`model`、`microunits`）と合計が並びます。通知はエラーではなく、フォークが送るものも課金するものも変えません。一時停止したステップで終わったノードの呼び出しは、そのステップに保存された書き込みからリプレイされるため、列挙された呼び出しのうちどれをフォークが再実行するかは、通知からは分かりません。通知は実行とともには保存されないので、`reconnect()` や `resume()` が返すハンドルにはありません。resolver が `SQLiteProgramProviderCallJournal` のブローカーを返すホストは、`core_provider_calls_journaled = true` を設定してください（`LocalProgramHost` は `sqlite_directory` があると設定します）。Program ガイド、Python バインディングガイド、リファレンスに記載しました。
+
 ### 修正
 
 - **Python でもビルド時の lint を止められます (#415)。** `GraphEngine.compile` にキーワード `stderr_notices` を追加しました。デフォルトは `True` で、C++ の `EngineConfig::stderr_notices` と同じです。`stderr_notices=False` にすると、strict なグラフの lint（`Send` や `Command.goto` だけが開始するノードに対する E7 など）と、fan-out が直列で実行されたことを知らせる 1 回限りの通知を出力しません。検証エラーは従来どおり例外になります。E7 自体は変えていません。グラフ定義には動的な対象を宣言する場所がないため、検証器は Send が開始するノードと、どこからも到達されないノードを区別できません。ドキュメントにこのことを明記しました。ドキュメントは、Send の対象への静的エッジが lint を黙らせる手段にならないことも説明しています。対象は、Send がすべて終わったあとに共有状態でもう一度実行されます。キーワードを渡さないコードの動作は従来どおりで、グラフの実行方法も変わりません。

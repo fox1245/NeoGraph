@@ -81,6 +81,9 @@ The deployment identity must be a host-owned SHA-256 identity of the actual
 provider route, model deployment and authority (including credential version);
 the broker does not discover these from a `Provider` object. Rebind the same
 durable database on restart/reconnect.
+Also set `RuntimeConfig::core_provider_calls_journaled = true`. A fork replays
+provider calls from this journal, and the flag keeps a fork on this host from
+reporting `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` in `ProgramHandle::notices()`.
 
 The journal keys each call by owner, immutable Program version, run, operation,
 Core thread/task/node and built-in call ordinal, **not** request content or

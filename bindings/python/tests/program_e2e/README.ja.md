@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=9b2d35cd43bd0d5aa5e954c4e92892fe542c6684dfb785ae31ae0f2911ab610e -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ja source_sha256=0d905e4f74f709d13c602dc998ce44c80e59274742fe7481e4d4dad02652303a -->
 # Program APIのエンドツーエンドのシナリオ
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -30,6 +30,7 @@
 | `test_19_fork_interrupt_identity.py` | 完了したバインド済みの `llm_call` の隣で、Coreのステップが2つの割り込みで一時停止した実行の `host.fork()`（#394）：フォークは、保留中の呼び出しの `core_interrupt_id` が指す割り込みに答え、もう一方のノードはフォークの中で再び質問する。完了した呼び出しは、再送信も再課金もされない。インメモリとSQLiteのジャーナルの両方を確認する |
 | `test_20_javascript_fork.py` | それぞれにバインド済みの `llm_call` を持つ2回目の `callCore` で一時停止した、JavaScriptの `main()` の `host.fork()`（#395）：フォークは、コマンドジャーナルから最初のコマンドをリプレイし、一時停止中の呼び出しを回答とともに再開して完了する。どちらのモデル呼び出しも、再送信も再課金もされない。インメモリとSQLiteのジャーナルの両方を確認する |
 | `test_21_fork_recorded_failure.py` | 収集を行う `ng.all` が、バインド済みの `llm_call` を拒否されたメンバーを記録した、JavaScriptの `main()` の `host.fork()`（#398）：フォークは、記録されたプロバイダーのエビデンスを自分自身に再バインドし、一時停止中のメンバーに答え、記録された失敗をそのエビデンスとともに報告する。どちらの呼び出しも再送信されない。インメモリとSQLiteのジャーナルの両方を確認する |
+| `test_22_fork_provider_journal_notice.py` | `host.fork()` とプロバイダー呼び出しのジャーナル（#431）：終了したバインド済みの `llm_call` の隣で一時停止した実行をインメモリでフォークすると、返されたハンドルの `notices` が記録された呼び出しを知らせ（`P_FORK_PROVIDER_CALLS_NOT_JOURNALED`）、フォークは通知がない場合と同じ送信と課金で完了する。SQLiteのジャーナルを使う場合と、プロバイダー呼び出しをしていない実行のフォークには通知がなく、`start()` と `resume()` のハンドルにもない |
 
 `support.py` には、共有のPythonのノード、条件、レジストリ、予算、JavaScriptのビルダーが入っています。
 

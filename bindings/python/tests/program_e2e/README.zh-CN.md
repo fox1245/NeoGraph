@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=9b2d35cd43bd0d5aa5e954c4e92892fe542c6684dfb785ae31ae0f2911ab610e -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=zh-CN source_sha256=0d905e4f74f709d13c602dc998ce44c80e59274742fe7481e4d4dad02652303a -->
 # Program API 端到端场景
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -30,6 +30,7 @@
 | `test_19_fork_interrupt_identity.py` | 对一个 Core 步骤在两个中断上暂停、且旁边有一个已完成的绑定 `llm_call` 的运行执行 `host.fork()`（#394）：fork 回答待处理调用的 `core_interrupt_id` 所指明的那个中断，另一个节点在 fork 中重新提问，已完成的调用永远不会重发或再次计费；分别在内存中和使用 SQLite journal |
 | `test_20_javascript_fork.py` | 对一个 JavaScript `main()` 执行 `host.fork()`，它在第二个 `callCore` 中暂停，其中各有一个绑定的 `llm_call`（#395）：fork 从命令 journal 重放第一条命令，带着回应恢复暂停的调用并完成，两次模型调用都不会再发送或再次计费；分别在内存中和使用 SQLite journal |
 | `test_21_fork_recorded_failure.py` | 对一个 JavaScript `main()` 执行 `host.fork()`，它的收集式 `ng.all` 记录了一个绑定 `llm_call` 被拒绝的成员（#398）：fork 把已记录的 provider 证据重新绑定到自己，回应暂停的成员，并连同证据一起报告已记录的失败，两次调用都不会再发送；分别在内存中和使用 SQLite journal |
+| `test_22_fork_provider_journal_notice.py` | `host.fork()` 与 provider 调用 journal（#431）：在内存中 fork 一个暂停在已完成的绑定 `llm_call` 旁边的运行，返回的句柄的 `notices` 会指出已记录的调用（`P_FORK_PROVIDER_CALLS_NOT_JOURNALED`），fork 照常完成，发送和计费的内容与没有通知时相同；使用 SQLite journal 时，以及对没有 provider 调用的运行做 fork 时，都没有通知，`start()` 和 `resume()` 的句柄上也没有 |
 
 `support.py` 放着共用的 Python 节点、条件、注册表、预算和 JavaScript 构建器。
 

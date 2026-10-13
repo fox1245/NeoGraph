@@ -480,6 +480,7 @@ public:
                     -> std::optional<ProgramCoreProviderCallBinding> {
                     return journal->bind_priced(context, deployment);
                 };
+                config.core_provider_calls_journaled = true;
             }
 #endif
             if (!config.core_provider_call_resolver) {
@@ -977,10 +978,23 @@ void init_program(py::module_& m) {
         .def_property_readonly("failure", &ProgramResult::failure)
         .def("serialize_canonical", &ProgramResult::serialize_canonical);
 
+    py::class_<ProgramNotice>(m, "ProgramNotice",
+        "A fact the runtime reports about how it started a run. It is not an error and does "
+        "not change the run's outcome.")
+        .def_readonly("code", &ProgramNotice::code)
+        .def_readonly("message", &ProgramNotice::message)
+        .def_property_readonly("witness", [](const ProgramNotice& value) { return json_to_py(value.witness); })
+        .def("__eq__", [](const ProgramNotice& left, const ProgramNotice& right) { return left == right; }, py::is_operator());
+
     py::class_<ProgramHandle>(m, "ProgramHandle")
         .def_property_readonly("run_id", &ProgramHandle::run_id)
         .def_property_readonly("program_version_id", &ProgramHandle::program_version_id)
         .def_property_readonly("attempt", &ProgramHandle::attempt)
+        .def_property_readonly("notices", &ProgramHandle::notices,
+            "Notices the runtime gave when the call that returned this handle created the run. "
+            "Only host.fork() gives one: P_FORK_PROVIDER_CALLS_NOT_JOURNALED, when the host has "
+            "no durable provider-call journal (no sqlite_directory) and the paused attempt "
+            "recorded provider calls in the paused operation. Empty for every other handle.")
         .def("cancel", &ProgramHandle::cancel)
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())
         .def("try_result", &ProgramHandle::try_result);
@@ -1072,7 +1086,11 @@ void init_program(py::module_& m) {
              "defaults to the run's exact checkpoint and pending_id to its single awaiting call. "
              "The fork "
              "replays what the paused run finished, as resume does: a finished node or Send "
-             "is neither run nor charged again (#390).");
+             "is neither run nor charged again (#390). A node that runs again in the fork "
+             "replays the provider calls it made before it asked only from a durable "
+             "provider-call journal, which a host has when it has sqlite_directory; without "
+             "one it sends and charges them again, and the returned handle's notices name "
+             "the calls the paused attempt recorded (P_FORK_PROVIDER_CALLS_NOT_JOURNALED).");
 }
 
 }  // namespace neograph::pybind

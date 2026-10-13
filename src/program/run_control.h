@@ -6,6 +6,7 @@
 #include <neograph/program/core_tool_grant.h>
 #include <neograph/program/core_provider_call.h>
 #include <neograph/program/graph_migration.h>
+#include <neograph/program/handle.h>
 #include <neograph/program/journal.h>
 #include <neograph/program/module.h>
 #include <neograph/program/result.h>
@@ -230,6 +231,8 @@ public:
         std::uint64_t max_attempt = 0; ///< The source's attempt at the fork.
     };
     std::optional<ForkProviderReplay> fork_provider_replay;
+    /// #431: what ProgramHandle::notices() returns; set before the attempt starts.
+    std::vector<ProgramNotice> notices;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;

@@ -79,7 +79,8 @@ using ProgramCoreProviderCallResolver = std::function<
  * the compiled-in price catalog, its upper bound is reserved before dispatch
  * (a call that cannot be bounded, or does not fit, is refused before it is
  * sent), and it is settled once from its outcome. It keeps no durable
- * journal; SQLiteProgramProviderCallJournal::bind_priced adds crash-safe replay.
+ * journal, so a node that runs again sends its calls again, and so does a fork;
+ * SQLiteProgramProviderCallJournal::bind_priced adds crash-safe replay.
  */
 NEOGRAPH_PROGRAM_API ProgramCoreProviderCallBinding bind_priced_provider_call(
     const ProgramCoreProviderCallContext& context);

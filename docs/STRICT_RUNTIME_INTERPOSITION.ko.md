@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=66add7e0d22c128f1999d5920e393a0a858ba181578a45c282fa158dcfd377b2 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -50,7 +50,7 @@ provider 경계에서는 서로 분리된 불변 값 두 개를 기록합니다.
 
 ## Program Core provider 호출 (독립 실행 Strict Runtime과는 별개)
 
-Program이 내장 Core LLM 노드를 쓰면, 호스트는 `RuntimeConfig::core_provider_call_resolver`를 설정하고 `require_core_provider_call_broker = true`로 지정할 수 있습니다. resolver는 `ProgramCoreProviderCallContext`마다 `<neograph/program/sqlite_provider_call_broker.h>`의 `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`를 반환해야 합니다. 이를 쓰려면 `neograph::program_sqlite`를 링크합니다. 배포 식별자(deployment identity)는 실제 provider 경로, 모델 배포, 권한(자격 증명 버전 포함)에 대해 호스트가 소유하는 SHA-256 식별자여야 합니다. broker는 이 값을 `Provider` 객체에서 알아내지 않습니다. 재시작하거나 재연결할 때는 같은 영속 데이터베이스를 다시 바인딩합니다.
+Program이 내장 Core LLM 노드를 쓰면, 호스트는 `RuntimeConfig::core_provider_call_resolver`를 설정하고 `require_core_provider_call_broker = true`로 지정할 수 있습니다. resolver는 `ProgramCoreProviderCallContext`마다 `<neograph/program/sqlite_provider_call_broker.h>`의 `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`를 반환해야 합니다. 이를 쓰려면 `neograph::program_sqlite`를 링크합니다. 배포 식별자(deployment identity)는 실제 provider 경로, 모델 배포, 권한(자격 증명 버전 포함)에 대해 호스트가 소유하는 SHA-256 식별자여야 합니다. broker는 이 값을 `Provider` 객체에서 알아내지 않습니다. 재시작하거나 재연결할 때는 같은 영속 데이터베이스를 다시 바인딩합니다. `RuntimeConfig::core_provider_calls_journaled = true`도 설정합니다. fork는 이 저널에서 provider 호출을 재생하며, 이 플래그가 있으면 이 호스트의 fork가 `ProgramHandle::notices()`에 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`를 알리지 않습니다.
 
 저널은 호출마다 소유자, 불변 Program 버전, run, operation, Core의 thread/task/node, 내장 호출 순번(ordinal)을 키로 사용하며, 요청 내용이나 Program attempt는 키에 **포함하지 않습니다**. 마커는 전송 전에 SQLite FULL 동기화로 커밋합니다. 이 마커는 전송이 *일어났을 수도 있다*는 뜻일 뿐, provider가 요청을 받았다거나 효과가 정확히 한 번 일어났다는 뜻이 아닙니다. SDK의 Completion/Failure 결과는 불변 값 전체를 인코딩 버전 2로 저장하며, 정확히 바인딩된 재생(replay)에 쓰입니다. 받아들여지지 않았음이 증명된 Failure(전송되지 않았거나, 완료된 HTTP 4xx 응답이 거절한 경우)는 `Failed`로 기록합니다. 전달 여부가 불확실하거나, 예외가 났거나, 정산(settlement) 전에 크래시가 나면 조정(reconciliation)이 필요하며, 조용히 다시 디스패치하는 일은 없습니다. 상태는 `inspect(owner, logical_call_id(context, core_identity))`로 확인합니다. 그다음 `reconcile_success`는 provider 쪽 증거를 독립적으로 검증했고 Completion 결과 전체가 있을 때에만 호출합니다. 스트리밍 호출을 재생(replay)하면 캡처해 둔 결과를 그대로 반환하며 스트림 이벤트를 새로 만들어 내지 않습니다.
 

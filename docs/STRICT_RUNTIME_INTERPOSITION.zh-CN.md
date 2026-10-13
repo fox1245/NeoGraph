@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=66add7e0d22c128f1999d5920e393a0a858ba181578a45c282fa158dcfd377b2 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -71,7 +71,7 @@ Program 使用内置的 Core LLM 节点时，宿主可以设置
 `<neograph/program/sqlite_provider_call_broker.h>` 返回
 `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`；需要链接 `neograph::program_sqlite`。
 部署标识必须是由宿主持有的、对实际 provider 路由、模型部署和权限（包括凭据版本）求出的 SHA-256 标识；
-broker 不会从 `Provider` 对象中自行发现这些信息。重启或重新连接时，要重新绑定同一个持久数据库。
+broker 不会从 `Provider` 对象中自行发现这些信息。重启或重新连接时，要重新绑定同一个持久数据库。还要设置 `RuntimeConfig::core_provider_calls_journaled = true`。fork 会从这个 journal 重放 provider 调用，设置该标志后，这个宿主上的 fork 就不会在 `ProgramHandle::notices()` 中报告 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`。
 
 journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线程/任务/节点以及内置调用的序号，
 作为每次调用的键，**而不是**请求内容或 Program 的尝试。它在传输之前，用 SQLite FULL 同步提交标记。

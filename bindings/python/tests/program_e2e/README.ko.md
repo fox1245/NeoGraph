@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=9b2d35cd43bd0d5aa5e954c4e92892fe542c6684dfb785ae31ae0f2911ab610e -->
+<!-- neograph-i18n: source=bindings/python/tests/program_e2e/README.md locale=ko source_sha256=0d905e4f74f709d13c602dc998ce44c80e59274742fe7481e4d4dad02652303a -->
 # Program API 엔드투엔드 시나리오
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -30,6 +30,7 @@
 | `test_19_fork_interrupt_identity.py` | Core 스텝이 인터럽트 두 개로 일시 중지되고 이미 끝난 바인딩된 `llm_call`이 있는 실행의 `host.fork()`(#394): fork는 pending 호출의 `core_interrupt_id`가 가리키는 인터럽트에 응답하고, 다른 노드는 fork에서 다시 질문한다. 끝난 호출은 다시 보내거나 다시 청구하지 않는다(메모리와 SQLite 저널) |
 | `test_20_javascript_fork.py` | 각 callCore에서 바인딩된 `llm_call`을 호출한 뒤 두 번째 `callCore`에서 일시 중지된 JavaScript `main()`의 `host.fork()`(#395): fork는 첫 번째 command를 command 저널에서 재생(replay)하고, 일시 중지된 호출을 응답과 함께 재개해 완료한다. 두 모델 호출 모두 다시 보내거나 다시 청구하지 않는다(메모리와 SQLite 저널) |
 | `test_21_fork_recorded_failure.py` | 결과를 모으는 `ng.all`이, 바인딩된 `llm_call`이 거부된 멤버를 기록한 JavaScript `main()`의 `host.fork()`(#398): fork는 기록된 provider 증거를 자기 자신에 다시 바인딩하고, 일시 중지된 멤버에 응답하며, 기록된 실패를 증거와 함께 보고한다. 어느 호출도 다시 보내지 않는다(메모리와 SQLite 저널) |
+| `test_22_fork_provider_journal_notice.py` | `host.fork()`와 provider 호출 저널(#431): 끝난 바인딩 `llm_call` 옆에서 일시 중지된 실행을 메모리에서 fork하면, 반환된 핸들의 `notices`가 기록된 호출을 알리고(`P_FORK_PROVIDER_CALLS_NOT_JOURNALED`), fork는 알림이 없을 때와 똑같이 전송하고 과금하며 완료된다. SQLite 저널을 쓸 때와 provider 호출이 없던 실행의 fork에는 알림이 없고, `start()`와 `resume()`의 핸들에도 없다 |
 
 `support.py`에는 공용 Python 노드, 조건, registry, 예산, JavaScript builder가 들어 있습니다.
 

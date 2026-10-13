@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=66add7e0d22c128f1999d5920e393a0a858ba181578a45c282fa158dcfd377b2 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -50,7 +50,7 @@ durable RAW history + admitted artifacts + required Skills/constraints
 
 ## ProgramのCoreのプロバイダー呼び出し（単独のStrictランタイムとは別）
 
-Programが組み込みのCoreのLLMノードを使う場合、ホストは `RuntimeConfig::core_provider_call_resolver` と `require_core_provider_call_broker = true` を設定できます。`ProgramCoreProviderCallContext` ごとに、`<neograph/program/sqlite_provider_call_broker.h>` の `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)` を返します。リンクするのは `neograph::program_sqlite` です。デプロイメントIDは、実際のプロバイダーのルート、モデルのデプロイメント、権限（認証情報のバージョンを含む）を表す、ホストが所有するSHA-256のIDでなければなりません。ブローカーは、これらを `Provider` オブジェクトから見つけ出すことはしません。再起動や再接続のときは、同じ永続データベースを再度バインドしてください。
+Programが組み込みのCoreのLLMノードを使う場合、ホストは `RuntimeConfig::core_provider_call_resolver` と `require_core_provider_call_broker = true` を設定できます。`ProgramCoreProviderCallContext` ごとに、`<neograph/program/sqlite_provider_call_broker.h>` の `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)` を返します。リンクするのは `neograph::program_sqlite` です。デプロイメントIDは、実際のプロバイダーのルート、モデルのデプロイメント、権限（認証情報のバージョンを含む）を表す、ホストが所有するSHA-256のIDでなければなりません。ブローカーは、これらを `Provider` オブジェクトから見つけ出すことはしません。再起動や再接続のときは、同じ永続データベースを再度バインドしてください。`RuntimeConfig::core_provider_calls_journaled = true` も設定してください。フォークはこのジャーナルからプロバイダー呼び出しをリプレイするので、このフラグを設定すれば、このホストでのフォークが `ProgramHandle::notices()` に `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` を出すことはありません。
 
 ジャーナルは、各呼び出しを、オーナー、変更できないProgramバージョン、実行、オペレーション、Coreのスレッド／タスク／ノード、組み込みの呼び出し序数で識別します。リクエストの内容やProgramの試行では識別**しません**。マーカーは、トランスポートの前に、SQLiteのFULL同期でコミットされます。このマーカーが意味するのは、トランスポートが行われた*可能性がある*ことです。プロバイダーが受け取ったことや、効果がちょうど1回起きたことを意味しません。変更できないSDKのCompletionまたはFailureの結果は、そのままエンコードバージョン2で保存され、正確に結び付いたリプレイに使われます。受け付けられていないことが証明されたFailure（送信されなかった場合と、完了したHTTP 4xx応答が拒否した場合）は `Failed` を記録します。配送が不確かな場合、例外が起きた場合、精算の前にクラッシュした場合は、照合が必要で、黙って再ディスパッチされることはありません。状態を確認するには `inspect(owner, logical_call_id(context, core_identity))` を使います。`reconcile_success` を使うのは、プロバイダー側の独立して検証したエビデンスと、完全なCompletionの結果がある場合だけです。リプレイされたストリーミングの呼び出しは、取得済みの結果を返し、ストリームのイベントを合成することはありません。
 

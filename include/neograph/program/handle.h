@@ -27,6 +27,22 @@ class ProgramRuntime;
 struct ProgramResume;
 struct ProgramEffectResolution;
 
+/**
+ * A fact about how the runtime started a run that the caller should know. A
+ * notice is not an error: it never changes the run's outcome. It belongs to
+ * the handle the call returned and is not stored with the run.
+ */
+struct ProgramNotice {
+    /// Stable identifier, for example P_FORK_PROVIDER_CALLS_NOT_JOURNALED.
+    std::string code;
+    /// One sentence for a person.
+    std::string message;
+    /// The facts the message summarizes, as JSON.
+    json        witness;
+
+    bool operator==(const ProgramNotice&) const = default;
+};
+
 class NEOGRAPH_PROGRAM_API ProgramHandle {
 public:
     ProgramHandle(const ProgramHandle&) noexcept            = default;
@@ -52,6 +68,15 @@ public:
     /** Hold the source before it consumes the next completed top-level checkpoint. */
     ProgramHandoff                        next_handoff() const;
     ProgramRunRecord                      snapshot() const;
+    /**
+     * Notices the runtime gave when the call that returned this handle
+     * created the run. Only ProgramRuntime::fork gives one: a fork that
+     * cannot replay provider calls (RuntimeConfig::core_provider_calls_journaled)
+     * names the calls of the paused operation it may send and charge again.
+     * Empty for every other handle, including one from reconnect() or from
+     * a repeated fork() of the same run.
+     */
+    std::vector<ProgramNotice>            notices() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;
     ProgramHandle reconcile(ProgramRuntime& runtime,
                             ProgramEffectResolution resolution) const;

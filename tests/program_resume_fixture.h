@@ -656,6 +656,7 @@ public:
         runtime.transitions                       = transitions;
         runtime.scheduler_threads                 = 2;
         runtime.require_core_provider_call_broker = true;
+        runtime.core_provider_calls_journaled     = static_cast<bool>(journal_);
         if (journal_) {
             runtime.core_provider_call_resolver =
                 [journal = journal_, deployment = program::detail::provider_deployment_identity("resume-model")](
@@ -722,8 +723,8 @@ public:
                                                 {}})
             .wait();
     }
-    ProgramResult fork(const ProgramVersion& version, const ProgramResult& paused, const std::string& target,
-                       json value, std::string pending_id) {
+    ProgramHandle start_fork(const ProgramVersion& version, const ProgramResult& paused, const std::string& target,
+                             json value, std::string pending_id) {
         // The scenarios compare what the fork is charged with what the source was, so
         // the fork keeps all the model budget; it takes a share of the rest (#414).
         auto share                 = neograph::test::fork_share(paused.remaining_budget());
@@ -731,10 +732,13 @@ public:
         share.monetary_microunits  = paused.remaining_budget().monetary_microunits;
         ProgramInvocation invocation{json::object(), share, "trace-fork", {}};
         invocation.requested_run_id = target;
-        return runtime_
-            ->fork(kOwner, ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id}, version,
-                   std::move(invocation), ProgramResume{std::move(value), "trace-fork-resume", {}, std::move(pending_id)})
-            .wait();
+        return runtime_->fork(kOwner, ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id},
+                              version, std::move(invocation),
+                              ProgramResume{std::move(value), "trace-fork-resume", {}, std::move(pending_id)});
+    }
+    ProgramResult fork(const ProgramVersion& version, const ProgramResult& paused, const std::string& target,
+                       json value, std::string pending_id) {
+        return start_fork(version, paused, target, std::move(value), std::move(pending_id)).wait();
     }
 
 private:

@@ -13,6 +13,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ## [未发布]
 
+### 变更
+
+- **需要重新构建 C++ 使用方：`RuntimeConfig` 新增了成员，`ProgramHandle` 新增了函数（#431）。** `RuntimeConfig` 新增 `core_provider_calls_journaled`，`ProgramHandle` 新增 `notices()`，`ProgramNotice` 为新增。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **在没有持久 provider 调用 journal 的宿主上，fork 会告知这一点（#431）。** fork 只从持久的 provider 调用 journal（`SQLiteProgramProviderCallJournal`，`LocalProgramHost` 在设置了 `sqlite_directory` 时有）重放暂停的调用所发出的 provider 调用。进程内的 broker 没有 journal，所以在 fork 中再次运行的节点会把先前的调用再发送一次、再计一次费，这一点没有变。**行为变化：** 当 `RuntimeConfig::core_provider_calls_journaled` 为 `false`（默认值），且暂停的那次尝试在暂停的操作里记录了已计价的 provider 调用时，`ProgramRuntime::fork` 返回的句柄现在带有一条代码为 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` 的 `ProgramNotice`（`ProgramHandle::notices()`，Python 中是 `handle.notices`）。它的 `witness` 列出这些调用（`call_id`、`node`、`model`、`microunits`）及其合计。通知不是错误，也不改变 fork 发送什么、计费多少。在暂停那一步中已完成的节点所发出的调用，会从该步保存的写入重放，所以通知无法说明列出的调用中哪些会在 fork 中再次运行。通知不随运行一起保存，因此 `reconnect()` 和 `resume()` 返回的句柄上没有。resolver 返回 `SQLiteProgramProviderCallJournal` 的 broker 的宿主应设置 `core_provider_calls_journaled = true`（`LocalProgramHost` 在有 `sqlite_directory` 时会设置）。已写入 Program 指南、Python 绑定指南和参考文档。
+
 ### 修复
 
 - **Python 也能关闭构建时的 lint（#415）。** `GraphEngine.compile` 新增关键字 `stderr_notices`，默认值为 `True`，与 C++ 的 `EngineConfig::stderr_notices` 相同。设为 `stderr_notices=False` 后，不再输出 strict 图的 lint（例如针对只由 `Send` 或 `Command.goto` 启动的节点的 E7），也不再输出 fan-out 串行执行的一次性提示；校验错误仍然会抛出。E7 本身没有变化：图定义里没有声明动态目标的地方，校验器无法区分由 Send 启动的节点和没有任何入口的节点，文档现已写明这一点。文档还说明，指向 Send 目标的静态边不能用来消除 lint：目标会在所有 Send 结束后，在共享状态上再多运行一次。不传这个关键字的代码行为不变，图的运行方式也不变。

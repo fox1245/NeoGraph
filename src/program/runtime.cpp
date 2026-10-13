@@ -427,6 +427,47 @@ std::optional<detail::RunControl::ForkProviderReplay> fork_provider_replay_of(
         events.front().attempt - 1};
 }
 
+// #431: a fork on a host whose provider calls are not journaled has no record
+// to replay the paused invocation's calls from, so a call the fork runs again
+// is sent and charged again. The notice names the calls the paused attempt
+// recorded in the paused operation: the runtime cannot tell which of them the
+// fork runs again (a call of a node that finished in the paused step is
+// replayed from the step's saved writes). It is given only when the paused
+// attempt recorded such a call.
+std::vector<ProgramNotice> fork_provider_call_notices(bool journaled,
+                                                      const ProgramRunRecord& source) {
+    const auto terminal = source.terminal_result();
+    if (journaled || !terminal) return {};
+    std::string operation;
+    if (const auto input = source.pending_input())
+        operation = input->operation_id();
+    else if (const auto effect = source.pending_effect())
+        operation = effect->operation_id();
+    json          calls = json::array();
+    std::uint64_t microunits = 0;
+    for (const auto& record : terminal->monetary_records()) {
+        if (record.operation_id != operation) continue;
+        calls.push_back(json{{"call_id", record.call_id},
+                             {"node", record.node},
+                             {"model", record.model},
+                             {"microunits", record.microunits}});
+        microunits += record.microunits;
+    }
+    if (calls.empty()) return {};
+    const auto count = calls.size();
+    json       witness{{"source_run_id", source.run_id()},
+                       {"source_attempt", terminal->attempt()},
+                       {"operation_id", operation},
+                       {"calls", std::move(calls)},
+                       {"microunits", microunits}};
+    return {ProgramNotice{
+        "P_FORK_PROVIDER_CALLS_NOT_JOURNALED",
+        "This host keeps no durable provider-call journal, so the fork cannot replay provider "
+        "calls: a call that the fork runs again is sent and charged again. The paused attempt "
+        "recorded " + std::to_string(count) + " provider call(s) in operation " + operation + ".",
+        std::move(witness)}};
+}
+
 // #398: the run a recorded result was written by, which its provider
 // evidence is bound to (owner scope aside).
 struct RecordCustody {
@@ -4453,6 +4494,9 @@ ProgramHandoff ProgramHandle::next_handoff() const {
 ProgramRunRecord ProgramHandle::snapshot() const {
     return control_->snapshot();
 }
+std::vector<ProgramNotice> ProgramHandle::notices() const {
+    return control_->notices;
+}
 ProgramHandle ProgramHandle::resume(ProgramRuntime& runtime, ProgramResume resume_value) const {
     return runtime.resume(control_->owner_scope, control_->run_id, std::move(resume_value));
 }
@@ -6518,6 +6562,9 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         checkpoint_identity.core_generation_id,
         core_thread_identity(source_record->run_id(), checkpoint_identity.core_generation_id),
         checkpoint_identity.core_thread_id, source_record->continuation().attempt};
+    // #431: tell the caller when the host cannot replay those calls.
+    control->notices = fork_provider_call_notices(impl_->config.core_provider_calls_journaled,
+                                                  *source_record);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
     control->set_core_provider_call_resolver(

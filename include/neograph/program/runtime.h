@@ -166,6 +166,14 @@ struct ProgramChildQuotaConfig {
       /// Hosts with durable provider effects can forbid raw Core provider calls.
       /// A missing resolver or binding then fails the Core operation closed.
       bool require_core_provider_call_broker = false;
+      /// True when core_provider_call_resolver returns brokers that journal
+      /// every call durably, as SQLiteProgramProviderCallJournal::bind and
+      /// bind_priced do, so a fork replays the provider calls of the paused
+      /// invocation from that journal instead of sending them again. It
+      /// changes nothing the runtime sends. When it is false, a fork whose
+      /// paused attempt recorded provider calls in the paused operation
+      /// reports P_FORK_PROVIDER_CALLS_NOT_JOURNALED in ProgramHandle::notices().
+      bool core_provider_calls_journaled = false;
       /// Host-owned SDK custody for native provider histories and outcomes.
       /// Null never enables a portable/native fallback during durable restore.
       std::shared_ptr<sp::NativeArchive> native_history_archive;
