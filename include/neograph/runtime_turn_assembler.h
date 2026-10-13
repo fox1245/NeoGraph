@@ -60,7 +60,12 @@ public:
                          std::vector<sp::Message> host_instructions,
                          std::vector<sp::Message> trusted_supplemental) const;
 
-    /** Conservative, provider-neutral estimate: three canonical bytes per token. */
+    /**
+     * Provider-neutral heuristic: the encoded request body's bytes, three per
+     * token. It counts the whole encoded request (messages, tool schemas and
+     * provider framing), not only the visible text, and it is not a proven
+     * upper bound of the tokens a provider counts or bills.
+     */
     static std::uint64_t estimate_input_tokens(const PreparedProviderRequest& request);
     /** Canonical digest of dispatch-relevant request data, excluding callback and cancellation identity. */
     static std::string normalized_request_digest(const PreparedProviderRequest& request);

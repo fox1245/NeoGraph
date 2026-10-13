@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=a59f41ed236e52e37f9dfde0999b346c60a33b1b22a8b88f100b5321a4580bb3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=763d878f17fb8f417c49035c6785aa71f7742483270391650738b86bb1e7a20b -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -657,6 +657,10 @@ profile.activate("tenant-a", strict_epoch)
 outcome = profile.invoke(request)
 profile.attach(engine)
 ```
+
+`max_input_tokens` 与对编码后请求的启发式估算值（字节数除以三）比较，不是分词器统计出的数值；参见[上下文预算](STRICT_RUNTIME_INTERPOSITION.md#context-budget)。
+
+与 C++ 一样，这个 profile 由宿主逐步推进：宿主每次 provider 调用前，都要追加 RAW 记录，并激活新的 epoch。如果某次调用提交了 epoch 首次分发之后新增的助手消息或工具消息，就会抛出 `RuntimeError`，错误信息会点明这一契约。`profile.attach(engine)` 之后，在一次 `engine.run()` 内部运行工具循环，就会触发这种情况；参见[宿主逐步推进契约](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract)。
 
 ## HITL 与状态
 

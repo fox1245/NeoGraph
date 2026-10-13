@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=b0839d08e680afa37876cb1515bd58a87a65063e453cbf63e7fb1e195d33a9e6 -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -35,7 +35,88 @@ durable RAW history + admitted artifacts + required Skills/constraints
 - 0이 아닌 입력 토큰 상한
 - 선택 사항으로, 필수 컨텍스트와 Skill 아티팩트의 정확한 식별자
 
-활성화할 수 있는 에포크는 `RuntimeGuaranteeProfile::Strict` 에포크뿐입니다. 프로파일을 `GraphEngine`에 연결하면 내장 소비자(consumer)에 provider 인터포지션과 라이프사이클 Hook이 모두 설치됩니다.
+활성화할 수 있는 에포크는 `RuntimeGuaranteeProfile::Strict` 에포크뿐입니다. 프로파일을 `GraphEngine`에 연결하면 내장 소비자(consumer)에 provider 인터포지션과 라이프사이클 Hook이 모두 설치됩니다. 다만 provider 호출 사이에 컨텍스트를 대신 진행해 주지는 않습니다. [호스트 단계 진행 계약](#host-stepped-contract)을 참고하세요.
+
+<a id="host-stepped-contract"></a>
+## 호스트 단계 진행(host-stepped) 계약
+
+엄격 경로는 provider 요청을 모두 활성 에포크로 만듭니다. 재료는 에포크의 고정된 RAW 범위와 선택된 아티팩트입니다. 그래프나 에이전트가 들고 있는 대화는 읽지 않습니다. 에포크 외에 프롬프트에 들어가는 것은 내장 노드가 채우는 호스트 지침 슬롯과 신뢰하는 보충 입력(trusted supplemental input) 슬롯뿐입니다. 그래서 호스트가 기록하기 전에는 NeoGraph가 모델 응답이나 도구 결과를 알 수 없습니다. 계약은 다음과 같습니다.
+
+**호스트는 provider를 호출할 때마다 RAW 레코드를 추가하고 새 에포크를 활성화합니다.**
+
+두 호출 사이에 호스트는 직전 턴(모델 응답, 이어서 도구 결과)을 `ContextStore`에 추가하고, 그 턴까지 RAW 범위에 담은 에포크를 만들어 `StrictRuntimeProfile::activate`로 활성화합니다. 첫 에포크도 사용자 메시지로 같은 방식으로 만듭니다. 아래 코드가 한 단계입니다. `head`는 `store.history_head(feed)`이고, `epoch_sequence`와 `previous_epoch_id`는 마지막 에포크에서 가져옵니다.
+
+```cpp
+for (auto& [message, trust] : turn) {  // the reply (ModelOutput), then the tool results (ToolOutput)
+    RuntimeHistoryRecordData record;
+    record.feed_id = feed.feed_id;
+    record.sequence = ++head.sequence;
+    record.message_id = "message-" + std::to_string(record.sequence);
+    record.trust = trust;
+    record.message = std::move(message);
+    record.predecessor_id = head.record_id;
+    const auto created = RuntimeHistoryRecord::create(std::move(record));
+    if (store.append_history(feed, created, head.record_id) != ContextStoreAppendResult::Appended)
+        throw std::runtime_error("the context feed moved");
+    head.record_id = created.id();
+}
+ContextEpochData next;
+next.run_id = run_id;
+next.sequence = ++epoch_sequence;
+next.predecessor_id = previous_epoch_id;
+next.feed_id = feed.feed_id;
+next.raw_from_sequence = 1;
+next.raw_through_sequence = head.sequence;
+next.raw_window_digest = store.snapshot_history(feed, 1, head.sequence).digest;
+next.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+auto epoch = ContextEpoch::create(std::move(next));
+previous_epoch_id = epoch.id();
+profile.activate(owner_id, std::move(epoch));
+```
+
+NeoGraph에는 실행 도중에 에포크를 진행하는 도우미가 아직 없습니다.
+
+**한 번의 실행 안에서 도는 루프.** 프로파일을 일반 `GraphEngine`에 연결해도 컨텍스트는 진행되지 않습니다. `engine.run()` 한 번 안에서 도구 루프(LLM 호출, 도구 디스패치, LLM 호출. `create_react_graph`가 만드는 구조)가 돌면 두 번째 LLM 호출도 같은 에포크로 실행됩니다. 도구 결과는 그래프 상태에는 있지만 에포크에는 없습니다. provider는 첫 턴의 컨텍스트를 다시 받고, 모델은 도구 결과를 끝내 보지 못하며, 단계 상한이나 예산에 걸려 실행이 멈출 때까지 같은 도구를 계속 요청할 수 있습니다.
+
+그래서 NeoGraph는 이런 호출을 거부합니다. 그래프가 이미 진행시킨 턴의 에포크로 provider 호출이 들어오면 `std::logic_error`를 던집니다. 호출자가 제시한 메시지에 에포크의 첫 디스패치 이후 추가된 어시스턴트 메시지나 도구 메시지가 있고, 호출이 그 메시지를 호스트 지침이나 신뢰하는 보충 입력으로도 싣지 않았다면 턴이 진행된 것으로 봅니다. 오류 메시지는 이 계약을 밝힙니다.
+
+```text
+Strict provider dispatch is host-stepped: the host appends RAW records and activates a new epoch for every provider call. This call presents assistant or tool messages added since the active epoch's first dispatch, so the graph or agent loop advanced inside one run and the provider would not receive them. Append those messages to the context feed and activate a new epoch before this call.
+```
+
+그래프에서는 실패한 노드가 `NodeExecutionError`로 보고합니다. logic error는 재시도하지 않으므로 `attempts()`는 1입니다. `set_runtime_interposition`으로 컨트롤러를 설정한 `llm::Agent`도 두 번째 provider 호출에서 같은 방식으로 실패합니다.
+
+다음은 거부하지 않습니다.
+
+- 같은 턴의 재시도. 노드 재시도나 provider 실패 뒤의 반복 호출은 같은 메시지를 다시 제시합니다.
+- 에포크의 첫 디스패치 때 이미 어시스턴트 메시지나 도구 메시지를 포함하던 대화. 그 메시지들이 기준선입니다.
+- 사용자 메시지만 늘어난 경우. 검사하는 것은 어시스턴트 메시지와 도구 메시지입니다.
+- 늘어난 대화를 신뢰하는 보충 입력으로 넘기는 내장 노드(예: plan-execute 그래프의 executor 노드). 응답과 도구 결과는 provider에 전달되고 조립 영수증에 묶입니다.
+
+에포크를 활성화하거나 `clear()`를 호출하면 제시된 내용을 모두 잊습니다. 컨트롤러는 호출 지점(노드 이름)별로 첫 제시를 기억하며, 에포크마다 서로 다른 제시를 일정한 개수까지만 보관합니다. 그 한도를 넘는 제시는 추적하지 않으므로, 그 경우 검사는 최선 노력(best effort)입니다.
+
+한 대화의 실행은 호스트가 직접 직렬화해야 합니다. 프로파일은 활성 에포크를 하나만 가지며 `thread_id`를 보지 않습니다. [한 대화의 실행](concurrency.md#runs-of-one-conversation)을 참고하세요.
+
+## 컨텍스트 관리 방식 고르기
+
+NeoGraph에는 모델 호출의 컨텍스트를 관리하는 방식이 네 가지 있습니다. 프롬프트를 무엇이 만드는지, 무엇을 보장하는지가 서로 다릅니다.
+
+| 방식 | 프롬프트의 출처 | 보장하는 것 |
+| --- | --- | --- |
+| `messages` 채널 | 노드가 남긴 그대로의 그래프 상태 `messages` 채널. `LLMCallNode`가 이 채널을 보내고 응답을 덧붙이며 `ToolDispatchNode`가 도구 결과를 덧붙이므로, 한 번의 실행 안에서 도구 루프가 동작함 | 그래프 상태로 요청을 만든다는 점, 체크포인트 저장소가 그 상태를 저장할 수 있다는 점. 호출별 영수증, 필수 아티팩트, 컨텍스트 상한은 없음 |
+| `history::compact_history` | 독립된 방식이 아니라 더 짧은 메시지 목록을 돌려주는 도우미. `estimate_tokens`가 한도를 넘으면 오래된 텍스트 전용 앞부분을 모델이 쓴 요약으로 바꾸고 최근 부분은 유지함. 결과는 다른 방식의 입력으로 사용. `RuntimeInterpositionController`를 받는 오버로드는 요약 호출을 그 컨트롤러로 보냄 | 히스토리를 유지했는지 바꿨는지와 그 이유를 알려 주는 상태. 네이티브 재생(replay) 봉인이 있는 히스토리는 그대로 반환. 요약은 모델 출력이므로 사실이나 제약이 요약에 남았다는 증거는 없음. 추정치는 휴리스틱. 에포크와 영수증은 없음 |
+| 기록(Recorded) 프로파일 | `RuntimeInterpositionController`를 거치는 활성 에포크(`RuntimeGuaranteeProfile::Recorded`, 기본값). `ContextStore`의 RAW 범위와 에포크의 아티팩트로 구성. 호스트가 단계를 진행함 | 요청을 정확히 그 에포크로 조립해 조립 영수증에 묶고, 디스패치마다 영수증을 남김. 저장소가 영속적일 필요가 없고 입력 상한을 0으로 둘 수 있으므로, 증거를 얼마나 오래 보존할지와 상한을 둘지는 호스트가 정함 |
+| 엄격(Strict) 프로파일 | 기록 프로파일과 같으며 `StrictRuntimeProfile`을 거침. 호스트가 단계를 진행함 | 기록 프로파일의 보장 전부에 더해, 영속적인 컨텍스트·디스패치 저장소, 호출마다 거는 필수 Hook, 에포크에 반드시 들어 있어야 하는 필수 아티팩트, 예산을 넘는 턴을 디스패치 전에 막는 0이 아닌 입력 상한. 모델이 컨텍스트에 주의를 기울였거나 따랐다는 보장은 없고, 에포크를 대신 진행해 주지도 않음 |
+
+`messages` 채널에서 에포크로 옮기면 컨텍스트의 주인이 바뀝니다. 그래프 상태는 더 이상 프롬프트의 원천이 아니고, RAW 히스토리는 호스트가 보관합니다.
+
+## 컨텍스트 예산
+
+엄격 경로는 조립한 요청마다 입력 상한(`max_input_tokens`)과 비교하고, 예산을 넘는 턴은 디스패치 전에 `ContextBudgetBlocked`로 막습니다. 조립 영수증에는 사용한 추정치(`estimated_input_tokens`)와 그중 필수 아티팩트 텍스트의 몫(`mandatory_input_tokens`)이 기록됩니다.
+
+추정치는 `RuntimeTurnAssembler::estimate_input_tokens`입니다. 인코딩된 요청 본문의 바이트 길이를 3으로 나눠 올림한 값입니다. 휴리스틱이며 증명된 상한이 아닙니다. provider의 토크나이저에서 나온 값이 아니므로 provider가 세는 수보다 작을 수도 클 수도 있습니다. 눈에 보이는 텍스트만이 아니라 인코딩된 요청 전체를 세며, 도구 스키마, 필드 이름, provider 프레이밍도 바이트에 들어갑니다. `max_input_tokens`는 지나치게 큰 요청을 막는 안전장치로 보고, provider가 보고하거나 청구하는 수에 대한 약속으로 보지 마세요. `mandatory_input_tokens`는 필수 아티팩트의 텍스트에만 같은 비율을 적용합니다.
+
+디스패치 토큰 예약은 별개의 리소스 계약입니다. run에 모델 토큰 예산이 있으면 디스패치마다 모델의 입력 한도에 출력 허용량을 더한 만큼을 시도 가능한 횟수만큼 예약하며, 이 추정치는 쓰지 않습니다.
 
 ## provider 결과의 수명 주기
 
@@ -75,6 +156,37 @@ RPC Hook이 만든 아티팩트는 증거일 뿐 권한이 아닙니다. `Contex
 `RuntimeContextRequirements`는 필수 아티팩트 ID 전체와, 그중 `RequiredSkill` 아티팩트여야 하는 부분집합을 구분합니다. `HardConstraint`는 필수 아티팩트 전용 종류입니다. 필수 아티팩트는 모두 활성 에포크에서 선택되어야 하고 `required=true`를 유지해야 하며, 필수 토큰 수에 포함됩니다.
 
 `ContextTransformReceipt`는 v1에서 일부러 보수적으로 설계했습니다. 변환기는 선택 증거를 교체하거나 압축할 수 있지만, 필수 입력 아티팩트의 ID는 모두 출력 집합에 바이트 단위로 똑같이 들어 있어야 합니다. 바꿔 쓴(paraphrase) 내용은 제약이 보존되었다는 증명으로 인정하지 않습니다.
+
+## 아티팩트 배치
+
+아티팩트의 `placement`는 그 텍스트가 RAW 메시지 사이 어디에 들어가는지를 정합니다. 어셈블러는 다음 순서로 프롬프트를 만듭니다. 같은 배치 안에서는 `priority`가 높은 쪽이 먼저이고, 그다음 `producer_id`, `id` 순입니다.
+
+```text
+host instructions
+BeforeHistory artifacts
+RAW messages before the latest user message
+BeforeLatestUser artifacts
+latest user message
+AfterLatestUser artifacts
+RAW messages after the latest user message
+AfterHistory artifacts
+trusted supplemental input
+```
+
+턴이 바뀌어도 그대로인 아티팩트는 `BeforeHistory`에 두세요. 기본 배치는 `BeforeLatestUser`이므로, 배치를 지정하지 않고 만든 아티팩트는 턴마다 움직입니다.
+
+- `BeforeLatestUser`와 `AfterLatestUser`는 가장 최근 사용자 메시지에 고정됩니다. 새 사용자 메시지가 오면 아티팩트도 함께 움직이며, 프롬프트는 아티팩트의 이전 위치부터 이전 프롬프트와 달라집니다. 이 두 배치에는 RAW 윈도에 사용자 메시지가 있어야 하며, 없으면 조립이 실패합니다.
+- `AfterHistory`는 항상 맨 끝입니다. 앞쪽 히스토리는 늘어나지만, 그 앞부분의 프롬프트는 바꾸지 않습니다.
+- `BeforeHistory`는 호스트 지침 바로 뒤에 오며 히스토리와 무관합니다. 아티팩트 집합과 우선순위가 같으면 텍스트와 위치도 같습니다.
+
+아티팩트 집합이 바뀌거나 RAW 윈도가 가장 오래된 레코드를 버리면, 그 지점부터 프롬프트가 달라집니다. 프롬프트의 앞부분을 캐시하는 provider는 첫 바이트부터 이전 요청과 같은 부분만 재사용할 수 있습니다. 배치가 캐시 적중에 미치는 영향은 NeoGraph에서 아직 측정하지 않았습니다.
+
+`RequiredSkill`과 `HardConstraint` 아티팩트는 System 메시지로, 나머지 종류는 User 메시지로 렌더링됩니다. System 메시지가 어떻게 처리되는지는 provider 계열에 따라 다릅니다.
+
+- `anthropic.messages`, `google.generate`, `google.interactions`에서는 요청 빌더가 모든 System 메시지를 배치와 상관없이 최상위 system 필드로 옮깁니다(빈 줄로 구분하며 조립된 순서대로). 그러면 Skill이나 제약의 배치는 대화 안의 위치가 아니라 system 텍스트들 사이의 순서만 정합니다.
+- `openai.chat`과 `openai.responses`에서는 System 메시지가 배치가 정한 자리에 그대로 남습니다.
+
+요청의 시작 부분을 안정적으로 유지하려면 System 역할 아티팩트의 텍스트를 턴마다 바꾸지 마세요. 여기까지는 현재의 조립 방식에 대한 설명입니다. 기본값과 계열별 규칙은 검토 중이며, 바뀌면 조립되는 바이트가 달라집니다.
 
 ## 런타임 개발자 지침
 

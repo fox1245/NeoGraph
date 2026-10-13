@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=7b28f6ab7b0b2e770dc3e78b5fb91e5c0b4a0e984f0f7f5e92da337753756d7a -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=ko source_sha256=6a70472a787f8ffaece52d4630a02370df682588e64986fd104f49284ad21a2d -->
 # 동시성과 비동기
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -34,6 +34,17 @@ auto result = neograph::async::run_sync(engine->run_async(run));
 - 노드 인스턴스는 실행 사이에 재사용됩니다. 실행별 임시 상태는 채널에 두고, 사용자 정의 노드, provider, 도구, 저장소는 상태가 없거나 동기화되어야 합니다. 번들된 인메모리 저장소는 뮤텍스를 사용합니다.
 
 provider 호출은 준비된 요청과 런타임 클라이언트를 직접 소유합니다. C++ 이벤트 뷰는 콜백 안에서만 유효하므로 보관할 데이터는 복사해야 합니다. 네이티브 재생(replay) 상태와 회계 권한에는 이식 가능한 JSON으로 재구성한 것이 아니라 실제 보관(custody)이 필요합니다. [비동기 가이드](ASYNC_GUIDE.md)를 참고하세요.
+
+## 한 대화의 실행
+
+한 대화는 두 계층에 저장될 수 있고, 두 계층은 동시에 쓰는 쪽을 서로 다르게 다룹니다.
+
+- **컨텍스트 피드**는 실패 시 차단(fail closed)합니다. `ContextStore::append_history`는 쓰는 쪽이 기대하는 head를 받습니다. 기대한 head, 시퀀스, 선행 레코드가 피드의 현재 값과 다른 추가는 `Conflict`를 반환하고 아무것도 저장하지 않으므로, 쓰는 쪽 둘이 같은 head를 함께 이을 수 없습니다. 이미 저장된 레코드를 똑같이 다시 추가하면 head가 움직인 뒤에도 `AlreadyPresent`를 반환합니다.
+- **체크포인트 저장소**는 `thread_id`마다 마지막에 쓴 쪽이 이깁니다(last-writer-wins). 호출 하나는 원자적이지만 호출의 연속은 그렇지 않습니다. 같은 `thread_id`의 실행 둘이 겹치면 `save_checkpoint` 호출이 정해진 순서 없이 섞이고, 마지막 저장이 남으며, `load_latest`는 마지막으로 저장한 쪽의 체크포인트를 돌려줍니다. 엔진도 저장소도 두 번째 실행을 거부하지 않습니다.
+
+같은 `thread_id`(와 같은 피드)의 실행과 재개를 직렬화하는 일은 호스트의 몫입니다. 프로세스가 여러 개일 때도 마찬가지입니다. 엄격 프로파일은 이 일을 하지 않습니다. 프로파일은 호출자 전체에 활성 에포크 하나만 두고 `thread_id`를 보지 않습니다. 한 대화에 요청이 겹치는 것은 대개 우연한 사고 때문입니다. 재시도된 웹훅이나 더블 클릭이 그 예입니다. 엔진에 닿기 전에 호스트에서 대기시키거나 거부하세요.
+
+프로세스 내부 가드를 계획하고 있습니다. 같은 `thread_id`의 실행이나 재개가 진행 중일 때 두 번째 요청을 거부하는 방식입니다. 이 가드는 프로세스 하나만 대상으로 합니다. 가드가 생기기 전에는 NeoGraph가 같은 `thread_id`의 실행 둘을 막지 않습니다. [호스트 단계 진행 계약](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract)도 참고하세요.
 
 ## 동기 요청의 승인(admission) 한도
 

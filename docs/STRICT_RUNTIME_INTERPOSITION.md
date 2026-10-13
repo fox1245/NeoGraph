@@ -43,7 +43,139 @@ only registered nodes and cannot manufacture that authority.
 
 Only a `RuntimeGuaranteeProfile::Strict` epoch may be activated. Attaching the
 profile to `GraphEngine` installs both provider interposition and lifecycle
-Hooks on built-in consumers.
+Hooks on built-in consumers. It does not step the context between provider
+calls; see [Host-stepped contract](#host-stepped-contract).
+
+## Host-stepped contract
+
+The strict path builds every provider request from the active epoch: its fixed
+RAW range and its selected artifacts. It does not read the conversation that a
+graph or an agent holds. Besides the epoch, only the host-instruction and trusted
+supplemental slots that built-in nodes fill reach the prompt. NeoGraph therefore
+cannot see a model reply or a tool result until the host has recorded it. The
+contract is:
+
+**The host appends RAW records and activates a new epoch for every provider
+call.**
+
+Between two calls the host appends the previous turn (the model's reply, then
+the tool results) to the `ContextStore`, builds an epoch whose RAW range covers
+it, and activates that epoch with `StrictRuntimeProfile::activate`. The first
+epoch is built the same way from the user's messages. The code below is one
+step. `head` is `store.history_head(feed)`, and `epoch_sequence` and
+`previous_epoch_id` come from the last epoch.
+
+```cpp
+for (auto& [message, trust] : turn) {  // the reply (ModelOutput), then the tool results (ToolOutput)
+    RuntimeHistoryRecordData record;
+    record.feed_id = feed.feed_id;
+    record.sequence = ++head.sequence;
+    record.message_id = "message-" + std::to_string(record.sequence);
+    record.trust = trust;
+    record.message = std::move(message);
+    record.predecessor_id = head.record_id;
+    const auto created = RuntimeHistoryRecord::create(std::move(record));
+    if (store.append_history(feed, created, head.record_id) != ContextStoreAppendResult::Appended)
+        throw std::runtime_error("the context feed moved");
+    head.record_id = created.id();
+}
+ContextEpochData next;
+next.run_id = run_id;
+next.sequence = ++epoch_sequence;
+next.predecessor_id = previous_epoch_id;
+next.feed_id = feed.feed_id;
+next.raw_from_sequence = 1;
+next.raw_through_sequence = head.sequence;
+next.raw_window_digest = store.snapshot_history(feed, 1, head.sequence).digest;
+next.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+auto epoch = ContextEpoch::create(std::move(next));
+previous_epoch_id = epoch.id();
+profile.activate(owner_id, std::move(epoch));
+```
+
+NeoGraph has no helper that steps the epoch inside a run yet.
+
+**A loop inside one run.** Attaching the profile to a plain `GraphEngine` does
+not step the context. In a tool loop inside one `engine.run()` (LLM call, tool
+dispatch, LLM call, as `create_react_graph` builds it), the second LLM call
+would run under the same epoch. The graph state holds the tool results, but the
+epoch does not. The provider would receive the first turn's context again, the
+model would never see the tool results, and it could ask for the same tool until
+the step limit or a budget stops the run.
+
+NeoGraph refuses that call instead. When a provider call arrives for an epoch
+whose turn the graph has already advanced, it throws `std::logic_error`. A turn
+counts as advanced when the messages the caller presents hold assistant or tool
+messages that were added since the epoch's first dispatch and that the call does
+not also carry as host instructions or trusted supplemental input. The error
+names the contract:
+
+```text
+Strict provider dispatch is host-stepped: the host appends RAW records and activates a new epoch for every provider call. This call presents assistant or tool messages added since the active epoch's first dispatch, so the graph or agent loop advanced inside one run and the provider would not receive them. Append those messages to the context feed and activate a new epoch before this call.
+```
+
+In a graph, the failing node reports it as a `NodeExecutionError`. A logic
+error is not retried, so `attempts()` is 1. `llm::Agent` with a controller set
+through `set_runtime_interposition` fails the same way on its second provider
+call.
+
+The check does not refuse:
+
+- A retry of the same turn. A node retry, or a repeated call after a provider
+  failure, presents the same messages again.
+- A conversation that already held assistant or tool messages at the epoch's
+  first dispatch. Those messages are the baseline.
+- Growth by user messages alone. The check looks for assistant and tool messages.
+- A built-in node that passes its growing conversation as trusted supplemental
+  input, such as the plan executor. Its replies and tool results reach the
+  provider, and the assembly receipt binds them.
+
+Activating an epoch, or `clear()`, forgets what was presented. The controller
+keeps the first presentation of each call site (the node name) for a bounded
+number of distinct presentations per epoch. A presentation past that limit is not
+tracked, so the check is best effort there.
+
+Serialize the runs of one conversation yourself; the profile holds one active
+epoch and does not look at `thread_id`. See
+[Runs of one conversation](concurrency.md#runs-of-one-conversation).
+
+## Choosing how to manage context
+
+NeoGraph has four ways to manage the context of a model call. They differ in
+what builds the prompt and in what is guaranteed.
+
+| Path | The prompt comes from | What it guarantees |
+| --- | --- | --- |
+| `messages` channel | The `messages` channel of the graph state, as the nodes leave it. `LLMCallNode` sends it and appends the reply, `ToolDispatchNode` appends the tool results, so a tool loop inside one run works. | The request is built from the graph state, and a checkpoint store can save that state. No receipt per call, no required artifact, no context ceiling. |
+| `history::compact_history` | Not a path of its own. It is a helper that returns a shorter message list: when `estimate_tokens` is over the limit, it replaces an old text-only prefix with a model-written summary and keeps the recent tail. You use the result as the input of another path. The overload that takes a `RuntimeInterpositionController` sends the summary call through it. | A status that says why the history was kept or replaced, and history that holds native replay seals is returned unchanged. The summary is model output: nothing proves that a fact or a constraint survived it. The estimate is a heuristic. No epoch, no receipt. |
+| Recorded profile | The active epoch (`RuntimeGuaranteeProfile::Recorded`, the default) through a `RuntimeInterpositionController`: its RAW range from the `ContextStore` plus its artifacts. Host-stepped. | The request is assembled from exactly that epoch and bound to an assembly receipt, and every dispatch has a receipt. The stores need not be durable and the input ceiling may be zero, so how long the evidence lasts, and whether a ceiling applies, is the host's choice. |
+| Strict profile | The same as the recorded profile, through `StrictRuntimeProfile`. Host-stepped. | Everything in the recorded row, with durable context and dispatch stores, mandatory Hooks around each call, required artifacts that must be in the epoch, and a non-zero input ceiling that blocks an over-budget turn before dispatch. It does not guarantee that the model attended to or obeyed the context, and it does not step the epoch for you. |
+
+Moving from the `messages` channel to an epoch changes who owns the context: the
+graph state stops being the source of the prompt, and the host keeps the RAW
+history.
+
+## Context budget
+
+The strict path checks every assembled request against the input ceiling
+(`max_input_tokens`) and blocks an over-budget turn before dispatch with
+`ContextBudgetBlocked`. The assembly receipt records the estimate it used
+(`estimated_input_tokens`) and the share that is required artifact text
+(`mandatory_input_tokens`).
+
+The estimate is `RuntimeTurnAssembler::estimate_input_tokens`: the length in
+bytes of the encoded request body, divided by three and rounded up. It is a
+heuristic, not a proven upper bound. It is not derived from any provider's
+tokenizer, so it can be below or above the number a provider counts. It counts
+the encoded request, not only the visible text: tool schemas, field names and
+provider framing add bytes too. Treat `max_input_tokens` as a guard against
+oversized requests, not as a promise about the count a provider reports or bills.
+`mandatory_input_tokens` uses the same rate on the text of the required
+artifacts only.
+
+The dispatch token reservation is a separate resource contract. When a run
+has a model-token budget, each dispatch reserves the model's input limit plus the
+output allowance for every attempt it may make, and does not use this estimate.
 
 ## Provider outcome lifecycle
 
@@ -148,6 +280,60 @@ count.
 may replace or compress optional evidence, but every required input artifact ID
 must appear byte-identically in the output set. A paraphrase is not accepted as
 a proof of constraint preservation.
+
+## Artifact placement
+
+An artifact's `placement` decides where its text goes among the RAW messages.
+The assembler builds the prompt in this order. Within one placement, artifacts
+are ordered by higher `priority` first, then by `producer_id` and `id`.
+
+```text
+host instructions
+BeforeHistory artifacts
+RAW messages before the latest user message
+BeforeLatestUser artifacts
+latest user message
+AfterLatestUser artifacts
+RAW messages after the latest user message
+AfterHistory artifacts
+trusted supplemental input
+```
+
+Put artifacts that stay the same from turn to turn at `BeforeHistory`. The
+default placement is `BeforeLatestUser`, so an artifact created without a
+placement moves on every turn:
+
+- `BeforeLatestUser` and `AfterLatestUser` are anchored to the latest user
+  message. When a new user message arrives, the artifact moves with it, and the
+  prompt differs from the previous one from the artifact's old position onward.
+  These two placements need a user message in the RAW window; assembly fails
+  without one.
+- `AfterHistory` is always last. The history in front of it grows, but it does
+  not change the part of the prompt in front of it.
+- `BeforeHistory` comes right after the host instructions and does not depend on
+  the history. Its text and position stay the same while the artifact set and
+  priorities stay the same.
+
+A change of the artifact set, or a RAW window that drops its oldest records,
+changes the prompt from that point on. A provider that caches the start of a
+prompt can reuse only the part that is identical to the previous request from
+its first byte. NeoGraph has not measured the effect of placement on cache hits.
+
+`RequiredSkill` and `HardConstraint` artifacts render as System messages; every
+other kind renders as a User message. What a System message does depends on the
+provider family:
+
+- On `anthropic.messages`, `google.generate` and `google.interactions`, the
+  request builder moves every System message into the top-level system field
+  (separated by a blank line, in assembled order), whatever its placement. For a
+  Skill or a constraint, the placement then decides only its order among the
+  system texts, not its position in the conversation.
+- On `openai.chat` and `openai.responses`, a System message stays where its
+  placement puts it.
+
+Keep the text of System-role artifacts unchanged between turns when you want a
+stable request start. This describes the assembly today. The defaults and the
+per-family rules are under review, and a change would alter the assembled bytes.
 
 ## Runtime developer instructions
 

@@ -34,6 +34,17 @@ Example `27_async_concurrent_runs.cpp` shows multiple sessions on one io_context
 
 Provider calls own their prepared request and runtime client. Their C++ event views are callback-scoped; copy retained data. Native replay state and accounting authority require authentic custody, not a portable JSON reconstruction. See [the async guide](ASYNC_GUIDE.md).
 
+## Runs of one conversation
+
+A conversation can be stored in two layers, and they treat concurrent writers differently.
+
+- **Context feeds** fail closed. `ContextStore::append_history` takes the head the writer expects. An append whose expected head, sequence or predecessor is not the feed's current one returns `Conflict` and stores nothing, so two writers cannot both extend the same head. Appending the exact record that is already stored returns `AlreadyPresent`, also after the head has moved.
+- **Checkpoint stores** are last-writer-wins per `thread_id`. Each call is atomic, but a sequence of calls is not. When two runs of one `thread_id` overlap, their `save_checkpoint` calls interleave in no defined order, the last save wins, and `load_latest` returns the last saver's checkpoint. Neither the engine nor a store rejects the second run.
+
+Serializing the runs and resumes of one `thread_id`, and of one feed, is the host's job. That holds across processes too. The strict profile does not do it: it holds one active epoch for all its callers and does not look at `thread_id`. Overlapping requests for one conversation are usually accidents, such as a retried webhook or a double click, so queue or reject them at the host before they reach the engine.
+
+An in-process guard is planned: it would reject a second run or resume of the same `thread_id` while one is in flight. It would cover one process only. Until it exists, nothing in NeoGraph stops two runs of one `thread_id`. See also [Host-stepped contract](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract).
+
 ## Bounded synchronous admission
 
 Link `neograph::util` to use `RequestQueue`. It uses `moodycamel::ConcurrentQueue`, with idle workers waiting on a condition variable. The pending-slot limit bounds queued sessions, not memory consumed by a running session.

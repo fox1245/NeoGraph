@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=b0839d08e680afa37876cb1515bd58a87a65063e453cbf63e7fb1e195d33a9e6 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -41,6 +41,112 @@ durable RAW history + admitted artifacts + required Skills/constraints
 
 只有 `RuntimeGuaranteeProfile::Strict` 的 epoch 才能被激活。把这个 profile 挂到
 `GraphEngine` 上，会同时在内置的使用方上，装好 provider 拦截和生命周期 Hook。
+但它不会在 provider 调用之间推进上下文；参见[宿主逐步推进契约](#host-stepped-contract)。
+
+<a id="host-stepped-contract"></a>
+## 宿主逐步推进（host-stepped）契约
+
+严格路径的每个 provider 请求，都由当前生效的 epoch 构建：它固定的 RAW 范围和选中的制品。
+图或智能体持有的对话，路径不会去读。除了 epoch，进入提示词的只有内置节点填写的宿主指令槽位
+和受信补充输入（trusted supplemental input）槽位。因此在宿主记录之前，NeoGraph 看不到
+模型的回复，也看不到工具结果。契约是：
+
+**宿主每次 provider 调用前，都要追加 RAW 记录，并激活新的 epoch。**
+
+两次调用之间，宿主把上一轮（先是模型的回复，再是工具结果）追加到 `ContextStore`，建一个 RAW 范围
+覆盖这一轮的 epoch，再用 `StrictRuntimeProfile::activate` 激活它。第一个 epoch 也按同样方式，
+由用户消息建立。下面的代码是其中一步。`head` 是 `store.history_head(feed)`，
+`epoch_sequence` 和 `previous_epoch_id` 来自上一个 epoch。
+
+```cpp
+for (auto& [message, trust] : turn) {  // the reply (ModelOutput), then the tool results (ToolOutput)
+    RuntimeHistoryRecordData record;
+    record.feed_id = feed.feed_id;
+    record.sequence = ++head.sequence;
+    record.message_id = "message-" + std::to_string(record.sequence);
+    record.trust = trust;
+    record.message = std::move(message);
+    record.predecessor_id = head.record_id;
+    const auto created = RuntimeHistoryRecord::create(std::move(record));
+    if (store.append_history(feed, created, head.record_id) != ContextStoreAppendResult::Appended)
+        throw std::runtime_error("the context feed moved");
+    head.record_id = created.id();
+}
+ContextEpochData next;
+next.run_id = run_id;
+next.sequence = ++epoch_sequence;
+next.predecessor_id = previous_epoch_id;
+next.feed_id = feed.feed_id;
+next.raw_from_sequence = 1;
+next.raw_through_sequence = head.sequence;
+next.raw_window_digest = store.snapshot_history(feed, 1, head.sequence).digest;
+next.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+auto epoch = ContextEpoch::create(std::move(next));
+previous_epoch_id = epoch.id();
+profile.activate(owner_id, std::move(epoch));
+```
+
+NeoGraph 目前还没有在一次运行内部推进 epoch 的辅助函数。
+
+**一次运行内部的循环。** 把 profile 挂到普通的 `GraphEngine` 上，并不会推进上下文。
+在一次 `engine.run()` 内部的工具循环里（LLM 调用、工具分发、LLM 调用，`create_react_graph` 构建的就是这种结构），
+第二次 LLM 调用仍运行在同一个 epoch 之下。工具结果在图状态里，却不在 epoch 里。
+provider 会再次收到第一轮的上下文，模型始终看不到工具结果，还可能反复请求同一个工具，
+直到步数上限或预算让这次运行停下。
+
+所以 NeoGraph 改为拒绝这样的调用。当 provider 调用到达的 epoch，其所属的一轮已经被图推进过，
+就会抛出 `std::logic_error`。调用方提交的消息里，含有 epoch 首次分发之后新增的助手消息或工具消息，
+而这次调用又没有把这些消息作为宿主指令或受信补充输入一并带上，就算这一轮已被推进。
+错误信息会点明这一契约：
+
+```text
+Strict provider dispatch is host-stepped: the host appends RAW records and activates a new epoch for every provider call. This call presents assistant or tool messages added since the active epoch's first dispatch, so the graph or agent loop advanced inside one run and the provider would not receive them. Append those messages to the context feed and activate a new epoch before this call.
+```
+
+在图里，失败的节点以 `NodeExecutionError` 报告。logic error 不会重试，所以 `attempts()` 为 1。
+通过 `set_runtime_interposition` 设置了控制器的 `llm::Agent`，在第二次 provider 调用时同样会失败。
+
+下面这些情况不会被拒绝：
+
+- 同一轮的重试。节点重试，或 provider 失败后的重复调用，提交的是同样的消息。
+- 在 epoch 首次分发时，就已经含有助手消息或工具消息的对话。这些消息是基线。
+- 只增加了用户消息。检查的对象是助手消息和工具消息。
+- 把不断增长的对话作为受信补充输入传入的内置节点，例如 plan-execute 图的 executor 节点。
+  它的回复和工具结果会送达 provider，并由组装回执绑定。
+
+激活 epoch 或调用 `clear()`，都会忘记已经提交过的内容。控制器按调用点（节点名）记住首次提交的内容，
+每个 epoch 只保留有限个互不相同的提交。超出上限的提交不再跟踪，此时的检查是尽力而为。
+
+同一场对话的多次运行，请宿主自己串行化。profile 只有一个生效的 epoch，也不看 `thread_id`。
+参见[一场对话的多次运行](concurrency.md#runs-of-one-conversation)。
+
+## 选择上下文的管理方式
+
+NeoGraph 有四种方式管理模型调用的上下文。它们的差别在于提示词由谁构建，以及保证什么。
+
+| 方式 | 提示词的来源 | 保证什么 |
+| --- | --- | --- |
+| `messages` 通道 | 图状态中的 `messages` 通道，保持节点留下的样子。`LLMCallNode` 发送它并追加回复，`ToolDispatchNode` 追加工具结果，因此一次运行内部的工具循环可以正常工作 | 请求由图状态构建，检查点存储可以保存这个状态。没有逐次调用的回执，没有必需制品，也没有上下文上限 |
+| `history::compact_history` | 不是独立的方式，而是返回更短消息列表的辅助函数：`estimate_tokens` 超过上限时，把较早的纯文本前缀替换为模型写的摘要，保留最近的部分。结果作为其他方式的输入使用。接受 `RuntimeInterpositionController` 的重载，会把摘要调用交给该控制器发送 | 一个状态，说明历史被保留还是被替换，以及原因；含 native 重放封印的历史原样返回。摘要是模型输出，没有任何东西证明某个事实或约束留在了摘要里。估算值只是启发式。没有 epoch，也没有回执 |
+| 记录（Recorded）profile | 经由 `RuntimeInterpositionController` 的当前 epoch（`RuntimeGuaranteeProfile::Recorded`，默认值）：来自 `ContextStore` 的 RAW 范围，加上 epoch 的制品。由宿主推进步骤 | 请求恰好由这个 epoch 组装，并绑定组装回执，每次分发都有回执。存储不必是持久的，输入上限也可以为 0，所以证据保留多久、是否设置上限，由宿主决定 |
+| 严格（Strict）profile | 与记录 profile 相同，经由 `StrictRuntimeProfile`。由宿主推进步骤 | 记录 profile 的全部保证，再加上持久的上下文存储与分发存储、围绕每次调用的强制 Hook、必须出现在 epoch 里的必需制品，以及在分发前拦下超预算轮次的非零输入上限。不保证模型关注或遵从了上下文，也不会代为推进 epoch |
+
+从 `messages` 通道换成 epoch，上下文的所有者就变了：图状态不再是提示词的来源，RAW 历史由宿主保管。
+
+## 上下文预算
+
+严格路径会把每个组装好的请求与输入上限（`max_input_tokens`）比较，超预算的轮次在分发前就以
+`ContextBudgetBlocked` 拦下。组装回执记录所用的估算值（`estimated_input_tokens`），
+以及其中属于必需制品文本的部分（`mandatory_input_tokens`）。
+
+估算值来自 `RuntimeTurnAssembler::estimate_input_tokens`：编码后请求体的字节长度除以三，向上取整。
+它是启发式，不是被证明的上界。它不是由任何 provider 的分词器推出来的，所以可能小于，也可能大于 provider 实际统计的数字。
+它统计的是编码后的整个请求，而不只是可见文本：工具 schema、字段名和 provider 的封装格式也都计入字节。
+请把 `max_input_tokens` 当作防止请求过大的保护措施，不要当作对 provider 所报告或所计费数字的承诺。
+`mandatory_input_tokens` 只对必需制品的文本按同样的比率计算。
+
+分发的 token 预留是另一份资源契约。运行设有模型 token 预算时，每次分发会按它可能进行的每次尝试，
+预留模型的输入上限加输出额度，不使用这个估算值。
 
 ## provider outcome 的生命周期
 
@@ -123,6 +229,45 @@ RPC Hook 的制品是证据，绝不是权限。`ContextStoreHookArtifactPublish
 `ContextTransformReceipt` 在 v1 中有意保持保守。转换器可以替换或压缩可选的证据，
 但每个必需的输入制品 ID，都必须以字节完全相同的形式出现在输出集合里。
 改写不被接受为约束得以保留的证明。
+
+## 制品的放置位置
+
+制品的 `placement` 决定它的文本放在 RAW 消息之间的哪个位置。组装器按下面的顺序构建提示词。
+同一种放置位置内，`priority` 较高的在前，然后按 `producer_id`、`id` 排序。
+
+```text
+host instructions
+BeforeHistory artifacts
+RAW messages before the latest user message
+BeforeLatestUser artifacts
+latest user message
+AfterLatestUser artifacts
+RAW messages after the latest user message
+AfterHistory artifacts
+trusted supplemental input
+```
+
+每一轮都保持不变的制品，请放在 `BeforeHistory`。默认的放置位置是 `BeforeLatestUser`，
+所以没有指定放置位置而创建的制品，每一轮都会移动：
+
+- `BeforeLatestUser` 和 `AfterLatestUser` 锚定在最新的用户消息上。新的用户消息到来时，制品跟着移动，
+  提示词从制品原来的位置起，就与上一次的提示词不同。这两种放置位置要求 RAW 窗口里有用户消息；没有的话，组装会失败。
+- `AfterHistory` 始终在最后。它前面的历史会增长，但不会改变它前面那部分提示词。
+- `BeforeHistory` 紧跟在宿主指令之后，与历史无关。只要制品集合和优先级不变，它的文本和位置也不变。
+
+制品集合变了，或者 RAW 窗口丢掉了最早的记录，提示词就从那一点起发生变化。会缓存提示词开头部分的 provider，
+只能复用从第一个字节起与上一次请求相同的那一部分。放置位置对缓存命中的影响，NeoGraph 还没有测量过。
+
+`RequiredSkill` 和 `HardConstraint` 制品渲染为 System 消息，其他类型渲染为 User 消息。
+System 消息怎么处理，取决于 provider 的系列：
+
+- 在 `anthropic.messages`、`google.generate` 和 `google.interactions` 上，请求构建器会把所有 System 消息移到
+  请求顶层的 system 字段，不论放置位置如何（以空行分隔，按组装后的顺序）。这样，Skill 或约束的放置位置
+  决定的只是它在各段 system 文本中的次序，而不是它在对话里的位置。
+- 在 `openai.chat` 和 `openai.responses` 上，System 消息留在其放置位置所决定的位置。
+
+想让请求的开头保持稳定，请不要在各轮之间改动 System 角色制品的文本。以上描述的是目前的组装方式。
+默认值和各系列的规则正在评审，一旦改动，就会改变组装出的字节。
 
 ## 运行时的开发者指令
 

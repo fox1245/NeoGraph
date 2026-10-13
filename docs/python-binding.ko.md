@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=a59f41ed236e52e37f9dfde0999b346c60a33b1b22a8b88f100b5321a4580bb3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=763d878f17fb8f417c49035c6785aa71f7742483270391650738b86bb1e7a20b -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -656,6 +656,10 @@ profile.activate("tenant-a", strict_epoch)
 outcome = profile.invoke(request)
 profile.attach(engine)
 ```
+
+`max_input_tokens`는 토크나이저가 센 값이 아니라, 인코딩된 요청의 휴리스틱 추정치(바이트 수를 3으로 나눈 값)와 비교합니다. [컨텍스트 예산](STRICT_RUNTIME_INTERPOSITION.md#context-budget)을 참고하세요.
+
+프로파일은 C++과 마찬가지로 호스트가 단계를 진행합니다. 호스트는 provider를 호출할 때마다 RAW 레코드를 추가하고 새 에포크를 활성화합니다. 에포크의 첫 디스패치 이후 추가된 어시스턴트 메시지나 도구 메시지를 제시하는 호출은 `RuntimeError`를 일으키며, 오류 메시지가 이 계약을 밝힙니다. `profile.attach(engine)` 뒤에 `engine.run()` 한 번 안에서 도구 루프가 돌면 바로 이 일이 일어납니다. [호스트 단계 진행 계약](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract)을 참고하세요.
 
 ## HITL과 상태
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=26a523d253dec6f963c8fa038d852beae43820d3280b22c15285466505b85818 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=b0839d08e680afa37876cb1515bd58a87a65063e453cbf63e7fb1e195d33a9e6 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -35,7 +35,88 @@ durable RAW history + admitted artifacts + required Skills/constraints
 - 0でない入力トークンの上限
 - 必須のコンテキストとSkillのアーティファクトを正確に指定するID（省略可能）
 
-アクティブにできるのは、`RuntimeGuaranteeProfile::Strict` のエポックだけです。プロファイルを `GraphEngine` に接続すると、組み込みのコンシューマーに、プロバイダーのインターポジションとライフサイクルHookの両方が組み込まれます。
+アクティブにできるのは、`RuntimeGuaranteeProfile::Strict` のエポックだけです。プロファイルを `GraphEngine` に接続すると、組み込みのコンシューマーに、プロバイダーのインターポジションとライフサイクルHookの両方が組み込まれます。ただし、プロバイダー呼び出しの間にコンテキストを進めることはしません。[ホストがステップを進める契約](#host-stepped-contract)を参照してください。
+
+<a id="host-stepped-contract"></a>
+## ホストがステップを進める契約（host-stepped）
+
+strictの経路は、プロバイダーへのリクエストをすべて、アクティブなエポックから作ります。材料は、エポックに固定されたRAWの範囲と、選択されたアーティファクトです。グラフやエージェントが保持している会話は読みません。エポックのほかにプロンプトへ入るのは、組み込みノードが埋めるホスト指示と、信頼された補足入力（trusted supplemental input）のスロットだけです。そのため、ホストが記録するまで、NeoGraphはモデルの返答もツールの結果も知ることができません。契約は次のとおりです。
+
+**ホストは、プロバイダーを呼び出すたびに、RAWレコードを追加し、新しいエポックをアクティブにします。**
+
+2回の呼び出しの間に、ホストは直前のターン（モデルの返答、続いてツールの結果）を `ContextStore` に追加します。そのターンまでをRAWの範囲に含むエポックを作り、`StrictRuntimeProfile::activate` でアクティブにします。最初のエポックも、ユーザーのメッセージから同じ方法で作ります。次のコードが1ステップ分です。`head` は `store.history_head(feed)` で、`epoch_sequence` と `previous_epoch_id` は直前のエポックから取ります。
+
+```cpp
+for (auto& [message, trust] : turn) {  // the reply (ModelOutput), then the tool results (ToolOutput)
+    RuntimeHistoryRecordData record;
+    record.feed_id = feed.feed_id;
+    record.sequence = ++head.sequence;
+    record.message_id = "message-" + std::to_string(record.sequence);
+    record.trust = trust;
+    record.message = std::move(message);
+    record.predecessor_id = head.record_id;
+    const auto created = RuntimeHistoryRecord::create(std::move(record));
+    if (store.append_history(feed, created, head.record_id) != ContextStoreAppendResult::Appended)
+        throw std::runtime_error("the context feed moved");
+    head.record_id = created.id();
+}
+ContextEpochData next;
+next.run_id = run_id;
+next.sequence = ++epoch_sequence;
+next.predecessor_id = previous_epoch_id;
+next.feed_id = feed.feed_id;
+next.raw_from_sequence = 1;
+next.raw_through_sequence = head.sequence;
+next.raw_window_digest = store.snapshot_history(feed, 1, head.sequence).digest;
+next.guarantee_profile = RuntimeGuaranteeProfile::Strict;
+auto epoch = ContextEpoch::create(std::move(next));
+previous_epoch_id = epoch.id();
+profile.activate(owner_id, std::move(epoch));
+```
+
+NeoGraphには、1回の実行の途中でエポックを進めるヘルパーは、まだありません。
+
+**1回の実行の中で回るループ。** プロファイルを素の `GraphEngine` に接続しても、コンテキストは進みません。`engine.run()` 1回の中でツールループ（LLM呼び出し、ツールのディスパッチ、LLM呼び出し。`create_react_graph` が作る構成）が回ると、2回目のLLM呼び出しも同じエポックで実行されます。ツールの結果はグラフの状態にはありますが、エポックにはありません。プロバイダーは最初のターンのコンテキストをもう一度受け取り、モデルはツールの結果を見ないまま、ステップ数の上限か予算で実行が止まるまで、同じツールを要求し続けるおそれがあります。
+
+そこでNeoGraphは、その呼び出しを拒否します。グラフがすでに進めたターンのエポックに対してプロバイダー呼び出しが届くと、`std::logic_error` を投げます。呼び出し元が提示したメッセージに、エポックの最初のディスパッチ以降に追加されたアシスタントまたはツールのメッセージがあり、呼び出しがそのメッセージをホスト指示や信頼された補足入力としても運んでいない場合に、ターンが進んだとみなします。エラーメッセージは、この契約を明示します。
+
+```text
+Strict provider dispatch is host-stepped: the host appends RAW records and activates a new epoch for every provider call. This call presents assistant or tool messages added since the active epoch's first dispatch, so the graph or agent loop advanced inside one run and the provider would not receive them. Append those messages to the context feed and activate a new epoch before this call.
+```
+
+グラフでは、失敗したノードが `NodeExecutionError` として報告します。logic errorは再試行されないので、`attempts()` は1です。`set_runtime_interposition` でコントローラーを設定した `llm::Agent` も、2回目のプロバイダー呼び出しで同じように失敗します。
+
+次のものは拒否しません。
+
+- 同じターンの再試行。ノードの再試行や、プロバイダーの失敗後の再呼び出しは、同じメッセージをもう一度提示します。
+- エポックの最初のディスパッチの時点で、すでにアシスタントまたはツールのメッセージを含んでいた会話。それらのメッセージが基準になります。
+- ユーザーのメッセージだけが増えた場合。検査するのは、アシスタントとツールのメッセージです。
+- 増えていく会話を信頼された補足入力として渡す組み込みノード（plan-executeグラフのexecutorノードなど）。返答とツールの結果はプロバイダーに届き、アセンブリのレシートに結び付けられます。
+
+エポックをアクティブにするか `clear()` を呼ぶと、提示された内容はすべて忘れられます。コントローラーは、呼び出し箇所（ノード名）ごとに最初の提示を覚えますが、1つのエポックで保持する異なる提示の数には上限があります。上限を超えた提示は追跡しないので、その場合の検査はベストエフォートです。
+
+1つの会話の実行は、ホスト側で直列化してください。プロファイルが持つアクティブなエポックは1つで、`thread_id` は見ません。[1つの会話の実行](concurrency.md#runs-of-one-conversation)を参照してください。
+
+## コンテキストの管理方法を選ぶ
+
+NeoGraphには、モデル呼び出しのコンテキストを管理する方法が4つあります。プロンプトを何が作るか、何を保証するかが、それぞれ異なります。
+
+| 方法 | プロンプトの出どころ | 保証すること |
+| --- | --- | --- |
+| `messages` チャネル | ノードが残したままの、グラフの状態の `messages` チャネル。`LLMCallNode` がこれを送って返答を追記し、`ToolDispatchNode` がツールの結果を追記するので、1回の実行の中のツールループが動く | グラフの状態からリクエストを作ること、チェックポイントのストアがその状態を保存できること。呼び出しごとのレシート、必須アーティファクト、コンテキストの上限はない |
+| `history::compact_history` | 独立した方法ではなく、より短いメッセージ一覧を返すヘルパー。`estimate_tokens` が上限を超えると、古いテキストだけの先頭部分をモデルが書いた要約に置き換え、最近の部分は残す。結果は別の方法の入力として使う。`RuntimeInterpositionController` を受け取るオーバーロードは、要約の呼び出しをそのコントローラー経由で送る | 履歴を残したか置き換えたかと、その理由を伝えるステータス。ネイティブのリプレイの封印を含む履歴は、そのまま返す。要約はモデルの出力なので、事実や制約が要約に残った証拠はない。見積もりはヒューリスティック。エポックもレシートもない |
+| Recordedプロファイル | `RuntimeInterpositionController` を通るアクティブなエポック（`RuntimeGuaranteeProfile::Recorded`、デフォルト）。`ContextStore` のRAWの範囲と、エポックのアーティファクトで構成する。ホストがステップを進める | リクエストをそのエポックから正確に組み立ててアセンブリのレシートに結び付け、ディスパッチごとにレシートを残す。ストアが永続的である必要はなく、入力の上限を0にできるので、エビデンスをどれだけ保持するかと、上限を置くかどうかは、ホストが決める |
+| Strictプロファイル | Recordedプロファイルと同じで、`StrictRuntimeProfile` を通る。ホストがステップを進める | Recordedプロファイルの保証すべてに加えて、永続的なコンテキストとディスパッチのストア、呼び出しごとの必須のHook、エポックに必ず含まれていなければならない必須アーティファクト、予算を超えるターンをディスパッチ前に止める0でない入力の上限。モデルがコンテキストに注意を払った、または従ったという保証はなく、エポックを代わりに進めることもしない |
+
+`messages` チャネルからエポックに移ると、コンテキストの持ち主が変わります。グラフの状態はプロンプトの元ではなくなり、RAWの履歴はホストが保持します。
+
+## コンテキストの予算
+
+strictの経路は、組み立てたリクエストごとに入力の上限（`max_input_tokens`）と比べ、予算を超えるターンをディスパッチの前に `ContextBudgetBlocked` で止めます。アセンブリのレシートには、使った見積もり（`estimated_input_tokens`）と、そのうち必須アーティファクトのテキストが占める分（`mandatory_input_tokens`）が記録されます。
+
+見積もりは `RuntimeTurnAssembler::estimate_input_tokens` です。エンコードしたリクエスト本文のバイト長を3で割り、切り上げた値です。ヒューリスティックであり、証明された上限ではありません。どのプロバイダーのトークナイザーからも導いていないので、プロバイダーが数える値より小さいことも大きいこともあります。見えているテキストだけでなく、エンコードしたリクエスト全体を数えます。ツールのスキーマ、フィールド名、プロバイダー固有のフレーミングも、バイト数に入ります。`max_input_tokens` は、大きすぎるリクエストを防ぐための安全装置として扱ってください。プロバイダーが報告する値や請求する値についての約束ではありません。`mandatory_input_tokens` は、必須アーティファクトのテキストだけに同じ比率を適用します。
+
+ディスパッチのトークン予約は、別のリソース契約です。実行にモデルトークンの予算がある場合、ディスパッチごとに、モデルの入力上限に出力の許容量を足した分を、行いうる試行の回数だけ予約します。この見積もりは使いません。
 
 ## プロバイダーの結果のライフサイクル
 
@@ -75,6 +156,37 @@ RPC Hookのアーティファクトは、エビデンスであり、権限では
 `RuntimeContextRequirements` は、必須のアーティファクトIDすべてと、そのうち `RequiredSkill` のアーティファクトでなければならないサブセットを、区別して保持します。`HardConstraint` は、専用の必須アーティファクトの種類です。必須のアーティファクトはすべて、アクティブなエポックに選択されていなければならず、`required=true` を保っていなければなりません。また、必須のトークン数に計上されます。
 
 `ContextTransformReceipt` は、v1では意図的に保守的になっています。トランスフォーマーは、省略可能なエビデンスを置き換えたり圧縮したりできます。ただし、必須の入力アーティファクトのIDは、すべて、出力の集合にバイト単位で同一のまま現れなければなりません。言い換えは、制約が保たれたことの証明として受け付けられません。
+
+## アーティファクトの配置
+
+アーティファクトの `placement` は、そのテキストをRAWメッセージのどこに入れるかを決めます。アセンブラーは、次の順序でプロンプトを組み立てます。同じ配置の中では、`priority` が高いものが先で、次に `producer_id`、`id` の順です。
+
+```text
+host instructions
+BeforeHistory artifacts
+RAW messages before the latest user message
+BeforeLatestUser artifacts
+latest user message
+AfterLatestUser artifacts
+RAW messages after the latest user message
+AfterHistory artifacts
+trusted supplemental input
+```
+
+ターンが変わっても変わらないアーティファクトは、`BeforeHistory` に置いてください。デフォルトの配置は `BeforeLatestUser` なので、配置を指定せずに作ったアーティファクトは、ターンごとに動きます。
+
+- `BeforeLatestUser` と `AfterLatestUser` は、最新のユーザーメッセージに固定されます。新しいユーザーメッセージが来ると、アーティファクトも一緒に動き、プロンプトは、アーティファクトの元の位置から先が前のプロンプトと異なります。この2つの配置には、RAWウィンドウにユーザーメッセージが必要です。なければ、アセンブリは失敗します。
+- `AfterHistory` は、常に最後です。手前の履歴は伸びていきますが、それより前のプロンプトの部分は変わりません。
+- `BeforeHistory` は、ホスト指示の直後に来て、履歴に依存しません。アーティファクトの集合と優先度が同じなら、テキストも位置も同じです。
+
+アーティファクトの集合が変わるか、RAWウィンドウが最も古いレコードを手放すと、その箇所から先のプロンプトが変わります。プロンプトの先頭部分をキャッシュするプロバイダーは、先頭のバイトから前のリクエストと同一の部分だけを再利用できます。配置がキャッシュヒットに与える影響は、NeoGraphではまだ測定していません。
+
+`RequiredSkill` と `HardConstraint` のアーティファクトはSystemメッセージとして、ほかの種類はUserメッセージとして描画されます。Systemメッセージの扱いは、プロバイダーのファミリーによって異なります。
+
+- `anthropic.messages`、`google.generate`、`google.interactions` では、リクエストビルダーが、すべてのSystemメッセージを、配置にかかわらず最上位のsystemフィールドに移します（空行で区切り、組み立てた順）。そのため、Skillや制約の配置が決めるのは、会話の中での位置ではなく、systemテキスト同士の順序だけです。
+- `openai.chat` と `openai.responses` では、Systemメッセージは、配置が決めた場所にそのまま残ります。
+
+リクエストの先頭を安定させたいときは、System役割のアーティファクトのテキストを、ターンの間で変えないでください。ここまでは現在のアセンブリの説明です。デフォルトとファミリーごとの規則は見直し中で、変わるとアセンブルされるバイト列が変わります。
 
 ## 実行時のデベロッパー指示
 

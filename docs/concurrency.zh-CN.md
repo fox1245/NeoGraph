@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=7b28f6ab7b0b2e770dc3e78b5fb91e5c0b4a0e984f0f7f5e92da337753756d7a -->
+<!-- neograph-i18n: source=docs/concurrency.md locale=zh-CN source_sha256=6a70472a787f8ffaece52d4630a02370df682588e64986fd104f49284ad21a2d -->
 # 并发与异步
 
 **Languages:** [English](concurrency.md) | [한국어](concurrency.ko.md) | [日本語](concurrency.ja.md) | [简体中文](concurrency.zh-CN.md)
@@ -34,6 +34,17 @@ auto result = neograph::async::run_sync(engine->run_async(run));
 - 节点实例会在多次运行之间复用。每次运行的临时状态放在通道里；自定义节点、provider、工具和存储必须是无状态的，或者做好同步。内置的内存存储使用互斥锁。
 
 Provider 调用自己持有准备好的请求和运行时客户端。它们的 C++ 事件视图只在回调期间有效；需要保留的数据要复制出来。native replay 状态和核算权限需要真实的托管，不能靠可移植 JSON 重建。参见[异步指南](ASYNC_GUIDE.md)。
+
+## 一场对话的多次运行
+
+一场对话可以存放在两层里，这两层对并发写入方的处理不同。
+
+- **上下文 feed** 失败时关闭（fail closed）。`ContextStore::append_history` 接受写入方期望的 head。期望的 head、序号或前驱与 feed 当前的值不一致时，追加会返回 `Conflict` 且不存储任何内容，因此两个写入方不可能都接在同一个 head 之后。把已经存储的那条记录原样再追加一次，即使 head 已经前移，也返回 `AlreadyPresent`。
+- **检查点存储**按 `thread_id` 采用最后写入者获胜（last-writer-wins）。单次调用是原子的，一连串调用则不是。同一个 `thread_id` 的两次运行重叠时，它们的 `save_checkpoint` 调用以没有规定的顺序交错，最后一次保存生效，`load_latest` 返回最后保存者的检查点。引擎和存储都不会拒绝第二次运行。
+
+对同一个 `thread_id`（以及同一个 feed）的运行和恢复做串行化，是宿主的职责，跨进程时同样如此。严格 profile 不负责这件事：它为所有调用方只持有一个生效的 epoch，也不看 `thread_id`。同一场对话的请求重叠，通常出于意外，比如重试的 webhook 或者双击。请在请求到达引擎之前，由宿主排队或拒绝。
+
+计划提供进程内的守卫：同一个 `thread_id` 的运行或恢复正在进行时，它会拒绝第二个。它只覆盖单个进程。在它出现之前，NeoGraph 不会阻止同一个 `thread_id` 的两次运行。另见[宿主逐步推进契约](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract)。
 
 ## 有界的同步准入
 

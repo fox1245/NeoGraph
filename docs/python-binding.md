@@ -663,6 +663,10 @@ outcome = profile.invoke(request)
 profile.attach(engine)
 ```
 
+`max_input_tokens` is compared with a heuristic estimate of the encoded request (its bytes divided by three), not with a tokenizer count; see [Context budget](STRICT_RUNTIME_INTERPOSITION.md#context-budget).
+
+The profile is host-stepped, as in C++: the host appends RAW records and activates a new epoch for every provider call. A call that presents assistant or tool messages added since its epoch's first dispatch raises `RuntimeError`, and the message names this contract. That is what a tool loop inside one `engine.run()` does after `profile.attach(engine)`; see [Host-stepped contract](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract).
+
 ## HITL and state
 
 Static `interrupt_before`/`interrupt_after`, dynamic `NodeInterrupt`, synchronous `resume`, asyncio `resume_async`, and exact `resume_from` require a checkpoint store.

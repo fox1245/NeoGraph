@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=a59f41ed236e52e37f9dfde0999b346c60a33b1b22a8b88f100b5321a4580bb3 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=763d878f17fb8f417c49035c6785aa71f7742483270391650738b86bb1e7a20b -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -665,6 +665,10 @@ profile.activate("tenant-a", strict_epoch)
 outcome = profile.invoke(request)
 profile.attach(engine)
 ```
+
+`max_input_tokens` は、トークナイザーで数えた値ではなく、エンコードしたリクエストのヒューリスティックな見積もり（バイト数を3で割った値）と比べます。[コンテキストの予算](STRICT_RUNTIME_INTERPOSITION.md#context-budget)を参照してください。
+
+プロファイルは、C++と同じくホストがステップを進めます。ホストは、プロバイダーを呼び出すたびに、RAWレコードを追加し、新しいエポックをアクティブにします。エポックの最初のディスパッチ以降に追加されたアシスタントまたはツールのメッセージを提示する呼び出しは `RuntimeError` を送出し、メッセージがこの契約を明示します。`profile.attach(engine)` の後で、`engine.run()` 1回の中でツールループが回ると、まさにこれが起きます。[ホストがステップを進める契約](STRICT_RUNTIME_INTERPOSITION.md#host-stepped-contract)を参照してください。
 
 ## HITLと状態
 
