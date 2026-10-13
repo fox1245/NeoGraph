@@ -184,7 +184,7 @@ word_count - Count the words in a text by running a NeoGraph graph.
 False 5
 ```
 
-The 0.13.1 wheel includes this Python client, and its stdio transport works against the server above. `MCPClient.shutdown()` is not in the wheel, and in our check the wheel's HTTP client could not open a session on the HTTP server described below; use a build of the current source for HTTP.
+The 0.14.0 wheel includes this Python client: its stdio transport works against the server above, its HTTP client works against the HTTP server described below, and `MCPClient.shutdown()` is in it. Wheels up to 0.13.1 have no `shutdown()`, and their HTTP client could not open a session on that HTTP server; with one of those, build the current source.
 
 For HTTP, `MCPClient("http://127.0.0.1:8000/mcp")` takes the server's endpoint URL and uses it as given. A discovered tool keeps its session, so it stays usable after the `MCPClient` object is destroyed.
 

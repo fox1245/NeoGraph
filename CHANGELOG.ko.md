@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7c3f3b5e831d79a63ebcfa1b15bb974258f8a45d58507df2aa3779e7ded54b26 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
 
-아래 날짜가 있는 항목은 과거 API와 측정을 보존한다. 과거 Provider 호환 보장은 [Unreleased]의 breaking C++ typed 계약으로 대체되었으며 현재 API 안내가 아니다.
+아래 날짜가 있는 항목은 과거 API와 측정을 보존한다. 과거 Provider 호환 보장은 [0.14.0]의 breaking C++ typed 계약으로 대체되었으며 현재 API 안내가 아니다.
 
 NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
@@ -12,6 +12,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.14.0] - 2026-10-13
 
 ### 변경됨
 
@@ -56,7 +58,6 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **Program: 플랜 quorum이 Core 노드가 실패한 분기를 셉니다 (#399).** 동작 변경: 그런 분기는 quorum의 실패한 분기이며, quorum은 계속 진행해 자신의 규칙(충족, `P_QUORUM_UNREACHABLE`, 또는 이후 분기에 의한 일시 정지)으로 끝납니다. 이전에는 노드 실패가 즉시 실행을 실패시켰습니다.
 - **Program: 재개된 join이 응답받은 멤버를 기다립니다 (#400).** 동작 변경: 재개가 응답한 멤버가 실행되는 동안, 재생된 멤버의 완료가 내릴 결정(fail-fast 실패, race의 첫 완료자, 충족되었거나 도달할 수 없는 quorum)은 보류되고 다른 멤버는 시작되지 않습니다. 결정은 응답받은 멤버가 끝날 때 내려집니다.
 - **Program: 일시 정지하는 join이 조정을 먼저 묻습니다 (#401).** 동작 변경: 실패 없이 일시 정지하는 JavaScript join이나 플랜 수준 `parallel`은 이제 선언 순서와 관계없이, 일반 질문에서 일시 정지한 멤버보다 먼저 불확실한 효과에서 일시 정지한 첫 멤버에서 일시 정지합니다. 수집형 `ng.all`은 실패 옆에서도 일시 정지한 멤버에서 계속 일시 정지하며, 이는 이제 #392/#397 우선순위의 의도된 예외로 문서화되어 있습니다.
-- **C++ 사용 코드를 재빌드해야 합니다. Program provider 호출 구조체에 member가 추가되었고, 가격이 매겨지는 호출에는 `monetary_microunits`가 적용됩니다 (#372).** `ProgramResultData`에 `monetary_records`가, `ProgramCoreProviderCallContext`에 `monetary_account`가, `SQLiteProgramProviderCallJournal::Record`에 `monetary_record`가 추가되었고, `Provider`에는 정적 함수 `invocation_upper_bound`가 생겼습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 재빌드하십시오([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조). provider journal은 기존 데이터베이스에 `monetary_record` 열을 추가합니다. 저장된 `ProgramResult`는 가격이 매겨진 호출이 있을 때만 `monetary_records`를 담으므로 다른 결과의 바이트와 id는 그대로입니다. **동작 변경:** 모든 `RunBudget` 양과 마찬가지로 `monetary_microunits = 0`은 아무것도 부여하지 않으므로, 금액 예산이 0인 실행은 가격 broker가 가격을 매기는 모든 호출을 `P_MONEY_BUDGET`으로 거부합니다. 이전에는 아무것도 금액을 청구하지 않았습니다.
 - **C++ 사용 코드를 재빌드해야 합니다. 그래프와 Program 구조체에 member가 추가되었습니다 (#357, #358, #361, #365, #367).** `EngineConfig`에 `validation`과 `stderr_notices`가, `RunMetadata`와 `RunContext`에 `shared_scheduler`가, `ProgramCompilerConfig`에 `require_acyclic`이, `ProgramCompilerConfig`와 `ValidationOptions`에 `soundness_check`와 `soundness_state_cap`이 추가되었고, `GraphEngine`에는 private member가, `RunStatus`에는 `BarrierStalled`가 추가되었습니다. #364로 `EngineConfig`에 `failure_text_redactor`, `RunMetadata`에 `node_retry_ceiling`, `RunBudget`에 `max_node_retries`, `ProgramUsage`에 `node_retries`, `CatalogConfig`에 `failure_text_redactor`가 추가되었고, `Scheduler`, `NodeExecutor`, `GraphEngine`에 멤버가, `RunStatus`에 `FailureExit`가 추가되었으며, `ProgramDiagnosticError`, `ProgramCompileError`, `ProgramAdmissionError`는 기반 클래스 `graph::ConfigurationFailure`를 얻었습니다. 이 변경으로 layout이 바뀌므로 NeoGraph, C++ 사용 코드, Python 확장을 함께 재빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고). 모든 값을 나열하는 `RunStatus`의 `switch`에는 `BarrierStalled`와 `FailureExit` case가 필요합니다.
 - **C++ 사용 코드를 재빌드해야 합니다. 시도 타임아웃으로 그래프 레이아웃이 바뀌었고 노드 본문은 시도 토큰을 받습니다 (#364, #367, #368).** `NodeRetryPolicySpec`에 `attempt_timeout_ms`가, `NodeExecutor`에 멤버가, `GraphEngine`에 멤버와 선언된 소멸자가 추가되었습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 재빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고). **동작 변경:** Program 실행에서, 그리고 타임아웃이 있는 모든 시도에서 노드 본문은 실행을 구동하는 코루틴 대신 워커 풀에서 실행되며, 그 `ctx.cancel_token`은 그 시도에 속한 실행 토큰의 자식입니다. 실행을 취소하면 여전히 그 토큰도 취소되지만, 그 토큰을 취소하면 그 시도만 취소됩니다. 그래서 Program 실행에서는 병렬 단계의 노드 본문이 겹쳐 실행되고, 그 `NODE_END` 이벤트는 완료 순서대로 도착합니다. `attempt_timeout_ms`를 쓰지 않는 정의는 바이트와 id를 유지합니다.
 - **Program: 실패한 노드는 분류된 코드를 보고합니다 (#364).** failure edge가 없는 노드 실패는 Program 실행을 `P_RUNTIME_CORE_FAILURE` 대신 노드 실패 분류기의 코드(`NG.TaskFailed`, `app.compile_error` 같은 작성자 코드, `NG.ProviderFailed` 등)로 `Failed`가 되게 하며, `failure.witness.node_failure`에 `{node, code, kind, attempts, retryable, routable}`이 들어갑니다. `P_RUNTIME_CORE_FAILURE`는 노드 실패 레코드가 없는 Core 실패에만 남습니다. 오케스트레이션 계획의 `retry` 연산도 같은 분류기에 묻습니다. 논리, 구성, 예산, 제공자 실패, 커밋된 효과, 도달한 재시도 상한 뒤에는 더 이상 본문을 다시 실행하지 않습니다.

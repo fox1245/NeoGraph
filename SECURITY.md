@@ -11,8 +11,8 @@ upgrade to the latest release.
 | Version | Supported |
 | ------- | --------- |
 | `master` | Yes, fixes land here first |
-| 0.13.x (latest release) | Yes |
-| < 0.13 | No |
+| 0.14.x (latest release) | Yes |
+| < 0.14 | No |
 
 ## Reporting a vulnerability
 

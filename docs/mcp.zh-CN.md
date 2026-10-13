@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=78e85bc6b43f65b50274da68f73191ca895f31f32e72d6a7654fb60b856fb3a3 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -185,7 +185,7 @@ word_count - Count the words in a text by running a NeoGraph graph.
 False 5
 ```
 
-0.13.1 的 wheel 包含这个 Python 客户端，其 stdio 传输可以配合上面的服务器工作。wheel 中没有 `MCPClient.shutdown()`；在我们的检查中，wheel 的 HTTP 客户端也无法在下文的 HTTP 服务器上建立会话。要使用 HTTP，请从当前源码构建。
+0.14.0 的 wheel 包含这个 Python 客户端：stdio 传输可以配合上面的服务器工作，HTTP 客户端可以配合下文的 HTTP 服务器工作，也提供 `MCPClient.shutdown()`。0.13.1 及更早的 wheel 没有 `shutdown()`，其 HTTP 客户端也无法在该 HTTP 服务器上建立会话；使用这些 wheel 时，请从当前源码构建。
 
 对于 HTTP，`MCPClient("http://127.0.0.1:8000/mcp")` 接收服务器的端点 URL，并原样使用。发现到的工具会保留自己的会话，因此在 `MCPClient` 对象销毁之后仍可使用。
 

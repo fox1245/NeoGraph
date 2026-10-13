@@ -58,6 +58,9 @@ MODEL = "relocation-local-model"
 OPERATIONS = ("buffered:6*7", "stream:6*7", "reject:6*7", "graph:6*7")
 
 
+# The version the wheel under test is built with (pyproject.toml); raised with each release.
+EXPECTED_VERSION = "0.14.0"
+
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
@@ -163,7 +166,7 @@ def macho(path):
 
 def installed_inventory():
     dist = importlib.metadata.distribution("neograph-engine")
-    require(dist.version == "0.13.1", "expected the installed NeoGraph 0.13.1 wheel")
+    require(dist.version == EXPECTED_VERSION, f"expected the installed NeoGraph {EXPECTED_VERSION} wheel")
     direct = dist.read_text("direct_url.json")
     require(not direct or not json.loads(direct).get("dir_info", {}).get("editable", False),
             "editable/source installs are not wheel proof")
@@ -339,7 +342,7 @@ def worker(config_path):
     import neograph_engine as ng
     import neograph_engine._neograph as extension
     require(Path(ng.__file__).resolve() == recorded["neograph_engine/__init__.py"] and
-            str(Path(extension.__file__).resolve()) in native and ng.__version__ == "0.13.1",
+            str(Path(extension.__file__).resolve()) in native and ng.__version__ == EXPECTED_VERSION,
             "import did not resolve to the original installed wheel RECORD")
     outcomes = behavior(ng, config["port"])
     after = images()

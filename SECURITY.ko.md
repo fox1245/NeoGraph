@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=SECURITY.md locale=ko source_sha256=1846450e26db18b21a90809734487fbc5fef135a3425887bd70fae57a20beb4e -->
+<!-- neograph-i18n: source=SECURITY.md locale=ko source_sha256=24ae45f92fb362565a8acd8171ea70ddd9ecdd80831b0d281d5c5284d51bc065 -->
 # 보안 정책
 
 **Languages:** [English](SECURITY.md) | [한국어](SECURITY.ko.md) | [日本語](SECURITY.ja.md) | [简体中文](SECURITY.zh-CN.md)
@@ -12,8 +12,8 @@ NeoGraph는 1.0 이전 단계입니다. 보안 수정은 먼저 `master`에 반�
 | 버전 | 지원 |
 | ---- | ---- |
 | `master` | 예, 수정이 가장 먼저 반영됨 |
-| 0.13.x (최신 릴리스) | 예 |
-| < 0.13 | 아니요 |
+| 0.14.x (최신 릴리스) | 예 |
+| < 0.14 | 아니요 |
 
 ## 취약점 신고
 

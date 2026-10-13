@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=9190cbec147688ffec389ff98c5852aa1e3d8460c6d04c64dc7718fbd046a0da -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,7 +15,7 @@
 
 Program 계층에는 Program과 QuickJS 제어가 포함된 빌드가 필요합니다. `pip install neograph-engine`에 이미 들어 있고, 소스 빌드에는 `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`이 필요합니다(그다음 `pip install pydantic certifi`를 실행하고 빌드 디렉터리를 `PYTHONPATH`에 추가).
 
-아래 예제는 실패 라우팅, `fork`, SQLite 상태 디렉터리를 씁니다. PyPI의 0.13.1 휠에는 이 기능들이 없으므로, 현재 소스로 빌드한 것으로 실행하세요. 이 기능을 쓰는 예제(Python 32, 35, 36)도 마찬가지입니다. 더 작은 것부터 시작하려면 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)를 실행하세요. Program 하나를 100줄 안에 컴파일하고, 승인(admission)하고, 실행합니다. C++에서는 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp)에서 시작하세요.
+아래 예제는 실패 라우팅, `fork`, SQLite 상태 디렉터리를 씁니다. PyPI의 0.14.0 휠에는 이 기능들이 있고 0.13.1 휠에는 없으므로, 더 오래된 휠이라면 현재 소스로 빌드한 것으로 실행하세요. 이 기능을 쓰는 예제(Python 32, 35, 36)도 마찬가지입니다. 더 작은 것부터 시작하려면 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)를 실행하세요. Program 하나를 100줄 안에 컴파일하고, 승인(admission)하고, 실행합니다. C++에서는 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp)에서 시작하세요.
 
 ## 실전 예제: 릴리스 점검
 

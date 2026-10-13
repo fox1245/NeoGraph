@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=78e85bc6b43f65b50274da68f73191ca895f31f32e72d6a7654fb60b856fb3a3 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
 # MCP: グラフをツールとして公開する、ツールを使うグラフを作る
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -185,7 +185,7 @@ word_count - Count the words in a text by running a NeoGraph graph.
 False 5
 ```
 
-0.13.1 のホイールにもこの Python クライアントが含まれており、stdio トランスポートは上のサーバーで動きます。`MCPClient.shutdown()` はホイールになく、確認した限りでは、ホイールの HTTP クライアントは後述の HTTP サーバーでセッションを開けませんでした。HTTP を使うには、現在のソースからビルドしてください。
+0.14.0 のホイールにもこの Python クライアントが含まれています。stdio トランスポートは上のサーバーで、HTTP クライアントは後述の HTTP サーバーで動き、`MCPClient.shutdown()` もあります。0.13.1 以前のホイールには `shutdown()` がなく、その HTTP クライアントは後述の HTTP サーバーでセッションを開けませんでした。そのようなホイールを使う場合は、現在のソースからビルドしてください。
 
 HTTP では、`MCPClient("http://127.0.0.1:8000/mcp")` のようにサーバーのエンドポイント URL を渡し、その URL がそのまま使われます。見つけたツールは自分のセッションを保持するので、`MCPClient` オブジェクトが破棄されたあとも使えます。
 

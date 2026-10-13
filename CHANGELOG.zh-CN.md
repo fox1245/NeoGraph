@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7c3f3b5e831d79a63ebcfa1b15bb974258f8a45d58507df2aa3779e7ded54b26 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
 
-以下带日期的条目保留历史 API 与测量。旧 Provider 兼容保证已被 [未发布] 的 breaking C++ typed 契约取代，不是当前 API 指南。
+以下带日期的条目保留历史 API 与测量。旧 Provider 兼容保证已被 [0.14.0] 的 breaking C++ typed 契约取代，不是当前 API 指南。
 
 NeoGraph 的所有显著变更均记录在本文件中。
 
@@ -12,6 +12,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.14.0] - 2026-10-13
 
 ### 变更
 
@@ -56,7 +58,6 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program：计划 quorum 会计入 Core 节点失败的分支 (#399)。** 行为变更：这样的分支是 quorum 的失败分支，quorum 继续进行并按自身规则结束（达成、`P_QUORUM_UNREACHABLE`，或被后续分支暂停）；此前节点失败会立即使运行失败。
 - **Program：恢复的 join 会等待它所答复的成员 (#400)。** 行为变更：在恢复所答复的成员运行期间，被重放成员的完成本应作出的决定（fail-fast 失败、race 的第一个完成者、已达成或无法达成的 quorum）会被暂缓，且不会启动其他成员；该决定在被答复的成员结束时作出。
 - **Program：暂停的 join 先询问对账 (#401)。** 行为变更：无失败而暂停的 JavaScript join 或计划级 `parallel`，现在无论声明顺序如何，都会先在第一个因不确定效果而暂停的成员上暂停，再轮到因普通问题而暂停的成员。收集式 `ng.all` 在失败旁仍会在暂停的成员上暂停，这现在被记录为 #392/#397 优先级的有意例外。
-- **需要重新构建 C++ 使用方：Program provider 调用结构体新增了成员，被计价的调用会执行 `monetary_microunits` (#372)。** `ProgramResultData` 新增 `monetary_records`，`ProgramCoreProviderCallContext` 新增 `monetary_account`，`SQLiteProgramProviderCallJournal::Record` 新增 `monetary_record`，`Provider` 新增静态函数 `invocation_upper_bound`；请一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。provider journal 会给已有数据库添加 `monetary_record` 列。存储的 `ProgramResult` 只在有调用被计价时才带 `monetary_records`，因此其他结果的字节与 id 不变。**行为变更：** 与所有 `RunBudget` 数量一样，`monetary_microunits = 0` 不授予任何额度，因此金额预算为零的运行会以 `P_MONEY_BUDGET` 拒绝计价 broker 计价的每个调用；此前没有任何东西收取金额。
 - **C++ 使用方须重新构建：图和 Program 结构体增加了 member (#357, #358, #361, #365, #367)。** `EngineConfig` 增加了 `validation` 和 `stderr_notices`，`RunMetadata` 和 `RunContext` 增加了 `shared_scheduler`，`ProgramCompilerConfig` 增加了 `require_acyclic`，`ProgramCompilerConfig` 和 `ValidationOptions` 增加了 `soundness_check` 和 `soundness_state_cap`，`GraphEngine` 增加了一个 private member，`RunStatus` 增加了 `BarrierStalled`。#364 使 `EngineConfig` 增加了 `failure_text_redactor`，`RunMetadata` 增加了 `node_retry_ceiling`，`RunBudget` 增加了 `max_node_retries`，`ProgramUsage` 增加了 `node_retries`，`CatalogConfig` 增加了 `failure_text_redactor`，`Scheduler`、`NodeExecutor` 和 `GraphEngine` 增加了成员，`RunStatus` 增加了 `FailureExit`，`ProgramDiagnosticError`、`ProgramCompileError` 和 `ProgramAdmissionError` 增加了基类 `graph::ConfigurationFailure`。这些改变了 layout：NeoGraph、C++ 使用方和 Python 扩展须一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。列出所有值的 `RunStatus` `switch` 需要 `BarrierStalled` 和 `FailureExit` 分支。
 - **C++ 使用方须重新构建：尝试超时改变了图的布局，节点主体获得尝试令牌 (#364, #367, #368)。** `NodeRetryPolicySpec` 增加了 `attempt_timeout_ms`，`NodeExecutor` 增加了成员，`GraphEngine` 增加了成员和一个声明的析构函数；请一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。**行为变更：**在 Program 运行中，以及对每个带超时的尝试，节点主体在工作线程池上运行，而不是在驱动运行的协程上运行，其 `ctx.cancel_token` 是属于该尝试的、运行令牌的子令牌：取消运行仍会取消它，但取消它只会取消该尝试。因此在 Program 运行中，并行步骤的节点主体会重叠执行，其 `NODE_END` 事件按完成顺序到达。不使用 `attempt_timeout_ms` 的定义保持其字节和 id。
 - **Program：失败的节点报告分类后的代码 (#364)。** 没有 failure edge 的节点失败会使 Program 运行以节点失败分类器的代码（`NG.TaskFailed`、`app.compile_error` 这样的作者代码、`NG.ProviderFailed` 等）而不是 `P_RUNTIME_CORE_FAILURE` 结束为 `Failed`，`failure.witness.node_failure` 中保存 `{node, code, kind, attempts, retryable, routable}`。`P_RUNTIME_CORE_FAILURE` 只保留给没有节点失败记录的 Core 失败。编排计划的 `retry` 操作也询问同一个分类器：在逻辑、配置、预算或 Provider 失败、已提交的效果或已达到的重试上限之后，不再重新运行其主体。

@@ -1,9 +1,9 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7c3f3b5e831d79a63ebcfa1b15bb974258f8a45d58507df2aa3779e7ded54b26 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=d3c966e89c41258e19d2fd9e7e5a293451f2700b9e8b9399ca0e1e6431d32948 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
 
-以下の日付付き項目は過去の API と測定を保持します。旧 Provider 互換保証は [未リリース] の breaking C++ typed 契約に置き換わり、現在の API 案内ではありません。
+以下の日付付き項目は過去の API と測定を保持します。旧 Provider 互換保証は [0.14.0] の breaking C++ typed 契約に置き換わり、現在の API 案内ではありません。
 
 NeoGraph に対するすべての重要な変更は、このファイルに記載されています。
 
@@ -12,6 +12,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+## [0.14.0] - 2026-10-13
 
 ### 変更
 
@@ -56,7 +58,6 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **Program: プランの quorum は Core ノードが失敗した分岐を数えます (#399)。** 動作の変更: そうした分岐は quorum の失敗した分岐であり、quorum は続行して自身の規則 (達成、`P_QUORUM_UNREACHABLE`、または後続の分岐による一時停止) で終わります。以前はノードの失敗がすぐに実行を失敗させていました。
 - **Program: 再開された join は応答を受けるメンバーを待ちます (#400)。** 動作の変更: 再開が応答するメンバーが実行されている間、再生されたメンバーの完了が下す決定 (fail-fast の失敗、race の最初の完了者、達成された、または到達不能になった quorum) は保留され、他のメンバーは開始されません。決定は応答を受けたメンバーが終わったときに下されます。
 - **Program: 一時停止する join は照合を先に尋ねます (#401)。** 動作の変更: 失敗なしに一時停止する JavaScript の join やプランレベルの `parallel` は、宣言順にかかわらず、通常の質問で一時停止したメンバーより先に、不確かな効果で一時停止した最初のメンバーで一時停止するようになりました。収集型の `ng.all` は失敗の横でも一時停止したメンバーで一時停止し続け、これは #392/#397 の優先順位の意図的な例外として文書化されました。
-- **C++ の利用コードは再ビルドが必要です。Program の provider 呼び出し構造体に member が加わり、価格の付く呼び出しには `monetary_microunits` が適用されます (#372)。** `ProgramResultData` に `monetary_records`、`ProgramCoreProviderCallContext` に `monetary_account`、`SQLiteProgramProviderCallJournal::Record` に `monetary_record` が加わり、`Provider` には静的関数 `invocation_upper_bound` ができました。NeoGraph、C++ の利用コード、Python 拡張を一緒に再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。provider journal は既存のデータベースに `monetary_record` 列を追加します。保存された `ProgramResult` は価格の付いた呼び出しがあるときだけ `monetary_records` を持つため、ほかの結果のバイトと id は変わりません。**動作の変更:** すべての `RunBudget` の量と同じく `monetary_microunits = 0` は何も与えないため、金額予算がゼロの実行は、価格付け broker が価格を付けるすべての呼び出しを `P_MONEY_BUDGET` で拒否します。以前は何も金額を請求しませんでした。
 - **C++ の利用コードは再ビルドが必要です。グラフと Program の構造体に member が加わりました (#357, #358, #361, #365, #367)。** `EngineConfig` に `validation` と `stderr_notices`、`RunMetadata` と `RunContext` に `shared_scheduler`、`ProgramCompilerConfig` に `require_acyclic`、`ProgramCompilerConfig` と `ValidationOptions` に `soundness_check` と `soundness_state_cap` が加わり、`GraphEngine` には private member、`RunStatus` には `BarrierStalled` が加わりました。#364 で `EngineConfig` に `failure_text_redactor`、`RunMetadata` に `node_retry_ceiling`、`RunBudget` に `max_node_retries`、`ProgramUsage` に `node_retries`、`CatalogConfig` に `failure_text_redactor` が加わり、`Scheduler`、`NodeExecutor`、`GraphEngine` にメンバーが、`RunStatus` に `FailureExit` が加わり、`ProgramDiagnosticError`、`ProgramCompileError`、`ProgramAdmissionError` は基底クラス `graph::ConfigurationFailure` を得ました。これらは layout を変えるため、NeoGraph、C++ の利用コード、Python 拡張を一緒に再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。すべての値を列挙する `RunStatus` の `switch` には `BarrierStalled` と `FailureExit` の case が必要です。
 - **C++ の利用コードは再ビルドが必要です。試行タイムアウトでグラフのレイアウトが変わり、ノード本体は試行のトークンを受け取ります (#364, #367, #368)。** `NodeRetryPolicySpec` に `attempt_timeout_ms` が、`NodeExecutor` にメンバーが、`GraphEngine` にメンバーと宣言されたデストラクターが加わりました。NeoGraph、C++ の利用コード、Python 拡張を一緒に再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。**動作の変更:** Program の実行では、またタイムアウトのあるすべての試行では、ノード本体は実行を駆動するコルーチンではなくワーカープールで実行され、その `ctx.cancel_token` はその試行に属する実行のトークンの子です。実行をキャンセルすればこれまでどおりそのトークンもキャンセルされますが、そのトークンをキャンセルしてもキャンセルされるのはその試行だけです。そのため Program の実行では並列ステップのノード本体が重なって実行され、その `NODE_END` イベントは完了した順に届きます。`attempt_timeout_ms` を使わない定義はバイト列と id を保ちます。
 - **Program: 失敗したノードは分類されたコードを報告します (#364)。** failure edge のないノードの失敗は、Program の実行を `P_RUNTIME_CORE_FAILURE` ではなくノード失敗の分類器のコード(`NG.TaskFailed`、`app.compile_error` のような作成者コード、`NG.ProviderFailed` など)で `Failed` にし、`failure.witness.node_failure` に `{node, code, kind, attempts, retryable, routable}` が入ります。`P_RUNTIME_CORE_FAILURE` はノード失敗のレコードを持たない Core の失敗にだけ残ります。オーケストレーション計画の `retry` 操作も同じ分類器に問い合わせ、論理、構成、予算、プロバイダーの失敗、コミットされた効果、到達したリトライ上限の後には本体を再実行しなくなりました。

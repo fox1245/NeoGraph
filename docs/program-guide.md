@@ -14,7 +14,7 @@ Use a plain graph when one graph and its checkpoints are enough. A Program is fo
 
 The Program layer needs a build with Program and QuickJS control: `pip install neograph-engine` includes them, and a source build needs `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` (then `pip install pydantic certifi` and put the build directory on `PYTHONPATH`).
 
-The example below uses failure routing, `fork` and the SQLite state directory. The 0.13.1 wheel on PyPI does not have them, so run it against a build of the current source; so do the examples that use them (Python 32, 35 and 36). To start smaller, run [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py), which compiles, admits and runs one Program in under a hundred lines. In C++, start from [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp).
+The example below uses failure routing, `fork` and the SQLite state directory. The 0.14.0 wheel on PyPI has them and the 0.13.1 wheel does not, so with an older wheel run it against a build of the current source, and the same goes for the examples that use them (Python 32, 35 and 36). To start smaller, run [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py), which compiles, admits and runs one Program in under a hundred lines. In C++, start from [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp).
 
 ## A worked example: a release check
 

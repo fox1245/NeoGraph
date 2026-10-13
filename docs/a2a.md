@@ -202,7 +202,7 @@ TaskState.InputRequired
 TaskState.Completed
 ```
 
-Other calls on the client: `send_message_stream(text, on_event)` delivers status and artifact updates as they arrive and returns the assembled task; `get_task(id)` reads a task; `cancel_task(id)` cancels one, including a task that waits for input. A message to a task that is already terminal fails with `-32004`. The Python client is in the 0.13.1 wheel, and the Python script above works against this server with it.
+Other calls on the client: `send_message_stream(text, on_event)` delivers status and artifact updates as they arrive and returns the assembled task; `get_task(id)` reads a task; `cancel_task(id)` cancels one, including a task that waits for input. A message to a task that is already terminal fails with `-32004`. The Python client is in the 0.14.0 wheel, and the Python script above works against this server with it.
 
 ## Use a remote agent as a node
 

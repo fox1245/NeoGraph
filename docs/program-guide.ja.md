@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=9190cbec147688ffec389ff98c5852aa1e3d8460c6d04c64dc7718fbd046a0da -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,7 +15,7 @@
 
 Program 層には、Program と QuickJS 制御を含むビルドが必要です。`pip install neograph-engine` に含まれており、ソースからのビルドでは `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON` が必要です(そのあと `pip install pydantic certifi` を実行し、ビルドディレクトリを `PYTHONPATH` に加えます)。
 
-以下の例は、失敗ルーティング、`fork`、SQLite の状態ディレクトリを使います。PyPI の 0.13.1 ホイールにはこれらがないので、現在のソースからビルドしたもので実行してください。これらを使う例(Python の 32、35、36)も同じです。もっと小さな例から始めるなら、[`29_program_hello.py`](../bindings/python/examples/29_program_hello.py) を実行してください。Program 1つのコンパイル、admission、実行を100行足らずで示します。C++ では [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) から始めてください。
+以下の例は、失敗ルーティング、`fork`、SQLite の状態ディレクトリを使います。PyPI の 0.14.0 ホイールにはこれらがあり、0.13.1 ホイールにはないので、古いホイールを使う場合は現在のソースからビルドしたもので実行してください。これらを使う例(Python の 32、35、36)も同じです。もっと小さな例から始めるなら、[`29_program_hello.py`](../bindings/python/examples/29_program_hello.py) を実行してください。Program 1つのコンパイル、admission、実行を100行足らずで示します。C++ では [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) から始めてください。
 
 ## 実践例: リリースのチェック
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=9873d79cea98d815e023d14384da32f3f021dc0c30122d6a004b7bb181f149db -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=ae2e03b8b87d0da548b07723e235ce213559d2ccc8a4060ef5b28e72d67a5799 -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -203,7 +203,7 @@ TaskState.InputRequired
 TaskState.Completed
 ```
 
-クライアントのその他の呼び出しは次のとおりです。`send_message_stream(text, on_event)` は、ステータスとアーティファクトの更新を届いた順に渡し、組み立てたタスクを返します。`get_task(id)` はタスクを読み、`cancel_task(id)` は、入力待ちのタスクを含め、タスクをキャンセルします。すでに終了したタスクにメッセージを送ると、`-32004` で失敗します。この Python クライアントは 0.13.1 のホイールにも入っており、上の Python スクリプトはホイールでもこのサーバーで動きます。
+クライアントのその他の呼び出しは次のとおりです。`send_message_stream(text, on_event)` は、ステータスとアーティファクトの更新を届いた順に渡し、組み立てたタスクを返します。`get_task(id)` はタスクを読み、`cancel_task(id)` は、入力待ちのタスクを含め、タスクをキャンセルします。すでに終了したタスクにメッセージを送ると、`-32004` で失敗します。この Python クライアントは 0.14.0 のホイールにも入っており、上の Python スクリプトはホイールでもこのサーバーで動きます。
 
 ## リモートエージェントをノードとして使う
 

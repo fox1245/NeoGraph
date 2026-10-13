@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=78e85bc6b43f65b50274da68f73191ca895f31f32e72d6a7654fb60b856fb3a3 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
 # MCP: 그래프를 도구로 공개하고, 도구를 쓰는 그래프 만들기
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -185,7 +185,7 @@ word_count - Count the words in a text by running a NeoGraph graph.
 False 5
 ```
 
-0.13.1 휠에도 이 Python 클라이언트가 들어 있으며, stdio 전송은 위 서버와 잘 동작합니다. `MCPClient.shutdown()`은 휠에 없고, 확인해 본 결과 휠의 HTTP 클라이언트는 아래에서 설명하는 HTTP 서버에 세션을 열지 못했습니다. HTTP를 쓰려면 현재 소스로 빌드하세요.
+0.14.0 휠에도 이 Python 클라이언트가 들어 있습니다. stdio 전송은 위 서버와, HTTP 클라이언트는 아래에서 설명하는 HTTP 서버와 동작하며, `MCPClient.shutdown()`도 있습니다. 0.13.1 이하의 휠에는 `shutdown()`이 없고, 그 휠의 HTTP 클라이언트는 해당 HTTP 서버에 세션을 열지 못했습니다. 그런 휠이라면 현재 소스로 빌드하세요.
 
 HTTP에서는 `MCPClient("http://127.0.0.1:8000/mcp")`처럼 서버의 엔드포인트 URL을 주며, 이 URL은 그대로 사용됩니다. 찾아낸 도구는 자신의 세션을 유지하므로 `MCPClient` 객체가 소멸된 뒤에도 쓸 수 있습니다.
 

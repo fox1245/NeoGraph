@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=69afc6fcb257ee278de8e8e0470fbfa008100e77d3a3af2e20a9435e8cef2a34 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=9190cbec147688ffec389ff98c5852aa1e3d8460c6d04c64dc7718fbd046a0da -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -15,7 +15,7 @@
 
 Program 层需要包含 Program 和 QuickJS 控制的构建：`pip install neograph-engine` 已经包含，源码构建需要 `-DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON`（然后执行 `pip install pydantic certifi`，并把构建目录加入 `PYTHONPATH`）。
 
-下面的示例用到了失败路由、`fork` 和 SQLite 状态目录。PyPI 上的 0.13.1 wheel 没有这些，请用当前源码构建的版本来运行；用到这些功能的示例（Python 32、35 和 36）也一样。想从更小的示例开始，可以运行 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)，它用不到一百行完成一个 Program 的编译、准入(admission)和运行。在 C++ 中，请从 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) 入手。
+下面的示例用到了失败路由、`fork` 和 SQLite 状态目录。PyPI 上的 0.14.0 wheel 有这些，0.13.1 wheel 没有，所以使用更早的 wheel 时，请用当前源码构建的版本来运行；用到这些功能的示例（Python 32、35 和 36）也一样。想从更小的示例开始，可以运行 [`29_program_hello.py`](../bindings/python/examples/29_program_hello.py)，它用不到一百行完成一个 Program 的编译、准入(admission)和运行。在 C++ 中，请从 [`65_program_javascript.cpp`](../examples/65_program_javascript.cpp) 入手。
 
 ## 完整示例：发布检查
 

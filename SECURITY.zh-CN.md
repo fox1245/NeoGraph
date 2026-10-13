@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=SECURITY.md locale=zh-CN source_sha256=1846450e26db18b21a90809734487fbc5fef135a3425887bd70fae57a20beb4e -->
+<!-- neograph-i18n: source=SECURITY.md locale=zh-CN source_sha256=24ae45f92fb362565a8acd8171ea70ddd9ecdd80831b0d281d5c5284d51bc065 -->
 # 安全策略
 
 **Languages:** [English](SECURITY.md) | [한국어](SECURITY.ko.md) | [日本語](SECURITY.ja.md) | [简体中文](SECURITY.zh-CN.md)
@@ -11,8 +11,8 @@ NeoGraph 尚处于 1.0 之前。安全修复会先合入 `master`，再随当前
 | 版本 | 支持 |
 | ---- | ---- |
 | `master` | 是，修复最先合入这里 |
-| 0.13.x（最新发布版本） | 是 |
-| < 0.13 | 否 |
+| 0.14.x（最新发布版本） | 是 |
+| < 0.14 | 否 |
 
 ## 报告漏洞
 
