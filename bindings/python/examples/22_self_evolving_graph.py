@@ -25,6 +25,8 @@ smoke-expect: model calls: 4
 smoke-forbid: [neograph] lint
 """
 
+from __future__ import annotations
+
 import json
 from typing import Any
 

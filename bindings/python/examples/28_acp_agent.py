@@ -18,6 +18,8 @@ smoke-expect: NeoGraph received: hello (turn 1)
 smoke-expect: NeoGraph received: hello again (turn 2)
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import re
