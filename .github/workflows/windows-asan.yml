@@ -1,0 +1,36 @@
+name: Windows ASan
+# The MSVC AddressSanitizer check of the Program and QuickJS tests. ci-extended.yml calls it with the
+# other sanitizer jobs; it can also be dispatched alone (Actions -> Windows ASan -> Run workflow),
+# which takes about a quarter of the time of the whole extended run.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+# Least privilege: the job only reads the repository; artifacts and caches use the runner's own token.
+permissions:
+  contents: read
+
+jobs:
+  windows-asan:
+    # VS 2022 MSVC 19.44 has an ASan coroutine catch-funclet defect.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install SDK transport dependencies
+        uses: ./.github/actions/windows-transport-deps
+      - name: Verify serial full Program and QuickJS ASan boundary
+        run: python scripts/verify_ci.py msvc-asan --work-dir build-windows-asan --jobs auto
+      - name: Upload sanitizer logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-logs-windows-asan
+          path: build-windows-asan/build/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
