@@ -157,12 +157,35 @@ jobs:
       - name: Install build and Python test dependencies
         run: |
           bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev \
-            libpq-dev postgresql-client libsqlite3-dev pkg-config
+            libpq-dev postgresql-client libsqlite3-dev pkg-config ccache
           python -m pip install --quiet pytest pydantic certifi
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-asan-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-asan-${{ runner.os }}-
+      # The same setup as ci.yml's Linux job; each sanitizer has its own cache, since
+      # its flags change every object. Saved even when a test fails: the build is valid.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          ccache --max-size=2G
+          ccache --zero-stats
       - name: Verify full ASan UBSan LSan native, examples and Python
         env:
           NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
-        run: python scripts/verify_ci.py asan --work-dir build-asan --jobs auto
+        run: python scripts/verify_ci.py asan --work-dir build-asan --jobs auto --ccache
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-asan-${{ runner.os }}-${{ github.sha }}
 
   tsan-test:
     runs-on: ubuntu-latest
@@ -174,9 +197,32 @@ jobs:
           python-version: '3.12'
       - name: Install build dependencies and process-local ASLR tool
         run: |
-          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config util-linux
+          bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config util-linux ccache
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-tsan-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-tsan-${{ runner.os }}-
+      # The same setup as ci.yml's Linux job; each sanitizer has its own cache, since
+      # its flags change every object. Saved even when a test fails: the build is valid.
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          ccache --max-size=1500M
+          ccache --zero-stats
       - name: Verify native TSan suite and real examples
-        run: python scripts/verify_ci.py tsan --work-dir build-tsan --jobs auto
+        run: python scripts/verify_ci.py tsan --work-dir build-tsan --jobs auto --ccache
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-tsan-${{ runner.os }}-${{ github.sha }}
 
   fuzz-canary:
     runs-on: ubuntu-latest
