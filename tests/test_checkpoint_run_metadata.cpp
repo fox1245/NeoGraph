@@ -145,8 +145,8 @@ TEST(CheckpointRunMetadata, BothTimingsCarryHowTheRunStoppedAndDifferOnlyInTheCo
     const auto during  = gd::checkpoint_metadata_for(ctx, gd::CheckpointTiming::DuringStep);
     const auto between = gd::checkpoint_metadata_for(ctx, gd::CheckpointTiming::BetweenSteps);
     for (const auto* metadata : {&during, &between}) {
-        EXPECT_EQ((*metadata)["_neograph"]["barrier_stalled"], runtime->status_marks->barrier_stall);
-        EXPECT_EQ((*metadata)["_neograph"]["failure_exit"], runtime->status_marks->failure_exit);
+        EXPECT_EQ((*metadata)["_neograph"]["barrier_stalled"], *runtime->status_marks->barrier_stall);
+        EXPECT_EQ((*metadata)["_neograph"]["failure_exit"], *runtime->status_marks->failure_exit);
     }
     // During a step: the counters from its start; between steps: as they are.
     EXPECT_EQ(during["_neograph"]["node_visits"], (json{{"T", 1}}));

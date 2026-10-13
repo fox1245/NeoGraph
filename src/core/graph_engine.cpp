@@ -2007,16 +2007,21 @@ GraphEngine::execute_graph_async(
         failure_state          = std::make_shared<detail::FailureRunState>();
         runtime->failure_state = failure_state;
     }
+    // One allocation holds the three records a run keeps across its steps.
+    const auto bookkeeping = std::make_shared<detail::RunBookkeeping>();
     // #383: how the run stopped, once known; every checkpoint carries it.
-    const auto status_marks = std::make_shared<detail::RunStatusMarks>();
+    const auto status_marks = std::shared_ptr<detail::RunStatusMarks>(bookkeeping,
+                                                                       &bookkeeping->status);
     runtime->status_marks   = status_marks;
     // #385: the state each step started from, for a Send that interrupts.
-    const auto step_start = std::make_shared<detail::StepStartState>();
+    const auto step_start = std::shared_ptr<detail::StepStartState>(bookkeeping,
+                                                                     &bookkeeping->step_start);
     step_start->enabled   = coord.enabled();
     runtime->step_start   = step_start;
     // #388: the NodeInterrupts of the step that pauses, and the one a resume
     // answers.
-    const auto step_interrupts = std::make_shared<detail::StepInterrupts>();
+    const auto step_interrupts = std::shared_ptr<detail::StepInterrupts>(bookkeeping,
+                                                                          &bookkeeping->interrupts);
     runtime->step_interrupts   = step_interrupts;
     // #396: on a resume of a gate's Before checkpoint, the gates of its step
     // that are answered: the ones the checkpoint carries, and the one it held,
@@ -2180,10 +2185,10 @@ GraphEngine::execute_graph_async(
     }
 
     std::vector<std::string> trace;
-    // Null unless the run stopped at an unsatisfiable barrier.
-    json& barrier_stall = status_marks->barrier_stall;
-    // #364: {node, code} once a failure-exit node completed; null otherwise.
-    json& failure_exit = status_marks->failure_exit;
+    // Set only when the run stopped at an unsatisfiable barrier.
+    auto& barrier_stall = status_marks->barrier_stall;
+    // #364: {node, code} once a failure-exit node completed.
+    auto& failure_exit = status_marks->failure_exit;
     // #364: failure records that routed to a node in the previous super-step,
     // by target: the interrupt payload when the target has interruptBefore.
     std::map<std::string, json> failure_arrivals;
@@ -2468,7 +2473,7 @@ GraphEngine::execute_graph_async(
             if (!handled.empty() && handled[i]) continue;
             const auto& completed = unified_routings[i].node_name;
             if (failure_state) failure_state->target_completed(*failure_routing_, completed);
-            if (failure_exit.is_null()) {
+            if (!failure_exit) {
                 const auto exit = failure_routing_->exits.find(completed);
                 if (exit != failure_routing_->exits.end())
                     failure_exit = json{{"node", completed}, {"code", exit->second}};
@@ -2478,7 +2483,7 @@ GraphEngine::execute_graph_async(
         auto plan = handled.empty()
             ? scheduler_->plan_next_step(unified_routings, state, barrier_state)
             : scheduler_->plan_next_step(unified_routings, state, barrier_state, handled);
-        if (!failure_exit.is_null()) {
+        if (failure_exit) {
             // An abort ends the run after this super-step, explicitly.
             plan.ready.clear();
             plan.hit_end          = true;
@@ -2613,8 +2618,8 @@ GraphEngine::execute_graph_async(
             {"max_steps_exhausted", true}
         };
     }
-    if (!barrier_stall.is_null()) result.output["_neograph"][kBarrierStalled] = barrier_stall;
-    if (!failure_exit.is_null()) result.output["_neograph"]["failure_exit"] = failure_exit;
+    if (barrier_stall) result.output["_neograph"][kBarrierStalled] = *barrier_stall;
+    if (failure_exit) result.output["_neograph"]["failure_exit"] = *failure_exit;
     if (!last_checkpoint_id.empty()) {
         result.checkpoint_id = last_checkpoint_id;
     }

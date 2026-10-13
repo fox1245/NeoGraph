@@ -268,10 +268,10 @@ json checkpoint_metadata_for(const RunContext& context, CheckpointTiming timing)
     // #383: once known, how the run stopped is on every checkpoint, so
     // resuming or forking any of them reports it instead of completion.
     if (runtime->status_marks) {
-        if (!runtime->status_marks->barrier_stall.is_null())
-            metadata[kMetadataNamespace][kBarrierStalled] = runtime->status_marks->barrier_stall;
-        if (!runtime->status_marks->failure_exit.is_null())
-            metadata[kMetadataNamespace][kFailureExit] = runtime->status_marks->failure_exit;
+        if (runtime->status_marks->barrier_stall)
+            metadata[kMetadataNamespace][kBarrierStalled] = *runtime->status_marks->barrier_stall;
+        if (runtime->status_marks->failure_exit)
+            metadata[kMetadataNamespace][kFailureExit] = *runtime->status_marks->failure_exit;
     }
     // A checkpoint saved between steps resumes the next step: it keeps the
     // counters as they are now.

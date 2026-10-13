@@ -30,8 +30,8 @@ class FailureRunState;
 /// saves afterwards carries it (#383). Only the run's own coroutine reads and
 /// writes it.
 struct RunStatusMarks {
-    json barrier_stall;
-    json failure_exit;
+    std::optional<json> barrier_stall;
+    std::optional<json> failure_exit;
 };
 
 /// #385: the state the current super-step started from, which a Send that
@@ -67,6 +67,14 @@ struct StepInterrupts {
     /// the run reports; empty when it saved none. The thread's latest
     /// checkpoint in a store can be another run's.
     std::string checkpoint_id;
+};
+
+/// The three per-run records above, allocated once per run: RunContextRuntime
+/// points at each through a shared_ptr that aliases this block.
+struct RunBookkeeping {
+    RunStatusMarks status;
+    StepStartState step_start;
+    StepInterrupts interrupts;
 };
 
 struct SubgraphWriteJournal {
