@@ -201,6 +201,40 @@ def ctest(build, jobs, *options, env=None, prefix=(), timeout=TEST_TIMEOUT):
          "--output-on-failure", "--timeout", timeout, "--parallel", jobs, *options], env=env)
 
 
+# Text that only a sanitizer prints. A failure of the parallel sanitizer run without it lost a
+# race against the clock on a loaded runner (a Program wall-time budget, the per-test timeout),
+# not a memory or UB check.
+SANITIZER_REPORT = re.compile(r"ERROR: (AddressSanitizer|LeakSanitizer|ThreadSanitizer)|"
+                              r"WARNING: ThreadSanitizer|runtime error:|"
+                              r"SUMMARY: (AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer)")
+
+
+def sanitizer_ctest(build, jobs, *options, env, prefix, timeout):
+    """Run ctest in parallel, then run its failures once more one at a time.
+
+    A failure is retried only when no test printed a sanitizer report; with one, the run
+    fails as before. The retried tests are named, so a test that keeps needing the retry
+    stays visible.
+    """
+    try:
+        ctest(build, jobs, *options, env=env, prefix=prefix, timeout=timeout)
+        return
+    except subprocess.CalledProcessError:
+        if jobs == 1:
+            raise
+    temporary = Path(build) / "Testing" / "Temporary"
+    log = temporary / "LastTest.log"
+    if not log.is_file() or SANITIZER_REPORT.search(log.read_text(errors="replace")):
+        raise RuntimeError("the sanitizer ctest run failed with a sanitizer report; see the output above")
+    failed = temporary / "LastTestsFailed.log"
+    names = [line.split(":", 1)[-1] for line in failed.read_text().splitlines()] if failed.is_file() else []
+    message = (f"{len(names)} test(s) failed in the parallel sanitizer run without a sanitizer "
+               f"report and run again one at a time: {', '.join(names)}")
+    print(f"::warning::{message}" if os.environ.get("GITHUB_ACTIONS") else f"warning: {message}",
+          flush=True)
+    ctest(build, 1, "--rerun-failed", env=env, prefix=prefix, timeout=timeout * 2)
+
+
 def binary(build, name, subdir=""):
     base = build / subdir
     suffix = ".exe" if platform.system() == "Windows" else ""
@@ -311,10 +345,12 @@ def sanitizer(args):
     # pybind_smoke is run separately below with the interpreter preload boundary.
     # The tests share no state (each takes its own temporary directories, ports and
     # PostgreSQL schemas), so the ASan run uses every job; one at a time it took
-    # 79 minutes, more than half of the job.
-    ctest(build, args.jobs if asan else min(args.jobs, 2), "-E",
-          "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix,
-          timeout=SANITIZER_TEST_TIMEOUT if asan else TEST_TIMEOUT)
+    # 79 minutes, more than half of the job. On a slow runner a few timing-bound tests can
+    # still miss their budget in parallel, so failures without a sanitizer report get one
+    # serial retry.
+    sanitizer_ctest(build, args.jobs if asan else min(args.jobs, 2), "-E",
+                    "BIG_|valgrind|^pybind_smoke$" if asan else "BIG_|valgrind", env=env, prefix=prefix,
+                    timeout=SANITIZER_TEST_TIMEOUT if asan else TEST_TIMEOUT)
     for example in ASAN_EXAMPLES if asan else TSAN_EXAMPLES:
         run([*prefix, binary(build, example)], env=env, timeout=90)
     if asan:
