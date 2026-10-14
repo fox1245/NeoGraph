@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=2548c2a7ce52e87bd6d681142967d489c7d0a3ced5acb4c58218f6c6fc232c31 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=df81105ea6875cf18cf9e115470610ffd521c20f862afdbca2a6c806b390833e -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@ NeoGraph 是一个 C++20 库，用来运行以图描述的工作流。节点负�
 - 要在 C++ 服务中运行这类工作流，或通过 MCP、A2A、ACP 把它们开放给其他智能体和工具的团队。
 - 熟悉 LangGraph 的读者：带归约器的通道、`Send`、`Command` 和检查点是相同的概念，所以[核心概念指南](docs/concepts.md)读起来会很快。
 
-NeoGraph 是 alpha 阶段的软件（版本 0.14.0）。C++ 二进制接口可能在 0.x 版本之间变化，见 [ABI 政策](docs/ABI_POLICY.md)。它不训练模型，也不能替代数值计算库；模型调用只是节点能做的事情之一。
+NeoGraph 是 alpha 阶段的软件（版本 0.14.1）。C++ 二进制接口可能在 0.x 版本之间变化，见 [ABI 政策](docs/ABI_POLICY.md)。它不训练模型，也不能替代数值计算库；模型调用只是节点能做的事情之一。
 
 ## 快速开始
 
@@ -70,7 +70,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-PyPI 上的 wheel 是由 0.14.0 版本构建的。[变更日志](CHANGELOG.md)中 *Unreleased* 下列出的变更不在其中；要使用它们，请从源码构建（见[构建配置](#build-configuration-and-further-reading)）。
+PyPI 上的 wheel 是由 0.14.1 版本构建的。[变更日志](CHANGELOG.md)中 *Unreleased* 下列出的变更不在其中；要使用它们，请从源码构建（见[构建配置](#build-configuration-and-further-reading)）。
 
 ### C++
 
@@ -397,7 +397,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux 上对比开启与关闭的两个匹配构建；为得到不可变的来源信息，需要真实的源码根目录 Git 检出。 |
 | `fuzz` | Linux Clang/libFuzzer 的 60 秒金丝雀测试；语料会复制到你拥有的输出目录。 |
 | `install` | 在隔离的导出前缀中检查 ABI、符号、C++、C11、冲突和重定位的使用方；不需要 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需要 `--program` 以及 ELF/Mach-O 检查，Windows 行没有它。 |
-| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.14.0`。 |
+| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.14.1`。 |
 | `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==2.23.0 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
 | `runtime-archive` | 共享 SDK 原生归档的可移植性目标/CTest。需要 Ninja 和平台运行时依赖。 |
 

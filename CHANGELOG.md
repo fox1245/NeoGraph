@@ -13,8 +13,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-14
+
 ### Changed
 
+- **Linux wheels are built from pinned images (#333).** The `manylinux_2_34` images are pinned by the digests that built 0.14.0, and the CI runners no longer use `-latest` labels. The bundled libraries of the Linux x86_64 wheel are byte-identical to 0.14.0's, including the LGPL `keyutils-libs` and `libxcrypt`, so the published library source still applies.
 - **Rebuild C++ consumers: `RuntimeConfig` gained a member and `ProgramHandle` a function (#431).** `RuntimeConfig` gained `core_provider_calls_journaled`, `ProgramHandle` gained `notices()`, and `ProgramNotice` is new. Rebuild NeoGraph, C++ consumers and Python extensions together (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
 - **A fork on a host without a durable provider-call journal says so (#431).** A fork replays the provider calls of the paused invocation only from a durable provider-call journal (`SQLiteProgramProviderCallJournal`, which `LocalProgramHost` has when it has a `sqlite_directory`). The in-process broker keeps none, so a node that runs again in the fork sends and charges its earlier calls again; that is unchanged. **Behavior change:** when `RuntimeConfig::core_provider_calls_journaled` is `false` (the default) and the paused attempt recorded priced provider calls in the paused operation, the handle `ProgramRuntime::fork` returns now carries a `ProgramNotice` with the code `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` (`ProgramHandle::notices()`, Python `handle.notices`). Its `witness` lists the calls (`call_id`, `node`, `model`, `microunits`) and their total. The notice is not an error and changes neither what the fork sends nor what it charges. It cannot tell which listed calls the fork runs again, since a call of a node that finished in the paused step is replayed from the step's saved writes. It is not stored with the run, so the handles of `reconnect()` and `resume()` have none. A host whose resolver returns `SQLiteProgramProviderCallJournal` brokers should set `core_provider_calls_journaled = true` (`LocalProgramHost` does when it has a `sqlite_directory`). Documented in the Program guide, the Python binding guide and the reference.
 

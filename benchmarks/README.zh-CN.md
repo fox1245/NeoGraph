@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=d6b1cba6b458984a84653db86d62c65c8bd21600f2ee76824e1d278b539fc614 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=c07815bfd0227cf5dc158696a9f58a64c78f1da6241f33e838e3b50112a93c9a -->
 # NeoGraph 与 Python 图/流水线框架对比：引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 测量范围包括节点分发、状态通道的写入和 reducer 调用。
 带日期的表格保留的是历史上的引擎标签和依赖版本；
 它们不代表当前的包版本。
-NeoGraph `0.14.0` 当前的构建方法，需要 alpha 版 SDK `0.3.1`、接口修订版/共享库
+NeoGraph `0.14.1` 当前的构建方法，需要 alpha 版 SDK `0.3.1`、接口修订版/共享库
 代数 6，以及匹配的头文件和库。
 
 Program 的准入(admission)、JavaScript 控制，以及 SQLite/PostgreSQL 运行时的开销，

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e0b576200cf902dd5cedc8654db89b574befceca829c49bb1f834606b9a8fc3a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=f2c0e512d2d3e9895f923b7ead71a944133bd7b7f4ab75dae6bc547c00b2a6c3 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -14,8 +14,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-14
+
 ### 변경됨
 
+- **Linux 휠을 고정된 이미지로 빌드합니다(#333).** `manylinux_2_34` 이미지를 0.14.0을 빌드한 digest로 고정했고, CI 러너는 더 이상 `-latest` 라벨을 쓰지 않습니다. Linux x86_64 휠에 동봉한 라이브러리는 LGPL인 `keyutils-libs`와 `libxcrypt`를 포함해 0.14.0과 바이트 단위로 같으므로, 공개한 라이브러리 소스가 그대로 적용됩니다.
 - **C++ 사용 코드를 재빌드해야 합니다. `RuntimeConfig`에 member가, `ProgramHandle`에 함수가 추가되었습니다 (#431).** `RuntimeConfig`에 `core_provider_calls_journaled`가, `ProgramHandle`에 `notices()`가 추가되었고, `ProgramNotice`가 새로 생겼습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조).
 - **영속적인 provider 호출 저널이 없는 호스트의 fork는 그 사실을 알립니다 (#431).** fork는 일시 중지된 호출의 provider 호출을 영속적인 provider 호출 저널(`SQLiteProgramProviderCallJournal`이며, `LocalProgramHost`는 `sqlite_directory`가 있을 때 가집니다)에서만 재생합니다. 프로세스 내 broker에는 저널이 없으므로 fork에서 다시 실행되는 노드는 앞서 한 호출을 다시 전송하고 다시 과금하며, 이 점은 달라지지 않았습니다. **동작 변경:** `RuntimeConfig::core_provider_calls_journaled`가 `false`(기본값)이고 일시 중지된 시도가 일시 중지된 연산에서 가격이 매겨진 provider 호출을 기록했다면, `ProgramRuntime::fork`가 반환하는 핸들이 이제 코드 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`인 `ProgramNotice`를 담습니다(`ProgramHandle::notices()`, Python에서는 `handle.notices`). `witness`에는 해당 호출(`call_id`, `node`, `model`, `microunits`)과 합계가 나열됩니다. 알림은 오류가 아니며 fork가 전송하거나 과금하는 내용을 바꾸지 않습니다. 일시 중지된 스텝에서 끝난 노드의 호출은 그 스텝에 저장된 쓰기에서 재생되므로, 나열된 호출 가운데 fork가 다시 실행하는 것이 무엇인지는 알림으로 알 수 없습니다. 알림은 실행과 함께 저장되지 않아서 `reconnect()`와 `resume()`이 반환한 핸들에는 없습니다. resolver가 `SQLiteProgramProviderCallJournal`의 broker를 반환하는 호스트는 `core_provider_calls_journaled = true`로 설정해야 합니다(`LocalProgramHost`는 `sqlite_directory`가 있을 때 설정합니다). Program 가이드, Python 바인딩 가이드, 레퍼런스에 문서화했습니다.
 

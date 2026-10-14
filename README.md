@@ -16,7 +16,7 @@ The same engine is available from C++ and from Python (`pip install neograph-eng
 - Teams that run such workflows inside a C++ service, or expose them to other agents and tools over MCP, A2A or ACP.
 - Readers who know LangGraph: channels with reducers, `Send`, `Command` and checkpoints are the same ideas, so the [concepts guide](docs/concepts.md) should read quickly.
 
-NeoGraph is alpha software (version 0.14.0). The C++ binary interface can change between 0.x releases; see the [ABI policy](docs/ABI_POLICY.md). It does not train models or replace a numerical library, and a model call is only one kind of node.
+NeoGraph is alpha software (version 0.14.1). The C++ binary interface can change between 0.x releases; see the [ABI policy](docs/ABI_POLICY.md). It does not train models or replace a numerical library, and a model call is only one kind of node.
 
 ## Quickstart
 
@@ -69,7 +69,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-The wheel on PyPI is built from release 0.14.0. Changes listed under *Unreleased* in the [changelog](CHANGELOG.md) are not in it; build from source to use them (see [Build configuration](#build-configuration-and-further-reading)).
+The wheel on PyPI is built from release 0.14.1. Changes listed under *Unreleased* in the [changelog](CHANGELOG.md) are not in it; build from source to use them (see [Build configuration](#build-configuration-and-further-reading)).
 
 ### C++
 
@@ -406,7 +406,7 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. |
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
-| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.14.0`. |
+| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.14.1`. |
 | `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
 

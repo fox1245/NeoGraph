@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e0b576200cf902dd5cedc8654db89b574befceca829c49bb1f834606b9a8fc3a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=f2c0e512d2d3e9895f923b7ead71a944133bd7b7f4ab75dae6bc547c00b2a6c3 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -14,8 +14,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ## [未リリース]
 
+## [0.14.1] - 2026-10-14
+
 ### 変更
 
+- **Linux のホイールを固定したイメージでビルドします（#333）。** `manylinux_2_34` のイメージを 0.14.0 をビルドした digest に固定し、CI のランナーは `-latest` ラベルを使わなくなりました。Linux x86_64 のホイールに同梱したライブラリは、LGPL の `keyutils-libs` と `libxcrypt` を含めて 0.14.0 とバイト単位で同じなので、公開しているライブラリのソースがそのまま当てはまります。
 - **C++ の利用側を再ビルドしてください。`RuntimeConfig` に member が、`ProgramHandle` に関数が追加されました（#431）。** `RuntimeConfig` に `core_provider_calls_journaled` が、`ProgramHandle` に `notices()` が追加され、`ProgramNotice` が新しく加わりました。NeoGraph、C++ の利用側、Python 拡張を一緒に再ビルドしてください([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
 - **永続的なプロバイダー呼び出しのジャーナルがないホストでのフォークは、そのことを知らせます（#431）。** フォークは、一時停止した呼び出しのプロバイダー呼び出しを、永続的なプロバイダー呼び出しのジャーナル（`SQLiteProgramProviderCallJournal`。`LocalProgramHost` は `sqlite_directory` があると持ちます）からだけリプレイします。プロセス内のブローカーにはジャーナルがないため、フォークで再び実行されるノードは先に行った呼び出しを再送し、再課金します。この点は変わっていません。**動作の変更:** `RuntimeConfig::core_provider_calls_journaled` が `false`（既定値）で、一時停止した試行が、止まっているオペレーションで価格付きのプロバイダー呼び出しを記録していた場合、`ProgramRuntime::fork` が返すハンドルに、コードが `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` の `ProgramNotice` が付くようになりました（`ProgramHandle::notices()`、Pythonでは `handle.notices`）。`witness` には、それらの呼び出し（`call_id`、`node`、`model`、`microunits`）と合計が並びます。通知はエラーではなく、フォークが送るものも課金するものも変えません。一時停止したステップで終わったノードの呼び出しは、そのステップに保存された書き込みからリプレイされるため、列挙された呼び出しのうちどれをフォークが再実行するかは、通知からは分かりません。通知は実行とともには保存されないので、`reconnect()` や `resume()` が返すハンドルにはありません。resolver が `SQLiteProgramProviderCallJournal` のブローカーを返すホストは、`core_provider_calls_journaled = true` を設定してください（`LocalProgramHost` は `sqlite_directory` があると設定します）。Program ガイド、Python バインディングガイド、リファレンスに記載しました。
 
