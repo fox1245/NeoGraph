@@ -541,3 +541,92 @@ TEST_F(WsLoopback, DelayedOperationsOwnEndpointAndPayloads) {
     ASSERT_GE(close.payload.size(), 2u);
     EXPECT_EQ(close.payload.substr(2), "owned-close");
 }
+
+TEST(WsClientOptionsDefaults, HandshakeHasAFiniteDeadlineAndReadsDoNot) {
+    const WsClientOptions options;
+    EXPECT_EQ(options.handshake_timeout, 30s);
+    EXPECT_EQ(options.read_timeout, 0ms);
+}
+
+TEST(WsClientTimeouts, HandshakeTimesOutAgainstASilentServer) {
+    // A server that accepts the TCP connection and never answers the
+    // Upgrade request must not hold ws_connect forever.
+    asio::io_context        server_ioc;
+    asio::ip::tcp::acceptor acceptor(
+        server_ioc, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+    const auto              port = std::to_string(acceptor.local_endpoint().port());
+    asio::ip::tcp::socket   held(server_ioc);
+    acceptor.async_accept(held, [](const asio::error_code&) {});
+    std::thread server([&] { server_ioc.run_for(10s); });
+
+    asio::io_context client_ioc;
+    WsClientOptions  options;
+    options.handshake_timeout = 200ms;
+    const auto started = std::chrono::steady_clock::now();
+    auto       result  = asio::co_spawn(
+        client_ioc,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await ws_connect(client_ioc.get_executor(), "127.0.0.1", port, "/", {},
+                                      /*tls=*/false, options);
+        },
+        asio::use_future);
+    client_ioc.run_for(5s);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    ASSERT_EQ(result.wait_for(0s), std::future_status::ready) << "ws_connect did not finish";
+    try {
+        result.get();
+        ADD_FAILURE() << "Expected a handshake timeout";
+    } catch (const asio::system_error& error) {
+        EXPECT_EQ(error.code(), asio::error::timed_out);
+    }
+    EXPECT_LT(elapsed, 3s);
+    server_ioc.stop();
+    server.join();
+}
+
+TEST_F(WsLoopback, ReadTimeoutEndsAHeldReceiveAndClosesTheConnection) {
+    asio::io_context  client_ioc;
+    const std::string port = std::to_string(port_);
+    WsClientOptions   options;
+    options.read_timeout = 200ms;
+
+    auto result = asio::co_spawn(
+        client_ioc,
+        [&]() -> asio::awaitable<std::string> {
+            auto ws = co_await ws_connect(client_ioc.get_executor(), "127.0.0.1", port, "/hold", {},
+                                          /*tls=*/false, options);
+            try {
+                (void)co_await ws->recv();
+                co_return std::string("message");
+            } catch (const asio::system_error& error) {
+                if (error.code() != asio::error::timed_out) co_return error.code().message();
+            }
+            try {
+                co_await ws->send_text("after timeout");
+                co_return std::string("usable after timeout");
+            } catch (const std::runtime_error&) {
+                co_return std::string("timed_out");
+            }
+        },
+        asio::use_future);
+    client_ioc.run_for(5s);
+
+    ASSERT_EQ(result.wait_for(0s), std::future_status::ready) << "recv did not finish";
+    EXPECT_EQ(result.get(), "timed_out");
+}
+
+TEST(WsClientTimeouts, NegativeTimeoutsAreRejected) {
+    asio::io_context client_ioc;
+    WsClientOptions  options;
+    options.read_timeout = -1ms;
+    auto result = asio::co_spawn(
+        client_ioc,
+        [&]() -> asio::awaitable<void> {
+            (void)co_await ws_connect(client_ioc.get_executor(), "127.0.0.1", "1", "/", {},
+                                      /*tls=*/false, options);
+        },
+        asio::use_future);
+    client_ioc.run();
+    EXPECT_THROW(result.get(), std::invalid_argument);
+}

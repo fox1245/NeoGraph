@@ -38,6 +38,7 @@
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -58,8 +59,8 @@ enum class WsOpcode : std::uint8_t {
     Pong         = 0xA,
 };
 
-/// Resource ceilings for a WebSocket connection. Limits are checked
-/// before payload reads or outbound frame construction.
+/// Resource ceilings and deadlines for a WebSocket connection. Limits are
+/// checked before payload reads or outbound frame construction.
 struct WsClientOptions {
     /// Maximum HTTP Upgrade response header size, including the final
     /// CRLF CRLF. Also bounds the serialized client Upgrade request.
@@ -70,6 +71,19 @@ struct WsClientOptions {
 
     /// Maximum assembled Text/Binary message size across fragments.
     std::size_t max_message_payload_bytes = 16u * 1024u * 1024u;
+
+    /// Deadline for the whole opening handshake of ws_connect: name
+    /// resolution, TCP connect, TLS handshake and the HTTP Upgrade exchange.
+    /// Expiry throws asio::system_error(asio::error::timed_out). Zero = no
+    /// deadline.
+    std::chrono::milliseconds handshake_timeout{30000};
+
+    /// Longest one recv() call waits for the next application message
+    /// (pings answered meanwhile do not extend it). Expiry closes the
+    /// connection and throws asio::system_error(asio::error::timed_out).
+    /// Zero (the default) = no deadline, since an idle connection that waits
+    /// for server pushes is normal.
+    std::chrono::milliseconds read_timeout{0};
 };
 
 struct WsMessage {
@@ -117,9 +131,10 @@ public:
     /// back and surfaced to the caller as op==Close (after which the
     /// connection is no longer usable).
     ///
-    /// Throws asio::system_error on transport failure or
-    /// std::runtime_error on malformed frames (reserved bits set,
-    /// masked server-to-client frame, unknown opcode).
+    /// Throws asio::system_error on transport failure (asio::error::timed_out
+    /// after WsClientOptions::read_timeout) or std::runtime_error on
+    /// malformed frames (reserved bits set, masked server-to-client frame,
+    /// unknown opcode).
     asio::awaitable<WsMessage> recv();
 
 private:
@@ -148,9 +163,18 @@ private:
 
     explicit WsClient(std::unique_ptr<Impl>);
 
+    asio::awaitable<WsMessage> recv_message();
     asio::awaitable<void> send_frame_owned(WsOpcode opcode, std::string payload);
     asio::awaitable<void> send_close_owned(std::uint16_t code, std::string reason);
     static asio::awaitable<std::unique_ptr<WsClient>> connect_owned(
+        asio::any_io_executor                            ex,
+        std::string                                      host,
+        std::string                                      port,
+        std::string                                      path,
+        std::vector<std::pair<std::string, std::string>> headers,
+        bool                                             tls,
+        WsClientOptions                                  options);
+    static asio::awaitable<std::unique_ptr<WsClient>> handshake_owned(
         asio::any_io_executor                            ex,
         std::string                                      host,
         std::string                                      port,
@@ -173,8 +197,10 @@ private:
 ///                the client sets those itself.
 /// @param tls     Use wss:// (TLS) vs ws:// (plain TCP).
 ///
-/// Throws asio::system_error on transport failure, std::runtime_error
-/// if the server refuses the upgrade (non-101 status or bad Accept).
+/// Throws asio::system_error on transport failure (asio::error::timed_out
+/// after WsClientOptions::handshake_timeout, 30 s by default),
+/// std::runtime_error if the server refuses the upgrade (non-101 status or
+/// bad Accept).
 /// Request inputs are copied before the returned awaitable is exposed.
 NEOGRAPH_API asio::awaitable<std::unique_ptr<WsClient>> ws_connect(
     asio::any_io_executor                            ex,
