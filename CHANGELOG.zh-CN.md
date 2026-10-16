@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=58b3cc5e27929ee6568c9404960553a75affa6e4843592150eccc048f96c4510 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3b9273817b3052237229460367f8572b69a419ced2c0e9c082157734dee3189c -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -23,6 +23,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **QuickJS 性能门禁允许运行器波动超出上限最多 10%（#463）。** `javascript_wrapped_core_ratio` 在托管运行器上介于其上限的 0.79 倍到 1.05 倍之间，因此 CI extended 在没有回归的情况下失败：逐字节相同的基准测试二进制文件在一次运行中测得中位数 547，在另一次运行中测得 617。预注册文件现在声明 `threshold_tolerance` 为 0.1，`scripts/run_quickjs_performance.py` 也固定同一个值。超出上限但不高于上限 1.1 倍的统计值视为通过，并在 JSON 报告和 job 日志中记为警告；更高的值与以前一样失败。上限本身不变。超出上限的统计值现在会在 job 日志中列出，而不仅仅记录在上传的报告里。
 - **QuickJS 性能门禁改为判定 JavaScript 包装的 Core 运行本身的耗时；它与直接 Core 运行的比值仍写入报告，但不再阻断门禁（#465）。** `javascript_wrapped_core_ratio` 以直接 Core 运行的耗时为分母，因此仅仅 Core 变快就会使它上升：#442 之后，在较慢的运行器类别上，直接运行从 8.94 µs 降到 7.97 µs，JavaScript 包装的运行变化不到 2%（4,311 µs 和 4,366 µs），比值却从 489 升到 549。反过来，Core 变慢可能掩盖 JavaScript 路径的变慢。新的阻断用例 `javascript_wrapped_core` 以每次调用的 µs 计量同一运行，上限为中位数 5,500 µs、p95 6,000 µs。在 2026-10-09 至 2026-10-16 的 39 次 CI extended 测量中，各次运行的中位数在 2,436 到 4,515 µs 之间，各次运行的 p95 最高为 4,720 µs；预注册文件记录了这一依据。比值连同其上限保留在报告中，超出上限时在 job 日志中记为警告。上限以 CI extended 的 GitHub 托管 x86-64 运行器为基准，预注册文件和 README 现已写明这一点：在更慢的硬件上本地运行时，即使没有回归，该用例也可能失败（一台安静的 Arm Neoverse-N1 机器测得中位数 6,234 µs）。报告现在还会记录 CPU 型号和运行器环境。
 - **Program 调用快了约 30%：canonical JSON 直接从底层 yyjson 值写出（#469）。** 每条 Program 记录（run record、日志条目、事件、lineage）都通过 canonical JSON 获得身份，这项序列化占了一次 Program 调用三分之一的时间。`canonical_json_bytes`、其大小和深度检查以及严格的重复成员检查都遍历 `neograph::json` 句柄：每次访问子节点都复制一个句柄，带来一次原子引用计数开销；每次遍历都构建键和值列表；每个键或字符串都被复制。现在这三种遍历都直接读取句柄下的 yyjson 值。字节、成员顺序、限制以及先报告哪个错误都不变：一个随机化测试把新的写出器与旧的进行比较，所有固定身份都不变。在一台安静的 Arm 机器上，`quickjs-performance` 门禁中 JavaScript 包装的 Core 运行从 6,126 µs 降到 4,350 µs，`structured_join_sequence` 从 10,060 µs 降到 6,967 µs，`structured_join_await` 从 7,505 µs 降到 5,143 µs；canonical JSON 在包装运行中的占比从 34% 降到 12%。
+- **Program 调用快了约 23%：json 文档从每线程的块缓存获取内存（#471）。** 每个 `neograph::json` 值都拥有自己的 yyjson 文档，每个文档最多分别分配四次：`shared_ptr` 控制块、文档本身、一个值池块和一个字符串池块。一个 Program 记录的主体在每次 transition 中创建并释放数百个这样的文档。同一尺寸的块多于 malloc 每线程缓存所能容纳的数量，因此大多走了较慢的路径。现在这些块来自按尺寸分类的每线程缓存：32 字节到 2 KiB，每类最多 64 个，每线程少于 260 KiB。更大的块仍像以前一样交给 malloc。在其他线程释放的块进入那个线程的缓存，线程结束时释放其缓存。使用 AddressSanitizer、ThreadSanitizer 或 MemorySanitizer 的构建直接分配每个块。在一台安静的 Arm 机器上，`quickjs-performance` 门禁中 JavaScript 包装的 Core 运行从 6,196 µs 降到 4,745 µs，`structured_join_sequence` 和 `structured_join_await` 快了 24%。与 #469 一起，这三个用例快了 44% 到 47%。
 
 ### 已添加
 
