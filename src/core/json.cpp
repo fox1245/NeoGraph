@@ -5,23 +5,190 @@
 #include "text_safety.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <new>
 #include <string_view>
 #include <istream>
 #include <sstream>
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || \
+    __has_feature(memory_sanitizer)
+#define NEOGRAPH_JSON_SANITIZED 1
+#endif
+#endif
+#if !defined(NEOGRAPH_JSON_SANITIZED) && \
+    (defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__))
+#define NEOGRAPH_JSON_SANITIZED 1
+#endif
+
 namespace neograph {
+
+// ===========================================================================
+// Document memory (#471)
+// ===========================================================================
+//
+// Every json value owns a yyjson document: a shared_ptr control block, the
+// document, and a value and a string pool chunk once it holds anything.
+// Building a Program record body creates and drops hundreds of them, more
+// small blocks of one size than malloc's per-thread cache keeps, so most
+// went through its slower paths. These blocks now come from a per-thread
+// cache by size class. A block freed on another thread joins that thread's
+// cache; a thread's cache is released when the thread ends. Sanitizer builds
+// allocate every block directly, so the sanitizer still sees each one.
+
+namespace {
+
+constexpr std::size_t kBlockClasses[] = {32, 64, 128, 256, 512, 1024, 2048};
+constexpr std::size_t kBlockClassCount = sizeof(kBlockClasses) / sizeof(kBlockClasses[0]);
+constexpr std::size_t kUncachedClass   = kBlockClassCount;
+// At most 64 blocks of each class wait per thread: under 260 KiB.
+constexpr std::size_t kCachedPerClass = 64;
+
+// Precedes every block and keeps the 16-byte alignment malloc gives.
+struct alignas(16) BlockHeader {
+    std::size_t capacity;
+    std::size_t size_class;
+};
+
+struct FreeBlock {
+    FreeBlock* next;
+};
+
+struct BlockCache {
+    FreeBlock*  heads[kBlockClassCount]  = {};
+    std::size_t counts[kBlockClassCount] = {};
+    ~BlockCache();
+};
+
+// Trivially destructible, so it stays readable while the thread's other
+// thread_local objects are destroyed after the cache.
+thread_local bool block_cache_released = false;
+
+BlockCache& block_cache() {
+    thread_local BlockCache cache;
+    return cache;
+}
+
+BlockCache::~BlockCache() {
+    block_cache_released = true;
+    for (auto* head : heads) {
+        while (head) {
+            auto* next = head->next;
+            std::free(reinterpret_cast<char*>(head) - sizeof(BlockHeader));
+            head = next;
+        }
+    }
+}
+
+constexpr bool kBlockCacheEnabled =
+#if defined(NEOGRAPH_JSON_SANITIZED)
+    false;
+#else
+    true;
+#endif
+
+std::size_t block_class(std::size_t size) noexcept {
+    for (std::size_t index = 0; index < kBlockClassCount; ++index)
+        if (size <= kBlockClasses[index]) return index;
+    return kUncachedClass;
+}
+
+void* allocate_block(std::size_t size) noexcept {
+    const auto size_class = block_class(size);
+    if (kBlockCacheEnabled && size_class != kUncachedClass && !block_cache_released) {
+        auto& cache = block_cache();
+        if (auto* block = cache.heads[size_class]) {
+            cache.heads[size_class] = block->next;
+            --cache.counts[size_class];
+            return block;
+        }
+    }
+    const auto capacity = size_class == kUncachedClass ? size : kBlockClasses[size_class];
+    auto* header = static_cast<BlockHeader*>(std::malloc(sizeof(BlockHeader) + capacity));
+    if (!header) return nullptr;
+    header->capacity   = capacity;
+    header->size_class = size_class;
+    return header + 1;
+}
+
+void free_block(void* block) noexcept {
+    if (!block) return;
+    auto*      header     = static_cast<BlockHeader*>(block) - 1;
+    const auto size_class = header->size_class;
+    if (kBlockCacheEnabled && size_class != kUncachedClass && !block_cache_released) {
+        auto& cache = block_cache();
+        if (cache.counts[size_class] < kCachedPerClass) {
+            auto* free_block = static_cast<FreeBlock*>(block);
+            free_block->next        = cache.heads[size_class];
+            cache.heads[size_class] = free_block;
+            ++cache.counts[size_class];
+            return;
+        }
+    }
+    std::free(header);
+}
+
+void* reallocate_block(void* block, std::size_t old_size, std::size_t size) noexcept {
+    if (!block) return allocate_block(size);
+    if (size <= (static_cast<BlockHeader*>(block) - 1)->capacity) return block;
+    void* moved = allocate_block(size);
+    if (!moved) return nullptr;
+    std::memcpy(moved, block, std::min(old_size, size));
+    free_block(block);
+    return moved;
+}
+
+constexpr yyjson_alc kDocumentAllocator{
+    [](void*, std::size_t size) { return allocate_block(size); },
+    [](void*, void* block, std::size_t old_size, std::size_t size) {
+        return reallocate_block(block, old_size, size);
+    },
+    [](void*, void* block) { free_block(block); },
+    nullptr};
+
+// The shared_ptr control block of a document comes from the same cache.
+template <class T>
+struct DocumentBlockAllocator {
+    using value_type = T;
+    DocumentBlockAllocator() noexcept = default;
+    template <class U>
+    DocumentBlockAllocator(const DocumentBlockAllocator<U>&) noexcept {}
+    T* allocate(std::size_t count) {
+        static_assert(alignof(T) <= alignof(BlockHeader));
+        if (auto* block = allocate_block(count * sizeof(T))) return static_cast<T*>(block);
+        throw std::bad_alloc();
+    }
+    void deallocate(T* block, std::size_t) noexcept { free_block(block); }
+    template <class U>
+    bool operator==(const DocumentBlockAllocator<U>&) const noexcept { return true; }
+    template <class U>
+    bool operator!=(const DocumentBlockAllocator<U>&) const noexcept { return false; }
+};
+
+struct DocumentDeleter {
+    void operator()(yyjson_mut_doc* doc) const noexcept {
+        if (doc) yyjson_mut_doc_free(doc);
+    }
+};
+
+std::shared_ptr<yyjson_mut_doc> share_document(yyjson_mut_doc* doc) {
+    return std::shared_ptr<yyjson_mut_doc>(doc, DocumentDeleter{},
+                                           DocumentBlockAllocator<yyjson_mut_doc>{});
+}
+
+}  // namespace
 
 // ===========================================================================
 // Helpers
 // ===========================================================================
 
 std::shared_ptr<yyjson_mut_doc> json::make_doc() {
-    return std::shared_ptr<yyjson_mut_doc>(
-        yyjson_mut_doc_new(nullptr),
-        [](yyjson_mut_doc* d) { if (d) yyjson_mut_doc_free(d); });
+    return share_document(yyjson_mut_doc_new(&kDocumentAllocator));
 }
 
 void json::reset_to(yyjson_mut_val* v) {
@@ -301,16 +468,13 @@ json json::parse(std::string_view s) {
     if (!immut) {
         throw parse_error(std::string("json::parse: ") + err.msg);
     }
-    yyjson_mut_doc* mdoc = yyjson_doc_mut_copy(immut, nullptr);
+    yyjson_mut_doc* mdoc = yyjson_doc_mut_copy(immut, &kDocumentAllocator);
     yyjson_doc_free(immut);
     if (!mdoc) {
         throw parse_error("json::parse: failed to create mutable copy");
     }
     yyjson_mut_val* root = yyjson_mut_doc_get_root(mdoc);
-    std::shared_ptr<yyjson_mut_doc> sp(
-        mdoc,
-        [](yyjson_mut_doc* d) { if (d) yyjson_mut_doc_free(d); });
-    return json(std::move(sp), root);
+    return json(share_document(mdoc), root);
 }
 
 json json::parse(std::istream& in) {
