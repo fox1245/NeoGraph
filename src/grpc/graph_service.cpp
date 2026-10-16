@@ -11,6 +11,7 @@
 
 #include "neograph.grpc.pb.h"   // generated into ${build}/grpc_gen
 #include "error_details.h"
+#include "serve.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
@@ -33,6 +34,13 @@ namespace neograph::grpc {
 
 using namespace neograph::graph;
 namespace pb = neograph::v1;
+
+namespace {
+// The `error` of a node-error stream event (never the exception text).
+constexpr const char* kNodeErrorText = "node failed";
+// EVENTS | TOKENS | VALUES | UPDATES | DEBUG.
+constexpr std::uint32_t kKnownStreamModes = 0x1F;
+}  // namespace
 
 class GraphServiceImpl final : public pb::GraphService::Service {
 public:
@@ -123,26 +131,14 @@ public:
             prepared.config.cancel_token = token;
 
             RunInvocationRequest request;
+            const auto mode = prepared.config.stream_mode;
             request.config = std::move(prepared.config);
-            request.on_event = [writer, token](const GraphEvent& ev) {
-                pb::GraphEvent out;
-                out.set_node(ev.node_name);
-                switch (ev.type) {
-                    case GraphEvent::Type::LLM_TOKEN:
-                        out.set_kind(pb::GraphEvent::TOKEN); break;
-                    case GraphEvent::Type::NODE_START:
-                        out.set_kind(pb::GraphEvent::NODE_START); break;
-                    case GraphEvent::Type::NODE_END:
-                        out.set_kind(pb::GraphEvent::NODE_END); break;
-                    case GraphEvent::Type::CHANNEL_WRITE:
-                        out.set_kind(pb::GraphEvent::UPDATES); break;
-                    case GraphEvent::Type::INTERRUPT:
-                    case GraphEvent::Type::ERROR:
-                    default:
-                        out.set_kind(pb::GraphEvent::DEBUG); break;
-                }
-                out.set_payload_json(ev.data.dump());
-                if (!writer->Write(out)) token->cancel();
+            request.on_event = [writer, token, mode](const GraphEvent& ev) {
+                // Nodes hand LLM tokens to the sink whatever the mode; the
+                // engine gates every other event by the mode itself.
+                if (ev.type == GraphEvent::Type::LLM_TOKEN && !has_mode(mode, StreamMode::TOKENS))
+                    return;
+                if (!writer->Write(to_wire_event(ev))) token->cancel();
             };
 
             watcher.emplace(sctx, token);
@@ -230,6 +226,41 @@ private:
         RunConfig config;
     };
 
+    // An engine event as a stream event (proto/neograph.proto, GraphEvent).
+    // A state snapshot is VALUES and any other channel write UPDATES. An
+    // interrupt and a node error have no kind of their own and stay DEBUG; a
+    // node error's text is replaced, because it is the thrown exception's
+    // what() and never crosses the wire.
+    static pb::GraphEvent to_wire_event(const GraphEvent& ev) {
+        pb::GraphEvent out;
+        out.set_node(ev.node_name);
+        switch (ev.type) {
+            case GraphEvent::Type::LLM_TOKEN:
+                out.set_kind(pb::GraphEvent::TOKEN); break;
+            case GraphEvent::Type::NODE_START:
+                out.set_kind(pb::GraphEvent::NODE_START); break;
+            case GraphEvent::Type::NODE_END:
+                out.set_kind(pb::GraphEvent::NODE_END); break;
+            case GraphEvent::Type::CHANNEL_WRITE:
+                out.set_kind(ev.node_name == "__state__" ? pb::GraphEvent::VALUES
+                                                         : pb::GraphEvent::UPDATES);
+                break;
+            case GraphEvent::Type::INTERRUPT:
+            case GraphEvent::Type::ERROR:
+            default:
+                out.set_kind(pb::GraphEvent::DEBUG); break;
+        }
+        if (ev.type == GraphEvent::Type::ERROR && ev.data.is_object() &&
+            ev.data.contains("error")) {
+            auto payload = ev.data;
+            payload["error"] = kNodeErrorText;
+            out.set_payload_json(payload.dump());
+        } else {
+            out.set_payload_json(ev.data.dump());
+        }
+        return out;
+    }
+
     static FailureVerdict failure_of(const InvocationResult& outcome) {
         if (outcome.failure) return *outcome.failure;
         FailureVerdict verdict;
@@ -264,6 +295,10 @@ private:
         }
         if (req.max_steps() > 0)
             cfg.max_steps = static_cast<int>(req.max_steps());
+        // The proto's bits are StreamMode's. 0 (unset) is every event; bits
+        // this version does not know are ignored.
+        if (req.stream_mode() != 0)
+            cfg.stream_mode = static_cast<StreamMode>(req.stream_mode() & kKnownStreamModes);
         cfg.resume_if_exists = req.resume_if_exists();
         if (req.graph_def_json().empty() && default_def_.empty())
             return detail::request_failure(::grpc::StatusCode::FAILED_PRECONDITION, "NG.NoGraph",
@@ -321,15 +356,15 @@ std::unique_ptr<pb::GraphService::Service> make_graph_service(
 void run_server(const std::string& address,
                 NodeContext ctx,
                 std::string default_graph_json) {
+    run_server(address, std::move(ctx), std::move(default_graph_json), ServeOptions{});
+}
+
+void run_server(const std::string& address,
+                NodeContext ctx,
+                std::string default_graph_json,
+                const ServeOptions& options) {
     GraphServiceImpl svc(std::move(ctx), std::move(default_graph_json));
-    ::grpc::ServerBuilder builder;
-    builder.AddListeningPort(address,
-                             ::grpc::InsecureServerCredentials());
-    builder.RegisterService(&svc);
-    std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
-    if (!server)
-        throw std::runtime_error("failed to start gRPC server on " + address);
-    server->Wait();
+    detail::serve(address, svc, pb::GraphService::service_full_name(), options, "gRPC server");
 }
 
 }  // namespace neograph::grpc

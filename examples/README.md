@@ -292,7 +292,7 @@ then an installed runtime package, then the pinned public GitHub source archive.
 The download fallback is enabled by default; set `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`
 for offline builds with an installed package or explicit source checkout.
 Installed SDK include root is `include/SchemaProvider`. Interface/capability
-checks are enforced; the SDK package is alpha `0.3.1` (interface revision/shared ABI 6).
+checks are enforced; the SDK package is alpha `0.3.2` (interface revision/shared ABI 6).
 
 The preserved interface-3 model-free C++ E2E run verified 39 numbered targets: 29 finite offline
 targets plus actual MCP/ACP/A2A/Harness and gRPC graph/checkpoint/tool paths.
@@ -316,7 +316,7 @@ claimed; remote CI and publication remain pending.
 
 ## Retained example contracts
 
-These source contracts build against SDK `0.3.1` (interface 6). The recorded C++ runs above were
+These source contracts build against SDK `0.3.2` (interface 6). The recorded C++ runs above were
 made with older SDK interfaces and remain historical evidence; they are not a qualification of
 the current SDK or new live calls.
 Family-specific controls are closed typed fields on `ProviderControls`; unsupported

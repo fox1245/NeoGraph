@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=f9c0f76e08290df9f91d1a314c6ed17ee411c406f5f07a7b7c4f03c1db8f584a -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=zh-CN source_sha256=4dcc35040d8c40a90b599803bb5e524424cb94f5ed1f08d135bf7a347d36126f -->
 # Python 客户端开销：当前的 runner 与历史结果
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -42,7 +42,7 @@ K=16/64 时吞吐量的下降，包含了与 `ThreadingHTTPServer` 和各客户�
 
 请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel，再安装下面用于对比的各 SDK。从源码构建时，即使只用 Core，也需要外部的 `SchemaProvider::runtime`；请按[构建指南](../../README.md)操作。只靠 Python 封装层，无法给旧的 wheel 补上带类型的原生 API。
 对于 NeoGraph `0.14.1`，wheel 和原生使用方必须匹配 alpha 版 SDK
-`0.3.1`、接口修订版/共享库代数 6。
+`0.3.2`、接口修订版/共享库代数 6。
 
 ## 运行新的 cohort
 

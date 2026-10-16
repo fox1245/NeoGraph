@@ -18,6 +18,7 @@
 
 #include <neograph/graph/engine.h>
 #include <neograph/graph/types.h>
+#include <neograph/grpc/serve_options.h>
 
 namespace neograph::grpc {
 
@@ -36,12 +37,18 @@ std::unique_ptr<neograph::v1::GraphService::Service> make_graph_service(
     std::size_t max_inflight_runs = 0);
 
 /// Convenience: build + run a blocking gRPC server on `address`
-/// (e.g. "0.0.0.0:50051") with insecure credentials until the
-/// process is signalled. For TLS / auth wire your own
-/// `grpc::ServerBuilder` against `make_graph_service()`.
+/// (e.g. "0.0.0.0:50051") with insecure credentials and the standard
+/// health service until the process is signalled. For TLS / auth wire your
+/// own `grpc::ServerBuilder` against `make_graph_service()`.
 void run_server(const std::string& address,
                 neograph::graph::NodeContext ctx,
                 std::string default_graph_json = "");
+
+/// The same, until `options.stop` is requested (see ServeOptions).
+void run_server(const std::string& address,
+                neograph::graph::NodeContext ctx,
+                std::string default_graph_json,
+                const ServeOptions& options);
 
 }  // namespace neograph::grpc
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=df81105ea6875cf18cf9e115470610ffd521c20f862afdbca2a6c806b390833e -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=fde93d2a05531c224176faf6f7457924bef597fe52414cb2b030a8a4a354836e -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -306,7 +306,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영입니다. 진짜 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 둘 수 있고, 영속적인 네이티브 이력에는 실제 `sp::NativeArchive`와 소유자 전용 보호 보관이 필요합니다. 이식 가능한 JSON으로는 그 권한을 다시 만들 수 없습니다. 아카이브는 독립된 키로 보관 상태를 인증합니다. 암호화도 아니고 벤더 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 블롭, 원시 와이어 관찰값은 공개하지 마세요. 영속성 실패, 옵저버, 관리되는 예산 뱅크, 재생 경계는 [provider 레퍼런스](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 보세요.
 
-타입 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거되었습니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 이전하세요. 호환용 별칭은 없습니다. SDK 패키지는 `0.3.1` 알파이며, 공개 커밋 `69f8aba5c75decd21d786853de134ac713634966`(`maint/interface6` 브랜치)에 고정되어 있고, 인터페이스 리비전 6, 공유 ABI 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로, SDK를 쓰는 코드, NeoGraph, Python 확장을 함께 다시 빌드하세요. 네이티브 아카이브 v3과 이식 가능한 JSON v2는 그대로입니다. 이 세대는 안정적인 SDK 인터페이스를 선언하지 않습니다.
+타입 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거되었습니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 이전하세요. 호환용 별칭은 없습니다. SDK 패키지는 `0.3.2` 알파이며, 공개 커밋 `91fb993e50e49e3b03d290b170c83cf57afbc518`(`maint/interface6` 브랜치)에 고정되어 있고, 인터페이스 리비전 6, 공유 ABI 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로, SDK를 쓰는 코드, NeoGraph, Python 확장을 함께 다시 빌드하세요. 네이티브 아카이브 v3과 이식 가능한 JSON v2는 그대로입니다. 이 세대는 안정적인 SDK 인터페이스를 선언하지 않습니다.
 
 ## Python
 
@@ -361,7 +361,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 다른 프로젝트에서는 빠른 시작의 `FetchContent` 줄을 `find_package(NeoGraph CONFIG REQUIRED)`로 바꾸고 `-DCMAKE_PREFIX_PATH="$HOME/neograph"`로 configure하세요. 설치된 구성 요소를 쓰는 쪽은 필요한 구성 요소만 링크합니다.
 
 ```cmake
-find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.2 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b8df513a502705cefaf6a8a6bc7c07fb3e050b5bdd03f35706aa09affac052fe -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=10dd0c889b7f7fd706b12f8dffaa4190ba06a0b46dcded3fe8e28813eb9d357c -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -40,10 +40,10 @@
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
-已安装 SDK package 须恰为 `0.3.1`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
+已安装 SDK package 须恰为 `0.3.2`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
 
 ```cmake
-find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.2 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -430,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.1`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.2`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 
@@ -593,6 +593,10 @@ public:
 `retryable` 在每个协议上都是 `FailureVerdict::retryable`：再次发送同一请求是否可能成功。它是节点的重试判定（[节点失败契约](#node-failure-contract)），对 provider 失败（`NG.ProviderFailed`）也为 `true`：节点重试循环把它交给 provider runtime，但新的请求可能会成功。A2A 在两个版本中都把代码和 `retryable` 放在 task 的 `metadata["neograph/failure"]` 中，ACP 放在错误的 `data` 中；只有 A2A 才有的请求错误见 [A2A 错误映射](#a2a-error-mapping)。
 
 每个非 OK 的 gRPC 状态都在 `grpc-status-details-bin` trailer 中携带一个 `google.rpc.Status`，其中包含一个 `google.rpc.ErrorInfo`：其 `reason` 遵循 AIP-193，是由代码派生的不超过 63 个字符的 UPPER_SNAKE 常量（`NG.HookBlocked` 为 `HOOK_BLOCKED`，此外还有 `TIMEOUT`、`TOOL_NOT_FOUND`、`INVALID_REQUEST`、`NO_GRAPH`、`CAPACITY`、`BACKEND_UNAVAILABLE`、`BARRIER_STALLED`；作者代码取其类别的 reason，如 `TASK_FAILED`）；`domain` 为 `neograph`；`metadata` 包含 `code`（稳定代码本身）、`retryable` 以及上表中的字段。`RunGraphResponse.error` 已弃用，仅携带公开消息并保留一个版本；非 OK 的一元状态不携带响应体。`RunGraphStream` 以 payload 为 `{error, code}` 的 `DEBUG` 事件报告失败，然后以与一元调用相同的状态结束。`CheckpointService` 对后端失败返回 `UNAVAILABLE`（`NG.BackendUnavailable`），而不是“没有检查点”、空列表或成功的删除；对格式错误的 `SaveCheckpoint` 返回 `INVALID_ARGUMENT`。
+
+`RunGraphStream` 遵循 `RunGraphRequest.stream_mode`，即 `StreamMode` 的位（0 表示流式发送所有事件；未知的位被忽略）。状态快照是 `VALUES` 事件，节点的通道写入是 `UPDATES` 事件，中断和节点错误是 `DEBUG` 事件；节点错误的 `error` 为 `node failed`，绝不包含异常文本。`RunGraphRequest.thread_id` 是必填项：为空时以 `INVALID_ARGUMENT` 拒绝。用其他语言编写的 `CheckpointService` 必须提供 `proto/neograph.proto` 中的每个 RPC，包括 `RequiresManagedBudget`：引擎在每次新运行和恢复运行时都会询问它，遇到 `UNIMPLEMENTED` 时使运行失败；不管理预算的服务器返回 `required = false`。NeoGraph 的 `CheckpointService` 存储的是 `Checkpoint` 而不是 JSON，因此对于无法完整保存的 `checkpoint_json`（它不认识的顶层成员，或比它自身更新的 `schema_version`），它以 `INVALID_ARGUMENT` 拒绝，而不是丢弃其中一部分；`channel_values` 和 `metadata` 按发送时的原样保存。
+
+`run_server`、`run_tool_server` 和 `run_checkpoint_server` 响应标准健康服务 `grpc.health.v1.Health`：在接受调用期间，服务器及其服务为 `SERVING`，开始停止后为 `NOT_SERVING`。接受 `ServeOptions`（`<neograph/grpc/serve_options.h>`）的重载在请求 `ServeOptions::stop` 时，先给进行中的调用 `shutdown_grace` 的时间再停止；它们把绑定的端口报告给 `on_serving`（因此地址可以使用端口 0）。服务器反射由宿主决定：链接 `gRPC::grpc++_reflection`，并在服务器启动前调用 `grpc::reflection::InitProtoReflectionServerBuilderPlugin()`，gRPC 就会把反射加到进程中的每个服务器上，包括内置服务器。需要 TLS、身份验证或消息大小限制时，请把 `make_graph_service()`、`make_tool_service()` 或 `make_checkpoint_service()` 注册到你自己的 `grpc::ServerBuilder`。gRPC 头文件包含 gRPC 自身的头文件，因此使用 `using namespace neograph;` 的代码应写作 `neograph::grpc::GrpcRemoteTool`：在那里不带限定的 `grpc::` 是有歧义的。
 
 NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超时而不再等待的请求发送 `notifications/cancelled`（`initialize` 除外），并丢弃迟到的响应；`GrpcRemoteTool`（`set_call_timeout`，默认 60 秒）与 `GrpcCheckpointStore`（`set_rpc_timeout`，默认 30 秒）为每次调用设置截止时间，运行的 cancel token 会取消远程工具的 RPC。这些客户端不会把远程代码还原为本地控制信号。远程 Hook 阻断（MCP `-32010`；`ErrorInfo` 代码为 `NG.HookBlocked` 的 gRPC 状态）与远程中断（`-32011`；`NG.Interrupted`）属于远程运行：`MCPTool` 与 `GrpcRemoteTool` 抛出 `graph::RemoteControlFailure`，这是一个携带该代码与远程公开消息、不会重试的普通失败，因此本地运行会带着失败的工具结果继续。来自远程服务器的其他 MCP JSON-RPC 错误、gRPC 工具错误或状态对调用方而言是普通工具失败。远程在运行前拒绝的请求（MCP 的 `-32700`、`-32600`、`-32601`、`-32602` 和标记为 `NG.InvalidRequest` 的结果，gRPC 的 `NOT_FOUND`、`INVALID_ARGUMENT`）除外，它们是效果确定的失败工具结果（[工具失败契约](#tool-failure-contract)）。TODO（后续阶段）：将远程中断作为由人回答的原生暂停传入本地运行。
 
@@ -3501,7 +3505,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 
 异常文本（`what()`）不会发送给客户端：message 是带类型的公开消息（`NodeFailureError::public_message`）或该失败类别的通用文本，细节只保留在宿主日志中。中断会变成一个工具调用：标题为中断原因，`rawInput` 为载荷，带有 `_meta["neograph/interrupt"]` 以及选项 "approve"（`allow_once`）和 "reject"（`reject_once`）；被选中的 option id 就是恢复值。如需修改，重写 `interrupt_permission` 和 `interrupt_resume_value`。回答 `cancelled` 会以取消结束轮次；适配器返回 `std::nullopt` 或客户端无法回答时，轮次以 `data.code: "NG.Interrupted"` 失败，会话不会停留在暂停状态。由 `session/resume` 从检查点恢复的暂停（例如 agent 重启之后）由下一个提示的文本回答。
 
-`session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
+`session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。`requestId` 为正在运行的 `session/prompt` 的 id 的 `$/cancel_request` 通知也以同样的方式取消该轮，这个提示仍然只得到一个响应（`stopReason: "cancelled"`）；其他请求（未知或已结束）的 `requestId` 会被忽略。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
 
 `session/new` 和 `session/resume` 中的 stdio `mcpServers` 通过 NeoGraph 的 MCP 客户端（以 `NEOGRAPH_BUILD_MCP_CLIENT` 构建）在会话的 `cwd` 中启动，环境是最小的：agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上客户端的 `env` 项，可能含有 provider API 密钥的其余 agent 环境不会传递；节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE MCP 服务器不会被声明，并以 `-32602` 拒绝。无法启动的服务器会使请求以 `-32603` 和 `data.reason: "mcp_server_unavailable"` 失败。
 

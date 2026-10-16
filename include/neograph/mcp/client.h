@@ -133,7 +133,10 @@ class NEOGRAPH_API MCPClient {
      * server messages between calls once its session is initialized, starts
      * a new session when the server answers 404 for its session and sends the
      * request again once, and ends its session with DELETE on shutdown() or
-     * when the last reference goes.
+     * when the last reference goes. A 307 or 308 answer is followed, with the
+     * request's method, body and headers, up to five times and only on the
+     * endpoint URL's origin (scheme, host and port); any other redirect is
+     * an error with its HTTP status.
      */
     explicit MCPClient(const std::string& server_url);
     MCPClient(const std::string& server_url, MCPClientConfig config);

@@ -221,6 +221,15 @@ class NEOGRAPH_API A2AServer {
     /// Bound port — useful when caller passed 0 to bind a free port.
     int port() const;
 
+    /// When the card has no configured `url`, the served card advertises the
+    /// address the client used, with the `http` scheme. Behind a
+    /// TLS-terminating reverse proxy, either configure `AgentCard::url` (the
+    /// public URL, always preferred) or enable this to take the scheme and
+    /// host from RFC 7239 `Forwarded`, else `X-Forwarded-Proto` /
+    /// `X-Forwarded-Host`. Off by default: those headers are set by the
+    /// client unless a proxy you control overwrites them.
+    void set_trust_forwarded_headers(bool enabled);
+
   private:
 #ifdef NEOGRAPH_A2A_TESTING
     friend class test::A2AServerTestAccess;

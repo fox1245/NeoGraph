@@ -35,6 +35,7 @@
 #endif
 
 #include <neograph/graph/checkpoint.h>
+#include <neograph/grpc/serve_options.h>
 
 namespace neograph::grpc {
 
@@ -121,6 +122,13 @@ NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend,
     std::shared_ptr<sp::NativeArchive> native_archive);
+/// The same, until `options.stop` is requested (see ServeOptions). Every
+/// built-in server also answers the standard health service.
+NEOGRAPH_API void run_checkpoint_server(
+    const std::string& address,
+    std::shared_ptr<neograph::graph::CheckpointStore> backend,
+    std::shared_ptr<sp::NativeArchive> native_archive,
+    const ServeOptions& options);
 
 // ── Serialization (exposed for tests / payload-size measurement) ─────
 //

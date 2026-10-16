@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=62663d66bda4e3728045a53f4d2598e6fe5297768b2d3a4523ca9bd6ef3bd4c0 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ja source_sha256=eef2e9b21ee3b2b0cc351a474c51177be3409e7f36c2def9e729f7d94a1295ee -->
 # マイグレーションガイド：従来の8個の仮想関数 → `run(NodeInput)`（v0.4.x → v0.9+）
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -275,7 +275,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # マイグレーション2：型付きでロスのないProviderへの切り替え（再コンパイル必須）
 
-これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。SDKはalphaの `0.3.1` で、インターフェースリビジョン6／共有ABI 6、capabilityのチェックはアウトオブラインです。これは、安定版リリースだという主張ではありません。
+これは、ソースとバイナリの両方の互換性を壊す変更です。すべてのC++コンシューマーとカスタムプロバイダーを、新しい対応するヘッダーとライブラリで再コンパイルしてください。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、ResponsesのWebSocket経路は削除されました。エイリアスも互換用のブリッジもありません。SDKはalphaの `0.3.2` で、インターフェースリビジョン6／共有ABI 6、capabilityのチェックはアウトオブラインです。これは、安定版リリースだという主張ではありません。
 
 削除された `Provider::complete`、`complete_async`、`complete_stream`、`complete_stream_async` の呼び出し箇所は、モードを明示したリクエストと、`invoke` / `dispatch`（またはC++の非同期版）に置き換えてください。`Agent::complete` は、所有権を持つ結果を返す、1ターン用の別のAPIとして残ります。
 

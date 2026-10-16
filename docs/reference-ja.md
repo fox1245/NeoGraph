@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=b8df513a502705cefaf6a8a6bc7c07fb3e050b5bdd03f35706aa09affac052fe -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=10dd0c889b7f7fd706b12f8dffaa4190ba06a0b46dcded3fe8e28813eb9d357c -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -33,10 +33,10 @@ CMake 3.20 以上が必要です。Core は所有 typed provider 契約を公開
 
 SDK imported target は `include/SchemaProvider` include root を提供します。公開例は recipe 専用 helper なしで `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>` を直接使います。
 
-設置 SDK package は正確に `0.3.1` で、interface revision 6 header と shared-library generation 6 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
+設置 SDK package は正確に `0.3.2` で、interface revision 6 header と shared-library generation 6 の一致が必要です。バージョン一致だけでは旧 interface/ABI binary を承認しません。
 
 ```cmake
-find_package(SchemaProvider 0.3.1 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.2 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -400,7 +400,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.3.1`、interface revision 6 / shared-library generation 6、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
+ソースとバイナリの破壊的変更です。全 C++ 利用者とカスタムプロバイダーを一致した新ヘッダー/ライブラリで再コンパイルします。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket は alias/互換 bridge なしで削除されました。SDK は alpha `0.3.2`、interface revision 6 / shared-library generation 6、out-of-line capability check を使い、安定リリースの宣言ではありません。検証済みのプラットフォームは Linux/POSIX です。Windows NTFS と macOS の実装はありますが、この SDK では検証していません。WASM provider runtime のサポートは確立していません。
 
 Python も C++ と同じ所有 request/outcome 境界を公開します: `make_provider_request`、`Provider.prepare`、`dispatch`、`invoke`。Provider 履歴には typed part を持つ `ProviderMessage` を使い、`ChatMessage` はグラフ用の便宜的 projection として残ります。SDK 失敗は `ProviderOutcome.failure` で読み、host observer/settlement 例外は `outcome` と `cause` を保持します。コンストラクターと GIL/コールバック動作は [Python binding ガイド](python-binding.md)を参照してください。
 
@@ -557,6 +557,10 @@ NeoGraph が MCP、gRPC、A2A、ACP でツール、グラフ、エージェン�
 `retryable` はすべてのプロトコルで `FailureVerdict::retryable` で、同じリクエストをもう一度送れば成功しうるかを表します。ノードの再試行判定([ノード失敗の契約](#node-failure-contract))であり、プロバイダー失敗(`NG.ProviderFailed`)でも `true` です。ノードの再試行ループはこれをプロバイダーランタイムに任せますが、新しいリクエストは通りうるからです。A2A はコードと `retryable` を両バージョンとも task の `metadata["neograph/failure"]` に、ACP はエラーの `data` に載せます。A2A だけにあるリクエストエラーは [A2A エラーマッピング](#a2a-error-mapping) にあります。
 
 OK でないすべての gRPC ステータスは、`grpc-status-details-bin` trailer に `google.rpc.ErrorInfo` を 1 つ持つ `google.rpc.Status` を載せます。`reason` は AIP-193 に従い、コードから導いた 63 文字以下の UPPER_SNAKE 定数です(`NG.HookBlocked` は `HOOK_BLOCKED`、ほかに `TIMEOUT`、`TOOL_NOT_FOUND`、`INVALID_REQUEST`、`NO_GRAPH`、`CAPACITY`、`BACKEND_UNAVAILABLE`、`BARRIER_STALLED`。作成者コードは `TASK_FAILED` のようにそのクラスの reason になります)。`domain` は `neograph` で、`metadata` には `code`(安定したコードそのもの)、`retryable` と上のフィールドが入ります。`RunGraphResponse.error` は非推奨で、公開メッセージだけを持って 1 リリースの間残ります。OK でない単項ステータスには応答本体が載りません。`RunGraphStream` は失敗をペイロードが `{error, code}` の `DEBUG` イベントで報告し、その後、単項呼び出しと同じステータスで終わります。`CheckpointService` はバックエンドの失敗に「チェックポイントなし」、空のリスト、成功した削除ではなく `UNAVAILABLE`(`NG.BackendUnavailable`)で、形式の不正な `SaveCheckpoint` には `INVALID_ARGUMENT` で応答します。
+
+`RunGraphStream` は `RunGraphRequest.stream_mode`、つまり `StreamMode` のビットに従います(0 はすべてのイベントをストリーミングし、未知のビットは無視します)。状態スナップショットは `VALUES` イベント、ノードのチャネル書き込みは `UPDATES` イベント、割り込みとノードエラーは `DEBUG` イベントです。ノードエラーの `error` は `node failed` で、例外テキストは決して含みません。`RunGraphRequest.thread_id` は必須で、空なら `INVALID_ARGUMENT` で拒否されます。他の言語で書いた `CheckpointService` は、`RequiresManagedBudget` を含め `proto/neograph.proto` のすべての RPC を提供しなければなりません。エンジンは新規実行と再開される実行のたびにこれを問い合わせ、`UNIMPLEMENTED` なら実行を失敗させます。予算を管理しないサーバーは `required = false` を返します。NeoGraph の `CheckpointService` は JSON ではなく `Checkpoint` を保存するため、そのまま保持できない `checkpoint_json`(知らないトップレベルのメンバー、または自身より新しい `schema_version`)は、一部を捨てる代わりに `INVALID_ARGUMENT` で拒否します。`channel_values` と `metadata` は送られたとおりに保持します。
+
+`run_server`、`run_tool_server`、`run_checkpoint_server` は標準のヘルスサービス `grpc.health.v1.Health` に応答します。呼び出しを受け付けている間はサーバーとそのサービスについて `SERVING`、停止を始めると `NOT_SERVING` です。`ServeOptions`(`<neograph/grpc/serve_options.h>`)を受け取るオーバーロードは、`ServeOptions::stop` が要求されると処理中の呼び出しに `shutdown_grace` を与えてから停止し、バインドしたポートを `on_serving` に通知します(そのためアドレスにポート 0 を指定できます)。サーバーリフレクションはホストが選びます。`gRPC::grpc++_reflection` をリンクし、サーバーの起動前に `grpc::reflection::InitProtoReflectionServerBuilderPlugin()` を呼ぶと、gRPC が組み込みサーバーを含むプロセスのすべてのサーバーにリフレクションを追加します。TLS、認証、メッセージサイズの上限が必要なら、`make_graph_service()`、`make_tool_service()`、`make_checkpoint_service()` を独自の `grpc::ServerBuilder` に登録してください。gRPC ヘッダーは gRPC 自身のヘッダーを含むため、`using namespace neograph;` を使うコードは `neograph::grpc::GrpcRemoteTool` と書きます。そこでは修飾なしの `grpc::` があいまいになります。
 
 NeoGraph 自身のクライアントは呼び出しを制限します。MCP クライアントは、キャンセルまたはタイムアウトで待つのをやめたリクエストについて(`initialize` を除き)`notifications/cancelled` を送り、遅れた応答を破棄します。`GrpcRemoteTool`(`set_call_timeout`、既定 60 秒)と `GrpcCheckpointStore`(`set_rpc_timeout`、既定 30 秒)はすべての呼び出しに期限を設け、実行の cancel token はリモートツールの RPC をキャンセルします。これらのクライアントはリモートのコードをローカルの制御シグナルに戻しません。リモートの Hook ブロック(MCP `-32010`、`ErrorInfo` のコードが `NG.HookBlocked` である gRPC ステータス)とリモートの割り込み(`-32011`、`NG.Interrupted`)はリモートの実行のものです。`MCPTool` と `GrpcRemoteTool` は、そのコードとリモートの公開メッセージを持ち、リトライされない通常の失敗である `graph::RemoteControlFailure` を送出するので、ローカルの実行は失敗したツール結果とともに続きます。リモートサーバーからのそれ以外の MCP JSON-RPC エラー、gRPC のツールエラーやステータスは、呼び出し元にとって通常のツール失敗です。ただし、リモートが実行前に拒否したリクエスト(MCP の `-32700`、`-32600`、`-32601`、`-32602` と `NG.InvalidRequest` の目印が付いた結果、gRPC の `NOT_FOUND`、`INVALID_ARGUMENT`)は、効果が不確定でない失敗したツール結果になります([ツール失敗の契約](#tool-failure-contract))。TODO(後の段階): リモートの割り込みを、人が答えるネイティブな一時停止としてローカルの実行に伝えます。
 
@@ -3110,7 +3114,7 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 
 例外テキスト (`what()`) はクライアントに届きません。message は型付きの公開メッセージ (`NodeFailureError::public_message`) か失敗クラスごとの汎用文で、詳細はホストのログにだけ残ります。割り込みは、理由をタイトル、ペイロードを `rawInput` とし、`_meta["neograph/interrupt"]` と選択肢 "approve" (`allow_once`)・"reject" (`reject_once`) を持つツール呼び出しになります。選ばれた option id が再開値です。変えるには `interrupt_permission` と `interrupt_resume_value` をオーバーライドします。`cancelled` の回答はターンを取り消しで終えます。アダプターが `std::nullopt` を返すか、クライアントが回答できない場合、ターンは `data.code: "NG.Interrupted"` で失敗し、セッションは一時停止のまま残りません。エージェントの再起動後のように `session/resume` がチェックポイントから復元した一時停止には、次のプロンプトのテキストが回答します。
 
-`session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
+`session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。`requestId` が実行中の `session/prompt` の id である `$/cancel_request` 通知も同じようにターンを取り消し、そのプロンプトには引き続き応答が 1 つ (`stopReason: "cancelled"`) 返ります。未知または終了済みなど、ほかのリクエストの `requestId` は無視します。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
 
 `session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境は最小限で、エージェントの `PATH`(Windows では `SystemRoot` も)にクライアントの `env` を加えたものです。プロバイダーの API キーを含みうるエージェントのその他の環境は渡しません。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
 

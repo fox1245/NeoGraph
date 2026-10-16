@@ -14,8 +14,15 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
+#include <asio/connect.hpp>
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/write.hpp>
+
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <map>
 #include <memory>
@@ -505,6 +512,60 @@ TEST(MCPHttpServerTest, DeleteClosesTheConnection) {
     ASSERT_TRUE(removed);
     EXPECT_EQ(removed->status, 204);
     EXPECT_EQ(removed->get_header_value("Connection"), "close");
+    EXPECT_EQ(ping_status(client, id), 404);
+}
+
+// What a raw connection received before the server closed it or the time
+// ran out.
+struct RawReply {
+    std::string bytes;
+    bool        closed = false;  ///< the server closed the connection
+};
+
+RawReply send_raw(int port, const std::string& message, std::chrono::milliseconds limit) {
+    asio::io_context      io;
+    asio::ip::tcp::socket socket(io);
+    socket.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(port)});
+    asio::write(socket, asio::buffer(message));
+    RawReply                  reply;
+    std::array<char, 4096>    buffer{};
+    std::function<void()>     read_more = [&] {
+        socket.async_read_some(asio::buffer(buffer), [&](const asio::error_code& error,
+                                                         std::size_t received) {
+            reply.bytes.append(buffer.data(), received);
+            if (error) {
+                reply.closed = error == asio::error::eof || error == asio::error::connection_reset;
+                return;
+            }
+            read_more();
+        });
+    };
+    read_more();
+    io.run_for(limit);
+    return reply;
+}
+
+TEST(MCPHttpServerTest, ADeleteWithoutContentLengthEndsItsConnection) {
+    // RFC 9112 6.3: a request without Content-Length or Transfer-Encoding has
+    // no body, and the official clients send their DELETE so. The server
+    // used to wait for a body after its 204, holding the connection and
+    // reading a next request on it as that body (#450). It answers and
+    // closes the connection, as its "Connection: close" says.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto id = open_session(client);
+    ASSERT_FALSE(id.empty());
+    const auto started = std::chrono::steady_clock::now();
+    const auto reply = send_raw(server.port(),
+                                "DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nMcp-Session-Id: " + id +
+                                    "\r\nMCP-Protocol-Version: 2025-11-25\r\n\r\n",
+                                3s);
+    EXPECT_EQ(reply.bytes.rfind("HTTP/1.1 204", 0), 0u) << reply.bytes;
+    EXPECT_NE(reply.bytes.find("Connection: close"), std::string::npos) << reply.bytes;
+    EXPECT_TRUE(reply.closed);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 2s);
     EXPECT_EQ(ping_status(client, id), 404);
 }
 

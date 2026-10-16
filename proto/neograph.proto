@@ -27,8 +27,11 @@ service GraphService {
   rpc RunGraph(RunGraphRequest) returns (RunGraphResponse);
 
   // Server-streaming: run a graph, stream GraphEvents (tokens, node
-  // start/end, debug) as they happen; the final message carries the
-  // terminal RunResult. Mirrors engine->run_stream's StreamMode.
+  // start/end, state snapshots, channel writes, debug) as they happen,
+  // filtered by RunGraphRequest.stream_mode; the final message (FINAL,
+  // whatever the mode) carries the terminal RunResult. A failed run sends
+  // one DEBUG event {"error": <public message>, "code": <stable code>} and
+  // ends with the same non-OK status as RunGraph, without FINAL.
   rpc RunGraphStream(RunGraphRequest) returns (stream GraphEvent);
 
   // Liveness / build-info probe (no graph execution).
@@ -41,7 +44,8 @@ message RunGraphRequest {
   string graph_def_json = 1;
 
   // Conversation / session id. Maps to RunConfig::thread_id —
-  // checkpoint streams stay isolated per thread_id.
+  // checkpoint streams stay isolated per thread_id. Required: an empty
+  // value is refused with INVALID_ARGUMENT before the graph runs.
   string thread_id = 2;
 
   // Initial channel values, as a JSON object string. Maps to
@@ -52,7 +56,12 @@ message RunGraphRequest {
   uint32 max_steps = 4;
 
   // Stream mode bitmask for RunGraphStream (EVENTS=1, TOKENS=2,
-  // VALUES=4, UPDATES=8, DEBUG=16). Ignored by unary RunGraph.
+  // VALUES=4, UPDATES=8, DEBUG=16), as StreamMode. 0 (unset) streams every
+  // event; bits outside these five are ignored. EVENTS: NODE_START,
+  // NODE_END and the DEBUG events of interrupts and node errors. TOKENS:
+  // TOKEN. VALUES: VALUES. UPDATES: UPDATES. DEBUG: the DEBUG events of node
+  // retries and the NODE_START events of routing (node "__routing__") and
+  // Send dispatch (node "__send__"). Ignored by unary RunGraph.
   uint32 stream_mode = 5;
 
   // When true and a checkpoint store is configured, load the latest
@@ -92,8 +101,13 @@ message GraphEvent {
     TOKEN            = 1;   // streaming LLM token
     NODE_START       = 2;
     NODE_END         = 3;
-    VALUES           = 4;   // channel snapshot
-    UPDATES          = 5;   // channel delta
+    VALUES           = 4;   // full state snapshot after a super-step (node "__state__")
+    UPDATES          = 5;   // one channel write of a node
+    // An interrupt ({"phase", "checkpoint_id"}, node = the interrupted
+    // node), a node error ({"error": "node failed", "attempts", "handled",
+    // and "routed_to" for a routed failure; a retry: {"retry",
+    // "max_retries", "delay_ms", "error": "node failed"}), or the run's
+    // failure (see RunGraphStream). Never exception text.
     DEBUG            = 6;
     FINAL            = 7;   // terminal — payload_json carries RunGraphResponse
   }
@@ -157,6 +171,10 @@ message ToolCallResponse {
 // payloads). The gRPC win is the HTTP/2 binary transport + multiplexing,
 // measured against JSON-RPC envelope overhead — not proto schema rigidity.
 
+// An implementation in another language must serve every RPC below. A
+// NeoGraph 0.14 engine calls RequiresManagedBudget for every new or resumed
+// run and fails the run when it is UNIMPLEMENTED (a managed budget is never
+// assumed absent); a server that manages no budget returns required = false.
 service CheckpointService {
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (StatusResponse);
   rpc LoadLatestCheckpoint(LoadLatestRequest) returns (CheckpointResponse);
@@ -182,6 +200,10 @@ message CheckpointBlob {
   // {id, thread_id, channel_values, channel_versions, parent_id,
   //  current_node, next_nodes[], interrupt_phase, barrier_state{},
   //  metadata, step, timestamp, schema_version}.
+  // channel_values and metadata are free JSON and kept as sent. NeoGraph's
+  // server refuses (INVALID_ARGUMENT) a record it could not store whole: a
+  // top-level member outside this list, or a schema_version newer than its
+  // own.
   string checkpoint_json = 3;
 }
 

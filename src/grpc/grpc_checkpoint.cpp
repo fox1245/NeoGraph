@@ -14,13 +14,18 @@
 
 #include "neograph.grpc.pb.h"
 #include "error_details.h"
+#include "serve.h"
 #include "../core/canonical_json.h"
 #include "../core/managed_budget_journal.h"
+#include "../core/text_safety.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
 
+#include <algorithm>
+#include <iterator>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace neograph::grpc {
@@ -213,6 +218,43 @@ template<class Operation>
         // Backend exception text never crosses the wire.
         return ::grpc::Status(::grpc::StatusCode::INTERNAL, "Managed-budget backend failure");
     }
+}
+
+// The members checkpoint_to_json writes. channel_values and metadata hold
+// free JSON and are kept as they are; anything else at the top level would
+// be lost, because the backend stores a Checkpoint, not the JSON.
+constexpr std::string_view kCheckpointMembers[] = {
+    "id", "thread_id", "channel_values", "channel_versions", "parent_id",
+    "current_node", "next_nodes", "interrupt_phase", "barrier_state",
+    "metadata", "step", "timestamp", "schema_version"};
+
+// Why this server cannot store `checkpoint_json` whole (a member it does not
+// know, a layout newer than its own), or nothing when it can. A record it
+// cannot parse is left to checkpoint_from_json.
+std::optional<std::string> unstorable(const std::string& checkpoint_json) {
+    neograph::json record;
+    try {
+        record = neograph::json::parse(checkpoint_json.empty() ? "{}" : checkpoint_json);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    if (!record.is_object()) return std::nullopt;
+    for (const auto& [key, value] : record.items()) {
+        (void)value;
+        if (std::find(std::begin(kCheckpointMembers), std::end(kCheckpointMembers), key) ==
+            std::end(kCheckpointMembers))
+            return "checkpoint_json member '" +
+                   neograph::detail::sanitize_untrusted_text(key, 64) +
+                   "' is not one this server stores";
+    }
+    if (record.contains("schema_version") && record["schema_version"].is_number_integer()) {
+        const auto version = record["schema_version"].get<std::int64_t>();
+        if (version > static_cast<std::int64_t>(neograph::graph::CHECKPOINT_SCHEMA_VERSION))
+            return "checkpoint schema_version " + std::to_string(version) +
+                   " is newer than this server's " +
+                   std::to_string(neograph::graph::CHECKPOINT_SCHEMA_VERSION);
+    }
+    return std::nullopt;
 }
 
 ::grpc::Status invalid_request(std::string message) {
@@ -493,6 +535,8 @@ public:
         // mapping"). No backend exception text crosses the wire.
         if (!req->has_checkpoint())
             return invalid_request("SaveCheckpoint requires a checkpoint");
+        if (auto reason = unstorable(req->checkpoint().checkpoint_json()))
+            return invalid_request(std::move(*reason));
         Checkpoint checkpoint;
         try {
             checkpoint = checkpoint_from_json(req->checkpoint().checkpoint_json());
@@ -642,6 +686,8 @@ public:
                 parse_journal_payload(request->lease_json()));
             if (!request->has_checkpoint())
                 throw std::invalid_argument("Managed-budget publication lacks checkpoint");
+            if (auto reason = unstorable(request->checkpoint().checkpoint_json()))
+                throw std::invalid_argument(*reason);
             auto checkpoint = from_blob(request->checkpoint());
             if (checkpoint.id != request->checkpoint().id() ||
                 checkpoint.thread_id != request->checkpoint().thread_id())
@@ -683,16 +729,17 @@ void run_checkpoint_server(const std::string& address,
 void run_checkpoint_server(const std::string& address,
                            std::shared_ptr<CheckpointStore> backend,
                            std::shared_ptr<sp::NativeArchive> native_archive) {
+    run_checkpoint_server(address, std::move(backend), std::move(native_archive),
+                          ServeOptions{});
+}
+
+void run_checkpoint_server(const std::string& address,
+                           std::shared_ptr<CheckpointStore> backend,
+                           std::shared_ptr<sp::NativeArchive> native_archive,
+                           const ServeOptions& options) {
     CheckpointServiceImpl svc(std::move(backend), std::move(native_archive));
-    ::grpc::ServerBuilder builder;
-    builder.AddListeningPort(address,
-                             ::grpc::InsecureServerCredentials());
-    builder.RegisterService(&svc);
-    std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
-    if (!server)
-        throw std::runtime_error(
-            "failed to start CheckpointService on " + address);
-    server->Wait();
+    detail::serve(address, svc, pb::CheckpointService::service_full_name(), options,
+                  "CheckpointService");
 }
 
 }  // namespace neograph::grpc

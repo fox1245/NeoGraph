@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=5a44b977003310ca797fa9891075e6f4c80b2e92a4a6e5bdd9707239c6d8e423 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=2e2dcc4b760bda9449810d90b19dccc53a354c23c8b63bc24e55bcfbf871d4c9 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -289,7 +289,7 @@ CMake 3.20+ は明示 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール�
 固定 public GitHub source archive の順に SDK を選択します。download fallback は既定で有効です。
 インストール済み package/明示 source の offline ビルドでは `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` にしてください。
 インストール include root は `include/SchemaProvider` です。interface/capability 検査を行い、
-SDK package は alpha `0.3.1`（interface revision/shared ABI 6）です。
+SDK package は alpha `0.3.2`（interface revision/shared ABI 6）です。
 
 保存済み interface-3 model-free C++ E2E 実行では番号付き target39個を検証しました。finite offline29個と、
 実際の MCP/ACP/A2A/Harness および gRPC graph/チェックポイント/tool 経路です。gRPC-vs-JSON-RPC
@@ -310,7 +310,7 @@ remote CI と公開は未完了です。
 
 ## 保持された例の契約
 
-このソース契約は SDK `0.3.1`（interface 6）に対してビルドします。上の C++ 実行記録は
+このソース契約は SDK `0.3.2`（interface 6）に対してビルドします。上の C++ 実行記録は
 それより古い SDK interface で行ったもので、過去の証拠のままです。現在の SDK の検証でも、
 新しい live 呼出しでもありません。family ごとの制御は
 `ProviderControls` の閉じた型付きフィールドで、非対応 family/origin/model は I/O 前に拒否します。

@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=763d878f17fb8f417c49035c6785aa71f7742483270391650738b86bb1e7a20b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=620afb767a5f6203942a77fa2b88825555e06a9f36d37b6b08de8e12dd5e66c6 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine`은 같은 C++ 런타임을 pybind11로 감싼 Python 인터페이스입니다. wheel에는 Core, LLM, Program/QuickJS, MCP, SQLite 런타임 영속성(durability)이 켜져 있습니다. 소스에서 선택적으로 빌드하면 컴파일한 컴포넌트만 노출됩니다.
 
-이 가이드의 내용은 SchemaProvider SDK `0.3.1`(인터페이스 리비전 `6`, 공유 라이브러리 ABI 리비전 `6`)에 맞춰 빌드한 wheel이 있어야 실행됩니다. wheel에 함께 들어 있는 컴포넌트는 같이 설치해야 합니다. `complete`를 노출하는 이전 wheel은 provider 인터페이스가 달라서 아래의 타입 기반 예제를 실행할 수 없습니다.
+이 가이드의 내용은 SchemaProvider SDK `0.3.2`(인터페이스 리비전 `6`, 공유 라이브러리 ABI 리비전 `6`)에 맞춰 빌드한 wheel이 있어야 실행됩니다. wheel에 함께 들어 있는 컴포넌트는 같이 설치해야 합니다. `complete`를 노출하는 이전 wheel은 provider 인터페이스가 달라서 아래의 타입 기반 예제를 실행할 수 없습니다.
 
 ```bash
 pip install neograph-engine

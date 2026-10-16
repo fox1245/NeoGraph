@@ -15,10 +15,12 @@
 
 #include <asio/buffer.hpp>
 #include <asio/connect.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read.hpp>
 #include <asio/ssl.hpp>
 #include <asio/ssl/host_name_verification.hpp>
+#include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/write.hpp>
 #include <openssl/evp.h>
@@ -30,6 +32,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -38,6 +41,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace neograph::async {
@@ -401,7 +405,60 @@ asio::awaitable<void> WsClient::send_close_owned(std::uint16_t code, std::string
     co_return;
 }
 
+namespace {
+
+// operator|| completes with the first operand that *succeeds*, so a failing
+// operation raced against a timer would otherwise be reported as a timeout
+// once the timer fires. Capture the outcome so the operation always succeeds.
+template <typename T>
+struct Captured {
+    std::optional<T>   value;
+    std::exception_ptr error;
+};
+
+template <typename T>
+asio::awaitable<Captured<T>> capture(asio::awaitable<T> operation) {
+    Captured<T> out;
+    try {
+        out.value.emplace(co_await std::move(operation));
+    } catch (...) {
+        out.error = std::current_exception();
+    }
+    co_return out;
+}
+
+/// Run `operation` with a deadline. Expiry cancels it and throws
+/// asio::system_error(timed_out, what).
+template <typename T>
+asio::awaitable<T> with_deadline(asio::any_io_executor ex, asio::awaitable<T> operation,
+                                 std::chrono::milliseconds deadline, const char* what) {
+    using asio::experimental::awaitable_operators::operator||;
+    asio::steady_timer timer(ex);
+    timer.expires_after(deadline);
+    auto outcome = co_await (capture(std::move(operation)) || timer.async_wait(asio::use_awaitable));
+    if (outcome.index() == 1) throw asio::system_error(asio::error::timed_out, what);
+    auto captured = std::get<0>(std::move(outcome));
+    if (captured.error) std::rethrow_exception(captured.error);
+    co_return std::move(*captured.value);
+}
+
+}  // namespace
+
 asio::awaitable<WsMessage> WsClient::recv() {
+    if (!impl_) throw std::runtime_error("ws: connection is unusable");
+    const auto deadline = impl_->options.read_timeout;
+    if (deadline.count() <= 0) co_return co_await recv_message();
+    try {
+        co_return co_await with_deadline(impl_->socket.get_executor(), recv_message(), deadline,
+                                         "ws: read timeout");
+    } catch (const asio::system_error& error) {
+        // A frame may be half read: the connection cannot be resumed.
+        if (error.code() == asio::error::timed_out) impl_->poison();
+        throw;
+    }
+}
+
+asio::awaitable<WsMessage> WsClient::recv_message() {
     // Reassemble fragmented messages: the first data frame carries
     // the real opcode (Text/Binary) with FIN=0; subsequent
     // Continuation frames carry FIN=0 until the final FIN=1. Control
@@ -680,6 +737,31 @@ asio::awaitable<std::unique_ptr<WsClient>> WsClient::connect_owned(
         throw std::invalid_argument(
             "ws: limits must be nonzero and frame <= message");
     }
+    if (options.handshake_timeout.count() < 0 || options.read_timeout.count() < 0) {
+        throw std::invalid_argument("ws: timeouts must not be negative");
+    }
+    const auto deadline = options.handshake_timeout;
+    if (deadline.count() == 0) {
+        co_return co_await handshake_owned(std::move(ex), std::move(host), std::move(port),
+                                           std::move(path), std::move(headers), tls,
+                                           std::move(options));
+    }
+    auto timer_ex = ex;
+    co_return co_await with_deadline(
+        std::move(timer_ex),
+        handshake_owned(std::move(ex), std::move(host), std::move(port), std::move(path),
+                        std::move(headers), tls, std::move(options)),
+        deadline, "ws: handshake timeout");
+}
+
+asio::awaitable<std::unique_ptr<WsClient>> WsClient::handshake_owned(
+    asio::any_io_executor                            ex,
+    std::string                                      host,
+    std::string                                      port,
+    std::string                                      path,
+    std::vector<std::pair<std::string, std::string>> headers,
+    bool                                             tls,
+    WsClientOptions                                  options) {
     auto impl = std::make_unique<WsClient::Impl>(ex, options);
 
     asio::ip::tcp::resolver resolver{ex};

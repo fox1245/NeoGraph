@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ko source_sha256=aa189fb9db1c66f220c8ba6653d77eeb9c83807cf2abc3a2dbb305973a9d7f31 -->
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ko source_sha256=8aec767411b80cf578d1b47d99bfeed6fc735107c33a7fa5fe88f67a0f70c492 -->
 # 동시 부하 벤치마크: NeoGraph와 Python의 과거 결과
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
@@ -48,7 +48,7 @@ Docker의 CPU 할당량이 `hardware_concurrency()`에 보이는 코어 수를 �
 ## 현재 의존성과 재현 상태
 
 `NEOGRAPH_BUILD_LLM=OFF`와 `NEOGRAPH_USE_LIBCURL=OFF`로 빌드해도 Core는 외부 `SchemaProvider::runtime`에 링크합니다. 설치된 SDK는 `CMAKE_PREFIX_PATH`로, 직접 받아 둔 체크아웃은 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`로 지정합니다. 자세한 내용은 [빌드 가이드](../../README.md)를 참고하세요. SDK를 소스로 빌드하려면 C++20, 설정 생성에 쓰는 Python, libcurl 7.88 이상, OpenSSL Crypto가 필요합니다. SDK는 Linux/POSIX에서만 시험했으며, 예전 Docker 결과는 다른 플랫폼에 적용되지 않습니다.
-NeoGraph `0.14.1` 레시피에는 알파 SDK `0.3.1`, 인터페이스 리비전/공유 라이브러리 세대 6과 이에 맞는 헤더/라이브러리가 필요합니다.
+NeoGraph `0.14.1` 레시피에는 알파 SDK `0.3.2`, 인터페이스 리비전/공유 라이브러리 세대 6과 이에 맞는 헤더/라이브러리가 필요합니다.
 
 저장소에서 관리하는 NeoGraph Docker 이미지는 curl/OpenSSL 개발 의존성을 설치하고, `neograph::core`에 링크하는 비공개 CMake 소비자를 빌드합니다. 이 소비자는 SDK의 의존성 전체를 그대로 이어받습니다. SDK는 루트 CMake 정책에 따라 가져오므로, 패키지나 소스 체크아웃을 제공하지 않으면 네트워크 접근이 필요할 수 있습니다. 선택 사항인 NeoGraph 네트워크 모듈은 꺼져 있지만 SDK의 의존성은 남습니다. 매트릭스는 빌드하기 전에 출력 파일을 비우므로 새 경로를 지정해야 합니다. `status=ok`는 JSON을 추출했다는 뜻일 뿐이므로 `ok`, `err`, 종료 상태도 함께 확인해야 합니다.
 

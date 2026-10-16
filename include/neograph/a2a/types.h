@@ -224,7 +224,10 @@ struct NEOGRAPH_API AgentCard {
     std::string             description;
     /// Public endpoint of the JSON-RPC binding. Empty on a server card: the
     /// server then advertises the address the client used (the request's
-    /// Host), or its bound address.
+    /// Host, `http` scheme), or its bound address; set it behind a
+    /// TLS-terminating proxy (or see A2AServer::set_trust_forwarded_headers).
+    /// The 0.3 JSON of a card with no `url` takes the first interface of the
+    /// preferred transport, else leaves the member out.
     std::string             url;
     std::string             version;
     /// The 0.3 card's `protocolVersion`; A2AServer always serves "0.3.0" in
