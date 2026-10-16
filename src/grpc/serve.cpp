@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <stop_token>
 
 namespace neograph::grpc::detail {
 namespace {
@@ -75,10 +76,21 @@ void serve(const std::string& address, ::grpc::Service& service, const char* ser
         return;
     }
     {
+        // A stop_callback and a plain condition variable rather than the
+        // stop_token overload of condition_variable_any, which older libc++
+        // releases do not ship.
         std::mutex mutex;
-        std::condition_variable_any requested;
+        std::condition_variable requested;
+        bool stopping = false;
+        std::stop_callback on_stop(options.stop, [&] {
+            {
+                std::lock_guard notify_lock(mutex);
+                stopping = true;
+            }
+            requested.notify_all();
+        });
         std::unique_lock lock(mutex);
-        requested.wait(lock, options.stop, [] { return false; });
+        requested.wait(lock, [&] { return stopping; });
     }
     stop();
 }
