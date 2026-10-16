@@ -1182,6 +1182,66 @@ TEST(ACPServer, CancelAbortsInflightPrompt) {
     EXPECT_EQ(response_count, 1);
 }
 
+// ACP "Cancellation" (#457): $/cancel_request naming an in-flight
+// session/prompt cancels that turn, which still gets its one response.
+TEST(ACPServer, CancelRequestForAnInflightPromptCancelsTheTurn) {
+    auto probe = std::make_shared<CancelProbe>();
+    CapturingSink cap;
+    ACPServer server(build_cancel_aware_engine(probe),
+                     {{"name", "test-acp"}, {"version", "0.0.1"}});
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    const std::string sid = new_session(server);
+    server.handle_message(make_request(20, "session/prompt",
+        {{"sessionId", sid}, {"prompt", neograph::json::array({
+            neograph::json{{"type", "text"}, {"text", "cancel"}}})}}));
+    for (int i = 0; i < 200 && !probe->entered.load(std::memory_order_acquire); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_TRUE(probe->entered.load(std::memory_order_acquire));
+
+    // Ids that name no in-flight prompt are ignored: another number, the same
+    // number as a string, and a malformed notification.
+    for (const auto& ignored : {neograph::json(21), neograph::json("20")}) {
+        EXPECT_TRUE(server.handle_message({{"jsonrpc", "2.0"}, {"method", "$/cancel_request"},
+                                           {"params", {{"requestId", ignored}}}}).is_null());
+    }
+    EXPECT_TRUE(server.handle_message({{"jsonrpc", "2.0"}, {"method", "$/cancel_request"},
+                                       {"params", neograph::json::object()}}).is_null());
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(cap.wait_for_response(20, std::chrono::milliseconds(0)).is_null());
+
+    EXPECT_TRUE(server.handle_message({{"jsonrpc", "2.0"}, {"method", "$/cancel_request"},
+                                       {"params", {{"requestId", 20}}}}).is_null());
+    auto response = cap.wait_for_response(20, std::chrono::milliseconds(500));
+    ASSERT_TRUE(response.contains("result")) << response.dump();
+    EXPECT_EQ(response["result"].value("stopReason", std::string()), "cancelled");
+    EXPECT_FALSE(probe->completed.load(std::memory_order_acquire));
+}
+
+TEST(ACPServer, CancelRequestForAFinishedPromptCannotReachTheNextTurn) {
+    CapturingSink cap;
+    auto server = make_server();
+    initialize_server(server);
+    server.set_notification_sink(cap.as_sink());
+    const std::string sid = new_session(server);
+    auto prompt = [](const char* text) {
+        return neograph::json::array({neograph::json{{"type", "text"}, {"text", text}}});
+    };
+    server.handle_message(make_request(1, "session/prompt",
+        {{"sessionId", sid}, {"prompt", prompt("first")}}));
+    auto first = cap.wait_for_response(1, std::chrono::seconds(1));
+    ASSERT_TRUE(first.contains("result")) << first.dump();
+
+    server.handle_message({{"jsonrpc", "2.0"}, {"method", "$/cancel_request"},
+                           {"params", {{"requestId", 1}}}});
+    server.handle_message(make_request(2, "session/prompt",
+        {{"sessionId", sid}, {"prompt", prompt("second")}}));
+    auto second = cap.wait_for_response(2, std::chrono::seconds(1));
+    ASSERT_TRUE(second.contains("result")) << second.dump();
+    EXPECT_EQ(second["result"].value("stopReason", std::string()), "end_turn");
+}
+
 TEST(ACPServer, CancelReachesProviderAndToolFixtures) {
     CapturingSink cap;
     auto probe = std::make_shared<DependencyProbe>();
