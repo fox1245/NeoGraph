@@ -644,6 +644,61 @@ TEST(GraphHostGRPCContract, StreamModeSelectsTheEvents) {
     server->Wait();
 }
 
+// #453: the server stores a Checkpoint, not the JSON, so it refuses a record
+// it could not keep whole instead of dropping part of it. Free JSON inside
+// channel_values and metadata is kept.
+TEST(GraphHostGRPCContract, CheckpointServerRefusesRecordsItCannotStoreWhole) {
+    auto backend = std::make_shared<InMemoryCheckpointStore>();
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::CheckpointService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+    const auto save = [&](const std::string& id, const json& record) {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 5s);
+        pb::SaveCheckpointRequest request;
+        request.mutable_checkpoint()->set_id(id);
+        request.mutable_checkpoint()->set_thread_id("thread");
+        request.mutable_checkpoint()->set_checkpoint_json(record.dump());
+        pb::StatusResponse response;
+        return stub->SaveCheckpoint(&context, request, &response);
+    };
+    Checkpoint checkpoint;
+    checkpoint.id = "cp-whole";
+    checkpoint.thread_id = "thread";
+    checkpoint.channel_values = json{{"channels", {{"x", {{"value", {{"future", 1}}}}}}}};
+    checkpoint.metadata = json{{"nested", {{"future_field", true}}}};
+    checkpoint.step = 1;
+    checkpoint.timestamp = 1;
+    const auto record = json::parse(neograph::grpc::checkpoint_to_json(checkpoint));
+    ASSERT_TRUE(save("cp-whole", record).ok());
+    const auto stored = backend->load_by_id("cp-whole");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->metadata, checkpoint.metadata);
+    EXPECT_EQ(stored->channel_values, checkpoint.channel_values);
+
+    auto extra = record;
+    extra["id"] = "cp-extra";
+    extra["future_field"] = json{{"kept", true}};
+    const auto refused = save("cp-extra", extra);
+    EXPECT_EQ(refused.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(refused.error_message().find("future_field"), std::string::npos)
+        << refused.error_message();
+    EXPECT_FALSE(backend->load_by_id("cp-extra"));
+
+    auto newer = record;
+    newer["id"] = "cp-newer";
+    newer["schema_version"] = CHECKPOINT_SCHEMA_VERSION + 1;
+    EXPECT_EQ(save("cp-newer", newer).error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_FALSE(backend->load_by_id("cp-newer"));
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
 // grpc.health.v1.Health/Check over a generic stub. Its messages are small
 // enough to encode by hand.
 struct RawCall {

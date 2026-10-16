@@ -44,7 +44,8 @@ message RunGraphRequest {
   string graph_def_json = 1;
 
   // Conversation / session id. Maps to RunConfig::thread_id —
-  // checkpoint streams stay isolated per thread_id.
+  // checkpoint streams stay isolated per thread_id. Required: an empty
+  // value is refused with INVALID_ARGUMENT before the graph runs.
   string thread_id = 2;
 
   // Initial channel values, as a JSON object string. Maps to
@@ -170,6 +171,10 @@ message ToolCallResponse {
 // payloads). The gRPC win is the HTTP/2 binary transport + multiplexing,
 // measured against JSON-RPC envelope overhead — not proto schema rigidity.
 
+// An implementation in another language must serve every RPC below. A
+// NeoGraph 0.14 engine calls RequiresManagedBudget for every new or resumed
+// run and fails the run when it is UNIMPLEMENTED (a managed budget is never
+// assumed absent); a server that manages no budget returns required = false.
 service CheckpointService {
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (StatusResponse);
   rpc LoadLatestCheckpoint(LoadLatestRequest) returns (CheckpointResponse);
@@ -195,6 +200,10 @@ message CheckpointBlob {
   // {id, thread_id, channel_values, channel_versions, parent_id,
   //  current_node, next_nodes[], interrupt_phase, barrier_state{},
   //  metadata, step, timestamp, schema_version}.
+  // channel_values and metadata are free JSON and kept as sent. NeoGraph's
+  // server refuses (INVALID_ARGUMENT) a record it could not store whole: a
+  // top-level member outside this list, or a schema_version newer than its
+  // own.
   string checkpoint_json = 3;
 }
 
