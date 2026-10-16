@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=df3d6cadfcfad312e4bc01d5ceb0d43d0bb60e38e45e24fcc1fb1f8f7f96edfd -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=451b8de5bca47254e053b29e9f189107d5cccbe07511304d771047c9e701ffde -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -39,6 +39,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **A2A: TLS를 종료하는 프록시 뒤의 카드 URL, 그리고 빈 `url` 제거 (#456).** `AgentCard::url`이 비어 있으면 `A2AServer`는 클라이언트가 사용한 주소를 항상 `http` scheme으로 광고했기 때문에, TLS를 종료하는 프록시 뒤에서는 카드(와 그 `supportedInterfaces`)가 SDK 클라이언트를 평문 HTTP로 보냈습니다. 이제 `A2AServer::set_trust_forwarded_headers(true)`이면 RFC 7239 `Forwarded`(첫 요소)에서, 없으면 `X-Forwarded-Proto` / `X-Forwarded-Host`에서 scheme과 host를 가져옵니다. `http` / `https`와 그럴듯한 host만 받아들입니다. 클라이언트가 이 헤더를 직접 보낼 수 있으므로 기본값은 꺼져 있고, 설정된 `AgentCard::url`이 여전히 우선합니다. `url`이 없는 `AgentCard`의 0.3 JSON(예: registry용으로 `A2AServer` 밖에서 쓴 것)에는 더 이상 `"url": ""`가 없습니다. 선호 transport의 첫 interface를 쓰고, 없으면 member를 뺍니다. **동작 변경:** 그런 카드에는 빈 `url` 대신 `url` member가 없습니다.
 - **ACP: `$/cancel_request`가 진행 중인 `session/prompt`를 취소합니다 (#457).** 서버는 자신의 대기 중인 클라이언트 요청에 대해 `$/cancel_request`를 보냈지만 클라이언트가 보낸 알림은 무시해서, 그 알림이 가리킨 prompt가 끝까지 실행되었습니다. 이제 `requestId`가 실행 중인 `session/prompt`의 것인 `$/cancel_request`는 `session/cancel`처럼 그 turn을 취소하고, prompt는 여전히 `stopReason: "cancelled"`인 응답 하나를 받습니다. 알 수 없거나 끝난 요청, 또는 다른 메서드 요청의 `requestId`는 무시합니다. **동작 변경:** prompt에 `$/cancel_request`를 보내는 클라이언트는 완료된 turn 대신 `cancelled`를 받습니다.
 - **`WsClient`에 handshake 기한과 선택적인 읽기 기한이 생겼습니다 (#458).** `ws_connect`는 TCP 연결을 받고 Upgrade 요청에 답하지 않는 서버를 영원히 기다렸습니다. `WsClientOptions::handshake_timeout`(기본 30초)은 이름 해석, 연결, TLS handshake, Upgrade 교환을 제한하고, `WsClientOptions::read_timeout`(기본 0, 기한 없음. 서버 push를 기다리는 유휴 연결은 정상이므로)은 `recv()` 한 번을 제한합니다. 둘 다 `asio::system_error(asio::error::timed_out)`으로 만료되며, frame이 반쯤 읽혔을 수 있으므로 읽기 시간 초과는 연결을 닫습니다. 음수 값은 `std::invalid_argument`를 던집니다. **동작 변경:** 기본 옵션의 `ws_connect`는 영원히 기다리지 않고 30초 뒤 실패합니다.
+- **Program 안에서 타임아웃이 없는 Core 노드 attempt가 본문을 기다리는 비용이 줄었습니다 (#467).** #367과 #368 이후 Program 안의 Core 실행은 모든 노드 본문을 공유 Program 스케줄러가 아닌 노드 attempt 워커 풀에서 실행합니다. 오케스트레이터는 이런 attempt마다 전용 strand, 코루틴, 24시간 타이머를 만들어 기다렸습니다. 타임아웃이 없는 attempt는 시간 초과도 분리(detach)도 일어나지 않으므로, 이제 본문이 끝나면 post 한 번으로 오케스트레이터를 재개합니다. 노드마다 스레드 깨우기가 한 번 줄어, 조용한 Arm 머신에서 노드당 약 8 µs가 줄었습니다. #367과 #368의 노드당 비용은 대부분 남아 있습니다. 본문이 다른 스레드, 흔히 다른 코어에서 돌기 때문에 `quickjs-performance` 게이트에서 JavaScript로 감싼 Core 실행은 9%, `structured_join_sequence`는 12% 느려졌습니다. 타임아웃이 있는 `ng.await`는 dispatch 전에 시작 시각을 명령 저널에 기록하므로(#391) 11%가 더 느린데, 이 기록은 크래시 복구에 필요합니다.
 
 ## [0.14.1] - 2026-10-14
 
