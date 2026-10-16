@@ -21,6 +21,7 @@
 #include <asio/experimental/channel_error.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <asio/read_until.hpp>
+#include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/streambuf.hpp>
 #include <asio/this_coro.hpp>
@@ -483,7 +484,9 @@ public:
         end_session();
         worker.shutdown([this] {
             shutdown_token->cancel();
-            if (listen_stop) listen_stop->cancel();
+            // Expiring the timer, rather than cancelling it, also ends a stop
+            // wait the listener has not begun yet.
+            if (listen_stop) listen_stop->expires_after(std::chrono::steady_clock::duration::zero());
         });
     }
     void listen() noexcept override;
@@ -2178,6 +2181,15 @@ constexpr std::chrono::milliseconds kSessionDeleteTimeout{2000};
 // The largest JSON body read, as for an event.
 constexpr std::size_t kMaxJsonBody = 16u * 1024u * 1024u;
 
+// Completes when @p signal expires or its wait is cancelled. operator||
+// waits for an operand to succeed: a stop wait that ended in an error would
+// leave it waiting for the other operand, such as a GET stream the server
+// keeps open (#448).
+asio::awaitable<void> until_signalled(asio::steady_timer& signal) {
+    asio::error_code ended;
+    co_await signal.async_wait(asio::redirect_error(asio::use_awaitable, ended));
+}
+
 }  // namespace
 
 std::chrono::milliseconds detail::HttpSession::remaining(
@@ -2300,7 +2312,7 @@ asio::awaitable<void> detail::HttpSession::listen_loop() {
         try {
             co_await (stream_once("GET", std::string(), std::move(headers), stream,
                                   std::chrono::milliseconds(0))
-                      || listen_stop->async_wait(asio::use_awaitable));
+                      || until_signalled(*listen_stop));
         } catch (...) {
             if (worker.stopped.load()) break;
             stream->status = 0;
@@ -2318,8 +2330,7 @@ asio::awaitable<void> detail::HttpSession::listen_loop() {
                                         std::min<std::uint64_t>(*retry, 3600000)))
                                   : kDefaultSseRetry);
         try {
-            co_await (pause.async_wait(asio::use_awaitable)
-                      || listen_stop->async_wait(asio::use_awaitable));
+            co_await (pause.async_wait(asio::use_awaitable) || until_signalled(*listen_stop));
         } catch (...) {
             break;
         }

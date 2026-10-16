@@ -890,3 +890,86 @@ TEST(MCPClientConformance, AStreamedRequestReportsItsHeadFirst) {
     EXPECT_EQ(probe.delete_status, 204);
     EXPECT_EQ(probe.deleted, "yes");
 }
+
+// The GET event stream may stay open as long as the session does (MCP
+// transports, "Listening for Messages from the Server"). shutdown() and the
+// destructor end it whether or not the server closes it on DELETE, and
+// whatever the DELETE answer is (#448).
+TEST(MCPClientConformance, ShutdownEndsAGetStreamTheServerKeepsOpen) {
+    for (const int delete_status : {200, 405}) {
+        for (const bool by_destructor : {false, true}) {
+            SCOPED_TRACE("DELETE " + std::to_string(delete_status) +
+                         (by_destructor ? ", destructor" : ", shutdown()"));
+            std::atomic<bool> released{false};
+            std::atomic<int> streams{0};
+            httplib::Server svr;
+            svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+                const auto request = json::parse(req.body);
+                if (common(request, res, "held")) return;
+                res.set_content(envelope(request["id"], text_result("ok")), "application/json");
+            });
+            svr.Get("/mcp", [&](const httplib::Request&, httplib::Response& res) {
+                streams.fetch_add(1);
+                const auto opened = std::chrono::steady_clock::now();
+                res.set_chunked_content_provider(
+                    "text/event-stream",
+                    [&released, opened](std::size_t, httplib::DataSink& sink) {
+                        // Open until the test ends, with a comment now and
+                        // then; bounded, so a client that hangs fails the test.
+                        if (released.load() || std::chrono::steady_clock::now() - opened > 8s) {
+                            sink.done();
+                            return true;
+                        }
+                        std::this_thread::sleep_for(50ms);
+                        const std::string comment = ": open\n\n";
+                        return sink.write(comment.data(), comment.size());
+                    });
+            });
+            svr.Delete("/mcp", [&](const httplib::Request&, httplib::Response& res) {
+                res.status = delete_status;  // the GET stream stays open either way
+            });
+            Guard server(svr);
+            auto client = std::make_unique<mcp::MCPClient>(server.url());
+            ASSERT_TRUE(client->initialize("held-stream"));
+            for (int i = 0; i < 400 && streams.load() < 1; ++i) std::this_thread::sleep_for(5ms);
+            ASSERT_EQ(streams.load(), 1);
+            const auto started = std::chrono::steady_clock::now();
+            if (by_destructor) {
+                client.reset();
+            } else {
+                client->shutdown();
+            }
+            EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+            client.reset();
+            released.store(true);
+        }
+    }
+}
+
+// An ended GET stream is reopened after the `retry` it named. shutdown() does
+// not wait for that pause (#448).
+TEST(MCPClientConformance, ShutdownDoesNotWaitForTheReconnectPause) {
+    std::atomic<int> streams{0};
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto request = json::parse(req.body);
+        if (common(request, res, "paused")) return;
+        res.set_content(envelope(request["id"], text_result("ok")), "application/json");
+    });
+    svr.Get("/mcp", [&](const httplib::Request&, httplib::Response& res) {
+        streams.fetch_add(1);
+        // A priming event that asks for a long pause, then the stream ends.
+        res.set_content("id: p1\nretry: 6000\ndata: \n\n", "text/event-stream");
+    });
+    svr.Delete("/mcp", [](const httplib::Request&, httplib::Response& res) { res.status = 204; });
+    Guard server(svr);
+    mcp::MCPClient client(server.url());
+    ASSERT_TRUE(client.initialize("paused-stream"));
+    for (int i = 0; i < 400 && streams.load() < 1; ++i) std::this_thread::sleep_for(5ms);
+    ASSERT_EQ(streams.load(), 1);
+    std::this_thread::sleep_for(200ms);  // the stream has ended: the client pauses
+    const auto started = std::chrono::steady_clock::now();
+    client.shutdown();
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 3s);
+    EXPECT_EQ(streams.load(), 1);
+}
