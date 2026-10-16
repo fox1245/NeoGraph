@@ -8581,6 +8581,14 @@ inline bool expect_content(const Request &req) {
   return false;
 }
 
+// NeoGraph: backported from cpp-httplib 0.61.0 (upstream issue #2450); drop
+// with the next cpp-httplib update. RFC 9112 6.3: a request without
+// Transfer-Encoding or Content-Length has no body.
+inline bool has_framed_body(const Request &req) {
+  return is_chunked_transfer_encoding(req.headers) ||
+         req.get_header_value_u64("Content-Length") > 0;
+}
+
 #ifdef _WIN32
 class WSInit {
 public:
@@ -11962,6 +11970,14 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   res.version = "HTTP/1.1";
   res.headers = default_headers_;
 
+  // NeoGraph: backported from cpp-httplib 0.61.0; drop with the next
+  // cpp-httplib update. RFC 9112 9.6: a server that sends the "close"
+  // connection option closes the connection after that response, whichever
+  // path wrote it, instead of reading on.
+  auto honor_connection_close = detail::scope_exit([&] {
+    if (res.get_header_value("Connection") == "close") { connection_closed = true; }
+  });
+
   // Request line and headers
   if (!parse_request_line(line_reader.ptr(), req)) {
     res.status = StatusCode::BadRequest_400;
@@ -12208,7 +12224,12 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
 
   // Drain any unconsumed request body to prevent request smuggling on
   // keep-alive connections.
-  if (!req.body_consumed_ && detail::expect_content(req)) {
+  // NeoGraph: backported from cpp-httplib 0.61.0 (upstream issue #2450); drop
+  // with the next cpp-httplib update. Without framing there is no body to
+  // drain, and reading one would consume the client's next request; a
+  // response that closes the connection has no next request to protect.
+  if (!req.body_consumed_ && detail::has_framed_body(req) &&
+      res.get_header_value("Connection") != "close") {
     int drain_status = 200; // required by read_content signature
     if (!detail::read_content(
             strm, req, payload_max_length_, drain_status, nullptr,
