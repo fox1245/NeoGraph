@@ -37,6 +37,7 @@ EXPECTED_CASES = {
     "structured_join_race",
     "structured_join_quorum",
     "structured_join_await",
+    "javascript_wrapped_core",
     "javascript_wrapped_core_ratio",
     "enabled_unused_core_ratio",
     "replay_growth",
@@ -408,6 +409,23 @@ def git_metadata() -> dict[str, Any]:
         raise BenchmarkError(f"cannot record git metadata: {error}") from error
 
 
+def cpu_model() -> str | None:
+    """The CPU a report was measured on; its microsecond ceilings assume CI's runners."""
+    try:
+        text = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        fields.setdefault(key.strip(), value.strip())
+    if fields.get("model name"):
+        return fields["model name"]
+    if fields.get("CPU implementer") and fields.get("CPU part"):
+        return f"CPU implementer {fields['CPU implementer']}, part {fields['CPU part']}"
+    return None
+
+
 def binary_metadata(paths: dict[str, Path | None]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name, path in paths.items():
@@ -484,6 +502,10 @@ def announce(results: list[dict[str, Any]], tolerance: float, stream: Any) -> No
                     f"is above its ceiling {entry['maximum']:.6g} and {band} the "
                     f"{tolerance:.0%} tolerance ({entry['tolerated_maximum']:.6g})"
                 )
+                # A non-blocking case cannot fail the job, so it never logs an error.
+                if not result["blocking"]:
+                    kind = "warning"
+                    message += "; the case is not blocking"
                 print(
                     f"::{kind}::{message}" if os.environ.get("GITHUB_ACTIONS") else f"{kind}: {message}",
                     file=stream,
@@ -645,7 +667,9 @@ def main() -> int:
             "platform": platform.platform(),
             "architecture": platform.machine(),
             "processor": platform.processor(),
+            "cpu_model": cpu_model(),
             "logical_cpu_count": os.cpu_count(),
+            "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"),
             "python": platform.python_version(),
         },
         "binaries": binary_metadata(binaries),

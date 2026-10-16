@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=fde93d2a05531c224176faf6f7457924bef597fe52414cb2b030a8a4a354836e -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=ad186e4c6872cd778c3ab3e480dc0440bfa8dc5e2e255b6725eb7f340d4c1d70 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -394,7 +394,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `msvc-asan` | Windows で直列に実行する Program/QuickJS のカナリア。有効化した `cl >=19.50`(VS2026)が必要で、MSVC 19.44 では動きません。 |
 | `grpc` | gRPC のグラフ契約。gRPC/Protobuf のコンパイラとライブラリが必要。 |
 | `benchmark` | Linux Release で4つのワークロードを見るリグレッションゲート。スループット、レイテンシー、目標 RSS の元の上限を適用。 |
-| `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。 |
+| `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。上限は CI の hosted x86-64 ランナー基準のため、より遅いハードウェアでは回帰がなくても `javascript_wrapped_core` が失敗することがある。 |
 | `fuzz` | Linux の Clang/libFuzzer による60秒のカナリア。コーパスは自分が所有する出力にコピーします。 |
 | `install` | 隔離したエクスポート先で ABI・シンボル・C++・C11・衝突・再配置を検査するコンシューマー。Git/Bash は不要。任意の `--shared`、`--core-only`、`--program`。`--quickjs` には `--program` と ELF/Mach-O の検査が必要で、Windows の行にはありません。 |
 | `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.14.1`。 |

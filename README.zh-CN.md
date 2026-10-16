@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=fde93d2a05531c224176faf6f7457924bef597fe52414cb2b030a8a4a354836e -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=ad186e4c6872cd778c3ab3e480dc0440bfa8dc5e2e255b6725eb7f340d4c1d70 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -394,7 +394,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `msvc-asan` | Windows 上串行运行的 Program/QuickJS 金丝雀测试；需要已激活的 `cl >=19.50`（VS2026），MSVC 19.44 不行。 |
 | `grpc` | gRPC 图契约。需要准备 gRPC/Protobuf 编译器和库。 |
 | `benchmark` | Linux Release 下检查 4 种工作负载的回归关卡；沿用原有的吞吐量、延迟和目标 RSS 上限。 |
-| `quickjs-performance` | Linux 上对比开启与关闭的两个匹配构建；为得到不可变的来源信息，需要真实的源码根目录 Git 检出。 |
+| `quickjs-performance` | Linux 上对比开启与关闭的两个匹配构建；为得到不可变的来源信息，需要真实的源码根目录 Git 检出。上限以 CI 的托管 x86-64 运行器为基准，在更慢的硬件上即使没有回归，`javascript_wrapped_core` 也可能失败。 |
 | `fuzz` | Linux Clang/libFuzzer 的 60 秒金丝雀测试；语料会复制到你拥有的输出目录。 |
 | `install` | 在隔离的导出前缀中检查 ABI、符号、C++、C11、冲突和重定位的使用方；不需要 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需要 `--program` 以及 ELF/Mach-O 检查，Windows 行没有它。 |
 | `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.14.1`。 |
