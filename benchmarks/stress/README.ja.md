@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=c1306366c502ac73d895192f18a6f8d02214d0442b8650348fbaf264ba959938 -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=ja source_sha256=a324da3b2f664f2e1502ab97372cf855ccd13737463d01df643826f0c05be057 -->
 # NeoGraphの持続的な並行実行のストレスベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windowsではプロセスのワーキングセットのカウンターを、Linu
 ## ビルドと実行
 
 外部のSchemaProvider SDKをインストールし、そのプレフィックスを設定します。LLMとオプションのNeoGraphのlibcurlバックエンドを無効にしても、Coreには `SchemaProvider::runtime` が必要です。プレフィックスの代わりに、`NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で、SDKのソースのチェックアウトを明示的に指定することもできます。そのビルドには、C++20、Python、libcurl 7.88以上、OpenSSL Cryptoが必要です。依存関係とプラットフォームの制約については、[ビルドガイド](../../README.md)を参照してください。このレシピは、ネットワークからの取得と、使わないNeoGraphの統合を無効にします。
-NeoGraph `0.14.1` では、alpha SDK `0.3.1`（インターフェースのリビジョンと共有世代は6）を使い、それに合ったヘッダーとライブラリーで再ビルドしてください。
+NeoGraph `0.14.1` では、alpha SDK `0.3.2`（インターフェースのリビジョンと共有世代は6）を使い、それに合ったヘッダーとライブラリーで再ビルドしてください。
 
 ```bash
 # Set SCHEMAPROVIDER_PREFIX to the installed SDK prefix.

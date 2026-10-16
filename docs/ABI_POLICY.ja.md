@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=9eb3b827690755fbe7fe7af9513b4faee74fc4cc8350f688f91d2852a7c58b20 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=78a8ec999c979ebd7bdb1e5b87493b9434c9d419a10ae96f0a0e0a99146e1770 -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,7 +33,7 @@ CheckpointStoreは、アダプターへの明示的な移行のために、従�
 
 ## SDKとPythonの境界
 
-Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.3.1` alphaで、公開されている `maint/interface6` のコミット `69f8aba5c75decd21d786853de134ac713634966`、インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.6` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
+Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.3.2` alphaで、公開されている `maint/interface6` のコミット `91fb993e50e49e3b03d290b170c83cf57afbc518`、インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.6` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
 
 インターフェース6では、公開されている使用量のレイアウトに、プロバイダーが報告する金額のメタデータ（固定サイズ）が加わりました。また、ブロッキングのSDK呼び出しと非同期のSDK呼び出しは、1つの非同期パイプラインを使います。採用しているコミットでは、リビジョン6の中で、`sp::OpenRouterRouting` も拡張されました（`max_price` が追加されています）。Chat、Messages、Responsesのリクエストのレイアウトも拡張されています。capabilityビット `OpenRouterRoutingMaxPrice` は、`RequiredProvider` の一部で、NeoGraphのハンドシェイクが要求するものです。このビットによって、これより前のインターフェース6のライブラリは拒否されます。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース6とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）とポータブルJSON v2は、それぞれ独立した、変更のない形式のままです。正規の結果v2の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。
 

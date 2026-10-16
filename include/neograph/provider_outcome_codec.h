@@ -14,7 +14,7 @@
 namespace neograph::provider_codec {
 
 static_assert(sp::EXPECTED_INTERFACE_REVISION == 6,
-              "NeoGraph requires SchemaProvider 0.3.1 interface 6 headers");
+              "NeoGraph requires SchemaProvider 0.3.2 interface 6 headers");
 
 // A versioned observational projection is not native replay authority. Only a
 // verified NativeArchive record can restore private provider continuation seals.
