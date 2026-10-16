@@ -488,6 +488,162 @@ TEST(GraphHostGRPCContract, RemoteToolCallsAreBoundedByTheRun) {
     server->Shutdown(std::chrono::system_clock::now() + 3s);
     server->Wait();
 }
+// #451: a node's exception text never crosses the wire, on the stream
+// either: the engine's error events go out without it, retries included.
+TEST(GraphHostGRPCContract, StreamEventsNeverCarryTheThrownText) {
+    NodeFactory::instance().register_type("grpc_typed_failure_node",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingNode>(name);
+        });
+    auto graph = definition("grpc-stream-failure", "grpc_typed_failure_node");
+    graph["schema_version"] = 1;
+    graph["node_retry_policies"] = {{"worker", {{"max_retries", 1}, {"initial_delay_ms", 10}}}};
+    auto service = neograph::grpc::make_graph_service(NodeContext{}, graph.dump());
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::GraphService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 10s);
+    pb::RunGraphRequest request;
+    request.set_thread_id("stream-thrown-text");
+    request.set_input_json(json{{"prompt", "ordinary"}}.dump());
+    auto stream = stub->RunGraphStream(&context, request);
+    pb::GraphEvent event;
+    int node_errors = 0;
+    int retries = 0;
+    while (stream->Read(&event)) {
+        EXPECT_EQ(event.payload_json().find("plain failure"), std::string::npos)
+            << "kind " << event.kind() << ": " << event.payload_json();
+        if (event.kind() != pb::GraphEvent::DEBUG) continue;
+        const auto payload = json::parse(event.payload_json());
+        if (payload.value("error", "") != "node failed") continue;
+        ++node_errors;
+        if (payload.contains("retry")) ++retries;
+    }
+    const auto status = stream->Finish();
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::UNKNOWN) << status.error_message();
+    EXPECT_EQ(error_info(status).reason, "TASK_FAILED");
+    EXPECT_EQ(retries, 1);
+    EXPECT_EQ(node_errors, 2) << "one retry and the node's final error";
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+// Streams two tokens, then writes its response.
+class TokenNode final : public GraphNode {
+public:
+    explicit TokenNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        if (input.stream_cb) {
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json("he")});
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json("llo")});
+        }
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"response", json("hello")});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// #452: stream_mode selects the events (StreamMode's bits; 0 is all of
+// them), a state snapshot is VALUES and a node's channel write UPDATES.
+TEST(GraphHostGRPCContract, StreamModeSelectsTheEvents) {
+    NodeFactory::instance().register_type("grpc_token_node",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TokenNode>(name);
+        });
+    auto service = neograph::grpc::make_graph_service(
+        NodeContext{}, definition("grpc-stream-mode", "grpc_token_node").dump());
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::GraphService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+
+    struct Seen {
+        std::set<int> kinds;
+        bool state_as_updates = false;
+        bool update_without_state = true;
+        bool values_are_state = true;
+        int final_events = 0;
+    };
+    const auto run = [&](std::uint32_t mode) {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 10s);
+        pb::RunGraphRequest request;
+        request.set_thread_id("stream-mode-" + std::to_string(mode));
+        request.set_input_json(json{{"prompt", "hi"}}.dump());
+        request.set_stream_mode(mode);
+        auto stream = stub->RunGraphStream(&context, request);
+        pb::GraphEvent event;
+        Seen seen;
+        while (stream->Read(&event)) {
+            seen.kinds.insert(event.kind());
+            if (event.kind() == pb::GraphEvent::UPDATES && event.node() == "__state__")
+                seen.state_as_updates = true;
+            if (event.kind() == pb::GraphEvent::VALUES && event.node() != "__state__")
+                seen.values_are_state = false;
+            if (event.kind() == pb::GraphEvent::FINAL) ++seen.final_events;
+        }
+        const auto status = stream->Finish();
+        EXPECT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(seen.final_events, 1);
+        return seen;
+    };
+    const auto kinds = [](std::initializer_list<int> values) { return std::set<int>(values); };
+    {
+        SCOPED_TRACE("unset: every event");
+        const auto seen = run(0);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::NODE_START,
+                                     pb::GraphEvent::NODE_END, pb::GraphEvent::VALUES,
+                                     pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+        EXPECT_FALSE(seen.state_as_updates);
+        EXPECT_TRUE(seen.values_are_state);
+    }
+    {
+        SCOPED_TRACE("TOKENS");
+        EXPECT_EQ(run(2).kinds, kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("VALUES");
+        const auto seen = run(4);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::VALUES, pb::GraphEvent::FINAL}));
+        EXPECT_TRUE(seen.values_are_state);
+    }
+    {
+        SCOPED_TRACE("UPDATES");
+        const auto seen = run(8);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+        EXPECT_FALSE(seen.state_as_updates);
+    }
+    {
+        SCOPED_TRACE("EVENTS");
+        EXPECT_EQ(run(1).kinds, kinds({pb::GraphEvent::NODE_START, pb::GraphEvent::NODE_END,
+                                       pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("TOKENS | UPDATES");
+        EXPECT_EQ(run(2 | 8).kinds,
+                  kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("only a bit this version does not know");
+        EXPECT_EQ(run(0x100).kinds, kinds({pb::GraphEvent::FINAL}));
+    }
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
 // grpc.health.v1.Health/Check over a generic stub. Its messages are small
 // enough to encode by hand.
 struct RawCall {
