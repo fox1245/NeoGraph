@@ -36,6 +36,8 @@
       "peak_allocated_bytes"
     ],
     "threshold_policy": "Absolute ceilings are version controlled here and cannot be overridden by the runner. A missing ceiling is a gate failure.",
+    "threshold_tolerance": 0.1,
+    "threshold_tolerance_policy": "A statistic above its ceiling but no higher than ceiling x (1 + threshold_tolerance) passes and is reported as a warning; a higher one fails. The runner pins the tolerance, so this file alone cannot widen it. The band absorbs hosted-runner variation: over 37 CI runs from 2026-10-07 to 2026-10-16, javascript_wrapped_core_ratio ranged from 0.79 to 1.05 of its ceilings, and byte-identical binaries measured a median of 547 in one run and 617 in another (#463).",
     "memory_definition": "Primitive cases use the QuickJS custom allocator high-water mark. Program and Core cases use the fresh process resident-set high-water mark.",
     "core_pair_order": "Enabled and disabled binaries alternate first position by sample index.",
     "one_off_result_sufficient": false
