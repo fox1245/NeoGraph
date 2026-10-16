@@ -7,6 +7,7 @@
 
 #include "neograph.grpc.pb.h"
 #include "error_details.h"
+#include "serve.h"
 #include "../core/text_safety.h"
 #include "../core/tool_failure.h"
 
@@ -240,16 +241,14 @@ std::unique_ptr<::grpc::Service> make_tool_service(
 
 void run_tool_server(const std::string& address,
                      std::unordered_map<std::string, ToolFn> tools) {
+    run_tool_server(address, std::move(tools), ServeOptions{});
+}
+
+void run_tool_server(const std::string& address,
+                     std::unordered_map<std::string, ToolFn> tools,
+                     const ServeOptions& options) {
     ToolServiceImpl svc(std::move(tools));
-    ::grpc::ServerBuilder builder;
-    builder.AddListeningPort(address,
-                             ::grpc::InsecureServerCredentials());
-    builder.RegisterService(&svc);
-    std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
-    if (!server)
-        throw std::runtime_error(
-            "failed to start ToolService on " + address);
-    server->Wait();
+    detail::serve(address, svc, pb::ToolService::service_full_name(), options, "ToolService");
 }
 
 }  // namespace neograph::grpc

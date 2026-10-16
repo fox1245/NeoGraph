@@ -14,6 +14,7 @@
 
 #include "neograph.grpc.pb.h"
 #include "error_details.h"
+#include "serve.h"
 #include "../core/canonical_json.h"
 #include "../core/managed_budget_journal.h"
 
@@ -683,16 +684,17 @@ void run_checkpoint_server(const std::string& address,
 void run_checkpoint_server(const std::string& address,
                            std::shared_ptr<CheckpointStore> backend,
                            std::shared_ptr<sp::NativeArchive> native_archive) {
+    run_checkpoint_server(address, std::move(backend), std::move(native_archive),
+                          ServeOptions{});
+}
+
+void run_checkpoint_server(const std::string& address,
+                           std::shared_ptr<CheckpointStore> backend,
+                           std::shared_ptr<sp::NativeArchive> native_archive,
+                           const ServeOptions& options) {
     CheckpointServiceImpl svc(std::move(backend), std::move(native_archive));
-    ::grpc::ServerBuilder builder;
-    builder.AddListeningPort(address,
-                             ::grpc::InsecureServerCredentials());
-    builder.RegisterService(&svc);
-    std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
-    if (!server)
-        throw std::runtime_error(
-            "failed to start CheckpointService on " + address);
-    server->Wait();
+    detail::serve(address, svc, pb::CheckpointService::service_full_name(), options,
+                  "CheckpointService");
 }
 
 }  // namespace neograph::grpc

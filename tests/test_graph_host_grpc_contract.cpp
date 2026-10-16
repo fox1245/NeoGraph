@@ -10,10 +10,13 @@
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
 #include "neograph.grpc.pb.h"
+#include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
 
 #include <algorithm>
+#include <future>
+#include <set>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -484,6 +487,184 @@ TEST(GraphHostGRPCContract, RemoteToolCallsAreBoundedByTheRun) {
     }
     server->Shutdown(std::chrono::system_clock::now() + 3s);
     server->Wait();
+}
+// grpc.health.v1.Health/Check over a generic stub. Its messages are small
+// enough to encode by hand.
+struct RawCall {
+    ::grpc::Status status;
+    std::string response;
+};
+
+RawCall raw_unary(int port, const std::string& method, const std::string& request) {
+    ::grpc::GenericStub stub(::grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                   ::grpc::InsecureChannelCredentials()));
+    ::grpc::Slice slice(request);
+    ::grpc::ByteBuffer request_buffer(&slice, 1);
+    ::grpc::ByteBuffer response_buffer;
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    std::promise<::grpc::Status> done;
+    stub.UnaryCall(&context, method, ::grpc::StubOptions(), &request_buffer, &response_buffer,
+                   [&done](::grpc::Status status) { done.set_value(std::move(status)); });
+    RawCall call{done.get_future().get(), {}};
+    std::vector<::grpc::Slice> slices;
+    if (call.status.ok() && response_buffer.Dump(&slices).ok())
+        for (const auto& part : slices)
+            call.response.append(reinterpret_cast<const char*>(part.begin()), part.size());
+    return call;
+}
+
+// HealthCheckRequest{service = 1}; the response's status is field 1 (SERVING = 1).
+RawCall health_check(int port, const std::string& service) {
+    std::string request;
+    if (!service.empty()) {
+        request.push_back('\x0a');
+        request.push_back(static_cast<char>(service.size()));
+        request += service;
+    }
+    return raw_unary(port, "/grpc.health.v1.Health/Check", request);
+}
+const std::string kServing("\x08\x01", 2);
+
+// A built-in server on a thread, stopped through ServeOptions::stop.
+class BuiltInServer {
+public:
+    template <class Run>
+    explicit BuiltInServer(Run run) {
+        auto serving = std::make_shared<std::promise<int>>();
+        auto port = serving->get_future();
+        thread_ = std::jthread([run = std::move(run), serving, this](std::stop_token stop) {
+            neograph::grpc::ServeOptions options;
+            options.stop = stop;
+            options.shutdown_grace = 500ms;
+            options.on_serving = [serving](int bound) { serving->set_value(bound); };
+            try {
+                run(options);
+            } catch (...) {
+                try { serving->set_exception(std::current_exception()); } catch (...) {}
+            }
+            returned_ = true;
+        });
+        if (port.wait_for(5s) != std::future_status::ready)
+            throw std::runtime_error("built-in server did not start");
+        port_ = port.get();
+    }
+    int port() const { return port_; }
+    // Requests the stop and reports how long the server took to return.
+    std::chrono::steady_clock::duration stop() {
+        const auto started = std::chrono::steady_clock::now();
+        thread_.request_stop();
+        thread_.join();
+        return std::chrono::steady_clock::now() - started;
+    }
+    bool returned() const { return returned_; }
+
+private:
+    int port_ = 0;
+    std::atomic<bool> returned_{false};
+    std::jthread thread_;  // last: joined before the members it writes go
+};
+
+// #454: the built-in servers answer the standard health service and can be
+// stopped.
+TEST(GraphHostGRPCContract, BuiltInServersAnswerHealthAndStop) {
+    {
+        SCOPED_TRACE("run_tool_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_tool_server(
+                "127.0.0.1:0",
+                {{"echo", [](const std::string& arguments) { return arguments; }}}, options);
+        });
+        const auto overall = health_check(server.port(), "");
+        ASSERT_TRUE(overall.status.ok()) << overall.status.error_message();
+        EXPECT_EQ(overall.response, kServing);
+        const auto named = health_check(server.port(), "neograph.v1.ToolService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_EQ(health_check(server.port(), "no.such.Service").status.error_code(),
+                  ::grpc::StatusCode::NOT_FOUND);
+        EXPECT_LT(server.stop(), 3s);
+        EXPECT_TRUE(server.returned());
+    }
+    {
+        SCOPED_TRACE("run_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_server("127.0.0.1:0", NodeContext{}, "", options);
+        });
+        const auto named = health_check(server.port(), "neograph.v1.GraphService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_LT(server.stop(), 3s);
+    }
+    {
+        SCOPED_TRACE("run_checkpoint_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_checkpoint_server(
+                "127.0.0.1:0", std::make_shared<InMemoryCheckpointStore>(), {}, options);
+        });
+        const auto named = health_check(server.port(), "neograph.v1.CheckpointService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_LT(server.stop(), 3s);
+    }
+    // The process-wide default stays as the host left it: a server the host
+    // builds itself after a built-in one has no health service.
+    {
+        auto service = neograph::grpc::make_tool_service({});
+        ::grpc::ServerBuilder builder;
+        int port = 0;
+        builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(service.get());
+        auto own = builder.BuildAndStart();
+        EXPECT_EQ(health_check(port, "").status.error_code(), ::grpc::StatusCode::UNIMPLEMENTED);
+        own->Shutdown(std::chrono::system_clock::now() + 2s);
+        own->Wait();
+    }
+    {
+        // A stop requested before the server starts: it starts, then stops.
+        std::stop_source stopped;
+        stopped.request_stop();
+        neograph::grpc::ServeOptions options;
+        options.stop = stopped.get_token();
+        int bound = 0;
+        options.on_serving = [&bound](int port) { bound = port; };
+        neograph::grpc::run_tool_server("127.0.0.1:0", {}, options);
+        EXPECT_NE(bound, 0);
+        options.shutdown_grace = -1ms;
+        EXPECT_THROW(neograph::grpc::run_tool_server("127.0.0.1:0", {}, options),
+                     std::invalid_argument);
+    }
+}
+
+// A stop gives a call in flight the grace to finish.
+TEST(GraphHostGRPCContract, StoppingABuiltInServerLetsACallInFlightFinish) {
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools{
+        {"slow", [](const std::string&) -> std::string {
+             std::this_thread::sleep_for(300ms);
+             return R"("done")";
+         }},
+    };
+    BuiltInServer server([tools](const neograph::grpc::ServeOptions& options) {
+        neograph::grpc::run_tool_server("127.0.0.1:0", tools, options);
+    });
+    auto stub = pb::ToolService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(server.port()), ::grpc::InsecureChannelCredentials()));
+    auto call = std::async(std::launch::async, [&] {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 5s);
+        pb::ToolCallRequest request;
+        request.set_name("slow");
+        request.set_arguments_json("{}");
+        pb::ToolCallResponse response;
+        const auto status = stub->CallTool(&context, request, &response);
+        return std::make_pair(status, response.result_json());
+    });
+    std::this_thread::sleep_for(100ms);
+    // The 500 ms grace covers the rest of the call: it completes.
+    EXPECT_LT(server.stop(), 3s);
+    const auto [status, result] = call.get();
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(result, R"("done")");
 }
 } // namespace
 

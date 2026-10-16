@@ -11,6 +11,7 @@
 
 #include "neograph.grpc.pb.h"   // generated into ${build}/grpc_gen
 #include "error_details.h"
+#include "serve.h"
 
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
@@ -321,15 +322,15 @@ std::unique_ptr<pb::GraphService::Service> make_graph_service(
 void run_server(const std::string& address,
                 NodeContext ctx,
                 std::string default_graph_json) {
+    run_server(address, std::move(ctx), std::move(default_graph_json), ServeOptions{});
+}
+
+void run_server(const std::string& address,
+                NodeContext ctx,
+                std::string default_graph_json,
+                const ServeOptions& options) {
     GraphServiceImpl svc(std::move(ctx), std::move(default_graph_json));
-    ::grpc::ServerBuilder builder;
-    builder.AddListeningPort(address,
-                             ::grpc::InsecureServerCredentials());
-    builder.RegisterService(&svc);
-    std::unique_ptr<::grpc::Server> server(builder.BuildAndStart());
-    if (!server)
-        throw std::runtime_error("failed to start gRPC server on " + address);
-    server->Wait();
+    detail::serve(address, svc, pb::GraphService::service_full_name(), options, "gRPC server");
 }
 
 }  // namespace neograph::grpc
