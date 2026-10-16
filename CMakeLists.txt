@@ -1130,6 +1130,7 @@ if(NEOGRAPH_BUILD_GRPC)
         src/grpc/error_details.cpp
         src/grpc/graph_service.cpp
         src/grpc/grpc_checkpoint.cpp
+        src/grpc/serve.cpp
         src/grpc/tool_service.cpp
     )
     target_include_directories(neograph_grpc

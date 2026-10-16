@@ -35,6 +35,7 @@
 #endif
 
 #include <neograph/api.h>   // NEOGRAPH_API
+#include <neograph/grpc/serve_options.h>
 #include <neograph/tool.h>  // neograph::Tool, ChatTool, json
 
 #include <asio/awaitable.hpp>
@@ -58,10 +59,15 @@ NEOGRAPH_API std::unique_ptr<::grpc::Service> make_tool_service(
 
 /// Build + run a blocking gRPC ToolService on `address`
 /// ("0.0.0.0:50091") serving `tools`, until the process is signalled.
-/// Insecure credentials.
+/// Insecure credentials, with the standard health service.
 NEOGRAPH_API void run_tool_server(
     const std::string& address,
     std::unordered_map<std::string, ToolFn> tools);
+/// The same, until `options.stop` is requested (see ServeOptions).
+NEOGRAPH_API void run_tool_server(
+    const std::string& address,
+    std::unordered_map<std::string, ToolFn> tools,
+    const ServeOptions& options);
 
 /// A neograph::Tool whose execute() round-trips to a remote
 /// ToolService.CallTool over gRPC. Drop it into an Agent's tool list

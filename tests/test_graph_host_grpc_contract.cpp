@@ -10,10 +10,13 @@
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
 #include "neograph.grpc.pb.h"
+#include <grpcpp/generic/generic_stub.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/server_builder.h>
 
 #include <algorithm>
+#include <future>
+#include <set>
 #include <thread>
 #include <tuple>
 #include <unordered_map>
@@ -484,6 +487,395 @@ TEST(GraphHostGRPCContract, RemoteToolCallsAreBoundedByTheRun) {
     }
     server->Shutdown(std::chrono::system_clock::now() + 3s);
     server->Wait();
+}
+// #451: a node's exception text never crosses the wire, on the stream
+// either: the engine's error events go out without it, retries included.
+TEST(GraphHostGRPCContract, StreamEventsNeverCarryTheThrownText) {
+    NodeFactory::instance().register_type("grpc_typed_failure_node",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<FailingNode>(name);
+        });
+    auto graph = definition("grpc-stream-failure", "grpc_typed_failure_node");
+    graph["schema_version"] = 1;
+    graph["node_retry_policies"] = {{"worker", {{"max_retries", 1}, {"initial_delay_ms", 10}}}};
+    auto service = neograph::grpc::make_graph_service(NodeContext{}, graph.dump());
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::GraphService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 10s);
+    pb::RunGraphRequest request;
+    request.set_thread_id("stream-thrown-text");
+    request.set_input_json(json{{"prompt", "ordinary"}}.dump());
+    auto stream = stub->RunGraphStream(&context, request);
+    pb::GraphEvent event;
+    int node_errors = 0;
+    int retries = 0;
+    while (stream->Read(&event)) {
+        EXPECT_EQ(event.payload_json().find("plain failure"), std::string::npos)
+            << "kind " << event.kind() << ": " << event.payload_json();
+        if (event.kind() != pb::GraphEvent::DEBUG) continue;
+        const auto payload = json::parse(event.payload_json());
+        if (payload.value("error", "") != "node failed") continue;
+        ++node_errors;
+        if (payload.contains("retry")) ++retries;
+    }
+    const auto status = stream->Finish();
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::UNKNOWN) << status.error_message();
+    EXPECT_EQ(error_info(status).reason, "TASK_FAILED");
+    EXPECT_EQ(retries, 1);
+    EXPECT_EQ(node_errors, 2) << "one retry and the node's final error";
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+// Streams two tokens, then writes its response.
+class TokenNode final : public GraphNode {
+public:
+    explicit TokenNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        if (input.stream_cb) {
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json("he")});
+            (*input.stream_cb)(GraphEvent{GraphEvent::Type::LLM_TOKEN, name_, json("llo")});
+        }
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"response", json("hello")});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// #452: stream_mode selects the events (StreamMode's bits; 0 is all of
+// them), a state snapshot is VALUES and a node's channel write UPDATES.
+TEST(GraphHostGRPCContract, StreamModeSelectsTheEvents) {
+    NodeFactory::instance().register_type("grpc_token_node",
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<TokenNode>(name);
+        });
+    auto service = neograph::grpc::make_graph_service(
+        NodeContext{}, definition("grpc-stream-mode", "grpc_token_node").dump());
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::GraphService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+
+    struct Seen {
+        std::set<int> kinds;
+        bool state_as_updates = false;
+        bool update_without_state = true;
+        bool values_are_state = true;
+        int final_events = 0;
+    };
+    const auto run = [&](std::uint32_t mode) {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 10s);
+        pb::RunGraphRequest request;
+        request.set_thread_id("stream-mode-" + std::to_string(mode));
+        request.set_input_json(json{{"prompt", "hi"}}.dump());
+        request.set_stream_mode(mode);
+        auto stream = stub->RunGraphStream(&context, request);
+        pb::GraphEvent event;
+        Seen seen;
+        while (stream->Read(&event)) {
+            seen.kinds.insert(event.kind());
+            if (event.kind() == pb::GraphEvent::UPDATES && event.node() == "__state__")
+                seen.state_as_updates = true;
+            if (event.kind() == pb::GraphEvent::VALUES && event.node() != "__state__")
+                seen.values_are_state = false;
+            if (event.kind() == pb::GraphEvent::FINAL) ++seen.final_events;
+        }
+        const auto status = stream->Finish();
+        EXPECT_TRUE(status.ok()) << status.error_message();
+        EXPECT_EQ(seen.final_events, 1);
+        return seen;
+    };
+    const auto kinds = [](std::initializer_list<int> values) { return std::set<int>(values); };
+    {
+        SCOPED_TRACE("unset: every event");
+        const auto seen = run(0);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::NODE_START,
+                                     pb::GraphEvent::NODE_END, pb::GraphEvent::VALUES,
+                                     pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+        EXPECT_FALSE(seen.state_as_updates);
+        EXPECT_TRUE(seen.values_are_state);
+    }
+    {
+        SCOPED_TRACE("TOKENS");
+        EXPECT_EQ(run(2).kinds, kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("VALUES");
+        const auto seen = run(4);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::VALUES, pb::GraphEvent::FINAL}));
+        EXPECT_TRUE(seen.values_are_state);
+    }
+    {
+        SCOPED_TRACE("UPDATES");
+        const auto seen = run(8);
+        EXPECT_EQ(seen.kinds, kinds({pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+        EXPECT_FALSE(seen.state_as_updates);
+    }
+    {
+        SCOPED_TRACE("EVENTS");
+        EXPECT_EQ(run(1).kinds, kinds({pb::GraphEvent::NODE_START, pb::GraphEvent::NODE_END,
+                                       pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("TOKENS | UPDATES");
+        EXPECT_EQ(run(2 | 8).kinds,
+                  kinds({pb::GraphEvent::TOKEN, pb::GraphEvent::UPDATES, pb::GraphEvent::FINAL}));
+    }
+    {
+        SCOPED_TRACE("only a bit this version does not know");
+        EXPECT_EQ(run(0x100).kinds, kinds({pb::GraphEvent::FINAL}));
+    }
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+// #453: the server stores a Checkpoint, not the JSON, so it refuses a record
+// it could not keep whole instead of dropping part of it. Free JSON inside
+// channel_values and metadata is kept.
+TEST(GraphHostGRPCContract, CheckpointServerRefusesRecordsItCannotStoreWhole) {
+    auto backend = std::make_shared<InMemoryCheckpointStore>();
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    auto stub = pb::CheckpointService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+    const auto save = [&](const std::string& id, const json& record) {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 5s);
+        pb::SaveCheckpointRequest request;
+        request.mutable_checkpoint()->set_id(id);
+        request.mutable_checkpoint()->set_thread_id("thread");
+        request.mutable_checkpoint()->set_checkpoint_json(record.dump());
+        pb::StatusResponse response;
+        return stub->SaveCheckpoint(&context, request, &response);
+    };
+    Checkpoint checkpoint;
+    checkpoint.id = "cp-whole";
+    checkpoint.thread_id = "thread";
+    checkpoint.channel_values = json{{"channels", {{"x", {{"value", {{"future", 1}}}}}}}};
+    checkpoint.metadata = json{{"nested", {{"future_field", true}}}};
+    checkpoint.step = 1;
+    checkpoint.timestamp = 1;
+    const auto record = json::parse(neograph::grpc::checkpoint_to_json(checkpoint));
+    ASSERT_TRUE(save("cp-whole", record).ok());
+    const auto stored = backend->load_by_id("cp-whole");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->metadata, checkpoint.metadata);
+    EXPECT_EQ(stored->channel_values, checkpoint.channel_values);
+
+    auto extra = record;
+    extra["id"] = "cp-extra";
+    extra["future_field"] = json{{"kept", true}};
+    const auto refused = save("cp-extra", extra);
+    EXPECT_EQ(refused.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(refused.error_message().find("future_field"), std::string::npos)
+        << refused.error_message();
+    EXPECT_FALSE(backend->load_by_id("cp-extra"));
+
+    auto newer = record;
+    newer["id"] = "cp-newer";
+    newer["schema_version"] = CHECKPOINT_SCHEMA_VERSION + 1;
+    EXPECT_EQ(save("cp-newer", newer).error_code(), ::grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_FALSE(backend->load_by_id("cp-newer"));
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+// grpc.health.v1.Health/Check over a generic stub. Its messages are small
+// enough to encode by hand.
+struct RawCall {
+    ::grpc::Status status;
+    std::string response;
+};
+
+RawCall raw_unary(int port, const std::string& method, const std::string& request) {
+    ::grpc::GenericStub stub(::grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                   ::grpc::InsecureChannelCredentials()));
+    ::grpc::Slice slice(request);
+    ::grpc::ByteBuffer request_buffer(&slice, 1);
+    ::grpc::ByteBuffer response_buffer;
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    std::promise<::grpc::Status> done;
+    stub.UnaryCall(&context, method, ::grpc::StubOptions(), &request_buffer, &response_buffer,
+                   [&done](::grpc::Status status) { done.set_value(std::move(status)); });
+    RawCall call{done.get_future().get(), {}};
+    std::vector<::grpc::Slice> slices;
+    if (call.status.ok() && response_buffer.Dump(&slices).ok())
+        for (const auto& part : slices)
+            call.response.append(reinterpret_cast<const char*>(part.begin()), part.size());
+    return call;
+}
+
+// HealthCheckRequest{service = 1}; the response's status is field 1 (SERVING = 1).
+RawCall health_check(int port, const std::string& service) {
+    std::string request;
+    if (!service.empty()) {
+        request.push_back('\x0a');
+        request.push_back(static_cast<char>(service.size()));
+        request += service;
+    }
+    return raw_unary(port, "/grpc.health.v1.Health/Check", request);
+}
+const std::string kServing("\x08\x01", 2);
+
+// A built-in server on a thread, stopped through ServeOptions::stop.
+class BuiltInServer {
+public:
+    template <class Run>
+    explicit BuiltInServer(Run run) {
+        auto serving = std::make_shared<std::promise<int>>();
+        auto port = serving->get_future();
+        thread_ = std::jthread([run = std::move(run), serving, this](std::stop_token stop) {
+            neograph::grpc::ServeOptions options;
+            options.stop = stop;
+            options.shutdown_grace = 500ms;
+            options.on_serving = [serving](int bound) { serving->set_value(bound); };
+            try {
+                run(options);
+            } catch (...) {
+                try { serving->set_exception(std::current_exception()); } catch (...) {}
+            }
+            returned_ = true;
+        });
+        if (port.wait_for(5s) != std::future_status::ready)
+            throw std::runtime_error("built-in server did not start");
+        port_ = port.get();
+    }
+    int port() const { return port_; }
+    // Requests the stop and reports how long the server took to return.
+    std::chrono::steady_clock::duration stop() {
+        const auto started = std::chrono::steady_clock::now();
+        thread_.request_stop();
+        thread_.join();
+        return std::chrono::steady_clock::now() - started;
+    }
+    bool returned() const { return returned_; }
+
+private:
+    int port_ = 0;
+    std::atomic<bool> returned_{false};
+    std::jthread thread_;  // last: joined before the members it writes go
+};
+
+// #454: the built-in servers answer the standard health service and can be
+// stopped.
+TEST(GraphHostGRPCContract, BuiltInServersAnswerHealthAndStop) {
+    {
+        SCOPED_TRACE("run_tool_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_tool_server(
+                "127.0.0.1:0",
+                {{"echo", [](const std::string& arguments) { return arguments; }}}, options);
+        });
+        const auto overall = health_check(server.port(), "");
+        ASSERT_TRUE(overall.status.ok()) << overall.status.error_message();
+        EXPECT_EQ(overall.response, kServing);
+        const auto named = health_check(server.port(), "neograph.v1.ToolService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_EQ(health_check(server.port(), "no.such.Service").status.error_code(),
+                  ::grpc::StatusCode::NOT_FOUND);
+        EXPECT_LT(server.stop(), 3s);
+        EXPECT_TRUE(server.returned());
+    }
+    {
+        SCOPED_TRACE("run_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_server("127.0.0.1:0", NodeContext{}, "", options);
+        });
+        const auto named = health_check(server.port(), "neograph.v1.GraphService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_LT(server.stop(), 3s);
+    }
+    {
+        SCOPED_TRACE("run_checkpoint_server");
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_checkpoint_server(
+                "127.0.0.1:0", std::make_shared<InMemoryCheckpointStore>(), {}, options);
+        });
+        const auto named = health_check(server.port(), "neograph.v1.CheckpointService");
+        ASSERT_TRUE(named.status.ok()) << named.status.error_message();
+        EXPECT_EQ(named.response, kServing);
+        EXPECT_LT(server.stop(), 3s);
+    }
+    // The process-wide default stays as the host left it: a server the host
+    // builds itself after a built-in one has no health service.
+    {
+        auto service = neograph::grpc::make_tool_service({});
+        ::grpc::ServerBuilder builder;
+        int port = 0;
+        builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(service.get());
+        auto own = builder.BuildAndStart();
+        EXPECT_EQ(health_check(port, "").status.error_code(), ::grpc::StatusCode::UNIMPLEMENTED);
+        own->Shutdown(std::chrono::system_clock::now() + 2s);
+        own->Wait();
+    }
+    {
+        // A stop requested before the server starts: it starts, then stops.
+        std::stop_source stopped;
+        stopped.request_stop();
+        neograph::grpc::ServeOptions options;
+        options.stop = stopped.get_token();
+        int bound = 0;
+        options.on_serving = [&bound](int port) { bound = port; };
+        neograph::grpc::run_tool_server("127.0.0.1:0", {}, options);
+        EXPECT_NE(bound, 0);
+        options.shutdown_grace = -1ms;
+        EXPECT_THROW(neograph::grpc::run_tool_server("127.0.0.1:0", {}, options),
+                     std::invalid_argument);
+    }
+}
+
+// A stop gives a call in flight the grace to finish.
+TEST(GraphHostGRPCContract, StoppingABuiltInServerLetsACallInFlightFinish) {
+    std::unordered_map<std::string, neograph::grpc::ToolFn> tools{
+        {"slow", [](const std::string&) -> std::string {
+             std::this_thread::sleep_for(300ms);
+             return R"("done")";
+         }},
+    };
+    BuiltInServer server([tools](const neograph::grpc::ServeOptions& options) {
+        neograph::grpc::run_tool_server("127.0.0.1:0", tools, options);
+    });
+    auto stub = pb::ToolService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(server.port()), ::grpc::InsecureChannelCredentials()));
+    auto call = std::async(std::launch::async, [&] {
+        ::grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + 5s);
+        pb::ToolCallRequest request;
+        request.set_name("slow");
+        request.set_arguments_json("{}");
+        pb::ToolCallResponse response;
+        const auto status = stub->CallTool(&context, request, &response);
+        return std::make_pair(status, response.result_json());
+    });
+    std::this_thread::sleep_for(100ms);
+    // The 500 ms grace covers the rest of the call: it completes.
+    EXPECT_LT(server.stop(), 3s);
+    const auto [status, result] = call.get();
+    EXPECT_TRUE(status.ok()) << status.error_message();
+    EXPECT_EQ(result, R"("done")");
 }
 } // namespace
 
