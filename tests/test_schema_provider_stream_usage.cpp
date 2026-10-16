@@ -193,3 +193,24 @@ TEST(SchemaProviderStreamUsage, InteractionsReportedTotalDoesNotInventMissingTho
         EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
     }
 }
+
+// Google's OpenAI-compatible endpoint leaves finish_reason out of every
+// streamed chunk before the last, repeats the role and sends cumulative usage
+// on each chunk. SchemaProvider 0.3.2 reads the missing member as null (#459).
+TEST(SchemaProviderStreamUsage, ChatStreamWhoseChunksOmitFinishReasonUntilTheLast) {
+    const std::string events =
+        wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{"role":"assistant","content":"1, 2,"}}],"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}})"))
+        + wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{"role":"assistant","content":" 3"}}],"usage":{"prompt_tokens":9,"completion_tokens":5,"total_tokens":14}})"))
+        + wire::chat_frame(json::parse(R"({"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":5,"total_tokens":14}})"))
+        + "data: [DONE]\n\n";
+    wire::Peer peer(events, true);
+    auto provider = wire::provider("openai.chat", peer.origin());
+    const auto result = provider->invoke(wire::request("openai.chat", ProviderMode::Stream));
+    ASSERT_TRUE(std::holds_alternative<sp::Completion>(*result));
+    const auto& completion = test::completion(result);
+    EXPECT_EQ(test::text(result), "1, 2, 3");
+    EXPECT_EQ(completion.stop.kind, sp::StopKind::EndTurn);
+    ASSERT_TRUE(completion.usage.output_total);
+    EXPECT_EQ(completion.usage.output_total->value, 5u);
+    EXPECT_EQ(completion.usage.stage, sp::UsageStage::Final);
+}
