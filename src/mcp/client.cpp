@@ -9,6 +9,8 @@
 #include <neograph/graph/types.h>
 #include <neograph/tool_execution.h>
 
+#include "http_redirect.h"
+
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
 #include <asio/multiple_exceptions.hpp>
@@ -420,6 +422,7 @@ struct HttpExchange {
     int status = 0;
     bool event_stream = false;
     bool saw_event = false;
+    std::string location;           ///< the Location of a 307 or 308 answer
     std::string body;               ///< a body that is not an event stream
     std::optional<json> response;   ///< this request's JSON-RPC response
     async::SseEventParser events{sse_limits()};
@@ -471,6 +474,10 @@ public:
     asio::awaitable<void> stream_once(std::string method, std::string body, HeaderList headers,
                                       std::shared_ptr<HttpExchange> exchange,
                                       std::chrono::milliseconds timeout);
+    asio::awaitable<void> stream_hop(std::string method, std::string body, HeaderList headers,
+                                     std::string request_target,
+                                     std::shared_ptr<HttpExchange> exchange,
+                                     std::chrono::milliseconds timeout);
     asio::awaitable<std::pair<int, std::string>> send(std::string method, std::string body,
                                                       HeaderList headers,
                                                       std::chrono::milliseconds timeout);
@@ -2180,6 +2187,8 @@ constexpr int kMaxIdleResumes = 3;
 constexpr std::chrono::milliseconds kSessionDeleteTimeout{2000};
 // The largest JSON body read, as for an event.
 constexpr std::size_t kMaxJsonBody = 16u * 1024u * 1024u;
+// Redirects followed for one request before its 3xx answer is the result.
+constexpr int kMaxRedirects = 5;
 
 // Completes when @p signal expires or its wait is cancelled. operator||
 // waits for an operand to succeed: a stop wait that ended in an error would
@@ -2342,6 +2351,30 @@ asio::awaitable<void> detail::HttpSession::stream_once(std::string method, std::
                                                        HeaderList headers,
                                                        std::shared_ptr<HttpExchange> exchange,
                                                        std::chrono::milliseconds timeout) {
+    // RFC 9110 15.4.8 and 15.4.9: a 307 or 308 repeats the request, method
+    // and body, at the Location, as the official clients do (FastMCP servers
+    // on mcp 1.x redirect /mcp to /mcp/). Only on the endpoint's origin: the
+    // request carries the session and may carry credentials (#449). The hops
+    // share the request's timeout.
+    const auto until = timeout.count() > 0 ? std::chrono::steady_clock::now() + timeout
+                                           : std::chrono::steady_clock::time_point::max();
+    std::string request_target = target;
+    for (int hop = 0;; ++hop) {
+        co_await stream_hop(method, body, headers, request_target, exchange,
+                            hop > 0 && timeout.count() > 0 ? remaining(until) : timeout);
+        if ((exchange->status != 307 && exchange->status != 308) || hop >= kMaxRedirects)
+            co_return;
+        auto next = same_origin_redirect_target(endpoint, exchange->location, request_target);
+        if (!next) co_return;
+        request_target = std::move(*next);
+    }
+}
+
+asio::awaitable<void> detail::HttpSession::stream_hop(std::string method, std::string body,
+                                                      HeaderList headers,
+                                                      std::string request_target,
+                                                      std::shared_ptr<HttpExchange> exchange,
+                                                      std::chrono::milliseconds timeout) {
     struct StreamAnswered {};
     auto ex = co_await asio::this_coro::executor;
     async::RequestOptions options;
@@ -2349,13 +2382,22 @@ asio::awaitable<void> detail::HttpSession::stream_once(std::string method, std::
     // An event stream lasts as long as the call; its events are bounded one
     // by one, and a JSON body below.
     options.max_response_body_bytes = 0;
+    // Node and uvicorn write each event as one HTTP chunk, so a chunk may be
+    // as large as an event (#449).
+    options.max_response_chunk_bytes = kMaxJsonBody;
+    exchange->status = 0;
+    exchange->event_stream = false;
+    exchange->location.clear();
+    exchange->body.clear();
     async::HttpStreamResponse response;
     try {
     response = co_await async::async_request_stream(
-        ex, method, endpoint.host, endpoint.port, target, body, std::move(headers),
+        ex, method, endpoint.host, endpoint.port, request_target, body, std::move(headers),
         endpoint.tls,
         [this, exchange](const async::HttpResponseHead& head) {
             exchange->status = head.status;
+            if (head.status == 307 || head.status == 308)
+                exchange->location = std::string(head.get_header("Location"));
             const bool success = head.status >= 200 && head.status < 300;
             exchange->event_stream =
                 success && lowercase(head.get_header("Content-Type")).rfind("text/event-stream", 0) == 0;
@@ -2426,6 +2468,11 @@ void detail::HttpSession::throw_http_failure(int status, const std::string& body
         message += " - the server has no MCP endpoint at this URL. The client uses the "
                    "configured endpoint URL as given, path and query included "
                    "(for example http://host:8000/mcp).";
+    } else if (status == 307 || status == 308) {
+        // The Location is left out: its query or userinfo may hold credentials.
+        message += " - a redirect the client did not follow: it follows one only on the "
+                   "endpoint's origin (scheme, host and port), up to " +
+                   std::to_string(kMaxRedirects) + " times.";
     }
     throw MCPTransportError(MCPFailure::http_status, std::move(message), status);
 }

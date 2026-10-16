@@ -3,6 +3,7 @@
 // Every server here is an in-process cpp-httplib mock that records the wire.
 #include <gtest/gtest.h>
 
+#include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
@@ -14,6 +15,8 @@
 #include <asio/awaitable.hpp>
 #include <asio/this_coro.hpp>
 
+#include "../src/mcp/http_redirect.h"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -22,6 +25,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 using namespace neograph;
@@ -972,4 +976,188 @@ TEST(MCPClientConformance, ShutdownDoesNotWaitForTheReconnectPause) {
     client.shutdown();
     EXPECT_LT(std::chrono::steady_clock::now() - started, 3s);
     EXPECT_EQ(streams.load(), 1);
+}
+
+// Node and uvicorn write each event of a response stream as one HTTP chunk.
+// An event over 1 MiB is read like a smaller one, up to the event limit (#449).
+TEST(MCPClientConformance, AnEventOverOneMebibyteInOneChunk) {
+    const std::string large(2 * 1024 * 1024, 'x');
+    httplib::Server svr;
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        const auto request = json::parse(req.body);
+        if (common(request, res)) return;
+        const json call_id = request["id"];
+        res.set_chunked_content_provider(
+            "text/event-stream", [&large, call_id](std::size_t, httplib::DataSink& sink) {
+                const auto event = "data: " + envelope(call_id, text_result(large)) + "\n\n";
+                sink.write(event.data(), event.size());  // one HTTP chunk
+                sink.done();
+                return true;
+            });
+    });
+    Guard server(svr);
+    mcp::MCPClient client(server.url());
+    const auto result = client.call_tool_result("large", json::object());
+    ASSERT_EQ(result.content.size(), 1u);
+    EXPECT_EQ(result.content[0]["text"].get<std::string>(), large);
+}
+
+// FastMCP servers on mcp 1.x answer POST /mcp with 307 to /mcp/. The client
+// follows 307 and 308 on the same origin, absolute or relative, with the
+// method, body and MCP headers of the request (RFC 9110 15.4.8, 15.4.9;
+// #449).
+TEST(MCPClientConformance, RedirectsOnTheSameOriginAreFollowed) {
+    Recorder recorder;
+    std::atomic<int> port{0};
+    httplib::Server svr;
+    const auto moved = [&](int status, bool absolute) {
+        return [&recorder, &port, status, absolute](const httplib::Request& req,
+                                                    httplib::Response& res) {
+            recorder.add(req);
+            res.status = status;
+            res.set_header("Location",
+                           absolute ? "http://127.0.0.1:" + std::to_string(port.load()) + "/mcp/"
+                                    : std::string("/mcp/"));
+        };
+    };
+    svr.Post("/mcp", moved(307, true));  // as Starlette writes it
+    svr.Get("/mcp", moved(308, false));
+    svr.Delete("/mcp", moved(307, false));
+    svr.Post("/mcp/", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        const auto request = json::parse(req.body);
+        if (common(request, res, "moved")) return;
+        res.set_content(envelope(request["id"], text_result("ok")), "application/json");
+    });
+    svr.Get("/mcp/", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        res.status = 405;
+    });
+    svr.Delete("/mcp/", [&](const httplib::Request& req, httplib::Response& res) {
+        recorder.add(req);
+        res.status = 204;
+    });
+    Guard server(svr);
+    port = server.port;
+    {
+        mcp::MCPClient client(server.url());
+        EXPECT_EQ(client.call_tool_result("echo", json::object()).content[0]["text"], "ok");
+        std::unique_lock lock(recorder.mu);
+        EXPECT_TRUE(recorder.changed.wait_for(lock, 5s, [&] {
+            for (const auto& item : recorder.seen)
+                if (item.method == "GET" && item.path == "/mcp/") return true;
+            return false;
+        }));
+    }
+    std::vector<std::string> redirected;
+    std::vector<std::string> answered;
+    for (const auto& item : recorder.snapshot()) {
+        if (item.method != "POST") continue;
+        (item.path == "/mcp" ? redirected : answered).push_back(item.body.dump());
+    }
+    EXPECT_EQ(redirected.size(), 3u);  // initialize, initialized, tools/call
+    EXPECT_EQ(answered, redirected);   // each sent again, body unchanged
+    const auto calls = recorder.with_method("tools/call");
+    ASSERT_EQ(calls.size(), 2u);
+    EXPECT_EQ(calls[1].path, "/mcp/");
+    EXPECT_EQ(calls[1].session, "moved");
+    EXPECT_EQ(calls[1].version, "2025-11-25");
+    const auto deletes = recorder.http("DELETE");
+    ASSERT_EQ(deletes.size(), 2u);
+    EXPECT_EQ(deletes[1].path, "/mcp/");
+    EXPECT_EQ(deletes[1].session, "moved");
+}
+
+// A redirect to another origin is not followed, as the request may carry
+// credentials: nothing reaches the other server, not even the request line.
+// Another port, another host name and another scheme are each another origin.
+// A redirect loop ends after a few hops, and 301, 302 and 303 are not followed
+// for a POST (#449).
+TEST(MCPClientConformance, RedirectsToAnotherOriginOrInALoopAreNotFollowed) {
+    std::atomic<int> reached_other{0};
+    httplib::Server other;
+    other.set_pre_routing_handler([&](const httplib::Request&, httplib::Response& res) {
+        reached_other.fetch_add(1);
+        res.status = 500;
+        return httplib::Server::HandlerResponse::Handled;
+    });
+    Guard other_server(other);
+
+    std::atomic<int> port{0};
+    std::atomic<int> answered{0};
+    std::atomic<int> loops{0};
+    httplib::Server svr;
+    const auto to = [&](int status, std::function<std::string()> location) {
+        return [status, location](const httplib::Request&, httplib::Response& res) {
+            res.status = status;
+            res.set_header("Location", location());
+        };
+    };
+    svr.Post("/other-port", to(307, [&] { return other_server.url(); }));
+    svr.Post("/other-host",
+             to(307, [&] { return "http://localhost:" + std::to_string(port.load()) + "/mcp"; }));
+    svr.Post("/other-scheme",
+             to(308, [&] { return "https://127.0.0.1:" + std::to_string(port.load()) + "/mcp"; }));
+    svr.Post("/see-other", to(303, [] { return std::string("/mcp"); }));
+    svr.Post("/found", to(302, [] { return std::string("/mcp"); }));
+    svr.Post("/moved", to(301, [] { return std::string("/mcp"); }));
+    svr.Post("/loop", [&](const httplib::Request&, httplib::Response& res) {
+        loops.fetch_add(1);
+        res.status = 308;
+        res.set_header("Location", "loop");
+    });
+    svr.Post("/mcp", [&](const httplib::Request& req, httplib::Response& res) {
+        answered.fetch_add(1);
+        common(json::parse(req.body), res);
+    });
+    Guard server(svr);
+    port = server.port;
+    const std::vector<std::pair<std::string, int>> cases = {
+        {"/other-port", 307}, {"/other-host", 307}, {"/other-scheme", 308}, {"/see-other", 303},
+        {"/found", 302},      {"/moved", 301},      {"/loop", 308}};
+    for (const auto& [target, status] : cases) {
+        SCOPED_TRACE(target);
+        mcp::MCPClientConfig config;
+        config.headers.emplace_back("Authorization", "Bearer must-not-leave-the-origin");
+        mcp::MCPClient client(server.url(target), config);
+        try {
+            client.initialize("redirected");
+            ADD_FAILURE() << "initialize succeeded";
+        } catch (const mcp::MCPTransportError& error) {
+            EXPECT_EQ(error.failure(), mcp::MCPFailure::http_status);
+            EXPECT_EQ(error.http_status(), status);
+            EXPECT_EQ(std::string(error.what()).find("must-not-leave"), std::string::npos);
+        }
+    }
+    EXPECT_EQ(reached_other.load(), 0);
+    EXPECT_EQ(answered.load(), 0);
+    EXPECT_GE(loops.load(), 2);
+    EXPECT_LE(loops.load(), 10);
+}
+
+// The origin check itself (RFC 6454): scheme, host and effective port. An
+// https endpoint never follows a redirect to http, whatever the host (#449).
+TEST(MCPClientConformance, RedirectTargetsStayOnTheEndpointOrigin) {
+    using mcp::detail::same_origin_redirect_target;
+    const auto https = async::split_async_endpoint("https://mcp.example.com/mcp");
+    const auto http = async::split_async_endpoint("http://127.0.0.1:8000/mcp");
+
+    EXPECT_FALSE(same_origin_redirect_target(https, "http://mcp.example.com/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "http://mcp.example.com:443/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(http, "https://127.0.0.1:8000/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "https://other.example.com/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "https://mcp.example.com:8443/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "//other.example.com/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "https://user@mcp.example.com/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "ftp://mcp.example.com/mcp/", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "/mcp/\r\nX-Injected: 1", "/mcp"));
+    EXPECT_FALSE(same_origin_redirect_target(https, "", "/mcp"));
+
+    EXPECT_EQ(same_origin_redirect_target(https, "https://MCP.example.com/mcp/?t=1#f", "/mcp"),
+              "/mcp/?t=1");
+    EXPECT_EQ(same_origin_redirect_target(https, "https://mcp.example.com:443/", "/mcp"), "/");
+    EXPECT_EQ(same_origin_redirect_target(http, "http://127.0.0.1:8000", "/mcp"), "/");
+    EXPECT_EQ(same_origin_redirect_target(http, "/mcp/", "/mcp?t=1"), "/mcp/");
+    EXPECT_EQ(same_origin_redirect_target(http, "next", "/a/b?t=1"), "/a/next");
+    EXPECT_EQ(same_origin_redirect_target(http, "?t=2", "/a/b?t=1"), "/a/b?t=2");
 }
