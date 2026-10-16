@@ -56,20 +56,39 @@ void validate_json_text_limits(std::string_view bytes) {
     }
 }
 
-void validate_strict_tree(const json& value) {
-    if (value.is_object()) {
-        std::set<std::string> fields;
-        for (const auto& [field, child] : value.items()) {
+// The checks and the canonical writer below walk the yyjson values under a
+// json directly: a json handle copy costs an atomic reference count, iterating
+// one allocates its key and value lists, and each key or string read copies
+// it. Canonical serialization is most of a Program transition (#469). Every
+// walk keeps the order and the results of the json-handle walk it replaces.
+std::string_view raw_string(yyjson_mut_val* value) noexcept {
+    const char* text = yyjson_mut_get_str(value);
+    return text ? std::string_view(text, yyjson_mut_get_len(value)) : std::string_view();
+}
+
+void validate_strict_tree(yyjson_mut_val* value) {
+    if (value && yyjson_mut_is_obj(value)) {
+        std::set<std::string_view> fields;
+        yyjson_mut_obj_iter        it;
+        yyjson_mut_obj_iter_init(value, &it);
+        while (auto* key = yyjson_mut_obj_iter_next(&it)) {
+            const auto field = raw_string(key);
             if (!fields.insert(field).second) {
                 throw std::invalid_argument("Program JSON contains duplicate object field '" +
-                                            field + "'");
+                                            std::string(field) + "'");
             }
-            validate_strict_tree(child);
+            validate_strict_tree(yyjson_mut_obj_iter_get_val(key));
         }
-    } else if (value.is_array()) {
-        for (const auto& child : value)
+    } else if (value && yyjson_mut_is_arr(value)) {
+        yyjson_mut_arr_iter it;
+        yyjson_mut_arr_iter_init(value, &it);
+        while (auto* child = yyjson_mut_arr_iter_next(&it))
             validate_strict_tree(child);
     }
+}
+
+void validate_strict_tree(const json& value) {
+    validate_strict_tree(value.raw_val());
 }
 
 std::size_t checked_json_size(std::size_t current, std::size_t additional) {
@@ -135,36 +154,45 @@ std::size_t escaped_json_string_size(std::string_view value) {
     return size;
 }
 
-std::size_t validate_json_value_limits(const json& value, std::size_t depth = 1) {
+std::size_t validate_json_value_limits(yyjson_mut_val* value, std::size_t depth) {
     if (depth > MAX_JSON_DEPTH) {
         throw std::invalid_argument("Program JSON exceeds the maximum nesting depth");
     }
-    if (value.is_null()) return 4;
-    if (value.is_boolean()) return value.get<bool>() ? 4 : 5;
-    if (value.is_number()) return 32;
-    if (value.is_string()) return escaped_json_string_size(value.get<std::string>());
+    if (!value || yyjson_mut_is_null(value)) return 4;
+    if (yyjson_mut_is_bool(value)) return yyjson_mut_get_bool(value) ? 4 : 5;
+    if (yyjson_mut_is_num(value)) return 32;
+    if (yyjson_mut_is_str(value)) return escaped_json_string_size(raw_string(value));
 
     std::size_t size  = 2;
     bool        first = true;
-    if (value.is_array()) {
-        for (const auto& child : value) {
+    if (yyjson_mut_is_arr(value)) {
+        yyjson_mut_arr_iter it;
+        yyjson_mut_arr_iter_init(value, &it);
+        while (auto* child = yyjson_mut_arr_iter_next(&it)) {
             if (!first) size = checked_json_size(size, 1);
             first = false;
             size  = checked_json_size(size, validate_json_value_limits(child, depth + 1));
         }
         return size;
     }
-    if (value.is_object()) {
-        for (const auto& [field, child] : value.items()) {
+    if (yyjson_mut_is_obj(value)) {
+        yyjson_mut_obj_iter it;
+        yyjson_mut_obj_iter_init(value, &it);
+        while (auto* key = yyjson_mut_obj_iter_next(&it)) {
             if (!first) size = checked_json_size(size, 1);
             first = false;
-            size  = checked_json_size(size, escaped_json_string_size(field));
+            size  = checked_json_size(size, escaped_json_string_size(raw_string(key)));
             size  = checked_json_size(size, 1);
-            size  = checked_json_size(size, validate_json_value_limits(child, depth + 1));
+            size  = checked_json_size(
+                size, validate_json_value_limits(yyjson_mut_obj_iter_get_val(key), depth + 1));
         }
         return size;
     }
     throw std::invalid_argument("Program JSON contains an unsupported value");
+}
+
+std::size_t validate_json_value_limits(const json& value) {
+    return validate_json_value_limits(value.raw_val(), 1);
 }
 
 json owned_json_copy_impl(const json& value, std::size_t depth) {
@@ -378,33 +406,37 @@ void append_float(std::string& out, double value) {
     out += encoded;
 }
 
-void append_value(std::string& out, const json& value) {
-    if (value.is_null()) {
+void append_value(std::string& out, yyjson_mut_val* value) {
+    if (!value || yyjson_mut_is_null(value)) {
         out += "null";
-    } else if (value.is_boolean()) {
-        out += value.get<bool>() ? "true" : "false";
-    } else if (value.is_number_unsigned()) {
-        out += std::to_string(value.get<unsigned long long>());
-    } else if (value.is_number_integer()) {
-        out += std::to_string(value.get<long long>());
-    } else if (value.is_number_float()) {
-        append_float(out, value.get<double>());
-    } else if (value.is_string()) {
-        append_escaped(out, value.get<std::string>());
-    } else if (value.is_array()) {
+    } else if (yyjson_mut_is_bool(value)) {
+        out += yyjson_mut_get_bool(value) ? "true" : "false";
+    } else if (yyjson_mut_is_uint(value)) {
+        out += std::to_string(static_cast<unsigned long long>(yyjson_mut_get_uint(value)));
+    } else if (yyjson_mut_is_sint(value)) {
+        out += std::to_string(static_cast<long long>(yyjson_mut_get_sint(value)));
+    } else if (yyjson_mut_is_real(value)) {
+        append_float(out, yyjson_mut_get_real(value));
+    } else if (yyjson_mut_is_str(value)) {
+        append_escaped(out, raw_string(value));
+    } else if (yyjson_mut_is_arr(value)) {
         out.push_back('[');
-        bool first = true;
-        for (const auto element : value) {
+        bool                first = true;
+        yyjson_mut_arr_iter it;
+        yyjson_mut_arr_iter_init(value, &it);
+        while (auto* element = yyjson_mut_arr_iter_next(&it)) {
             if (!first) out.push_back(',');
             first = false;
             append_value(out, element);
         }
         out.push_back(']');
-    } else if (value.is_object()) {
-        std::vector<std::pair<std::string, json>> fields;
-        fields.reserve(value.size());
-        for (const auto& [key, child] : value.items()) {
-            fields.emplace_back(key, child);
+    } else if (yyjson_mut_is_obj(value)) {
+        std::vector<std::pair<std::string_view, yyjson_mut_val*>> fields;
+        fields.reserve(yyjson_mut_obj_size(value));
+        yyjson_mut_obj_iter it;
+        yyjson_mut_obj_iter_init(value, &it);
+        while (auto* key = yyjson_mut_obj_iter_next(&it)) {
+            fields.emplace_back(raw_string(key), yyjson_mut_obj_iter_get_val(key));
         }
         std::sort(fields.begin(), fields.end(),
                   [](const auto& lhs, const auto& rhs) { return lhs.first < rhs.first; });
@@ -473,7 +505,7 @@ json parse_json_strict(std::string_view bytes) {
 std::string canonical_json_bytes(const json& value) {
     (void)validate_json_value_limits(value);
     std::string result;
-    append_value(result, value);
+    append_value(result, value.raw_val());
     return result;
 }
 void validate_utf8(std::string_view value) {
