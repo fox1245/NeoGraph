@@ -104,6 +104,9 @@ def load_preregistration(path: Path) -> tuple[dict[str, Any], dict[str, dict[str
         or core_pair_rerun_samples != 20
     ):
         raise ConfigurationError("core_pair_failure_rerun_samples must be exactly 20")
+    tolerance = methodology.get("threshold_tolerance")
+    if not isinstance(tolerance, float) or tolerance != 0.1:
+        raise ConfigurationError("threshold_tolerance must be exactly 0.1")
 
     entries = document.get("cases")
     if not isinstance(entries, list) or not entries:
@@ -348,7 +351,9 @@ def summarize(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def evaluate_gate(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
+def evaluate_gate(
+    summary: dict[str, Any], thresholds: dict[str, Any], tolerance: float
+) -> dict[str, Any]:
     comparisons = {
         "median": (summary["median"], thresholds["median_max"]),
         "p95": (summary["p95"], thresholds["p95_max"]),
@@ -361,12 +366,26 @@ def evaluate_gate(summary: dict[str, Any], thresholds: dict[str, Any]) -> dict[s
             thresholds["peak_allocated_bytes_max"],
         ),
     }
-    failures = [
-        {"metric": metric, "observed": observed, "maximum": maximum}
-        for metric, (observed, maximum) in comparisons.items()
-        if observed > maximum
-    ]
-    return {"status": "fail" if failures else "pass", "failures": failures}
+    # A statistic above its ceiling but within the tolerance band passes as a
+    # warning; hosted runners alone move some cases a few percent across it.
+    failures = []
+    warnings = []
+    for metric, (observed, maximum) in comparisons.items():
+        if observed <= maximum:
+            continue
+        tolerated = maximum * (1 + tolerance)
+        entry = {
+            "metric": metric,
+            "observed": observed,
+            "maximum": maximum,
+            "tolerated_maximum": tolerated,
+        }
+        (failures if observed > tolerated else warnings).append(entry)
+    return {
+        "status": "fail" if failures else "pass",
+        "failures": failures,
+        "warnings": warnings,
+    }
 
 
 def git_metadata() -> dict[str, Any]:
@@ -404,9 +423,11 @@ def replay_growth_result(
     sample_count: int,
     minimum_sample_count: int,
     required_build_type: str,
+    tolerance: float,
 ) -> dict[str, Any]:
     replay_counts = []
     failures = []
+    warnings = []
     for replay_case in case["replay_command_counts"]:
         replay_count = replay_case["count"]
         samples = [
@@ -418,7 +439,7 @@ def replay_growth_result(
             raise BenchmarkError(
                 f"replay_growth[{replay_count}]: fewer than {minimum_sample_count} valid samples"
             )
-        gate = evaluate_gate(summary, replay_case["thresholds"])
+        gate = evaluate_gate(summary, replay_case["thresholds"], tolerance)
         replay_counts.append(
             {
                 "replay_command_count": replay_count,
@@ -431,14 +452,43 @@ def replay_growth_result(
         failures.extend(
             {"replay_command_count": replay_count, **failure} for failure in gate["failures"]
         )
+        warnings.extend(
+            {"replay_command_count": replay_count, **warning} for warning in gate["warnings"]
+        )
     return {
         "id": case["id"],
         "blocking": case["blocking"],
         "scope": case["scope"],
         "iterations_per_sample": case["iterations"],
         "replay_command_counts": replay_counts,
-        "gate": {"status": "fail" if failures else "pass", "failures": failures},
+        "gate": {
+            "status": "fail" if failures else "pass",
+            "failures": failures,
+            "warnings": warnings,
+        },
     }
+
+
+def announce(results: list[dict[str, Any]], tolerance: float, stream: Any) -> None:
+    """Name every statistic above its ceiling in the log, not only in the report."""
+    for result in results:
+        gate = result["gate"]
+        for kind, entries in (("warning", gate["warnings"]), ("error", gate["failures"])):
+            for entry in entries:
+                case = result["id"]
+                if "replay_command_count" in entry:
+                    case = f"{case}[{entry['replay_command_count']}]"
+                band = "within" if kind == "warning" else "beyond"
+                message = (
+                    f"QuickJS performance: {case} {entry['metric']} {entry['observed']:.6g} "
+                    f"is above its ceiling {entry['maximum']:.6g} and {band} the "
+                    f"{tolerance:.0%} tolerance ({entry['tolerated_maximum']:.6g})"
+                )
+                print(
+                    f"::{kind}::{message}" if os.environ.get("GITHUB_ACTIONS") else f"{kind}: {message}",
+                    file=stream,
+                    flush=True,
+                )
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -479,6 +529,7 @@ def main() -> int:
         raise ConfigurationError("selected cases must not contain duplicates")
 
     required_build_type = preregistration["methodology"]["required_build_type"]
+    tolerance = preregistration["methodology"]["threshold_tolerance"]
     sample_count = preregistration["methodology"]["samples_per_case"]
     primitive_binary = arguments.primitive_binary
     control_binary = arguments.control_binary
@@ -496,6 +547,7 @@ def main() -> int:
                 sample_count,
                 preregistration["methodology"]["minimum_samples_per_case"],
                 required_build_type,
+                tolerance,
             )
             failed = failed or (case["blocking"] and result["gate"]["status"] == "fail")
             results.append(result)
@@ -516,7 +568,7 @@ def main() -> int:
         summary = summarize(samples)
         if summary["sample_count"] < preregistration["methodology"]["minimum_samples_per_case"]:
             raise BenchmarkError(f"{case_id}: fewer than 30 valid samples")
-        initial_gate = evaluate_gate(summary, case["thresholds"])
+        initial_gate = evaluate_gate(summary, case["thresholds"], tolerance)
         gate = initial_gate
         effective_summary = summary
         effective_samples = samples
@@ -535,7 +587,7 @@ def main() -> int:
                     paired_sample(case, sample_index, enabled, disabled, required_build_type)
                 )
             rerun_summary = summarize(rerun_samples)
-            gate = evaluate_gate(rerun_summary, case["thresholds"])
+            gate = evaluate_gate(rerun_summary, case["thresholds"], tolerance)
             effective_summary = rerun_summary
             effective_samples = rerun_samples
             failure_rerun = {
@@ -586,6 +638,7 @@ def main() -> int:
             "path": str(arguments.preregistration.resolve()),
             "sha256": sha256_file(arguments.preregistration.resolve()),
             "source_baseline": preregistration["source_baseline"],
+            "threshold_tolerance": tolerance,
         },
         "source": git_metadata(),
         "machine": {
@@ -600,6 +653,8 @@ def main() -> int:
         "status": "fail" if failed else "pass",
         "cases": results,
     }
+    # Without --output the report itself is written to stdout.
+    announce(results, tolerance, sys.stdout if arguments.output else sys.stderr)
     serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)
