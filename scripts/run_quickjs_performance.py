@@ -409,6 +409,23 @@ def git_metadata() -> dict[str, Any]:
         raise BenchmarkError(f"cannot record git metadata: {error}") from error
 
 
+def cpu_model() -> str | None:
+    """The CPU a report was measured on; its microsecond ceilings assume CI's runners."""
+    try:
+        text = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        fields.setdefault(key.strip(), value.strip())
+    if fields.get("model name"):
+        return fields["model name"]
+    if fields.get("CPU implementer") and fields.get("CPU part"):
+        return f"CPU implementer {fields['CPU implementer']}, part {fields['CPU part']}"
+    return None
+
+
 def binary_metadata(paths: dict[str, Path | None]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for name, path in paths.items():
@@ -650,7 +667,9 @@ def main() -> int:
             "platform": platform.platform(),
             "architecture": platform.machine(),
             "processor": platform.processor(),
+            "cpu_model": cpu_model(),
             "logical_cpu_count": os.cpu_count(),
+            "runner_environment": os.environ.get("RUNNER_ENVIRONMENT"),
             "python": platform.python_version(),
         },
         "binaries": binary_metadata(binaries),
