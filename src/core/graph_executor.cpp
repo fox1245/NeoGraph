@@ -12,7 +12,9 @@
 #include "text_safety.h"
 #include "tool_failure.h"
 #include <asio/as_tuple.hpp>
+#include <asio/async_result.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/deferred.hpp>
 #include <asio/error.hpp>
@@ -732,6 +734,32 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
     if (timed_out && unit->events) unit->events->close();
 }
 
+// An attempt without a timeout can neither time out nor be detached, so the
+// orchestrator only waits for its body to stop. The body's finish() posts the
+// wait's completion straight to the orchestrator's executor: one hand-off
+// back, without await_dispatched's strand, coroutine and timer (#467).
+asio::awaitable<void> await_stopped(std::shared_ptr<DispatchedAttempt> unit) {
+    const auto executor         = co_await asio::this_coro::executor;
+    auto       completion_token = asio::bind_executor(executor, asio::use_awaitable);
+    co_await asio::async_initiate<decltype(completion_token), void()>(
+        [unit, executor](auto handler) {
+            using Handler   = std::decay_t<decltype(handler)>;
+            auto completion = std::make_shared<Handler>(std::move(handler));
+            // Only the first call resumes the wait. It also drops the handler,
+            // which owns this coroutine, so `unit` no longer owns it.
+            std::function<void()> resume = [executor, completion]() mutable {
+                if (!completion) return;
+                asio::post(executor, [completion = std::move(completion)] { (*completion)(); });
+            };
+            std::lock_guard lock(unit->mutex);
+            if (unit->stopped)
+                resume();
+            else
+                unit->wake = std::move(resume);
+        },
+        completion_token);
+}
+
 }  // namespace
 
 bool wait_for_node_attempts(std::chrono::milliseconds timeout) {
@@ -1360,14 +1388,18 @@ asio::awaitable<void> NodeExecutor::run_dispatched_attempt_async(
     if (attempt_timeout)
         unit->timeout_at = AttemptClock::now() + std::chrono::milliseconds(*attempt_timeout);
     start_dispatched_body(unit);
-    const auto stop_grace = std::max(std::chrono::milliseconds(attempt_timeout.value_or(0)),
-                                     kMinAttemptStopGrace);
     // Run cancellation reaches the body through its token; the wait
     // itself is not cancelled, so a cancelled run still waits for
     // the body to stop, as an inline body would be waited for.
-    co_await asio::co_spawn(
-        asio::make_strand(ex), await_dispatched(unit, stop_grace),
-        asio::bind_cancellation_slot(asio::cancellation_slot(), asio::use_awaitable));
+    if (attempt_timeout) {
+        const auto stop_grace =
+            std::max(std::chrono::milliseconds(*attempt_timeout), kMinAttemptStopGrace);
+        co_await asio::co_spawn(
+            asio::make_strand(ex), await_dispatched(unit, stop_grace),
+            asio::bind_cancellation_slot(asio::cancellation_slot(), asio::use_awaitable));
+    } else {
+        co_await await_stopped(unit);
+    }
     {
         std::lock_guard lock(unit->mutex);
         attempt_timed_out = unit->timed_out;
