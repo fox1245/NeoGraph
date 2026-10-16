@@ -37,7 +37,7 @@
     ],
     "threshold_policy": "Absolute ceilings are version controlled here and cannot be overridden by the runner. A missing ceiling is a gate failure.",
     "threshold_tolerance": 0.1,
-    "threshold_tolerance_policy": "A statistic above its ceiling but no higher than ceiling x (1 + threshold_tolerance) passes and is reported as a warning; a higher one fails. The runner pins the tolerance, so this file alone cannot widen it. The band absorbs hosted-runner variation: over 37 CI runs from 2026-10-07 to 2026-10-16, javascript_wrapped_core_ratio ranged from 0.79 to 1.05 of its ceilings, and byte-identical binaries measured a median of 547 in one run and 617 in another (#463).",
+    "threshold_tolerance_policy": "A statistic above its ceiling but no higher than ceiling x (1 + threshold_tolerance) passes and is reported as a warning; a higher one fails. The runner pins the tolerance, so this file alone cannot widen it. The band absorbs hosted-runner variation: over 37 CI runs from 2026-10-09 to 2026-10-16, javascript_wrapped_core_ratio ranged from 0.79 to 1.05 of its ceilings, and byte-identical binaries measured a median of 547 in one run and 617 in another (#463).",
     "memory_definition": "Primitive cases use the QuickJS custom allocator high-water mark. Program and Core cases use the fresh process resident-set high-water mark.",
     "core_pair_order": "Enabled and disabled binaries alternate first position by sample index.",
     "one_off_result_sufficient": false
@@ -226,12 +226,27 @@
       }
     },
     {
-      "id": "javascript_wrapped_core_ratio",
+      "id": "javascript_wrapped_core",
       "driver": "control",
       "blocking": true,
       "iterations": 128,
+      "unit": "us",
+      "scope": "per-invocation time of 128 repeated JavaScript generator plus in-memory ProgramRuntime Core invocations after one warm-up invocation; the numerator of javascript_wrapped_core_ratio",
+      "threshold_basis": "Set from the javascript_wrapped_core_us component of javascript_wrapped_core_ratio, which times the same run, in 39 hosted-runner measurements in CI extended from 2026-10-09 to 2026-10-16 (#465). Run medians ranged from 2436 to 4515 us (3967 to 4515 us on the slower runner class), run p95s reached 4720 us and run MADs 60 us. The median ceiling is 1.22 times the highest run median and the p95 ceiling 1.27 times the highest run p95.",
+      "thresholds": {
+        "median_max": 5500.0,
+        "p95_max": 6000.0,
+        "mad_max": 1000.0,
+        "peak_allocated_bytes_max": 536870912
+      }
+    },
+    {
+      "id": "javascript_wrapped_core_ratio",
+      "driver": "control",
+      "blocking": false,
+      "iterations": 128,
       "unit": "ratio",
-      "scope": "128 repeated JavaScript generator plus in-memory ProgramRuntime Core invocations divided by direct Core invocation; repeated denominator timing suppresses sub-10us clock noise",
+      "scope": "128 repeated JavaScript generator plus in-memory ProgramRuntime Core invocations divided by direct Core invocation; repeated denominator timing suppresses sub-10us clock noise. Reported, not blocking: a faster Core alone raises the ratio and a slower one can hide a slower JavaScript path, so javascript_wrapped_core gates the wrapped run's own time (#465)",
       "thresholds": {
         "median_max": 600.0,
         "p95_max": 650.0,

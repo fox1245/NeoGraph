@@ -37,6 +37,7 @@ EXPECTED_CASES = {
     "structured_join_race",
     "structured_join_quorum",
     "structured_join_await",
+    "javascript_wrapped_core",
     "javascript_wrapped_core_ratio",
     "enabled_unused_core_ratio",
     "replay_growth",
@@ -484,6 +485,10 @@ def announce(results: list[dict[str, Any]], tolerance: float, stream: Any) -> No
                     f"is above its ceiling {entry['maximum']:.6g} and {band} the "
                     f"{tolerance:.0%} tolerance ({entry['tolerated_maximum']:.6g})"
                 )
+                # A non-blocking case cannot fail the job, so it never logs an error.
+                if not result["blocking"]:
+                    kind = "warning"
+                    message += "; the case is not blocking"
                 print(
                     f"::{kind}::{message}" if os.environ.get("GITHUB_ACTIONS") else f"{kind}: {message}",
                     file=stream,

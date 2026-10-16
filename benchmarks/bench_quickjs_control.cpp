@@ -468,25 +468,23 @@ void benchmark_structured_join(std::string_view case_id,
     print_sample(case_id, elapsed_us(started) / static_cast<double>(iterations), "us");
 }
 
-void benchmark_wrapped_core(std::size_t iterations) {
-    RuntimeFixture fixture;
-    const auto     version = fixture.admit(
+ProgramVersion admit_wrapped_core(RuntimeFixture& fixture) {
+    return fixture.admit(
         ProgramSource::from_javascript("bench:wrapped-core.js", javascript_control_source()));
-    auto direct = GraphEngine::compile(core_definition(), NodeContext{});
+}
 
-    (void)direct->run(RunConfig{});
+void warm_up_wrapped_core(RuntimeFixture& fixture, const ProgramVersion& version) {
     require_completed(
         fixture.runtime().run(
             "quickjs-performance", version,
             ProgramInvocation{json::object(), kJavaScriptBudget, "wrapped-warmup", {}}),
         "JavaScript-wrapped warm-up");
+}
 
-    const auto direct_started = Clock::now();
-    for (std::size_t index = 0; index < iterations; ++index)
-        (void)direct->run(RunConfig{});
-    const auto direct_us = elapsed_us(direct_started) / static_cast<double>(iterations);
-
-    const auto wrapped_started = Clock::now();
+double wrapped_core_us(RuntimeFixture&       fixture,
+                       const ProgramVersion& version,
+                       std::size_t           iterations) {
+    const auto started = Clock::now();
     for (std::size_t index = 0; index < iterations; ++index) {
         require_completed(
             fixture.runtime().run(
@@ -495,7 +493,32 @@ void benchmark_wrapped_core(std::size_t iterations) {
                     json::object(), kJavaScriptBudget, "wrapped-" + std::to_string(index), {}}),
             "JavaScript-wrapped Core sample");
     }
-    const auto wrapped_us = elapsed_us(wrapped_started) / static_cast<double>(iterations);
+    return elapsed_us(started) / static_cast<double>(iterations);
+}
+
+// The gated time of the JavaScript-wrapped run. Dividing it by a direct Core
+// run (below) moves with Core speed alone, so the ratio is only reported (#465).
+void benchmark_wrapped_core(std::size_t iterations) {
+    RuntimeFixture fixture;
+    const auto     version = admit_wrapped_core(fixture);
+    warm_up_wrapped_core(fixture, version);
+    print_sample("javascript_wrapped_core", wrapped_core_us(fixture, version, iterations), "us");
+}
+
+void benchmark_wrapped_core_ratio(std::size_t iterations) {
+    RuntimeFixture fixture;
+    const auto     version = admit_wrapped_core(fixture);
+    auto           direct  = GraphEngine::compile(core_definition(), NodeContext{});
+
+    (void)direct->run(RunConfig{});
+    warm_up_wrapped_core(fixture, version);
+
+    const auto direct_started = Clock::now();
+    for (std::size_t index = 0; index < iterations; ++index)
+        (void)direct->run(RunConfig{});
+    const auto direct_us = elapsed_us(direct_started) / static_cast<double>(iterations);
+
+    const auto wrapped_us = wrapped_core_us(fixture, version, iterations);
     if (direct_us <= 0.0) throw std::runtime_error("direct Core timing was not positive");
     print_sample("javascript_wrapped_core_ratio", wrapped_us / direct_us, "ratio",
                  {{"direct_core_us", direct_us}, {"javascript_wrapped_core_us", wrapped_us}});
@@ -617,8 +640,10 @@ int main(int argc, char** argv) {
             benchmark_structured_join(*case_id, "quorum", iterations);
         } else if (*case_id == "structured_join_await") {
             benchmark_structured_join(*case_id, "await", iterations);
-        } else if (*case_id == "javascript_wrapped_core_ratio") {
+        } else if (*case_id == "javascript_wrapped_core") {
             benchmark_wrapped_core(iterations);
+        } else if (*case_id == "javascript_wrapped_core_ratio") {
+            benchmark_wrapped_core_ratio(iterations);
         } else if (*case_id == "replay_growth") {
             if (!replay_count) throw std::invalid_argument("replay_growth requires --replay-count");
             benchmark_replay_growth(*replay_count);
