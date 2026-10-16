@@ -1,10 +1,10 @@
 #include <neograph/mcp/http_server.h>
 
-// cpp-httplib v0.41.0 uses blocking Server handlers, bounded below with its
+// cpp-httplib v0.61.0 uses blocking Server handlers, bounded below with its
 // runtime ThreadPool. Keep the TLS macro consistent with every NeoGraph TU that
 // instantiates httplib types to avoid the macro-gated layout ODR trap.
-// Source: https://github.com/yhirose/cpp-httplib/blob/v0.41.0/README.md
-// Verified against the vendored header on 2026-07-21.
+// Source: https://github.com/yhirose/cpp-httplib/blob/v0.61.0/README.md
+// Verified against the vendored header on 2026-10-16.
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #endif
