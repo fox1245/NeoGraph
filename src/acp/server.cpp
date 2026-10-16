@@ -531,6 +531,11 @@ struct ACPServer::Impl {
     /// notification sink.
     std::map<std::string, std::shared_ptr<neograph::graph::CancelToken>>
                                                     active_cancel_tokens;
+    /// The session and turn token of each in-flight session/prompt request,
+    /// by its JSON-RPC id (`id.dump()`), so `$/cancel_request` can find it.
+    std::map<std::string,
+             std::pair<std::string, std::shared_ptr<neograph::graph::CancelToken>>>
+                                                    prompt_requests;
     /// Pre-armed cancels (opt-in, see set_pre_armed_cancel).
     std::set<std::string>                         pending_cancels;
     /// A terminal prompt response has been committed for these sessions. A
@@ -698,6 +703,15 @@ struct ACPServer::Impl {
                                          const neograph::json& id,
                                          bool reply_expected);
     void           handle_session_cancel(const neograph::json& params);
+    void           handle_cancel_request(const neograph::json& params);
+    /// Forget the request record of a turn whose token is `token`; callers
+    /// hold sessions_mu.
+    void           forget_prompt_request(const neograph::json& id,
+                                         const std::shared_ptr<neograph::graph::CancelToken>& token) {
+        if (id.is_null()) return;
+        auto it = prompt_requests.find(id.dump());
+        if (it != prompt_requests.end() && it->second.second == token) prompt_requests.erase(it);
+    }
 
     TurnResult run_turn(const PromptRequest& req,
                         const ACPSessionContext& session,
@@ -1381,6 +1395,7 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
         std::lock_guard lk(sessions_mu);
         task_cancel = std::make_shared<neograph::graph::CancelToken>();
         active_cancel_tokens[req.session_id] = task_cancel;
+        if (reply_expected && !id.is_null()) prompt_requests[id.dump()] = {req.session_id, task_cancel};
         pre_cancelled = pending_cancels.erase(req.session_id) != 0;
         terminal_prompt_sessions.erase(req.session_id);
         resume_pending = interrupted_sessions.count(req.session_id) != 0;
@@ -1418,6 +1433,7 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
                         && it->second == task_cancel) {
                         active_cancel_tokens.erase(it);
                     }
+                    forget_prompt_request(reply_expected ? id : neograph::json(), task_cancel);
                     if (!terminal_committed) {
                         // Error paths still complete this prompt turn. Mark it
                         // terminal so a late cancel cannot cancel the next one.
@@ -1442,6 +1458,7 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
                         && it->second == task_cancel) {
                         active_cancel_tokens.erase(it);
                     }
+                    forget_prompt_request(reply_expected ? id : neograph::json(), task_cancel);
                     terminal_prompt_sessions.insert(req.session_id);
                     terminal_committed = true;
                 };
@@ -1533,6 +1550,7 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
             if (it != active_cancel_tokens.end() && it->second == task_cancel) {
                 active_cancel_tokens.erase(it);
             }
+            forget_prompt_request(reply_expected ? id : neograph::json(), task_cancel);
         }
         if (reply_expected) emit_internal_error(id);
     }
@@ -1558,6 +1576,30 @@ ACPServer::Impl::handle_session_cancel(const neograph::json& params) {
             pending_cancels.insert(n.session_id);
         }
         // Otherwise there is no ongoing turn to cancel; the cancel is stale.
+    }
+    if (token) token->cancel();
+}
+
+void
+ACPServer::Impl::handle_cancel_request(const neograph::json& params) {
+    // ACP "Cancellation": $/cancel_request names an outstanding request by
+    // id. An in-flight session/prompt is cancelled as session/cancel cancels
+    // its session's turn and still gets its one response (stopReason
+    // "cancelled"); an unknown or finished id, or another method's request,
+    // is ignored.
+    if (!params.is_object() || !params.contains("requestId")
+        || !valid_request_id(params["requestId"]) || params["requestId"].is_null()) {
+        return;
+    }
+    std::shared_ptr<neograph::graph::CancelToken> token;
+    {
+        std::lock_guard lk(sessions_mu);
+        auto it = prompt_requests.find(params["requestId"].dump());
+        if (it == prompt_requests.end()) return;
+        auto active = active_cancel_tokens.find(it->second.first);
+        if (active != active_cancel_tokens.end() && active->second == it->second.second) {
+            token = active->second;
+        }
     }
     if (token) token->cancel();
 }
@@ -1898,6 +1940,10 @@ ACPServer::handle_message(const neograph::json& env) {
     }
     if (method == "session/cancel") {
         impl_->handle_session_cancel(params);
+        return {};
+    }
+    if (method == "$/cancel_request" && is_notification) {
+        impl_->handle_cancel_request(params);
         return {};
     }
 

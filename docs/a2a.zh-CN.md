@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=ae2e03b8b87d0da548b07723e235ce213559d2ccc8a4060ef5b28e72d67a5799 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=86d8cffc37b1915de7134b36712461ee3bfa0f9cefb2a46d145909c5b55111f2 -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -122,7 +122,7 @@ int main() {
 - 默认适配器只把最终回答放在已完成任务的状态消息里。任务没有工件，因此读取工件的客户端什么也拿不到。要把回答作为工件返回，请重写 `build_output_artifact()`。[示例 78](../examples/78_a2a_input_required.cpp) 就用这种方式把 `response` 通道提升为工件。
 - 一次图运行就是一个任务，任务 ID 就是这次运行的 `thread_id`。每个任务在自己的工作线程上运行，所以连接断开后任务仍会继续。服务器同时最多接收 32 个任务，更多的会收到 JSON-RPC 错误 `-32603`，原因为 `RESOURCE_EXHAUSTED`。
 - `interrupt_before`（或节点抛出的 `NodeInterrupt`）会让任务进入 `input-required`。状态消息中是原因，`metadata["neograph/interrupt"]` 中是节点和检查点；用同一个任务 ID 发送后续消息，就会从该检查点恢复运行。后续消息的文本就是恢复值。如果没有检查点存储，图会以后续消息为输入从头再运行一遍，所以图可能暂停时，请给引擎配置一个存储。
-- 卡片通过 `GET /.well-known/agent-card.json` 提供，JSON-RPC 端点是 `POST /`。没有设置 `AgentCard::url` 时，卡片公布的是客户端所访问的地址。
+- 卡片通过 `GET /.well-known/agent-card.json` 提供，JSON-RPC 端点是 `POST /`。没有设置 `AgentCard::url` 时，卡片公布的是客户端所访问的地址，使用 `http` 协议。位于终止 TLS 的反向代理之后时，请把 `AgentCard::url` 设为公开 URL，或者调用 `A2AServer::set_trust_forwarded_headers(true)`，让协议和主机取自代理发送的 `Forwarded`（RFC 7239）或 `X-Forwarded-Proto` / `X-Forwarded-Host` 头。客户端自己也能设置这些头，所以默认关闭；只有当你掌控的代理会覆盖这些头时才打开。没有 `url` 的卡片序列化时会省略这个成员（如果有首选传输的第一个接口，则使用它的 URL），而不是写入空字符串。
 - 这个服务器不对请求做认证；只有基于 Program 的构造函数才接受认证器。请绑定到回环地址，或在前面放一个负责认证的代理。
 
 链接 `neograph::core` 和 `neograph::a2a`：

@@ -370,4 +370,49 @@ TEST(A2ATypesV1, AgentCardParsesSupportedInterfaces) {
     EXPECT_EQ(legacy.supported_interfaces[1].protocol_binding, "GRPC");
 }
 
+// #455: an optional member sent as JSON null is absent, not "" or a default.
+TEST(A2ATypes, NullOptionalMembersAreAbsent) {
+    Message m;
+    from_json(json::parse(R"({"messageId":"m","role":"user","parts":[],
+                              "taskId":null,"contextId":null})"), m);
+    EXPECT_FALSE(m.task_id.has_value());
+    EXPECT_FALSE(m.context_id.has_value());
+
+    MessageSendParams p;
+    from_json(json::parse(R"({"message":{"messageId":"m","role":"user","parts":[]},
+                              "configuration":{"blocking":null,"returnImmediately":null,
+                                               "historyLength":null}})"), p);
+    ASSERT_TRUE(p.configuration.has_value());
+    EXPECT_FALSE(p.configuration->blocking.has_value());
+    EXPECT_FALSE(p.configuration->history_length.has_value());
+
+    MessageSendParams q;
+    from_json(json::parse(R"({"message":{"messageId":"m","role":"user","parts":[]},
+                              "configuration":null})"), q);
+    EXPECT_FALSE(q.configuration.has_value());
+
+    Artifact a;
+    from_json(json::parse(R"({"artifactId":"a","parts":[],"name":null,"description":null})"), a);
+    EXPECT_FALSE(a.name.has_value());
+    EXPECT_FALSE(a.description.has_value());
+}
+
+// #456: a card without a url never serializes `"url": ""`.
+TEST(A2ATypes, AgentCardWithoutUrlOmitsItOrTakesThePreferredInterface) {
+    AgentCard c;
+    c.name = "n";
+    json j;
+    to_json(j, c);
+    EXPECT_FALSE(j.contains("url"));
+
+    c.supported_interfaces = {AgentInterface{"https://grpc.example", "GRPC", "1.0", {}},
+                              AgentInterface{"https://rpc.example", "JSONRPC", "1.0", {}}};
+    to_json(j, c);
+    EXPECT_EQ(j["url"], "https://rpc.example");
+
+    c.url = "https://explicit.example";
+    to_json(j, c);
+    EXPECT_EQ(j["url"], "https://explicit.example");
+}
+
 }  // namespace

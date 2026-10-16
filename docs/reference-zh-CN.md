@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=776b8c54a23511043b7b4420ea2cac1a50b69ec0161082272f81814d278248d7 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=67cdf454b4a9d458dd8be4d1e270a4b287f65ee7b114915ca1c4aaf14cb900aa -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3505,7 +3505,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 
 异常文本（`what()`）不会发送给客户端：message 是带类型的公开消息（`NodeFailureError::public_message`）或该失败类别的通用文本，细节只保留在宿主日志中。中断会变成一个工具调用：标题为中断原因，`rawInput` 为载荷，带有 `_meta["neograph/interrupt"]` 以及选项 "approve"（`allow_once`）和 "reject"（`reject_once`）；被选中的 option id 就是恢复值。如需修改，重写 `interrupt_permission` 和 `interrupt_resume_value`。回答 `cancelled` 会以取消结束轮次；适配器返回 `std::nullopt` 或客户端无法回答时，轮次以 `data.code: "NG.Interrupted"` 失败，会话不会停留在暂停状态。由 `session/resume` 从检查点恢复的暂停（例如 agent 重启之后）由下一个提示的文本回答。
 
-`session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
+`session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。`requestId` 为正在运行的 `session/prompt` 的 id 的 `$/cancel_request` 通知也以同样的方式取消该轮，这个提示仍然只得到一个响应（`stopReason: "cancelled"`）；其他请求（未知或已结束）的 `requestId` 会被忽略。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
 
 `session/new` 和 `session/resume` 中的 stdio `mcpServers` 通过 NeoGraph 的 MCP 客户端（以 `NEOGRAPH_BUILD_MCP_CLIENT` 构建）在会话的 `cwd` 中启动，环境是最小的：agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上客户端的 `env` 项，可能含有 provider API 密钥的其余 agent 环境不会传递；节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE MCP 服务器不会被声明，并以 `-32602` 拒绝。无法启动的服务器会使请求以 `-32603` 和 `data.reason: "mcp_server_unavailable"` 失败。
 

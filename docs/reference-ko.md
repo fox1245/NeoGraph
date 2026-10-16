@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=776b8c54a23511043b7b4420ea2cac1a50b69ec0161082272f81814d278248d7 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=67cdf454b4a9d458dd8be4d1e270a4b287f65ee7b114915ca1c4aaf14cb900aa -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3571,7 +3571,7 @@ stdio 위 줄 단위 JSON으로 주고받는 에디터↔에이전트 JSON-RPC 2
 
 예외 텍스트(`what()`)는 클라이언트로 가지 않는다. message는 타입이 정해진 공개 메시지(`NodeFailureError::public_message`)나 실패 클래스별 일반 문구이며, 세부 내용은 호스트 로그에만 남는다. 인터럽트는 사유를 제목으로, 페이로드를 `rawInput`으로 하고 `_meta["neograph/interrupt"]`와 선택지 "approve"(`allow_once`), "reject"(`reject_once`)를 가진 도구 호출이 된다. 선택된 option id가 재개 값이다. 바꾸려면 `interrupt_permission`과 `interrupt_resume_value`를 재정의한다. `cancelled` 응답은 턴을 취소로 끝낸다. 어댑터가 `std::nullopt`를 반환하거나 클라이언트가 응답하지 못하면 턴은 `data.code: "NG.Interrupted"`로 실패하고 세션은 일시 정지 상태로 남지 않는다. 에이전트 재시작 뒤처럼 `session/resume`이 체크포인트에서 복원한 일시 정지는 다음 프롬프트의 텍스트가 응답한다.
 
-`session/cancel`은 진행 중인 턴만 취소한다. 실행 중인 턴이 없을 때 온 취소는 무시한다(메시지 순서를 바꾸는 전송은 `set_pre_armed_cancel(true)`로 이전의 사전 취소를 유지할 수 있다). 취소 뒤 대기 중인 agent→client 요청은 응답할 시간 500 ms를 받고, 그 뒤 서버는 `$/cancel_request`를 보내고 턴을 끝낸다. 권한 요청은 `ACPClient::set_permission_timeout`으로 정하지 않으면 시간 제한이 없다. stdin이 EOF에 닿으면 `run()`은 진행 중인 턴이 `set_eof_grace`(1초) 동안 끝나기를 기다린 뒤 취소한다.
+`session/cancel`은 진행 중인 턴만 취소한다. 실행 중인 턴이 없을 때 온 취소는 무시한다(메시지 순서를 바꾸는 전송은 `set_pre_armed_cancel(true)`로 이전의 사전 취소를 유지할 수 있다). `requestId`가 실행 중인 `session/prompt`의 id인 `$/cancel_request` 알림도 같은 방식으로 턴을 취소하며, 그 프롬프트는 여전히 응답을 하나(`stopReason: "cancelled"`) 받는다. 알 수 없거나 끝난 요청 등 다른 요청의 `requestId`는 무시한다. 취소 뒤 대기 중인 agent→client 요청은 응답할 시간 500 ms를 받고, 그 뒤 서버는 `$/cancel_request`를 보내고 턴을 끝낸다. 권한 요청은 `ACPClient::set_permission_timeout`으로 정하지 않으면 시간 제한이 없다. stdin이 EOF에 닿으면 `run()`은 진행 중인 턴이 `set_eof_grace`(1초) 동안 끝나기를 기다린 뒤 취소한다.
 
 `session/new`와 `session/resume`의 stdio `mcpServers`는 NeoGraph의 MCP 클라이언트(`NEOGRAPH_BUILD_MCP_CLIENT`로 빌드)로 세션의 `cwd`에서 시작하며, 환경은 최소한으로, 에이전트의 `PATH`(Windows에서는 `SystemRoot`도)에 클라이언트의 `env` 항목을 더한 것이다. provider API 키가 있을 수 있는 나머지 에이전트 환경은 넘기지 않는다. 노드는 `ACPClient::session_tools(session_id)`로 그 도구를 쓴다. HTTP와 SSE MCP 서버는 알리지 않으며 `-32602`로 거절한다. 시작하지 못한 서버는 요청을 `-32603`, `data.reason: "mcp_server_unavailable"`로 실패시킨다.
 

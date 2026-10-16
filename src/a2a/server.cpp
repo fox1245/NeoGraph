@@ -486,6 +486,54 @@ bool plausible_host(const std::string& host) {
     });
 }
 
+/// The first element of a comma-separated header list, trimmed.
+std::string first_list_item(const std::string& value) {
+    auto item = value.substr(0, value.find(','));
+    const auto begin = item.find_first_not_of(" \t");
+    if (begin == std::string::npos) return {};
+    const auto end = item.find_last_not_of(" \t");
+    return item.substr(begin, end - begin + 1);
+}
+
+/// Scheme and host a trusted reverse proxy reports for the client's request:
+/// RFC 7239 `Forwarded` (its first element, the hop nearest the client),
+/// else `X-Forwarded-Proto` / `X-Forwarded-Host`. Only `http` / `https` and
+/// plausible hosts are taken; anything else keeps the direct value.
+void apply_forwarded_origin(const httplib::Request& req, std::string& scheme, std::string& host) {
+    std::string proto;
+    std::string forwarded_host;
+    const auto forwarded = first_list_item(req.get_header_value("Forwarded"));
+    if (!forwarded.empty()) {
+        std::size_t pos = 0;
+        while (pos <= forwarded.size()) {
+            const auto next = forwarded.find(';', pos);
+            auto pair = forwarded.substr(pos, next == std::string::npos ? std::string::npos
+                                                                        : next - pos);
+            const auto eq = pair.find('=');
+            if (eq != std::string::npos) {
+                auto key = first_list_item(pair.substr(0, eq));
+                auto value = first_list_item(pair.substr(eq + 1));
+                if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+                    value = value.substr(1, value.size() - 2);
+                }
+                std::transform(key.begin(), key.end(), key.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (key == "proto") proto = value;
+                else if (key == "host") forwarded_host = value;
+            }
+            if (next == std::string::npos) break;
+            pos = next + 1;
+        }
+    } else {
+        proto = first_list_item(req.get_header_value("X-Forwarded-Proto"));
+        forwarded_host = first_list_item(req.get_header_value("X-Forwarded-Host"));
+    }
+    std::transform(proto.begin(), proto.end(), proto.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (proto == "http" || proto == "https") scheme = proto;
+    if (plausible_host(forwarded_host)) host = forwarded_host;
+}
+
 // --- page tokens ------------------------------------------------------------
 
 std::string hex_encode(const std::string& text) {
@@ -595,6 +643,7 @@ struct A2AServer::Impl {
     std::atomic<bool>                             stopping{false};
     int                                           bound_port = 0;
     bool                                          generated_card_url = false;
+    std::atomic<bool>                             trust_forwarded_headers{false};
 
     void bind_card_endpoint(const std::string& host) {
         if (!card.url.empty() && !generated_card_url) return;
@@ -980,9 +1029,15 @@ AgentCard A2AServer::Impl::served_card(const httplib::Request& req) const {
     if (url.empty() || generated_card_url) {
         // No public URL was configured: advertise the address this client
         // used, so a client that keeps to the card's origin reaches us even
-        // when the server is bound to a wildcard address.
-        const auto host = req.get_header_value("Host");
-        if (plausible_host(host)) url = "http://" + host;
+        // when the server is bound to a wildcard address. Behind a reverse
+        // proxy the host may opt in to the proxy's forwarded scheme and host;
+        // those headers are client-controlled otherwise and are ignored.
+        std::string scheme = "http";
+        auto host = req.get_header_value("Host");
+        if (trust_forwarded_headers.load(std::memory_order_relaxed)) {
+            apply_forwarded_origin(req, scheme, host);
+        }
+        if (plausible_host(host)) url = scheme + "://" + host;
     }
     if (c.supported_interfaces.empty()) {
         // 1.0 is the primary binding; 0.3 is the compatibility dialect.
@@ -2470,5 +2525,9 @@ void A2AServer::stop() {
 bool A2AServer::is_running() const { return impl_->running.load(std::memory_order_acquire); }
 
 int A2AServer::port() const { return impl_->bound_port; }
+
+void A2AServer::set_trust_forwarded_headers(bool enabled) {
+    impl_->trust_forwarded_headers.store(enabled, std::memory_order_relaxed);
+}
 
 }  // namespace neograph::a2a

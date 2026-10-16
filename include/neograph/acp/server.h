@@ -16,6 +16,8 @@
  *   - session/resume
  *   - session/prompt
  *   - session/cancel  (notification — no response)
+ *   - $/cancel_request (notification) for an in-flight session/prompt, which
+ *     it cancels as session/cancel does; other request ids are ignored
  *
  * Methods emitted (agent → client):
  *   - session/update  (streaming notification while a prompt is in flight)
@@ -371,7 +373,10 @@ class NEOGRAPH_API ACPServer {
     /// `StopReason::Cancelled`.
     ///
     /// session/cancel cancels the session's ongoing prompt turn; a cancel
-    /// with no prompt running is ignored. An embedder whose transport can
+    /// with no prompt running is ignored. A `$/cancel_request` that names an
+    /// in-flight session/prompt by its id does the same for that turn (its
+    /// response is the `cancelled` stop reason); one that names an unknown or
+    /// finished request, or any other request, is ignored. An embedder whose transport can
     /// reorder messages may opt into @ref set_pre_armed_cancel, under which a
     /// cancel that arrives before a session's first prompt cancels it.
     ///

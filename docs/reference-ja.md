@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=776b8c54a23511043b7b4420ea2cac1a50b69ec0161082272f81814d278248d7 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=67cdf454b4a9d458dd8be4d1e270a4b287f65ee7b114915ca1c4aaf14cb900aa -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3114,7 +3114,7 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 
 例外テキスト (`what()`) はクライアントに届きません。message は型付きの公開メッセージ (`NodeFailureError::public_message`) か失敗クラスごとの汎用文で、詳細はホストのログにだけ残ります。割り込みは、理由をタイトル、ペイロードを `rawInput` とし、`_meta["neograph/interrupt"]` と選択肢 "approve" (`allow_once`)・"reject" (`reject_once`) を持つツール呼び出しになります。選ばれた option id が再開値です。変えるには `interrupt_permission` と `interrupt_resume_value` をオーバーライドします。`cancelled` の回答はターンを取り消しで終えます。アダプターが `std::nullopt` を返すか、クライアントが回答できない場合、ターンは `data.code: "NG.Interrupted"` で失敗し、セッションは一時停止のまま残りません。エージェントの再起動後のように `session/resume` がチェックポイントから復元した一時停止には、次のプロンプトのテキストが回答します。
 
-`session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
+`session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。`requestId` が実行中の `session/prompt` の id である `$/cancel_request` 通知も同じようにターンを取り消し、そのプロンプトには引き続き応答が 1 つ (`stopReason: "cancelled"`) 返ります。未知または終了済みなど、ほかのリクエストの `requestId` は無視します。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
 
 `session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境は最小限で、エージェントの `PATH`(Windows では `SystemRoot` も)にクライアントの `env` を加えたものです。プロバイダーの API キーを含みうるエージェントのその他の環境は渡しません。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
 

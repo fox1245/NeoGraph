@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=ae2e03b8b87d0da548b07723e235ce213559d2ccc8a4060ef5b28e72d67a5799 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=86d8cffc37b1915de7134b36712461ee3bfa0f9cefb2a46d145909c5b55111f2 -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -122,7 +122,7 @@ int main() {
 - 既定のアダプターは、最終的な答えを完了したタスクのステータスメッセージにだけ入れます。タスクにアーティファクトはないので、アーティファクトを読むクライアントは何も受け取れません。答えをアーティファクトとして返すには、`build_output_artifact()` をオーバーライドします。[サンプル 78](../examples/78_a2a_input_required.cpp) は、`response` チャネルをこの方法でアーティファクトにしています。
 - グラフの実行1回がタスク1つで、タスク ID はその実行の `thread_id` です。タスクはそれぞれ専用のワーカースレッドで動くので、接続が切れてもタスクは続きます。サーバーが同時に受け付けるタスクは32件までで、それを超えると JSON-RPC エラー `-32603`(理由 `RESOURCE_EXHAUSTED`)が返ります。
 - `interrupt_before`(またはノードが投げた `NodeInterrupt`)は、タスクを `input-required` にします。ステータスメッセージには理由が、`metadata["neograph/interrupt"]` にはノードとチェックポイントが入り、同じタスク ID で続きのメッセージを送ると、そのチェックポイントから実行が再開されます。続きのメッセージのテキストが再開値になります。チェックポイントストアがなければ、続きのメッセージを入力にしてグラフを最初からやり直すので、グラフが停止する可能性があるなら、エンジンにストアを持たせてください。
-- カードは `GET /.well-known/agent-card.json` で、JSON-RPC のエンドポイントは `POST /` で提供されます。`AgentCard::url` がなければ、カードはクライアントがアクセスしたアドレスを示します。
+- カードは `GET /.well-known/agent-card.json` で、JSON-RPC のエンドポイントは `POST /` で提供されます。`AgentCard::url` がなければ、カードはクライアントがアクセスしたアドレスを `http` スキームで示します。TLS を終端するリバースプロキシの後ろでは、`AgentCard::url` に公開 URL を設定するか、`A2AServer::set_trust_forwarded_headers(true)` を呼んで、プロキシが付けた `Forwarded` (RFC 7239) または `X-Forwarded-Proto` / `X-Forwarded-Host` ヘッダーからスキームとホストを取るようにします。これらのヘッダーはクライアント自身も付けられるため既定ではオフで、自分で管理するプロキシがこれらを上書きする場合にだけオンにします。`url` なしで直列化したカードは空文字列を書かず、このメンバーを省きます (優先トランスポートの最初のインターフェースがあればその URL を使います)。
 - このサーバーはリクエストを認証しません。認証関数を受け取るのは、Program ベースのコンストラクターだけです。ループバックアドレスにバインドするか、認証を行うプロキシを前に置いてください。
 
 `neograph::core` と `neograph::a2a` をリンクします。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=d77b934a500c3e111fd61587bca9025e698ac91bf4048ddb2d4eb56b1de80fc4 -->
+<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=3617734aebc1bcbee95c4407fb07e702416c58627b2137e686d6c9ff0571b8b8 -->
 # ACP: グラフをエディターのエージェントとして使う
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -175,7 +175,7 @@ stop reason: end_turn
 
 ## キャンセル、セッション、エラー
 
-- **キャンセル。** `session/cancel` は実行中のターンをキャンセルし、そのターンは `stopReason: "cancelled"` で終わります。実行中のターンがないときのキャンセルは無視されます。stdin がファイルの終端に達すると、`run()` は実行中のターンが終わるまで `set_eof_grace`(1秒)待ち、そのあとキャンセルします。
+- **キャンセル。** `session/cancel` は実行中のターンをキャンセルし、そのターンは `stopReason: "cancelled"` で終わります。実行中のターンがないときのキャンセルは無視されます。実行中の `session/prompt` をリクエスト id で指す `$/cancel_request` も同じようにそのターンをキャンセルし、ほかのリクエストを指すものは無視されます。stdin がファイルの終端に達すると、`run()` は実行中のターンが終わるまで `set_eof_grace`(1秒)待ち、そのあとキャンセルします。
 - **ターンの終わり方。** 実行が完了すれば `end_turn`、キャンセルされれば `cancelled`、実行が `RunConfig::max_steps` に達すれば `max_turn_requests`、モデルのトークン予算を超えれば `max_tokens`、provider が拒否すれば `refusal` です。それ以外の失敗は、`data` が `{code, retryable}` の JSON-RPC エラー `-32603` で、メッセージは失敗の公開メッセージであり、例外のテキストではありません。完全な表は、リファレンスの [ACP](reference-en.md#neographacp--agent-client-protocol) と[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。
 - **セッション。** `session/new` はセッションを作り、`session/resume` はエージェントが知っているセッションを続けます。エンジンにチェックポイントストアがあれば、許可リクエストで止まったセッションを、エージェントの再起動後に `session/resume` で復元できます。このとき、次のプロンプトのテキストが、待っていた質問への答えになります。`initialize` の前の呼び出しは `-32600`、未知のセッションは `-32002` です。
 - **MCP サーバー。** クライアントは `session/new` で stdio の MCP サーバーを渡せます。エージェントは NeoGraph の MCP クライアントを使い、セッションの `cwd` で、最小限の環境(`PATH` とクライアントの `env` の項目)でそれらを起動するので、エージェントの環境にある provider のキーは渡りません。ノードは `ACPClient::session_tools(session_id)` でそれらのツールにアクセスします。HTTP と SSE の MCP サーバーは `-32602` で拒否されます。[MCP ガイド](mcp.md)を参照してください。

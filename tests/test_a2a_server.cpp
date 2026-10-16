@@ -1028,4 +1028,102 @@ TEST(A2AServerV1, RawStreamEmitsArtifactBeforeTerminalWithoutLegacyFields) {
     }
 }
 
+// An optional id sent as JSON null is absent (#455): the 0.3 TCK's
+// test_null_optional_fields sends it so, and ProtoJSON reads it so.
+TEST(A2AServer, NullTaskIdAndContextIdAreAbsentInBothDialects) {
+    LiveServer srv;
+    const auto legacy = neograph::json::parse(R"({
+        "message": {"kind": "message", "messageId": "null-ids-03", "role": "user",
+                    "parts": [{"kind": "text", "text": "hi"}],
+                    "taskId": null, "contextId": null}
+    })");
+    auto rpc = raw_rpc(srv, "message/send", legacy, "");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["status"]["state"], "completed");
+    EXPECT_FALSE(rpc["result"]["contextId"].get<std::string>().empty());
+
+    const auto v1 = neograph::json::parse(R"({
+        "message": {"messageId": "null-ids-10", "role": "ROLE_USER",
+                    "parts": [{"text": "hi"}], "taskId": null, "contextId": null}
+    })");
+    rpc = raw_rpc(srv, "SendMessage", v1, "1.0");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["task"]["status"]["state"], "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(rpc["result"]["task"]["contextId"].get<std::string>().empty());
+}
+
+TEST(A2AServer, NullConfigurationMembersKeepTheirDefaults) {
+    LiveServer srv;
+    // `blocking: null` is absent, so the send still blocks until the task is
+    // terminal (a null read as false would return the SUBMITTED task).
+    const auto params = neograph::json::parse(R"({
+        "message": {"kind": "message", "messageId": "null-config", "role": "user",
+                    "parts": [{"kind": "text", "text": "hi"}]},
+        "configuration": {"blocking": null, "historyLength": null}
+    })");
+    auto rpc = raw_rpc(srv, "message/send", params, "");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["status"]["state"], "completed");
+    EXPECT_EQ(rpc["result"]["history"].size(), 2u);
+}
+
+namespace {
+
+neograph::json card_with_headers(int port, const httplib::Headers& headers) {
+    httplib::Client c("127.0.0.1", port);
+    auto res = c.Get("/.well-known/agent-card.json", headers);
+    if (!res) throw std::runtime_error("no response");
+    return neograph::json::parse(res->body);
+}
+
+}  // namespace
+
+TEST(A2AServer, ForwardedHeadersAreIgnoredUnlessTheHostTrustsThem) {
+    auto card = build_card(0);
+    card.url.clear();
+    A2AServer server(build_echo_engine(), std::move(card));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const httplib::Headers proxied = {{"Host", "agent.example.com"},
+                                      {"X-Forwarded-Proto", "https"},
+                                      {"X-Forwarded-Host", "public.example"}};
+    auto served = card_with_headers(server.port(), proxied);
+    EXPECT_EQ(served["url"], "http://agent.example.com");
+    server.stop();
+}
+
+TEST(A2AServer, TrustedForwardedHeadersSetTheDerivedCardUrl) {
+    auto card = build_card(0);
+    card.url.clear();
+    A2AServer server(build_echo_engine(), std::move(card));
+    server.set_trust_forwarded_headers(true);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+
+    auto served = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                                    {"X-Forwarded-Proto", "https, http"},
+                                                    {"X-Forwarded-Host", "public.example"}});
+    EXPECT_EQ(served["url"], "https://public.example");
+    EXPECT_EQ(served["supportedInterfaces"][0]["url"], "https://public.example");
+
+    // RFC 7239 wins over the X-Forwarded-* pair; its first element is the
+    // hop nearest the client.
+    served = card_with_headers(server.port(),
+        {{"Host", "agent.example.com"},
+         {"Forwarded", "for=192.0.2.1;proto=https;host=\"edge.example:8443\", proto=http"},
+         {"X-Forwarded-Proto", "http"}});
+    EXPECT_EQ(served["url"], "https://edge.example:8443");
+
+    auto v1 = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                                {"A2A-Version", "1.0"},
+                                                {"X-Forwarded-Proto", "https"}});
+    EXPECT_FALSE(v1.contains("url"));
+    EXPECT_EQ(v1["supportedInterfaces"][0]["url"], "https://agent.example.com");
+
+    // Only http and https are taken; the host must be plausible.
+    served = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                               {"X-Forwarded-Proto", "javascript"},
+                                               {"X-Forwarded-Host", "bad host/x"}});
+    EXPECT_EQ(served["url"], "http://agent.example.com");
+    server.stop();
+}
+
 }  // namespace
