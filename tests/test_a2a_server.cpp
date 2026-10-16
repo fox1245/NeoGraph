@@ -1067,5 +1067,63 @@ TEST(A2AServer, NullConfigurationMembersKeepTheirDefaults) {
     EXPECT_EQ(rpc["result"]["history"].size(), 2u);
 }
 
+namespace {
+
+neograph::json card_with_headers(int port, const httplib::Headers& headers) {
+    httplib::Client c("127.0.0.1", port);
+    auto res = c.Get("/.well-known/agent-card.json", headers);
+    if (!res) throw std::runtime_error("no response");
+    return neograph::json::parse(res->body);
+}
+
+}  // namespace
+
+TEST(A2AServer, ForwardedHeadersAreIgnoredUnlessTheHostTrustsThem) {
+    auto card = build_card(0);
+    card.url.clear();
+    A2AServer server(build_echo_engine(), std::move(card));
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+    const httplib::Headers proxied = {{"Host", "agent.example.com"},
+                                      {"X-Forwarded-Proto", "https"},
+                                      {"X-Forwarded-Host", "public.example"}};
+    auto served = card_with_headers(server.port(), proxied);
+    EXPECT_EQ(served["url"], "http://agent.example.com");
+    server.stop();
+}
+
+TEST(A2AServer, TrustedForwardedHeadersSetTheDerivedCardUrl) {
+    auto card = build_card(0);
+    card.url.clear();
+    A2AServer server(build_echo_engine(), std::move(card));
+    server.set_trust_forwarded_headers(true);
+    ASSERT_TRUE(server.start_async("127.0.0.1", 0));
+
+    auto served = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                                    {"X-Forwarded-Proto", "https, http"},
+                                                    {"X-Forwarded-Host", "public.example"}});
+    EXPECT_EQ(served["url"], "https://public.example");
+    EXPECT_EQ(served["supportedInterfaces"][0]["url"], "https://public.example");
+
+    // RFC 7239 wins over the X-Forwarded-* pair; its first element is the
+    // hop nearest the client.
+    served = card_with_headers(server.port(),
+        {{"Host", "agent.example.com"},
+         {"Forwarded", "for=192.0.2.1;proto=https;host=\"edge.example:8443\", proto=http"},
+         {"X-Forwarded-Proto", "http"}});
+    EXPECT_EQ(served["url"], "https://edge.example:8443");
+
+    auto v1 = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                                {"A2A-Version", "1.0"},
+                                                {"X-Forwarded-Proto", "https"}});
+    EXPECT_FALSE(v1.contains("url"));
+    EXPECT_EQ(v1["supportedInterfaces"][0]["url"], "https://agent.example.com");
+
+    // Only http and https are taken; the host must be plausible.
+    served = card_with_headers(server.port(), {{"Host", "agent.example.com"},
+                                               {"X-Forwarded-Proto", "javascript"},
+                                               {"X-Forwarded-Host", "bad host/x"}});
+    EXPECT_EQ(served["url"], "http://agent.example.com");
+    server.stop();
+}
 
 }  // namespace

@@ -397,4 +397,22 @@ TEST(A2ATypes, NullOptionalMembersAreAbsent) {
     EXPECT_FALSE(a.description.has_value());
 }
 
+// #456: a card without a url never serializes `"url": ""`.
+TEST(A2ATypes, AgentCardWithoutUrlOmitsItOrTakesThePreferredInterface) {
+    AgentCard c;
+    c.name = "n";
+    json j;
+    to_json(j, c);
+    EXPECT_FALSE(j.contains("url"));
+
+    c.supported_interfaces = {AgentInterface{"https://grpc.example", "GRPC", "1.0", {}},
+                              AgentInterface{"https://rpc.example", "JSONRPC", "1.0", {}}};
+    to_json(j, c);
+    EXPECT_EQ(j["url"], "https://rpc.example");
+
+    c.url = "https://explicit.example";
+    to_json(j, c);
+    EXPECT_EQ(j["url"], "https://explicit.example");
+}
+
 }  // namespace

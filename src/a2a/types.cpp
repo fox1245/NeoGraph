@@ -551,7 +551,21 @@ void to_json(json& j, const AgentCard& c) {
     j = json::object();
     j["name"]                = c.name;
     j["description"]         = c.description;
-    j["url"]                 = c.url;
+    // An empty `url` is unusable: take the first interface of the preferred
+    // transport that has one, else leave the member out rather than
+    // advertising "" (A2AServer fills it in from the bound address).
+    std::string url = c.url;
+    if (url.empty()) {
+        const auto& preferred = c.preferred_transport.empty() ? std::string("JSONRPC")
+                                                              : c.preferred_transport;
+        for (const auto& i : c.supported_interfaces) {
+            if (!i.url.empty() && i.protocol_binding == preferred) {
+                url = i.url;
+                break;
+            }
+        }
+    }
+    if (!url.empty()) j["url"] = url;
     j["version"]             = c.version;
     j["protocolVersion"]     = c.protocol_version.empty() ? std::string("0.3.0")
                                                           : c.protocol_version;
