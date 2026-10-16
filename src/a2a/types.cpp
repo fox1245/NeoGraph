@@ -12,6 +12,12 @@ void parse_array_of(const json& arr, Vec& dst, Fn from_one) {
         dst.push_back(std::move(elem));
     }
 }
+
+// An optional member sent as JSON null is absent (ProtoJSON and the 0.3
+// JSON schema both read it so), not an empty or default value.
+bool present(const json& j, const char* key) {
+    return j.contains(key) && !j[key].is_null();
+}
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +213,8 @@ void from_json(const json& j, Message& m) {
         parse_array_of(j["parts"], m.parts,
                        [](const json& v, Part& out) { from_json(v, out); });
     }
-    if (j.contains("taskId"))    m.task_id    = j.value("taskId", std::string());
-    if (j.contains("contextId")) m.context_id = j.value("contextId", std::string());
+    if (present(j, "taskId"))    m.task_id    = j.value("taskId", std::string());
+    if (present(j, "contextId")) m.context_id = j.value("contextId", std::string());
     if (j.contains("referenceTaskIds")) {
         auto arr = j["referenceTaskIds"];
         if (arr.is_array()) for (auto v : arr) m.reference_task_ids.push_back(v.get<std::string>());
@@ -246,8 +252,8 @@ void from_json(const json& j, Artifact& a) {
         parse_array_of(j["parts"], a.parts,
                        [](const json& v, Part& out) { from_json(v, out); });
     }
-    if (j.contains("name"))        a.name        = j.value("name", std::string());
-    if (j.contains("description")) a.description = j.value("description", std::string());
+    if (present(j, "name"))        a.name        = j.value("name", std::string());
+    if (present(j, "description")) a.description = j.value("description", std::string());
     if (j.contains("metadata"))    a.metadata    = j["metadata"];
 }
 
@@ -361,10 +367,10 @@ void from_json(const json& j, MessageSendConfiguration& c) {
         if (arr.is_array())
             for (auto v : arr) c.accepted_output_modes.push_back(v.get<std::string>());
     }
-    if (j.contains("blocking"))      c.blocking       = j.value("blocking", false);
-    else if (j.contains("returnImmediately"))
+    if (present(j, "blocking"))      c.blocking       = j.value("blocking", false);
+    else if (present(j, "returnImmediately"))
         c.blocking = !j.value("returnImmediately", false);
-    if (j.contains("historyLength")) c.history_length = j.value("historyLength", 0);
+    if (present(j, "historyLength")) c.history_length = j.value("historyLength", 0);
 }
 
 void to_json(json& j, const MessageSendParams& p) {
@@ -386,7 +392,7 @@ void to_json(json& j, const MessageSendParams& p, WireDialect dialect) {
 
 void from_json(const json& j, MessageSendParams& p) {
     if (j.contains("message")) from_json(j["message"], p.message);
-    if (j.contains("configuration")) {
+    if (present(j, "configuration")) {
         MessageSendConfiguration c;
         from_json(j["configuration"], c);
         p.configuration = c;

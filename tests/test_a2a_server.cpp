@@ -1028,4 +1028,44 @@ TEST(A2AServerV1, RawStreamEmitsArtifactBeforeTerminalWithoutLegacyFields) {
     }
 }
 
+// An optional id sent as JSON null is absent (#455): the 0.3 TCK's
+// test_null_optional_fields sends it so, and ProtoJSON reads it so.
+TEST(A2AServer, NullTaskIdAndContextIdAreAbsentInBothDialects) {
+    LiveServer srv;
+    const auto legacy = neograph::json::parse(R"({
+        "message": {"kind": "message", "messageId": "null-ids-03", "role": "user",
+                    "parts": [{"kind": "text", "text": "hi"}],
+                    "taskId": null, "contextId": null}
+    })");
+    auto rpc = raw_rpc(srv, "message/send", legacy, "");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["status"]["state"], "completed");
+    EXPECT_FALSE(rpc["result"]["contextId"].get<std::string>().empty());
+
+    const auto v1 = neograph::json::parse(R"({
+        "message": {"messageId": "null-ids-10", "role": "ROLE_USER",
+                    "parts": [{"text": "hi"}], "taskId": null, "contextId": null}
+    })");
+    rpc = raw_rpc(srv, "SendMessage", v1, "1.0");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["task"]["status"]["state"], "TASK_STATE_COMPLETED");
+    EXPECT_FALSE(rpc["result"]["task"]["contextId"].get<std::string>().empty());
+}
+
+TEST(A2AServer, NullConfigurationMembersKeepTheirDefaults) {
+    LiveServer srv;
+    // `blocking: null` is absent, so the send still blocks until the task is
+    // terminal (a null read as false would return the SUBMITTED task).
+    const auto params = neograph::json::parse(R"({
+        "message": {"kind": "message", "messageId": "null-config", "role": "user",
+                    "parts": [{"kind": "text", "text": "hi"}]},
+        "configuration": {"blocking": null, "historyLength": null}
+    })");
+    auto rpc = raw_rpc(srv, "message/send", params, "");
+    ASSERT_TRUE(rpc.contains("result")) << rpc.dump();
+    EXPECT_EQ(rpc["result"]["status"]["state"], "completed");
+    EXPECT_EQ(rpc["result"]["history"].size(), 2u);
+}
+
+
 }  // namespace
