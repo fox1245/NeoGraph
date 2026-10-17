@@ -1,5 +1,7 @@
 #include <neograph/json.h>
 
+#include "json_builder.h"
+
 #include <yyjson.h>
 
 #include "text_safety.h"
@@ -1011,5 +1013,95 @@ std::vector<std::string> json::get<std::vector<std::string>>() const {
     }
     return out;
 }
+
+// ===========================================================================
+// detail::JsonBuilder (#478)
+// ===========================================================================
+
+namespace detail {
+
+JsonBuilder::JsonBuilder() : doc_(json::make_doc()) {
+    if (!doc_) throw std::bad_alloc();
+}
+
+JsonBuilder::Value JsonBuilder::make(std::nullptr_t) {
+    return yyjson_mut_null(doc_.get());
+}
+JsonBuilder::Value JsonBuilder::make(bool value) {
+    return yyjson_mut_bool(doc_.get(), value);
+}
+JsonBuilder::Value JsonBuilder::make(int value) {
+    return make(static_cast<long long>(value));
+}
+JsonBuilder::Value JsonBuilder::make(unsigned value) {
+    return make(static_cast<unsigned long long>(value));
+}
+JsonBuilder::Value JsonBuilder::make(long value) {
+    return make(static_cast<long long>(value));
+}
+JsonBuilder::Value JsonBuilder::make(unsigned long value) {
+    return make(static_cast<unsigned long long>(value));
+}
+JsonBuilder::Value JsonBuilder::make(long long value) {
+    return yyjson_mut_sint(doc_.get(), value);
+}
+JsonBuilder::Value JsonBuilder::make(unsigned long long value) {
+    return yyjson_mut_uint(doc_.get(), value);
+}
+JsonBuilder::Value JsonBuilder::make(double value) {
+    return yyjson_mut_real(doc_.get(), value);
+}
+JsonBuilder::Value JsonBuilder::make(float value) {
+    return make(static_cast<double>(value));
+}
+JsonBuilder::Value JsonBuilder::make(const char* value) {
+    return yyjson_mut_strcpy(doc_.get(), value ? value : "");
+}
+JsonBuilder::Value JsonBuilder::make(const std::string& value) {
+    return yyjson_mut_strncpy(doc_.get(), value.data(), value.size());
+}
+JsonBuilder::Value JsonBuilder::make(std::string_view value) {
+    return yyjson_mut_strncpy(doc_.get(), value.data(), value.size());
+}
+JsonBuilder::Value JsonBuilder::make(const std::vector<std::string>& value) {
+    auto* array = yyjson_mut_arr(doc_.get());
+    for (const auto& item : value)
+        yyjson_mut_arr_append(array, yyjson_mut_strncpy(doc_.get(), item.data(), item.size()));
+    return array;
+}
+JsonBuilder::Value JsonBuilder::make(const json& value) {
+    return value.val_ ? yyjson_mut_val_mut_copy(doc_.get(), value.val_)
+                      : yyjson_mut_null(doc_.get());
+}
+
+JsonBuilder::Value JsonBuilder::object(std::initializer_list<Member> members) {
+    auto* object = yyjson_mut_obj(doc_.get());
+    for (const auto& [key, value] : members) {
+        yyjson_mut_obj_add(object, yyjson_mut_strncpy(doc_.get(), key.data(), key.size()),
+                           value);
+    }
+    return object;
+}
+
+JsonBuilder::Value JsonBuilder::array(std::initializer_list<Value> items) {
+    auto* array = yyjson_mut_arr(doc_.get());
+    for (auto* item : items) yyjson_mut_arr_append(array, item);
+    return array;
+}
+
+void JsonBuilder::push(Value array, Value item) {
+    yyjson_mut_arr_append(array, item);
+}
+
+void JsonBuilder::set(Value object, std::string_view key, Value value) {
+    yyjson_mut_obj_put(object, yyjson_mut_strncpy(doc_.get(), key.data(), key.size()), value);
+}
+
+json JsonBuilder::finish(Value root) && {
+    yyjson_mut_doc_set_root(doc_.get(), root);
+    return json(std::move(doc_), root);
+}
+
+}  // namespace detail
 
 } // namespace neograph

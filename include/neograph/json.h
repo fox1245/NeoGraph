@@ -40,6 +40,10 @@
 
 namespace neograph {
 
+namespace detail {
+class JsonBuilder;
+}
+
 class NEOGRAPH_API json {
 public:
     // ----- Exceptions -----
@@ -260,6 +264,8 @@ private:
     static std::shared_ptr<yyjson_mut_doc> make_doc();
 
     friend void to_json_forwarding(json& j, const json& v);
+    // Builds values in one document and hands it over (#478).
+    friend class detail::JsonBuilder;
 };
 
 // ----- items() proxy (defined outside json so it can hold a json member) -----

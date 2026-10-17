@@ -18,6 +18,8 @@
 #include <neograph/json.h>
 #include <neograph/program/result.h>
 
+#include "../core/json_builder.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <optional>
@@ -47,6 +49,14 @@ inline std::optional<std::uint64_t> tighter_node_retries(const std::optional<std
 /// Writes "max_node_retries" only when the budget sets it.
 inline void encode_node_retries(json& encoded, const RunBudget& budget) {
     if (budget.max_node_retries) encoded[kMaxNodeRetries] = *budget.max_node_retries;
+}
+
+/// The same member, in a body built with neograph::detail::JsonBuilder (#478).
+inline void encode_node_retries(::neograph::detail::JsonBuilder& builder,
+                                ::neograph::detail::JsonBuilder::Value encoded,
+                                const RunBudget& budget) {
+    if (budget.max_node_retries)
+        builder.set(encoded, kMaxNodeRetries, builder.make(*budget.max_node_retries));
 }
 
 /// Reads an optional "max_node_retries" (an unsigned integer).

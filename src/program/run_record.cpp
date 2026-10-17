@@ -1,6 +1,7 @@
 #include <neograph/program/run_record.h>
 
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 #include "node_retry_budget.h"
 
 #include <algorithm>
@@ -47,17 +48,21 @@ json rv(const json& v, std::string_view key) {
         throw std::invalid_argument("Program run record requires field '" + k + "'");
     return v[k];
 }
-json eb(const RunBudget& b) {
-    json encoded{{"wall_time_ms", b.wall_time_ms},
-            {"model_tokens", b.model_tokens},
-            {"monetary_microunits", b.monetary_microunits},
-            {"max_concurrency", b.max_concurrency},
-            {"max_program_operations", b.max_program_operations},
-            {"max_core_steps", b.max_core_steps},
-            {"max_dynamic_compiles", b.max_dynamic_compiles},
-            {"max_child_depth", b.max_child_depth},
-            {"max_total_children", b.max_total_children}};
-    detail::encode_node_retries(encoded, b);
+// Run record bodies are built in one document (#478). Each make() takes the
+// argument the json initializer list took, so the members keep their types.
+using Builder = ::neograph::detail::JsonBuilder;
+using BV      = Builder::Value;
+BV eb(Builder& j, const RunBudget& b) {
+    auto* encoded = j.object({{"wall_time_ms", j.make(b.wall_time_ms)},
+                              {"model_tokens", j.make(b.model_tokens)},
+                              {"monetary_microunits", j.make(b.monetary_microunits)},
+                              {"max_concurrency", j.make(b.max_concurrency)},
+                              {"max_program_operations", j.make(b.max_program_operations)},
+                              {"max_core_steps", j.make(b.max_core_steps)},
+                              {"max_dynamic_compiles", j.make(b.max_dynamic_compiles)},
+                              {"max_child_depth", j.make(b.max_child_depth)},
+                              {"max_total_children", j.make(b.max_total_children)}});
+    detail::encode_node_retries(j, encoded, b);
     return encoded;
 }
 RunBudget db(const json& v) {
@@ -75,13 +80,19 @@ RunBudget db(const json& v) {
     budget.max_node_retries = detail::decode_node_retries(v);
     return budget;
 }
-json invocation_body(const ProgramPersistedInvocation& invocation) {
-    json value{{"input", invocation.input},
-               {"granted_budget", eb(invocation.granted_budget)},
-               {"trace_id", invocation.trace_id}};
-    if (!invocation.parent_run_id.empty()) value["parent_run_id"] = invocation.parent_run_id;
-    if (invocation.child_depth != 0) value["child_depth"] = invocation.child_depth;
+BV invocation_body(Builder& j, const ProgramPersistedInvocation& invocation) {
+    auto* value = j.object({{"input", j.make(invocation.input)},
+                            {"granted_budget", eb(j, invocation.granted_budget)},
+                            {"trace_id", j.make(invocation.trace_id)}});
+    if (!invocation.parent_run_id.empty())
+        j.set(value, "parent_run_id", j.make(invocation.parent_run_id));
+    if (invocation.child_depth != 0) j.set(value, "child_depth", j.make(invocation.child_depth));
     return value;
+}
+json invocation_body(const ProgramPersistedInvocation& invocation) {
+    Builder j;
+    auto*   root = invocation_body(j, invocation);
+    return std::move(j).finish(root);
 }
 
 ProgramPersistedInvocation parse_invocation(const json& value, std::string_view label) {
@@ -125,17 +136,23 @@ ProgramChildState child_state_from_string(std::string_view value) {
     throw std::invalid_argument("Unknown Program child state: " + std::string(value));
 }
 
-json child_body(const ProgramChildRecord& child) {
-    json value{{"child_run_id", child.child_run_id},
-                {"link_id", child.link_id},
-                {"link_receipt", child.link_receipt},
-                {"invocation", invocation_body(child.invocation)},
-                {"state", std::string(child_state_string(child.state))}};
-    if (child.terminal_generation) value["terminal_generation"] = child.terminal_generation;
+BV child_body(Builder& j, const ProgramChildRecord& child) {
+    auto* value = j.object({{"child_run_id", j.make(child.child_run_id)},
+                            {"link_id", j.make(child.link_id)},
+                            {"link_receipt", j.make(child.link_receipt)},
+                            {"invocation", invocation_body(j, child.invocation)},
+                            {"state", j.make(std::string(child_state_string(child.state)))}});
+    if (child.terminal_generation)
+        j.set(value, "terminal_generation", j.make(child.terminal_generation));
     if (child.terminal_result)
-        value["terminal_result"] =
-            detail::parse_json_strict(child.terminal_result->serialize_canonical());
+        j.set(value, "terminal_result",
+              j.make(detail::parse_json_strict(child.terminal_result->serialize_canonical())));
     return value;
+}
+json child_body(const ProgramChildRecord& child) {
+    Builder j;
+    auto*   root = child_body(j, child);
+    return std::move(j).finish(root);
 }
 
 ProgramChildRecord parse_child(const json& value) {
@@ -156,12 +173,12 @@ ProgramChildRecord parse_child(const json& value) {
             detail::canonical_json_bytes(value.at("terminal_result")));
     return result;
 }
-json ec(const CoreCheckpointIdentity& c) {
-    return {{"core_name", c.core_name},
-            {"core_generation_id", c.core_generation_id},
-            {"core_thread_id", c.core_thread_id},
-            {"checkpoint_id", c.checkpoint_id},
-            {"checkpoint_schema_version", c.checkpoint_schema_version}};
+BV ec(Builder& j, const CoreCheckpointIdentity& c) {
+    return j.object({{"core_name", j.make(c.core_name)},
+                     {"core_generation_id", j.make(c.core_generation_id)},
+                     {"core_thread_id", j.make(c.core_thread_id)},
+                     {"checkpoint_id", j.make(c.checkpoint_id)},
+                     {"checkpoint_schema_version", j.make(c.checkpoint_schema_version)}});
 }
 CoreCheckpointIdentity dc(const json& v) {
     if (!v.is_object()) throw std::invalid_argument("Program run checkpoint must be an object");
@@ -394,63 +411,66 @@ void validate(const ProgramRunRecordData& d) {
         (void)invocation_body(child.invocation);
     }
 }
-json body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
-    json value{{"format", std::string(FORMAT)},
-               {"storage_schema_version", schema_version},
-               {"owner_scope", d.owner_scope},
-               {"run_id", d.run_id},
-               {"program_version_id", d.program_version_id},
-               {"bundle_id", d.bundle_id},
-               {"binding_fingerprint", d.binding_fingerprint},
-               {"invocation", nested(d.invocation.serialize_canonical())},
-               {"child_depth", d.child_depth},
-               {"continuation", json{{"operation_id", d.continuation.operation_id},
-                                     {"state", std::string(to_string(d.continuation.state))},
-                                     {"attempt", d.continuation.attempt}}},
-               {"remaining_budget", eb(d.remaining_budget)},
-               {"exact_checkpoint", d.exact_checkpoint ? ec(*d.exact_checkpoint) : json(nullptr)},
-               {"pending_input",
-                d.pending_input ? nested(d.pending_input->serialize_canonical()) : json(nullptr)},
-               {"pending_effect",
-                d.pending_effect ? nested(d.pending_effect->serialize_canonical()) : json(nullptr)},
-               {"terminal_result",
-                d.terminal_result ? nested(d.terminal_result->serialize_canonical()) : json(nullptr)},
-               {"fork_receipt",
-                d.fork_receipt ? nested(d.fork_receipt->serialize_canonical()) : json(nullptr)},
-               {"fork_source_run_id",
-                d.fork_source_run_id ? json(*d.fork_source_run_id) : json(nullptr)},
-               {"fork_source_program_version_id",
-                d.fork_source_program_version_id ? json(*d.fork_source_program_version_id)
-                                                  : json(nullptr)},
-               {"fork_source_checkpoint_id",
-                d.fork_source_checkpoint_id ? json(*d.fork_source_checkpoint_id) : json(nullptr)},
-               {"journal_head", d.journal_head},
-               {"event_sequence", d.event_sequence},
-               {"effect_sequence", d.effect_sequence},
-               {"created_at_ms", d.created_at_ms},
-               {"updated_at_ms", d.updated_at_ms}};
+BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version) {
+    auto* value = j.object(
+        {{"format", j.make(std::string(FORMAT))},
+         {"storage_schema_version", j.make(schema_version)},
+         {"owner_scope", j.make(d.owner_scope)},
+         {"run_id", j.make(d.run_id)},
+         {"program_version_id", j.make(d.program_version_id)},
+         {"bundle_id", j.make(d.bundle_id)},
+         {"binding_fingerprint", j.make(d.binding_fingerprint)},
+         {"invocation", j.make(nested(d.invocation.serialize_canonical()))},
+         {"child_depth", j.make(d.child_depth)},
+         {"continuation", j.object({{"operation_id", j.make(d.continuation.operation_id)},
+                                    {"state", j.make(std::string(to_string(d.continuation.state)))},
+                                    {"attempt", j.make(d.continuation.attempt)}})},
+         {"remaining_budget", eb(j, d.remaining_budget)},
+         {"exact_checkpoint", d.exact_checkpoint ? ec(j, *d.exact_checkpoint) : j.null()},
+         {"pending_input",
+          d.pending_input ? j.make(nested(d.pending_input->serialize_canonical())) : j.null()},
+         {"pending_effect",
+          d.pending_effect ? j.make(nested(d.pending_effect->serialize_canonical())) : j.null()},
+         {"terminal_result",
+          d.terminal_result ? j.make(nested(d.terminal_result->serialize_canonical())) : j.null()},
+         {"fork_receipt",
+          d.fork_receipt ? j.make(nested(d.fork_receipt->serialize_canonical())) : j.null()},
+         {"fork_source_run_id",
+          d.fork_source_run_id ? j.make(*d.fork_source_run_id) : j.null()},
+         {"fork_source_program_version_id",
+          d.fork_source_program_version_id ? j.make(*d.fork_source_program_version_id) : j.null()},
+         {"fork_source_checkpoint_id",
+          d.fork_source_checkpoint_id ? j.make(*d.fork_source_checkpoint_id) : j.null()},
+         {"journal_head", j.make(d.journal_head)},
+         {"event_sequence", j.make(d.event_sequence)},
+         {"effect_sequence", j.make(d.effect_sequence)},
+         {"created_at_ms", j.make(d.created_at_ms)},
+         {"updated_at_ms", j.make(d.updated_at_ms)}});
     if (schema_version >= 3) {
-        value["exact_checkpoint_content_id"] = d.exact_checkpoint_content_id
-            ? json(*d.exact_checkpoint_content_id) : json(nullptr);
+        j.set(value, "exact_checkpoint_content_id",
+              d.exact_checkpoint_content_id ? j.make(*d.exact_checkpoint_content_id) : j.null());
     }
-    if (!d.logical_run_id.empty()) value["logical_run_id"] = d.logical_run_id;
+    if (!d.logical_run_id.empty()) j.set(value, "logical_run_id", j.make(d.logical_run_id));
     if (d.attempt_resume) {
-        value["attempt_resume"] = json{{"checkpoint_id", d.attempt_resume->checkpoint_id},
-                                       {"value", d.attempt_resume->value}};
+        j.set(value, "attempt_resume",
+              j.object({{"checkpoint_id", j.make(d.attempt_resume->checkpoint_id)},
+                        {"value", j.make(d.attempt_resume->value)}}));
     }
-    if (d.settled_branches) value["settled_branches"] = *d.settled_branches;
+    if (d.settled_branches) j.set(value, "settled_branches", j.make(*d.settled_branches));
     if (!d.children.empty()) {
-        value["children"] = json::array();
-        for (const auto& child : d.children) value["children"].push_back(child_body(child));
+        auto* children = j.array();
+        for (const auto& child : d.children) j.push(children, child_body(j, child));
+        j.set(value, "children", children);
     }
     return value;
 }
 json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
-    auto value = body(d, schema_version);
-    value["recorded_binding_set_fingerprint"] = d.recorded_binding_set_fingerprint
-                                                    ? json(*d.recorded_binding_set_fingerprint)
-                                                    : json(nullptr);
-    return value;
+    Builder j;
+    auto*   value = body(j, d, schema_version);
+    j.set(value, "recorded_binding_set_fingerprint",
+          d.recorded_binding_set_fingerprint ? j.make(*d.recorded_binding_set_fingerprint)
+                                             : j.null());
+    return std::move(j).finish(value);
 }
 }  // namespace
 bool ProgramPersistedInvocation::operator==(const ProgramPersistedInvocation& other) const {

@@ -2,6 +2,7 @@
 #include <neograph/program/run_record.h>
 
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 #include "node_retry_budget.h"
 
 #include <limits>
@@ -67,17 +68,22 @@ std::optional<std::string> require_optional_identity(const json& value, std::str
     return result;
 }
 
-json encode_budget(const RunBudget& budget) {
-    json encoded{{"wall_time_ms", budget.wall_time_ms},
-            {"model_tokens", budget.model_tokens},
-            {"monetary_microunits", budget.monetary_microunits},
-            {"max_concurrency", budget.max_concurrency},
-            {"max_program_operations", budget.max_program_operations},
-            {"max_core_steps", budget.max_core_steps},
-            {"max_dynamic_compiles", budget.max_dynamic_compiles},
-            {"max_child_depth", budget.max_child_depth},
-            {"max_total_children", budget.max_total_children}};
-    detail::encode_node_retries(encoded, budget);
+// Generation and lineage bodies are built in one document (#478). Each make()
+// takes the argument the json initializer list took, so the members keep
+// their types.
+using Builder = ::neograph::detail::JsonBuilder;
+using BV      = Builder::Value;
+BV encode_budget(Builder& j, const RunBudget& budget) {
+    auto* encoded = j.object({{"wall_time_ms", j.make(budget.wall_time_ms)},
+                              {"model_tokens", j.make(budget.model_tokens)},
+                              {"monetary_microunits", j.make(budget.monetary_microunits)},
+                              {"max_concurrency", j.make(budget.max_concurrency)},
+                              {"max_program_operations", j.make(budget.max_program_operations)},
+                              {"max_core_steps", j.make(budget.max_core_steps)},
+                              {"max_dynamic_compiles", j.make(budget.max_dynamic_compiles)},
+                              {"max_child_depth", j.make(budget.max_child_depth)},
+                              {"max_total_children", j.make(budget.max_total_children)}});
+    detail::encode_node_retries(j, encoded, budget);
     return encoded;
 }
 
@@ -180,61 +186,65 @@ std::vector<std::string> parse_transfer_id_array(const json& value, std::string_
 }
 
 json generation_body(const ProgramRunGenerationData& data, std::uint32_t schema_version) {
-    json value = {
-        {"format", std::string(GENERATION_FORMAT)},
-        {"storage_schema_version", schema_version},
-        {"owner_scope", data.owner_scope},
-        {"lineage_id", data.lineage_id},
-        {"generation", data.generation},
-        {"run_id", data.run_id},
-        {"program_version_id", data.program_version_id},
-        {"bundle_id", data.bundle_id},
-        {"initial_run_record_id", data.initial_run_record_id},
-        {"initial_journal_head", data.initial_journal_head},
+    Builder j;
+    auto*   value = j.object(
+        {{"format", j.make(std::string(GENERATION_FORMAT))},
+         {"storage_schema_version", j.make(schema_version)},
+         {"owner_scope", j.make(data.owner_scope)},
+         {"lineage_id", j.make(data.lineage_id)},
+         {"generation", j.make(data.generation)},
+         {"run_id", j.make(data.run_id)},
+         {"program_version_id", j.make(data.program_version_id)},
+         {"bundle_id", j.make(data.bundle_id)},
+         {"initial_run_record_id", j.make(data.initial_run_record_id)},
+         {"initial_journal_head", j.make(data.initial_journal_head)},
          {"predecessor_generation_id",
-          data.predecessor_generation_id ? json(*data.predecessor_generation_id) : json(nullptr)},
-        {"created_at_ms", data.created_at_ms},
-        {"child_depth", data.child_depth}};
+          data.predecessor_generation_id ? j.make(*data.predecessor_generation_id) : j.null()},
+         {"created_at_ms", j.make(data.created_at_ms)},
+         {"child_depth", j.make(data.child_depth)}});
     if (schema_version >= 2) {
-        value["replacement_receipt"] =
-            data.replacement_receipt
-                ? detail::parse_json_strict(data.replacement_receipt->serialize_canonical())
-                : json(nullptr);
+        j.set(value, "replacement_receipt",
+              data.replacement_receipt
+                  ? j.make(detail::parse_json_strict(data.replacement_receipt->serialize_canonical()))
+                  : j.null());
     }
     if (schema_version >= 3) {
-        value["graph_migration_receipt"] =
-            data.graph_migration_receipt
-                ? detail::parse_json_strict(
-                      data.graph_migration_receipt->serialize_canonical())
-                : json(nullptr);
+        j.set(value, "graph_migration_receipt",
+              data.graph_migration_receipt
+                  ? j.make(detail::parse_json_strict(
+                        data.graph_migration_receipt->serialize_canonical()))
+                  : j.null());
     }
     if (schema_version >= 4) {
-        value["runtime_state_transfer_receipt"] =
-            data.runtime_state_transfer_receipt
-                ? detail::parse_json_strict(
-                      data.runtime_state_transfer_receipt->serialize_canonical())
-                : json(nullptr);
+        j.set(value, "runtime_state_transfer_receipt",
+              data.runtime_state_transfer_receipt
+                  ? j.make(detail::parse_json_strict(
+                        data.runtime_state_transfer_receipt->serialize_canonical()))
+                  : j.null());
     }
-    return value;
+    return std::move(j).finish(value);
 }
 
 json lineage_body(const ProgramRunLineageData& data) {
-    return {{"format", std::string(LINEAGE_FORMAT)},
-            {"storage_schema_version", ProgramRunLineage::STORAGE_SCHEMA_VERSION},
-            {"owner_scope", data.owner_scope},
-            {"lineage_id", data.lineage_id},
-            {"root_run_id", data.root_run_id},
-            {"active_generation", data.active_generation},
-            {"active_generation_id", data.active_generation_id},
-            {"active_run_record_id", data.active_run_record_id},
-            {"active_journal_head", data.active_journal_head},
-            {"remaining_budget", encode_budget(data.remaining_budget)},
-            {"inflight_reservation", encode_budget(data.inflight_reservation)},
-            {"predecessor_head_id",
-             data.predecessor_head_id ? json(*data.predecessor_head_id) : json(nullptr)},
-            {"created_at_ms", data.created_at_ms},
-            {"updated_at_ms", data.updated_at_ms},
-            {"committed_descendant_budget", encode_budget(data.committed_descendant_budget)}};
+    Builder j;
+    auto*   value = j.object(
+        {{"format", j.make(std::string(LINEAGE_FORMAT))},
+         {"storage_schema_version", j.make(ProgramRunLineage::STORAGE_SCHEMA_VERSION)},
+         {"owner_scope", j.make(data.owner_scope)},
+         {"lineage_id", j.make(data.lineage_id)},
+         {"root_run_id", j.make(data.root_run_id)},
+         {"active_generation", j.make(data.active_generation)},
+         {"active_generation_id", j.make(data.active_generation_id)},
+         {"active_run_record_id", j.make(data.active_run_record_id)},
+         {"active_journal_head", j.make(data.active_journal_head)},
+         {"remaining_budget", encode_budget(j, data.remaining_budget)},
+         {"inflight_reservation", encode_budget(j, data.inflight_reservation)},
+         {"predecessor_head_id",
+          data.predecessor_head_id ? j.make(*data.predecessor_head_id) : j.null()},
+         {"created_at_ms", j.make(data.created_at_ms)},
+         {"updated_at_ms", j.make(data.updated_at_ms)},
+         {"committed_descendant_budget", encode_budget(j, data.committed_descendant_budget)}});
+    return std::move(j).finish(value);
 }
 
 void validate_generation(const ProgramRunGenerationData& data) {

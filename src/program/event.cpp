@@ -1,5 +1,6 @@
 #include <neograph/program/event.h>
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 #include "node_retry_budget.h"
 #include <limits>
 #include <stdexcept>
@@ -7,7 +8,10 @@
 namespace neograph::program {namespace{
 template<class...T>struct O:T...{using T::operator()...;};template<class...T>O(T...)->O<T...>;constexpr std::string_view FORMAT="neograph-program-event";
 std::string rs(const json&v,std::string_view k0){std::string k(k0);if(!v.contains(k)||!v[k].is_string())throw std::invalid_argument("Program event string field invalid");return v[k].get<std::string>();}std::uint64_t ru(const json&v,std::string_view k0){std::string k(k0);if(!v.contains(k)||!v[k].is_number_unsigned())throw std::invalid_argument("Program event unsigned field invalid");return v[k].get<std::uint64_t>();}std::uint32_t r32(const json&v,std::string_view k){auto n=ru(v,k);if(n>std::numeric_limits<std::uint32_t>::max())throw std::invalid_argument("Program event integer out of range");return static_cast<std::uint32_t>(n);}std::int64_t ri(const json&v,std::string_view k0){std::string k(k0);if(!v.contains(k)||!v[k].is_number_integer())throw std::invalid_argument("Program event integer field invalid");return v[k].get<std::int64_t>();}json rv(const json&v,std::string_view k0){std::string k(k0);if(!v.contains(k))throw std::invalid_argument("Program event field missing");return v[k];}std::optional<std::string>os(const json&v,std::string_view k){auto x=rv(v,k);if(x.is_null())return{};if(!x.is_string())throw std::invalid_argument("Program event optional string invalid");return x.get<std::string>();}std::optional<int>oi(const json&v,std::string_view k){auto x=rv(v,k);if(x.is_null())return{};if(!x.is_number_integer())throw std::invalid_argument("Program event optional int invalid");auto n=x.get<std::int64_t>();if(n<std::numeric_limits<int>::min()||n>std::numeric_limits<int>::max())throw std::invalid_argument("Program event optional int out of range");return static_cast<int>(n);}
-json eb(const RunBudget&b){json e{{"wall_time_ms",b.wall_time_ms},{"model_tokens",b.model_tokens},{"monetary_microunits",b.monetary_microunits},{"max_concurrency",b.max_concurrency},{"max_program_operations",b.max_program_operations},{"max_core_steps",b.max_core_steps},{"max_dynamic_compiles",b.max_dynamic_compiles},{"max_child_depth",b.max_child_depth},{"max_total_children",b.max_total_children}};detail::encode_node_retries(e,b);return e;}RunBudget db(const json&v){RunBudget b{ru(v,"wall_time_ms"),ru(v,"model_tokens"),ru(v,"monetary_microunits"),r32(v,"max_concurrency"),ru(v,"max_program_operations"),ru(v,"max_core_steps"),ru(v,"max_dynamic_compiles"),r32(v,"max_child_depth"),ru(v,"max_total_children")};b.max_node_retries=detail::decode_node_retries(v);return b;}json ec(const CoreCheckpointIdentity&c){return{{"core_name",c.core_name},{"core_generation_id",c.core_generation_id},{"core_thread_id",c.core_thread_id},{"checkpoint_id",c.checkpoint_id},{"checkpoint_schema_version",c.checkpoint_schema_version}};}CoreCheckpointIdentity dc(const json&v){return{rs(v,"core_name"),rs(v,"core_generation_id"),rs(v,"core_thread_id"),rs(v,"checkpoint_id"),r32(v,"checkpoint_schema_version")};}
+using Builder=::neograph::detail::JsonBuilder;using BV=Builder::Value;
+// Event bodies are built in one document (#478); each make() takes the
+// argument the json initializer list took, so the members keep their types.
+BV eb(Builder&j,const RunBudget&b){auto*e=j.object({{"wall_time_ms",j.make(b.wall_time_ms)},{"model_tokens",j.make(b.model_tokens)},{"monetary_microunits",j.make(b.monetary_microunits)},{"max_concurrency",j.make(b.max_concurrency)},{"max_program_operations",j.make(b.max_program_operations)},{"max_core_steps",j.make(b.max_core_steps)},{"max_dynamic_compiles",j.make(b.max_dynamic_compiles)},{"max_child_depth",j.make(b.max_child_depth)},{"max_total_children",j.make(b.max_total_children)}});detail::encode_node_retries(j,e,b);return e;}RunBudget db(const json&v){RunBudget b{ru(v,"wall_time_ms"),ru(v,"model_tokens"),ru(v,"monetary_microunits"),r32(v,"max_concurrency"),ru(v,"max_program_operations"),ru(v,"max_core_steps"),ru(v,"max_dynamic_compiles"),r32(v,"max_child_depth"),ru(v,"max_total_children")};b.max_node_retries=detail::decode_node_retries(v);return b;}BV ec(Builder&j,const CoreCheckpointIdentity&c){return j.object({{"core_name",j.make(c.core_name)},{"core_generation_id",j.make(c.core_generation_id)},{"core_thread_id",j.make(c.core_thread_id)},{"checkpoint_id",j.make(c.checkpoint_id)},{"checkpoint_schema_version",j.make(c.checkpoint_schema_version)}});}CoreCheckpointIdentity dc(const json&v){return{rs(v,"core_name"),rs(v,"core_generation_id"),rs(v,"core_thread_id"),rs(v,"checkpoint_id"),r32(v,"checkpoint_schema_version")};}
 void validate_checkpoint(const CoreCheckpointIdentity& checkpoint) {
     detail::validate_token(checkpoint.core_name, "Program event checkpoint core_name");
     if (!detail::is_sha256_identity(checkpoint.core_generation_id)) {
@@ -24,7 +28,7 @@ void validate_checkpoint(const CoreCheckpointIdentity& checkpoint) {
     }
 }
 std::string_view rt(graph::GraphEvent::Type t){switch(t){case graph::GraphEvent::Type::NODE_START:return"node_start";case graph::GraphEvent::Type::NODE_END:return"node_end";case graph::GraphEvent::Type::LLM_TOKEN:return"llm_token";case graph::GraphEvent::Type::CHANNEL_WRITE:return"channel_write";case graph::GraphEvent::Type::INTERRUPT:return"interrupt";case graph::GraphEvent::Type::ERROR:return"error";}return"unknown";}graph::GraphEvent::Type drt(std::string_view t){if(t=="node_start")return graph::GraphEvent::Type::NODE_START;if(t=="node_end")return graph::GraphEvent::Type::NODE_END;if(t=="llm_token")return graph::GraphEvent::Type::LLM_TOKEN;if(t=="channel_write")return graph::GraphEvent::Type::CHANNEL_WRITE;if(t=="interrupt")return graph::GraphEvent::Type::INTERRUPT;if(t=="error")return graph::GraphEvent::Type::ERROR;throw std::invalid_argument("Unknown raw event type");}
-json eg(const graph::TypedGraphEvent&e){return std::visit(O{[](const graph::NodeStartEvent&x){return json{{"type","node_start"},{"node",x.node_name},{"retry",x.retry_attempt?json(*x.retry_attempt):json(nullptr)},{"data",x.data}};},[](const graph::NodeEndEvent&x){return json{{"type","node_end"},{"node",x.node_name},{"goto",x.command_goto?json(*x.command_goto):json(nullptr)},{"sends",x.send_count},{"data",x.data}};},[](const graph::LlmTokenEvent&x){return json{{"type","llm_token"},{"node",x.node_name},{"token",x.token}};},[](const graph::ChannelWriteEvent&x){return json{{"type","channel_write"},{"node",x.node_name},{"channel",x.channel},{"value",x.value}};},[](const graph::StateSnapshotEvent&x){return json{{"type","state_snapshot"},{"state",x.state}};},[](const graph::RoutingEvent&x){return json{{"type","routing"},{"goto",x.command_goto?json(*x.command_goto):json(nullptr)},{"nodes",x.next_nodes},{"step",x.step?json(*x.step):json(nullptr)},{"data",x.data}};},[](const graph::SendDispatchEvent&x){json a=json::array();for(auto&s:x.sends)a.push_back(json{{"target",s.target_node},{"input",s.input},{"source",s.source_node}});return json{{"type","send_dispatch"},{"items",a}};},[](const graph::InterruptEvent&x){return json{{"type","interrupt"},{"node",x.node_name},{"phase",x.phase?json(*x.phase):json(nullptr)},{"checkpoint",x.checkpoint_id?json(*x.checkpoint_id):json(nullptr)},{"data",x.data}};},[](const graph::ErrorEvent&x){return json{{"type","error"},{"node",x.node_name},{"message",x.message},{"data",x.data}};},[](const graph::RawGraphEvent&x){return json{{"type","raw"},{"raw_type",std::string(rt(x.event.type))},{"node",x.event.node_name},{"data",x.event.data}};}},e);}
+BV eg(Builder&j,const graph::TypedGraphEvent&e){return std::visit(O{[&](const graph::NodeStartEvent&x){return j.object({{"type",j.make("node_start")},{"node",j.make(x.node_name)},{"retry",x.retry_attempt?j.make(*x.retry_attempt):j.null()},{"data",j.make(x.data)}});},[&](const graph::NodeEndEvent&x){return j.object({{"type",j.make("node_end")},{"node",j.make(x.node_name)},{"goto",x.command_goto?j.make(*x.command_goto):j.null()},{"sends",j.make(x.send_count)},{"data",j.make(x.data)}});},[&](const graph::LlmTokenEvent&x){return j.object({{"type",j.make("llm_token")},{"node",j.make(x.node_name)},{"token",j.make(x.token)}});},[&](const graph::ChannelWriteEvent&x){return j.object({{"type",j.make("channel_write")},{"node",j.make(x.node_name)},{"channel",j.make(x.channel)},{"value",j.make(x.value)}});},[&](const graph::StateSnapshotEvent&x){return j.object({{"type",j.make("state_snapshot")},{"state",j.make(x.state)}});},[&](const graph::RoutingEvent&x){return j.object({{"type",j.make("routing")},{"goto",x.command_goto?j.make(*x.command_goto):j.null()},{"nodes",j.make(x.next_nodes)},{"step",x.step?j.make(*x.step):j.null()},{"data",j.make(x.data)}});},[&](const graph::SendDispatchEvent&x){auto*a=j.array();for(auto&s:x.sends)j.push(a,j.object({{"target",j.make(s.target_node)},{"input",j.make(s.input)},{"source",j.make(s.source_node)}}));return j.object({{"type",j.make("send_dispatch")},{"items",a}});},[&](const graph::InterruptEvent&x){return j.object({{"type",j.make("interrupt")},{"node",j.make(x.node_name)},{"phase",x.phase?j.make(*x.phase):j.null()},{"checkpoint",x.checkpoint_id?j.make(*x.checkpoint_id):j.null()},{"data",j.make(x.data)}});},[&](const graph::ErrorEvent&x){return j.object({{"type",j.make("error")},{"node",j.make(x.node_name)},{"message",j.make(x.message)},{"data",j.make(x.data)}});},[&](const graph::RawGraphEvent&x){return j.object({{"type",j.make("raw")},{"raw_type",j.make(std::string(rt(x.event.type)))},{"node",j.make(x.event.node_name)},{"data",j.make(x.event.data)}});}},e);}
 graph::TypedGraphEvent dg(const json& v) {
     const auto t = rs(v, "type");
     if (t == "node_start") {
@@ -102,39 +106,40 @@ graph::TypedGraphEvent dg(const json& v) {
     }
     throw std::invalid_argument("Unknown core event type");
 }
-json ep(const ProgramEvent& e) {
+BV ep(Builder& j, const ProgramEvent& e) {
     switch (e.kind) {
         case ProgramEventKind::Started:
             if (const auto* payload = std::get_if<ProgramStartedEvent>(&e.payload)) {
-                return eb(payload->budget);
+                return eb(j, payload->budget);
             }
             break;
         case ProgramEventKind::OperationStarted:
             if (const auto* payload = std::get_if<ProgramOperationEvent>(&e.payload))
-                return json{{"operation_kind", payload->operation_kind},
-                            {"input_digest", payload->input_digest}};
+                return j.object({{"operation_kind", j.make(payload->operation_kind)},
+                                 {"input_digest", j.make(payload->input_digest)}});
             break;
         case ProgramEventKind::Core:
             if (const auto* payload =
                     std::get_if<graph::TypedGraphEvent>(&e.payload)) {
-                return eg(*payload);
+                return eg(j, *payload);
             }
             break;
         case ProgramEventKind::Emit:
             if (const auto* payload = std::get_if<ProgramEmitEvent>(&e.payload)) {
-                return json{{"operation_id", payload->operation_id}, {"value", payload->value}};
+                return j.object({{"operation_id", j.make(payload->operation_id)},
+                                 {"value", j.make(payload->value)}});
             }
             break;
         case ProgramEventKind::CheckpointPublished:
             if (const auto* payload =
                     std::get_if<ProgramCheckpointEvent>(&e.payload)) {
-                return ec(payload->checkpoint);
+                return ec(j, payload->checkpoint);
             }
             break;
         case ProgramEventKind::Terminal:
             if (const auto* payload =
                     std::get_if<ProgramTerminalEvent>(&e.payload)) {
-                return json{{"status", std::string(to_string(payload->status))}};
+                return j.object({{"status", j.make(std::string(to_string(payload->status)))}});
             }
             break;
     }
@@ -222,20 +227,22 @@ void val(const ProgramEvent& e) {
     }
 }
 json body(const ProgramEvent& e) {
-    return {{"format", std::string(FORMAT)},
-            {"storage_schema_version", ProgramEvent::STORAGE_SCHEMA_VERSION},
-            {"sequence", e.sequence},
-            {"timestamp_ms", e.timestamp_ms},
-            {"run_id", e.run_id},
-            {"program_version_id", e.program_version_id},
-            {"bundle_id", e.bundle_id},
-            {"operation_id", e.operation_id},
-            {"core_generation_id", e.core_generation_id},
-            {"core_run_id", e.core_run_id},
-            {"trace_id", e.trace_id},
-            {"attempt", e.attempt},
-            {"kind", std::string(to_string(e.kind))},
-            {"payload", ep(e)}};
+    Builder j;
+    auto* root = j.object({{"format", j.make(std::string(FORMAT))},
+                           {"storage_schema_version", j.make(ProgramEvent::STORAGE_SCHEMA_VERSION)},
+                           {"sequence", j.make(e.sequence)},
+                           {"timestamp_ms", j.make(e.timestamp_ms)},
+                           {"run_id", j.make(e.run_id)},
+                           {"program_version_id", j.make(e.program_version_id)},
+                           {"bundle_id", j.make(e.bundle_id)},
+                           {"operation_id", j.make(e.operation_id)},
+                           {"core_generation_id", j.make(e.core_generation_id)},
+                           {"core_run_id", j.make(e.core_run_id)},
+                           {"trace_id", j.make(e.trace_id)},
+                           {"attempt", j.make(e.attempt)},
+                           {"kind", j.make(std::string(to_string(e.kind)))},
+                           {"payload", ep(j, e)}});
+    return std::move(j).finish(root);
 }
 std::string hash(const ProgramEvent& e) {
     return detail::sha256_identity(
