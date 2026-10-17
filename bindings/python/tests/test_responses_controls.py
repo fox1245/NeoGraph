@@ -283,7 +283,12 @@ def test_include_selection_preserves_observable_reasoning_and_server_metadata(ty
     ("previous_response_history", [_user("original prefix")]),
 ])
 def test_responses_controls_reject_wrong_family_before_io(typed_peer, family, field, value):
-    provider = typed_peer.provider(family)
+    # A google.generate descriptor names its model in both paths (SchemaProvider 0.3.3).
+    paths = {
+        "buffered": f"/v1beta/models/{MODEL}:generateContent",
+        "streaming": f"/v1beta/models/{MODEL}:streamGenerateContent?alt=sse",
+    } if family == "google.generate" else None
+    provider = typed_peer.provider(family, paths=paths)
     controls = ng.ProviderControls()
     setattr(controls, field, value)
     with pytest.raises(ValueError):

@@ -303,7 +303,7 @@ After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to i
 
 `ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.3.2` alpha, pinned to public commit `91fb993e50e49e3b03d290b170c83cf57afbc518` on its `maint/interface6` branch, with interface revision 6 and shared ABI 6. Monetary usage metadata changes public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 and portable JSON v2 remain unchanged; the generation does not declare a stable SDK interface.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.3.3` alpha, pinned to public commit `0437853529b5932e7097a38629a95779d08f03aa` on its `maint/interface6` branch, with interface revision 6 and shared ABI 6. Monetary usage metadata changes public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 and portable JSON v2 remain unchanged; the generation does not declare a stable SDK interface.
 
 ## Python
 
@@ -357,7 +357,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 In the other project, replace the `FetchContent` lines of the Quickstart with `find_package(NeoGraph CONFIG REQUIRED)` and configure with `-DCMAKE_PREFIX_PATH="$HOME/neograph"`. Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider 0.3.2 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.3 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

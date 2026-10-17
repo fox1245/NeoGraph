@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a7cd4ce6049270b67f1b8cde99d69ccf9fb9c0b153ab8e0150711760b99755e8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fd5e5a448537737fa422d5ecb16c31de84cc64363d0504acbbc8253966ffcb09 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 변경됨
+
+- **SchemaProvider `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6`의 SDK 0.3.3)를 도입합니다(#496).** 인터페이스 리비전과 공유 라이브러리 세대는 6 그대로이고, 공개 struct나 enum의 레이아웃은 바뀌지 않습니다. SDK의 두 수정이 NeoGraph 사용자에게 보이는 동작을 바꿉니다. **동작 변경:** 스트리밍되는 텍스트 파트가 더는 빈 텍스트 delta를 전달하지 않습니다(SchemaProvider #37). OpenAI Chat, Anthropic Messages, Gemini, Responses 스트림은 각각 이런 delta를 하나씩 보냈고, NeoGraph는 이를 빈 텍스트의 `LLM_TOKEN` 이벤트와 `llm.token` span 이벤트로 넘겼습니다. 그래서 토큰 수를 세거나 첫 이벤트를 첫 토큰으로 보는 소비자는 하나씩 어긋났습니다. 텍스트, 파트, 최종 결과는 그대로입니다. **동작 변경:** buffered 경로와 streaming 경로가 같은 리터럴 모델을 가리키지 않는 `google.generate` 디스크립터(`/v1beta/models/<model>:generateContent`와 `/v1beta/models/<model>:streamGenerateContent?alt=sse`)는 로드할 때 경로를 밝히는 `ConfigError`로 거절됩니다. 예전에는 로드된 뒤 모든 요청이 `InvalidConfig`로 실패했습니다(SchemaProvider #40). 다른 모델 이름으로 응답하는 프록시나 게이트웨이 뒤에 있는 배포가 그것을 라우팅 게이트웨이로 선언하는 방법도 SDK 문서에 적혔습니다(SchemaProvider #38). 이제 NeoGraph는 빌드와 설치된 `NeoGraphConfig`의 `find_dependency`에서 `SchemaProvider 0.3.3 EXACT`를 요구합니다. NeoGraph, C++ 소비자, Python 확장을 0.3.3 헤더와 라이브러리로 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ### 수정됨
 
