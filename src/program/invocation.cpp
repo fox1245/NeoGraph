@@ -1,6 +1,7 @@
 #include <neograph/program/invocation.h>
 
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 #include "node_retry_budget.h"
 
 #include <limits>
@@ -45,17 +46,22 @@ json required_value(const json& value, std::string_view field) {
     return value[key];
 }
 
-json encode_budget(const RunBudget& budget) {
-    auto encoded = json{{"wall_time_ms", budget.wall_time_ms},
-                {"model_tokens", budget.model_tokens},
-                {"monetary_microunits", budget.monetary_microunits},
-                {"max_concurrency", budget.max_concurrency},
-                {"max_program_operations", budget.max_program_operations},
-                {"max_core_steps", budget.max_core_steps},
-                {"max_dynamic_compiles", budget.max_dynamic_compiles},
-                {"max_child_depth", budget.max_child_depth},
-                {"max_total_children", budget.max_total_children}};
-    detail::encode_node_retries(encoded, budget);
+// Invocation payloads and stored values are built in one document each (#478).
+// Each make() takes the argument the json initializer list took, so the
+// members keep their types.
+using Builder = ::neograph::detail::JsonBuilder;
+using BV      = Builder::Value;
+BV encode_budget(Builder& j, const RunBudget& budget) {
+    auto* encoded = j.object({{"wall_time_ms", j.make(budget.wall_time_ms)},
+                              {"model_tokens", j.make(budget.model_tokens)},
+                              {"monetary_microunits", j.make(budget.monetary_microunits)},
+                              {"max_concurrency", j.make(budget.max_concurrency)},
+                              {"max_program_operations", j.make(budget.max_program_operations)},
+                              {"max_core_steps", j.make(budget.max_core_steps)},
+                              {"max_dynamic_compiles", j.make(budget.max_dynamic_compiles)},
+                              {"max_child_depth", j.make(budget.max_child_depth)},
+                              {"max_total_children", j.make(budget.max_total_children)}});
+    detail::encode_node_retries(j, encoded, budget);
     return encoded;
 }
 
@@ -86,11 +92,16 @@ RunBudget decode_budget(const json& value) {
     return budget;
 }
 
+BV encode_artifact(Builder& j, const InvocationArtifactReference& artifact) {
+    return j.object({{"artifact_identity", j.make(artifact.artifact_identity)},
+                     {"uri", j.make(artifact.uri)},
+                     {"media_type", j.make(artifact.media_type)},
+                     {"size_bytes", j.make(artifact.size_bytes)}});
+}
 json encode_artifact(const InvocationArtifactReference& artifact) {
-    return json{{"artifact_identity", artifact.artifact_identity},
-                {"uri", artifact.uri},
-                {"media_type", artifact.media_type},
-                {"size_bytes", artifact.size_bytes}};
+    Builder j;
+    auto*   value = encode_artifact(j, artifact);
+    return std::move(j).finish(value);
 }
 
 InvocationArtifactReference decode_artifact(const json& value) {
@@ -104,22 +115,26 @@ InvocationArtifactReference decode_artifact(const json& value) {
 }
 
 json invocation_payload(const RunInvocation& invocation) {
-    json payload{{"protocol_revision", invocation.protocol_revision},
-                 {"owner_scope", invocation.owner_scope},
-                 {"agent_id", invocation.agent_id},
-                 {"program_version_id", invocation.program_version_id},
-                 {"run_id", invocation.run_id},
-                 {"parent_run_id", invocation.parent_run_id},
-                 {"budget", encode_budget(invocation.budget)},
-                 {"input", invocation.input},
-                 {"message_sequence", invocation.message_sequence},
-                 {"correlation_id", invocation.correlation_id},
-                 {"artifact", invocation.artifact ? encode_artifact(*invocation.artifact) : json(nullptr)}};
+    Builder j;
+    auto*   payload = j.object(
+        {{"protocol_revision", j.make(invocation.protocol_revision)},
+         {"owner_scope", j.make(invocation.owner_scope)},
+         {"agent_id", j.make(invocation.agent_id)},
+         {"program_version_id", j.make(invocation.program_version_id)},
+         {"run_id", j.make(invocation.run_id)},
+         {"parent_run_id", j.make(invocation.parent_run_id)},
+         {"budget", encode_budget(j, invocation.budget)},
+         {"input", j.make(invocation.input)},
+         {"message_sequence", j.make(invocation.message_sequence)},
+         {"correlation_id", j.make(invocation.correlation_id)},
+         {"artifact",
+          invocation.artifact ? encode_artifact(j, *invocation.artifact) : j.null()}});
     if (invocation.selected_activation) {
-        payload["selected_activation"] = detail::parse_json_strict(
-            invocation.selected_activation->serialize_canonical());
+        j.set(payload, "selected_activation",
+              j.make(detail::parse_json_strict(
+                  invocation.selected_activation->serialize_canonical())));
     }
-    return payload;
+    return std::move(j).finish(payload);
 }
 
 void validate_diagnostic(const InvocationDiagnostic& diagnostic) {
@@ -428,23 +443,25 @@ std::string RunInvocation::serialize_canonical() const {
     const auto payload = invocation_payload(*this);
     const auto identity = detail::sha256_identity(
         "program-run-invocation/v1", detail::canonical_json_bytes(payload));
-    json value{{"format", std::string(INVOCATION_FORMAT)},
-               {"storage_schema_version", STORAGE_SCHEMA_VERSION},
-               {"id", identity},
-               {"protocol_revision", protocol_revision},
-               {"owner_scope", owner_scope},
-               {"agent_id", agent_id},
-               {"program_version_id", program_version_id},
-               {"run_id", run_id},
-               {"parent_run_id", parent_run_id},
-               {"budget", payload["budget"]},
-               {"input", input},
-               {"message_sequence", message_sequence},
-               {"idempotency_key", idempotency_key},
-               {"correlation_id", correlation_id},
-               {"artifact", artifact ? encode_artifact(*artifact) : json(nullptr)}};
-    if (selected_activation) value["selected_activation"] = payload["selected_activation"];
-    return detail::canonical_json_bytes(value);
+    Builder j;
+    auto*   value = j.object({{"format", j.make(std::string(INVOCATION_FORMAT))},
+                              {"storage_schema_version", j.make(STORAGE_SCHEMA_VERSION)},
+                              {"id", j.make(identity)},
+                              {"protocol_revision", j.make(protocol_revision)},
+                              {"owner_scope", j.make(owner_scope)},
+                              {"agent_id", j.make(agent_id)},
+                              {"program_version_id", j.make(program_version_id)},
+                              {"run_id", j.make(run_id)},
+                              {"parent_run_id", j.make(parent_run_id)},
+                              {"budget", j.make(payload["budget"])},
+                              {"input", j.make(input)},
+                              {"message_sequence", j.make(message_sequence)},
+                              {"idempotency_key", j.make(idempotency_key)},
+                              {"correlation_id", j.make(correlation_id)},
+                              {"artifact", artifact ? encode_artifact(j, *artifact) : j.null()}});
+    if (selected_activation)
+        j.set(value, "selected_activation", j.make(payload["selected_activation"]));
+    return detail::canonical_json_bytes(std::move(j).finish(value));
 }
 
 RunInvocation RunInvocation::parse(std::string_view stored_bytes) {

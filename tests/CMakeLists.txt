@@ -119,6 +119,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_fork_replay.cpp
         test_graph_migration_capsule.cpp
         test_program_transition_store.cpp
+        test_program_record_identity.cpp
         test_program_runtime.cpp
         test_program_runtime_instruction.cpp
         test_program_invocation.cpp

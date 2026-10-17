@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2962ee217acf6224261d1e7d53dbdfe9f5b7fbb7349150feb9b7d31bbd49fa55 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=0b2b07005af234fbfe38665d7a3788ac3f007d46ab997d28343171cdc4a4a36a -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -25,6 +25,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program 调用快了约 30%：canonical JSON 直接从底层 yyjson 值写出（#469）。** 每条 Program 记录（run record、日志条目、事件、lineage）都通过 canonical JSON 获得身份，这项序列化占了一次 Program 调用三分之一的时间。`canonical_json_bytes`、其大小和深度检查以及严格的重复成员检查都遍历 `neograph::json` 句柄：每次访问子节点都复制一个句柄，带来一次原子引用计数开销；每次遍历都构建键和值列表；每个键或字符串都被复制。现在这三种遍历都直接读取句柄下的 yyjson 值。字节、成员顺序、限制以及先报告哪个错误都不变：一个随机化测试把新的写出器与旧的进行比较，所有固定身份都不变。在一台安静的 Arm 机器上，`quickjs-performance` 门禁中 JavaScript 包装的 Core 运行从 6,126 µs 降到 4,350 µs，`structured_join_sequence` 从 10,060 µs 降到 6,967 µs，`structured_join_await` 从 7,505 µs 降到 5,143 µs；canonical JSON 在包装运行中的占比从 34% 降到 12%。
 - **Program 调用快了约 23%：json 文档从每线程的块缓存获取内存（#471）。** 每个 `neograph::json` 值都拥有自己的 yyjson 文档，每个文档最多分别分配四次：`shared_ptr` 控制块、文档本身、一个值池块和一个字符串池块。一个 Program 记录的主体在每次 transition 中创建并释放数百个这样的文档。同一尺寸的块多于 malloc 每线程缓存所能容纳的数量，因此大多走了较慢的路径。现在这些块来自按尺寸分类的每线程缓存：32 字节到 2 KiB，每类最多 64 个，每线程少于 260 KiB。更大的块仍像以前一样交给 malloc。在其他线程释放的块进入那个线程的缓存，线程结束时释放其缓存。使用 AddressSanitizer、ThreadSanitizer 或 MemorySanitizer 的构建直接分配每个块。在一台安静的 Arm 机器上，`quickjs-performance` 门禁中 JavaScript 包装的 Core 运行从 6,196 µs 降到 4,745 µs，`structured_join_sequence` 和 `structured_join_await` 快了 24%。与 #469 一起，这三个用例快了 44% 到 47%。
 - **QuickJS 性能门禁还会在同一运行器上把每个用例与 base 构建进行比较（#476）。** 不同类型的托管运行器之间数值相差可达 1.7 倍，因此绝对上限无法发现 #467 中 9% 到 23% 的变慢。现在 `scripts/verify_ci.py quickjs-performance --base <ref>` 用 `git archive` 导出该提交并构建其 QuickJS 基准测试。随后 `scripts/run_quickjs_performance.py` 在两个构建上运行除 `replay_growth` 以外的所有 primitive 和 control 用例，各取 20 个样本并交替进行。head 中位数超过 base 中位数 1.1 倍时记为警告，阻断用例超过 1.25 倍时会用新样本再比较一次，只有这次仍超过 1.25 倍才失败。base 构建中没有的用例报告为跳过。比值记录在预注册文件（`ab_comparison`）中，报告会记录比较结果。CI extended 把分支与其在 `master` 上的 merge base 比较，把 `master` 与最新发布版本比较。绝对上限仍然适用。
+- **Program 调用又快了约 20%：记录主体在一个 JSON 文档中构建（#478）。** Program 调用此前用 `json` 初始化列表构建记录的 canonical 字节。初始化列表为每个键、每个值和每个键值对各创建一个 yyjson 文档，再把每个值复制到结果中。因此在 `quickjs-performance` 门禁的 JavaScript 包装 Core 运行中，每次调用会产生约 5,400 个文档。现在由内部构建器（`neograph::detail::JsonBuilder`）在一个文档中构建事件、run record、lineage 和 generation 记录、日志记录、invocation 以及命令日志条目的主体。构建器的值重载与 `json` 的转换构造函数一一对应，因此每个成员保持相同的 yyjson 类型，字节、身份和限制检查都不变。一个新测试固定了变更前生成的代表性记录的 31 个身份。现在每次调用约产生 1,000 个文档。在一台 x86 桌面机上，JavaScript 包装的 Core 运行、`structured_join_sequence` 和 `structured_join_await` 分别快了 21%、18% 和 19%。
 
 ### 已添加
 

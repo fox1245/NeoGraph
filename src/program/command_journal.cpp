@@ -1,6 +1,7 @@
 #include <neograph/program/command_journal.h>
 
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 
 #include <limits>
 #include <stdexcept>
@@ -37,17 +38,23 @@ std::uint32_t require_uint32(const json& value, std::string_view field) {
     return static_cast<std::uint32_t>(number);
 }
 
+// Coordinate and entry bodies are built in one document (#478). Each make()
+// takes the argument the json initializer list took, so the members keep
+// their types.
+using Builder = ::neograph::detail::JsonBuilder;
 json coordinate_body(const ProgramJavaScriptCommandJournalEntryData& data) {
     const auto command = data.command.to_json();
-    return json{{"bundle_id", data.bundle_id},
-                {"command_ordinal", data.command_ordinal},
-                {"protocol_version", command.at("protocol_version")},
-                {"kind", command.at("kind")},
-                {"import_slot", command.at("import_slot")},
-                {"source_site", command.at("source_site")},
-                {"arguments", command.at("arguments")},
-                {"effect_identity",
-                 data.effect_identity ? json(*data.effect_identity) : json(nullptr)}};
+    Builder    j;
+    auto*      body = j.object(
+        {{"bundle_id", j.make(data.bundle_id)},
+         {"command_ordinal", j.make(data.command_ordinal)},
+         {"protocol_version", j.make(command.at("protocol_version"))},
+         {"kind", j.make(command.at("kind"))},
+         {"import_slot", j.make(command.at("import_slot"))},
+         {"source_site", j.make(command.at("source_site"))},
+         {"arguments", j.make(command.at("arguments"))},
+         {"effect_identity", data.effect_identity ? j.make(*data.effect_identity) : j.null()}});
+    return std::move(j).finish(body);
 }
 
 std::string coordinate_id_for(const ProgramJavaScriptCommandJournalEntryData& data) {
@@ -67,22 +74,23 @@ std::uint32_t storage_schema_version(const ProgramJavaScriptCommandJournalEntryD
 }
 
 json entry_body(const ProgramJavaScriptCommandJournalEntryData& data) {
-    auto body = json{{"format", std::string(FORMAT)},
-                     {"storage_schema_version", storage_schema_version(data)},
-                     {"sequence", data.sequence},
-                     {"bundle_id", data.bundle_id},
-                     {"command_ordinal", data.command_ordinal},
-                     {"command", data.command.to_json()},
-                     {"effect_identity",
-                      data.effect_identity ? json(*data.effect_identity) : json(nullptr)},
-                     {"terminal_result",
-                      data.terminal_result ? detail::owned_json_copy(*data.terminal_result)
-                                           : json(nullptr)}};
+    Builder j;
+    auto*   body = j.object(
+        {{"format", j.make(std::string(FORMAT))},
+         {"storage_schema_version", j.make(storage_schema_version(data))},
+         {"sequence", j.make(data.sequence)},
+         {"bundle_id", j.make(data.bundle_id)},
+         {"command_ordinal", j.make(data.command_ordinal)},
+         {"command", j.make(data.command.to_json())},
+         {"effect_identity", data.effect_identity ? j.make(*data.effect_identity) : j.null()},
+         {"terminal_result",
+          data.terminal_result ? j.make(detail::owned_json_copy(*data.terminal_result))
+                               : j.null()}});
     if (data.settled_members)
-        body["settled_members"] = detail::owned_json_copy(*data.settled_members);
+        j.set(body, "settled_members", j.make(detail::owned_json_copy(*data.settled_members)));
     if (data.await_started_at)
-        body["await_started_at"] = detail::owned_json_copy(*data.await_started_at);
-    return body;
+        j.set(body, "await_started_at", j.make(detail::owned_json_copy(*data.await_started_at)));
+    return std::move(j).finish(body);
 }
 
 std::string entry_id_for(const ProgramJavaScriptCommandJournalEntryData& data) {

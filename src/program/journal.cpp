@@ -1,6 +1,7 @@
 #include <neograph/program/journal.h>
 
 #include "canonical_json.h"
+#include "../core/json_builder.h"
 #include "node_retry_budget.h"
 
 #include <limits>
@@ -72,17 +73,21 @@ void require_sha256(std::string_view value, std::string_view field) {
     }
 }
 
-json encode_budget(const RunBudget& budget) {
-    auto encoded = json{{"wall_time_ms", budget.wall_time_ms},
-                {"model_tokens", budget.model_tokens},
-                {"monetary_microunits", budget.monetary_microunits},
-                {"max_concurrency", budget.max_concurrency},
-                {"max_program_operations", budget.max_program_operations},
-                {"max_core_steps", budget.max_core_steps},
-                {"max_dynamic_compiles", budget.max_dynamic_compiles},
-                {"max_child_depth", budget.max_child_depth},
-                {"max_total_children", budget.max_total_children}};
-    detail::encode_node_retries(encoded, budget);
+// Journal record bodies are built in one document (#478). Each make() takes the
+// argument the json assignment took, so the members keep their types.
+using Builder = ::neograph::detail::JsonBuilder;
+using BV      = Builder::Value;
+BV encode_budget(Builder& j, const RunBudget& budget) {
+    auto* encoded = j.object({{"wall_time_ms", j.make(budget.wall_time_ms)},
+                              {"model_tokens", j.make(budget.model_tokens)},
+                              {"monetary_microunits", j.make(budget.monetary_microunits)},
+                              {"max_concurrency", j.make(budget.max_concurrency)},
+                              {"max_program_operations", j.make(budget.max_program_operations)},
+                              {"max_core_steps", j.make(budget.max_core_steps)},
+                              {"max_dynamic_compiles", j.make(budget.max_dynamic_compiles)},
+                              {"max_child_depth", j.make(budget.max_child_depth)},
+                              {"max_total_children", j.make(budget.max_total_children)}});
+    detail::encode_node_retries(j, encoded, budget);
     return encoded;
 }
 
@@ -217,12 +222,12 @@ bool settled_reservation_budget(const ProgramJournalRecord& previous,
     return true;
 }
 
-json encode_checkpoint(const CoreCheckpointIdentity& checkpoint) {
-    return json{{"core_name", checkpoint.core_name},
-                {"core_generation_id", checkpoint.core_generation_id},
-                {"core_thread_id", checkpoint.core_thread_id},
-                {"checkpoint_id", checkpoint.checkpoint_id},
-                {"checkpoint_schema_version", checkpoint.checkpoint_schema_version}};
+BV encode_checkpoint(Builder& j, const CoreCheckpointIdentity& checkpoint) {
+    return j.object({{"core_name", j.make(checkpoint.core_name)},
+                     {"core_generation_id", j.make(checkpoint.core_generation_id)},
+                     {"core_thread_id", j.make(checkpoint.core_thread_id)},
+                     {"checkpoint_id", j.make(checkpoint.checkpoint_id)},
+                     {"checkpoint_schema_version", j.make(checkpoint.checkpoint_schema_version)}});
 }
 
 CoreCheckpointIdentity parse_checkpoint(const json& value) {
@@ -260,10 +265,10 @@ bool same_core(const CoreCheckpointIdentity& lhs, const CoreCheckpointIdentity& 
            lhs.checkpoint_schema_version == rhs.checkpoint_schema_version;
 }
 
-json encode_continuation(const ProgramContinuation& continuation) {
-    return json{{"operation_id", continuation.operation_id},
-                {"state", std::string(to_string(continuation.state))},
-                {"attempt", continuation.attempt}};
+BV encode_continuation(Builder& j, const ProgramContinuation& continuation) {
+    return j.object({{"operation_id", j.make(continuation.operation_id)},
+                     {"state", j.make(std::string(to_string(continuation.state)))},
+                     {"attempt", j.make(continuation.attempt)}});
 }
 
 ProgramContinuation parse_continuation(const json& value) {
@@ -350,21 +355,22 @@ void validate_record_body(const ProgramJournalRecord& record) {
 }
 
 json record_body(const ProgramJournalRecord& record) {
-    json value                      = json::object();
-    value["format"]                 = std::string(JOURNAL_FORMAT);
-    value["storage_schema_version"] = ProgramJournalRecord::STORAGE_SCHEMA_VERSION;
-    value["previous_id"]            = record.previous_id;
-    value["run_id"]                 = record.run_id;
-    value["program_version_id"]     = record.program_version_id;
-    value["bundle_id"]              = record.bundle_id;
-    value["sequence"]               = record.sequence;
-    value["continuation"]           = encode_continuation(record.continuation);
-    value["remaining_budget"]       = encode_budget(record.remaining_budget);
-    value["inflight_reservation"]   = encode_budget(record.inflight_reservation);
-    value["core_checkpoint"] =
-        record.core_checkpoint ? encode_checkpoint(*record.core_checkpoint) : json(nullptr);
-    value["timestamp_ms"] = record.timestamp_ms;
-    return value;
+    Builder j;
+    auto*   value = j.object(
+        {{"format", j.make(std::string(JOURNAL_FORMAT))},
+         {"storage_schema_version", j.make(ProgramJournalRecord::STORAGE_SCHEMA_VERSION)},
+         {"previous_id", j.make(record.previous_id)},
+         {"run_id", j.make(record.run_id)},
+         {"program_version_id", j.make(record.program_version_id)},
+         {"bundle_id", j.make(record.bundle_id)},
+         {"sequence", j.make(record.sequence)},
+         {"continuation", encode_continuation(j, record.continuation)},
+         {"remaining_budget", encode_budget(j, record.remaining_budget)},
+         {"inflight_reservation", encode_budget(j, record.inflight_reservation)},
+         {"core_checkpoint",
+          record.core_checkpoint ? encode_checkpoint(j, *record.core_checkpoint) : j.null()},
+         {"timestamp_ms", j.make(record.timestamp_ms)}});
+    return std::move(j).finish(value);
 }
 
 std::string computed_record_id(const ProgramJournalRecord& record) {
