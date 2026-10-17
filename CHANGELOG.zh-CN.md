@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=0b2b07005af234fbfe38665d7a3788ac3f007d46ab997d28343171cdc4a4a36a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=b30f7a733ea1af2ee3036f7d8ea8aa7acd82ce5c1e074b71dbdcd555cdfbc0db -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -30,6 +30,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 已添加
 
 - **内置 gRPC 服务器响应标准 health 服务，并且可以停止（#454）。** `run_server`、`run_tool_server` 和 `run_checkpoint_server` 现在提供 `grpc.health.v1.Health`：在接收调用期间为服务器及其服务（`neograph.v1.GraphService`、`neograph.v1.ToolService`、`neograph.v1.CheckpointService`）返回 `SERVING`，停止后返回 `NOT_SERVING`，因此 Kubernetes gRPC 探针和 `grpc-health-probe` 可以使用。gRPC 关于 health 服务的进程级默认值只在内置服务器启动期间打开，随后恢复，因此宿主自己的服务器不受影响。新的重载接受 `ServeOptions`（`<neograph/grpc/serve_options.h>`）：一个 `std::stop_token`，请求停止后为进行中的调用等待 `shutdown_grace`（默认 5 秒）再停止服务器；以及一个接收所绑定端口的 `on_serving` 回调，因此地址可以使用端口 0。服务器反射由宿主选择：链接 `gRPC::grpc++_reflection` 并在服务器启动前调用 `grpc::reflection::InitProtoReflectionServerBuilderPlugin()`，gRPC 会把反射加到所有服务器上，包括内置服务器。现有签名不变。
+- **`json::parse` 接受调用方指定的嵌套上限（#481）。** 新的重载 `json::parse(std::string_view, std::size_t max_depth)` 和 `json::parse(std::istream&, std::size_t max_depth)` 拒绝数组和对象嵌套超过 `max_depth` 层的文本；上限为 0 时只接受标量。不带上限的重载仍使用 `json::max_parse_depth`（自 #480 起为 1,024），NeoGraph 自身的调用（包括其服务器和客户端）也继续使用这些重载。复制和比较值时每一层递归一次，因此大于 1,024 的上限用于调用方信任的文本，并且要在栈足以复制和比较这么深的值的线程上读取。现有签名不变：只增加符号，不改变布局。
 
 ### 修复
 

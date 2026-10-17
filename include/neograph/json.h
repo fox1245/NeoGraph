@@ -110,6 +110,12 @@ public:
     static json parse(std::string_view s);
     static json parse(std::istream& in);
 
+    // The same with a limit of max_depth levels; 0 admits only scalars. A
+    // limit above max_parse_depth is for text the caller trusts, on a thread
+    // whose stack can copy and compare a value that deep.
+    static json parse(std::string_view s, std::size_t max_depth);
+    static json parse(std::istream& in, std::size_t max_depth);
+
     // ----- Type queries -----
     bool is_null() const noexcept;
     bool is_boolean() const noexcept;
