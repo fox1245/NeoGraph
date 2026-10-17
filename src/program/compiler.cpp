@@ -4,6 +4,7 @@
 #include "bundle_access.h"
 #include "canonical_json.h"
 #include "javascript.h"
+#include "../core/json_walk.h"
 #include "registry_access.h"
 
 #include <algorithm>
@@ -23,6 +24,8 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::program {
 namespace {
@@ -878,7 +881,9 @@ void validate_root(const json&            document,
 }
 void validate_condition(const json&            value,
                         std::string_view       pointer,
-                        DiagnosticAccumulator& diagnostics) {
+                        DiagnosticAccumulator& diagnostics,
+                        std::size_t            depth = 0) {
+    check_walk_depth(depth, "Program condition check");
     if (!value.is_object()) {
         add_type(diagnostics, pointer, "object", value);
         return;
@@ -924,11 +929,11 @@ void validate_condition(const json&            value,
                 validate_condition(
                     list[index],
                     child_pointer(child_pointer(pointer, field), std::to_string(index)),
-                    diagnostics);
+                    diagnostics, depth + 1);
         }
     }
     if (value.contains("not"))
-        validate_condition(value["not"], child_pointer(pointer, "not"), diagnostics);
+        validate_condition(value["not"], child_pointer(pointer, "not"), diagnostics, depth + 1);
 }
 
 std::string lower_operation(const json& authored,
@@ -1607,18 +1612,19 @@ OrchestrationPlanRecord lower_plan(const json& root,
     return OrchestrationPlanRecord{1, std::move(plan)};
 }
 
-bool contains_operation(const json& value, std::string_view wanted) {
+bool contains_operation(const json& value, std::string_view wanted, std::size_t depth = 0) {
+    if (value.is_object() || value.is_array()) check_walk_depth(depth, "Program operation scan");
     if (value.is_object()) {
         if (value.contains("op") && value["op"].is_string() &&
             value["op"].get<std::string>() == wanted)
             return true;
         for (const auto& [key, child] : value.items()) {
             (void)key;
-            if (contains_operation(child, wanted)) return true;
+            if (contains_operation(child, wanted, depth + 1)) return true;
         }
     } else if (value.is_array()) {
         for (const auto& child : value)
-            if (contains_operation(child, wanted)) return true;
+            if (contains_operation(child, wanted, depth + 1)) return true;
     }
     return false;
 }
@@ -1828,17 +1834,21 @@ json with_core_code(const json& witness, std::string_view core_code) {
 // Tab, newline and carriage return are ordinary text; other C0 characters warn.
 void add_control_character_warnings(const json&            value,
                                     const std::string&     pointer,
-                                    DiagnosticAccumulator& diagnostics) {
+                                    DiagnosticAccumulator& diagnostics,
+                                    std::size_t            depth = 0) {
     if (value.is_object()) {
+        check_walk_depth(depth, "Program config string check");
         for (const auto& [key, child] : value.items())
-            add_control_character_warnings(child, child_pointer(pointer, key), diagnostics);
+            add_control_character_warnings(child, child_pointer(pointer, key), diagnostics,
+                                           depth + 1);
         return;
     }
     if (value.is_array()) {
+        check_walk_depth(depth, "Program config string check");
         std::size_t index = 0;
         for (const auto& child : value)
             add_control_character_warnings(child, pointer + "/" + std::to_string(index++),
-                                           diagnostics);
+                                           diagnostics, depth + 1);
         return;
     }
     if (!value.is_string()) return;

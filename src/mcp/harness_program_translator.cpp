@@ -2,6 +2,7 @@
 #include <neograph/mcp/json_schema.h>
 #include <neograph/program/compiler.h>
 #include "../program/canonical_json.h"
+#include "../core/json_walk.h"
 #include "../program/javascript.h"
 
 #include <algorithm>
@@ -12,6 +13,8 @@
 #include <set>
 #include <tuple>
 #include <utility>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::mcp {
 namespace {
@@ -515,15 +518,17 @@ std::vector<program::SourceMapEntry> source_map(const json&                     
     return result;
 }
 
-void reject_unsupported_program_operations(const json& operation,
-                                           std::string_view pointer) {
+void reject_unsupported_program_operations(const json&     operation,
+                                           std::string_view pointer,
+                                           std::size_t      depth = 0) {
+    check_walk_depth(depth, "Harness Program operation check");
     const auto operation_name = operation.is_object() ? operation.value("op", "") : "";
     if (operation_name == "spawn" || operation_name == "parallel_map") {
         fail("H_PROGRAM_CHILD_BINDING", std::string(pointer),
              "Harness program mode does not support durable child publication or scheduling");
     }
     const auto visit = [&](const json& child, std::string_view child_pointer) {
-        reject_unsupported_program_operations(child, child_pointer);
+        reject_unsupported_program_operations(child, child_pointer, depth + 1);
     };
     if (operation.contains("children") && operation["children"].is_array()) {
         for (std::size_t index = 0; index < operation["children"].size(); ++index)

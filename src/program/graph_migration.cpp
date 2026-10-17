@@ -10,6 +10,7 @@
 #include <neograph/program/version.h>
 
 #include "canonical_json.h"
+#include "../core/json_walk.h"
 #include "node_retry_budget.h"
 
 #include <algorithm>
@@ -19,6 +20,8 @@
 #include <set>
 #include <stdexcept>
 #include <utility>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::program {
 namespace {
@@ -1171,7 +1174,8 @@ namespace {
 void collect_metadata_changes(const json&                       source,
                               const json&                       target,
                               const std::string&                pointer,
-                              std::vector<GraphMetadataChange>& changes) {
+                              std::vector<GraphMetadataChange>& changes,
+                              std::size_t                       depth = 0) {
     const bool source_object = source.is_object();
     const bool target_object = target.is_object();
     if (!source_object || !target_object) {
@@ -1183,6 +1187,7 @@ void collect_metadata_changes(const json&                       source,
             changes.push_back({"changed", pointer});
         return;
     }
+    check_walk_depth(depth, "Program metadata diff");
     std::set<std::string> keys;
     for (const auto& [key, unused] : source.items()) {
         (void)unused;
@@ -1204,7 +1209,7 @@ void collect_metadata_changes(const json&                       source,
         }
         collect_metadata_changes(source.contains(key) ? source[key] : json(),
                                  target.contains(key) ? target[key] : json(),
-                                 pointer + "/" + escaped, changes);
+                                 pointer + "/" + escaped, changes, depth + 1);
     }
 }
 

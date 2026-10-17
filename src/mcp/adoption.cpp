@@ -5,6 +5,7 @@
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
 #include "../core/sha256.h"
+#include "../core/json_walk.h"
 
 #include <algorithm>
 #include <cctype>
@@ -24,6 +25,8 @@
 #include <sys/stat.h>
 #endif
 
+using neograph::detail::check_walk_depth;
+
 namespace neograph::mcp {
 namespace {
 
@@ -41,15 +44,16 @@ bool unsafe_key(std::string_view key) {
            key == "authorization" || key == "token" || key == "password" || key == "secret" ||
            key == "api_key" || key == "apiKey" || key == "$env" || key == "$file";
 }
-bool contains_external_ref(const json& value) {
+bool contains_external_ref(const json& value, std::size_t depth = 0) {
+    if (value.is_object() || value.is_array()) check_walk_depth(depth, "MCP adoption scan");
     if (value.is_object()) {
         for (auto it = value.begin(); it != value.end(); ++it) {
             if (it.key() == "environment" && it.value().is_object() && it.value().empty()) continue;
             if (unsafe_key(it.key())) return true;
-            if (contains_external_ref(it.value())) return true;
+            if (contains_external_ref(it.value(), depth + 1)) return true;
         }
     } else if (value.is_array()) {
-        for (const auto& item : value) if (contains_external_ref(item)) return true;
+        for (const auto& item : value) if (contains_external_ref(item, depth + 1)) return true;
     }
     else if (value.is_string()) {
         const auto text = value.get<std::string>();

@@ -552,7 +552,10 @@ bool assign_json_pointer(json&                           target,
 
 bool assign_json_path(json& target, std::string_view path, json value) {
     const auto tokens = decode_json_pointer(path);
-    return tokens && assign_json_pointer(target, *tokens, 0, std::move(value));
+    // Assignment recurses once per token and builds a value as deep as the
+    // pointer; past json::max_parse_depth tokens it fails like a bad pointer.
+    return tokens && tokens->size() <= json::max_parse_depth &&
+           assign_json_pointer(target, *tokens, 0, std::move(value));
 }
 
 bool condition_matches(const json& state, const json& condition) {

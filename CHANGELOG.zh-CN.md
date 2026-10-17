@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6d463da0fca7b3aab792f9cd3ab5905d28ff89a4cd052c4300dfca6e5d65d672 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=353b5ea475448cdc6480ddc7ce093ace7c3699d68c1cb26fe3c9bade40348c5b -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -47,6 +47,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program 中没有超时的 Core 节点 attempt 等待其主体的开销减少了（#467）。** 自 #367 和 #368 起，Program 中的 Core 运行把每个节点主体放在节点 attempt 工作线程池上执行，而不是共享的 Program 调度器上。编排器为每个这样的 attempt 各自创建 strand、协程和 24 小时定时器来等待。没有超时的 attempt 既不会超时也不会被分离（detach），因此现在主体结束时只需一次 post 即可恢复编排器。每个节点少一次线程唤醒，在一台安静的 Arm 机器上每个节点约少 8 µs。#367 和 #368 的每节点开销大部分仍然存在：主体在另一个线程上运行，常常在另一个核心上，这使 `quickjs-performance` 门禁中 JavaScript 包装的 Core 运行慢了 9%，`structured_join_sequence` 慢了 12%。带超时的 `ng.await` 在 dispatch 之前把开始时间记录到命令日志（#391），因此还要再慢 11%，而崩溃恢复需要这条记录。
 - **`json::parse` 拒绝数组和对象嵌套超过 256 层的文本（#480、#483）。** 复制 `neograph::json` 值以及比较两个值时，每一层嵌套都会递归一次，NeoGraph 内部遍历值的部分函数也是如此，而 `json::parse` 不限制深度，因此嵌套足够深的文本可能耗尽线程栈。现在，对于嵌套深度超过新常量 `json::max_parse_depth`（256，即 Program JSON 已有的上限）的文本，`json::parse` 会在复制值之前抛出 `json::parse_error`。在这个深度下，帧最大的函数也只需约 384 KB 栈，小于 macOS 辅助线程的 512 KiB。**行为变更：** 来自对端、文件和调用方、嵌套超过 256 层的文本不再能解析；信任此类文本的调用方可以传入更高的上限（#481）。`SqliteCheckpointStore`、`PostgresCheckpointStore`、`SqliteHarnessRecordStore`、`FileHarnessRecordStore`、`SqliteEvidenceLedger` 以及 NeoGraph 内部的复制会不限深度地读回 NeoGraph 写入的文本，因此包含更深值的检查点仍能加载。值不超过 256 个的文档跳过该检查，更大的文档会多遍历一次其值。
 - **Python：转换包含自身的值或嵌套超过 256 层的值时会抛出异常，而不是让进程崩溃（#484）。** 绑定以递归方式把 Python 值转换为 `neograph::json`，既没有深度上限，也没有循环检查，因此包含自身的 dict 或 list 会一直递归直到栈耗尽。现在，嵌套超过 `json::max_parse_depth`（256）层的 dict、list 和 tuple 会抛出 `ValueError`，包含自身的值也会达到这一深度并抛出同样的异常。每个容器还会经过 Python 的递归检查，因此从 Python 调用栈深处开始的转换会抛出 `RecursionError`，而不是耗尽栈。
+- **NeoGraph 内部遍历 `json` 值的递归函数在 `json::max_parse_depth` 处停止（#485）。** 以下函数每一层递归一次，且没有自己的上限：图往返检查，Program 编译器的条件、操作和配置字符串检查，Program 元数据差异，harness 日志脱敏（redaction），harness 主机配置过滤，MCP adoption 扫描，JSON Schema 的 `const`、`enum` 和 `uniqueItems` 相等比较，Decisions 客户端的值检查，以及 harness Program 转换器的操作检查。因此，未经过解析上限的值可能耗尽线程栈，例如在代码中构建的值、以更高上限解析的值，或从存储中读回的值。现在，当数组和对象嵌套超过 256 层时，每个函数都会抛出 `std::invalid_argument`，而不再继续递归。它会失败而不是提前返回，因此不会跳过脱敏或检查。Program 的 JSON Pointer 赋值在超过 256 个 token 时会像无效指针一样失败。上限以内的值行为不变。
 
 ## [0.14.1] - 2026-10-14
 

@@ -1930,6 +1930,57 @@ TEST(HarnessServiceTest, SqliteJournalOrdersEventsAndRedactsPayloadsAtRest) {
     EXPECT_THROW(records.save_run("run_1", rebound), std::invalid_argument);
 }
 
+TEST(HarnessServiceTest, SqliteJournalRedactsPayloadsUpToTheDepthLimit) {
+    const auto root = unique_temp_path("neograph-harness-journal-depth");
+    TempDirectoryCleanup cleanup(root);
+    std::filesystem::create_directories(root);
+    neograph::mcp::SqliteHarnessRecordStore records((root / "runs.db").string());
+    records.save_artifact("artifact_1", {
+        {"artifact_id", "artifact_1"},
+        {"request", json::object()},
+    });
+    records.save_run("run_1", json{
+        {"run_id", "run_1"},
+        {"artifact_id", "artifact_1"},
+        {"revision_digest", "fnv1a64:1234"},
+        {"protocol_version", "2025-11-25"},
+        {"profile", "harness-m4"},
+        {"status", "queued"},
+    });
+    const auto event = [](json payload) {
+        return json{
+            {"run_id", "run_1"},
+            {"artifact_id", "artifact_1"},
+            {"revision_digest", "fnv1a64:1234"},
+            {"protocol_version", "2025-11-25"},
+            {"profile", "harness-m4"},
+            {"event_type", "worker.attempt.started"},
+            {"payload", std::move(payload)},
+        };
+    };
+    // A payload of `depth` nested objects whose innermost member is redacted.
+    const auto nested = [](std::size_t depth) {
+        json value = {{"token", "hidden"}};
+        for (std::size_t level = 1; level < depth; ++level) value = json{{"inner", value}};
+        return value;
+    };
+
+    records.append_event(event(nested(json::max_parse_depth)));
+    const auto events = records.list_events("run_1");
+    ASSERT_EQ(events.size(), 1u);
+    json inner = events[0]["payload"];
+    for (std::size_t level = 1; level < json::max_parse_depth; ++level) {
+        json next = inner.at("inner");
+        inner     = std::move(next);
+    }
+    EXPECT_EQ(inner["token"], "[REDACTED]");
+
+    // One level more fails the append instead of storing the payload unredacted.
+    EXPECT_THROW(records.append_event(event(nested(json::max_parse_depth + 1))),
+                 std::invalid_argument);
+    EXPECT_EQ(records.list_events("run_1").size(), 1u);
+}
+
 TEST(HarnessServiceTest, SqliteJournalSupportsMetadataOnlyAndFullPayloadModes) {
     const auto root = unique_temp_path("neograph-harness-journal-modes");
     TempDirectoryCleanup cleanup(root);
