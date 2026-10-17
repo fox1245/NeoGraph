@@ -554,7 +554,9 @@ Security defaults are transport-level and do not couple authentication to
 - The default bind is `127.0.0.1`; a non-loopback bind is rejected unless a
   bearer authorizer is configured.
 - Every supplied `Origin` is rejected unless it exactly matches an entry in
-  `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` (comma-separated in the executable).
+  `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` (comma-separated in the executable) or, on a
+  loopback bind, is the server's own loopback origin (`http://localhost:<port>`,
+  `http://127.0.0.1:<port>` or `http://[::1]:<port>` at the bound port).
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` enables the executable's single-principal
   bearer boundary. Library embeddings can use
   `MCPHttpServerConfig::bearer_authorizer` for OAuth/JWT validation and return a

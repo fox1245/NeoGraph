@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=bb496c51253637e7a274ba36af0c8d26e97f8c3d6fa013c796beeb25b1ecac34 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -301,7 +301,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 보안 기본값은 전송 계층에서 적용되며, 인증을 `GraphEngine`이나 `HarnessService`에 결합하지 않습니다.
 
 - 기본 바인딩 주소는 `127.0.0.1`입니다. bearer authorizer를 설정하지 않으면 루프백이 아닌 주소에는 바인딩할 수 없습니다.
-- `Origin`이 오면 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS`의 항목과 정확히 일치하지 않는 한 거부됩니다(실행 파일에서는 쉼표로 구분합니다).
+- `Origin`이 오면 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS`의 항목과 정확히 일치하거나(실행 파일에서는 쉼표로 구분합니다), loopback 바인드에서 서버 자신의 loopback 출처(바인드한 포트의 `http://localhost:<port>`, `http://127.0.0.1:<port>` 또는 `http://[::1]:<port>`)가 아닌 한 거부됩니다.
 - `NEOGRAPH_HARNESS_BEARER_TOKEN`을 설정하면 실행 파일의 단일 principal bearer 경계가 켜집니다. 라이브러리로 임베딩할 때는 `MCPHttpServerConfig::bearer_authorizer`로 OAuth/JWT를 검증하고 안정적인 principal/scope를 반환할 수 있습니다.
 - 세션은 반환된 인가 범위(scope)에 묶입니다. 유출된 `Mcp-Session-Id`를 다른 유효한 principal이 재사용할 수 없습니다.
 - `MCPHttpServer` 팩토리는 검증된 scope를 받아 `MCPHttpServerSession` 소유자를 반환합니다. 멀티 테넌트 임베딩은 이 scope로 서로 격리된 Harness 기록/체크포인트 저장소를 골라야 하며, 인증 상태가 그래프 런타임 안으로 들어가는 일은 없습니다. authorizer가 없으면(루프백 바인딩에서만 가능) scope는 비어 있고, 실행 파일은 로컬의 단일 소유자 scope를 유지합니다.

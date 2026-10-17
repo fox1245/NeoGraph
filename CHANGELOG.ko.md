@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=218d0f80c03057cc37b300eaf78fa45715d606d48fcee6a33b728f074d1365f6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a7cd4ce6049270b67f1b8cde99d69ccf9fb9c0b153ab8e0150711760b99755e8 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -17,6 +17,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 수정됨
 
 - **MCP HTTP 서버가 지원하는 다른 `MCP-Protocol-Version`을 적은 요청을 처리합니다(#490).** `initialize` 이후 서버는 `MCP-Protocol-Version`이 세션이 협상한 리비전과 다른 요청에 모두 `400`으로 응답했습니다. 서버가 지원하는 리비전(`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`)도 마찬가지였습니다. MCP 2025-11-25는 잘못되었거나 지원하지 않는 리비전에만 `400`을 요구하고, 공식 TypeScript 서버는 지원하는 리비전이면 모두 받습니다. conformance 스위트의 `server-sse-multiple-streams` 시나리오는 `2025-11-25` 세션에 `2025-03-26`을 보내 `400`을 세 번 받았습니다. 이제 그런 요청은 세션이 협상한 리비전으로 처리합니다. 배치, 도구 필드 등은 헤더가 아니라 세션을 따릅니다. 한 세션의 첫 그런 요청은 stderr에 경고를 한 줄 씁니다. 지원하지 않거나 형식이 틀린 값은 여전히 `400`(`-32600`, 메시지는 이제 "MCP-Protocol-Version is not a supported revision")이고, 헤더가 없는 요청은 여전히 협상한 리비전을 씁니다. **동작 변경:** 지원하는 다른 리비전을 보내는 클라이언트는 거절되지 않고 처리됩니다.
+- **loopback 바인드에서 MCP HTTP 서버가 기본으로 자기 loopback 출처를 받아들입니다(#491).** `Origin`이 있는 요청은 `allowed_origins`에 없으면 `403`으로 거절했고, 목록은 기본으로 비어 있어서 loopback 서버는 자기 출처조차 거절했습니다. conformance 스위트의 `dns-rebinding-protection` 시나리오는 서버 자신의 `Host`와 `Origin`으로 `initialize`를 보내고 성공을 기대하는데, 기본 설정에서는 실패했습니다. 이제 loopback 바인드(`127.0.0.1`, `::1`, `localhost`)에서 서버는 바인드한 포트의 `http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<port>`도 브라우저가 보내는 형태 그대로 비교해 받아들이고, 각 출처를 처음 받아들일 때 stderr에 한 줄 씁니다. DNS 리바인딩 페이지는 자기 출처를 보내므로 여전히 거절되고, 다른 포트의 loopback 출처, `https` 출처, `null`도 거절됩니다. 브라우저 인스펙터처럼 다른 localhost 포트의 페이지는 여전히 목록에 넣어야 합니다. loopback이 아닌 바인드는 전과 같이 목록에 있는 출처만 받아들입니다. **동작 변경:** loopback 바인드에서 `Origin`이 서버 자신의 loopback 출처인 요청은 `403`으로 거절되지 않고 처리됩니다.
 
 ## [0.14.2] - 2026-10-18
 

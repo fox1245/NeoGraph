@@ -806,6 +806,78 @@ TEST(MCPHttpServerTest, RejectsUnlistedOrigin) {
     EXPECT_EQ(response->status, 403);
 }
 
+int initialize_status(httplib::Client& client, const std::string& origin,
+                      const std::string& bearer = {}) {
+    auto headers = base_headers();
+    headers.emplace("Origin", origin);
+    if (!bearer.empty()) headers.emplace("Authorization", "Bearer " + bearer);
+    auto response =
+        client.Post("/mcp", headers,
+                    request(1, "initialize",
+                            {{"protocolVersion", "2025-11-25"},
+                             {"capabilities", json::object()},
+                             {"clientInfo", {{"name", "origin-test"}, {"version", "1"}}}})
+                        .dump(),
+                    "application/json");
+    return response ? response->status : -1;
+}
+
+TEST(MCPHttpServerTest, ALoopbackBindAdmitsItsOwnLoopbackOrigin) {
+    // #491: a browser sends the origin of its page. A loopback bind admits
+    // its own loopback origin without a listing, as the conformance
+    // dns-rebinding-protection scenario expects, and refuses every other one.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto port  = std::to_string(server.port());
+    const auto other = std::to_string(server.port() == 65535 ? 65534 : server.port() + 1);
+
+    const std::vector<std::string> own = {"http://127.0.0.1:" + port, "http://localhost:" + port,
+                                          "http://[::1]:" + port};
+    testing::internal::CaptureStderr();
+    for (const auto& origin : own) {
+        EXPECT_EQ(initialize_status(client, origin), 200) << origin;
+        EXPECT_EQ(initialize_status(client, origin), 200) << origin;
+    }
+    const auto notes = testing::internal::GetCapturedStderr();
+    // One line for each origin, the first time it is admitted.
+    for (const auto& origin : own) {
+        const auto line = "admits Origin " + origin + ",";
+        const auto at   = notes.find(line);
+        EXPECT_NE(at, std::string::npos) << notes;
+        EXPECT_EQ(notes.find(line, at + 1), std::string::npos) << notes;
+    }
+
+    for (const auto& origin : {"http://127.0.0.1:" + other, "https://127.0.0.1:" + port,
+                               std::string("http://127.0.0.1"), "http://LOCALHOST:" + port,
+                               "http://127.0.0.1:" + port + "/", "http://127.0.0.2:" + port,
+                               "http://evil.example:" + port, std::string("null")}) {
+        EXPECT_EQ(initialize_status(client, origin), 403) << origin;
+    }
+}
+
+TEST(MCPHttpServerTest, ARemoteBindAdmitsOnlyListedOrigins) {
+    // #491 is for loopback binds: a bind to every address admits no loopback
+    // origin it does not list.
+    MCPHttpServerConfig config;
+    config.host              = "0.0.0.0";
+    config.allowed_origins   = {"https://app.example"};
+    config.bearer_authorizer = [](std::string_view token) -> std::optional<std::string> {
+        if (token == "token") return std::string("principal");
+        return std::nullopt;
+    };
+    MCPHttpServer server(make_http_session, std::move(config));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto port = std::to_string(server.port());
+
+    EXPECT_EQ(initialize_status(client, "https://app.example", "token"), 200);
+    EXPECT_EQ(initialize_status(client, "http://127.0.0.1:" + port, "token"), 403);
+    EXPECT_EQ(initialize_status(client, "http://localhost:" + port, "token"), 403);
+}
+
 TEST(MCPHttpServerTest, DuplicateRequestDoesNotOrphanOriginalResponse) {
     struct BlockState {
         std::atomic<int>         calls{0};

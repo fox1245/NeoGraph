@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=bb496c51253637e7a274ba36af0c8d26e97f8c3d6fa013c796beeb25b1ecac34 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -302,7 +302,7 @@ endpoint 是 `http://127.0.0.1:8080/mcp`。它实现了已发布的 MCP 2025-11-
 默认的安全措施都在传输层，认证不会与 `GraphEngine` 或 `HarnessService` 耦合：
 
 - 默认绑定到 `127.0.0.1`；除非配置了 bearer 授权器，否则非回环地址的绑定会被拒绝。
-- 任何带有的 `Origin`，只要不与 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` 中的某一项完全一致，就会被拒绝（可执行文件中以逗号分隔）。
+- 任何带有的 `Origin`，只要既不与 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` 中的某一项完全一致（可执行文件中以逗号分隔），也不是绑定到回环地址的服务器自己的回环来源（所绑定端口上的 `http://localhost:<port>`、`http://127.0.0.1:<port>` 或 `http://[::1]:<port>`），就会被拒绝。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` 启用可执行文件的单主体 bearer 边界。作为库嵌入时，可以用 `MCPHttpServerConfig::bearer_authorizer` 做 OAuth/JWT 校验，并返回稳定的主体/作用域。
 - 会话绑定到返回的授权作用域。另一个同样合法的主体，也不能复用泄露的 `Mcp-Session-Id`。
 - `MCPHttpServer` 工厂接收已验证的作用域，并返回一个 `MCPHttpServerSession` 所有者。多租户的嵌入方必须用这个作用域来选择相互隔离的 Harness 记录/检查点存储；认证状态不会进入图运行时本身。没有授权器时（仅限回环绑定），作用域为空，可执行文件仍使用它单一的本地 owner 作用域。
