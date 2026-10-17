@@ -73,7 +73,7 @@ jobs:
           name: sdist
           path: build-sdist/dist/*.tar.gz
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   # One job per platform and CPython: the jobs run in parallel instead of rebuilding the C++ five
   # times in sequence inside one job.
@@ -181,7 +181,7 @@ jobs:
           name: wheels-${{ matrix.platform.os }}-${{ matrix.platform.arch }}-${{ matrix.python }}
           path: build-wheels/wheelhouse/*.whl
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   runtime_portability:
     name: Native archive / ${{ matrix.os }}

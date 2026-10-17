@@ -129,7 +129,7 @@ jobs:
           name: quickjs-performance-report
           path: ${{ runner.temp }}/neograph-quickjs-performance/quickjs-performance.json
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   # Observed 76-108 minutes on hosted runners (build and serial ctest both vary by about 40%
   # between days); the limit keeps headroom for a slow day without failing the nightly run.

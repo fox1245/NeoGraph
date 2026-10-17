@@ -1,1 +1,4 @@
 examples/cookbook/ai-assembly/scripts/run_session.sh text eol=lf
+# Tests compare and hash fixtures byte for byte, so they keep LF under
+# core.autocrlf as well (#474).
+tests/fixtures/** text=auto eol=lf
