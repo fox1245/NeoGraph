@@ -226,8 +226,10 @@ TEST(ProgramSourceTest, StrictParserBoundsBytesAndNestingBeforeMaterialization) 
     deeply_nested += '0';
     deeply_nested.append(257, ']');
     deeply_nested += '}';
+    // A host can build a value deeper than json::parse admits by default; the
+    // Program limit refuses it all the same.
     EXPECT_THROW((void)ProgramSource::from_cpp_builder("deep-source", 1,
-                                                       json::parse(deeply_nested)),
+                                                       json::parse(deeply_nested, 300)),
                  ProgramDiagnosticError);
 
     std::string oversized = R"({"program_schema_version":1,"payload":")";

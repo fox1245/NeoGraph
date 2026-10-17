@@ -1,4 +1,5 @@
 #include <neograph/mcp/harness.h>
+#include "../core/own_json.h"
 #include "../core/sha256.h"
 
 #include <algorithm>
@@ -16,6 +17,8 @@
 #endif
 #include <windows.h>
 #endif
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::mcp {
 
@@ -126,7 +129,7 @@ struct FileHarnessRecordStore::Impl {
         }
         std::ostringstream content;
         content << input.rdbuf();
-        return json::parse(content.str());
+        return parse_own_json(content.str());
     }
 
     std::filesystem::path root;

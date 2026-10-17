@@ -1,10 +1,14 @@
 #include <neograph/mcp/harness.h>
 #include <neograph/mcp/harness_program_store.h>
 
+#include "../core/own_json.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <utility>
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::mcp {
 namespace {
@@ -61,7 +65,7 @@ bool is_program_identity(std::string_view value) noexcept {
 }
 
 json owned_json(const json& value) {
-    return json::parse(value.dump());
+    return parse_own_json(value.dump());
 }
 bool budget_within_template(const program::RunBudget& requested,
                             const program::RunBudget& ceiling) noexcept {

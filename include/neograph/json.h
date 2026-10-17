@@ -101,9 +101,10 @@ public:
     static json array(std::initializer_list<json> il);
 
     // parse() refuses text that nests arrays and objects deeper than this.
-    // Copying and comparing a value recurse once per level, and text a few
-    // hundred KiB long can nest deep enough to exhaust a thread's stack.
-    static constexpr std::size_t max_parse_depth = 1024;
+    // Copying and comparing a value recurse once per level, as do some of
+    // NeoGraph's own walks over values. At this depth they all fit the 512 KiB
+    // stack of a macOS secondary thread.
+    static constexpr std::size_t max_parse_depth = 256;
 
     // Throws parse_error for text that is not JSON or that nests arrays and
     // objects deeper than max_parse_depth.
