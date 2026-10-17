@@ -597,6 +597,50 @@ TEST(MCPHttpServerTest, ErrorBodiesCarryNoNullId) {
     EXPECT_FALSE(body.contains("id")) << unparsable->body;
 }
 
+// A body nested a few hundred thousand levels deep fits well under the
+// default payload limit. json::parse rejects it, because copying or comparing
+// a value that deep would exhaust the worker thread's stack, so the client
+// gets a parse error and the server keeps serving.
+std::string nested_arrays(std::size_t depth) {
+    return std::string(depth, '[') + std::string(depth, ']');
+}
+
+TEST(MCPHttpServerTest, DeeplyNestedInitializeIsAParseError) {
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+
+    const auto body = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{)"
+                      R"("protocolVersion":"2025-11-25","capabilities":{},)"
+                      R"("clientInfo":{"name":"deep","version":"1"},"nested":)" +
+                      nested_arrays(300'000) + "}}";
+    ASSERT_LT(body.size(), MCPHttpServerConfig{}.max_payload_bytes);
+    auto deep = client.Post("/mcp", base_headers(), body, "application/json");
+    ASSERT_TRUE(deep);
+    EXPECT_EQ(deep->status, 400);
+    EXPECT_EQ(json::parse(deep->body)["error"]["code"], -32700) << deep->body;
+    EXPECT_FALSE(open_session(client).empty());
+}
+
+TEST(MCPHttpServerTest, DeeplyNestedToolArgumentsAreAParseError) {
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto session = open_session(client);
+    ASSERT_FALSE(session.empty());
+
+    const auto body = R"({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo",)"
+                      R"("arguments":{"value":)" +
+                      nested_arrays(300'000) + "}}}";
+    auto deep = client.Post("/mcp", session_headers(session), body, "application/json");
+    ASSERT_TRUE(deep);
+    EXPECT_EQ(deep->status, 400);
+    EXPECT_EQ(json::parse(deep->body)["error"]["code"], -32700) << deep->body;
+    EXPECT_EQ(ping_status(client, session), 200);
+}
+
 // MCP 2025-03-26 Streamable HTTP: a POST body may be a batch, and a batch
 // with requests is answered with an array. Sessions that negotiated
 // 2025-03-26 or 2024-11-05 get that; later revisions removed batching, and a

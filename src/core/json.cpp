@@ -5,6 +5,7 @@
 #include "text_safety.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -457,6 +458,30 @@ json json::array(std::initializer_list<json> il) {
 // Parse
 // ===========================================================================
 
+namespace {
+
+// Whether a parsed document nests arrays and objects deeper than
+// json::max_parse_depth, found without recursion. The reader stores values in
+// document order, and each container records where the values after it begin,
+// so a stack of those positions holds the containers around the current value.
+bool nested_too_deep(yyjson_doc* doc) {
+    // A document of n values holds at most n containers.
+    if (yyjson_doc_get_val_count(doc) <= json::max_parse_depth) return false;
+    std::array<yyjson_val*, json::max_parse_depth> ends;
+    std::size_t depth = 0;
+    yyjson_val* value      = yyjson_doc_get_root(doc);
+    yyjson_val* const last = unsafe_yyjson_get_next(value);
+    for (; value < last; ++value) {
+        while (depth > 0 && value >= ends[depth - 1]) --depth;
+        if (!unsafe_yyjson_is_ctn(value)) continue;
+        if (depth == ends.size()) return true;
+        ends[depth++] = unsafe_yyjson_get_next(value);
+    }
+    return false;
+}
+
+}  // namespace
+
 json json::parse(std::string_view s) {
     yyjson_read_err err;
     yyjson_doc* immut = yyjson_read_opts(
@@ -467,6 +492,11 @@ json json::parse(std::string_view s) {
         &err);
     if (!immut) {
         throw parse_error(std::string("json::parse: ") + err.msg);
+    }
+    if (nested_too_deep(immut)) {
+        yyjson_doc_free(immut);
+        throw parse_error("json::parse: arrays and objects nested deeper than " +
+                          std::to_string(max_parse_depth) + " levels");
     }
     yyjson_mut_doc* mdoc = yyjson_doc_mut_copy(immut, &kDocumentAllocator);
     yyjson_doc_free(immut);
