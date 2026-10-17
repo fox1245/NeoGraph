@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=10dd0c889b7f7fd706b12f8dffaa4190ba06a0b46dcded3fe8e28813eb9d357c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=253058bb1fb801f3f5d74cefffe8e39931520ff916030ef807b9ec6eccb00594 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3083,7 +3083,9 @@ HTTP 上以一个数组应答。之后的修订版去掉了批处理，initializ
 该 id 返回 404。工具调用在返回前占用一个 HTTP 线程，因此线程按需启动，最多到
 `max_http_threads`（64）；超过 `response_timeout` 的请求得到 504，其工具调用被取消；`DELETE`
 会关闭其连接；设置 `protected_resource_metadata` 时，服务器发布 RFC 9728 元数据，并在每个
-401 质询中指明其位置。
+401 质询中指明其位置。`initialize` 之后的请求可以在 `MCP-Protocol-Version` 中写任一受支持的
+修订版本：会话仍按协商的修订版本工作，一个会话中第一个写了其他修订版本的请求会记录到 stderr，
+不支持的值返回 400。
 
 **HTTP 用法：**
 

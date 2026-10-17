@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eb1f04dda28e4e77c4028e895ef14aef9ea854c0afb2c5daece21428055fe8e8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=218d0f80c03057cc37b300eaf78fa45715d606d48fcee6a33b728f074d1365f6 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 수정됨
+
+- **MCP HTTP 서버가 지원하는 다른 `MCP-Protocol-Version`을 적은 요청을 처리합니다(#490).** `initialize` 이후 서버는 `MCP-Protocol-Version`이 세션이 협상한 리비전과 다른 요청에 모두 `400`으로 응답했습니다. 서버가 지원하는 리비전(`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`)도 마찬가지였습니다. MCP 2025-11-25는 잘못되었거나 지원하지 않는 리비전에만 `400`을 요구하고, 공식 TypeScript 서버는 지원하는 리비전이면 모두 받습니다. conformance 스위트의 `server-sse-multiple-streams` 시나리오는 `2025-11-25` 세션에 `2025-03-26`을 보내 `400`을 세 번 받았습니다. 이제 그런 요청은 세션이 협상한 리비전으로 처리합니다. 배치, 도구 필드 등은 헤더가 아니라 세션을 따릅니다. 한 세션의 첫 그런 요청은 stderr에 경고를 한 줄 씁니다. 지원하지 않거나 형식이 틀린 값은 여전히 `400`(`-32600`, 메시지는 이제 "MCP-Protocol-Version is not a supported revision")이고, 헤더가 없는 요청은 여전히 협상한 리비전을 씁니다. **동작 변경:** 지원하는 다른 리비전을 보내는 클라이언트는 거절되지 않고 처리됩니다.
 
 ## [0.14.2] - 2026-10-18
 

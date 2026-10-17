@@ -333,10 +333,21 @@ def test_http_connection_survives_delete_with_json_content_type(http):
 
 def test_http_invalid_protocol_version_header_is_400(http):
     h = http.session()
-    for bad in ("1999-01-01", "2025-06-18", "garbage"):
+    for bad in ("1999-01-01", "2026-07-28", "garbage"):
         r = http.req("POST", {"jsonrpc": "2.0", "id": 4, "method": "ping"},
                      {**h, "MCP-Protocol-Version": bad})
         assert r.status_code == 400
+
+
+def test_http_other_supported_protocol_version_header_is_served(http):
+    """transports 'Protocol Version Header': 400 is for an invalid or unsupported revision.
+    Another supported one is served under the negotiated revision, as the official
+    TypeScript server does (conformance 'server-sse-multiple-streams' sends 2025-03-26)."""
+    h = http.session()
+    for other in ("2025-06-18", "2025-03-26", "2024-11-05"):
+        r = http.req("POST", {"jsonrpc": "2.0", "id": 6, "method": "ping"},
+                     {**h, "MCP-Protocol-Version": other})
+        assert r.status_code == 200, f"{other}: {r.status_code} {r.text}"
 
 
 def test_http_missing_protocol_version_header_uses_negotiated_version(http):

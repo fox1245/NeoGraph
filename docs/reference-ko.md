@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=10dd0c889b7f7fd706b12f8dffaa4190ba06a0b46dcded3fe8e28813eb9d357c -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=253058bb1fb801f3f5d74cefffe8e39931520ff916030ef807b9ec6eccb00594 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3157,7 +3157,10 @@ Schema 2020-12가 아닌 스키마, SEP-986의 `A-Za-z0-9_.-` 1~128자를 벗어
 하나를 점유하므로 스레드는 필요할 때 `max_http_threads`(64)까지 시작됩니다.
 `response_timeout`을 넘긴 요청은 504를 받고 그 도구 호출은 취소됩니다. `DELETE`는 그
 연결을 닫습니다. `protected_resource_metadata`가 있으면 서버는 RFC 9728 메타데이터를
-게시하고 모든 401 challenge에서 그 위치를 알립니다.
+게시하고 모든 401 challenge에서 그 위치를 알립니다. `initialize` 이후의 요청은
+`MCP-Protocol-Version`에 지원하는 어느 리비전이든 적을 수 있습니다. 세션은 협상한 리비전을
+그대로 쓰고, 한 세션에서 다른 리비전을 적은 첫 요청은 stderr에 기록되며, 지원하지 않는 값은
+400입니다.
 
 **HTTP 사용법:**
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=3ef6fb103df6e08503c9f69f06635e530a6c903ce510e296d5bc312d01e2f2c8 -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
 - 一个 HTTP 会话对应一个 `MCPServer`。工厂函数每个会话运行一次，必须在新服务器上注册工具。它的参数是 `bearer_authorizer` 返回的作用域，因此程序可以把不同主体的会话隔离开。
 - `MCPHttpServerConfig::host` 默认为 `127.0.0.1`。绑定到其他地址时，除非设置了 `bearer_authorizer`，否则会抛出 `std::invalid_argument`。授权函数接收 Bearer 令牌并返回调用者的作用域；返回 `std::nullopt` 或空字符串，则以 `401` 拒绝该令牌。会话与作用域绑定，所以其他主体无法复用泄露的 `Mcp-Session-Id`。
 - 带有 `Origin` 头的请求，如果该来源不在 `allowed_origins` 中，会被以 `403` 拒绝。
+- `initialize` 之后的请求可以在 `MCP-Protocol-Version` 头中写 `MCP_SUPPORTED_PROTOCOL_VERSIONS` 里的任一修订版本。会话仍按协商的修订版本工作；一个会话中第一个写了其他修订版本的请求会记录到 stderr。不支持或格式不正确的值以 `400` 拒绝，没有该头的请求使用协商的修订版本。
 - 设置 `protected_resource_metadata` 后，服务器会发布 RFC 9728 元数据，并在每个 `401` 质询中指出其位置，适用于令牌来自 OAuth 授权服务器的部署。不设置时，静态 Bearer 令牌不需要发现机制。
 - 限制：`max_sessions`（64；最久未使用的空闲会话会被淘汰）、`session_idle_timeout`（30 分钟）、`max_payload_bytes`（1 MiB）、`response_timeout`（10 分钟；运行更久的请求会收到 `504`，对应的调用被取消）。
 - 该传输对每个 POST 返回一个 `application/json` 响应，对 `GET` 返回 `405`，不提供服务器到客户端的事件流。

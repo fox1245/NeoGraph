@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eb1f04dda28e4e77c4028e895ef14aef9ea854c0afb2c5daece21428055fe8e8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=218d0f80c03057cc37b300eaf78fa45715d606d48fcee6a33b728f074d1365f6 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 修复
+
+- **MCP HTTP 服务器处理写了另一个受支持 `MCP-Protocol-Version` 的请求（#490）。** `initialize` 之后，只要请求的 `MCP-Protocol-Version` 与会话协商的修订版本不同，服务器就一律以 `400` 应答，服务器自己支持的修订版本（`2025-11-25`、`2025-06-18`、`2025-03-26`、`2024-11-05`）也不例外。MCP 2025-11-25 只要求对无效或不受支持的修订版本返回 `400`，官方 TypeScript 服务器接受任一受支持的修订版本；conformance 套件的 `server-sse-multiple-streams` 场景在 `2025-11-25` 会话上发送 `2025-03-26`，收到了三次 `400`。现在这样的请求按会话协商的修订版本处理：批处理、工具字段等都跟随会话，而不是该头。一个会话中第一个这样的请求会向 stderr 写一行警告。不受支持或格式不正确的值仍是 `400`（`-32600`，消息现在是 "MCP-Protocol-Version is not a supported revision"），没有该头的请求仍使用协商的修订版本。**行为变更：** 发送另一个受支持修订版本的客户端会得到处理，而不是被拒绝。
 
 ## [0.14.2] - 2026-10-18
 

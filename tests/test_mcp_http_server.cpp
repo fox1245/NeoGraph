@@ -230,7 +230,7 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
     EXPECT_EQ(json::parse(initialize->body)["result"]["protocolVersion"], "2025-11-25");
 
     // Without MCP-Protocol-Version the negotiated revision applies (MCP-S-08);
-    // another revision than the negotiated one is 400.
+    // a revision the server does not support is 400.
     auto missing_version_headers = base_headers();
     missing_version_headers.emplace("Mcp-Session-Id", session_id);
     auto missing_version = client.Post("/mcp", missing_version_headers,
@@ -238,7 +238,7 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
     ASSERT_TRUE(missing_version);
     EXPECT_EQ(missing_version->status, 200);
     auto other_version_headers = missing_version_headers;
-    other_version_headers.emplace("MCP-Protocol-Version", "2025-06-18");
+    other_version_headers.emplace("MCP-Protocol-Version", "1999-01-01");
     auto other_version = client.Post("/mcp", other_version_headers,
                                      request(19, "ping").dump(), "application/json");
     ASSERT_TRUE(other_version);
@@ -290,8 +290,9 @@ TEST(MCPHttpServerTest, JsonPostLifecycleAndDeleteRoundTrip) {
 }
 
 TEST(MCPHttpServerTest, SessionsKeepTheRevisionTheyNegotiated) {
-    // D2: a session that negotiated 2025-06-18 expects that revision in
-    // MCP-Protocol-Version, or no header at all.
+    // D2: a session that negotiated 2025-06-18 takes that revision in
+    // MCP-Protocol-Version, no header at all, or another supported revision
+    // (#490); anything else is 400.
     MCPHttpServer server(make_http_session);
     ASSERT_TRUE(server.start_async());
     HttpServerGuard guard(server);
@@ -321,7 +322,69 @@ TEST(MCPHttpServerTest, SessionsKeepTheRevisionTheyNegotiated) {
     EXPECT_EQ(absent->status, 200);
     auto newest = with_version("2025-11-25");
     ASSERT_TRUE(newest);
-    EXPECT_EQ(newest->status, 400);
+    EXPECT_EQ(newest->status, 200);
+    for (const char* unsupported : {"2026-07-28", "1999-01-01", "garbage"}) {
+        auto refused = with_version(unsupported);
+        ASSERT_TRUE(refused);
+        EXPECT_EQ(refused->status, 400) << unsupported;
+        const auto error = json::parse(refused->body);
+        EXPECT_EQ(error["error"]["code"], -32600) << refused->body;
+        EXPECT_EQ(error["error"]["message"], "MCP-Protocol-Version is not a supported revision");
+    }
+}
+
+TEST(MCPHttpServerTest, AnotherSupportedRevisionIsServedAsTheNegotiatedOne) {
+    // #490: the header does not change what the session negotiated. A
+    // 2025-11-25 session refuses a JSON-RPC batch even when a request names
+    // 2025-03-26, and a 2025-03-26 session answers one under 2025-11-25.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    auto open_as = [&](const std::string& revision) {
+        auto init = client.Post(
+            "/mcp", base_headers(),
+            request(1, "initialize", {{"protocolVersion", revision},
+                                      {"capabilities", json::object()},
+                                      {"clientInfo", {{"name", "revisions"}, {"version", "1"}}}})
+                .dump(),
+            "application/json");
+        EXPECT_TRUE(init && init->status == 200);
+        return init ? init->get_header_value("Mcp-Session-Id") : std::string();
+    };
+    auto post_as = [&](const std::string& session, const char* revision, const json& body) {
+        auto headers = base_headers();
+        headers.emplace("Mcp-Session-Id", session);
+        headers.emplace("MCP-Protocol-Version", revision);
+        return client.Post("/mcp", headers, body.dump(), "application/json");
+    };
+    const auto batch = json::array({request(2, "ping")});
+
+    const auto modern = open_as("2025-11-25");
+    testing::internal::CaptureStderr();
+    auto refused = post_as(modern, "2025-03-26", batch);
+    auto again   = post_as(modern, "2025-06-18", request(3, "ping"));
+    const auto warnings = testing::internal::GetCapturedStderr();
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->status, 400) << refused->body;
+    EXPECT_EQ(json::parse(refused->body)["error"]["code"], -32600);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->status, 200);
+    // One line for the session, naming both revisions.
+    EXPECT_NE(warnings.find("negotiated 2025-11-25, and a request carried MCP-Protocol-Version "
+                            "2025-03-26"),
+              std::string::npos)
+        << warnings;
+    EXPECT_EQ(warnings.find("[neograph]", warnings.find("[neograph]") + 1), std::string::npos)
+        << warnings;
+
+    const auto older = open_as("2025-03-26");
+    auto answered = post_as(older, "2025-11-25", batch);
+    ASSERT_TRUE(answered);
+    EXPECT_EQ(answered->status, 200) << answered->body;
+    const auto body = json::parse(answered->body);
+    ASSERT_TRUE(body.is_array()) << answered->body;
+    EXPECT_EQ(body[0]["result"], json::object());
 }
 
 TEST(MCPHttpServerTest, IdleSessionsExpireAndAnswer404) {
