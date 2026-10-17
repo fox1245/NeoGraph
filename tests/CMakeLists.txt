@@ -15,6 +15,7 @@ add_executable(neograph_tests
     test_schema_export.cpp
     test_json_array.cpp
     test_json_document_memory.cpp
+    test_json_parse_depth.cpp
     test_pending_writes.cpp
     test_channel_write_mode.cpp
     test_graph_state_reducer_ownership.cpp

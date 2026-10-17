@@ -24,6 +24,7 @@
 
 #include <yyjson.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <iosfwd>
@@ -95,6 +96,13 @@ public:
     static json array();
     static json array(std::initializer_list<json> il);
 
+    // parse() refuses text that nests arrays and objects deeper than this.
+    // Copying and comparing a value recurse once per level, and text a few
+    // hundred KiB long can nest deep enough to exhaust a thread's stack.
+    static constexpr std::size_t max_parse_depth = 1024;
+
+    // Throws parse_error for text that is not JSON or that nests arrays and
+    // objects deeper than max_parse_depth.
     static json parse(std::string_view s);
     static json parse(std::istream& in);
 

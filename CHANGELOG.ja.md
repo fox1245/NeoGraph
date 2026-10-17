@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=741bd772761ec774441d815fbfcb68f5e844d14d302228f715e8562e8b9c62fb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2962ee217acf6224261d1e7d53dbdfe9f5b7fbb7349150feb9b7d31bbd49fa55 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -43,6 +43,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **ACP: `$/cancel_request` が実行中の `session/prompt` をキャンセルします（#457）。** サーバーは自分の保留中のクライアントリクエストには `$/cancel_request` を送っていましたが、クライアントからの通知は無視していたため、通知が指す prompt は最後まで実行されていました。`requestId` が実行中の `session/prompt` のものである `$/cancel_request` は、`session/cancel` と同様にその turn をキャンセルし、prompt は引き続き `stopReason: "cancelled"` の応答を 1 つ受け取ります。未知または終了済みのリクエスト、あるいは別のメソッドのリクエストの `requestId` は無視します。**挙動の変更:** prompt に `$/cancel_request` を送るクライアントは、完了した turn ではなく `cancelled` を受け取ります。
 - **`WsClient` に handshake の期限と任意の読み取り期限ができました（#458）。** `ws_connect` は、TCP 接続を受け付けて Upgrade リクエストに応答しないサーバーを永遠に待っていました。`WsClientOptions::handshake_timeout`（既定 30 秒）は名前解決、接続、TLS handshake、Upgrade のやり取りを制限し、`WsClientOptions::read_timeout`（既定 0、期限なし。サーバーの push を待つアイドル接続は正常なため）は 1 回の `recv()` を制限します。どちらも `asio::system_error(asio::error::timed_out)` で期限切れになり、frame が途中まで読まれている可能性があるため、読み取りのタイムアウトは接続を閉じます。負の値は `std::invalid_argument` を投げます。**挙動の変更:** 既定のオプションの `ws_connect` は、永遠に待たずに 30 秒後に失敗します。
 - **Program 内でタイムアウトのない Core ノード attempt が本体を待つコストが減りました（#467）。** #367 と #368 以降、Program 内の Core 実行はすべてのノード本体を共有 Program スケジューラではなくノード attempt ワーカープールで実行します。オーケストレータはこうした attempt ごとに専用の strand、コルーチン、24 時間タイマーを作って待っていました。タイムアウトのない attempt は時間切れにも切り離し（detach）にもならないため、本体が終わると post 1 回でオーケストレータを再開するようになりました。ノードごとにスレッドの起床が 1 回減り、静かな Arm マシンでノードあたり約 8 µs 短くなりました。#367 と #368 によるノードあたりのコストの大部分は残っています。本体が別のスレッド、多くの場合別のコアで動くため、`quickjs-performance` ゲートで JavaScript でラップした Core 実行は 9%、`structured_join_sequence` は 12% 遅くなりました。タイムアウト付きの `ng.await` は dispatch の前に開始時刻をコマンドジャーナルに記録するため（#391）さらに 11% 遅く、この記録はクラッシュ回復に必要です。
+- **`json::parse` は配列とオブジェクトを 1,024 段より深く入れ子にしたテキストを拒否します（#480）。** `neograph::json` の値のコピーと 2 つの値の比較は入れ子 1 段ごとに再帰しますが、`json::parse` は深さを制限していなかったため、十分に深く入れ子になったテキストがスレッドのスタックを使い果たすことがありました。`json::parse` は、新しい定数 `json::max_parse_depth`(1024)より深く入れ子になったテキストに対し、値をコピーする前に `json::parse_error` を投げるようになりました。上限以内のテキストはこれまでどおり解析され、Program JSON は独自の上限 256 段を維持します。値が 1,024 個以下の文書は検査を省き、それより大きい文書は値をもう一度走査します。
 
 ## [0.14.1] - 2026-10-14
 
