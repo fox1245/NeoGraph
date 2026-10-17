@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ja source_sha256=3ef6fb103df6e08503c9f69f06635e530a6c903ce510e296d5bc312d01e2f2c8 -->
 # MCP: グラフをツールとして公開する、ツールを使うグラフを作る
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
 - HTTP セッション1つが `MCPServer` 1つに対応します。ファクトリーはセッションごとに1回実行され、新しいサーバーにツールを登録する必要があります。引数は `bearer_authorizer` が返したスコープなので、プリンシパルごとにセッションを分けられます。
 - `MCPHttpServerConfig::host` の既定値は `127.0.0.1` です。それ以外のアドレスにバインドすると、`bearer_authorizer` を設定していない限り `std::invalid_argument` が投げられます。認可関数はベアラートークンを受け取り、呼び出し元のスコープを返します。`std::nullopt` か空文字列を返すと、トークンを `401` で拒否します。セッションはスコープに結び付くので、別のプリンシパルが漏えいした `Mcp-Session-Id` を使い回すことはできません。
 - `Origin` ヘッダーを持つリクエストは、そのオリジンが `allowed_origins` に載っていなければ `403` で拒否されます。
+- `initialize` 以降のリクエストは、`MCP-Protocol-Version` ヘッダーに `MCP_SUPPORTED_PROTOCOL_VERSIONS` のどのリビジョンを書いてもかまいません。セッションはネゴシエートしたリビジョンのまま動作し、セッション内で別のリビジョンを書いた最初のリクエストは stderr に記録されます。サポートしない値や形式の正しくない値は `400` で拒否され、ヘッダーのないリクエストにはネゴシエートしたリビジョンが使われます。
 - `protected_resource_metadata` を設定すると、RFC 9728 のメタデータを公開し、すべての `401` チャレンジでその場所を示します。トークンを OAuth 認可サーバーから受け取る構成のための機能です。設定しなければ、固定のベアラートークンにディスカバリーは不要です。
 - 制限: `max_sessions`(64。最も長く使われていないアイドルセッションから退去)、`session_idle_timeout`(30分)、`max_payload_bytes`(1 MiB)、`response_timeout`(10分。それより長くかかるリクエストは `504` を受け、その呼び出しはキャンセルされます)。
 - このトランスポートは POST ごとに `application/json` の応答を1つ返し、`GET` には `405` で答えます。サーバーからクライアントへのイベントストリームは提供しません。

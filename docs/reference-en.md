@@ -3237,7 +3237,10 @@ id then answers 404. HTTP threads start on demand up to `max_http_threads` (64),
 since a tool call holds one until it returns; a request that outlives
 `response_timeout` gets 504 and its tool call is cancelled; a `DELETE` closes
 its connection; and with `protected_resource_metadata` the server publishes
-RFC 9728 metadata and names it in every 401 challenge.
+RFC 9728 metadata and names it in every 401 challenge. A request after
+`initialize` may name any supported revision in `MCP-Protocol-Version`: the
+session keeps the revision it negotiated, the first request of a session that
+names another one is reported on stderr, and an unsupported value is 400.
 
 **HTTP usage:**
 

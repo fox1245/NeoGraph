@@ -13,6 +13,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The MCP HTTP server serves a request that names another supported `MCP-Protocol-Version` (#490).** After `initialize` the server answered `400` to any request whose `MCP-Protocol-Version` differed from the session's negotiated revision, including the revisions it supports (`2025-11-25`, `2025-06-18`, `2025-03-26`, `2024-11-05`). MCP 2025-11-25 asks for `400` only for an invalid or unsupported revision, and the official TypeScript server accepts any supported one; the conformance suite's `server-sse-multiple-streams` scenario sends `2025-03-26` on a `2025-11-25` session and got three `400` answers. Such a request is now served under the revision the session negotiated: batches, tool fields and the rest follow the session, not the header. The first such request of a session writes one warning to stderr. An unsupported or malformed value is still `400` (`-32600`, now with the message "MCP-Protocol-Version is not a supported revision"), and a request without the header still uses the negotiated revision. **Behavior change:** a client that sends another supported revision is served instead of refused.
+
 ## [0.14.2] - 2026-10-18
 
 ### Changed

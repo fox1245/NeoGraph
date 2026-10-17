@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=abc70d9a0145ccd69ce6a55ee5f73de248ffab8c6d9e1b00aafbc6bea42f7372 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=3ef6fb103df6e08503c9f69f06635e530a6c903ce510e296d5bc312d01e2f2c8 -->
 # MCP: 그래프를 도구로 공개하고, 도구를 쓰는 그래프 만들기
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
 - HTTP 세션 하나가 `MCPServer` 하나입니다. 팩토리는 세션마다 한 번 실행되며 새 서버에 도구를 등록해야 합니다. 팩토리의 인자는 `bearer_authorizer`가 돌려준 스코프이므로, 주체별로 세션을 분리할 수 있습니다.
 - `MCPHttpServerConfig::host`의 기본값은 `127.0.0.1`입니다. 다른 주소에 바인드하면 `bearer_authorizer`가 설정되어 있지 않은 한 `std::invalid_argument`가 발생합니다. 인증기는 베어러 토큰을 받아 호출자의 스코프를 돌려줍니다. `std::nullopt`나 빈 문자열을 돌려주면 토큰을 `401`로 거절합니다. 세션은 스코프에 묶이므로, 다른 주체가 유출된 `Mcp-Session-Id`를 재사용할 수 없습니다.
 - `Origin` 헤더가 있는 요청은 그 출처가 `allowed_origins`에 없으면 `403`으로 거절합니다.
+- `initialize` 이후의 요청은 `MCP-Protocol-Version` 헤더에 `MCP_SUPPORTED_PROTOCOL_VERSIONS`의 어느 리비전이든 적을 수 있습니다. 세션은 협상한 리비전을 그대로 쓰고, 한 세션에서 다른 리비전을 적은 첫 요청은 stderr에 기록됩니다. 지원하지 않거나 형식이 틀린 값은 `400`으로 거절하고, 헤더가 없는 요청은 협상한 리비전을 씁니다.
 - `protected_resource_metadata`를 설정하면 RFC 9728 메타데이터를 공개하고 모든 `401` 응답의 챌린지에 그 위치를 알립니다. 토큰을 OAuth 인가 서버에서 받는 배포를 위한 기능입니다. 설정하지 않으면 고정 베어러 토큰에는 디스커버리가 필요 없습니다.
 - 제한: `max_sessions`(64, 가장 오래 쓰지 않은 유휴 세션부터 제거), `session_idle_timeout`(30분), `max_payload_bytes`(1 MiB), `response_timeout`(10분, 이보다 오래 걸리는 요청은 `504`를 받고 해당 호출이 취소됨).
 - 이 전송은 POST마다 `application/json` 응답 하나를 돌려주고 `GET`에는 `405`로 답합니다. 서버에서 클라이언트로 가는 이벤트 스트림은 제공하지 않습니다.

@@ -16,6 +16,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <functional>
 #include <future>
@@ -177,6 +178,9 @@ struct MCPHttpServer::Impl {
         std::atomic<Clock::rep> last_used{Clock::now().time_since_epoch().count()};
         /// Requests being handled now. A busy session never expires.
         std::atomic<int> in_flight{0};
+        /// A request named another supported MCP-Protocol-Version, and
+        /// stderr said so.
+        std::atomic<bool> reported_other_revision{false};
 
         void touch() noexcept { last_used.store(Clock::now().time_since_epoch().count()); }
         Clock::time_point used_at() const noexcept {
@@ -501,19 +505,29 @@ struct MCPHttpServer::Impl {
     }
 
     // MCP transports, "Protocol Version Header": a request after initialize
-    // carries the negotiated revision. A missing header means the negotiated
-    // one (MCP-S-08; 2025-03-26 clients never send it); any other value is
-    // 400 Bad Request.
+    // carries the negotiated revision, and an invalid or unsupported one is
+    // 400 Bad Request. A missing header means the negotiated one (MCP-S-08;
+    // 2025-03-26 clients never send it). Another supported revision is served
+    // as the negotiated one, as the official TypeScript server does (#490);
+    // the first such request of a session is reported on stderr.
     bool validate_protocol_header(const httplib::Request& request, httplib::Response& response,
-                                  const Session& session) const {
+                                  Session& session) const {
         if (!request.has_header("MCP-Protocol-Version")) return true;
-        const auto negotiated = session.server->protocol_version();
-        const auto header     = request.get_header_value("MCP-Protocol-Version");
-        if (header != (negotiated.empty() ? std::string(MCP_PROTOCOL_VERSION) : negotiated)) {
-            http_error(response, 400, -32600,
-                       "MCP-Protocol-Version must be the negotiated revision " +
-                           (negotiated.empty() ? std::string(MCP_PROTOCOL_VERSION) : negotiated));
+        const auto header = request.get_header_value("MCP-Protocol-Version");
+        if (!is_supported_protocol_version(header)) {
+            http_error(response, 400, -32600, "MCP-Protocol-Version is not a supported revision");
             return false;
+        }
+        auto negotiated = session.server->protocol_version();
+        if (negotiated.empty()) negotiated = MCP_PROTOCOL_VERSION;
+        if (header != negotiated && !session.reported_other_revision.exchange(true)) {
+            // FILE* stderr: see graph_executor.cpp.
+            std::fprintf(stderr,
+                         "[neograph] warning: an MCP HTTP session negotiated %s, and a request "
+                         "carried MCP-Protocol-Version %s; it is served as %s. Later requests "
+                         "of this session are not reported.\n",
+                         negotiated.c_str(), header.c_str(), negotiated.c_str());
+            std::fflush(stderr);
         }
         return true;
     }
