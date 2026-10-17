@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=ca7a7c5c3faefccb625acf486a982758f77ba83862ed5bcbcb5386c3f52c6a28 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=d667d15284d7c1c9a1a73a4866747d3f2353d61e41c0ad00bdf07c387e5e9e02 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@ NeoGraph は、グラフとして記述したワークフローを実行する C
 - そうしたワークフローを C++ のサービス内で動かす、または MCP・A2A・ACP で他のエージェントやツールに公開するチーム。
 - LangGraph を知っている読者。リデューサー付きのチャネル、`Send`、`Command`、チェックポイントは同じ考え方なので、[コンセプトガイド](docs/concepts.md)は早く読み進められるはずです。
 
-NeoGraph はアルファ版のソフトウェアです(バージョン 0.14.1)。C++ のバイナリインターフェースは 0.x のリリース間で変わることがあります。[ABI ポリシー](docs/ABI_POLICY.md)を参照してください。モデルの学習や数値計算ライブラリの代わりはしません。モデル呼び出しは、ノードがすることの1つにすぎません。
+NeoGraph はアルファ版のソフトウェアです(バージョン 0.14.2)。C++ のバイナリインターフェースは 0.x のリリース間で変わることがあります。[ABI ポリシー](docs/ABI_POLICY.md)を参照してください。モデルの学習や数値計算ライブラリの代わりはしません。モデル呼び出しは、ノードがすることの1つにすぎません。
 
 ## クイックスタート
 
@@ -70,7 +70,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-PyPI のホイールは、リリース 0.14.1 からビルドされたものです。[変更履歴](CHANGELOG.md)の *Unreleased* に載っている変更は含まれていません。それらを使うには、ソースからビルドしてください([ビルド設定](#build-configuration-and-further-reading)を参照)。
+PyPI のホイールは、リリース 0.14.2 からビルドされたものです。[変更履歴](CHANGELOG.md)の *Unreleased* に載っている変更は含まれていません。それらを使うには、ソースからビルドしてください([ビルド設定](#build-configuration-and-further-reading)を参照)。
 
 ### C++
 
@@ -397,7 +397,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。上限は CI の hosted x86-64 ランナー基準のため、より遅いハードウェアでは回帰がなくても `javascript_wrapped_core` が失敗することがある。`--base <ref>` を指定すると、そのコミットもビルドし、同じマシンでケースごとに比較する。 |
 | `fuzz` | Linux の Clang/libFuzzer による60秒のカナリア。コーパスは自分が所有する出力にコピーします。 |
 | `install` | 隔離したエクスポート先で ABI・シンボル・C++・C11・衝突・再配置を検査するコンシューマー。Git/Bash は不要。任意の `--shared`、`--core-only`、`--program`。`--quickjs` には `--program` と ELF/Mach-O の検査が必要で、Windows の行にはありません。 |
-| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.14.1`。 |
+| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.14.2`。 |
 | `wheel` | 修復を経たインストール済みホイール。cibuildwheel==2.23.0 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 

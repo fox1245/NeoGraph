@@ -7,7 +7,7 @@ frameworks on matched small workloads with no I/O, sleep, or model calls.
 The measurements include node dispatch, state-channel writes, and reducer calls.
 The dated tables retain historical engine labels and dependency versions;
 they do not identify the current package version.
-Current NeoGraph `0.14.1` recipes require alpha SDK `0.3.2`, interface revision/shared
+Current NeoGraph `0.14.2` recipes require alpha SDK `0.3.2`, interface revision/shared
 generation 6, with matching headers and libraries.
 
 For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,

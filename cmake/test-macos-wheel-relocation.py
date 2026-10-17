@@ -59,7 +59,7 @@ OPERATIONS = ("buffered:6*7", "stream:6*7", "reject:6*7", "graph:6*7")
 
 
 # The version the wheel under test is built with (pyproject.toml); raised with each release.
-EXPECTED_VERSION = "0.14.1"
+EXPECTED_VERSION = "0.14.2"
 
 def require(condition, message):
     if not condition:

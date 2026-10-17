@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-18
+
 ### Changed
 
 - **Rebuild C++ consumers: `WsClientOptions` gained members, `A2AServer` and `WsClient` gained functions (#456, #458).** `neograph::async::WsClientOptions` gained `handshake_timeout` and `read_timeout`, so its layout changed (it is passed by value to `ws_connect`); `A2AServer` gained `set_trust_forwarded_headers`, and `WsClient` gained private member functions. Rebuild NeoGraph, C++ consumers and Python extensions together (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
