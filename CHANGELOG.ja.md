@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=0b2b07005af234fbfe38665d7a3788ac3f007d46ab997d28343171cdc4a4a36a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=b30f7a733ea1af2ee3036f7d8ea8aa7acd82ce5c1e074b71dbdcd555cdfbc0db -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -30,6 +30,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ### 追加
 
 - **組み込みの gRPC サーバーが標準の health サービスに応答し、停止できるようになりました（#454）。** `run_server`、`run_tool_server`、`run_checkpoint_server` は `grpc.health.v1.Health` を提供します。呼び出しを受け付けている間はサーバーとそのサービス（`neograph.v1.GraphService`、`neograph.v1.ToolService`、`neograph.v1.CheckpointService`）に `SERVING` を、停止後は `NOT_SERVING` を返すため、Kubernetes の gRPC probe や `grpc-health-probe` が使えます。health サービスに関する gRPC のプロセス全体の既定値は、組み込みサーバーの起動中だけオンにして元に戻すため、ホスト自身のサーバーには影響しません。新しい overload は `ServeOptions`（`<neograph/grpc/serve_options.h>`）を受け取ります。`std::stop_token` が要求されると実行中の呼び出しのために `shutdown_grace`（既定 5 秒）の後でサーバーを止め、`on_serving` コールバックはバインドしたポートを受け取るので、アドレスにポート 0 を指定できます。サーバーリフレクションはホストが選びます。`gRPC::grpc++_reflection` をリンクし、サーバーの起動前に `grpc::reflection::InitProtoReflectionServerBuilderPlugin()` を呼ぶと、gRPC は組み込みサーバーを含むすべてのサーバーにリフレクションを追加します。既存のシグネチャは変わりません。
+- **`json::parse` が呼び出し側の指定したネストの上限を受け取ります（#481）。** 新しいオーバーロード `json::parse(std::string_view, std::size_t max_depth)` と `json::parse(std::istream&, std::size_t max_depth)` は、配列とオブジェクトが `max_depth` 段より深くネストしたテキストを拒否します。上限が 0 ならスカラーだけを受け付けます。上限を取らないオーバーロードは `json::max_parse_depth`（#480 以降 1,024）のままで、サーバーとクライアントを含む NeoGraph 内部の呼び出しも引き続きそれを使います。値のコピーと比較は段ごとに 1 回再帰するため、1,024 より大きい上限は、呼び出し側が信頼するテキストを、それだけ深い値をコピー・比較できるスタックのスレッドで読むためのものです。既存のシグネチャは変わりません。シンボルが増えるだけで、レイアウトは変わりません。
 
 ### 修正
 

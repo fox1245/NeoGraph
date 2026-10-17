@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=0b2b07005af234fbfe38665d7a3788ac3f007d46ab997d28343171cdc4a4a36a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b30f7a733ea1af2ee3036f7d8ea8aa7acd82ce5c1e074b71dbdcd555cdfbc0db -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -30,6 +30,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 추가됨
 
 - **내장 gRPC 서버가 표준 health 서비스에 응답하고 멈출 수 있습니다 (#454).** `run_server`, `run_tool_server`, `run_checkpoint_server`는 이제 `grpc.health.v1.Health`를 제공합니다. 호출을 받는 동안 서버와 그 서비스(`neograph.v1.GraphService`, `neograph.v1.ToolService`, `neograph.v1.CheckpointService`)에 `SERVING`을, 멈춘 뒤에는 `NOT_SERVING`을 답하므로 Kubernetes gRPC probe와 `grpc-health-probe`가 동작합니다. health 서비스에 대한 gRPC의 프로세스 전역 기본값은 내장 서버가 시작하는 동안에만 켜졌다가 원래대로 돌아가므로, 호스트가 직접 만든 서버에는 영향이 없습니다. 새 overload는 `ServeOptions`(`<neograph/grpc/serve_options.h>`)를 받습니다. `std::stop_token`이 요청되면 진행 중인 호출을 위해 `shutdown_grace`(기본 5초) 뒤에 서버를 멈추고, `on_serving` 콜백은 바인딩된 포트를 받으므로 주소에 포트 0을 쓸 수 있습니다. 서버 리플렉션은 호스트가 선택합니다. `gRPC::grpc++_reflection`을 링크하고 서버가 시작하기 전에 `grpc::reflection::InitProtoReflectionServerBuilderPlugin()`을 호출하면, gRPC가 내장 서버를 포함한 모든 서버에 리플렉션을 추가합니다. 기존 시그니처는 바뀌지 않았습니다.
+- **`json::parse`가 호출자가 정한 중첩 한도를 받습니다 (#481).** 새 오버로드 `json::parse(std::string_view, std::size_t max_depth)`와 `json::parse(std::istream&, std::size_t max_depth)`는 배열과 객체가 `max_depth` 단계보다 깊게 중첩된 텍스트를 거부하며, 한도가 0이면 스칼라만 받습니다. 한도를 받지 않는 오버로드는 `json::max_parse_depth`(#480부터 1,024)를 그대로 쓰고, 서버와 클라이언트를 포함한 NeoGraph 내부 호출도 계속 이 오버로드를 씁니다. 값을 복사하고 비교할 때 단계마다 한 번씩 재귀하므로, 1,024보다 큰 한도는 호출자가 신뢰하는 텍스트를 그만큼 깊은 값을 복사하고 비교할 수 있는 스택의 스레드에서 읽을 때 씁니다. 기존 시그니처는 그대로입니다. 심볼이 추가될 뿐 레이아웃은 바뀌지 않습니다.
 
 ### 수정됨
 

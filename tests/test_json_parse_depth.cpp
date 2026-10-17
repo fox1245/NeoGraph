@@ -49,6 +49,36 @@ TEST(JsonParseDepth, RefusesNestingThatWouldExhaustTheStack) {
     EXPECT_THROW(json::parse(arrays(300'000)), json::parse_error);
 }
 
+TEST(JsonParseDepth, TakesALimitFromTheCaller) {
+    // A smaller limit, for a thread with a small stack.
+    EXPECT_NO_THROW(json::parse(arrays(16), 16));
+    EXPECT_THROW(json::parse(arrays(17), 16), json::parse_error);
+    EXPECT_THROW(json::parse("[" + objects(16) + "]", 16), json::parse_error);
+    // A larger one, for text the caller trusts.
+    EXPECT_TRUE(json::parse(arrays(kMax + 1), kMax + 1).is_array());
+    EXPECT_THROW(json::parse(arrays(kMax + 2), kMax + 1), json::parse_error);
+    std::istringstream deeper(arrays(kMax + 1));
+    EXPECT_TRUE(json::parse(deeper, kMax + 1).is_array());
+    std::istringstream shallower(arrays(17));
+    EXPECT_THROW(json::parse(shallower, 16), json::parse_error);
+}
+
+TEST(JsonParseDepth, ALimitOfZeroAdmitsOnlyScalars) {
+    EXPECT_EQ(json::parse(R"("text")", 0).get<std::string>(), "text");
+    EXPECT_THROW(json::parse("[]", 0), json::parse_error);
+    EXPECT_THROW(json::parse("{}", 0), json::parse_error);
+}
+
+TEST(JsonParseDepth, TheErrorNamesTheLimit) {
+    try {
+        json::parse(arrays(9), 8);
+        FAIL() << "nine levels passed a limit of eight";
+    } catch (const json::parse_error& error) {
+        EXPECT_NE(std::string(error.what()).find("deeper than 8 levels"), std::string::npos)
+            << error.what();
+    }
+}
+
 TEST(JsonParseDepth, CountsOnlyTheEnclosingContainers) {
     // Many siblings, scalars and keys add no depth.
     std::string wide = "[";
