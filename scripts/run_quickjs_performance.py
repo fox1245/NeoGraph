@@ -108,6 +108,22 @@ def load_preregistration(path: Path) -> tuple[dict[str, Any], dict[str, dict[str
     tolerance = methodology.get("threshold_tolerance")
     if not isinstance(tolerance, float) or tolerance != 0.1:
         raise ConfigurationError("threshold_tolerance must be exactly 0.1")
+    comparison = methodology.get("ab_comparison")
+    if not isinstance(comparison, dict):
+        raise ConfigurationError("methodology.ab_comparison must be an object")
+    ab_samples = comparison.get("samples_per_case")
+    if not isinstance(ab_samples, int) or isinstance(ab_samples, bool) or ab_samples < 10:
+        raise ConfigurationError("ab_comparison.samples_per_case must be an integer >= 10")
+    warning_ratio = comparison.get("warning_ratio")
+    failure_ratio = comparison.get("failure_ratio")
+    if not (
+        isinstance(warning_ratio, float)
+        and isinstance(failure_ratio, float)
+        and 1.0 < warning_ratio < failure_ratio
+    ):
+        raise ConfigurationError(
+            "ab_comparison needs 1 < warning_ratio < failure_ratio, both floats"
+        )
 
     entries = document.get("cases")
     if not isinstance(entries, list) or not entries:
@@ -487,6 +503,142 @@ def replay_growth_result(
     }
 
 
+def ab_measure(
+    case: dict[str, Any],
+    head: tuple[Path | None, Path | None],
+    base: tuple[Path | None, Path | None],
+    sample_count: int,
+    required_build_type: str,
+) -> dict[str, list[float]] | None:
+    """Head and base samples of one case, alternating; None if the base build lacks the case."""
+    values: dict[str, list[float]] = {"head": [], "base": []}
+    for index in range(sample_count):
+        for side in ("head", "base") if index % 2 == 0 else ("base", "head"):
+            primitive, control = head if side == "head" else base
+            try:
+                sample = single_sample(case, primitive, control, required_build_type)
+            except BenchmarkError as error:
+                # An older base build may not have the case yet: its driver
+                # rejects it as an "unknown ... benchmark case".
+                message = str(error)
+                if side == "base" and not values["base"] and "unknown" in message and "benchmark case" in message:
+                    return None
+                raise
+            values[side].append(float(sample["value"]))
+    return values
+
+
+def ab_verdict(
+    case: dict[str, Any], values: dict[str, list[float]], settings: dict[str, Any]
+) -> dict[str, Any]:
+    head_median = float(statistics.median(values["head"]))
+    base_median = float(statistics.median(values["base"]))
+    if base_median > 0:
+        ratio = head_median / base_median
+    else:
+        ratio = 1.0 if head_median == 0 else math.inf
+    if ratio > settings["failure_ratio"] and case["blocking"]:
+        status = "fail"
+    elif ratio > settings["warning_ratio"]:
+        status = "warn"
+    else:
+        status = "pass"
+    return {
+        "head_median": head_median,
+        "base_median": base_median,
+        "ratio": ratio,
+        "status": status,
+        "head_values": values["head"],
+        "base_values": values["base"],
+    }
+
+
+def ab_comparison(
+    cases: dict[str, dict[str, Any]],
+    selected: list[str],
+    head: tuple[Path | None, Path | None],
+    base: tuple[Path | None, Path | None],
+    base_commit: str | None,
+    settings: dict[str, Any],
+    required_build_type: str,
+) -> dict[str, Any]:
+    """Each primitive and control case on the head and the base build, alternating, on one machine.
+
+    Absolute ceilings cannot see a regression smaller than the spread between
+    hosted runner types (#476); the ratio of two builds measured side by side
+    can. replay_growth and core_pair cases are not compared. A blocking case
+    above the failure ratio is compared once more with fresh samples and
+    fails only if that comparison fails too, as a core_pair case reruns.
+    """
+    results = []
+    sample_count = settings["samples_per_case"]
+    for case_id in selected:
+        case = cases[case_id]
+        if case["driver"] not in {"primitive", "control"} or case_id == "replay_growth":
+            continue
+        values = ab_measure(case, head, base, sample_count, required_build_type)
+        if values is None:
+            results.append(
+                {"id": case_id, "status": "skipped", "reason": "the base build does not have this case"}
+            )
+            continue
+        identity = {"id": case_id, "blocking": case["blocking"], "unit": case["unit"]}
+        verdict = ab_verdict(case, values, settings)
+        if verdict["status"] == "fail":
+            rerun = ab_measure(case, head, base, sample_count, required_build_type)
+            if rerun is None:
+                raise BenchmarkError(f"{case_id}: the base build stopped running the case")
+            results.append({**identity, **ab_verdict(case, rerun, settings), "initial_run": verdict})
+        else:
+            results.append({**identity, **verdict})
+    return {
+        "base_commit": base_commit,
+        "samples_per_case": settings["samples_per_case"],
+        "warning_ratio": settings["warning_ratio"],
+        "failure_ratio": settings["failure_ratio"],
+        "order": "head and base alternate first position by sample index",
+        "failure_rerun": "a blocking case above failure_ratio is compared again and fails only if the rerun fails",
+        "status": "fail" if any(entry["status"] == "fail" for entry in results) else "pass",
+        "cases": results,
+    }
+
+
+def announce_comparison(comparison: dict[str, Any], stream: Any) -> None:
+    """Name every case slower than its base build beyond the warning ratio."""
+    for entry in comparison["cases"]:
+        initial = entry.get("initial_run")
+        if initial and entry["status"] != "fail":
+            message = (
+                f"QuickJS A/B: {entry['id']} was {initial['ratio']:.3f} times its base build, "
+                f"above the failure ratio {comparison['failure_ratio']:g}, and "
+                f"{entry['ratio']:.3f} times in the rerun"
+            )
+            print(
+                f"::warning::{message}" if os.environ.get("GITHUB_ACTIONS") else f"warning: {message}",
+                file=stream,
+                flush=True,
+            )
+            continue
+        if entry["status"] not in {"warn", "fail"}:
+            continue
+        kind = "error" if entry["status"] == "fail" else "warning"
+        limit = comparison["failure_ratio"] if kind == "error" else comparison["warning_ratio"]
+        message = (
+            f"QuickJS A/B: {entry['id']} median {entry['head_median']:.6g} {entry['unit']} "
+            f"against {entry['base_median']:.6g} on the base build, {entry['ratio']:.3f} times, "
+            f"above the {'failure' if kind == 'error' else 'warning'} ratio {limit:g}"
+        )
+        if entry["status"] == "warn" and entry["ratio"] > comparison["failure_ratio"]:
+            message += "; the case is not blocking"
+        if initial:
+            message += f" (first comparison {initial['ratio']:.3f} times)"
+        print(
+            f"::{kind}::{message}" if os.environ.get("GITHUB_ACTIONS") else f"{kind}: {message}",
+            file=stream,
+            flush=True,
+        )
+
+
 def announce(results: list[dict[str, Any]], tolerance: float, stream: Any) -> None:
     """Name every statistic above its ceiling in the log, not only in the report."""
     for result in results:
@@ -522,6 +674,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--control-binary", type=Path)
     parser.add_argument("--core-enabled-binary", type=Path)
     parser.add_argument("--core-disabled-binary", type=Path)
+    parser.add_argument("--base-primitive-binary", type=Path)
+    parser.add_argument("--base-control-binary", type=Path)
+    parser.add_argument("--base-commit")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -638,11 +793,31 @@ def main() -> int:
             result["failure_rerun"] = failure_rerun
         results.append(result)
 
+    comparison = None
+    base_binaries = (arguments.base_primitive_binary, arguments.base_control_binary)
+    if any(base_binaries):
+        if not all(base_binaries):
+            raise ConfigurationError(
+                "--base-primitive-binary and --base-control-binary go together"
+            )
+        comparison = ab_comparison(
+            cases,
+            selected,
+            (primitive_binary, control_binary),
+            base_binaries,
+            arguments.base_commit,
+            preregistration["methodology"]["ab_comparison"],
+            required_build_type,
+        )
+        failed = failed or comparison["status"] == "fail"
+
     binaries = {
         "primitive": primitive_binary,
         "control": control_binary,
         "core_enabled": enabled_binary,
         "core_disabled": disabled_binary,
+        "base_primitive": arguments.base_primitive_binary,
+        "base_control": arguments.base_control_binary,
     }
     used_drivers = {cases[case_id]["driver"] for case_id in selected}
     if "primitive" not in used_drivers:
@@ -677,8 +852,13 @@ def main() -> int:
         "status": "fail" if failed else "pass",
         "cases": results,
     }
+    if comparison is not None:
+        report["ab_comparison"] = comparison
     # Without --output the report itself is written to stdout.
-    announce(results, tolerance, sys.stdout if arguments.output else sys.stderr)
+    stream = sys.stdout if arguments.output else sys.stderr
+    announce(results, tolerance, stream)
+    if comparison is not None:
+        announce_comparison(comparison, stream)
     serialized = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if arguments.output:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

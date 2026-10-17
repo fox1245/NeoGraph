@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -402,11 +403,35 @@ def quickjs_performance(args):
     build_targets(disabled, args.jobs, "bench_core_quickjs_probe")
     configure(enabled, options + definitions(NEOGRAPH_BUILD_QUICKJS_CONTROL="ON"))
     build_targets(enabled, args.jobs, "bench_core_quickjs_probe", "bench_quickjs_primitives", "bench_quickjs_control")
+    comparison = []
+    if args.base:
+        # The base commit's own tree and benchmarks, built beside the head's
+        # and measured on this machine (#476). git archive leaves the
+        # checkout without another worktree.
+        base_commit = run(["git", "rev-parse", "--verify", args.base + "^{commit}"],
+                          capture=True).stdout.strip()
+        archive = args.work_dir / "quickjs-base-source.tar"
+        source = args.work_dir / "quickjs-base-source"
+        run(["git", "archive", "--format=tar", "-o", archive, base_commit])
+        source.mkdir()
+        with tarfile.open(archive) as tree:
+            if hasattr(tarfile, "data_filter"):
+                tree.extractall(source, filter="data")
+            else:
+                tree.extractall(source)
+        archive.unlink()
+        base = args.work_dir / "quickjs-base"
+        configure(base, options + definitions(NEOGRAPH_BUILD_QUICKJS_CONTROL="ON"), source=source)
+        build_targets(base, args.jobs, "bench_quickjs_primitives", "bench_quickjs_control")
+        comparison = ["--base-primitive-binary", binary(base, "bench_quickjs_primitives"),
+                      "--base-control-binary", binary(base, "bench_quickjs_control"),
+                      "--base-commit", base_commit]
     run([sys.executable, ROOT / "scripts/run_quickjs_performance.py",
          "--primitive-binary", binary(enabled, "bench_quickjs_primitives"),
          "--control-binary", binary(enabled, "bench_quickjs_control"),
          "--core-enabled-binary", binary(enabled, "bench_core_quickjs_probe"),
          "--core-disabled-binary", binary(disabled, "bench_core_quickjs_probe"),
+         *comparison,
          "--output", args.work_dir / "quickjs-performance.json"])
 
 
@@ -517,6 +542,7 @@ def main():
     parser.add_argument("--arch", choices=("x86_64", "aarch64", "arm64", "AMD64"), help="wheel: exact cibuildwheel matrix architecture")
     parser.add_argument("--generator", help="native-windows: CMake generator (default Ninja; for example \"Visual Studio 17 2022\")")
     parser.add_argument("--python", help="wheel: build only this CPython tag, for example cp312 (default: every tag in pyproject.toml)")
+    parser.add_argument("--base", help="quickjs-performance: also build this commit and compare each case with it on this machine")
     args = parser.parse_args()
     atexit.register(write_timing_summary, args.profile)
     if args.jobs < 1:
@@ -531,6 +557,8 @@ def main():
         parser.error("--arch applies to wheel; --release-tag applies to sdist")
     if args.generator and args.profile != "native-windows":
         parser.error("--generator applies to native-windows")
+    if args.base and args.profile != "quickjs-performance":
+        parser.error("--base applies to quickjs-performance")
     if args.python and (args.profile != "wheel" or not re.fullmatch(r"cp3\d{1,2}", args.python)):
         parser.error("--python applies to wheel and must look like cp312")
     args.work_dir = args.work_dir.resolve()
