@@ -2,6 +2,7 @@
 
 #include <pybind11/pybind11.h>
 
+#include <cstddef>
 #include <string>
 
 namespace neograph::pybind {
@@ -63,7 +64,35 @@ py::str utf8_to_py(const std::string& text) {
     return py::reinterpret_steal<py::str>(value.release());
 }
 
-neograph::json py_to_json(py::handle obj) {
+namespace {
+
+// Python's recursion check, held while a container converts. A conversion
+// that starts deep in a Python call stack raises RecursionError instead of
+// running out of stack.
+class RecursionCheck {
+public:
+    RecursionCheck() {
+        if (Py_EnterRecursiveCall(" while converting a value to JSON"))
+            throw py::error_already_set();
+    }
+    ~RecursionCheck() { Py_LeaveRecursiveCall(); }
+    RecursionCheck(const RecursionCheck&)            = delete;
+    RecursionCheck& operator=(const RecursionCheck&) = delete;
+};
+
+// A dict, list or tuple below `depth` enclosing ones is level depth + 1.
+// json::parse admits max_parse_depth levels, and the conversion admits the
+// same; a value that contains itself reaches the limit and raises too.
+void check_container_depth(std::size_t depth) {
+    if (depth < neograph::json::max_parse_depth) return;
+    throw py::value_error(
+        "cannot convert to JSON: dicts, lists and tuples nested deeper than " +
+        std::to_string(neograph::json::max_parse_depth) +
+        " levels, or a value that contains itself");
+}
+
+// Converts obj, which sits below `depth` enclosing containers.
+neograph::json py_to_json_at(py::handle obj, std::size_t depth) {
     // Order matters: bool is a subclass of int in Python, so the bool
     // check must come first, otherwise ``True`` round-trips as ``1``.
     if (obj.is_none()) {
@@ -89,26 +118,36 @@ neograph::json py_to_json(py::handle obj) {
         return neograph::json(py_to_utf8(obj));
     }
     if (py::isinstance<py::dict>(obj)) {
+        check_container_depth(depth);
+        RecursionCheck check;
         auto out = neograph::json::object();
         for (auto item : obj.cast<py::dict>()) {
             // Keys are always stringified — JSON has no other key type.
             // Non-string keys (e.g. int) match Python's json.dumps()
             // behaviour by going through ``str()``.
             std::string key = py_to_utf8(item.first);
-            out[key] = py_to_json(item.second);
+            out[key] = py_to_json_at(item.second, depth + 1);
         }
         return out;
     }
     if (py::isinstance<py::list>(obj) || py::isinstance<py::tuple>(obj)) {
+        check_container_depth(depth);
+        RecursionCheck check;
         auto out = neograph::json::array();
         for (auto item : obj) {
-            out.push_back(py_to_json(item));
+            out.push_back(py_to_json_at(item, depth + 1));
         }
         return out;
     }
     // Fallback: str() the object. This catches numpy scalars, Path
     // objects, datetime, etc. Lossy but deterministic.
     return neograph::json(py_to_utf8(obj));
+}
+
+}  // namespace
+
+neograph::json py_to_json(py::handle obj) {
+    return py_to_json_at(obj, 0);
 }
 
 py::object json_to_py(const neograph::json& j) {

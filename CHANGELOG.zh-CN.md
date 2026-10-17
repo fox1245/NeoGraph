@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6762d422f95d72695b63ff9956d239d9ee5ad52cf32f91bc01d99cbe8248d41c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6d463da0fca7b3aab792f9cd3ab5905d28ff89a4cd052c4300dfca6e5d65d672 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -46,6 +46,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **`WsClient` 有了握手期限和可选的读取期限（#458）。** 对于接受 TCP 连接却从不响应 Upgrade 请求的服务器，`ws_connect` 会永远等待。`WsClientOptions::handshake_timeout`（默认 30 秒）限制名称解析、连接、TLS 握手和 Upgrade 交换；`WsClientOptions::read_timeout`（默认 0，即无期限，因为等待服务器推送的空闲连接是正常的）限制一次 `recv()`。两者到期时都抛出 `asio::system_error(asio::error::timed_out)`；由于帧可能只读了一半，读取超时会关闭连接。负值会抛出 `std::invalid_argument`。**行为变更：** 使用默认选项的 `ws_connect` 会在 30 秒后失败，而不是永远等待。
 - **Program 中没有超时的 Core 节点 attempt 等待其主体的开销减少了（#467）。** 自 #367 和 #368 起，Program 中的 Core 运行把每个节点主体放在节点 attempt 工作线程池上执行，而不是共享的 Program 调度器上。编排器为每个这样的 attempt 各自创建 strand、协程和 24 小时定时器来等待。没有超时的 attempt 既不会超时也不会被分离（detach），因此现在主体结束时只需一次 post 即可恢复编排器。每个节点少一次线程唤醒，在一台安静的 Arm 机器上每个节点约少 8 µs。#367 和 #368 的每节点开销大部分仍然存在：主体在另一个线程上运行，常常在另一个核心上，这使 `quickjs-performance` 门禁中 JavaScript 包装的 Core 运行慢了 9%，`structured_join_sequence` 慢了 12%。带超时的 `ng.await` 在 dispatch 之前把开始时间记录到命令日志（#391），因此还要再慢 11%，而崩溃恢复需要这条记录。
 - **`json::parse` 拒绝数组和对象嵌套超过 256 层的文本（#480、#483）。** 复制 `neograph::json` 值以及比较两个值时，每一层嵌套都会递归一次，NeoGraph 内部遍历值的部分函数也是如此，而 `json::parse` 不限制深度，因此嵌套足够深的文本可能耗尽线程栈。现在，对于嵌套深度超过新常量 `json::max_parse_depth`（256，即 Program JSON 已有的上限）的文本，`json::parse` 会在复制值之前抛出 `json::parse_error`。在这个深度下，帧最大的函数也只需约 384 KB 栈，小于 macOS 辅助线程的 512 KiB。**行为变更：** 来自对端、文件和调用方、嵌套超过 256 层的文本不再能解析；信任此类文本的调用方可以传入更高的上限（#481）。`SqliteCheckpointStore`、`PostgresCheckpointStore`、`SqliteHarnessRecordStore`、`FileHarnessRecordStore`、`SqliteEvidenceLedger` 以及 NeoGraph 内部的复制会不限深度地读回 NeoGraph 写入的文本，因此包含更深值的检查点仍能加载。值不超过 256 个的文档跳过该检查，更大的文档会多遍历一次其值。
+- **Python：转换包含自身的值或嵌套超过 256 层的值时会抛出异常，而不是让进程崩溃（#484）。** 绑定以递归方式把 Python 值转换为 `neograph::json`，既没有深度上限，也没有循环检查，因此包含自身的 dict 或 list 会一直递归直到栈耗尽。现在，嵌套超过 `json::max_parse_depth`（256）层的 dict、list 和 tuple 会抛出 `ValueError`，包含自身的值也会达到这一深度并抛出同样的异常。每个容器还会经过 Python 的递归检查，因此从 Python 调用栈深处开始的转换会抛出 `RecursionError`，而不是耗尽栈。
 
 ## [0.14.1] - 2026-10-14
 

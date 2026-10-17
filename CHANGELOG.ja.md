@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=6762d422f95d72695b63ff9956d239d9ee5ad52cf32f91bc01d99cbe8248d41c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=6d463da0fca7b3aab792f9cd3ab5905d28ff89a4cd052c4300dfca6e5d65d672 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -46,6 +46,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **`WsClient` に handshake の期限と任意の読み取り期限ができました（#458）。** `ws_connect` は、TCP 接続を受け付けて Upgrade リクエストに応答しないサーバーを永遠に待っていました。`WsClientOptions::handshake_timeout`（既定 30 秒）は名前解決、接続、TLS handshake、Upgrade のやり取りを制限し、`WsClientOptions::read_timeout`（既定 0、期限なし。サーバーの push を待つアイドル接続は正常なため）は 1 回の `recv()` を制限します。どちらも `asio::system_error(asio::error::timed_out)` で期限切れになり、frame が途中まで読まれている可能性があるため、読み取りのタイムアウトは接続を閉じます。負の値は `std::invalid_argument` を投げます。**挙動の変更:** 既定のオプションの `ws_connect` は、永遠に待たずに 30 秒後に失敗します。
 - **Program 内でタイムアウトのない Core ノード attempt が本体を待つコストが減りました（#467）。** #367 と #368 以降、Program 内の Core 実行はすべてのノード本体を共有 Program スケジューラではなくノード attempt ワーカープールで実行します。オーケストレータはこうした attempt ごとに専用の strand、コルーチン、24 時間タイマーを作って待っていました。タイムアウトのない attempt は時間切れにも切り離し（detach）にもならないため、本体が終わると post 1 回でオーケストレータを再開するようになりました。ノードごとにスレッドの起床が 1 回減り、静かな Arm マシンでノードあたり約 8 µs 短くなりました。#367 と #368 によるノードあたりのコストの大部分は残っています。本体が別のスレッド、多くの場合別のコアで動くため、`quickjs-performance` ゲートで JavaScript でラップした Core 実行は 9%、`structured_join_sequence` は 12% 遅くなりました。タイムアウト付きの `ng.await` は dispatch の前に開始時刻をコマンドジャーナルに記録するため（#391）さらに 11% 遅く、この記録はクラッシュ回復に必要です。
 - **`json::parse` は配列とオブジェクトを 256 段より深く入れ子にしたテキストを拒否します（#480、#483）。** `neograph::json` の値のコピーと 2 つの値の比較は入れ子 1 段ごとに再帰し、値をたどる NeoGraph 内部の処理の一部も同様です。一方 `json::parse` は深さを制限していなかったため、十分に深く入れ子になったテキストがスレッドのスタックを使い果たすことがありました。`json::parse` は、新しい定数 `json::max_parse_depth`（256。Program JSON がすでに使っていた上限）より深く入れ子になったテキストに対し、値をコピーする前に `json::parse_error` を投げるようになりました。この深さでは、フレームが最も大きい処理でもスタックは約 384 KB で、macOS のセカンダリスレッドの 512 KiB より小さくなります。**動作の変更:** ピア、ファイル、呼び出し側から来た 256 段より深いテキストは解析されなくなります。そのようなテキストを信頼する呼び出し側は、より大きい上限を渡せます（#481）。`SqliteCheckpointStore`、`PostgresCheckpointStore`、`SqliteHarnessRecordStore`、`FileHarnessRecordStore`、`SqliteEvidenceLedger` と NeoGraph 内部のコピーは、NeoGraph が書いたテキストを深さに関係なく読み戻すため、より深い値を含むチェックポイントも引き続き読み込めます。値が 256 個以下の文書は検査を省き、それより大きい文書は値をもう一度走査します。
+- **Python: 自分自身を含む値や、256 段より深く入れ子になった値を変換すると、プロセスが落ちずに例外になります（#484）。** バインディングは Python の値を `neograph::json` へ再帰的に変換していましたが、深さの上限も循環の検査もなかったため、自分自身を含む dict や list はスタックが尽きるまで再帰していました。`json::max_parse_depth`（256）より深く入れ子になった dict、list、tuple は `ValueError` を投げるようになり、自分自身を含む値もこの深さに達して同じ例外になります。コンテナごとに Python の再帰チェックも通るため、Python の呼び出しスタックの深いところで始まった変換は、スタックを使い果たす代わりに `RecursionError` を投げます。
 
 ## [0.14.1] - 2026-10-14
 
