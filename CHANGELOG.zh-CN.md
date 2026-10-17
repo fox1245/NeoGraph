@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=353b5ea475448cdc6480ddc7ce093ace7c3699d68c1cb26fe3c9bade40348c5b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eb1f04dda28e4e77c4028e895ef14aef9ea854c0afb2c5daece21428055fe8e8 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.14.2] - 2026-10-18
 
 ### 变更
 
