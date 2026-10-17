@@ -307,6 +307,9 @@ struct MCPHttpServer::Impl {
     std::thread         listener;
     std::atomic<bool>   running{false};
     int                 bound_port = 0;
+    /// Own loopback origins admitted without a listing, each reported once.
+    mutable std::mutex               admitted_origins_mutex;
+    mutable std::vector<std::string> admitted_origins;
 
     std::mutex                                      sessions_mutex;
     std::map<std::string, std::shared_ptr<Session>> sessions;
@@ -347,15 +350,50 @@ struct MCPHttpServer::Impl {
     }
 
     bool validate_origin(const httplib::Request& request, httplib::Response& response) const {
-        if (request.has_header("Origin")) {
-            const auto origin = request.get_header_value("Origin");
-            if (std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) ==
-                config.allowed_origins.end()) {
-                http_error(response, 403, -32003, "Origin is not allowed");
-                return false;
-            }
+        if (!request.has_header("Origin")) return true;
+        const auto origin = request.get_header_value("Origin");
+        if (std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) !=
+            config.allowed_origins.end()) {
+            return true;
         }
-        return true;
+        if (own_loopback_origin(origin)) {
+            report_admitted_origin(origin);
+            return true;
+        }
+        http_error(response, 403, -32003, "Origin is not allowed");
+        return false;
+    }
+
+    // A browser sends the origin of the page it runs. On a loopback bind, a
+    // page with this server's own loopback address and port is served by
+    // this machine, so its origin needs no listing (#491). Browsers send it
+    // in this form: lowercase, no path, no default port. A DNS-rebinding page
+    // sends its own origin and is refused.
+    bool own_loopback_origin(const std::string& origin) const {
+        if (!is_loopback_bind(config.host)) return false;
+        const auto port = bound_port == 80 ? std::string() : ":" + std::to_string(bound_port);
+        for (const char* host : {"localhost", "127.0.0.1", "[::1]"}) {
+            if (origin == "http://" + std::string(host) + port) return true;
+        }
+        return false;
+    }
+
+    void report_admitted_origin(const std::string& origin) const {
+        {
+            std::lock_guard lock(admitted_origins_mutex);
+            if (std::find(admitted_origins.begin(), admitted_origins.end(), origin) !=
+                admitted_origins.end()) {
+                return;
+            }
+            admitted_origins.push_back(origin);
+        }
+        // FILE* stderr: see graph_executor.cpp.
+        std::fprintf(stderr,
+                     "[neograph] warning: the MCP HTTP server admits Origin %s, its own loopback "
+                     "origin, although allowed_origins does not list it. A page on another "
+                     "origin still has to be listed.\n",
+                     origin.c_str());
+        std::fflush(stderr);
     }
 
     bool expired(const Session& session, Clock::time_point now) const {

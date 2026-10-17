@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=bb496c51253637e7a274ba36af0c8d26e97f8c3d6fa013c796beeb25b1ecac34 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -306,7 +306,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 セキュリティのデフォルトはトランスポートのレベルにあり、認証を `GraphEngine` や `HarnessService` に結び付けません。
 
 - デフォルトのバインド先は `127.0.0.1` です。ループバック以外へのバインドは、bearerのオーソライザーを設定しない限り、拒否されます。
-- 指定された `Origin` は、`NEOGRAPH_HARNESS_ALLOWED_ORIGINS`（実行ファイルではカンマ区切り）のエントリと完全に一致しない限り、すべて拒否されます。
+- 指定された `Origin` は、`NEOGRAPH_HARNESS_ALLOWED_ORIGINS`（実行ファイルではカンマ区切り）のエントリと完全に一致するか、ループバックにバインドしたサーバー自身のループバックオリジン（バインドしたポートの `http://localhost:<port>`、`http://127.0.0.1:<port>`、`http://[::1]:<port>`）でない限り、すべて拒否されます。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` を設定すると、実行ファイルの、単一のプリンシパルによるbearerの境界が有効になります。ライブラリとして組み込む場合は、`MCPHttpServerConfig::bearer_authorizer` でOAuth/JWTを検証し、安定したプリンシパルとスコープを返せます。
 - セッションは、返された認可スコープに結び付けられます。別の有効なプリンシパルが、漏えいした `Mcp-Session-Id` を再利用することはできません。
 - `MCPHttpServer` のファクトリーは、その検証済みのスコープを受け取り、`MCPHttpServerSession` のオーナーを返します。マルチテナントで組み込む場合は、このスコープを使って、隔離されたHarnessのレコードストアとチェックポイントストアを選ぶ必要があります。認証の状態が、グラフランタイム自体に入ることはありません。オーソライザーがない場合（ループバックへのバインドのみ）、スコープは空で、実行ファイルは単一のローカルのオーナースコープを保ちます。

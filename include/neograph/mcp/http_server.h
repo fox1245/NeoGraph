@@ -54,7 +54,10 @@ struct NEOGRAPH_API MCPHttpServerConfig {
     /// server. Zero keeps idle sessions until DELETE or eviction.
     std::chrono::milliseconds session_idle_timeout = std::chrono::minutes(30);
 
-    /// Exact allowed Origin values. An Origin header is rejected unless listed.
+    /// Exact allowed Origin values. An Origin header is rejected unless
+    /// listed, except that a loopback bind also admits its own loopback
+    /// origin: `http://localhost:<port>`, `http://127.0.0.1:<port>` or
+    /// `http://[::1]:<port>` at the port it is bound to.
     std::vector<std::string> allowed_origins;
 
     /**

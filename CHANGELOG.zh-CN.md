@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=218d0f80c03057cc37b300eaf78fa45715d606d48fcee6a33b728f074d1365f6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a7cd4ce6049270b67f1b8cde99d69ccf9fb9c0b153ab8e0150711760b99755e8 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 修复
 
 - **MCP HTTP 服务器处理写了另一个受支持 `MCP-Protocol-Version` 的请求（#490）。** `initialize` 之后，只要请求的 `MCP-Protocol-Version` 与会话协商的修订版本不同，服务器就一律以 `400` 应答，服务器自己支持的修订版本（`2025-11-25`、`2025-06-18`、`2025-03-26`、`2024-11-05`）也不例外。MCP 2025-11-25 只要求对无效或不受支持的修订版本返回 `400`，官方 TypeScript 服务器接受任一受支持的修订版本；conformance 套件的 `server-sse-multiple-streams` 场景在 `2025-11-25` 会话上发送 `2025-03-26`，收到了三次 `400`。现在这样的请求按会话协商的修订版本处理：批处理、工具字段等都跟随会话，而不是该头。一个会话中第一个这样的请求会向 stderr 写一行警告。不受支持或格式不正确的值仍是 `400`（`-32600`，消息现在是 "MCP-Protocol-Version is not a supported revision"），没有该头的请求仍使用协商的修订版本。**行为变更：** 发送另一个受支持修订版本的客户端会得到处理，而不是被拒绝。
+- **绑定到回环地址时，MCP HTTP 服务器默认接受它自己的回环来源（#491）。** 带有 `Origin` 的请求只要不在 `allowed_origins` 中就以 `403` 拒绝，而该列表默认为空，所以回环服务器连自己的来源也拒绝。conformance 套件的 `dns-rebinding-protection` 场景用服务器自己的 `Host` 和 `Origin` 发送 `initialize` 并期望成功，在默认设置下会失败。现在绑定到回环地址（`127.0.0.1`、`::1`、`localhost`）时，服务器还接受所绑定端口上的 `http://localhost:<port>`、`http://127.0.0.1:<port>` 和 `http://[::1]:<port>`，按浏览器发送的形式精确比较，并在第一次接受每个来源时向 stderr 写一行。DNS 重绑定页面发送的是它自己的来源，因此仍被拒绝；其他端口上的回环来源、`https` 来源和 `null` 也被拒绝。其他 localhost 端口上的页面（例如浏览器检查器）仍须列入该列表。非回环绑定与以前一样只接受列出的来源。**行为变更：** 绑定到回环地址时，`Origin` 为服务器自己回环来源的请求会得到处理，而不是以 `403` 拒绝。
 
 ## [0.14.2] - 2026-10-18
 
