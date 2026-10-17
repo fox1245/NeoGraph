@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a7cd4ce6049270b67f1b8cde99d69ccf9fb9c0b153ab8e0150711760b99755e8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fd5e5a448537737fa422d5ecb16c31de84cc64363d0504acbbc8253966ffcb09 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 变更
+
+- **采用 SchemaProvider `0437853529b5932e7097a38629a95779d08f03aa`，即 `maint/interface6` 上的 SDK 0.3.3（#496）。** 接口修订版本和共享库代数仍为 6，公开的 struct 和 enum 布局不变。SDK 的两项修复会改变 NeoGraph 用户看到的行为。**行为变更：** 流式文本部分不再传递文本为空的 delta（SchemaProvider #37）。OpenAI Chat、Anthropic Messages、Gemini 和 Responses 的流各自会发送一个这样的 delta，NeoGraph 把它作为文本为空的 `LLM_TOKEN` 事件和 `llm.token` span 事件传了出去，因此统计 token 数或把第一个事件当作第一个 token 的使用方会差一个。文本、各部分和最终结果都不变。**行为变更：** buffered 路径和 streaming 路径没有指向同一个字面模型（`/v1beta/models/<model>:generateContent` 与 `/v1beta/models/<model>:streamGenerateContent?alt=sse`）的 `google.generate` 描述符，在加载时就会以指明路径的 `ConfigError` 被拒绝；以前它能加载，之后每个请求都以 `InvalidConfig` 失败（SchemaProvider #40）。SDK 文档还说明了位于以其他模型名应答的代理或网关之后的部署，如何把它声明为路由网关（SchemaProvider #38）。NeoGraph 现在在构建和安装的 `NeoGraphConfig` 的 `find_dependency` 中要求 `SchemaProvider 0.3.3 EXACT`。请用 0.3.3 的头文件和库一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a7cd4ce6049270b67f1b8cde99d69ccf9fb9c0b153ab8e0150711760b99755e8 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=fd5e5a448537737fa422d5ecb16c31de84cc64363d0504acbbc8253966ffcb09 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -13,6 +13,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 変更
+
+- **SchemaProvider `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` の SDK 0.3.3）を採用します (#496)。** インターフェースのリビジョンと共有ライブラリの世代は 6 のままで、公開の struct や enum のレイアウトは変わりません。SDK の 2 つの修正が、NeoGraph の利用者から見える動作を変えます。**動作の変更:** ストリーミングされるテキストパートは、空のテキストの delta を渡さなくなりました (SchemaProvider #37)。OpenAI Chat、Anthropic Messages、Gemini、Responses のストリームはそれぞれこの delta を 1 つ送っていて、NeoGraph はそれを空のテキストの `LLM_TOKEN` イベントと `llm.token` の span イベントとして渡していました。そのため、トークン数を数える利用者や最初のイベントを最初のトークンとみなす利用者は 1 つずれていました。テキスト、パート、最終結果は変わりません。**動作の変更:** buffered と streaming のパスが同じリテラルのモデルを指していない `google.generate` のディスクリプター (`/v1beta/models/<model>:generateContent` と `/v1beta/models/<model>:streamGenerateContent?alt=sse`) は、読み込み時にパスを示す `ConfigError` で拒否されます。以前は読み込めたうえで、すべてのリクエストが `InvalidConfig` で失敗していました (SchemaProvider #40)。別のモデル名で応答するプロキシやゲートウェイの背後にあるデプロイメントが、それをルーティングゲートウェイとして宣言する方法も SDK のドキュメントに書かれました (SchemaProvider #38)。NeoGraph はビルドと、インストールされる `NeoGraphConfig` の `find_dependency` で `SchemaProvider 0.3.3 EXACT` を要求するようになりました。NeoGraph、C++ の利用者、Python 拡張を 0.3.3 のヘッダーとライブラリでまとめて再ビルドしてください ([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
 
 ### 修正
 

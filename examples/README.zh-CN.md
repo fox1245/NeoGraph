@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=2e2dcc4b760bda9449810d90b19dccc53a354c23c8b63bc24e55bcfbf871d4c9 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=18a0c0aaab5da7803afa48aa59bff6d33adcf4a456ae389145e257de6e5d932a -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -289,7 +289,7 @@ CMake 3.20+ 按显式 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、已安装 runtime p
 固定 public GitHub source archive 的顺序选择 SDK。download fallback 默认启用；
 使用已安装 package 或显式 source 的 offline 构建应设置 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`。
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
-SDK package 为 alpha `0.3.2`（interface revision/shared ABI 6）。
+SDK package 为 alpha `0.3.3`（interface revision/shared ABI 6）。
 
 保留的 interface-3 model-free C++ E2E 执行验证了 39 个编号 target：29 个 finite offline target 与实际
 MCP/ACP/A2A/Harness 和 gRPC graph/检查点/tool 路径。gRPC-vs-JSON-RPC 测量示例也运行了，
@@ -308,7 +308,7 @@ remote CI 与公开发布仍待完成。
 
 ## 保留的示例契约
 
-这些源码契约基于 SDK `0.3.2`（interface 6）构建。上面记录的 C++ 运行使用的是较早的 SDK
+这些源码契约基于 SDK `0.3.3`（interface 6）构建。上面记录的 C++ 运行使用的是较早的 SDK
 interface，仍属历史证据，不是对当前 SDK 的验证，也不包含新的 live 调用。各 family 控制是 `ProviderControls` 的封闭类型化字段；
 不支持的 family/origin/model 组合在 I/O 前拒绝。reasoning/sampling/tool 控制、
 Responses 服务端保存 cursor、deployment header 和显式 portable Gemini history 见
