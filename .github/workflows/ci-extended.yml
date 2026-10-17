@@ -115,13 +115,30 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The A/B comparison builds an older commit as its base (#476).
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install build dependencies
         run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev pkg-config
+      - name: Choose the A/B comparison base
+        id: base
+        # A branch compares with its merge base on master; master itself with
+        # the latest release before it.
+        run: |
+          git fetch --no-tags --quiet origin master
+          base=$(git merge-base HEAD origin/master)
+          if [ "$base" = "$(git rev-parse HEAD)" ]; then
+            base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || git rev-parse HEAD^)
+          fi
+          echo "ref=$base" >> "$GITHUB_OUTPUT"
+          echo "A/B base: $base ($(git log -1 --format=%s "$base"))"
       - name: Verify immutable QuickJS matrix
-        run: python scripts/verify_ci.py quickjs-performance --work-dir "$RUNNER_TEMP/neograph-quickjs-performance" --jobs auto
+        env:
+          BASE_REF: ${{ steps.base.outputs.ref }}
+        run: python scripts/verify_ci.py quickjs-performance --work-dir "$RUNNER_TEMP/neograph-quickjs-performance" --jobs auto --base "$BASE_REF"
       - name: Upload QuickJS performance report
         if: always()
         uses: actions/upload-artifact@v4

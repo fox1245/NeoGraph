@@ -41,6 +41,12 @@
     "reference_hardware": "The ceilings are calibrated on the GitHub-hosted ubuntu-24.04 x86-64 runners of CI extended, and the CI result is the reference. There the other microsecond ceilings leave at least 2.4 times headroom, while javascript_wrapped_core leaves about 1.2 times, so a run on slower hardware can exceed it without a regression: a quiet Arm Neoverse-N1 machine measured a median of 6234 us (#465). Reports record the CPU model and the runner environment.",
     "memory_definition": "Primitive cases use the QuickJS custom allocator high-water mark. Program and Core cases use the fresh process resident-set high-water mark.",
     "core_pair_order": "Enabled and disabled binaries alternate first position by sample index.",
+    "ab_comparison": {
+      "samples_per_case": 20,
+      "warning_ratio": 1.1,
+      "failure_ratio": 1.25,
+      "policy": "When a base build is given (verify_ci.py quickjs-performance --base <ref>), every primitive and control case except replay_growth also runs on it, alternating base and head samples by sample index on the same machine. The ratio of the head median to the base median warns above warning_ratio. A blocking case above failure_ratio is compared once more with fresh samples and fails only if that comparison is above failure_ratio too. A case the base build does not have is reported as skipped. The absolute ceilings still apply. Hosted runner types differ by more than these ratios, so only a comparison on one machine can see a regression of 10-25% (#476)."
+    },
     "one_off_result_sufficient": false
   },
   "cases": [
