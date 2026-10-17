@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=b30f7a733ea1af2ee3036f7d8ea8aa7acd82ce5c1e074b71dbdcd555cdfbc0db -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6762d422f95d72695b63ff9956d239d9ee5ad52cf32f91bc01d99cbe8248d41c -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -30,7 +30,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 已添加
 
 - **内置 gRPC 服务器响应标准 health 服务，并且可以停止（#454）。** `run_server`、`run_tool_server` 和 `run_checkpoint_server` 现在提供 `grpc.health.v1.Health`：在接收调用期间为服务器及其服务（`neograph.v1.GraphService`、`neograph.v1.ToolService`、`neograph.v1.CheckpointService`）返回 `SERVING`，停止后返回 `NOT_SERVING`，因此 Kubernetes gRPC 探针和 `grpc-health-probe` 可以使用。gRPC 关于 health 服务的进程级默认值只在内置服务器启动期间打开，随后恢复，因此宿主自己的服务器不受影响。新的重载接受 `ServeOptions`（`<neograph/grpc/serve_options.h>`）：一个 `std::stop_token`，请求停止后为进行中的调用等待 `shutdown_grace`（默认 5 秒）再停止服务器；以及一个接收所绑定端口的 `on_serving` 回调，因此地址可以使用端口 0。服务器反射由宿主选择：链接 `gRPC::grpc++_reflection` 并在服务器启动前调用 `grpc::reflection::InitProtoReflectionServerBuilderPlugin()`，gRPC 会把反射加到所有服务器上，包括内置服务器。现有签名不变。
-- **`json::parse` 接受调用方指定的嵌套上限（#481）。** 新的重载 `json::parse(std::string_view, std::size_t max_depth)` 和 `json::parse(std::istream&, std::size_t max_depth)` 拒绝数组和对象嵌套超过 `max_depth` 层的文本；上限为 0 时只接受标量。不带上限的重载仍使用 `json::max_parse_depth`（自 #480 起为 1,024），NeoGraph 自身的调用（包括其服务器和客户端）也继续使用这些重载。复制和比较值时每一层递归一次，因此大于 1,024 的上限用于调用方信任的文本，并且要在栈足以复制和比较这么深的值的线程上读取。现有签名不变：只增加符号，不改变布局。
+- **`json::parse` 接受调用方指定的嵌套上限（#481）。** 新的重载 `json::parse(std::string_view, std::size_t max_depth)` 和 `json::parse(std::istream&, std::size_t max_depth)` 拒绝数组和对象嵌套超过 `max_depth` 层的文本；上限为 0 时只接受标量。不带上限的重载仍使用 `json::max_parse_depth`（自 #480 起为 256），NeoGraph 自身的调用（包括其服务器和客户端）也继续使用这些重载。复制和比较值时每一层递归一次，因此大于 256 的上限用于调用方信任的文本，并且要在栈足以复制和比较这么深的值的线程上读取。现有签名不变：只增加符号，不改变布局。
 
 ### 修复
 
@@ -45,7 +45,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **ACP：`$/cancel_request` 会取消进行中的 `session/prompt`（#457）。** 服务器会为自己待处理的客户端请求发送 `$/cancel_request`，却忽略来自客户端的该通知，因此它所指向的 prompt 会一直运行到完成。现在 `requestId` 属于正在运行的 `session/prompt` 的 `$/cancel_request` 会像 `session/cancel` 那样取消该 turn，prompt 仍会收到一个 `stopReason: "cancelled"` 的响应；未知或已完成请求、或其他方法请求的 `requestId` 会被忽略。**行为变更：** 为 prompt 发送 `$/cancel_request` 的客户端现在得到 `cancelled`，而不是完成的 turn。
 - **`WsClient` 有了握手期限和可选的读取期限（#458）。** 对于接受 TCP 连接却从不响应 Upgrade 请求的服务器，`ws_connect` 会永远等待。`WsClientOptions::handshake_timeout`（默认 30 秒）限制名称解析、连接、TLS 握手和 Upgrade 交换；`WsClientOptions::read_timeout`（默认 0，即无期限，因为等待服务器推送的空闲连接是正常的）限制一次 `recv()`。两者到期时都抛出 `asio::system_error(asio::error::timed_out)`；由于帧可能只读了一半，读取超时会关闭连接。负值会抛出 `std::invalid_argument`。**行为变更：** 使用默认选项的 `ws_connect` 会在 30 秒后失败，而不是永远等待。
 - **Program 中没有超时的 Core 节点 attempt 等待其主体的开销减少了（#467）。** 自 #367 和 #368 起，Program 中的 Core 运行把每个节点主体放在节点 attempt 工作线程池上执行，而不是共享的 Program 调度器上。编排器为每个这样的 attempt 各自创建 strand、协程和 24 小时定时器来等待。没有超时的 attempt 既不会超时也不会被分离（detach），因此现在主体结束时只需一次 post 即可恢复编排器。每个节点少一次线程唤醒，在一台安静的 Arm 机器上每个节点约少 8 µs。#367 和 #368 的每节点开销大部分仍然存在：主体在另一个线程上运行，常常在另一个核心上，这使 `quickjs-performance` 门禁中 JavaScript 包装的 Core 运行慢了 9%，`structured_join_sequence` 慢了 12%。带超时的 `ng.await` 在 dispatch 之前把开始时间记录到命令日志（#391），因此还要再慢 11%，而崩溃恢复需要这条记录。
-- **`json::parse` 拒绝数组和对象嵌套超过 1,024 层的文本（#480）。** 复制 `neograph::json` 值以及比较两个值时，每一层嵌套都会递归一次，而 `json::parse` 不限制深度，因此嵌套足够深的文本可能耗尽线程栈。现在，对于嵌套深度超过新常量 `json::max_parse_depth`（1024）的文本，`json::parse` 会在复制值之前抛出 `json::parse_error`。上限以内的文本照常解析，Program JSON 仍保留自身 256 层的上限。值不超过 1,024 个的文档跳过该检查，更大的文档会多遍历一次其值。
+- **`json::parse` 拒绝数组和对象嵌套超过 256 层的文本（#480、#483）。** 复制 `neograph::json` 值以及比较两个值时，每一层嵌套都会递归一次，NeoGraph 内部遍历值的部分函数也是如此，而 `json::parse` 不限制深度，因此嵌套足够深的文本可能耗尽线程栈。现在，对于嵌套深度超过新常量 `json::max_parse_depth`（256，即 Program JSON 已有的上限）的文本，`json::parse` 会在复制值之前抛出 `json::parse_error`。在这个深度下，帧最大的函数也只需约 384 KB 栈，小于 macOS 辅助线程的 512 KiB。**行为变更：** 来自对端、文件和调用方、嵌套超过 256 层的文本不再能解析；信任此类文本的调用方可以传入更高的上限（#481）。`SqliteCheckpointStore`、`PostgresCheckpointStore`、`SqliteHarnessRecordStore`、`FileHarnessRecordStore`、`SqliteEvidenceLedger` 以及 NeoGraph 内部的复制会不限深度地读回 NeoGraph 写入的文本，因此包含更深值的检查点仍能加载。值不超过 256 个的文档跳过该检查，更大的文档会多遍历一次其值。
 
 ## [0.14.1] - 2026-10-14
 

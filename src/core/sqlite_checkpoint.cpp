@@ -18,6 +18,7 @@
 
 #include <neograph/graph/sqlite_checkpoint.h>
 #include "managed_budget_journal.h"
+#include "own_json.h"
 #include "sqlite_wal.h"
 
 #include <sqlite3.h>
@@ -27,6 +28,8 @@
 #include <limits>
 #include <stdexcept>
 #include <thread>
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::graph {
 
@@ -144,7 +147,7 @@ std::string to_text(const json& j) {
 
 json parse_text(const std::string& s) {
     if (s.empty()) return json();
-    return json::parse(s);
+    return parse_own_json(s);
 }
 
 bool has_managed_budget_obligation(sqlite3* db, const std::string& thread_id) {
@@ -173,7 +176,7 @@ json load_managed_budget_head(sqlite3* db, const std::string& thread_id) {
     const int status = query.step();
     if (status == SQLITE_DONE) return nullptr;
     if (status != SQLITE_ROW) throw_sqlite_error(db, "managed budget head query failed");
-    return json::parse(query.column_text(0));
+    return parse_own_json(query.column_text(0));
 }
 
 void save_managed_budget_head(sqlite3* db, const std::string& thread_id, const json& head) {
@@ -196,7 +199,7 @@ json load_managed_budget_effect(sqlite3* db, const std::string& thread_id,
     const int status = query.step();
     if (status == SQLITE_DONE) return nullptr;
     if (status != SQLITE_ROW) throw_sqlite_error(db, "managed budget effect query failed");
-    return json::parse(query.column_text(0));
+    return parse_own_json(query.column_text(0));
 }
 
 void save_managed_budget_effect(sqlite3* db, const std::string& thread_id,
@@ -525,7 +528,7 @@ void SqliteCheckpointStore::ensure_schema() {
             bool obligation = true;
             try {
                 Checkpoint checkpoint;
-                checkpoint.metadata = json::parse(retained.column_text(1));
+                checkpoint.metadata = parse_own_json(retained.column_text(1));
                 restore_checkpoint_storage_envelope(checkpoint);
                 obligation = detail::ManagedBudgetJournalAccess::checkpoint_requires_obligation(checkpoint);
             } catch (const std::exception&) {
@@ -672,7 +675,7 @@ LoadedShell stmt_to_loaded(Stmt& q) {
     ls.cp.step             = q.column_int64(10);
     ls.cp.timestamp        = q.column_int64(11);
     ls.cp.schema_version   = q.column_int  (12);
-    if (!q.column_is_null(13)) ls.checkpoint_shape = json::parse(q.column_text(13));
+    if (!q.column_is_null(13)) ls.checkpoint_shape = parse_own_json(q.column_text(13));
     return ls;
 }
 

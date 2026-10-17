@@ -4,6 +4,8 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/loader.h>
 
+#include "own_json.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -14,10 +16,12 @@
 #include <utility>
 #include <vector>
 
+using neograph::detail::parse_own_json;
+
 namespace neograph::graph {
 namespace {
 
-json deep_copy(const json& v) { return json::parse(v.dump()); }
+json deep_copy(const json& v) { return parse_own_json(v.dump()); }
 
 template<typename T>
 const T& pick(const std::vector<T>& vec, std::mt19937& rng) {
@@ -232,7 +236,7 @@ MutationResult op_remove_edge(const json& core, std::mt19937& rng) {
         return {std::nullopt, "remove_edge: only the entry edge is removable"};
 
     size_t idx = removable[std::uniform_int_distribution<size_t>(0, removable.size() - 1)(rng)];
-    json mutated = json::parse(core.dump());
+    json mutated = parse_own_json(core.dump());
     json new_edges = json::array();
     for (size_t i = 0; i < n; ++i) {
         if (i == idx) continue;

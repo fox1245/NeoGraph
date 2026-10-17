@@ -1,5 +1,7 @@
 #include <neograph/research/sqlite_evidence_ledger.h>
 
+#include "own_json.h"
+
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -12,6 +14,8 @@
 #include <string>
 #include <unordered_set>
 #include <utility>
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::research {
 namespace {
@@ -396,7 +400,7 @@ std::optional<SourceIdentity> load_source(sqlite3* db, std::string_view source_i
     const auto result = statement.step();
     if (result == SQLITE_DONE) return std::nullopt;
     if (result != SQLITE_ROW) throw_sqlite_error(db, "load source failed");
-    return source_from_json(json::parse(statement.column_text(0)));
+    return source_from_json(parse_own_json(statement.column_text(0)));
 }
 
 std::optional<ResearchTask> load_task(sqlite3* db, std::string_view task_id) {
@@ -405,7 +409,7 @@ std::optional<ResearchTask> load_task(sqlite3* db, std::string_view task_id) {
     const auto result = statement.step();
     if (result == SQLITE_DONE) return std::nullopt;
     if (result != SQLITE_ROW) throw_sqlite_error(db, "load task failed");
-    return task_from_json(json::parse(statement.column_text(0)));
+    return task_from_json(parse_own_json(statement.column_text(0)));
 }
 
 std::optional<EvidenceArtifact> load_task_artifact(sqlite3* db, std::string_view task_id) {
@@ -414,7 +418,7 @@ std::optional<EvidenceArtifact> load_task_artifact(sqlite3* db, std::string_view
     const auto result = statement.step();
     if (result == SQLITE_DONE) return std::nullopt;
     if (result != SQLITE_ROW) throw_sqlite_error(db, "load task artifact failed");
-    return artifact_from_json(json::parse(statement.column_text(0)));
+    return artifact_from_json(parse_own_json(statement.column_text(0)));
 }
 
 std::optional<EvidenceArtifact> load_artifact(sqlite3* db, std::string_view artifact_id) {
@@ -423,7 +427,7 @@ std::optional<EvidenceArtifact> load_artifact(sqlite3* db, std::string_view arti
     const auto result = statement.step();
     if (result == SQLITE_DONE) return std::nullopt;
     if (result != SQLITE_ROW) throw_sqlite_error(db, "load artifact failed");
-    return artifact_from_json(json::parse(statement.column_text(0)));
+    return artifact_from_json(parse_own_json(statement.column_text(0)));
 }
 
 void write_task(sqlite3* db, const ResearchTask& task) {
@@ -500,7 +504,7 @@ ORDER BY task_id
         const auto result = statement.step();
         if (result == SQLITE_DONE) break;
         if (result != SQLITE_ROW) throw_sqlite_error(db, "query board usage failed");
-        const auto task = task_from_json(json::parse(statement.column_text(0)));
+        const auto task = task_from_json(parse_own_json(statement.column_text(0)));
         if (task.board_id != board_id) continue;
         const bool active = task.state == ResearchTaskState::Leased
             && task.lease_expires_at_unix_ms > now_unix_ms;
@@ -826,7 +830,7 @@ WHERE owner_scope = ? AND state IN ('ready', 'leased') ORDER BY task_id
         const auto step = statement.step();
         if (step == SQLITE_DONE) break;
         if (step != SQLITE_ROW) throw_sqlite_error(impl_->db, "list tasks failed");
-        result.push_back(task_from_json(json::parse(statement.column_text(0))));
+        result.push_back(task_from_json(parse_own_json(statement.column_text(0))));
     }
     return result;
 }
@@ -940,7 +944,7 @@ WHERE owner_scope = ? AND state = 'leased' AND lease_expires_at_ms <= ? ORDER BY
         const auto result = select.step();
         if (result == SQLITE_DONE) break;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "find expired leases failed");
-        expired.push_back(task_from_json(json::parse(select.column_text(0))));
+        expired.push_back(task_from_json(parse_own_json(select.column_text(0))));
     }
     std::vector<std::string> ids;
     ids.reserve(expired.size());
@@ -1032,7 +1036,7 @@ WHERE owner_scope = ? AND claim_id = ? ORDER BY artifact_id
         const auto result = statement.step();
         if (result == SQLITE_DONE) break;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "list claim artifacts failed");
-        artifacts.push_back(artifact_from_json(json::parse(statement.column_text(0))));
+        artifacts.push_back(artifact_from_json(parse_own_json(statement.column_text(0))));
     }
     return artifacts;
 }

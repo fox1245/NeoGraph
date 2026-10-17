@@ -16,6 +16,7 @@
 
 #include <neograph/graph/postgres_checkpoint.h>
 #include "managed_budget_journal.h"
+#include "own_json.h"
 
 #include <libpq-fe.h>
 
@@ -54,6 +55,8 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::graph {
 
@@ -225,7 +228,7 @@ std::string to_jsonb_text(const json& j) {
 
 json parse_jsonb_text(std::string_view sv) {
     if (sv.empty()) return json();
-    return json::parse(sv);
+    return parse_own_json(sv);
 }
 
 json next_nodes_to_json(const std::vector<std::string>& v) {
@@ -544,7 +547,7 @@ constexpr const char* kSelectCols =
 json stored_json(PGresult* result, int row, const char* raw_name, const char* projection_name) {
     const auto raw_column = col_idx(result, raw_name);
     if (!PQgetisnull(result, row, raw_column))
-        return json::parse(col_text(result, row, raw_column));
+        return parse_own_json(col_text(result, row, raw_column));
     return parse_jsonb_text(col_text(result, row, col_idx(result, projection_name)));
 }
 

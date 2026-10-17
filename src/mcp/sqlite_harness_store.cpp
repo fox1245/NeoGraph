@@ -2,6 +2,7 @@
 
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
+#include "../core/own_json.h"
 #include "../core/sqlite_wal.h"
 #include <sqlite3.h>
 
@@ -17,6 +18,8 @@
 #include <set>
 #include <stdexcept>
 #include <utility>
+
+using neograph::detail::parse_own_json;
 
 namespace neograph::mcp {
 namespace {
@@ -453,7 +456,7 @@ void validate_contract_run_binding(const HarnessProgramArtifactRecord& artifact,
     }
     if (verification && status != program::ContractRunStatus::Running &&
         status != program::ContractRunStatus::Frozen) {
-        auto replay_json = json::parse(contract_run.serialize_canonical());
+        auto replay_json = parse_own_json(contract_run.serialize_canonical());
         replay_json["status"] = "running";
         replay_json["verification"] = nullptr;
         auto replay = program::ContractRun::parse(replay_json.dump());
@@ -647,7 +650,7 @@ ALTER TABLE neograph_harness_runs
                     const auto result = rows.step();
                     if (result == SQLITE_DONE) break;
                     if (result != SQLITE_ROW) throw_sqlite_error(db, "run migration read failed");
-                    records.emplace_back(rows.text(0), json::parse(rows.text(1)));
+                    records.emplace_back(rows.text(0), parse_own_json(rows.text(1)));
                 }
                 for (const auto& [run_id, record] : records) {
                     Statement update(db,
@@ -1018,7 +1021,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
         const auto result = statement.step();
         if (result == SQLITE_DONE) return std::nullopt;
         if (result != SQLITE_ROW) throw_sqlite_error(db, "read failed");
-        return json::parse(statement.text(0));
+        return parse_own_json(statement.text(0));
     }
 
     sqlite3*                   db = nullptr;
@@ -1548,7 +1551,7 @@ public:
             }
             if (exists) {
                 const auto stored_wrapper =
-                    HarnessProgramRunRecord::parse(json::parse(current.text(6)));
+                    HarnessProgramRunRecord::parse(parse_own_json(current.text(6)));
                 if (stored_wrapper.run_record().run_id() != run_id) {
                     throw std::invalid_argument("Stored Program run alias is corrupt");
                 }
@@ -1856,7 +1859,7 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
                 const auto source = HarnessProgramRunRecord::parse(
-                    json::parse(source_run_query.text(0))).run_record();
+                    parse_own_json(source_run_query.text(0))).run_record();
                 const auto source_contexts = load_context_publications_locked(
                     owner_scope, source_generation.run_id(), 0);
                 const auto fork       = publication.run_record.fork_receipt();
@@ -1958,7 +1961,7 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
                 const auto source = HarnessProgramRunRecord::parse(
-                    json::parse(source_run_query.text(0))).run_record();
+                    parse_own_json(source_run_query.text(0))).run_record();
                 const auto contexts = load_context_publications_locked(owner_scope, receipt.run_id, 0);
                 if (lineage.id() != source_lineage_query.text(0) ||
                     has_blocking_hook_obligation(load_hook_outbox_entries_locked(
@@ -2006,7 +2009,7 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
                 const auto previous_wrapper =
-                    HarnessProgramRunRecord::parse(json::parse(current.text(6)));
+                    HarnessProgramRunRecord::parse(parse_own_json(current.text(6)));
                 previous_wrapper.validate_artifact(artifact_);
                 const auto previous_run = previous_wrapper.run_record();
                 const auto old_terminal = previous_run.terminal_result();
@@ -2457,7 +2460,7 @@ private:
         const auto result = query.step();
         if (result == SQLITE_DONE) return std::nullopt;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program artifact read failed");
-        return HarnessProgramArtifactRecord::parse(json::parse(query.text(0)));
+        return HarnessProgramArtifactRecord::parse(parse_own_json(query.text(0)));
     }
 
     void validate_publication_locked(const HarnessProgramRunRecord& wrapper,
@@ -2571,7 +2574,7 @@ private:
 #ifdef NEOGRAPH_TESTING
         if (auto callback = std::exchange(impl_->program_run_read_callback, {})) callback();
 #endif
-        auto wrapper = HarnessProgramRunRecord::parse(json::parse(query.text(0)));
+        auto wrapper = HarnessProgramRunRecord::parse(parse_own_json(query.text(0)));
         if (wrapper.run_record().run_id() != run_id) {
             throw std::invalid_argument("Stored Program run alias is corrupt");
         }
@@ -2691,7 +2694,7 @@ private:
         const auto result = query.step();
         if (result == SQLITE_DONE) return std::nullopt;
         if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program run read failed");
-        auto wrapper = HarnessProgramRunRecord::parse(json::parse(query.text(0)));
+        auto wrapper = HarnessProgramRunRecord::parse(parse_own_json(query.text(0)));
         if (wrapper.run_record().run_id() != run_id || wrapper.artifact_id() != query.text(1) ||
             wrapper.owner_scope() != query.text(2) || wrapper.run_record().bundle_id() != query.text(3) ||
             wrapper.run_record().program_version_id() != query.text(4) ||
@@ -3070,7 +3073,7 @@ std::vector<json> SqliteHarnessRecordStore::list_events(const std::string& run_i
             {"protocol_version", list.text(3)},
             {"profile", list.text(4)},
             {"event_type", list.text(5)},
-            {"payload", json::parse(list.text(10))},
+            {"payload", parse_own_json(list.text(10))},
             {"created_at_ms", list.int64(11)},
         };
         if (!list.text(6).empty()) event["correlation_id"] = list.text(6);
@@ -3247,7 +3250,7 @@ void SqliteHarnessRecordStore::save_contract_run(
         if (current.step() != SQLITE_ROW) {
             throw std::invalid_argument("Harness contract requires a persisted Program run");
         }
-        auto wrapper = HarnessProgramRunRecord::parse(json::parse(current.text(5)));
+        auto wrapper = HarnessProgramRunRecord::parse(parse_own_json(current.text(5)));
         if (current.text(0) != run_record.owner_scope() ||
             current.text(1) != artifact.artifact_id() || current.text(2) != run_record.bundle_id() ||
             current.text(3) != run_record.program_version_id() ||
@@ -3380,8 +3383,8 @@ std::optional<HarnessProgramRunRecord> SqliteHarnessRecordStore::resolve_program
     const auto result = query.step();
     if (result == SQLITE_DONE) return std::nullopt;
     if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program run alias read failed");
-    auto wrapper  = HarnessProgramRunRecord::parse(json::parse(query.text(0)));
-    auto artifact = HarnessProgramArtifactRecord::parse(json::parse(query.text(2)));
+    auto wrapper  = HarnessProgramRunRecord::parse(parse_own_json(query.text(0)));
+    auto artifact = HarnessProgramArtifactRecord::parse(parse_own_json(query.text(2)));
     if (wrapper.run_record().run_id() != run_id) {
         throw std::invalid_argument("Stored Program run alias is corrupt");
     }

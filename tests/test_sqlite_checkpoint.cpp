@@ -246,6 +246,19 @@ TEST(SqliteCheckpointTransactionTest, RolledBackByTriggerPreservesOriginalError)
     EXPECT_EQ(store.load_latest("t")->id, cp.id);
 }
 
+TEST_F(SqliteCheckpointTest, LoadsAValueNestedDeeperThanTheParseLimit) {
+    // A node can write a value of any depth, and json::parse's default limit
+    // is for text from elsewhere: the store reads back what it saved.
+    json value = json::array();
+    for (std::size_t level = 1; level < json::max_parse_depth + 8; ++level)
+        value = json::array({value});
+    store->save(make_state_cp("t", 0, {{"deep", {value, 1}}}));
+
+    auto loaded = store->load_latest("t");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->channel_values["channels"]["deep"]["value"], value);
+}
+
 TEST_F(SqliteCheckpointTest, LoadByIdReturnsCheckpoint) {
     auto cp = make_state_cp("t", 0, {{"x", {99, 5}}});
     store->save(cp);

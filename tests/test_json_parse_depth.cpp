@@ -6,8 +6,19 @@
 #include <neograph/json.h>
 
 #include <cstddef>
+#include <functional>
 #include <sstream>
 #include <string>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <process.h>
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 using json = neograph::json;
 
@@ -24,6 +35,40 @@ std::string objects(std::size_t depth) {
     for (std::size_t level = 0; level < depth; ++level) text += R"({"a":)";
     text += "null";
     return text + std::string(depth, '}');
+}
+
+using Work = std::function<void()>;
+
+#if defined(_WIN32)
+unsigned __stdcall run_work(void* work) {
+    (*static_cast<Work*>(work))();
+    return 0;
+}
+#else
+void* run_work(void* work) {
+    (*static_cast<Work*>(work))();
+    return nullptr;
+}
+#endif
+
+// Runs work on a new thread with a stack of `bytes`, and waits for it.
+void run_on_stack(std::size_t bytes, Work work) {
+#if defined(_WIN32)
+    const auto thread = reinterpret_cast<HANDLE>(_beginthreadex(
+        nullptr, static_cast<unsigned>(bytes), run_work, &work, STACK_SIZE_PARAM_IS_A_RESERVATION,
+        nullptr));
+    ASSERT_NE(thread, nullptr);
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+#else
+    pthread_attr_t attributes;
+    ASSERT_EQ(pthread_attr_init(&attributes), 0);
+    ASSERT_EQ(pthread_attr_setstacksize(&attributes, bytes), 0);
+    pthread_t thread;
+    ASSERT_EQ(pthread_create(&thread, &attributes, run_work, &work), 0);
+    pthread_join(thread, nullptr);
+    pthread_attr_destroy(&attributes);
+#endif
 }
 
 }  // namespace
@@ -47,6 +92,21 @@ TEST(JsonParseDepth, RefusesOneLevelMore) {
 TEST(JsonParseDepth, RefusesNestingThatWouldExhaustTheStack) {
     // Copying this value overflowed an 8 MiB stack before the limit.
     EXPECT_THROW(json::parse(arrays(300'000)), json::parse_error);
+}
+
+TEST(JsonParseDepth, ValuesAtTheLimitFitASmallThreadStack) {
+    // 512 KiB is what a macOS secondary thread gets, the smallest default
+    // stack of a platform NeoGraph ships for.
+    for (const auto& text : {arrays(kMax), objects(kMax)}) {
+        const auto value = json::parse(text);
+        bool       same  = false;
+        run_on_stack(512 * 1024, [&] {
+            const json copy   = value;
+            const json parsed = json::parse(text);
+            same = copy == value && parsed == value && parsed.dump() == value.dump();
+        });
+        EXPECT_TRUE(same);
+    }
 }
 
 TEST(JsonParseDepth, TakesALimitFromTheCaller) {
