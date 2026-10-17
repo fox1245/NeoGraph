@@ -17,6 +17,8 @@
 
 #include <neograph/mcp/json_schema.h>
 
+#include "../core/json_walk.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -33,6 +35,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::mcp {
 namespace {
@@ -77,7 +81,7 @@ long double number_of(const json& value) {
 
 // JSON Schema equality: numbers compare by value (1 equals 1.0), objects by
 // their members whatever their order.
-bool json_equal(const json& a, const json& b) {
+bool json_equal(const json& a, const json& b, std::size_t depth = 0) {
     if (a.is_number() && b.is_number()) return number_of(a) == number_of(b);
     if (a.is_null() || b.is_null()) return a.is_null() && b.is_null();
     if (a.is_boolean() || b.is_boolean())
@@ -86,15 +90,17 @@ bool json_equal(const json& a, const json& b) {
         return a.is_string() && b.is_string() && a.get<std::string>() == b.get<std::string>();
     if (a.is_array() || b.is_array()) {
         if (!a.is_array() || !b.is_array() || a.size() != b.size()) return false;
+        check_walk_depth(depth, "JSON Schema equality");
         for (std::size_t i = 0; i < a.size(); ++i)
-            if (!json_equal(a[i], b[i])) return false;
+            if (!json_equal(a[i], b[i], depth + 1)) return false;
         return true;
     }
     if (a.is_object() && b.is_object()) {
         if (a.size() != b.size()) return false;
+        check_walk_depth(depth, "JSON Schema equality");
         for (auto it = a.begin(); it != a.end(); ++it) {
             const std::string key = it.key();
-            if (!b.contains(key) || !json_equal(it.value(), b[key])) return false;
+            if (!b.contains(key) || !json_equal(it.value(), b[key], depth + 1)) return false;
         }
         return true;
     }

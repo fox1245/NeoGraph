@@ -2,6 +2,8 @@
 #include <neograph/async/endpoint.h>
 #include <neograph/async/http_client.h>
 
+#include "../core/json_walk.h"
+
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/system_error.hpp>
@@ -16,6 +18,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <type_traits>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::llm {
 namespace {
@@ -33,11 +37,13 @@ EndpointFailure failure(EndpointFailureKind kind, const char* message,
 bool guidance(const json& value) {
     return value.is_string() || value.is_object() || value.is_array();
 }
-void validate_json_value(const json& value) {
+void validate_json_value(const json& value, std::size_t depth = 0) {
     if (value.is_number_float())
         require(std::isfinite(value.get<double>()), "Nonfinite Decisions JSON number");
-    if (value.is_object() || value.is_array())
-        for (const auto& child : value) validate_json_value(child);
+    if (value.is_object() || value.is_array()) {
+        check_walk_depth(depth, "Decisions JSON check");
+        for (const auto& child : value) validate_json_value(child, depth + 1);
+    }
 }
 void closed(const json& value, std::initializer_list<std::string_view> keys) {
     require(value.is_object(), "Decisions config must contain JSON objects");

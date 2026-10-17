@@ -7,12 +7,15 @@
 #include <neograph/tool.h>
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
+#include "../core/json_walk.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <mutex>
 #include <stdexcept>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::mcp {
 namespace {
@@ -25,17 +28,20 @@ bool is_secret_host_key(std::string_view key) {
            key == "token";
 }
 
-json non_secret_host_configuration(const json& value) {
+json non_secret_host_configuration(const json& value, std::size_t depth = 0) {
     if (value.is_array()) {
+        check_walk_depth(depth, "Harness host configuration filter");
         json result = json::array();
-        for (const auto& child : value) result.push_back(non_secret_host_configuration(child));
+        for (const auto& child : value)
+            result.push_back(non_secret_host_configuration(child, depth + 1));
         return result;
     }
     if (!value.is_object()) return value;
+    check_walk_depth(depth, "Harness host configuration filter");
     json result = json::object();
     for (const auto& [key, child] : value.items()) {
         if (!is_secret_host_key(key))
-            result[key] = non_secret_host_configuration(child);
+            result[key] = non_secret_host_configuration(child, depth + 1);
     }
     return result;
 }

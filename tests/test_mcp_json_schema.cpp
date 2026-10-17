@@ -78,6 +78,19 @@ TEST(McpJsonSchema, EqualityIsNumericAndOrderInsensitive) {
     EXPECT_TRUE(accepts(json::parse(R"({"uniqueItems":true})"), json::parse("[1, \"1\"]")));
 }
 
+TEST(McpJsonSchema, EqualityStopsAtTheDepthLimit) {
+    const auto nested = [](std::size_t depth) {
+        json value = json::array();
+        for (std::size_t level = 1; level < depth; ++level) value = json::array({value});
+        return value;
+    };
+    const auto at_limit = nested(json::max_parse_depth);
+    EXPECT_TRUE(accepts(json{{"const", at_limit}}, at_limit));
+    const auto deeper = nested(json::max_parse_depth + 1);
+    EXPECT_NE(rejection(json{{"const", deeper}}, deeper).find("nested deeper than 256 levels"),
+              std::string::npos);
+}
+
 TEST(McpJsonSchema, PydanticDefsAndRefs) {
     // The shape pydantic and zod generate: definitions under $defs, $ref to them.
     const json schema = json::parse(R"({

@@ -4,6 +4,7 @@
 
 #include "canonical_json.h"
 #include "graph_v2_keys.h"
+#include "json_walk.h"
 #include "routing_policy.h"
 #include "text_safety.h"
 
@@ -13,6 +14,8 @@
 #include <cstdio>
 #include <limits>
 #include <vector>
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::graph {
 
@@ -231,8 +234,9 @@ json canon_backoff(const json& v) {
 // operator== compares serializations, so canonical forms must rebuild
 // every object with sorted keys (recursively) or two semantically equal
 // documents would compare unequal.
-json sort_keys(const json& v) {
+json sort_keys(const json& v, std::size_t depth = 0) {
     if (v.is_object()) {
+        check_walk_depth(depth, "graph canonicalization");
         std::vector<std::string> keys;
         for (const auto& [k, val] : v.items()) {
             (void)val;
@@ -241,13 +245,14 @@ json sort_keys(const json& v) {
         std::sort(keys.begin(), keys.end());
         json out = json::object();
         for (const auto& k : keys)
-            out[k] = sort_keys(v[k]);
+            out[k] = sort_keys(v[k], depth + 1);
         return out;
     }
     if (v.is_array()) {
+        check_walk_depth(depth, "graph canonicalization");
         json out = json::array();
         for (const auto& e : v)
-            out.push_back(sort_keys(e));
+            out.push_back(sort_keys(e, depth + 1));
         return out;
     }
     return v;
@@ -259,10 +264,12 @@ json sort_keys(const json& v) {
 void collect_mismatches(const json&                      declared,
                         const json&                      compiled,
                         const std::string&               pointer,
-                        std::vector<CompilerDiagnostic>& diagnostics) {
+                        std::vector<CompilerDiagnostic>& diagnostics,
+                        std::size_t                      depth = 0) {
     constexpr size_t kMax = 8;
     if (diagnostics.size() >= kMax || declared == compiled) return;
     if (declared.is_object() && compiled.is_object()) {
+        check_walk_depth(depth, "graph round-trip check");
         for (const auto& [k, v] : declared.items()) {
             if (diagnostics.size() >= kMax) return;
             const std::string child = pointer + "/" + pointer_token(k);
@@ -270,7 +277,7 @@ void collect_mismatches(const json&                      declared,
                 diagnostics.push_back({"GC_ROUNDTRIP", child, child + ": lost in compilation",
                                        json{{"kind", "lost"}, {"declared", v}}});
             } else {
-                collect_mismatches(v, compiled[k], child, diagnostics);
+                collect_mismatches(v, compiled[k], child, diagnostics, depth + 1);
             }
         }
         for (const auto& [k, v] : compiled.items()) {
@@ -284,6 +291,7 @@ void collect_mismatches(const json&                      declared,
         return;
     }
     if (declared.is_array() && compiled.is_array()) {
+        check_walk_depth(depth, "graph round-trip check");
         if (declared.size() != compiled.size()) {
             diagnostics.push_back(
                 {"GC_ROUNDTRIP", pointer,
@@ -295,7 +303,7 @@ void collect_mismatches(const json&                      declared,
         for (size_t i = 0; i < declared.size(); ++i) {
             if (diagnostics.size() >= kMax) return;
             collect_mismatches(declared[i], compiled[i], pointer + "/" + std::to_string(i),
-                               diagnostics);
+                               diagnostics, depth + 1);
         }
         return;
     }

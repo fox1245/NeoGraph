@@ -3,6 +3,7 @@
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
 #include "../core/own_json.h"
+#include "../core/json_walk.h"
 #include "../core/sqlite_wal.h"
 #include <sqlite3.h>
 
@@ -20,6 +21,8 @@
 #include <utility>
 
 using neograph::detail::parse_own_json;
+
+using neograph::detail::check_walk_depth;
 
 namespace neograph::mcp {
 namespace {
@@ -488,22 +491,25 @@ std::string lowercase(std::string value) {
     return value;
 }
 
-json redacted_json(const json& value, const std::set<std::string>& redacted_keys) {
+json redacted_json(const json& value, const std::set<std::string>& redacted_keys,
+                   std::size_t depth = 0) {
     if (value.is_object()) {
+        check_walk_depth(depth, "Harness journal redaction");
         json result = json::object();
         for (const auto [key, child] : value.items()) {
             if (redacted_keys.contains(lowercase(key))) {
                 result[key] = detail::kHarnessRedactedMarker;
             } else {
-                result[key] = redacted_json(child, redacted_keys);
+                result[key] = redacted_json(child, redacted_keys, depth + 1);
             }
         }
         return result;
     }
     if (value.is_array()) {
+        check_walk_depth(depth, "Harness journal redaction");
         json result = json::array();
         for (const auto child : value)
-            result.push_back(redacted_json(child, redacted_keys));
+            result.push_back(redacted_json(child, redacted_keys, depth + 1));
         return result;
     }
     return value;
