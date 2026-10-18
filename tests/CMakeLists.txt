@@ -717,6 +717,12 @@ if(TARGET neograph::llm)
             $<TARGET_FILE:neograph_typed_veo_tests>)
     target_compile_definitions(neograph_typed_decisions_tests PRIVATE
         NEOGRAPH_SHIPPED_SCHEMAS="${PROJECT_SOURCE_DIR}/schemas")
+    # Live end-to-end checks with real provider keys. Built so that they compile with every change, run only by
+    # scripts/live_e2e.py (tests/live/README.md), never by CTest.
+    add_executable(neograph_live_e2e_tests live_e2e_test.cpp)
+    target_link_libraries(neograph_live_e2e_tests PRIVATE neograph::llm GTest::gtest_main)
+    target_compile_definitions(neograph_live_e2e_tests PRIVATE
+        NEOGRAPH_SHIPPED_SCHEMAS="${PROJECT_SOURCE_DIR}/schemas")
     add_test(NAME TypedDecisions.LocalHTTP
         COMMAND neograph_typed_decisions_tests)
     set_tests_properties(

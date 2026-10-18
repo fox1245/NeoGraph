@@ -262,10 +262,24 @@ jobs:
       - name: Verify public SDK native archive custody
         run: python source-dist/source/scripts/verify_ci.py runtime-archive --work-dir runtime-proof --jobs auto
 
+  # A release tag publishes only a commit whose committed live end-to-end report passes
+  # (tests/live/README.md). The check needs no provider key.
+  live_e2e_report:
+    name: Live e2e report of the release commit
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/live_e2e.py verify
+
   # Protected OIDC publication still depends on every wheel and native lane.
   publish_pypi:
     name: Publish to PyPI
-    needs: [build_wheels, build_sdist, runtime_portability]
+    needs: [build_wheels, build_sdist, runtime_portability, live_e2e_report]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')

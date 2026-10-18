@@ -1,0 +1,44 @@
+name: Live e2e report
+# A release must pass the live end-to-end suite with real provider keys (tests/live/README.md).
+# The maintainer runs scripts/live_e2e.py on the release commit and commits tests/live/report.json
+# in the release pull request; this workflow only checks that report, so it needs no key and calls
+# no provider. The same check runs on the release tag in wheels.yml before PyPI publishing.
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  script:
+    name: Report checker self-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tests/test_live_e2e_script.py
+
+  report:
+    name: Release report
+    if: startsWith(github.head_ref, 'release/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The report names the release commit, not the merge preview GitHub builds by default.
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/live_e2e.py verify
