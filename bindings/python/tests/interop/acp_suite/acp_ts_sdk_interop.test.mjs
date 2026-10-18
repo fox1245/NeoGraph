@@ -228,7 +228,9 @@ test("failed graph turn is a JSON-RPC error without exception text", { skip }, a
       error = e;
     }
     assert.equal(error.code, -32603, wire(transcript));
-    assert.deepEqual(error.data, { code: "NG.TaskFailed", retryable: true }, wire(transcript));
+    // The node's one attempt is used up; only its class allows a retry (#500).
+    assert.deepEqual(error.data, { code: "NG.TaskFailed", retryable: false, retryable_by_class: true },
+                     wire(transcript));
     assert.ok(!JSON.stringify([error.message, error.data]).includes("hunter2"), wire(transcript));
     assert.deepEqual(texts(seen), [], wire(transcript));
   });

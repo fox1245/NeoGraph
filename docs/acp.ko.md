@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=3617734aebc1bcbee95c4407fb07e702416c58627b2137e686d6c9ff0571b8b8 -->
+<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
 # ACP: 그래프를 에디터 에이전트로 쓰기
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
 
 Agent Client Protocol(ACP)은 에디터를 코딩 에이전트나 대화 에이전트에 연결합니다. 에디터(Zed, CodeCompanion을 쓰는 Neovim, Gemini CLI 등)는 에이전트를 자식 프로세스로 실행하고, 에이전트의 stdin과 stdout으로 JSON-RPC 2.0 메시지를 한 줄에 JSON 객체 하나씩 주고받습니다. 에디터가 세션을 열고 프롬프트를 보내면, 에이전트는 답을 업데이트로 스트리밍합니다. 에이전트가 에디터에 권한이나 파일, 터미널 접근을 요청할 수도 있습니다.
 
-`ACPServer`는 컴파일된 NeoGraph 그래프를 이런 에이전트로 실행합니다. NeoGraph는 에이전트 쪽을 구현하며, 에디터가 클라이언트입니다. `ACPClient`는 에이전트가 에디터에 자신의 요청을 보내는 데 쓰는 핸들입니다.
+`ACPServer`는 컴파일된 NeoGraph 그래프를 이런 에이전트로 실행합니다. NeoGraph는 에이전트 쪽을 구현하며, 에디터가 클라이언트입니다. `ACPClient`는 에이전트가 에디터에 자신의 요청을 보내는 데 쓰는 핸들입니다. 에디터가 오류로 답하면 `acp::ACPClientError`를 던집니다. 없는 파일에 대한 `-32002`처럼 요청이 성공할 수 없다는 코드이면 `acp::ACPClientRefusal`이 되고, 노드는 재시도되지 않습니다.
 
 ## 구성 요소
 
@@ -176,7 +176,7 @@ stop reason: end_turn
 ## 취소, 세션, 오류
 
 - **취소.** `session/cancel`은 실행 중인 턴을 취소하고 그 턴은 `stopReason: "cancelled"`로 끝납니다. 실행 중인 턴이 없을 때의 취소는 무시됩니다. 실행 중인 `session/prompt`를 요청 id로 지목한 `$/cancel_request`도 같은 방식으로 그 턴을 취소하며, 다른 요청을 지목한 것은 무시됩니다. stdin이 파일 끝에 이르면 `run()`은 실행 중인 턴이 끝나도록 `set_eof_grace`(1초)만큼 기다린 뒤 취소합니다.
-- **턴이 끝나는 방식.** 실행이 완료되면 `end_turn`, 취소되면 `cancelled`, 실행이 `RunConfig::max_steps`에 이르면 `max_turn_requests`, 모델 토큰 예산을 넘으면 `max_tokens`, provider가 거절하면 `refusal`입니다. 그 밖의 실패는 `data`가 `{code, retryable}`인 JSON-RPC 오류 `-32603`이며, 메시지는 실패의 공개 메시지이고 예외 텍스트는 아닙니다. 전체 표는 레퍼런스의 [ACP](reference-en.md#neographacp--agent-client-protocol)와 [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)에 있습니다.
+- **턴이 끝나는 방식.** 실행이 완료되면 `end_turn`, 취소되면 `cancelled`, 실행이 `RunConfig::max_steps`에 이르면 `max_turn_requests`, 모델 토큰 예산을 넘으면 `max_tokens`, provider가 거절하면 `refusal`입니다. 그 밖의 실패는 `data`가 `{code, retryable, retryable_by_class}`인 JSON-RPC 오류 `-32603`입니다. `retryable`은 엔진이 노드의 시도를 다 쓰면 `false`가 되고, `retryable_by_class`는 실패의 분류가 재시도를 허용하는지를 알려 줍니다. 이 오류의 메시지는 실패의 공개 메시지이고 예외 텍스트는 아닙니다. 전체 표는 레퍼런스의 [ACP](reference-en.md#neographacp--agent-client-protocol)와 [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)에 있습니다.
 - **세션.** `session/new`는 세션을 만들고, `session/resume`은 에이전트가 아는 세션을 이어 갑니다. 엔진에 체크포인트 저장소가 있으면, 권한 요청에서 멈춘 세션을 에이전트가 재시작된 뒤 `session/resume`으로 복원할 수 있습니다. 이때는 다음 프롬프트의 텍스트가 대기 중이던 질문에 대한 답이 됩니다. `initialize` 전의 호출은 `-32600`, 알 수 없는 세션은 `-32002`입니다.
 - **MCP 서버.** 클라이언트는 `session/new`에 stdio MCP 서버를 넘길 수 있습니다. 에이전트는 NeoGraph의 MCP 클라이언트로 이 서버들을 세션의 `cwd`에서 최소한의 환경(`PATH`와 클라이언트의 `env` 항목)으로 시작하므로, 에이전트 환경에 있는 provider 키는 전달되지 않습니다. 노드는 `ACPClient::session_tools(session_id)`로 이 도구들에 접근합니다. HTTP·SSE MCP 서버는 `-32602`로 거절합니다. [MCP 가이드](mcp.md)를 보세요.
 - **기능.** `ACPServer::capabilities()`가 `initialize`에서 알리는 내용입니다. 프롬프트는 텍스트와 `resource_link` 블록을 받으며, 이미지, 오디오, 임베디드 리소스는 `capabilities().prompt`에서 켠 경우에만 받습니다.

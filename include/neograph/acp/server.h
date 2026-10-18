@@ -50,11 +50,13 @@
 #include <neograph/api.h>
 #include <neograph/acp/types.h>
 #include <neograph/graph/execution.h>
+#include <neograph/tool_execution.h>
 
 #include <chrono>
 #include <iosfwd>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -183,6 +185,56 @@ class NEOGRAPH_API ACPGraphAdapter {
 };
 
 /**
+ * @brief A JSON-RPC error the client answered to a request of the agent.
+ *
+ * ACPServer::call_client() and the ACPClient calls throw it for an `error`
+ * envelope, whatever the method: `fs/*`, `terminal/*`,
+ * `session/request_permission` or an extension. what() is
+ * "ACPServer::call_client: error response: " followed by the error object.
+ * A code that says the request itself cannot succeed makes it an
+ * ACPClientRefusal.
+ */
+class NEOGRAPH_API ACPClientError : public std::runtime_error {
+public:
+    /// `error` is the response's `error` object.
+    ACPClientError(std::string method, const neograph::json& error);
+    ~ACPClientError() override;
+
+    /// The method the agent called, such as "fs/read_text_file".
+    [[nodiscard]] const std::string& method() const noexcept { return method_; }
+    /// The JSON-RPC error code; -32603 when the client sent none.
+    [[nodiscard]] int code() const noexcept { return code_; }
+    /// The client's error message; empty when it sent none.
+    [[nodiscard]] const std::string& message() const noexcept { return message_; }
+    /// The error's `data`; null when it had none.
+    [[nodiscard]] const neograph::json& data() const noexcept { return data_; }
+
+private:
+    std::string    method_;
+    int            code_ = -32603;
+    std::string    message_;
+    neograph::json data_;
+};
+
+/**
+ * @brief An ACPClientError whose code says the request cannot succeed (#500).
+ *
+ * The codes are -32700 (parse error), -32600 (invalid request), -32601
+ * (method not found), -32602 (invalid params, an invalid path among them),
+ * -32002 (resource not found) and -32000 (authentication required). Sending
+ * the same request again fails the same way, so this is a ToolRequestRefusal
+ * that is not retryable: the node retry loop does not try the node again,
+ * and protocol hosts report `retryable: false`. Any other code, -32603 among
+ * them, and a timeout stay ordinary failures, which are retried.
+ */
+class NEOGRAPH_API ACPClientRefusal final : public ACPClientError, public ToolRequestRefusal {
+public:
+    using ACPClientError::ACPClientError;
+    ~ACPClientRefusal() override;
+    [[nodiscard]] bool retryable() const noexcept override { return false; }
+};
+
+/**
  * @brief Agent-side handle for issuing requests back to the editor.
  *
  * ACP is bidirectional — the client (editor) drives the agent with
@@ -209,8 +261,8 @@ class NEOGRAPH_API ACPGraphAdapter {
  * auto src  = client->read_text_file(sid, path);
  * @endcode
  *
- * Calls throw `std::runtime_error` on transport failure, on
- * JSON-RPC error envelopes, and on timeout.
+ * Calls throw ACPClientError (a `std::runtime_error`) on a JSON-RPC error
+ * envelope, and `std::runtime_error` on transport failure and on timeout.
  */
 class NEOGRAPH_API ACPClient {
   public:
@@ -435,8 +487,9 @@ class NEOGRAPH_API ACPServer {
     /// turn in flight, cancelling that turn ends the wait (after the grace
     /// described at @ref stop) with neograph::graph::CancelledException.
     /// `timeout` of std::chrono::milliseconds::max() waits without a
-    /// deadline. Throws std::runtime_error on transport not yet connected,
-    /// on a missing capability, on an `error` envelope, and on timeout.
+    /// deadline. Throws ACPClientError on an `error` envelope, and
+    /// std::runtime_error on transport not yet connected, on a missing
+    /// capability and on timeout.
     neograph::json call_client(std::string method,
                                 neograph::json params,
                                 std::chrono::milliseconds timeout

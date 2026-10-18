@@ -969,8 +969,14 @@ TEST(A2AConformance, FailureClassesMapToStatesWithoutExceptionText) {
     const auto coded = send_v1(srv, "coded");
     EXPECT_EQ(coded["status"]["message"]["parts"][0]["text"], "the tool failed");
     EXPECT_EQ(coded["metadata"]["neograph/failure"]["retryable"], false);
+    EXPECT_EQ(coded["metadata"]["neograph/failure"]["retryable_by_class"], false);
+    // #500: the node's one attempt is used up, but its class may be retried.
+    const auto failed = send_v1(srv, "fail");
+    EXPECT_EQ(failed["metadata"]["neograph/failure"]["retryable"], false);
+    EXPECT_EQ(failed["metadata"]["neograph/failure"]["retryable_by_class"], true);
     const auto provider = send_v1(srv, "provider");
     EXPECT_EQ(provider["metadata"]["neograph/failure"]["retryable"], true);
+    EXPECT_EQ(provider["metadata"]["neograph/failure"]["retryable_by_class"], true);
 }
 
 TEST(A2AConformance, InterruptIsInputRequiredAndAFollowUpResumes) {
@@ -1034,15 +1040,17 @@ TEST(A2AConformance, CallerNodeContinuesByContextAndResumesOnlyOpenTasks) {
     EXPECT_EQ(state.get("response_task_id"), json(""));
 }
 
-TEST(A2AConformance, AttemptTimeoutIsAFailedTaskThatMayBeRetried) {
+TEST(A2AConformance, AttemptTimeoutIsAFailedTaskOfARetryableClass) {
     // NG.Timeout: the attempt ran past attempt_timeout_ms and stopped.
-    // Failure-routing keys are read under schema_version >= 1 only.
+    // Failure-routing keys are read under schema_version >= 1 only. The
+    // node's one attempt is used up, so only the class says retry (#500).
     Server srv(true, true, json{{"schema_version", 1}, {"node_retry_policies",
         json{{"probe", json{{"attempt_timeout_ms", 100}, {"max_retries", 0}}}}}});
     const auto r = rpc(srv, "SendMessage", {{"message", v1_message("slow timeout")}});
     const auto task = r.envelope["result"]["task"];
     EXPECT_EQ(task["status"]["state"], "TASK_STATE_FAILED") << r.body;
     EXPECT_EQ(task["metadata"]["neograph/failure"]["code"], "NG.Timeout") << r.body;
-    EXPECT_EQ(task["metadata"]["neograph/failure"]["retryable"], true) << r.body;
+    EXPECT_EQ(task["metadata"]["neograph/failure"]["retryable"], false) << r.body;
+    EXPECT_EQ(task["metadata"]["neograph/failure"]["retryable_by_class"], true) << r.body;
     EXPECT_EQ(r.body.find("timed out after"), std::string::npos) << "what() text on the wire";
 }

@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=3617734aebc1bcbee95c4407fb07e702416c58627b2137e686d6c9ff0571b8b8 -->
+<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
 # ACP: グラフをエディターのエージェントとして使う
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
 
 Agent Client Protocol(ACP)は、エディターをコーディング用や対話用のエージェントにつなぎます。エディター(Zed、CodeCompanion を使う Neovim、Gemini CLI など)はエージェントを子プロセスとして起動し、エージェントの stdin と stdout で、1行に1つの JSON オブジェクトという形の JSON-RPC 2.0 メッセージをやり取りします。エディターがセッションを開いてプロンプトを送ると、エージェントは答えを更新としてストリーミングで返します。エージェントがエディターに、許可や、ファイルおよびターミナルへのアクセスを求めることもあります。
 
-`ACPServer` は、コンパイル済みの NeoGraph のグラフをこのようなエージェントとして動かします。NeoGraph が実装するのはエージェント側で、エディターがクライアントです。`ACPClient` は、エージェントがエディターへ自分のリクエストを送るためのハンドルです。
+`ACPServer` は、コンパイル済みの NeoGraph のグラフをこのようなエージェントとして動かします。NeoGraph が実装するのはエージェント側で、エディターがクライアントです。`ACPClient` は、エージェントがエディターへ自分のリクエストを送るためのハンドルです。エディターがエラーで答えると `acp::ACPClientError` を送出します。存在しないファイルへの `-32002` のように、リクエストが成功しえないことを示すコードなら `acp::ACPClientRefusal` になり、ノードはリトライされません。
 
 ## コンポーネント
 
@@ -176,7 +176,7 @@ stop reason: end_turn
 ## キャンセル、セッション、エラー
 
 - **キャンセル。** `session/cancel` は実行中のターンをキャンセルし、そのターンは `stopReason: "cancelled"` で終わります。実行中のターンがないときのキャンセルは無視されます。実行中の `session/prompt` をリクエスト id で指す `$/cancel_request` も同じようにそのターンをキャンセルし、ほかのリクエストを指すものは無視されます。stdin がファイルの終端に達すると、`run()` は実行中のターンが終わるまで `set_eof_grace`(1秒)待ち、そのあとキャンセルします。
-- **ターンの終わり方。** 実行が完了すれば `end_turn`、キャンセルされれば `cancelled`、実行が `RunConfig::max_steps` に達すれば `max_turn_requests`、モデルのトークン予算を超えれば `max_tokens`、provider が拒否すれば `refusal` です。それ以外の失敗は、`data` が `{code, retryable}` の JSON-RPC エラー `-32603` で、メッセージは失敗の公開メッセージであり、例外のテキストではありません。完全な表は、リファレンスの [ACP](reference-en.md#neographacp--agent-client-protocol) と[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。
+- **ターンの終わり方。** 実行が完了すれば `end_turn`、キャンセルされれば `cancelled`、実行が `RunConfig::max_steps` に達すれば `max_turn_requests`、モデルのトークン予算を超えれば `max_tokens`、provider が拒否すれば `refusal` です。それ以外の失敗は、`data` が `{code, retryable, retryable_by_class}` の JSON-RPC エラー `-32603` です。`retryable` はエンジンがノードの試行を使い切ると `false` になり、`retryable_by_class` は失敗の分類が再試行を許すかどうかを示します。このエラーのメッセージは失敗の公開メッセージであり、例外のテキストではありません。完全な表は、リファレンスの [ACP](reference-en.md#neographacp--agent-client-protocol) と[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。
 - **セッション。** `session/new` はセッションを作り、`session/resume` はエージェントが知っているセッションを続けます。エンジンにチェックポイントストアがあれば、許可リクエストで止まったセッションを、エージェントの再起動後に `session/resume` で復元できます。このとき、次のプロンプトのテキストが、待っていた質問への答えになります。`initialize` の前の呼び出しは `-32600`、未知のセッションは `-32002` です。
 - **MCP サーバー。** クライアントは `session/new` で stdio の MCP サーバーを渡せます。エージェントは NeoGraph の MCP クライアントを使い、セッションの `cwd` で、最小限の環境(`PATH` とクライアントの `env` の項目)でそれらを起動するので、エージェントの環境にある provider のキーは渡りません。ノードは `ACPClient::session_tools(session_id)` でそれらのツールにアクセスします。HTTP と SSE の MCP サーバーは `-32602` で拒否されます。[MCP ガイド](mcp.md)を参照してください。
 - **ケイパビリティ。** `ACPServer::capabilities()` が `initialize` で通知する内容です。プロンプトはテキストと `resource_link` ブロックを受け付け、画像、音声、埋め込みリソースは、`capabilities().prompt` で有効にしたときだけ受け付けます。

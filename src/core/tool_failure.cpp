@@ -434,7 +434,10 @@ FailureVerdict classify_failure(const std::exception_ptr& error,
             out.failure_class = record->failure_class;
             out.code = record->code;
             out.public_message = record->public_message;
-            out.retryable = record->retryable || out.failure_class == NodeFailureClass::ProviderFailed;
+            out.retryable_by_class =
+                record->retryable || out.failure_class == NodeFailureClass::ProviderFailed;
+            // The engine already tried as often as the node allows (#500).
+            out.retryable = out.retryable_by_class && record->kind != NodeFailureKind::Exhausted;
             out.routable = record->routable;
             return out;
         }
@@ -450,6 +453,7 @@ FailureVerdict classify_failure(const std::exception_ptr& error,
     // provider runtime owns those retries), but the same request sent again
     // may well succeed, which is what `retryable` tells a peer.
     out.retryable = verdict.retryable || out.failure_class == NodeFailureClass::ProviderFailed;
+    out.retryable_by_class = out.retryable;
     out.routable = verdict.routable;
     switch (out.failure_class) {
     case NodeFailureClass::Cancelled:

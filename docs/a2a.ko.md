@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=86d8cffc37b1915de7134b36712461ee3bfa0f9cefb2a46d145909c5b55111f2 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=a15e12725cfad3f149714a9a1176e279273fc478f82e946c386ac2329e4c8092 -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
 
 - **인터럽트.** 멈춘 그래프는 위에서 본 것처럼 `input-required` 태스크입니다. 태스크가 기다리는 동안 활성 실행은 없고, 그 상태는 엔진의 체크포인트 저장소에 있습니다.
 - **취소.** `CancelTask`는 실행의 토큰을 취소하고 태스크는 `canceled`로 끝납니다. 이미 종료된 태스크를 취소하면 `-32002`입니다.
-- **실패.** 실패한 실행은 `failed` 태스크이며, 상태 메시지는 실패의 공개 메시지, `metadata["neograph/failure"]`는 `{code, retryable}`입니다. 예외 텍스트는 네트워크로 나가지 않습니다. 어떤 노드도 끝나기 전에 Hook이 막으면 `rejected`가 됩니다. `max_steps`에 도달한 그래프는 코드 `NG.StepLimit`으로 실패합니다.
+- **실패.** 실패한 실행은 `failed` 태스크이며, 상태 메시지는 실패의 공개 메시지, `metadata["neograph/failure"]`는 `{code, retryable, retryable_by_class}`입니다. `retryable`은 엔진이 노드의 시도를 다 쓰면 `false`가 되고, `retryable_by_class`는 실패의 분류가 재시도를 허용하는지를 알려 줍니다. 예외 텍스트는 네트워크로 나가지 않습니다. 어떤 노드도 끝나기 전에 Hook이 막으면 `rejected`가 됩니다. `max_steps`에 도달한 그래프는 코드 `NG.StepLimit`으로 실패합니다.
 - **요청 오류**(알 수 없는 태스크 `-32001`, 종료된 태스크에 메시지 `-32004`, 태스크의 것과 다른 `contextId` `-32602`, 아직 실행 중인 태스크 `-32603`과 사유 `TASK_BUSY`)는 레퍼런스의 [A2A 오류 매핑](reference-en.md#a2a-error-mapping)에, 모든 프로토콜의 실패 분류는 [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)에 있습니다. 여기에 다시 옮기지 않았습니다.
 - **Program.** Program 기반 에이전트(`A2AServer` 뒤의 승인된 `ProgramVersion`)는 NeoGraph 협업 봉투(collaboration envelope)도 받습니다. [A2A 협업 확장](reference-en.md#a2a-collaboration-extension)을 보세요. 입력을 기다리는 Program 태스크에는 아직 A2A로 답할 수 없습니다. 메시지는 `-32004`를 받고 태스크는 계속 기다립니다. 서버를 다시 시작하면 `CollaborationMailbox`에서 Program 태스크를 복구합니다. 복구한 태스크가 아직 실행 중일 때 `SubscribeToTask`를 호출하면 Task를 먼저 보낸 다음, 영속 run이 끝날 때까지 따라가서 최종 상태로 마칩니다. run을 따라갈 수 없으면 빈 채로 닫지 않고 오류 이벤트로 마칩니다.
 

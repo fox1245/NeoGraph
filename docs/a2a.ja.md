@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=86d8cffc37b1915de7134b36712461ee3bfa0f9cefb2a46d145909c5b55111f2 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=a15e12725cfad3f149714a9a1176e279273fc478f82e946c386ac2329e4c8092 -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -259,7 +259,7 @@ int main(int argc, char** argv) {
 
 - **インタラプト。** 停止したグラフは、上で見たとおり `input-required` のタスクです。タスクが待っている間、アクティブな実行はなく、その状態はエンジンのチェックポイントストアにあります。
 - **キャンセル。** `CancelTask` は実行のトークンをキャンセルし、タスクは `canceled` で終わります。すでに終了したタスクのキャンセルは `-32002` です。
-- **失敗。** 失敗した実行は `failed` のタスクで、ステータスメッセージは失敗の公開メッセージ、`metadata["neograph/failure"]` は `{code, retryable}` です。例外のテキストはネットワークに出ません。どのノードも終わる前に Hook がブロックした場合は `rejected` になります。`max_steps` に達したグラフは、コード `NG.StepLimit` で失敗します。
+- **失敗。** 失敗した実行は `failed` のタスクで、ステータスメッセージは失敗の公開メッセージ、`metadata["neograph/failure"]` は `{code, retryable, retryable_by_class}` です。`retryable` はエンジンがノードの試行を使い切ると `false` になり、`retryable_by_class` は失敗の分類が再試行を許すかどうかを示します。例外のテキストはネットワークに出ません。どのノードも終わる前に Hook がブロックした場合は `rejected` になります。`max_steps` に達したグラフは、コード `NG.StepLimit` で失敗します。
 - **リクエストのエラー**(未知のタスク `-32001`、終了済みタスクへのメッセージ `-32004`、タスクのものと異なる `contextId` は `-32602`、まだ実行中のタスクは `-32603` と理由 `TASK_BUSY`)は、リファレンスの [A2A エラーマッピング](reference-en.md#a2a-error-mapping)に、すべてのプロトコルの失敗クラスは[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。ここには再掲しません。
 - **Program。** Program ベースのエージェント(`A2AServer` の背後にある承認済みの `ProgramVersion`)は、NeoGraph のコラボレーションエンベロープも受け付けます。[A2A コラボレーション拡張](reference-en.md#a2a-collaboration-extension)を参照してください。入力待ちの Program タスクには、まだ A2A で答えられません。メッセージには `-32004` が返り、タスクは待ち続けます。サーバーを再起動すると、`CollaborationMailbox` から Program タスクを復旧します。復旧したタスクがまだ実行中のときに `SubscribeToTask` を呼ぶと、先に Task を送り、永続 run が終わるまで追って、最終状態で終わります。run を追えないときは、空のまま閉じず、エラーイベントで終わります。
 

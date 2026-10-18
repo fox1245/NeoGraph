@@ -257,6 +257,12 @@ TEST(GraphHostGRPCContract, TypedGraphFailuresAreCanonicalStatuses) {
             EXPECT_EQ(info.metadata.at("invocation_id"), "sha256:" + std::string(64, 'b'));
             EXPECT_EQ(info.metadata.at("state"), "failed");
         }
+        // #500: an ordinary failure or a timeout has used up its node's one
+        // attempt, so only its class allows a retry; the provider runtime,
+        // not the node, retries a provider call.
+        const bool by_class = kind == "ordinary" || kind == "timeout" || kind == "provider";
+        EXPECT_EQ(info.metadata.at("retryable"), kind == "provider" ? "true" : "false");
+        EXPECT_EQ(info.metadata.at("retryable_by_class"), by_class ? "true" : "false");
     }
     {
         // A failed stream reports the failure as an event and then ends with
@@ -304,6 +310,8 @@ TEST(GraphHostGRPCContract, InvalidGraphRequestsAreRefusedBeforeTheyRun) {
         const auto info = error_info(status);
         EXPECT_EQ(info.reason, "INVALID_REQUEST");
         EXPECT_EQ(info.metadata.at("code"), "NG.InvalidRequest");
+        EXPECT_EQ(info.metadata.at("retryable"), "false");
+        EXPECT_EQ(info.metadata.at("retryable_by_class"), "false");
     }
 }
 
