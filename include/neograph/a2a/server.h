@@ -212,7 +212,11 @@ class NEOGRAPH_API A2AServer {
     /// Applies the same discovery URL rule as start(), including ephemeral ports.
     bool start_async(const std::string& host, int port);
 
-    /// Signal the server to stop accepting connections and join.
+    /// Signal the server to stop accepting connections and join. Requests
+    /// already being handled are answered first, a stream with at least its
+    /// opening Task; a request that arrives meanwhile gets JSON-RPC error
+    /// -32603 (reason UNAVAILABLE). Open streams and blocking sends end when
+    /// their runs publish a final state, and a stop never cancels a run.
     void stop();
 
     /// True once start_async() has the server listening.
@@ -248,6 +252,9 @@ class A2AServerTestAccess {
     static void set_max_inflight_runs(A2AServer& server, std::size_t cap);
     /// How long a task stream may be silent before it sends an SSE comment.
     static void set_stream_keepalive(A2AServer& server, std::chrono::milliseconds interval);
+    /// How long a streaming request waits before it hands its stream to the
+    /// HTTP server (#493).
+    static void set_stream_handoff_delay(A2AServer& server, std::chrono::milliseconds delay);
 };
 
 }  // namespace neograph::a2a::test

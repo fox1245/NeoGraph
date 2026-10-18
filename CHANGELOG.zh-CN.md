@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=b58f9a64afc268ffc7d30ac401b7f9d1f0a961da2a1777de6a69468a88756402 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1a3318292ec670303c0c1c72c0ce8fe9ab32fe353baeffdcc4f0f3981865bf3b -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -22,6 +22,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 修复
 
 - **向已停止读取的子进程写入时，宿主不再因 SIGPIPE 而终止（#495）。** NeoGraph 会写入 stdio MCP 服务器和进程工具（`ProcessTool`）的 stdin。子进程关闭其 stdin 或退出之后，这样的写入会引发 SIGPIPE，而它的默认动作会终止整个进程。stdio MCP 客户端只在自己的 I/O 线程上屏蔽 SIGPIPE。在信号发给写入线程的 Linux 上这已足够，但在为整个进程引发该信号的 macOS 上并不够：正如一次 macOS CI 运行所示，在读取 `initialize` 之前就退出的 MCP 服务器可能终止 C++ 宿主。进程工具桥则完全没有屏蔽它。现在在 macOS 上，这类管道的写端会标记 `F_SETNOSIGPIPE`；在 Linux 上，进程工具桥在每次写入时于自己的线程上屏蔽 SIGPIPE，并收回该写入引发的信号。写入随之以 `EPIPE` 失败，调用会像其他情况一样失败或结束。此外，对于读端已不存在的已满 stdin 管道（只报告 `POLLERR`），进程工具桥会立即再次 poll，直到子进程退出，一直占用一个 CPU 核心；现在它会在此结束输入。忽略 SIGPIPE 的 Python 宿主不受影响；运行 NeoGraph 的 A2A 或 MCP HTTP 服务器的进程也不受影响，因为 cpp-httplib 的服务器会把进程的 SIGPIPE 设为 `SIG_IGN`。
+- **停止 A2A 服务器时，不再切断尚未开始发送的流（#493）。** cpp-httplib（0.41 和 0.61 都是如此）在监听器停止后不会再调用 chunked content provider。`A2AServer::stop()` 先停止监听器，因此处理函数已接受请求、但流尚未发送开头 Task 的 `SendStreamingMessage` 或 `SubscribeToTask`，会在一个字节都没发送的情况下被关闭：运行仍在继续，客户端读到的却是 `End of file`，而不是运行的事件。`GraphHostA2AContract.SharedBoundary` 偶尔会因此失败。现在 `stop()` 会等到它正在处理的每个请求都已应答，或对流而言已开始发送，然后才停止监听器；该流会像已打开的流一样以运行的最终状态结束。在等待期间到达的请求不会开始工作，而是得到 JSON-RPC 错误 `-32603`（reason `UNAVAILABLE`，"The agent is stopping; retry later"）。
 
 ## [0.14.3] - 2026-10-18
 

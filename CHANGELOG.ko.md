@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b58f9a64afc268ffc7d30ac401b7f9d1f0a961da2a1777de6a69468a88756402 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1a3318292ec670303c0c1c72c0ce8fe9ab32fe353baeffdcc4f0f3981865bf3b -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -22,6 +22,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 수정됨
 
 - **읽기를 멈춘 자식 프로세스에 쓰다가 호스트가 SIGPIPE로 끝나는 일이 없어졌습니다(#495).** NeoGraph는 stdio MCP 서버와 프로세스 도구(`ProcessTool`)의 stdin에 씁니다. 자식이 stdin을 닫았거나 종료한 뒤에는 이런 쓰기가 SIGPIPE를 일으키고, 그 기본 동작은 프로세스 전체를 끝냅니다. stdio MCP 클라이언트는 자기 I/O 스레드에서만 SIGPIPE를 막았습니다. 신호가 쓴 스레드로 가는 Linux에서는 이것으로 충분하지만, 프로세스에 신호를 보내는 macOS에서는 그렇지 않습니다. macOS CI에서 드러났듯이 `initialize`를 읽기 전에 끝난 MCP 서버가 C++ 호스트를 끝낼 수 있었습니다. 프로세스 도구 브리지는 SIGPIPE를 전혀 막지 않았습니다. 이제 macOS에서는 그런 파이프의 쓰기 끝에 `F_SETNOSIGPIPE`를 표시하고, Linux에서는 프로세스 도구 브리지가 쓰기마다 자기 스레드에서 SIGPIPE를 막고 그 쓰기가 일으킨 신호를 거둬들입니다. 그러면 쓰기는 `EPIPE`로 실패하고, 호출은 그렇지 않았을 때처럼 실패하거나 끝납니다. 또 브리지는 읽는 쪽이 사라진 가득 찬 stdin 파이프(`POLLERR`만 보고됨)를 자식이 끝날 때까지 곧바로 다시 poll해 CPU 코어 하나를 계속 썼는데, 이제 거기서 입력을 끝냅니다. SIGPIPE를 무시하는 Python 호스트는 영향을 받지 않았고, NeoGraph의 A2A나 MCP HTTP 서버를 실행하는 프로세스도 cpp-httplib 서버가 프로세스의 SIGPIPE를 `SIG_IGN`으로 설정하므로 영향을 받지 않았습니다.
+- **A2A 서버를 멈춰도 아직 보내기 시작하지 않은 스트림이 끊기지 않습니다(#493).** cpp-httplib는 0.41과 0.61 모두 리스너가 멈춘 뒤에는 chunked content provider를 호출하지 않습니다. `A2AServer::stop()`은 리스너부터 멈췄으므로, 핸들러가 요청을 받아들였지만 스트림이 아직 첫 Task를 보내지 않은 `SendStreamingMessage`나 `SubscribeToTask`는 스트림을 한 바이트도 보내지 못한 채 닫혔습니다. 실행은 계속되는데 클라이언트는 실행의 이벤트 대신 `End of file`을 읽었습니다. `GraphHostA2AContract.SharedBoundary`가 가끔 이렇게 실패했습니다. 이제 `stop()`은 처리 중인 모든 요청이 응답했거나, 스트림이라면 보내기를 시작할 때까지 기다린 뒤에 리스너를 멈춥니다. 그 스트림은 이미 열려 있던 스트림처럼 실행의 최종 상태로 끝납니다. 기다리는 동안 들어온 요청은 일을 시작하지 않고 JSON-RPC 오류 `-32603`(reason `UNAVAILABLE`, "The agent is stopping; retry later")을 받습니다.
 
 ## [0.14.3] - 2026-10-18
 

@@ -647,6 +647,47 @@ struct A2AServer::Impl {
     bool                                          generated_card_url = false;
     std::atomic<bool>                             trust_forwarded_headers{false};
 
+    // #493: cpp-httplib checks for shutdown before it first calls a chunked
+    // content provider, so svr.stop() cut a stream whose headers were out
+    // but whose provider had not run: the client got neither the Task nor an
+    // end, only a closed connection. A JSON-RPC request holds a Handoff from
+    // the start of its handler until it answers or, for a stream, until its
+    // provider first runs; stop() waits for every Handoff before it stops the
+    // listener, and refuses new requests meanwhile (`draining`).
+    class Handoff {
+    public:
+        explicit Handoff(Impl& impl) : impl_(impl) {
+            std::lock_guard lk(impl_.handoff_mu);
+            ++impl_.handoffs;
+        }
+        ~Handoff() { release(); }
+        Handoff(const Handoff&)            = delete;
+        Handoff& operator=(const Handoff&) = delete;
+        void release() noexcept {
+            if (released_.exchange(true)) return;
+            std::lock_guard lk(impl_.handoff_mu);
+            --impl_.handoffs;
+            impl_.handoff_cv.notify_all();
+        }
+
+    private:
+        Impl&             impl_;
+        std::atomic<bool> released_{false};
+    };
+    std::mutex              handoff_mu;
+    std::condition_variable handoff_cv;
+    std::size_t             handoffs = 0;
+    std::atomic<bool>       draining{false};
+    /// Test seam: how long a streaming handler waits before it hands its
+    /// stream to cpp-httplib.
+    std::chrono::milliseconds stream_handoff_delay{0};
+
+    void await_handoffs() {
+        draining.store(true, std::memory_order_release);
+        std::unique_lock lk(handoff_mu);
+        handoff_cv.wait(lk, [&] { return handoffs == 0; });
+    }
+
     void bind_card_endpoint(const std::string& host) {
         if (!card.url.empty() && !generated_card_url) return;
         card.url.clear();
@@ -943,6 +984,7 @@ struct A2AServer::Impl {
         /// Answer even an upfront error as an event stream (0.3
         /// `tasks/resubscribe`, whose 0.3 clients accept nothing else).
         bool                     sse_errors = false;
+        std::shared_ptr<Handoff> handoff;
     };
 
     void reply_result(Call& call, json result) {
@@ -979,7 +1021,8 @@ struct A2AServer::Impl {
     void stream_task(Call& call, Task snapshot, std::shared_ptr<TaskChannel> channel,
                      std::size_t cursor, FollowPoll follow = {});
 
-    void handle_jsonrpc(const httplib::Request& req, httplib::Response& res);
+    void handle_jsonrpc(const httplib::Request& req, httplib::Response& res,
+                        std::shared_ptr<Handoff> handoff);
     void handle_send(Call& call);
     void handle_get(Call& call);
     void handle_cancel(Call& call);
@@ -992,6 +1035,11 @@ void test::A2AServerTestAccess::set_max_inflight_runs(
     A2AServer& server, std::size_t cap) {
     std::lock_guard lk(server.impl_->tasks_mu);
     server.impl_->max_inflight_runs = cap;
+}
+
+void test::A2AServerTestAccess::set_stream_handoff_delay(
+    A2AServer& server, std::chrono::milliseconds delay) {
+    server.impl_->stream_handoff_delay = delay;
 }
 
 void test::A2AServerTestAccess::set_stream_keepalive(
@@ -1143,15 +1191,17 @@ void A2AServer::Impl::register_routes() {
 
     svr.Post("/",
              [this](const httplib::Request& req, httplib::Response& res) {
-                 handle_jsonrpc(req, res);
+                 handle_jsonrpc(req, res, std::make_shared<Handoff>(*this));
              });
 }
 
 void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
-                                     httplib::Response& res) {
+                                     httplib::Response& res,
+                                     std::shared_ptr<Handoff> handoff) {
     Call call;
     call.req = &req;
     call.res = &res;
+    call.handoff = std::move(handoff);
 
     json envelope;
     try {
@@ -1190,6 +1240,8 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
     call.streaming = method == "SendStreamingMessage" || method == "message/stream"
                   || method == "SubscribeToTask" || method == "tasks/resubscribe";
     call.sse_errors = method == "tasks/resubscribe";
+    // Only a stream's provider can be cut by the listener's stop.
+    if (!call.streaming) call.handoff->release();
 
     // JSON-RPC 2.0 §4.1: "The Server MUST NOT reply to a Notification."
     // Every A2A method is a request, so a notification does nothing.
@@ -1210,6 +1262,16 @@ void A2AServer::Impl::handle_jsonrpc(const httplib::Request& req,
         return;
     }
     call.dialect = *dialect;
+
+    // stop() is waiting for the requests it has; this one would start work
+    // it then had to wait for as well (#493).
+    if (draining.load(std::memory_order_acquire)) {
+        auto e   = rpc_error(-32603, "The agent is stopping; retry later");
+        e.reason = "UNAVAILABLE";
+        e.domain = kNeoGraphDomain;
+        reply_error(call, e);
+        return;
+    }
 
     if (envelope.contains("params") && !envelope["params"].is_null()) {
         call.params = envelope["params"];
@@ -1901,10 +1963,14 @@ void A2AServer::Impl::stream_task(Call& call, Task snapshot,
     const auto rpc_id  = call.id;
     const auto dialect = call.dialect;
     auto* self = this;
+    if (stream_handoff_delay.count() > 0) std::this_thread::sleep_for(stream_handoff_delay);
     call.res->set_chunked_content_provider(
         "text/event-stream",
         [self, rpc_id, dialect, snapshot = std::move(snapshot), channel, cursor,
-         follow = std::move(follow)](size_t /*offset*/, httplib::DataSink& sink) mutable {
+         follow = std::move(follow), handoff = call.handoff](
+            size_t /*offset*/, httplib::DataSink& sink) mutable {
+            // cpp-httplib runs the provider: stop() may stop the listener now.
+            if (handoff) std::exchange(handoff, nullptr)->release();
             using Clock = std::chrono::steady_clock;
             auto last_sent = Clock::now();
             auto write = [&](json result) {
@@ -2482,6 +2548,7 @@ bool A2AServer::start(const std::string& host, int port) {
     }
 #endif
     impl_->stopping.store(false, std::memory_order_release);
+    impl_->draining.store(false, std::memory_order_release);
     impl_->running.store(true, std::memory_order_release);
     bool ok = impl_->svr.listen_after_bind();
     impl_->running.store(false, std::memory_order_release);
@@ -2507,6 +2574,7 @@ bool A2AServer::start_async(const std::string& host, int port) {
     }
 #endif
     impl_->stopping.store(false, std::memory_order_release);
+    impl_->draining.store(false, std::memory_order_release);
     impl_->running.store(true, std::memory_order_release);
     impl_->listener = std::thread([this] {
         impl_->svr.listen_after_bind();
@@ -2519,9 +2587,11 @@ bool A2AServer::start_async(const std::string& host, int port) {
 }
 
 void A2AServer::stop() {
-    // Drain: the listener stops accepting, open streams and blocking sends
-    // end when their runs publish a final state, and the runs finish on their
-    // workers. A server stop never cancels a run (a Program run is durable).
+    // Drain: requests being handled hand their streams over first (#493),
+    // the listener stops accepting, open streams and blocking sends end when
+    // their runs publish a final state, and the runs finish on their workers.
+    // A server stop never cancels a run (a Program run is durable).
+    impl_->await_handoffs();
     if (impl_->svr.is_running()) impl_->svr.stop();
     if (impl_->listener.joinable()) impl_->listener.join();
     impl_->join_workers();
