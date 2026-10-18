@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=bc9d86d329fda916b6eef6b141c85d2928d3415e03ec9dbad7c05f2651555cc8 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=1ba2435bb0bde68ce969a20064ff5577a3e61d0fc1705b904627a8ec4c2c649e -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,7 +24,7 @@ CMake는 설치된 패키지, 명시적 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<s
 또는 immutable public SDK archive fallback 중 하나를 사용합니다. offline installed/source SDK를 쓸 때는
 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 fetching을 끕니다.
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
-수행합니다. SDK `0.3.3` alpha는 interface revision/shared ABI 6을 씁니다.
+수행합니다. SDK `0.3.5` alpha는 interface revision/shared ABI 6을 씁니다.
 
 보존된 interface-3 model-free 실행에서는 Assembly 로컬 A2A member 서버 4개와 C++ speaker,
 JARVIS CLI synthetic turn·메모리 영속화, Beast strict Core 컴파일·진화·checkpoint 롤백,

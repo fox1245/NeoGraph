@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=07d5a75a5534331119fa184c25d1d70720cb0972c2ed17145a33b101a55a7ca6 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=d27dd614306bd671760dc1ab857a6330bd76af0a3941afb5f8bd21c9e49f1a55 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -306,7 +306,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植的投影。真正的原生历史可以连同原生检查点旁路数据留在内存中；持久化的原生历史则需要真正的 `sp::NativeArchive` 和受保护的、仅限所有者的保管。可移植的 JSON 无法重建这种权限。归档用独立的密钥认证保管状态，它既不是加密，也不是对厂商签发者的认证。不要公开归档正文、密钥、原生 blob 或原始的线路观测值。关于持久化失败、观察者、受管预算库和重放边界，见 [provider 参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)。
 
-这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.3` alpha，固定在公开提交 `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3 和可移植 JSON v2 保持不变；这一代不声明稳定的 SDK 接口。
+这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.5` alpha，固定在公开提交 `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3 和可移植 JSON v2 保持不变；这一代不声明稳定的 SDK 接口。
 
 ## Python
 
@@ -361,7 +361,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 在另一个项目里，把快速开始中的 `FetchContent` 几行换成 `find_package(NeoGraph CONFIG REQUIRED)`，并用 `-DCMAKE_PREFIX_PATH="$HOME/neograph"` 配置。使用已安装版本的项目只链接它需要的已启用组件：
 
 ```cmake
-find_package(SchemaProvider 0.3.3 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```

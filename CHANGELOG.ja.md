@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8c97a5d31c281786cdbc345e1dfe44670346e9c63620b255a9d2d1f7df1e5dc2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=550a33a941b3a8c6d95667c4436e76a879249e4fd3bc15d986e95588af80efbf -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -13,6 +13,17 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 変更
+- **SchemaProvider `060f52c9ab0fbbc6b785b097785a17bdf16d7773`（`maint/interface6` の SDK 0.3.5）を採用します（#511）。**
+  - **互換性。** インターフェースリビジョンと共有ライブラリ世代は 6 のままで、公開 struct や enum のレイアウトは変わらず、組み込みのディスクリプターポリシーとその identity も変わりません。NeoGraph はビルドと、インストールされた `NeoGraphConfig` の `find_dependency` で `SchemaProvider 0.3.5 EXACT` を要求します。
+  - **動作変更：Chat Completions は生成された画像を保持します。** 画像モデル（OpenRouter の `google/gemini-3.1-flash-lite-image` など）は画像を `message.images` で返します。SDK がこのメンバーを無視していたため、トークンは課金されても結果に画像がありませんでした。各画像は wire 型が `images` の `Opaque` パートになり、その `wire_metadata` に wire の項目が入ります（データ URL は `image.image_url.url`）。このパートは履歴の assistant メッセージに残しておけますが、プロバイダーには送り返しません。
+  - **動作変更：code-execution の `container` やキャッシュの `diagnostics` オブジェクトを含む Messages 応答が完了します。** 以前は `Unsupported` で失敗し、課金済みの回答が失われていました。`web_fetch_20260318` や `web_search_20260318` を使う Claude 5.5 はこの両方を返します。どちらも `raw_events` に残ります。
+  - **修正：Interactions のストリーム呼び出しが完了します。** API は Interactions のストリームを `status` のない `interaction.created` リソースで開くようになり、SDK がこれを拒否していたため、テキストのみの場合も含めてすべての Interactions ストリーム呼び出しが失敗していました（SchemaProvider #65）。
+  - **修正：1 MiB を超える生成画像のストリームが完了します。** SSE の行とイベントの既定上限を 1 MiB から 16 MiB に引き上げました。以前は base64 が 1.5 MB の `gemini-3.1-flash-lite-image` のストリーム応答が `ResourceLimit` で失敗していました（SchemaProvider #66）。ランタイムの既定値はポリシーの identity に含まれません。
+  - **Python。** `Opaque.wire_metadata` を読めるようになり、保持された画像を Python から取り出せます。
+  - **このラインでは直さないもの。** `claude-haiku-4-5` のように programmatic tool calling に対応しないモデルでは、`_20260318` の Web ツールに `allowed_callers` が必要ですが、インターフェース 6 はこれを送れません。そうしたモデルでは `web_search_20250305` か `web_fetch_20250910` を使ってください。Lyria など thinking のない Gemini モデルは、family 既定の `includeThoughts` のため引き続き 400 になります。どちらも NeoGraph 0.16.0 が採用する SchemaProvider 0.4.0 で直ります（#512）。
+  - NeoGraph、C++ コンシューマー、Python 拡張を 0.3.5 のヘッダーとライブラリでまとめて再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
 
 ### 非推奨
 - **型付きクライアント `VeoClient`、`ImagesClient`、`DecisionsClient` は提供終了が近いモデルしか受け付けません。今後は拡張せず、0.16.0 で削除します（#510）。**

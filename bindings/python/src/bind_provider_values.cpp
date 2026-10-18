@@ -237,6 +237,8 @@ void init_provider_values(py::module_& m) {
     cReasoning.def_readwrite("content", &sp::Reasoning::content);
     auto cOpaque = py::class_<sp::Opaque>(m, "Opaque").def(py::init<>());
     cOpaque.def_readwrite("wire_type", &sp::Opaque::wire_type);
+    // The retained wire object, for example a generated image (wire type "images", #511).
+    cOpaque.def_property("wire_metadata", [](const sp::Opaque& v) { return document_view(v.wire_metadata); }, [](sp::Opaque& v, py::object x) { v.wire_metadata = document_from(x); });
     auto cThought = py::class_<sp::Thought>(m, "Thought").def(py::init<>());
     cThought.def_readwrite("summary", &sp::Thought::summary);
     cThought.def_readwrite("signature", &sp::Thought::signature);

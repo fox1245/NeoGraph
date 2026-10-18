@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d666eb708d94a5c71d20287af84b0eacd9f2a1a76ca66e0f37aeba320a84348f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=a7eb1a4e69dc63a7bbaec6c0409491771cfdf1989510fd9e336d9ce90cd5e69f -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -40,10 +40,10 @@
 
 SDK imported target 提供 `include/SchemaProvider` include root；公开示例直接使用 `<descriptor/descriptor.h>`、`<runtime/client.h>`、`<neograph/llm/schema_provider.h>`，不依赖 recipe 专用 helper。
 
-已安装 SDK package 须恰为 `0.3.3`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
+已安装 SDK package 须恰为 `0.3.5`，并匹配 interface revision 6 header 和 shared-library generation 6。版本匹配本身不批准旧 interface/ABI binary。
 
 ```cmake
-find_package(SchemaProvider 0.3.3 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -430,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.3`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
+这是源码和二进制破坏性变更；所有 C++ 使用者和自定义提供方都须使用匹配的新头文件/库重新编译。`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、descriptor interpreter、Responses WebSocket 已删除，没有 alias 或兼容 bridge。SDK 为 alpha `0.3.5`、interface revision 6 / shared-library generation 6，采用 out-of-line capability check，不表示稳定发布。已验证的平台是 Linux/POSIX。Windows NTFS 与 macOS 实现已存在，但尚未在该 SDK 上验证；WASM provider runtime 支持尚未确立。
 
 Python 公开与 C++ 相同的所有权 request/outcome 边界：`make_provider_request`、`Provider.prepare`、`dispatch` 和 `invoke`。Provider 历史使用带 typed part 的 `ProviderMessage`；`ChatMessage` 仍是图的便利 projection。SDK 失败可通过 `ProviderOutcome.failure` 读取，host observer/settlement 异常保留 `outcome` 和 `cause`。构造器及 GIL/回调行为参见 [Python binding 指南](python-binding.md)。
 

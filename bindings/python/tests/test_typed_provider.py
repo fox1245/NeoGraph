@@ -347,3 +347,16 @@ def test_repeated_observer_cause_reads_preserve_original_exception_and_traceback
         assert error.__cause__ is refusal
         assert error.outcome is not None
     assert len(provider_peer.requests) == 2
+
+
+def test_generated_image_is_kept_as_an_opaque_part(provider_peer):
+    # SchemaProvider 0.3.4 keeps message.images instead of dropping the billed image (#511).
+    url = "data:image/png;base64,iVBORw0KGgo="
+    provider_peer.message_extra = {"images": [{"type": "image_url", "image_url": {"url": url}}]}
+    provider = provider_peer.provider()
+    result = provider.invoke(_request(provider))
+    assert result.failure is None
+    images = [part for message in result.completion.messages for part in message.parts
+              if isinstance(part, ng.Opaque) and part.wire_type == "images"]
+    assert len(images) == 1
+    assert images[0].wire_metadata["image"]["image_url"]["url"] == url

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=261eeb93129ad968faa586826df1f0b99c50e32005c9f5367626250e68e2f722 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=3473ae4657b5258f5bd1b7f01230a5236d5072784958288e502866dd6beb57b9 -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -289,7 +289,7 @@ CMake 3.20+는 명시적 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`, 설치된 runtime
 고정된 public GitHub source archive 순서로 SDK를 선택합니다. 다운로드 fallback은 기본 활성화이며,
 설치 package나 명시 source를 쓰는 offline 빌드에서는 `NEOGRAPH_FETCH_SCHEMAPROVIDER=OFF`로 끄세요.
 설치 include root는 `include/SchemaProvider`입니다. interface/capability 검사를
-수행하며 SDK package는 alpha `0.3.3` (interface revision/shared ABI 6)입니다.
+수행하며 SDK package는 alpha `0.3.5` (interface revision/shared ABI 6)입니다.
 
 보존된 interface-3 model-free C++ E2E 실행에서는 번호가 있는 타깃 39개를 검증했습니다. finite offline 29개와
 실제 MCP/ACP/A2A/Harness 및 gRPC graph/checkpoint/tool 경로입니다. gRPC-vs-JSON-RPC
@@ -310,7 +310,7 @@ remote CI와 공개 배포는 아직 대기 중입니다.
 
 ## 보존된 예제 계약
 
-이 소스 계약은 SDK `0.3.3`(interface 6)으로 빌드합니다. 위에 기록된 C++ 실행은
+이 소스 계약은 SDK `0.3.5`(interface 6)으로 빌드합니다. 위에 기록된 C++ 실행은
 더 오래된 SDK interface로 수행했으며 과거 증거로 남습니다. 현재 SDK를 검증한 것도,
 새로운 live 호출도 아닙니다. family별 제어는 `ProviderControls`의
 닫힌 타입 필드이며 지원하지 않는 family/origin/model 조합은 I/O 전에 거부합니다.

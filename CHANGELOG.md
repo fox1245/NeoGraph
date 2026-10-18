@@ -13,6 +13,17 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Adopt SchemaProvider `060f52c9ab0fbbc6b785b097785a17bdf16d7773`, SDK 0.3.5 on `maint/interface6` (#511).**
+  - **Compatibility.** The interface revision and shared-library generation stay 6, no public struct or enum changes layout, and the embedded descriptor policy and its identity are unchanged. NeoGraph now requires `SchemaProvider 0.3.5 EXACT`, in its build and in the `find_dependency` of the installed `NeoGraphConfig`.
+  - **Behavior change: generated images on Chat Completions are kept.** Image models (OpenRouter `google/gemini-3.1-flash-lite-image` and the like) return their images in `message.images`. The SDK ignored the member, so the outcome had no image although its tokens were billed. Each image is now an `Opaque` part of wire type `images`, and its `wire_metadata` holds the wire entry (the data URL is at `image.image_url.url`). A history may keep the part on its assistant message; it is not sent back to the provider.
+  - **Behavior change: a Messages response with a code-execution `container` or the cache `diagnostics` object completes.** It used to fail as `Unsupported`, which threw away the billed answer. Claude 5.5 with `web_fetch_20260318` or `web_search_20260318` returns both. They stay in `raw_events`.
+  - **Fix: a streamed Interactions call completes.** The API now opens an Interactions stream with an `interaction.created` resource without `status`, and the SDK refused it, so every streamed Interactions call failed, plain text included (SchemaProvider #65).
+  - **Fix: a streamed generated image over 1 MiB completes.** The SSE line and event defaults are now 16 MiB instead of 1 MiB. A streamed `gemini-3.1-flash-lite-image` answer with 1.5 MB of base64 used to fail with `ResourceLimit` (SchemaProvider #66). The runtime defaults are not part of the policy identity.
+  - **Python.** `Opaque.wire_metadata` is now readable, so a kept image can be read from Python.
+  - **Not fixed on this line.** On models without programmatic tool calling, such as `claude-haiku-4-5`, the `_20260318` web tools need `allowed_callers`, which interface 6 cannot send; use `web_search_20250305` or `web_fetch_20250910` there. Lyria and other Gemini models without thinking still answer 400 to the family's `includeThoughts` default. Both are fixed in SchemaProvider 0.4.0, which NeoGraph 0.16.0 adopts (#512).
+  - Rebuild NeoGraph, C++ consumers and Python extensions together against the 0.3.5 headers and libraries (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
+
 ### Deprecated
 - **The typed `VeoClient`, `ImagesClient` and `DecisionsClient` admit models that are going out of service. They will not be extended, and 0.16.0 removes them (#510).**
   - **`VeoClient`.** It admits only `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview` and `veo-3.1-lite-generate-preview`. Google shuts all three down on 2026-10-22, so from that date it has no model to call. The Gemini API offers no other Veo model, and Google names Gemini Omni (`gemini-omni-1.1-flash`, through the Interactions API) as the replacement.

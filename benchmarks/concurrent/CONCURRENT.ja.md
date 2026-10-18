@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=a372bd48a5a531836f3b2151d2fb01109b31f20f72814f3318b2384562c2f083 -->
+<!-- neograph-i18n: source=benchmarks/concurrent/CONCURRENT.md locale=ja source_sha256=393c38a31cd0bdf501633998c3320cf0e23697b7edbd3e8bc10da385a87e3c65 -->
 # 同時負荷ベンチマーク：NeoGraphとPythonの過去の結果
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
@@ -48,7 +48,7 @@ DockerのCPUクォータを設定しても、`hardware_concurrency()` から見�
 ## 現在の依存関係と再現の状況
 
 Coreは、`NEOGRAPH_BUILD_LLM=OFF` と `NEOGRAPH_USE_LIBCURL=OFF` にしても、外部の `SchemaProvider::runtime` をリンクします。インストール済みのSDKは `CMAKE_PREFIX_PATH` で、明示的なチェックアウトは `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` で指定してください。詳しくは[ビルドガイド](../../README.md)を参照してください。SDKをソースからビルドするには、C++20、設定を生成するためのPython、libcurl 7.88以上、OpenSSL Cryptoが必要です。SDKはLinux/POSIXでのみテストしており、過去のDockerの結果は他のプラットフォームには当てはまりません。
-NeoGraph `0.15.0` のレシピには、alpha SDK `0.3.3`（インターフェースのリビジョンと共有世代は6）と、それに合ったヘッダーおよびライブラリーが必要です。
+NeoGraph `0.15.0` のレシピには、alpha SDK `0.3.5`（インターフェースのリビジョンと共有世代は6）と、それに合ったヘッダーおよびライブラリーが必要です。
 
 メンテナンスしているNeoGraphのDockerイメージは、curlとOpenSSLの開発用パッケージをインストールし、`neograph::core` にリンクする専用のCMakeコンシューマーをビルドします。SDKへの依存関係は、そこから引き継がれます。SDKの取得はルートのCMakeのポリシーに従います。パッケージもソースのチェックアウトも指定しない場合は、ネットワークへのアクセスが必要になることがあります。NeoGraphのオプションのネットワークモジュールはOFFですが、SDKの依存は残ります。マトリクスは、ビルドする前に出力先を空にします。そのため、新しいパスを指定してください。`status=ok` が示すのは、JSONを取り出せたことだけです。`ok`、`err`、終了ステータスも確認してください。
 
