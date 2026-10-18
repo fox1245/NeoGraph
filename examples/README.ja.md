@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=18a0c0aaab5da7803afa48aa59bff6d33adcf4a456ae389145e257de6e5d932a -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=261eeb93129ad968faa586826df1f0b99c50e32005c9f5367626250e68e2f722 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -440,7 +440,11 @@ tool search、`shell.environment` の skills、shell(`container_auto`) です。
 `openai-spreadsheets` skill を置換します。この inspection demo は function tool を宣言するだけでローカル実行しません。
 順序付き型付き/raw event と完全な terminal を保持します。hosted tool は route によって未対応または追加費用となり、
 型付き admission は live 互換性保証ではありません。WebSocket/primitive 実行例は残しません。
-Images/Veo/Decisions は別の型付き NeoGraph client で、chat spending grant を継承しません。
+Images/Veo/Decisions は別の型付き NeoGraph client で、chat spending grant を継承しません。これらは非推奨で、0.16.0 で SchemaProvider のエンドポイントに置き換えて削除します。
+- Google は `VeoClient` が受け付ける Veo モデルを 2026-10-22 にすべて終了します。
+- OpenAI は `gpt-image-1` を 2026-10-23 に、`gpt-image-1-mini` と `gpt-image-1.5` を 2026-12-01 に終了します。
+
+CHANGELOG を参照してください。
 
 Decisions の choice criteria は文字列配列ではなく、choice をキーとするオブジェクトです。
 現在の別個の typed client は、raw `SchemaProvider::request_json()` body を使わずに正しい形を表現します。

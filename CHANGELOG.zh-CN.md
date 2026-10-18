@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=215102c5e0bddef34a332e068bf5b76064bacce598c6bc64e3758b85578210f2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8c97a5d31c281786cdbc345e1dfe44670346e9c63620b255a9d2d1f7df1e5dc2 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,13 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 已弃用
+- **类型化客户端 `VeoClient`、`ImagesClient` 和 `DecisionsClient` 只接受即将停止服务的模型。它们不再扩展，并将在 0.16.0 中移除（#510）。**
+  - **`VeoClient`。** 只接受 `veo-3.1-generate-preview`、`veo-3.1-fast-generate-preview` 和 `veo-3.1-lite-generate-preview`。Google 于 2026-10-22 关闭这三个模型，从这一天起它没有可调用的模型。Gemini API 没有其他 Veo 模型，Google 指定 Gemini Omni（`gemini-omni-1.1-flash`，经 Interactions API）作为替代。
+  - **`ImagesClient`。** OpenAI 已于 2026-05-12 移除 `dall-e-2` 和 `dall-e-3`。`gpt-image-1` 于 2026-10-23 关闭，`gpt-image-1-mini` 和 `gpt-image-1.5` 于 2026-12-01 关闭。Gemini 配置（`gemini-3.1-flash-lite-image`）不受影响。
+  - **`DecisionsClient`。** 只接受 `typesafe/jev-1.13`。
+  - **替代方案。** 图像、视频、音频、嵌入、rerank、decisions 以及实时 API，所有提供方端点都改由 SchemaProvider 负责。它按能力配置而不是固定模型列表接受模型。NeoGraph 0.16.0 将采用它，删除这三个客户端，并通过它提供 Omni 视频。
 
 ## [0.15.0] - 2026-10-18
 

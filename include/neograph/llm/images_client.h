@@ -1,5 +1,9 @@
 #pragma once
 
+// Deprecated (#510): OpenAI shuts down gpt-image-1 on 2026-10-23 and gpt-image-1-mini
+// and gpt-image-1.5 on 2026-12-01 (dall-e-2/3 are already removed). NeoGraph 0.16.0
+// removes this client in favour of SchemaProvider endpoints.
+
 #include <neograph/llm/endpoint_types.h>
 #include <neograph/graph/cancel.h>
 #include <asio/awaitable.hpp>

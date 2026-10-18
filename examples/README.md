@@ -486,7 +486,13 @@ All ordered typed/raw events and full terminals are retained. Hosted tools may
 be unsupported by the chosen route or incur additional charges; typed admission
 is not a live compatibility guarantee. No WebSocket/primitive runnable example
 is retained. Images/Veo/Decisions are separate typed NeoGraph clients and do not
-inherit a chat-run spending grant.
+inherit a chat-run spending grant. They are deprecated, and 0.16.0 removes them in favour of
+SchemaProvider endpoints:
+- Google shuts down every Veo model `VeoClient` admits on 2026-10-22.
+- OpenAI shuts down `gpt-image-1` on 2026-10-23, and `gpt-image-1-mini` and `gpt-image-1.5` on
+  2026-12-01.
+
+See the CHANGELOG.
 
 Decisions choice criteria are an object keyed by choice, not a string array.
 The current separate typed client expresses the valid shape without a raw

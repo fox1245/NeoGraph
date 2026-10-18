@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=18a0c0aaab5da7803afa48aa59bff6d33adcf4a456ae389145e257de6e5d932a -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=261eeb93129ad968faa586826df1f0b99c50e32005c9f5367626250e68e2f722 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -430,7 +430,11 @@ tool search、`shell.environment` 的 skills 和 shell(`container_auto`)。
 `openai-spreadsheets` skill。本 inspection demo 只声明 function tool，不在本地执行。
 保留全部有序类型化/raw event 和完整 terminal。hosted tool 可能得不到所选 route 的支持，或产生额外费用；
 类型化准入(admission)不是 live 兼容保证。不保留 WebSocket/primitive 可运行示例。
-Images/Veo/Decisions 是独立类型化 NeoGraph client，不继承 chat spending grant。
+Images/Veo/Decisions 是独立类型化 NeoGraph client，不继承 chat spending grant。它们已弃用，0.16.0 将以 SchemaProvider 端点取代并移除它们。
+- Google 于 2026-10-22 关闭 `VeoClient` 接受的全部 Veo 模型。
+- OpenAI 于 2026-10-23 关闭 `gpt-image-1`，于 2026-12-01 关闭 `gpt-image-1-mini` 和 `gpt-image-1.5`。
+
+参见 CHANGELOG。
 
 Decisions 的 choice criteria 是以 choice 为键的对象，而不是字符串数组。
 当前独立的 typed client 无需 raw `SchemaProvider::request_json()` body 即可表达有效结构：
