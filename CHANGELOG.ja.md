@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=463d840c4041f2427a4d31f9766c5c7b1620c32d6239d90175060fab213394ef -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=215102c5e0bddef34a332e068bf5b76064bacce598c6bc64e3758b85578210f2 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -13,6 +13,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+## [0.15.0] - 2026-10-18
 
 ### 変更
 

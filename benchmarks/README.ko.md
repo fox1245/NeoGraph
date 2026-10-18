@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=0e4a6858e928e9248f3a40093fc815e0684b7ea3aca0e22f8b80e5d2ece6e62b -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=5f62adf416dbc3da6bd268bd943d9906322ea6e23de43e5c3df6a70f24898eae -->
 # NeoGraph와 Python 그래프/파이프라인 프레임워크 비교 — 엔진 오버헤드 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@ I/O, sleep, 모델 호출이 없는 동일한 소규모 워크로드로 NeoGraph
 측정 범위에는 노드 디스패치, 상태 채널 쓰기, 리듀서 호출이 들어갑니다.
 날짜가 붙은 표에는 당시의 엔진 이름과 의존성 버전이 그대로 남아 있습니다.
 이 표는 현재 패키지 버전을 나타내지 않습니다.
-현재 NeoGraph `0.14.3` 레시피는 alpha SDK `0.3.3`과, 인터페이스 리비전·공유 세대(generation) 6에 맞는
+현재 NeoGraph `0.15.0` 레시피는 alpha SDK `0.3.3`과, 인터페이스 리비전·공유 세대(generation) 6에 맞는
 헤더와 라이브러리를 요구합니다.
 
 Program 승인(admission), JavaScript 제어, SQLite/PostgreSQL 런타임 비용은
