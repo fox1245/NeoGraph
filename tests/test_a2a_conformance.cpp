@@ -32,6 +32,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -709,6 +710,34 @@ TEST(A2AConformance, ASubscriberJoiningAsTheRunFinishesGetsTheFinalStatusOrTheTe
         EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED")
             << r.body;
     }
+}
+
+TEST(A2AConformance, AStopLetsAStreamThatWasNotHandedOverYetFinish) {
+    // #493: cpp-httplib does not call a chunked provider once its listener
+    // has stopped. A stream whose handler had not handed it over yet was cut
+    // before its opening Task, and the client read only a closed connection.
+    Server srv;
+    neograph::a2a::test::A2AServerTestAccess::set_stream_handoff_delay(*srv.server, 300ms);
+    auto stream = std::async(std::launch::async, [&] {
+        return stream_rpc(srv, "SendStreamingMessage", {{"message", v1_message("nap 100000")}},
+                          [](const std::string&) {});
+    });
+    // The handler now waits to hand its stream over; stop() waits for it.
+    std::this_thread::sleep_for(100ms);
+    auto stopped = std::async(std::launch::async, [&] { srv.server->stop(); });
+    std::this_thread::sleep_for(50ms);
+    // A request that arrives meanwhile is refused instead of starting work.
+    const auto refused = rpc(srv, "GetTask", {{"id", "task-while-stopping"}});
+    EXPECT_EQ(error_code(refused.envelope), -32603) << refused.body;
+    EXPECT_NE(refused.body.find("stopping"), std::string::npos) << refused.body;
+
+    const auto r = stream.get();
+    stopped.get();
+    const auto events = sse_events(r.body);
+    ASSERT_GE(events.size(), 2u) << r.body;
+    EXPECT_TRUE(events.front()["result"].contains("task")) << r.body;
+    EXPECT_EQ(events.back()["result"]["statusUpdate"]["status"]["state"], "TASK_STATE_COMPLETED")
+        << r.body;
 }
 
 TEST(A2AConformance, AQuietStreamIsKeptAliveWhileTheRunWorks) {
