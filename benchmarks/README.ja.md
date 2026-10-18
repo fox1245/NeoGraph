@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=a8188a12968245c00f0158e28732bd9f4f30df25b77b3f2eb69c3dbba3c6843b -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=0e4a6858e928e9248f3a40093fc815e0684b7ea3aca0e22f8b80e5d2ece6e62b -->
 # NeoGraphとPythonのグラフ／パイプラインフレームワークの比較 — エンジンのオーバーヘッドベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 I/O、スリープ、モデル呼び出しのない小さな同等のワークロードで、NeoGraphとPythonのオーケストレーションフレームワークについて、1回の呼び出しあたりのエンジンのオーバーヘッドを測定します。測定の対象は、ノードのディスパッチ、ステートチャネルへの書き込み、リデューサーの呼び出しです。
 日付付きの表に載っているエンジンのラベルと依存バージョンは、当時のものです。現在のパッケージのバージョンを示すものではありません。
-現在のNeoGraph `0.14.2` のレシピには、alpha SDK `0.3.3`（インターフェースのリビジョンと共有世代は6）と、それに合ったヘッダーおよびライブラリーが必要です。
+現在のNeoGraph `0.14.3` のレシピには、alpha SDK `0.3.3`（インターフェースのリビジョンと共有世代は6）と、それに合ったヘッダーおよびライブラリーが必要です。
 
 Programのadmission、JavaScriptによる制御、SQLite／PostgreSQLのランタイムのコストについては、[Programのコストの測定](../docs/PROGRAM_COST_MEASUREMENT.md)を参照してください。
 そちらのマトリクスにはジャーナルとチェックポイントの処理が含まれているので、下のチェックポイントなしのCoreの比較と並べて示してはいけません。
