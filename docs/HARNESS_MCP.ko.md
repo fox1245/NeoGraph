@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -302,6 +302,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 
 - 기본 바인딩 주소는 `127.0.0.1`입니다. bearer authorizer를 설정하지 않으면 루프백이 아닌 주소에는 바인딩할 수 없습니다.
 - `Origin`이 오면 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS`의 항목과 정확히 일치하거나(실행 파일에서는 쉼표로 구분합니다), loopback 바인드에서 서버 자신의 loopback 출처(바인드한 포트의 `http://localhost:<port>`, `http://127.0.0.1:<port>` 또는 `http://[::1]:<port>`)가 아닌 한 거부됩니다.
+- loopback 바인드에서는 `Host`가 `localhost`, `127.0.0.1`, `[::1]`(포트는 무관)이 아닌 요청을 `Origin`이 있든 없든 거부합니다. 그 이름이 `NEOGRAPH_HARNESS_ALLOWED_HOSTS`(포트 없는 이름을 쉼표로 구분하며, `*`는 모두 받아들입니다)에 있으면 예외입니다. loopback이 아닌 바인드는 이름이 나열되어 있을 때만 `Host`를 확인합니다.
 - `NEOGRAPH_HARNESS_BEARER_TOKEN`을 설정하면 실행 파일의 단일 principal bearer 경계가 켜집니다. 라이브러리로 임베딩할 때는 `MCPHttpServerConfig::bearer_authorizer`로 OAuth/JWT를 검증하고 안정적인 principal/scope를 반환할 수 있습니다.
 - 세션은 반환된 인가 범위(scope)에 묶입니다. 유출된 `Mcp-Session-Id`를 다른 유효한 principal이 재사용할 수 없습니다.
 - `MCPHttpServer` 팩토리는 검증된 scope를 받아 `MCPHttpServerSession` 소유자를 반환합니다. 멀티 테넌트 임베딩은 이 scope로 서로 격리된 Harness 기록/체크포인트 저장소를 골라야 하며, 인증 상태가 그래프 런타임 안으로 들어가는 일은 없습니다. authorizer가 없으면(루프백 바인딩에서만 가능) scope는 비어 있고, 실행 파일은 로컬의 단일 소유자 scope를 유지합니다.
@@ -310,7 +311,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 
 `neograph::mcp::ScopedHarnessStore`는 공개 ID와, 스키마가 소유한 기록/저널 참조를 되돌릴 수 있는 테넌트 네임스페이스로 매핑합니다. 불투명한 요청, 결과, 이벤트 payload는 고쳐 쓰지 않습니다. File 저장소와 SQLite 저장소는 이 비공개 ID를 받아들입니다. 너무 긴 File 키는 고정 길이 해시 파일 이름을 쓰며, 짧은 키의 경로는 바뀌지 않습니다. SQLite 보존 정책은 한 트랜잭션 안에서 개수와 삭제 후보를 모두 선택한 네임스페이스로 제한하므로 다른 테넌트와 보호된 원본 참조는 그대로 남습니다. 이 저장소 경계는 인증된 scope나, 애플리케이션의 provider/도구/쿼터 정책을 대신하지 않습니다.
 
-루프백이 아닌 배포에서는 신뢰할 수 있는 리버스 프록시에서 TLS를 종료하고, 그 프록시의 OAuth/OIDC 검증이나 이에 준하는 `bearer_authorizer`를 사용해야 합니다. 원래의 `Authorization`과 `Origin` 헤더를 그대로 전달하고, 평문 공개 리스너는 노출하지 말고, Harness 상태 디렉터리 하나에는 인가 도메인 하나만 배포해야 합니다.
+루프백이 아닌 배포에서는 신뢰할 수 있는 리버스 프록시에서 TLS를 종료하고, 그 프록시의 OAuth/OIDC 검증이나 이에 준하는 `bearer_authorizer`를 사용해야 합니다. 원래의 `Authorization`과 `Origin` 헤더를 그대로 전달하고, 평문 공개 리스너는 노출하지 말고, Harness 상태 디렉터리 하나에는 인가 도메인 하나만 배포해야 합니다. 프록시 뒤에서 loopback에 바인드한 Harness는 공개 `Host`가 `NEOGRAPH_HARNESS_ALLOWED_HOSTS`에 없으면 그 요청을 거부합니다.
 
 ## 호스트 설정
 

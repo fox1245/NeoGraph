@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -303,6 +303,7 @@ endpoint 是 `http://127.0.0.1:8080/mcp`。它实现了已发布的 MCP 2025-11-
 
 - 默认绑定到 `127.0.0.1`；除非配置了 bearer 授权器，否则非回环地址的绑定会被拒绝。
 - 任何带有的 `Origin`，只要既不与 `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` 中的某一项完全一致（可执行文件中以逗号分隔），也不是绑定到回环地址的服务器自己的回环来源（所绑定端口上的 `http://localhost:<port>`、`http://127.0.0.1:<port>` 或 `http://[::1]:<port>`），就会被拒绝。
+- 绑定到回环地址时，`Host` 不是 `localhost`、`127.0.0.1` 或 `[::1]`（端口不限）的请求，无论是否带有 `Origin`，都会被拒绝，除非该名称列在 `NEOGRAPH_HARNESS_ALLOWED_HOSTS` 中（以逗号分隔、不带端口的名称；`*` 接受任何名称）。非回环绑定只有在列出了名称时才检查 `Host`。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` 启用可执行文件的单主体 bearer 边界。作为库嵌入时，可以用 `MCPHttpServerConfig::bearer_authorizer` 做 OAuth/JWT 校验，并返回稳定的主体/作用域。
 - 会话绑定到返回的授权作用域。另一个同样合法的主体，也不能复用泄露的 `Mcp-Session-Id`。
 - `MCPHttpServer` 工厂接收已验证的作用域，并返回一个 `MCPHttpServerSession` 所有者。多租户的嵌入方必须用这个作用域来选择相互隔离的 Harness 记录/检查点存储；认证状态不会进入图运行时本身。没有授权器时（仅限回环绑定），作用域为空，可执行文件仍使用它单一的本地 owner 作用域。
@@ -311,7 +312,7 @@ endpoint 是 `http://127.0.0.1:8080/mcp`。它实现了已发布的 MCP 2025-11-
 
 `neograph::mcp::ScopedHarnessStore` 把公开 ID，以及由 schema 管辖的记录/journal 引用，映射到一个可还原的租户命名空间；不透明的请求、结果和事件 payload 则不会被改写。File 和 SQLite 存储接受这些私有 ID。过长的 File 键使用定长的哈希文件名，较短键的路径不变。SQLite 的留存在一个事务内，把数量上限和删除候选都限定在所选的命名空间内，其他租户和受保护的来源引用不受影响。这一层存储边界不能替代已认证的作用域，也不能替代应用自己的 provider/工具/配额策略。
 
-任何非回环的部署，都应当在受信的反向代理处终止 TLS，并使用它的 OAuth/OIDC 校验，或等价的 `bearer_authorizer`。要转发原始的 `Authorization` 和 `Origin` 头，不要暴露明文的公网监听端口，并且每个 Harness 状态目录只对应一个授权域。
+任何非回环的部署，都应当在受信的反向代理处终止 TLS，并使用它的 OAuth/OIDC 校验，或等价的 `bearer_authorizer`。要转发原始的 `Authorization` 和 `Origin` 头，不要暴露明文的公网监听端口，并且每个 Harness 状态目录只对应一个授权域。在代理之后绑定到回环地址的 Harness，如果 `NEOGRAPH_HARNESS_ALLOWED_HOSTS` 没有列出公网 `Host`，会拒绝这些请求。
 
 ## 宿主配置
 

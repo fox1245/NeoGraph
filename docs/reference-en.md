@@ -3240,7 +3240,11 @@ its connection; and with `protected_resource_metadata` the server publishes
 RFC 9728 metadata and names it in every 401 challenge. A request after
 `initialize` may name any supported revision in `MCP-Protocol-Version`: the
 session keeps the revision it negotiated, the first request of a session that
-names another one is reported on stderr, and an unsupported value is 400.
+names another one is reported on stderr, and an unsupported value is 400. On a
+loopback bind it answers only the `Host` names `localhost`, `127.0.0.1` and
+`[::1]` and those in `allowed_hosts`: another `Host` is 403 and a missing or
+malformed one 400. A remote bind checks `Host` only when `allowed_hosts` lists
+names.
 
 **HTTP usage:**
 

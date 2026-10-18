@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=4ecbc42e3d4ef31d34554f6273751cebcd6b00050c91a2bbd224d8e6a155dac0 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=7fe6e74e139f5001b7c31df5f9651680d2f4b0ae8341da22bfa9006ed796b089 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3085,7 +3085,9 @@ HTTP 上以一个数组应答。之后的修订版去掉了批处理，initializ
 会关闭其连接；设置 `protected_resource_metadata` 时，服务器发布 RFC 9728 元数据，并在每个
 401 质询中指明其位置。`initialize` 之后的请求可以在 `MCP-Protocol-Version` 中写任一受支持的
 修订版本：会话仍按协商的修订版本工作，一个会话中第一个写了其他修订版本的请求会记录到 stderr，
-不支持的值返回 400。
+不支持的值返回 400。绑定到回环地址时，只有 `Host` 为 `localhost`、`127.0.0.1`、`[::1]`
+或 `allowed_hosts` 中的名称时才应答：其他 `Host` 返回 403，缺失或格式错误的 `Host` 返回 400。
+远程绑定只有在 `allowed_hosts` 列出名称时才检查 `Host`。
 
 **HTTP 用法：**
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=8601f242503105c39bba073ca851309cdc8898dccadab7d4d994fa2955bbc4e0 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -307,6 +307,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 
 - デフォルトのバインド先は `127.0.0.1` です。ループバック以外へのバインドは、bearerのオーソライザーを設定しない限り、拒否されます。
 - 指定された `Origin` は、`NEOGRAPH_HARNESS_ALLOWED_ORIGINS`（実行ファイルではカンマ区切り）のエントリと完全に一致するか、ループバックにバインドしたサーバー自身のループバックオリジン（バインドしたポートの `http://localhost:<port>`、`http://127.0.0.1:<port>`、`http://[::1]:<port>`）でない限り、すべて拒否されます。
+- ループバックにバインドしたサーバーは、`Host` が `localhost`、`127.0.0.1`、`[::1]`（ポートは問わない）でないリクエストを、`Origin` の有無にかかわらず拒否します。その名前が `NEOGRAPH_HARNESS_ALLOWED_HOSTS`（ポートのない名前のカンマ区切り。`*` はすべてを受け入れる）に載っていれば受け入れます。ループバック以外のバインドは、名前が載っているときだけ `Host` を確認します。
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` を設定すると、実行ファイルの、単一のプリンシパルによるbearerの境界が有効になります。ライブラリとして組み込む場合は、`MCPHttpServerConfig::bearer_authorizer` でOAuth/JWTを検証し、安定したプリンシパルとスコープを返せます。
 - セッションは、返された認可スコープに結び付けられます。別の有効なプリンシパルが、漏えいした `Mcp-Session-Id` を再利用することはできません。
 - `MCPHttpServer` のファクトリーは、その検証済みのスコープを受け取り、`MCPHttpServerSession` のオーナーを返します。マルチテナントで組み込む場合は、このスコープを使って、隔離されたHarnessのレコードストアとチェックポイントストアを選ぶ必要があります。認証の状態が、グラフランタイム自体に入ることはありません。オーソライザーがない場合（ループバックへのバインドのみ）、スコープは空で、実行ファイルは単一のローカルのオーナースコープを保ちます。
@@ -315,7 +316,7 @@ export NEOGRAPH_HARNESS_HTTP_PORT=8080
 
 `neograph::mcp::ScopedHarnessStore` は、公開IDと、スキーマが所有するレコードやジャーナルへの参照を、元に戻せるテナントの名前空間にマッピングします。不透明なリクエスト、結果、イベントのペイロードは、書き換えられません。FileストアとSQLiteストアは、これらの非公開IDを受け付けます。長すぎるFileのキーには、固定長のハッシュ値のファイル名が使われ、短いキーのパスは変わりません。SQLiteのリテンションは、1つのトランザクションの中で、件数と削除の候補の両方を、選択した名前空間に限定します。他のテナントと、保護されたコピー元の参照は残ります。このストレージの境界は、認証されたスコープや、アプリケーションのプロバイダー／ツール／クォータのポリシーの代わりにはなりません。
 
-ループバック以外へのデプロイでは、信頼できるリバースプロキシでTLSを終端し、そのOAuth/OIDCの検証か、同等の `bearer_authorizer` を使ってください。元の `Authorization` ヘッダーと `Origin` ヘッダーは転送してください。平文の公開リスナーを公開してはいけません。Harnessの状態ディレクトリ1つにつき、認可ドメインは1つにしてください。
+ループバック以外へのデプロイでは、信頼できるリバースプロキシでTLSを終端し、そのOAuth/OIDCの検証か、同等の `bearer_authorizer` を使ってください。元の `Authorization` ヘッダーと `Origin` ヘッダーは転送してください。平文の公開リスナーを公開してはいけません。Harnessの状態ディレクトリ1つにつき、認可ドメインは1つにしてください。プロキシの背後でループバックにバインドしたHarnessは、公開の `Host` が `NEOGRAPH_HARNESS_ALLOWED_HOSTS` に載っていなければ、そのリクエストを拒否します。
 
 ## ホストの設定
 

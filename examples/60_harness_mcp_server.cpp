@@ -398,6 +398,7 @@ int main(int argc, char** argv) {
         http_config.port = 8080;
     }
     http_config.allowed_origins = split_csv(environment("NEOGRAPH_HARNESS_ALLOWED_ORIGINS"));
+    http_config.allowed_hosts   = split_csv(environment("NEOGRAPH_HARNESS_ALLOWED_HOSTS"));
     if (const auto token = environment("NEOGRAPH_HARNESS_BEARER_TOKEN"); !token.empty()) {
         const auto expected = digest(token);
         http_config.bearer_authorizer =
