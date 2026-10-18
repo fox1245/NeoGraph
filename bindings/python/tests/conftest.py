@@ -102,6 +102,7 @@ def provider_peer(tmp_path):
             self.release.set()
             self.stream_chunks = ["ok"]
             self.response_extra = {}
+            self.message_extra = {}
 
         def provider(self, *, max_operations=256, max_host_connections=0,
                      timeout_ms=5000, resource_bytes=None):
@@ -192,7 +193,8 @@ def provider_peer(tmp_path):
                 document = {"id": "local-completion", "object": "chat.completion",
                             "model": body["model"], "created": 1,
                             "choices": [{"index": 0,
-                                         "message": {"role": "assistant", "content": peer.reply},
+                                         "message": {"role": "assistant", "content": peer.reply,
+                                                     **peer.message_extra},
                                          "finish_reason": "stop"}], **peer.response_extra}
                 if peer.usage is not None:
                     document["usage"] = peer.usage

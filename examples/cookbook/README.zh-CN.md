@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=bc9d86d329fda916b6eef6b141c85d2928d3415e03ec9dbad7c05f2651555cc8 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=43195ffe37ea546ef4451cfc4244af6586f33cbda7dd9bf3b9bd103f9459ac92 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -23,7 +23,7 @@ header-only `examples/provider_example_support.h` 使用真实 SDK runtime。
 显式的 `-DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR=<sdk-source>`，或不可变的公开 SDK archive fallback。
 使用离线的已安装/源码 SDK 时，可用 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` 禁止 fetching。
 安装 include root 是 `include/SchemaProvider`；执行 interface/capability 检查，
-SDK `0.3.3` alpha 的 interface revision/shared ABI 为 6。
+SDK `0.3.4` alpha 的 interface revision/shared ABI 为 6。
 
 保留的 interface-3 model-free 执行覆盖 Assembly 四个真实本地 A2A member 服务器与 C++ speaker、
 JARVIS CLI synthetic turn 和记忆持久化、Beast strict Core 编译·演化·检查点回滚、

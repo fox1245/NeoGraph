@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=5f62adf416dbc3da6bd268bd943d9906322ea6e23de43e5c3df6a70f24898eae -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=b64006b2c083e0772218cc023a2257b92ac7ff38e7bbcb040ae5a14d9f40f12c -->
 # NeoGraph 与 Python 图/流水线框架对比：引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@
 测量范围包括节点分发、状态通道的写入和 reducer 调用。
 带日期的表格保留的是历史上的引擎标签和依赖版本；
 它们不代表当前的包版本。
-NeoGraph `0.15.0` 当前的构建方法，需要 alpha 版 SDK `0.3.3`、接口修订版/共享库
+NeoGraph `0.15.0` 当前的构建方法，需要 alpha 版 SDK `0.3.4`、接口修订版/共享库
 代数 6，以及匹配的头文件和库。
 
 Program 的准入(admission)、JavaScript 控制，以及 SQLite/PostgreSQL 运行时的开销，
@@ -213,7 +213,7 @@ CMake 3.20 及以上会按顺序选择：显式指定的
 复现用的命令构建的是仍在维护的目标；它们不会重建历史上的二进制文件，
 也不会自动固定表格中的 Python 版本。
 显式指定的检出或已安装的包，必须提供接口/共享库代数 6。
-新的输出要另行保存；历史上的表格和 JSON 文件不是用 SDK 0.3.3 测得的结果。
+新的输出要另行保存；历史上的表格和 JSON 文件不是用 SDK 0.3.4 测得的结果。
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for

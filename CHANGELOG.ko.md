@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8c97a5d31c281786cdbc345e1dfe44670346e9c63620b255a9d2d1f7df1e5dc2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=25f95f9371f16a3b6f4c3652ac7590a9e6a4d409eb7241e5c1045ebf5f400ba2 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,15 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 변경됨
+- **SchemaProvider `2ffecf8202dfe5c1c2184cf5d720b76354209f83`(`maint/interface6`의 SDK 0.3.4)를 채택합니다 (#511).**
+  - **호환성.** 인터페이스 리비전과 공유 라이브러리 세대는 6으로 유지되고, 공개 struct나 enum의 레이아웃은 바뀌지 않으며, 내장 디스크립터 정책과 그 identity도 그대로입니다. NeoGraph는 이제 빌드와 설치된 `NeoGraphConfig`의 `find_dependency`에서 `SchemaProvider 0.3.4 EXACT`를 요구합니다.
+  - **동작 변경: Chat Completions가 생성한 이미지를 보존합니다.** 이미지 모델(OpenRouter의 `google/gemini-3.1-flash-lite-image` 등)은 이미지를 `message.images`에 담아 반환합니다. SDK는 이 필드를 무시했기 때문에, 토큰은 과금되는데 결과에는 이미지가 없었습니다. 이제 각 이미지는 wire 타입이 `images`인 `Opaque` part가 되고, `wire_metadata`에 wire 항목이 담깁니다(데이터 URL은 `image.image_url.url`). 이 part는 히스토리의 assistant 메시지에 남겨 둘 수 있으며, 공급자에게 다시 보내지 않습니다.
+  - **동작 변경: code-execution `container`나 캐시 `diagnostics` 객체가 있는 Messages 응답이 정상 완료됩니다.** 전에는 `Unsupported`로 실패해서 이미 과금된 답이 버려졌습니다. `web_fetch_20260318`이나 `web_search_20260318`을 쓰는 Claude 5.5가 이 두 필드를 함께 반환합니다. 두 필드는 `raw_events`에 남습니다.
+  - **Python.** 이제 `Opaque.wire_metadata`를 읽을 수 있으므로, 보존된 이미지를 Python에서 꺼낼 수 있습니다.
+  - **이번 라인에서 고치지 않는 것.** `claude-haiku-4-5`처럼 programmatic tool calling을 지원하지 않는 모델에서는 `_20260318` 웹 툴에 `allowed_callers`가 필요한데, 인터페이스 6은 이 값을 보낼 수 없습니다. 이런 모델에는 `web_search_20250305`나 `web_fetch_20250910`을 쓰세요. Lyria처럼 thinking이 없는 Gemini 모델은 family 기본값 `includeThoughts` 때문에 여전히 400을 받습니다. 두 문제 모두 NeoGraph 0.16.0이 채택할 SchemaProvider 0.4.0에서 고쳐집니다 (#512).
+  - NeoGraph, C++ 소비자, Python 확장을 0.3.4 헤더와 라이브러리로 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ### 폐기 예정
 - **타입 클라이언트 `VeoClient`, `ImagesClient`, `DecisionsClient`가 서비스 종료를 앞둔 모델만 허용합니다. 앞으로 확장하지 않으며 0.16.0에서 제거합니다 (#510).**
