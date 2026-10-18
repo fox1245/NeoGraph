@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=2162d0df8ed528e3ce5a457cf6875641172f1ddf0baf63342723892ee3437395 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d666eb708d94a5c71d20287af84b0eacd9f2a1a76ca66e0f37aeba320a84348f -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -564,7 +564,7 @@ public:
 
 **텍스트.** 경계를 넘는 텍스트는 올바른 UTF-8입니다. 잘못된 형식의 최대 부분 시퀀스 하나하나가 U+FFFD가 되며, 이는 Unicode와 WHATWG의 대체 방식입니다. 이 규칙은 도구 결과와 실패 메시지, Hook 영수증, `json::dump`(잘못된 문자열을 담은 문서가 예전에는 빈 문자열로 직렬화되었습니다), MCP와 gRPC 응답, 그리고 Python 바인딩에 적용됩니다. Python에서는 C++에서 읽은 텍스트도 같은 방식으로 디코딩되며, `str`은 UTF-8로 바뀔 때 surrogate-escape된 바이트(U+DC80부터 U+DCFF까지, `errors="surrogateescape"`가 만드는 것)는 그것이 나타내는 바이트로 되돌아가고, 그 밖의 단독 surrogate는 U+FFFD가 됩니다.
 
-**예외를 던지는 파사드.** `ToolExecutionController::execute_async`는 성공하면 출력을 반환하고, `cancelled_before_start`와 `cancellation_requested`에는 `graph::CancelledException`을, 그 밖의 모든 상태에는 `ToolExecutionResult` 전체를 담은 `ToolExecutionError`를 던집니다. 노드 실패 분류기는 이를 읽어, 효과가 불확실하면 `NG.EffectUncertain`, 시간을 초과했거나 만료된 호출이면 `NG.Timeout`, 그 밖에는 Ordinary로 분류합니다.
+**예외를 던지는 파사드.** `ToolExecutionController::execute_async`는 성공하면 출력을 반환하고, `cancelled_before_start`와 `cancellation_requested`에는 `graph::CancelledException`을, 그 밖의 모든 상태에는 `ToolExecutionResult` 전체를 담은 `ToolExecutionError`를 던집니다. 노드 실패 분류기는 이를 읽어, 효과가 불확실하면 `NG.EffectUncertain`, 시간을 초과했거나 만료된 호출이면 `NG.Timeout`, 그 밖에는 Ordinary로 분류합니다. 도구의 서비스가 실행 전에 거부한 호출(`ToolRequestRefusal`일 때 설정되는 `ToolExecutionResult::refused`)은 거부가 노드에 그대로 도달했을 때처럼, `retryable`이 재시도가 도움이 될 수 있다고 하지 않는 한 재시도되지 않습니다.
 
 <a id="protocol-failure-mapping"></a>
 ### 프로토콜 실패 매핑

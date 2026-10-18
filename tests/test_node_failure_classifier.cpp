@@ -498,6 +498,31 @@ TEST(NodeFailureRetry, ARefusedRequestRunsOnceAndIsNotRetryable) {
     EXPECT_FALSE(verdict.retryable_by_class);
 }
 
+TEST(NodeFailureRetry, ACallTheThrowingFacadeReportsAsRefusedRunsOnce) {
+    // #502: ToolExecutionController::execute_async throws the typed result.
+    ToolExecutionResult refused;
+    refused.status = ToolTerminalStatus::Failed;
+    refused.error = "the server refused the arguments";
+    refused.refused = true;
+    Harness once(throws(ToolExecutionError(refused)));
+    const auto error = once.run();
+    EXPECT_EQ(once.node->calls.load(), 1);
+    EXPECT_FALSE(classify_failure(error).retryable);
+
+    // A refusal that says a retry may help, and a failure that was not a
+    // refusal, are retried as before.
+    refused.retryable = true;
+    Harness again(throws(ToolExecutionError(refused)));
+    (void)again.run();
+    EXPECT_EQ(again.node->calls.load(), 3);
+    ToolExecutionResult failed;
+    failed.status = ToolTerminalStatus::Failed;
+    failed.error = "the tool failed";
+    Harness ordinary(throws(ToolExecutionError(failed)));
+    (void)ordinary.run();
+    EXPECT_EQ(ordinary.node->calls.load(), 3);
+}
+
 TEST(NodeFailureRetry, AuthorCodeIsRetriedAndReported) {
     Harness h(throws(NodeFailureError("app.flaky_check", "flaky")), 2, 1);
     EXPECT_FALSE(h.run());

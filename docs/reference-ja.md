@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=2162d0df8ed528e3ce5a457cf6875641172f1ddf0baf63342723892ee3437395 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d666eb708d94a5c71d20287af84b0eacd9f2a1a76ca66e0f37aeba320a84348f -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -528,7 +528,7 @@ public:
 
 **テキスト。** 境界を越えるテキストは正しい UTF-8 です。不正な形式の最大部分列 1 つごとに U+FFFD になり、これは Unicode と WHATWG の置換方法です。この規則はツール結果と失敗メッセージ、Hook のレシート、`json::dump`(不正な文字列を含むドキュメントは以前は空文字列にシリアライズされていました)、MCP と gRPC の応答、そして Python バインディングに適用されます。Python では C++ から読んだテキストも同じ方法でデコードされ、`str` が UTF-8 になるときは、surrogate-escape されたバイト(U+DC80 から U+DCFF、`errors="surrogateescape"` が作るもの)は元のバイトに戻り、それ以外の単独サロゲートは U+FFFD になります。
 
-**例外を送出するファサード。** `ToolExecutionController::execute_async` は成功すると出力を返し、`cancelled_before_start` と `cancellation_requested` には `graph::CancelledException` を、それ以外のすべてのステータスには `ToolExecutionResult` 全体を持つ `ToolExecutionError` を送出します。ノード失敗の分類器はこれを読み、効果が不確定なら `NG.EffectUncertain`、タイムアウトまたは期限切れの呼び出しなら `NG.Timeout`、それ以外は Ordinary とします。
+**例外を送出するファサード。** `ToolExecutionController::execute_async` は成功すると出力を返し、`cancelled_before_start` と `cancellation_requested` には `graph::CancelledException` を、それ以外のすべてのステータスには `ToolExecutionResult` 全体を持つ `ToolExecutionError` を送出します。ノード失敗の分類器はこれを読み、効果が不確定なら `NG.EffectUncertain`、タイムアウトまたは期限切れの呼び出しなら `NG.Timeout`、それ以外は Ordinary とします。ツールのサービスが実行前に拒否した呼び出し（`ToolRequestRefusal` のときに設定される `ToolExecutionResult::refused`）は、拒否そのものがノードに届いたときと同じく、`retryable` が再試行で成功しうると示さない限りリトライされません。
 
 <a id="protocol-failure-mapping"></a>
 ### プロトコル失敗のマッピング

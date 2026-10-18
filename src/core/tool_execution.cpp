@@ -1386,6 +1386,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             // effects.
             result = ToolExecutionResult{ToolTerminalStatus::Failed, {}, error.what(),
                                          refusal->retryable(), false};
+            result.refused = true;
         }
         co_return publish_singleflight(std::move(result));
     } catch (...) {
