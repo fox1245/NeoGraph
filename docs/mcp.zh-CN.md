@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=35616ba98c0fa3900879794547acc01f6c1403cc516da4240d355f0b3e85aa95 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=6830afee07902c0353afb9c7bddaee959f53339a0c42a85033545c317dd36a03 -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -301,6 +301,7 @@ int main(int argc, char** argv) {
 - 一个 HTTP 会话对应一个 `MCPServer`。工厂函数每个会话运行一次，必须在新服务器上注册工具。它的参数是 `bearer_authorizer` 返回的作用域，因此程序可以把不同主体的会话隔离开。
 - `MCPHttpServerConfig::host` 默认为 `127.0.0.1`。绑定到其他地址时，除非设置了 `bearer_authorizer`，否则会抛出 `std::invalid_argument`。授权函数接收 Bearer 令牌并返回调用者的作用域；返回 `std::nullopt` 或空字符串，则以 `401` 拒绝该令牌。会话与作用域绑定，所以其他主体无法复用泄露的 `Mcp-Session-Id`。
 - 带有 `Origin` 头的请求，如果该来源不在 `allowed_origins` 中，会被以 `403` 拒绝。绑定到回环地址时，服务器还接受它自己在所绑定端口上的回环来源（`http://localhost:<port>`、`http://127.0.0.1:<port>`、`http://[::1]:<port>`），并在第一次接受每个来源时向 stderr 写一行。其他端口上的页面（例如浏览器检查器或开发服务器）必须列入该列表。DNS 重绑定页面发送的是它自己的来源，因此会被拒绝。
+- 绑定到回环地址时，服务器还会检查 `Host`。无论端口如何，它只应答 `localhost`、`127.0.0.1`、`[::1]`，以及 `allowed_hosts` 中列出的名称。其他 `Host` 无论是否带有 `Origin` 都会被以 `403` 拒绝，因此即使请求不带 `Origin`，DNS 重绑定页面也会被拒绝。没有 `Host` 的请求，或 `Host` 不是 `host[:port]` 形式的请求，得到 `400`。条目是不带端口的名称，例如 `mcp.example.com` 或 `[::1]`，比较时不区分大小写；`*` 接受任何 `Host`。在原样转发公网名称的本地反向代理或隧道之后，请把该名称列入列表。绑定到其他地址时，列表为空则不做任何检查，非空则只接受列出的名称。
 - `initialize` 之后的请求可以在 `MCP-Protocol-Version` 头中写 `MCP_SUPPORTED_PROTOCOL_VERSIONS` 里的任一修订版本。会话仍按协商的修订版本工作；一个会话中第一个写了其他修订版本的请求会记录到 stderr。不支持或格式不正确的值以 `400` 拒绝，没有该头的请求使用协商的修订版本。
 - 设置 `protected_resource_metadata` 后，服务器会发布 RFC 9728 元数据，并在每个 `401` 质询中指出其位置，适用于令牌来自 OAuth 授权服务器的部署。不设置时，静态 Bearer 令牌不需要发现机制。
 - 限制：`max_sessions`（64；最久未使用的空闲会话会被淘汰）、`session_idle_timeout`（30 分钟）、`max_payload_bytes`（1 MiB）、`response_timeout`（10 分钟；运行更久的请求会收到 `504`，对应的调用被取消）。

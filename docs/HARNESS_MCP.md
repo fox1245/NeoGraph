@@ -557,6 +557,11 @@ Security defaults are transport-level and do not couple authentication to
   `NEOGRAPH_HARNESS_ALLOWED_ORIGINS` (comma-separated in the executable) or, on a
   loopback bind, is the server's own loopback origin (`http://localhost:<port>`,
   `http://127.0.0.1:<port>` or `http://[::1]:<port>` at the bound port).
+- On a loopback bind, a request whose `Host` is not `localhost`, `127.0.0.1` or
+  `[::1]` (on any port) is rejected, with or without an `Origin`, unless the
+  name is listed in `NEOGRAPH_HARNESS_ALLOWED_HOSTS` (comma-separated names
+  without a port; `*` admits any). A non-loopback bind checks `Host` only when
+  names are listed.
 - `NEOGRAPH_HARNESS_BEARER_TOKEN` enables the executable's single-principal
   bearer boundary. Library embeddings can use
   `MCPHttpServerConfig::bearer_authorizer` for OAuth/JWT validation and return a
@@ -587,7 +592,9 @@ the application's provider/tool/quota policy.
 For any non-loopback deployment, terminate TLS at a trusted reverse proxy and
 use its OAuth/OIDC validation or an equivalent `bearer_authorizer`. Forward the
 original `Authorization` and `Origin` headers, do not expose a cleartext public
-listener, and deploy one authorization domain per Harness state directory.
+listener, and deploy one authorization domain per Harness state directory. A
+Harness bound to loopback behind the proxy refuses the public `Host` unless
+`NEOGRAPH_HARNESS_ALLOWED_HOSTS` lists it.
 
 ## Host Setup
 

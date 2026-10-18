@@ -878,6 +878,133 @@ TEST(MCPHttpServerTest, ARemoteBindAdmitsOnlyListedOrigins) {
     EXPECT_EQ(initialize_status(client, "http://localhost:" + port, "token"), 403);
 }
 
+int host_status(httplib::Client& client, const std::string& host, const std::string& bearer = {}) {
+    auto headers = base_headers();
+    headers.emplace("Host", host);
+    if (!bearer.empty()) headers.emplace("Authorization", "Bearer " + bearer);
+    auto response =
+        client.Post("/mcp", headers,
+                    request(1, "initialize",
+                            {{"protocolVersion", "2025-11-25"},
+                             {"capabilities", json::object()},
+                             {"clientInfo", {{"name", "host-test"}, {"version", "1"}}}})
+                        .dump(),
+                    "application/json");
+    return response ? response->status : -1;
+}
+
+MCPHttpServerConfig::BearerAuthorizer token_authorizer() {
+    return [](std::string_view token) -> std::optional<std::string> {
+        if (token == "token") return std::string("principal");
+        return std::nullopt;
+    };
+}
+
+TEST(MCPHttpServerTest, ALoopbackBindAnswersOnlyLoopbackHosts) {
+    // #499: a DNS-rebinding page sends its own name in Host, with or without
+    // an Origin. A loopback bind answers the loopback names on any port.
+    MCPHttpServer server(make_http_session);
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    const auto port = std::to_string(server.port());
+
+    for (const auto& host : {"127.0.0.1:" + port, "localhost:" + port, "[::1]:" + port,
+                             "LOCALHOST:" + port, std::string("localhost"),
+                             std::string("127.0.0.1:1")}) {
+        EXPECT_EQ(host_status(client, host), 200) << host;
+    }
+    for (const auto& host : {"evil.example:" + port, std::string("evil.example"),
+                             "127.0.0.2:" + port, "localhost.:" + port, "[::2]:" + port}) {
+        EXPECT_EQ(host_status(client, host), 403) << host;
+    }
+    for (const auto& host : {std::string("localhost:http"), std::string("[::1"),
+                             std::string("[::1]x"), std::string(""), ":" + port}) {
+        EXPECT_EQ(host_status(client, host), 400) << host;
+    }
+
+    // GET and DELETE are checked too, before their own answers.
+    httplib::Headers foreign = {{"Host", "evil.example:" + port}};
+    auto             get     = client.Get("/mcp", foreign);
+    ASSERT_TRUE(get);
+    EXPECT_EQ(get->status, 403);
+    auto removed = client.Delete("/mcp", foreign);
+    ASSERT_TRUE(removed);
+    EXPECT_EQ(removed->status, 403);
+
+    // A request without Host at all.
+    const std::string body =
+        request(1, "initialize",
+                {{"protocolVersion", "2025-11-25"},
+                 {"capabilities", json::object()},
+                 {"clientInfo", {{"name", "host-test"}, {"version", "1"}}}})
+            .dump();
+    const auto reply = send_raw(server.port(),
+                                "POST /mcp HTTP/1.1\r\nContent-Type: application/json\r\n"
+                                "Accept: application/json, text/event-stream\r\nContent-Length: " +
+                                    std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" +
+                                    body,
+                                5s);
+    EXPECT_EQ(reply.bytes.rfind("HTTP/1.1 400", 0), 0u) << reply.bytes;
+}
+
+TEST(MCPHttpServerTest, ListedHostsAreAnsweredAndAStarAnswersAny) {
+    MCPHttpServerConfig listed;
+    listed.allowed_hosts = {"MCP.example.test", "[2001:db8::1]"};
+    MCPHttpServer server(make_http_session, std::move(listed));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    EXPECT_EQ(host_status(client, "mcp.example.test:8443"), 200);
+    EXPECT_EQ(host_status(client, "[2001:DB8::1]"), 200);
+    EXPECT_EQ(host_status(client, "localhost:" + std::to_string(server.port())), 200);
+    EXPECT_EQ(host_status(client, "other.example.test"), 403);
+
+    MCPHttpServerConfig any;
+    any.allowed_hosts = {"*"};
+    MCPHttpServer open(make_http_session, std::move(any));
+    ASSERT_TRUE(open.start_async());
+    HttpServerGuard open_guard(open);
+    httplib::Client open_client("127.0.0.1", open.port());
+    EXPECT_EQ(host_status(open_client, "tunnel.example.test"), 200);
+    EXPECT_EQ(host_status(open_client, "localhost:http"), 200);
+}
+
+TEST(MCPHttpServerTest, ARemoteBindChecksHostOnlyWhenHostsAreListed) {
+    MCPHttpServerConfig unlisted;
+    unlisted.host              = "0.0.0.0";
+    unlisted.bearer_authorizer = token_authorizer();
+    MCPHttpServer server(make_http_session, std::move(unlisted));
+    ASSERT_TRUE(server.start_async());
+    HttpServerGuard guard(server);
+    httplib::Client client("127.0.0.1", server.port());
+    EXPECT_EQ(host_status(client, "anything.example.test", "token"), 200);
+
+    MCPHttpServerConfig listed;
+    listed.host              = "0.0.0.0";
+    listed.bearer_authorizer = token_authorizer();
+    listed.allowed_hosts     = {"mcp.example.test"};
+    MCPHttpServer checked(make_http_session, std::move(listed));
+    ASSERT_TRUE(checked.start_async());
+    HttpServerGuard checked_guard(checked);
+    httplib::Client checked_client("127.0.0.1", checked.port());
+    EXPECT_EQ(host_status(checked_client, "mcp.example.test", "token"), 200);
+    EXPECT_EQ(host_status(checked_client, "127.0.0.1:" + std::to_string(checked.port()), "token"),
+              403);
+}
+
+TEST(MCPHttpServerTest, AllowedHostsEntriesAreNamesWithoutAPort) {
+    for (const auto& entry : {"localhost:8080", "::1", "", "[::1"}) {
+        MCPHttpServerConfig config;
+        config.allowed_hosts = {entry};
+        EXPECT_THROW(MCPHttpServer(make_http_session, std::move(config)), std::invalid_argument)
+            << entry;
+    }
+    MCPHttpServerConfig config;
+    config.allowed_hosts = {"[::1]", "Example.Test", "*"};
+    EXPECT_NO_THROW(MCPHttpServer(make_http_session, std::move(config)));
+}
+
 TEST(MCPHttpServerTest, DuplicateRequestDoesNotOrphanOriginalResponse) {
     struct BlockState {
         std::atomic<int>         calls{0};

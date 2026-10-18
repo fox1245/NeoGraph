@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=75de408b7af36caefadad890619068ae87080e053a2c4e155e209cbf1b56de33 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fbcdc2a6aa5b468a533f926b713122df8ae9357690769d9c432d47b0ec630dfe -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 변경됨
+
+- **loopback MCP HTTP 서버가 loopback 이름과 나열한 `Host` 이름에만 응답합니다(#499).** 서버는 `Origin`은 확인했지만 `Host`는 확인하지 않아서, `Origin`이 없는 요청은 어느 이름으로 보냈든 처리했습니다. DNS 리바인딩 페이지는 자기 이름을 `Host`에 실어 보내며, 그 `initialize`가 거절된 것은 `Origin`도 함께 보내기 때문이었을 뿐입니다. 이제 `MCPHttpServerConfig::allowed_hosts`가 서버가 응답할 이름을 나열합니다. 호스트 이름, IPv4 주소, 대괄호로 감싼 IPv6 주소를 포트 없이 대소문자 구분 없이 비교하며, `*`는 모든 이름을 뜻합니다. loopback 바인드(`127.0.0.1`, `::1`, `localhost`)에서 서버는 언제나 `localhost`, `127.0.0.1`, `[::1]`에 응답하고, 그 밖의 `Host`는 `Origin`이 있든 없든 `403`(`-32003`, "Host is not allowed")으로 거절합니다. `Host`가 없거나 `host[:port]` 형태가 아닌 요청은 `400`(`-32600`)을 받습니다. 공식 TypeScript SDK의 `createMcpExpressApp()`처럼 포트는 비교하지 않습니다. loopback이 아닌 바인드에서는 목록이 비어 있으면 이전처럼 아무것도 확인하지 않고, 비어 있지 않으면 나열한 이름만 받아들입니다. 확인 대상은 엔드포인트의 `POST`, `GET`, `DELETE`이며, 공개된 RFC 9728 메타데이터는 대상이 아닙니다. 포트가 붙은 항목, 대괄호 없는 IPv6 주소, 빈 항목은 서버를 생성할 때 `std::invalid_argument`로 거절합니다. `neograph-harness-mcp`는 쉼표로 구분한 목록을 `NEOGRAPH_HARNESS_ALLOWED_HOSTS`에서 읽습니다. **동작 변경:** 공개 `Host`를 그대로 전달하는 로컬 리버스 프록시나 터널 뒤의 loopback 서버는 그 이름이나 `*`를 목록에 넣을 때까지 그 요청을 거절합니다. `MCPHttpServerConfig`에 멤버가 추가되었으므로 NeoGraph와 C++ 사용자 코드를 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ## [0.14.3] - 2026-10-18
 

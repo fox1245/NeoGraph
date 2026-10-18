@@ -55,6 +55,29 @@ std::string lower(std::string value) {
     return value;
 }
 
+// The host of a Host header value, `uri-host [":" port]` (RFC 9110 section
+// 7.2), in lowercase and without its port; nullopt when the value is not of
+// that form. An IPv6 address keeps its brackets. cpp-httplib has already
+// answered 400 to a repeated Host and to characters a Host cannot hold.
+std::optional<std::string> host_name_of(const std::string& value) {
+    std::size_t end = 0;
+    if (!value.empty() && value.front() == '[') {
+        end = value.find(']');
+        if (end == std::string::npos) return std::nullopt;
+        ++end;
+    } else {
+        end = std::min(value.find(':'), value.size());
+    }
+    if (end == 0 || value.compare(0, end, "[]") == 0) return std::nullopt;
+    if (end < value.size()) {
+        if (value[end] != ':') return std::nullopt;
+        for (std::size_t i = end + 1; i < value.size(); ++i) {
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) return std::nullopt;
+        }
+    }
+    return lower(value.substr(0, end));
+}
+
 bool media_type_contains(const std::string& header, const std::string& expected) {
     std::size_t start = 0;
     while (start < header.size()) {
@@ -228,6 +251,13 @@ struct MCPHttpServer::Impl {
         if (!is_loopback_bind(config.host) && !config.bearer_authorizer) {
             throw std::invalid_argument("remote MCP HTTP binds require a bearer authorizer");
         }
+        for (const auto& name : config.allowed_hosts) {
+            if (name != "*" && host_name_of(name) != lower(name)) {
+                throw std::invalid_argument(
+                    "MCP HTTP allowed_hosts entries are host names without a port, "
+                    "IPv6 addresses in brackets, or *");
+            }
+        }
         if (!config.protected_resource_metadata.is_null()) {
             metadata_url = metadata_url_of(config.protected_resource_metadata);
             const auto& metadata = config.protected_resource_metadata;
@@ -323,7 +353,9 @@ struct MCPHttpServer::Impl {
 
     std::optional<std::string> authorize(const httplib::Request& request,
                                          httplib::Response&      response) const {
-        if (!validate_origin(request, response)) return std::nullopt;
+        if (!validate_host(request, response) || !validate_origin(request, response)) {
+            return std::nullopt;
+        }
 
         if (!config.bearer_authorizer) return std::string{};
         const auto                 authorization = request.get_header_value("Authorization");
@@ -347,6 +379,34 @@ struct MCPHttpServer::Impl {
             return std::nullopt;
         }
         return scope;
+    }
+
+    // A page whose name resolves to this machine sends that name in Host,
+    // with or without an Origin (#499). A loopback bind answers the loopback
+    // names and the listed ones; a remote bind checks Host only when
+    // allowed_hosts lists names.
+    bool validate_host(const httplib::Request& request, httplib::Response& response) const {
+        const auto& allowed  = config.allowed_hosts;
+        const bool  loopback = is_loopback_bind(config.host);
+        if ((!loopback && allowed.empty()) ||
+            std::find(allowed.begin(), allowed.end(), "*") != allowed.end()) {
+            return true;
+        }
+        const auto name = request.has_header("Host")
+                              ? host_name_of(request.get_header_value("Host"))
+                              : std::nullopt;
+        if (!name) {
+            http_error(response, 400, -32600, "Host header is missing or invalid");
+            return false;
+        }
+        if (loopback && (*name == "localhost" || *name == "127.0.0.1" || *name == "[::1]")) {
+            return true;
+        }
+        for (const auto& entry : allowed) {
+            if (lower(entry) == *name) return true;
+        }
+        http_error(response, 403, -32003, "Host is not allowed");
+        return false;
     }
 
     bool validate_origin(const httplib::Request& request, httplib::Response& response) const {
@@ -720,7 +780,7 @@ struct MCPHttpServer::Impl {
     }
 
     void handle_get(const httplib::Request& request, httplib::Response& response) const {
-        if (!validate_origin(request, response)) return;
+        if (!validate_host(request, response) || !validate_origin(request, response)) return;
         response.status = 405;
         response.set_header("Allow", "POST, DELETE");
     }

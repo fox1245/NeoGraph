@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=4ecbc42e3d4ef31d34554f6273751cebcd6b00050c91a2bbd224d8e6a155dac0 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=7fe6e74e139f5001b7c31df5f9651680d2f4b0ae8341da22bfa9006ed796b089 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3160,7 +3160,9 @@ Schema 2020-12가 아닌 스키마, SEP-986의 `A-Za-z0-9_.-` 1~128자를 벗어
 게시하고 모든 401 challenge에서 그 위치를 알립니다. `initialize` 이후의 요청은
 `MCP-Protocol-Version`에 지원하는 어느 리비전이든 적을 수 있습니다. 세션은 협상한 리비전을
 그대로 쓰고, 한 세션에서 다른 리비전을 적은 첫 요청은 stderr에 기록되며, 지원하지 않는 값은
-400입니다.
+400입니다. loopback 바인드에서는 `Host`가 `localhost`, `127.0.0.1`, `[::1]`이거나
+`allowed_hosts`에 있는 이름일 때만 응답합니다. 다른 `Host`는 403, 없거나 형식이 잘못된
+`Host`는 400입니다. 원격 바인드는 `allowed_hosts`에 이름이 있을 때만 `Host`를 확인합니다.
 
 **HTTP 사용법:**
 

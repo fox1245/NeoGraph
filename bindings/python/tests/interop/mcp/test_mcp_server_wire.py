@@ -306,6 +306,17 @@ def test_http_origin_validation(http):
     assert r.status_code == 200
 
 
+def test_http_host_validation(http):
+    # #499: a loopback server answers only loopback Host names, with or
+    # without an Origin, so a DNS-rebinding page is refused either way.
+    r = http.req("POST", INIT, {"Host": "rebind.example"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == -32003
+    r = http.req("POST", INIT, {"Host": "rebind.example", "Origin": "http://allowed.example"})
+    assert r.status_code == 403
+    r = http.req("POST", INIT, {"Host": "localhost:1"})
+    assert r.status_code == 200
+
+
 def test_http_session_required_and_unknown_session_404(http):
     r = http.req("POST", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
                  {"MCP-Protocol-Version": "2025-11-25"})

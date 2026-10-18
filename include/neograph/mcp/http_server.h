@@ -60,6 +60,15 @@ struct NEOGRAPH_API MCPHttpServerConfig {
     /// `http://[::1]:<port>` at the port it is bound to.
     std::vector<std::string> allowed_origins;
 
+    /// Host header names the server answers: host names, IPv4 addresses and
+    /// bracketed IPv6 addresses (`[::1]`), compared with the Host header's
+    /// host without its port and ignoring case. `*` admits any Host. A
+    /// loopback bind always admits `localhost`, `127.0.0.1` and `[::1]` and
+    /// refuses every other Host unless it is listed, with or without an
+    /// Origin. On a remote bind an empty list checks nothing, and a non-empty
+    /// one admits only the listed names.
+    std::vector<std::string> allowed_hosts;
+
     /**
      * Validate a bearer token and return its stable authorization scope.
      *

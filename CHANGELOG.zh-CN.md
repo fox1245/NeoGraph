@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=75de408b7af36caefadad890619068ae87080e053a2c4e155e209cbf1b56de33 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fbcdc2a6aa5b468a533f926b713122df8ae9357690769d9c432d47b0ec630dfe -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 变更
+
+- **回环 MCP HTTP 服务器只应答回环名称和列出的 `Host` 名称（#499）。** 服务器检查 `Origin`，但不检查 `Host`，因此不带 `Origin` 的请求无论发往哪个名称都会被处理。DNS 重绑定页面会在 `Host` 中发送它自己的名称；它的 `initialize` 被拒绝，只是因为它同时发送了 `Origin`。现在由 `MCPHttpServerConfig::allowed_hosts` 列出服务器应答的名称：主机名、IPv4 地址和带方括号的 IPv6 地址，比较时不含端口、不区分大小写；`*` 表示任意名称。绑定到回环地址（`127.0.0.1`、`::1`、`localhost`）时，服务器总是应答 `localhost`、`127.0.0.1` 和 `[::1]`，其他 `Host` 无论是否带有 `Origin`，都会被以 `403`（`-32003`，"Host is not allowed"）拒绝。没有 `Host` 的请求，或 `Host` 不是 `host[:port]` 形式的请求，得到 `400`（`-32600`）。与官方 TypeScript SDK 的 `createMcpExpressApp()` 一样，不比较端口。绑定到非回环地址时，列表为空则和以前一样不做任何检查，非空则只接受列出的名称。检查覆盖端点上的 `POST`、`GET` 和 `DELETE`，不覆盖公开的 RFC 9728 元数据。带端口的条目、不带方括号的 IPv6 地址和空条目，会在构造服务器时以 `std::invalid_argument` 拒绝。`neograph-harness-mcp` 从 `NEOGRAPH_HARNESS_ALLOWED_HOSTS` 读取以逗号分隔的列表。**行为变更：** 位于原样转发公网 `Host` 的本地反向代理或隧道之后的回环服务器，在把该名称或 `*` 列入列表之前，会拒绝这些请求。`MCPHttpServerConfig` 增加了成员，因此请一起重新构建 NeoGraph 和 C++ 使用方代码（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ## [0.14.3] - 2026-10-18
 
