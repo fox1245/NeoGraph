@@ -13,6 +13,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Releases pass a live end-to-end suite with real provider keys (#522).** Local tests replay recorded traffic and cannot show that a provider still accepts what NeoGraph sends; 0.15.0 shipped two streaming defects that one real call shows. `bindings/python/tests/live/` and `tests/live_e2e_test.cpp` cover the eight family presets buffered and streamed, vision, tool calls, generated media, the Anthropic Messages controls, typed failures, the C++ adapter and the typed endpoint clients, with the known gaps of the release line as strict xfail. `scripts/live_e2e.py run` writes `tests/live/report.json` for a clean commit. A release pull request commits it, and the `Live e2e report` workflow and the Wheels release tag check it before anything is published (see [`tests/live/README.md`](tests/live/README.md)).
+
 ### Changed
 - **Adopt SchemaProvider `060f52c9ab0fbbc6b785b097785a17bdf16d7773`, SDK 0.3.5 on `maint/interface6` (#511).**
   - **Compatibility.** The interface revision and shared-library generation stay 6, no public struct or enum changes layout, and the embedded descriptor policy and its identity are unchanged. NeoGraph now requires `SchemaProvider 0.3.5 EXACT`, in its build and in the `find_dependency` of the installed `NeoGraphConfig`.
