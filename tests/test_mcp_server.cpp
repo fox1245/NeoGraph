@@ -275,7 +275,9 @@ TEST(MCPServerTest, ArgumentsAreValidatedAsJsonSchema2020_12) {
     // arguments are refused again. A client reads this as a call that did not
     // start.
     EXPECT_EQ(negative["result"]["_meta"]["io.neograph/failure"],
-              (json{{"code", "NG.InvalidRequest"}, {"retryable", false}}));
+              (json{{"code", "NG.InvalidRequest"},
+                    {"retryable", false},
+                    {"retryable_by_class", false}}));
 
     auto wrong_branch = server.handle_message(request(51, "tools/call", {
         {"name", "count"}, {"arguments", {{"n", 1}, {"tag", 3}}}}));
@@ -584,9 +586,12 @@ TEST(MCPServerTest, TypedFailuresMapToDistinctResponses) {
             EXPECT_EQ(response["result"]["_meta"]["io.neograph/failure"]["code"], code);
             // A transient provider failure may succeed when sent again, as on
             // every protocol (graph::FailureVerdict::retryable).
-            EXPECT_EQ(response["result"]["_meta"]["io.neograph/failure"]["retryable"].get<bool>(),
+            const auto failure = response["result"]["_meta"]["io.neograph/failure"];
+            EXPECT_EQ(failure["retryable"].get<bool>(),
                       kind == "provider" || kind == "ordinary" || kind == "timeout")
                 << kind;
+            // A handler's own exception went through no retry loop (#500).
+            EXPECT_EQ(failure["retryable_by_class"], failure["retryable"]) << kind;
         } else {
             ASSERT_TRUE(response.contains("error")) << response.dump();
             EXPECT_EQ(response["error"]["code"], rpc);

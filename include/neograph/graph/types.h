@@ -369,10 +369,18 @@ struct FailureVerdict {
     std::string code;
     /// Text from typed safe sources only (NodeFailureError::public_message).
     std::string public_message;
-    /// Sending the same request again may succeed: the node's retry verdict,
-    /// and also for NG.ProviderFailed, which the node retry loop leaves to the
-    /// provider runtime. Protocol hosts put it on the wire.
+    /// Sending the same request again may succeed: retryable_by_class, unless
+    /// the node's retry loop already used up the node's attempts on it
+    /// (NodeFailureKind::Exhausted). A node the loop stopped retrying for the
+    /// run's deadline or retry ceiling keeps it, as a new run has a new
+    /// budget. Protocol hosts put it on the wire (#500).
     bool retryable = false;
+    /// The failure's class and hints allow a retry, whether or not attempts
+    /// were left: NodeFailure::retryable, and also NG.ProviderFailed, which
+    /// the node retry loop leaves to the provider runtime. Protocol hosts put
+    /// it on the wire next to `retryable`, for callers that retry outside the
+    /// engine.
+    bool retryable_by_class = false;
     bool routable = false;
     /// For the run control classes, the signal itself as found in the cause
     /// chain: the HookBoundaryBlocked, the NodeInterrupt or the

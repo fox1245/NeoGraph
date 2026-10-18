@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=6830afee07902c0353afb9c7bddaee959f53339a0c42a85033545c317dd36a03 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=a8f7e349912caf07dfb404ab4028ca0be14f572ae5a92d04c088205b301b832c -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
 ## 中断、取消和错误
 
 - MCP 工具调用无法暂停后再恢复。如果处理函数运行的图暂停了（`RunResult::interrupted`），客户端看到什么由处理函数决定。处理函数抛出 `NodeInterrupt`，表示这次调用需要输入：客户端会收到 JSON-RPC 错误 `-32011`，其 `data` 为 `{code: "NG.Interrupted", reason, value}`。
-- 处理函数抛出其他异常时，返回 `isError: true` 的结果，稳定的错误码放在 `_meta["io.neograph/failure"]` 中。到达客户端的只有失败的公开消息，不包含异常文本。想自己指定错误码和消息，请抛出 `NodeFailureError`。
+- 处理函数抛出其他异常时，返回 `isError: true` 的结果，稳定的错误码以及 `retryable`、`retryable_by_class` 放在 `_meta["io.neograph/failure"]` 中（[协议失败映射](reference-en.md#protocol-failure-mapping)）。到达客户端的只有失败的公开消息，不包含异常文本。想自己指定错误码和消息，请抛出 `NodeFailureError`。
 - 被客户端取消的调用，在任何传输上都不会收到应答。未知工具返回 `-32602`。
 - 在智能体中，`MCPTool`（由 `client.get_tools()` 得到）失败时模型读到什么，取决于服务器有没有运行过这个工具。服务器在运行前拒绝的请求，是带有服务器消息、`retryable` 与 `effect_uncertain` 均为 false 的普通 `failed` 结果。这包括 JSON-RPC 错误 `-32700`、`-32600`、`-32601`、`-32602`，以及标记为 `NG.InvalidRequest` 的 `isError` 结果，`MCPServer` 用它标记不符合输入 schema 的参数。什么都没有运行，模型可以修正参数。其他失败可能发生在工具开始之后（处理函数返回的 `isError` 结果、`-32603`、服务器错误），因此没有能排除效果的 `ToolExecutionPolicy` 时，结果为 `reconciliation_required`，`effect_uncertain` 为 true。想得到普通的 `failed`，请在策略中声明只读或幂等的工具。参见[工具失败契约](reference-en.md#tool-failure-contract)。
 - MCP、gRPC、A2A、ACP 各类失败的完整对照表在参考文档的[协议失败映射](reference-en.md#protocol-failure-mapping)中，这里不再重复。

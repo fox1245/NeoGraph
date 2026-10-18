@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fbcdc2a6aa5b468a533f926b713122df8ae9357690769d9c432d47b0ec630dfe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=67419050189b282bc2b4df3958e8d7630126cb7bbb88fd7165c7747b9d542541 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -17,6 +17,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 变更
 
 - **回环 MCP HTTP 服务器只应答回环名称和列出的 `Host` 名称（#499）。** 服务器检查 `Origin`，但不检查 `Host`，因此不带 `Origin` 的请求无论发往哪个名称都会被处理。DNS 重绑定页面会在 `Host` 中发送它自己的名称；它的 `initialize` 被拒绝，只是因为它同时发送了 `Origin`。现在由 `MCPHttpServerConfig::allowed_hosts` 列出服务器应答的名称：主机名、IPv4 地址和带方括号的 IPv6 地址，比较时不含端口、不区分大小写；`*` 表示任意名称。绑定到回环地址（`127.0.0.1`、`::1`、`localhost`）时，服务器总是应答 `localhost`、`127.0.0.1` 和 `[::1]`，其他 `Host` 无论是否带有 `Origin`，都会被以 `403`（`-32003`，"Host is not allowed"）拒绝。没有 `Host` 的请求，或 `Host` 不是 `host[:port]` 形式的请求，得到 `400`（`-32600`）。与官方 TypeScript SDK 的 `createMcpExpressApp()` 一样，不比较端口。绑定到非回环地址时，列表为空则和以前一样不做任何检查，非空则只接受列出的名称。检查覆盖端点上的 `POST`、`GET` 和 `DELETE`，不覆盖公开的 RFC 9728 元数据。带端口的条目、不带方括号的 IPv6 地址和空条目，会在构造服务器时以 `std::invalid_argument` 拒绝。`neograph-harness-mcp` 从 `NEOGRAPH_HARNESS_ALLOWED_HOSTS` 读取以逗号分隔的列表。**行为变更：** 位于原样转发公网 `Host` 的本地反向代理或隧道之后的回环服务器，在把该名称或 `*` 列入列表之前，会拒绝这些请求。`MCPHttpServerConfig` 增加了成员，因此请一起重新构建 NeoGraph 和 C++ 使用方代码（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **用完尝试次数的失败不再报告为可重试，ACP 客户端对请求的拒绝也不再重试（#500）。** 每个协议主机发送的 `FailureVerdict::retryable` 是节点的重试判定，与是否还有剩余尝试无关。因此，每次尝试都失败的节点，或没有重试策略、失败一次的节点，都会告诉对方 `retryable: true`；把它理解为“再试一次可能成功”的编辑器，可能会重试引擎已经重试过的操作。现在，一旦节点重试循环用完了节点的尝试次数（`kind` 为 `exhausted`），`retryable` 即为 `false`。因运行的截止时间或重试上限而停止重试的失败以及 `NG.ProviderFailed` 保持 `true`。新的 `FailureVerdict::retryable_by_class` 为在引擎之外重试的调用方保留原来的含义，ACP（`data`）、A2A（`metadata["neograph/failure"]`）、gRPC（ErrorInfo 的 metadata）和 MCP 服务器（`_meta["io.neograph/failure"]`）会把它与 `retryable` 一起发送。ACP 客户端对 agent 请求应答的 JSON-RPC 错误现在是 `acp::ACPClientError`，携带方法、代码、客户端的消息和 `data`，其 `what()` 不变。如果代码表明请求不可能成功（`-32700`、`-32600`、`-32601`、`-32602`、`-32002` resource not found、`-32000` authentication required），它就是 `acp::ACPClientRefusal`，即不可重试的 `ToolRequestRefusal`：`fs/read_text_file` 收到 `-32002` 的节点只运行一次，其轮次报告 `retryable: false`、`retryable_by_class: false`。`-32603`、其他代码和超时仍和以前一样重试。`NodeFailure::retryable`、路由的失败记录和 Program 任务重试保留按类别的含义。**行为变更：** 对用完尝试次数的失败读到 `retryable: true` 的对方，现在读到 `false`；ACP 客户端拒绝其请求的节点不再重试。`FailureVerdict` 增加了成员，因此请一起重新构建 NeoGraph 和 C++ 使用方代码（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ## [0.14.3] - 2026-10-18
 

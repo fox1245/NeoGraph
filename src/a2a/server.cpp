@@ -620,7 +620,9 @@ std::string interrupt_checkpoint(const Task& task) {
 
 /// Failure fields a task may carry: `metadata["neograph/failure"]`.
 json failure_metadata(const FailureVerdict& failure) {
-    return json{{"code", failure.code}, {"retryable", failure.retryable}};
+    return json{{"code", failure.code},
+                {"retryable", failure.retryable},
+                {"retryable_by_class", failure.retryable_by_class}};
 }
 
 }  // namespace
@@ -1329,7 +1331,8 @@ Task A2AServer::Impl::execute_graph(
         } else if (outcome.status == neograph::graph::InvocationStatus::MaxSteps) {
             set_status(result, TaskState::Failed,
                        agent_text(task_id, context_id, "The agent run reached its step limit."));
-            metadata["neograph/failure"] = json{{"code", "NG.StepLimit"}, {"retryable", false}};
+            metadata["neograph/failure"] =
+                json{{"code", "NG.StepLimit"}, {"retryable", false}, {"retryable_by_class", false}};
         } else {
             const auto& rr = *outcome.run_result;
             set_status(result, TaskState::Completed,
@@ -1559,7 +1562,9 @@ Task A2AServer::Impl::execute_program(const Message& inbound, const std::string&
         set_status(result, TaskState::Rejected,
                    agent_text(task_id, context_id,
                               "The agent's Program policy rejected the request."));
-        result.metadata = json{{"neograph/failure", {{"code", "NG.Rejected"}, {"retryable", false}}}};
+        result.metadata = json{{"neograph/failure", {{"code", "NG.Rejected"},
+                                                      {"retryable", false},
+                                                      {"retryable_by_class", false}}}};
     } catch (...) {
         const auto failure = neograph::graph::classify_failure(std::current_exception());
         set_status(result, failure.failure_class == neograph::graph::NodeFailureClass::Cancelled

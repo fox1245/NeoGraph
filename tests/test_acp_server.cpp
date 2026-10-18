@@ -22,6 +22,7 @@
 #include <neograph/tool.h>
 #include <neograph/types.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -2343,6 +2344,7 @@ struct FailureCase {
     const char* verb;
     const char* code;
     bool        retryable;
+    bool        retryable_by_class;
 };
 
 TEST(ACPServer, FailedTurnsAreJsonRpcErrorsWithoutExceptionText) {
@@ -2352,12 +2354,14 @@ TEST(ACPServer, FailedTurnsAreJsonRpcErrorsWithoutExceptionText) {
     server.set_notification_sink(cap.as_sink());
     const auto sid = new_session(server);
     const FailureCase cases[] = {
-        {"fail", "NG.TaskFailed", true},
-        {"coded", "app.tool_error", false},
-        {"logic", "NG.LogicError", false},
-        {"hook", "NG.HookBlocked", false},
-        {"budget", "NG.BudgetExhausted", false},
-        {"provider", "NG.ProviderFailed", true},
+        // The node has no retry policy: its one attempt is used up (#500).
+        {"fail", "NG.TaskFailed", false, true},
+        {"coded", "app.tool_error", false, false},
+        {"logic", "NG.LogicError", false, false},
+        {"hook", "NG.HookBlocked", false, false},
+        {"budget", "NG.BudgetExhausted", false, false},
+        // The provider runtime, not the node loop, retries provider calls.
+        {"provider", "NG.ProviderFailed", true, true},
     };
     int id = 10;
     for (const auto& c : cases) {
@@ -2367,6 +2371,8 @@ TEST(ACPServer, FailedTurnsAreJsonRpcErrorsWithoutExceptionText) {
         const auto data = resp["error"]["data"];
         EXPECT_EQ(data.value("code", std::string()), c.code) << c.verb;
         EXPECT_EQ(data.value("retryable", !c.retryable), c.retryable) << c.verb;
+        EXPECT_EQ(data.value("retryable_by_class", !c.retryable_by_class), c.retryable_by_class)
+            << c.verb;
         EXPECT_FALSE(resp["error"].value("message", std::string()).empty()) << c.verb;
     }
     // The author's public message is the only free text a failure may carry.
@@ -2384,6 +2390,86 @@ TEST(ACPServer, FailedTurnsAreJsonRpcErrorsWithoutExceptionText) {
     const auto wire = cap.wire();
     EXPECT_EQ(wire.find("hunter2"), std::string::npos) << wire;
     EXPECT_EQ(wire.find("/srv/secret"), std::string::npos) << wire;
+}
+
+TEST(ACPServer, AClientRefusalOfAnAgentRequestIsNotRetried) {
+    // #500: an editor that answers fs/read_text_file with -32002 (resource
+    // not found) answers it the same way again. The node runs once and the
+    // turn says no retry can help; a -32603 is retried, and once the
+    // node's attempts are used up the turn says so too.
+    auto client = std::make_shared<ACPClient>();
+    auto engine = build_read_file_engine(client);
+    neograph::graph::RetryPolicy retry;
+    retry.max_retries      = 2;
+    retry.initial_delay_ms = 1;
+    retry.max_delay_ms     = 1;
+    engine->set_node_retry_policy("reader", retry);
+
+    CapturingSink cap;
+    auto server = std::make_shared<ACPServer>(engine, neograph::json{{"name", "acp-refusal"},
+                                                                     {"version", "0.0.1"}});
+    initialize_server(*server, true, false);
+    server->attach_client(client);
+    auto              weak_server = std::weak_ptr<ACPServer>(server);
+    std::atomic<int>  error_code{-32002};
+    std::atomic<int>  reads{0};
+    auto              cap_sink = cap.as_sink();
+    server->set_notification_sink([&, cap_sink, weak_server](const neograph::json& env) {
+        cap_sink(env);
+        if (env.value("method", std::string()) != "fs/read_text_file" || !env.contains("id"))
+            return;
+        reads.fetch_add(1);
+        auto reply_id = env["id"];
+        const int code = error_code.load();
+        std::thread([weak_server, reply_id, code]() {
+            neograph::json reply;
+            reply["jsonrpc"] = "2.0";
+            reply["id"]      = reply_id;
+            reply["error"]   = {{"code", code}, {"message", "no such file"}, {"data", {{"n", 1}}}};
+            if (auto server = weak_server.lock()) server->handle_message(reply);
+        }).detach();
+    });
+    auto sid = server->handle_message(make_request(1, "session/new",
+        {{"cwd", "/work"}, {"mcpServers", neograph::json::array()}}))["result"]
+        .value("sessionId", std::string());
+
+    auto refused = prompt_turn(*server, cap, sid, 2, "x");
+    ASSERT_TRUE(refused.contains("error")) << refused.dump();
+    EXPECT_EQ(reads.load(), 1);
+    EXPECT_EQ(refused["error"]["data"].value("code", std::string()), "NG.TaskFailed");
+    EXPECT_FALSE(refused["error"]["data"].value("retryable", true));
+    EXPECT_FALSE(refused["error"]["data"].value("retryable_by_class", true));
+
+    error_code = -32603;
+    reads      = 0;
+    auto exhausted = prompt_turn(*server, cap, sid, 3, "x");
+    ASSERT_TRUE(exhausted.contains("error")) << exhausted.dump();
+    EXPECT_EQ(reads.load(), 3);
+    EXPECT_FALSE(exhausted["error"]["data"].value("retryable", true));
+    EXPECT_TRUE(exhausted["error"]["data"].value("retryable_by_class", false));
+
+    // The typed error carries the client's answer and keeps its old text.
+    error_code = -32002;
+    try {
+        (void)client->read_text_file(sid, "/work/missing.cpp");
+        ADD_FAILURE() << "read_text_file did not throw";
+    } catch (const ACPClientRefusal& error) {
+        EXPECT_EQ(error.method(), "fs/read_text_file");
+        EXPECT_EQ(error.code(), -32002);
+        EXPECT_EQ(error.message(), "no such file");
+        EXPECT_EQ(error.data().value("n", 0), 1);
+        EXPECT_FALSE(error.retryable());
+        EXPECT_EQ(std::string(error.what()).rfind("ACPServer::call_client: error response: ", 0),
+                  0u);
+    }
+    error_code = -32603;
+    try {
+        (void)client->read_text_file(sid, "/work/main.cpp");
+        ADD_FAILURE() << "read_text_file did not throw";
+    } catch (const ACPClientError& error) {
+        EXPECT_EQ(error.code(), -32603);
+        EXPECT_EQ(dynamic_cast<const ToolRequestRefusal*>(&error), nullptr);
+    }
 }
 
 TEST(ACPServer, ProviderRefusalIsTheRefusalStopReason) {

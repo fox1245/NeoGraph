@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=7fe6e74e139f5001b7c31df5f9651680d2f4b0ae8341da22bfa9006ed796b089 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=2162d0df8ed528e3ce5a457cf6875641172f1ddf0baf63342723892ee3437395 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -574,10 +574,10 @@ public:
 | 类别（代码） | MCP `tools/call`（`MCPServer`） | gRPC `GraphService` | gRPC `ToolService.CallTool` | A2A 任务（`A2AServer`） | ACP `session/prompt`（`ACPServer`） |
 |------|------|------|------|------|------|
 | 客户端取消（`NG.Cancelled`）：`notifications/cancelled`、gRPC 取消 | 任何传输上都不应答：stdio（`run`）不发送任何内容；HTTP（`MCPHttpServer`）以空的 `text/event-stream` 结束 POST；读取应答 sink 的传输改为通过其 `NoResponseSink` 收到该 id | `CANCELLED` | `CANCELLED` | `CancelTask`：`CANCELED`；stream 也以此状态关闭 | `session/cancel`：`stopReason: "cancelled"` |
-| 服务器取消（`NG.Cancelled`）：`stop()`，或处理器自身的工作 | JSON-RPC 错误 `-32000`（`stop()`）或 `-32603`，`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 错误 `-32800`，`data` `{code, retryable}` |
-| Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`，Hook 超时则为 `DEADLINE_EXCEEDED`；ErrorInfo metadata `invocation_id`、`state` | 与 `GraphService` 相同 | 没有 node 完成时为 `REJECTED`，否则为 `FAILED`；`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 错误 `-32603`，`data` `{code, retryable}` |
+| 服务器取消（`NG.Cancelled`）：`stop()`，或处理器自身的工作 | JSON-RPC 错误 `-32000`（`stop()`）或 `-32603`，`data.code` | `CANCELLED` | `CANCELLED` | `CANCELED` | JSON-RPC 错误 `-32800`，`data` `{code, retryable, retryable_by_class}` |
+| Hook 阻断（`NG.HookBlocked`） | JSON-RPC 错误 `-32010`，`data` `{code, invocation_id, state}` | `FAILED_PRECONDITION`，Hook 超时则为 `DEADLINE_EXCEEDED`；ErrorInfo metadata `invocation_id`、`state` | 与 `GraphService` 相同 | 没有 node 完成时为 `REJECTED`，否则为 `FAILED`；`metadata["neograph/failure"]` `{code, retryable, retryable_by_class}` | JSON-RPC 错误 `-32603`，`data` `{code, retryable, retryable_by_class}` |
 | 中断（`NG.Interrupted`） | JSON-RPC 错误 `-32011`，`data` `{code, reason, value}` | 已暂停的运行：`OK`、`interrupted`、`interrupt_node`、`interrupt_value_json`（流的 FINAL payload：`interrupt_value`） | `FAILED_PRECONDITION`，ErrorInfo metadata `reason`、`value` | `INPUT_REQUIRED`：原因作为 text，payload 作为 data part，`metadata["neograph/interrupt"]` `{node, checkpointId}`；后续 message 恢复运行 | 同一轮次内的 `session/request_permission`，其回答恢复运行；适配器或客户端无法回答时为带 `NG.Interrupted` 的 JSON-RPC 错误 `-32603` |
-| 普通（`NG.TaskFailed`、作者代码） | 带有 `isError: true` 与 `_meta["io.neograph/failure"]` `{code, retryable}` 的 `result` | `UNKNOWN` | 带有 `error` 与 `error_code` 的 `OK` | `FAILED`，公开消息作为 status message，`metadata["neograph/failure"]` `{code, retryable}` | JSON-RPC 错误 `-32603`，公开消息作为 message，`data` `{code, retryable}` |
+| 普通（`NG.TaskFailed`、作者代码） | 带有 `isError: true` 与 `_meta["io.neograph/failure"]` `{code, retryable, retryable_by_class}` 的 `result` | `UNKNOWN` | 带有 `error` 与 `error_code` 的 `OK` | `FAILED`，公开消息作为 status message，`metadata["neograph/failure"]` `{code, retryable, retryable_by_class}` | JSON-RPC 错误 `-32603`，公开消息作为 message，`data` `{code, retryable, retryable_by_class}` |
 | 超时（`NG.Timeout`） | 与普通相同，带有各自的代码 | `DEADLINE_EXCEEDED` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 |
 | Provider 失败（`NG.ProviderFailed`） | 与普通相同，带有各自的代码 | `UNAVAILABLE` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 |
 | 预算（`NG.BudgetExhausted`） | 与普通相同，带有各自的代码 | `RESOURCE_EXHAUSTED` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 超出运行的模型 token 预算时为 `stopReason: "max_tokens"`，否则与普通相同 |
@@ -586,19 +586,19 @@ public:
 | 已提交的效果（`NG.EffectCommitted`） | 与普通相同，带有各自的代码 | `ABORTED` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 |
 | 不确定的效果、未知、失败出口（`NG.EffectUncertain`、`NG.UnknownFailure`、出口的代码） | 与普通相同，带有各自的代码 | `UNKNOWN` | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 | 与普通相同，带有各自的代码 |
 | 步数上限（`NG.StepLimit`）：`RunConfig::max_steps` | 无 | `OK`，`max_steps_exhausted` | 无 | `FAILED`，代码 `NG.StepLimit` | `stopReason: "max_turn_requests"` |
-| 无效请求（`NG.InvalidRequest`） | JSON-RPC 错误 `-32602`；不符合工具输入 schema 的参数则为带 `isError: true` 与 `_meta["io.neograph/failure"]` `{code: "NG.InvalidRequest", retryable: false}` 的 `result`，NeoGraph 客户端据此得知没有运行任何东西 | `INVALID_ARGUMENT`；没有可运行的图时为 `FAILED_PRECONDITION`（`NG.NoGraph`） | `INVALID_ARGUMENT` | 带 `google.rpc.BadRequest` field violation 的 JSON-RPC 错误 `-32602`；格式错误的 envelope 或 batch 为 `-32600` | JSON-RPC 错误 `-32602` |
+| 无效请求（`NG.InvalidRequest`） | JSON-RPC 错误 `-32602`；不符合工具输入 schema 的参数则为带 `isError: true` 与 `_meta["io.neograph/failure"]` `{code: "NG.InvalidRequest", retryable: false, retryable_by_class: false}` 的 `result`，NeoGraph 客户端据此得知没有运行任何东西 | `INVALID_ARGUMENT`；没有可运行的图时为 `FAILED_PRECONDITION`（`NG.NoGraph`） | `INVALID_ARGUMENT` | 带 `google.rpc.BadRequest` field violation 的 JSON-RPC 错误 `-32602`；格式错误的 envelope 或 batch 为 `-32600` | JSON-RPC 错误 `-32602` |
 | 未知工具（`NG.ToolNotFound`） | JSON-RPC 错误 `-32602`，`data.code` | 无 | `NOT_FOUND` | 无 | 无 |
 | 容量已满（`NG.Capacity`） | JSON-RPC 错误 `-32000`，`data.capacity` | `RESOURCE_EXHAUSTED` | 无 | JSON-RPC 错误 `-32603`，ErrorInfo reason `RESOURCE_EXHAUSTED`，domain `neograph` | JSON-RPC 错误 `-32603`，`data.reason` `overloaded` |
 
-`retryable` 在每个协议上都是 `FailureVerdict::retryable`：再次发送同一请求是否可能成功。它是节点的重试判定（[节点失败契约](#node-failure-contract)），对 provider 失败（`NG.ProviderFailed`）也为 `true`：节点重试循环把它交给 provider runtime，但新的请求可能会成功。A2A 在两个版本中都把代码和 `retryable` 放在 task 的 `metadata["neograph/failure"]` 中，ACP 放在错误的 `data` 中；只有 A2A 才有的请求错误见 [A2A 错误映射](#a2a-error-mapping)。
+`retryable` 在每个协议上都是 `FailureVerdict::retryable`：再次发送同一请求是否可能成功。它以节点的重试判定（[节点失败契约](#node-failure-contract)）为起点，对 provider 失败（`NG.ProviderFailed`）也为 `true`：节点重试循环把它交给 provider runtime，但新的请求可能会成功。一旦节点重试循环在该失败上用完了节点的尝试次数（`kind` 为 `exhausted`），它就为 `false`；没有重试策略的节点也属于这种情况，因为它只有一次尝试：再次发送请求只会重复引擎已经尝试过的事。因运行的截止时间或重试上限而停止重试的失败保持 `true`，因为新的运行有新的预算。`retryable_by_class`（`FailureVerdict::retryable_by_class`）只表示判定本身，不论是否还有剩余尝试。它面向在引擎之外重试的调用方，例如包裹一个只有一次尝试的图。用完尝试的暂时性失败是 `retryable: false, retryable_by_class: true`，确定性失败是 `false, false`。A2A 在两个版本中都把代码和这两个标志放在 task 的 `metadata["neograph/failure"]` 中，ACP 放在错误的 `data` 中，MCP 服务器放在 `_meta["io.neograph/failure"]` 中，gRPC 以 `"true"` 或 `"false"` 放在 ErrorInfo 的 metadata 中；只有 A2A 才有的请求错误见 [A2A 错误映射](#a2a-error-mapping)。
 
-每个非 OK 的 gRPC 状态都在 `grpc-status-details-bin` trailer 中携带一个 `google.rpc.Status`，其中包含一个 `google.rpc.ErrorInfo`：其 `reason` 遵循 AIP-193，是由代码派生的不超过 63 个字符的 UPPER_SNAKE 常量（`NG.HookBlocked` 为 `HOOK_BLOCKED`，此外还有 `TIMEOUT`、`TOOL_NOT_FOUND`、`INVALID_REQUEST`、`NO_GRAPH`、`CAPACITY`、`BACKEND_UNAVAILABLE`、`BARRIER_STALLED`；作者代码取其类别的 reason，如 `TASK_FAILED`）；`domain` 为 `neograph`；`metadata` 包含 `code`（稳定代码本身）、`retryable` 以及上表中的字段。`RunGraphResponse.error` 已弃用，仅携带公开消息并保留一个版本；非 OK 的一元状态不携带响应体。`RunGraphStream` 以 payload 为 `{error, code}` 的 `DEBUG` 事件报告失败，然后以与一元调用相同的状态结束。`CheckpointService` 对后端失败返回 `UNAVAILABLE`（`NG.BackendUnavailable`），而不是“没有检查点”、空列表或成功的删除；对格式错误的 `SaveCheckpoint` 返回 `INVALID_ARGUMENT`。
+每个非 OK 的 gRPC 状态都在 `grpc-status-details-bin` trailer 中携带一个 `google.rpc.Status`，其中包含一个 `google.rpc.ErrorInfo`：其 `reason` 遵循 AIP-193，是由代码派生的不超过 63 个字符的 UPPER_SNAKE 常量（`NG.HookBlocked` 为 `HOOK_BLOCKED`，此外还有 `TIMEOUT`、`TOOL_NOT_FOUND`、`INVALID_REQUEST`、`NO_GRAPH`、`CAPACITY`、`BACKEND_UNAVAILABLE`、`BARRIER_STALLED`；作者代码取其类别的 reason，如 `TASK_FAILED`）；`domain` 为 `neograph`；`metadata` 包含 `code`（稳定代码本身）、`retryable`、`retryable_by_class` 以及上表中的字段。`RunGraphResponse.error` 已弃用，仅携带公开消息并保留一个版本；非 OK 的一元状态不携带响应体。`RunGraphStream` 以 payload 为 `{error, code}` 的 `DEBUG` 事件报告失败，然后以与一元调用相同的状态结束。`CheckpointService` 对后端失败返回 `UNAVAILABLE`（`NG.BackendUnavailable`），而不是“没有检查点”、空列表或成功的删除；对格式错误的 `SaveCheckpoint` 返回 `INVALID_ARGUMENT`。
 
 `RunGraphStream` 遵循 `RunGraphRequest.stream_mode`，即 `StreamMode` 的位（0 表示流式发送所有事件；未知的位被忽略）。状态快照是 `VALUES` 事件，节点的通道写入是 `UPDATES` 事件，中断和节点错误是 `DEBUG` 事件；节点错误的 `error` 为 `node failed`，绝不包含异常文本。`RunGraphRequest.thread_id` 是必填项：为空时以 `INVALID_ARGUMENT` 拒绝。用其他语言编写的 `CheckpointService` 必须提供 `proto/neograph.proto` 中的每个 RPC，包括 `RequiresManagedBudget`：引擎在每次新运行和恢复运行时都会询问它，遇到 `UNIMPLEMENTED` 时使运行失败；不管理预算的服务器返回 `required = false`。NeoGraph 的 `CheckpointService` 存储的是 `Checkpoint` 而不是 JSON，因此对于无法完整保存的 `checkpoint_json`（它不认识的顶层成员，或比它自身更新的 `schema_version`），它以 `INVALID_ARGUMENT` 拒绝，而不是丢弃其中一部分；`channel_values` 和 `metadata` 按发送时的原样保存。
 
 `run_server`、`run_tool_server` 和 `run_checkpoint_server` 响应标准健康服务 `grpc.health.v1.Health`：在接受调用期间，服务器及其服务为 `SERVING`，开始停止后为 `NOT_SERVING`。接受 `ServeOptions`（`<neograph/grpc/serve_options.h>`）的重载在请求 `ServeOptions::stop` 时，先给进行中的调用 `shutdown_grace` 的时间再停止；它们把绑定的端口报告给 `on_serving`（因此地址可以使用端口 0）。服务器反射由宿主决定：链接 `gRPC::grpc++_reflection`，并在服务器启动前调用 `grpc::reflection::InitProtoReflectionServerBuilderPlugin()`，gRPC 就会把反射加到进程中的每个服务器上，包括内置服务器。需要 TLS、身份验证或消息大小限制时，请把 `make_graph_service()`、`make_tool_service()` 或 `make_checkpoint_service()` 注册到你自己的 `grpc::ServerBuilder`。gRPC 头文件包含 gRPC 自身的头文件，因此使用 `using namespace neograph;` 的代码应写作 `neograph::grpc::GrpcRemoteTool`：在那里不带限定的 `grpc::` 是有歧义的。
 
-NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超时而不再等待的请求发送 `notifications/cancelled`（`initialize` 除外），并丢弃迟到的响应；`GrpcRemoteTool`（`set_call_timeout`，默认 60 秒）与 `GrpcCheckpointStore`（`set_rpc_timeout`，默认 30 秒）为每次调用设置截止时间，运行的 cancel token 会取消远程工具的 RPC。这些客户端不会把远程代码还原为本地控制信号。远程 Hook 阻断（MCP `-32010`；`ErrorInfo` 代码为 `NG.HookBlocked` 的 gRPC 状态）与远程中断（`-32011`；`NG.Interrupted`）属于远程运行：`MCPTool` 与 `GrpcRemoteTool` 抛出 `graph::RemoteControlFailure`，这是一个携带该代码与远程公开消息、不会重试的普通失败，因此本地运行会带着失败的工具结果继续。来自远程服务器的其他 MCP JSON-RPC 错误、gRPC 工具错误或状态对调用方而言是普通工具失败。远程在运行前拒绝的请求（MCP 的 `-32700`、`-32600`、`-32601`、`-32602` 和标记为 `NG.InvalidRequest` 的结果，gRPC 的 `NOT_FOUND`、`INVALID_ARGUMENT`）除外，它们是效果确定的失败工具结果（[工具失败契约](#tool-failure-contract)）。TODO（后续阶段）：将远程中断作为由人回答的原生暂停传入本地运行。
+NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超时而不再等待的请求发送 `notifications/cancelled`（`initialize` 除外），并丢弃迟到的响应；`GrpcRemoteTool`（`set_call_timeout`，默认 60 秒）与 `GrpcCheckpointStore`（`set_rpc_timeout`，默认 30 秒）为每次调用设置截止时间，运行的 cancel token 会取消远程工具的 RPC。这些客户端不会把远程代码还原为本地控制信号。远程 Hook 阻断（MCP `-32010`；`ErrorInfo` 代码为 `NG.HookBlocked` 的 gRPC 状态）与远程中断（`-32011`；`NG.Interrupted`）属于远程运行：`MCPTool` 与 `GrpcRemoteTool` 抛出 `graph::RemoteControlFailure`，这是一个携带该代码与远程公开消息、不会重试的普通失败，因此本地运行会带着失败的工具结果继续。来自远程服务器的其他 MCP JSON-RPC 错误、gRPC 工具错误或状态对调用方而言是普通工具失败。远程在运行前拒绝的请求（MCP 的 `-32700`、`-32600`、`-32601`、`-32602` 和标记为 `NG.InvalidRequest` 的结果，gRPC 的 `NOT_FOUND`、`INVALID_ARGUMENT`）除外，它们是效果确定的失败工具结果（[工具失败契约](#tool-failure-contract)）。ACP 客户端对 agent 的请求（`ACPServer::call_client`、`ACPClient`）以 JSON-RPC 错误应答时，该错误是 `acp::ACPClientError`，携带方法、代码、客户端的消息和 `data`。如果代码表明请求本身不可能成功（`-32700`、`-32600`、`-32601`、`-32602`、`-32002` resource not found、`-32000` authentication required），它就是 `acp::ACPClientRefusal`：不会重试，在工具中是效果确定的失败结果。包括 `-32603` 在内的其他代码以及超时都是普通失败。TODO（后续阶段）：将远程中断作为由人回答的原生暂停传入本地运行。
 
 <a id="node-failure-contract"></a>
 ### 节点失败契约
@@ -607,7 +607,7 @@ NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超�
 
 | 分类（由轻到重） | 代码 | 来源 | 重试 | 可路由 |
 |------|------|------|------|------|
-| Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` 或作者代码 | `std::runtime_error` 及其子类、`NodeFailureError`、Python 异常、根因为 Ordinary 的子图失败 | 是，作者标记为不可重试时除外 | 是 |
+| Ordinary | `NG.TaskFailed`、`NG.SubgraphFailed` 或作者代码 | `std::runtime_error` 及其子类、`NodeFailureError`、Python 异常、根因为 Ordinary 的子图失败 | 是，作者标记为不可重试或请求被拒绝（表明这一点的 `ToolRequestRefusal`，例如 `acp::ACPClientRefusal`）时除外 | 是 |
 | Timeout | `NG.Timeout` | 超过 `attempt_timeout_ms`、被取消并已停止的尝试（`NodeAttemptTimeout`）；超时的操作（`timed_out` 的 asio 或 `std::system_error`）；超时或过期的工具调用（`ToolExecutionError`） | 是 | 是 |
 | ProviderFailed | `NG.ProviderFailed` | 暂时性的 `ProviderFailure`：传输、响应被截断、截止时间、过载、限流，或 HTTP 5xx 状态的远程失败 | 否，Provider 重试由 Provider 运行时负责 | 是 |
 | EffectCommitted | `NG.EffectCommitted` | 该尝试提交了非幂等的 Tool 效果 | 从不 | 是，处理节点可以进行补偿 |
@@ -619,7 +619,7 @@ NeoGraph 自己的客户端会约束其调用：MCP 客户端对因取消或超�
 | UnknownFailure | `NG.UnknownFailure` | `std::bad_alloc` 或其他任何异常类型 | 否 | 否 |
 | 运行控制 | `NG.Interrupted`、`NG.HookBlocked`、`NG.Cancelled` | `NodeInterrupt`、`HookBoundaryBlocked`、取消 | 否 | 否，运行暂停或停止。无论位于原因链何处，Hook 阻断或取消都会像在每条工具路径上一样，不产生 `ERROR` 事件，以 `HookBoundaryBlocked` 或 `CancelledException` 本身离开图运行 |
 
-`graph::classify_failure(error, run_token)` 对任意异常返回这一判定（对带有 `NodeFailure` 记录的 `NodeExecutionError` 则返回该记录的判定）：其类别、代码、`public_message`、能否重试或路由，以及对运行控制类别而言的信号本身（`FailureVerdict::signal`）。协议主机会在传输上报告该代码（[协议失败映射](#protocol-failure-mapping)）。
+`graph::classify_failure(error, run_token)` 对任意异常返回这一判定（对带有 `NodeFailure` 记录的 `NodeExecutionError` 则返回该记录的判定）：其类别、代码、`public_message`、能否重试或路由，以及对运行控制类别而言的信号本身（`FailureVerdict::signal`）。对于已用完尝试的记录，`retryable` 为 `false`，`retryable_by_class` 保留记录的 `retryable`。协议主机会在传输上报告该代码（[协议失败映射](#protocol-failure-mapping)）。
 
 `NG.` 前缀为保留前缀。作者代码须匹配 `[a-z][a-z0-9_]*(\.[a-z0-9_]+)+`。C++ 节点抛出 `NodeFailureError(code, public_message, retryable)`。Python 节点抛出任意带有字符串 `code` 属性的异常，并可附带布尔值 `retryable` 与字符串 `public_message`；调用方收到的仍是原始异常。执行器放弃一个节点时，它抛出的 `NodeExecutionError` 带有一条 `NodeFailure` 记录，可通过 `node_failure_of()` 取得。记录包含代码、分类、停止重试的原因（`exhausted`、`non_retryable`、`effect_committed`，达到运行重试上限时为 `ceiling`，下一次尝试之前的退避会越过运行截止时间时为 `deadline`，节点激活超过 `max_visits` 时为 `visit_limit`）、尝试次数、可重试与可路由标志、`public_message`，以及最后一次尝试的效果（形如 `{tool, ordinal, status}`）。它从不复制 `what()`。节点 `non_retryable` 中列出的代码不会重试。
 
@@ -3456,7 +3456,7 @@ task id 由 server 生成。`taskId` 未知的 message 以 `-32001` 失败，ter
 <a id="a2a-error-mapping"></a>
 #### A2A 错误映射
 
-run 的失败 class 按 [协议失败映射](#protocol-failure-mapping) 到达 peer：task 状态、作为 status message 的 public message，以及 `metadata["neograph/failure"] = {code, retryable}`，异常文本永远不会到达。完成的 run 为 `COMPLETED`，以 agent 回复作为 status message 并带有 adapter artifact；step limit 为 code `NG.StepLimit` 的 `FAILED`；failure exit 为带 exit 声明的 code 的 `FAILED`。server 拒绝的请求：
+run 的失败 class 按 [协议失败映射](#protocol-failure-mapping) 到达 peer：task 状态、作为 status message 的 public message，以及 `metadata["neograph/failure"] = {code, retryable, retryable_by_class}`，异常文本永远不会到达。完成的 run 为 `COMPLETED`，以 agent 回复作为 status message 并带有 adapter artifact；step limit 为 code `NG.StepLimit` 的 `FAILED`；failure exit 为带 exit 声明的 code 的 `FAILED`。server 拒绝的请求：
 
 | 请求 | A2A 结果 |
 |---|---|
@@ -3490,7 +3490,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 ### `neograph::acp` — Agent 客户端协议
 
 **头文件：** `<neograph/acp/{server,types}.h>`
-编辑器↔agent 通过 stdio 上的换行分隔 JSON 进行 JSON-RPC 2.0 通信（Zed、Gemini CLI、Neovim CodeCompanion）。协议为 ACP 版本 1，已用官方 schema v1.25.0 以及官方 Python（0.12、1.0）和 TypeScript SDK 验证。client→agent：`initialize`、`session/{new,resume,prompt,cancel}`。agent→client：`session/update`、`session/request_permission`；`fs/*`、`terminal/*` 和 `elicitation/*` 只在客户端声明了相应能力时，才通过延迟绑定的 `ACPClient` 发送。`ACPServer::handle_message` 在工作线程上运行每个提示轮次，同时最多 `max_inflight_prompts`（32）个，每个会话一个。被拒绝的轮次返回 JSON-RPC `-32603`，`data.reason` 为 `"overloaded"` 或 `"session_busy"`；`-32000` 是 ACP 的 "Authentication required"，因此不使用。`initialize` 之前的调用返回 `-32600`，未知会话返回 `-32002`；对 agent 已知但没有检查点的会话执行 `session/resume` 会成功。
+编辑器↔agent 通过 stdio 上的换行分隔 JSON 进行 JSON-RPC 2.0 通信（Zed、Gemini CLI、Neovim CodeCompanion）。协议为 ACP 版本 1，已用官方 schema v1.25.0 以及官方 Python（0.12、1.0）和 TypeScript SDK 验证。client→agent：`initialize`、`session/{new,resume,prompt,cancel}`。agent→client：`session/update`、`session/request_permission`；`fs/*`、`terminal/*` 和 `elicitation/*` 只在客户端声明了相应能力时，才通过延迟绑定的 `ACPClient` 发送。客户端以 `error` 应答时，会抛出携带方法、代码、消息和 `data` 的 `acp::ACPClientError`；如果代码表明请求不可能成功，则是不会重试的 `acp::ACPClientRefusal`（[协议失败映射](#protocol-failure-mapping)）。`ACPServer::handle_message` 在工作线程上运行每个提示轮次，同时最多 `max_inflight_prompts`（32）个，每个会话一个。被拒绝的轮次返回 JSON-RPC `-32603`，`data.reason` 为 `"overloaded"` 或 `"session_busy"`；`-32000` 是 ACP 的 "Authentication required"，因此不使用。`initialize` 之前的调用返回 `-32600`，未知会话返回 `-32002`；对 agent 已知但没有检查点的会话执行 `session/resume` 会成功。
 
 提示接受 text 和 `resource_link` 块（基础内容；默认适配器把链接以 `[name](uri)` 形式写入输入），image、audio 和嵌入资源只在 `capabilities().prompt` 声明后才接受。格式错误或未声明的块返回 `-32602`。默认适配器会写入 `_acp_session_id`、`_acp_cwd`、`_acp_additional_directories` 和 `_acp_mcp_tools`；如需修改，重写 `build_session_state`（或旧的 `build_initial_state`）。`agentInfo` 始终是 ACP `Implementation`，缺少的 name 或 version 会被补齐。
 
@@ -3504,7 +3504,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 | 超出模型 token 预算 | `stopReason: "max_tokens"` |
 | provider 拒绝或内容过滤（`NG.SafetyBlocked`） | `stopReason: "refusal"` |
 | `NodeInterrupt` | 同一轮次内的 `session/request_permission`；回答后恢复运行 |
-| Hook 阻止（`NG.HookBlocked`）、节点或工具失败（`NG.TaskFailed`、作者代码）、超时（`NG.Timeout`）、provider 失败（`NG.ProviderFailed`）、金额或配额预算（`NG.BudgetExhausted`）、配置、逻辑或未知失败 | JSON-RPC 错误 `-32603`，message = 公开消息，`data: {code, retryable}`（[协议失败映射](#protocol-failure-mapping)） |
+| Hook 阻止（`NG.HookBlocked`）、节点或工具失败（`NG.TaskFailed`、作者代码）、超时（`NG.Timeout`）、provider 失败（`NG.ProviderFailed`）、金额或配额预算（`NG.BudgetExhausted`）、配置、逻辑或未知失败 | JSON-RPC 错误 `-32603`，message = 公开消息，`data: {code, retryable, retryable_by_class}`（[协议失败映射](#protocol-failure-mapping)） |
 | 并非由客户端引起的取消（节点中止、关闭） | JSON-RPC 错误 `-32800` |
 
 异常文本（`what()`）不会发送给客户端：message 是带类型的公开消息（`NodeFailureError::public_message`）或该失败类别的通用文本，细节只保留在宿主日志中。中断会变成一个工具调用：标题为中断原因，`rawInput` 为载荷，带有 `_meta["neograph/interrupt"]` 以及选项 "approve"（`allow_once`）和 "reject"（`reject_once`）；被选中的 option id 就是恢复值。如需修改，重写 `interrupt_permission` 和 `interrupt_resume_value`。回答 `cancelled` 会以取消结束轮次；适配器返回 `std::nullopt` 或客户端无法回答时，轮次以 `data.code: "NG.Interrupted"` 失败，会话不会停留在暂停状态。由 `session/resume` 从检查点恢复的暂停（例如 agent 重启之后）由下一个提示的文本回答。

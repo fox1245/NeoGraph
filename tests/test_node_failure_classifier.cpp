@@ -21,6 +21,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/state.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/tool_execution.h>
 
 #include <asio/error.hpp>
 #include <asio/system_error.hpp>
@@ -28,9 +29,11 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <new>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -383,7 +386,8 @@ private:
 };
 
 struct Harness {
-    explicit Harness(std::function<void(int)> fail, int max_retries = 2, int succeed_on = -1) {
+    explicit Harness(std::function<void(int)> fail, int max_retries = 2, int succeed_on = -1,
+                     int delay_ms = 1) {
         auto owned = std::make_unique<ThrowingNode>(std::move(fail), succeed_on);
         node = owned.get();
         nodes.emplace("worker", std::move(owned));
@@ -394,9 +398,9 @@ struct Harness {
         channels.push_back(channel);
         RetryPolicy policy;
         policy.max_retries = max_retries;
-        policy.initial_delay_ms = 1;
+        policy.initial_delay_ms = delay_ms;
         policy.backoff_multiplier = 1.0f;
-        policy.max_delay_ms = 1;
+        policy.max_delay_ms = delay_ms;
         executor = std::make_unique<NodeExecutor>(
             nodes, channels, [policy](const std::string&) { return policy; });
     }
@@ -408,6 +412,7 @@ struct Harness {
             state.init_channel(cd.name, cd.type, ReducerRegistry::instance().get(cd.reducer_name),
                                cd.initial_value);
         RunContext ctx;
+        ctx.deadline = deadline;
         try {
             (void)async::run_sync(executor->execute_node_with_retry_async(
                 "worker", state, nullptr, StreamMode::EVENTS, ctx));
@@ -421,6 +426,7 @@ struct Harness {
     std::vector<ChannelDef> channels;
     std::unique_ptr<NodeExecutor> executor;
     ThrowingNode* node = nullptr;
+    std::optional<std::chrono::steady_clock::time_point> deadline;
 };
 
 template <typename E>
@@ -447,6 +453,49 @@ TEST(NodeFailureRetry, OrdinaryFailureIsRetriedUntilExhausted) {
     EXPECT_TRUE(record->retryable);
     EXPECT_TRUE(record->routable);
     EXPECT_TRUE(record->effects.empty());
+}
+
+// #500: what a protocol host tells a peer about each way the loop gives up.
+TEST(NodeFailureRetry, AFailureWhoseAttemptsAreUsedUpIsNotRetryableOnTheWire) {
+    Harness h(throws(std::runtime_error("transient")));
+    const auto verdict = classify_failure(h.run());
+    EXPECT_EQ(verdict.code, "NG.TaskFailed");
+    EXPECT_FALSE(verdict.retryable);
+    EXPECT_TRUE(verdict.retryable_by_class);
+
+    // A node with no retry policy has one attempt, and it is used up too.
+    Harness once(throws(std::runtime_error("transient")), 0);
+    const auto single = classify_failure(once.run());
+    EXPECT_EQ(once.node->calls.load(), 1);
+    EXPECT_FALSE(single.retryable);
+    EXPECT_TRUE(single.retryable_by_class);
+}
+
+TEST(NodeFailureRetry, AFailureStoppedByTheRunDeadlineStaysRetryable) {
+    // The next backoff would cross the run's deadline: attempts were left,
+    // and a new run has a new deadline.
+    Harness h(throws(std::runtime_error("transient")), 2, -1, 10000);
+    h.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto error = h.run();
+    EXPECT_EQ(h.node->calls.load(), 1);
+    const auto record = record_of(error);
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->kind, NodeFailureKind::Deadline);
+    const auto verdict = classify_failure(error);
+    EXPECT_TRUE(verdict.retryable);
+    EXPECT_TRUE(verdict.retryable_by_class);
+}
+
+TEST(NodeFailureRetry, ARefusedRequestRunsOnceAndIsNotRetryable) {
+    Harness h(throws(ToolRequestRejected("the client has no such file")));
+    const auto error = h.run();
+    EXPECT_EQ(h.node->calls.load(), 1);
+    const auto record = record_of(error);
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->kind, NodeFailureKind::NonRetryable);
+    const auto verdict = classify_failure(error);
+    EXPECT_FALSE(verdict.retryable);
+    EXPECT_FALSE(verdict.retryable_by_class);
 }
 
 TEST(NodeFailureRetry, AuthorCodeIsRetriedAndReported) {

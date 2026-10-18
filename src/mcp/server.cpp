@@ -97,7 +97,9 @@ json failure_response(const std::exception_ptr& error, const graph::CancelToken&
     default: {
         auto result = tool_error(message);
         result.meta = json{{"io.neograph/failure",
-                            {{"code", verdict.code}, {"retryable", verdict.retryable}}}};
+                            {{"code", verdict.code},
+                             {"retryable", verdict.retryable},
+                             {"retryable_by_class", verdict.retryable_by_class}}}};
         return rpc_result(result.to_json(), id);
     }
     }
@@ -537,7 +539,9 @@ struct MCPServer::Impl {
                             result = tool_error("Tool result does not match its outputSchema: " +
                                                 problem);
                             result.meta = json{{"io.neograph/failure",
-                                                {{"code", "NG.LogicError"}, {"retryable", false}}}};
+                                                {{"code", "NG.LogicError"},
+                                                 {"retryable", false},
+                                                 {"retryable_by_class", false}}}};
                         }
                     }
                     result_json = result.to_json();
@@ -656,7 +660,9 @@ struct MCPServer::Impl {
             // again: the marker tells a NeoGraph client that nothing happened.
             auto refused = tool_error(e.what());
             refused.meta = json{{"io.neograph/failure",
-                                 {{"code", "NG.InvalidRequest"}, {"retryable", false}}}};
+                                 {{"code", "NG.InvalidRequest"},
+                                  {"retryable", false},
+                                  {"retryable_by_class", false}}}};
             return rpc_result(refused.to_json(), id);
         }
 

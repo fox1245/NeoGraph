@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=6830afee07902c0353afb9c7bddaee959f53339a0c42a85033545c317dd36a03 -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=a8f7e349912caf07dfb404ab4028ca0be14f572ae5a92d04c088205b301b832c -->
 # MCP: 그래프를 도구로 공개하고, 도구를 쓰는 그래프 만들기
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -310,7 +310,7 @@ int main(int argc, char** argv) {
 ## 인터럽트, 취소, 오류
 
 - MCP 도구 호출은 일시 중지했다가 재개할 수 없습니다. 핸들러가 실행한 그래프가 멈추면(`RunResult::interrupted`) 클라이언트에게 무엇을 보일지는 핸들러가 정합니다. 핸들러가 `NodeInterrupt`를 던지면 그 호출에 입력이 필요하다는 뜻이 되어, 클라이언트는 JSON-RPC 오류 `-32011`과 `data` `{code: "NG.Interrupted", reason, value}`를 받습니다.
-- 핸들러가 다른 예외를 던지면 `isError: true`인 결과가 가고, `_meta["io.neograph/failure"]`에 안정적인 코드가 담깁니다. 클라이언트에는 실패의 공개 메시지만 전달되고 예외 텍스트는 전달되지 않습니다. 코드와 메시지를 직접 정하려면 `NodeFailureError`를 던지세요.
+- 핸들러가 다른 예외를 던지면 `isError: true`인 결과가 가고, `_meta["io.neograph/failure"]`에 안정적인 코드와 `retryable`, `retryable_by_class`가 담깁니다([프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)). 클라이언트에는 실패의 공개 메시지만 전달되고 예외 텍스트는 전달되지 않습니다. 코드와 메시지를 직접 정하려면 `NodeFailureError`를 던지세요.
 - 클라이언트가 취소한 호출에는 어떤 전송에서든 응답이 가지 않습니다. 알 수 없는 도구는 `-32602`입니다.
 - 에이전트에서 `MCPTool`(`client.get_tools()`로 얻은 도구)이 실패했을 때 모델이 읽는 내용은 서버가 도구를 실행했는지에 따라 달라집니다. 서버가 실행하기 전에 거부한 요청은 서버의 메시지를 담고 `retryable`과 `effect_uncertain`이 모두 false인 평범한 `failed` 결과입니다. JSON-RPC 오류 `-32700`, `-32600`, `-32601`, `-32602`와, `NG.InvalidRequest`로 표시된 `isError` 결과가 여기에 해당하며, `MCPServer`는 입력 스키마에 맞지 않는 인자를 이렇게 표시합니다. 아무것도 실행되지 않았으므로 모델은 인자를 고칠 수 있습니다. 그 밖의 실패는 도구가 시작된 뒤에 일어났을 수 있으므로(핸들러가 낸 `isError` 결과, `-32603`, 서버 오류), 효과를 배제하는 `ToolExecutionPolicy`가 없으면 `effect_uncertain`이 true인 `reconciliation_required`입니다. 평범한 `failed`를 받으려면 읽기 전용이거나 멱등인 도구를 정책에 선언하세요. [도구 실패 계약](reference-en.md#tool-failure-contract)을 참조하세요.
 - MCP, gRPC, A2A, ACP 전반의 실패 분류 표는 레퍼런스의 [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)에 있으며, 여기에 다시 옮기지 않았습니다.

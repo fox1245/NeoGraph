@@ -464,7 +464,8 @@ Task ProgramAgentAdapter::task_snapshot(const program::ProgramHandle& handle,
         task.metadata["program_result_id"] = result->id();
         task.metadata["program_status"] = std::string(program::to_string(result->status()));
         if (const auto failure = result->failure()) {
-            task.metadata["neograph/failure"] = json{{"code", failure->code}, {"retryable", false}};
+            task.metadata["neograph/failure"] = json{
+                {"code", failure->code}, {"retryable", false}, {"retryable_by_class", false}};
         }
         return task;
     }

@@ -454,15 +454,17 @@ def test_capability_gated_methods_are_not_called_without_the_capability(verb, re
 # failure classes -> stop reasons / errors
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("verb,code,retryable", [
-    ("fail", "NG.TaskFailed", True),
-    ("coded", "app.tool_error", False),
-    ("logic", "NG.LogicError", False),
-    ("hook", "NG.HookBlocked", False),
-    ("budget", "NG.BudgetExhausted", False),
-    ("provider", "NG.ProviderFailed", True),
+@pytest.mark.parametrize("verb,code,retryable,retryable_by_class", [
+    # The node's one attempt is used up; only its class allows a retry (#500).
+    ("fail", "NG.TaskFailed", False, True),
+    ("coded", "app.tool_error", False, False),
+    ("logic", "NG.LogicError", False, False),
+    ("hook", "NG.HookBlocked", False, False),
+    ("budget", "NG.BudgetExhausted", False, False),
+    ("provider", "NG.ProviderFailed", True, True),
 ])
-def test_failed_turn_is_a_json_rpc_error_without_exception_text(verb, code, retryable):
+def test_failed_turn_is_a_json_rpc_error_without_exception_text(verb, code, retryable,
+                                                                retryable_by_class):
     # StopReason "end_turn" is defined as "The turn ended successfully"; a turn
     # whose graph failed is a JSON-RPC error carrying only typed public fields.
     async def body():
@@ -473,7 +475,8 @@ def test_failed_turn_is_a_json_rpc_error_without_exception_text(verb, code, retr
                 await prompt(s, sid, [text_block(verb)])
             exc = err.value
             assert exc.code == -32603, s.wire()
-            assert exc.data == {"code": code, "retryable": retryable}, s.wire()
+            assert exc.data == {"code": code, "retryable": retryable,
+                                "retryable_by_class": retryable_by_class}, s.wire()
             if verb == "coded":
                 # The author's public message is the only free text allowed.
                 assert "the probe tool failed" in str(exc), s.wire()

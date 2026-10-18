@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=3617734aebc1bcbee95c4407fb07e702416c58627b2137e686d6c9ff0571b8b8 -->
+<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
 # ACP：把图作为编辑器中的智能体
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
 
 Agent Client Protocol（ACP）把编辑器与编码智能体或对话智能体连接起来。编辑器（Zed、使用 CodeCompanion 的 Neovim、Gemini CLI 等）把智能体作为子进程启动，在智能体的 stdin 和 stdout 上交换 JSON-RPC 2.0 消息，每行一个 JSON 对象。编辑器打开会话并发送提示词，智能体把回答以更新的形式流式返回。智能体还可以向编辑器请求权限，或请求访问文件和终端。
 
-`ACPServer` 把编译好的 NeoGraph 图作为这样的智能体运行。NeoGraph 实现的是智能体一侧，编辑器是客户端。`ACPClient` 是智能体向编辑器发出自己的请求时使用的句柄。
+`ACPServer` 把编译好的 NeoGraph 图作为这样的智能体运行。NeoGraph 实现的是智能体一侧，编辑器是客户端。`ACPClient` 是智能体向编辑器发出自己的请求时使用的句柄。编辑器以错误应答时会抛出 `acp::ACPClientError`。如果代码表明请求不可能成功，例如对不存在的文件返回 `-32002`，它就是 `acp::ACPClientRefusal`，节点不会重试。
 
 ## 组件
 
@@ -176,7 +176,7 @@ stop reason: end_turn
 ## 取消、会话和错误
 
 - **取消。** `session/cancel` 取消正在运行的那一轮，这一轮以 `stopReason: "cancelled"` 结束；没有运行中的轮次时，取消请求不起作用。按请求 id 指向正在运行的 `session/prompt` 的 `$/cancel_request` 也以同样的方式取消该轮；指向其他请求的则被忽略。stdin 到达文件末尾时，`run()` 会等运行中的轮次 `set_eof_grace`（1 秒）让它们结束，然后取消。
-- **一轮如何结束。** 运行完成是 `end_turn`，取消则是 `cancelled`，运行达到 `RunConfig::max_steps` 是 `max_turn_requests`，超出模型令牌预算是 `max_tokens`，provider 拒绝是 `refusal`。其他失败是 JSON-RPC 错误 `-32603`，其 `data` 为 `{code, retryable}`；消息是失败的公开消息，不是异常文本。完整的对照表在参考文档的 [ACP](reference-en.md#neographacp--agent-client-protocol) 和[协议失败映射](reference-en.md#protocol-failure-mapping)中。
+- **一轮如何结束。** 运行完成是 `end_turn`，取消则是 `cancelled`，运行达到 `RunConfig::max_steps` 是 `max_turn_requests`，超出模型令牌预算是 `max_tokens`，provider 拒绝是 `refusal`。其他失败是 JSON-RPC 错误 `-32603`，其 `data` 为 `{code, retryable, retryable_by_class}`：引擎用完节点的尝试次数后 `retryable` 为 `false`，`retryable_by_class` 表示失败的类别是否允许重试；消息是失败的公开消息，不是异常文本。完整的对照表在参考文档的 [ACP](reference-en.md#neographacp--agent-client-protocol) 和[协议失败映射](reference-en.md#protocol-failure-mapping)中。
 - **会话。** `session/new` 创建会话，`session/resume` 继续智能体已知的会话。引擎配置了检查点存储时，停在权限请求上的会话可以在智能体重启后用 `session/resume` 恢复；这时下一条提示词的文本就是对待答问题的回答。在 `initialize` 之前调用是 `-32600`，未知的会话是 `-32002`。
 - **MCP 服务器。** 客户端可以在 `session/new` 中传入 stdio MCP 服务器。智能体用 NeoGraph 的 MCP 客户端，在会话的 `cwd` 中以最小环境（`PATH` 和客户端的 `env` 条目）启动它们，所以智能体环境中的 provider 密钥不会传给它们。节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE 的 MCP 服务器会以 `-32602` 拒绝。见 [MCP 指南](mcp.md)。
 - **能力。** `ACPServer::capabilities()` 就是 `initialize` 所公布的内容。提示词接受文本和 `resource_link` 块；图像、音频和嵌入资源只有在 `capabilities().prompt` 中开启后才接受。

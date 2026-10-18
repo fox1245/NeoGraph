@@ -199,6 +199,7 @@ constexpr int kInvalidParams    = -32602;
 constexpr int kInternalError    = -32603;
 constexpr int kRequestCancelled = -32800;
 constexpr int kResourceNotFound = -32002;
+constexpr int kAuthRequired     = -32000;
 
 /// How long a cancelled turn waits for the client to answer a pending
 /// agent->client request on its own before the server abandons it.
@@ -231,6 +232,13 @@ neograph::json jsonrpc_notify(std::string method, neograph::json params) {
     env["method"]  = std::move(method);
     env["params"]  = std::move(params);
     return env;
+}
+
+/// Whether a client's JSON-RPC error code says that the agent's request
+/// cannot succeed as sent (ACPClientRefusal).
+bool request_cannot_succeed(int code) {
+    return code == -32700 || code == kInvalidRequest || code == kMethodNotFound ||
+           code == kInvalidParams || code == kResourceNotFound || code == kAuthRequired;
 }
 
 /// A refusal of a request the server cannot serve right now. ACP reserves
@@ -751,7 +759,8 @@ struct ACPServer::Impl {
         try {
             emit(jsonrpc_error(kInternalError, "Internal error", id,
                                neograph::json{{"code", "NG.UnknownFailure"},
-                                              {"retryable", false}}));
+                                              {"retryable", false},
+                                              {"retryable_by_class", false}}));
         } catch (...) {
             // A failing transport/sink cannot be used to report its own
             // failure, but it must never escape a prompt worker.
@@ -996,7 +1005,9 @@ ACPServer::Impl::handle_session_resume(const neograph::json& params,
                 const auto failure = graph::classify_failure(std::current_exception());
                 return jsonrpc_error(kInternalError, "Failed to restore the session", id,
                                      neograph::json{{"code", failure.code},
-                                                    {"retryable", failure.retryable}});
+                                                    {"retryable", failure.retryable},
+                                                    {"retryable_by_class",
+                                                     failure.retryable_by_class}});
             }
         }
     }
@@ -1509,7 +1520,9 @@ ACPServer::Impl::handle_session_prompt(const neograph::json& params,
                             // (reference, "Protocol failure mapping").
                             const auto& failure = *turn.failure;
                             neograph::json data{{"code", failure.code},
-                                                {"retryable", failure.retryable}};
+                                                {"retryable", failure.retryable},
+                                                {"retryable_by_class",
+                                                 failure.retryable_by_class}};
                             if (turn.internal_cancel) {
                                 emit(jsonrpc_error(kRequestCancelled, "Request cancelled", id,
                                                    std::move(data)));
@@ -1716,9 +1729,16 @@ ACPServer::Impl::request_client(std::string method, neograph::json params,
     }
     auto resp = fut.get();
     if (resp.contains("error")) {
-        throw std::runtime_error(
-            "ACPServer::call_client: error response: "
-            + resp["error"].dump());
+        const auto error = resp["error"];
+        const int  code  = error.is_object() && error.contains("code") &&
+                                 error["code"].is_number_integer()
+                             ? error["code"].get<int>()
+                             : kInternalError;
+        // #500: an answer that says the request itself cannot succeed is
+        // refused again, so the node is not retried and no peer is told
+        // that a retry may help.
+        if (request_cannot_succeed(code)) throw ACPClientRefusal(std::move(method), error);
+        throw ACPClientError(std::move(method), error);
     }
     // A JSON null result (seen from some clients for fs/write_text_file) is
     // tolerated as an empty object.
@@ -1729,6 +1749,21 @@ ACPServer::Impl::request_client(std::string method, neograph::json params,
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
+ACPClientError::ACPClientError(std::string method, const neograph::json& error)
+    : std::runtime_error("ACPServer::call_client: error response: " + error.dump()),
+      method_(std::move(method)) {
+    if (!error.is_object()) return;
+    if (error.contains("code") && error["code"].is_number_integer())
+        code_ = error["code"].get<int>();
+    if (error.contains("message") && error["message"].is_string())
+        message_ = error["message"].get<std::string>();
+    if (error.contains("data")) data_ = error["data"];
+}
+
+ACPClientError::~ACPClientError() = default;
+
+ACPClientRefusal::~ACPClientRefusal() = default;
+
 ACPServer::ACPServer(std::shared_ptr<neograph::graph::GraphEngine> engine,
                      neograph::json info,
                      std::shared_ptr<ACPGraphAdapter> adapter)

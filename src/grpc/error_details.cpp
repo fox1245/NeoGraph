@@ -108,6 +108,7 @@ WireFailure wire_failure(const graph::FailureVerdict& verdict) {
     out.info.domain = std::string(kErrorDomain);
     out.info.metadata["code"] = code;
     out.info.metadata["retryable"] = verdict.retryable ? "true" : "false";
+    out.info.metadata["retryable_by_class"] = verdict.retryable_by_class ? "true" : "false";
     try {
         if (verdict.signal) std::rethrow_exception(verdict.signal);
     } catch (const HookBoundaryBlocked& blocked) {
@@ -131,6 +132,7 @@ WireFailure request_failure(::grpc::StatusCode code, std::string ng_code, std::s
     out.info.domain = std::string(kErrorDomain);
     out.info.metadata["code"] = std::move(ng_code);
     out.info.metadata["retryable"] = "false";
+    out.info.metadata["retryable_by_class"] = "false";
     return out;
 }
 
