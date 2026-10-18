@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=13e082778effbbcb79c2d71addf21b2e5b8ac340acd2dbeb45454f64c6141400 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=ff6bab6aa38c7e13d289059fc5a771c4a4755160cc3b37bd20977e4378f070df -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@ NeoGraph는 그래프로 기술한 워크플로를 실행하는 C++20 라이브�
 - 그런 워크플로를 C++ 서비스 안에서 실행하거나, MCP·A2A·ACP로 다른 에이전트와 도구에 공개하려는 팀.
 - LangGraph를 아는 독자. 리듀서가 붙은 채널, `Send`, `Command`, 체크포인트는 같은 개념이므로 [핵심 개념 가이드](docs/concepts.md)를 빠르게 읽을 수 있습니다.
 
-NeoGraph는 알파 단계 소프트웨어입니다(버전 0.14.2). C++ 바이너리 인터페이스는 0.x 릴리스 사이에 바뀔 수 있으니 [ABI 정책](docs/ABI_POLICY.md)을 보세요. 모델을 학습시키거나 수치 계산 라이브러리를 대신하지 않으며, 모델 호출은 노드가 하는 일 가운데 하나일 뿐입니다.
+NeoGraph는 알파 단계 소프트웨어입니다(버전 0.14.3). C++ 바이너리 인터페이스는 0.x 릴리스 사이에 바뀔 수 있으니 [ABI 정책](docs/ABI_POLICY.md)을 보세요. 모델을 학습시키거나 수치 계산 라이브러리를 대신하지 않으며, 모델 호출은 노드가 하는 일 가운데 하나일 뿐입니다.
 
 ## 빠른 시작
 
@@ -70,7 +70,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-PyPI의 휠은 0.14.2 릴리스로 빌드한 것입니다. [변경 이력](CHANGELOG.md)의 *Unreleased* 항목에 있는 변경은 휠에 들어 있지 않습니다. 그 변경을 쓰려면 소스에서 빌드하세요([빌드 설정](#build-configuration-and-further-reading) 참고).
+PyPI의 휠은 0.14.3 릴리스로 빌드한 것입니다. [변경 이력](CHANGELOG.md)의 *Unreleased* 항목에 있는 변경은 휠에 들어 있지 않습니다. 그 변경을 쓰려면 소스에서 빌드하세요([빌드 설정](#build-configuration-and-further-reading) 참고).
 
 ### C++
 
@@ -397,7 +397,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux에서 켜짐/꺼짐 빌드를 맞춰 비교. 불변 출처 정보를 위해 실제 소스 루트 Git 체크아웃 필요. 상한은 CI의 hosted x86-64 러너 기준이라, 더 느린 하드웨어에서는 회귀가 없어도 `javascript_wrapped_core`가 실패할 수 있음. `--base <ref>`를 주면 그 커밋도 빌드해 같은 머신에서 케이스별로 비교함. |
 | `fuzz` | Linux Clang/libFuzzer 60초 카나리. 코퍼스를 본인 소유 출력으로 복사. |
 | `install` | 격리된 내보내기 접두사에서 ABI·심볼·C++·C11·충돌·재배치를 검사하는 소비자. Git/Bash 불필요. 선택 옵션 `--shared`, `--core-only`, `--program`. `--quickjs`는 `--program`과 ELF/Mach-O 검사가 필요하며 Windows 행에는 없습니다. |
-| `sdist` | 소스 아카이브와 Twine. build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 필요. 선택 옵션 `--release-tag v0.14.2`. |
+| `sdist` | 소스 아카이브와 Twine. build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 필요. 선택 옵션 `--release-tag v0.14.3`. |
 | `wheel` | 복구를 거친 설치형 휠. cibuildwheel==2.23.0과 네이티브/컨테이너 provider 필요. `--arch x86_64\|aarch64\|arm64\|AMD64` 필수. 선택 옵션 `--python cp312`는 모든 CPython 대신 하나만 빌드합니다. |
 | `runtime-archive` | 공유 SDK 네이티브 아카이브 이식성 타깃/CTest. Ninja와 플랫폼 런타임 의존성 필요. |
 

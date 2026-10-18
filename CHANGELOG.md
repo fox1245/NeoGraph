@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-10-18
+
 ### Changed
 
 - **Adopt SchemaProvider `0437853529b5932e7097a38629a95779d08f03aa`, SDK 0.3.3 on `maint/interface6` (#496).** The interface revision and shared-library generation stay 6 and no public struct or enum changes layout. Two SDK fixes change what NeoGraph users see. **Behavior change:** a streamed text part no longer delivers a delta with empty text (SchemaProvider #37). OpenAI Chat, Anthropic Messages, Gemini and Responses streams each delivered one, which NeoGraph passed on as an `LLM_TOKEN` event, and as an `llm.token` span event, with empty text, so a consumer that counted tokens or took the first event for the first token was off by one. The text, the parts and the final result are unchanged. **Behavior change:** a `google.generate` descriptor whose buffered and streaming paths do not name the same literal model (`/v1beta/models/<model>:generateContent` and `/v1beta/models/<model>:streamGenerateContent?alt=sse`) is refused when it is loaded, with a `ConfigError` naming the path; it used to load and then fail every request with `InvalidConfig` (SchemaProvider #40). The SDK documentation now says how a deployment behind a proxy or gateway that answers with another model name declares it as a routing gateway (SchemaProvider #38). NeoGraph now requires `SchemaProvider 0.3.3 EXACT`, in its build and in the `find_dependency` of the installed `NeoGraphConfig`. Rebuild NeoGraph, C++ consumers and Python extensions together against the 0.3.3 headers and libraries (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
