@@ -1,0 +1,483 @@
+{
+ "format": "neograph.live-e2e/v1",
+ "neograph": "0.15.1",
+ "python_module": "0.15.1",
+ "schemaprovider": "060f52c9ab0fbbc6b785b097785a17bdf16d7773",
+ "commit": "14a886d36934d6908658fe3013e8d242404ed688",
+ "tree": "fbc132d63afac5f842cb4644f5c695e0207454ec52f588dfa30503bd0a59fa7a",
+ "dirty": false,
+ "finished": "2026-10-18T19:24:46Z",
+ "seconds": 220.8,
+ "cases": {
+  "cpp:LiveTypedClients.DecisionsShippedCatalogue": {
+   "status": "passed",
+   "seconds": 24.14,
+   "message": ""
+  },
+  "cpp:LiveTypedClients.ImagesGptImage2": {
+   "status": "passed",
+   "seconds": 9.02,
+   "message": ""
+  },
+  "cpp:LiveTypedClients.ImagesShippedGeminiConfiguration": {
+   "status": "passed",
+   "seconds": 2.89,
+   "message": ""
+  },
+  "cpp:LiveTypedClients.VeoShippedConfiguration": {
+   "status": "passed",
+   "seconds": 35.4,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Collect": {
+   "status": "passed",
+   "seconds": 6.13,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Stream": {
+   "status": "passed",
+   "seconds": 5.1,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Collect": {
+   "status": "passed",
+   "seconds": 3.25,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Stream": {
+   "status": "passed",
+   "seconds": 3.29,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.InteractionsText/Collect": {
+   "status": "passed",
+   "seconds": 0.73,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.InteractionsText/Stream": {
+   "status": "passed",
+   "seconds": 0.87,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.OpenRouterChatKeepsGeneratedImages/Collect": {
+   "status": "passed",
+   "seconds": 3.19,
+   "message": ""
+  },
+  "cpp:Mode/LiveAdapter.OpenRouterChatKeepsGeneratedImages/Stream": {
+   "status": "passed",
+   "seconds": 3.19,
+   "message": ""
+  },
+  "py:test_live_matrix::test_claude_5_5_text[claude-haiku-5-5-collect]": {
+   "status": "passed",
+   "seconds": 0.7,
+   "message": ""
+  },
+  "py:test_live_matrix::test_claude_5_5_text[claude-haiku-5-5-stream]": {
+   "status": "passed",
+   "seconds": 0.77,
+   "message": ""
+  },
+  "py:test_live_matrix::test_claude_5_5_text[claude-sonnet-5-5-collect]": {
+   "status": "passed",
+   "seconds": 1.05,
+   "message": ""
+  },
+  "py:test_live_matrix::test_claude_5_5_text[claude-sonnet-5-5-stream]": {
+   "status": "passed",
+   "seconds": 0.93,
+   "message": ""
+  },
+  "py:test_live_matrix::test_gemini_generate_image_output[collect]": {
+   "status": "passed",
+   "seconds": 3.32,
+   "message": ""
+  },
+  "py:test_live_matrix::test_gemini_generate_image_output[stream]": {
+   "status": "passed",
+   "seconds": 3.13,
+   "message": ""
+  },
+  "py:test_live_matrix::test_known_gap_gemini_media[lyria-clip]": {
+   "status": "xfailed",
+   "seconds": 0.41,
+   "message": "known gap, fox1245/SchemaProvider#45"
+  },
+  "py:test_live_matrix::test_known_gap_gemini_media[tts]": {
+   "status": "xfailed",
+   "seconds": 0.35,
+   "message": "known gap, fox1245/SchemaProvider#55, interface 6 has no speech_config"
+  },
+  "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[collect]": {
+   "status": "passed",
+   "seconds": 3.96,
+   "message": ""
+  },
+  "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[stream]": {
+   "status": "passed",
+   "seconds": 4.72,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[anthropic.messages-collect]": {
+   "status": "passed",
+   "seconds": 0.9,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[anthropic.messages-stream]": {
+   "status": "passed",
+   "seconds": 0.67,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[google.generate-collect]": {
+   "status": "passed",
+   "seconds": 0.92,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[google.generate-stream]": {
+   "status": "passed",
+   "seconds": 1.15,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[google.interactions-collect]": {
+   "status": "passed",
+   "seconds": 1.05,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[google.interactions-stream]": {
+   "status": "passed",
+   "seconds": 0.72,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openai.chat-collect]": {
+   "status": "passed",
+   "seconds": 2.96,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openai.chat-stream]": {
+   "status": "passed",
+   "seconds": 1.07,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openai.responses-collect]": {
+   "status": "passed",
+   "seconds": 1.97,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openai.responses-stream]": {
+   "status": "passed",
+   "seconds": 1.98,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.chat-collect]": {
+   "status": "passed",
+   "seconds": 0.74,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.chat-stream]": {
+   "status": "passed",
+   "seconds": 1.91,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.messages-collect]": {
+   "status": "passed",
+   "seconds": 1.45,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.messages-stream]": {
+   "status": "passed",
+   "seconds": 1.46,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.responses-collect]": {
+   "status": "passed",
+   "seconds": 0.59,
+   "message": ""
+  },
+  "py:test_live_matrix::test_text[openrouter.responses-stream]": {
+   "status": "passed",
+   "seconds": 1.81,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[anthropic.messages]": {
+   "status": "passed",
+   "seconds": 1.01,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[google.generate]": {
+   "status": "passed",
+   "seconds": 0.77,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[google.interactions]": {
+   "status": "passed",
+   "seconds": 1.08,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[openai.chat]": {
+   "status": "passed",
+   "seconds": 1.25,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[openai.responses]": {
+   "status": "passed",
+   "seconds": 2.22,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[openrouter.chat]": {
+   "status": "passed",
+   "seconds": 1.17,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[openrouter.messages]": {
+   "status": "passed",
+   "seconds": 1.52,
+   "message": ""
+  },
+  "py:test_live_matrix::test_tool_call[openrouter.responses]": {
+   "status": "passed",
+   "seconds": 2.46,
+   "message": ""
+  },
+  "py:test_live_matrix::test_vision_input[anthropic.messages]": {
+   "status": "passed",
+   "seconds": 0.72,
+   "message": ""
+  },
+  "py:test_live_matrix::test_vision_input[google.generate]": {
+   "status": "passed",
+   "seconds": 1.17,
+   "message": ""
+  },
+  "py:test_live_matrix::test_vision_input[openai.chat]": {
+   "status": "passed",
+   "seconds": 1.21,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_adaptive_thinking_high_effort[collect]": {
+   "status": "passed",
+   "seconds": 0.81,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_adaptive_thinking_high_effort[stream]": {
+   "status": "passed",
+   "seconds": 0.83,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_adaptive_thinking_low_effort[collect]": {
+   "status": "passed",
+   "seconds": 0.89,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_adaptive_thinking_low_effort[stream]": {
+   "status": "passed",
+   "seconds": 0.78,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_disabled_thinking_has_no_thinking_part[collect]": {
+   "status": "passed",
+   "seconds": 0.69,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_disabled_thinking_has_no_thinking_part[stream]": {
+   "status": "passed",
+   "seconds": 0.72,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_manual_thinking_budget_returns_signed_thinking[collect]": {
+   "status": "passed",
+   "seconds": 1.14,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_manual_thinking_budget_returns_signed_thinking[stream]": {
+   "status": "passed",
+   "seconds": 1.19,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_openrouter_manual_thinking_budget[collect]": {
+   "status": "passed",
+   "seconds": 1.76,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_openrouter_manual_thinking_budget[stream]": {
+   "status": "passed",
+   "seconds": 2.01,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_openrouter_tool_choice_named_tool[collect]": {
+   "status": "passed",
+   "seconds": 1.68,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_openrouter_tool_choice_named_tool[stream]": {
+   "status": "passed",
+   "seconds": 1.76,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_prompt_cache_is_written_then_read[collect]": {
+   "status": "passed",
+   "seconds": 1.77,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_temperature_is_refused_before_dispatch_where_the_model_forbids_it[collect]": {
+   "status": "passed",
+   "seconds": 0.0,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_temperature_is_sent_where_the_model_allows_it[collect]": {
+   "status": "passed",
+   "seconds": 0.74,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_any[collect]": {
+   "status": "passed",
+   "seconds": 0.89,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_any[stream]": {
+   "status": "passed",
+   "seconds": 0.88,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_named_tool[collect]": {
+   "status": "passed",
+   "seconds": 0.96,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_named_tool[stream]": {
+   "status": "passed",
+   "seconds": 0.93,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_none[collect]": {
+   "status": "passed",
+   "seconds": 0.65,
+   "message": ""
+  },
+  "py:test_live_messages_controls::test_tool_choice_none[stream]": {
+   "status": "passed",
+   "seconds": 0.64,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[anthropic]": {
+   "status": "passed",
+   "seconds": 2.58,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[gemini]": {
+   "status": "passed",
+   "seconds": 7.64,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[openai]": {
+   "status": "passed",
+   "seconds": 1.62,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[openrouter]": {
+   "status": "passed",
+   "seconds": 0.82,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_expired_deadline_is_deadline_exceeded[anthropic]": {
+   "status": "passed",
+   "seconds": 0.03,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_expired_deadline_is_deadline_exceeded[gemini]": {
+   "status": "passed",
+   "seconds": 0.03,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_expired_deadline_is_deadline_exceeded[openai]": {
+   "status": "passed",
+   "seconds": 0.03,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_expired_deadline_is_deadline_exceeded[openrouter]": {
+   "status": "passed",
+   "seconds": 0.03,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[anthropic]": {
+   "status": "passed",
+   "seconds": 0.26,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[gemini]": {
+   "status": "passed",
+   "seconds": 0.18,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[openai]": {
+   "status": "passed",
+   "seconds": 0.76,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[openrouter]": {
+   "status": "passed",
+   "seconds": 0.18,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_plain_completion_reports_usage[anthropic]": {
+   "status": "passed",
+   "seconds": 0.73,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_plain_completion_reports_usage[gemini]": {
+   "status": "passed",
+   "seconds": 2.55,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_plain_completion_reports_usage[openai]": {
+   "status": "passed",
+   "seconds": 6.6,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_plain_completion_reports_usage[openrouter]": {
+   "status": "passed",
+   "seconds": 0.85,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[anthropic]": {
+   "status": "passed",
+   "seconds": 0.82,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[gemini]": {
+   "status": "passed",
+   "seconds": 2.62,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[openai]": {
+   "status": "passed",
+   "seconds": 1.85,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[openrouter]": {
+   "status": "passed",
+   "seconds": 2.58,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_tool_round_trip[anthropic]": {
+   "status": "passed",
+   "seconds": 1.62,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_tool_round_trip[gemini]": {
+   "status": "passed",
+   "seconds": 4.71,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_tool_round_trip[openai]": {
+   "status": "passed",
+   "seconds": 2.38,
+   "message": ""
+  },
+  "py:test_live_provider::test_live_tool_round_trip[openrouter]": {
+   "status": "passed",
+   "seconds": 4.23,
+   "message": ""
+  }
+ }
+}
