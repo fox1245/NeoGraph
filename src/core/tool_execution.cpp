@@ -3,6 +3,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/tool.h>
 
+#include "pipe_write.h"
 #include "text_safety.h"
 #include "tool_failure.h"
 
@@ -430,6 +431,7 @@ ProcessExit run_process(const ToolProcessSpec& spec,
         close_fd(input_pipe[1]);
         throw_process_setup("process tool pipe creation failed");
     }
+    detail::no_sigpipe_on(input_pipe[1]);
 
     const pid_t child = ::fork();
     if (child < 0) {
@@ -579,11 +581,15 @@ ProcessExit run_process(const ToolProcessSpec& spec,
                 break;
             }
         }
+        // A process that closed its stdin leaves the write end with POLLERR
+        // only (Linux), once the pipe is full: the write below then fails with
+        // EPIPE, and SIGPIPE stays off (#495).
         if (input_index >= 0
-            && (descriptors[input_index].revents & (POLLOUT | POLLHUP))) {
+            && (descriptors[input_index].revents & (POLLOUT | POLLHUP | POLLERR))) {
             while (input_offset < spec.stdin_data.size()) {
-                const auto written = ::write(input_pipe[1], spec.stdin_data.data() + input_offset,
-                                             spec.stdin_data.size() - input_offset);
+                const auto written = detail::write_without_sigpipe(
+                    input_pipe[1], spec.stdin_data.data() + input_offset,
+                    spec.stdin_data.size() - input_offset);
                 if (written > 0) {
                     input_offset += static_cast<std::size_t>(written);
                     continue;

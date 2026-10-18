@@ -24,6 +24,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -465,6 +466,40 @@ TEST(MCPStdioAsync, DeadSubprocessIsAConnectionFailure) {
     }
     EXPECT_FALSE(client.is_initialized());
 }
+
+#ifndef _WIN32
+// SIGPIPE's default action for the scope of a test. cpp-httplib's Server
+// sets SIG_IGN for the whole process, which would hide a SIGPIPE from every
+// test that runs after one; a host does not have to ignore it.
+class DefaultSigpipe {
+public:
+    DefaultSigpipe() : previous_(std::signal(SIGPIPE, SIG_DFL)) {}
+    ~DefaultSigpipe() { std::signal(SIGPIPE, previous_); }
+    DefaultSigpipe(const DefaultSigpipe&) = delete;
+    DefaultSigpipe& operator=(const DefaultSigpipe&) = delete;
+
+private:
+    void (*previous_)(int);
+};
+
+TEST(MCPStdioAsync, AServerThatClosedItsInputFailsWithoutASignal) {
+    // #495: the write of initialize fails with EPIPE. macOS raised SIGPIPE
+    // for the process, and this thread, which does not block it, ended the
+    // test.
+    DefaultSigpipe default_action;
+    mcp::MCPClient client({"/bin/sh", "-c", "exec 0<&-; sleep 2"});
+    // The client starts the server here; let it close its stdin first, so
+    // that the write of initialize finds no reader.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    try {
+        client.initialize();
+        FAIL() << "expected a broken pipe";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::connection);
+    }
+    EXPECT_FALSE(client.is_initialized());
+}
+#endif
 
 TEST(MCPStdioAsync, MalformedSubprocessFrameIsAProtocolFailure) {
     if (!python3_available()) GTEST_SKIP() << "python3 not available";
