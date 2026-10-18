@@ -6,9 +6,16 @@
     "allow_insecure_loopback": false
   },
   "models": [
-    "veo-3.1-lite-generate-preview",
+    "veo-3.1-fast-generate-preview",
     "veo-3.1-generate-preview",
-    "veo-3.1-fast-generate-preview"
+    {
+      "id": "veo-3.1-lite-generate-preview",
+      "resolutions": [
+        "720p",
+        "1080p"
+      ],
+      "max_reference_images": 0
+    }
   ],
   "defaults": {
     "model": "veo-3.1-lite-generate-preview",

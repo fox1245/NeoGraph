@@ -71,31 +71,67 @@ bool valid_uri(std::string_view uri) {
            uri.find('#') == std::string_view::npos &&
            std::none_of(uri.begin(), uri.end(), [](unsigned char c) { return c <= 32 || c == 127; });
 }
-void controls_valid(const ImagesClient::Controls& controls, std::string_view profile) {
+// Model capabilities come from the optional `capabilities` member of the
+// external configuration. A capability the configuration leaves out is not
+// checked locally; the provider validates it.
+struct Capabilities {
+    std::optional<std::vector<std::string>> sizes, qualities, aspect_ratios, image_sizes;
+    std::optional<std::uint64_t> max_n, max_prompt_characters, min_output_tokens, max_output_tokens;
+};
+bool allowed(const std::optional<std::vector<std::string>>& values, const std::string& value) {
+    return !values || std::find(values->begin(), values->end(), value) != values->end();
+}
+bool at_most(const std::optional<std::uint64_t>& bound, std::uint64_t value) { return !bound || value <= *bound; }
+void controls_valid(const ImagesClient::Controls& controls, std::string_view profile, const Capabilities& caps) {
     if (profile == "nano_banana_2_lite") {
         const auto* c = std::get_if<ImagesClient::GeminiControls>(&controls);
-        require(c && c->image_size == "1K" && c->max_output_tokens >= 1120 && c->max_output_tokens <= 4096);
+        require(c && !c->aspect_ratio.empty() && !c->image_size.empty() && c->max_output_tokens > 0);
         require(c->thinking == ImagesClient::Thinking::Minimal || c->thinking == ImagesClient::Thinking::High);
-        require(one_of(c->aspect_ratio, {"1:1", "1:4", "4:1", "1:8", "8:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"}));
+        require(allowed(caps.aspect_ratios, c->aspect_ratio) && allowed(caps.image_sizes, c->image_size));
+        require(at_most(caps.max_output_tokens, c->max_output_tokens) &&
+                (!caps.min_output_tokens || c->max_output_tokens >= *caps.min_output_tokens));
         return;
     }
     const auto* c = std::get_if<ImagesClient::OpenAIControls>(&controls);
-    require(c && c->n >= 1 && c->n <= 10);
+    require(c && c->n >= 1 && at_most(caps.max_n, c->n) && !c->size.empty() && !c->quality.empty());
     require(c->response_format == ImagesClient::ResponseFormat::Native ||
             c->response_format == ImagesClient::ResponseFormat::Base64 ||
             c->response_format == ImagesClient::ResponseFormat::Url);
-    if (profile == "openai_gpt_image") {
-        require(c->response_format == ImagesClient::ResponseFormat::Native);
-        require(one_of(c->quality, {"auto", "low", "medium", "high"}));
-        require(one_of(c->size, {"auto", "1024x1024", "1536x1024", "1024x1536"}));
-    } else if (profile == "openai_dall_e_2") {
-        require(c->response_format != ImagesClient::ResponseFormat::Native && c->quality == "standard");
-        require(one_of(c->size, {"256x256", "512x512", "1024x1024"}));
-    } else {
-        require(profile == "openai_dall_e_3" && c->n == 1 && c->response_format != ImagesClient::ResponseFormat::Native);
-        require(one_of(c->quality, {"standard", "hd"}));
-        require(one_of(c->size, {"1024x1024", "1792x1024", "1024x1792"}));
+    require(allowed(caps.sizes, c->size) && allowed(caps.qualities, c->quality));
+    // The profile is the wire shape: GPT Image never takes response_format,
+    // DALL-E always does.
+    if (profile == "openai_gpt_image") require(c->response_format == ImagesClient::ResponseFormat::Native);
+    else require(one_of(profile, {"openai_dall_e_2", "openai_dall_e_3"}) &&
+                 c->response_format != ImagesClient::ResponseFormat::Native);
+}
+std::vector<std::string> names(const json& value) {
+    require(value.is_array() && !value.empty());
+    std::vector<std::string> result;
+    for (const auto& item : value) {
+        require(item.is_string() && !item.get<std::string>().empty());
+        result.push_back(item.get<std::string>());
     }
+    return result;
+}
+Capabilities capabilities(const json& value) {
+    static constexpr std::string_view keys[] = {"sizes", "qualities", "aspect_ratios", "image_sizes",
+        "max_n", "max_prompt_characters", "min_output_tokens", "max_output_tokens"};
+    require(value.is_object());
+    for (const auto& item : value.items())
+        require(std::find(std::begin(keys), std::end(keys), item.first) != std::end(keys));
+    Capabilities result;
+    const auto list = [&](const char* key, auto& field) { if (value.contains(key)) field = names(value[key]); };
+    const auto bound = [&](const char* key, auto& field) {
+        if (value.contains(key)) {
+            field = integer(value[key]);
+            require(*field > 0);
+        }
+    };
+    list("sizes", result.sizes); list("qualities", result.qualities);
+    list("aspect_ratios", result.aspect_ratios); list("image_sizes", result.image_sizes);
+    bound("max_n", result.max_n); bound("max_prompt_characters", result.max_prompt_characters);
+    bound("min_output_tokens", result.min_output_tokens); bound("max_output_tokens", result.max_output_tokens);
+    return result;
 }
 int sextet(unsigned char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -207,24 +243,28 @@ struct ImagesClient::State {
     std::size_t prompt_limit, artifact_limit, output_limit;
     async::RequestOptions options;
     Controls defaults;
+    Capabilities capabilities;
 };
 
 std::variant<ImagesClient::Config, EndpointFailure> ImagesClient::Config::from_json(const json& document) {
     try {
-        closed(document, {"version", "provider", "model_profile", "model", "endpoint", "limits", "defaults"});
+        if (document.is_object() && document.contains("capabilities"))
+            closed(document, {"version", "provider", "model_profile", "model", "endpoint", "limits", "defaults", "capabilities"});
+        else closed(document, {"version", "provider", "model_profile", "model", "endpoint", "limits", "defaults"});
         require(integer(document["version"]) == 1);
         auto state = std::make_shared<State>();
         state->provider = string(document["provider"]);
         state->profile = string(document["model_profile"]);
+        // The model is whatever the configuration names; the profile only
+        // selects the wire shape.
         state->model = string(document["model"]);
-        if (state->provider == "gemini") {
-            require(state->profile == "nano_banana_2_lite" && state->model == "gemini-3.1-flash-lite-image");
-        } else {
-            require(state->provider == "openai");
-            if (state->profile == "openai_dall_e_2") require(state->model == "dall-e-2");
-            else if (state->profile == "openai_dall_e_3") require(state->model == "dall-e-3");
-            else require(state->profile == "openai_gpt_image" && one_of(state->model, {"gpt-image-1", "gpt-image-1-mini", "gpt-image-1.5"}));
-        }
+        require(!state->model.empty() && std::none_of(state->model.begin(), state->model.end(),
+            [](unsigned char c) { return c <= 32 || c == 127; }));
+        if (state->provider == "gemini")
+            require(state->profile == "nano_banana_2_lite" && state->model.find_first_of("/:?#%") == std::string::npos);
+        else require(state->provider == "openai" &&
+                     one_of(state->profile, {"openai_gpt_image", "openai_dall_e_2", "openai_dall_e_3"}));
+        if (document.contains("capabilities")) state->capabilities = capabilities(document["capabilities"]);
         const auto endpoint = document["endpoint"];
         closed(endpoint, {"host", "port", "path"});
         state->host = string(endpoint["host"]);
@@ -258,17 +298,17 @@ std::variant<ImagesClient::Config, EndpointFailure> ImagesClient::Config::from_j
             auto thinking = string(defaults["thinking"]);
             require(thinking == "minimal" || thinking == "high");
             auto tokens = integer(defaults["max_output_tokens"]);
-            require(tokens <= 4096);
+            require(tokens <= std::numeric_limits<std::uint32_t>::max());
             state->defaults = GeminiControls{string(defaults["aspect_ratio"]), string(defaults["image_size"]), thinking == "minimal" ? Thinking::Minimal : Thinking::High, static_cast<std::uint32_t>(tokens)};
         } else {
             closed(defaults, {"size", "quality", "n", "response_format"});
             const auto format = string(defaults["response_format"]);
             require(one_of(format, {"native", "b64_json", "url"}));
             const auto n = integer(defaults["n"]);
-            require(n <= 10);
+            require(n <= state->output_limit);
             state->defaults = OpenAIControls{string(defaults["size"]), string(defaults["quality"]), static_cast<std::uint32_t>(n), format == "native" ? ResponseFormat::Native : format == "url" ? ResponseFormat::Url : ResponseFormat::Base64};
         }
-        controls_valid(state->defaults, state->profile);
+        controls_valid(state->defaults, state->profile, state->capabilities);
         return Config(std::move(state));
     } catch (...) {
         return failure(Kind::InvalidConfig, "Invalid images client configuration");
@@ -297,7 +337,8 @@ asio::awaitable<ImagesClient::Result> ImagesClient::generate_owned(
             co_return failure(Kind::InvalidConfig, "Invalid image credential");
         require(!request.prompt.empty() && request.prompt.size() <= state->prompt_limit);
         const auto prompt_characters = utf8_characters(request.prompt);
-        controls_valid(request.controls, state->profile);
+        controls_valid(request.controls, state->profile, state->capabilities);
+        require(at_most(state->capabilities.max_prompt_characters, prompt_characters));
         const bool google = state->provider == "gemini";
         json body = json::object();
         if (google) {
@@ -309,7 +350,6 @@ asio::awaitable<ImagesClient::Result> ImagesClient::generate_owned(
                 {"thinkingConfig", json{{"thinkingLevel", c.thinking == Thinking::Minimal ? "MINIMAL" : "HIGH"}, {"includeThoughts", false}}}};
         } else {
             const auto& c = std::get<OpenAIControls>(request.controls);
-            require(prompt_characters <= (state->profile == "openai_dall_e_2" ? 1000u : state->profile == "openai_dall_e_3" ? 4000u : 32000u));
             require(c.n <= state->output_limit);
             body = json{{"model", state->model}, {"prompt", request.prompt}, {"size", c.size}, {"quality", c.quality}, {"n", c.n}};
             if (c.response_format != ResponseFormat::Native)

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=3473ae4657b5258f5bd1b7f01230a5236d5072784958288e502866dd6beb57b9 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=6febb729812688fe3344bd0c2660cae2e99586800d5395b29381eb25c43800d5 -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -438,7 +438,7 @@ tool search, `shell.environment`의 skills, shell(`container_auto`)입니다.
 순서 있는 타입/raw event와 전체 terminal을 유지합니다. hosted tool은 route에 따라 지원되지 않거나
 추가 비용이 발생할 수 있습니다. 타입 admission은 live 호환성 보장이 아닙니다.
 WebSocket/primitive 실행 예제는 유지하지 않습니다. Images/Veo/Decisions는 별도 타입 NeoGraph client이며 chat spending grant를 상속하지 않습니다. 이 클라이언트들은 폐기 예정이며, 0.16.0에서 SchemaProvider 엔드포인트로 대체하면서 제거합니다.
-- Google은 `VeoClient`가 허용하는 Veo 모델을 2026-10-22에 모두 종료합니다.
+- Google은 Gemini API가 제공하는 Veo 모델(`veo-3.1-*-preview` 세 개)을 2026-10-22에 모두 종료합니다.
 - OpenAI는 `gpt-image-1`을 2026-10-23에, `gpt-image-1-mini`와 `gpt-image-1.5`를 2026-12-01에 종료합니다.
 
 CHANGELOG를 참고하세요.

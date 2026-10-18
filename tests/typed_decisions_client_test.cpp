@@ -1,4 +1,6 @@
 #include <neograph/llm/decisions_client.h>
+#include <neograph/llm/images_client.h>
+#include <neograph/llm/veo_client.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
@@ -15,9 +17,12 @@
 
 #include <atomic>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <future>
 #include <istream>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <stdexcept>
 #include <thread>
@@ -39,6 +44,8 @@ public:
     int status = 200;
     std::chrono::milliseconds delay{0};
     std::string redirect;
+    std::mutex mutex;
+    std::string last_body;
 
     explicit TypedDecisionsPeer(json document, int code = 200,
         std::chrono::milliseconds wait = 0ms, std::string location = {})
@@ -81,6 +88,10 @@ private:
                     asio::transfer_exactly(length - buffer.size()), asio::use_awaitable);
             std::string body(length, '\0');
             input.read(body.data(), static_cast<std::streamsize>(length));
+            {
+                std::lock_guard lock(mutex);
+                last_body = body;
+            }
             const auto request = json::parse(body);
             bool admitted = request.is_object() && !request.contains("criteria") &&
                 request.contains("model") && request.contains("state") &&
@@ -263,7 +274,7 @@ TEST(TypedDecisionsClient, BadNamedControlsAndQuestionGrammarNeverDispatch) {
         }
         if (scenario == 8) {
             request.provider.emplace();
-            request.provider->options["typesafe"] = json{{"max_tokens", 5}};
+            request.provider->options[""] = json{{"max_tokens", 5}};
         }
         if (scenario == 9) request.state = json{{"number", std::numeric_limits<double>::infinity()}};
         auto result = run(client.submit_async(std::move(request)));
@@ -292,6 +303,78 @@ TEST(TypedDecisionsClient, ClosedConfigRejectsUnknownControlsAndCredentialLeakPa
         EXPECT_EQ(error.safe_message.find("fixture-key"), std::string::npos);
     }
     EXPECT_THROW(DecisionsClient(admit(base), "key\r\nInjected: value"), std::invalid_argument);
+}
+
+TEST(TypedDecisionsClient, ConfiguredCatalogueIsTheOnlyModelList) {
+    TypedDecisionsPeer peer(tiny_response());
+    auto document = fixture_config(peer.endpoint());
+    document["default_model"] = "liquid/d1";
+    document["models"] = json::array({
+        {{"id", "perplexity/pplx-decider-flash-v1.2"}, {"prompt_usd_per_million_tokens", 0.01},
+            {"output_usd_per_million_tokens", 0}, {"implicit_caching", false}},
+        {{"id", "liquid/d1"}, {"prompt_usd_per_million_tokens", 0.02},
+            {"output_usd_per_million_tokens", 0}, {"implicit_caching", true}}});
+    DecisionsClient client(admit(document), "fixture-key");
+
+    auto request = tiny_request();
+    request.model = "perplexity/pplx-decider-flash-v1.2";
+    request.provider.emplace();
+    request.provider->options["perplexity"] = json{{"mode", "fast"}};
+    auto result = run(client.submit_async(std::move(request)));
+    ASSERT_TRUE(std::holds_alternative<DecisionsResponse>(result));
+    json sent;
+    {
+        std::lock_guard lock(peer.mutex);
+        sent = json::parse(peer.last_body);
+    }
+    EXPECT_EQ(sent["model"], "perplexity/pplx-decider-flash-v1.2");
+    EXPECT_EQ(sent["provider"]["options"], (json{{"perplexity", {{"mode", "fast"}}}}));
+
+    result = run(client.submit_async(tiny_request()));
+    ASSERT_TRUE(std::holds_alternative<DecisionsResponse>(result));
+    {
+        std::lock_guard lock(peer.mutex);
+        EXPECT_EQ(json::parse(peer.last_body)["model"], "liquid/d1");
+    }
+
+    // A model the configuration does not list is refused before dispatch.
+    auto unlisted = tiny_request();
+    unlisted.model = "typesafe/jev-1.13";
+    result = run(client.submit_async(std::move(unlisted)));
+    ASSERT_TRUE(std::holds_alternative<EndpointFailure>(result));
+    EXPECT_EQ(std::get<EndpointFailure>(result).kind, EndpointFailureKind::InvalidRequest);
+    EXPECT_EQ(peer.dispatches.load(), 2u);
+}
+
+// The configurations NeoGraph ships (and scripts/sync_model_catalogues.py
+// regenerates) must stay admissible.
+TEST(TypedDecisionsClient, ShippedConfigurationsAreAdmitted) {
+    const auto read = [](const char* name) {
+        std::ifstream file(std::string(NEOGRAPH_SHIPPED_SCHEMAS) + "/" + name);
+        std::stringstream text;
+        text << file.rdbuf();
+        return json::parse(text.str());
+    };
+    const auto decisions = read("typed-decisions-client.json");
+    EXPECT_TRUE(std::holds_alternative<DecisionsConfig>(DecisionsConfig::from_json(decisions)));
+    EXPECT_GE(decisions.at("models").size(), 1u);
+    EXPECT_TRUE(std::holds_alternative<ImagesClient::Config>(
+        ImagesClient::Config::from_json(read("typed-images-client.json"))));
+    EXPECT_NO_THROW(VeoClient(read("typed-veo-client.json"), "shipped-config-key"));
+}
+
+TEST(TypedDecisionsClient, RefusedConfigNamesTheFailedCheck) {
+    auto document = fixture_config("https://openrouter.ai/api/alpha/decisions");
+    document["models"].push_back(document["models"][0]);
+    auto result = DecisionsConfig::from_json(document);
+    ASSERT_TRUE(std::holds_alternative<EndpointFailure>(result));
+    EXPECT_EQ(std::get<EndpointFailure>(result).safe_message, "Duplicate Decisions model");
+
+    document = fixture_config("https://openrouter.ai/api/alpha/decisions");
+    document["default_model"] = "cloudflare/clef";
+    result = DecisionsConfig::from_json(document);
+    ASSERT_TRUE(std::holds_alternative<EndpointFailure>(result));
+    EXPECT_EQ(std::get<EndpointFailure>(result).safe_message, "Default Decisions model is not admitted");
 }
 
 TEST(TypedDecisionsClient, ProviderErrorDoesNotExposeSecretsOrRetry) {

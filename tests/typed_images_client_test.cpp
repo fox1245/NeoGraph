@@ -158,7 +158,12 @@ TEST(TypedImagesClient, ProviderErrorBlockedAndRedirectHaveNoRetryOrSecretEcho) 
 
 TEST(TypedImagesClient, IncompatibleControlsAndAdmissionCauseZeroDispatch) {
     const auto before = dispatches();
-    auto image_client = client(configuration());
+    // Model limits are configuration data, as in the shipped
+    // schemas/typed-images-client.json.
+    auto gemini_config = configuration();
+    gemini_config["capabilities"] = json{{"image_sizes", json::array({"1K"})},
+        {"min_output_tokens", 1120}, {"max_output_tokens", 4096}};
+    auto image_client = client(gemini_config);
     auto request = image_client.request("ordered");
     request.controls = Client::OpenAIControls{"1024x1024", "low", 1, Client::ResponseFormat::Native};
     expect_failure(run(image_client.async_generate(request)), Kind::InvalidRequest, false);
@@ -172,7 +177,9 @@ TEST(TypedImagesClient, IncompatibleControlsAndAdmissionCauseZeroDispatch) {
     auto gpt_request = gpt.request("ordered");
     std::get<Client::OpenAIControls>(gpt_request.controls).response_format = Client::ResponseFormat::Url;
     expect_failure(run(gpt.async_generate(gpt_request)), Kind::InvalidRequest, false);
-    auto dalle = client(configuration("openai_dall_e_3"));
+    auto dalle_config = configuration("openai_dall_e_3");
+    dalle_config["capabilities"] = json{{"max_n", 1}};
+    auto dalle = client(dalle_config);
     auto dalle_request = dalle.request("ordered");
     std::get<Client::OpenAIControls>(dalle_request.controls).n = 2;
     expect_failure(run(dalle.async_generate(dalle_request)), Kind::InvalidRequest, false);
@@ -182,6 +189,36 @@ TEST(TypedImagesClient, IncompatibleControlsAndAdmissionCauseZeroDispatch) {
     ASSERT_TRUE(std::holds_alternative<Failure>(admitted));
     EXPECT_EQ(std::get<Failure>(admitted).kind, Kind::InvalidConfig);
     EXPECT_EQ(dispatches(), before);
+}
+
+TEST(TypedImagesClient, ConfiguredModelNeedsNoCompiledAdmission) {
+    const auto before = dispatches();
+    auto gpt_config = configuration("openai_gpt_image");
+    gpt_config["model"] = "gpt-image-2";
+    auto gpt = client(gpt_config);
+    auto gpt_request = gpt.request("ordered");
+    std::get<Client::OpenAIControls>(gpt_request.controls).size = "2048x2048";
+    auto generated = run(gpt.async_generate(gpt_request));
+    ASSERT_TRUE(std::holds_alternative<Client::Generation>(generated));
+    EXPECT_EQ(std::get<Client::Generation>(generated).model, "gpt-image-2");
+
+    auto gemini_config = configuration();
+    gemini_config["model"] = "gemini-3.1-flash-image";
+    gemini_config["endpoint"]["path"] = "/v1beta/models/gemini-3.1-flash-image:generateContent";
+    auto gemini = client(gemini_config);
+    auto gemini_request = gemini.request("ordered");
+    std::get<Client::GeminiControls>(gemini_request.controls).image_size = "2K";
+    EXPECT_TRUE(std::holds_alternative<Client::Generation>(run(gemini.async_generate(gemini_request))));
+    EXPECT_EQ(dispatches(), before + 2);
+
+    // A declared limit is enforced before dispatch.
+    gpt_config["capabilities"] = json{{"sizes", json::array({"1024x1024"})}, {"max_prompt_characters", 3}};
+    auto limited = client(gpt_config);
+    expect_failure(run(limited.async_generate(gpt_request)), Kind::InvalidRequest, false);
+    expect_failure(run(limited.async_generate(limited.request("ordered"))), Kind::InvalidRequest, false);
+    gpt_config["capabilities"] = json{{"unknown_limit", 1}};
+    EXPECT_TRUE(std::holds_alternative<Failure>(Client::Config::from_json(gpt_config)));
+    EXPECT_EQ(dispatches(), before + 2);
 }
 
 TEST(TypedImagesClient, CancelBeforeDispatchAndExpiredDeadlineAreUnbilled) {

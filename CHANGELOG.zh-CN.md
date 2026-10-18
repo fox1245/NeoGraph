@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=550a33a941b3a8c6d95667c4436e76a879249e4fd3bc15d986e95588af80efbf -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=05d91e022716485f1f09dbc63f435a4dd1d019f3dc4316cce1dcfc5e028517d1 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -24,12 +24,17 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **Python。** 现在可以读取 `Opaque.wire_metadata`，因此能在 Python 中取出保留的图像。
   - **本版本线不修复的问题。** 在 `claude-haiku-4-5` 等不支持 programmatic tool calling 的模型上，`_20260318` 网页工具需要 `allowed_callers`，而接口 6 无法发送该字段；此类模型请改用 `web_search_20250305` 或 `web_fetch_20250910`。Lyria 等不支持 thinking 的 Gemini 模型仍会因 family 默认的 `includeThoughts` 而返回 400。两者都将在 NeoGraph 0.16.0 所采用的 SchemaProvider 0.4.0 中修复（#512）。
   - 请使用 0.3.5 的头文件和库一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **类型化客户端 `VeoClient`、`ImagesClient` 和 `DecisionsClient` 接受其配置列出的模型（#518）。** 此前每个客户端还会拒绝不在其内置列表中的所有模型，因此即使提供商已经提供某个模型，也要等 NeoGraph 发布新版本才能调用。`DecisionsClient` 在 OpenRouter 的 27 个决策模型中只接受 `typesafe/jev-1.13`，`ImagesClient` 拒绝 `gpt-image-2` 和 `gemini-3.1-flash-image`，`VeoClient` 只接受三个 `veo-3.1-*-preview` id。现在配置是唯一的模型列表。
+  - **模型限制是配置数据。** `ImagesClient` 接受可选的 `capabilities` 对象（`sizes`、`qualities`、`aspect_ratios`、`image_sizes`、`max_n`、`max_prompt_characters`、`min_output_tokens`、`max_output_tokens`）。`VeoClient` 的模型条目可以是带有 `id`、`resolutions` 和 `max_reference_images` 的对象。配置未声明的限制不在本地检查，由提供商判断。随附的 `schemas/typed-images-client.json` 和 `schemas/typed-veo-client.json` 声明了以前内置在代码中的限制。**行为变更：** 没有 `capabilities` 时，`ImagesClient` 不再在发送前拒绝未知的尺寸、质量、宽高比或图像尺寸；`VeoClient` 只对条目中声明了相应限制的模型拒绝 4K 或参考图像。
+  - **`DecisionsClient`。** 它转发 `provider.options`（以提供商 slug 为键的对象）而不再拒绝，并接受 `implicit_caching: true` 的模型。被拒绝的配置现在在 `safe_message` 中指出失败的检查。对配置中未列出的模型的请求仍在发送前被拒绝。
+  - **目录刷新。** 随附的 `schemas/typed-decisions-client.json` 列出了全部 27 个 OpenRouter 决策模型。`scripts/sync_model_catalogues.py` 根据 OpenRouter 的公开模型列表重新生成该列表；设置了 `GEMINI_API_KEY` 时，还根据 Gemini 模型列表重新生成 Veo 列表。使用 `--check` 时它不写入任何内容，有差异时以 1 退出。它从不选择新的默认模型。
+  - 公共头文件的布局不变。
 
 ### 已弃用
-- **类型化客户端 `VeoClient`、`ImagesClient` 和 `DecisionsClient` 只接受即将停止服务的模型。它们不再扩展，并将在 0.16.0 中移除（#510）。**
-  - **`VeoClient`。** 只接受 `veo-3.1-generate-preview`、`veo-3.1-fast-generate-preview` 和 `veo-3.1-lite-generate-preview`。Google 于 2026-10-22 关闭这三个模型，从这一天起它没有可调用的模型。Gemini API 没有其他 Veo 模型，Google 指定 Gemini Omni（`gemini-omni-1.1-flash`，经 Interactions API）作为替代。
-  - **`ImagesClient`。** OpenAI 已于 2026-05-12 移除 `dall-e-2` 和 `dall-e-3`。`gpt-image-1` 于 2026-10-23 关闭，`gpt-image-1-mini` 和 `gpt-image-1.5` 于 2026-12-01 关闭。Gemini 配置（`gemini-3.1-flash-lite-image`）不受影响。
-  - **`DecisionsClient`。** 只接受 `typesafe/jev-1.13`。
+- **类型化客户端 `VeoClient`、`ImagesClient` 和 `DecisionsClient` 不再扩展，并将在 0.16.0 中移除（#510）。**
+  - **`VeoClient`。** Gemini API 提供的 Veo 模型共三个：`veo-3.1-generate-preview`、`veo-3.1-fast-generate-preview` 和 `veo-3.1-lite-generate-preview`。Google 于 2026-10-22 关闭这三个模型，从这一天起该客户端没有可调用的模型。Google 指定 Gemini Omni（`gemini-omni-1.1-flash`，经 Interactions API）作为替代。
+  - **`ImagesClient`。** OpenAI 已于 2026-05-12 移除 `dall-e-2` 和 `dall-e-3`。`gpt-image-1` 于 2026-10-23 关闭，`gpt-image-1-mini` 和 `gpt-image-1.5` 于 2026-12-01 关闭。请改为配置 `gpt-image-2`（#518）。Gemini 配置（`gemini-3.1-flash-lite-image`）不受影响。
+  - **`DecisionsClient`。** 随附的配置列出了全部 27 个 OpenRouter 决策模型（#518）。
   - **替代方案。** 图像、视频、音频、嵌入、rerank、decisions 以及实时 API，所有提供方端点都改由 SchemaProvider 负责。它按能力配置而不是固定模型列表接受模型。NeoGraph 0.16.0 将采用它，删除这三个客户端，并通过它提供 Omni 视频。
 
 ## [0.15.0] - 2026-10-18

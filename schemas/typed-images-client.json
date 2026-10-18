@@ -22,5 +22,28 @@
     "image_size": "1K",
     "thinking": "minimal",
     "max_output_tokens": 2048
+  },
+  "capabilities": {
+    "aspect_ratios": [
+      "1:1",
+      "1:4",
+      "4:1",
+      "1:8",
+      "8:1",
+      "2:3",
+      "3:2",
+      "3:4",
+      "4:3",
+      "4:5",
+      "5:4",
+      "9:16",
+      "16:9",
+      "21:9"
+    ],
+    "image_sizes": [
+      "1K"
+    ],
+    "min_output_tokens": 1120,
+    "max_output_tokens": 4096
   }
 }

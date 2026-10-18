@@ -5,7 +5,163 @@
   "default_model": "typesafe/jev-1.13",
   "models": [
     {
+      "id": "cloudflare/clef",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "cloudflare/clef-flash",
+      "prompt_usd_per_million_tokens": 0.038,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "cloudflare/clef-omni",
+      "prompt_usd_per_million_tokens": 0.15,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "inception/mercury-decide",
+      "prompt_usd_per_million_tokens": 0.02,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "inception/mercury-decide:free",
+      "prompt_usd_per_million_tokens": 0,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "jaredpalmer/kev-4b",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "liquid/d1",
+      "prompt_usd_per_million_tokens": 0.02,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "liquid/d1-ultra",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "microsoft/microsoft-decision-1",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "nace-ai/drex-v1.5",
+      "prompt_usd_per_million_tokens": 0.04,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "nace-ai/drex-v2.0",
+      "prompt_usd_per_million_tokens": 0.06,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "openai/gpt-6-luna-decisions",
+      "prompt_usd_per_million_tokens": 0.1,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "perplexity/pplx-decider-flash-v1.2",
+      "prompt_usd_per_million_tokens": 0.01,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "perplexity/pplx-decider-v1.2",
+      "prompt_usd_per_million_tokens": 0.02,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "respan/span-01",
+      "prompt_usd_per_million_tokens": 0.02,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "respan/span-01-lite",
+      "prompt_usd_per_million_tokens": 0,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "respan/span-01-lite:free",
+      "prompt_usd_per_million_tokens": 0,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "respan/span-02",
+      "prompt_usd_per_million_tokens": 0.01,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "scaledown/classify-1",
+      "prompt_usd_per_million_tokens": 0.04,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "togethercomputer/tev1-4b-experimental",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
       "id": "typesafe/jev-1.13",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "typesafe/jev-1.14",
+      "prompt_usd_per_million_tokens": 0.042,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "upstage/solar-decide",
+      "prompt_usd_per_million_tokens": 0.05,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "upstage/solar-decide-flash",
+      "prompt_usd_per_million_tokens": 0.05,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": true
+    },
+    {
+      "id": "~perplexity/pplx-decider-flash-latest",
+      "prompt_usd_per_million_tokens": 0.01,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "~perplexity/pplx-decider-latest",
+      "prompt_usd_per_million_tokens": 0.02,
+      "output_usd_per_million_tokens": 0,
+      "implicit_caching": false
+    },
+    {
+      "id": "~typesafe/jev-latest",
       "prompt_usd_per_million_tokens": 0.042,
       "output_usd_per_million_tokens": 0,
       "implicit_caching": false

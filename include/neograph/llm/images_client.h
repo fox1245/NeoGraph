@@ -2,7 +2,9 @@
 
 // Deprecated (#510): OpenAI shuts down gpt-image-1 on 2026-10-23 and gpt-image-1-mini
 // and gpt-image-1.5 on 2026-12-01 (dall-e-2/3 are already removed). NeoGraph 0.16.0
-// removes this client in favour of SchemaProvider endpoints.
+// removes this client in favour of SchemaProvider endpoints. The model and its
+// limits come from the external configuration; the client has no model list of
+// its own.
 
 #include <neograph/llm/endpoint_types.h>
 #include <neograph/graph/cancel.h>
