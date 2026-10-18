@@ -715,6 +715,8 @@ if(TARGET neograph::llm)
         COMMAND Python3::Interpreter
             ${CMAKE_CURRENT_SOURCE_DIR}/typed_veo_peer.py
             $<TARGET_FILE:neograph_typed_veo_tests>)
+    target_compile_definitions(neograph_typed_decisions_tests PRIVATE
+        NEOGRAPH_SHIPPED_SCHEMAS="${PROJECT_SOURCE_DIR}/schemas")
     add_test(NAME TypedDecisions.LocalHTTP
         COMMAND neograph_typed_decisions_tests)
     set_tests_properties(

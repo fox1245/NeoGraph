@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=550a33a941b3a8c6d95667c4436e76a879249e4fd3bc15d986e95588af80efbf -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=05d91e022716485f1f09dbc63f435a4dd1d019f3dc4316cce1dcfc5e028517d1 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -24,12 +24,17 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **Python.** 이제 `Opaque.wire_metadata`를 읽을 수 있으므로, 보존된 이미지를 Python에서 꺼낼 수 있습니다.
   - **이번 라인에서 고치지 않는 것.** `claude-haiku-4-5`처럼 programmatic tool calling을 지원하지 않는 모델에서는 `_20260318` 웹 툴에 `allowed_callers`가 필요한데, 인터페이스 6은 이 값을 보낼 수 없습니다. 이런 모델에는 `web_search_20250305`나 `web_fetch_20250910`을 쓰세요. Lyria처럼 thinking이 없는 Gemini 모델은 family 기본값 `includeThoughts` 때문에 여전히 400을 받습니다. 두 문제 모두 NeoGraph 0.16.0이 채택할 SchemaProvider 0.4.0에서 고쳐집니다 (#512).
   - NeoGraph, C++ 소비자, Python 확장을 0.3.5 헤더와 라이브러리로 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
+- **타입 클라이언트 `VeoClient`, `ImagesClient`, `DecisionsClient`가 설정에 나열된 모델을 허용합니다 (#518).** 각 클라이언트는 설정과 별도로 코드에 박힌 목록에 없는 모델을 모두 거부했기 때문에, 공급자가 이미 제공하는 모델도 NeoGraph 릴리스를 기다려야 했습니다. `DecisionsClient`는 OpenRouter의 결정 모델 27개 중 `typesafe/jev-1.13`만 허용했고, `ImagesClient`는 `gpt-image-2`와 `gemini-3.1-flash-image`를 거부했으며, `VeoClient`는 `veo-3.1-*-preview` id 세 개만 허용했습니다. 이제 설정이 유일한 모델 목록입니다.
+  - **모델 한도는 설정 데이터입니다.** `ImagesClient`는 선택 항목인 `capabilities` 객체(`sizes`, `qualities`, `aspect_ratios`, `image_sizes`, `max_n`, `max_prompt_characters`, `min_output_tokens`, `max_output_tokens`)를 받습니다. `VeoClient`의 모델 항목은 `id`, `resolutions`, `max_reference_images`를 가진 객체일 수 있습니다. 설정이 선언하지 않은 한도는 로컬에서 검사하지 않고 공급자가 판단합니다. 함께 배포하는 `schemas/typed-images-client.json`과 `schemas/typed-veo-client.json`은 그동안 코드에 박혀 있던 한도를 선언합니다. **동작 변경:** `capabilities`가 없으면 `ImagesClient`는 알 수 없는 크기, 품질, 종횡비, 이미지 크기를 더 이상 보내기 전에 거부하지 않고, `VeoClient`는 항목에 그렇게 적힌 모델에 대해서만 4K나 참조 이미지를 거부합니다.
+  - **`DecisionsClient`.** `provider.options`(공급자 slug를 키로 하는 객체)를 거부하지 않고 그대로 보내며, `implicit_caching: true`인 모델도 허용합니다. 거부된 설정은 이제 실패한 검사를 `safe_message`에 밝힙니다. 설정에 없는 모델로 보낸 요청은 여전히 보내기 전에 거부합니다.
+  - **카탈로그 갱신.** 함께 배포하는 `schemas/typed-decisions-client.json`은 OpenRouter 결정 모델 27개를 모두 나열합니다. `scripts/sync_model_catalogues.py`는 이 목록을 OpenRouter의 공개 모델 목록에서, `GEMINI_API_KEY`가 설정되어 있으면 Veo 목록을 Gemini 모델 목록에서 다시 만듭니다. `--check`를 주면 아무것도 쓰지 않고 차이가 있을 때 1로 종료합니다. 새 기본 모델을 고르지는 않습니다.
+  - 공개 헤더의 레이아웃은 바뀌지 않습니다.
 
 ### 폐기 예정
-- **타입 클라이언트 `VeoClient`, `ImagesClient`, `DecisionsClient`가 서비스 종료를 앞둔 모델만 허용합니다. 앞으로 확장하지 않으며 0.16.0에서 제거합니다 (#510).**
-  - **`VeoClient`.** `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview`만 허용합니다. Google이 세 모델을 모두 2026-10-22에 종료하므로, 이날부터는 호출할 모델이 없습니다. Gemini API에는 다른 Veo 모델이 없고, Google은 대체 모델로 Gemini Omni(`gemini-omni-1.1-flash`, Interactions API 경유)를 안내합니다.
-  - **`ImagesClient`.** OpenAI는 `dall-e-2`와 `dall-e-3`를 2026-05-12에 제거했습니다. `gpt-image-1`은 2026-10-23에, `gpt-image-1-mini`와 `gpt-image-1.5`는 2026-12-01에 종료합니다. Gemini 프로필(`gemini-3.1-flash-lite-image`)은 영향이 없습니다.
-  - **`DecisionsClient`.** `typesafe/jev-1.13`만 허용합니다.
+- **타입 클라이언트 `VeoClient`, `ImagesClient`, `DecisionsClient`는 앞으로 확장하지 않으며 0.16.0에서 제거합니다 (#510).**
+  - **`VeoClient`.** Gemini API가 제공하는 Veo 모델은 `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview` 세 개입니다. Google이 세 모델을 모두 2026-10-22에 종료하므로, 이날부터 이 클라이언트는 호출할 모델이 없습니다. Google은 대체 모델로 Gemini Omni(`gemini-omni-1.1-flash`, Interactions API 경유)를 안내합니다.
+  - **`ImagesClient`.** OpenAI는 `dall-e-2`와 `dall-e-3`를 2026-05-12에 제거했습니다. `gpt-image-1`은 2026-10-23에, `gpt-image-1-mini`와 `gpt-image-1.5`는 2026-12-01에 종료합니다. 대신 `gpt-image-2`를 설정하세요 (#518). Gemini 프로필(`gemini-3.1-flash-lite-image`)은 영향이 없습니다.
+  - **`DecisionsClient`.** 함께 배포하는 설정은 OpenRouter 결정 모델 27개를 모두 나열합니다 (#518).
   - **대체 방안.** SchemaProvider가 이미지, 영상, 오디오, 임베딩, rerank, decisions, 실시간 API까지 모든 공급자 엔드포인트를 맡습니다. 모델은 고정 목록이 아니라 기능 프로필로 허용합니다. NeoGraph 0.16.0이 이를 채택해 세 클라이언트를 삭제하고, Omni 영상도 이 경로로 제공합니다.
 
 ## [0.15.0] - 2026-10-18

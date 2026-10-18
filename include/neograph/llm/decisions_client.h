@@ -1,7 +1,8 @@
 #pragma once
 
-// Deprecated (#510): admits typesafe/jev-1.13 only. NeoGraph 0.16.0 removes this
-// client in favour of SchemaProvider endpoints.
+// Deprecated (#510): NeoGraph 0.16.0 removes this client in favour of
+// SchemaProvider endpoints. The models it admits are the ones the external
+// configuration lists; the client has no model list of its own.
 
 #include <neograph/api.h>
 #include <neograph/graph/cancel.h>
@@ -63,8 +64,8 @@ struct DecisionsProviderPreferences {
     std::optional<std::variant<DecisionsSortBy, DecisionsSort>> sort;
     std::optional<DecisionsPreference> preferred_max_latency,
         preferred_min_throughput;
-    // Current Jev catalogue advertises no supported parameters. Nonempty
-    // provider-specific options fail before dispatch instead of being dropped.
+    // Provider-specific options keyed by provider slug, sent as
+    // `provider.options`. The provider decides which ones it accepts.
     std::map<std::string, json> options;
 };
 struct DecisionsRequest {
@@ -101,7 +102,10 @@ using DecisionsResult = std::variant<DecisionsResponse, EndpointFailure>;
 
 class NEOGRAPH_API DecisionsConfig final {
 public:
-    // Closed version-1 operational JSON. No credentials in the document.
+    // Closed version-1 operational JSON, usually read from a file the
+    // operator maintains. `models` is the catalogue: any model id listed there
+    // is admitted. No credentials in the document. A refused document names
+    // the failed check in `safe_message`.
     static std::variant<DecisionsConfig, EndpointFailure> from_json(const json& document);
 private:
     struct Data;

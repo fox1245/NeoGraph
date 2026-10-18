@@ -488,7 +488,7 @@ is not a live compatibility guarantee. No WebSocket/primitive runnable example
 is retained. Images/Veo/Decisions are separate typed NeoGraph clients and do not
 inherit a chat-run spending grant. They are deprecated, and 0.16.0 removes them in favour of
 SchemaProvider endpoints:
-- Google shuts down every Veo model `VeoClient` admits on 2026-10-22.
+- Google shuts down every Veo model the Gemini API offers (the three `veo-3.1-*-preview` models) on 2026-10-22.
 - OpenAI shuts down `gpt-image-1` on 2026-10-23, and `gpt-image-1-mini` and `gpt-image-1.5` on
   2026-12-01.
 

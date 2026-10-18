@@ -37,7 +37,7 @@ struct VeoLocalPeer {
     std::string file_location;
 
     VeoLocalPeer() {
-        server.Post("/v1beta/models/veo-3.1-lite-generate-preview:predictLongRunning",
+        server.Post(R"(/v1beta/models/[A-Za-z0-9._-]+:predictLongRunning)",
             [this](const httplib::Request&, httplib::Response& response) {
                 ++posts;
                 std::lock_guard<std::mutex> lock(mutex);
@@ -118,6 +118,30 @@ VeoSubmitResult submit(const VeoClient& client, VeoRequest r = request(),
     };
     return async::run_sync(work(&client, std::move(r), deadline));
 }
+}
+
+TEST(TypedVeoClient, ConfiguredCatalogueIsTheOnlyModelList) {
+    VeoLocalPeer peer;
+    peer.submission["name"] = "models/veo-next-generate/operations/local-1";
+    auto document = config(peer);
+    document["models"] = json::array({"veo-next-generate"});
+    document["defaults"]["model"] = "veo-next-generate";
+    VeoClient client(document, "private-local-key");
+    // Without declared limits the provider, not the client, judges 4K.
+    auto r = request();
+    r.resolution = VeoResolution::P4K;
+    r.duration_seconds = 8;
+    const auto submitted = submit(client, std::move(r));
+    ASSERT_TRUE(submitted.operation);
+    EXPECT_FALSE(submitted.failure);
+    EXPECT_EQ(peer.posts, 1);
+
+    auto unlisted = request();
+    unlisted.model = model;
+    const auto refused = submit(client, std::move(unlisted));
+    ASSERT_TRUE(refused.failure);
+    EXPECT_EQ(refused.failure->kind, EndpointFailureKind::InvalidRequest);
+    EXPECT_EQ(peer.posts, 1);
 }
 
 TEST(TypedVeoClient, MissingDoneRemainsPendingThenDownloadsOwnedMp4) {
@@ -306,7 +330,12 @@ TEST(TypedVeoClient, CancelInterruptsWaitTimerAndDownloadSocket) {
 
 TEST(TypedVeoClient, UnsupportedLiteVariantsAndInvalidControlsDispatchNothing) {
     VeoLocalPeer peer;
-    VeoClient client(config(peer), "private-local-key");
+    // The lite limits come from the configured catalogue, as in the shipped
+    // schemas/typed-veo-client.json, not from the model name.
+    auto document = config(peer);
+    document["models"] = json::array({{{"id", model}, {"resolutions", json::array({"720p", "1080p"})},
+        {"max_reference_images", 0}}});
+    VeoClient client(document, "private-local-key");
     for (int variant = 0; variant != 7; ++variant) {
         auto r = request();
         if (variant == 0) r.duration_seconds = 5;

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=550a33a941b3a8c6d95667c4436e76a879249e4fd3bc15d986e95588af80efbf -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=05d91e022716485f1f09dbc63f435a4dd1d019f3dc4316cce1dcfc5e028517d1 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -24,12 +24,17 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **Python。** `Opaque.wire_metadata` を読めるようになり、保持された画像を Python から取り出せます。
   - **このラインでは直さないもの。** `claude-haiku-4-5` のように programmatic tool calling に対応しないモデルでは、`_20260318` の Web ツールに `allowed_callers` が必要ですが、インターフェース 6 はこれを送れません。そうしたモデルでは `web_search_20250305` か `web_fetch_20250910` を使ってください。Lyria など thinking のない Gemini モデルは、family 既定の `includeThoughts` のため引き続き 400 になります。どちらも NeoGraph 0.16.0 が採用する SchemaProvider 0.4.0 で直ります（#512）。
   - NeoGraph、C++ コンシューマー、Python 拡張を 0.3.5 のヘッダーとライブラリでまとめて再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
+- **型付きクライアント `VeoClient`、`ImagesClient`、`DecisionsClient` は設定に挙げたモデルを受け付けます（#518）。** 各クライアントは設定とは別に、コードに組み込んだ一覧にないモデルをすべて拒否していたため、プロバイダーがすでに提供しているモデルでも NeoGraph のリリースを待つ必要がありました。`DecisionsClient` は OpenRouter の判定モデル 27 個のうち `typesafe/jev-1.13` しか受け付けず、`ImagesClient` は `gpt-image-2` と `gemini-3.1-flash-image` を拒否し、`VeoClient` は `veo-3.1-*-preview` の 3 つの id しか受け付けませんでした。いまは設定が唯一のモデル一覧です。
+  - **モデルの上限は設定データです。** `ImagesClient` は省略可能な `capabilities` オブジェクト（`sizes`、`qualities`、`aspect_ratios`、`image_sizes`、`max_n`、`max_prompt_characters`、`min_output_tokens`、`max_output_tokens`）を受け取ります。`VeoClient` のモデル項目は `id`、`resolutions`、`max_reference_images` を持つオブジェクトにできます。設定が宣言しない上限はローカルでは検査せず、プロバイダーが判断します。同梱の `schemas/typed-images-client.json` と `schemas/typed-veo-client.json` は、これまでコードに組み込まれていた上限を宣言します。**動作変更：** `capabilities` がなければ、`ImagesClient` は未知のサイズ、品質、アスペクト比、画像サイズを送信前に拒否しなくなり、`VeoClient` は項目にそう書かれたモデルに対してだけ 4K や参照画像を拒否します。
+  - **`DecisionsClient`。** `provider.options`（プロバイダー slug をキーとするオブジェクト）を拒否せずにそのまま送り、`implicit_caching: true` のモデルも受け付けます。拒否された設定は、失敗した検査を `safe_message` で示すようになりました。設定にないモデルへのリクエストは、これまでどおり送信前に拒否します。
+  - **カタログの更新。** 同梱の `schemas/typed-decisions-client.json` は OpenRouter の判定モデル 27 個をすべて挙げます。`scripts/sync_model_catalogues.py` はこの一覧を OpenRouter の公開モデル一覧から作り直し、`GEMINI_API_KEY` が設定されていれば Veo の一覧を Gemini のモデル一覧から作り直します。`--check` を付けると何も書かず、差分があれば 1 で終了します。新しい既定モデルを選ぶことはありません。
+  - 公開ヘッダーのレイアウトは変わりません。
 
 ### 非推奨
-- **型付きクライアント `VeoClient`、`ImagesClient`、`DecisionsClient` は提供終了が近いモデルしか受け付けません。今後は拡張せず、0.16.0 で削除します（#510）。**
-  - **`VeoClient`。** 受け付けるのは `veo-3.1-generate-preview`、`veo-3.1-fast-generate-preview`、`veo-3.1-lite-generate-preview` だけです。Google はこの3モデルを 2026-10-22 にすべて終了するため、その日から呼べるモデルがなくなります。Gemini API にほかの Veo モデルはなく、Google は後継として Gemini Omni（`gemini-omni-1.1-flash`、Interactions API 経由）を案内しています。
-  - **`ImagesClient`。** OpenAI は `dall-e-2` と `dall-e-3` を 2026-05-12 に削除しました。`gpt-image-1` は 2026-10-23、`gpt-image-1-mini` と `gpt-image-1.5` は 2026-12-01 に終了します。Gemini のプロファイル（`gemini-3.1-flash-lite-image`）は影響を受けません。
-  - **`DecisionsClient`。** 受け付けるのは `typesafe/jev-1.13` だけです。
+- **型付きクライアント `VeoClient`、`ImagesClient`、`DecisionsClient` は今後拡張せず、0.16.0 で削除します（#510）。**
+  - **`VeoClient`。** Gemini API が提供する Veo モデルは `veo-3.1-generate-preview`、`veo-3.1-fast-generate-preview`、`veo-3.1-lite-generate-preview` の3つです。Google はこの3モデルを 2026-10-22 にすべて終了するため、その日からこのクライアントには呼べるモデルがなくなります。Google は後継として Gemini Omni（`gemini-omni-1.1-flash`、Interactions API 経由）を案内しています。
+  - **`ImagesClient`。** OpenAI は `dall-e-2` と `dall-e-3` を 2026-05-12 に削除しました。`gpt-image-1` は 2026-10-23、`gpt-image-1-mini` と `gpt-image-1.5` は 2026-12-01 に終了します。代わりに `gpt-image-2` を設定してください（#518）。Gemini のプロファイル（`gemini-3.1-flash-lite-image`）は影響を受けません。
+  - **`DecisionsClient`。** 同梱の設定は OpenRouter の判定モデル 27 個をすべて挙げます（#518）。
   - **今後の置き換え。** 画像、動画、音声、埋め込み、rerank、decisions、リアルタイム API まで、プロバイダーのエンドポイントはすべて SchemaProvider が担います。モデルは固定リストではなく機能プロファイルで受け付けます。NeoGraph 0.16.0 はこれを採用して3つのクライアントを削除し、Omni の動画もこの経路で提供します。
 
 ## [0.15.0] - 2026-10-18

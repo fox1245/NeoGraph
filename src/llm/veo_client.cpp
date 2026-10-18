@@ -23,10 +23,17 @@ namespace neograph::llm {
 namespace veo_detail {
 using Clock = std::chrono::steady_clock;
 using Ms = std::chrono::milliseconds;
+// Per-model limits the external configuration may declare. A limit the
+// configuration leaves out is not checked locally; the provider validates it.
+struct ModelCapabilities {
+    std::optional<std::vector<VeoResolution>> resolutions;
+    std::optional<std::size_t> max_reference_images;
+};
 struct Client {
     std::string origin, host, port, api_path, key, default_model;
     bool tls = true, adult_only = false;
     std::vector<std::string> models;
+    std::vector<ModelCapabilities> capabilities; // parallel to models
     std::vector<std::string> download_origins;
     unsigned download_redirects = 0;
     VeoAspectRatio aspect;
@@ -64,14 +71,17 @@ std::uint64_t positive(const json& value, std::uint64_t max) {
     if (!n || n > max) throw std::invalid_argument("Invalid Veo limit range");
     return n;
 }
-bool model_supported(const std::string& value) {
-    return value == "veo-3.1-lite-generate-preview" ||
-           value == "veo-3.1-generate-preview" || value == "veo-3.1-fast-generate-preview";
-}
 bool component(std::string_view s) {
     return !s.empty() && std::all_of(s.begin(), s.end(), [](unsigned char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                (c >= '0' && c <= '9') || c == '-' || c == '_';
+    });
+}
+// A model id is one URL path segment.
+bool model_name(std::string_view s) {
+    return !s.empty() && s != "." && s != ".." && std::all_of(s.begin(), s.end(), [](unsigned char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
     });
 }
 bool path_valid(std::string_view path) {
@@ -81,6 +91,44 @@ bool path_valid(std::string_view path) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
                (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' || c == ':';
     });
+}
+VeoResolution resolution_value(const std::string& value) {
+    if (value == "720p") return VeoResolution::P720;
+    if (value == "1080p") return VeoResolution::P1080;
+    if (value == "4k") return VeoResolution::P4K;
+    throw std::invalid_argument("Invalid Veo resolution");
+}
+// A catalogue entry is a model id, or an object with the id and its limits.
+std::pair<std::string, ModelCapabilities> catalogue_entry(const json& entry) {
+    if (entry.is_string()) return {entry.get<std::string>(), {}};
+    if (!entry.is_object() || !entry.contains("id"))
+        throw std::invalid_argument("Invalid Veo model catalogue entry");
+    for (const auto& item : entry.items())
+        if (item.first != "id" && item.first != "resolutions" && item.first != "max_reference_images")
+            throw std::invalid_argument("Invalid Veo model catalogue member");
+    ModelCapabilities caps;
+    if (entry.contains("resolutions")) {
+        const auto& values = entry.at("resolutions");
+        if (!values.is_array() || values.empty()) throw std::invalid_argument("Invalid Veo model resolutions");
+        caps.resolutions.emplace();
+        for (const auto& value : values) caps.resolutions->push_back(resolution_value(value.get<std::string>()));
+    }
+    if (entry.contains("max_reference_images")) {
+        const auto& value = entry.at("max_reference_images");
+        if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<std::int64_t>() < 0) ||
+            value.get<std::uint64_t>() > 3)
+            throw std::invalid_argument("Invalid Veo model reference image limit");
+        caps.max_reference_images = static_cast<std::size_t>(value.get<std::uint64_t>());
+    }
+    return {entry.at("id").get<std::string>(), std::move(caps)};
+}
+const ModelCapabilities* capabilities_of(const Client& c, const std::string& model) {
+    const auto it = std::find(c.models.begin(), c.models.end(), model);
+    return it == c.models.end() ? nullptr : &c.capabilities[static_cast<std::size_t>(it - c.models.begin())];
+}
+bool resolution_allowed(const ModelCapabilities& caps, VeoResolution value) {
+    return !caps.resolutions ||
+        std::find(caps.resolutions->begin(), caps.resolutions->end(), value) != caps.resolutions->end();
 }
 std::shared_ptr<const Client> admit(const json& cfg, std::string key) {
     try {
@@ -119,11 +167,14 @@ std::shared_ptr<const Client> admit(const json& cfg, std::string key) {
             throw std::invalid_argument("Invalid Veo endpoint");
         const auto& models = cfg.at("models");
         if (!models.is_array() || models.empty()) throw std::invalid_argument("Invalid Veo models");
+        // The configured catalogue is the only model list; the client never
+        // carries one of its own.
         for (const auto& m : models) {
-            auto name = m.get<std::string>();
-            if (!model_supported(name) || std::find(c->models.begin(), c->models.end(), name) != c->models.end())
+            auto [name, caps] = catalogue_entry(m);
+            if (!model_name(name) || std::find(c->models.begin(), c->models.end(), name) != c->models.end())
                 throw std::invalid_argument("Invalid Veo model catalogue");
             c->models.push_back(std::move(name));
+            c->capabilities.push_back(std::move(caps));
         }
         const auto& d = cfg.at("defaults");
         closed(d, {"model", "aspect_ratio", "person_generation", "duration_seconds", "resolution"});
@@ -146,7 +197,7 @@ std::shared_ptr<const Client> admit(const json& cfg, std::string key) {
                         resolution == "1080p" ? VeoResolution::P1080 : VeoResolution::P4K;
         if ((c->duration != 4 && c->duration != 6 && c->duration != 8) ||
             (c->resolution != VeoResolution::P720 && c->duration != 8) ||
-            (c->resolution == VeoResolution::P4K && c->default_model == "veo-3.1-lite-generate-preview"))
+            !resolution_allowed(*capabilities_of(*c, c->default_model), c->resolution))
             throw std::invalid_argument("Invalid Veo default combination");
         const auto& l = cfg.at("limits");
         closed(l, {"deadline_ms", "poll_interval_ms", "max_prompt_bytes", "max_image_bytes",
@@ -268,10 +319,12 @@ std::optional<EndpointFailure> request_body(const Client& c, const VeoRequest& r
     const auto person = r.person_generation.value_or(c.person);
     const auto duration = r.duration_seconds.value_or(c.duration);
     const auto resolution = r.resolution.value_or(c.resolution);
-    const bool lite = model == "veo-3.1-lite-generate-preview";
-    if (std::find(c.models.begin(), c.models.end(), model) == c.models.end() || r.extension_video ||
-        r.number_of_videos != 1 || person == VeoPersonGeneration::DontAllow ||
-        (lite && (resolution == VeoResolution::P4K || !r.reference_images.empty())))
+    const auto* caps = capabilities_of(c, model);
+    if (!caps) return failure(EndpointFailureKind::InvalidRequest, "Veo model is not in the configured catalogue");
+    if (!resolution_allowed(*caps, resolution) ||
+        (caps->max_reference_images && r.reference_images.size() > *caps->max_reference_images))
+        return failure(EndpointFailureKind::Unsupported, "The configured catalogue does not admit this Veo capability for the model");
+    if (r.extension_video || r.number_of_videos != 1 || person == VeoPersonGeneration::DontAllow)
         return failure(EndpointFailureKind::Unsupported, "Unsupported Veo model or capability");
     if (r.prompt.empty() || r.prompt.size() > c.prompt_limit || !aspect_name(aspect) ||
         !person_name(person) || !resolution_name(resolution) ||

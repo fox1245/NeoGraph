@@ -146,7 +146,6 @@ json preference_json(const DecisionsPreference& preference) {
     }, preference);
 }
 json provider_json(const DecisionsProviderPreferences& value) {
-    require(value.options.empty(), "Provider options are unsupported by the admitted Decisions models");
     json result = json::object();
     const auto boolean = [&](const char* key, const std::optional<bool>& entry) {
         if (entry) result[key] = *entry;
@@ -204,6 +203,14 @@ json provider_json(const DecisionsProviderPreferences& value) {
                 return result;
             }
         }, *value.sort);
+    }
+    if (!value.options.empty()) {
+        json options = json::object();
+        for (const auto& [slug, entry] : value.options) {
+            require(!slug.empty() && entry.is_object(), "Provider options must be objects keyed by provider slug");
+            options[slug] = entry;
+        }
+        result["options"] = std::move(options);
     }
     if (value.preferred_max_latency)
         result["preferred_max_latency"] = preference_json(*value.preferred_max_latency);
@@ -360,17 +367,16 @@ std::variant<DecisionsConfig, EndpointFailure> DecisionsConfig::from_json(const 
         require(models.is_array() && !models.empty(), "Decisions models must be a nonempty array");
         for (const auto& model : models) {
             closed(model, {"id", "prompt_usd_per_million_tokens", "output_usd_per_million_tokens", "implicit_caching"});
+            // The configured catalogue is the only model list; the client never
+            // carries one of its own.
             auto id = nonempty_string(model.at("id"));
-            require(id == "typesafe/jev-1.13" || id == "typesafe/jev-1.13-20260917",
-                    "Unsupported Decisions model");
             require(std::find(data->models.begin(), data->models.end(), id) == data->models.end(),
                     "Duplicate Decisions model");
             for (const char* name : {"prompt_usd_per_million_tokens", "output_usd_per_million_tokens"}) {
                 require(model.at(name).is_number() && nonnegative(model.at(name).get<double>()),
                         "Invalid Decisions catalogue price");
             }
-            require(model.at("implicit_caching").is_boolean() && !model.at("implicit_caching").get<bool>(),
-                    "Current Decisions models do not support implicit caching");
+            require(model.at("implicit_caching").is_boolean(), "Invalid Decisions implicit caching flag");
             data->models.push_back(std::move(id));
         }
         require(std::find(data->models.begin(), data->models.end(), data->default_model) != data->models.end(),
@@ -391,6 +397,9 @@ std::variant<DecisionsConfig, EndpointFailure> DecisionsConfig::from_json(const 
         data->transport.max_redirects = 0;
         data->transport.allow_replay = false;
         return DecisionsConfig(std::move(data));
+    } catch (const AdmissionError& error) {
+        // The message names the failed check and never includes config values.
+        return failure(EndpointFailureKind::InvalidConfig, error.message);
     } catch (...) {
         return failure(EndpointFailureKind::InvalidConfig, "Invalid closed version-1 Decisions configuration");
     }
