@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=49267cdeab9f769df554c14dbf088eedb8913bbe95971f27f9e338a20ecdb3ec -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.15.1] - 2026-10-19
 
 ### 已添加
 - **每个版本都要用真实的提供商密钥通过实时端到端测试套件（#522）。** 本地测试只回放录制的流量，无法说明提供商现在是否仍接受 NeoGraph 发送的内容；0.15.0 带着两个只需一次真实调用就能发现的流式缺陷发布了。`bindings/python/tests/live/` 和 `tests/live_e2e_test.cpp` 覆盖八个家族预设的缓冲与流式调用、视觉、工具调用、生成的媒体、Anthropic Messages 控制项、类型化的失败、C++ 适配器和类型化端点客户端，并把该版本线的已知缺口作为 strict xfail。`scripts/live_e2e.py run` 为干净的提交写入 `tests/live/report.json`。发布拉取请求提交该报告，在发布任何内容之前，`Live e2e report` 工作流和 Wheels 发布标签都会检查它（参见 [`tests/live/README.md`](tests/live/README.md)）。

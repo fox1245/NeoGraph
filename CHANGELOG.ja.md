@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=49267cdeab9f769df554c14dbf088eedb8913bbe95971f27f9e338a20ecdb3ec -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -13,6 +13,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+## [0.15.1] - 2026-10-19
 
 ### 追加
 - **リリースは実際のプロバイダーキーでライブ・エンドツーエンド・スイートを通過します（#522）。** ローカルテストは記録した通信を再生するだけなので、NeoGraph が送るものをプロバイダーがいまも受け付けるかは示せません。0.15.0 は、実際の呼び出し 1 回で分かるストリームの欠陥を 2 つ抱えたまま出ました。`bindings/python/tests/live/` と `tests/live_e2e_test.cpp` は、8 つのファミリープリセットのバッファとストリームの呼び出し、ビジョン、ツール呼び出し、生成メディア、Anthropic Messages の制御、型付きの失敗、C++ アダプター、型付きエンドポイントクライアントを対象とし、そのリリースラインの既知のギャップは strict xfail にします。`scripts/live_e2e.py run` はクリーンなコミットについて `tests/live/report.json` を書きます。リリースのプルリクエストがそれをコミットし、何かを公開する前に `Live e2e report` ワークフローと Wheels のリリースタグがそれを検査します（[`tests/live/README.md`](tests/live/README.md) を参照）。

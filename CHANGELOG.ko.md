@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=49267cdeab9f769df554c14dbf088eedb8913bbe95971f27f9e338a20ecdb3ec -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.15.1] - 2026-10-19
 
 ### 추가됨
 - **릴리스는 실제 공급자 키로 라이브 엔드투엔드 스위트를 통과합니다 (#522).** 로컬 테스트는 녹화한 트래픽을 재생할 뿐이라, 공급자가 NeoGraph가 보내는 요청을 지금도 받아들이는지 보여 주지 못합니다. 0.15.0은 실제 호출 한 번이면 드러나는 스트림 결함 두 개를 안고 나갔습니다. `bindings/python/tests/live/`와 `tests/live_e2e_test.cpp`는 family 프리셋 여덟 개의 버퍼·스트림 호출, 비전, 툴 호출, 생성 미디어, Anthropic Messages 제어, 타입이 정해진 실패, C++ 어댑터, 타입 엔드포인트 클라이언트를 다루며, 그 릴리스 라인의 알려진 빈틈은 strict xfail로 둡니다. `scripts/live_e2e.py run`은 깨끗한 커밋에 대해 `tests/live/report.json`을 씁니다. 릴리스 풀 리퀘스트가 이를 커밋하면, 무엇이든 게시하기 전에 `Live e2e report` 워크플로와 Wheels 릴리스 태그가 이를 검사합니다([`tests/live/README.md`](tests/live/README.md) 참고).

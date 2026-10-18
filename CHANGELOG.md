@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-10-19
+
 ### Added
 - **Releases pass a live end-to-end suite with real provider keys (#522).** Local tests replay recorded traffic and cannot show that a provider still accepts what NeoGraph sends; 0.15.0 shipped two streaming defects that one real call shows. `bindings/python/tests/live/` and `tests/live_e2e_test.cpp` cover the eight family presets buffered and streamed, vision, tool calls, generated media, the Anthropic Messages controls, typed failures, the C++ adapter and the typed endpoint clients, with the known gaps of the release line as strict xfail. `scripts/live_e2e.py run` writes `tests/live/report.json` for a clean commit. A release pull request commits it, and the `Live e2e report` workflow and the Wheels release tag check it before anything is published (see [`tests/live/README.md`](tests/live/README.md)).
 
