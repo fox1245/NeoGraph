@@ -87,6 +87,10 @@ struct NEOGRAPH_API ToolExecutionResult {
     std::optional<int> signal_number;
     /// True when the bridge stopped after hitting the policy output limit.
     bool output_truncated = false;
+    /// The tool's service refused the call before running it (the tool threw
+    /// a ToolRequestRefusal), so nothing ran; `retryable` says whether the
+    /// same call may succeed when sent again.
+    bool refused = false;
 
     [[nodiscard]] bool succeeded() const noexcept {
         return status == ToolTerminalStatus::Succeeded;
@@ -99,7 +103,8 @@ struct NEOGRAPH_API ToolExecutionResult {
  * (which throw graph::CancelledException): it carries the whole typed result.
  * The node failure classifier reads it: an uncertain effect is
  * NG.EffectUncertain, a timed-out or expired call NG.Timeout, anything else
- * an ordinary failure.
+ * an ordinary failure, which is not retried when the call was refused
+ * (`refused`) and the refusal is not retryable.
  */
 class NEOGRAPH_API ToolExecutionError : public std::runtime_error {
 public:

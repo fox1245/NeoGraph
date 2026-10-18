@@ -297,8 +297,12 @@ private:
             else if (result.status == ToolTerminalStatus::TimedOut ||
                      result.status == ToolTerminalStatus::Expired)
                 found(NodeFailureClass::Timeout);
-            else
+            else {
                 found(NodeFailureClass::Ordinary);
+                // A call the tool's service refused is refused again, as when
+                // the refusal itself reaches the node (#502).
+                if (result.refused && !result.retryable) not_retryable_ = true;
+            }
             return {{}, nested_of(failure)};
         } catch (const ProviderFailure& failure) {
             found(provider_failure_class(failure, run_token_));

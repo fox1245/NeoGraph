@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1a3318292ec670303c0c1c72c0ce8fe9ab32fe353baeffdcc4f0f3981865bf3b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=463d840c4041f2427a4d31f9766c5c7b1620c32d6239d90175060fab213394ef -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -23,6 +23,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 - **読むのをやめた子プロセスへの書き込みで、ホストが SIGPIPE によって終了しなくなりました (#495)。** NeoGraph は stdio の MCP サーバーとプロセスツール (`ProcessTool`) の stdin に書き込みます。子が stdin を閉じたか終了した後は、そのような書き込みが SIGPIPE を起こし、その既定の動作はプロセス全体を終了させます。stdio の MCP クライアントは、自分の I/O スレッドでだけ SIGPIPE をブロックしていました。シグナルが書き込んだスレッドに届く Linux ではそれで足りますが、プロセスに対してシグナルを起こす macOS では足りません。macOS の CI で見られたように、`initialize` を読む前に終了した MCP サーバーが C++ のホストを終了させることがありました。プロセスツールのブリッジは SIGPIPE をまったくブロックしていませんでした。macOS ではそのようなパイプの書き込み側に `F_SETNOSIGPIPE` を付け、Linux ではプロセスツールのブリッジが書き込みのたびに自分のスレッドで SIGPIPE をブロックし、その書き込みが起こしたシグナルを回収するようになりました。書き込みは `EPIPE` で失敗し、呼び出しはそうでなかった場合と同じように失敗するか終わります。また、ブリッジは読み手のいなくなった満杯の stdin パイプ (`POLLERR` だけが報告される) を子が終了するまですぐに poll し直し、CPU コアを 1 つ使い続けていましたが、そこで入力を終えるようになりました。SIGPIPE を無視する Python のホストは影響を受けず、NeoGraph の A2A や MCP HTTP サーバーを動かすプロセスも、cpp-httplib のサーバーがプロセスの SIGPIPE を `SIG_IGN` にするため影響を受けませんでした。
 - **A2A サーバーを止めても、まだ送り始めていないストリームが切れなくなりました (#493)。** cpp-httplib は 0.41 も 0.61 も、リスナーが止まった後は chunked content provider を呼びません。`A2AServer::stop()` は最初にリスナーを止めていたため、ハンドラーがリクエストを受け付けたものの、ストリームがまだ最初の Task を送っていない `SendStreamingMessage` や `SubscribeToTask` は、ストリームを 1 バイトも送らずに閉じられていました。実行は続いているのに、クライアントは実行のイベントではなく `End of file` を読みました。`GraphHostA2AContract.SharedBoundary` がときどきこのように失敗していました。`stop()` は、処理中のすべてのリクエストが応答するか、ストリームなら送り始めるまで待ってからリスナーを止めるようになりました。そのストリームは、すでに開いていたストリームと同じく実行の最終状態で終わります。待っている間に届いたリクエストは、仕事を始めずに JSON-RPC エラー `-32603` (reason `UNAVAILABLE`、"The agent is stopping; retry later") を受け取ります。
+- **ノードが例外を送出するファサードでツールを呼んだとき、ツールのサービスが拒否したリクエストをリトライしなくなりました (#502)。** `ToolExecutionController::execute_async` は、ツールの `ToolRequestRefusal`（MCP の `-32602`、gRPC の `INVALID_ARGUMENT`、`acp::ACPClientRefusal`）を失敗した結果に変えて `ToolExecutionError` として送出しますが、この例外は呼び出しが拒否されたことを伝えていませんでした。ノード失敗の分類器はこれを通常の失敗として読んだため、ノードの再試行ポリシーが拒否されたリクエストをもう一度送り、すべてのプロトコルのホストが `retryable_by_class: true` と報告していました。`ToolExecutionResult` にそのような呼び出しで設定される `refused` が加わり、分類器はリトライできない拒否された呼び出しを、拒否そのものと同じように扱います。ノードは 1 回だけ実行されます。`ToolExecutionResult` にメンバーが増えたため、NeoGraph と C++ の利用側コードを一緒に再ビルドしてください ([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
 
 ## [0.14.3] - 2026-10-18
 

@@ -79,13 +79,47 @@ TEST(ToolRequestRefusal, IsAPlainFailureWhateverThePolicySays) {
         EXPECT_EQ(refused.error, "arguments refused");
         EXPECT_FALSE(refused.effect_uncertain);
         EXPECT_FALSE(refused.retryable) << "the same request is refused again";
+        EXPECT_TRUE(refused.refused);
 
-        EXPECT_TRUE(run_with(Refusal::RejectedRetryable, controller).retryable);
+        const auto later = run_with(Refusal::RejectedRetryable, controller);
+        EXPECT_TRUE(later.retryable);
+        EXPECT_TRUE(later.refused);
 
         const auto own_base = run_with(Refusal::OwnBase, controller);
         EXPECT_EQ(own_base.status, ToolTerminalStatus::Failed);
         EXPECT_FALSE(own_base.effect_uncertain);
+        EXPECT_TRUE(own_base.refused);
     }
+    EXPECT_FALSE(run_with(Refusal::OrdinaryFailure, controller_declaring(ToolEffectClass::ReadOnly))
+                     .refused);
+}
+
+// #502: the throwing facade turns the refusal into a ToolExecutionError; the
+// classifier still reads it as a refused request, not as a failure to retry.
+TEST(ToolRequestRefusal, TheThrowingFacadeKeepsTheRefusal) {
+    const auto facade = [](Refusal refusal) {
+        RefusingTool tool(refusal);
+        auto controller = controller_declaring(ToolEffectClass::ReadOnly);
+        ToolExecutionContext context;
+        context.controller = controller;
+        try {
+            (void)neograph::async::run_sync(
+                controller->execute_async(tool, json::object(), context));
+        } catch (const ToolExecutionError& error) {
+            EXPECT_TRUE(error.result().refused || refusal == Refusal::OrdinaryFailure);
+            return classify_failure(std::current_exception());
+        }
+        ADD_FAILURE() << "execute_async did not throw";
+        return FailureVerdict{};
+    };
+    const auto refused = facade(Refusal::Rejected);
+    EXPECT_EQ(refused.failure_class, NodeFailureClass::Ordinary);
+    EXPECT_FALSE(refused.retryable);
+    EXPECT_FALSE(refused.retryable_by_class);
+    EXPECT_TRUE(facade(Refusal::RejectedRetryable).retryable);
+    EXPECT_FALSE(facade(Refusal::OwnBase).retryable);
+    // Unchanged: an ordinary failure of a read-only call is retried.
+    EXPECT_TRUE(facade(Refusal::OrdinaryFailure).retryable);
 }
 
 TEST(ToolRequestRefusal, AnyOtherFailureOfAStartedCallStaysUncertain) {

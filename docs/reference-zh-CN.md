@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=2162d0df8ed528e3ce5a457cf6875641172f1ddf0baf63342723892ee3437395 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d666eb708d94a5c71d20287af84b0eacd9f2a1a76ca66e0f37aeba320a84348f -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -564,7 +564,7 @@ public:
 
 **文本。** 跨越边界的文本都是格式正确的 UTF-8：每个格式错误的最大子序列都变为 U+FFFD，这是 Unicode 与 WHATWG 的替换做法。该规则适用于工具结果与失败消息、Hook 回执、`json::dump`（含有错误字符串的文档过去会被序列化为空字符串）、MCP 与 gRPC 响应，以及 Python 绑定。在 Python 中，从 C++ 读取的文本也以同样方式解码；`str` 转为 UTF-8 时，其中经过 surrogate-escape 的字节（U+DC80 到 U+DCFF，即 `errors="surrogateescape"` 产生的）还原为它们所代表的字节，其他孤立代理项变为 U+FFFD。
 
-**抛出异常的门面。** `ToolExecutionController::execute_async` 成功时返回输出，对 `cancelled_before_start` 与 `cancellation_requested` 抛出 `graph::CancelledException`，对其他所有状态抛出携带完整 `ToolExecutionResult` 的 `ToolExecutionError`。节点失败分类器会读取它：效果不确定为 `NG.EffectUncertain`，超时或过期的调用为 `NG.Timeout`，其余为 Ordinary。
+**抛出异常的门面。** `ToolExecutionController::execute_async` 成功时返回输出，对 `cancelled_before_start` 与 `cancellation_requested` 抛出 `graph::CancelledException`，对其他所有状态抛出携带完整 `ToolExecutionResult` 的 `ToolExecutionError`。节点失败分类器会读取它：效果不确定为 `NG.EffectUncertain`，超时或过期的调用为 `NG.Timeout`，其余为 Ordinary。工具服务在运行前拒绝的调用（`ToolRequestRefusal` 时设置的 `ToolExecutionResult::refused`）不会重试，除非其 `retryable` 表明重试可能成功，这与拒绝本身到达节点时相同。
 
 <a id="protocol-failure-mapping"></a>
 ### 协议失败映射
