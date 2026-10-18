@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=f9e99fcd68ac033d625662002851cb5f07dff21612ab2b50dfe87fe41e592602 -->
+<!-- neograph-i18n: source=docs/migration-v0.4-to-v1.0.md locale=ko source_sha256=f5d0f039713cc56d18d373cbfeb6c8ad09c2c921fa9a0c8219cd786951c4efa1 -->
 # 마이그레이션 가이드: 기존 가상 함수 8개 → `run(NodeInput)` (v0.4.x → v0.9+)
 
 **Languages:** [English](migration-v0.4-to-v1.0.md) | [한국어](migration-v0.4-to-v1.0.ko.md) | [日本語](migration-v0.4-to-v1.0.ja.md) | [简体中文](migration-v0.4-to-v1.0.zh-CN.md)
@@ -270,7 +270,7 @@ grep -lE 'execute\(const GraphState' src/**/*.cpp
 
 # 마이그레이션 2: 타입이 있는 무손실 Provider 전환 (재컴파일 필수)
 
-이 변경은 소스 호환과 바이너리 호환을 모두 깨뜨립니다. 모든 C++ 소비자와 사용자 정의 provider를 새 헤더·라이브러리에 맞춰 다시 컴파일해야 합니다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor 인터프리터, Responses WebSocket 경로는 제거되었고 별칭이나 호환용 브리지도 없습니다. SDK는 알파 `0.3.4`이며 인터페이스 리비전 6 / 공유 ABI 6입니다. 기능 검사는 out-of-line으로 하며, 이것이 안정 릴리스라는 뜻은 아닙니다.
+이 변경은 소스 호환과 바이너리 호환을 모두 깨뜨립니다. 모든 C++ 소비자와 사용자 정의 provider를 새 헤더·라이브러리에 맞춰 다시 컴파일해야 합니다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor 인터프리터, Responses WebSocket 경로는 제거되었고 별칭이나 호환용 브리지도 없습니다. SDK는 알파 `0.3.5`이며 인터페이스 리비전 6 / 공유 ABI 6입니다. 기능 검사는 out-of-line으로 하며, 이것이 안정 릴리스라는 뜻은 아닙니다.
 
 제거된 `Provider::complete`, `complete_async`, `complete_stream`, `complete_stream_async` 호출부는 모드를 명시한 요청과 `invoke` / `dispatch`(또는 C++ 비동기 짝)로 바꿉니다. `Agent::complete`는 소유 결과를 반환하는 단일 턴 API로 별도로 남아 있습니다.
 

@@ -43,10 +43,10 @@ CMake 3.20 or newer is required. SchemaProvider runtime remains mandatory when `
 
 The SDK imported target supplies its `include/SchemaProvider` include root; public examples use `<descriptor/descriptor.h>`, `<runtime/client.h>` and `<neograph/llm/schema_provider.h>` directly, without recipe-only helpers.
 
-The installed SDK package must be exactly `0.3.4`, with matching interface revision 6 headers and shared-library generation 6. A version match alone does not admit older interface/ABI binaries.
+The installed SDK package must be exactly `0.3.5`, with matching interface revision 6 headers and shared-library generation 6. A version match alone does not admit older interface/ABI binaries.
 
 ```cmake
-find_package(SchemaProvider 0.3.4 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -430,7 +430,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.3.4`, interface revision 6 / shared-library generation 6, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.3.5`, interface revision 6 / shared-library generation 6, with out-of-line capability checks; that is not a stable release claim. Linux/POSIX is the tested platform. Windows NTFS and macOS implementations are present but not tested with this SDK, and WASM provider runtime support is not established.
 
 Python exposes the same owned request/outcome boundary as C++: `make_provider_request`, `Provider.prepare`, `dispatch` and `invoke`. Use `ProviderMessage` with typed parts for provider history; `ChatMessage` remains a graph convenience projection. A returned SDK failure is available through `ProviderOutcome.failure`, while host observer/settlement exceptions retain `outcome` and `cause`. See the [Python binding guide](python-binding.md) for constructors and GIL/callback behavior.
 

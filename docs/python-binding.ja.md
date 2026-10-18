@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=69092024c41114ec65a77ef31d244c031ed2104e2cb7aaab2a6f7193a37b9d10 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=010470d7fb5715159131726603bf5dff5f10a3357b2a21f5332037cc265324ff -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
 
 `neograph-engine` は、同じC++ランタイムをpybind11で公開したパッケージです。wheelでは、Core、LLM、Program/QuickJS、MCP、SQLiteによるランタイムの永続化が有効になっています。wheelを使わずソースからビルドした場合は、コンパイルしたコンポーネントだけが公開されます。
 
-このガイドの内容は、SchemaProvider SDK `0.3.4`（インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6`）でビルドしたwheelが前提です。同梱されているコンポーネントは、まとめてインストールしてください。`complete` を公開している古いwheelはプロバイダーのインターフェースが異なるため、以下の型付きのサンプルは動きません。
+このガイドの内容は、SchemaProvider SDK `0.3.5`（インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6`）でビルドしたwheelが前提です。同梱されているコンポーネントは、まとめてインストールしてください。`complete` を公開している古いwheelはプロバイダーのインターフェースが異なるため、以下の型付きのサンプルは動きません。
 
 ```bash
 pip install neograph-engine

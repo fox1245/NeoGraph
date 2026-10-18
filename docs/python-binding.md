@@ -4,7 +4,7 @@
 
 `neograph-engine` is the pybind11 surface of the same C++ runtime. The wheel enables Core, LLM, Program/QuickJS, MCP and SQLite runtime durability; optional source builds expose only the components they compile.
 
-This guide requires a wheel built against SchemaProvider SDK `0.3.4`, interface revision `6` and shared-library ABI revision `6`; install its bundled components together. Older wheels that expose `complete` use a different provider interface; they cannot run the typed examples below.
+This guide requires a wheel built against SchemaProvider SDK `0.3.5`, interface revision `6` and shared-library ABI revision `6`; install its bundled components together. Older wheels that expose `complete` use a different provider interface; they cannot run the typed examples below.
 
 ```bash
 pip install neograph-engine

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=4a5179b0c04f2a473acb13e4c8d85111fdf4b5e08178da28efb452a0304e2faf -->
+<!-- neograph-i18n: source=benchmarks/stress/README.md locale=zh-CN source_sha256=df6b7bf131ff03ef0e48fc6e6030949f26db57dfc8b1b97918a626ee0dd32eb9 -->
 # NeoGraph 持续并发压力基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,7 +16,7 @@ Windows 使用进程工作集的计数器；Linux 使用 `/proc/self/status`。�
 ## 构建与运行
 
 先安装外部的 SchemaProvider SDK，并设置它的前缀。即使禁用了 LLM 和 NeoGraph 可选的 libcurl 后端，Core 仍然需要 `SchemaProvider::runtime`。也可以用 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR` 指定显式的 SDK 源码检出来代替前缀；构建它需要 C++20、Python、libcurl ≥7.88 和 OpenSSL Crypto。依赖和平台方面的限制，见[构建指南](../../README.md)。这套做法关闭了联网下载，也关闭了用不到的 NeoGraph 集成。
-对于 NeoGraph `0.15.0`，请使用 alpha 版 SDK `0.3.4`、接口修订版/共享库
+对于 NeoGraph `0.15.0`，请使用 alpha 版 SDK `0.3.5`、接口修订版/共享库
 代数 6，并用匹配的头文件和库重新构建。
 
 ```bash

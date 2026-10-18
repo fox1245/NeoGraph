@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=b258b312928c587a1424a312832a418e3d703714c74bba77f4ce5625d5ddb9ad -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=0bffaa29ee89124513d8673fc9573584da522c5526d7efde94524e9757a1bd79 -->
 # NeoGraphのWASMスモークプログラム
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -11,7 +11,7 @@
 CoreがリンクするのはSDKのランタイムで、そのlibcurlトランスポートはリンクしません。確認したSDKの固定リビジョンでは、ランタイムのターゲットがCURLをリンクしないにもかかわらず、SDKのトップレベルのCMakeが、構成時にCURLを要求します。OpenSSLは、ランタイムが直接依存するものではありません。
 ネイティブのSDKライブラリーを、WebAssemblyにリンクすることはできません。Emscriptenのターゲットでは、SDKのランタイム、アーカイブのサポート、C++標準ライブラリーが動作する必要があります。下の過去のスモークテストは、現在のコードがビルドできることを示すものではありません。
 
-現在のビルドには、同じターゲット向けにビルドした、SDK `0.3.4`（インターフェースのリビジョンと共有世代は6、SchemaProviderの `maint/interface6` のコミット `0437853529b5932e7097a38629a95779d08f03aa`）が必要です。本物のEmscripten向けのSDKランタイムのビルドが前提条件であり、このページは、現在のビルドが成功することを保証するものではありません。
+現在のビルドには、同じターゲット向けにビルドした、SDK `0.3.5`（インターフェースのリビジョンと共有世代は6、SchemaProviderの `maint/interface6` のコミット `0437853529b5932e7097a38629a95779d08f03aa`）が必要です。本物のEmscripten向けのSDKランタイムのビルドが前提条件であり、このページは、現在のビルドが成功することを保証するものではありません。
 
 ### サポート対象のターゲットの要件
 

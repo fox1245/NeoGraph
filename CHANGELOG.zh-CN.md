@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=25f95f9371f16a3b6f4c3652ac7590a9e6a4d409eb7241e5c1045ebf5f400ba2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=550a33a941b3a8c6d95667c4436e76a879249e4fd3bc15d986e95588af80efbf -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -15,13 +15,15 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 变更
-- **采用 SchemaProvider `2ffecf8202dfe5c1c2184cf5d720b76354209f83`（`maint/interface6` 上的 SDK 0.3.4）（#511）。**
-  - **兼容性。** 接口修订号和共享库代数保持为 6，公共 struct 或 enum 的布局不变，内置描述符策略及其 identity 也不变。NeoGraph 现在在构建以及已安装 `NeoGraphConfig` 的 `find_dependency` 中要求 `SchemaProvider 0.3.4 EXACT`。
+- **采用 SchemaProvider `060f52c9ab0fbbc6b785b097785a17bdf16d7773`（`maint/interface6` 上的 SDK 0.3.5）（#511）。**
+  - **兼容性。** 接口修订号和共享库代数保持为 6，公共 struct 或 enum 的布局不变，内置描述符策略及其 identity 也不变。NeoGraph 现在在构建以及已安装 `NeoGraphConfig` 的 `find_dependency` 中要求 `SchemaProvider 0.3.5 EXACT`。
   - **行为变更：Chat Completions 保留生成的图像。** 图像模型（如 OpenRouter 的 `google/gemini-3.1-flash-lite-image`）在 `message.images` 中返回图像。SDK 过去忽略该成员，因此 token 已计费，结果中却没有图像。现在每张图像成为 wire 类型为 `images` 的 `Opaque` part，其 `wire_metadata` 保存 wire 条目（数据 URL 位于 `image.image_url.url`）。该 part 可以保留在历史的 assistant 消息上，但不会再发回提供方。
   - **行为变更：带有 code-execution `container` 或缓存 `diagnostics` 对象的 Messages 响应可以正常完成。** 过去会以 `Unsupported` 失败，已计费的回答随之丢失。使用 `web_fetch_20260318` 或 `web_search_20260318` 的 Claude 5.5 会同时返回这两个字段。它们保留在 `raw_events` 中。
+  - **修复：Interactions 流式调用可以完成。** API 现在以不含 `status` 的 `interaction.created` 资源开启 Interactions 流，SDK 过去会拒绝它，导致包括纯文本在内的所有 Interactions 流式调用都失败（SchemaProvider #65）。
+  - **修复：超过 1 MiB 的生成图像流可以完成。** SSE 行和事件的默认上限从 1 MiB 提高到 16 MiB。过去 base64 为 1.5 MB 的 `gemini-3.1-flash-lite-image` 流式响应会以 `ResourceLimit` 失败（SchemaProvider #66）。运行时默认值不属于策略 identity。
   - **Python。** 现在可以读取 `Opaque.wire_metadata`，因此能在 Python 中取出保留的图像。
   - **本版本线不修复的问题。** 在 `claude-haiku-4-5` 等不支持 programmatic tool calling 的模型上，`_20260318` 网页工具需要 `allowed_callers`，而接口 6 无法发送该字段；此类模型请改用 `web_search_20250305` 或 `web_fetch_20250910`。Lyria 等不支持 thinking 的 Gemini 模型仍会因 family 默认的 `includeThoughts` 而返回 400。两者都将在 NeoGraph 0.16.0 所采用的 SchemaProvider 0.4.0 中修复（#512）。
-  - 请使用 0.3.4 的头文件和库一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+  - 请使用 0.3.5 的头文件和库一起重新构建 NeoGraph、C++ 使用方和 Python 扩展（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 已弃用
 - **类型化客户端 `VeoClient`、`ImagesClient` 和 `DecisionsClient` 只接受即将停止服务的模型。它们不再扩展，并将在 0.16.0 中移除（#510）。**
