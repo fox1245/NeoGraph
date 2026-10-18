@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <functional>
 #include <future>
 #include <system_error>
@@ -17,6 +18,14 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include "../src/core/pipe_write.h"
+
+#include <cerrno>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 using namespace std::chrono_literals;
 using namespace neograph;
@@ -138,6 +147,14 @@ public:
             return spec;
         }
         if (mode == "flood") return ToolProcessSpec{{"/usr/bin/yes", "flood"}};
+        if (mode == "closed-input") {
+            // Closes stdin before reading it: more input than a pipe holds
+            // fails with EPIPE (#495).
+            ToolProcessSpec spec;
+            spec.argv = {"/bin/sh", "-c", "exec 0<&-; sleep 0.5; printf done"};
+            spec.stdin_data.assign(1024 * 1024, 'x');
+            return spec;
+        }
         throw std::invalid_argument("unknown process probe mode");
     }
 };
@@ -540,6 +557,75 @@ TEST(ToolExecutionController, ProcessBridgePreservesTypedTerminalDetails) {
         controller->execute_result_async(tool, json{{"mode", "flood"}}, {}));
     EXPECT_EQ(flood.status, ToolTerminalStatus::Killed);
     EXPECT_TRUE(flood.output_truncated);
+}
+
+// SIGPIPE's default action for the scope of a test. cpp-httplib's Server
+// sets SIG_IGN for the whole process, which would hide a SIGPIPE from every
+// test that runs after one; a host does not have to ignore it.
+class DefaultSigpipe {
+public:
+    DefaultSigpipe() : previous_(std::signal(SIGPIPE, SIG_DFL)) {}
+    ~DefaultSigpipe() { std::signal(SIGPIPE, previous_); }
+    DefaultSigpipe(const DefaultSigpipe&) = delete;
+    DefaultSigpipe& operator=(const DefaultSigpipe&) = delete;
+
+private:
+    void (*previous_)(int);
+};
+
+double cpu_seconds() {
+    rusage usage{};
+    ::getrusage(RUSAGE_SELF, &usage);
+    const auto seconds = [](const timeval& value) {
+        return static_cast<double>(value.tv_sec) + static_cast<double>(value.tv_usec) / 1e6;
+    };
+    return seconds(usage.ru_utime) + seconds(usage.ru_stime);
+}
+
+TEST(PipeWrite, AWriteToAPipeWithoutAReaderFailsWithEpipeAndNoSignal) {
+    // #495: with SIGPIPE's default action, a plain write here ends the process.
+    DefaultSigpipe default_action;
+    int ends[2] = {-1, -1};
+    ASSERT_EQ(::pipe(ends), 0);
+    neograph::detail::no_sigpipe_on(ends[1]);
+    ::close(ends[0]);
+    const char byte = 'x';
+    errno = 0;
+    EXPECT_EQ(neograph::detail::write_without_sigpipe(ends[1], &byte, 1), -1);
+    EXPECT_EQ(errno, EPIPE);
+    sigset_t pending;
+    sigemptyset(&pending);
+    ASSERT_EQ(::sigpending(&pending), 0);
+    EXPECT_EQ(sigismember(&pending, SIGPIPE), 0) << "the write left a SIGPIPE pending";
+    ::close(ends[1]);
+}
+
+TEST(ToolExecutionController, AProcessThatClosesItsInputEndsNormally) {
+    // #495: once the child closes its stdin, the bridge's write fails with
+    // EPIPE instead of raising SIGPIPE. A full pipe whose reader is gone
+    // polls as POLLERR only, which the bridge did not handle: it polled again
+    // at once until the child exited, spending CPU the whole time.
+    DefaultSigpipe default_action;
+    ProcessProbeTool tool;
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingProcess;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.execution_timeout = 5s;
+    policy.output_limit_bytes = 4096;
+    policies->upsert("process-probe", policy);
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    const auto cpu_before = cpu_seconds();
+    const auto result = neograph::async::run_sync(
+        controller->execute_result_async(tool, json{{"mode", "closed-input"}}, {}));
+    const auto cpu_spent = cpu_seconds() - cpu_before;
+    EXPECT_TRUE(result.succeeded()) << to_string(result.status) << ": " << result.error;
+    EXPECT_EQ(result.output, "done");
+    // The child sleeps 0.5 s. Polling a pipe that reports POLLERR spent
+    // nearly all of it.
+    EXPECT_LT(cpu_spent, 0.2) << "the bridge kept polling a pipe without a reader";
 }
 
 TEST(ToolExecutionController, ProcessBridgeKillsTheProcessGroupOnCancellation) {

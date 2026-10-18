@@ -9,6 +9,7 @@
 #include <neograph/graph/types.h>
 #include <neograph/tool_execution.h>
 
+#include "../core/pipe_write.h"
 #include "http_redirect.h"
 
 #include <asio/co_spawn.hpp>
@@ -295,6 +296,9 @@ private:
         if (thread_.joinable()) return;
         thread_ = std::thread([this] {
 #ifndef _WIN32
+            // Linux raises SIGPIPE for the writing thread: a write to a
+            // stdio server that has exited fails with EPIPE here. macOS
+            // needs the pipe's F_SETNOSIGPIPE as well (no_sigpipe_on).
             sigset_t mask;
             sigemptyset(&mask);
             sigaddset(&mask, SIGPIPE);
@@ -1161,6 +1165,10 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         close_all();
         throw std::system_error(error, std::generic_category(), "pipe()");
     }
+    // Every write to the server's stdin runs on the session's I/O thread,
+    // which blocks SIGPIPE. macOS raises it for the process instead, so a
+    // server that exits before it reads its input would end the host (#495).
+    neograph::detail::no_sigpipe_on(in_pipe[1]);
 
     char* const* environment = own_environment ? child_envp.data() : inherited_environment;
 
