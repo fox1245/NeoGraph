@@ -716,21 +716,46 @@ TEST(A2AConformance, AStopLetsAStreamThatWasNotHandedOverYetFinish) {
     // #493: cpp-httplib does not call a chunked provider once its listener
     // has stopped. A stream whose handler had not handed it over yet was cut
     // before its opening Task, and the client read only a closed connection.
+    using neograph::a2a::test::A2AServerTestAccess;
+    // The handler holds its stream here until the test lets it go, so the
+    // order below does not depend on how long a sleep takes.
+    RunGate held, let_go;
     Server srv;
-    neograph::a2a::test::A2AServerTestAccess::set_stream_handoff_delay(*srv.server, 300ms);
-    auto stream = std::async(std::launch::async, [&] {
+    A2AServerTestAccess::set_stream_handoff_hook(*srv.server, [&] {
+        held.open();
+        let_go.wait_for(30s);
+    });
+    // A client's first reply compiles a std::regex, which fills a libstdc++
+    // ctype cache. Fill it on this thread before the stream's client starts,
+    // or TSan sees two threads fill it at once.
+    ASSERT_EQ(error_code(rpc(srv, "GetTask", {{"id", "task-before-stopping"}}).envelope), -32001);
+
+    std::future<Reply> stream;
+    std::future<void> stopped;
+    // Destroyed first: a failed assertion does not leave the futures waiting
+    // on a held stream.
+    struct LetGo {
+        RunGate& gate;
+        ~LetGo() { gate.open(); }
+    } let_go_on_exit{let_go};
+
+    stream = std::async(std::launch::async, [&] {
         return stream_rpc(srv, "SendStreamingMessage", {{"message", v1_message("nap 100000")}},
                           [](const std::string&) {});
     });
-    // The handler now waits to hand its stream over; stop() waits for it.
-    std::this_thread::sleep_for(100ms);
-    auto stopped = std::async(std::launch::async, [&] { srv.server->stop(); });
-    std::this_thread::sleep_for(50ms);
+    ASSERT_TRUE(held.wait_for(30s));
+    stopped = std::async(std::launch::async, [&] { srv.server->stop(); });
+    for (int i = 0; i < 6000 && !A2AServerTestAccess::draining(*srv.server); ++i)
+        std::this_thread::sleep_for(5ms);
+    ASSERT_TRUE(A2AServerTestAccess::draining(*srv.server));
     // A request that arrives meanwhile is refused instead of starting work.
     const auto refused = rpc(srv, "GetTask", {{"id", "task-while-stopping"}});
     EXPECT_EQ(error_code(refused.envelope), -32603) << refused.body;
     EXPECT_NE(refused.body.find("stopping"), std::string::npos) << refused.body;
+    // stop() waits for the stream to be handed over.
+    EXPECT_EQ(stopped.wait_for(0ms), std::future_status::timeout);
 
+    let_go.open();
     const auto r = stream.get();
     stopped.get();
     const auto events = sse_events(r.body);

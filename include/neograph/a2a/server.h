@@ -252,9 +252,11 @@ class A2AServerTestAccess {
     static void set_max_inflight_runs(A2AServer& server, std::size_t cap);
     /// How long a task stream may be silent before it sends an SSE comment.
     static void set_stream_keepalive(A2AServer& server, std::chrono::milliseconds interval);
-    /// How long a streaming request waits before it hands its stream to the
-    /// HTTP server (#493).
-    static void set_stream_handoff_delay(A2AServer& server, std::chrono::milliseconds delay);
+    /// Runs in a streaming request just before it hands its stream to the
+    /// HTTP server (#493), so a test can hold the request there.
+    static void set_stream_handoff_hook(A2AServer& server, std::function<void()> hook);
+    /// Whether stop() is waiting for the requests it has (#493).
+    static bool draining(const A2AServer& server);
 };
 
 }  // namespace neograph::a2a::test
