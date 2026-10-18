@@ -1,5 +1,9 @@
 #pragma once
 
+// Deprecated (#510): Google shuts down every model this client admits
+// (veo-3.1-*-preview) on 2026-10-22, and NeoGraph 0.16.0 removes it in favour of
+// SchemaProvider endpoints. Gemini Omni (gemini-omni-1.1-flash, Interactions) replaces Veo.
+
 #include <neograph/llm/endpoint_types.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>

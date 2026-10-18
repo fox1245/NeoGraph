@@ -13,6 +13,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Deprecated
+- **The typed `VeoClient`, `ImagesClient` and `DecisionsClient` admit models that are going out of service. They will not be extended, and 0.16.0 removes them (#510).**
+  - **`VeoClient`.** It admits only `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview` and `veo-3.1-lite-generate-preview`. Google shuts all three down on 2026-10-22, so from that date it has no model to call. The Gemini API offers no other Veo model, and Google names Gemini Omni (`gemini-omni-1.1-flash`, through the Interactions API) as the replacement.
+  - **`ImagesClient`.** OpenAI removed `dall-e-2` and `dall-e-3` on 2026-05-12. It shuts down `gpt-image-1` on 2026-10-23, and `gpt-image-1-mini` and `gpt-image-1.5` on 2026-12-01. The Gemini profile (`gemini-3.1-flash-lite-image`) is not affected.
+  - **`DecisionsClient`.** It admits only `typesafe/jev-1.13`.
+  - **What replaces them.** SchemaProvider takes over every provider endpoint: images, video, audio, embeddings, rerank, decisions and the realtime APIs. It admits models by capability profile instead of closed lists. NeoGraph 0.16.0 adopts it, deletes these three clients and serves Omni video through it.
+
 ## [0.15.0] - 2026-10-18
 
 ### Changed

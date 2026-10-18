@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=215102c5e0bddef34a332e068bf5b76064bacce598c6bc64e3758b85578210f2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8c97a5d31c281786cdbc345e1dfe44670346e9c63620b255a9d2d1f7df1e5dc2 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,13 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 폐기 예정
+- **타입 클라이언트 `VeoClient`, `ImagesClient`, `DecisionsClient`가 서비스 종료를 앞둔 모델만 허용합니다. 앞으로 확장하지 않으며 0.16.0에서 제거합니다 (#510).**
+  - **`VeoClient`.** `veo-3.1-generate-preview`, `veo-3.1-fast-generate-preview`, `veo-3.1-lite-generate-preview`만 허용합니다. Google이 세 모델을 모두 2026-10-22에 종료하므로, 이날부터는 호출할 모델이 없습니다. Gemini API에는 다른 Veo 모델이 없고, Google은 대체 모델로 Gemini Omni(`gemini-omni-1.1-flash`, Interactions API 경유)를 안내합니다.
+  - **`ImagesClient`.** OpenAI는 `dall-e-2`와 `dall-e-3`를 2026-05-12에 제거했습니다. `gpt-image-1`은 2026-10-23에, `gpt-image-1-mini`와 `gpt-image-1.5`는 2026-12-01에 종료합니다. Gemini 프로필(`gemini-3.1-flash-lite-image`)은 영향이 없습니다.
+  - **`DecisionsClient`.** `typesafe/jev-1.13`만 허용합니다.
+  - **대체 방안.** SchemaProvider가 이미지, 영상, 오디오, 임베딩, rerank, decisions, 실시간 API까지 모든 공급자 엔드포인트를 맡습니다. 모델은 고정 목록이 아니라 기능 프로필로 허용합니다. NeoGraph 0.16.0이 이를 채택해 세 클라이언트를 삭제하고, Omni 영상도 이 경로로 제공합니다.
 
 ## [0.15.0] - 2026-10-18
 

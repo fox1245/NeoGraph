@@ -1,5 +1,8 @@
 #pragma once
 
+// Deprecated (#510): admits typesafe/jev-1.13 only. NeoGraph 0.16.0 removes this
+// client in favour of SchemaProvider endpoints.
+
 #include <neograph/api.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/llm/endpoint_types.h>
