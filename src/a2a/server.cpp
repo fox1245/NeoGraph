@@ -678,9 +678,9 @@ struct A2AServer::Impl {
     std::condition_variable handoff_cv;
     std::size_t             handoffs = 0;
     std::atomic<bool>       draining{false};
-    /// Test seam: how long a streaming handler waits before it hands its
-    /// stream to cpp-httplib.
-    std::chrono::milliseconds stream_handoff_delay{0};
+    /// Test seam: runs in a streaming handler before it hands its stream to
+    /// cpp-httplib.
+    std::function<void()> stream_handoff_hook;
 
     void await_handoffs() {
         draining.store(true, std::memory_order_release);
@@ -1037,9 +1037,13 @@ void test::A2AServerTestAccess::set_max_inflight_runs(
     server.impl_->max_inflight_runs = cap;
 }
 
-void test::A2AServerTestAccess::set_stream_handoff_delay(
-    A2AServer& server, std::chrono::milliseconds delay) {
-    server.impl_->stream_handoff_delay = delay;
+void test::A2AServerTestAccess::set_stream_handoff_hook(
+    A2AServer& server, std::function<void()> hook) {
+    server.impl_->stream_handoff_hook = std::move(hook);
+}
+
+bool test::A2AServerTestAccess::draining(const A2AServer& server) {
+    return server.impl_->draining.load(std::memory_order_acquire);
 }
 
 void test::A2AServerTestAccess::set_stream_keepalive(
@@ -1963,7 +1967,7 @@ void A2AServer::Impl::stream_task(Call& call, Task snapshot,
     const auto rpc_id  = call.id;
     const auto dialect = call.dialect;
     auto* self = this;
-    if (stream_handoff_delay.count() > 0) std::this_thread::sleep_for(stream_handoff_delay);
+    if (stream_handoff_hook) stream_handoff_hook();
     call.res->set_chunked_content_provider(
         "text/event-stream",
         [self, rpc_id, dialect, snapshot = std::move(snapshot), channel, cursor,
