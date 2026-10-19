@@ -8,9 +8,11 @@
 #include <neograph/graph/cancel.h>
 #include <pybind11/functional.h>
 #include <pybind11/stl.h>
+#include <array>
 #include <chrono>
 #ifdef NEOGRAPH_PYBIND_HAS_LLM
 #include <neograph/llm/schema_provider.h>
+#include <descriptor/catalogue.h>
 #endif
 namespace py = pybind11;
 namespace neograph::pybind {
@@ -254,12 +256,26 @@ void init_provider(py::module_& m) {
     m.def("builtin_provider_policy", [] { return DescriptorPolicyView{sp::descriptor::builtin_policy()}; });
     m.def("provider_policy_json", [] { return std::string(sp::config_defaults::descriptor_policy_json); });
     m.def("provider_codec_defaults_json", [] { return std::string(sp::config_defaults::codec_defaults_json); });
-    m.def("load_provider_policy", [](const std::string& families, const std::string& resources) {
-        auto result = sp::descriptor::load_policy(families, resources);
-        if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))
-            throw py::value_error(error->pointer + ": " + error->message);
+    m.def("provider_model_catalogue_json", [] { return sp::descriptor::builtin_catalogue_json(); });
+    // `model_catalogue_json` ({"version": 1, "models": [...]}) is layered over the embedded catalogue.
+    m.def("load_provider_policy", [](const std::string& families, const std::string& resources,
+                                     std::optional<std::string> models) {
+        const auto refuse = [](const sp::descriptor::ConfigError& error) {
+            throw py::value_error(error.pointer + ": " + error.message);
+        };
+        auto catalogue = sp::descriptor::builtin_catalogue();
+        if (models) {
+            auto loaded = sp::descriptor::load_catalogue(*models);
+            if (auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded)) refuse(*error);
+            const std::array layers{catalogue, std::get<sp::descriptor::CatalogueSnapshot>(std::move(loaded))};
+            auto merged = sp::descriptor::merge_catalogues(layers);
+            if (auto* error = std::get_if<sp::descriptor::ConfigError>(&merged)) refuse(*error);
+            catalogue = std::get<sp::descriptor::CatalogueSnapshot>(std::move(merged));
+        }
+        auto result = sp::descriptor::load_policy(families, resources, std::move(catalogue));
+        if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result)) refuse(*error);
         return DescriptorPolicyView{std::get<sp::descriptor::PolicySnapshot>(std::move(result))};
-    }, py::arg("family_json"), py::arg("resource_json"));
+    }, py::arg("family_json"), py::arg("resource_json"), py::arg("model_catalogue_json") = py::none());
     m.def("load_provider_descriptor", [](const std::string& source, std::optional<DescriptorPolicyView> policy) {
         auto result = sp::descriptor::load(source, policy ? policy->value : sp::descriptor::builtin_policy());
         if (auto* error = std::get_if<sp::descriptor::ConfigError>(&result))

@@ -86,7 +86,7 @@ TEST(RuntimeContext, RawHistoryRetainsMediaInvalidCallsAndWireMetadataInOrder) {
     const auto image_bytes = std::make_shared<const std::string>("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB");
     data.message.parts = {
         sp::Text{"before"},
-        sp::Image{"image/png", image_bytes, sp::ImageDetail::High},
+        sp::Media::image("image/png", image_bytes, sp::ImageDetail::High),
         sp::InvalidToolCall{"call-bad", "read", sp::ToolCallKind::ClientExecuted,
                             R"({"path":)", sp::InvalidReason::Truncated,
                             "function", test::document(R"({"vendor":{"position":3}})")},
@@ -101,7 +101,7 @@ TEST(RuntimeContext, RawHistoryRetainsMediaInvalidCallsAndWireMetadataInOrder) {
     EXPECT_EQ(provider_codec::encode_message(restored.message()), original);
     EXPECT_EQ(restored.message().id, "provider-message");
     ASSERT_EQ(restored.message().parts.size(), 6u);
-    const auto& image = std::get<sp::Image>(restored.message().parts[1]);
+    const auto& image = std::get<sp::Media>(restored.message().parts[1]);
     ASSERT_TRUE(image.data);
     EXPECT_EQ(*image.data, *image_bytes);
     EXPECT_EQ(image.detail, sp::ImageDetail::High);

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=a7eb1a4e69dc63a7bbaec6c0409491771cfdf1989510fd9e336d9ce90cd5e69f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -228,7 +228,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式仍为 [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
+`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式为 [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)；v2 格式的记录仍可读取。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
 
 `RuntimeHistoryRecord` 的无参数 `serialize_canonical()` 支持可移植记录。持久原生历史须使用 `serialize_canonical(archive, owner_id)`，并提供所有者范围与该 ID 一致的存档。Python 暴露同一重载以及 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`；面向可移植记录的默认参数不会在缺少匹配存档时授权原生恢复。Python 的解析和存档感知序列化会在原生工作期间释放 GIL。JSON 观测数据仍与存档认证的保管权限不同。
 

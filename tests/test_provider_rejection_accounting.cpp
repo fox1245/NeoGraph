@@ -49,18 +49,10 @@ constexpr std::uint64_t kReservation = 164;
 
 sp::descriptor::ValidatedDescriptor bounded_descriptor(const std::string& family,
                                                        const std::string& origin) {
-    auto policy = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (const auto& row : policy.at("families"))
-        if (row.at("family") == family) defaults = row.at("defaults");
     // A family's own default output cap would exceed the model's admitted limit.
-    if (defaults.contains("max_output_tokens")) defaults["max_output_tokens"] = nullptr;
-    policy.at("models").push_back({{"family", family}, {"model", "fixture-model"},
-        {"defaults", std::move(defaults)}, {"output_limit", 64}, {"input_limit", 100}});
-    auto admitted = sp::descriptor::load_policy(policy.dump(), sp::config_defaults::codec_defaults_json);
-    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::runtime_error(error->pointer + ": " + error->message);
-    return test::descriptor(family, origin, std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)));
+    return test::descriptor(family, origin, test::policy_with_models(
+        json::parse(sp::config_defaults::descriptor_policy_json),
+        {{family, "fixture-model", 100, 64, json{{"max_output_tokens", nullptr}}}}));
 }
 
 std::shared_ptr<Provider> loopback_provider(const std::string& family, const std::string& origin) {

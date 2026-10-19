@@ -22,7 +22,7 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -43,21 +43,24 @@ model input limits, the encoded output cap (or declared output limit), hosted
 invocation limits and enabled retry policy; request bytes are not a token bound.
 Missing model facts reject before reservation or dispatch. Select a model with
 admitted limits and a budget large enough for the whole window. Private loopback
-fixtures must supply their own explicit supported-model policy facts; the mock
-does not invent limits or provider usage.
-Use `--descriptor-policy PATH` (C++ `Options::descriptor_policy_file`) for a
-host-owned SDK descriptor-policy JSON file. It is admitted once with the embedded
-codec resource snapshot, then shared by both tenants; no model proposal or
-checkpoint can select it. Without the option, the built-in policy remains active.
-An explicit fixture policy must declare its exact loopback `openrouter_origins`
-and `program-chat-mock` model limits (or the explicitly selected fixture model).
-The admitted policy identity is bound into session settings: changed policy
-content requires a new session, even when the file path is unchanged. Offline
-`--mock` examples require these facts as well; raise budgets only explicitly.
-The shipped [demo-policy.json](demo-policy.json) declares fixed facts only for
-`program-chat-mock`: 4,096 input tokens and 65,536 output tokens. Select it
-explicitly for the offline recipe; it is not a live-model catalog, spending
-grant, usage report or budget reset. The explicit `--model` overrides inherited
+fixtures must supply their own explicit model facts; the mock does not invent
+limits or provider usage.
+Use `--model-catalogue PATH` (C++ `Options::model_catalogue_file`) for a
+host-owned SDK model catalogue JSON file, layered over the embedded catalogue,
+and `--descriptor-policy PATH` (C++ `Options::descriptor_policy_file`) for a
+host-owned SDK descriptor-policy JSON file. They are admitted once with the
+embedded codec resource snapshot, then shared by both tenants; no model proposal
+or checkpoint can select them. Without the options, the built-in policy and
+catalogue remain active. An explicit fixture policy must declare its exact
+loopback `openrouter_origins`, and the catalogue the `program-chat-mock` model
+limits (or those of the explicitly selected fixture model). The content digest
+of the admitted policy, catalogue included, is bound into session settings:
+changed content requires a new session, even when the file paths are unchanged.
+Offline `--mock` examples require these facts as well; raise budgets only
+explicitly. The shipped [demo-models.json](demo-models.json) declares fixed
+facts only for `program-chat-mock`: 4,096 input tokens and 65,536 output tokens.
+Select it explicitly for the offline recipe; it is not a live-model catalog,
+spending grant, usage report or budget reset. The explicit `--model` overrides inherited
 model environment settings without weakening admission.
 Nullable wide provider counts remain separate from `charged_tokens`; known zero
 is known, not missing. Consistent final input/output evidence settles the charge
@@ -109,7 +112,7 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite
 ```
 
 Open http://127.0.0.1:8768. Switch between Alice and Bob. In demo mode, a message
@@ -164,7 +167,7 @@ not a production deployment/migration manager.
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --session postgres-demo
 ```
 
 When the variable is present, both chat and Program persistence use PostgreSQL.

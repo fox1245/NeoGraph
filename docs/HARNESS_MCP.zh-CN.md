@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=zh-CN source_sha256=e9328cd59eabfb0a4baf54342699e02c75b0ec404887f0a10725942727e50d4f -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)

@@ -14,6 +14,11 @@ def _policy(peer, *, routed=True):
     for family in source["families"]:
         if family["family"] in ("openai.chat", "anthropic.messages"):
             family["openrouter_origins"] = [peer.base_url] if routed else []
+            if not routed:
+                # Gateway facts (media, plugins, server tools) need a declared OpenRouter origin.
+                family["openrouter_media"] = None
+                family.pop("openrouter_plugins", None)
+                family.pop("openrouter_server_tools", None)
     return ng.load_provider_policy(json.dumps(source), ng.provider_codec_defaults_json())
 
 

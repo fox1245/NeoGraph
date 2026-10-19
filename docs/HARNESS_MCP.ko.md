@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ko source_sha256=e9328cd59eabfb0a4baf54342699e02c75b0ec404887f0a10725942727e50d4f -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -446,7 +446,7 @@ OpenCode(프로젝트의 `opencode.json` 또는 사용자 설정):
 
 ### Provider 예산
 
-`budgets.provider_timeout_seconds`는 준비된 provider 연산 하나의 절대 데드라인을 1~600초로 정합니다. `budgets.max_output_tokens`는 그 연산의 출력 한도를 1~128000 토큰으로 정합니다. 둘 다 선택 사항입니다. 생략하면 그 제어가 설정되지 않은 채로 남고, 승인(admission)된 SDK/기본 정책이 그대로 유지됩니다. 시간이나 출력이 무제한이라는 뜻이 아닙니다. provider 재시도는 준비된 연산의 데드라인 안에서 SDK가 맡습니다.
+`budgets.provider_timeout_seconds`는 준비된 provider 연산 하나의 절대 데드라인을 1초부터 호스트의 `HarnessTranslationDefaults::provider_timeout_seconds`(기본 600, 최대 86400)까지로 정합니다. `budgets.max_output_tokens`는 그 연산의 출력 한도를 1부터 호스트의 `HarnessTranslationDefaults::max_output_tokens`(기본 4096) 토큰까지로 정합니다. 둘 다 선택 사항입니다. 생략하면 그 제어가 설정되지 않은 채로 남고, 승인(admission)된 SDK/기본 정책이 그대로 유지됩니다. 시간이나 출력이 무제한이라는 뜻이 아닙니다. provider 재시도는 준비된 연산의 데드라인 안에서 SDK가 맡습니다.
 
 워커는 두 필드를 더 작은 값으로 설정할 수 있습니다. Harness 전체 값보다 큰 워커 값은 컴파일 시점에 거부됩니다. 데드라인이 되면 Harness는 그 provider 호출에 전달한 자식 취소 토큰만 취소하고, 다른 워커나 상위 run은 취소하지 않습니다. provider가 토큰을 따라야 하므로, 중단할 수 없는 provider는 데드라인 이후에 반환될 수도 있습니다.
 

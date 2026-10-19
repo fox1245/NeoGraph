@@ -284,7 +284,7 @@ RuntimeHistoryRecord RuntimeHistoryRecord::create(RuntimeHistoryRecordData data)
     if (data.predecessor_id) body["predecessor_id"] = *data.predecessor_id;
     auto impl = std::make_shared<Impl>();
     impl->data = std::move(data);
-    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "runtime-history-record/v2", impl->id));
+    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "runtime-history-record/v3", impl->id));
     return RuntimeHistoryRecord(std::move(impl));
 }
 
@@ -298,7 +298,10 @@ RuntimeHistoryRecord RuntimeHistoryRecord::parse(
         {"format", "storage_schema_version", "id", "feed_id", "sequence", "message_id",
          "trust", "message", "source_payload", "source_media_type", "predecessor_id",
          "native_archive_reference"});
-    require_format(value, "neograph-runtime-history-record", STORAGE_SCHEMA_VERSION,
+    const bool legacy = value.contains("storage_schema_version") &&
+        value.at("storage_schema_version") == json(LEGACY_STORAGE_SCHEMA_VERSION);
+    require_format(value, "neograph-runtime-history-record",
+                   legacy ? LEGACY_STORAGE_SCHEMA_VERSION : STORAGE_SCHEMA_VERSION,
                    "Stored RuntimeHistoryRecord");
     const auto stored_id = required_string(value, "id");
     RuntimeHistoryRecordData data;
@@ -319,7 +322,7 @@ RuntimeHistoryRecord RuntimeHistoryRecord::parse(
         }
         auto& messages = std::get<std::vector<sp::Message>>(loaded);
         if (messages.size() != 1 ||
-            message_body(messages.front()) != value.at("message")) {
+            message_body(messages.front()) != provider_codec::current_message(value.at("message"))) {
             throw std::invalid_argument("Runtime native history archive projection mismatch");
         }
         data.message = std::move(messages.front());
@@ -330,6 +333,18 @@ RuntimeHistoryRecord RuntimeHistoryRecord::parse(
     data.source_media_type = optional_string(value, "source_media_type");
     data.predecessor_id = optional_string(value, "predecessor_id");
     auto result = create(std::move(data));
+    if (legacy) {
+        // The id was sealed over the body as stored, with its v2 message.
+        auto body = json::object();
+        for (const auto& [key, field] : value.items())
+            if (key != "id" && key != "native_archive_reference") body[key] = field;
+        if (runtime_identity("runtime-history-record/v2", body) != stored_id)
+            throw std::invalid_argument("Stored RuntimeHistoryRecord id mismatch");
+        auto impl = std::make_shared<Impl>(*result.impl_);
+        impl->id = stored_id;
+        impl->canonical = detail::canonical_json_bytes(value);
+        return RuntimeHistoryRecord(std::move(impl));
+    }
     if (result.id() != stored_id) throw std::invalid_argument("Stored RuntimeHistoryRecord id mismatch");
     if (reference) {
         auto impl = std::make_shared<Impl>(*result.impl_);

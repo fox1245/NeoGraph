@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=7d554cef7ff138fd563b7ecd7739dc7f01a8a641aec41c5fdd0b38d33db5d01c -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=c7857297daccf819804962b55d2f6ed035f4cc6d255c419e68c9f9c262ebae2e -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -22,7 +22,7 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -41,13 +41,15 @@ retry 策略计算。缺少模型事实时，在预留或 dispatch 前拒绝。p
 known zero 不是缺失。只有 consistent final input/output evidence、先前 usage 非 unknown 且没有
 transport 内部重发时才结算；否则保留原始预留为 `UnknownHold`。
 高于预留的 report 仍计入 charge；`cost` 保持 unknown。
-使用 `--descriptor-policy PATH`（C++ `Options::descriptor_policy_file`）指定主机拥有的 SDK
-descriptor-policy JSON。它与内嵌 codec resource snapshot 一起准入一次，再由两个 tenant 共享；
-未指定时仍使用内置策略。明确的 fixture 策略必须声明精确 loopback `openrouter_origins` 和
-`program-chat-mock`（或明确选择的 fixture 模型）的限制。已准入策略 identity 绑定到 session
-settings；即使文件路径不变，内容变更也必须使用新 session。模型提案或 checkpoint 不能选择策略。
-`--mock` 同样需要这些事实；预算只能明确提高。
-提供的 [demo-policy.json](demo-policy.json) 只声明 `program-chat-mock` 的 input 4,096、output 65,536
+使用 `--model-catalogue PATH`（C++ `Options::model_catalogue_file`）指定叠加在内嵌 catalogue
+之上的主机拥有 SDK 模型 catalogue JSON，使用 `--descriptor-policy PATH`（C++
+`Options::descriptor_policy_file`）指定主机拥有的 SDK descriptor-policy JSON。它们与内嵌 codec
+resource snapshot 一起准入一次，再由两个 tenant 共享；未指定时仍使用内置策略和 catalogue。
+明确的 fixture 策略必须声明精确 loopback `openrouter_origins`，catalogue 必须声明
+`program-chat-mock`（或明确选择的 fixture 模型）的限制。包含 catalogue 的已准入策略 content
+digest 绑定到 session settings；即使文件路径不变，内容变更也必须使用新 session。模型提案或
+checkpoint 不能选择策略。`--mock` 同样需要这些事实；预算只能明确提高。
+提供的 [demo-models.json](demo-models.json) 只声明 `program-chat-mock` 的 input 4,096、output 65,536
 token 事实。offline recipe 必须显式选择；它不是 live model catalog、spending grant、usage report
 或 budget reset。显式 `--model` 覆盖继承的模型环境设置，不会削弱 admission。
 `--max-output-tokens` 接受正64-bit值，仍受所选 model limit 与既有 session budget 限制，
@@ -76,7 +78,7 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite
 ```
 
 在 `http://127.0.0.1:8768` 切换 Alice/Bob。demo 中 `review`、`검토`、`비교` 提议 review Harness。首次回答用当前 Harness，批准后变更在下一 turn resume 应用。force checkbox 只交替两个已审核 plan，不证明品质提升。
@@ -103,7 +105,7 @@ output limit 发送为 [OpenRouter chat API](https://openrouter.ai/docs/api/api-
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --session postgres-demo
 ```
 
 有此变量时 chat/Program persistence 用 PostgreSQL，否则 `--db` 选择 SQLite。各 backend 可在 build 时关闭。

@@ -9,6 +9,16 @@
 
 namespace neograph::graph {
 
+namespace {
+// A stored provider-message projection in the current schema: v2 entries are upgraded.
+json current_projection(const json& value) {
+    if (!value.is_array()) return value;
+    auto out = json::array();
+    for (const auto& message : value) out.push_back(provider_codec::current_message(message));
+    return out;
+}
+}  // namespace
+
 static bool has_budget_authority(std::uint64_t ceiling,
                                  const UsageAccumulator::AuthoritySnapshot& authority) {
     return ceiling != 0 || authority.charged != 0 || authority.reserved != 0 ||
@@ -561,16 +571,17 @@ void GraphState::restore_provider_history_locked(const json& snapshot, bool trus
                 const auto previous = provider_histories_.find(channel);
                 if (previous != provider_histories_.end())
                     for (const auto& message : previous->second.messages) current.push_back(provider_codec::encode_message(message));
-                if (current == item.at("projection") && previous != provider_histories_.end() &&
+                const auto stored = current_projection(item.at("projection"));
+                if (current == stored && previous != provider_histories_.end() &&
                     previous->second.projection == history.projection)
                     history.messages = previous->second.messages;
                 else
-                    for (const auto& message : item.at("projection")) history.messages.push_back(provider_codec::decode_message(message));
+                    for (const auto& message : stored) history.messages.push_back(provider_codec::decode_message(message));
             }
             json full = json::array();
             for (const auto& message : history.messages)
                 full.push_back(provider_codec::encode_message(message));
-            if (full != item.at("projection"))
+            if (full != current_projection(item.at("projection")))
                 throw std::invalid_argument("Checkpoint provider history projection was edited");
             histories.emplace(channel, std::move(history));
         }

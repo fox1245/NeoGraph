@@ -119,20 +119,11 @@ std::vector<std::string> journal_states(const std::string& provider_db) {
 // The SDK policy with an input limit for `model`; `origin` is the base URL.
 std::shared_ptr<sp::runtime::Client> client_for(std::string origin, const std::string& model,
                                                 std::optional<std::uint64_t> input_limit) {
-    auto  source = json::parse(sp::config_defaults::descriptor_policy_json);
-    json  defaults;
-    for (const auto& family : source.at("families"))
-        if (family.at("family") == "openai.chat") defaults = family.at("defaults");
-    if (input_limit)
-        source.at("models").push_back(json{{"family", "openai.chat"}, {"model", model},
-                                           {"defaults", defaults}, {"output_limit", nullptr},
-                                           {"input_limit", *input_limit}});
-    auto admitted = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
-    if (auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::invalid_argument(error->pointer + ": " + error->message);
+    std::vector<neograph::test::FixtureModel> models;
+    if (input_limit) models.push_back({"openai.chat", model, *input_limit});
     return std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
         "openai.chat", std::move(origin),
-        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted))));
+        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json), models)));
 }
 
 sp::Usage final_usage(std::uint64_t input, std::uint64_t output) {
@@ -857,20 +848,10 @@ namespace wire = neograph::test::wire;
 // routing for it and the catalog prices it as OpenRouter.
 sp::descriptor::ValidatedDescriptor loopback_openrouter_descriptor(const std::string& origin) {
     auto policy = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (auto family : policy.at("families")) {
-        if (family.at("family") != "openai.chat") continue;
-        family.at("openrouter_origins").push_back(origin);
-        defaults = family.at("defaults");
-    }
-    policy.at("models").push_back(json{{"family", "openai.chat"}, {"model", std::string(kModel)},
-                                       {"defaults", defaults}, {"output_limit", nullptr},
-                                       {"input_limit", kInputLimit}});
-    auto admitted = sp::descriptor::load_policy(policy.dump(), sp::config_defaults::codec_defaults_json);
-    if (auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::invalid_argument(error->pointer + ": " + error->message);
-    return neograph::test::descriptor("openai.chat", origin,
-                                      std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)));
+    for (auto family : policy.at("families"))
+        if (family.at("family") == "openai.chat") family.at("openrouter_origins").push_back(origin);
+    return neograph::test::descriptor("openai.chat", origin, neograph::test::policy_with_models(
+        policy, {{"openai.chat", std::string(kModel), kInputLimit}}));
 }
 
 // A real SDK client at the loopback peer. A durable journal needs the trusted
@@ -1209,9 +1190,20 @@ TEST(ProgramProviderBinding, OnlyAnOpenRouterOriginIsPinned) {
     // An OpenRouter URL whose SDK policy admits no OpenRouter routing cannot
     // be pinned, so its route ceiling bounds nothing and the call is refused.
     auto source = json::parse(sp::config_defaults::descriptor_policy_json);
-    for (std::size_t i = 0; i < source.at("families").size(); ++i)
-        source["families"][i]["openrouter_origins"] = json::array();
+    // Gateway facts (media, plugins, server tools) need a declared OpenRouter origin.
+    auto families = json::array();
+    for (const auto& family : source.at("families")) {
+        auto unrouted = json::object();
+        for (const auto& [key, value] : family.items())
+            if (key != "openrouter_plugins" && key != "openrouter_server_tools") unrouted[key] = value;
+        unrouted["openrouter_origins"] = json::array();
+        unrouted["openrouter_media"] = nullptr;
+        families.push_back(std::move(unrouted));
+    }
+    source["families"] = std::move(families);
     auto admitted = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
+        FAIL() << error->pointer << ": " << error->message;
     auto unrouted = make_provider(peer, std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
         "openai.chat", std::string(kOpenRouter),
         std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)))));

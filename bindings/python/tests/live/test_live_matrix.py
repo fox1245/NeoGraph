@@ -53,7 +53,7 @@ VISION = [case(preset, keys=[_key(preset)], id=preset)
 @pytest.mark.parametrize("preset", VISION)
 def test_vision_input(preset):
     model, values = TEXT_MODELS[preset]
-    message = user("What color is this image? Answer with one word.", ng.ProviderImage("image/png", red_png()))
+    message = user("What color is this image? Answer with one word.", ng.ProviderMedia.image("image/png", red_png()))
     run = Run(provider(preset, model), model, [message], **values)
     assert "red" in run.text().lower()
 
@@ -72,7 +72,7 @@ def test_tool_call(preset):
 
 
 def _images(run):
-    return [p for p in run.parts() if type(p).__name__ == "Opaque" and p.wire_type == "images"]
+    return [p for p in run.parts() if isinstance(p, ng.ProviderMedia) and p.kind == ng.ProviderMediaKind.Image]
 
 
 @pytest.mark.parametrize("stream", [case(s, keys=["OPENROUTER_API_KEY"], id=n) for n, s in MODES])
@@ -82,16 +82,12 @@ def test_openrouter_chat_keeps_generated_images(stream):
               stream=stream)
     images = _images(run)
     assert images
-    assert images[0].wire_metadata["image"]["image_url"]["url"].startswith("data:image/")
+    assert images[0].mime.startswith("image/") and images[0].data
 
 
 def _inline_bytes(run):
-    total = 0
-    for part in run.parts():
-        if type(part).__name__ == "Opaque" and part.wire_type == "inlineData":
-            data = part.wire_metadata.get("inlineData") or part.wire_metadata.get("part", {}).get("inlineData", {})
-            total += len(data.get("data", ""))
-    return total
+    return sum(len(part.data) for part in run.parts()
+               if isinstance(part, ng.ProviderMedia) and part.source == ng.ProviderMediaSource.Inline and part.data)
 
 
 @pytest.mark.parametrize("stream", [case(s, keys=["GEMINI_API_KEY"], id=n) for n, s in MODES])
@@ -103,12 +99,13 @@ def test_gemini_generate_image_output(stream):
     assert _inline_bytes(run) > 10_000
 
 
-# Known gaps of interface 6. They must fail; when one starts to pass, update tests/live/manifest.json.
+# Known gaps: they must fail; when one starts to pass, update tests/live/manifest.json. Both need the
+# Generate response modalities and speech settings, which are not reachable from Python yet (#512).
 GAPS = [
     case("lyria-3-clip-preview", "A short bright chiptune loop. Instrumental only.", keys=["GEMINI_API_KEY"],
-         id="lyria-clip", gap="fox1245/SchemaProvider#45"),
+         id="lyria-clip", gap="#512, Python cannot set response_modalities"),
     case("gemini-3.8-flash-lite-tts", "Say: hello.", keys=["GEMINI_API_KEY"], id="tts",
-         gap="fox1245/SchemaProvider#55, interface 6 has no speech_config"),
+         gap="#512, Python cannot set speech_config"),
 ]
 
 

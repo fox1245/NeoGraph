@@ -184,10 +184,10 @@ TEST(SchemaProviderStreamAsyncOuterIo, StalledConsumerOverflowRetainsDrainedOwne
     const auto& usage = outcome_usage(*retained);
     ASSERT_EQ(messages.size(), 1u);
     ASSERT_EQ(messages[0].parts.size(), 2u);
-    const auto& image = std::get<sp::Opaque>(messages[0].parts[0]);
-    ASSERT_TRUE(image.wire_metadata);
-    EXPECT_EQ(image.wire_type, "image_generation_call");
-    EXPECT_EQ(image.wire_metadata->root().get("result").as_string(), "UE5H");
+    const auto& image = std::get<sp::Media>(messages[0].parts[0]);
+    EXPECT_EQ(image.kind, sp::MediaKind::Image);
+    ASSERT_TRUE(image.data);
+    EXPECT_EQ(*image.data, "UE5H");
     EXPECT_EQ(std::get<sp::Text>(messages[0].parts[1]).value, "owned overflow text");
     ASSERT_TRUE(usage.input_total);
     EXPECT_EQ(usage.input_total->value, 0u);

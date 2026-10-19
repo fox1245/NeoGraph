@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "program-chat-mock",
+      "families": ["openai.chat"],
+      "input_limit": 4096,
+      "output_limit": 65536
+    }
+  ]
+}

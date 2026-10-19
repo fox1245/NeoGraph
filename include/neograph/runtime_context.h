@@ -71,7 +71,10 @@ struct RuntimeHistoryRecordData {
 /** One immutable, content-addressed line in the authoritative RAW history feed. */
 class NEOGRAPH_API RuntimeHistoryRecord final {
 public:
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
+    // 3 since SchemaProvider interface 7 (provider-message/v3). A version 2 record is read
+    // with its bytes and id as stored, so a feed's predecessor chain stays intact.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 3;
+    static constexpr std::uint32_t LEGACY_STORAGE_SCHEMA_VERSION = 2;
 
     static RuntimeHistoryRecord create(RuntimeHistoryRecordData data);
     static RuntimeHistoryRecord parse(

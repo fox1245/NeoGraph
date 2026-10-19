@@ -550,13 +550,19 @@ inline sp::Message portable_message(const ChatMessage& source) {
     }
     if (!source.content.empty()) message.parts.emplace_back(sp::Text{source.content});
     for (const auto& url : source.image_urls) {
-        const auto separator = url.find(";base64,");
-        if (!url.starts_with("data:") || separator == std::string::npos)
-            throw std::invalid_argument("Portable images require admitted inline base64, not URL fetching");
-        sp::Image image;
-        image.mime = url.substr(5, separator - 5);
-        image.data = std::make_shared<const std::string>(url.substr(separator + 8));
-        if (!sp::valid_image(image)) throw std::invalid_argument("Invalid portable inline image");
+        // A data URL is inline base64; an https URL is a location the provider fetches.
+        sp::Media image;
+        if (url.starts_with("data:")) {
+            const auto separator = url.find(";base64,");
+            if (separator == std::string::npos)
+                throw std::invalid_argument("Portable inline image requires a base64 data URL");
+            image = sp::Media::image(url.substr(5, separator - 5),
+                                     std::make_shared<const std::string>(url.substr(separator + 8)));
+        } else {
+            image = sp::Media::url(sp::MediaKind::Image, url);
+        }
+        if (sp::check_media(image, sp::config_defaults::codec_resources_image_decoded_bytes) != sp::MediaFault::None)
+            throw std::invalid_argument("Invalid portable image");
         message.parts.emplace_back(std::move(image));
     }
     for (const auto& call : source.tool_calls) {
@@ -590,8 +596,13 @@ inline ChatMessage project_message(const sp::Message& message) {
                 result.tool_retryable = tool->host->retryable;
                 result.tool_effect_uncertain = tool->host->effect_uncertain;
             }
-        } else if (const auto* image = std::get_if<sp::Image>(&part); image && image->data)
-            result.image_urls.push_back("data:" + image->mime + ";base64," + *image->data);
+        } else if (const auto* media = std::get_if<sp::Media>(&part);
+                   media && media->kind == sp::MediaKind::Image) {
+            if (media->source == sp::MediaSource::Inline && media->data)
+                result.image_urls.push_back("data:" + media->mime + ";base64," + *media->data);
+            else if (media->source == sp::MediaSource::Url)
+                result.image_urls.push_back(media->reference);
+        }
     }
     return result;
 }

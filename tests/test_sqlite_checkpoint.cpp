@@ -665,26 +665,9 @@ EngineConfig durable_native_config(const std::shared_ptr<neograph::Provider>& pr
 }
 
 sp::descriptor::ValidatedDescriptor managed_responses_descriptor() {
-    auto source = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (const auto& family : source.at("families"))
-        if (family.at("family") == "openai.responses") defaults = family.at("defaults");
-    const json model{{"family", "openai.responses"}, {"model", "fixture-model"},
-        {"defaults", std::move(defaults)}, {"output_limit", nullptr}, {"input_limit", 1}};
-    bool replaced = false;
-    for (auto row : source.at("models")) {
-        if (row.at("family") == "openai.responses" && row.at("model") == "fixture-model") {
-            row = model;
-            replaced = true;
-            break;
-        }
-    }
-    if (!replaced) source.at("models").push_back(model);
-    auto policy = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
-    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&policy))
-        throw std::logic_error(error->pointer + ": " + error->message);
     return neograph::test::descriptor("openai.responses", "https://fixture.invalid",
-        std::get<sp::descriptor::PolicySnapshot>(std::move(policy)));
+        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json),
+                                           {{"openai.responses", "fixture-model", 1}}));
 }
 
 sp::runtime::Result managed_missing_output_outcome(const sp::descriptor::ValidatedDescriptor& descriptor) {

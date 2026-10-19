@@ -83,6 +83,7 @@ add_executable(neograph_tests
     test_schema_provider_extra_fields_temperature.cpp
     test_openai_provider_async.cpp
     test_message_reasoning.cpp
+    test_provider_format_upgrade.cpp
     test_checkpoint_async_default.cpp
     test_graph_engine_async_api.cpp
     test_async_tool.cpp
@@ -1012,18 +1013,18 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 if(TARGET neograph::llm)
-    add_executable(neograph_schema_provider_interface6_tests
-        test_schema_provider_interface6.cpp)
-    target_link_libraries(neograph_schema_provider_interface6_tests PRIVATE
+    add_executable(neograph_schema_provider_interface_tests
+        test_schema_provider_interface.cpp)
+    target_link_libraries(neograph_schema_provider_interface_tests PRIVATE
         neograph::core neograph::llm SchemaProvider::transport
         httplib OpenSSL::SSL OpenSSL::Crypto GTest::gtest_main)
     if(WIN32)
-        target_link_libraries(neograph_schema_provider_interface6_tests PRIVATE advapi32)
+        target_link_libraries(neograph_schema_provider_interface_tests PRIVATE advapi32)
     endif()
-    target_include_directories(neograph_schema_provider_interface6_tests PRIVATE
+    target_include_directories(neograph_schema_provider_interface_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/deps)
-    neograph_discover_tests(neograph_schema_provider_interface6_tests
-        PROPERTIES TIMEOUT 60 LABELS "provider;interface6;model-free")
+    neograph_discover_tests(neograph_schema_provider_interface_tests
+        PROPERTIES TIMEOUT 60 LABELS "provider;interface;model-free")
 
     # What a provider failure costs the token bank: a completed HTTP 4xx answer
     # releases the reservation, every other failure keeps it, and the usage
