@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=c027e55aafc7a82ed76cae8126196d9edc668bcb52bded563f7e6a4496f744a4 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b1d8f9b4364dcc543a4c2c52e194847b7791d164e521f99cd5e1a744cc6968ef -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -529,7 +529,17 @@ controls = ng.ProviderControls()
 controls.max_output_tokens = 256
 ceiling.model_tokens = 100_000
 ceiling.monetary_microunits = 500_000
-# descriptor and options as in "Descriptor and runtime policy" above
+# Prices are host data: a catalogue layer over the embedded catalogue, in the
+# provider's policy. This one prices one OpenRouter model and its route ceiling.
+prices = {"version": 1, "models": [{
+    "id": "deepseek/deepseek-v4-flash-0731", "origins": ["https://openrouter.ai"],
+    "pricing": {"input": "0.000000018", "output": "0.00000064",
+                "ceiling_input": "0.00000044", "ceiling_output": "0.00000132"}}]}
+policy = ng.load_provider_policy(ng.provider_policy_json(), ng.provider_codec_defaults_json(),
+                                 json.dumps(prices))
+# descriptor_json: a descriptor as in "Descriptor and runtime policy" above, for
+# https://openrouter.ai; options as there, with the OpenRouter key.
+descriptor = ng.load_provider_descriptor(descriptor_json, policy)
 host = ng.LocalProgramHost(
     registry, "tenant-a", ceiling,
     node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
@@ -558,7 +568,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 結び付けのうち、どのIDにも含まれるのはラベルだけです。プロバイダーを必要とするProgramのバージョンには、機能のレシートが付きます。このレシートのIDは、ラベルとプロバイダーのレジストリ上のIDのダイジェストです。プロバイダーのキー、エンドポイント、モデルは含まれません。したがって、モデルを変えてもバージョンIDは変わらず、ラベルを変えると変わります。プロバイダーを必要としないProgramにはレシートが付かず、バンドルIDとバージョンIDも変わりません。ラベルは、英小文字（`a-z`）、数字（`0-9`）、`.`、`_`、`-`、`:` からなる1〜64文字で、先頭は英字か数字にします。APIキーに見える文字列にしてはいけません。`node_context` がないと、プロバイダーを必要とするProgramは、admissionで `P_ADMIT_PROVIDER` により拒否されます。`provider=` なしで登録した `llm_call` ノードや `intent_classifier` ノードを持つProgramも同様です。
 
-各呼び出しの料金は、NeoGraphに組み込まれた価格カタログを使って、実行の `monetary_microunits` に対して計算されます。リクエストを送る前に、その呼び出しの上限額が予約されます。OpenRouterの場合は、リクエストにもこの上限が `provider.max_price` として付きます。値は、ルートの上限の入力・出力の単価です。コントロールや `SchemaProviderDefaults` で、すでにこれより低い `max_price` を設定している場合は、そちらが使われます。これにより、OpenRouterが呼び出しを、より高価なエンドポイントに回すことはなくなります。料金の計算では、会話がユーザーメッセージ1件だけのプローブ用リクエストを準備しますが、送信はしません。そのため、Pythonのプロバイダーの `prepare` から、そのプローブが見えます。上限を決められない呼び出しや、予約額が残りの予算に収まらない呼び出しは、何も送信されないまま拒否され、実行は `P_MONEY_*` のコードで失敗します。上限を決められない呼び出しとは、カタログにないモデル、ルートの上限がないルーターのエイリアス、出力の上限がないリクエストのことです。`ProgramRunBudget` の他のフィールドと同じく、`monetary_microunits = 0` は何も許可しません。この場合、すべての呼び出しが拒否されます。応答の後、`result.monetary_records` には、呼び出しごとに1件の `ng.ProgramMonetaryRecord` が入り、`evidence` が付きます。その種類は次の3つです。`reported`（OpenRouterの `usage.cost`）、`estimated`（カタログの単価。`catalog_version` と `catalog_digest` でカタログを特定します）、`held`（結果または使用量が不明なため、予約額が課金されます）。プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く。たとえば不正なキーや不正なリクエスト）で拒否した呼び出しと、送信されなかった呼び出しは、予約を解放し、記録を残さず、金額もモデルトークンも課金しません。429、5xx の応答、途中で切れた呼び出しは `held` のままです。`result.usage.monetary_microunits` は、これらの合計です。コード、上限、精算の規則は、[料金のエビデンスと価格カタログ](reference-en.md#pricing-evidence-and-the-price-catalog)にあります。
+各呼び出しの料金は、プロバイダーのポリシーが持つモデルカタログだけを使って、実行の `monetary_microunits` に対して計算されます。組み込みのカタログには価格が載っていないので、ホストが上で示したように自分の価格を重ねます。項目の `pricing` は、単位あたりの10進 USD を与えます。`input`、`output`、キャッシュ・推論・画像の単位、OpenRouterのルートの上限（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context の帯（`input+200000`）、サーバーツールの料金（`tool:web_search`）です。リクエストを送る前に、その呼び出しの上限額が予約されます。OpenRouterの場合は、リクエストにもこの上限が `provider.max_price` として付きます。値は、ルートの上限の入力・出力の単価です。コントロールや `SchemaProviderDefaults` で、すでにこれより低い `max_price` を設定している場合は、そちらが使われます。これにより、OpenRouterが呼び出しを、より高価なエンドポイントに回すことはなくなります。料金の計算では、会話がユーザーメッセージ1件だけのプローブ用リクエストを準備しますが、送信はしません。そのため、Pythonのプロバイダーの `prepare` から、そのプローブが見えます。上限を決められない呼び出しや、予約額が残りの予算に収まらない呼び出しは、何も送信されないまま拒否され、実行は `P_MONEY_*` のコードで失敗します。上限を決められない呼び出しとは、カタログが価格を付けていないモデル、ルートの上限がないルーターのエイリアス、出力の上限がないリクエスト、料金も使用の上限もないサーバーツールのことです。`ProgramRunBudget` の他のフィールドと同じく、`monetary_microunits = 0` は何も許可しません。この場合、すべての呼び出しが拒否されます。応答の後、`result.monetary_records` には、呼び出しごとに1件の `ng.ProgramMonetaryRecord` が入り、`evidence` が付きます。その種類は次の3つです。`reported`（OpenRouterの `usage.cost`）、`estimated`（カタログの単価。`catalog_version` と `catalog_digest` でカタログを、`pricing` で項目と価格の行を特定します）、`held`（結果または使用量が不明なため、予約額が課金されます）。プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く。たとえば不正なキーや不正なリクエスト）で拒否した呼び出しと、送信されなかった呼び出しは、予約を解放し、記録を残さず、金額もモデルトークンも課金しません。429、5xx の応答、途中で切れた呼び出しは `held` のままです。`result.usage.monetary_microunits` は、これらの合計です。コード、単位、上限、精算の規則は、[価格の証拠とモデルカタログ](reference-en.md#pricing-evidence-and-the-model-catalogue)にあります。
 
 モデルを呼び出すPythonノードは、プロバイダーを自分で持ちます。そのような呼び出しは、Programの予算には反映されません。
 

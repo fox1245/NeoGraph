@@ -1184,20 +1184,20 @@ if(NEOGRAPH_BUILD_PROGRAM)
     neograph_discover_tests(neograph_program_v2_tests PROPERTIES LABELS "program;program-v2")
 endif()
 
-# Pricing registry for monetary Program budgets (#372): catalog loading,
-# reservations and settlements, plus the stdlib-only drift checker on
-# recorded fixtures. Neither touches the network.
+# Program pricing from the SchemaProvider model catalogue (#520): parity with
+# the 0.15 price catalog, reservation bounds, refusals and settlement. No
+# network.
 if(NEOGRAPH_BUILD_PROGRAM)
     add_executable(neograph_pricing_tests test_pricing.cpp)
     target_include_directories(neograph_pricing_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
-    target_link_libraries(neograph_pricing_tests PRIVATE neograph::program GTest::gtest_main)
+    target_link_libraries(neograph_pricing_tests PRIVATE
+        neograph::program neograph::llm SchemaProvider::transport httplib OpenSSL::SSL OpenSSL::Crypto
+        GTest::gtest_main)
+    if(WIN32)
+        target_link_libraries(neograph_pricing_tests PRIVATE advapi32)
+    endif()
     target_compile_definitions(neograph_pricing_tests PRIVATE
-        NEOGRAPH_PRICING_CATALOG="${PROJECT_SOURCE_DIR}/data/pricing/catalog.json")
+        NEOGRAPH_MODEL_PRICES="${PROJECT_SOURCE_DIR}/tests/fixtures/pricing/model_prices.json"
+        NEOGRAPH_MONETARY_SOURCE="${PROJECT_SOURCE_DIR}/src/program/monetary.cpp")
     neograph_discover_tests(neograph_pricing_tests PROPERTIES LABELS pricing)
-endif()
-find_package(Python3 COMPONENTS Interpreter QUIET)
-if(Python3_Interpreter_FOUND)
-    add_test(NAME Pricing.DriftScript
-        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/test_price_drift.py)
-    set_tests_properties(Pricing.DriftScript PROPERTIES LABELS "pricing;metadata")
 endif()

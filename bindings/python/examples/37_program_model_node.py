@@ -5,8 +5,8 @@ its registry declares that `llm_call` requires a provider called "openrouter", a
 supplies the object when it is built, with `node_context=` and a non-secret `binding_label`.
 Here the provider is the scripted model. The reply goes into the `messages` channel, the
 reported tokens are charged to the run (`usage.model_tokens`, `remaining_budget`), and each
-call leaves a monetary record priced from the catalog. A host without the binding refuses to
-admit the Program at all (P_ADMIT_PROVIDER).
+call leaves a monetary record priced from the provider policy's model catalogue. A host
+without the binding refuses to admit the Program at all (P_ADMIT_PROVIDER).
 
 Run:
     python 37_program_model_node.py

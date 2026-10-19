@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=5c3e4c6c372c93c35827c46f459aa4459f614a81906a65a164022c519356c817 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=851dc97f4653b8bcf2e2af6712b5b8f1915bfa559d320daf9c354062c5619640 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -62,7 +62,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [2. Provider 接口](#2-provider-interface)
   - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
-  - [计价证据与价格目录](#pricing-evidence-and-the-price-catalog)
+  - [计价证据与模型目录](#pricing-evidence-and-the-model-catalogue)
 - [3. Tool 接口](#3-tool-interface)
   - [Tool](#tool)
   - [工具失败契约](#tool-failure-contract)
@@ -439,28 +439,29 @@ Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`Pr
 原生代码调用 Python provider 的 `prepare` 重写时，返回 `None` 会在消费 handle 前引发 `TypeError`。`ProviderDescriptorPolicy.identity` 是包含 raw SHA-256 digest 的 `bytes`；`.hex()` 仅用于显示转换。反复检查已保存的 Python provider/graph cause 会保留原始异常值与 traceback，不消费已保存异常的 restore 状态；此规则也适用于嵌套原生异常转换。
 
 <a id="pricing-evidence-and-the-price-catalog"></a>
-### 计价证据与价格目录
+<a id="pricing-evidence-and-the-model-catalogue"></a>
+### 计价证据与模型目录
 
-Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。`monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/pricing.h`、`monetary.h`），不承诺 ABI。
+Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。`monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/monetary.h`），不承诺 ABI。
 
-分发之前，broker 为已准备的请求计价。origin 是 URL 与 descriptor base URL 匹配的目录 origin；若 SDK 策略把该 base URL 声明为 OpenRouter origin，则为 `openrouter`。hold 是请求的输入上限与输出上限对应的目录预留，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。输入上限是该模型已知的最小输入限制：SDK 策略的限制、目录的 `max_input_tokens` 或其上下文窗口。每个输入 token 按最贵的输入档计价，每个输出 token 按最贵的输出费率计价，aggregator 上使用 route ceiling。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、上限与目录：
+分发之前，broker 只用 provider 的 descriptor 策略所带的 SchemaProvider 模型目录为已准备的请求计价，不用其他来源。条目是策略针对 family、base URL 和已准入的模型，按 id、alias 或 origin 范围匹配到的那一条。hold 是 `sp::pricing::upper_bound` 对条目价格算出的值，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。该上限涵盖请求的输入上限与输出上限、按使用上限计的服务器工具，以及在 OpenRouter origin 上条目的 route ceiling。输入上限是目录所知该模型的最小输入限制：其 `input_limit` 或 `context_window`。每个输入 token 按最贵的输入费率计价，每个输出 token 按最贵的输出费率计价，并且覆盖上限之内的调用可能到达的每一档。OpenRouter 模型回退（`models`）预留最贵的候选。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、条目、上限与目录 digest：
 
 | 代码 | 状态 | 拒绝原因 |
 |---|---|---|
-| `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider endpoint 不是目录 origin |
-| `P_MONEY_UNKNOWN_MODEL` | `Failed` | 目录中没有该 origin 与 model 的条目 |
-| `P_MONEY_UNMODELED` | `Failed` | 请求使用了目录不建模的内容：非标准 service tier、OpenRouter 模型回退（`models`）、Responses hosted tool 或 Anthropic 服务器工具 |
+| `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider 没有已准入的 descriptor，因此不知道它的目录 |
+| `P_MONEY_UNKNOWN_MODEL` | `Failed` | 目录没有给出该模型在 base URL 上的价格，或没有给出其某个 OpenRouter 回退的价格 |
+| `P_MONEY_UNMODELED` | `Failed` | 条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
-| `P_MONEY_NO_INPUT_BOUND` | `Failed` | 不知道该模型的输入限制 |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | aggregator 条目没有 route ceiling，例如 router alias，或其 ceiling 无法作为 `provider.max_price` 固定 |
+| `P_MONEY_NO_INPUT_BOUND` | `Failed` | 目录不知道该模型的输入限制或上下文窗口 |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | 服务器工具或 hosted tool 没有使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`；Gemini 的内置工具没有这类上限），OpenRouter 条目没有 route ceiling（例如 router alias），或 route ceiling 无法作为 `provider.max_price` 固定 |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits`（收费超出预算而结束的运行也用同一个错误码，此时 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by`） |
 
-得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed` 与 `reason`。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
+得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason` 与 `pricing`（条目、其价格行、service tier、预留的工具使用和估算的假设）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：
 
 | 证据 | 条件 | 金额 |
 |---|---|---|
-| `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，由 SDK 解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额向上取整到整数 microunit。 |
-| `estimated` | 没有报告费用的最终且一致的 usage。 | 目录费率乘以报告的 token 档，每次调用向上取整一次。记录写明目录的 version 与 digest。 |
+| `reported` | 响应带有 provider 自己的费用：OpenRouter 的 `usage.cost`，由 SDK 解析为以 nano-USD 计的 `Usage::provider_cost`。BYOK 时加上报告的 upstream 费用。 | 报告金额向上取整到整数 microunit。记录仍注明 hold 计价所用的目录和行。 |
+| `estimated` | 没有报告费用的最终且一致的 usage。 | `sp::pricing::estimate` 按计价 hold 时所用的目录快照计算，再加上按使用上限预留的服务器工具费用，每次调用向上取整一次。Messages 的 1 小时缓存写入和 Gemini 的图像 token 按各自的费率计费，OpenRouter 调用按 route ceiling 计费。记录写明 `sp-model-catalogue/1`、目录 digest 以及用于计价的行。 |
 | `held` | 结果未知（transport 异常、取消、超时）、调用失败时可能已有工作开始（HTTP 408、425、429 或 5xx 响应、被切断的流、请求发出后的 transport 失败）、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
 证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
@@ -469,11 +470,18 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 
 fork 只从持久的 provider 调用 journal（`SQLiteProgramProviderCallJournal::bind` 或 `bind_priced`）重放暂停的调用所发出的 provider 调用。进程内的 broker 没有 journal，所以在 fork 中再次运行的节点会把先前的调用再发送一次、再计一次费。`core_provider_call_resolver` 返回该 journal 的 broker 的宿主，应设置 `RuntimeConfig::core_provider_calls_journaled = true`；Python 的 `LocalProgramHost` 在有 `sqlite_directory` 时会这样设置。当该标志为 `false`，且暂停的那次尝试在暂停的操作里记录了已计价的 provider 调用（源运行暂停结果的 `ProgramResult::monetary_records()`）时，`ProgramRuntime::fork` 会给它返回的句柄附上一条 `ProgramNotice`，用 `ProgramHandle::notices()`（Python 中是 `handle.notices`）读取。它的 `code` 是 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`，`witness` 是 `{source_run_id, source_attempt, operation_id, calls: [{call_id, node, model, microunits}], microunits}`。通知不是错误，也不改变 fork 发送什么、计费多少。它无法说明列出的调用中哪些会在 fork 中再次运行，因为在暂停那一步中已完成的节点所发出的调用，会从该步保存的写入重放。通知不随运行一起保存，所以 `reconnect()`、`resume()` 返回的句柄，以及对同一个运行重复调用 `fork()` 得到的句柄上都没有。该标志只决定是否给出通知，不会让 broker 去写 journal。不通过计价 broker 发送 provider 调用的宿主，不会记录已计价的调用，也就没有通知。
 
-在 OpenRouter origin 上，broker 会在把请求准备为待发送之前，将 route ceiling 固定到请求上。OpenRouter 的 `provider.max_price` 以每百万 token 的精确十进制 USD 写入 ceiling 中最贵的输入费率作为 `prompt`、最贵的输出费率作为 `completion`；对于 `deepseek/deepseek-v4-flash-0731`，请求体带有 `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}`。OpenRouter 只会路由到标价不高于这些价格的 endpoint，没有时请求失败，因此预留限定了 endpoint 的 token 价格。宿主已通过 `ProviderControls::provider` 或 `SchemaProvider::Defaults::provider` 发送的 `max_price`（请求自身的值取代默认值）在更低的字段上保留，目录不计价的金额（`image`、`audio`、`request`）保持宿主的值。被固定的是 Chat Completions、Responses 和 Messages 请求；其他 origin 不会带 `max_price`。计价使用把对话替换为一条用户消息的请求 probe，probe 不会发送。请求以固定后的形式只准备一次，因此 provider journal 记录的是实际发送请求的 digest，重放与之一致。在固定值下捕获了 native history 的后续轮次也带同样的固定值。如果 SDK policy 不允许在该 base URL 上使用 OpenRouter routing，或费率超过 `max_price` 允许的 2^53 nanoUSD，导致 route ceiling 无法固定，调用会以 `P_MONEY_NO_UPPER_BOUND` 被拒绝。
+在 OpenRouter origin 上，broker 会在把请求准备为待发送之前，将 route ceiling 固定到请求上。OpenRouter 的 `provider.max_price` 以每百万 token 的精确十进制 USD 写入条目的 `ceiling_input` 作为 `prompt`、`ceiling_output` 作为 `completion`；对于每百万 token 0.44 USD 和 1.32 USD 的 ceiling，请求体带有 `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}`。有回退时，固定值是最贵候选的 ceiling，逐字段取值。OpenRouter 只会路由到标价不高于这些价格的 endpoint，没有时请求失败，因此预留限定了 endpoint 的 token 价格。宿主已通过 `ProviderControls::provider` 或 `SchemaProvider::Defaults::provider` 发送的 `max_price`（请求自身的值取代默认值）在更低的字段上保留，broker 不固定的金额（`image`、`audio`、`request`）保持宿主的值。被固定的是 Chat Completions、Responses 和 Messages 请求；其他 origin 不会带 `max_price`。计价使用把对话替换为一条用户消息的请求 probe，probe 不会发送。请求以固定后的形式只准备一次，因此 provider journal 记录的是实际发送请求的 digest，重放与之一致。在固定值下捕获了 native history 的后续轮次也带同样的固定值。如果 SDK policy 不允许在该 base URL 上使用 OpenRouter routing，或费率超过 `max_price` 允许的 2^53 nanoUSD，导致 route ceiling 无法固定，调用会以 `P_MONEY_NO_UPPER_BOUND` 被拒绝。
 
-目录 [`data/pricing/catalog.json`](../data/pricing/catalog.json) 在构建时编译进 `neograph::program`，运行时只用这些字节计价。键为 origin 和 model。经由 Google AI Studio 的 Gemini 与经由 Vertex AI global endpoint 的 Gemini 是不同条目，OpenAI、Anthropic 和 OpenRouter 也同样分开。每个条目记录 `source_url`（官方价格页面或 OpenRouter models API）与 `retrieved` 日期。费率是以每百万 token 美元计的十进制字符串，涵盖输入、输出、缓存读取、缓存写入（Anthropic 的 5 分钟与 1 小时 TTL）和图像输出各档，并可选按提示长度分 tier。条目按标准 service tier 计价；batch、flex、priority tier，Anthropic 仅限美国的 inference_geo 与 fast mode，服务器工具费用和按请求收费均未建模。OpenRouter 把一个模型路由到价格不同的多个 endpoint，因此其条目带有 `route_ceiling`，即编写条目时最贵的 endpoint，预留使用它。像 `~deepseek/deepseek-v4-flash-latest` 这样的 router alias 不列出 endpoint，因此没有 ceiling，无法预留。没有条目的模型没有价格，对它的计价调用会被拒绝。
+价格是宿主提供的数据。内置的 SchemaProvider 目录不列出任何价格，所以在宿主给 provider 一个其目录为该模型计价的策略之前，有预算的运行会拒绝每一个被计价的调用。在 C++ 中使用 `sp::descriptor::load_policy(family, resources, catalogue)` 或 `DescriptorPolicy::with_catalogue`，宿主的层由 `sp::descriptor::merge_catalogues` 合并。在 Python 中，`load_provider_policy(family_json, resource_json, model_catalogue_json)` 把给定的目录叠加在内置目录之上。条目的 `pricing` 把单位映射到每单位的十进制 USD（SchemaProvider 的 USAGE，"Pricing by the catalogue"）：
+- `input`、`output`、`cache_read`、`cache_write`、`cache_write_1h`、`reasoning`、`output_image` 和 `request`。
+- `ceiling_input`、`ceiling_output` 和 `ceiling_request`：OpenRouter 的 route ceiling，即该模型各 endpoint 中最贵的，broker 将其固定为 `provider.max_price`。
+- `<unit>/<tier>`：某个 service tier 的价格。tier 不是 `default`、`standard` 或 `standard_only` 的请求，只按这些单位计价。
+- `<unit>+<tokens>`：long-context 档。输入 token（含缓存）超过该数量时，该档的单位为整个调用计价。
+- `tool:<type>`：服务器工具或 hosted tool 每次使用的费用。`"0"` 声明免费；默认没有任何工具是免费的。
 
-NeoGraph 运行时从不获取价格。[`scripts/check_price_drift.py`](../scripts/check_price_drift.py) 把目录与 OpenRouter 的 models 和 endpoints 列表、LiteLLM 社区价格文件（只是需要核对的信号，并非事实）以及在设置 `GCP_BILLING_API_KEY` 时 Cloud Billing Catalog API 中的 Vertex AI SKU 进行比较。它输出表格（`--json` 输出 JSON），漂移超过 `--tolerance` 时以 1 退出，且从不修改目录。每周的 `Price drift` 工作流运行它；OpenRouter 与 LiteLLM 不需要 secret。
+带有 origin 范围（`origins`）的条目只为发往这些 origin 的调用计价。同一模型出现在两个 origin 上时，需要第二个条目：它有自己的 id，把该模型列为 alias，并限定在另一个 origin。[`tests/fixtures/pricing/model_prices.json`](../tests/fixtures/pricing/model_prices.json) 以这种形式保存了 0.15 的价格目录。它是测试 fixture，其价格取自 2026-10-11，不是价格来源。
+
+NeoGraph 在运行期间从不获取或刷新价格。宿主在运行之外刷新自己的目录，例如用 `sp::transport::refresh_catalogue` 从 OpenRouter 的列表刷新，并绑定用它构建的 provider。每次调用都会在 journal 中记录目录 digest 和计价所用的行；已分发的调用按其 hold 计价时的快照结算；恢复或 fork 的运行保留其 journal 中的金额。0.16.0 之前写入 journal 的记录字节保持不变：它们写明 `openrouter` 这样的价格目录 origin、目录 version 与 digest，没有 `pricing`。
 
 组织费用报告（OpenAI 的 organization costs endpoint、Anthropic 的 cost report）需要管理员密钥，按时间段汇总且到达较晚，因此运行时不使用它们。主机可以事后用它们核对 `reported` 与 `estimated` 记录。
 

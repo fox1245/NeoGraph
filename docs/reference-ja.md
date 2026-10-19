@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=5c3e4c6c372c93c35827c46f459aa4459f614a81906a65a164022c519356c817 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=851dc97f4653b8bcf2e2af6712b5b8f1915bfa559d320daf9c354062c5619640 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -52,7 +52,7 @@ target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::r
 - [2. Provider インターフェース](#2-provider-interface)
   - [ProviderRequest / ProviderControls](#providerrequest--providercontrols)
   - [PreparedProviderRequest / ProviderBudgetClaim](#preparedproviderrequest--providerbudgetclaim)
-  - [価格の証拠と価格カタログ](#pricing-evidence-and-the-price-catalog)
+  - [価格の証拠とモデルカタログ](#pricing-evidence-and-the-model-catalogue)
 - [3. Tool インターフェース](#3-tool-interface)
   - [Tool](#tool)
   - [ツール失敗の契約](#tool-failure-contract)
@@ -409,28 +409,29 @@ Python SDK の vector/map getter は独立した値を返します: `ProviderMes
 ネイティブコードが Python provider の `prepare` オーバーライドを呼ぶ際に `None` を返すと、handle を消費する前に `TypeError` が発生します。`ProviderDescriptorPolicy.identity` は raw SHA-256 digest を格納する `bytes` で、`.hex()` は表示用の変換です。保存された Python provider/graph の cause を繰り返し調べても、元の例外値と traceback を保持し、保存された例外の restore 状態を消費しません。ネイティブの入れ子になった例外変換にも適用されます。
 
 <a id="pricing-evidence-and-the-price-catalog"></a>
-### 価格の証拠と価格カタログ
+<a id="pricing-evidence-and-the-model-catalogue"></a>
+### 価格の証拠とモデルカタログ
 
-Program 実行の `monetary_microunits` 予算は micro-USD（1 microunit = 1e-6 USD）を数えます。ホストが組み込み `llm_call` ノードの provider 呼び出しを価格付け broker に通すと、その呼び出しに価格が付きます。プロセス内では `bind_priced_provider_call(context)`、クラッシュに安全な再生が必要なら `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)` を使います。ランタイムは各 broker に attempt の金額アカウントを `ProgramCoreProviderCallContext::monetary_account` で渡します。Python の `LocalProgramHost(node_context=..., binding_label=...)` は常に呼び出しに価格を付けます（[Python ガイド](python-binding.md#model-calling-nodes)）。すべての `RunBudget` フィールドと同じく `monetary_microunits` は実行に与えられる量で、`0` は何も与えません。子と fork の予算は親の量から切り出され、`model_tokens = 0` でモデルトークンを使った完了実行は `BudgetExhausted` と報告されます。`monetary_microunits = 0` の実行は、価格の付くすべての呼び出しを送信前に拒否します。価格付けのコードは内部用（`src/program/pricing.h`、`monetary.h`）で、ABI を約束しません。
+Program 実行の `monetary_microunits` 予算は micro-USD（1 microunit = 1e-6 USD）を数えます。ホストが組み込み `llm_call` ノードの provider 呼び出しを価格付け broker に通すと、その呼び出しに価格が付きます。プロセス内では `bind_priced_provider_call(context)`、クラッシュに安全な再生が必要なら `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)` を使います。ランタイムは各 broker に attempt の金額アカウントを `ProgramCoreProviderCallContext::monetary_account` で渡します。Python の `LocalProgramHost(node_context=..., binding_label=...)` は常に呼び出しに価格を付けます（[Python ガイド](python-binding.md#model-calling-nodes)）。すべての `RunBudget` フィールドと同じく `monetary_microunits` は実行に与えられる量で、`0` は何も与えません。子と fork の予算は親の量から切り出され、`model_tokens = 0` でモデルトークンを使った完了実行は `BudgetExhausted` と報告されます。`monetary_microunits = 0` の実行は、価格の付くすべての呼び出しを送信前に拒否します。価格付けのコードは内部用（`src/program/monetary.h`）で、ABI を約束しません。
 
-dispatch の前に broker は準備済みリクエストに価格を付けます。origin は descriptor の base URL と URL が一致するカタログ origin で、SDK ポリシーがその base URL を OpenRouter origin と宣言していれば `openrouter` です。hold は、リクエストの入力上限と出力 cap に対するカタログ予約に、1 回の dispatch が請求しうるモデル呼び出し数（`Provider::invocation_upper_bound`）を掛けた値です。入力上限は、そのモデルについて分かっている最小の入力上限、つまり SDK ポリシーの上限、カタログの `max_input_tokens` またはコンテキストウィンドウです。すべての入力トークンは最も高い入力帯の料金、すべての出力トークンは最も高い出力料金で計算し、aggregator では route ceiling を使います。上限を決められない呼び出しや、hold が残り予算に収まらない呼び出しは、リクエストや journal marker ができる前に拒否されます。ノードは未送信を示す合成 provider 失敗で失敗し、実行の `ProgramFailure` が理由を示します。`failure.witness["monetary"]` には origin、model、上限、カタログが入ります。
+dispatch の前に broker は、provider の descriptor ポリシーが持つ SchemaProvider のモデルカタログから準備済みリクエストに価格を付けます。それ以外は使いません。項目は、ポリシーが family、base URL、許可されたモデルに対して、id、alias、または origin の範囲で対応づけるものです。hold は、項目の価格に対する `sp::pricing::upper_bound` に、1 回の dispatch が請求しうるモデル呼び出し数（`Provider::invocation_upper_bound`）を掛けた値です。この上限は、リクエストの入力上限と出力 cap、使用 cap までのサーバーツール、OpenRouter の origin では項目の route ceiling を含みます。入力上限は、カタログがそのモデルについて知っている最小の入力上限、つまり `input_limit` または `context_window` です。すべての入力トークンは最も高い入力料金、すべての出力トークンは最も高い出力料金で計算し、上限内の呼び出しが届きうるすべての帯にわたって適用します。OpenRouter のモデル fallback（`models`）は最も高い候補を予約します。上限を決められない呼び出しや、hold が残り予算に収まらない呼び出しは、リクエストや journal marker ができる前に拒否されます。ノードは未送信を示す合成 provider 失敗で失敗し、実行の `ProgramFailure` が理由を示します。`failure.witness["monetary"]` には origin、model、項目、上限、カタログの digest が入ります。
 
 | コード | ステータス | 拒否の理由 |
 |---|---|---|
-| `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider endpoint がカタログ origin ではない |
-| `P_MONEY_UNKNOWN_MODEL` | `Failed` | カタログにその origin と model の項目がない |
-| `P_MONEY_UNMODELED` | `Failed` | リクエストがカタログの反映しないものを使う：標準以外の service tier、OpenRouter のモデル fallback（`models`）、Responses の hosted tool、Anthropic のサーバーツール |
+| `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider に許可された descriptor がなく、カタログが分からない |
+| `P_MONEY_UNKNOWN_MODEL` | `Failed` | カタログが base URL のそのモデルに価格を付けていない、またはその OpenRouter fallback のいずれかに価格を付けていない |
+| `P_MONEY_UNMODELED` | `Failed` | 項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、あるいはリクエストが OpenRouter の plugin を使う |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
-| `P_MONEY_NO_INPUT_BOUND` | `Failed` | そのモデルの入力上限が分からない |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | router alias のように aggregator の項目に route ceiling がない、またはその ceiling を `provider.max_price` として固定できない |
+| `P_MONEY_NO_INPUT_BOUND` | `Failed` | カタログがそのモデルの入力上限もコンテキストウィンドウも知らない |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | サーバーツールや hosted tool に使用 cap がない（Messages の `max_uses`、Responses の `max_tool_calls`。Gemini の組み込みツールにはない）、router alias のように OpenRouter の項目に route ceiling がない、または route ceiling を `provider.max_price` として固定できない |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold が残りの `monetary_microunits` に収まらない（請求額が予算を超えて終わった実行も同じコードで、その場合は `failure.witness["monetary"]` に `granted`、`used`、`over_by` が入る） |
 
-結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason` です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
+結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（項目、その価格行、service tier、予約したツールの使用、推定の前提）です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。
 
 | 証拠 | 条件 | 金額 |
 |---|---|---|
-| `reported` | 応答に provider 自身の費用がある：OpenRouter の `usage.cost` で、SDK が nano-USD 単位の `Usage::provider_cost` にパースします。BYOK なら報告された upstream の請求額を加えます。 | 報告額を整数 microunit に切り上げた値。 |
-| `estimated` | 報告費用のない最終で一貫した usage。 | カタログ料金 × 報告されたトークン帯、呼び出しごとに 1 回切り上げ。記録にカタログの version と digest が残ります。 |
+| `reported` | 応答に provider 自身の費用がある：OpenRouter の `usage.cost` で、SDK が nano-USD 単位の `Usage::provider_cost` にパースします。BYOK なら報告された upstream の請求額を加えます。 | 報告額を整数 microunit に切り上げた値。記録には hold の算定に使ったカタログと行も残ります。 |
+| `estimated` | 報告費用のない最終で一貫した usage。 | `sp::pricing::estimate` が hold に価格を付けたときのカタログのスナップショットから求めた値に、予約したサーバーツール料金を cap の分だけ加え、呼び出しごとに 1 回切り上げ。Messages の 1 時間キャッシュ書き込みと Gemini の画像トークンはそれぞれ固有の料金で、OpenRouter の呼び出しは route ceiling で請求されます。記録には `sp-model-catalogue/1`、カタログの digest、価格を付けた行が残ります。 |
 | `held` | 結果が分からない（transport 例外、キャンセル、タイムアウト）、すでに始まった処理の後に失敗した可能性がある（HTTP 408、425、429、5xx の応答、途中で切れたストリーム、リクエストが出た後の transport 失敗）、SDK が transport 試行を再送した、または usage が部分的か一貫しない。 | hold。 |
 
 プロバイダーが何も受け付けなかったことを証明する失敗は hold を解放し、記録を残しません。リクエストが送られなかった場合と、プロバイダーが完了した HTTP 4xx 応答（408、425、429 を除く）でリクエストを拒否した場合です。金額の hold もモデルトークンの reservation も請求されません。hold を超える請求額（BYOK の upstream 費用のように、固定した上限が抑えない費用が報告費用に含まれるときに起こりえます）は報告どおりに請求され、請求額が予算を超えた実行は `P_MONEY_BUDGET` とともに `BudgetExhausted` で終わります。並行呼び出し（`ng.all`、`ng.race`、`ng.quorum`、並列ノード）は 1 つのアカウントに予約するので、収まらない member は拒否されます。ノードの再試行は自分の effect namespace（`task#a<k>`）で呼び出すため、attempt ごとの呼び出しは新しい呼び出しで、再び請求されます。
@@ -439,11 +440,18 @@ dispatch の前に broker は準備済みリクエストに価格を付けます
 
 フォークは、一時停止した呼び出しのプロバイダー呼び出しを、永続的なプロバイダー呼び出しのjournal（`SQLiteProgramProviderCallJournal::bind` または `bind_priced`）からだけリプレイします。プロセス内のブローカーにはjournalがないため、フォークで再び実行されるノードは、先に行った呼び出しを再送し、再課金します。`core_provider_call_resolver` がjournalのブローカーを返すホストは、`RuntimeConfig::core_provider_calls_journaled = true` を設定します。Pythonの `LocalProgramHost` は、`sqlite_directory` があるときにそうします。このフラグが `false` で、一時停止した試行が、止まっているオペレーションで価格付きのプロバイダー呼び出しを記録していた場合（コピー元の一時停止した `ProgramResult::monetary_records()`）、`ProgramRuntime::fork` は返すハンドルに `ProgramNotice` を1つ付けます。これは `ProgramHandle::notices()`（Pythonでは `handle.notices`）で読みます。`code` は `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`、`witness` は `{source_run_id, source_attempt, operation_id, calls: [{call_id, node, model, microunits}], microunits}` です。通知はエラーではなく、フォークが送るものも課金するものも変えません。列挙された呼び出しのうちどれをフォークが再実行するかは分かりません。一時停止したステップで終わったノードの呼び出しは、そのステップに保存された書き込みからリプレイされるためです。通知は実行とともには保存されないので、`reconnect()` や `resume()` が返したハンドルにも、同じ実行の `fork()` を繰り返して得たハンドルにもありません。フラグが決めるのは通知を出すかどうかだけで、ブローカーにjournalを書かせるわけではありません。プロバイダー呼び出しを価格付きブローカー経由で送らないホストは、価格付きの呼び出しを記録しないので、通知も出ません。
 
-OpenRouter の origin では、broker はリクエストを送信用に準備する前に route ceiling をリクエストに固定します。OpenRouter の `provider.max_price` には、ceiling の最も高い入力レートが `prompt` に、最も高い出力レートが `completion` に、100万トークンあたりの正確な10進 USD で入ります。`deepseek/deepseek-v4-flash-0731` なら本文は `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}` を含みます。OpenRouter はその価格以下で掲載された endpoint にだけルーティングし、該当がなければリクエストを失敗させるので、予約が endpoint のトークン価格を抑えます。ホストが `ProviderControls::provider` または `SchemaProvider::Defaults::provider` ですでに送る `max_price`（リクエスト自身の値が既定値を置き換えます）は、より低いフィールドで保たれ、カタログが価格を付けない金額（`image`、`audio`、`request`）はホストの値のままです。固定されるのは Chat Completions、Responses、Messages のリクエストで、ほかの origin には `max_price` は付きません。価格は会話をユーザーメッセージ1つに置き換えたリクエストの probe から求め、probe は送信しません。リクエストは固定した状態で一度だけ準備されるので、provider journal は実際に送ったリクエストの digest を記録し、再生はそれと一致します。固定値のもとでキャプチャされた native history を持つ次のターンも同じ固定値を載せます。SDK policy がその base URL で OpenRouter routing を認めない、またはレートが `max_price` の認める 2^53 nanoUSD を超えるために route ceiling を固定できない呼び出しは `P_MONEY_NO_UPPER_BOUND` で拒否されます。
+OpenRouter の origin では、broker はリクエストを送信用に準備する前に route ceiling をリクエストに固定します。OpenRouter の `provider.max_price` には、項目の `ceiling_input` が `prompt` に、`ceiling_output` が `completion` に、100万トークンあたりの正確な10進 USD で入ります。ceiling が100万トークンあたり 0.44 USD と 1.32 USD なら、本文は `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}` を含みます。fallback がある場合、固定値はフィールドごとに最も高い候補の ceiling です。OpenRouter はその価格以下で掲載された endpoint にだけルーティングし、該当がなければリクエストを失敗させるので、予約が endpoint のトークン価格を抑えます。ホストが `ProviderControls::provider` または `SchemaProvider::Defaults::provider` ですでに送る `max_price`（リクエスト自身の値が既定値を置き換えます）は、より低いフィールドで保たれ、broker が固定しない金額（`image`、`audio`、`request`）はホストの値のままです。固定されるのは Chat Completions、Responses、Messages のリクエストで、ほかの origin には `max_price` は付きません。価格は会話をユーザーメッセージ1つに置き換えたリクエストの probe から求め、probe は送信しません。リクエストは固定した状態で一度だけ準備されるので、provider journal は実際に送ったリクエストの digest を記録し、再生はそれと一致します。固定値のもとでキャプチャされた native history を持つ次のターンも同じ固定値を載せます。SDK policy がその base URL で OpenRouter routing を認めない、またはレートが `max_price` の認める 2^53 nanoUSD を超えるために route ceiling を固定できない呼び出しは `P_MONEY_NO_UPPER_BOUND` で拒否されます。
 
-カタログ [`data/pricing/catalog.json`](../data/pricing/catalog.json) はビルド時に `neograph::program` にコンパイルされ、ランタイムはそのバイトだけで価格を付けます。キーは origin と model です。Google AI Studio 経由の Gemini と Vertex AI global endpoint 経由の Gemini は別の項目で、OpenAI、Anthropic、OpenRouter も同様です。各項目は `source_url`（公式の価格ページ、または OpenRouter models API）と `retrieved` の日付を記録します。料金は 100 万トークンあたりの USD を表す 10 進文字列で、入力、出力、キャッシュ読み取り、キャッシュ書き込み（Anthropic の 5 分・1 時間 TTL）、画像出力の帯と、任意のプロンプト長 tier を持ちます。項目は標準の service tier の価格で、batch・flex・priority tier、Anthropic の US 限定 inference_geo と fast mode、サーバーツール料金、リクエスト単位の料金は反映しません。OpenRouter は一つのモデルを価格の異なる複数の endpoint にルーティングするため、その項目には作成時点で最も高い endpoint である `route_ceiling` があり、予約はこれを使います。`~deepseek/deepseek-v4-flash-latest` のような router alias は endpoint を列挙しないため ceiling がなく、予約できません。項目のないモデルには価格がなく、そのモデルへの価格付き呼び出しは拒否されます。
+価格はホストが供給するデータです。組み込みの SchemaProvider カタログには価格が一つもないので、ホストがモデルに価格を付けるカタログを持つポリシーを provider に渡すまで、予算付きの実行は価格の付くすべての呼び出しを拒否します。C++ では `sp::descriptor::load_policy(family, resources, catalogue)` または `DescriptorPolicy::with_catalogue` を使い、ホストのレイヤーは `sp::descriptor::merge_catalogues` で統合します。Python では `load_provider_policy(family_json, resource_json, model_catalogue_json)` が、渡されたカタログを組み込みカタログの上に重ねます。項目の `pricing` は、単位を単位あたりの10進 USD に対応づけます（SchemaProvider の USAGE、"Pricing by the catalogue"）：
+- `input`、`output`、`cache_read`、`cache_write`、`cache_write_1h`、`reasoning`、`output_image`、`request`。
+- `ceiling_input`、`ceiling_output`、`ceiling_request`：OpenRouter の route ceiling。モデルの endpoint のうち最も高い値で、broker が `provider.max_price` として固定します。
+- `<unit>/<tier>`：service tier の価格。`default`、`standard`、`standard_only` 以外の tier のリクエストは、その単位だけで価格が付きます。
+- `<unit>+<tokens>`：long-context の帯。キャッシュを含む入力トークンがその数を超えると、帯の単位が呼び出し全体に価格を付けます。
+- `tool:<type>`：サーバーツールまたは hosted tool を 1 回使うごとの料金。`"0"` は無料であることを宣言します。既定で無料のツールはありません。
 
-NeoGraph は実行時に価格を取得しません。[`scripts/check_price_drift.py`](../scripts/check_price_drift.py) は、カタログを OpenRouter の models・endpoints 一覧、LiteLLM のコミュニティ価格ファイル（真実ではなく確認のための信号）、そして `GCP_BILLING_API_KEY` が設定されていれば Cloud Billing Catalog API の Vertex AI SKU と比較します。表を出力し（`--json` なら JSON）、`--tolerance` を超える drift があれば 1 で終了し、カタログは編集しません。週次の `Price drift` ワークフローがこれを実行し、OpenRouter と LiteLLM には secret が不要です。
+origin の範囲（`origins`）を持つ項目は、それらの origin への呼び出しにだけ価格を付けます。同じモデルが 2 つの origin にある場合は、そのモデルを alias として名指しし、もう一方の origin に範囲を限った、独自の id を持つ 2 つ目の項目が必要です。[`tests/fixtures/pricing/model_prices.json`](../tests/fixtures/pricing/model_prices.json) は、0.15 の価格カタログをこの形で保持しています。2026-10-11 に取得した価格を持つテスト fixture であり、価格の出どころではありません。
+
+NeoGraph は実行中に価格を取得も更新もしません。ホストは、たとえば OpenRouter の一覧から `sp::transport::refresh_catalogue` で、カタログを実行とは別の経路で更新し、それで作った provider をバインドします。各呼び出しは、カタログの digest と価格を付けた行を journal に記録し、dispatch された呼び出しは hold の価格を付けたスナップショットから精算され、復旧または fork された実行は journal に記録された金額を保ちます。0.16.0 より前に journal に記録されたレコードはバイトが変わりません。それらは `openrouter` のような価格カタログの origin、カタログの version と digest を名指しし、`pricing` はありません。
 
 組織の費用レポート（OpenAI の organization costs endpoint、Anthropic の cost report）は admin key が必要で、時間帯ごとに集計され、遅れて届くため、ランタイムは使いません。ホストは後から `reported` と `estimated` の記録をこれらと照合できます。
 

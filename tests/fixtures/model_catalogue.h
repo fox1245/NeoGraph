@@ -24,6 +24,10 @@ struct FixtureModel {
     std::optional<std::uint64_t> input_limit{}, output_limit{};
     // Overlays the family defaults member by member; a null member leaves that control unset.
     neograph::json defaults = neograph::json::object();
+    // Catalogue price units (decimal USD per unit), as a host's pricing layer gives them.
+    neograph::json pricing = neograph::json::object();
+    // Base URLs the entry is scoped to; empty means every origin.
+    std::vector<std::string> origins{};
 };
 
 inline sp::descriptor::CatalogueSnapshot fixture_catalogue(const std::vector<FixtureModel>& models) {
@@ -33,6 +37,8 @@ inline sp::descriptor::CatalogueSnapshot fixture_catalogue(const std::vector<Fix
         if (model.input_limit) entry["input_limit"] = *model.input_limit;
         if (model.output_limit) entry["output_limit"] = *model.output_limit;
         if (!model.defaults.empty()) entry["defaults"] = neograph::json{{model.family, model.defaults}};
+        if (!model.pricing.empty()) entry["pricing"] = model.pricing;
+        if (!model.origins.empty()) entry["origins"] = model.origins;
         entries.push_back(std::move(entry));
     }
     auto loaded = sp::descriptor::load_catalogue(neograph::json{{"version", 1}, {"models", entries}}.dump());

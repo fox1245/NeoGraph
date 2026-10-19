@@ -20,7 +20,6 @@
 #include "fixtures/fork_share.h"
 #include "fixtures/typed_provider.h"
 #include "monetary.h"
-#include "pricing.h"
 #include "provider_binding.h"
 
 #include <sqlite3.h>
@@ -122,10 +121,13 @@ void crash_image(const std::filesystem::path& from, const std::filesystem::path&
 
 std::shared_ptr<sp::runtime::Client> client_for(std::string origin, const std::string& model,
                                                 std::uint64_t input_limit) {
+    // The prices and OpenRouter route ceiling a host's catalogue layer gives the model.
+    neograph::test::FixtureModel priced{"openai.chat", model, input_limit};
+    priced.pricing = json{{"input", "0.000000018"}, {"cache_read", "0.000000018"}, {"output", "0.00000064"},
+                          {"ceiling_input", "0.00000044"}, {"ceiling_output", "0.00000132"}};
     return std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
         "openai.chat", std::move(origin),
-        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json),
-                                           {{"openai.chat", model, input_limit}})));
+        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json), {priced})));
 }
 
 sp::Usage priced_usage() {

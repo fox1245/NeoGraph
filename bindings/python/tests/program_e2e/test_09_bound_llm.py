@@ -3,13 +3,13 @@
 LocalProgramHost(node_context=ng.NodeContext(provider=..., model=...),
 binding_label=...) binds one provider to the llm_call nodes a registry
 declares with add_registered_node("llm_call", ..., provider=name). Every call
-is priced from the repository's price catalog against the run's
+is priced from the provider policy's model catalogue against the run's
 monetary_microunits budget: reserved before it is sent, refused (fail closed)
 when it cannot be bounded or does not fit, and settled once from the reply.
 
 The peer is a loopback Chat Completions server declared as an OpenRouter
 origin, so no key and no paid call are involved. A reply with usage.cost
-settles as `reported`; without it the catalog `estimated` amount applies.
+settles as `reported`; without it the catalogue `estimated` amount applies.
 """
 
 import json
@@ -22,7 +22,7 @@ import pytest
 import neograph_engine as ng
 
 from . import support
-from .support import (ChatPeer, CATALOG_PATH, PRICED_MODEL, admit, budget, ceiling,
+from .support import (ChatPeer, PRICED_MODEL, admit, budget, ceiling,
                       define_graph, describe, digest, last_json_line,
                       make_bound_host, make_host, priced_budget, route_ceiling_hold,
                       run_python, slow, with_main)
@@ -47,9 +47,8 @@ def peer():
         yield running
 
 
-def catalog():
-    with open(CATALOG_PATH, encoding="utf-8") as handle:
-        return json.load(handle)
+def priced_entry():
+    return next(e for e in support.price_layer()["models"] if e["id"] == PRICED_MODEL)
 
 
 def run_bound(peer, text=CHAT, run_budget=None, **host_options):
@@ -77,8 +76,10 @@ def test_a_bound_llm_call_settles_the_reported_cost(peer):
     assert record.microunits == 1235
     assert record.reserved_microunits == HOLD
     assert record.basis == "provider_reported"
-    assert (record.origin, record.model, record.node) == ("openrouter", PRICED_MODEL, "llm")
-    assert record.catalog_version == "" and record.catalog_digest == ""
+    assert (record.origin, record.model, record.node) == (support.origin_of(peer.base_url), PRICED_MODEL, "llm")
+    # The record still names the catalogue and rows its hold was priced with.
+    assert record.catalog_version == "sp-model-catalogue/1" and len(record.catalog_digest) == 64
+    assert record.pricing["entry"] == PRICED_MODEL
     assert not record.replayed
     [sent] = peer.requests
     body = sent["body"]
@@ -98,8 +99,11 @@ def test_without_a_reported_cost_the_catalog_estimate_names_its_catalog(peer):
     # (the route ceiling), rounded up once: 13.2 -> 14 microunits.
     assert record.microunits == 14
     assert record.basis == "route_ceiling"
-    assert record.catalog_version == catalog()["version"]
-    assert record.catalog_digest.startswith("sha256:")
+    assert record.catalog_version == "sp-model-catalogue/1"
+    assert len(record.catalog_digest) == 64  # the provider policy's catalogue
+    assert record.pricing["entry"] == PRICED_MODEL
+    assert record.pricing["units"]["ceiling_input"] == priced_entry()["pricing"]["ceiling_input"]
+    assert record.pricing["assumptions"] == ["route ceiling"]
     assert result.usage.monetary_microunits == 14
 
 
@@ -278,13 +282,9 @@ def test_the_request_pins_the_route_ceiling_as_max_price(peer):
     # OpenRouter may route only to endpoints priced at or below the ceiling the
     # call was reserved at: the dearest input and output rate of the entry's
     # route ceiling, in USD per million tokens, sent as exact decimals.
-    entry = next(e for e in catalog()["entries"]
-                 if e["origin"] == "openrouter" and e["model"] == PRICED_MODEL)
-    rates = {key: Decimal(value) for key, value in entry["route_ceiling"].items()
-             if key not in ("source_url", "retrieved")}
-    prompt = max(rates[key] for key in ("input", "cache_read", "cache_write", "cache_write_1h")
-                 if key in rates)
-    completion = max(rates[key] for key in ("output", "output_image") if key in rates)
+    pricing = priced_entry()["pricing"]  # decimal USD per token
+    prompt = Decimal(pricing["ceiling_input"]) * 1_000_000
+    completion = Decimal(pricing["ceiling_output"]) * 1_000_000
     provider = json.loads(sent["raw_body"], parse_float=Decimal)["provider"]
     assert provider["max_price"] == {"prompt": prompt, "completion": completion}, provider
     assert (prompt, completion) == (Decimal("0.44"), Decimal("1.32"))

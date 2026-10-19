@@ -16,12 +16,14 @@ from __future__ import annotations
 import hashlib
 import http.server
 import json
+import math
 import os
 import subprocess
 import sys
 import textwrap
 import threading
 import time
+from decimal import Decimal
 from urllib.parse import urlsplit
 
 import pytest
@@ -545,32 +547,54 @@ def last_json_line(stdout: str):
 # --------------------------------------------------------------------------
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.dirname(TESTS_DIR)))
-CATALOG_PATH = os.path.join(REPO_DIR, "data", "pricing", "catalog.json")
+# The host's pricing layer: the 0.15 price catalog as SchemaProvider model
+# catalogue entries, each scoped to the origin it was priced at.
+PRICES_PATH = os.path.join(REPO_DIR, "tests", "fixtures", "pricing", "model_prices.json")
+OPENROUTER_ORIGIN = "https://openrouter.ai"
 
-# A price catalog entry with an OpenRouter route ceiling.
+# A priced model with an OpenRouter route ceiling.
 PRICED_MODEL = "deepseek/deepseek-v4-flash-0731"
 # Declared in the loopback peer's SDK policy so a call's reservation stays small.
 PRICED_INPUT_LIMIT = 100_000
 OUTPUT_CAP = 64
 
 
-def openrouter_descriptor(base_url, *, input_limits=None):
-    """The validated descriptor openrouter_provider() uses."""
+def origin_of(base_url):
     endpoint = urlsplit(base_url.rstrip("/"))
-    origin = f"{endpoint.scheme}://{endpoint.netloc}"
+    return f"{endpoint.scheme}://{endpoint.netloc}"
+
+
+def price_layer(origin=OPENROUTER_ORIGIN):
+    """The pricing layer, its OpenRouter entries scoped to `origin`, as a host
+    serving OpenRouter's prices at a loopback peer would scope them."""
+    with open(PRICES_PATH, encoding="utf-8") as handle:
+        layer = json.load(handle)
+    for entry in layer["models"]:
+        if entry.get("origins") == [OPENROUTER_ORIGIN]:
+            entry["origins"] = [origin]
+    return layer
+
+
+def openrouter_descriptor(base_url, *, input_limits=None):
+    """The validated descriptor openrouter_provider() uses. Its policy carries
+    the pricing layer, the only source of the prices a budgeted run pays."""
+    endpoint = urlsplit(base_url.rstrip("/"))
+    origin = origin_of(base_url)
     path = endpoint.path.rstrip("/") + "/chat/completions"
-    policy = None
-    loopback = endpoint.hostname in {"127.0.0.1", "::1"}
-    if loopback or input_limits:
-        document = json.loads(ng.provider_policy_json())
-        chat = next(f for f in document["families"] if f["family"] == "openai.chat")
-        if loopback:
-            chat["openrouter_origins"].append(origin)
-        # Model input limits are catalogue facts, layered over the embedded catalogue.
-        models = [{"id": model, "families": ["openai.chat"], "input_limit": limit}
-                  for model, limit in (input_limits or {}).items()]
-        policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json(),
-                                         json.dumps({"version": 1, "models": models}))
+    document = json.loads(ng.provider_policy_json())
+    chat = next(f for f in document["families"] if f["family"] == "openai.chat")
+    if endpoint.hostname in {"127.0.0.1", "::1"}:
+        chat["openrouter_origins"].append(origin)
+    # Model input limits are catalogue facts too.
+    layer = price_layer(origin)
+    for model, limit in (input_limits or {}).items():
+        entry = next((e for e in layer["models"] if e["id"] == model), None)
+        if entry is None:
+            layer["models"].append({"id": model, "families": ["openai.chat"], "input_limit": limit})
+        else:
+            entry["input_limit"] = limit
+    policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json(),
+                                     json.dumps(layer))
     return ng.load_provider_descriptor(json.dumps({
         "descriptor_version": 1,
         "revision": 1,
@@ -586,8 +610,8 @@ def openrouter_provider(base_url, api_key, *, input_limits=None, timeout_ms=120_
 
     A loopback base URL is declared an OpenRouter origin through the closed
     policy loader, exactly like the cookbook's no-cost smoke: the SDK then
-    admits OpenRouter routing and parses usage.cost, and the price catalog
-    prices the endpoint as OpenRouter. input_limits maps a model to the input
+    admits OpenRouter routing and parses usage.cost, and the policy's pricing
+    layer prices the endpoint as OpenRouter. input_limits maps a model to the input
     token limit the SDK policy declares for it.
     """
     from neograph_engine.llm import SchemaProvider
@@ -791,18 +815,8 @@ def priced_budget(**overrides):
 
 
 def route_ceiling_hold(model=PRICED_MODEL, input_tokens=PRICED_INPUT_LIMIT, output_tokens=OUTPUT_CAP):
-    """The reservation the catalog makes for one call, in microunits (rounded up)."""
-    with open(CATALOG_PATH, encoding="utf-8") as handle:
-        catalog = json.load(handle)
-    entry = next(e for e in catalog["entries"]
-                 if e["origin"] == "openrouter" and model in [e["model"], *e.get("aliases", [])])
-    ceiling_rates = entry["route_ceiling"]
-
-    def micro(rate):  # USD per million tokens -> micro-USD per million tokens
-        whole, _, fraction = rate.partition(".")
-        return int(whole) * 1_000_000 + int((fraction + "000000")[:6])
-
-    top_input = max(micro(ceiling_rates[key]) for key in ("input", "cache_read", "cache_write")
-                    if key in ceiling_rates)
-    exact = input_tokens * top_input + output_tokens * micro(ceiling_rates["output"])
-    return -(-exact // 1_000_000)
+    """The reservation for one call at the model's route ceiling, in microunits (rounded up once)."""
+    entry = next(e for e in price_layer()["models"] if model in [e["id"], *e.get("aliases", [])])
+    pricing = entry["pricing"]  # decimal USD per token
+    exact = input_tokens * Decimal(pricing["ceiling_input"]) + output_tokens * Decimal(pricing["ceiling_output"])
+    return math.ceil(exact * 1_000_000)
