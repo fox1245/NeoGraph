@@ -1,5 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9b55c68c85cfa656f7f24d256faf0d6a0426a6a3912a7c7a207a815724c1dff3 -->
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=02e529afc4d567bfe5b7df7936551284059e1f7033180667503ab66ed2d9be43 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -15,6 +14,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 变更
+- **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。
+  - **新控制。** Chat 的输出 modality、音频输出、OpenRouter 图像输出和 plugin；Responses 的托管工具（网页搜索、图像生成、文件搜索、工具搜索、shell、code interpreter、MCP、computer use、OpenRouter 服务端工具以及策略准入的工具）、输出 modality、图像输出、plugin、include 名称和 MCP 审批；Messages 的服务端与类型化客户端工具、container、skill、beta 和 MCP 服务器；Generate 的响应 modality、语音、图像输出、音频转写、音频格式、内置工具、MCP 服务器、服务端工具调用和 retrieval；Interactions 的响应格式、语音、转写、内置工具、`previous_interaction_id`、`video_task`、`agent` 和 `background`（可移植的 `store` 现在也适用于 Interactions）。每个嵌套都有 `extensions`，即 SDK 策略按 origin 准入的顶层成员。
+  - **行为变更：每个 family 只应用自己的嵌套。** 节点调用不同 family 的图可以共用一个 `ProviderControls`；其他 family 的控制会被忽略。family 无法表达的可移植控制仍会抛出异常。
+  - **已弃用：扁平的 family 成员**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。它们在 0.16.0 中移入对应的嵌套，同时设置别名和嵌套成员会抛出异常，0.17.0 将移除它们。
+  - **Python。** 绑定了嵌套结构及其中所有 SDK 类型，`MessagesOutputEffort` 新增 `XHigh`，每个控制类都有严格的 `from_dict`：拒绝未知的键，枚举按成员名接受，工具或格式 variant 按 `"type"` 接受（`neograph_engine.provider_controls`）。
 - **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。在 SchemaProvider 0.4.0 发布之前，构建固定在其 `main` 分支（包版本 0.3.0）；0.16.0 发布前会改为 0.4.0 正式版。
   - **行为变更：带类型的媒体。** `sp::Image` 变为 `sp::Media`：图像、音频、视频或文档，可以是内联数据，也可以位于 URL 或 provider 文件中。`ChatMessage::image_urls` 仍把内联图像投影为 data URL，现在也投影 URL 图像；`portable_message` 把 https 条目作为由 provider 获取的 URL 媒体发送。生成的图像（Chat 的 `message.images`、Responses 的 `image_generation_call`、Gemini 的 `inlineData`）是 `Media` 部件而不是 `Opaque` 部件；其 wire 条目保留在 native 输出中。
   - **Provider outcome 格式 v3。** `neograph.provider-outcome/v3` 和 `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）增加了媒体部件、文本引用、带类型的工具结果内容、错误的 `reason` 和实际响应的 `model`。v2 格式的记录（Program 日志、检查点、运行时历史）仍可读取：图像部件变为内联图像媒体，新成员为空。新记录以 v3 写入，NeoGraph 0.15 无法读取。

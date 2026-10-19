@@ -37,7 +37,8 @@ void init_provider_controls(py::module_& m) {
         .value("Low", sp::messages::OutputEffort::Low)
         .value("Medium", sp::messages::OutputEffort::Medium)
         .value("High", sp::messages::OutputEffort::High)
-        .value("Max", sp::messages::OutputEffort::Max);
+        .value("Max", sp::messages::OutputEffort::Max)
+        .value("XHigh", sp::messages::OutputEffort::XHigh);
     py::enum_<sp::messages::CacheTtl>(m, "MessagesCacheTtl")
         .value("FiveMinutes", sp::messages::CacheTtl::FiveMinutes)
         .value("OneHour", sp::messages::CacheTtl::OneHour);

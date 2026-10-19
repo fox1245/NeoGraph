@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=010470d7fb5715159131726603bf5dff5f10a3357b2a21f5332037cc265324ff -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=dbcd1f06a80dbd2da9b01a7fe8d18861340916b559e3dfc8244e34733bd11b9f -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -104,59 +104,65 @@ peer의 `usage` 멤버를 모두 지우고 다시 시작하면 카운터가 없�
 
 ### 계열(family)별 controls
 
-패키지 버전, 네이티브 archive v3, 이식 가능한 JSON v2는 서로 별개입니다. 아래 코드 조각은 디스패치 없이 controls만 만듭니다. 각 조각은 그 계열의 승인(admission)된 provider와 함께 써야 합니다. 첫 번째 루프백 요청은 바꾸지 않습니다. OpenRouter 전용 controls는 승인(admission)되지 않은 origin을 I/O 이전에 거부합니다.
+이식 가능한 controls(`max_output_tokens`, `temperature`, `reasoning_effort`, `store` 등)는 `ProviderControls`의 멤버이고, 계열마다 고유한 controls는 그 계열의 nest(`chat`, `responses`, `messages`, `generate`, `interactions`)에 있습니다. 호출은 provider 계열의 nest만 적용하고 다른 nest는 무시하므로, 노드마다 다른 계열을 부르는 그래프도 `ProviderControls` 하나로 처리할 수 있습니다. 그 계열이 표현할 수 없는 이식 가능한 control은 여전히 `ValueError`를 냅니다. 아래 코드 조각은 디스패치 없이 controls만 만듭니다. 첫 번째 루프백 요청은 바꾸지 않습니다. OpenRouter 전용 controls는 승인(admission)되지 않은 origin을 I/O 이전에 거부합니다.
 
 ```python
-chat = ng.ProviderControls()
+controls = ng.ProviderControls()
+controls.max_output_tokens = 4096
+
+# Chat Completions (OpenRouter-only members need a declared OpenRouter origin).
 reasoning = ng.ChatReasoningOptions()
 reasoning.effort = "low"
 reasoning.enabled = True
-chat.chat_reasoning = reasoning
-chat.include_reasoning = True
-chat.usage_include = True
-chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+controls.chat.reasoning = reasoning
+controls.chat.usage_include = True
+controls.chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
 routing = ng.OpenRouterRouting()
 price = ng.OpenRouterMaxPrice()
 price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
 price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
 routing.max_price = price
-chat.provider = routing
+controls.provider = routing
 
-responses = ng.ProviderControls()
-responses.parallel_tool_calls = False
-responses.verbosity = ng.ResponsesVerbosity.Low
-responses.truncation = ng.ResponsesTruncation.Disabled
-responses.responses_include = [ng.ResponsesInclude.ReasoningEncryptedContent]
+# Responses: hosted tools the service runs.
+image = ng.ResponsesImageGenerationTool()
+image.size = "1024x1024"
+controls.responses.hosted_tools = [image, ng.ResponsesWebSearchTool()]
+controls.responses.verbosity = ng.ResponsesVerbosity.Low
+controls.responses.include = [ng.ResponsesInclude.ReasoningEncryptedContent]
 
-messages = ng.ProviderControls()
-messages.max_output_tokens = 4096
-messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
-messages.output_effort = ng.MessagesOutputEffort.High
-cache = ng.MessagesCacheControl()
-cache.ttl = ng.MessagesCacheTtl.FiveMinutes
-messages.cache_control = cache
-choice = ng.MessagesToolChoice()
-choice.mode = ng.MessagesToolChoiceMode.Auto
-choice.disable_parallel_tool_use = True
-messages.messages_tool_choice = choice
+# Anthropic Messages: thinking, effort, caching and server tools.
+controls.messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
+controls.messages.output_effort = ng.MessagesOutputEffort.High
+search = ng.MessagesToolDefinition()
+search.type = "web_search_20250305"
+search.name = "web_search"
+search.max_uses = 3
+controls.messages.tools = [search]
 
-gemini = ng.ProviderControls()
-gemini.temperature = 0.7
-gemini.gemini_thinking_level = ng.GeminiThinkingLevel.Low
-safety = ng.GeminiSafetySetting()
-safety.category = ng.GeminiSafetyCategory.Harassment
-safety.threshold = ng.GeminiSafetyThreshold.BlockMediumAndAbove
-gemini.safety_settings = [safety]
-choice = ng.GeminiToolChoice()
-choice.mode = ng.GeminiToolChoiceMode.Auto
-gemini.gemini_tool_choice = choice
+# Gemini generateContent: speech output.
+controls.generate.response_modalities = [ng.GeminiResponseModality.Audio]
+voice = ng.GeminiVoiceConfig()
+voice.prebuilt_voice_name = "Kore"
+speech = ng.GeminiSpeechConfig()
+speech.voice_config = voice
+controls.generate.speech_config = speech
+
+# The same controls, written as data. Unknown keys are refused.
+controls = ng.ProviderControls.from_dict({
+    "max_output_tokens": 4096,
+    "responses": {"hosted_tools": [{"type": "image_generation", "size": "1024x1024"},
+                                   {"type": "web_search"}]},
+    "generate": {"response_modalities": ["Audio"],
+                 "speech_config": {"voice_config": {"prebuilt_voice_name": "Kore"}}},
+})
 ```
 
-레코드는 기본 생성자로 만든 뒤 필드를 대입합니다. 이 레코드들에는 키워드 생성자가 없습니다. 선택적 레코드와 벡터는 분리된 복사본을 반환하므로, 수정한 뒤 다시 대입해야 합니다. `OpenRouterRouting.max_price`가 그런 경우입니다. `routing.max_price.prompt_nano_usd = ...`는 복사본만 수정하므로, `ng.OpenRouterMaxPrice`를 만들어 객체 전체를 대입합니다. 금액은 정수 nanoUSD이며 `prompt_nano_usd`와 `completion_nano_usd`는 100만 토큰당 값이고, 그 밖에 `image_nano_usd`, `audio_nano_usd`, `request_nano_usd`가 있습니다. 전송할 때는 정확한 십진 USD 값으로 변환됩니다(`75_000_000`은 `0.075`). 이 중 하나 이상은 반드시 지정해야 하고 2**53을 넘는 값은 허용되지 않습니다. `SchemaProviderDefaults.provider`는 `max_price`를 다른 라우팅 필드와 같은 방식으로 병합합니다. 요청에 지정한 값이 기본값을 대체합니다. `ChatReasoningOptions`에는 `max_tokens`와 `exclude`도 있습니다. 중첩된 Chat reasoning, `include_reasoning`, `usage_include`, `models`는 선언된 OpenRouter origin이 있어야 쓸 수 있습니다. 스칼라 `reasoning_effort`, `service_tier`, 타입이 있는 라우팅, 응답 형식은 계속 쓸 수 있습니다.
+레코드는 기본 생성자로 만든 뒤 필드를 대입하거나 `from_dict`로 만듭니다. 모든 controls 클래스와 그 nest의 SDK 타입은 dict를 받고, 모르는 키는 거부하며, enum은 멤버 이름(`"Audio"`)으로 받고, hosted tool·built-in tool·응답 형식은 `"type"`(`"image_generation"`, `"google_search"`, `"audio"`)으로 클래스를 고릅니다. SDK에 클래스가 없는 Responses hosted tool 타입은 `ResponsesOpenRouterServerTool`(`openrouter:` 타입) 또는 `ResponsesGenericHostedTool`이 되며, SDK 정책이 승인해야 합니다. nest 자체는 원본에 연결되어 있지만(`controls.generate.speech_config = ...`는 `controls`를 바꿉니다), 그 안의 선택적 레코드와 벡터는 분리된 복사본을 반환하므로 수정한 뒤 다시 대입해야 합니다. `OpenRouterRouting.max_price`가 그런 경우입니다. `routing.max_price.prompt_nano_usd = ...`는 복사본만 수정하므로, `ng.OpenRouterMaxPrice`를 만들어 객체 전체를 대입합니다. 금액은 정수 nanoUSD이며 `prompt_nano_usd`와 `completion_nano_usd`는 100만 토큰당 값이고, 그 밖에 `image_nano_usd`, `audio_nano_usd`, `request_nano_usd`가 있습니다. 전송할 때는 정확한 십진 USD 값으로 변환됩니다(`75_000_000`은 `0.075`). 이 중 하나 이상은 반드시 지정해야 하고 2**53을 넘는 값은 허용되지 않습니다. `SchemaProviderDefaults.provider`는 `max_price`를 다른 라우팅 필드와 같은 방식으로 병합합니다. 요청에 지정한 값이 기본값을 대체합니다. `ChatReasoningOptions`에는 `max_tokens`와 `exclude`도 있습니다. `chat.reasoning`, `chat.include_reasoning`, `chat.usage_include`, `chat.models`, `chat.plugins`, `chat.image_config`는 선언된 OpenRouter origin이 있어야 쓸 수 있습니다. 스칼라 `reasoning_effort`, `service_tier`, 타입이 있는 라우팅, 응답 형식은 계속 쓸 수 있습니다. 0.15의 평평한 멤버(`chat_reasoning`, `responses_include`, `messages_tool_choice`, `gemini_thinking_level` 등)는 0.16.0에서도 동작하며 해당 nest로 옮겨집니다. 평평한 멤버와 그 nest 멤버를 함께 지정하면 `ValueError`가 납니다. 0.17.0에서 제거됩니다.
 
-Responses의 verbosity는 `Low/Medium/High`, truncation은 `Disabled/Auto`입니다. include에서는 `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs`도 지원합니다. `responses_include=None`이면 암호화된 reasoning을 포함하는 기본 include를 유지합니다. `[]`를 포함해 명시적인 리스트를 지정하면 그 리스트가 그대로 적용되고, 이후 네이티브 재생(replay)을 할 수 없게 될 수 있습니다. 기존의 store, reasoning, 호스팅 도구, 도구 호출 상한은 그대로 타입이 있는 설정으로 남아 있습니다.
+Responses의 verbosity는 `Low/Medium/High`, truncation은 `Disabled/Auto`입니다. include에서는 `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs`도 지원합니다. `responses.include = None`이면 암호화된 reasoning을 포함하는 기본 include를 유지합니다. `[]`를 포함해 명시적인 리스트를 지정하면 그 리스트가 그대로 적용되고, 이후 네이티브 재생(replay)을 할 수 없게 될 수 있습니다. 기존의 store, reasoning, 호스팅 도구, 도구 호출 상한은 그대로 타입이 있는 설정으로 남아 있습니다.
 
-Messages의 thinking 모드는 `Manual/Adaptive/Disabled`입니다. Manual이면 `thinking_budget`이 승인(admission)된 최솟값 이상이면서 출력 상한보다 작아야 합니다. 모드를 지정하지 않고 budget만 지정하면 Manual로 선택됩니다. Adaptive와 disabled에서는 budget을 지정할 수 없습니다. thinking을 켜면 벤더의 규칙에 따라 temperature가 전송에서 빠지지만, 모델이 temperature를 금지하는 경우에는 명시적으로 지정한 temperature를 거부합니다. effort는 `Low/Medium/High/Max`, 캐시 TTL은 `FiveMinutes/OneHour`이고, tool choice는 `Auto/Any/None_/Tool`입니다. `Tool`을 쓰려면 선언된 클라이언트 도구의 `name`이 필요합니다. Messages에서 라우팅을 쓰려면 선언된 OpenRouter origin이 있어야 합니다.
+Messages의 thinking 모드는 `Manual/Adaptive/Disabled`입니다. Manual이면 `thinking_budget`이 승인(admission)된 최솟값 이상이면서 출력 상한보다 작아야 합니다. 모드를 지정하지 않고 budget만 지정하면 Manual로 선택됩니다. Adaptive와 disabled에서는 budget을 지정할 수 없습니다. thinking을 켜면 벤더의 규칙에 따라 temperature가 전송에서 빠지지만, 모델이 temperature를 금지하는 경우에는 명시적으로 지정한 temperature를 거부합니다. effort는 `Low/Medium/High/Max/XHigh`, 캐시 TTL은 `FiveMinutes/OneHour`이고, tool choice는 `Auto/Any/None_/Tool`입니다. `Tool`을 쓰려면 선언된 클라이언트 도구의 `name`이 필요합니다. Messages에서 라우팅을 쓰려면 선언된 OpenRouter origin이 있어야 합니다.
 
 Gemini의 thinking level은 `Minimal/Low/Medium/High`이며 `thinking_budget`과 함께 쓸 수 없습니다. tool choice는 `Auto/Any/None_/Validated`이고 `allowed_function_names` 리스트를 받으며 `required_tool`과 함께 쓸 수 없습니다. 안전 카테고리는 `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`, 임계값은 `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`입니다. 계열이 맞지 않거나 범위를 벗어난 값, 서로 호환되지 않는 thinking/상한/도구 controls는 I/O 이전에 거부됩니다. 모델 접두사에 따른 temperature 금지는 마지막 `/` 뒤의 접미사까지 포함해 ASCII 대소문자를 구분하지 않고 비교합니다. Chat/Responses에서는 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`가, Messages에서는 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`이 해당합니다. [SDK controls 승인(admission)](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)을 참고하세요.
 
@@ -182,8 +188,9 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
-responses.previous_response_id = first_outcome.messages[-1].id
-responses.previous_response_history = (
+responses = ng.ProviderControls()
+responses.responses.previous_response_id = first_outcome.messages[-1].id
+responses.responses.previous_response_history = (
     first_request.messages + first_outcome.messages
 )
 new_input = [ng.ProviderMessage(
@@ -196,7 +203,7 @@ next_request = ng.make_provider_request(
 
 `previous_response_history`는 `ProviderMessage`의 벡터이며, 응답 하나나 JSON 객체가 될 수 없습니다. 이 값은 전송되지 않습니다. 클라이언트 도구의 소유권을 실제로 확인하려면 원래 prefix 전체와, ID가 커서와 같은 마지막 assistant 메시지가 필요할 수 있습니다. 서버가 보관하는 텍스트를 그대로 이어 가는 경우에는 비워 둘 수 있습니다. 이후 같은 프로세스에서 나온 커서 출력은 마지막 메시지의 비공개 소유권을 유지하지만, 그렇다고 전체 기록의 네이티브 재생(replay)이나 archive 권한이 되지는 않습니다. 실패했거나 편집되었거나 origin/모델/설정/route 상태가 맞지 않으면 거부합니다. 전체 네이티브 재생(replay)과 archive에는 여전히 원래의 전체 prefix가 필요합니다. [SDK Responses 이어 가기](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)를 참고하세요.
 
-호출자가 만든 외부(foreign) assistant `Text`/`ProviderToolCall` 기록을 네이티브 상태, wire 출력, 서명 없이 쓰려면 `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign`을 명시적으로 설정합니다. 기본값은 `NativeOnly`입니다. 첫 번째 외부 함수 호출에만 Google의 서명 검증 우회 값이 붙고, 텍스트만 있는 턴에는 서명이 붙지 않습니다. 실제 네이티브 그룹은 여전히 엄격하게 검증합니다. 이 모드는 실패한 봉인을 복구하거나 제거하거나 격하할 수 없고, reasoning 권한을 가져오거나 이식 가능한 데이터에 네이티브 재생(replay) 권한을 부여할 수도 없습니다. [SDK 외부 Gemini 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)을 참고하세요.
+호출자가 만든 외부(foreign) assistant `Text`/`ProviderToolCall` 기록을 네이티브 상태, wire 출력, 서명 없이 쓰려면 `controls.generate.history_mode = ng.GeminiHistoryMode.PortableForeign`을 명시적으로 설정합니다. 기본값은 `NativeOnly`입니다. 첫 번째 외부 함수 호출에만 Google의 서명 검증 우회 값이 붙고, 텍스트만 있는 턴에는 서명이 붙지 않습니다. 실제 네이티브 그룹은 여전히 엄격하게 검증합니다. 이 모드는 실패한 봉인을 복구하거나 제거하거나 격하할 수 없고, reasoning 권한을 가져오거나 이식 가능한 데이터에 네이티브 재생(replay) 권한을 부여할 수도 없습니다. [SDK 외부 Gemini 기록](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)을 참고하세요.
 
 PortableForeign은 서명뿐 아니라 가져온 wire 메타데이터도 거부합니다. 커서 출력은 `NativeReplay.complete == False`이며 archive 대상이 될 수 없습니다. 커서 출력의 비공개 소유자가 전체 기록 재생(replay)을 승인하지는 않습니다.
 

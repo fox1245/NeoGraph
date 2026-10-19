@@ -143,7 +143,14 @@ void init_provider(py::module_& m) {
         });
     py::enum_<sp::ResponseFormat::Kind>(format, "Kind").value("JsonObject", sp::ResponseFormat::Kind::JsonObject).value("JsonSchema", sp::ResponseFormat::Kind::JsonSchema);
     init_provider_controls(m);
+    init_provider_families(m);
     auto controls = py::class_<ProviderControls>(m, "ProviderControls").def(py::init<>());
+    // The family nests are live members: `controls.generate.speech_config = ...` changes these controls.
+    controls.def_readwrite("chat", &ProviderControls::chat);
+    controls.def_readwrite("responses", &ProviderControls::responses);
+    controls.def_readwrite("messages", &ProviderControls::messages);
+    controls.def_readwrite("generate", &ProviderControls::generate);
+    controls.def_readwrite("interactions", &ProviderControls::interactions);
     controls.def_readwrite("max_output_tokens", &ProviderControls::max_output_tokens);
     controls.def_readwrite("max_tool_calls", &ProviderControls::max_tool_calls);
     controls.def_readwrite("temperature", &ProviderControls::temperature);

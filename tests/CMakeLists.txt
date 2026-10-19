@@ -84,6 +84,7 @@ add_executable(neograph_tests
     test_openai_provider_async.cpp
     test_message_reasoning.cpp
     test_provider_format_upgrade.cpp
+    test_provider_family_controls.cpp
     test_checkpoint_async_default.cpp
     test_graph_engine_async_api.cpp
     test_async_tool.cpp

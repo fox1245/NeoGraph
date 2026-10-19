@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -309,17 +309,17 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)` は閉じた family を一つ選びます。別 family の制御は `std::invalid_argument`、SDK prepare は enum 値、承認 origin、モデル規則、tool 宣言、native binding を I/O 前に検査します。`ProviderControls` に dictionary の迂回路はありません。optional は未指定と明示的な `false`・空の選択を区別します。
+`make_provider_request(provider, model, messages, tools, controls, mode)` は閉じた family を一つ選びます。ポータブルな制御は `ProviderControls` のメンバーで、family 固有の制御はその family のネストにあり、呼び出しは自分の family のネストだけを適用するので、`ProviderControls` 一つで異なる family を呼ぶノードをまとめて扱えます。family が表現できないポータブルな制御は `std::invalid_argument`、SDK prepare は enum 値、承認 origin、モデル規則、tool 宣言、native binding を I/O 前に検査します。型のない値はネストの `extensions` だけを通り、SDK ポリシーが origin ごとに値スキーマとともに承認します。0.15 のフラットな family メンバー（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` など）は 0.16.0 ではネストに移される非推奨の別名で、別名とネストのメンバーを両方指定すると例外になります。optional は未指定と明示的な `false`・空の選択を区別します。
 
-| Family | `ProviderControls` フィールドと SDK 対応 |
-|---|---|
-| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format`; `chat_reasoning` → `sp::chat::Request::reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models` |
-| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope`; `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `responses_include` → `include` |
-| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider`; `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `messages_tool_choice` → `tool_choice` |
-| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope`; `gemini_history_mode` → `history_mode`, `gemini_thinking_level` → `thinking_level`, `safety_settings`, `gemini_tool_choice` → `tool_choice` |
-| `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate の enum `gemini_thinking_level` は適用されません |
+| Family | ポータブルな `ProviderControls` フィールドと SDK 対応 | Family ネスト（`controls.<nest>`） |
+|---|---|---|
+| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format` | `chat`: `reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models`, `modalities`, `audio`, `image_config`, `plugins`, `extensions` |
+| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope` | `responses`: `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `include`, `include_names`, `hosted_tools` → `tools`, `modalities`, `image_config`, `plugins`, `mcp_approvals`, `extensions` |
+| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider` | `messages`: `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `tool_choice`, `tools` (server and typed client tools, after the portable tools), `container`, `skills`, `betas`, `mcp_servers`, `extensions` |
+| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope` | `generate`: `history_mode`, `thinking_level`, `safety_settings`, `tool_choice`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`, `extensions` |
+| `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `store`, `system`, `account_scope` | `interactions`: `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `video_task`, `agent`, `background`, `extensions` |
 
-Chat の `sp::chat::ReasoningOptions` は optional `effort`, `max_tokens`, `exclude`, `enabled` を持ちます。この nested reasoning object、`include_reasoning`、`usage_include`、代替 `models` は policy 宣言済み OpenRouter origin に限ります。`sp::OpenRouterRouting` も Chat/Responses/Messages の宣言済み OpenRouter origin のみです。gateway 形式のモデル名では別 origin を承認できません。SDK payload は family ごとの typed tool 宣言、Responses `hosted_tools`、strict/deferred tool option も持ちます。raw JSON でなく実際の payload variant を使います。
+Chat の `sp::chat::ReasoningOptions` は optional `effort`, `max_tokens`, `exclude`, `enabled` を持ちます。この nested reasoning object、`include_reasoning`、`usage_include`、代替 `models` は policy 宣言済み OpenRouter origin に限ります。`sp::OpenRouterRouting` も Chat/Responses/Messages の宣言済み OpenRouter origin のみです。gateway 形式のモデル名では別 origin を承認できません。Responses のホスト型ツール（`controls.responses.hosted_tools`）と Messages のサーバー・型付きクライアントツール（`controls.messages.tools`）は、ネスト内の型付き SDK 値です。
 
 Responses SSE には終了イベント `response.completed` または `response.incomplete` が必要です。`response.done` は同じ完全な終了 Responses envelope（completed または incomplete）を運ぶエイリアスの場合にのみ受け入れられ、終了でない、または形式が不正な `response.done` はプロトコルエラーとして失敗します。`response.content_part.delta` などリストにないイベントは `Unsupported` です。宣言済みの OpenRouter origin では、Responses と Messages は `~vendor/model-latest` のようなルーティングエイリアスに対してゲートウェイが報告する実際のモデル名も受け入れます。サービングモデルは 1 つの応答内で変わってはならず、replay は要求したモデルに束縛されたままです。
 
@@ -329,7 +329,7 @@ Responses SSE には終了イベント `response.completed` または `response.
 | `sp::responses::Truncation` | `Disabled`, `Auto` |
 | `sp::responses::Include` | `ReasoningEncryptedContent`, `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs` |
 | `sp::messages::ThinkingMode` | `Manual`, `Adaptive`, `Disabled` |
-| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max` |
+| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max`, `XHigh` |
 | `sp::messages::CacheControl` / `CacheTtl` | optional `ttl`: `FiveMinutes`, `OneHour`; wire type `ephemeral`, optional TTL `5m`/`1h` |
 | `sp::messages::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Tool`; `name`; optional `disable_parallel_tool_use` |
 | `sp::gemini::HistoryMode` | `NativeOnly`, `PortableForeign` |
@@ -338,7 +338,7 @@ Responses SSE には終了イベント `response.completed` または `response.
 | `sp::gemini::SafetyThreshold` | `BlockNone`, `BlockOnlyHigh`, `BlockMediumAndAbove`, `BlockLowAndAbove`, `Off` |
 | `sp::gemini::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Validated`; `allowed_function_names`: 宣言済み関数名の vector |
 
-Messages は正の output cap が必要です。mode 未指定の thinking budget は `Manual` を選び、承認 minimum 以上かつ cap 未満にします。`Adaptive`/`Disabled` は明示 budget を拒否します。Manual/adaptive はそれ以外で有効な temperature を省略し、thinking `top_p` minimum を検査しますが、モデル別 temperature 禁止は上書きしません。強制 `Any`/`Tool` は tools と disabled thinking が必要です。`Tool` は宣言済み client tool 名、他 mode は `name` を拒否、`None` は `disable_parallel_tool_use` を拒否します。Generate の thinking budget/level と `required_tool`/`gemini_tool_choice` はそれぞれ排他的です。allowed-function リストは宣言済み関数を指します。sampling は family/policy の範囲内です。Generate は `top_p` 非対応、Interactions は両 sampling field 非対応です。
+Messages は正の output cap が必要です。mode 未指定の thinking budget は `Manual` を選び、承認 minimum 以上かつ cap 未満にします。`Adaptive`/`Disabled` は明示 budget を拒否します。Manual/adaptive はそれ以外で有効な temperature を省略し、thinking `top_p` minimum を検査しますが、モデル別 temperature 禁止は上書きしません。強制 `Any`/`Tool` は tools と disabled thinking が必要です。`Tool` は宣言済み client tool 名、他 mode は `name` を拒否、`None` は `disable_parallel_tool_use` を拒否します。Generate の thinking budget/level と `required_tool`/`generate.tool_choice` はそれぞれ排他的です。allowed-function リストは宣言済み関数を指します。sampling は family/policy の範囲内です。Generate は `top_p` 非対応、Interactions は両 sampling field 非対応です。
 
 `FamilyPolicy.temperature_forbidden_model_prefixes` はモデル全体と最後の `/` 以降を ASCII 大小文字無視で照合します。組込み Chat/Responses は `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages は `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-` です。gateway prefix のモデルでも禁止 temperature の明示指定は I/O 前に拒否します。
 

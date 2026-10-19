@@ -35,8 +35,83 @@ struct ProviderDispatchBudget {
 
 enum class ProviderMode : std::uint8_t { Collect, Stream };
 
+/// Controls of one provider family, in that family's own SDK types. `make_provider_request` applies the nest
+/// of the provider's family and ignores the others, so one `ProviderControls` can serve every node of a graph
+/// whose nodes call different families. Unset members are not sent; the SDK checks every set one at prepare.
+/// `extensions` are top-level request members the SDK policy admits for the origin, sent as given.
+struct ChatControls {
+    std::optional<sp::chat::ReasoningOptions> reasoning;
+    std::optional<bool> include_reasoning, usage_include;
+    std::vector<std::string> models;
+    std::vector<sp::chat::OutputModality> modalities;
+    std::optional<sp::chat::AudioOutput> audio;
+    std::optional<sp::OpenRouterImageConfig> image_config;
+    std::vector<sp::OpenRouterPlugin> plugins;
+    std::optional<json> extensions;
+};
+struct ResponsesControls {
+    /// Server-side cursor; send only new input with this identifier.
+    std::optional<std::string> previous_response_id;
+    /// Prior cursor turns retained as local validation evidence, not resent input.
+    std::vector<sp::Message> previous_response_history;
+    std::optional<bool> parallel_tool_calls;
+    std::optional<sp::responses::Verbosity> verbosity;
+    std::optional<sp::responses::Truncation> truncation;
+    std::optional<std::vector<sp::responses::Include>> include;
+    std::vector<std::string> include_names;
+    /// Tools the service runs (web search, image generation, file search, code interpreter, MCP, ...).
+    std::vector<sp::responses::HostedTool> hosted_tools;
+    std::vector<sp::responses::OutputModality> modalities;
+    std::optional<sp::OpenRouterImageConfig> image_config;
+    std::vector<sp::OpenRouterPlugin> plugins;
+    std::vector<sp::responses::McpApproval> mcp_approvals;
+    std::optional<json> extensions;
+};
+struct MessagesControls {
+    std::optional<sp::messages::ThinkingMode> thinking_mode;
+    std::optional<sp::messages::OutputEffort> output_effort;
+    std::optional<sp::messages::CacheControl> cache_control;
+    std::optional<sp::messages::ToolChoice> tool_choice;
+    /// Tools the family defines (server tools such as web search, typed client tools such as memory), sent
+    /// after the portable function tools.
+    std::vector<sp::messages::ToolDefinition> tools;
+    std::optional<std::string> container;
+    std::vector<sp::messages::ContainerSkill> skills;
+    std::vector<std::string> betas;
+    std::vector<sp::messages::McpServer> mcp_servers;
+    std::optional<json> extensions;
+};
+struct GenerateControls {
+    /// Explicit admission mode for authentic or portable foreign Gemini history.
+    std::optional<sp::gemini::HistoryMode> history_mode;
+    std::optional<sp::gemini::ThinkingLevel> thinking_level;
+    std::vector<sp::gemini::SafetySetting> safety_settings;
+    std::optional<sp::gemini::ToolChoice> tool_choice;
+    std::vector<sp::gemini::ResponseModality> response_modalities;
+    std::optional<sp::gemini::SpeechConfig> speech_config;
+    std::optional<sp::gemini::ImageConfig> image_config;
+    std::optional<sp::gemini::AudioTranscriptionConfig> audio_transcription_config;
+    std::optional<sp::gemini::AudioFormat> audio_format;
+    std::vector<sp::gemini::BuiltinTool> builtin_tools;
+    std::vector<sp::gemini::McpServer> mcp_servers;
+    std::optional<bool> server_tool_invocations;
+    std::optional<sp::gemini::RetrievalConfig> retrieval_config;
+    std::optional<json> extensions;
+};
+struct InteractionsControls {
+    std::vector<sp::interactions::ResponseFormat> response_format;
+    std::optional<sp::interactions::SpeechConfiguration> speech_config;
+    std::optional<sp::interactions::TranscriptionConfig> transcription_config;
+    std::vector<sp::interactions::BuiltinTool> builtin_tools;
+    /// Continues a stored interaction; `background` runs it as a job (it needs the portable `store`).
+    std::optional<std::string> previous_interaction_id, video_task, agent;
+    std::optional<bool> background;
+    std::optional<json> extensions;
+};
+
 /// Typed per-call controls translated into the selected SDK provider family.
-/// Unsupported family/model combinations fail during request preparation.
+/// The flat members are portable; a family's own controls are in its nest. A portable control the family
+/// cannot express throws in `make_provider_request`; unsupported family/model combinations fail at prepare.
 struct ProviderControls {
     std::optional<std::uint64_t> max_output_tokens;
     std::optional<std::uint64_t> max_tool_calls;
@@ -50,12 +125,21 @@ struct ProviderControls {
     std::optional<sp::OpenRouterRouting> provider;
     std::optional<sp::ResponseFormat> response_format;
     std::optional<bool> store;
+    std::string account_scope, system;
+
+    ChatControls chat;
+    ResponsesControls responses;
+    MessagesControls messages;
+    GenerateControls generate;
+    InteractionsControls interactions;
+
+    /// Deprecated in 0.16.0 and removed in 0.17.0: use the family nests (`chat.reasoning`,
+    /// `responses.include`, `messages.tool_choice`, `generate.thinking_level`, ...). Setting one of these and
+    /// its nest member too throws.
     std::optional<sp::chat::ReasoningOptions> chat_reasoning;
     std::optional<bool> include_reasoning, usage_include;
     std::vector<std::string> models;
-    /// Responses server-side cursor; send only new input with this identifier.
     std::optional<std::string> previous_response_id;
-    /// Prior cursor turns retained as local validation evidence, not resent input.
     std::vector<sp::Message> previous_response_history;
     std::optional<bool> parallel_tool_calls;
     std::optional<sp::responses::Verbosity> verbosity;
@@ -65,12 +149,10 @@ struct ProviderControls {
     std::optional<sp::messages::OutputEffort> output_effort;
     std::optional<sp::messages::CacheControl> cache_control;
     std::optional<sp::messages::ToolChoice> messages_tool_choice;
-    /// Explicit admission mode for authentic or portable foreign Gemini history.
     std::optional<sp::gemini::HistoryMode> gemini_history_mode;
     std::optional<sp::gemini::ThinkingLevel> gemini_thinking_level;
     std::vector<sp::gemini::SafetySetting> safety_settings;
     std::optional<sp::gemini::ToolChoice> gemini_tool_choice;
-    std::string account_scope, system;
 };
 
 /// Host-only delivery caps; explicit values may tighten admitted SDK resources.
