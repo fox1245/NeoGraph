@@ -13,6 +13,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **Built-in graphs and nodes send the caller's model, sampling and token settings, not one vendor's (#521).** A model that refuses `temperature` (`gpt-5*`, `o3`, Claude 4.7 and later) failed at prepare in every step of the deep research graph, in the intent classifier, in the history summarizer and in the Harness provider worker.
+  - **Behavior change: `DeepResearchConfig::model` is required.** It defaulted to `claude-sonnet-4-5`; `create_deep_research_graph` now throws `std::invalid_argument` when it is empty.
+  - **Deep research settings are configuration.** `DeepResearchConfig::controls` holds what every step sends (only the members that are set). Each step's output cap is a field (`brief_max_output_tokens`, `clarify_…`, `supervisor_…`, `researcher_…`, `compress_…`, `report_…`, with the old values as defaults), and so are the largest cap the empty-answer retry asks for (`max_output_budget`, 16384) and the node retry policy of the model steps (`retry`, as before: twice, after 15 s and 30 s; the brief and clarify steps now take it too). No step sends a temperature of its own.
+  - **Behavior change: the brief and clarify steps report a provider failure.** They caught it and went on with the raw query, so a wrong model id or a refused parameter degraded the run without a trace.
+  - **Behavior change: no fixed temperature or classifier cap.** The intent classifier sends the node context's `provider_controls` instead of `temperature = 0` and `max_output_tokens = 20`, which a reasoning model spends before it answers. `default_summary_controls()` keeps its 500-token cap and no longer sends `temperature = 0.2`. The Harness provider worker no longer sends `temperature = 0`.
+  - **Harness translation ceilings are the host's.** `HarnessTranslationDefaults` refused a `provider_timeout_seconds` over 600 and a `max_output_tokens` over 128,000. The host's values are now the ceilings, up to 86,400 seconds and 2^32 − 1 tokens.
+
 ## [0.15.1] - 2026-10-19
 
 ### Added

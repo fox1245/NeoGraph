@@ -39,8 +39,8 @@ void sanitize_tool_calls(std::vector<sp::Message>& messages) {
 }
 
 ProviderControls default_summary_controls() {
+    // An output cap and no sampling: a model that refuses `temperature` can summarize.
     ProviderControls controls;
-    controls.temperature = 0.2;
     controls.max_output_tokens = 500;
     return controls;
 }

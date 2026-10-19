@@ -738,8 +738,11 @@ the Harness tools. A suitable request is:
 ### Provider Budgets
 
 `budgets.provider_timeout_seconds` sets one prepared provider operation's
-absolute deadline to 1--600 seconds. `budgets.max_output_tokens` sets its output
-limit to 1--128000 tokens. Both are optional: omission leaves that control unset
+absolute deadline, from 1 second up to the host's
+`HarnessTranslationDefaults::provider_timeout_seconds` (600 by default, at most
+86400). `budgets.max_output_tokens` sets its output limit, from 1 up to the
+host's `HarnessTranslationDefaults::max_output_tokens` (4096 by default). Both
+are optional: omission leaves that control unset
 and preserves the admitted SDK/default policy, not unlimited time or output.
 The SDK owns any provider retry within the prepared operation's deadline.
 

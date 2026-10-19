@@ -191,6 +191,7 @@ IntentClassifierNode::IntentClassifierNode(
     , model_(ctx.model)
     , prompt_(prompt)
     , valid_routes_(std::move(valid_routes))
+    , controls_(ctx.provider_controls)
 {}
 
 ProviderRequest IntentClassifierNode::build_params(const GraphState& state) const {
@@ -211,12 +212,10 @@ ProviderRequest IntentClassifierNode::build_params(const GraphState& state) cons
         sys_prompt += "\nNo explanation, just the category name.";
     }
 
-    ProviderControls controls;
-    controls.temperature = 0.0;
-    controls.max_output_tokens = 20;
+    // The caller's controls: a fixed temperature or a tiny cap fails on models that refuse one or reason first.
     return make_provider_request(*provider_, model_,
         {portable_message(ChatMessage{"system", sys_prompt}),
-         std::move(user)}, {}, controls);
+         std::move(user)}, {}, controls_);
 }
 
 std::vector<ChannelWrite> IntentClassifierNode::route_from(const std::string& intent) const {

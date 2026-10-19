@@ -174,8 +174,10 @@ void validate_defaults(const HarnessTranslationDefaults& defaults) {
         defaults.max_program_operations == std::numeric_limits<std::uint64_t>::max() ||
         defaults.max_core_steps == 0 || defaults.max_core_steps > 1000 ||
         defaults.max_worker_retries > 5 || defaults.provider_timeout_seconds == 0 ||
-        defaults.provider_timeout_seconds > 600 || defaults.max_output_tokens == 0 ||
-        defaults.max_output_tokens > 128000 || defaults.input_token_ceiling_per_round == 0 ||
+        // The defaults are the ceilings a worker may ask for, set by the host: a provider call is bounded like a
+        // run, and an output cap stays representable.
+        defaults.provider_timeout_seconds > 86400 || defaults.max_output_tokens == 0 ||
+        defaults.max_output_tokens > std::numeric_limits<std::uint32_t>::max() || defaults.input_token_ceiling_per_round == 0 ||
         defaults.input_token_ceiling_per_round == std::numeric_limits<std::uint64_t>::max() ||
         defaults.max_provider_tool_rounds == 0 || defaults.max_provider_tool_rounds > 64 ||
         defaults.max_provider_tool_rounds == std::numeric_limits<std::uint32_t>::max() ||

@@ -272,7 +272,9 @@ public:
     /**
      * @brief Construct an intent classifier node.
      * @param name Unique node name within the graph.
-     * @param ctx Node context providing the LLM provider.
+     * @param ctx Node context providing the LLM provider, the model and the
+     *            controls the call sends (`ctx.provider_controls`, as set;
+     *            the node adds no temperature or output cap of its own).
      * @param prompt Classification prompt template sent to the LLM.
      * @param valid_routes List of valid intent route names the LLM can return.
      */
@@ -296,6 +298,7 @@ private:
     std::string               model_;
     std::string               prompt_;
     std::vector<std::string>  valid_routes_;
+    ProviderControls          controls_;  ///< The node context's controls, sent as the caller set them.
 
     ProviderRequest build_params(const GraphState& state) const;
     std::vector<ChannelWrite> route_from(const std::string& intent) const;

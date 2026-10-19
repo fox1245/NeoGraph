@@ -1105,7 +1105,7 @@ public:
 | コンストラクターパラメーター | 型 | 説明 |
 |-----------------------|------|-------------|
 | `name` | `std::string` | ノード名 |
-| `ctx` | `NodeContext` | 分類用 LLM 呼び出しに使う Provider と model |
+| `ctx` | `NodeContext` | 分類用 LLM 呼び出しに使う Provider、model、`provider_controls`。ノードは controls を設定どおりに送り、独自の temperature や出力上限は加えない |
 | `prompt` | `std::string` | 分類プロンプトテンプレート |
 | `valid_routes` | `std::vector<std::string>` | 許可する分類値。LLM 出力はこれらに照らして検証されます |
 ### SubgraphNode
@@ -3146,6 +3146,8 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 - **`neograph::graph::create_deep_research_graph`** —
   `examples/25_deep_research.cpp` で使われます。
   `BriefNode` による LLM の書き換え、`FinalReportNode` のトークン上限再試行、
-  `ClarifyNode` の HITL gate を含みます。
+  `ClarifyNode` の HITL gate を含みます。`DeepResearchConfig::model` は必須で、
+  各ステップは `DeepResearchConfig::controls` と設定された出力上限を送り、
+  独自のサンプリング設定は送りません。
 このツアーに必要な型がない場合は `include/neograph/` を直接確認してください。
 すべての公開ヘッダーにリファレンス文書があります。

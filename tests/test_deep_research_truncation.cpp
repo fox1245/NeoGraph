@@ -13,6 +13,7 @@
 #include <array>
 #include <deque>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 
 using namespace neograph;
@@ -57,6 +58,9 @@ struct Script {
     std::array<std::vector<std::uint64_t>, 5> caps;
     std::array<std::string, 5> last_user;
     std::vector<std::optional<std::chrono::steady_clock::time_point>> deadlines;
+    std::vector<std::string> models;
+    std::vector<std::optional<double>> temperatures;
+    std::vector<std::optional<std::string>> efforts;
     bool throw_observer = false;
     bool throw_settlement = false;
     bool emit_output = false;
@@ -72,7 +76,8 @@ struct Scenario {
     std::unique_ptr<graph::GraphEngine> engine;
     graph::RunConfig config;
     graph::RunMetadata metadata;
-    explicit Scenario(std::shared_ptr<sp::runtime::Client> client = test::client()) {
+    explicit Scenario(std::shared_ptr<sp::runtime::Client> client = test::client(),
+                      std::function<void(graph::DeepResearchConfig&)> configure = {}) {
         script->set(Role::Brief, {reply("brief text")});
         script->set(Role::Supervisor, {
             reply("", sp::StopKind::ToolUse, {call("c1", "conduct_research", R"({"research_topic":"topic A"})")}),
@@ -89,6 +94,9 @@ struct Scenario {
             state->caps[index].push_back(payload.max_output_tokens.value_or(0));
             state->last_user[index] = message_text(payload.canonical_messages.back());
             state->deadlines.push_back(request.options.deadline);
+            state->models.push_back(payload.model);
+            state->temperatures.push_back(payload.temperature);
+            state->efforts.push_back(payload.reasoning_effort);
             auto& queue = state->replies[index];
             if (queue.empty()) throw std::logic_error("unscripted research role");
             const auto result = queue.front();
@@ -111,6 +119,7 @@ struct Scenario {
         }, "research-script", std::move(client));
         graph::DeepResearchConfig settings;
         settings.model = "test-model";
+        if (configure) configure(settings);
         engine = graph::create_deep_research_graph(provider, {}, settings);
         config.thread_id = "research-thread";
         config.input = {{"user_query", "q"}};
@@ -330,4 +339,51 @@ TEST(DeepResearchTruncation, ImplicitProviderDeadlineIsPinnedAcrossBudgetAttempt
     ASSERT_EQ(deadlines.size(), 7u);
     ASSERT_TRUE(deadlines[5]);
     EXPECT_EQ(deadlines[5], deadlines[6]);
+}
+
+TEST(DeepResearchSettings, ModelIsRequired) {
+    Scenario scenario;
+    EXPECT_THROW(graph::create_deep_research_graph(scenario.provider, {}, {}), std::invalid_argument);
+}
+
+TEST(DeepResearchSettings, StepsSendOnlyTheCallersControls) {
+    Scenario plain;
+    EXPECT_EQ(report_of(plain.run()), "## report");
+    ASSERT_FALSE(plain.script->temperatures.empty());
+    for (const auto& temperature : plain.script->temperatures) EXPECT_FALSE(temperature);
+    for (const auto& model : plain.script->models) EXPECT_EQ(model, "test-model");
+
+    Scenario tuned(test::client(), [](graph::DeepResearchConfig& settings) {
+        settings.model = "other-model";
+        settings.controls.reasoning_effort = "low";
+        settings.controls.max_output_tokens = 7;  // ignored: the step caps apply
+        settings.brief_max_output_tokens = 300;
+        settings.supervisor_max_output_tokens = 1000;
+        settings.researcher_max_output_tokens = 1100;
+        settings.compress_max_output_tokens = 1200;
+        settings.report_max_output_tokens = 1300;
+    });
+    EXPECT_EQ(report_of(tuned.run()), "## report");
+    for (const auto& model : tuned.script->models) EXPECT_EQ(model, "other-model");
+    for (const auto& effort : tuned.script->efforts) EXPECT_EQ(effort, std::optional<std::string>("low"));
+    for (const auto& temperature : tuned.script->temperatures) EXPECT_FALSE(temperature);
+    EXPECT_EQ(tuned.script->budgets(Role::Brief), (std::vector<std::uint64_t>{300}));
+    EXPECT_EQ(tuned.script->budgets(Role::Supervisor), (std::vector<std::uint64_t>{1000, 1000}));
+    EXPECT_EQ(tuned.script->budgets(Role::Researcher), (std::vector<std::uint64_t>{1100}));
+    EXPECT_EQ(tuned.script->budgets(Role::Compress), (std::vector<std::uint64_t>{1200}));
+    EXPECT_EQ(tuned.script->budgets(Role::FinalReport), (std::vector<std::uint64_t>{1300}));
+}
+
+TEST(DeepResearchSettings, OutputBudgetBoundsTheEmptyAnswerRetry) {
+    Scenario scenario(test::client(), [](graph::DeepResearchConfig& settings) { settings.max_output_budget = 6000; });
+    scenario.script->set(Role::FinalReport, {reply("", sp::StopKind::MaxTokens)});
+    EXPECT_THROW(scenario.run(), std::exception);
+    EXPECT_EQ(scenario.script->budgets(Role::FinalReport), (std::vector<std::uint64_t>{4096, 6000}));
+}
+
+TEST(DeepResearchSettings, BriefFailureFailsTheRun) {
+    Scenario scenario(test::client(), [](graph::DeepResearchConfig& settings) { settings.retry.max_retries = 0; });
+    scenario.script->set(Role::Brief, {test::failure(sp::ErrorKind::InvalidRequest)});
+    EXPECT_THROW(scenario.run(), std::exception);
+    EXPECT_TRUE(scenario.script->budgets(Role::Supervisor).empty());
 }

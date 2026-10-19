@@ -287,8 +287,8 @@ TEST(HistoryCompaction, SummarizerRequestUsesTheDocumentedDefaultControls) {
     ASSERT_EQ(run.script->requests.size(), 1u);
     const auto& request = run.script->requests.front();
     EXPECT_EQ(request.max_output_tokens, 500u);
-    ASSERT_TRUE(request.temperature);
-    EXPECT_DOUBLE_EQ(*request.temperature, 0.2);
+    // No sampling: a model that refuses `temperature` can summarize.
+    EXPECT_FALSE(request.temperature);
     EXPECT_FALSE(request.reasoning_effort);
 }
 
