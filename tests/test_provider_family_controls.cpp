@@ -118,8 +118,9 @@ TEST(ProviderFamilyControls, DeprecatedMembersMoveIntoTheirNests) {
     ASSERT_TRUE(from_alias.prepared.valid()) << from_alias.prepared.error()->reason;
     ASSERT_TRUE(from_nest.prepared.valid());
     EXPECT_EQ(from_alias.body, from_nest.body);
-    // On another family the alias is ignored like its nest.
-    EXPECT_TRUE(encode("openai.chat", "https://api.openai.com", alias).prepared.valid());
+    // Another family refuses the alias, as it did before the nests, while it ignores the nest.
+    EXPECT_THROW(encode("openai.chat", "https://api.openai.com", alias), std::invalid_argument);
+    EXPECT_TRUE(encode("openai.chat", "https://api.openai.com", nest).prepared.valid());
     ProviderControls both = nest;
     both.gemini_thinking_level = sp::gemini::ThinkingLevel::High;
     EXPECT_THROW(encode("google.generate", "https://generativelanguage.googleapis.com", both), std::invalid_argument);

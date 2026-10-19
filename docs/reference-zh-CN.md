@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=5c3e4c6c372c93c35827c46f459aa4459f614a81906a65a164022c519356c817 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -339,7 +339,7 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)` 选择一个封闭 family。可移植控制是 `ProviderControls` 的成员，family 自己的控制位于该 family 的嵌套结构中；一次调用只应用其 family 的嵌套，因此一个 `ProviderControls` 可服务调用不同 family 的节点。family 无法表达的可移植控制引发 `std::invalid_argument`；SDK prepare 在 I/O 前检查 enum 值、获准 origin、模型规则、tool 声明和 native binding。无类型的值只能经由嵌套的 `extensions` 发送，由 SDK 策略按 origin 连同值 schema 准入。0.15 的扁平 family 成员（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` 等）在 0.16.0 中是会移入嵌套的弃用别名；同时设置别名和嵌套成员会抛出异常。optional 区分未指定与显式 `false`、空选择。
+`make_provider_request(provider, model, messages, tools, controls, mode)` 选择一个封闭 family。可移植控制是 `ProviderControls` 的成员，family 自己的控制位于该 family 的嵌套结构中；一次调用只应用其 family 的嵌套，因此一个 `ProviderControls` 可服务调用不同 family 的节点。family 无法表达的可移植控制引发 `std::invalid_argument`；SDK prepare 在 I/O 前检查 enum 值、获准 origin、模型规则、tool 声明和 native binding。无类型的值只能经由嵌套的 `extensions` 发送，由 SDK 策略按 origin 连同值 schema 准入。0.15 的扁平 family 成员（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` 等）在 0.16.0 中是会移入嵌套的弃用别名；其他 family 与 0.15 一样拒绝它们，同时设置别名和嵌套成员会抛出异常。optional 区分未指定与显式 `false`、空选择。
 
 | Family | 可移植的 `ProviderControls` 字段及 SDK 映射 | Family 嵌套（`controls.<nest>`） |
 |---|---|---|
