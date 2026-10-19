@@ -16,7 +16,7 @@ Two shapes are covered:
 - the built-in llm_call node bound to the provider through
   LocalProgramHost(node_context=..., binding_label=...) (#372): the call is
   priced against the run's monetary budget and settled from OpenRouter's
-  reported cost. It needs a model whose catalog entry has a route ceiling,
+  reported cost. It needs a model whose catalogue entry has a route ceiling,
   deepseek/deepseek-v4-flash-0731 by default (override with
   OPENROUTER_PRICED_MODEL); a router alias cannot be bounded and is refused.
 """
@@ -179,7 +179,7 @@ def test_bound_llm_call_wiring_against_a_loopback_peer(chat_peer):
     assert sent["auth"] == "Bearer local-smoke"
     assert sent["body"]["model"] == support.PRICED_MODEL
     assert sent["body"]["usage"] == {"include": True}, sent["body"]
-    # The priced call carries the catalog route ceiling as OpenRouter's max_price.
+    # The priced call carries the catalogue route ceiling as OpenRouter's max_price.
     assert sent["body"]["provider"]["max_price"] == {"prompt": 0.44, "completion": 1.32}, sent["body"]
 
 
@@ -212,7 +212,7 @@ def test_live_openrouter_bound_llm_call_is_priced():
     assert 0 < result.usage.model_tokens
     [record] = result.monetary_records
     assert record.evidence in ("reported", "estimated"), record
-    assert record.origin == "openrouter" and record.model == PRICED_MODEL
+    assert record.origin == "https://openrouter.ai" and record.model == PRICED_MODEL
     assert 0 < record.microunits <= record.reserved_microunits, record
     assert result.usage.monetary_microunits == record.microunits
     assert result.remaining_budget.monetary_microunits == 1_000_000 - record.microunits

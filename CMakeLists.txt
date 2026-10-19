@@ -578,15 +578,6 @@ add_library(neograph::core ALIAS neograph_core)
 # neograph::program — optional Program durable values
 # ===========================================================================
 if(NEOGRAPH_BUILD_PROGRAM)
-    # The price catalog is repository data compiled into the library; the
-    # runtime never reads or fetches prices from anywhere else (#372).
-    set(_NEOGRAPH_PRICE_CATALOG "${PROJECT_SOURCE_DIR}/data/pricing/catalog.json")
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_NEOGRAPH_PRICE_CATALOG}")
-    file(READ "${_NEOGRAPH_PRICE_CATALOG}" _NEOGRAPH_PRICE_CATALOG_HEX HEX)
-    string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," NEOGRAPH_PRICE_CATALOG_BYTES
-           "${_NEOGRAPH_PRICE_CATALOG_HEX}")
-    configure_file(cmake/pricing_catalog_data.cpp.in
-                   "${CMAKE_CURRENT_BINARY_DIR}/generated/program/pricing_catalog_data.cpp" @ONLY)
     add_library(neograph_program
         src/program/authoring.cpp
         src/program/command.cpp
@@ -632,10 +623,8 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/core_progress.cpp
         src/program/run_attempt.cpp
         src/program/invocation.cpp
-        src/program/pricing.cpp
         src/program/monetary.cpp
         src/program/provider_binding.cpp
-        ${CMAKE_CURRENT_BINARY_DIR}/generated/program/pricing_catalog_data.cpp
     )
     target_include_directories(neograph_program
         PUBLIC

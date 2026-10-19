@@ -1,596 +1,504 @@
-// The internal pricing registry (#372): catalog loading and validation, tier
-// selection, cache bands, rounding, reported versus estimated settlement,
-// reservation upper bounds and unknown models. No network.
+// Program pricing from the SchemaProvider model catalogue (#520): parity with
+// the 0.15 price catalog, the reservation bound, data-driven refusals,
+// settlement, the journal record, and no model id in the pricing code. No
+// network.
 
-#include "pricing.h"
+#include "monetary.h"
+
+#include "fixtures/model_catalogue.h"
+#include "fixtures/typed_provider.h"
+
+#include <neograph/llm/schema_provider.h>
 
 #include <gtest/gtest.h>
 
-#include <limits>
+#include <array>
+#include <fstream>
+#include <iterator>
+#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
-using namespace neograph::program::pricing;
+using namespace neograph;
+using namespace neograph::program;
 
 namespace {
 
-constexpr std::uint64_t kMax = (std::numeric_limits<std::uint64_t>::max)();
+constexpr std::string_view kOpenRouter = "https://openrouter.ai";
+constexpr std::string_view kDirect     = "https://api.example.com";
 
-const PriceCatalog& shipped() {
-    static const PriceCatalog catalog = PriceCatalog::load(NEOGRAPH_PRICING_CATALOG);
-    return catalog;
+std::string read_file(const char* path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) throw std::runtime_error(std::string("cannot read ") + path);
+    return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
 }
 
-// A synthetic catalog: one direct origin with a two-tier model shaped like a
-// prompt-length tier, and one aggregator. Prices here are test values only.
-constexpr std::string_view kTiered = R"({
-  "schema": "neograph.pricing.catalog",
-  "schema_version": 1,
-  "version": "test-1",
-  "currency": "USD",
-  "rate_unit": "usd_per_million_tokens",
-  "origins": {
-    "example": {"url": "https://api.example.com", "routing": "direct"},
-    "router": {"url": "https://router.example.com", "routing": "aggregator"}
-  },
-  "entries": [
-    {
-      "origin": "example", "model": "tiered-model", "aliases": ["tiered-model-2026"],
-      "source_url": "https://example.com/pricing", "retrieved": "2026-10-11",
-      "tiers": [
-        {"up_to_input_tokens": 100000, "input": "0.10", "cache_write": "0.125",
-         "cache_write_1h": "0.20", "cache_read": "0.01", "output": "0.50"},
-        {"up_to_input_tokens": null, "input": "0.50", "cache_write": "0.625",
-         "cache_write_1h": "1", "cache_read": "0.05", "output": "2.50"}
-      ]
-    },
-    {
-      "origin": "router", "model": "vendor/model",
-      "source_url": "https://example.com/models", "retrieved": "2026-10-11",
-      "tiers": [{"input": "0.10", "output": "0.20"}],
-      "route_ceiling": {"source_url": "https://example.com/endpoints",
-                        "retrieved": "2026-10-11", "input": "0.40", "output": "0.80"}
-    },
-    {
-      "origin": "router", "model": "~vendor/model-latest",
-      "source_url": "https://example.com/models", "retrieved": "2026-10-11",
-      "tiers": [{"input": "0.10", "output": "0.20"}]
+sp::descriptor::CatalogueSnapshot catalogue_of(std::string_view text) {
+    auto loaded = sp::descriptor::load_catalogue(text);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::runtime_error("catalogue " + error->pointer + ": " + error->expected);
+    return std::get<sp::descriptor::CatalogueSnapshot>(std::move(loaded));
+}
+
+// The 0.15 price catalog as a host's catalogue layer.
+const sp::descriptor::CatalogueSnapshot& shipped_layer() {
+    static const auto layer = catalogue_of(read_file(NEOGRAPH_MODEL_PRICES));
+    return layer;
+}
+
+std::uint64_t microunits(const sp::UsdAmount& amount) { return (amount.nano_usd + 999) / 1000; }
+
+sp::Count count(std::uint64_t value) { return sp::Count{value, sp::Evidence::Reported}; }
+
+// ---------------------------------------------------------------- parity
+
+struct Parity {
+    const char*                  family;
+    const char*                  origin;
+    const char*                  model;
+    // The 0.15 catalog's reservation for 100,000 input and 4,096 output
+    // tokens, and its estimate of parity_usage(), in microunits.
+    std::optional<std::uint64_t> reserved;
+    std::optional<std::uint64_t> estimated;
+};
+
+const std::vector<Parity> kParity{
+    // A router alias lists no endpoints: no route ceiling, so no bound.
+    {"openai.chat", "https://openrouter.ai", "~deepseek/deepseek-v4-flash-latest", std::nullopt, std::nullopt},
+    {"openai.chat", "https://openrouter.ai", "deepseek/deepseek-v4-flash-0731", 49'407, 6'327},
+    {"openai.chat", "https://openrouter.ai", "deepseek/deepseek-v4-flash-vision-exp", 49'407, 6'327},
+    {"openai.chat", "https://api.openai.com", "gpt-4.1-nano", 11'639, 1'556},
+    {"openai.chat", "https://api.openai.com", "gpt-4.1-mini", 46'554, 6'223},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-haiku-4-5-20251001", 220'480, 21'185},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-sonnet-4-5-20250929", 661'440, 63'555},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-sonnet-5", 440'960, 42'370},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-opus-4-7", 1'102'400, 105'925},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-opus-4-8", 1'102'400, 105'925},
+    {"anthropic.messages", "https://api.anthropic.com", "claude-opus-5", 1'102'400, 105'925},
+    {"google.generate", "https://generativelanguage.googleapis.com", "gemini-3.1-flash-lite-image", 147'880, 18'854},
+    {"google.generate", "https://aiplatform.googleapis.com", "gemini-3.1-flash-lite-image", 147'880, 18'404},
+};
+
+// 12,345 uncached input tokens and 678 output tokens; 2,000 cache reads off
+// OpenRouter; 3,000 Anthropic cache writes (1,000 five-minute, 2,000 one-hour);
+// 500 image output tokens for an image model.
+sp::Usage parity_usage(const Parity& row) {
+    const bool        routed = std::string_view(row.origin) == kOpenRouter;
+    const std::uint64_t read = routed ? 0 : 2'000;
+    const std::uint64_t write = std::string_view(row.family) == "anthropic.messages" ? 3'000 : 0;
+    sp::Usage usage;
+    usage.stage          = sp::UsageStage::Final;
+    usage.quality        = sp::UsageQuality::Consistent;
+    usage.input_uncached = count(12'345);
+    usage.cache_read     = count(read);
+    usage.cache_write    = count(write);
+    usage.input_total    = count(12'345 + read + write);
+    usage.output_total   = count(678);
+    if (write) {
+        usage.extra["cache_creation.ephemeral_5m_input_tokens"] = count(1'000);
+        usage.extra["cache_creation.ephemeral_1h_input_tokens"] = count(2'000);
     }
-  ]
-})";
-
-const PriceCatalog& tiered() {
-    static const PriceCatalog catalog = PriceCatalog::parse(kTiered);
-    return catalog;
+    if (std::string_view(row.model).find("image") != std::string_view::npos)
+        usage.extra["candidatesTokensDetails.IMAGE"] = count(500);
+    return usage;
 }
 
-sp::Count count(std::uint64_t value, sp::Evidence evidence = sp::Evidence::Reported) {
-    return sp::Count{value, evidence};
+// ------------------------------------------------------- monetary layer
+
+// A SchemaProvider for `family` at `origin` whose policy carries `models`.
+std::shared_ptr<Provider> provider_at(const std::string& family, const std::string& origin,
+                                      const std::vector<neograph::test::FixtureModel>& models) {
+    return llm::SchemaProvider::create(
+        neograph::test::descriptor(family, origin,
+                                   neograph::test::policy_with_models(
+                                       json::parse(sp::config_defaults::descriptor_policy_json), models)));
 }
 
-// Final usage with the given inclusive input total and output total; bands are set by the caller.
-sp::Usage usage(std::uint64_t input_total, std::uint64_t output_total) {
-    sp::Usage result;
-    result.input_total  = count(input_total);
-    result.output_total = count(output_total);
-    result.stage        = sp::UsageStage::Final;
-    return result;
+neograph::test::FixtureModel model_with(std::string model, std::uint64_t input_limit, json pricing) {
+    neograph::test::FixtureModel fixture{"openai.chat", std::move(model), input_limit};
+    fixture.pricing = std::move(pricing);
+    return fixture;
 }
 
-sp::Usage banded(std::uint64_t uncached, std::uint64_t read, std::uint64_t write,
-                 std::uint64_t output) {
-    auto result           = usage(uncached + read + write, output);
-    result.input_uncached = count(uncached, sp::Evidence::Derived);
-    result.cache_read     = count(read);
-    result.cache_write    = count(write);
-    return result;
+PreparedProviderRequest prepared(Provider& provider, const std::string& model, std::uint64_t output = 100) {
+    auto request = make_provider_request(provider, model, {neograph::test::message("q", sp::Role::User)});
+    std::get<sp::chat::Request>(request.payload).max_output_tokens = output;
+    return provider.prepare(std::move(request));
 }
 
-template <class T>
-const T& value_of(const PricingResult<T>& result) {
-    if (const auto* error = std::get_if<PricingError>(&result)) {
-        ADD_FAILURE() << "unexpected pricing error: " << to_string(*error);
-        static const T empty{};
-        return empty;
-    }
-    return std::get<T>(result);
-}
+// 1 and 2 USD per million input and output tokens: 1,000 and 2,000 nano-USD per token.
+const json kListed{{"input", "0.000001"}, {"output", "0.000002"}};
 
-template <class T>
-PricingError error_of(const PricingResult<T>& result) {
-    EXPECT_TRUE(std::holds_alternative<PricingError>(result));
-    return std::holds_alternative<PricingError>(result) ? std::get<PricingError>(result)
-                                                        : PricingError::Overflow;
-}
-
-sp::ProviderReportedCost openrouter_cost(std::uint64_t total_nano) {
-    sp::ProviderReportedCost cost;
-    cost.source    = sp::CostSource::OpenRouterUsd;
-    cost.total     = sp::UsdAmount{total_nano};
-    cost.status[0] = sp::CostStatus::Available;
-    cost.is_byok     = false;
-    cost.byok_status = sp::CostStatus::Available;
-    return cost;
-}
-
-std::string with(std::string_view base, std::string_view from, std::string_view to) {
-    std::string text(base);
-    const auto at = text.find(from);
-    EXPECT_NE(at, std::string::npos) << from;
-    if (at != std::string::npos) text.replace(at, from.size(), to);
-    return text;
-}
-
-void expect_rejected(const std::string& text, std::string_view fragment) {
-    try {
-        (void)PriceCatalog::parse(text);
-        ADD_FAILURE() << "catalog accepted; expected an error mentioning " << fragment;
-    } catch (const CatalogError& error) {
-        EXPECT_NE(std::string(error.what()).find(fragment), std::string::npos) << error.what();
-    }
+program::detail::MonetaryRequestFacts with_tools(std::vector<std::string> types, std::optional<std::uint64_t> uses) {
+    program::detail::MonetaryRequestFacts facts;
+    facts.tools.push_back({std::move(types), uses});
+    return facts;
 }
 
 }  // namespace
 
-// ---------------------------------------------------------------- loading
-
-TEST(PricingCatalog, ShippedCatalogLoadsWithSourcesForEveryEntry) {
-    const auto& catalog = shipped();
-    EXPECT_FALSE(catalog.version().empty());
-    EXPECT_EQ(catalog.digest().rfind("sha256:", 0), 0u) << catalog.digest();
-    ASSERT_FALSE(catalog.entries().empty());
-    for (const auto& entry : catalog.entries()) {
-        EXPECT_EQ(entry.source_url.rfind("https://", 0), 0u) << entry.model;
-        EXPECT_EQ(entry.retrieved.size(), 10u) << entry.model;
-        EXPECT_EQ(catalog.find(entry.origin, entry.model), &entry);
-        for (const auto& alias : entry.aliases) EXPECT_EQ(catalog.find(entry.origin, alias), &entry);
-        const auto* origin = catalog.find_origin(entry.origin);
-        ASSERT_NE(origin, nullptr);
-        // Route ceilings exist only where an aggregator chooses among endpoints.
-        if (entry.route_ceiling) {
-            EXPECT_TRUE(origin->aggregator) << entry.model;
-        }
+TEST(PricingParity, TheShippedLayerLoadsAndMergesOverTheEmbeddedCatalogue) {
+    const auto& layer = shipped_layer();
+    EXPECT_EQ(layer->entries().size(), kParity.size());
+    for (const auto& entry : layer->entries()) {
+        EXPECT_FALSE(entry.pricing.empty()) << entry.id;
+        EXPECT_EQ(entry.origins.size(), 1U) << entry.id << " is scoped to the origin it was priced at";
+        EXPECT_TRUE(entry.source) << entry.id;
     }
-}
-
-TEST(PricingCatalog, ShippedCatalogKeysTheSameModelPerOrigin) {
-    const auto& catalog = shipped();
-    const auto* studio  = catalog.find("google-ai-studio", "gemini-3.1-flash-lite-image");
-    const auto* vertex  = catalog.find("google-vertex-global", "gemini-3.1-flash-lite-image");
-    ASSERT_NE(studio, nullptr);
-    ASSERT_NE(vertex, nullptr);
+    const std::array layers{sp::descriptor::builtin_catalogue(), layer};
+    EXPECT_TRUE(std::holds_alternative<sp::descriptor::CatalogueSnapshot>(sp::descriptor::merge_catalogues(layers)));
+    // One model at two origins: an entry per origin, the second by an alias.
+    const auto* studio = layer->find("google.generate", "https://generativelanguage.googleapis.com",
+                                     "gemini-3.1-flash-lite-image").entry;
+    const auto* vertex = layer->find("google.generate", "https://aiplatform.googleapis.com",
+                                     "gemini-3.1-flash-lite-image").entry;
+    ASSERT_TRUE(studio && vertex);
     EXPECT_NE(studio, vertex);
-    // The two origins publish different cache terms for the same model.
-    EXPECT_FALSE(studio->tiers.front().rates.cache_read.has_value());
-    EXPECT_EQ(vertex->tiers.front().rates.cache_read, 25'000u);
-    EXPECT_EQ(catalog.find("openai", "gemini-3.1-flash-lite-image"), nullptr);
-
-    ASSERT_NE(catalog.find("anthropic", "claude-haiku-4-5"), nullptr);
-    EXPECT_EQ(catalog.find("anthropic", "claude-haiku-4-5"),
-              catalog.find("anthropic", "claude-haiku-4-5-20251001"));
-    EXPECT_EQ(catalog.find("openrouter", "deepseek/deepseek-v4-flash-20260731"),
-              catalog.find("openrouter", "deepseek/deepseek-v4-flash-0731"));
+    EXPECT_FALSE(layer->find("google.generate", "https://api.openai.com", "gemini-3.1-flash-lite-image").entry);
 }
 
-TEST(PricingCatalog, OriginLookupUsesSchemeAndHostOnly) {
-    const auto& catalog = shipped();
-    const auto* router  = catalog.find_origin_by_url("https://OpenRouter.ai/api/v1/chat/completions");
-    ASSERT_NE(router, nullptr);
-    EXPECT_EQ(router->id, "openrouter");
-    EXPECT_TRUE(router->aggregator);
-    ASSERT_NE(catalog.find_origin_by_url("https://generativelanguage.googleapis.com/v1beta"), nullptr);
-    EXPECT_EQ(catalog.find_origin_by_url("https://generativelanguage.googleapis.com")->id,
-              "google-ai-studio");
-    // A regional Vertex endpoint is a different origin with different prices.
-    EXPECT_EQ(catalog.find_origin_by_url("https://us-central1-aiplatform.googleapis.com/v1"), nullptr);
-    EXPECT_EQ(catalog.find_origin_by_url("http://openrouter.ai"), nullptr);
-    EXPECT_EQ(catalog.find_origin_by_url("not a url"), nullptr);
-}
-
-TEST(PricingCatalog, DigestIsCanonical) {
-    const auto spaced = with(kTiered, R"("version": "test-1",)", "\"version\":   \"test-1\" ,");
-    EXPECT_EQ(PriceCatalog::parse(spaced).digest(), tiered().digest());
-    const auto changed = with(kTiered, R"("input": "0.40")", R"("input": "0.41")");
-    EXPECT_NE(PriceCatalog::parse(changed).digest(), tiered().digest());
-}
-
-TEST(PricingCatalog, RatesAreExactDecimals) {
-    EXPECT_EQ(parse_rate("0.10"), 100'000u);
-    EXPECT_EQ(parse_rate("30"), 30'000'000u);
-    EXPECT_EQ(parse_rate("30.00"), 30'000'000u);
-    EXPECT_EQ(parse_rate("0.00686"), 6'860u);
-    EXPECT_EQ(parse_rate("0.000001"), 1u);
-    EXPECT_EQ(parse_rate("0"), 0u);
-    EXPECT_EQ(parse_rate("10000"), 10'000'000'000u);
-    for (const auto* bad : {"", "0.0000001", "-1", "+1", "1e3", ".5", "1.", "01", "0x10", " 1",
-                            "1 ", "1,5", "10000.000001", "123456"}) {
-        EXPECT_FALSE(parse_rate(bad).has_value()) << bad;
+TEST(PricingParity, ReservationsAndEstimatesMatchThe015Catalog) {
+    for (const auto& row : kParity) {
+        SCOPED_TRACE(std::string(row.origin) + " " + row.model);
+        const auto* entry = shipped_layer()->find(row.family, row.origin, row.model).entry;
+        ASSERT_TRUE(entry);
+        const bool routed = std::string_view(row.origin) == kOpenRouter;
+        const auto bound  = sp::pricing::upper_bound(sp::pricing::dearest_price_of(*entry, {}, 100'000),
+                                                     {100'000, 4'096, routed, {}});
+        const auto estimate = sp::pricing::estimate(*shipped_layer(), row.family, row.origin,
+                                                    sp::ServedModel{row.model, row.model, sp::ServedRelation::Exact},
+                                                    parity_usage(row), {}, routed);
+        if (!row.reserved) {
+            EXPECT_FALSE(bound.total);
+            EXPECT_EQ(bound.unpriced, std::vector<std::string>{"ceiling"});
+            EXPECT_FALSE(estimate.total);
+            continue;
+        }
+        ASSERT_TRUE(bound.total);
+        EXPECT_EQ(microunits(*bound.total), *row.reserved);
+        ASSERT_TRUE(estimate.total) << estimate.unpriced.size();
+        EXPECT_EQ(microunits(*estimate.total), *row.estimated);
     }
 }
 
-TEST(PricingCatalog, ValidationNamesTheOffendingField) {
-    const std::string base(kTiered);
-    expect_rejected(with(base, R"("schema_version": 1)", R"("schema_version": 2)"), "schema_version");
-    expect_rejected(with(base, R"("currency": "USD")", R"("currency": "EUR")"), "currency");
-    expect_rejected(with(base, R"("version": "test-1",)", R"("version": "test-1", "extra": 1,)"),
-                    "undeclared field 'extra'");
-    expect_rejected(with(base, R"("version": "test-1",)", R"("version": "a", "version": "b",)"),
-                    "duplicate");
-    expect_rejected(with(base, R"("url": "https://api.example.com")", R"("url": "http://api.example.com")"),
-                    "origins.example.url");
-    expect_rejected(with(base, R"("url": "https://api.example.com")",
-                         R"("url": "https://api.example.com/v1")"),
-                    "origins.example.url");
-    expect_rejected(with(base, R"("source_url": "https://example.com/pricing")", R"("source_url": "")"),
-                    "entries[0].source_url");
-    expect_rejected(with(base, R"("source_url": "https://example.com/pricing", )", ""),
-                    "missing field 'source_url'");
-    expect_rejected(with(base, R"("retrieved": "2026-10-11",
-      "tiers")", R"("retrieved": "2026-13-01",
-      "tiers")"), "entries[0].retrieved");
-    expect_rejected(with(base, R"("input": "0.10", "cache_write")", R"("input": 0.1, "cache_write")"),
-                    "entries[0].tiers[0].input");
-    expect_rejected(with(base, R"("origin": "example", "model")", R"("origin": "nowhere", "model")"),
-                    "entries[0].origin");
-    expect_rejected(with(base, R"("aliases": ["tiered-model-2026"])", R"("aliases": ["tiered-model"])"),
-                    "already priced");
-    expect_rejected(with(base, R"("up_to_input_tokens": null)", R"("up_to_input_tokens": 200000)"),
-                    "last tier must be unbounded");
-    expect_rejected(with(base, R"("up_to_input_tokens": 100000)", R"("up_to_input_tokens": null)"),
-                    "only the last tier may be unbounded");
-    expect_rejected(with(base, R"("up_to_input_tokens": 100000)", R"("up_to_input_tokens": 0)"),
-                    "positive integer");
-    // A higher tier that is cheaper would make a bound at the larger input unsound.
-    expect_rejected(with(base, R"("cache_read": "0.05")", R"("cache_read": "0.001")"),
-                    "must not be cheaper");
-    expect_rejected(with(base, R"("input": "0.40", "output": "0.80")", R"("input": "0.05", "output": "0.80")"),
-                    "route ceiling is below a listed rate");
-    expect_rejected(with(base, R"("routing": "aggregator")", R"("routing": "direct")"),
-                    "only aggregator origins have a route ceiling");
-    expect_rejected(with(base, R"("tiers": [{"input": "0.10", "output": "0.20"}]
+TEST(PricingBound, AnEstimateNeverExceedsItsReservation) {
+    // The shipped entries and one with a long-context band, over random bounds
+    // and random usage within them.
+    std::vector<std::pair<std::string, const sp::descriptor::CatalogueEntry*>> entries;
+    for (const auto& row : kParity)
+        if (row.reserved) entries.emplace_back(row.origin, shipped_layer()->find(row.family, row.origin, row.model).entry);
+    const auto banded = catalogue_of(R"({"version":1,"models":[{"id":"banded","pricing":{
+        "input":"0.000001","output":"0.000004","cache_read":"0.0000001","cache_write":"0.00000125",
+        "cache_write_1h":"0.000002","input+200000":"0.000002","output+200000":"0.000006",
+        "cache_read+200000":"0.0000002","cache_write_1h+200000":"0.000004","request":"0.0005"}}]})");
+    entries.emplace_back(std::string(kDirect), banded->entry("banded"));
+    std::mt19937_64 random(520);
+    const auto below = [&](std::uint64_t limit) { return std::uniform_int_distribution<std::uint64_t>(0, limit)(random); };
+    for (int i = 0; i < 4'000; ++i) {
+        const auto& [origin, entry] = entries[i % entries.size()];
+        const bool routed = origin == kOpenRouter;
+        const auto input = below(400'000), output = below(64'000);
+        const auto bound = sp::pricing::upper_bound(sp::pricing::dearest_price_of(*entry, {}, input),
+                                                    {input, output, routed, {}});
+        ASSERT_TRUE(bound.total);
+        sp::Usage usage;
+        usage.stage   = sp::UsageStage::Final;
+        usage.quality = sp::UsageQuality::Consistent;
+        const auto read = below(input), write = below(input - read), uncached = below(input - read - write);
+        const auto hour = below(write);
+        usage.input_uncached = count(uncached);
+        usage.cache_read     = count(read);
+        usage.cache_write    = count(write);
+        usage.input_total    = count(uncached + read + write);
+        usage.output_total   = count(output);
+        usage.reasoning      = count(below(output));
+        if (i % 2) {
+            usage.extra["cache_creation.ephemeral_5m_input_tokens"] = count(write - hour);
+            usage.extra["cache_creation.ephemeral_1h_input_tokens"] = count(hour);
+            usage.extra["candidatesTokensDetails.IMAGE"]           = count(below(output));
+        }
+        const auto estimate = sp::pricing::estimate(entry == banded->entry("banded") ? *banded : *shipped_layer(),
+                                                    "anthropic.messages", origin,
+                                                    sp::ServedModel{entry->id, entry->id, sp::ServedRelation::Exact},
+                                                    usage, {}, routed);
+        ASSERT_TRUE(estimate.total) << entry->id;
+        EXPECT_LE(estimate.total->nano_usd, bound.total->nano_usd) << entry->id << " input " << input;
     }
-  ])", R"("tiers": []
-    }
-  ])"), "1 to 8 tiers");
-    expect_rejected("{", "document");
 }
 
-TEST(PricingCatalog, LoadReportsMissingFiles) {
-    EXPECT_THROW((void)PriceCatalog::load("/nonexistent/neograph/pricing.json"), CatalogError);
+TEST(PricingAssess, TheHoldIsTheCatalogueBoundOfTheAdmittedRequest) {
+    auto provider = provider_at("openai.chat", std::string(kDirect), {model_with("vendor/model", 1'000, kListed)});
+    const auto quote = program::detail::assess_monetary_call({}, prepared(*provider, "vendor/model"));
+    ASSERT_TRUE(quote.blocker.empty()) << quote.blocker_message;
+    // 1,000 input tokens at 1,000 and 100 output tokens at 2,000 nano-USD.
+    EXPECT_EQ(quote.hold, (1'000U * 1'000 + 100 * 2'000) / 1'000);
+    EXPECT_EQ(quote.hold_basis, "list_rates");
+    EXPECT_EQ(quote.origin, kDirect);
+    EXPECT_EQ(quote.catalog_version, program::detail::kCatalogueScheme);
+    EXPECT_EQ(quote.catalog_digest.size(), 64U);
+    EXPECT_FALSE(quote.pin) << "a direct origin routes nowhere else";
+    EXPECT_EQ(quote.pricing, (json{{"entry", "vendor/model"}, {"units", kListed}}));
+    EXPECT_EQ(quote.witness.at("input_tokens_bound"), 1'000);
 }
 
-// ------------------------------------------------------- tiers and rounding
-
-TEST(PricingTiers, InputTotalSelectsTheTierForTheWholeRequest) {
-    const auto& catalog = tiered();
-    const auto* entry   = catalog.find("example", "tiered-model");
-    ASSERT_NE(entry, nullptr);
-    EXPECT_EQ(&entry->tier_for(0), &entry->tiers[0]);
-    EXPECT_EQ(&entry->tier_for(100'000), &entry->tiers[0]);
-    EXPECT_EQ(&entry->tier_for(100'001), &entry->tiers[1]);
-
-    // 100000 input tokens at 0.10/M plus 1000 output tokens at 0.50/M.
-    auto at_threshold = value_of(catalog.estimate("example", "tiered-model", banded(100'000, 0, 0, 1'000)));
-    EXPECT_EQ(at_threshold.microunits, 10'000u + 500u);
-    EXPECT_EQ(at_threshold.basis, Basis::ListRates);
-    EXPECT_FALSE(at_threshold.conservative);
-    // One more input token moves every token, output included, to the higher tier:
-    // 100001 * 0.50 = 50000.5 and 1000 * 2.50 = 2500, rounded up once.
-    auto above = value_of(catalog.estimate("example", "tiered-model", banded(100'001, 0, 0, 1'000)));
-    EXPECT_EQ(above.microunits, 52'501u);
-    // Cache reads count toward the prompt length that selects the tier.
-    auto cached = value_of(catalog.estimate("example", "tiered-model", banded(1, 100'000, 0, 0)));
-    EXPECT_EQ(cached.microunits, 5'001u);  // 1 * 0.50 + 100000 * 0.05 = 5000.5
+TEST(PricingAssess, ALongContextBandIsReservedWhenTheInputLimitReachesIt) {
+    auto prices                  = kListed;
+    prices["input+200000"]       = "0.000002";
+    prices["output+200000"]      = "0.000003";
+    auto provider = provider_at("openai.chat", std::string(kDirect),
+                                {model_with("short", 200'000, prices), model_with("long", 1'000'000, prices)});
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*provider, "short")).hold, 200'000U + 200);
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*provider, "long")).hold, 2'000'000U + 300);
 }
 
-TEST(PricingRounding, OneCeilingPerCallInWholeMicrounits) {
-    const auto& catalog = shipped();
-    // gpt-4.1-nano input is 0.10 USD per million tokens: one token is 0.1 microunit.
-    EXPECT_EQ(value_of(catalog.estimate("openai", "gpt-4.1-nano", banded(1, 0, 0, 0))).microunits, 1u);
-    EXPECT_EQ(value_of(catalog.estimate("openai", "gpt-4.1-nano", banded(10, 0, 0, 0))).microunits, 1u);
-    EXPECT_EQ(value_of(catalog.estimate("openai", "gpt-4.1-nano", banded(11, 0, 0, 0))).microunits, 2u);
-    EXPECT_EQ(value_of(catalog.estimate("openai", "gpt-4.1-nano", banded(0, 0, 0, 0))).microunits, 0u);
-    // 0.1 (uncached) + 0.025 (cache read) + 0.4 (output) = 0.525: one microunit, not three.
-    EXPECT_EQ(value_of(catalog.estimate("openai", "gpt-4.1-nano", banded(1, 1, 0, 1))).microunits, 1u);
-    EXPECT_EQ(value_of(catalog.reserve("openai", "gpt-4.1-nano", 1, 1)).microunits, 1u);
+TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
+    auto ceiling                 = kListed;
+    ceiling["ceiling_input"]     = "0.000003";
+    ceiling["ceiling_output"]    = "0.000004";
+    auto tiered                  = kListed;
+    tiered["input/flex"]         = "0.0000005";
+    tiered["output/flex"]        = "0.000001";
+    auto fees                    = kListed;
+    fees["tool:web_search"]      = "0.01";
+    fees["tool:file_search"]     = "0.0025";
+    fees["tool:free_tool"]       = "0";
+
+    // No price for the model.
+    auto direct = provider_at("openai.chat", std::string(kDirect),
+                              {model_with("unpriced", 1'000, json::object()), model_with("tiered", 1'000, tiered),
+                               model_with("fees", 1'000, fees)});
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*direct, "unpriced")).blocker, "P_MONEY_UNKNOWN_MODEL");
+
+    // A service tier the entry does not price, and one it does.
+    program::detail::MonetaryRequestFacts flex;
+    flex.service_tier = "flex";
+    EXPECT_EQ(program::detail::assess_monetary_call(flex, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
+    const auto tier = program::detail::assess_monetary_call(flex, prepared(*direct, "tiered"));
+    ASSERT_TRUE(tier.blocker.empty()) << tier.blocker_message;
+    EXPECT_EQ(tier.hold, 500U + 100);
+    EXPECT_EQ(tier.service_tier, "flex");
+    EXPECT_EQ(tier.pricing.at("service_tier"), "flex");
+    program::detail::MonetaryRequestFacts standard;
+    standard.service_tier = "default";
+    EXPECT_EQ(program::detail::assess_monetary_call(standard, prepared(*direct, "tiered")).hold, 1'000U + 200);
+
+    // A server tool without a use cap, without a fee, and with both. Tools that
+    // share one cap are bounded at the dearest fee; zero is a declared fee.
+    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"web_search"}, std::nullopt), prepared(*direct, "fees")).blocker,
+              "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"code_interpreter"}, 2), prepared(*direct, "fees")).blocker,
+              "P_MONEY_UNMODELED");
+    const auto tools = program::detail::assess_monetary_call(with_tools({"file_search", "web_search"}, 3), prepared(*direct, "fees"));
+    ASSERT_TRUE(tools.blocker.empty()) << tools.blocker_message;
+    // Three uses at 0.01 USD on top of the tokens.
+    EXPECT_EQ(tools.hold, 1'000U + 200 + 30'000);
+    EXPECT_EQ(tools.tool_fees_nano_usd, 30'000'000U);
+    EXPECT_EQ(tools.pricing.at("tool_uses"), (json{{"web_search", 3}}));
+    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"free_tool"}, 5), prepared(*direct, "fees")).hold, 1'000U + 200);
+
+    // A feature the catalogue cannot price.
+    program::detail::MonetaryRequestFacts plugins;
+    plugins.unpriced = "OpenRouter plugins";
+    EXPECT_EQ(program::detail::assess_monetary_call(plugins, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
+
+    // A routing gateway needs a route ceiling, and a ceiling needs a gateway.
+    auto routed = provider_at("openai.chat", std::string(kOpenRouter),
+                              {model_with("vendor/listed", 1'000, kListed), model_with("vendor/ceiling", 1'000, ceiling),
+                               model_with("vendor/dearer", 2'000, json{{"input", "0.000001"}, {"output", "0.000002"},
+                                                                       {"ceiling_input", "0.000005"},
+                                                                       {"ceiling_output", "0.000003"}})});
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*routed, "vendor/listed")).blocker, "P_MONEY_NO_UPPER_BOUND");
+    const auto pinned = program::detail::assess_monetary_call({}, prepared(*routed, "vendor/ceiling"));
+    ASSERT_TRUE(pinned.blocker.empty()) << pinned.blocker_message;
+    EXPECT_EQ(pinned.hold, 3'000U + 400);
+    EXPECT_EQ(pinned.hold_basis, "route_ceiling");
+    ASSERT_TRUE(pinned.pin);
+    EXPECT_EQ(pinned.pin->prompt_nano_usd, 3'000'000'000U);
+    auto misplaced = provider_at("openai.chat", std::string(kDirect), {model_with("vendor/ceiling", 1'000, ceiling)});
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*misplaced, "vendor/ceiling")).blocker, "P_MONEY_NO_UPPER_BOUND");
+
+    // OpenRouter fallbacks: every candidate is priced, the pin covers the
+    // dearest ceiling, and the hold is the dearest candidate's bound at it.
+    program::detail::MonetaryRequestFacts fallbacks;
+    fallbacks.fallback_models = {"vendor/unlisted"};
+    EXPECT_EQ(program::detail::assess_monetary_call(fallbacks, prepared(*routed, "vendor/ceiling")).blocker,
+              "P_MONEY_UNKNOWN_MODEL");
+    fallbacks.fallback_models = {"vendor/dearer"};
+    const auto fallback = program::detail::assess_monetary_call(fallbacks, prepared(*routed, "vendor/ceiling"));
+    ASSERT_TRUE(fallback.blocker.empty()) << fallback.blocker_message;
+    ASSERT_TRUE(fallback.pin);
+    EXPECT_EQ(fallback.pin->prompt_nano_usd, 5'000'000'000U);
+    EXPECT_EQ(fallback.pin->completion_nano_usd, 4'000'000'000U);
+    // vendor/dearer: 2,000 input tokens at 5,000 and 100 output at 4,000 nano-USD.
+    EXPECT_EQ(fallback.hold, 10'000U + 400);
+    EXPECT_EQ(fallback.pricing.at("entry"), "vendor/dearer");
 }
 
-// ---------------------------------------------------------------- cache bands
+TEST(PricingAssess, RequestFactsComeFromTheTypedRequest) {
+    ProviderRequest chat;
+    sp::chat::Request chat_payload;
+    chat_payload.models       = {"vendor/a", "vendor/b"};
+    chat_payload.service_tier = "flex";
+    chat.payload              = chat_payload;
+    auto facts                = program::detail::monetary_request_facts(chat);
+    EXPECT_EQ(facts.fallback_models, (std::vector<std::string>{"vendor/a", "vendor/b"}));
+    EXPECT_EQ(facts.service_tier, "flex");
+    EXPECT_FALSE(facts.unpriced);
+    std::get<sp::chat::Request>(chat.payload).plugins.emplace_back();
+    EXPECT_TRUE(program::detail::monetary_request_facts(chat).unpriced);
 
-TEST(PricingCache, AnthropicBandsAndTheTtlSplit) {
-    const auto& catalog = shipped();
-    auto split = banded(1'000, 2'000, 3'000, 500);
-    split.extra["cache_creation.ephemeral_5m_input_tokens"] = count(1'000);
-    split.extra["cache_creation.ephemeral_1h_input_tokens"] = count(2'000);
-    // 1000*1 + 2000*0.10 + 1000*1.25 + 2000*2 + 500*5
-    auto exact = value_of(catalog.estimate("anthropic", "claude-haiku-4-5", split));
-    EXPECT_EQ(exact.microunits, 1'000u + 200u + 1'250u + 4'000u + 2'500u);
-    EXPECT_FALSE(exact.conservative);
-    EXPECT_EQ(exact.evidence, Evidence::Estimated);
-    EXPECT_EQ(exact.catalog_version, catalog.version());
-    EXPECT_EQ(exact.catalog_digest, catalog.digest());
+    ProviderRequest responses;
+    sp::responses::Request responses_payload;
+    responses_payload.hosted_tools   = {sp::responses::WebSearchTool{}, sp::responses::FileSearchTool{}};
+    responses_payload.max_tool_calls = 4;
+    responses.payload                = responses_payload;
+    facts                            = program::detail::monetary_request_facts(responses);
+    ASSERT_EQ(facts.tools.size(), 1U);
+    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search", "file_search"}));
+    EXPECT_EQ(facts.tools[0].uses, 4U);
 
-    // Without the split every written token is priced at the dearer 1-hour rate.
-    auto unsplit = value_of(catalog.estimate("anthropic", "claude-haiku-4-5", banded(1'000, 2'000, 3'000, 500)));
-    EXPECT_EQ(unsplit.microunits, 1'000u + 200u + 6'000u + 2'500u);
-    EXPECT_TRUE(unsplit.conservative);
+    ProviderRequest messages;
+    sp::messages::Request messages_payload;
+    sp::messages::ToolDefinition search;
+    search.type     = "web_search_20250305";
+    search.name     = "web_search";
+    search.max_uses = 2;
+    sp::messages::ToolDefinition client;
+    client.name = "lookup";
+    messages_payload.tools = {search, client};
+    messages.payload       = messages_payload;
+    facts                  = program::detail::monetary_request_facts(messages);
+    ASSERT_EQ(facts.tools.size(), 1U) << "a client tool bills only tokens";
+    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search_20250305"}));
+    EXPECT_EQ(facts.tools[0].uses, 2U);
 
-    // A split that does not add up to the written total is not trusted.
-    auto wrong = split;
-    wrong.extra["cache_creation.ephemeral_1h_input_tokens"] = count(1'999);
-    EXPECT_EQ(value_of(catalog.estimate("anthropic", "claude-haiku-4-5", wrong)).microunits,
-              unsplit.microunits);
+    ProviderRequest generate;
+    sp::gemini::Request generate_payload;
+    generate_payload.builtin_tools = {sp::gemini::GoogleSearchTool{}};
+    generate.payload               = generate_payload;
+    facts                          = program::detail::monetary_request_facts(generate);
+    ASSERT_EQ(facts.tools.size(), 1U);
+    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"google_search"}));
+    EXPECT_FALSE(facts.tools[0].uses) << "Gemini's built-in tools take no use cap";
 }
 
-TEST(PricingCache, OpenAiCacheReadsWithoutAWriteCounter) {
-    const auto& catalog = shipped();
-    // Chat on a direct origin has no cache-write counter; the SDK derives uncached input.
-    auto chat           = usage(1'000'000, 100'000);
-    chat.cache_read     = count(400'000);
-    chat.input_uncached = count(600'000, sp::Evidence::Derived);
-    auto settled        = value_of(catalog.settle("openai", "gpt-4.1-nano", chat));
-    EXPECT_EQ(settled.microunits, 60'000u + 10'000u + 40'000u);
-    EXPECT_FALSE(settled.conservative);
-}
+TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
+    auto fees               = kListed;
+    fees["tool:web_search"] = "0.01";
+    auto provider = provider_at("openai.chat", std::string(kDirect), {model_with("vendor/model", 1'000, fees)});
+    const auto quote = program::detail::assess_monetary_call(with_tools({"web_search"}, 2), prepared(*provider, "vendor/model"));
+    ASSERT_TRUE(quote.blocker.empty()) << quote.blocker_message;
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+    auto usage    = neograph::test::usage(300, 40, 340);
+    const auto record = program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", usage));
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Estimated);
+    // 300 input tokens at 1,000 and 40 output at 2,000 nano-USD, plus two uses
+    // of the tool at its 0.01 USD fee.
+    EXPECT_EQ(record->microunits, (300U * 1'000 + 40 * 2'000 + 20'000'000) / 1'000);
+    EXPECT_LE(record->microunits, record->reserved_microunits);
+    EXPECT_TRUE(record->conservative) << "tool uses are charged at their cap";
+    EXPECT_EQ(record->basis, "list_rates");
+    EXPECT_EQ(record->catalog_digest, quote.catalog_digest);
+    EXPECT_EQ(record->pricing.at("entry"), "vendor/model");
+    EXPECT_EQ(record->pricing.at("tool_uses"), (json{{"web_search", 2}}));
 
-TEST(PricingCache, UnreportedBandsArePricedAtTheirHighestRate) {
-    const auto& catalog = shipped();
-    // Only the inclusive total is known: every input token could have been a 1-hour write.
-    auto totals = value_of(catalog.estimate("anthropic", "claude-haiku-4-5", usage(1'000, 0)));
-    EXPECT_EQ(totals.microunits, 2'000u);
-    EXPECT_TRUE(totals.conservative);
+    // A reported cost settles without the catalogue.
+    usage.provider_cost.source    = sp::CostSource::OpenRouterUsd;
+    usage.provider_cost.total     = sp::UsdAmount{1'234'567};
+    usage.provider_cost.status[0] = sp::CostStatus::Available;
+    usage.provider_cost.is_byok   = false;
+    usage.provider_cost.byok_status = sp::CostStatus::Available;
+    const auto reported = program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", usage));
+    ASSERT_TRUE(reported);
+    EXPECT_EQ(reported->evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(reported->microunits, 1'235U);
+    EXPECT_EQ(reported->basis, "provider_reported");
+    // It still names the catalogue and rows its hold was priced with.
+    EXPECT_EQ(reported->catalog_digest, quote.catalog_digest);
+    EXPECT_EQ(reported->pricing, quote.pricing);
 
-    // Reads known, writes unknown: the remainder is uncached or written.
-    auto reads       = usage(1'000, 0);
-    reads.cache_read = count(400);
-    auto partial     = value_of(catalog.estimate("anthropic", "claude-haiku-4-5", reads));
-    EXPECT_EQ(partial.microunits, 40u + 1'200u);  // 400*0.10 + 600*2
-    EXPECT_TRUE(partial.conservative);
-
-    // Gemini omits the cached count when nothing was read; the input rate is still the ceiling.
-    auto gemini = value_of(catalog.estimate("google-vertex-global", "gemini-3.1-flash-lite-image",
-                                            usage(1'000'000, 0)));
-    EXPECT_EQ(gemini.microunits, 250'000u);
-}
-
-TEST(PricingCache, ContradictoryBandsAreRejected) {
-    const auto& catalog = shipped();
-    auto over       = usage(100, 0);
-    over.cache_read = count(101);
-    EXPECT_EQ(error_of(catalog.estimate("openai", "gpt-4.1-nano", over)), PricingError::InconsistentUsage);
-
-    auto gap = banded(10, 10, 10, 0);
-    gap.input_total = count(31);  // every band reported, one token unaccounted for
-    EXPECT_EQ(error_of(catalog.estimate("openai", "gpt-4.1-nano", gap)), PricingError::InconsistentUsage);
-
-    auto flagged    = banded(10, 0, 0, 0);
-    flagged.quality = sp::UsageQuality::Inconsistent;
-    EXPECT_EQ(error_of(catalog.estimate("openai", "gpt-4.1-nano", flagged)),
-              PricingError::InconsistentUsage);
-}
-
-TEST(PricingOutput, GeminiImageTokensUseTheImageRate) {
-    const auto& catalog = shipped();
-    auto image = usage(1'000, 2'000);
-    image.extra["candidatesTokensDetails.IMAGE"] = count(1'120);
-    // 1000*0.25 + 1120*30 + 880*1.50
-    auto exact = value_of(catalog.estimate("google-ai-studio", "gemini-3.1-flash-lite-image", image));
-    EXPECT_EQ(exact.microunits, 250u + 33'600u + 1'320u);
-    // Without the modality breakdown all output is priced as image output.
-    auto unknown = value_of(catalog.estimate("google-ai-studio", "gemini-3.1-flash-lite-image",
-                                             usage(1'000, 2'000)));
-    EXPECT_EQ(unknown.microunits, 250u + 60'000u);
-    EXPECT_TRUE(unknown.conservative);
-
-    image.extra["candidatesTokensDetails.IMAGE"] = count(2'001);
-    EXPECT_EQ(error_of(catalog.estimate("google-ai-studio", "gemini-3.1-flash-lite-image", image)),
-              PricingError::InconsistentUsage);
-}
-
-// ------------------------------------------------------- reported settlement
-
-TEST(PricingSettle, ReportedCostWinsAndRoundsUp) {
-    const auto& catalog = shipped();
-    auto call           = banded(1'000, 0, 0, 100);
-    call.provider_cost  = openrouter_cost(1'234'567);  // 0.001234567 USD
-    auto settled        = value_of(catalog.settle("openrouter", "deepseek/deepseek-v4-flash-0731", call));
-    EXPECT_EQ(settled.evidence, Evidence::Reported);
-    EXPECT_EQ(settled.basis, Basis::ProviderReported);
-    EXPECT_EQ(settled.microunits, 1'235u);
-    EXPECT_TRUE(settled.catalog_version.empty());
-    // A reported cost needs no catalog entry.
-    EXPECT_EQ(value_of(catalog.settle("openrouter", "vendor/unlisted", call)).microunits, 1'235u);
-    call.provider_cost = openrouter_cost(2'000);
-    EXPECT_EQ(value_of(catalog.settle("openrouter", "vendor/unlisted", call)).microunits, 2u);
-    call.provider_cost = openrouter_cost(0);
-    EXPECT_EQ(value_of(catalog.settle("openrouter", "vendor/unlisted", call)).microunits, 0u);
+    // Partial usage keeps the hold, which names its catalogue and rows.
+    auto partial  = neograph::test::usage(300, std::nullopt, std::nullopt, sp::UsageStage::Partial);
+    const auto held = program::detail::settle_monetary_call(quote, site, neograph::test::success("answer", partial));
+    ASSERT_TRUE(held);
+    EXPECT_EQ(held->evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(held->microunits, quote.hold);
+    EXPECT_EQ(held->pricing, quote.pricing);
 }
 
 TEST(PricingSettle, ByokAddsTheUpstreamCharge) {
-    auto cost              = openrouter_cost(50'000);
-    cost.is_byok           = true;
-    cost.upstream_total    = sp::UsdAmount{1'000'000};
-    cost.status[1]         = sp::CostStatus::Available;
-    EXPECT_EQ(reported_cost_microunits(cost), 1'050u);
-
-    auto missing_upstream    = openrouter_cost(50'000);
-    missing_upstream.is_byok = true;
-    EXPECT_FALSE(reported_cost_microunits(missing_upstream).has_value());
-
-    // Unknown BYOK flag with an upstream amount: add it rather than risk under-counting.
+    sp::ProviderReportedCost cost;
+    cost.source      = sp::CostSource::OpenRouterUsd;
+    cost.total       = sp::UsdAmount{50'000};
+    cost.status[0]   = sp::CostStatus::Available;
+    cost.is_byok     = true;
+    cost.byok_status = sp::CostStatus::Available;
+    cost.upstream_total = sp::UsdAmount{1'000'000};
+    cost.status[1]      = sp::CostStatus::Available;
+    EXPECT_EQ(program::detail::reported_cost_microunits(cost), 1'050U);
+    auto missing_upstream           = cost;
+    missing_upstream.upstream_total = std::nullopt;
+    missing_upstream.status[1]      = sp::CostStatus::Missing;
+    EXPECT_FALSE(program::detail::reported_cost_microunits(missing_upstream));
+    // An unknown BYOK flag with an upstream amount adds it rather than risk under-counting.
     auto unknown        = cost;
     unknown.is_byok     = std::nullopt;
     unknown.byok_status = sp::CostStatus::Missing;
-    EXPECT_EQ(reported_cost_microunits(unknown), 1'050u);
-    unknown.upstream_total = std::nullopt;
-    unknown.status[1]      = sp::CostStatus::Missing;
-    EXPECT_EQ(reported_cost_microunits(unknown), 50u);
-
+    EXPECT_EQ(program::detail::reported_cost_microunits(unknown), 1'050U);
     // Not BYOK: OpenRouter's total already includes the upstream inference.
-    auto direct           = openrouter_cost(50'000);
-    direct.upstream_total = sp::UsdAmount{40'000};
-    direct.status[1]      = sp::CostStatus::Available;
-    EXPECT_EQ(reported_cost_microunits(direct), 50u);
+    auto direct    = cost;
+    direct.is_byok = false;
+    EXPECT_EQ(program::detail::reported_cost_microunits(direct), 50U);
 }
 
-TEST(PricingSettle, UnusableReportsFallBackToTheCatalog) {
-    const auto& catalog = shipped();
-    auto call           = banded(1'000'000, 0, 0, 0);
-    auto expect_estimate = [&](const sp::ProviderReportedCost& cost) {
-        call.provider_cost = cost;
-        auto settled = value_of(catalog.settle("openrouter", "deepseek/deepseek-v4-flash-0731", call));
-        EXPECT_EQ(settled.evidence, Evidence::Estimated);
-        // No reported cost: the served endpoint is unknown, so the route ceiling prices it.
-        EXPECT_EQ(settled.basis, Basis::RouteCeiling);
-        EXPECT_EQ(settled.microunits, 440'000u);
-    };
-    expect_estimate(sp::ProviderReportedCost{});
-    auto unknown_currency   = openrouter_cost(1);
-    unknown_currency.source = sp::CostSource::UnknownCurrency;
-    expect_estimate(unknown_currency);
-    auto inconsistent    = openrouter_cost(1);
-    inconsistent.quality = sp::UsageQuality::Inconsistent;
-    expect_estimate(inconsistent);
-    auto missing_total      = openrouter_cost(1);
-    missing_total.total     = std::nullopt;
-    missing_total.status[0] = sp::CostStatus::Malformed;
-    expect_estimate(missing_total);
+TEST(PricingRecord, A015RecordKeepsItsBytesAndANewOneCarriesItsPricing) {
+    // A record journaled by 0.15 decodes and encodes to the same canonical bytes.
+    const auto old_record = json::parse(
+        R"({"call_id":"call","operation_id":"op","node":"llm","origin":"openrouter","model":"vendor/model",)"
+        R"("evidence":"estimated","microunits":14,"reserved_microunits":1000,"basis":"route_ceiling",)"
+        R"("catalog_version":"2026-10-11.1","catalog_digest":"sha256:)" + std::string(64, 'a') +
+        R"(","conservative":false,"may_undercount":false,"replayed":false,"reason":""})");
+    const auto decoded = program::detail::decode_monetary_record(old_record);
+    EXPECT_TRUE(decoded.pricing.empty());
+    EXPECT_EQ(program::detail::encode_monetary_record(decoded).dump(), old_record.dump());
+
+    auto current    = old_record;
+    current["pricing"] = json{{"entry", "vendor/model"}, {"units", kListed}, {"assumptions", json::array({"route ceiling"})}};
+    const auto with_pricing = program::detail::decode_monetary_record(current);
+    EXPECT_EQ(with_pricing.pricing.at("units"), kListed);
+    EXPECT_EQ(program::detail::encode_monetary_record(with_pricing).dump(), current.dump());
+
+    current["pricing"] = json::array();
+    EXPECT_THROW((void)program::detail::decode_monetary_record(current), std::invalid_argument);
 }
 
-TEST(PricingSettle, PartialOrMissingUsageKeepsTheHold) {
-    const auto& catalog = shipped();
-    auto partial          = banded(10, 0, 0, 10);
-    partial.stage         = sp::UsageStage::Partial;
-    partial.provider_cost = openrouter_cost(5'000);
-    EXPECT_EQ(error_of(catalog.settle("openrouter", "deepseek/deepseek-v4-flash-0731", partial)),
-              PricingError::IncompleteUsage);
-    auto no_output         = banded(10, 0, 0, 0);
-    no_output.output_total = std::nullopt;
-    EXPECT_EQ(error_of(catalog.settle("openai", "gpt-4.1-mini", no_output)), PricingError::IncompleteUsage);
-    auto no_input        = banded(10, 0, 0, 0);
-    no_input.input_total = std::nullopt;
-    EXPECT_EQ(error_of(catalog.estimate("openai", "gpt-4.1-mini", no_input)), PricingError::IncompleteUsage);
-}
-
-// ------------------------------------------------- reservations and bounds
-
-TEST(PricingReserve, PricesEveryTokenAtItsHighestRate) {
-    const auto& catalog = shipped();
-    // gpt-4.1-nano: 1M input at 0.10 plus 100k output at 0.40.
-    auto nano = value_of(catalog.reserve("openai", "gpt-4.1-nano", 1'000'000, 100'000));
-    EXPECT_EQ(nano.microunits, 100'000u + 40'000u);
-    EXPECT_EQ(nano.basis, Basis::ListRates);
-    EXPECT_EQ(nano.catalog_version, catalog.version());
-    // Haiku 4.5: the 1-hour cache write (2/M) is the dearest input band.
-    EXPECT_EQ(value_of(catalog.reserve("anthropic", "claude-haiku-4-5", 1'000, 1'000)).microunits,
-              2'000u + 5'000u);
-    // Gemini image model: output is bounded at the image rate.
-    EXPECT_EQ(value_of(catalog.reserve("google-ai-studio", "gemini-3.1-flash-lite-image", 0, 1'000))
-                  .microunits,
-              30'000u);
-    // The tier follows the input bound.
-    EXPECT_EQ(value_of(tiered().reserve("example", "tiered-model", 100'000, 1'000)).microunits,
-              20'000u + 500u);
-    EXPECT_EQ(value_of(tiered().reserve("example", "tiered-model", 100'001, 1'000)).microunits,
-              100'001u + 2'500u);
-}
-
-TEST(PricingReserve, AggregatorsReserveAtTheRouteCeiling) {
-    const auto& catalog = shipped();
-    auto dated = value_of(catalog.reserve("openrouter", "deepseek/deepseek-v4-flash-0731", 1'000'000, 1'000'000));
-    EXPECT_EQ(dated.basis, Basis::RouteCeiling);
-    EXPECT_EQ(dated.microunits, 440'000u + 1'320'000u);
-    // A router alias lists no endpoints, so nothing bounds it.
-    EXPECT_EQ(error_of(catalog.reserve("openrouter", "~deepseek/deepseek-v4-flash-latest", 1, 1)),
-              PricingError::NoUpperBound);
-    auto listed = value_of(catalog.estimate("openrouter", "~deepseek/deepseek-v4-flash-latest",
-                                            banded(1'000'000, 0, 0, 0)));
-    EXPECT_EQ(listed.basis, Basis::ListRates);
-    EXPECT_TRUE(listed.may_undercount);
-    EXPECT_EQ(listed.microunits, 18'000u);
-}
-
-TEST(PricingReserve, OverflowIsAnErrorNotAWrap) {
-    const auto& catalog = shipped();
-    EXPECT_EQ(error_of(catalog.reserve("anthropic", "claude-opus-5", kMax, kMax)), PricingError::Overflow);
-    EXPECT_EQ(error_of(catalog.estimate("anthropic", "claude-opus-5", banded(kMax, 0, 0, kMax))),
-              PricingError::Overflow);
-    // A huge amount that still fits is exact: (2^64 - 1) tokens at 0.40 USD per million.
-    EXPECT_EQ(value_of(tiered().reserve("router", "vendor/model", kMax, 0)).microunits,
-              7'378'697'629'483'820'646u);
-    EXPECT_EQ(value_of(tiered().reserve("router", "vendor/model", 0, 0)).microunits, 0u);
-}
-
-TEST(PricingReserve, UnknownModelsHaveNoPrice) {
-    const auto& catalog = shipped();
-    EXPECT_EQ(catalog.find("openai", "gpt-unknown"), nullptr);
-    EXPECT_EQ(error_of(catalog.reserve("openai", "gpt-unknown", 1, 1)), PricingError::UnknownModel);
-    EXPECT_EQ(error_of(catalog.estimate("openai", "gpt-unknown", banded(1, 0, 0, 1))),
-              PricingError::UnknownModel);
-    // Without a reported cost, settlement needs an entry too.
-    EXPECT_EQ(error_of(catalog.settle("openai", "gpt-unknown", banded(1, 0, 0, 1))),
-              PricingError::UnknownModel);
-    // An entry under another origin is not a match.
-    EXPECT_EQ(error_of(catalog.reserve("openrouter", "gpt-4.1-nano", 1, 1)), PricingError::UnknownModel);
-    EXPECT_EQ(error_of(catalog.reserve("nowhere", "gpt-4.1-nano", 1, 1)), PricingError::UnknownModel);
-}
-
-TEST(PricingReserve, EstimatesNeverExceedTheirReservation) {
-    std::mt19937_64 random(366);
-    const auto draw = [&](std::uint64_t upper) {
-        return std::uniform_int_distribution<std::uint64_t>(0, upper)(random);
-    };
-    const auto coin = [&] { return (random() & 1) != 0; };
-    std::size_t checked = 0;
-    for (const auto* catalog : {&shipped(), &tiered()}) {
-        for (const auto& entry : catalog->entries()) {
-            if (catalog->find_origin(entry.origin)->aggregator && !entry.route_ceiling) continue;
-            for (int round = 0; round < 400; ++round) {
-                const auto input_bound  = draw(coin() ? 300'000 : 2'000'000);
-                const auto output_bound = draw(coin() ? 4'096 : 200'000);
-                const auto reserved = catalog->reserve(entry.origin, entry.model, input_bound, output_bound);
-                ASSERT_TRUE(std::holds_alternative<Reservation>(reserved));
-
-                const auto input  = draw(input_bound);
-                const auto read   = draw(input);
-                const auto write  = draw(input - read);
-                const auto output = draw(output_bound);
-                auto call         = usage(input, output);
-                if (coin()) call.input_uncached = count(input - read - write, sp::Evidence::Derived);
-                if (coin()) call.cache_read = count(read);
-                if (coin()) {
-                    call.cache_write = count(write);
-                    if (coin()) {
-                        const auto five = draw(write);
-                        call.extra["cache_creation.ephemeral_5m_input_tokens"] = count(five);
-                        call.extra["cache_creation.ephemeral_1h_input_tokens"] = count(write - five);
-                    }
-                }
-                if (coin()) call.extra["candidatesTokensDetails.IMAGE"] = count(draw(output));
-                // With some bands unreported the remainder may still be unattributable.
-                const auto estimated = catalog->estimate(entry.origin, entry.model, call);
-                if (const auto* error = std::get_if<PricingError>(&estimated)) {
-                    EXPECT_EQ(*error, PricingError::InconsistentUsage);
-                    continue;
-                }
-                EXPECT_LE(std::get<Settlement>(estimated).microunits,
-                          std::get<Reservation>(reserved).microunits)
-                    << entry.origin << " " << entry.model << " in=" << input << "/" << input_bound
-                    << " out=" << output << "/" << output_bound;
-                ++checked;
+TEST(PricingSource, ThePricingCodeNamesNoModel) {
+    // Model ids, prices and limits are catalogue data; the pricing code holds
+    // none. Every string literal of monetary.cpp is checked for a model id.
+    const auto source = read_file(NEOGRAPH_MONETARY_SOURCE);
+    std::vector<std::string> literals;
+    for (std::size_t at = 0; at < source.size(); ++at) {
+        if (source.compare(at, 2, "//") == 0) {
+            at = source.find('\n', at);
+            if (at == std::string::npos) break;
+        } else if (source[at] == '\'') {
+            at += source[at + 1] == '\\' ? 3 : 2;
+        } else if (source[at] == '"') {
+            std::string literal;
+            for (++at; at < source.size() && source[at] != '"'; ++at) {
+                if (source[at] == '\\') ++at;
+                literal += source[at];
             }
+            literals.push_back(std::move(literal));
         }
     }
-    EXPECT_GT(checked, 3'000u);
-}
-
-TEST(Pricing, BuiltinCatalogIsTheRepositoryCatalog) {
-    // The runtime prices calls only from the catalog compiled into the library.
-    const auto& builtin = PriceCatalog::builtin();
-    const auto  source  = PriceCatalog::load(NEOGRAPH_PRICING_CATALOG);
-    EXPECT_EQ(builtin.digest(), source.digest());
-    EXPECT_EQ(builtin.version(), source.version());
-    EXPECT_EQ(&builtin, &PriceCatalog::builtin()) << "parsed once";
+    EXPECT_GT(literals.size(), 50U);
+    for (const auto& literal : literals)
+        for (const std::string_view vendor : {"gpt-", "claude", "gemini-", "deepseek", "llama", "grok", "mistral",
+                                              "qwen", "o1-", "o3-", "o4-"})
+            EXPECT_EQ(literal.find(vendor), std::string::npos) << "a model id in a literal: \"" << literal << '"';
 }

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=a99715bb81db399544918988ad01ba271599c369707e6c9f0eb677e1de3e5b51 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=000755d33741ace41037f6b7bf5f292a198ed3d37603aba0ae7f5caf4d38b641 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -108,7 +108,7 @@ worker_count의 기본값은 `1`이므로 엔진이 소유하는 풀이 만들�
 | `P_JS_CONTROL_COMMAND`: JavaScript command references a Core outside the admitted root | `ng.callCore`가 `define()`이 반환한 그래프가 아닌 다른 그래프의 이름을 쓴다 | `ng.graph(...)`에 넘긴 이름을 쓴다 |
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 나열된 상한 필드 중 0인 것이 있다 | 양수로 바꾼다. Program이 모델을 호출하지 않아도 마찬가지다 |
 | `ng.ProgramAdmissionError`의 `P_ADMIT_PROVIDER` | `llm_call` 노드가 필요로 하는 provider를 호스트가 바인딩하지 않았거나, `llm_call` 또는 `intent_classifier` 노드를 `provider=` 없이 등록했다 | `add_provider(...)`와 `add_registered_node("llm_call", ..., provider=...)`를 등록하고, `LocalProgramHost`에 `node_context=`와 `binding_label=`을 넘긴다 |
-| `P_MONEY_BUDGET`(`BudgetExhausted`) 또는 다른 `P_MONEY_*` 코드(`Failed`)가 나오고 provider가 요청을 받지 못함 | 바인딩된 호출의 예약액이 `monetary_microunits`에 맞지 않거나(0은 아무것도 허용하지 않음), 호출의 상한을 정할 수 없다. 모델이나 origin을 알 수 없음, route 상한이 없는 router 별칭, 출력 상한 없음, 알려진 입력 한도 없음, 가격 카탈로그가 다루지 않는 기능 중 하나이다 | `monetary_microunits`를 올리거나 `provider_controls.max_output_tokens`를 설정하거나 카탈로그에 항목이 있는 모델을 쓴다. [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)를 참고한다 |
+| `P_MONEY_BUDGET`(`BudgetExhausted`) 또는 다른 `P_MONEY_*` 코드(`Failed`)가 나오고 provider가 요청을 받지 못함 | 바인딩된 호출의 예약액이 `monetary_microunits`에 맞지 않거나(0은 아무것도 허용하지 않음), 호출의 상한을 정할 수 없다. provider 정책의 카탈로그에 그 모델의 가격이 없음, route 상한이 없는 router 별칭, 출력 상한 없음, 알려진 입력 한도 없음, 가격이 없는 service tier나 서버 도구, 사용 상한이 없는 도구 중 하나이다 | `monetary_microunits`를 올리거나 `provider_controls.max_output_tokens`를 설정하거나 provider 정책의 카탈로그 레이어에서 그 모델에 가격을 매긴다. [가격 증거와 모델 카탈로그](reference-en.md#pricing-evidence-and-the-model-catalogue)를 참고한다 |
 | `P_MONEY_BUDGET`(`BudgetExhausted`)이 나오고 `failure.witness["monetary"]`에 `granted`, `used`, `over_by`가 있음 | provider가 요청을 받았고, 응답이 예약액보다 큰 비용을 보고해서 실행의 청구액이 `monetary_microunits`를 넘겼다 | `monetary_microunits`를 올리거나 호출 비용을 낮춘다 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 실행 예산이 `compile_admit`에 넘긴 예산과 다르다 | 같은 예산을 넘기거나, 다시 컴파일하고 승인(admission)한다 |
 | `ng.spawn`에서 발생하는 `P_CHILD_BINDING` | `LocalProgramHost`에 자식 바인딩 resolver가 없다 | 자식 Program은 C++ 호스트에서 실행한다 |

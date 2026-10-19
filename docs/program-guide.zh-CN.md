@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=f6877fa2edea4b8e4bebe30ec03143b3d82f0d970761d08e32839b95ea0a8daa -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=593b4725bf9971dc00e8817fa162cc6025c46602ba4ff010d0f4362cf81e03c2 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -227,7 +227,7 @@ ProgramTerminalStatus.Failed release.held
 
 分叉的预算是原运行剩余预算中切出的一份。`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_program_operations`、`max_core_steps` 和 `max_dynamic_compiles` 是量：分叉从原运行剩下的量里取走自己的份额，其余仍归原运行。这个例子中，原运行保留剩余的 `wall_time_ms` 减去 2,000，以及剩余的 `max_core_steps` 减去 20。`max_concurrency` 是上限，不是量：分叉有自己的上限，不超过原运行的，原运行保留自己的，所以分叉的 3 不会占用原运行的并发。如果分叉会让原运行的 `wall_time_ms` 或 `max_core_steps` 变成 0，`fork` 调用会以 `P_FORK_SOURCE_BUDGET` 拒绝它；比原运行剩余量更大的分叉则以 `P_FORK_BUDGET` 拒绝。两种情况都不会改变原运行。
 
-在 fork 中再次运行的节点（例如提问的那个）会重复它在提问之前发出的 provider 调用。有持久的 provider 调用 journal 时，fork 会重放这些调用，所以不会再次发送，也不会再次计费；`LocalProgramHost` 在设置了 `sqlite_directory` 时有这样的 journal。全部放在内存里的宿主没有 journal，所以那里的 fork 会把这些调用再发送一次、再计一次费。这不是错误，fork 发送和计费的内容也不变，但 fork 会告知这一点：如果暂停的那次尝试在暂停的操作里记录了 provider 调用，`fork` 返回的句柄上的 `handle.notices` 就有一条代码为 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` 的通知，它的 `witness` 列出这些调用（`call_id`、`node`、`model`、`microunits`）及其合计。通知无法说明其中哪些调用会在 fork 中再次运行：在暂停那一步中已完成的节点所发出的调用，会从该步保存的写入重放，不会再次发送。在有 journal 的宿主上做的 fork，或者暂停的那次尝试没有记录这类调用的 fork，没有通知。通知不随运行一起保存，所以 `reconnect` 返回的句柄上没有。详情见 [Python 绑定指南](python-binding.md#in-memory-state-and-resume)和[定价证据与价格目录](reference-en.md#pricing-evidence-and-the-price-catalog)。
+在 fork 中再次运行的节点（例如提问的那个）会重复它在提问之前发出的 provider 调用。有持久的 provider 调用 journal 时，fork 会重放这些调用，所以不会再次发送，也不会再次计费；`LocalProgramHost` 在设置了 `sqlite_directory` 时有这样的 journal。全部放在内存里的宿主没有 journal，所以那里的 fork 会把这些调用再发送一次、再计一次费。这不是错误，fork 发送和计费的内容也不变，但 fork 会告知这一点：如果暂停的那次尝试在暂停的操作里记录了 provider 调用，`fork` 返回的句柄上的 `handle.notices` 就有一条代码为 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` 的通知，它的 `witness` 列出这些调用（`call_id`、`node`、`model`、`microunits`）及其合计。通知无法说明其中哪些调用会在 fork 中再次运行：在暂停那一步中已完成的节点所发出的调用，会从该步保存的写入重放，不会再次发送。在有 journal 的宿主上做的 fork，或者暂停的那次尝试没有记录这类调用的 fork，没有通知。通知不随运行一起保存，所以 `reconnect` 返回的句柄上没有。详情见 [Python 绑定指南](python-binding.md#in-memory-state-and-resume)和[计价证据与模型目录](reference-en.md#pricing-evidence-and-the-model-catalogue)。
 
 ### 7. 用回答恢复运行
 

@@ -1,0 +1,208 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "~deepseek/deepseek-v4-flash-latest",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 1048576,
+      "pricing": {
+        "input": "0.000000018",
+        "cache_read": "0.000000018",
+        "output": "0.00000064"
+      },
+      "source": "https://openrouter.ai/api/v1/models"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "aliases": [
+        "deepseek/deepseek-v4-flash-20260731"
+      ],
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 1048576,
+      "pricing": {
+        "input": "0.000000018",
+        "cache_read": "0.000000018",
+        "output": "0.00000064",
+        "ceiling_input": "0.00000044",
+        "ceiling_output": "0.00000132"
+      },
+      "source": "https://openrouter.ai/api/v1/models"
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-vision-exp",
+      "aliases": [
+        "deepseek/deepseek-v4-flash-vision-exp-20260821"
+      ],
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 1048576,
+      "pricing": {
+        "input": "0.0000002156",
+        "cache_read": "0.00000000686",
+        "output": "0.0000006468",
+        "ceiling_input": "0.00000044",
+        "ceiling_output": "0.00000132"
+      },
+      "source": "https://openrouter.ai/api/v1/models"
+    },
+    {
+      "id": "gpt-4.1-nano",
+      "aliases": [
+        "gpt-4.1-nano-2025-04-14"
+      ],
+      "origins": [
+        "https://api.openai.com"
+      ],
+      "context_window": 1047576,
+      "output_limit": 32768,
+      "pricing": {
+        "input": "0.0000001",
+        "cache_read": "0.000000025",
+        "output": "0.0000004"
+      },
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "id": "gpt-4.1-mini",
+      "aliases": [
+        "gpt-4.1-mini-2025-04-14"
+      ],
+      "origins": [
+        "https://api.openai.com"
+      ],
+      "context_window": 1047576,
+      "output_limit": 32768,
+      "pricing": {
+        "input": "0.0000004",
+        "cache_read": "0.0000001",
+        "output": "0.0000016"
+      },
+      "source": "https://developers.openai.com/api/docs/pricing"
+    },
+    {
+      "id": "claude-haiku-4-5-20251001",
+      "aliases": [
+        "claude-haiku-4-5"
+      ],
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000001",
+        "cache_write": "0.00000125",
+        "cache_write_1h": "0.000002",
+        "cache_read": "0.0000001",
+        "output": "0.000005"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "claude-sonnet-4-5-20250929",
+      "aliases": [
+        "claude-sonnet-4-5"
+      ],
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000003",
+        "cache_write": "0.00000375",
+        "cache_write_1h": "0.000006",
+        "cache_read": "0.0000003",
+        "output": "0.000015"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "claude-sonnet-5",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000002",
+        "cache_write": "0.0000025",
+        "cache_write_1h": "0.000004",
+        "cache_read": "0.0000002",
+        "output": "0.00001"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "claude-opus-4-7",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000005",
+        "cache_write": "0.00000625",
+        "cache_write_1h": "0.00001",
+        "cache_read": "0.0000005",
+        "output": "0.000025"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "claude-opus-4-8",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000005",
+        "cache_write": "0.00000625",
+        "cache_write_1h": "0.00001",
+        "cache_read": "0.0000005",
+        "output": "0.000025"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "claude-opus-5",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "pricing": {
+        "input": "0.000005",
+        "cache_write": "0.00000625",
+        "cache_write_1h": "0.00001",
+        "cache_read": "0.0000005",
+        "output": "0.000025"
+      },
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing"
+    },
+    {
+      "id": "gemini-3.1-flash-lite-image",
+      "origins": [
+        "https://generativelanguage.googleapis.com"
+      ],
+      "input_limit": 65536,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.00000025",
+        "output": "0.0000015",
+        "output_image": "0.00003"
+      },
+      "source": "https://ai.google.dev/gemini-api/docs/pricing"
+    },
+    {
+      "id": "gemini-3.1-flash-lite-image:google-vertex-global",
+      "aliases": [
+        "gemini-3.1-flash-lite-image"
+      ],
+      "origins": [
+        "https://aiplatform.googleapis.com"
+      ],
+      "pricing": {
+        "input": "0.00000025",
+        "cache_read": "0.000000025",
+        "output": "0.0000015",
+        "output_image": "0.00003"
+      },
+      "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+    }
+  ]
+}

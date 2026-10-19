@@ -732,9 +732,10 @@ void init_program(py::module_& m) {
 
     py::class_<ProgramMonetaryRecord>(m, "ProgramMonetaryRecord",
         "One priced provider call of a Program attempt, in micro-USD (1e-6 USD). evidence is "
-        "'reported' (the provider's own cost), 'estimated' (the price catalog applied to the "
-        "reported tokens; catalog_version and catalog_digest name it) or 'held' (outcome or "
-        "usage unknown, so the reservation is charged; reason says why).")
+        "'reported' (the provider's own cost), 'estimated' (the provider policy's model catalogue "
+        "applied to the reported tokens; catalog_version and catalog_digest name it, pricing holds "
+        "the entry and price rows) or 'held' (outcome or usage unknown, so the reservation is "
+        "charged; reason says why).")
         .def_readonly("call_id", &ProgramMonetaryRecord::call_id)
         .def_readonly("operation_id", &ProgramMonetaryRecord::operation_id)
         .def_readonly("node", &ProgramMonetaryRecord::node)
@@ -752,6 +753,9 @@ void init_program(py::module_& m) {
         .def_readonly("may_undercount", &ProgramMonetaryRecord::may_undercount)
         .def_readonly("replayed", &ProgramMonetaryRecord::replayed)
         .def_readonly("reason", &ProgramMonetaryRecord::reason)
+        .def_property_readonly("pricing", [](const ProgramMonetaryRecord& value) {
+            return json_to_py(value.pricing);
+        })
         .def("__repr__", [](const ProgramMonetaryRecord& value) {
             return "<ProgramMonetaryRecord " + value.model + " " +
                    std::string(to_string(value.evidence)) + " " +

@@ -528,8 +528,7 @@ private:
         // Dropping this handle cannot dispatch transport.
         // Price the call first: pinning the route ceiling changes the request,
         // and everything below must see the request that is actually sent.
-        auto priced = program::detail::prepare_priced_call(
-            pricing::PriceCatalog::builtin(), *provider, std::move(request), monetary != nullptr);
+        auto priced = program::detail::prepare_priced_call(*provider, std::move(request), monetary != nullptr);
         auto prepared = std::move(priced.prepared);
         if (!prepared.valid()) co_return program::detail::preparation_failure_outcome(prepared);
         const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};

@@ -96,7 +96,8 @@ struct ProgramMonetaryRecord {
     std::string             operation_id;
     /// Core node that made the call.
     std::string             node;
-    /// Price catalog origin, for example "openrouter".
+    /// The provider's base URL, for example "https://openrouter.ai". Records
+    /// written before 0.16.0 name a price catalog origin such as "openrouter".
     std::string             origin;
     std::string             model;
     ProgramMonetaryEvidence evidence = ProgramMonetaryEvidence::Estimated;
@@ -106,18 +107,29 @@ struct ProgramMonetaryRecord {
     std::uint64_t           reserved_microunits = 0;
     /// "provider_reported", "list_rates" or "route_ceiling".
     std::string             basis;
-    /// The catalog that priced an estimated or held amount.
+    /// The catalogue that priced an estimated or held amount:
+    /// "sp-model-catalogue/1" and the SchemaProvider model catalogue's
+    /// SHA-256, or before 0.16.0 a NeoGraph price catalog version and digest.
     std::string             catalog_version;
     std::string             catalog_digest;
-    /// Some tokens were priced at the highest rate they could have billed at.
+    /// Some tokens or tool uses were priced at the highest rate or count they
+    /// could have billed at.
     bool                    conservative = false;
-    /// An aggregator estimate at the list price: the served endpoint may have cost more.
+    /// The amount may be below the bill: the catalogue gave no price for a
+    /// dearer band and the cheaper one priced it (or, before 0.16.0, an
+    /// aggregator estimate at the list price).
     bool                    may_undercount = false;
     /// Restored from the provider journal after a restart; its request was
     /// sent once, before the restart.
     bool                    replayed = false;
     /// Why an amount is held (the usage state or the unknown outcome).
     std::string             reason;
+    /// What priced an estimated or held amount, empty before 0.16.0:
+    /// `entry` (the catalogue entry id), `service_tier` when not standard,
+    /// `units` (the entry's price rows, unit to decimal USD per unit),
+    /// `tool_uses` (the server-tool types and caps reserved) and
+    /// `assumptions` (sp::pricing::CostEstimate::assumptions).
+    json                    pricing = json::object();
 
     bool operator==(const ProgramMonetaryRecord&) const = default;
 };

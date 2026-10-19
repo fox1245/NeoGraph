@@ -18,9 +18,10 @@ JavaScript. This module holds that setup so each example shows only what it teac
 
 Model-calling nodes (``llm_call``) are bound by ``make_model_host``: the host gets a
 provider that talks to a ``_scripted.ScriptedModel``. A Program prices every model call
-from a catalog compiled into NeoGraph, so the scripted server is presented as a catalog
-model routed through OpenRouter (a loopback origin declared in the provider policy);
-nothing leaves 127.0.0.1 and no key is involved.
+from the model catalogue of the provider's policy, so the scripted server is presented as
+an OpenRouter model (a loopback origin declared in the provider policy) whose prices and
+route ceiling this module layers into that catalogue; nothing leaves 127.0.0.1 and no key
+is involved.
 """
 
 from __future__ import annotations
@@ -34,8 +35,11 @@ import neograph_engine as ng
 
 OWNER = "tenant:example"
 
-# A model in the price catalog; the scripted server answers for it.
+# The model the scripted server answers for, and its prices in decimal USD per token:
+# the listed rates and OpenRouter's route ceiling, which a budgeted call is reserved at.
 MODEL = "deepseek/deepseek-v4-flash-0731"
+PRICES = {"input": "0.000000018", "cache_read": "0.000000018", "output": "0.00000064",
+          "ceiling_input": "0.00000044", "ceiling_output": "0.00000132"}
 # A call reserves its worst case before it is sent: the model's input window plus the
 # output cap. Small values keep a budget of about a thousand tokens usable.
 INPUT_LIMIT = 200
@@ -194,8 +198,10 @@ def _descriptor(base_url: str):
     document = json.loads(ng.provider_policy_json())
     chat = next(f for f in document["families"] if f["family"] == "openai.chat")
     chat["openrouter_origins"].append(origin)          # a loopback origin priced as OpenRouter
-    # The scripted model's input limit is a catalogue fact, layered over the embedded catalogue.
-    models = {"version": 1, "models": [{"id": MODEL, "families": ["openai.chat"], "input_limit": INPUT_LIMIT}]}
+    # The scripted model's input limit and prices are catalogue facts, layered over the
+    # embedded catalogue, which lists no prices.
+    models = {"version": 1, "models": [{"id": MODEL, "families": ["openai.chat"],
+                                        "input_limit": INPUT_LIMIT, "pricing": PRICES}]}
     policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json(), json.dumps(models))
     return ng.load_provider_descriptor(json.dumps({
         "descriptor_version": 1, "revision": 1, "id": "example-openrouter-chat",

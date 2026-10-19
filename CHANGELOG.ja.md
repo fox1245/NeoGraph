@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3495d0318c4ef97de279a7cf4c59a04baa5353f4d2236a099f20255841eb99ed -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8e5574f4efe58a6728845cc78d0a9f8e3cbc7e180130ad5eef46ce53a542dbeb -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **動作の変更: 各 family は自分のネストだけを適用します。** 異なる family を呼ぶノードからなるグラフでも `ProviderControls` を一つ共有でき、他の family の制御は無視されます。family が表現できないポータブルな制御は引き続き例外になります。
   - **非推奨: フラットな family メンバー**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。0.16.0 では対応するネストに移され、ほかの family は 0.15 と同じくこれを拒否し、別名とネストのメンバーを両方指定すると例外になり、0.17.0 で削除されます。
   - **Python。** ネストとその中のすべての SDK 型をバインドし、`MessagesOutputEffort` に `XHigh` が加わり、各制御クラスに厳格な `from_dict` があります。未知のキーは拒否し、enum はメンバー名で、ツールや形式の variant は `"type"` で受け取ります（`neograph_engine.provider_controls`）。
+- **Program の価格は、プロバイダーのポリシーが持つ SchemaProvider のモデルカタログからのみ得られます (#520).** 2026-10-20 の価格ラウンドテーブルが設計を決めました。route ceiling、tier の料率、ツール料金は NeoGraph の価格ファイルではなく、カタログの単位とレイヤーです。
+  - **動作の変更: ホストが価格を供給します。** 組み込みの SchemaProvider カタログには価格が一つもないので、予算付きの実行は、プロバイダーのポリシーがそのモデルに価格を付けるカタログレイヤーを持つまで、価格の付くすべての呼び出しを拒否します。`sp::descriptor::load_policy(..., catalogue)` または `with_catalogue` を使い、Python では `load_provider_policy(..., model_catalogue_json)` を使います。項目の `pricing` は、単位あたりの10進 USD（`input`、`output`、キャッシュ・推論・画像の単位）、OpenRouter の route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context の帯（`input+200000`）、サーバーツールの料金（`tool:<type>`）を与えます。
+  - **何を拒否するかはカタログで決まります。** service tier には固有の単位が必要です。OpenRouter の fallback（`models`）はすべての候補に価格が必要で、hold は最も高い候補の値です。サーバーツールまたは hosted tool には料金（`"0"` は無料の宣言）と使用 cap（Messages の `max_uses`、Responses の `max_tool_calls`）が必要です。long-context の帯は、モデルの入力上限がそこに届くときに予約されます。使用 cap を持たない OpenRouter の plugin と Gemini の組み込みツールは、予算付きの実行では拒否されます。
+  - **精算。** 報告された費用がない場合、`sp::pricing::estimate` が hold に価格を付けたカタログのスナップショットから呼び出しの価格を求め、予約したサーバーツール料金は cap の分だけ請求されます。
+  - **動作の変更: レコード。** `ProgramMonetaryRecord::origin` はプロバイダーの base URL です（`https://openrouter.ai`、以前は `openrouter`）。`catalog_version` はカタログの digest とともに `sp-model-catalogue/1` で、新しい `pricing`（Python では `record.pricing`）は項目、その価格行、service tier、予約したツールの使用、推定の前提を持ちます。0.16.0 より前に journal に記録されたレコードはバイトが変わりません。
+  - **動作の変更: `P_MONEY_UNKNOWN_ORIGIN`** は、許可された descriptor がないプロバイダーだけを意味するようになりました。base URL でカタログが価格を付けていないモデルは `P_MONEY_UNKNOWN_MODEL` です。
 - **SchemaProvider interface 7 を採用します (#512).** NeoGraph は interface 7 のヘッダーと第 7 世代のライブラリ（`libsp_*.so.7`）でビルドします。SchemaProvider 0.4.0 のリリースまでは `main` ブランチ（パッケージバージョン 0.3.0）に固定し、0.16.0 のリリース前に 0.4.0 のリリースへ移します。
   - **動作の変更: 型付きのメディア。** `sp::Image` は `sp::Media` になります。画像・音声・動画・文書で、インライン、URL、またはプロバイダーのファイルにあります。`ChatMessage::image_urls` はインライン画像をこれまでどおり data URL として射影し、URL の画像も射影するようになりました。`portable_message` は https の項目を、プロバイダーが取得する URL メディアとして送ります。生成された画像（Chat の `message.images`、Responses の `image_generation_call`、Gemini の `inlineData`）は `Opaque` ではなく `Media` パートになり、ワイヤーの項目はネイティブ出力に残ります。
   - **プロバイダー結果フォーマット v3。** `neograph.provider-outcome/v3` と `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）は、メディアパート、テキストの引用、型付きのツール結果、エラーの `reason`、実際に応答した `model` を追加します。v2 フォーマットのレコード（Program ジャーナル、チェックポイント、ランタイム履歴）も引き続き読み込めます。画像パートはインライン画像のメディアになり、新しいメンバーは空です。新しいレコードは v3 で書き込み、NeoGraph 0.15 はそれを読めません。
@@ -35,6 +41,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **Harness の変換上限はホストの値です。** `HarnessTranslationDefaults` は 600 を超える `provider_timeout_seconds` と 128,000 を超える `max_output_tokens` を拒否していました。今はホストの値が上限で、最大 86,400 秒と 2^32 − 1 トークンです。
 
 ### 削除
+- **コンパイル済みの価格カタログを削除しました (#520).** `data/pricing/catalog.json`、内部の `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py`、週次の `Price drift` ワークフローはなくなりました。価格はホストが供給するカタログのデータです。`tests/fixtures/pricing/model_prices.json` は、13 個の項目をテスト用のカタログレイヤーとして保持します。
 - **型付きクライアント `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました (#510).** 0.15.1 で非推奨になっていました。画像、動画、decisions は SchemaProvider のエンドポイントで、`<codecs/images.h>`、`<codecs/videos.h>`、`<codecs/decisions.h>` を通じて `sp::runtime::Client` で呼び出します。ヘッダー（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、同梱の設定（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py`、およびそれらのテストはなくなりました。ライブスイートから型付きクライアントの 4 ケースがなくなります。
 
 ## [0.15.1] - 2026-10-19

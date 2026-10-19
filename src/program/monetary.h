@@ -13,26 +13,36 @@
  * Both pricing brokers, bind_priced_provider_call() and
  * SQLiteProgramProviderCallJournal::bind_priced(), treat one call the same way:
  *
- *  1. Assess. The origin is the price catalog origin whose URL matches the
- *     provider descriptor's base URL, or OpenRouter when the SDK policy
- *     declares that base URL an OpenRouter origin. The model is the admitted
- *     one. The hold is the catalog reservation for the request's input bound
- *     and output cap (route ceiling on an aggregator), times the invocations
- *     one dispatch can bill. The input bound is the smallest input limit
- *     known for the model: the SDK policy's, the catalog's max input or its
- *     context window. On an aggregator the request is pinned before it is
- *     prepared to be sent: its OpenRouter provider.max_price becomes the route
- *     ceiling, or the host's own cap where that is lower, so the request that
- *     is digested, journaled and sent is the pinned one
- *     (prepare_priced_call()).
+ *  1. Assess. Prices come only from the SchemaProvider model catalogue of the
+ *     provider's admitted descriptor policy: the embedded catalogue and the
+ *     layers the host merged over it (sp::descriptor::merge_catalogues,
+ *     DescriptorPolicy::with_catalogue). The entry is the one the policy
+ *     matches for the family, the base URL and the admitted model, priced in
+ *     the request's service tier (sp::pricing::dearest_price_of). The hold is
+ *     the catalogue bound (sp::pricing::upper_bound) for the request's input
+ *     bound and output cap, its server tools at their use caps, and on an
+ *     OpenRouter origin the entry's route ceiling, times the invocations one
+ *     dispatch can bill. The input bound is the smallest input limit the
+ *     catalogue knows for the model: its input limit or its context window.
+ *     OpenRouter model fallbacks reserve the dearest candidate. On an
+ *     OpenRouter origin the request is pinned before it is prepared to be
+ *     sent: its provider.max_price becomes the route ceiling, or the host's
+ *     own cap where that is lower, so the request that is digested, journaled
+ *     and sent is the pinned one (prepare_priced_call()).
  *  2. Preflight. A call that cannot be bounded is refused before any request
  *     is sent, with a P_MONEY_* code; so is a call whose hold does not fit the
  *     remaining budget (P_MONEY_BUDGET).
  *  3. Settle exactly once from the outcome: the provider's reported cost when
- *     the response carries one, else the catalog estimate. An unknown outcome,
- *     resent transport attempts, or partial or inconsistent usage keep the
- *     hold as the charge. A failure that proves the provider accepted nothing (no
- *     request was sent, or a completed HTTP 4xx answer declined it) releases it.
+ *     the response carries one, else the catalogue estimate
+ *     (sp::pricing::estimate) from the snapshot the hold was priced with, plus
+ *     the reserved server-tool fees. An unknown outcome, resent transport
+ *     attempts, or partial or inconsistent usage keep the hold as the charge.
+ *     A failure that proves the provider accepted nothing (no request was
+ *     sent, or a completed HTTP 4xx answer declined it) releases it.
+ *
+ * Units. One microunit is 1e-6 USD. Catalogue amounts are exact nano-USD and
+ * round up once to whole microunits, so for usage within the reserved bounds a
+ * settlement never exceeds its hold.
  *
  * Exported for the SQLite journal library and the Python binding only; no
  * compatibility promise.
@@ -46,7 +56,8 @@
 #include <neograph/program/result.h>
 #include <neograph/provider.h>
 
-#include "pricing.h"
+#include <core/pricing.h>
+#include <descriptor/catalogue.h>
 
 #include <cstdint>
 #include <memory>
@@ -124,8 +135,33 @@ struct MonetaryCallSite {
     std::string node;
 };
 
-/** What the catalog says about one prepared call. */
+/** The scheme of catalog_version for amounts priced from a SchemaProvider model catalogue. */
+inline constexpr std::string_view kCatalogueScheme = "sp-model-catalogue/1";
+
+/** What a typed request adds to its price beyond its tokens. */
+struct MonetaryRequestFacts {
+    /// The request's own service tier; unset, the provider's default applies.
+    std::optional<std::string> service_tier;
+    /// OpenRouter Chat model fallbacks (`models`): any of them may serve the call.
+    std::vector<std::string> fallback_models;
+    /// Server and hosted tool types that share one per-request use cap:
+    /// Messages' max_uses per tool, Responses' max_tool_calls for all its
+    /// hosted tools. No cap leaves the call without an upper bound.
+    struct ToolCap {
+        std::vector<std::string>     types;
+        std::optional<std::uint64_t> uses;
+    };
+    std::vector<ToolCap> tools;
+    /// A feature the catalogue cannot price at all (OpenRouter plugins).
+    std::optional<std::string> unpriced;
+};
+
+/** The request facts that decide a call's price, read from the typed request. */
+NEOGRAPH_PROGRAM_API MonetaryRequestFacts monetary_request_facts(const ProviderRequest& request);
+
+/** What the catalogue says about one prepared call. */
 struct MonetaryQuote {
+    /// The provider's base URL, the origin the catalogue entry matched at.
     std::string   origin;
     std::string   model;
     /// Reservation for one dispatch; 0 when none can be computed.
@@ -136,31 +172,29 @@ struct MonetaryQuote {
     /// Why the call cannot be bounded (a P_MONEY_* code); empty when it can.
     std::string   blocker;
     std::string   blocker_message;
-    /// OpenRouter's provider.max_price for an aggregator request: the route
+    /// OpenRouter's provider.max_price for a routed request: the route
     /// ceiling, lowered field by field to any cap the host already sends.
     std::optional<sp::OpenRouterMaxPrice> pin;
     json          witness = json::object();
+    /// What settles the call: the catalogue snapshot the hold was priced
+    /// from, the family, the service tier ("" for the standard tier), whether
+    /// the served endpoint is unknown (a routing gateway), and the server-tool
+    /// fees the hold reserved, in nano-USD.
+    sp::descriptor::CatalogueSnapshot catalogue;
+    std::string                       family;
+    std::string                       service_tier;
+    bool                              route_ceiling = false;
+    std::uint64_t                     tool_fees_nano_usd = 0;
+    /// The entry and price rows the hold was priced with (ProgramMonetaryRecord::pricing).
+    json pricing = json::object();
 };
 
-/** A feature of the typed request that the price catalog does not model. */
-NEOGRAPH_PROGRAM_API std::optional<std::string> unmodeled_feature(const ProviderRequest& request);
-
 /**
- * Assess one prepared call. `unmodeled` is unmodeled_feature() of the typed
+ * Assess one prepared call. `facts` is monetary_request_facts() of the typed
  * request it was prepared from.
  */
-NEOGRAPH_PROGRAM_API MonetaryQuote assess_monetary_call(
-    const pricing::PriceCatalog&      catalog,
-    const std::optional<std::string>& unmodeled,
-    const PreparedProviderRequest&    prepared);
-
-/**
- * The entry's route ceiling as OpenRouter's provider.max_price: prompt and
- * completion in nanoUSD per million tokens, the dearest input and output rate
- * of the ceiling (catalog micro-USD times 1000). None when the entry has no
- * route ceiling or a rate exceeds the 2^53 nanoUSD that max_price admits.
- */
-NEOGRAPH_PROGRAM_API std::optional<sp::OpenRouterMaxPrice> route_max_price(const pricing::Entry& entry);
+NEOGRAPH_PROGRAM_API MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
+                                                        const PreparedProviderRequest& prepared);
 
 /**
  * Pin provider.max_price on an OpenRouter request (Chat Completions, Responses
@@ -196,10 +230,9 @@ struct PricedPreparation {
  * `prepared` may be invalid: the broker returns preparation_failure_outcome().
  * `quote` is empty when the call is not priced or could not be prepared.
  */
-NEOGRAPH_PROGRAM_API PricedPreparation prepare_priced_call(const pricing::PriceCatalog& catalog,
-                                                           Provider&                    provider,
-                                                           ProviderRequest              request,
-                                                           bool                         priced);
+NEOGRAPH_PROGRAM_API PricedPreparation prepare_priced_call(Provider&       provider,
+                                                           ProviderRequest request,
+                                                           bool            priced);
 
 /**
  * The not-sent failure a pricing broker returns for a preparation that is not
@@ -217,10 +250,21 @@ NEOGRAPH_PROGRAM_API sp::runtime::Result monetary_refusal_outcome(const Monetary
  * hold is released and nothing is charged.
  */
 NEOGRAPH_PROGRAM_API std::optional<ProgramMonetaryRecord> settle_monetary_call(
-    const pricing::PriceCatalog& catalog,
-    const MonetaryQuote&         quote,
-    const MonetaryCallSite&      site,
-    const sp::runtime::Result&   outcome);
+    const MonetaryQuote&       quote,
+    const MonetaryCallSite&    site,
+    const sp::runtime::Result& outcome);
+
+/**
+ * The provider-reported cost of one call in microunits, if the SDK admitted
+ * one: an OpenRouter USD amount with consistent quality and an available
+ * total. With BYOK the upstream provider bills the caller's own key, so the
+ * call cost is the OpenRouter total plus the reported upstream total; a BYOK
+ * response without an upstream amount has no reported cost. When the BYOK
+ * flag itself is missing and an upstream amount is present, both are added
+ * (it may double count; it cannot under-count).
+ */
+NEOGRAPH_PROGRAM_API std::optional<std::uint64_t> reported_cost_microunits(
+    const sp::ProviderReportedCost& cost) noexcept;
 
 /** The record for a dispatched call whose outcome is unknown: its hold is charged. */
 NEOGRAPH_PROGRAM_API ProgramMonetaryRecord unknown_outcome_record(

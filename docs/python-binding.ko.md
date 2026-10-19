@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=c027e55aafc7a82ed76cae8126196d9edc668bcb52bded563f7e6a4496f744a4 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b1d8f9b4364dcc543a4c2c52e194847b7791d164e521f99cd5e1a744cc6968ef -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -522,7 +522,17 @@ controls = ng.ProviderControls()
 controls.max_output_tokens = 256
 ceiling.model_tokens = 100_000
 ceiling.monetary_microunits = 500_000
-# descriptor and options as in "Descriptor and runtime policy" above
+# Prices are host data: a catalogue layer over the embedded catalogue, in the
+# provider's policy. This one prices one OpenRouter model and its route ceiling.
+prices = {"version": 1, "models": [{
+    "id": "deepseek/deepseek-v4-flash-0731", "origins": ["https://openrouter.ai"],
+    "pricing": {"input": "0.000000018", "output": "0.00000064",
+                "ceiling_input": "0.00000044", "ceiling_output": "0.00000132"}}]}
+policy = ng.load_provider_policy(ng.provider_policy_json(), ng.provider_codec_defaults_json(),
+                                 json.dumps(prices))
+# descriptor_json: a descriptor as in "Descriptor and runtime policy" above, for
+# https://openrouter.ai; options as there, with the OpenRouter key.
+descriptor = ng.load_provider_descriptor(descriptor_json, policy)
 host = ng.LocalProgramHost(
     registry, "tenant-a", ceiling,
     node_context=ng.NodeContext(provider=SchemaProvider(descriptor, options),
@@ -551,7 +561,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 바인딩에서 어떤 identity에 들어가는 부분은 레이블뿐입니다. 그 provider를 요구하는 Program 버전에는 capability receipt가 붙는데, 이 receipt의 identity는 레이블과 provider의 레지스트리 identity를 합친 다이제스트입니다. provider의 키, 엔드포인트, 모델은 여기에 들어가지 않습니다. 그래서 모델을 바꿔도 버전 id는 그대로이고, 레이블을 바꾸면 버전 id가 바뀝니다. provider를 요구하지 않는 Program에는 receipt가 붙지 않으며 bundle id와 버전 id도 그대로입니다. 레이블은 `a-z`, `0-9`, `.`, `_`, `-`, `:` 중 1~64자여야 하고, 영문자나 숫자로 시작해야 하며, API 키처럼 보이면 안 됩니다. `node_context`가 없으면, 그 provider를 요구하는 Program은 승인(admission) 단계에서 `P_ADMIT_PROVIDER`로 거부됩니다. `provider=` 없이 등록한 `llm_call`이나 `intent_classifier` 노드가 있는 Program도 마찬가지입니다.
 
-호출마다 NeoGraph에 내장된 가격 카탈로그로 비용을 산정하고 그 값을 실행의 `monetary_microunits`와 대조합니다. 요청을 보내기 전에 그 호출의 상한 금액을 예약합니다. OpenRouter에서는 요청에도 이 상한이 `provider.max_price`로 함께 실립니다. 값은 route 상한의 입력/출력 단가이고, controls나 `SchemaProviderDefaults`에 이미 더 낮은 `max_price`가 있으면 그 값입니다. 이렇게 하면 OpenRouter가 더 비싼 엔드포인트로 호출을 보내지 못합니다. 가격 산정 과정에서 요청의 탐색용 사본(대화가 사용자 메시지 하나인 요청)을 준비하되 전송하지는 않으므로, Python provider의 `prepare`가 이 사본을 보게 됩니다. 상한을 정할 수 없는 호출(카탈로그에 없는 모델, route 상한이 없는 router 별칭, 출력 상한이 없는 요청)이나 예약액이 남은 예산에 맞지 않는 호출은 아무것도 전송하기 전에 거부되고, 실행은 `P_MONEY_*` 코드로 실패합니다. 모든 `ProgramRunBudget` 필드가 그렇듯 `monetary_microunits = 0`은 아무것도 허용하지 않으므로, 이 값이면 모든 호출이 거부됩니다. 응답이 온 뒤에는 `result.monetary_records`에 호출마다 `ng.ProgramMonetaryRecord`가 하나씩 들어 있고, 각 레코드의 `evidence`는 다음 중 하나입니다. `reported`는 OpenRouter의 `usage.cost`, `estimated`는 카탈로그 단가(카탈로그는 `catalog_version`과 `catalog_digest`로 식별), `held`는 결과나 사용량을 알 수 없어 예약액을 그대로 청구한 경우입니다. 공급자가 완료된 HTTP 4xx 응답(408, 425, 429 제외, 예를 들어 잘못된 키나 잘못된 요청)으로 거절한 호출이나 전송되지 않은 호출은 예약을 풀고 기록을 남기지 않으며, 금액도 모델 토큰도 청구하지 않습니다. 429, 5xx 응답, 끊긴 호출은 계속 `held`입니다. `result.usage.monetary_microunits`는 이들의 합계입니다. 코드, 상한, 정산 규칙은 [가격 증거와 가격 카탈로그](reference-en.md#pricing-evidence-and-the-price-catalog)에 있습니다.
+호출마다 provider 정책의 모델 카탈로그로만 비용을 산정하고 그 값을 실행의 `monetary_microunits`와 대조합니다. 내장 카탈로그에는 가격이 없으므로 호스트가 위에서처럼 자기 가격을 얹습니다. 항목의 `pricing`은 단위당 십진 USD를 줍니다. `input`, `output`, 캐시·추론·이미지 단위, OpenRouter의 route 상한(`ceiling_input`, `ceiling_output`), service tier(`input/flex`), long-context 구간(`input+200000`), 서버 도구 요금(`tool:web_search`)입니다. 요청을 보내기 전에 그 호출의 상한 금액을 예약합니다. OpenRouter에서는 요청에도 이 상한이 `provider.max_price`로 함께 실립니다. 값은 route 상한의 입력/출력 단가이고, controls나 `SchemaProviderDefaults`에 이미 더 낮은 `max_price`가 있으면 그 값입니다. 이렇게 하면 OpenRouter가 더 비싼 엔드포인트로 호출을 보내지 못합니다. 가격 산정 과정에서 요청의 탐색용 사본(대화가 사용자 메시지 하나인 요청)을 준비하되 전송하지는 않으므로, Python provider의 `prepare`가 이 사본을 보게 됩니다. 상한을 정할 수 없는 호출(카탈로그가 가격을 매기지 않는 모델, route 상한이 없는 router 별칭, 출력 상한이 없는 요청, 요금이나 사용 상한이 없는 서버 도구)이나 예약액이 남은 예산에 맞지 않는 호출은 아무것도 전송하기 전에 거부되고, 실행은 `P_MONEY_*` 코드로 실패합니다. 모든 `ProgramRunBudget` 필드가 그렇듯 `monetary_microunits = 0`은 아무것도 허용하지 않으므로, 이 값이면 모든 호출이 거부됩니다. 응답이 온 뒤에는 `result.monetary_records`에 호출마다 `ng.ProgramMonetaryRecord`가 하나씩 들어 있고, 각 레코드의 `evidence`는 다음 중 하나입니다. `reported`는 OpenRouter의 `usage.cost`, `estimated`는 카탈로그 단가(`catalog_version`과 `catalog_digest`가 카탈로그를, `pricing`이 항목과 가격 행을 식별), `held`는 결과나 사용량을 알 수 없어 예약액을 그대로 청구한 경우입니다. 공급자가 완료된 HTTP 4xx 응답(408, 425, 429 제외, 예를 들어 잘못된 키나 잘못된 요청)으로 거절한 호출이나 전송되지 않은 호출은 예약을 풀고 기록을 남기지 않으며, 금액도 모델 토큰도 청구하지 않습니다. 429, 5xx 응답, 끊긴 호출은 계속 `held`입니다. `result.usage.monetary_microunits`는 이들의 합계입니다. 코드, 단위, 상한, 정산 규칙은 [가격 증거와 모델 카탈로그](reference-en.md#pricing-evidence-and-the-model-catalogue)에 있습니다.
 
 모델을 호출하는 Python 노드는 자기 provider를 직접 소유하며, Program 예산에는 이런 호출이 잡히지 않습니다.
 

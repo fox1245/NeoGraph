@@ -85,7 +85,6 @@ sdist.include = [
     "/CMakeLists.txt", "/pyproject.toml", "/README.md", "/LICENSE",
     "/THIRD_PARTY_LICENSES", "/THIRD_PARTY_LICENSES.md",
     "cmake/**", "include/**", "src/**", "deps/**", "schemas/**", "proto/**",
-    "data/pricing/**",
     "bindings/python/CMakeLists.txt", "bindings/python/src/**",
     "bindings/python/neograph_engine/*.py", "bindings/python/tests/*.py",
     "bindings/python/examples/*.py", "bindings/python/examples/README.md",

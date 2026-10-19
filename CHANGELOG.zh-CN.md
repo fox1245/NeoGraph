@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3495d0318c4ef97de279a7cf4c59a04baa5353f4d2236a099f20255841eb99ed -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8e5574f4efe58a6728845cc78d0a9f8e3cbc7e180130ad5eef46ce53a542dbeb -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **行为变更：每个 family 只应用自己的嵌套。** 节点调用不同 family 的图可以共用一个 `ProviderControls`；其他 family 的控制会被忽略。family 无法表达的可移植控制仍会抛出异常。
   - **已弃用：扁平的 family 成员**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。它们在 0.16.0 中移入对应的嵌套，其他 family 与 0.15 一样拒绝它们，同时设置别名和嵌套成员会抛出异常，0.17.0 将移除它们。
   - **Python。** 绑定了嵌套结构及其中所有 SDK 类型，`MessagesOutputEffort` 新增 `XHigh`，每个控制类都有严格的 `from_dict`：拒绝未知的键，枚举按成员名接受，工具或格式 variant 按 `"type"` 接受（`neograph_engine.provider_controls`）。
+- **Program 的价格只来自 provider 策略中的 SchemaProvider 模型目录 (#520)。** 2026-10-20 的定价圆桌会议确定了设计：route ceiling、tier 费率和工具费用都是目录单位与目录层，而不是 NeoGraph 自带的价格文件。
+  - **行为变更：价格由宿主提供。** 内置的 SchemaProvider 目录不列出任何价格，因此在 provider 的策略带有为该模型计价的目录层之前，有预算的运行会拒绝每一个被计价的调用：使用 `sp::descriptor::load_policy(..., catalogue)` 或 `with_catalogue`，在 Python 中使用 `load_provider_policy(..., model_catalogue_json)`。条目的 `pricing` 给出每单位的十进制 USD（`input`、`output`，缓存、推理和图像单位）、OpenRouter 的 route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context 档（`input+200000`）和服务器工具费用（`tool:<type>`）。
+  - **拒绝与否由目录决定。** service tier 需要自己的单位。OpenRouter 回退（`models`）要求每个候选都有价格，hold 取最贵候选的值。服务器工具或 hosted tool 需要费用（`"0"` 声明免费）和使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`）。当模型的输入限制达到 long-context 档时，该档会被预留。没有使用上限的 OpenRouter plugin 和 Gemini 内置工具，在有预算的运行中会被拒绝。
+  - **结算。** 没有报告的费用时，`sp::pricing::estimate` 按计价其 hold 时的目录快照为调用计价，预留的服务器工具费用按其上限收取。
+  - **行为变更：记录。** `ProgramMonetaryRecord::origin` 是 provider 的 base URL（`https://openrouter.ai`，原先是 `openrouter`），`catalog_version` 是 `sp-model-catalogue/1` 并附带目录的 digest，新增的 `pricing`（Python 为 `record.pricing`）保存条目、其价格行、service tier、预留的工具使用和估算的假设。0.16.0 之前写入 journal 的记录字节保持不变。
+  - **行为变更：`P_MONEY_UNKNOWN_ORIGIN`** 现在只表示没有已准入 descriptor 的 provider。目录在 base URL 上没有给出价格的模型是 `P_MONEY_UNKNOWN_MODEL`。
 - **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。在 SchemaProvider 0.4.0 发布之前，构建固定在其 `main` 分支（包版本 0.3.0）；0.16.0 发布前会改为 0.4.0 正式版。
   - **行为变更：带类型的媒体。** `sp::Image` 变为 `sp::Media`：图像、音频、视频或文档，可以是内联数据，也可以位于 URL 或 provider 文件中。`ChatMessage::image_urls` 仍把内联图像投影为 data URL，现在也投影 URL 图像；`portable_message` 把 https 条目作为由 provider 获取的 URL 媒体发送。生成的图像（Chat 的 `message.images`、Responses 的 `image_generation_call`、Gemini 的 `inlineData`）是 `Media` 部件而不是 `Opaque` 部件；其 wire 条目保留在 native 输出中。
   - **Provider outcome 格式 v3。** `neograph.provider-outcome/v3` 和 `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）增加了媒体部件、文本引用、带类型的工具结果内容、错误的 `reason` 和实际响应的 `model`。v2 格式的记录（Program 日志、检查点、运行时历史）仍可读取：图像部件变为内联图像媒体，新成员为空。新记录以 v3 写入，NeoGraph 0.15 无法读取。
@@ -35,6 +41,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **Harness 转换上限由宿主决定。** `HarnessTranslationDefaults` 曾拒绝超过 600 的 `provider_timeout_seconds` 和超过 128,000 的 `max_output_tokens`。现在宿主的值就是上限，最大 86,400 秒和 2^32 − 1 个 token。
 
 ### 已移除
+- **移除编译进来的价格目录 (#520)。** `data/pricing/catalog.json`、内部的 `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py` 以及每周的 `Price drift` 工作流均已删除；价格是宿主提供的目录数据。`tests/fixtures/pricing/model_prices.json` 把这 13 个条目保留为供测试使用的目录层。
 - **移除类型化客户端 `ImagesClient`、`VeoClient` 和 `DecisionsClient` (#510)。** 它们已在 0.15.1 中弃用。图像、视频和 decisions 是 SchemaProvider 端点：通过 `<codecs/images.h>`、`<codecs/videos.h>` 和 `<codecs/decisions.h>` 在 `sp::runtime::Client` 上调用。其头文件（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、随附的配置（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py` 以及相关测试均已删除。实时套件中去掉了四个类型化客户端用例。
 
 ## [0.15.1] - 2026-10-19
