@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=5c3e4c6c372c93c35827c46f459aa4459f614a81906a65a164022c519356c817 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -309,7 +309,7 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)` は閉じた family を一つ選びます。ポータブルな制御は `ProviderControls` のメンバーで、family 固有の制御はその family のネストにあり、呼び出しは自分の family のネストだけを適用するので、`ProviderControls` 一つで異なる family を呼ぶノードをまとめて扱えます。family が表現できないポータブルな制御は `std::invalid_argument`、SDK prepare は enum 値、承認 origin、モデル規則、tool 宣言、native binding を I/O 前に検査します。型のない値はネストの `extensions` だけを通り、SDK ポリシーが origin ごとに値スキーマとともに承認します。0.15 のフラットな family メンバー（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` など）は 0.16.0 ではネストに移される非推奨の別名で、別名とネストのメンバーを両方指定すると例外になります。optional は未指定と明示的な `false`・空の選択を区別します。
+`make_provider_request(provider, model, messages, tools, controls, mode)` は閉じた family を一つ選びます。ポータブルな制御は `ProviderControls` のメンバーで、family 固有の制御はその family のネストにあり、呼び出しは自分の family のネストだけを適用するので、`ProviderControls` 一つで異なる family を呼ぶノードをまとめて扱えます。family が表現できないポータブルな制御は `std::invalid_argument`、SDK prepare は enum 値、承認 origin、モデル規則、tool 宣言、native binding を I/O 前に検査します。型のない値はネストの `extensions` だけを通り、SDK ポリシーが origin ごとに値スキーマとともに承認します。0.15 のフラットな family メンバー（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` など）は 0.16.0 ではネストに移される非推奨の別名で、ほかの family は 0.15 と同じくこれを拒否し、別名とネストのメンバーを両方指定すると例外になります。optional は未指定と明示的な `false`・空の選択を区別します。
 
 | Family | ポータブルな `ProviderControls` フィールドと SDK 対応 | Family ネスト（`controls.<nest>`） |
 |---|---|---|

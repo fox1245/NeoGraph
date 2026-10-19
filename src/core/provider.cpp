@@ -603,7 +603,23 @@ template <class T> void adopt(std::vector<T>& nest, std::vector<T>& alias, const
     nest = std::move(alias);
     alias.clear();
 }
-void adopt_deprecated(ProviderControls& c) {
+template <class T> bool present(const std::optional<T>& value) { return value.has_value(); }
+template <class T> bool present(const std::vector<T>& value) { return !value.empty(); }
+// A deprecated flat control belongs to one family. It moves into that family's
+// nest, and any other family refuses it, as it did before the nests.
+void adopt_deprecated(ProviderControls& c, std::string_view family) {
+    const bool chat = present(c.chat_reasoning) || present(c.include_reasoning) || present(c.usage_include) ||
+                      present(c.models);
+    const bool responses = present(c.previous_response_id) || present(c.previous_response_history) ||
+                           present(c.parallel_tool_calls) || present(c.verbosity) || present(c.truncation) ||
+                           present(c.responses_include);
+    const bool messages = present(c.thinking_mode) || present(c.output_effort) || present(c.cache_control) ||
+                          present(c.messages_tool_choice);
+    const bool generate = present(c.gemini_history_mode) || present(c.gemini_thinking_level) ||
+                          present(c.safety_settings) || present(c.gemini_tool_choice);
+    if ((chat && family != "openai.chat") || (responses && family != "openai.responses") ||
+        (messages && family != "anthropic.messages") || (generate && family != "google.generate"))
+        throw std::invalid_argument("Requested provider controls are unsupported by this family");
     adopt(c.chat.reasoning, c.chat_reasoning, "chat_reasoning");
     adopt(c.chat.include_reasoning, c.include_reasoning, "include_reasoning");
     adopt(c.chat.usage_include, c.usage_include, "usage_include");
@@ -651,7 +667,7 @@ ProviderRequest make_provider_request(
         std::any_of(tools.begin(), tools.end(), [](const ChatTool& tool) { return tool.strict.value_or(false); }))
         throw std::invalid_argument("Strict tool definitions are supported only by the openai.responses family");
     // Each family takes its own nest; the nests of other families are ignored.
-    adopt_deprecated(controls);
+    adopt_deprecated(controls, family);
     ProviderRequest result;
     result.mode = mode;
     if (family == "openai.chat") {

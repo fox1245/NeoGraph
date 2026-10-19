@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=5c3e4c6c372c93c35827c46f459aa4459f614a81906a65a164022c519356c817 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -338,7 +338,7 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)`는 닫힌 family 하나를 선택한다. 이식 가능한 제어는 `ProviderControls`의 멤버이고 family 고유 제어는 그 family의 nest에 있으며, 호출은 자기 family의 nest만 적용하므로 `ProviderControls` 하나로 서로 다른 family를 부르는 노드를 모두 처리할 수 있다. family가 표현할 수 없는 이식 가능한 제어는 `std::invalid_argument`로 거부하고 SDK prepare가 enum 값, 승인 origin, 모델 규칙, 도구 선언, native binding을 I/O 전에 검사한다. 타입 없는 값은 nest의 `extensions`로만 보내며, SDK 정책이 origin별로 값 스키마와 함께 승인한다. 0.15의 평평한 family 멤버(`chat_reasoning`, `responses_include`, `messages_tool_choice`, `gemini_thinking_level` 등)는 0.16.0에서 nest로 옮겨지는 폐기 예정 별칭이며, 별칭과 nest 멤버를 함께 지정하면 예외가 난다. optional 값은 미지정과 명시적 `false`·빈 선택을 구분한다.
+`make_provider_request(provider, model, messages, tools, controls, mode)`는 닫힌 family 하나를 선택한다. 이식 가능한 제어는 `ProviderControls`의 멤버이고 family 고유 제어는 그 family의 nest에 있으며, 호출은 자기 family의 nest만 적용하므로 `ProviderControls` 하나로 서로 다른 family를 부르는 노드를 모두 처리할 수 있다. family가 표현할 수 없는 이식 가능한 제어는 `std::invalid_argument`로 거부하고 SDK prepare가 enum 값, 승인 origin, 모델 규칙, 도구 선언, native binding을 I/O 전에 검사한다. 타입 없는 값은 nest의 `extensions`로만 보내며, SDK 정책이 origin별로 값 스키마와 함께 승인한다. 0.15의 평평한 family 멤버(`chat_reasoning`, `responses_include`, `messages_tool_choice`, `gemini_thinking_level` 등)는 0.16.0에서 nest로 옮겨지는 폐기 예정 별칭이며, 다른 family는 0.15처럼 이를 거부하고, 별칭과 nest 멤버를 함께 지정하면 예외가 난다. optional 값은 미지정과 명시적 `false`·빈 선택을 구분한다.
 
 | Family | 이식 가능한 `ProviderControls` 필드와 SDK 매핑 | Family nest(`controls.<nest>`) |
 |---|---|---|
