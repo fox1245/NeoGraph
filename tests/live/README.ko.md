@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=4834040858097bba00645bd6041377aa2c8b1cb59124098518aea7961d848922 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=c3a0175c4cbbf4f305a079fcb5558a574a1c3e10430be8bbe3e7cd0d16fec94b -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,12 +17,9 @@
   - 타입이 정해진 실패: 잘못된 키, 취소된 스트림, 이미 지난 deadline.
 - **C++** (`tests/live_e2e_test.cpp`, 타깃 `neograph_live_e2e_tests`):
   - Claude 5.5 서버 툴, 생성 이미지, Interactions를 쓰는 공급자 어댑터;
-  - 함께 배포하는 카탈로그의 모든 모델에 대한 타입 클라이언트 `DecisionsClient`;
-  - 함께 배포하는 설정과 `gpt-image-2`를 쓰는 `ImagesClient`;
-  - 함께 배포하는 설정을 쓰는 `VeoClient`.
 - **알려진 빈틈**은 그 릴리스 라인에서 반드시 실패해야 하는 케이스입니다(strict xfail). `tests/live/manifest.json`이 고칠 이슈와 함께 이를 나열합니다. 수정이 들어오면 케이스가 통과하기 시작하므로 매니페스트도 함께 바꿔야 합니다.
 
-호출마다 싼 모델과 작은 상한을 씁니다. 전체 실행 비용은 몇 미국 센트이고, 대부분은 Veo 영상입니다.
+호출마다 싼 모델과 작은 상한을 씁니다. 전체 실행 비용은 몇 미국 센트입니다.
 
 ## 실행
 

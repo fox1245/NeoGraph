@@ -835,14 +835,11 @@ if(NEOGRAPH_BUILD_SQLITE)
 endif()
 
 # ===========================================================================
-# neograph::llm — Typed SchemaProvider, retained non-chat clients, and Agent
+# neograph::llm — Typed SchemaProvider and Agent
 # ===========================================================================
 if(NEOGRAPH_BUILD_LLM)
     add_library(neograph_llm
         src/llm/schema_provider.cpp
-        src/llm/images_client.cpp
-        src/llm/veo_client.cpp
-        src/llm/decisions_client.cpp
         src/llm/agent.cpp
     )
 

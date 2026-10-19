@@ -485,28 +485,8 @@ Function tools are advertised, not locally executed by this inspection demo.
 All ordered typed/raw events and full terminals are retained. Hosted tools may
 be unsupported by the chosen route or incur additional charges; typed admission
 is not a live compatibility guarantee. No WebSocket/primitive runnable example
-is retained. Images/Veo/Decisions are separate typed NeoGraph clients and do not
-inherit a chat-run spending grant. They are deprecated, and 0.16.0 removes them in favour of
-SchemaProvider endpoints:
-- Google shuts down every Veo model the Gemini API offers (the three `veo-3.1-*-preview` models) on 2026-10-22.
-- OpenAI shuts down `gpt-image-1` on 2026-10-23, and `gpt-image-1-mini` and `gpt-image-1.5` on
-  2026-12-01.
-
-See the CHANGELOG.
-
-Decisions choice criteria are an object keyed by choice, not a string array.
-The current separate typed client expresses the valid shape without a raw
-`SchemaProvider::request_json()` body:
-
-```cpp
-#include <neograph/llm/decisions_client.h>
-neograph::llm::DecisionsChoiceQuestion question;
-question.instructions = "Choose whether the supplied answer addresses the question.";
-question.criteria = {{"accept", "The answer addresses the question."},
-                     {"reject", "The answer does not address the question."}};
-neograph::llm::DecisionsRequest request;
-request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
-request.questions.emplace("decision", std::move(question));
-```
-
-This is request construction, not a new paid request or proof of vendor accuracy.
+is retained.
+Images, video and decisions are SchemaProvider endpoints, called on `sp::runtime::Client`
+through `<codecs/images.h>`, `<codecs/videos.h>` and `<codecs/decisions.h>`.
+NeoGraph 0.16.0 removed its typed `ImagesClient`, `VeoClient` and `DecisionsClient`;
+see the CHANGELOG.

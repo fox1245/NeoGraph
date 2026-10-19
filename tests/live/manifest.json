@@ -5,10 +5,6 @@
   "py:test_live_matrix::test_known_gap_gemini_media[tts]": "Python cannot set the Generate speech_config and response_modalities (#512)."
  },
  "cases": [
-  "cpp:LiveTypedClients.DecisionsShippedCatalogue",
-  "cpp:LiveTypedClients.ImagesGptImage2",
-  "cpp:LiveTypedClients.ImagesShippedGeminiConfiguration",
-  "cpp:LiveTypedClients.VeoShippedConfiguration",
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Collect",
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Stream",
   "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Collect",

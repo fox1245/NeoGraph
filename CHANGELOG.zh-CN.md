@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1511e4163bfc40cf6044fe858e025f9409147eac4b3a9c943a9fef4b8c1dc983 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9b55c68c85cfa656f7f24d256faf0d6a0426a6a3912a7c7a207a815724c1dff3 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -29,6 +29,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **行为变更：brief 和 clarify 步骤会报告 provider 失败。** 以前它们捕获失败并继续使用原始查询，因此错误的模型 id 或被拒绝的参数会悄无声息地降低运行质量。
   - **行为变更：不再有固定的 temperature 或分类器上限。** intent classifier 发送节点上下文的 `provider_controls`，而不是 `temperature = 0` 和 `max_output_tokens = 20`（推理模型会在作答前用光）。`default_summary_controls()` 保留 500 token 上限，不再发送 `temperature = 0.2`。Harness provider worker 不再发送 `temperature = 0`。
   - **Harness 转换上限由宿主决定。** `HarnessTranslationDefaults` 曾拒绝超过 600 的 `provider_timeout_seconds` 和超过 128,000 的 `max_output_tokens`。现在宿主的值就是上限，最大 86,400 秒和 2^32 − 1 个 token。
+
+### 已移除
+- **移除类型化客户端 `ImagesClient`、`VeoClient` 和 `DecisionsClient` (#510)。** 它们已在 0.15.1 中弃用。图像、视频和 decisions 是 SchemaProvider 端点：通过 `<codecs/images.h>`、`<codecs/videos.h>` 和 `<codecs/decisions.h>` 在 `sp::runtime::Client` 上调用。其头文件（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、随附的配置（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py` 以及相关测试均已删除。实时套件中去掉了四个类型化客户端用例。
 
 ## [0.15.1] - 2026-10-19
 
