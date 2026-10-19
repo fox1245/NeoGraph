@@ -447,7 +447,7 @@ OpenCode，写在项目的 `opencode.json` 或用户配置中：
 
 ### Provider 预算
 
-`budgets.provider_timeout_seconds` 把单次已准备的 provider 操作的绝对截止时间设为 1--600 秒。`budgets.max_output_tokens` 把它的输出上限设为 1--128000 个 token。两者都是可选的：省略时该项控制不做设置，沿用已准入的 SDK/默认策略，而不是不限时间或不限输出。在已准备操作的截止时间之内，provider 的任何重试都由 SDK 负责。
+`budgets.provider_timeout_seconds` 把单次已准备的 provider 操作的绝对截止时间设为 1 秒到宿主的 `HarnessTranslationDefaults::provider_timeout_seconds`（默认 600，最多 86400）。`budgets.max_output_tokens` 把它的输出上限设为 1 到宿主的 `HarnessTranslationDefaults::max_output_tokens`（默认 4096）个 token。两者都是可选的：省略时该项控制不做设置，沿用已准入的 SDK/默认策略，而不是不限时间或不限输出。在已准备操作的截止时间之内，provider 的任何重试都由 SDK 负责。
 
 worker 可以把其中任一字段设成更小的值。worker 的值大于 Harness 全局值的，会在编译时被拒绝。到达截止时间时，Harness 只取消提供给那次 provider 调用的子取消令牌，不会取消同级的 worker，也不会取消外层的运行。provider 必须响应这个令牌，所以无法被中断的 provider 可能在超过截止时间之后才返回。
 

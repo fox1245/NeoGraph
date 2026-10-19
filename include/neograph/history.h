@@ -79,10 +79,10 @@ struct CompactedHistory {
     std::size_t summarized_end = 0;
 };
 
-/// Historical defaults when the caller does not supply ProviderControls:
-/// temperature 0.2, max_output_tokens 500; no reasoning override. Explicit
-/// controls replace these defaults, including unset fields. Models rejecting
-/// temperature can use ProviderControls{} with a suitable output/reasoning cap.
+/// Defaults when the caller does not supply ProviderControls: max_output_tokens
+/// 500, and no sampling or reasoning override, so a model that refuses
+/// `temperature` can summarize. Explicit controls replace these defaults,
+/// including unset fields.
 NEOGRAPH_API ProviderControls default_summary_controls();
 
 /**

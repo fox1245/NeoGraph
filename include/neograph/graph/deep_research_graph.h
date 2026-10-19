@@ -17,6 +17,7 @@
 #include <neograph/graph/engine.h>
 #include <neograph/provider.h>
 #include <neograph/tool.h>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,26 +26,32 @@ namespace neograph::graph {
 
 /// @brief Configuration knobs for the Deep Research graph.
 ///
-/// The default values are calibrated for **Anthropic tier-1 quotas
-/// (30K input TPM)** running Claude Sonnet 4.5. They are the
-/// safest-shipping defaults for a fresh user pointed at Anthropic
-/// without rate-limit wallpaper, but they are NOT optimal for other
-/// providers / higher tiers:
-///   - tier-3 Anthropic users have ~5× headroom — bump
-///     `max_concurrent_researchers` to 5–8.
-///   - Self-hosted vLLM / OpenAI: no minute-window TPM throttle,
-///     `max_concurrent_researchers` 8–16.
-///   - Different provider: also override `model` to a non-Claude id;
-///     the default is set up for SchemaProvider("claude").
-/// A future major version may move these magic-number defaults out
-/// of the public struct and into a `DeepResearchConfig::for_anthropic_tier(N)`
-/// factory; for now they stay here and the doc string carries the
-/// caveat.
+/// The graph names no model and sends no sampling of its own: `model` is required, and `controls` holds what every
+/// step sends (only the members that are set). Leave `controls.temperature` unset for a model that refuses it
+/// (gpt-5*, o3, Claude 4.7 and later). The iteration and concurrency defaults are small, to stay inside low
+/// rate-limit tiers; raise them where the provider allows more.
 struct DeepResearchConfig {
-    std::string model = "claude-sonnet-4-5";  ///< Claude model identifier.
-    int max_supervisor_iterations = 2;        ///< Supervisor planning rounds (keep ≤ 3 for low-tier Anthropic quotas).
-    int max_concurrent_researchers = 2;       ///< Cap per conduct_research fan-out batch. Default 2 so 3× parallel researchers don't collectively exceed the 30K-tokens-per-minute tier-1 Anthropic limit; raise on higher tiers.
+    std::string model;                        ///< The model every step calls. Required.
+    int max_supervisor_iterations = 2;        ///< Supervisor planning rounds.
+    int max_concurrent_researchers = 2;       ///< Cap per conduct_research fan-out batch.
     int max_researcher_iterations = 2;        ///< Inner LLM↔tools loop cap per researcher.
+
+    /// Controls every step sends with its model call (temperature, reasoning effort, routing, ...), beside its
+    /// output cap. Unset members are not sent. `controls.max_output_tokens` is ignored: the caps below apply.
+    ProviderControls controls{};
+    /// The output cap of each step. A supervisor, researcher, compression or report step that stops at its cap
+    /// having written nothing asks again with twice the cap, up to `max_output_budget`.
+    std::uint64_t brief_max_output_tokens      = 800;
+    std::uint64_t clarify_max_output_tokens    = 200;
+    std::uint64_t supervisor_max_output_tokens = 2048;
+    std::uint64_t researcher_max_output_tokens = 2048;
+    std::uint64_t compress_max_output_tokens   = 2048;
+    std::uint64_t report_max_output_tokens     = 4096;
+    std::uint64_t max_output_budget            = 16384;
+    /// The node retry policy of every step that calls the model: by default twice, after 15 s and 30 s. It retries
+    /// an ordinary failure of the step. The provider runtime retries a transient provider failure (a rate limit, an
+    /// overload) itself, and a refused request (a wrong model id, a refused parameter) fails the run.
+    RetryPolicy retry{2, 15'000, 2.0f, 45'000};
 
     /// When true, inserts a `human_review` node between `final_report`
     /// and `__end__`. The node throws NodeInterrupt on first execution
@@ -79,7 +86,7 @@ struct DeepResearchConfig {
  * On completion, `result.output["channels"]["final_report"]` holds the
  * markdown report.
  *
- * @param provider  LLM provider (SchemaProvider with the "claude" schema).
+ * @param provider  LLM provider; `cfg.model` names the model it calls.
  * @param tools     Search/fetch tools made available to every researcher.
  *                  Typical set: `web_search`, `fetch_url`.
  * @param cfg       Iteration budgets and model id.

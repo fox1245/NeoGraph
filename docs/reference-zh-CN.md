@@ -1228,7 +1228,7 @@ public:
 | 构造函数参数 | 类型 | 描述 |
 |-----------------------|------|-------------|
 | `name` | `std::string` | 节点名称 |
-| `ctx` | `NodeContext` | 用于分类 LLM 调用的 provider 和模型 |
+| `ctx` | `NodeContext` | 用于分类 LLM 调用的 provider、模型和 `provider_controls`。节点按设置发送这些控制项，不自行添加 temperature 或输出上限 |
 | `prompt` | `std::string` | 分类提示模板 |
 | `valid_routes` | `std::vector<std::string>` | 允许的分类值。LLM 输出对照这些验证 |
 
@@ -3547,7 +3547,9 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
   open_deep_research 风格的 supervisor + 子研究者扇出，由
   `examples/25_deep_research.cpp` 使用。它包含
   `BriefNode` LLM 重写、`FinalReportNode` token 限制重试以及
-  `ClarifyNode` HITL 闸门。
+  `ClarifyNode` HITL 闸门。`DeepResearchConfig::model` 为必填项；
+  各步骤发送 `DeepResearchConfig::controls` 和配置的输出上限，
+  不自行发送采样设置。
 
 如果本导览中没有所需类型，请直接检查 `include/neograph/`；
 每个公共头文件都包含其参考文档。

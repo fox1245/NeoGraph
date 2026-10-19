@@ -368,6 +368,13 @@ TEST(HarnessProgramTranslator, EmitsNineExactFiniteTotalBudgetsAndRejectsUnbound
     EXPECT_THROW(
         HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, overflow),
         HarnessTranslationError);
+
+    // The ceilings are host configuration: a long provider deadline and a large output cap translate.
+    auto generous                     = fixture.defaults;
+    generous.provider_timeout_seconds = 3600;
+    generous.max_output_tokens        = 200000;
+    EXPECT_NO_THROW(
+        HarnessRequestTranslator::translate(request(), fixture.snapshots.registry, generous));
     EXPECT_EQ(calls.load(), 0);
 }
 

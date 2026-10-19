@@ -280,7 +280,7 @@ HarnessWorkerExecutor make_provider_harness_executor(HarnessProviderExecutorConf
         }
 
         ProviderControls controls;
-        controls.temperature = 0.0;
+        // No sampling of its own: the model's defaults apply, and a model that refuses `temperature` works.
         const auto budget = call.worker.value("_harness_provider_budget", json::object());
         const int provider_timeout = budget.value("provider_timeout_seconds", 0);
         const auto max_output_value = budget.value("max_output_tokens", json(-1));

@@ -1239,7 +1239,7 @@ public:
 | Constructor Parameter | Type | Description |
 |-----------------------|------|-------------|
 | `name` | `std::string` | Node name |
-| `ctx` | `NodeContext` | Provider and model for the classification LLM call |
+| `ctx` | `NodeContext` | Provider, model and `provider_controls` for the classification LLM call. The node sends the controls as set and adds no temperature or output cap of its own |
 | `prompt` | `std::string` | Classification prompt template |
 | `valid_routes` | `std::vector<std::string>` | Allowed classification values. The LLM output is validated against these |
 
@@ -3620,7 +3620,9 @@ edge / single-host deployments.
   open_deep_research-style supervisor + sub-researcher fan-out,
   used by `examples/25_deep_research.cpp`. It includes a
   `BriefNode` LLM rewrite, a `FinalReportNode` token-limit retry and
-  a `ClarifyNode` HITL gate.
+  a `ClarifyNode` HITL gate. `DeepResearchConfig::model` is required;
+  the steps send `DeepResearchConfig::controls` and their configured
+  output caps, and no sampling of their own.
 
 If the type you need isn't in this tour, check `include/neograph/`
 directly. Every public header carries its reference documentation.

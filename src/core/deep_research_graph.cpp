@@ -95,7 +95,7 @@ Output ONLY the final report. No preamble, no "here is the report" framing.
 // Helpers
 // =========================================================================
 
-// Build a ChatTool definition that Claude will emit as `tool_use`. The
+// Build a ChatTool definition that the model will emit as a tool call. The
 // arguments JSON is interpreted downstream by SupervisorDispatchNode /
 // the researcher loop.
 ChatTool make_tool(const char* name, const char* description,
@@ -179,7 +179,6 @@ ChatMessage tool_result_msg(const std::string& tool_call_id,
 // Budget recovery is a new semantic call, not transport retry or native-history
 // repair. Three slots per logical turn keep every prepared cap broker-distinct.
 constexpr std::uint64_t kBudgetAttemptSlots = 3;
-constexpr std::uint64_t kMaxOutputBudget = 16384;
 
 bool empty_max_tokens(const sp::Outcome& outcome) {
     const auto* completion = std::get_if<sp::Completion>(&outcome);
@@ -198,7 +197,7 @@ template<class Invoke>
 asio::awaitable<sp::runtime::Result> complete_with_budget(
     const std::shared_ptr<Provider>& provider, const std::string& model,
     const std::vector<sp::Message>& messages, const std::vector<ChatTool>& tools,
-    ProviderControls controls, const RunContext& ctx,
+    ProviderControls controls, std::uint64_t output_budget, const RunContext& ctx,
     std::uint64_t logical_turn, Invoke invoke) {
     auto deadline = ctx.deadline;
     for (std::uint64_t attempt = 0; attempt < kBudgetAttemptSlots; ++attempt) {
@@ -237,15 +236,15 @@ asio::awaitable<sp::runtime::Result> complete_with_budget(
         outcome_or_throw(result);
         if (!empty_max_tokens(*result) || output_observed
             || attempt + 1 == kBudgetAttemptSlots
-            || !controls.max_output_tokens || *controls.max_output_tokens >= kMaxOutputBudget)
+            || !controls.max_output_tokens || *controls.max_output_tokens >= output_budget)
             co_return result;
-        controls.max_output_tokens = std::min(kMaxOutputBudget, *controls.max_output_tokens * 2);
+        controls.max_output_tokens = std::min(output_budget, *controls.max_output_tokens * 2);
     }
     throw std::logic_error("unreachable research budget attempt");
 }
 
 // =========================================================================
-// SupervisorLLMNode — one Claude call producing `conduct_research` /
+// SupervisorLLMNode — one model call producing `conduct_research` /
 // `think_tool` / `research_complete` tool uses. Reads/writes the
 // `supervisor_messages` channel so it is isolated from the final-report
 // step (which reads `notes`).
@@ -253,10 +252,12 @@ asio::awaitable<sp::runtime::Result> complete_with_budget(
 class SupervisorLLMNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     SupervisorLLMNode(std::string name, std::shared_ptr<Provider> provider,
-                      std::string model)
+                      std::string model, ProviderControls controls, std::uint64_t output_budget)
         : name_(std::move(name))
         , provider_(std::move(provider))
-        , model_(std::move(model)) {}
+        , model_(std::move(model))
+        , controls_(std::move(controls))
+        , output_budget_(output_budget) {}
 
     std::string get_name() const override { return name_; }
 
@@ -278,13 +279,11 @@ public:
             convo.push_back(portable_message(u));
         }
 
-        ProviderControls controls;
-        controls.temperature = 0.3;
-        controls.max_output_tokens = 2048;
+        ProviderControls controls = controls_;
         std::vector<sp::Message> host{portable_message(ChatMessage{"system", SUPERVISOR_SYSTEM})};
         std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
         auto completion = co_await complete_with_budget(provider_, model_, convo,
-            supervisor_tool_defs(), controls, in.ctx, 0,
+            supervisor_tool_defs(), controls, output_budget_, in.ctx, 0,
             [&](ProviderRequest request, std::uint64_t ordinal) {
                 return invoke_provider(provider_, std::move(request), host, supplemental,
                     provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
@@ -308,6 +307,8 @@ private:
     std::string               name_;
     std::shared_ptr<Provider> provider_;
     std::string               model_;
+    ProviderControls          controls_;
+    std::uint64_t             output_budget_;
 };
 
 // =========================================================================
@@ -443,7 +444,7 @@ public:
             // The research_calls_to_dispatch will NOT run; we still need
             // their tool_results paired or the next (never-made) supervisor
             // call would 400. But since we're going to final_report and not
-            // back to supervisor, no Claude call observes these messages —
+            // back to supervisor, no model call observes these messages —
             // we still write them for a clean conversation log.
             for (const auto& tc : research_calls_to_dispatch) {
                 sv_updates.push_back(build_echo(tc,
@@ -530,12 +531,16 @@ class ResearcherNode : public GraphNode, public ::neograph::RuntimeInterposition
 public:
     ResearcherNode(std::string name, std::shared_ptr<Provider> provider,
                    std::vector<Tool*> tools, std::string model,
-                   int max_iterations)
+                   int max_iterations, ProviderControls controls, ProviderControls compress_controls,
+                   std::uint64_t output_budget)
         : name_(std::move(name))
         , provider_(std::move(provider))
         , tools_(std::move(tools))
         , model_(std::move(model))
-        , max_iter_(max_iterations) {}
+        , controls_(std::move(controls))
+        , compress_controls_(std::move(compress_controls))
+        , max_iter_(max_iterations)
+        , output_budget_(output_budget) {}
 
     std::string get_name() const override { return name_; }
 
@@ -581,13 +586,11 @@ public:
             auto calls = continuation.client_calls_ready ? pending_client_tool_calls(convo) : std::vector<ToolCall>{};
             if (calls.empty()) {
             if (continuation.turns >= static_cast<std::uint64_t>(std::max(0, max_iter_))) break;
-            ProviderControls controls;
-            controls.temperature = 0.3;
-            controls.max_output_tokens = 2048;
+            ProviderControls controls = controls_;
             std::vector<sp::Message> host{portable_message(ChatMessage{"system", RESEARCHER_SYSTEM})};
             std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
             auto completion = co_await complete_with_budget(provider_, model_, convo, tool_defs,
-                controls, in.ctx, continuation.turns,
+                controls, output_budget_, in.ctx, continuation.turns,
                 [&](ProviderRequest request, std::uint64_t ordinal) {
                     return invoke_provider(provider_, std::move(request), host, supplemental,
                         provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
@@ -655,14 +658,12 @@ private:
             compress_msgs.push_back(std::move(u));
         }
 
-        ProviderControls controls;
-        controls.temperature = 0.2;
-        controls.max_output_tokens = 2048;
+        ProviderControls controls = compress_controls_;
         const auto messages = portable_prompts(compress_msgs);
         std::vector<sp::Message> host{messages.front()};
         std::vector<sp::Message> supplemental(messages.begin() + 1, messages.end());
         auto completion = co_await complete_with_budget(provider_, model_, messages, {},
-            controls, ctx, static_cast<std::uint64_t>(std::max(0, max_iter_)),
+            controls, output_budget_, ctx, static_cast<std::uint64_t>(std::max(0, max_iter_)),
             [&](ProviderRequest request, std::uint64_t ordinal) {
                 return invoke_provider(provider_, std::move(request), host, supplemental,
                     provider_call_broker(ctx), make_provider_call_identity(ctx, name_, ordinal));
@@ -701,7 +702,10 @@ private:
     std::shared_ptr<Provider> provider_;
     std::vector<Tool*>        tools_;
     std::string               model_;
+    ProviderControls          controls_;
+    ProviderControls          compress_controls_;
     int                       max_iter_;
+    std::uint64_t             output_budget_;
 };
 
 // =========================================================================
@@ -715,10 +719,12 @@ private:
 class FinalReportNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     FinalReportNode(std::string name, std::shared_ptr<Provider> provider,
-                    std::string model)
+                    std::string model, ProviderControls controls, std::uint64_t output_budget)
         : name_(std::move(name))
         , provider_(std::move(provider))
-        , model_(std::move(model)) {}
+        , model_(std::move(model))
+        , controls_(std::move(controls))
+        , output_budget_(output_budget) {}
 
     std::string get_name() const override { return name_; }
 
@@ -759,13 +765,11 @@ public:
             portable_message(ChatMessage{"system", FINAL_REPORT_SYSTEM}),
             portable_message(ChatMessage{"user", "## Research brief\n" + brief +
                 "\n\n## Collected findings\n" + findings_text})};
-        ProviderControls controls;
-        controls.temperature = 0.4;
-        controls.max_output_tokens = 4096;
+        ProviderControls controls = controls_;
         std::vector<sp::Message> host{convo.front()};
         std::vector<sp::Message> supplemental(convo.begin() + 1, convo.end());
         auto completion = co_await complete_with_budget(provider_, model_, convo, {},
-            controls, in.ctx, 0,
+            controls, output_budget_, in.ctx, 0,
             [&](ProviderRequest request, std::uint64_t ordinal) {
                 return invoke_provider(provider_, std::move(request), host, supplemental,
                     provider_call_broker(in.ctx), make_provider_call_identity(in.ctx, name_, ordinal));
@@ -786,6 +790,8 @@ private:
     std::string               name_;
     std::shared_ptr<Provider> provider_;
     std::string               model_;
+    ProviderControls          controls_;
+    std::uint64_t             output_budget_;
 };
 
 // =========================================================================
@@ -802,10 +808,11 @@ private:
 // =========================================================================
 class BriefNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
-    BriefNode(std::string name, std::shared_ptr<Provider> provider, std::string model)
+    BriefNode(std::string name, std::shared_ptr<Provider> provider, std::string model, ProviderControls controls)
         : name_(std::move(name))
         , provider_(std::move(provider))
-        , model_(std::move(model)) {}
+        , model_(std::move(model))
+        , controls_(std::move(controls)) {}
 
     std::string get_name() const override { return name_; }
 
@@ -841,9 +848,7 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
             u.content = "User research question:\n" + user_query;
             convo.push_back(std::move(u));
 
-            ProviderControls controls;
-            controls.temperature = 0.2;
-            controls.max_output_tokens = 800;
+            ProviderControls controls = controls_;
             auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
             params.cancel_token = in.ctx.cancel_token;
             params.options.deadline = in.ctx.deadline;
@@ -862,13 +867,9 @@ Output ONLY the brief, in plain markdown. No preamble. Keep it under 200 words.)
                 eptr = std::current_exception();
             }
         }
-        if (eptr) {
-            // Provider failure → degrade gracefully to pass-through so
-            // the rest of the graph still gets a (degraded) brief.
-            NodeOutput out;
-            out.writes.push_back(ChannelWrite{"research_brief", json(user_query)});
-            co_return out;
-        }
+        // A provider failure (a wrong model id, a refused parameter, an exhausted retry) is the run's failure,
+        // not a reason to continue on a degraded brief.
+        if (eptr) std::rethrow_exception(eptr);
         std::string brief = outcome_text(*completion);
         if (brief.empty()) brief = user_query;  // pass-through guard
         NodeOutput out;
@@ -879,6 +880,7 @@ private:
     std::string               name_;
     std::shared_ptr<Provider> provider_;
     std::string               model_;
+    ProviderControls          controls_;
 };
 
 // =========================================================================
@@ -897,10 +899,11 @@ private:
 // =========================================================================
 class ClarifyNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
-    ClarifyNode(std::string name, std::shared_ptr<Provider> provider, std::string model)
+    ClarifyNode(std::string name, std::shared_ptr<Provider> provider, std::string model, ProviderControls controls)
         : name_(std::move(name))
         , provider_(std::move(provider))
-        , model_(std::move(model)) {}
+        , model_(std::move(model))
+        , controls_(std::move(controls)) {}
 
     std::string get_name() const override { return name_; }
 
@@ -955,9 +958,7 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
             ChatMessage u; u.role = "user"; u.content = "Request:\n" + query;
             convo.push_back(std::move(u));
 
-            ProviderControls controls;
-            controls.temperature = 0.0;
-            controls.max_output_tokens = 200;
+            ProviderControls controls = controls_;
             auto params = make_provider_request(*provider_, model_, portable_prompts(convo), {}, controls);
             params.options.deadline = in.ctx.deadline;
             params.mode = in.ctx.on_provider_event ? ProviderMode::Stream : ProviderMode::Collect;
@@ -977,10 +978,8 @@ Bias toward PROCEED — only ASK when the question would clearly fork the resear
                 eptr = std::current_exception();
             }
         }
-        if (eptr) {
-            // Provider failure — degrade to PROCEED so the run isn't sunk.
-            co_return NodeOutput{};
-        }
+        // A provider failure is the run's failure; the node's retry policy has already had its chance.
+        if (eptr) std::rethrow_exception(eptr);
 
         // Parse the decision. Tolerant — accept "DECISION: PROCEED" anywhere
         // in the reply.
@@ -1020,6 +1019,7 @@ private:
     std::string               name_;
     std::shared_ptr<Provider> provider_;
     std::string               model_;
+    ProviderControls          controls_;
 };
 
 // =========================================================================
@@ -1127,30 +1127,41 @@ private:
 // =========================================================================
 // Node registration (idempotent, thread-safe).
 // =========================================================================
+// The caller's controls for one step, with the step's output cap from its node configuration.
+ProviderControls step_controls(const NodeContext& ctx, const json& config, const char* cap = "max_output_tokens") {
+    ProviderControls controls = ctx.provider_controls;
+    if (config.contains(cap) && config[cap].is_number_unsigned()) controls.max_output_tokens = config[cap].get<std::uint64_t>();
+    return controls;
+}
+// The largest cap a step that stopped at its cap having written nothing asks again with.
+std::uint64_t output_budget(const json& config) {
+    return config.value("max_output_budget", DeepResearchConfig{}.max_output_budget);
+}
+
 void register_node_types_once() {
     static std::once_flag once;
     std::call_once(once, [] {
         auto& nf = NodeFactory::instance();
 
         nf.register_type("__dr_clarify",
-            [](const std::string& name, const json&, const NodeContext& ctx)
+            [](const std::string& name, const json& config, const NodeContext& ctx)
                 -> std::unique_ptr<GraphNode> {
                 return std::make_unique<ClarifyNode>(
-                    name, ctx.provider, ctx.model);
+                    name, ctx.provider, ctx.model, step_controls(ctx, config));
             });
 
         nf.register_type("__dr_brief",
-            [](const std::string& name, const json&, const NodeContext& ctx)
+            [](const std::string& name, const json& config, const NodeContext& ctx)
                 -> std::unique_ptr<GraphNode> {
                 return std::make_unique<BriefNode>(
-                    name, ctx.provider, ctx.model);
+                    name, ctx.provider, ctx.model, step_controls(ctx, config));
             });
 
         nf.register_type("__dr_supervisor_llm",
-            [](const std::string& name, const json&, const NodeContext& ctx)
+            [](const std::string& name, const json& config, const NodeContext& ctx)
                 -> std::unique_ptr<GraphNode> {
                 return std::make_unique<SupervisorLLMNode>(
-                    name, ctx.provider, ctx.model);
+                    name, ctx.provider, ctx.model, step_controls(ctx, config), output_budget(config));
             });
 
         nf.register_type("__dr_supervisor_dispatch",
@@ -1167,14 +1178,16 @@ void register_node_types_once() {
                const NodeContext& ctx) -> std::unique_ptr<GraphNode> {
                 int max_iter = config.value("max_iterations", 4);
                 return std::make_unique<ResearcherNode>(
-                    name, ctx.provider, ctx.tools.view(), ctx.model, max_iter);
+                    name, ctx.provider, ctx.tools.view(), ctx.model, max_iter,
+                    step_controls(ctx, config), step_controls(ctx, config, "compress_max_output_tokens"),
+                    output_budget(config));
             });
 
         nf.register_type("__dr_final_report",
-            [](const std::string& name, const json&, const NodeContext& ctx)
+            [](const std::string& name, const json& config, const NodeContext& ctx)
                 -> std::unique_ptr<GraphNode> {
                 return std::make_unique<FinalReportNode>(
-                    name, ctx.provider, ctx.model);
+                    name, ctx.provider, ctx.model, step_controls(ctx, config), output_budget(config));
             });
 
         nf.register_type("__dr_human_review",
@@ -1196,10 +1209,13 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     DeepResearchConfig cfg) {
 
     register_node_types_once();
+    if (cfg.model.empty())
+        throw std::invalid_argument("DeepResearchConfig::model must name the model every step calls");
 
     NodeContext ctx;
     ctx.provider = std::move(provider);
     ctx.model = cfg.model;
+    ctx.provider_controls = cfg.controls;
     ctx.tools = ToolSet(std::move(tools));
 
     // Channels — common set always present.
@@ -1216,8 +1232,9 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
 
     // Nodes — common set always present.
     json nodes = {
-        {"brief",        {{"type", "__dr_brief"}}},
-        {"supervisor",   {{"type", "__dr_supervisor_llm"}}},
+        {"brief",        {{"type", "__dr_brief"}, {"max_output_tokens", cfg.brief_max_output_tokens}}},
+        {"supervisor",   {{"type", "__dr_supervisor_llm"}, {"max_output_tokens", cfg.supervisor_max_output_tokens},
+                          {"max_output_budget", cfg.max_output_budget}}},
         {"dispatch",     {
             {"type", "__dr_supervisor_dispatch"},
             {"max_iterations", cfg.max_supervisor_iterations},
@@ -1225,9 +1242,13 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
         }},
         {kResearcherNodeName,   {
             {"type", "__dr_researcher"},
-            {"max_iterations", cfg.max_researcher_iterations}
+            {"max_iterations", cfg.max_researcher_iterations},
+            {"max_output_tokens", cfg.researcher_max_output_tokens},
+            {"compress_max_output_tokens", cfg.compress_max_output_tokens},
+            {"max_output_budget", cfg.max_output_budget}
         }},
-        {"final_report", {{"type", "__dr_final_report"}}}
+        {"final_report", {{"type", "__dr_final_report"}, {"max_output_tokens", cfg.report_max_output_tokens},
+                          {"max_output_budget", cfg.max_output_budget}}}
     };
 
     // Edges — common set: start → brief → supervisor → dispatch loop;
@@ -1238,7 +1259,7 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
         // The `messages` channel is shared between clarify and human_review.
         // Both nodes consume the resume_value engine.resume() drops here.
         channels["messages"] = json{{"reducer", "overwrite"}};
-        nodes["clarify"] = json{{"type", "__dr_clarify"}};
+        nodes["clarify"] = json{{"type", "__dr_clarify"}, {"max_output_tokens", cfg.clarify_max_output_tokens}};
         edges.push_back({{"from", "__start__"}, {"to", "clarify"}});
         edges.push_back({{"from", "clarify"},   {"to", "brief"}});
     } else {
@@ -1289,18 +1310,10 @@ std::unique_ptr<GraphEngine> create_deep_research_graph(
     // 두 가지가 사실상 순차로 깎임.
     engine->set_worker_count_auto();
 
-    // Resilience against transient Anthropic 5xx and rate-limit (HTTP 429)
-    // errors. Anthropic's minute-window rate limits usually clear within 60s;
-    // two retries at up to 45s apart cover that. Applied to every LLM-calling
-    // node. Brief/dispatch don't call the API but policy is harmless there.
-    RetryPolicy llm_retry;
-    llm_retry.max_retries       = 2;
-    llm_retry.initial_delay_ms  = 15'000;
-    llm_retry.backoff_multiplier = 2.0f;
-    llm_retry.max_delay_ms      = 45'000;
-    engine->set_node_retry_policy("supervisor",   llm_retry);
-    engine->set_node_retry_policy(kResearcherNodeName, llm_retry);
-    engine->set_node_retry_policy("final_report", llm_retry);
+    // Every node that calls the model retries a failed step by the caller's policy.
+    for (const char* node : {"brief", "supervisor", kResearcherNodeName, "final_report"})
+        engine->set_node_retry_policy(node, cfg.retry);
+    if (cfg.enable_clarification) engine->set_node_retry_policy("clarify", cfg.retry);
 
     return engine;
 }
