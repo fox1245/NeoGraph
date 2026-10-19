@@ -165,7 +165,7 @@ TEST(SchemaProviderWireContract, CanonicalInlineVisionRetainsOrderAcrossFamilies
         auto provider = wire::provider(family, "http://127.0.0.1:1");
         auto request = wire::request(family);
         set_provider_request_messages(request, {sp::Message{"", sp::Role::User,
-            {sp::Text{"before-image"}, sp::Image{"image/png", bytes}, sp::Text{"after-image"}}}});
+            {sp::Text{"before-image"}, sp::Media::image("image/png", bytes), sp::Text{"after-image"}}}});
         const auto prepared = provider->prepare(std::move(request));
         ASSERT_TRUE(prepared.valid());
         const auto body = std::string(prepared.encoded_body());
@@ -180,7 +180,7 @@ TEST(SchemaProviderWireContract, InvalidInlineVisionRejectsBeforeAnyWireActivity
     auto provider = wire::provider("openai.chat", peer.origin());
     auto request = wire::request();
     std::get<sp::chat::Request>(request.payload).canonical_messages[0].parts.push_back(
-        sp::Image{"image/png", std::make_shared<const std::string>("not base64")});
+        sp::Media::image("image/png", std::make_shared<const std::string>("not base64")));
     const auto prepared = provider->prepare(std::move(request));
     ASSERT_FALSE(prepared.valid()); ASSERT_NE(prepared.error(), nullptr);
     EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);

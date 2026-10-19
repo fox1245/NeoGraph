@@ -102,7 +102,7 @@ void validate_outcome_data(const ProviderDispatchOutcomeReceiptData& data) {
 
 std::string completion_digest(const sp::Outcome& outcome) {
     return detail::sha256_identity(
-        IDENTITY_PREAMBLE, "provider-outcome/v2",
+        IDENTITY_PREAMBLE, "provider-outcome/v3",
         detail::canonical_json_bytes(outcome_projection_json(outcome)));
 }
 

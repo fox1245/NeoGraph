@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1511e4163bfc40cf6044fe858e025f9409147eac4b3a9c943a9fef4b8c1dc983 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -13,6 +13,22 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 変更
+- **SchemaProvider interface 7 を採用します (#512).** NeoGraph は interface 7 のヘッダーと第 7 世代のライブラリ（`libsp_*.so.7`）でビルドします。SchemaProvider 0.4.0 のリリースまでは `main` ブランチ（パッケージバージョン 0.3.0）に固定し、0.16.0 のリリース前に 0.4.0 のリリースへ移します。
+  - **動作の変更: 型付きのメディア。** `sp::Image` は `sp::Media` になります。画像・音声・動画・文書で、インライン、URL、またはプロバイダーのファイルにあります。`ChatMessage::image_urls` はインライン画像をこれまでどおり data URL として射影し、URL の画像も射影するようになりました。`portable_message` は https の項目を、プロバイダーが取得する URL メディアとして送ります。生成された画像（Chat の `message.images`、Responses の `image_generation_call`、Gemini の `inlineData`）は `Opaque` ではなく `Media` パートになり、ワイヤーの項目はネイティブ出力に残ります。
+  - **プロバイダー結果フォーマット v3。** `neograph.provider-outcome/v3` と `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）は、メディアパート、テキストの引用、型付きのツール結果、エラーの `reason`、実際に応答した `model` を追加します。v2 フォーマットのレコード（Program ジャーナル、チェックポイント、ランタイム履歴）も引き続き読み込めます。画像パートはインライン画像のメディアになり、新しいメンバーは空です。新しいレコードは v3 で書き込み、NeoGraph 0.15 はそれを読めません。
+  - **ランタイム履歴レコード**は保存バージョン 3 です。バージョン 2 のレコードは保存されたバイトと id のまま読むので、フィードの predecessor チェーンは変わりません。Program のプロバイダージャーナルの行は、書き込まれたときの digest ドメインを保ちます。
+  - **動作の変更: 0.15 のネイティブ履歴はリプレイされません。** interface 7 はすべてのポリシー identity を変えるため、0.15 が封印したネイティブ履歴を続けると `ReplayIneligible` になります。ポータブルな履歴には影響しません。
+  - **モデルの情報はカタログのデータです。** descriptor ポリシーには `models` の一覧がなく、モデルの上限とモデルごとのデフォルトは SDK のモデルカタログの項目です（`sp::descriptor::load_catalogue`、`merge_catalogues`、`DescriptorPolicy::with_catalogue`）。cookbook のチャットボットは `--model-catalogue PATH` を受け取り、`demo-policy.json` の代わりに `demo-models.json` を同梱し、セッションはカタログを含むポリシーの content digest に結び付きます。
+  - **Python。** `ProviderImage` は `ProviderMedia` に置き換わります。`ProviderMedia.image(...)`、`.audio`、`.video`、`.document`、`.url`、`.file` があり、`kind`、`source`、`mime`、`data`、`reference`、`name`、`detail`、`id`、`transcript` と、列挙型 `ProviderMediaKind`、`ProviderMediaSource` があります。新規: `Text.citations`（`ProviderCitation`）、`ProviderToolResult.content_parts`、`ProviderError.reason`、`ProviderCompletion.model` と `ProviderPartialCompletion.model`（`ProviderServedModel`、`ProviderServedRelation`）、`ProviderPartHeader.media`、`ProviderPartSeal.citations`、`ProviderStopKind.Pending` と `Compaction`、`ProviderPartKind.Media`、`ProviderCostRounding.CeilingCatalogueProduct`。`load_provider_policy` は組み込みカタログの上に重ねる省略可能な `model_catalogue_json` を受け取り、`provider_model_catalogue_json()` は組み込みカタログを返します。
+  - NeoGraph、C++ の利用側、Python 拡張を、対応する interface 7 のヘッダーとライブラリでまとめて再ビルドしてください。
+- **組み込みのグラフとノードは、特定ベンダーの設定ではなく呼び出し側のモデル・サンプリング・トークン設定を送ります (#521).** `temperature` を拒否するモデル（`gpt-5*`、`o3`、Claude 4.7 以降）は、deep research グラフのすべてのステップ、intent classifier、履歴の要約、Harness のプロバイダーワーカーで、prepare の時点で失敗していました。
+  - **動作の変更: `DeepResearchConfig::model` は必須です。** デフォルトは `claude-sonnet-4-5` でしたが、空のときは `create_deep_research_graph` が `std::invalid_argument` を投げます。
+  - **Deep research の設定は構成値です。** `DeepResearchConfig::controls` はすべてのステップが送る値を持ちます（設定されたメンバーのみ）。ステップごとの出力上限はフィールド（`brief_max_output_tokens`、`clarify_…`、`supervisor_…`、`researcher_…`、`compress_…`、`report_…`、デフォルトは従来の値）で、空の応答の再試行が求める最大の上限（`max_output_budget`、16384）と、モデルを呼ぶステップのノード再試行ポリシー（`retry`、従来どおり 15 秒後と 30 秒後の 2 回、brief と clarify のステップにも適用）もフィールドです。どのステップも独自の temperature を送りません。
+  - **動作の変更: brief と clarify のステップはプロバイダーの失敗を報告します。** 以前は失敗を捕まえて元のクエリのまま続けていたため、誤ったモデル id や拒否されたパラメーターが痕跡なく実行を劣化させていました。
+  - **動作の変更: 固定の temperature や分類器の上限はありません。** intent classifier は `temperature = 0` と `max_output_tokens = 20`（推論モデルは答える前に使い切ります）の代わりに、ノードコンテキストの `provider_controls` を送ります。`default_summary_controls()` は 500 トークンの上限を保ち、`temperature = 0.2` は送らなくなりました。Harness のプロバイダーワーカーは `temperature = 0` を送らなくなりました。
+  - **Harness の変換上限はホストの値です。** `HarnessTranslationDefaults` は 600 を超える `provider_timeout_seconds` と 128,000 を超える `max_output_tokens` を拒否していました。今はホストの値が上限で、最大 86,400 秒と 2^32 − 1 トークンです。
 
 ## [0.15.1] - 2026-10-19
 

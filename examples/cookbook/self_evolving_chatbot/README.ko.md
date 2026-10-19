@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=7d554cef7ff138fd563b7ecd7739dc7f01a8a641aec41c5fdd0b38d33db5d01c -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=c7857297daccf819804962b55d2f6ed035f4cc6d255c419e68c9f9c262ebae2e -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -23,7 +23,7 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -45,14 +45,16 @@ input/output 한도, 실제 output cap, hosted invocation 한도와 retry 정책
 evidence가 있고 이전 usage가 unknown이 아니며 transport 내부 재전송이 없을 때만 정산합니다.
 그 외에는 원래 예약을 `UnknownHold`로 유지합니다. 예약 초과 report도 charge에 포함하며
 `cost`는 unknown입니다.
-`--descriptor-policy PATH`(C++ `Options::descriptor_policy_file`)로 호스트 소유 SDK
-descriptor-policy JSON을 지정합니다. 내장 codec resource snapshot으로 한 번 승인한 뒤
-두 tenant가 공유하며 기본값은 내장 정책입니다. 명시적인 fixture 정책은 정확한 loopback
-`openrouter_origins`와 `program-chat-mock`(또는 지정한 fixture 모델)의 한도를 선언해야 합니다.
-승인된 정책 identity를 세션 settings에 바인딩하므로 같은 파일 경로라도 내용이 바뀌면 새 세션이
-필요합니다. 모델 제안이나 checkpoint는 정책을 선택할 수 없습니다. `--mock`에도 해당 사실이
-필요하며 예산 증가는 명시적으로만 지정합니다.
-제공된 [demo-policy.json](demo-policy.json)은 `program-chat-mock`의 input 4,096·output 65,536
+`--model-catalogue PATH`(C++ `Options::model_catalogue_file`)로 내장 catalogue 위에 얹을
+호스트 소유 SDK 모델 catalogue JSON을, `--descriptor-policy PATH`(C++
+`Options::descriptor_policy_file`)로 호스트 소유 SDK descriptor-policy JSON을 지정합니다.
+내장 codec resource snapshot으로 한 번 승인한 뒤 두 tenant가 공유하며 기본값은 내장 정책과
+catalogue입니다. 명시적인 fixture 정책은 정확한 loopback `openrouter_origins`를, catalogue는
+`program-chat-mock`(또는 지정한 fixture 모델)의 한도를 선언해야 합니다. catalogue를 포함한
+승인된 정책의 content digest를 세션 settings에 바인딩하므로 같은 파일 경로라도 내용이 바뀌면
+새 세션이 필요합니다. 모델 제안이나 checkpoint는 정책을 선택할 수 없습니다. `--mock`에도
+해당 사실이 필요하며 예산 증가는 명시적으로만 지정합니다.
+제공된 [demo-models.json](demo-models.json)은 `program-chat-mock`의 input 4,096·output 65,536
 토큰 사실만 선언합니다. offline recipe에서 명시적으로 선택하세요. live 모델 catalog,
 spending grant, usage report나 budget reset이 아니며, 명시적 `--model`은 승인 검사를
 약화하지 않고 상속된 모델 환경 설정보다 우선합니다.
@@ -81,7 +83,7 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite
 ```
 
 `http://127.0.0.1:8768`에서 Alice/Bob을 선택합니다. demo에서 `review`, `검토`, `비교`는 review Harness를 제안합니다. 첫 답변은 현재 Harness를 사용하고 승인된 변경은 다음 turn의 resume에 적용됩니다. force checkbox는 검토된 두 plan을 교대할 뿐 품질 향상을 주장하지 않습니다.
@@ -108,7 +110,7 @@ WSL native Docker에서 전용 PostgreSQL DB를 만들고 같은 shell에서 URL
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --session postgres-demo
 ```
 
 이 변수가 있으면 chat와 Program persistence가 PostgreSQL을, 없으면 `--db`가 SQLite를 선택합니다. 각 backend는 빌드에서 끌 수 있습니다.

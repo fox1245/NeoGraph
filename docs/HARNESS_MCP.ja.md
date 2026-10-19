@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=3e5f69c6322b8fa76df3970582ed013fae46d4b3bcb8eb9e3565bf4851521823 -->
+<!-- neograph-i18n: source=docs/HARNESS_MCP.md locale=ja source_sha256=e9328cd59eabfb0a4baf54342699e02c75b0ec404887f0a10725942727e50d4f -->
 # NeoGraph Harness MCP
 
 **Languages:** [English](HARNESS_MCP.md) | [한국어](HARNESS_MCP.ko.md) | [日本語](HARNESS_MCP.ja.md) | [简体中文](HARNESS_MCP.zh-CN.md)
@@ -451,7 +451,7 @@ OpenCode（プロジェクトの `opencode.json` またはユーザー設定）�
 
 ### プロバイダーの予算
 
-`budgets.provider_timeout_seconds` は、準備済みのプロバイダー操作1回の絶対的なデッドラインを、1〜600秒に設定します。`budgets.max_output_tokens` は、その出力の上限を、1〜128000トークンに設定します。どちらも省略可能です。省略すると、その項目は未設定のままになり、admission済みのSDKのデフォルトポリシーが保たれます。時間や出力が無制限になるわけではありません。プロバイダーのリトライは、準備済みの操作のデッドラインの範囲内で、SDKが担当します。
+`budgets.provider_timeout_seconds` は、準備済みのプロバイダー操作1回の絶対的なデッドラインを、1秒からホストの `HarnessTranslationDefaults::provider_timeout_seconds`（デフォルト600、最大86400）までの範囲で設定します。`budgets.max_output_tokens` は、その出力の上限を、1からホストの `HarnessTranslationDefaults::max_output_tokens`（デフォルト4096）トークンまでの範囲で設定します。どちらも省略可能です。省略すると、その項目は未設定のままになり、admission済みのSDKのデフォルトポリシーが保たれます。時間や出力が無制限になるわけではありません。プロバイダーのリトライは、準備済みの操作のデッドラインの範囲内で、SDKが担当します。
 
 ワーカーは、どちらのフィールドも、より小さい値に設定できます。Harness全体の値を超えるワーカーの値は、コンパイル時に拒否されます。デッドラインに達すると、Harnessは、そのプロバイダー呼び出しに渡した子のキャンセルトークンだけをキャンセルします。並列のワーカーや、それを含む実行はキャンセルしません。プロバイダーはトークンに従う必要があるため、中断できないプロバイダーは、デッドラインの後に戻ることがあります。
 

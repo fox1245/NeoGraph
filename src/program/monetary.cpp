@@ -413,7 +413,7 @@ MonetaryQuote assess_monetary_call(const pricing::PriceCatalog&      catalog,
         return quote;
     }
     const auto input = min_known(
-        {descriptor->policy()->input_limit(prepared.family(), quote.model),
+        {descriptor->policy()->input_limit(prepared.family(), descriptor->base_url(), quote.model),
          entry->limits.max_input_tokens, entry->limits.context_window});
     if (!input) {
         block(quote, "P_MONEY_NO_INPUT_BOUND",

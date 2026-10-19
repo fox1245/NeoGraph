@@ -3,11 +3,13 @@
 #include <neograph/provider_outcome_codec.h>
 #include "../../provider_example_support.h"
 #include <neograph/neograph.h>
+#include <descriptor/catalogue.h>
 #include <sp/config_defaults.h>
 
 #include "chat_store.h"
 #include <openssl/sha.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -247,10 +249,29 @@ void fold_report(json aggregate, const std::optional<sp::Count>& value) {
     aggregate = aggregate.get<std::uint64_t>() + value->value;
 }
 
+sp::descriptor::CatalogueSnapshot load_host_catalogue(const Options& options) {
+    if (options.model_catalogue_file.empty()) return sp::descriptor::builtin_catalogue();
+    auto loaded = sp::descriptor::load_catalogue_file(options.model_catalogue_file);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument("Host model catalogue rejected at " + error->pointer + ": " + error->message);
+    const std::array layers{sp::descriptor::builtin_catalogue(),
+                            std::get<sp::descriptor::CatalogueSnapshot>(std::move(loaded))};
+    auto merged = sp::descriptor::merge_catalogues(layers);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&merged))
+        throw std::invalid_argument("Host model catalogue rejected at " + error->pointer + ": " + error->message);
+    return std::get<sp::descriptor::CatalogueSnapshot>(std::move(merged));
+}
+
 sp::descriptor::PolicySnapshot load_host_policy(const Options& options) {
     const bool loopback = options.allow_loopback && options.base_url.starts_with("http://");
-    if (options.descriptor_policy_file.empty() && !loopback)
-        return sp::descriptor::builtin_policy();
+    if (options.descriptor_policy_file.empty() && !loopback) {
+        if (options.model_catalogue_file.empty()) return sp::descriptor::builtin_policy();
+        auto admitted = sp::descriptor::builtin_policy()->with_catalogue(load_host_catalogue(options));
+        if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
+            throw std::invalid_argument("Host model catalogue rejected at " +
+                error->pointer + ": " + error->message);
+        return std::get<sp::descriptor::PolicySnapshot>(std::move(admitted));
+    }
     std::string source;
     if (options.descriptor_policy_file.empty()) {
         source = sp::config_defaults::descriptor_policy_json;
@@ -273,7 +294,8 @@ sp::descriptor::PolicySnapshot load_host_policy(const Options& options) {
                 family["openrouter_origins"].push_back(origin);
         source = policy_json.dump();
     }
-    auto admitted = sp::descriptor::load_policy(source, sp::config_defaults::codec_defaults_json);
+    auto admitted = sp::descriptor::load_policy(source, sp::config_defaults::codec_defaults_json,
+                                                load_host_catalogue(options));
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
         throw std::invalid_argument("Host descriptor policy rejected at " +
             error->pointer + ": " + error->message);
@@ -319,7 +341,8 @@ struct Tenant {
           compiler(std::make_shared<ProgramCompiler>(registry, ProgramCompilerConfig{build_id})),
           catalog(std::make_shared<ProgramCatalog>(CatalogConfig{
               store->programs, registry, std::make_shared<EngineGenerationCache>(), build_id})) {
-        const auto descriptor_policy_digest = digest(std::string(descriptor_policy->identity()));
+        // The whole admitted policy, catalogue included: changed model facts need a new session.
+        const auto descriptor_policy_digest = digest(descriptor_policy->content_digest_hex());
         data = store->load(owner);
         if (data.is_null()) {
             data = {{"schema", "neograph.program-chat/v6"},

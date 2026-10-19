@@ -119,10 +119,10 @@ TEST_P(LiveAdapter, OpenRouterChatKeepsGeneratedImages) {
     std::size_t images = 0;
     for (const auto& message : completion.messages)
         for (const auto& part : message.parts)
-            if (const auto* opaque = std::get_if<sp::Opaque>(&part); opaque && opaque->wire_type == "images") {
+            if (const auto* media = std::get_if<sp::Media>(&part); media && media->kind == sp::MediaKind::Image) {
                 ++images;
-                EXPECT_EQ(opaque->wire_metadata->root().get("image").get("image_url").get("url").as_string()
-                              .rfind("data:image/", 0), 0u);
+                EXPECT_EQ(media->mime.rfind("image/", 0), 0u);
+                EXPECT_TRUE(media->data && !media->data->empty());
             }
     EXPECT_GT(images, 0u);
 }
@@ -160,11 +160,8 @@ TEST_P(LiveAdapter, GeminiGeneratedImage) {
     std::size_t encoded = 0;
     for (const auto& message : completion.messages)
         for (const auto& part : message.parts)
-            if (const auto* opaque = std::get_if<sp::Opaque>(&part); opaque && opaque->wire_type == "inlineData") {
-                auto root = opaque->wire_metadata->root();
-                auto data = root.get("inlineData").valid() ? root.get("inlineData") : root.get("part").get("inlineData");
-                if (data.get("data").is_string()) encoded += data.get("data").as_string().size();
-            }
+            if (const auto* media = std::get_if<sp::Media>(&part); media && media->data)
+                encoded += media->data->size();
     EXPECT_GT(encoded, 10000u);
 }
 

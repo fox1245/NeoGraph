@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1511e4163bfc40cf6044fe858e025f9409147eac4b3a9c943a9fef4b8c1dc983 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 变更日志
 
@@ -13,6 +13,22 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 变更
+- **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。在 SchemaProvider 0.4.0 发布之前，构建固定在其 `main` 分支（包版本 0.3.0）；0.16.0 发布前会改为 0.4.0 正式版。
+  - **行为变更：带类型的媒体。** `sp::Image` 变为 `sp::Media`：图像、音频、视频或文档，可以是内联数据，也可以位于 URL 或 provider 文件中。`ChatMessage::image_urls` 仍把内联图像投影为 data URL，现在也投影 URL 图像；`portable_message` 把 https 条目作为由 provider 获取的 URL 媒体发送。生成的图像（Chat 的 `message.images`、Responses 的 `image_generation_call`、Gemini 的 `inlineData`）是 `Media` 部件而不是 `Opaque` 部件；其 wire 条目保留在 native 输出中。
+  - **Provider outcome 格式 v3。** `neograph.provider-outcome/v3` 和 `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）增加了媒体部件、文本引用、带类型的工具结果内容、错误的 `reason` 和实际响应的 `model`。v2 格式的记录（Program 日志、检查点、运行时历史）仍可读取：图像部件变为内联图像媒体，新成员为空。新记录以 v3 写入，NeoGraph 0.15 无法读取。
+  - **运行时历史记录**的存储版本为 3。版本 2 的记录按其存储的字节和 id 读取，因此 feed 的 predecessor 链不变。Program provider 日志的行保留写入时的 digest 域。
+  - **行为变更：0.15 的 native 历史不再重放。** interface 7 改变了每个策略 identity，因此继续使用 0.15 封存的 native 历史会得到 `ReplayIneligible`。可移植历史不受影响。
+  - **模型信息是目录数据。** descriptor 策略不再有 `models` 列表；模型上限和按模型的默认值是 SDK 模型目录的条目（`sp::descriptor::load_catalogue`、`merge_catalogues`、`DescriptorPolicy::with_catalogue`）。cookbook 聊天机器人接受 `--model-catalogue PATH`，以 `demo-models.json` 取代 `demo-policy.json`，会话绑定包含目录在内的策略 content digest。
+  - **Python。** `ProviderMedia` 取代 `ProviderImage`：有 `ProviderMedia.image(...)`、`.audio`、`.video`、`.document`、`.url` 和 `.file`，以及 `kind`、`source`、`mime`、`data`、`reference`、`name`、`detail`、`id`、`transcript` 和枚举 `ProviderMediaKind`、`ProviderMediaSource`。新增：`Text.citations`（`ProviderCitation`）、`ProviderToolResult.content_parts`、`ProviderError.reason`、`ProviderCompletion.model` 和 `ProviderPartialCompletion.model`（`ProviderServedModel`、`ProviderServedRelation`）、`ProviderPartHeader.media`、`ProviderPartSeal.citations`、`ProviderStopKind.Pending` 和 `Compaction`、`ProviderPartKind.Media` 以及 `ProviderCostRounding.CeilingCatalogueProduct`。`load_provider_policy` 接受叠加在内置目录之上的可选 `model_catalogue_json`，`provider_model_catalogue_json()` 返回内置目录。
+  - 请用相互匹配的 interface 7 头文件和库，一起重新构建 NeoGraph、C++ 使用方和 Python 扩展。
+- **内置图和节点发送调用方的模型、采样和 token 设置，而不是某一家厂商的 (#521)。** 拒绝 `temperature` 的模型（`gpt-5*`、`o3`、Claude 4.7 及以后）在 deep research 图的每个步骤、intent classifier、历史摘要器和 Harness provider worker 中都会在 prepare 时失败。
+  - **行为变更：`DeepResearchConfig::model` 为必填项。** 它原先默认为 `claude-sonnet-4-5`；现在为空时 `create_deep_research_graph` 抛出 `std::invalid_argument`。
+  - **Deep research 的设置是配置项。** `DeepResearchConfig::controls` 保存每个步骤发送的内容（只发送已设置的成员）。各步骤的输出上限是字段（`brief_max_output_tokens`、`clarify_…`、`supervisor_…`、`researcher_…`、`compress_…`、`report_…`，默认值为原来的值），空回答重试所请求的最大上限（`max_output_budget`，16384）和模型步骤的节点重试策略（`retry`，与之前相同：在 15 秒和 30 秒后各重试一次；brief 和 clarify 步骤现在也使用它）也是字段。没有任何步骤自行发送 temperature。
+  - **行为变更：brief 和 clarify 步骤会报告 provider 失败。** 以前它们捕获失败并继续使用原始查询，因此错误的模型 id 或被拒绝的参数会悄无声息地降低运行质量。
+  - **行为变更：不再有固定的 temperature 或分类器上限。** intent classifier 发送节点上下文的 `provider_controls`，而不是 `temperature = 0` 和 `max_output_tokens = 20`（推理模型会在作答前用光）。`default_summary_controls()` 保留 500 token 上限，不再发送 `temperature = 0.2`。Harness provider worker 不再发送 `temperature = 0`。
+  - **Harness 转换上限由宿主决定。** `HarnessTranslationDefaults` 曾拒绝超过 600 的 `provider_timeout_seconds` 和超过 128,000 的 `max_output_tokens`。现在宿主的值就是上限，最大 86,400 秒和 2^32 − 1 个 token。
 
 ## [0.15.1] - 2026-10-19
 

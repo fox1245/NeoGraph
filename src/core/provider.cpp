@@ -808,9 +808,9 @@ std::optional<std::uint64_t> Provider::conservative_token_upper_bound(const Prep
     const auto* descriptor = request.impl_->prepared.descriptor();
     const auto possible = invocation_upper_bound(request);
     if (!descriptor || !possible) return {};
-    const auto input = descriptor->policy()->input_limit(request.family(), request.model());
+    const auto input = descriptor->policy()->input_limit(request.family(), descriptor->base_url(), request.model());
     const auto output = request.max_output_tokens() ? request.max_output_tokens()
-        : descriptor->policy()->output_limit(request.family(), request.model());
+        : descriptor->policy()->output_limit(request.family(), descriptor->base_url(), request.model());
     if (!input || !output || *output > std::numeric_limits<std::uint64_t>::max() - *input) return {};
     const auto per_invocation = *input + *output;
     if (per_invocation > std::numeric_limits<std::uint64_t>::max() / *possible) return {};

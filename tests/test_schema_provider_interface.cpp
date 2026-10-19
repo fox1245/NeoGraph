@@ -36,20 +36,10 @@ sp::descriptor::ValidatedDescriptor cost_descriptor(std::string family, const st
                                                     bool usd = true) {
     if (!usd) return test::descriptor(std::move(family), origin);
     auto policy = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (auto row : policy.at("families")) {
-        if (row.at("family") == family) {
-            row.at("openrouter_origins").push_back(origin);
-            defaults = row.at("defaults");
-        }
-    }
-    policy.at("models").push_back({{"family", family}, {"model", "fixture-model"},
-        {"defaults", std::move(defaults)}, {"output_limit", 64}, {"input_limit", 100}});
-    auto admitted = sp::descriptor::load_policy(policy.dump(), sp::config_defaults::codec_defaults_json);
-    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::runtime_error(error->pointer + ": " + error->message);
-    return test::descriptor(std::move(family), origin,
-        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted)));
+    for (auto row : policy.at("families"))
+        if (row.at("family") == family) row.at("openrouter_origins").push_back(origin);
+    auto admitted = test::policy_with_models(policy, {{family, "fixture-model", 100, 64}});
+    return test::descriptor(std::move(family), origin, std::move(admitted));
 }
 sp::runtime::Options runtime_options() {
     sp::runtime::Options options;
@@ -138,7 +128,7 @@ public:
         SECURITY_ATTRIBUTES attributes{sizeof(SECURITY_ATTRIBUTES), &security.descriptor, FALSE};
 #endif
         for (unsigned attempt = 0; attempt != 100; ++attempt) {
-            root_ = neograph::graph::test_support::unique_temp_path("ng-interface6-");
+            root_ = neograph::graph::test_support::unique_temp_path("ng-interface-");
 #ifdef _WIN32
             if (::CreateDirectoryW(root_.c_str(), &attributes)) return;
             const auto error = ::GetLastError();
@@ -208,12 +198,12 @@ private:
 };
 } // namespace
 
-TEST(SchemaProviderInterface6, LinkedAbiGateAdmitsRealPreparedDispatch) {
-    EXPECT_EQ(sp::core_interface_contract().revision, 6U);
-    EXPECT_EQ(sp::codec_interface_revision(), 6U);
-    EXPECT_EQ(sp::runtime::interface_contract().revision, 6U);
-    EXPECT_NO_THROW(sp::runtime::require_interface_contract(6, sp::capability::RequiredProvider));
-    EXPECT_THROW(sp::runtime::require_interface_contract(5, sp::capability::RequiredProvider),
+TEST(SchemaProviderInterface, LinkedAbiGateAdmitsRealPreparedDispatch) {
+    EXPECT_EQ(sp::core_interface_contract().revision, 7U);
+    EXPECT_EQ(sp::codec_interface_revision(), 7U);
+    EXPECT_EQ(sp::runtime::interface_contract().revision, 7U);
+    EXPECT_NO_THROW(sp::runtime::require_interface_contract(7, sp::capability::RequiredProvider));
+    EXPECT_THROW(sp::runtime::require_interface_contract(6, sp::capability::RequiredProvider),
                  sp::runtime::InterfaceContractError);
     // The linked library sends OpenRouterRouting::max_price, which the Program
     // monetary binding pins (#372); NeoGraph's handshakes require the bit.
@@ -226,7 +216,7 @@ TEST(SchemaProviderInterface6, LinkedAbiGateAdmitsRealPreparedDispatch) {
     EXPECT_EQ(test::text(result), "pong");
 }
 
-TEST(SchemaProviderInterface6, MissingCostsKeepOldCanonicalUsageBytesAndZeroIsEvidence) {
+TEST(SchemaProviderInterface, MissingCostsKeepOldCanonicalUsageBytesAndZeroIsEvidence) {
     wire::Peer peer(wire::responses_body());
     auto descriptor = cost_descriptor("openai.responses", peer.origin());
     auto provider = llm::SchemaProvider::create(descriptor, runtime_options());
@@ -289,7 +279,7 @@ TEST(SchemaProviderInterface6, MissingCostsKeepOldCanonicalUsageBytesAndZeroIsEv
     EXPECT_FALSE(provider_failure_proves_not_sent(contradictory));
 }
 
-TEST(SchemaProviderInterface6, StoredUsdAmountsDecodeBothRoundingContracts) {
+TEST(SchemaProviderInterface, StoredUsdAmountsDecodeBothRoundingContracts) {
     namespace codec = neograph::provider_codec::detail;
     // Records written before the shortest-decimal contract carry rounding 0 and keep decoding.
     const auto legacy = codec::parse_usd_amount(json{{"nano_usd", 1501}, {"evidence", 0}, {"rounding", 0}});
@@ -299,16 +289,20 @@ TEST(SchemaProviderInterface6, StoredUsdAmountsDecodeBothRoundingContracts) {
     ASSERT_TRUE(current);
     EXPECT_EQ(current->rounding, sp::CostRounding::CeilingShortestDecimal);
     EXPECT_EQ(codec::usd_amount(current), (json{{"nano_usd", 1500}, {"evidence", 0}, {"rounding", 1}}));
-    EXPECT_THROW(codec::parse_usd_amount(json{{"nano_usd", 1}, {"evidence", 0}, {"rounding", 2}}), std::runtime_error);
+    // Catalogue estimates round once over the exact product (interface 7).
+    const auto estimate = codec::parse_usd_amount(json{{"nano_usd", 7}, {"evidence", 1}, {"rounding", 2}});
+    ASSERT_TRUE(estimate);
+    EXPECT_EQ(estimate->rounding, sp::CostRounding::CeilingCatalogueProduct);
+    EXPECT_THROW(codec::parse_usd_amount(json{{"nano_usd", 1}, {"evidence", 0}, {"rounding", 3}}), std::runtime_error);
 }
 
-TEST(SchemaProviderInterface6, EveryMonetaryFieldStatusSurvivesObservationAndTrustedArchive) {
+TEST(SchemaProviderInterface, EveryMonetaryFieldStatusSurvivesObservationAndTrustedArchive) {
     wire::Peer peer(wire::responses_body());
     auto descriptor = cost_descriptor("openai.responses", peer.origin());
     auto provider = llm::SchemaProvider::create(descriptor, runtime_options());
     ArchiveDirectory directory;
     auto archive = archive_activation(sp::NativeArchive::provision(
-        directory.records(), directory.key(), "interface6-owner", descriptor));
+        directory.records(), directory.key(), "interface-owner", descriptor));
     constexpr std::array<const char*, 4> names{
         "cost", "upstream_inference_cost", "upstream_inference_input_cost", "upstream_inference_output_cost"};
     struct Case { const char* amount; sp::CostStatus status; std::uint64_t nanos; };
@@ -357,14 +351,14 @@ TEST(SchemaProviderInterface6, EveryMonetaryFieldStatusSurvivesObservationAndTru
     auto stored = provider_codec::encode_outcome(*conflict, archive, "reopen");
     archive.reset();
     archive = archive_activation(sp::NativeArchive::open(
-        directory.records(), directory.key(), "interface6-owner", descriptor));
+        directory.records(), directory.key(), "interface-owner", descriptor));
     EXPECT_EQ(provider_codec::observe_outcome(*provider_codec::decode_outcome(stored, archive, "reopen")),
               provider_codec::observe_outcome(*conflict));
     stored["usage"]["provider_cost"]["is_byok"] = true;
     EXPECT_THROW(provider_codec::decode_outcome(stored, archive, "reopen"), std::runtime_error);
 }
 
-TEST(SchemaProviderInterface6, UnknownCurrencyAndMalformedByokRemainTypedEvidence) {
+TEST(SchemaProviderInterface, UnknownCurrencyAndMalformedByokRemainTypedEvidence) {
     wire::Peer peer(response_with_usage(json::parse(R"({"cost":0,"is_byok":false,"cost_details":{"upstream_inference_cost":0,"upstream_inference_input_cost":0,"upstream_inference_output_cost":0}})")).dump());
     auto provider = wire::provider("openai.responses", peer.origin());
     const auto result = prepared_run(*provider, "openai.responses");
@@ -398,7 +392,7 @@ TEST(SchemaProviderInterface6, UnknownCurrencyAndMalformedByokRemainTypedEvidenc
     expect_archive_roundtrip(malformed, malformed_archive, "malformed-byok");
 }
 
-TEST(SchemaProviderInterface6, ResponsesFinalSnapshotDoesNotRetainEarlierCostEvidence) {
+TEST(SchemaProviderInterface, ResponsesFinalSnapshotDoesNotRetainEarlierCostEvidence) {
     auto initial = response_with_usage({{"cost", 4e-6}, {"is_byok", false}});
     initial["status"] = "in_progress";
     initial["output"] = json::array();
@@ -418,7 +412,7 @@ TEST(SchemaProviderInterface6, ResponsesFinalSnapshotDoesNotRetainEarlierCostEvi
     expect_usage_roundtrip(completion.usage);
 }
 
-TEST(SchemaProviderInterface6, PartialFailureRetainsCostsWithoutRefundingUnknownTokens) {
+TEST(SchemaProviderInterface, PartialFailureRetainsCostsWithoutRefundingUnknownTokens) {
     auto initial = response_with_usage({{"cost", 0}, {"is_byok", false}});
     initial["status"] = "in_progress";
     initial["output"] = json::array();
@@ -453,7 +447,7 @@ TEST(SchemaProviderInterface6, PartialFailureRetainsCostsWithoutRefundingUnknown
     expect_archive_roundtrip(result, archive, "partial-call");
 }
 
-TEST(SchemaProviderInterface6, ThinBlockingWrappersRejectRuntimeCallbackWorkerReentry) {
+TEST(SchemaProviderInterface, ThinBlockingWrappersRejectRuntimeCallbackWorkerReentry) {
     wire::Peer peer(wire::chat_response());
     { std::lock_guard lock(peer.state->mutex); peer.state->hold = true; }
     sp::runtime::Client client(test::descriptor("openai.chat", peer.origin()), runtime_options());
@@ -493,7 +487,7 @@ TEST(SchemaProviderInterface6, ThinBlockingWrappersRejectRuntimeCallbackWorkerRe
     EXPECT_EQ(peer.state->entered, 3U) << "rejected callback wrappers must not issue HTTP requests";
 }
 
-TEST(SchemaProviderInterface6, ResponseDoneAliasRequiresFullTerminalResponsesEnvelope) {
+TEST(SchemaProviderInterface, ResponseDoneAliasRequiresFullTerminalResponsesEnvelope) {
     wire::Peer peer("", true);
     auto provider = wire::provider("openai.responses", peer.origin());
     for (const auto& status : {"completed", "incomplete"}) {
@@ -539,7 +533,7 @@ TEST(SchemaProviderInterface6, ResponseDoneAliasRequiresFullTerminalResponsesEnv
     }
 }
 
-TEST(SchemaProviderInterface6, ChatTerminalUsageTailIsIdempotentAndNeverReopensOutput) {
+TEST(SchemaProviderInterface, ChatTerminalUsageTailIsIdempotentAndNeverReopensOutput) {
     auto tail = wire::chat_frame({{"choices", json::array({{{"index", 0},
         {"delta", {{"content", ""}, {"role", "assistant"}}}, {"finish_reason", "stop"}}})},
         {"usage", {{"prompt_tokens", 3}, {"completion_tokens", 2}, {"total_tokens", 5}, {"cost", 0}, {"is_byok", false}}}});
@@ -571,7 +565,7 @@ TEST(SchemaProviderInterface6, ChatTerminalUsageTailIsIdempotentAndNeverReopensO
     }
 }
 
-TEST(SchemaProviderInterface6, GeminiOtherIsUnknownWhileImageSafetyAndMalformedCallStayNormalized) {
+TEST(SchemaProviderInterface, GeminiOtherIsUnknownWhileImageSafetyAndMalformedCallStayNormalized) {
     wire::Peer peer("");
     auto provider = wire::provider("google.generate", peer.origin());
     for (const auto& raw : {"OTHER", "MALFORMED_FUNCTION_CALL", "IMAGE_SAFETY"}) {
@@ -602,7 +596,7 @@ TEST(SchemaProviderInterface6, GeminiOtherIsUnknownWhileImageSafetyAndMalformedC
 
 // Responses keeps one atomic native replay group, but its typed parts and native
 // output items must preserve commentary -> function call -> final answer order.
-TEST(SchemaProviderInterface6, ResponsesCommentaryToolFinalAnswerRetainIdentityPhaseAndOrder) {
+TEST(SchemaProviderInterface, ResponsesCommentaryToolFinalAnswerRetainIdentityPhaseAndOrder) {
     for (const auto mode : {ProviderMode::Collect, ProviderMode::Stream}) {
         SCOPED_TRACE(mode == ProviderMode::Stream ? "native SSE" : "buffered");
         const json commentary{{"id", "msg-commentary"}, {"type", "message"},
@@ -767,7 +761,7 @@ TEST(SchemaProviderInterface6, ResponsesCommentaryToolFinalAnswerRetainIdentityP
     }
 }
 
-TEST(SchemaProviderInterface6, ResponsesRefusalRemainsTypedThroughObservationArchiveAndReplay) {
+TEST(SchemaProviderInterface, ResponsesRefusalRemainsTypedThroughObservationArchiveAndReplay) {
     for (const auto mode : {ProviderMode::Collect, ProviderMode::Stream}) {
         SCOPED_TRACE(mode == ProviderMode::Stream ? "native SSE" : "buffered");
         const json refusal_part{{"type", "refusal"}, {"refusal", "I cannot provide that instruction."}};

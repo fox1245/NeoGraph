@@ -26,7 +26,10 @@ std::shared_ptr<const sp::json::Document> document_from(py::object value) {
 struct NativeReplayView { std::shared_ptr<const sp::NativeReplay> value; };
 struct NativeContextView { std::shared_ptr<const sp::NativeContext> value; };
 struct OwnedDelta { sp::LocalId part; sp::PartKind kind; std::string bytes; sp::DeltaChannel channel; };
-struct OwnedSeal { sp::LocalId part; std::optional<std::string> snapshot; std::shared_ptr<const sp::json::Document> wire_metadata; };
+struct OwnedSeal {
+    sp::LocalId part; std::optional<std::string> snapshot; std::shared_ptr<const sp::json::Document> wire_metadata;
+    std::vector<sp::Citation> citations;
+};
 using OwnedEventValue = std::variant<sp::Begin, sp::MessageBegin, sp::PartBegin,
     OwnedDelta, OwnedSeal, sp::MessageSeal, sp::UsageUpdate, sp::Stop, sp::Commit,
     sp::Fail, sp::RawWire, sp::ResponseEnvelope>;
@@ -37,7 +40,8 @@ struct OwnedEvent {
         if constexpr (std::is_same_v<T, sp::PartDelta>)
             return OwnedDelta{item.part, item.payload.kind, std::string(item.payload.bytes), item.payload.channel};
         else if constexpr (std::is_same_v<T, sp::PartSeal>)
-            return OwnedSeal{item.part, item.snapshot ? std::optional<std::string>{std::string(*item.snapshot)} : std::nullopt, item.wire_metadata};
+            return OwnedSeal{item.part, item.snapshot ? std::optional<std::string>{std::string(*item.snapshot)} : std::nullopt,
+                             item.wire_metadata, item.citations};
         else return item;
     }, event)) {}
 };
@@ -66,7 +70,7 @@ py::object provider_observer_function(const std::function<void(const sp::Event&)
             else if constexpr (std::is_same_v<T, OwnedSeal>)
                 return sp::PartSeal{item.part,
                     item.snapshot ? std::optional<std::string_view>{*item.snapshot} : std::nullopt,
-                    item.wire_metadata};
+                    item.wire_metadata, item.citations};
             else return item;
         }, owned.value);
         py::gil_scoped_release release;
@@ -138,6 +142,8 @@ void init_provider_values(py::module_& m) {
         .value("ContextLimit", sp::StopKind::ContextLimit)
         .value("MalformedCall", sp::StopKind::MalformedCall)
         .value("Unknown", sp::StopKind::Unknown)
+        .value("Pending", sp::StopKind::Pending)
+        .value("Compaction", sp::StopKind::Compaction)
         ;
     py::enum_<sp::ErrorKind>(m, "ProviderErrorKind")
         .value("InvalidConfig", sp::ErrorKind::InvalidConfig)
@@ -188,13 +194,44 @@ void init_provider_values(py::module_& m) {
         .value("Reasoning", sp::PartKind::Reasoning)
         .value("Opaque", sp::PartKind::Opaque)
         .value("Thought", sp::PartKind::Thought)
+        .value("Media", sp::PartKind::Media)
+        ;
+    py::enum_<sp::MediaKind>(m, "ProviderMediaKind")
+        .value("Image", sp::MediaKind::Image)
+        .value("Audio", sp::MediaKind::Audio)
+        .value("Video", sp::MediaKind::Video)
+        .value("Document", sp::MediaKind::Document)
+        ;
+    py::enum_<sp::MediaSource>(m, "ProviderMediaSource")
+        .value("Inline", sp::MediaSource::Inline)
+        .value("Url", sp::MediaSource::Url)
+        .value("File", sp::MediaSource::File)
+        ;
+    py::enum_<sp::ServedRelation>(m, "ProviderServedRelation")
+        .value("NotReported", sp::ServedRelation::NotReported)
+        .value("Exact", sp::ServedRelation::Exact)
+        .value("Snapshot", sp::ServedRelation::Snapshot)
+        .value("Listed", sp::ServedRelation::Listed)
+        .value("Routed", sp::ServedRelation::Routed)
+        .value("Unexplained", sp::ServedRelation::Unexplained)
         ;
     py::enum_<sp::DeltaChannel>(m, "ProviderDeltaChannel")
         .value("Content", sp::DeltaChannel::Content)
         .value("Signature", sp::DeltaChannel::Signature)
         ;
+    auto cCitation = py::class_<sp::Citation>(m, "ProviderCitation");
+    cCitation.def_readonly("kind", &sp::Citation::kind);
+    cCitation.def_readonly("url", &sp::Citation::url);
+    cCitation.def_readonly("title", &sp::Citation::title);
+    cCitation.def_readonly("file_id", &sp::Citation::file_id);
+    cCitation.def_readonly("filename", &sp::Citation::filename);
+    cCitation.def_readonly("start", &sp::Citation::start);
+    cCitation.def_readonly("end", &sp::Citation::end);
+    cCitation.def_property_readonly("raw", [](const sp::Citation& v) { return document_view(v.raw); });
     auto cText = py::class_<sp::Text>(m, "Text").def(py::init<>());
     cText.def_readwrite("value", &sp::Text::value);
+    // The sources the answer cites, read from the wire; not part of the native seal.
+    cText.def_property_readonly("citations", [](const sp::Text& v) { return v.citations; });
     auto cRefusal = py::class_<sp::Refusal>(m, "Refusal").def(py::init<>());
     cRefusal.def_readwrite("text", &sp::Refusal::text);
     cRefusal.def_readwrite("raw_code", &sp::Refusal::raw_code);
@@ -229,6 +266,9 @@ void init_provider_values(py::module_& m) {
     cToolResult.def_readwrite("is_error", &sp::ToolResult::is_error);
     cToolResult.def_property("host", [](const sp::ToolResult& v) { return v.host; },
         [](sp::ToolResult& v, std::optional<sp::ToolResultHostMetadata> host) { v.host = std::move(host); });
+    // Ordered typed output (Text, ProviderMedia, Opaque); keep `content` empty when this is set.
+    cToolResult.def_property("content_parts", [](const sp::ToolResult& v) { return v.content_parts; },
+        [](sp::ToolResult& v, std::vector<std::variant<sp::Text, sp::Media, sp::Opaque>> parts) { v.content_parts = std::move(parts); });
     auto cReasoning = py::class_<sp::Reasoning>(m, "Reasoning").def(py::init<>());
     cReasoning.def_readwrite("id", &sp::Reasoning::id);
     cReasoning.def_readwrite("summary", &sp::Reasoning::summary);
@@ -250,15 +290,50 @@ void init_provider_values(py::module_& m) {
     cInvalidToolCall.def_property("wire_metadata", [](const sp::InvalidToolCall& v) { return document_view(v.wire_metadata); }, [](sp::InvalidToolCall& v, py::object x) { v.wire_metadata = document_from(x); });
     cServerToolResult.def_property("content", [](const sp::ServerToolResult& v) { return document_view(v.content); }, [](sp::ServerToolResult& v, py::object x) { v.content = document_from(x); });
     cOpaque.def_property("wire_metadata", [](const sp::Opaque& v) { return document_view(v.wire_metadata); }, [](sp::Opaque& v, py::object x) { v.wire_metadata = document_from(x); });
-    py::class_<sp::Image>(m, "ProviderImage")
-        .def(py::init([](std::string mime, std::string data, sp::ImageDetail detail) {
-            sp::Image image{std::move(mime), std::make_shared<const std::string>(std::move(data)), detail};
-            if (!sp::valid_image(image)) throw py::value_error("Invalid inline provider image");
-            return image;
-        }), py::arg("mime"), py::arg("data"), py::arg("detail") = sp::ImageDetail::Auto)
-        .def_readonly("mime", &sp::Image::mime)
-        .def_readonly("detail", &sp::Image::detail)
-        .def_property_readonly("data", [](const sp::Image& v) -> py::object { return v.data ? py::cast(*v.data) : py::none(); });
+    // Inline media is canonical base64; a Url or File source names a location or provider file.
+    const auto checked = [](sp::Media media) {
+        const auto limit = media.kind == sp::MediaKind::Image ? sp::config_defaults::codec_resources_image_decoded_bytes
+            : media.kind == sp::MediaKind::Audio ? sp::config_defaults::codec_resources_audio_decoded_bytes
+            : media.kind == sp::MediaKind::Video ? sp::config_defaults::codec_resources_video_decoded_bytes
+            : sp::config_defaults::codec_resources_document_decoded_bytes;
+        if (const auto fault = sp::check_media(media, limit); fault != sp::MediaFault::None)
+            throw py::value_error(std::string("Invalid provider media: ") + sp::media_fault_name(fault));
+        return media;
+    };
+    py::class_<sp::Media>(m, "ProviderMedia")
+        .def(py::init([checked](sp::MediaKind kind, std::string mime, std::string data, sp::ImageDetail detail, std::string name) {
+            auto media = sp::Media::inline_data(kind, std::move(mime), std::make_shared<const std::string>(std::move(data)));
+            media.detail = detail;
+            media.name = std::move(name);
+            return checked(std::move(media));
+        }), py::arg("kind"), py::arg("mime"), py::arg("data"), py::arg("detail") = sp::ImageDetail::Auto, py::arg("name") = "")
+        .def_static("image", [checked](std::string mime, std::string data, sp::ImageDetail detail) {
+            return checked(sp::Media::image(std::move(mime), std::make_shared<const std::string>(std::move(data)), detail));
+        }, py::arg("mime"), py::arg("data"), py::arg("detail") = sp::ImageDetail::Auto)
+        .def_static("audio", [checked](std::string mime, std::string data) {
+            return checked(sp::Media::audio(std::move(mime), std::make_shared<const std::string>(std::move(data))));
+        }, py::arg("mime"), py::arg("data"))
+        .def_static("video", [checked](std::string mime, std::string data) {
+            return checked(sp::Media::video(std::move(mime), std::make_shared<const std::string>(std::move(data))));
+        }, py::arg("mime"), py::arg("data"))
+        .def_static("document", [checked](std::string mime, std::string data, std::string name) {
+            return checked(sp::Media::document(std::move(mime), std::make_shared<const std::string>(std::move(data)), std::move(name)));
+        }, py::arg("mime"), py::arg("data"), py::arg("name") = "")
+        .def_static("url", [checked](sp::MediaKind kind, std::string location, std::string mime) {
+            return checked(sp::Media::url(kind, std::move(location), std::move(mime)));
+        }, py::arg("kind"), py::arg("location"), py::arg("mime") = "")
+        .def_static("file", [checked](sp::MediaKind kind, std::string provider_id, std::string mime) {
+            return checked(sp::Media::file(kind, std::move(provider_id), std::move(mime)));
+        }, py::arg("kind"), py::arg("provider_id"), py::arg("mime") = "")
+        .def_readonly("kind", &sp::Media::kind)
+        .def_readonly("mime", &sp::Media::mime)
+        .def_readonly("source", &sp::Media::source)
+        .def_property_readonly("data", [](const sp::Media& v) -> py::object { return v.data ? py::cast(*v.data) : py::none(); })
+        .def_readonly("reference", &sp::Media::reference)
+        .def_readonly("name", &sp::Media::name)
+        .def_readonly("detail", &sp::Media::detail)
+        .def_readonly("id", &sp::Media::id)
+        .def_readonly("transcript", &sp::Media::transcript);
     py::class_<NativeReplayView>(m, "NativeReplay")
         .def_property_readonly("complete", [](const NativeReplayView& v) { return v.value->complete(); });
     py::class_<NativeContextView>(m, "NativeContext")
@@ -295,7 +370,8 @@ void init_provider_values(py::module_& m) {
         .value("Conflict", sp::CostStatus::Conflict);
     py::enum_<sp::CostRounding>(m, "ProviderCostRounding")
         .value("CeilingParsedBinary64", sp::CostRounding::CeilingParsedBinary64)
-        .value("CeilingShortestDecimal", sp::CostRounding::CeilingShortestDecimal);
+        .value("CeilingShortestDecimal", sp::CostRounding::CeilingShortestDecimal)
+        .value("CeilingCatalogueProduct", sp::CostRounding::CeilingCatalogueProduct);
     py::class_<sp::UsdAmount>(m, "ProviderUsdAmount")
         .def_readonly("nano_usd", &sp::UsdAmount::nano_usd)
         .def_readonly("evidence", &sp::UsdAmount::evidence)
@@ -339,13 +415,20 @@ void init_provider_values(py::module_& m) {
     cError.def_readonly("http_status", &sp::Error::http_status);
     cError.def_readonly("vendor_code", &sp::Error::vendor_code);
     cError.def_readonly("attempt", &sp::Error::attempt);
+    // The SDK check that failed ("request.chat.temperature_prohibited"); empty for transport and HTTP failures.
+    cError.def_readonly("reason", &sp::Error::reason);
     auto cStopReason = py::class_<sp::StopReason>(m, "ProviderStopReason");
     cStopReason.def_readonly("kind", &sp::StopReason::kind);
     cStopReason.def_readonly("raw", &sp::StopReason::raw);
     cStopReason.def_readonly("sequence", &sp::StopReason::sequence);
     auto cRawWire = py::class_<sp::RawWire>(m, "ProviderRawWire");
     cRawWire.def_readonly("type", &sp::RawWire::type);
+    auto cServedModel = py::class_<sp::ServedModel>(m, "ProviderServedModel");
+    cServedModel.def_readonly("requested", &sp::ServedModel::requested);
+    cServedModel.def_readonly("served", &sp::ServedModel::served);
+    cServedModel.def_readonly("relation", &sp::ServedModel::relation);
     auto cCompletion = py::class_<sp::Completion>(m, "ProviderCompletion");
+    cCompletion.def_readonly("model", &sp::Completion::model);
     cCompletion.def_property_readonly("messages", [](const sp::Completion& v) { return v.messages; });
     cCompletion.def_readonly("stop", &sp::Completion::stop);
     cCompletion.def_readonly("usage", &sp::Completion::usage);
@@ -354,6 +437,7 @@ void init_provider_values(py::module_& m) {
     auto cPartialCompletion = py::class_<sp::PartialCompletion>(m, "ProviderPartialCompletion");
     cPartialCompletion.def_property_readonly("messages", [](const sp::PartialCompletion& v) { return v.messages; });
     cPartialCompletion.def_readonly("usage", &sp::PartialCompletion::usage);
+    cPartialCompletion.def_readonly("model", &sp::PartialCompletion::model);
     cPartialCompletion.def_readonly("stop", &sp::PartialCompletion::stop);
     cPartialCompletion.def_property_readonly("raw_events", [](const sp::PartialCompletion& v) { return v.raw_events; });
     auto cFailure = py::class_<sp::Failure>(m, "ProviderFailure");
@@ -377,6 +461,8 @@ void init_provider_values(py::module_& m) {
     ePartHeader.def_readonly("name", &sp::PartHeader::name);
     ePartHeader.def_readonly("tool_kind", &sp::PartHeader::tool_kind);
     ePartHeader.def_readonly("wire_type", &sp::PartHeader::wire_type);
+    // A media part's kind, MIME, source and identity; its inline bytes arrive as deltas.
+    ePartHeader.def_readonly("media", &sp::PartHeader::media);
     auto eBegin = py::class_<sp::Begin>(m, "ProviderBegin");
     eBegin.def_readonly("generation", &sp::Begin::generation);
     auto eMessageBegin = py::class_<sp::MessageBegin>(m, "ProviderMessageBegin");
@@ -409,6 +495,7 @@ void init_provider_values(py::module_& m) {
         .def_readonly("bytes", &OwnedDelta::bytes).def_readonly("channel", &OwnedDelta::channel);
     py::class_<OwnedSeal>(m, "ProviderPartSeal")
         .def_readonly("part", &OwnedSeal::part).def_readonly("snapshot", &OwnedSeal::snapshot)
+        .def_readonly("citations", &OwnedSeal::citations)
         .def_property_readonly("wire_metadata", [](const OwnedSeal& v) { return document_view(v.wire_metadata); });
     py::class_<OwnedEvent>(m, "ProviderEvent")
         .def_property_readonly("kind", [](const OwnedEvent& v) {

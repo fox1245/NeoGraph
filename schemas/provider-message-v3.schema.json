@@ -1,0 +1,639 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/provider-message-v3.schema.json",
+  "title": "NeoGraph full provider message projection v3",
+  "description": "Full ordered data projection only. The native boolean cannot grant replay authority; authenticated host archive custody is verified independently. v3 adds media parts (in place of v2 image parts), text citations and typed tool result content; v2 records are read as v3.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "role",
+    "parts",
+    "native",
+    "wire_output"
+  ],
+  "properties": {
+    "schema": {
+      "const": "neograph.provider-message/v3"
+    },
+    "id": {
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    "parts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/text"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "text",
+              "raw_code"
+            ],
+            "properties": {
+              "type": {
+                "const": "refusal"
+              },
+              "text": {
+                "type": "string"
+              },
+              "raw_code": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "name",
+              "kind",
+              "input",
+              "wire_type",
+              "wire_metadata"
+            ],
+            "properties": {
+              "type": {
+                "const": "tool_call"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  0,
+                  1,
+                  2
+                ]
+              },
+              "input": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "wire_metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "name",
+              "kind",
+              "raw_fragment",
+              "reason",
+              "wire_type",
+              "wire_metadata"
+            ],
+            "properties": {
+              "type": {
+                "const": "invalid_tool_call"
+              },
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  0,
+                  1,
+                  2
+                ]
+              },
+              "raw_fragment": {
+                "type": "string"
+              },
+              "reason": {
+                "enum": [
+                  0,
+                  1,
+                  2,
+                  3,
+                  4,
+                  5
+                ]
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "wire_metadata": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "text",
+              "signature"
+            ],
+            "properties": {
+              "type": {
+                "const": "thinking"
+              },
+              "text": {
+                "type": "string"
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "data"
+            ],
+            "properties": {
+              "type": {
+                "const": "redacted_thinking"
+              },
+              "data": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "tool_use_id",
+              "wire_type",
+              "content"
+            ],
+            "properties": {
+              "type": {
+                "const": "server_tool_result"
+              },
+              "tool_use_id": {
+                "type": "string"
+              },
+              "wire_type": {
+                "type": "string"
+              },
+              "content": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "json"
+                    ],
+                    "properties": {
+                      "json": {
+                        "type": "string",
+                        "contentMediaType": "application/json"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "tool_use_id",
+              "content",
+              "is_error",
+              "host",
+              "content_parts"
+            ],
+            "properties": {
+              "type": {
+                "const": "tool_result"
+              },
+              "tool_use_id": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "is_error": {
+                "type": "boolean"
+              },
+              "host": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "name",
+                      "status",
+                      "retryable",
+                      "effect_uncertain"
+                    ],
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "status": {
+                        "type": "string"
+                      },
+                      "retryable": {
+                        "type": "boolean"
+                      },
+                      "effect_uncertain": {
+                        "type": "boolean"
+                      }
+                    }
+                  }
+                ]
+              },
+              "content_parts": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/text"
+                    },
+                    {
+                      "$ref": "#/$defs/media"
+                    },
+                    {
+                      "$ref": "#/$defs/opaque"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "id",
+              "summary",
+              "encrypted_content",
+              "status",
+              "content"
+            ],
+            "properties": {
+              "type": {
+                "const": "reasoning"
+              },
+              "id": {
+                "type": "string"
+              },
+              "summary": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "content": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          {
+            "$ref": "#/$defs/opaque"
+          },
+          {
+            "$ref": "#/$defs/media"
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "type",
+              "summary",
+              "signature"
+            ],
+            "properties": {
+              "type": {
+                "const": "thought"
+              },
+              "summary": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "signature": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    "native": {
+      "type": "boolean"
+    },
+    "wire_output": {
+      "$ref": "#/$defs/document"
+    }
+  },
+  "$defs": {
+    "document": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "json"
+          ],
+          "properties": {
+            "json": {
+              "type": "string",
+              "contentMediaType": "application/json"
+            }
+          }
+        }
+      ]
+    },
+    "citation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "url",
+        "title",
+        "file_id",
+        "filename",
+        "start",
+        "end",
+        "raw"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "end": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "raw": {
+          "$ref": "#/$defs/document"
+        }
+      }
+    },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "value",
+        "citations"
+      ],
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "value": {
+          "type": "string"
+        },
+        "citations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/citation"
+          }
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "kind",
+        "mime",
+        "source",
+        "data",
+        "reference",
+        "name",
+        "detail",
+        "id",
+        "transcript"
+      ],
+      "properties": {
+        "type": {
+          "const": "media"
+        },
+        "kind": {
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "description": "0 Image, 1 Audio, 2 Video, 3 Document"
+        },
+        "mime": {
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            0,
+            1,
+            2
+          ],
+          "description": "0 Inline (data holds canonical base64), 1 Url, 2 File (reference holds the location or provider file id)"
+        },
+        "data": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "detail": {
+          "enum": [
+            0,
+            1,
+            2,
+            3
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "transcript": {
+          "type": "string"
+        }
+      }
+    },
+    "opaque": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "wire_type",
+        "wire_metadata"
+      ],
+      "properties": {
+        "type": {
+          "const": "opaque"
+        },
+        "wire_type": {
+          "type": "string"
+        },
+        "wire_metadata": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "json"
+              ],
+              "properties": {
+                "json": {
+                  "type": "string",
+                  "contentMediaType": "application/json"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

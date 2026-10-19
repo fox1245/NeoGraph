@@ -21,6 +21,8 @@ struct Options {
     std::string base_url                 = "https://openrouter.ai/api/v1";
     /// Host-owned descriptor policy file; empty selects the built-in SDK policy.
     std::string descriptor_policy_file;
+    /// Host-owned model catalogue file layered over the embedded one; empty keeps the embedded one.
+    std::string model_catalogue_file;
     bool        mock                     = true;
     bool        allow_loopback           = false;
     unsigned    max_turns                = 12;

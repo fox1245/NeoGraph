@@ -25,7 +25,9 @@ namespace {
 // Keep the logical slot identity stable so a historic uncertain dispatch cannot
 // become a fresh call merely because its outcome format changed.
 constexpr std::string_view slot_domain = "program-core-provider-call/v1";
-constexpr std::string_view outcome_domain = "program-core-provider-outcome/v2";
+constexpr std::string_view outcome_domain = "program-core-provider-outcome/v3";
+// Rows written before interface 7 hold v2 outcomes under the v2 domain; they are read, not rewritten.
+constexpr std::string_view legacy_outcome_domain = "program-core-provider-outcome/v2";
 
 [[noreturn]] void sql_error(sqlite3* db) {
     throw std::runtime_error(std::string("Program provider journal SQLite error: ") + sqlite3_errmsg(db));
@@ -246,12 +248,15 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
         row.state != "reconciliation_required")
         throw std::runtime_error("Corrupt Program provider journal state");
     if (!row.completion.empty()) {
-        if (row.state == "dispatched" ||
-            row.outcome != neograph::detail::sha256_identity(outcome_domain, "outcome", row.completion))
+        const bool current =
+            row.outcome == neograph::detail::sha256_identity(outcome_domain, "outcome", row.completion);
+        const bool legacy = !current &&
+            row.outcome == neograph::detail::sha256_identity(legacy_outcome_domain, "outcome", row.completion);
+        if (row.state == "dispatched" || (!current && !legacy))
             throw std::runtime_error("Corrupt Program provider journal outcome");
         const auto encoded = neograph::detail::parse_json_strict(row.completion);
         if (neograph::detail::canonical_json_bytes(encoded) != row.completion ||
-            encoded.at("schema") != provider_codec::outcome_schema ||
+            encoded.at("schema") != (legacy ? provider_codec::legacy_outcome_schema : provider_codec::outcome_schema) ||
             ((row.state == "succeeded") != (encoded.at("kind") == "completion")))
             throw std::runtime_error("Program provider journal terminal outcome mismatch");
     } else if (row.state == "succeeded" || row.state == "failed" ||

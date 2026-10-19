@@ -54,11 +54,17 @@ class Server:
         if "--descriptor-policy" not in self.extra:
             base = urllib.parse.urlsplit(self.env.get("NEOGRAPH_CHAT_BASE_URL", ""))
             origin = f"{base.scheme}://{base.netloc}" if base.scheme == "http" else ""
-            generated = subprocess.run([POLICY_GENERATOR, origin], check=True,
+            generated = subprocess.run([POLICY_GENERATOR, "policy", origin], check=True,
                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             policy_file = self.directory / (self.session + ".policy.json")
             policy_file.write_text(generated.stdout, encoding="utf-8")
             self.extra += ["--descriptor-policy", str(policy_file)]
+        if "--model-catalogue" not in self.extra:
+            generated = subprocess.run([POLICY_GENERATOR, "catalogue"], check=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            catalogue_file = self.directory / (self.session + ".models.json")
+            catalogue_file.write_text(generated.stdout, encoding="utf-8")
+            self.extra += ["--model-catalogue", str(catalogue_file)]
         self.process = None
         self.running = None
         self.log_path = self.directory / (self.session + ".log")

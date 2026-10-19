@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=a7eb1a4e69dc63a7bbaec6c0409491771cfdf1989510fd9e336d9ce90cd5e69f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -204,7 +204,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v2`](../schemas/provider-message-v2.schema.json)、[`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json) のままです。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
+`ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json) で、v2 形式のレコードも引き続き読み込めます。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
 
 `RuntimeHistoryRecord` の引数なしの `serialize_canonical()` はポータブルなレコードを扱います。永続ネイティブ履歴には `serialize_canonical(archive, owner_id)` と、その ID に所有者範囲が一致するアーカイブを使います。Python も同じオーバーロードと `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` を公開します。ポータブルなレコード用の既定引数は、一致するアーカイブなしでのネイティブ復元を許可しません。Python のパースとアーカイブ対応の直列化はネイティブ処理中に GIL を解放します。JSON の観測データと、アーカイブで認証された保管権限は区別されます。
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model_catalogue.h"
 #include <neograph/provider.h>
 #include <neograph/llm/schema_provider.h>
 #include <descriptor/descriptor.h>
@@ -64,32 +65,10 @@ inline std::shared_ptr<sp::runtime::Client> client() {
 
 inline std::shared_ptr<sp::runtime::Client> bounded_client(
     std::string model = "test-model", std::uint64_t input_limit = 1) {
-    auto source = neograph::json::parse(sp::config_defaults::descriptor_policy_json);
-    neograph::json defaults;
-    for (const auto& family : source.at("families")) {
-        if (family.at("family") == "openai.chat") {
-            defaults = family.at("defaults");
-            break;
-        }
-    }
-    const neograph::json row{{"family", "openai.chat"}, {"model", model},
-        {"defaults", std::move(defaults)}, {"output_limit", nullptr}, {"input_limit", input_limit}};
-    bool replaced = false;
-    for (auto admitted : source.at("models")) {
-        if (admitted.at("family") == "openai.chat" && admitted.at("model") == model) {
-            admitted = row;
-            replaced = true;
-            break;
-        }
-    }
-    if (!replaced) source.at("models").push_back(row);
-    auto admitted = sp::descriptor::load_policy(
-        source.dump(), sp::config_defaults::codec_defaults_json);
-    if (auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::invalid_argument(error->pointer + ": " + error->message);
     return std::make_shared<sp::runtime::Client>(descriptor(
         "openai.chat", "https://fixture.invalid",
-        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted))));
+        policy_with_models(neograph::json::parse(sp::config_defaults::descriptor_policy_json),
+                           {{"openai.chat", std::move(model), input_limit}})));
 }
 
 inline sp::Message message(std::string text, sp::Role role = sp::Role::Assistant) {

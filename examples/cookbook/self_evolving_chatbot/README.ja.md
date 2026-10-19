@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=7d554cef7ff138fd563b7ecd7739dc7f01a8a641aec41c5fdd0b38d33db5d01c -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=c7857297daccf819804962b55d2f6ed035f4cc6d255c419e68c9f9c262ebae2e -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -22,7 +22,7 @@ cmake -S . -B build-chat -DNEOGRAPH_BUILD_EXAMPLES=ON -DNEOGRAPH_BUILD_LLM=ON \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite \
   --native-archive-dir .chat-native --session demo
 ```
 
@@ -44,14 +44,16 @@ raw native payload、鍵、prompt、ledger artifact を公開 log に出さな�
 evidence があり、以前の usage が unknown でなく transport 内部再送もない場合だけ精算します。
 それ以外は元の予約を `UnknownHold` として保持します。予約超過 report も charge に含め、
 `cost` は unknown です。
-`--descriptor-policy PATH`（C++ `Options::descriptor_policy_file`）でホスト所有の SDK
-descriptor-policy JSON を指定します。組み込み codec resource snapshot で一度承認して
-両 tenant で共有し、指定しない場合は組み込み方針を使います。明示的な fixture 方針は正確な
-loopback `openrouter_origins` と `program-chat-mock`（または指定した fixture モデル）の
-上限を宣言する必要があります。承認された方針 identity をセッション settings に結び付けるため、
+`--model-catalogue PATH`（C++ `Options::model_catalogue_file`）で組み込み catalogue の上に
+重ねるホスト所有の SDK モデル catalogue JSON を、`--descriptor-policy PATH`（C++
+`Options::descriptor_policy_file`）でホスト所有の SDK descriptor-policy JSON を指定します。
+組み込み codec resource snapshot で一度承認して両 tenant で共有し、指定しない場合は組み込み
+方針と catalogue を使います。明示的な fixture 方針は正確な loopback `openrouter_origins` を、
+catalogue は `program-chat-mock`（または指定した fixture モデル）の上限を宣言する必要があります。
+catalogue を含む承認済み方針の content digest をセッション settings に結び付けるため、
 同じパスでも内容が変われば新しいセッションが必要です。モデル提案や checkpoint は方針を
 選択できません。`--mock` にもこれらの事実が必要で、予算増加は明示的に指定します。
-提供される [demo-policy.json](demo-policy.json) は `program-chat-mock` の input 4,096・output
+提供される [demo-models.json](demo-models.json) は `program-chat-mock` の input 4,096・output
 65,536 token の事実だけを宣言します。offline recipe で明示的に選択してください。live model catalog、
 spending grant、usage report や budget reset ではありません。明示的な `--model` は admission を
 弱めずに継承された model 環境設定を上書きします。`--max-output-tokens` は正の64-bit値を受け取り、
@@ -81,7 +83,7 @@ cmake -S . -B build-chat -G Ninja \
   -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE"
 cmake --build build-chat --target cookbook_program_chatbot -j 4
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --db evolving-chat.sqlite
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --db evolving-chat.sqlite
 ```
 
 `http://127.0.0.1:8768` で Alice/Bob を選びます。demo の `review`、`검토`、`비교` は review Harness を提案します。最初の回答は現在の Harness、承認後の変更は次 turn の resume で適用します。force checkbox はレビュー済み二 plan を交替するだけで品質改善の主張ではありません。
@@ -108,7 +110,7 @@ WSL native Docker に専用 PostgreSQL DB を作り同じ shell に URL を設�
 ```bash
 export NEOGRAPH_CHAT_POSTGRES_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/DATABASE'
 ./build-chat/cookbook_program_chatbot --mock --no-env --model program-chat-mock \
-  --descriptor-policy examples/cookbook/self_evolving_chatbot/demo-policy.json --session postgres-demo
+  --model-catalogue examples/cookbook/self_evolving_chatbot/demo-models.json --session postgres-demo
 ```
 
 変数があれば chat/Program persistence は PostgreSQL、なければ `--db` は SQLite を選びます。各 backend は build 時に無効にできます。

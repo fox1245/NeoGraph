@@ -21,11 +21,14 @@ void expect_mixed(const sp::runtime::Result& result) {
     const auto& message = completion.messages[0];
     ASSERT_EQ(message.parts.size(), 3u);
     EXPECT_EQ(std::get<sp::Text>(message.parts[0]).value, "ready");
-    const auto& image = std::get<sp::Opaque>(message.parts[1]);
-    EXPECT_EQ(image.wire_type, "image_generation_call");
-    ASSERT_TRUE(image.wire_metadata);
-    EXPECT_EQ(image.wire_metadata->root().get("result").as_string(), "aW1hZ2U=");
-    EXPECT_EQ(image.wire_metadata->root().get("id").as_string(), "img-7");
+    // A finished image generation call is typed media; the wire item stays in the native output.
+    const auto& image = std::get<sp::Media>(message.parts[1]);
+    EXPECT_EQ(image.kind, sp::MediaKind::Image);
+    EXPECT_EQ(image.source, sp::MediaSource::Inline);
+    EXPECT_EQ(image.mime, "image/png");
+    ASSERT_TRUE(image.data);
+    EXPECT_EQ(*image.data, "aW1hZ2U=");
+    EXPECT_EQ(image.id, "img-7");
     EXPECT_EQ(std::get<sp::ToolCall>(message.parts[2]).name, "save");
     const auto& usage = completion.usage;
     ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.output_total);
@@ -53,7 +56,7 @@ void expect_mixed(const sp::runtime::Result& result) {
 }
 }
 
-TEST(SchemaProviderMedia, ResponsesPreservesOrderedTextOpaqueImageAndClientTool) {
+TEST(SchemaProviderMedia, ResponsesPreservesOrderedTextImageAndClientTool) {
     sp::runtime::Result retained;
     { wire::Peer peer(mixed_response().dump());
       auto provider = wire::provider("openai.responses", peer.origin());
@@ -61,7 +64,7 @@ TEST(SchemaProviderMedia, ResponsesPreservesOrderedTextOpaqueImageAndClientTool)
     expect_mixed(retained);
 }
 
-TEST(SchemaProviderMedia, ResponsesStreamPreservesTerminalOpaqueArtifactsOnce) {
+TEST(SchemaProviderMedia, ResponsesStreamPreservesTerminalArtifactsOnce) {
     const auto final = mixed_response();
     auto initial = final; initial["status"] = "in_progress"; initial["output"] = json::array();
     auto frame = [](std::string type, json body) { body["type"] = type; return "event: " + type + "\ndata: " + body.dump() + "\n\n"; };
@@ -95,12 +98,12 @@ TEST(SchemaProviderMedia, GeminiInlineMediaAndThoughtMetadataStayOrderedAndOwned
         const auto& message = completion.messages[0];
         ASSERT_EQ(message.parts.size(), 3u);
         EXPECT_EQ(std::get<sp::Text>(message.parts[0]).value, "before");
-        const auto& media = std::get<sp::Opaque>(message.parts[1]);
-        EXPECT_EQ(media.wire_type, "inlineData");
-        ASSERT_TRUE(media.wire_metadata);
-        EXPECT_EQ(media.wire_metadata->root().get("inlineData").get("data").as_string(), "SlBFRw==");
-        EXPECT_EQ(media.wire_metadata->root().get("thoughtSignature").as_string(), "media-seal");
-        EXPECT_EQ(media.wire_metadata->root().get("videoMetadata").get("startOffset").as_string(), "1s");
+        // Inline data is typed media; its signature and metadata stay in the native wire part.
+        const auto& media = std::get<sp::Media>(message.parts[1]);
+        EXPECT_EQ(media.kind, sp::MediaKind::Image);
+        EXPECT_EQ(media.mime, "image/jpeg");
+        ASSERT_TRUE(media.data);
+        EXPECT_EQ(*media.data, "SlBFRw==");
         EXPECT_EQ(std::get<sp::Text>(message.parts[2]).value, "after");
         const auto& usage = completion.usage;
         ASSERT_TRUE(usage.input_total); ASSERT_TRUE(usage.provider_reported_total);
@@ -121,6 +124,7 @@ TEST(SchemaProviderMedia, GeminiInlineMediaAndThoughtMetadataStayOrderedAndOwned
         EXPECT_EQ(usage.quality, sp::UsageQuality::Consistent);
         ASSERT_TRUE(message.wire_output);
         EXPECT_EQ(message.wire_output->root().at(1).get("thoughtSignature").as_string(), "media-seal");
+        EXPECT_EQ(message.wire_output->root().at(1).get("videoMetadata").get("startOffset").as_string(), "1s");
         ASSERT_TRUE(message.native); EXPECT_TRUE(message.native->complete());
     }
 }
@@ -139,8 +143,10 @@ TEST(SchemaProviderMedia, RealWireFailureRetainsOrderedPartialMediaWithoutReplay
     const auto& message = failure.partial.messages[0];
     ASSERT_EQ(message.parts.size(), 3u);
     EXPECT_EQ(std::get<sp::Text>(message.parts[0]).value, "before");
-    ASSERT_TRUE(std::get<sp::Opaque>(message.parts[1]).wire_metadata);
-    EXPECT_EQ(std::get<sp::Opaque>(message.parts[1]).wire_metadata->root().get("inlineData").get("data").as_string(), "UE5H");
+    const auto& media = std::get<sp::Media>(message.parts[1]);
+    EXPECT_EQ(media.mime, "image/png");
+    ASSERT_TRUE(media.data);
+    EXPECT_EQ(*media.data, "UE5H");
     EXPECT_EQ(std::get<sp::Text>(message.parts[2]).value, "after");
     ASSERT_TRUE(failure.partial.usage.input_total); EXPECT_EQ(failure.partial.usage.input_total->value, 0u);
     EXPECT_EQ(failure.partial.usage.input_total->evidence, sp::Evidence::Reported);
@@ -177,7 +183,7 @@ TEST(SchemaProviderMedia, HostedFileMetadataIsOwnedWithoutSyntheticDownloadAutho
     ASSERT_TRUE(message.native); EXPECT_TRUE(message.native->complete());
 }
 
-TEST(SchemaProviderMedia, NativeMixedModalityContinuationReplaysOpaqueItemWithoutFlattening) {
+TEST(SchemaProviderMedia, NativeMixedModalityContinuationReplaysImageItemWithoutFlattening) {
     wire::Peer peer(mixed_response().dump());
     auto provider = wire::provider("openai.responses", peer.origin());
     auto initial = wire::request("openai.responses");
@@ -213,6 +219,6 @@ TEST(SchemaProviderMedia, NativeMixedModalityContinuationReplaysOpaqueItemWithou
         EXPECT_EQ(input.at(4).at("type"), "function_call_output");
         EXPECT_EQ(input.at(4).at("output"), "saved");
     }
-    EXPECT_EQ(std::get<sp::Opaque>(original.parts.at(1)).wire_metadata->root().get("result").as_string(), "aW1hZ2U=");
+    EXPECT_EQ(*std::get<sp::Media>(original.parts.at(1)).data, "aW1hZ2U=");
     ASSERT_TRUE(original.native); EXPECT_TRUE(original.native->complete());
 }

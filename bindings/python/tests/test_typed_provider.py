@@ -349,14 +349,17 @@ def test_repeated_observer_cause_reads_preserve_original_exception_and_traceback
     assert len(provider_peer.requests) == 2
 
 
-def test_generated_image_is_kept_as_an_opaque_part(provider_peer):
-    # SchemaProvider 0.3.4 keeps message.images instead of dropping the billed image (#511).
+def test_generated_image_is_a_media_part(provider_peer):
+    # An image in message.images is a typed media part (SchemaProvider interface 7).
     url = "data:image/png;base64,iVBORw0KGgo="
     provider_peer.message_extra = {"images": [{"type": "image_url", "image_url": {"url": url}}]}
     provider = provider_peer.provider()
     result = provider.invoke(_request(provider))
     assert result.failure is None
     images = [part for message in result.completion.messages for part in message.parts
-              if isinstance(part, ng.Opaque) and part.wire_type == "images"]
+              if isinstance(part, ng.ProviderMedia)]
     assert len(images) == 1
-    assert images[0].wire_metadata["image"]["image_url"]["url"] == url
+    assert images[0].kind == ng.ProviderMediaKind.Image
+    assert images[0].source == ng.ProviderMediaSource.Inline
+    assert images[0].mime == "image/png"
+    assert images[0].data == "iVBORw0KGgo="

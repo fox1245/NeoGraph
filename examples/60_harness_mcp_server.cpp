@@ -18,6 +18,7 @@
 // smoke-expect: "name":"neograph_compile"
 
 #include "provider_example_support.h"
+#include <descriptor/catalogue.h>
 #include <sp/config_defaults.h>
 #include <neograph/mcp/adoption.h>
 #include <neograph/mcp/harness.h>
@@ -94,20 +95,21 @@ constexpr std::uint64_t kSmokeOutputTokens = 256;
 constexpr const char* kSmokeModel = "harness-smoke";
 
 std::shared_ptr<sp::runtime::Client> smoke_client() {
-    auto source = neograph::json::parse(sp::config_defaults::descriptor_policy_json);
-    neograph::json defaults;
-    for (const auto& family : source.at("families")) {
-        if (family.at("family") == "openai.chat") {
-            defaults = family.at("defaults");
-            break;
-        }
-    }
-    source.at("models").push_back({
-        {"family", "openai.chat"}, {"model", kSmokeModel},
-        {"defaults", std::move(defaults)}, {"input_limit", kSmokeInputTokens},
-        {"output_limit", kSmokeOutputTokens}});
-    auto admitted = sp::descriptor::load_policy(
-        source.dump(), sp::config_defaults::codec_defaults_json);
+    // The fixture model's limits are catalogue facts, layered over the embedded catalogue.
+    neograph::json model{{"id", kSmokeModel}, {"families", neograph::json::array({"openai.chat"})},
+                         {"input_limit", kSmokeInputTokens}, {"output_limit", kSmokeOutputTokens}};
+    auto models = neograph::json::array();
+    models.push_back(std::move(model));
+    auto loaded = sp::descriptor::load_catalogue(neograph::json{{"version", 1}, {"models", models}}.dump());
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
+        throw std::invalid_argument(error->pointer + ": " + error->message);
+    const std::array layers{sp::descriptor::builtin_catalogue(),
+                            std::get<sp::descriptor::CatalogueSnapshot>(std::move(loaded))};
+    auto catalogue = sp::descriptor::merge_catalogues(layers);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&catalogue))
+        throw std::invalid_argument(error->pointer + ": " + error->message);
+    auto admitted = sp::descriptor::builtin_policy()->with_catalogue(
+        std::get<sp::descriptor::CatalogueSnapshot>(std::move(catalogue)));
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
         throw std::invalid_argument(error->pointer + ": " + error->message);
     return std::make_shared<sp::runtime::Client>(examples::admitted_descriptor(

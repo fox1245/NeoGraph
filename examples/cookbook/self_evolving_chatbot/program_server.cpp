@@ -47,6 +47,8 @@ int main(int argc, char** argv) {
                 options.native_archive_directory = value();
             else if (arg == "--descriptor-policy")
                 options.descriptor_policy_file = value();
+            else if (arg == "--model-catalogue")
+                options.model_catalogue_file = value();
             else if (arg == "--session")
                 options.session = value();
             else if (arg == "--model")
@@ -94,8 +96,10 @@ int main(int argc, char** argv) {
                        "--provider-timeout-seconds 120 sets the per-call timeout (1..120).\n"
                        "--native-archive-dir PATH selects host-private native custody; defaults "
                        "to DB_PATH.native (independent key, never from model JSON).\n"
-                       "--descriptor-policy PATH admits a host-owned model/control policy with "
+                       "--descriptor-policy PATH admits a host-owned control policy with "
                        "the embedded SDK codec resource snapshot; default: built-in policy.\n"
+                       "--model-catalogue PATH layers host-owned model facts (limits, defaults) "
+                       "over the embedded SDK model catalogue.\n"
                        "GLM 5.3 Flash chat defaults to low reasoning effort; --reasoning-effort "
                        "default omits the override.\n"
                        "--script JSON_FILE runs [{tenant,request_id,message,force_swap?}, ...].\n"

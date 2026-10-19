@@ -13,13 +13,17 @@
 
 namespace neograph::provider_codec {
 
-static_assert(sp::EXPECTED_INTERFACE_REVISION == 6,
-              "NeoGraph requires SchemaProvider 0.3.5 interface 6 headers");
+static_assert(sp::EXPECTED_INTERFACE_REVISION == 7,
+              "NeoGraph requires SchemaProvider interface 7 headers");
 
 // A versioned observational projection is not native replay authority. Only a
 // verified NativeArchive record can restore private provider continuation seals.
-inline constexpr std::string_view outcome_schema = "neograph.provider-outcome/v2";
-inline constexpr std::string_view message_schema = "neograph.provider-message/v2";
+inline constexpr std::string_view outcome_schema = "neograph.provider-outcome/v3";
+inline constexpr std::string_view message_schema = "neograph.provider-message/v3";
+// Records written by interface 6 are read: an image part becomes Media::image, and
+// the members v3 added take their empty values.
+inline constexpr std::string_view legacy_outcome_schema = "neograph.provider-outcome/v2";
+inline constexpr std::string_view legacy_message_schema = "neograph.provider-message/v2";
 
 namespace detail {
 inline void require(bool condition, const char* message) {
@@ -88,11 +92,89 @@ inline std::optional<sp::ToolResultHostMetadata> parse_tool_host_metadata(const 
         value.at("name").get<std::string>(), value.at("status").get<std::string>(),
         value.at("retryable").get<bool>(), value.at("effect_uncertain").get<bool>()};
 }
+inline std::optional<std::uint64_t> parse_offset(const json& value) {
+    return value.is_null() ? std::nullopt : std::optional<std::uint64_t>(counter(value));
+}
+inline json citation(const sp::Citation& value) {
+    return {{"kind", value.kind}, {"url", value.url}, {"title", value.title},
+            {"file_id", value.file_id}, {"filename", value.filename},
+            {"start", value.start ? json(*value.start) : json(nullptr)},
+            {"end", value.end ? json(*value.end) : json(nullptr)}, {"raw", document(value.raw)}};
+}
+inline sp::Citation parse_citation(const json& value) {
+    const auto text = [&](const char* key) { return value.at(key).get<std::string>(); };
+    return sp::Citation{text("kind"), text("url"), text("title"), text("file_id"), text("filename"),
+                        parse_offset(value.at("start")), parse_offset(value.at("end")),
+                        parse_document(value.at("raw"), true)};
+}
+inline json text_part(const sp::Text& item) {
+    auto citations = json::array();
+    for (const auto& value : item.citations) citations.push_back(citation(value));
+    return {{"type", "text"}, {"value", item.value}, {"citations", std::move(citations)}};
+}
+inline json media_part(const sp::Media& item) {
+    return {{"type", "media"}, {"kind", static_cast<int>(item.kind)}, {"mime", item.mime},
+            {"source", static_cast<int>(item.source)},
+            {"data", item.data ? json(*item.data) : json(nullptr)}, {"reference", item.reference},
+            {"name", item.name}, {"detail", static_cast<int>(item.detail)}, {"id", item.id},
+            {"transcript", item.transcript}};
+}
+inline json opaque_part(const sp::Opaque& item) {
+    return {{"type", "opaque"}, {"wire_type", item.wire_type},
+            {"wire_metadata", document(item.wire_metadata)}};
+}
+inline sp::Text parse_text(const json& value) {
+    require(value.at("citations").is_array(), "Invalid provider citations");
+    sp::Text result{value.at("value").get<std::string>()};
+    for (const auto& item : value.at("citations")) result.citations.push_back(parse_citation(item));
+    return result;
+}
+inline sp::Media parse_media(const json& value) {
+    sp::Media result;
+    result.kind = enumeration(value.at("kind"), sp::MediaKind::Document);
+    result.mime = value.at("mime").get<std::string>();
+    result.source = enumeration(value.at("source"), sp::MediaSource::File);
+    if (!value.at("data").is_null())
+        result.data = std::make_shared<const std::string>(value.at("data").get<std::string>());
+    result.reference = value.at("reference").get<std::string>();
+    result.name = value.at("name").get<std::string>();
+    result.detail = enumeration(value.at("detail"), sp::ImageDetail::Original);
+    result.id = value.at("id").get<std::string>();
+    result.transcript = value.at("transcript").get<std::string>();
+    return result;
+}
+inline sp::Opaque parse_opaque(const json& value) {
+    return sp::Opaque{value.at("wire_type").get<std::string>(),
+                      parse_document(value.at("wire_metadata"), true)};
+}
+inline json tool_content(const std::vector<std::variant<sp::Text, sp::Media, sp::Opaque>>& parts) {
+    auto result = json::array();
+    for (const auto& item : parts)
+        result.push_back(std::visit([](const auto& value) -> json {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, sp::Text>) return text_part(value);
+            else if constexpr (std::is_same_v<T, sp::Media>) return media_part(value);
+            else return opaque_part(value);
+        }, item));
+    return result;
+}
+inline std::vector<std::variant<sp::Text, sp::Media, sp::Opaque>> parse_tool_content(const json& value) {
+    require(value.is_array(), "Invalid provider tool result content");
+    std::vector<std::variant<sp::Text, sp::Media, sp::Opaque>> result;
+    for (const auto& item : value) {
+        const auto type = item.at("type").get<std::string>();
+        if (type == "text") result.emplace_back(parse_text(item));
+        else if (type == "media") result.emplace_back(parse_media(item));
+        else if (type == "opaque") result.emplace_back(parse_opaque(item));
+        else throw std::runtime_error("Unknown provider tool result content");
+    }
+    return result;
+}
 inline json part(const sp::Part& value) {
     return std::visit([](const auto& item) -> json {
         using T = std::decay_t<decltype(item)>;
         if constexpr (std::is_same_v<T, sp::Text>)
-            return {{"type", "text"}, {"value", item.value}};
+            return text_part(item);
         else if constexpr (std::is_same_v<T, sp::Refusal>)
             return {{"type", "refusal"}, {"text", item.text}, {"raw_code", item.raw_code}};
         else if constexpr (std::is_same_v<T, sp::ToolCall>)
@@ -115,18 +197,16 @@ inline json part(const sp::Part& value) {
         else if constexpr (std::is_same_v<T, sp::ToolResult>)
             return {{"type", "tool_result"}, {"tool_use_id", item.tool_use_id},
                     {"content", item.content}, {"is_error", item.is_error},
-                    {"host", tool_host_metadata(item.host)}};
+                    {"host", tool_host_metadata(item.host)},
+                    {"content_parts", tool_content(item.content_parts)}};
         else if constexpr (std::is_same_v<T, sp::Reasoning>)
             return {{"type", "reasoning"}, {"id", item.id}, {"summary", item.summary},
                     {"encrypted_content", optional_string(item.encrypted_content)},
                     {"status", optional_string(item.status)}, {"content", item.content}};
         else if constexpr (std::is_same_v<T, sp::Opaque>)
-            return {{"type", "opaque"}, {"wire_type", item.wire_type},
-                    {"wire_metadata", document(item.wire_metadata)}};
-        else if constexpr (std::is_same_v<T, sp::Image>)
-            return {{"type", "image"}, {"mime", item.mime},
-                    {"data", item.data ? json(*item.data) : json(nullptr)},
-                    {"detail", static_cast<int>(item.detail)}};
+            return opaque_part(item);
+        else if constexpr (std::is_same_v<T, sp::Media>)
+            return media_part(item);
         else if constexpr (std::is_same_v<T, sp::Thought>)
             return {{"type", "thought"}, {"summary", item.summary},
                     {"signature", optional_string(item.signature)}};
@@ -136,7 +216,7 @@ inline sp::Part parse_part(const json& value) {
     const auto type = value.at("type").get<std::string>();
     const auto text = [&](const char* key) { return value.at(key).get<std::string>(); };
     sp::Part result;
-    if (type == "text") result = sp::Text{text("value")};
+    if (type == "text") result = parse_text(value);
     else if (type == "refusal") result = sp::Refusal{text("text"), text("raw_code")};
     else if (type == "tool_call") result = sp::ToolCall{
         text("id"), text("name"), enumeration(value.at("kind"), sp::ToolCallKind::ApprovalRequest),
@@ -151,17 +231,13 @@ inline sp::Part parse_part(const json& value) {
         text("tool_use_id"), text("wire_type"), parse_document(value.at("content"), true)};
     else if (type == "tool_result") result = sp::ToolResult{
         text("tool_use_id"), text("content"), value.at("is_error").get<bool>(),
-        parse_tool_host_metadata(value.at("host"))};
+        parse_tool_host_metadata(value.at("host")), parse_tool_content(value.at("content_parts"))};
     else if (type == "reasoning") result = sp::Reasoning{
         text("id"), value.at("summary").get<std::vector<std::string>>(),
         parse_string(value.at("encrypted_content")), parse_string(value.at("status")),
         value.at("content").get<std::vector<std::string>>()};
-    else if (type == "opaque") result = sp::Opaque{
-        text("wire_type"), parse_document(value.at("wire_metadata"), true)};
-    else if (type == "image") result = sp::Image{
-        text("mime"), value.at("data").is_null() ? nullptr
-            : std::make_shared<const std::string>(text("data")),
-        enumeration(value.at("detail"), sp::ImageDetail::Original)};
+    else if (type == "opaque") result = parse_opaque(value);
+    else if (type == "media") result = parse_media(value);
     else if (type == "thought") result = sp::Thought{
         value.at("summary").get<std::vector<std::string>>(), parse_string(value.at("signature"))};
     else throw std::runtime_error("Unknown provider part encoding");
@@ -173,7 +249,7 @@ inline json stop(const sp::StopReason& value) {
             {"sequence", optional_string(value.sequence)}, {"details", document(value.details)}};
 }
 inline sp::StopReason parse_stop(const json& value) {
-    sp::StopReason result{enumeration(value.at("kind"), sp::StopKind::Unknown),
+    sp::StopReason result{enumeration(value.at("kind"), sp::StopKind::Compaction),
                          value.at("raw").get<std::string>(),
                          parse_string(value.at("sequence")), parse_document(value.at("details"), true)};
     require(stop(result) == value, "Noncanonical provider stop encoding");
@@ -221,7 +297,7 @@ inline json error(const sp::Error& value) {
             {"retry_safety", static_cast<int>(value.retry_safety)}, {"http_status", value.http_status},
             {"vendor_code", value.vendor_code},
             {"retry_after_ms", value.retry_after ? json(value.retry_after->count()) : json(nullptr)},
-            {"attempt", attempt(value.attempt)}};
+            {"attempt", attempt(value.attempt)}, {"reason", value.reason}};
 }
 inline sp::Error parse_error(const json& value) {
     sp::Error result;
@@ -234,10 +310,72 @@ inline sp::Error parse_error(const json& value) {
     if (!value.at("retry_after_ms").is_null())
         result.retry_after = std::chrono::milliseconds(value.at("retry_after_ms").get<std::int64_t>());
     result.attempt = parse_attempt(value.at("attempt"));
+    result.reason = value.at("reason").get<std::string>();
     require(error(result) == value, "Noncanonical provider error encoding");
     return result;
 }
+inline json served_model(const sp::ServedModel& value) {
+    return {{"requested", value.requested}, {"served", value.served},
+            {"relation", static_cast<int>(value.relation)}};
+}
+inline sp::ServedModel parse_served_model(const json& value) {
+    return sp::ServedModel{value.at("requested").get<std::string>(), value.at("served").get<std::string>(),
+                           enumeration(value.at("relation"), sp::ServedRelation::Unexplained)};
+}
 } // namespace detail
+
+namespace detail {
+// The v3 form of a v2 record. A v2 record holds none of the members v3 added, so a
+// record that does is refused rather than read.
+inline json upgrade_legacy_part(json value) {
+    const auto type = value.at("type").get<std::string>();
+    if (type == "image") {
+        require(value.size() == 4, "Noncanonical legacy provider image encoding");
+        return {{"type", "media"}, {"kind", static_cast<int>(sp::MediaKind::Image)},
+                {"mime", value.at("mime")}, {"source", static_cast<int>(sp::MediaSource::Inline)},
+                {"data", value.at("data")}, {"reference", ""}, {"name", ""},
+                {"detail", value.at("detail")}, {"id", ""}, {"transcript", ""}};
+    }
+    require(type != "media", "Unknown legacy provider part encoding");
+    if (type == "text") {
+        require(!value.contains("citations"), "Noncanonical legacy provider text encoding");
+        value["citations"] = json::array();
+    } else if (type == "tool_result") {
+        require(!value.contains("content_parts"), "Noncanonical legacy provider tool result encoding");
+        value["content_parts"] = json::array();
+    }
+    return value;
+}
+inline json upgrade_legacy_message(json value) {
+    require(value.at("parts").is_array(), "Invalid provider message parts");
+    auto parts = json::array();
+    for (const auto& part : value.at("parts")) parts.push_back(upgrade_legacy_part(part));
+    value["parts"] = std::move(parts);
+    value["schema"] = std::string(message_schema);
+    return value;
+}
+inline json upgrade_legacy_outcome(json value) {
+    require(!value.contains("model") && value.at("messages").is_array(),
+            "Noncanonical legacy provider outcome encoding");
+    auto messages = json::array();
+    for (const auto& message : value.at("messages")) messages.push_back(upgrade_legacy_message(message));
+    value["messages"] = std::move(messages);
+    if (value.contains("error")) {
+        require(!value.at("error").contains("reason"), "Noncanonical legacy provider error encoding");
+        value["error"]["reason"] = "";
+    }
+    value["model"] = served_model({});
+    value["schema"] = std::string(outcome_schema);
+    return value;
+}
+} // namespace detail
+
+// A stored message projection in the current schema: a v2 projection is upgraded, a
+// current one is returned as it is.
+inline json current_message(const json& value) {
+    return value.is_object() && value.contains("schema") && value.at("schema") == legacy_message_schema
+        ? detail::upgrade_legacy_message(value) : value;
+}
 
 inline json encode_message(const sp::Message& value) {
     auto parts = json::array();
@@ -247,6 +385,8 @@ inline json encode_message(const sp::Message& value) {
             {"native", static_cast<bool>(value.native)}, {"wire_output", detail::document(value.wire_output)}};
 }
 inline sp::Message decode_message(const json& value) {
+    if (value.at("schema") == legacy_message_schema)
+        return decode_message(detail::upgrade_legacy_message(value));
     detail::require(value.at("schema") == message_schema, "Incompatible provider message encoding");
     detail::require(!value.at("native").get<bool>(), "Native provider message requires trusted archive");
     sp::Message result;
@@ -289,7 +429,7 @@ inline void validate_provider_cost(const sp::ProviderReportedCost& value) {
             require(value.source == sp::CostSource::OpenRouterUsd &&
                         amount.nano_usd <= (std::uint64_t{1} << 53) &&
                         valid(amount.evidence, sp::Evidence::Derived) &&
-                        valid(amount.rounding, sp::CostRounding::CeilingShortestDecimal),
+                        valid(amount.rounding, sp::CostRounding::CeilingCatalogueProduct),
                     "Invalid provider USD amount");
         }
         require(status != sp::CostStatus::UnknownCurrency ||
@@ -318,7 +458,7 @@ inline std::optional<sp::UsdAmount> parse_usd_amount(const json& value) {
     if (value.is_null()) return {};
     return sp::UsdAmount{counter(value.at("nano_usd")),
         enumeration(value.at("evidence"), sp::Evidence::Derived),
-        enumeration(value.at("rounding"), sp::CostRounding::CeilingShortestDecimal)};
+        enumeration(value.at("rounding"), sp::CostRounding::CeilingCatalogueProduct)};
 }
 inline json provider_cost(const sp::ProviderReportedCost& value) {
     validate_provider_cost(value);
@@ -411,6 +551,7 @@ inline json observe_outcome(const sp::Outcome& value) {
             result["wire_envelope"] = detail::document(item.wire_envelope);
             result["attempt"] = detail::attempt(item.attempt);
             result["raw_events"] = detail::raw_events(item.raw_events);
+            result["model"] = detail::served_model(item.model);
         } else {
             result["kind"] = "failure";
             result["usage"] = encode_usage(item.partial.usage);
@@ -418,6 +559,7 @@ inline json observe_outcome(const sp::Outcome& value) {
             result["error"] = detail::error(item.error);
             result["wire_envelope"] = detail::document(item.partial.wire_envelope);
             result["raw_events"] = detail::raw_events(item.partial.raw_events);
+            result["model"] = detail::served_model(item.partial.model);
         }
         return result;
     }, value);
@@ -453,12 +595,14 @@ inline json encode_outcome(const sp::Outcome& value,
     }
     return result;
 }
-inline sp::runtime::Result decode_outcome(const json& value,
-                                         const std::shared_ptr<sp::NativeArchive>& archive = {},
-                                         std::string_view binding = {}) {
-    detail::require(value.at("schema") == outcome_schema, "Incompatible provider outcome encoding");
+namespace detail {
+// `value` is the record in the current schema; `recorded` is the record as written, whose
+// metadata and schema the archive authenticated.
+inline sp::runtime::Result decode_outcome_record(const json& value, const json& recorded,
+                                                 const std::shared_ptr<sp::NativeArchive>& archive,
+                                                 std::string_view binding) {
     detail::require(value.at("messages").is_array(), "Invalid provider outcome messages");
-    const auto reference = value.at("native_archive_reference");
+    const auto reference = recorded.at("native_archive_reference");
     auto metadata = json::object();
     for (const auto& [key, field] : value.items())
         if (key != "native_archive_reference") metadata[key] = field;
@@ -466,8 +610,8 @@ inline sp::runtime::Result decode_outcome(const json& value,
     if (!reference.is_null()) {
         detail::require(static_cast<bool>(archive), "Provider outcome trusted archive is unavailable");
         auto authenticated_metadata = json::object();
-        for (const auto& [key, field] : metadata.items())
-            if (key != "messages") authenticated_metadata[key] = field;
+        for (const auto& [key, field] : recorded.items())
+            if (key != "messages" && key != "native_archive_reference") authenticated_metadata[key] = field;
         auto loaded = archive->load(reference.get<std::string>(), binding);
         if (const auto* error = std::get_if<sp::Error>(&loaded))
             throw std::runtime_error(error->safe_message);
@@ -476,7 +620,8 @@ inline sp::runtime::Result decode_outcome(const json& value,
         const auto& envelope = retained.front();
         const auto* opaque = envelope.parts.size() == 1 ? std::get_if<sp::Opaque>(&envelope.parts.front()) : nullptr;
         detail::require(!envelope.native && envelope.id.empty() && envelope.role == sp::Role::Assistant &&
-                            !envelope.wire_output && opaque && opaque->wire_type == outcome_schema &&
+                            !envelope.wire_output && opaque &&
+                            opaque->wire_type == recorded.at("schema").get<std::string>() &&
                             opaque->wire_metadata &&
                             json::parse(opaque->wire_metadata->root().dump()) == authenticated_metadata,
                         "Provider outcome authenticated metadata mismatch");
@@ -491,15 +636,25 @@ inline sp::runtime::Result decode_outcome(const json& value,
     if (kind == "completion") outcome = sp::Completion{
         std::move(messages), detail::parse_stop(value.at("stop")), decode_usage(value.at("usage")),
         detail::parse_document(value.at("wire_envelope"), true), detail::parse_attempt(value.at("attempt")),
-        detail::parse_raw_events(value.at("raw_events"))};
+        detail::parse_raw_events(value.at("raw_events")), detail::parse_served_model(value.at("model"))};
     else if (kind == "failure") outcome = sp::Failure{
         detail::parse_error(value.at("error")), sp::PartialCompletion{
             std::move(messages), decode_usage(value.at("usage")), value.at("stop").is_null()
                 ? std::nullopt : std::optional<sp::StopReason>(detail::parse_stop(value.at("stop"))),
-            detail::parse_document(value.at("wire_envelope"), true), detail::parse_raw_events(value.at("raw_events"))}};
+            detail::parse_document(value.at("wire_envelope"), true), detail::parse_raw_events(value.at("raw_events")),
+            detail::parse_served_model(value.at("model"))}};
     else throw std::runtime_error("Unknown provider outcome encoding");
     detail::require(observe_outcome(outcome) == metadata, "Noncanonical provider outcome encoding");
     return std::make_shared<const sp::Outcome>(std::move(outcome));
+}
+} // namespace detail
+inline sp::runtime::Result decode_outcome(const json& value,
+                                         const std::shared_ptr<sp::NativeArchive>& archive = {},
+                                         std::string_view binding = {}) {
+    if (value.at("schema") == legacy_outcome_schema)
+        return detail::decode_outcome_record(detail::upgrade_legacy_outcome(value), value, archive, binding);
+    detail::require(value.at("schema") == outcome_schema, "Incompatible provider outcome encoding");
+    return detail::decode_outcome_record(value, value, archive, binding);
 }
 
 } // namespace neograph::provider_codec

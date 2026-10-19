@@ -122,17 +122,10 @@ void crash_image(const std::filesystem::path& from, const std::filesystem::path&
 
 std::shared_ptr<sp::runtime::Client> client_for(std::string origin, const std::string& model,
                                                 std::uint64_t input_limit) {
-    auto source = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (const auto& family : source.at("families"))
-        if (family.at("family") == "openai.chat") defaults = family.at("defaults");
-    source.at("models").push_back(json{{"family", "openai.chat"}, {"model", model}, {"defaults", defaults},
-                                       {"output_limit", nullptr}, {"input_limit", input_limit}});
-    auto admitted = sp::descriptor::load_policy(source.dump(), sp::config_defaults::codec_defaults_json);
-    if (auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::invalid_argument(error->pointer + ": " + error->message);
     return std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
-        "openai.chat", std::move(origin), std::get<sp::descriptor::PolicySnapshot>(std::move(admitted))));
+        "openai.chat", std::move(origin),
+        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json),
+                                           {{"openai.chat", model, input_limit}})));
 }
 
 sp::Usage priced_usage() {

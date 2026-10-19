@@ -566,11 +566,11 @@ def openrouter_descriptor(base_url, *, input_limits=None):
         chat = next(f for f in document["families"] if f["family"] == "openai.chat")
         if loopback:
             chat["openrouter_origins"].append(origin)
-        for model, limit in (input_limits or {}).items():
-            document["models"].append({"family": "openai.chat", "model": model,
-                                       "defaults": chat["defaults"], "output_limit": None,
-                                       "input_limit": limit})
-        policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json())
+        # Model input limits are catalogue facts, layered over the embedded catalogue.
+        models = [{"id": model, "families": ["openai.chat"], "input_limit": limit}
+                  for model, limit in (input_limits or {}).items()]
+        policy = ng.load_provider_policy(json.dumps(document), ng.provider_codec_defaults_json(),
+                                         json.dumps({"version": 1, "models": models}))
     return ng.load_provider_descriptor(json.dumps({
         "descriptor_version": 1,
         "revision": 1,

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=328efff7b1f8c8b840eaae21b1fb8ee9d5e8b60cc5232799562059f5b3fc251e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1511e4163bfc40cf6044fe858e025f9409147eac4b3a9c943a9fef4b8c1dc983 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 변경 로그
 
@@ -13,6 +13,22 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 변경됨
+- **SchemaProvider interface 7을 채택합니다 (#512).** NeoGraph는 interface 7 헤더와 7세대 라이브러리(`libsp_*.so.7`)로 빌드합니다. SchemaProvider 0.4.0이 출시될 때까지 빌드는 `main` 브랜치(패키지 버전 0.3.0)에 고정되며, 0.16.0 출시 전에 0.4.0 릴리스로 옮겨집니다.
+  - **동작 변경: 타입이 있는 미디어.** `sp::Image`는 `sp::Media`가 됩니다. 이미지·오디오·비디오·문서이며, 인라인이거나 URL 또는 provider 파일에 있습니다. `ChatMessage::image_urls`는 인라인 이미지를 이전처럼 data URL로 투영하고, 이제 URL 이미지도 투영합니다. `portable_message`는 https 항목을 provider가 가져갈 URL 미디어로 보냅니다. 생성된 이미지(Chat `message.images`, Responses `image_generation_call`, Gemini `inlineData`)는 `Opaque`가 아니라 `Media` 파트이며, wire 항목은 native 출력에 그대로 남습니다.
+  - **Provider outcome 포맷 v3.** `neograph.provider-outcome/v3`와 `neograph.provider-message/v3`(`schemas/*-v3.schema.json`)는 미디어 파트, 텍스트 인용, 타입이 있는 도구 결과 내용, 에러의 `reason`, 실제 응답한 `model`을 더합니다. v2 포맷의 레코드(Program 저널, 체크포인트, 런타임 히스토리)도 계속 읽습니다. 이미지 파트는 인라인 이미지 미디어가 되고 새 멤버는 비어 있습니다. 새 레코드는 v3로 쓰며, NeoGraph 0.15는 이를 읽을 수 없습니다.
+  - **런타임 히스토리 레코드**는 저장 버전 3입니다. 버전 2 레코드는 저장된 바이트와 id 그대로 읽으므로 피드의 predecessor 체인이 바뀌지 않습니다. Program provider 저널 행은 기록될 때의 digest 도메인을 유지합니다.
+  - **동작 변경: 0.15의 native 히스토리는 재생되지 않습니다.** interface 7은 모든 정책 identity를 바꾸므로, 0.15가 봉인한 native 히스토리를 이어 가면 `ReplayIneligible`입니다. 이식 가능한 히스토리는 영향이 없습니다.
+  - **모델 정보는 카탈로그 데이터입니다.** descriptor 정책에는 `models` 목록이 없으며, 모델 한도와 모델별 기본값은 SDK 모델 카탈로그의 항목입니다(`sp::descriptor::load_catalogue`, `merge_catalogues`, `DescriptorPolicy::with_catalogue`). cookbook 챗봇은 `--model-catalogue PATH`를 받고 `demo-policy.json` 대신 `demo-models.json`을 제공하며, 세션은 카탈로그를 포함한 정책의 content digest에 묶입니다.
+  - **Python.** `ProviderImage`를 `ProviderMedia`가 대체합니다. `ProviderMedia.image(...)`, `.audio`, `.video`, `.document`, `.url`, `.file`이 있고, `kind`, `source`, `mime`, `data`, `reference`, `name`, `detail`, `id`, `transcript`와 열거형 `ProviderMediaKind`, `ProviderMediaSource`가 있습니다. 새로 생긴 것: `Text.citations`(`ProviderCitation`), `ProviderToolResult.content_parts`, `ProviderError.reason`, `ProviderCompletion.model`과 `ProviderPartialCompletion.model`(`ProviderServedModel`, `ProviderServedRelation`), `ProviderPartHeader.media`, `ProviderPartSeal.citations`, `ProviderStopKind.Pending`과 `Compaction`, `ProviderPartKind.Media`, `ProviderCostRounding.CeilingCatalogueProduct`. `load_provider_policy`는 내장 카탈로그 위에 얹는 선택적 `model_catalogue_json`을 받고, `provider_model_catalogue_json()`은 내장 카탈로그를 돌려줍니다.
+  - NeoGraph, C++ 소비자, Python 확장을 서로 맞는 interface 7 헤더와 라이브러리로 함께 다시 빌드하세요.
+- **내장 그래프와 노드는 한 벤더의 설정이 아니라 호출자의 모델·샘플링·토큰 설정을 보냅니다 (#521).** `temperature`를 거부하는 모델(`gpt-5*`, `o3`, Claude 4.7 이후)은 deep research 그래프의 모든 단계, intent classifier, 히스토리 요약기, Harness provider worker에서 prepare 단계에 실패했습니다.
+  - **동작 변경: `DeepResearchConfig::model`은 필수입니다.** 기본값이 `claude-sonnet-4-5`였으나, 이제 비어 있으면 `create_deep_research_graph`가 `std::invalid_argument`를 던집니다.
+  - **Deep research 설정은 구성값입니다.** `DeepResearchConfig::controls`는 모든 단계가 보내는 값을 담습니다(설정된 멤버만). 단계별 출력 상한은 필드(`brief_max_output_tokens`, `clarify_…`, `supervisor_…`, `researcher_…`, `compress_…`, `report_…`, 기본값은 이전 값)이고, 빈 응답 재시도가 요청하는 최대 상한(`max_output_budget`, 16384)과 모델 단계의 노드 재시도 정책(`retry`, 이전과 같이 15초와 30초 뒤 두 번, 이제 brief와 clarify 단계에도 적용)도 필드입니다. 어떤 단계도 자체 temperature를 보내지 않습니다.
+  - **동작 변경: brief와 clarify 단계는 provider 실패를 보고합니다.** 이전에는 실패를 잡고 원래 질의로 계속했기 때문에, 잘못된 모델 id나 거부된 파라미터가 흔적 없이 실행을 저하시켰습니다.
+  - **동작 변경: 고정 temperature와 분류기 상한이 없습니다.** intent classifier는 `temperature = 0`과 `max_output_tokens = 20`(추론 모델은 답하기 전에 다 써 버립니다) 대신 노드 컨텍스트의 `provider_controls`를 보냅니다. `default_summary_controls()`는 500 토큰 상한을 유지하고 더 이상 `temperature = 0.2`를 보내지 않습니다. Harness provider worker는 더 이상 `temperature = 0`을 보내지 않습니다.
+  - **Harness 변환 상한은 호스트의 값입니다.** `HarnessTranslationDefaults`는 600을 넘는 `provider_timeout_seconds`와 128,000을 넘는 `max_output_tokens`를 거부했습니다. 이제 호스트의 값이 상한이며, 최대 86,400초와 2^32 − 1 토큰입니다.
 
 ## [0.15.1] - 2026-10-19
 

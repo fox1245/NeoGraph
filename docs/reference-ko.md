@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=a7eb1a4e69dc63a7bbaec6c0409491771cfdf1989510fd9e336d9ce90cd5e69f -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -229,7 +229,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v2`](../schemas/provider-message-v2.schema.json), [`runtime-history-record-v2`](../schemas/runtime-history-record-v2.schema.json)를 유지한다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
+`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v3`](../schemas/provider-message-v3.schema.json), [`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)이며 v2 포맷 레코드도 계속 읽을 수 있다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
 `RuntimeHistoryRecord`의 인자 없는 `serialize_canonical()`은 이식 가능한 기록을 지원한다. 영속 네이티브 이력에는 `serialize_canonical(archive, owner_id)`와 해당 ID에 소유자 범위가 일치하는 아카이브를 사용한다. Python도 같은 오버로드와 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`를 제공한다. 이식 가능한 기록용 기본 인자는 일치하는 아카이브 없이 네이티브 복원을 허가하지 않는다. Python의 파싱과 아카이브를 사용하는 직렬화는 네이티브 작업 중 GIL을 해제한다. JSON 관찰 데이터와 아카이브로 인증된 보관 권한은 구별된다.
 

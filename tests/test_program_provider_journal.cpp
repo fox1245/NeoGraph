@@ -130,7 +130,7 @@ TEST(ProgramProviderJournal, ReopenedCompletionPreservesOrderedPartsWithoutRedis
     Database db("artifacts");
     auto transport = std::make_shared<Transport>();
     transport->parts = {
-        sp::Image{"image/png", std::make_shared<const std::string>("AAEC/w==")},
+        sp::Media::image("image/png", std::make_shared<const std::string>("AAEC/w==")),
         sp::Opaque{"generated-image", neograph::test::document(
             R"({"url":"https://example.test/image","file_id":"file-image","width":2,"nested":{"seed":17,"flags":[true,false]}})")},
         sp::Opaque{"generated-video", neograph::test::document(
@@ -847,20 +847,10 @@ void prove_native_program_failure_custody(bool ordinary_failure) {
     std::filesystem::create_directory(root);
     std::filesystem::permissions(root, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace);
-    auto policy_source = json::parse(sp::config_defaults::descriptor_policy_json);
-    json defaults;
-    for (const auto& family : policy_source.at("families"))
-        if (family.at("family") == "anthropic.messages") defaults = family.at("defaults");
-    defaults["max_output_tokens"] = nullptr;
-    policy_source.at("models").push_back(
-        json{{"family", "anthropic.messages"}, {"model", "program-native-fault"},
-             {"defaults", std::move(defaults)}, {"input_limit", 64U}, {"output_limit", 64U}});
-    auto admitted_policy = sp::descriptor::load_policy(
-        policy_source.dump(), sp::config_defaults::codec_defaults_json);
-    ASSERT_TRUE(std::holds_alternative<sp::descriptor::PolicySnapshot>(admitted_policy));
     const auto descriptor = neograph::test::descriptor(
         "anthropic.messages", "https://fixture.invalid",
-        std::get<sp::descriptor::PolicySnapshot>(std::move(admitted_policy)));
+        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json),
+            {{"anthropic.messages", "program-native-fault", 64U, 64U, json{{"max_output_tokens", nullptr}}}}));
     sp::messages::Request payload;
     payload.model = "program-native-fault";
     payload.max_tokens = 64;
