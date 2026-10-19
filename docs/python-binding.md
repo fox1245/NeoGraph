@@ -103,59 +103,65 @@ Remove the peer's entire `usage` member and restart it to exercise the missing-c
 
 ### Family controls
 
-Package versions, native archive v3 and portable JSON v2 are separate. These fragments construct controls without dispatch. Use each with an admitted provider of the corresponding family. Keep the first loopback request unchanged: OpenRouter-only controls reject that unadmitted origin before I/O.
+Portable controls (`max_output_tokens`, `temperature`, `reasoning_effort`, `store`, ...) are members of `ProviderControls`; each family's own controls are in its nest: `chat`, `responses`, `messages`, `generate` and `interactions`. A call applies the nest of its provider's family and ignores the others, so one `ProviderControls` can serve a graph whose nodes call different families. A portable control the family cannot express still raises `ValueError`. These fragments construct controls without dispatch. Keep the first loopback request unchanged: OpenRouter-only controls reject that unadmitted origin before I/O.
 
 ```python
-chat = ng.ProviderControls()
+controls = ng.ProviderControls()
+controls.max_output_tokens = 4096
+
+# Chat Completions (OpenRouter-only members need a declared OpenRouter origin).
 reasoning = ng.ChatReasoningOptions()
 reasoning.effort = "low"
 reasoning.enabled = True
-chat.chat_reasoning = reasoning
-chat.include_reasoning = True
-chat.usage_include = True
-chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+controls.chat.reasoning = reasoning
+controls.chat.usage_include = True
+controls.chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
 routing = ng.OpenRouterRouting()
 price = ng.OpenRouterMaxPrice()
 price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
 price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
 routing.max_price = price
-chat.provider = routing
+controls.provider = routing
 
-responses = ng.ProviderControls()
-responses.parallel_tool_calls = False
-responses.verbosity = ng.ResponsesVerbosity.Low
-responses.truncation = ng.ResponsesTruncation.Disabled
-responses.responses_include = [ng.ResponsesInclude.ReasoningEncryptedContent]
+# Responses: hosted tools the service runs.
+image = ng.ResponsesImageGenerationTool()
+image.size = "1024x1024"
+controls.responses.hosted_tools = [image, ng.ResponsesWebSearchTool()]
+controls.responses.verbosity = ng.ResponsesVerbosity.Low
+controls.responses.include = [ng.ResponsesInclude.ReasoningEncryptedContent]
 
-messages = ng.ProviderControls()
-messages.max_output_tokens = 4096
-messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
-messages.output_effort = ng.MessagesOutputEffort.High
-cache = ng.MessagesCacheControl()
-cache.ttl = ng.MessagesCacheTtl.FiveMinutes
-messages.cache_control = cache
-choice = ng.MessagesToolChoice()
-choice.mode = ng.MessagesToolChoiceMode.Auto
-choice.disable_parallel_tool_use = True
-messages.messages_tool_choice = choice
+# Anthropic Messages: thinking, effort, caching and server tools.
+controls.messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
+controls.messages.output_effort = ng.MessagesOutputEffort.High
+search = ng.MessagesToolDefinition()
+search.type = "web_search_20250305"
+search.name = "web_search"
+search.max_uses = 3
+controls.messages.tools = [search]
 
-gemini = ng.ProviderControls()
-gemini.temperature = 0.7
-gemini.gemini_thinking_level = ng.GeminiThinkingLevel.Low
-safety = ng.GeminiSafetySetting()
-safety.category = ng.GeminiSafetyCategory.Harassment
-safety.threshold = ng.GeminiSafetyThreshold.BlockMediumAndAbove
-gemini.safety_settings = [safety]
-choice = ng.GeminiToolChoice()
-choice.mode = ng.GeminiToolChoiceMode.Auto
-gemini.gemini_tool_choice = choice
+# Gemini generateContent: speech output.
+controls.generate.response_modalities = [ng.GeminiResponseModality.Audio]
+voice = ng.GeminiVoiceConfig()
+voice.prebuilt_voice_name = "Kore"
+speech = ng.GeminiSpeechConfig()
+speech.voice_config = voice
+controls.generate.speech_config = speech
+
+# The same controls, written as data. Unknown keys are refused.
+controls = ng.ProviderControls.from_dict({
+    "max_output_tokens": 4096,
+    "responses": {"hosted_tools": [{"type": "image_generation", "size": "1024x1024"},
+                                   {"type": "web_search"}]},
+    "generate": {"response_modalities": ["Audio"],
+                 "speech_config": {"voice_config": {"prebuilt_voice_name": "Kore"}}},
+})
 ```
 
-Default-construct records, then assign fields; these records have no keyword constructors. Optional records and vectors return detached copies: edit and assign back. `OpenRouterRouting.max_price` is one: `routing.max_price.prompt_nano_usd = ...` edits a copy, so build an `ng.OpenRouterMaxPrice` and assign the whole object. Its amounts are integer nanoUSD, `prompt_nano_usd` and `completion_nano_usd` per million tokens, `image_nano_usd`, `audio_nano_usd` and `request_nano_usd`, sent as exact decimal USD (`75_000_000` is `0.075`); at least one is required and none may exceed 2**53. `SchemaProviderDefaults.provider` merges `max_price` like the other routing fields: a request's own replaces the default. `ChatReasoningOptions` also has `max_tokens` and `exclude`. Nested Chat reasoning, `include_reasoning`, `usage_include` and `models` require a declared OpenRouter origin; scalar `reasoning_effort`, `service_tier`, typed routing and response formats remain available.
+Default-construct records, then assign fields, or build them with `from_dict`: every controls class and the SDK types of its nests take a dict, refuse unknown keys, take enum member names (`"Audio"`), and pick a hosted tool, built-in tool or response format class from its `"type"` (`"image_generation"`, `"google_search"`, `"audio"`). A Responses hosted tool type the SDK has no class for becomes `ResponsesOpenRouterServerTool` (`openrouter:` types) or `ResponsesGenericHostedTool`, which the SDK policy must admit. The nests themselves are live (`controls.generate.speech_config = ...` changes `controls`), but optional records and vectors inside them return detached copies: edit and assign back. `OpenRouterRouting.max_price` is one: `routing.max_price.prompt_nano_usd = ...` edits a copy, so build an `ng.OpenRouterMaxPrice` and assign the whole object. Its amounts are integer nanoUSD, `prompt_nano_usd` and `completion_nano_usd` per million tokens, `image_nano_usd`, `audio_nano_usd` and `request_nano_usd`, sent as exact decimal USD (`75_000_000` is `0.075`); at least one is required and none may exceed 2**53. `SchemaProviderDefaults.provider` merges `max_price` like the other routing fields: a request's own replaces the default. `ChatReasoningOptions` also has `max_tokens` and `exclude`. `chat.reasoning`, `chat.include_reasoning`, `chat.usage_include`, `chat.models`, `chat.plugins` and `chat.image_config` require a declared OpenRouter origin; scalar `reasoning_effort`, `service_tier`, typed routing and response formats remain available. The flat members of 0.15 (`chat_reasoning`, `responses_include`, `messages_tool_choice`, `gemini_thinking_level`, ...) still work in 0.16.0 and move into their nests; setting one and its nest member raises `ValueError`. They are removed in 0.17.0.
 
-Responses verbosity is `Low/Medium/High`, truncation `Disabled/Auto`; include also supports `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs`. `responses_include=None` preserves the default encrypted-reasoning include; an explicit list, including `[]`, selects that list and may make later native replay ineligible. Existing store, reasoning, hosted tools and tool-call caps remain typed.
+Responses verbosity is `Low/Medium/High`, truncation `Disabled/Auto`; include also supports `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs`. `responses.include = None` preserves the default encrypted-reasoning include; an explicit list, including `[]`, selects that list and may make later native replay ineligible. Existing store, reasoning, hosted tools and tool-call caps remain typed.
 
-Messages thinking is `Manual/Adaptive/Disabled`. Manual requires `thinking_budget` at least the admitted minimum and below the output cap; an absent mode with a budget selects manual. Adaptive/disabled forbid a budget. Enabled thinking omits temperature under vendor semantics, but model prohibitions reject explicit temperature. Effort is `Low/Medium/High/Max`, cache TTL `FiveMinutes/OneHour`; tool choice `Auto/Any/None_/Tool`, with `Tool` requiring `name` of a declared client tool. Messages routing requires a declared OpenRouter origin.
+Messages thinking is `Manual/Adaptive/Disabled`. Manual requires `thinking_budget` at least the admitted minimum and below the output cap; an absent mode with a budget selects manual. Adaptive/disabled forbid a budget. Enabled thinking omits temperature under vendor semantics, but model prohibitions reject explicit temperature. Effort is `Low/Medium/High/Max/XHigh`, cache TTL `FiveMinutes/OneHour`; tool choice `Auto/Any/None_/Tool`, with `Tool` requiring `name` of a declared client tool. Messages routing requires a declared OpenRouter origin.
 
 Gemini thinking level is `Minimal/Low/Medium/High` and excludes `thinking_budget`. Tool choice is `Auto/Any/None_/Validated`, with list `allowed_function_names`, and excludes `required_tool`. Safety categories are `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`, thresholds `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`. Wrong families, ranges and incompatible thinking/cap/tool controls reject before I/O. Model-prefix temperature prohibitions compare ASCII case-insensitively, including the suffix after the final `/`: Chat/Responses use `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages use `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`. See [SDK control admission](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls).
 
@@ -181,8 +187,9 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
-responses.previous_response_id = first_outcome.messages[-1].id
-responses.previous_response_history = (
+responses = ng.ProviderControls()
+responses.responses.previous_response_id = first_outcome.messages[-1].id
+responses.responses.previous_response_history = (
     first_request.messages + first_outcome.messages
 )
 new_input = [ng.ProviderMessage(
@@ -195,7 +202,7 @@ next_request = ng.make_provider_request(
 
 `previous_response_history` is a vector of `ProviderMessage`, never a single response or JSON object. It is not emitted. Authentic client-tool ownership can require the full original prefix plus terminal assistant with ID equal to the cursor; plain server-held text continuation may leave it empty. Later in-process cursor outputs retain private terminal ownership without becoming full-history native replay or archive authority. Failed, edited or mismatched origin/model/config/route state rejects. Full native replay and archives still require their original full prefix. See [SDK Responses continuation](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation).
 
-Set `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign` explicitly for caller-created foreign assistant `Text`/`ProviderToolCall` history without native state, wire output or signatures; the default is `NativeOnly`. Only the first foreign function call receives Google's signature-validator bypass; text-only turns receive no signature. Genuine native groups still undergo strict validation. This cannot repair, strip or demote a failed seal, import reasoning authority or grant native replay to portable data. See [SDK foreign Gemini history](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history).
+Set `controls.generate.history_mode = ng.GeminiHistoryMode.PortableForeign` explicitly for caller-created foreign assistant `Text`/`ProviderToolCall` history without native state, wire output or signatures; the default is `NativeOnly`. Only the first foreign function call receives Google's signature-validator bypass; text-only turns receive no signature. Genuine native groups still undergo strict validation. This cannot repair, strip or demote a failed seal, import reasoning authority or grant native replay to portable data. See [SDK foreign Gemini history](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history).
 
 PortableForeign rejects imported wire metadata as well as signatures. Cursor output has `NativeReplay.complete == False` and is archive-ineligible; its private owner does not authorize full-history replay.
 

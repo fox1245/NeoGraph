@@ -589,6 +589,50 @@ static void group_tool_results(std::vector<sp::Message>& messages) {
     messages.resize(write);
 }
 
+namespace {
+// A deprecated flat control moves into its family nest; setting both is ambiguous.
+template <class T> void adopt(std::optional<T>& nest, std::optional<T>& alias, const char* name) {
+    if (!alias) return;
+    if (nest) throw std::invalid_argument(std::string("Set ProviderControls::") + name + " or its family nest, not both");
+    nest = std::move(alias);
+    alias.reset();
+}
+template <class T> void adopt(std::vector<T>& nest, std::vector<T>& alias, const char* name) {
+    if (alias.empty()) return;
+    if (!nest.empty()) throw std::invalid_argument(std::string("Set ProviderControls::") + name + " or its family nest, not both");
+    nest = std::move(alias);
+    alias.clear();
+}
+void adopt_deprecated(ProviderControls& c) {
+    adopt(c.chat.reasoning, c.chat_reasoning, "chat_reasoning");
+    adopt(c.chat.include_reasoning, c.include_reasoning, "include_reasoning");
+    adopt(c.chat.usage_include, c.usage_include, "usage_include");
+    adopt(c.chat.models, c.models, "models");
+    adopt(c.responses.previous_response_id, c.previous_response_id, "previous_response_id");
+    adopt(c.responses.previous_response_history, c.previous_response_history, "previous_response_history");
+    adopt(c.responses.parallel_tool_calls, c.parallel_tool_calls, "parallel_tool_calls");
+    adopt(c.responses.verbosity, c.verbosity, "verbosity");
+    adopt(c.responses.truncation, c.truncation, "truncation");
+    adopt(c.responses.include, c.responses_include, "responses_include");
+    adopt(c.messages.thinking_mode, c.thinking_mode, "thinking_mode");
+    adopt(c.messages.output_effort, c.output_effort, "output_effort");
+    adopt(c.messages.cache_control, c.cache_control, "cache_control");
+    adopt(c.messages.tool_choice, c.messages_tool_choice, "messages_tool_choice");
+    adopt(c.generate.history_mode, c.gemini_history_mode, "gemini_history_mode");
+    adopt(c.generate.thinking_level, c.gemini_thinking_level, "gemini_thinking_level");
+    adopt(c.generate.safety_settings, c.safety_settings, "safety_settings");
+    adopt(c.generate.tool_choice, c.gemini_tool_choice, "gemini_tool_choice");
+}
+std::shared_ptr<const sp::json::Document> extensions_document(const std::optional<json>& value) {
+    if (!value) return {};
+    auto parsed = sp::json::parse(value->dump());
+    auto* document = std::get_if<sp::json::Document>(&parsed);
+    if (!document || !document->root().is_object())
+        throw std::invalid_argument("Provider extensions must be a JSON object");
+    return std::make_shared<const sp::json::Document>(std::move(*document));
+}
+} // namespace
+
 ProviderRequest make_provider_request(
     const Provider& provider, std::string model, std::vector<sp::Message> messages,
     std::vector<ChatTool> tools, ProviderControls controls, ProviderMode mode) {
@@ -606,19 +650,8 @@ ProviderRequest make_provider_request(
     if (family != "openai.responses" &&
         std::any_of(tools.begin(), tools.end(), [](const ChatTool& tool) { return tool.strict.value_or(false); }))
         throw std::invalid_argument("Strict tool definitions are supported only by the openai.responses family");
-    const bool chat_controls = controls.chat_reasoning || controls.include_reasoning ||
-        controls.usage_include || !controls.models.empty();
-    const bool responses_controls = controls.previous_response_id ||
-        !controls.previous_response_history.empty() || controls.parallel_tool_calls ||
-        controls.verbosity || controls.truncation || controls.responses_include;
-    const bool messages_controls = controls.thinking_mode || controls.output_effort ||
-        controls.cache_control || controls.messages_tool_choice;
-    const bool generate_controls = controls.gemini_history_mode || controls.gemini_thinking_level ||
-        !controls.safety_settings.empty() || controls.gemini_tool_choice;
-    reject((family != "openai.chat" && chat_controls) ||
-           (family != "openai.responses" && responses_controls) ||
-           (family != "anthropic.messages" && messages_controls) ||
-           (family != "google.generate" && generate_controls));
+    // Each family takes its own nest; the nests of other families are ignored.
+    adopt_deprecated(controls);
     ProviderRequest result;
     result.mode = mode;
     if (family == "openai.chat") {
@@ -635,10 +668,16 @@ ProviderRequest make_provider_request(
         request.service_tier = std::move(controls.service_tier);
         request.provider = std::move(controls.provider);
         request.response_format = std::move(controls.response_format);
-        request.reasoning = std::move(controls.chat_reasoning);
-        request.include_reasoning = controls.include_reasoning;
-        request.usage_include = controls.usage_include;
-        request.models = std::move(controls.models);
+        auto& chat = controls.chat;
+        request.reasoning = std::move(chat.reasoning);
+        request.include_reasoning = chat.include_reasoning;
+        request.usage_include = chat.usage_include;
+        request.models = std::move(chat.models);
+        request.modalities = std::move(chat.modalities);
+        request.audio = std::move(chat.audio);
+        request.image_config = std::move(chat.image_config);
+        request.plugins = std::move(chat.plugins);
+        request.extensions = extensions_document(chat.extensions);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool)});
         result.payload = std::move(request);
@@ -655,13 +694,26 @@ ProviderRequest make_provider_request(
         request.temperature = controls.temperature;
         request.top_p = controls.top_p;
         request.thinking_budget = controls.thinking_budget;
-        request.thinking_mode = controls.thinking_mode;
-        request.output_effort = controls.output_effort;
-        request.cache_control = std::move(controls.cache_control);
-        request.tool_choice = std::move(controls.messages_tool_choice);
+        auto& family_controls = controls.messages;
+        request.thinking_mode = family_controls.thinking_mode;
+        request.output_effort = family_controls.output_effort;
+        request.cache_control = std::move(family_controls.cache_control);
+        request.tool_choice = std::move(family_controls.tool_choice);
         request.provider = std::move(controls.provider);
-        request.tools.reserve(tools.size());
-        for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool), {}, {}});
+        request.container = std::move(family_controls.container);
+        request.skills = std::move(family_controls.skills);
+        request.betas = std::move(family_controls.betas);
+        request.mcp_servers = std::move(family_controls.mcp_servers);
+        request.extensions = extensions_document(family_controls.extensions);
+        request.tools.reserve(tools.size() + family_controls.tools.size());
+        for (const auto& tool : tools) {
+            sp::messages::ToolDefinition definition;
+            definition.name = tool.name;
+            definition.description = tool.description;
+            definition.input_schema = parameters(tool);
+            request.tools.push_back(std::move(definition));
+        }
+        for (auto& tool : family_controls.tools) request.tools.push_back(std::move(tool));
         result.payload = std::move(request);
     } else if (family == "openai.responses") {
         reject(controls.thinking_budget || controls.include_thoughts ||
@@ -678,12 +730,20 @@ ProviderRequest make_provider_request(
         request.response_format = std::move(controls.response_format);
         request.store = controls.store;
         request.max_tool_calls = controls.max_tool_calls;
-        request.previous_response_id = std::move(controls.previous_response_id);
-        request.previous_response_history = std::move(controls.previous_response_history);
-        request.parallel_tool_calls = controls.parallel_tool_calls;
-        request.verbosity = controls.verbosity;
-        request.truncation = controls.truncation;
-        request.include = std::move(controls.responses_include);
+        auto& responses = controls.responses;
+        request.previous_response_id = std::move(responses.previous_response_id);
+        request.previous_response_history = std::move(responses.previous_response_history);
+        request.parallel_tool_calls = responses.parallel_tool_calls;
+        request.verbosity = responses.verbosity;
+        request.truncation = responses.truncation;
+        request.include = std::move(responses.include);
+        request.include_names = std::move(responses.include_names);
+        request.hosted_tools = std::move(responses.hosted_tools);
+        request.modalities = std::move(responses.modalities);
+        request.image_config = std::move(responses.image_config);
+        request.plugins = std::move(responses.plugins);
+        request.mcp_approvals = std::move(responses.mcp_approvals);
+        request.extensions = extensions_document(responses.extensions);
         if (controls.reasoning_effort || controls.reasoning_summary)
             request.reasoning = sp::responses::ReasoningOptions{std::move(controls.reasoning_effort), std::move(controls.reasoning_summary)};
         request.service_tier = std::move(controls.service_tier);
@@ -704,10 +764,21 @@ ProviderRequest make_provider_request(
         request.thinking_budget = controls.thinking_budget;
         request.include_thoughts = controls.include_thoughts;
         request.temperature = controls.temperature;
-        request.thinking_level = controls.gemini_thinking_level;
-        request.safety_settings = std::move(controls.safety_settings);
-        request.tool_choice = std::move(controls.gemini_tool_choice);
-        if (controls.gemini_history_mode) request.history_mode = *controls.gemini_history_mode;
+        auto& generate = controls.generate;
+        request.thinking_level = generate.thinking_level;
+        request.safety_settings = std::move(generate.safety_settings);
+        request.tool_choice = std::move(generate.tool_choice);
+        if (generate.history_mode) request.history_mode = *generate.history_mode;
+        request.response_modalities = std::move(generate.response_modalities);
+        request.speech_config = std::move(generate.speech_config);
+        request.image_config = std::move(generate.image_config);
+        request.audio_transcription_config = std::move(generate.audio_transcription_config);
+        request.audio_format = std::move(generate.audio_format);
+        request.builtin_tools = std::move(generate.builtin_tools);
+        request.mcp_servers = std::move(generate.mcp_servers);
+        request.server_tool_invocations = generate.server_tool_invocations;
+        request.retrieval_config = std::move(generate.retrieval_config);
+        request.extensions = extensions_document(generate.extensions);
         request.required_tool = std::move(controls.required_tool);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool)});
@@ -715,7 +786,7 @@ ProviderRequest make_provider_request(
     } else if (family == "google.interactions") {
         reject(controls.temperature || controls.top_p || controls.reasoning_effort || controls.reasoning_summary ||
                controls.thinking_budget || controls.include_thoughts ||
-               controls.provider || controls.response_format || controls.store || controls.max_tool_calls);
+               controls.provider || controls.response_format || controls.max_tool_calls);
         sp::interactions::Request request;
         request.model = std::move(model);
         request.messages = std::move(messages);
@@ -726,6 +797,17 @@ ProviderRequest make_provider_request(
         request.thinking_summaries = controls.thinking_summaries;
         request.service_tier = std::move(controls.service_tier);
         request.required_tool = std::move(controls.required_tool);
+        request.store = controls.store;
+        auto& interactions = controls.interactions;
+        request.response_format = std::move(interactions.response_format);
+        request.speech_config = std::move(interactions.speech_config);
+        request.transcription_config = std::move(interactions.transcription_config);
+        request.builtin_tools = std::move(interactions.builtin_tools);
+        request.previous_interaction_id = std::move(interactions.previous_interaction_id);
+        request.video_task = std::move(interactions.video_task);
+        request.agent = std::move(interactions.agent);
+        request.background = interactions.background;
+        request.extensions = extensions_document(interactions.extensions);
         request.tools.reserve(tools.size());
         for (const auto& tool : tools) request.tools.push_back({tool.name, tool.description, parameters(tool)});
         result.payload = std::move(request);

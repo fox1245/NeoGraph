@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=010470d7fb5715159131726603bf5dff5f10a3357b2a21f5332037cc265324ff -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=dbcd1f06a80dbd2da9b01a7fe8d18861340916b559e3dfc8244e34733bd11b9f -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -104,59 +104,65 @@ output tokens: 0
 
 ### ファミリー別のコントロール
 
-パッケージのバージョン、ネイティブarchive v3、ポータブルJSON v2は、それぞれ別物です。以下の断片は、ディスパッチせずにコントロールを組み立てるだけです。それぞれ、対応するファミリーのadmission済みプロバイダーで使ってください。最初のループバックのリクエストは、変更しないでください。OpenRouter専用のコントロールは、admission前のoriginに対して、I/Oの前に拒否されます。
+ポータブルなコントロール（`max_output_tokens`、`temperature`、`reasoning_effort`、`store` など）は `ProviderControls` のメンバーで、ファミリー固有のコントロールはそのファミリーのネスト（`chat`、`responses`、`messages`、`generate`、`interactions`）にあります。呼び出しはプロバイダーのファミリーのネストだけを適用し、他のネストは無視するので、ノードごとに異なるファミリーを呼ぶグラフでも `ProviderControls` 1つで済みます。そのファミリーが表現できないポータブルなコントロールは、引き続き `ValueError` になります。以下の断片は、ディスパッチせずにコントロールを組み立てるだけです。最初のループバックのリクエストは、変更しないでください。OpenRouter専用のコントロールは、admission前のoriginに対して、I/Oの前に拒否されます。
 
 ```python
-chat = ng.ProviderControls()
+controls = ng.ProviderControls()
+controls.max_output_tokens = 4096
+
+# Chat Completions (OpenRouter-only members need a declared OpenRouter origin).
 reasoning = ng.ChatReasoningOptions()
 reasoning.effort = "low"
 reasoning.enabled = True
-chat.chat_reasoning = reasoning
-chat.include_reasoning = True
-chat.usage_include = True
-chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+controls.chat.reasoning = reasoning
+controls.chat.usage_include = True
+controls.chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
 routing = ng.OpenRouterRouting()
 price = ng.OpenRouterMaxPrice()
 price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
 price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
 routing.max_price = price
-chat.provider = routing
+controls.provider = routing
 
-responses = ng.ProviderControls()
-responses.parallel_tool_calls = False
-responses.verbosity = ng.ResponsesVerbosity.Low
-responses.truncation = ng.ResponsesTruncation.Disabled
-responses.responses_include = [ng.ResponsesInclude.ReasoningEncryptedContent]
+# Responses: hosted tools the service runs.
+image = ng.ResponsesImageGenerationTool()
+image.size = "1024x1024"
+controls.responses.hosted_tools = [image, ng.ResponsesWebSearchTool()]
+controls.responses.verbosity = ng.ResponsesVerbosity.Low
+controls.responses.include = [ng.ResponsesInclude.ReasoningEncryptedContent]
 
-messages = ng.ProviderControls()
-messages.max_output_tokens = 4096
-messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
-messages.output_effort = ng.MessagesOutputEffort.High
-cache = ng.MessagesCacheControl()
-cache.ttl = ng.MessagesCacheTtl.FiveMinutes
-messages.cache_control = cache
-choice = ng.MessagesToolChoice()
-choice.mode = ng.MessagesToolChoiceMode.Auto
-choice.disable_parallel_tool_use = True
-messages.messages_tool_choice = choice
+# Anthropic Messages: thinking, effort, caching and server tools.
+controls.messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
+controls.messages.output_effort = ng.MessagesOutputEffort.High
+search = ng.MessagesToolDefinition()
+search.type = "web_search_20250305"
+search.name = "web_search"
+search.max_uses = 3
+controls.messages.tools = [search]
 
-gemini = ng.ProviderControls()
-gemini.temperature = 0.7
-gemini.gemini_thinking_level = ng.GeminiThinkingLevel.Low
-safety = ng.GeminiSafetySetting()
-safety.category = ng.GeminiSafetyCategory.Harassment
-safety.threshold = ng.GeminiSafetyThreshold.BlockMediumAndAbove
-gemini.safety_settings = [safety]
-choice = ng.GeminiToolChoice()
-choice.mode = ng.GeminiToolChoiceMode.Auto
-gemini.gemini_tool_choice = choice
+# Gemini generateContent: speech output.
+controls.generate.response_modalities = [ng.GeminiResponseModality.Audio]
+voice = ng.GeminiVoiceConfig()
+voice.prebuilt_voice_name = "Kore"
+speech = ng.GeminiSpeechConfig()
+speech.voice_config = voice
+controls.generate.speech_config = speech
+
+# The same controls, written as data. Unknown keys are refused.
+controls = ng.ProviderControls.from_dict({
+    "max_output_tokens": 4096,
+    "responses": {"hosted_tools": [{"type": "image_generation", "size": "1024x1024"},
+                                   {"type": "web_search"}]},
+    "generate": {"response_modalities": ["Audio"],
+                 "speech_config": {"voice_config": {"prebuilt_voice_name": "Kore"}}},
+})
 ```
 
-レコードはデフォルトで構築してから、フィールドを代入します。これらのレコードには、キーワード引数を受け取るコンストラクターはありません。省略可能なレコードとベクトルは、独立したコピーを返すので、編集したら代入し直してください。`OpenRouterRouting.max_price` もその1つです。`routing.max_price.prompt_nano_usd = ...` はコピーを書き換えるだけなので、`ng.OpenRouterMaxPrice` を作って、オブジェクトごと代入します。金額は整数のnanoUSDで指定します。項目は、100万トークンあたりの `prompt_nano_usd` と `completion_nano_usd`、および `image_nano_usd`、`audio_nano_usd`、`request_nano_usd` です。送信時には、正確な10進数のUSDになります（`75_000_000` は `0.075`）。少なくとも1つは必須で、どの値も2**53を超えられません。`SchemaProviderDefaults.provider` は、`max_price` を他のルーティング項目と同じように統合します。リクエスト自身の値が、デフォルト値を置き換えます。`ChatReasoningOptions` には、`max_tokens` と `exclude` もあります。入れ子のChat reasoning、`include_reasoning`、`usage_include`、`models` には、宣言済みのOpenRouterのoriginが必要です。スカラーの `reasoning_effort`、`service_tier`、型付きのルーティング、レスポンスフォーマットは、引き続き使えます。
+レコードはデフォルトで構築してからフィールドを代入するか、`from_dict` で作ります。すべてのコントロールクラスとそのネストのSDK型はdictを受け取り、未知のキーを拒否し、enumはメンバー名（`"Audio"`）で受け取り、ホスト型ツール・組み込みツール・レスポンス形式は `"type"`（`"image_generation"`、`"google_search"`、`"audio"`）からクラスを選びます。SDKにクラスがないResponsesのホスト型ツールの型は、`ResponsesOpenRouterServerTool`（`openrouter:` の型）か `ResponsesGenericHostedTool` になり、SDKのポリシーによるadmissionが必要です。ネスト自体は元のオブジェクトにつながっています（`controls.generate.speech_config = ...` は `controls` を変更します）が、その中の省略可能なレコードとベクトルは独立したコピーを返すので、編集したら代入し直してください。`OpenRouterRouting.max_price` もその1つです。`routing.max_price.prompt_nano_usd = ...` はコピーを書き換えるだけなので、`ng.OpenRouterMaxPrice` を作って、オブジェクトごと代入します。金額は整数のnanoUSDで指定します。項目は、100万トークンあたりの `prompt_nano_usd` と `completion_nano_usd`、および `image_nano_usd`、`audio_nano_usd`、`request_nano_usd` です。送信時には、正確な10進数のUSDになります（`75_000_000` は `0.075`）。少なくとも1つは必須で、どの値も2**53を超えられません。`SchemaProviderDefaults.provider` は、`max_price` を他のルーティング項目と同じように統合します。リクエスト自身の値が、デフォルト値を置き換えます。`ChatReasoningOptions` には、`max_tokens` と `exclude` もあります。`chat.reasoning`、`chat.include_reasoning`、`chat.usage_include`、`chat.models`、`chat.plugins`、`chat.image_config` には、宣言済みのOpenRouterのoriginが必要です。スカラーの `reasoning_effort`、`service_tier`、型付きのルーティング、レスポンスフォーマットは、引き続き使えます。0.15のフラットなメンバー（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` など）は0.16.0でも動作し、対応するネストに移されます。フラットなメンバーとそのネストのメンバーを両方指定すると `ValueError` になります。0.17.0で削除されます。
 
-Responsesのverbosityは `Low/Medium/High`、truncationは `Disabled/Auto` です。includeでは、`WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs` も指定できます。`responses_include=None` なら、暗号化されたreasoningをincludeするデフォルトのまま変わりません。`[]` を含め、リストを明示すると、そのリストだけが選ばれ、後続のネイティブリプレイの対象外になることがあります。既存のstore、reasoning、ホスト型ツール、ツール呼び出しの上限も、引き続き型付きで指定します。
+Responsesのverbosityは `Low/Medium/High`、truncationは `Disabled/Auto` です。includeでは、`WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs` も指定できます。`responses.include = None` なら、暗号化されたreasoningをincludeするデフォルトのまま変わりません。`[]` を含め、リストを明示すると、そのリストだけが選ばれ、後続のネイティブリプレイの対象外になることがあります。既存のstore、reasoning、ホスト型ツール、ツール呼び出しの上限も、引き続き型付きで指定します。
 
-Messagesのthinkingは `Manual/Adaptive/Disabled` です。Manualでは、`thinking_budget` を、admission済みの最小値以上、出力上限未満にする必要があります。モードを省略してbudgetだけを指定すると、Manualになります。Adaptive/Disabledでは、budgetを指定できません。thinkingを有効にすると、ベンダーの仕様によりtemperatureは省かれますが、モデルごとの禁止事項によって、temperatureを明示すると拒否されます。effortは `Low/Medium/High/Max`、キャッシュのTTLは `FiveMinutes/OneHour`、tool choiceは `Auto/Any/None_/Tool` で、`Tool` には、宣言済みのクライアントツールの `name` が必要です。Messagesでルーティングを使うには、宣言済みのOpenRouterのoriginが必要です。
+Messagesのthinkingは `Manual/Adaptive/Disabled` です。Manualでは、`thinking_budget` を、admission済みの最小値以上、出力上限未満にする必要があります。モードを省略してbudgetだけを指定すると、Manualになります。Adaptive/Disabledでは、budgetを指定できません。thinkingを有効にすると、ベンダーの仕様によりtemperatureは省かれますが、モデルごとの禁止事項によって、temperatureを明示すると拒否されます。effortは `Low/Medium/High/Max/XHigh`、キャッシュのTTLは `FiveMinutes/OneHour`、tool choiceは `Auto/Any/None_/Tool` で、`Tool` には、宣言済みのクライアントツールの `name` が必要です。Messagesでルーティングを使うには、宣言済みのOpenRouterのoriginが必要です。
 
 Geminiのthinking levelは `Minimal/Low/Medium/High` で、`thinking_budget` とは併用できません。tool choiceは `Auto/Any/None_/Validated` で、`allowed_function_names` にはリストを渡し、`required_tool` とは併用できません。safetyのカテゴリは `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`、しきい値は `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off` です。ファミリーの誤り、範囲外の値、組み合わせられないthinking・上限・ツールのコントロールは、I/Oの前に拒否されます。temperatureを禁止するモデルの接頭辞は、ASCIIの大文字小文字を区別せずに比較します。最後の `/` より後ろの部分も対象です。Chat/Responsesでは `gpt-5`、`gpt-6`、`o1`、`o3`、`o4`、Messagesでは `claude-opus-4-7`、`claude-opus-4-8`、`claude-opus-5`、`claude-sonnet-5`、`claude-fable-` が該当します。詳しくは[SDKのコントロールのadmission](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)を参照してください。
 
@@ -182,8 +188,9 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
-responses.previous_response_id = first_outcome.messages[-1].id
-responses.previous_response_history = (
+responses = ng.ProviderControls()
+responses.responses.previous_response_id = first_outcome.messages[-1].id
+responses.responses.previous_response_history = (
     first_request.messages + first_outcome.messages
 )
 new_input = [ng.ProviderMessage(
@@ -196,7 +203,7 @@ next_request = ng.make_provider_request(
 
 `previous_response_history` は `ProviderMessage` のベクトルで、単一のレスポンスやJSONオブジェクトにはなりません。リクエストには含まれません。クライアント側ツールの所有権が本物であることを示すために、元の先頭部分（prefix）全体と、IDがカーソルと等しい終端のアシスタントメッセージが必要になる場合があります。サーバーが保持するテキストをそのまま継続するだけなら、空のままでかまいません。その後にプロセス内で得たカーソルの出力は、終端メッセージの非公開の所有権を保持しますが、履歴全体のネイティブリプレイの権限にも、archiveの権限にもなりません。失敗した状態、編集された状態、origin・モデル・設定・ルートが一致しない状態は、拒否されます。完全なネイティブリプレイとarchiveには、これまでどおり、元の先頭部分全体が必要です。詳しくは[SDKのResponsesの継続](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)を参照してください。
 
-呼び出し側が作った外部のアシスタント履歴（`Text` / `ProviderToolCall`）に、ネイティブな状態、ワイヤー出力、署名がない場合は、`gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign` を明示的に設定します。デフォルトは `NativeOnly` です。Googleの署名検証を迂回する仕組み（bypass）が適用されるのは、最初の外部の関数呼び出しだけです。テキストだけのターンには、署名は付きません。本物のネイティブグループには、これまでどおり厳密な検証が行われます。この設定では、失敗したシールの修復も、除去も、格下げもできません。reasoningの権限を取り込むことも、ポータブルなデータにネイティブリプレイを許可することもできません。詳しくは[SDKの外部Gemini履歴](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)を参照してください。
+呼び出し側が作った外部のアシスタント履歴（`Text` / `ProviderToolCall`）に、ネイティブな状態、ワイヤー出力、署名がない場合は、`controls.generate.history_mode = ng.GeminiHistoryMode.PortableForeign` を明示的に設定します。デフォルトは `NativeOnly` です。Googleの署名検証を迂回する仕組み（bypass）が適用されるのは、最初の外部の関数呼び出しだけです。テキストだけのターンには、署名は付きません。本物のネイティブグループには、これまでどおり厳密な検証が行われます。この設定では、失敗したシールの修復も、除去も、格下げもできません。reasoningの権限を取り込むことも、ポータブルなデータにネイティブリプレイを許可することもできません。詳しくは[SDKの外部Gemini履歴](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)を参照してください。
 
 PortableForeignでは、署名だけでなく、取り込んだワイヤーのメタデータも拒否されます。カーソルの出力は `NativeReplay.complete == False` で、archiveの対象外です。非公開の所有者に、履歴全体のリプレイを承認する効力はありません。
 

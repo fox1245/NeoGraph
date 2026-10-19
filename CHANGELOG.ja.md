@@ -1,5 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9b55c68c85cfa656f7f24d256faf0d6a0426a6a3912a7c7a207a815724c1dff3 -->
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=02e529afc4d567bfe5b7df7936551284059e1f7033180667503ab66ed2d9be43 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -15,6 +14,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 変更
+- **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。2026-10-20 の円卓会議で決めた構造です。
+  - **新しい制御。** Chat の出力 modality、音声出力、OpenRouter の画像出力と plugin。Responses のホスト型ツール（Web 検索、画像生成、ファイル検索、ツール検索、shell、code interpreter、MCP、computer use、OpenRouter のサーバーツール、ポリシーが承認したツール）、出力 modality、画像出力、plugin、include 名、MCP の承認。Messages のサーバー・型付きクライアントツール、container、skill、beta、MCP サーバー。Generate の応答 modality、音声、画像出力、音声の文字起こし、音声形式、組み込みツール、MCP サーバー、サーバーツールの呼び出し、retrieval。Interactions の応答形式、音声、文字起こし、組み込みツール、`previous_interaction_id`、`video_task`、`agent`、`background`（ポータブルな `store` も Interactions に適用されるようになりました）。各ネストには、SDK ポリシーが origin ごとに承認する最上位メンバー `extensions` があります。
+  - **動作の変更: 各 family は自分のネストだけを適用します。** 異なる family を呼ぶノードからなるグラフでも `ProviderControls` を一つ共有でき、他の family の制御は無視されます。family が表現できないポータブルな制御は引き続き例外になります。
+  - **非推奨: フラットな family メンバー**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。0.16.0 では対応するネストに移され、別名とネストのメンバーを両方指定すると例外になり、0.17.0 で削除されます。
+  - **Python。** ネストとその中のすべての SDK 型をバインドし、`MessagesOutputEffort` に `XHigh` が加わり、各制御クラスに厳格な `from_dict` があります。未知のキーは拒否し、enum はメンバー名で、ツールや形式の variant は `"type"` で受け取ります（`neograph_engine.provider_controls`）。
 - **SchemaProvider interface 7 を採用します (#512).** NeoGraph は interface 7 のヘッダーと第 7 世代のライブラリ（`libsp_*.so.7`）でビルドします。SchemaProvider 0.4.0 のリリースまでは `main` ブランチ（パッケージバージョン 0.3.0）に固定し、0.16.0 のリリース前に 0.4.0 のリリースへ移します。
   - **動作の変更: 型付きのメディア。** `sp::Image` は `sp::Media` になります。画像・音声・動画・文書で、インライン、URL、またはプロバイダーのファイルにあります。`ChatMessage::image_urls` はインライン画像をこれまでどおり data URL として射影し、URL の画像も射影するようになりました。`portable_message` は https の項目を、プロバイダーが取得する URL メディアとして送ります。生成された画像（Chat の `message.images`、Responses の `image_generation_call`、Gemini の `inlineData`）は `Opaque` ではなく `Media` パートになり、ワイヤーの項目はネイティブ出力に残ります。
   - **プロバイダー結果フォーマット v3。** `neograph.provider-outcome/v3` と `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）は、メディアパート、テキストの引用、型付きのツール結果、エラーの `reason`、実際に応答した `model` を追加します。v2 フォーマットのレコード（Program ジャーナル、チェックポイント、ランタイム履歴）も引き続き読み込めます。画像パートはインライン画像のメディアになり、新しいメンバーは空です。新しいレコードは v3 で書き込み、NeoGraph 0.15 はそれを読めません。

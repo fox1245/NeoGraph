@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -339,17 +339,17 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)` 选择一个封闭 family。错误 family 控制引发 `std::invalid_argument`；SDK prepare 在 I/O 前检查 enum 值、获准 origin、模型规则、tool 声明和 native binding。`ProviderControls` 没有 dictionary 逃生通道。optional 区分未指定与显式 `false`、空选择。
+`make_provider_request(provider, model, messages, tools, controls, mode)` 选择一个封闭 family。可移植控制是 `ProviderControls` 的成员，family 自己的控制位于该 family 的嵌套结构中；一次调用只应用其 family 的嵌套，因此一个 `ProviderControls` 可服务调用不同 family 的节点。family 无法表达的可移植控制引发 `std::invalid_argument`；SDK prepare 在 I/O 前检查 enum 值、获准 origin、模型规则、tool 声明和 native binding。无类型的值只能经由嵌套的 `extensions` 发送，由 SDK 策略按 origin 连同值 schema 准入。0.15 的扁平 family 成员（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` 等）在 0.16.0 中是会移入嵌套的弃用别名；同时设置别名和嵌套成员会抛出异常。optional 区分未指定与显式 `false`、空选择。
 
-| Family | `ProviderControls` 字段及 SDK 映射 |
-|---|---|
-| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format`; `chat_reasoning` → `sp::chat::Request::reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models` |
-| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope`; `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `responses_include` → `include` |
-| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider`; `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `messages_tool_choice` → `tool_choice` |
-| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope`; `gemini_history_mode` → `history_mode`, `gemini_thinking_level` → `thinking_level`, `safety_settings`, `gemini_tool_choice` → `tool_choice` |
-| `google.interactions` | `max_output_tokens`, `thinking_level`（optional string）, `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate 的 enum `gemini_thinking_level` 不适用 |
+| Family | 可移植的 `ProviderControls` 字段及 SDK 映射 | Family 嵌套（`controls.<nest>`） |
+|---|---|---|
+| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format` | `chat`: `reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models`, `modalities`, `audio`, `image_config`, `plugins`, `extensions` |
+| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope` | `responses`: `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `include`, `include_names`, `hosted_tools` → `tools`, `modalities`, `image_config`, `plugins`, `mcp_approvals`, `extensions` |
+| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider` | `messages`: `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `tool_choice`, `tools` (server and typed client tools, after the portable tools), `container`, `skills`, `betas`, `mcp_servers`, `extensions` |
+| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope` | `generate`: `history_mode`, `thinking_level`, `safety_settings`, `tool_choice`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`, `extensions` |
+| `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `store`, `system`, `account_scope` | `interactions`: `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `video_task`, `agent`, `background`, `extensions` |
 
-Chat 的 `sp::chat::ReasoningOptions` 包含 optional `effort`, `max_tokens`, `exclude`, `enabled`。其 nested reasoning object、`include_reasoning`、`usage_include`、备用 `models` 需要 policy 声明的 OpenRouter origin。`sp::OpenRouterRouting` 也仅适用于 Chat/Responses/Messages 的声明 OpenRouter origin。gateway 形式的模型名不会批准其他 origin。SDK payload 还提供 family typed tool 声明、Responses `hosted_tools`、strict/deferred tool 选项；使用实际 payload variant，不添加 raw JSON。
+Chat 的 `sp::chat::ReasoningOptions` 包含 optional `effort`, `max_tokens`, `exclude`, `enabled`。其 nested reasoning object、`include_reasoning`、`usage_include`、备用 `models` 需要 policy 声明的 OpenRouter origin。`sp::OpenRouterRouting` 也仅适用于 Chat/Responses/Messages 的声明 OpenRouter origin。gateway 形式的模型名不会批准其他 origin。Responses 托管工具（`controls.responses.hosted_tools`）和 Messages 服务端及类型化客户端工具（`controls.messages.tools`）是嵌套中带类型的 SDK 值。
 
 Responses SSE 要求终止事件 `response.completed` 或 `response.incomplete`。`response.done` 仅在作为携带相同完整终止 Responses envelope（completed 或 incomplete）的别名时被接受；非终止或格式错误的 `response.done` 会以协议错误失败，`response.content_part.delta` 及其他未列出的事件为 `Unsupported`。在已声明的 OpenRouter origin 上，Responses 与 Messages 还接受网关针对 `~vendor/model-latest` 等路由别名报告的实际模型名；服务模型在同一响应内不得变化，replay 仍绑定到请求的模型。
 
@@ -359,7 +359,7 @@ Responses SSE 要求终止事件 `response.completed` 或 `response.incomplete`�
 | `sp::responses::Truncation` | `Disabled`, `Auto` |
 | `sp::responses::Include` | `ReasoningEncryptedContent`, `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs` |
 | `sp::messages::ThinkingMode` | `Manual`, `Adaptive`, `Disabled` |
-| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max` |
+| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max`, `XHigh` |
 | `sp::messages::CacheControl` / `CacheTtl` | optional `ttl`: `FiveMinutes`, `OneHour`; wire type `ephemeral`, optional TTL `5m`/`1h` |
 | `sp::messages::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Tool`; `name`; optional `disable_parallel_tool_use` |
 | `sp::gemini::HistoryMode` | `NativeOnly`, `PortableForeign` |
@@ -368,7 +368,7 @@ Responses SSE 要求终止事件 `response.completed` 或 `response.incomplete`�
 | `sp::gemini::SafetyThreshold` | `BlockNone`, `BlockOnlyHigh`, `BlockMediumAndAbove`, `BlockLowAndAbove`, `Off` |
 | `sp::gemini::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Validated`; `allowed_function_names`: 已声明函数名 vector |
 
-Messages 要求正 output cap。无 mode 的 thinking budget 选择 `Manual`，须达到获准 minimum 且严格小于 cap。`Adaptive`/`Disabled` 拒绝显式 budget。Manual/adaptive 省略其他方面有效的 temperature 并检查 thinking `top_p` minimum，但不覆盖模型 temperature 禁令。强制 `Any`/`Tool` 要求 tools 和 disabled thinking；`Tool` 指定已声明 client tool，其他 mode 拒绝 `name`，`None` 拒绝 `disable_parallel_tool_use`。Generate 的 thinking budget/level 与 `required_tool`/`gemini_tool_choice` 分别互斥；allowed-function 列表须引用已声明函数。sampling 遵守 family/policy 范围。Generate 没有 `top_p`，Interactions 不接受两个 sampling 字段。
+Messages 要求正 output cap。无 mode 的 thinking budget 选择 `Manual`，须达到获准 minimum 且严格小于 cap。`Adaptive`/`Disabled` 拒绝显式 budget。Manual/adaptive 省略其他方面有效的 temperature 并检查 thinking `top_p` minimum，但不覆盖模型 temperature 禁令。强制 `Any`/`Tool` 要求 tools 和 disabled thinking；`Tool` 指定已声明 client tool，其他 mode 拒绝 `name`，`None` 拒绝 `disable_parallel_tool_use`。Generate 的 thinking budget/level 与 `required_tool`/`generate.tool_choice` 分别互斥；allowed-function 列表须引用已声明函数。sampling 遵守 family/policy 范围。Generate 没有 `top_p`，Interactions 不接受两个 sampling 字段。
 
 `FamilyPolicy.temperature_forbidden_model_prefixes` 按 ASCII 大小写不敏感方式匹配完整模型名及最后 `/` 后的 suffix。内置 Chat/Responses 前缀为 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`；Messages 为 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`。显式禁用 temperature 在 I/O 前拒绝，包括 gateway 前缀模型。
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=010470d7fb5715159131726603bf5dff5f10a3357b2a21f5332037cc265324ff -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=dbcd1f06a80dbd2da9b01a7fe8d18861340916b559e3dfc8244e34733bd11b9f -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -104,59 +104,65 @@ output tokens: 0
 
 ### 各请求族的控制项
 
-包版本、native archive v3 和可移植 JSON v2 是各自独立的。下面的片段只构造控制项，不分发。使用时，要搭配对应请求族中已准入的 provider。第一个回环请求保持不变：仅限 OpenRouter 的控制项，会在 I/O 之前拒绝那个未准入的 origin。
+可移植的控制项（`max_output_tokens`、`temperature`、`reasoning_effort`、`store` 等）是 `ProviderControls` 的成员；各请求族自己的控制项在该族的嵌套结构（`chat`、`responses`、`messages`、`generate`、`interactions`）里。一次调用只应用 provider 所属请求族的嵌套结构，忽略其他的，所以节点调用不同请求族的图也只需一个 `ProviderControls`。请求族无法表达的可移植控制项仍会抛出 `ValueError`。下面的片段只构造控制项，不分发。第一个回环请求保持不变：仅限 OpenRouter 的控制项，会在 I/O 之前拒绝那个未准入的 origin。
 
 ```python
-chat = ng.ProviderControls()
+controls = ng.ProviderControls()
+controls.max_output_tokens = 4096
+
+# Chat Completions (OpenRouter-only members need a declared OpenRouter origin).
 reasoning = ng.ChatReasoningOptions()
 reasoning.effort = "low"
 reasoning.enabled = True
-chat.chat_reasoning = reasoning
-chat.include_reasoning = True
-chat.usage_include = True
-chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+controls.chat.reasoning = reasoning
+controls.chat.usage_include = True
+controls.chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
 routing = ng.OpenRouterRouting()
 price = ng.OpenRouterMaxPrice()
 price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
 price.completion_nano_usd = 300_000_000  # 0.30 USD per million completion tokens
 routing.max_price = price
-chat.provider = routing
+controls.provider = routing
 
-responses = ng.ProviderControls()
-responses.parallel_tool_calls = False
-responses.verbosity = ng.ResponsesVerbosity.Low
-responses.truncation = ng.ResponsesTruncation.Disabled
-responses.responses_include = [ng.ResponsesInclude.ReasoningEncryptedContent]
+# Responses: hosted tools the service runs.
+image = ng.ResponsesImageGenerationTool()
+image.size = "1024x1024"
+controls.responses.hosted_tools = [image, ng.ResponsesWebSearchTool()]
+controls.responses.verbosity = ng.ResponsesVerbosity.Low
+controls.responses.include = [ng.ResponsesInclude.ReasoningEncryptedContent]
 
-messages = ng.ProviderControls()
-messages.max_output_tokens = 4096
-messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
-messages.output_effort = ng.MessagesOutputEffort.High
-cache = ng.MessagesCacheControl()
-cache.ttl = ng.MessagesCacheTtl.FiveMinutes
-messages.cache_control = cache
-choice = ng.MessagesToolChoice()
-choice.mode = ng.MessagesToolChoiceMode.Auto
-choice.disable_parallel_tool_use = True
-messages.messages_tool_choice = choice
+# Anthropic Messages: thinking, effort, caching and server tools.
+controls.messages.thinking_mode = ng.MessagesThinkingMode.Adaptive
+controls.messages.output_effort = ng.MessagesOutputEffort.High
+search = ng.MessagesToolDefinition()
+search.type = "web_search_20250305"
+search.name = "web_search"
+search.max_uses = 3
+controls.messages.tools = [search]
 
-gemini = ng.ProviderControls()
-gemini.temperature = 0.7
-gemini.gemini_thinking_level = ng.GeminiThinkingLevel.Low
-safety = ng.GeminiSafetySetting()
-safety.category = ng.GeminiSafetyCategory.Harassment
-safety.threshold = ng.GeminiSafetyThreshold.BlockMediumAndAbove
-gemini.safety_settings = [safety]
-choice = ng.GeminiToolChoice()
-choice.mode = ng.GeminiToolChoiceMode.Auto
-gemini.gemini_tool_choice = choice
+# Gemini generateContent: speech output.
+controls.generate.response_modalities = [ng.GeminiResponseModality.Audio]
+voice = ng.GeminiVoiceConfig()
+voice.prebuilt_voice_name = "Kore"
+speech = ng.GeminiSpeechConfig()
+speech.voice_config = voice
+controls.generate.speech_config = speech
+
+# The same controls, written as data. Unknown keys are refused.
+controls = ng.ProviderControls.from_dict({
+    "max_output_tokens": 4096,
+    "responses": {"hosted_tools": [{"type": "image_generation", "size": "1024x1024"},
+                                   {"type": "web_search"}]},
+    "generate": {"response_modalities": ["Audio"],
+                 "speech_config": {"voice_config": {"prebuilt_voice_name": "Kore"}}},
+})
 ```
 
-先用默认构造创建记录，再逐个字段赋值；这些记录没有带关键字参数的构造函数。可选记录和向量返回的都是分离的副本：改完要赋回去。`OpenRouterRouting.max_price` 就是其中之一：`routing.max_price.prompt_nano_usd = ...` 改的是副本，所以应该构造一个 `ng.OpenRouterMaxPrice`，再把整个对象赋回去。它的金额都是整数 nanoUSD：`prompt_nano_usd` 和 `completion_nano_usd` 是每百万 token 的价格，另外还有 `image_nano_usd`、`audio_nano_usd` 和 `request_nano_usd`；发送时转成精确的十进制美元（`75_000_000` 即 `0.075`）。至少要设置一项，且每一项都不能超过 2**53。`SchemaProviderDefaults.provider` 对 `max_price` 的合并方式与其他路由字段相同：请求自己的值会替换默认值。`ChatReasoningOptions` 还有 `max_tokens` 和 `exclude`。嵌套的 Chat reasoning、`include_reasoning`、`usage_include` 和 `models` 要求描述符声明了 OpenRouter origin；标量的 `reasoning_effort`、`service_tier`、带类型的路由和响应格式则不受此限。
+先用默认构造创建记录再逐个字段赋值，或者用 `from_dict` 构造：所有控制项类及其嵌套结构中的 SDK 类型都接受 dict，拒绝未知的键，枚举按成员名（`"Audio"`）接受，托管工具、内置工具和响应格式按 `"type"`（`"image_generation"`、`"google_search"`、`"audio"`）选择类。SDK 没有对应类的 Responses 托管工具类型会成为 `ResponsesOpenRouterServerTool`（`openrouter:` 类型）或 `ResponsesGenericHostedTool`，需要 SDK 策略准入。嵌套结构本身与原对象相连（`controls.generate.speech_config = ...` 会改变 `controls`），但其中的可选记录和向量返回分离的副本：改完要赋回去。`OpenRouterRouting.max_price` 就是其中之一：`routing.max_price.prompt_nano_usd = ...` 改的是副本，所以应该构造一个 `ng.OpenRouterMaxPrice`，再把整个对象赋回去。它的金额都是整数 nanoUSD：`prompt_nano_usd` 和 `completion_nano_usd` 是每百万 token 的价格，另外还有 `image_nano_usd`、`audio_nano_usd` 和 `request_nano_usd`；发送时转成精确的十进制美元（`75_000_000` 即 `0.075`）。至少要设置一项，且每一项都不能超过 2**53。`SchemaProviderDefaults.provider` 对 `max_price` 的合并方式与其他路由字段相同：请求自己的值会替换默认值。`ChatReasoningOptions` 还有 `max_tokens` 和 `exclude`。`chat.reasoning`、`chat.include_reasoning`、`chat.usage_include`、`chat.models`、`chat.plugins` 和 `chat.image_config` 要求描述符声明了 OpenRouter origin；标量的 `reasoning_effort`、`service_tier`、带类型的路由和响应格式则不受此限。0.15 的扁平成员（`chat_reasoning`、`responses_include`、`messages_tool_choice`、`gemini_thinking_level` 等）在 0.16.0 中仍可用，并会移入对应的嵌套结构；同时设置扁平成员和它的嵌套成员会抛出 `ValueError`。它们将在 0.17.0 中移除。
 
-Responses 的 verbosity 取 `Low/Medium/High`，truncation 取 `Disabled/Auto`；include 还支持 `WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs`。`responses_include=None` 保留默认的加密 reasoning include；显式给出列表（包括 `[]`）则以该列表为准，并且可能导致之后无法使用 native replay。已有的 store、reasoning、托管工具和工具调用上限，仍然是带类型的。
+Responses 的 verbosity 取 `Low/Medium/High`，truncation 取 `Disabled/Auto`；include 还支持 `WebSearchSources`、`FileSearchResults`、`MessageOutputTextLogprobs`、`ComputerCallOutputImageUrl`、`CodeInterpreterCallOutputs`。`responses.include = None` 保留默认的加密 reasoning include；显式给出列表（包括 `[]`）则以该列表为准，并且可能导致之后无法使用 native replay。已有的 store、reasoning、托管工具和工具调用上限，仍然是带类型的。
 
-Messages 的 thinking 取 `Manual/Adaptive/Disabled`。Manual 要求 `thinking_budget` 不小于准入的最小值，并且小于输出上限；没有指定模式但给了 budget 时，选用 manual。Adaptive 和 disabled 不允许设置 budget。按 vendor 的语义，启用 thinking 时会省略 temperature；而模型层面的禁止规则会拒绝显式指定的 temperature。effort 取 `Low/Medium/High/Max`，缓存 TTL 取 `FiveMinutes/OneHour`；工具选择取 `Auto/Any/None_/Tool`，其中 `Tool` 要求 `name` 是一个已声明的客户端工具。Messages 的路由要求描述符声明了 OpenRouter origin。
+Messages 的 thinking 取 `Manual/Adaptive/Disabled`。Manual 要求 `thinking_budget` 不小于准入的最小值，并且小于输出上限；没有指定模式但给了 budget 时，选用 manual。Adaptive 和 disabled 不允许设置 budget。按 vendor 的语义，启用 thinking 时会省略 temperature；而模型层面的禁止规则会拒绝显式指定的 temperature。effort 取 `Low/Medium/High/Max/XHigh`，缓存 TTL 取 `FiveMinutes/OneHour`；工具选择取 `Auto/Any/None_/Tool`，其中 `Tool` 要求 `name` 是一个已声明的客户端工具。Messages 的路由要求描述符声明了 OpenRouter origin。
 
 Gemini 的 thinking level 取 `Minimal/Low/Medium/High`，与 `thinking_budget` 互斥。工具选择取 `Auto/Any/None_/Validated`，并带有列表 `allowed_function_names`，与 `required_tool` 互斥。安全类别取 `Harassment/HateSpeech/SexuallyExplicit/DangerousContent/CivicIntegrity`，阈值取 `BlockNone/BlockOnlyHigh/BlockMediumAndAbove/BlockLowAndAbove/Off`。请求族不对、取值越界，以及互相冲突的 thinking、上限、工具控制项，都会在 I/O 之前被拒绝。按模型名前缀禁止 temperature 的规则，按 ASCII 不区分大小写来比较，最后一个 `/` 之后的部分同样参与比较：Chat/Responses 用 `gpt-5`、`gpt-6`、`o1`、`o3`、`o4`；Messages 用 `claude-opus-4-7`、`claude-opus-4-8`、`claude-opus-5`、`claude-sonnet-5`、`claude-fable-`。参见 [SDK 的控制项准入](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#reasoning-sampling-and-tool-controls)。
 
@@ -182,8 +188,9 @@ descriptor = ng.load_provider_descriptor_with_deployment_headers(
 
 ```python
 # first_request/first_outcome belong to responses_provider and response_model.
-responses.previous_response_id = first_outcome.messages[-1].id
-responses.previous_response_history = (
+responses = ng.ProviderControls()
+responses.responses.previous_response_id = first_outcome.messages[-1].id
+responses.responses.previous_response_history = (
     first_request.messages + first_outcome.messages
 )
 new_input = [ng.ProviderMessage(
@@ -196,7 +203,7 @@ next_request = ng.make_provider_request(
 
 `previous_response_history` 是 `ProviderMessage` 的向量，不是单个 response，也不是 JSON 对象。它不会发送出去。要具备真实的客户端工具所有权，可能需要完整的原始前缀，外加 ID 等于该游标的终止 assistant；纯粹由服务端保存的文本续接，可以让它留空。之后在进程内产生的游标输出，保留私有的终止所有权，但不会因此变成完整历史的 native replay，也不具备 archive 权限。失败、被编辑，或者 origin/模型/配置/路由对不上的状态，一律拒绝。完整的 native replay 和 archive 仍然需要它们原来的完整前缀。参见 [SDK 的 Responses 续接](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#responses-provider-held-continuation)。
 
-如果历史里的 assistant `Text`/`ProviderToolCall` 是调用方自己构造的外来内容，没有 native 状态、wire 输出和签名，请显式设置 `gemini.gemini_history_mode = ng.GeminiHistoryMode.PortableForeign`；默认值是 `NativeOnly`。只有第一个外来的 function call 能绕过 Google 的签名校验器；纯文本的轮次不带签名。真实的 native 分组仍然要经过严格校验。这个模式无法修复、剥离或降级一个失败的 seal，也不能引入 reasoning 的权限，更不能让可移植数据获得 native replay。参见 [SDK 的外来 Gemini 历史](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)。
+如果历史里的 assistant `Text`/`ProviderToolCall` 是调用方自己构造的外来内容，没有 native 状态、wire 输出和签名，请显式设置 `controls.generate.history_mode = ng.GeminiHistoryMode.PortableForeign`；默认值是 `NativeOnly`。只有第一个外来的 function call 能绕过 Google 的签名校验器；纯文本的轮次不带签名。真实的 native 分组仍然要经过严格校验。这个模式无法修复、剥离或降级一个失败的 seal，也不能引入 reasoning 的权限，更不能让可移植数据获得 native replay。参见 [SDK 的外来 Gemini 历史](https://github.com/fox1245/SchemaProvider/blob/poc/curl-asio-transport/docs/USAGE.md#explicit-portable-gemini-history)。
 
 PortableForeign 既拒绝签名，也拒绝导入的 wire 元数据。游标输出的 `NativeReplay.complete == False`，不能进入 archive；它的私有所有者也不授权完整历史的重放。
 

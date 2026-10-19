@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=6487d490fe20336faff2db817ad68b4f6f433e3feb1cd108e05aad764c87fb2e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=505c4c6d2d35f5a0e721784db8938bc8d6053331a6a37932b69eba411cebae72 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -338,17 +338,17 @@ sp::runtime::Result call_provider(
 
 #### Typed controls
 
-`make_provider_request(provider, model, messages, tools, controls, mode)`는 닫힌 family 하나를 선택한다. 다른 family의 제어는 `std::invalid_argument`로 거부하고 SDK prepare가 enum 값, 승인 origin, 모델 규칙, 도구 선언, native binding을 I/O 전에 검사한다. `ProviderControls`에 dictionary 우회 경로는 없다. optional 값은 미지정과 명시적 `false`·빈 선택을 구분한다.
+`make_provider_request(provider, model, messages, tools, controls, mode)`는 닫힌 family 하나를 선택한다. 이식 가능한 제어는 `ProviderControls`의 멤버이고 family 고유 제어는 그 family의 nest에 있으며, 호출은 자기 family의 nest만 적용하므로 `ProviderControls` 하나로 서로 다른 family를 부르는 노드를 모두 처리할 수 있다. family가 표현할 수 없는 이식 가능한 제어는 `std::invalid_argument`로 거부하고 SDK prepare가 enum 값, 승인 origin, 모델 규칙, 도구 선언, native binding을 I/O 전에 검사한다. 타입 없는 값은 nest의 `extensions`로만 보내며, SDK 정책이 origin별로 값 스키마와 함께 승인한다. 0.15의 평평한 family 멤버(`chat_reasoning`, `responses_include`, `messages_tool_choice`, `gemini_thinking_level` 등)는 0.16.0에서 nest로 옮겨지는 폐기 예정 별칭이며, 별칭과 nest 멤버를 함께 지정하면 예외가 난다. optional 값은 미지정과 명시적 `false`·빈 선택을 구분한다.
 
-| Family | `ProviderControls` 필드와 SDK 매핑 |
-|---|---|
-| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format`; `chat_reasoning` → `sp::chat::Request::reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models` |
-| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope`; `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `responses_include` → `include` |
-| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider`; `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `messages_tool_choice` → `tool_choice` |
-| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope`; `gemini_history_mode` → `history_mode`, `gemini_thinking_level` → `thinking_level`, `safety_settings`, `gemini_tool_choice` → `tool_choice` |
-| `google.interactions` | `max_output_tokens`, `thinking_level`(optional string), `thinking_summaries`, `service_tier`, `required_tool`, `system`, `account_scope`; Generate의 enum `gemini_thinking_level`은 적용되지 않는다 |
+| Family | 이식 가능한 `ProviderControls` 필드와 SDK 매핑 | Family nest(`controls.<nest>`) |
+|---|---|---|
+| `openai.chat` | `max_output_tokens`, `temperature`, `top_p`, `reasoning_effort`, `service_tier`, `provider`, `response_format` | `chat`: `reasoning`, `include_reasoning`, `usage_include` → `usage.include`, `models`, `modalities`, `audio`, `image_config`, `plugins`, `extensions` |
+| `openai.responses` | `max_output_tokens`, `max_tool_calls`, `temperature`, `top_p`, `reasoning_effort`/`reasoning_summary` → `reasoning`, `service_tier`, `required_tool`, `provider`, `response_format`, `store`, `system` → `instructions`, `account_scope` | `responses`: `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity` → `text.verbosity`, `truncation`, `include`, `include_names`, `hosted_tools` → `tools`, `modalities`, `image_config`, `plugins`, `mcp_approvals`, `extensions` |
+| `anthropic.messages` | `max_output_tokens` → `max_tokens`, `temperature`, `top_p`, `thinking_budget`, `system`, `account_scope`, `provider` | `messages`: `thinking_mode`, `output_effort` → `output_config.effort`, `cache_control`, `tool_choice`, `tools` (server and typed client tools, after the portable tools), `container`, `skills`, `betas`, `mcp_servers`, `extensions` |
+| `google.generate` | `max_output_tokens`, `temperature`, `thinking_budget`, `include_thoughts`, `required_tool`, `system`, `account_scope` | `generate`: `history_mode`, `thinking_level`, `safety_settings`, `tool_choice`, `response_modalities`, `speech_config`, `image_config`, `audio_transcription_config`, `audio_format`, `builtin_tools`, `mcp_servers`, `server_tool_invocations`, `retrieval_config`, `extensions` |
+| `google.interactions` | `max_output_tokens`, `thinking_level` (optional string), `thinking_summaries`, `service_tier`, `required_tool`, `store`, `system`, `account_scope` | `interactions`: `response_format`, `speech_config`, `transcription_config`, `builtin_tools`, `previous_interaction_id`, `video_task`, `agent`, `background`, `extensions` |
 
-Chat의 `sp::chat::ReasoningOptions`는 optional `effort`, `max_tokens`, `exclude`, `enabled`를 담는다. 이 nested reasoning object, `include_reasoning`, `usage_include`, 대체 `models`는 policy가 선언한 OpenRouter origin에서만 허용된다. `sp::OpenRouterRouting`도 Chat/Responses/Messages의 선언된 OpenRouter origin에서만 지원한다. gateway 형태 모델 이름이 다른 origin을 승인하지 않는다. SDK payload는 family별 typed tool 선언, Responses `hosted_tools`, strict/deferred tool 옵션도 제공한다. raw JSON 대신 실제 payload variant를 사용한다.
+Chat의 `sp::chat::ReasoningOptions`는 optional `effort`, `max_tokens`, `exclude`, `enabled`를 담는다. 이 nested reasoning object, `include_reasoning`, `usage_include`, 대체 `models`는 policy가 선언한 OpenRouter origin에서만 허용된다. `sp::OpenRouterRouting`도 Chat/Responses/Messages의 선언된 OpenRouter origin에서만 지원한다. gateway 형태 모델 이름이 다른 origin을 승인하지 않는다. Responses hosted tool(`controls.responses.hosted_tools`)과 Messages 서버·타입 클라이언트 도구(`controls.messages.tools`)는 nest 안의 타입 있는 SDK 값이다.
 
 Responses SSE는 종료 이벤트 `response.completed` 또는 `response.incomplete`를 요구합니다. `response.done`은 같은 완전한 종료 Responses envelope(completed 또는 incomplete)를 담은 별칭일 때만 허용되며, 종료가 아니거나 형식이 잘못된 `response.done`은 프로토콜 오류로 실패합니다. `response.content_part.delta`를 비롯해 목록에 없는 이벤트는 `Unsupported`입니다. 선언된 OpenRouter origin에서는 Responses와 Messages가 `~vendor/model-latest` 같은 라우팅 별칭에 대해 게이트웨이가 보고하는 실제 모델명도 받아들입니다. 서빙 모델은 한 응답 안에서 바뀌면 안 되고, replay는 요청한 모델에 묶인 채로 유지됩니다.
 
@@ -358,7 +358,7 @@ Responses SSE는 종료 이벤트 `response.completed` 또는 `response.incomple
 | `sp::responses::Truncation` | `Disabled`, `Auto` |
 | `sp::responses::Include` | `ReasoningEncryptedContent`, `WebSearchSources`, `FileSearchResults`, `MessageOutputTextLogprobs`, `ComputerCallOutputImageUrl`, `CodeInterpreterCallOutputs` |
 | `sp::messages::ThinkingMode` | `Manual`, `Adaptive`, `Disabled` |
-| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max` |
+| `sp::messages::OutputEffort` | `Low`, `Medium`, `High`, `Max`, `XHigh` |
 | `sp::messages::CacheControl` / `CacheTtl` | optional `ttl`: `FiveMinutes`, `OneHour`; wire type `ephemeral`, optional TTL `5m`/`1h` |
 | `sp::messages::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Tool`; `name`; optional `disable_parallel_tool_use` |
 | `sp::gemini::HistoryMode` | `NativeOnly`, `PortableForeign` |
@@ -367,7 +367,7 @@ Responses SSE는 종료 이벤트 `response.completed` 또는 `response.incomple
 | `sp::gemini::SafetyThreshold` | `BlockNone`, `BlockOnlyHigh`, `BlockMediumAndAbove`, `BlockLowAndAbove`, `Off` |
 | `sp::gemini::ToolChoice` / `ToolChoiceMode` | `mode`: `Auto`, `Any`, `None`, `Validated`; `allowed_function_names`: 선언된 함수 이름 vector |
 
-Messages는 양수 output cap이 필요하다. mode 없이 thinking budget을 주면 `Manual`이며 승인 minimum 이상, cap 미만이어야 한다. `Adaptive`/`Disabled`는 명시적 budget을 거부한다. Manual/adaptive는 그 외 유효한 temperature를 생략하고 thinking `top_p` minimum을 검사하지만 모델별 temperature 금지는 무시하지 않는다. 강제 `Any`/`Tool`은 도구와 disabled thinking이 필요하다. `Tool` 이름은 선언된 client tool이어야 하고 다른 mode는 `name`을 거부하며 `None`은 `disable_parallel_tool_use`를 거부한다. Generate의 thinking budget/level과 `required_tool`/`gemini_tool_choice`는 각각 동시 사용 불가다. allowed-function 목록은 선언된 함수를 가리킨다. sampling은 family/policy 범위를 따른다. Generate에는 `top_p`가 없고 Interactions에는 두 sampling 필드 모두 없다.
+Messages는 양수 output cap이 필요하다. mode 없이 thinking budget을 주면 `Manual`이며 승인 minimum 이상, cap 미만이어야 한다. `Adaptive`/`Disabled`는 명시적 budget을 거부한다. Manual/adaptive는 그 외 유효한 temperature를 생략하고 thinking `top_p` minimum을 검사하지만 모델별 temperature 금지는 무시하지 않는다. 강제 `Any`/`Tool`은 도구와 disabled thinking이 필요하다. `Tool` 이름은 선언된 client tool이어야 하고 다른 mode는 `name`을 거부하며 `None`은 `disable_parallel_tool_use`를 거부한다. Generate의 thinking budget/level과 `required_tool`/`generate.tool_choice`는 각각 동시 사용 불가다. allowed-function 목록은 선언된 함수를 가리킨다. sampling은 family/policy 범위를 따른다. Generate에는 `top_p`가 없고 Interactions에는 두 sampling 필드 모두 없다.
 
 `FamilyPolicy.temperature_forbidden_model_prefixes`는 전체 모델과 마지막 `/` 뒤 suffix를 ASCII 대소문자 무시로 비교한다. 내장 Chat/Responses prefix는 `gpt-5`, `gpt-6`, `o1`, `o3`, `o4`; Messages는 `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-sonnet-5`, `claude-fable-`다. 명시적 금지 temperature는 gateway prefix 모델에서도 I/O 전에 거부한다.
 

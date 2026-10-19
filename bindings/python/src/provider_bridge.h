@@ -34,6 +34,7 @@ pybind11::object provider_observer_function(const std::function<void(const sp::E
 pybind11::object provider_cause(const std::exception_ptr& cause);
 void init_provider_values(pybind11::module_& module);
 void init_provider_controls(pybind11::module_& module);
+void init_provider_families(pybind11::module_& module);
 } // namespace neograph::pybind
 
 // All binding units use the same ownership conversion for SDK outcomes. No
