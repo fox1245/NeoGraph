@@ -29,6 +29,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **Behavior change: no fixed temperature or classifier cap.** The intent classifier sends the node context's `provider_controls` instead of `temperature = 0` and `max_output_tokens = 20`, which a reasoning model spends before it answers. `default_summary_controls()` keeps its 500-token cap and no longer sends `temperature = 0.2`. The Harness provider worker no longer sends `temperature = 0`.
   - **Harness translation ceilings are the host's.** `HarnessTranslationDefaults` refused a `provider_timeout_seconds` over 600 and a `max_output_tokens` over 128,000. The host's values are now the ceilings, up to 86,400 seconds and 2^32 − 1 tokens.
 
+### Removed
+- **The typed `ImagesClient`, `VeoClient` and `DecisionsClient` (#510).** They were deprecated in 0.15.1. Images, video and decisions are SchemaProvider endpoints: call them on `sp::runtime::Client` with `<codecs/images.h>`, `<codecs/videos.h>` and `<codecs/decisions.h>`. Their headers (`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), the shipped configurations (`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py` and their tests are gone. The live suite drops its four typed-client cases.
+
 ## [0.15.1] - 2026-10-19
 
 ### Added

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=6febb729812688fe3344bd0c2660cae2e99586800d5395b29381eb25c43800d5 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -437,24 +437,7 @@ tool search, `shell.environment`의 skills, shell(`container_auto`)입니다.
 `openai-spreadsheets` skill을 교체합니다. 이 inspection demo는 function tool을 알리지만 직접 실행하지 않습니다.
 순서 있는 타입/raw event와 전체 terminal을 유지합니다. hosted tool은 route에 따라 지원되지 않거나
 추가 비용이 발생할 수 있습니다. 타입 admission은 live 호환성 보장이 아닙니다.
-WebSocket/primitive 실행 예제는 유지하지 않습니다. Images/Veo/Decisions는 별도 타입 NeoGraph client이며 chat spending grant를 상속하지 않습니다. 이 클라이언트들은 폐기 예정이며, 0.16.0에서 SchemaProvider 엔드포인트로 대체하면서 제거합니다.
-- Google은 Gemini API가 제공하는 Veo 모델(`veo-3.1-*-preview` 세 개)을 2026-10-22에 모두 종료합니다.
-- OpenAI는 `gpt-image-1`을 2026-10-23에, `gpt-image-1-mini`와 `gpt-image-1.5`를 2026-12-01에 종료합니다.
-
-CHANGELOG를 참고하세요.
-
-Decisions choice criteria는 문자열 배열이 아니라 choice를 키로 하는 객체입니다.
-현재 별도 typed client는 raw `SchemaProvider::request_json()` body 없이 올바른 형태를 표현합니다.
-
-```cpp
-#include <neograph/llm/decisions_client.h>
-neograph::llm::DecisionsChoiceQuestion question;
-question.instructions = "Choose whether the supplied answer addresses the question.";
-question.criteria = {{"accept", "The answer addresses the question."},
-                     {"reject", "The answer does not address the question."}};
-neograph::llm::DecisionsRequest request;
-request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
-request.questions.emplace("decision", std::move(question));
-```
-
-이는 요청 구성일 뿐 새 유료 요청이나 vendor 정확도의 증거가 아닙니다.
+WebSocket/primitive 실행 예제는 유지하지 않습니다.
+이미지, 비디오, decisions는 SchemaProvider 엔드포인트이며 `<codecs/images.h>`, `<codecs/videos.h>`,
+`<codecs/decisions.h>`를 통해 `sp::runtime::Client`에서 호출합니다. NeoGraph 0.16.0은 타입 클라이언트
+`ImagesClient`, `VeoClient`, `DecisionsClient`를 제거했습니다. CHANGELOG를 참고하세요.

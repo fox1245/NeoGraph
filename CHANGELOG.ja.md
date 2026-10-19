@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1511e4163bfc40cf6044fe858e025f9409147eac4b3a9c943a9fef4b8c1dc983 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9b55c68c85cfa656f7f24d256faf0d6a0426a6a3912a7c7a207a815724c1dff3 -->
 <!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=eccdfd77485685d085575f9bf352ac89afc251515fbfcdb1677a340561fbaa73 -->
 # 変更履歴
 
@@ -29,6 +29,9 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **動作の変更: brief と clarify のステップはプロバイダーの失敗を報告します。** 以前は失敗を捕まえて元のクエリのまま続けていたため、誤ったモデル id や拒否されたパラメーターが痕跡なく実行を劣化させていました。
   - **動作の変更: 固定の temperature や分類器の上限はありません。** intent classifier は `temperature = 0` と `max_output_tokens = 20`（推論モデルは答える前に使い切ります）の代わりに、ノードコンテキストの `provider_controls` を送ります。`default_summary_controls()` は 500 トークンの上限を保ち、`temperature = 0.2` は送らなくなりました。Harness のプロバイダーワーカーは `temperature = 0` を送らなくなりました。
   - **Harness の変換上限はホストの値です。** `HarnessTranslationDefaults` は 600 を超える `provider_timeout_seconds` と 128,000 を超える `max_output_tokens` を拒否していました。今はホストの値が上限で、最大 86,400 秒と 2^32 − 1 トークンです。
+
+### 削除
+- **型付きクライアント `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました (#510).** 0.15.1 で非推奨になっていました。画像、動画、decisions は SchemaProvider のエンドポイントで、`<codecs/images.h>`、`<codecs/videos.h>`、`<codecs/decisions.h>` を通じて `sp::runtime::Client` で呼び出します。ヘッダー（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、同梱の設定（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py`、およびそれらのテストはなくなりました。ライブスイートから型付きクライアントの 4 ケースがなくなります。
 
 ## [0.15.1] - 2026-10-19
 

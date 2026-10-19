@@ -698,37 +698,10 @@ endif()
 neograph_discover_tests(neograph_runtime_turn_tests)
 
 if(TARGET neograph::llm)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
-    add_executable(neograph_typed_images_tests typed_images_client_test.cpp)
-    add_executable(neograph_typed_veo_tests typed_veo_client_test.cpp)
-    add_executable(neograph_typed_decisions_tests typed_decisions_client_test.cpp)
-    foreach(endpoint IN ITEMS images veo decisions)
-        target_link_libraries(neograph_typed_${endpoint}_tests PRIVATE
-            neograph::llm GTest::gtest_main)
-        target_include_directories(neograph_typed_${endpoint}_tests PRIVATE
-            ${PROJECT_SOURCE_DIR}/deps)
-    endforeach()
-    add_test(NAME TypedImages.LocalHTTPS
-        COMMAND Python3::Interpreter
-            ${CMAKE_CURRENT_SOURCE_DIR}/typed_images_peer.py
-            $<TARGET_FILE:neograph_typed_images_tests>)
-    add_test(NAME TypedVeo.LocalHTTPAndSignedHTTPS
-        COMMAND Python3::Interpreter
-            ${CMAKE_CURRENT_SOURCE_DIR}/typed_veo_peer.py
-            $<TARGET_FILE:neograph_typed_veo_tests>)
-    target_compile_definitions(neograph_typed_decisions_tests PRIVATE
-        NEOGRAPH_SHIPPED_SCHEMAS="${PROJECT_SOURCE_DIR}/schemas")
     # Live end-to-end checks with real provider keys. Built so that they compile with every change, run only by
     # scripts/live_e2e.py (tests/live/README.md), never by CTest.
     add_executable(neograph_live_e2e_tests live_e2e_test.cpp)
     target_link_libraries(neograph_live_e2e_tests PRIVATE neograph::llm GTest::gtest_main)
-    target_compile_definitions(neograph_live_e2e_tests PRIVATE
-        NEOGRAPH_SHIPPED_SCHEMAS="${PROJECT_SOURCE_DIR}/schemas")
-    add_test(NAME TypedDecisions.LocalHTTP
-        COMMAND neograph_typed_decisions_tests)
-    set_tests_properties(
-        TypedImages.LocalHTTPS TypedVeo.LocalHTTPAndSignedHTTPS TypedDecisions.LocalHTTP
-        PROPERTIES TIMEOUT 180 LABELS "provider;typed-endpoint;model-free")
 endif()
 
 # Keep the live safe-point boundary independently runnable from optional

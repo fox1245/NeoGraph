@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=6febb729812688fe3344bd0c2660cae2e99586800d5395b29381eb25c43800d5 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -440,24 +440,6 @@ tool search、`shell.environment` の skills、shell(`container_auto`) です。
 `openai-spreadsheets` skill を置換します。この inspection demo は function tool を宣言するだけでローカル実行しません。
 順序付き型付き/raw event と完全な terminal を保持します。hosted tool は route によって未対応または追加費用となり、
 型付き admission は live 互換性保証ではありません。WebSocket/primitive 実行例は残しません。
-Images/Veo/Decisions は別の型付き NeoGraph client で、chat spending grant を継承しません。これらは非推奨で、0.16.0 で SchemaProvider のエンドポイントに置き換えて削除します。
-- Google は Gemini API が提供する Veo モデル（`veo-3.1-*-preview` の3つ）を 2026-10-22 にすべて終了します。
-- OpenAI は `gpt-image-1` を 2026-10-23 に、`gpt-image-1-mini` と `gpt-image-1.5` を 2026-12-01 に終了します。
-
-CHANGELOG を参照してください。
-
-Decisions の choice criteria は文字列配列ではなく、choice をキーとするオブジェクトです。
-現在の別個の typed client は、raw `SchemaProvider::request_json()` body を使わずに正しい形を表現します。
-
-```cpp
-#include <neograph/llm/decisions_client.h>
-neograph::llm::DecisionsChoiceQuestion question;
-question.instructions = "Choose whether the supplied answer addresses the question.";
-question.criteria = {{"accept", "The answer addresses the question."},
-                     {"reject", "The answer does not address the question."}};
-neograph::llm::DecisionsRequest request;
-request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
-request.questions.emplace("decision", std::move(question));
-```
-
-これは要求の構築であり、新しい有料要求や vendor 精度の証明ではありません。
+画像、動画、decisions は SchemaProvider のエンドポイントで、`<codecs/images.h>`、`<codecs/videos.h>`、
+`<codecs/decisions.h>` を通じて `sp::runtime::Client` で呼び出します。NeoGraph 0.16.0 は型付きクライアント
+`ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました。CHANGELOG を参照してください。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=6febb729812688fe3344bd0c2660cae2e99586800d5395b29381eb25c43800d5 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -430,24 +430,6 @@ tool search、`shell.environment` 的 skills 和 shell(`container_auto`)。
 `openai-spreadsheets` skill。本 inspection demo 只声明 function tool，不在本地执行。
 保留全部有序类型化/raw event 和完整 terminal。hosted tool 可能得不到所选 route 的支持，或产生额外费用；
 类型化准入(admission)不是 live 兼容保证。不保留 WebSocket/primitive 可运行示例。
-Images/Veo/Decisions 是独立类型化 NeoGraph client，不继承 chat spending grant。它们已弃用，0.16.0 将以 SchemaProvider 端点取代并移除它们。
-- Google 于 2026-10-22 关闭 Gemini API 提供的全部 Veo 模型（三个 `veo-3.1-*-preview` 模型）。
-- OpenAI 于 2026-10-23 关闭 `gpt-image-1`，于 2026-12-01 关闭 `gpt-image-1-mini` 和 `gpt-image-1.5`。
-
-参见 CHANGELOG。
-
-Decisions 的 choice criteria 是以 choice 为键的对象，而不是字符串数组。
-当前独立的 typed client 无需 raw `SchemaProvider::request_json()` body 即可表达有效结构：
-
-```cpp
-#include <neograph/llm/decisions_client.h>
-neograph::llm::DecisionsChoiceQuestion question;
-question.instructions = "Choose whether the supplied answer addresses the question.";
-question.criteria = {{"accept", "The answer addresses the question."},
-                     {"reject", "The answer does not address the question."}};
-neograph::llm::DecisionsRequest request;
-request.state = {{"question", "What is 2 + 2?"}, {"answer", "4"}};
-request.questions.emplace("decision", std::move(question));
-```
-
-这只是请求构造，不是新的付费请求，也不证明 vendor 准确性。
+图像、视频和 decisions 是 SchemaProvider 端点，通过 `<codecs/images.h>`、`<codecs/videos.h>` 和
+`<codecs/decisions.h>` 在 `sp::runtime::Client` 上调用。NeoGraph 0.16.0 已移除类型化客户端
+`ImagesClient`、`VeoClient` 和 `DecisionsClient`；参见 CHANGELOG。
