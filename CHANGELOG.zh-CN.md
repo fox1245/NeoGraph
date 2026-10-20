@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d1e8605da45985624b1f77a313c987f1559c617fbc056be6d2b80d4a9918f3d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - 调用在 provider 自己的 SchemaProvider 客户端上运行，与其聊天调用共用该客户端，descriptor 策略按 origin 准入每个端点。
   - 它们取代 0.16.0 移除的类型化客户端。Python、图节点和 Program 调用随后跟进。
   - `Provider` 新增了虚成员 `endpoint_runtime()`，因此 `Provider` 的 C++ 子类必须用新头文件重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **图中的端点节点 (#531)。**
+  - 内置节点类型 `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe` 和 `translate` 各自发起一次端点调用。它们从节点 config 所指定名称的通道读取输入，并把结果写入一个通道：provider 媒体 JSON、向量、排名、判定、答案或文本。
+  - `job_submit` 和 `job_collect` 运行一个视频任务。collect 节点每次运行时轮询一次，并在任务完成之前中断运行。
+  - 调用报告的 token 用量会记录到运行中。有预算的运行会拒绝这些节点，直到 Program 调用中介它们为止。
 
 ### 变更
 - **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。

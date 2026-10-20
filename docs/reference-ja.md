@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d5164064f1180f9307875fa50c67c56a7d233ab3cfc2d91e6216c1aaefb0ad00 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2338,6 +2338,32 @@ public:
 | `"tool_dispatch"` | `ToolDispatchNode` | 最新の assistant メッセージからツール呼び出しを dispatch します |
 | `"intent_classifier"` | `IntentClassifierNode` | LLM による意図分類。`config` から `prompt` と `valid_routes` を読みます |
 | `"subgraph"` | `SubgraphNode` | コンパイル済みサブグラフを実行します。`config` から `input_map` と `output_map` を読みます |
+| `"image_generate"`, `"image_edit"` | エンドポイントノード | 画像を生成または編集します (「エンドポイントノード」を参照) |
+| `"embed"`, `"rerank"`, `"moderate"`, `"decide"` | エンドポイントノード | テキストの埋め込み、ドキュメントの順位付け、テキストの検査、または構造化された質問への回答を行います |
+| `"speak"`, `"transcribe"`, `"translate"` | エンドポイントノード | テキストを音声合成するか、音声を文字起こしまたは翻訳します |
+| `"job_submit"`, `"job_collect"` | エンドポイントノード | 動画ジョブを投入し、続いて回収します |
+
+#### エンドポイントノード
+
+エンドポイントノード (#531) は、それぞれノードコンテキストの provider で SchemaProvider のエンドポイントを 1 回呼び出します（`Provider::complete_endpoint_async`）。
+- **設定。** `model` は必須です。ノードは、エンドポイントのオプションを SDK リクエストのメンバー名（`size`、`quality`、`dimensions`、`voice`、`top`、...）で受け取り、provider ポリシーが許可するメンバーは `extensions` で受け取ります。読み書きするチャネルの名前も受け取り、`output` は書き込むチャネルの名前です。厳密なグラフ（`schema_version` 1）は未知のキーを拒否します。チャネルは設定で指定されるため、エンドポイントノードを含むグラフでは、検証器の効果分析は実行されません。
+- **テキスト。** `embed` と `moderate` は文字列または文字列の配列（チャネル `input`）を、`speak` は文字列（`text`）を、`rerank` はクエリ文字列（`query`）とドキュメントの配列（`documents`）を読みます。
+- **メディア。** メディアのチャネルには、base64 の data URL、https URL、または provider の outcome format v3 のメディア JSON が入ります。ノードはメディアを v3 形式で書き込みます。`image_generate` と `image_edit` は `images` に、`speak` は `audio` に、`job_collect` は `video` に書き込みます。`image_edit` は編集する画像を `references` から読み、`transcribe` と `translate` は `audio` を読みます。
+- **その他の結果。**
+  - `embed` は入力ごとに数値の配列を 1 つ書き込みます（`embeddings`）。
+  - `rerank` は `[{index, relevance}]` を関連度の高い順に書き込みます（`ranking`）。
+  - `moderate` は `[{flagged, categories, scores}]` を書き込みます（`moderation`）。
+  - `transcribe` と `translate` はテキストを書き込みます（`transcript`、`translation`）。
+- **`decide`。** 任意の JSON を根拠（`input`）として読み、`questions` を受け取ります。各質問は `{name, kind, instructions, options, when_true, when_false}` で、`kind` は `predicate`、`choice`、`score`、`box` のいずれかです。回答は `decisions` に書き込みます。
+- **動画ジョブ。**
+  - `job_submit` はプロンプト（`prompt`）を読み、ジョブのハンドル（`job`）を書き込みます。
+  - `job_collect` は実行されるたびにハンドルを 1 回ポーリングします。完了したジョブの出力は `video` にダウンロードされ、失敗、キャンセル、または期限切れのジョブはノードを失敗させます。
+  - まだ実行中のジョブは、`{"job", "status", "raw_status"}` とともに `NodeInterrupt` を送出します。ホストは好きなときに実行を再開し、ノードは再びポーリングします。ステップの中ではポーリングせず、投入は再送されません。
+- **使用量、予算、キャンセル。**
+  - 呼び出しが報告したトークン使用量は、実行の使用量に加算されます。使用量を報告しない呼び出し（moderation、ダウンロード）は何も加算しないため、実行のほかの呼び出しの合計を消しません。
+  - エンドポイント呼び出しにはまだ予算が適用されないため、model token 予算、managed budget lease、または provider 呼び出し broker（Program）を持つ実行は、エンドポイントノードが何かを送信する前にそれを拒否します。
+  - 実行のキャンセルトークンと deadline は呼び出しに届きます。
+
 <a id="topology-schema-export-issue-56"></a>
 ### トポロジースキーマのエクスポート (issue #56)
 NeoGraph は *JSON で記述された* グラフを実行します。JSON を差し替えれば、同じエンジンが別のハーネスになります。
