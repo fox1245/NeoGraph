@@ -135,15 +135,20 @@ def test_lyria_clip(model):
 
 
 # A Responses hosted tool from Python (SchemaProvider#54, #513): OpenAI web search, buffered and streamed.
+# Responses cannot require a hosted tool yet (SchemaProvider#148), and the model sometimes answers this from memory.
+# The case checks that a search, when the model makes one, decodes; so it asks up to three times for one.
 @pytest.mark.parametrize("stream", [case(s, keys=["OPENAI_API_KEY"], id=n) for n, s in MODES])
 def test_responses_hosted_web_search(stream):
     model, values = TEXT_MODELS["openai.responses"]
     responses = ng.ResponsesControls()
     responses.hosted_tools = [ng.ResponsesWebSearchTool()]
-    run = Run(provider("openai.responses", model), model,
-              [user("Use web search: what is the title of the page at https://example.com? Answer in five words.")],
-              stream=stream, responses=responses, **{**values, "max_output_tokens": 1200})
-    assert run.text().strip()
-    searched = [part for part in run.parts() if isinstance(part, ng.ServerToolResult)] or \
-        [citation for part in run.parts() if isinstance(part, ng.Text) for citation in part.citations]
+    for _attempt in range(3):
+        run = Run(provider("openai.responses", model), model,
+                  [user("Use web search: what is the title of the page at https://example.com? Answer in five words.")],
+                  stream=stream, responses=responses, **{**values, "max_output_tokens": 1200})
+        assert run.text().strip()
+        searched = [part for part in run.parts() if isinstance(part, ng.ServerToolResult)] or \
+            [citation for part in run.parts() if isinstance(part, ng.Text) for citation in part.citations]
+        if searched:
+            break
     assert searched, "the answer shows the web search: a server tool result or a citation"
