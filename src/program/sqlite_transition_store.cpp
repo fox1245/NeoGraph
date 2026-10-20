@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "command_publication_head.h"
+#include "transition_validator.h"
 #include <sqlite3.h>
 
 #include <algorithm>
@@ -21,6 +22,8 @@
 
 namespace neograph::program {
 namespace {
+
+using detail::transition::Borrowed;
 
 [[noreturn]] void throw_sqlite(sqlite3* db, std::string_view operation) {
     throw std::runtime_error(std::string(operation) + ": " +
@@ -425,377 +428,84 @@ std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         d
     return heads;
 }
 
-bool has_blocking_hook_obligation(const std::vector<HookOutboxEntry>& entries) noexcept {
-    return std::any_of(entries.begin(), entries.end(), [](const auto& entry) {
-        const auto state = entry.data().state;
-        const bool pending = state != HookExecutionState::Succeeded &&
-            state != HookExecutionState::Cancelled;
-        return pending && entry.data().invocation.data().delivery == HookDelivery::BlockingMandatory;
-    });
-}
+// The stored state as the transition validator reads it, inside the caller's transaction.
+class SqliteReads final : public detail::transition::TransitionReads {
+public:
+    SqliteReads(sqlite3* db, std::string_view owner_scope) : db_(db), owner_scope_(owner_scope) {}
 
-bool is_final(ContinuationState state) noexcept {
-    return state != ContinuationState::Running && state != ContinuationState::Interrupted &&
-           state != ContinuationState::AmbiguousEffect;
-}
-
-bool same_fork(const ProgramRunRecord& old_run, const ProgramRunRecord& new_run) {
-    const auto old_receipt = old_run.fork_receipt();
-    const auto new_receipt = new_run.fork_receipt();
-    return old_receipt.has_value() == new_receipt.has_value() &&
-           (!old_receipt || old_receipt->id() == new_receipt->id());
-}
-
-bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
-    return lhs.child_run_id == rhs.child_run_id && lhs.link_id == rhs.link_id &&
-           lhs.link_receipt == rhs.link_receipt && lhs.invocation == rhs.invocation;
-}
-
-bool valid_child_state_transition(ProgramChildState previous, ProgramChildState next) noexcept {
-    if (previous == next) return true;
-    if (previous == ProgramChildState::Publishing &&
-        (next == ProgramChildState::Dispatched || next == ProgramChildState::Completed ||
-         next == ProgramChildState::Cancelled || next == ProgramChildState::Failed))
-        return true;
-    if (previous == ProgramChildState::Dispatched &&
-        (next == ProgramChildState::Completed || next == ProgramChildState::Cancelled ||
-         next == ProgramChildState::Failed))
-        return true;
-    return false;
-}
-
-bool valid_children_transition(const ProgramRunRecord& previous, const ProgramRunRecord& next) {
-    const auto previous_children = previous.children();
-    const auto next_children     = next.children();
-    for (const auto& child : previous_children) {
-        const auto found = std::find_if(next_children.begin(), next_children.end(),
-                                        [&](const auto& value) {
-                                            return value.child_run_id == child.child_run_id;
-                                        });
-        if (found == next_children.end() || !same_child_metadata(child, *found) ||
-            !valid_child_state_transition(child.state, found->state))
-            return false;
+    std::optional<GraphMigrationCapsule> graph_migration_capsule(
+        std::string_view run_id, std::string_view lineage_head_id) override {
+        return load_graph_migration_capsule_record(db_, owner_scope_, run_id, lineage_head_id);
     }
-    return true;
-}
-
-bool effect_ids_are_new(sqlite3* db, std::string_view owner_scope, std::string_view run_id,
-                        const std::vector<ProgramEffectOutboxEntry>& new_effects) {
-    if (new_effects.empty()) return true;
-    std::set<std::string, std::less<>> ids;
-    Statement statement(
-        db, "SELECT 1 FROM program_transition_effect_log_v2 "
-            "WHERE owner_scope = ?1 AND run_id = ?2 AND effect_id = ?3 LIMIT 1");
-    for (const auto& effect : new_effects) {
-        const auto& effect_id = effect.effect().effect_id();
-        if (!ids.emplace(effect_id).second) return false;
-        statement.bind_text(1, owner_scope);
+    bool effect_id_published(std::string_view run_id, std::string_view effect_id) override {
+        Statement statement(
+            db_, "SELECT 1 FROM program_transition_effect_log_v2 "
+                 "WHERE owner_scope = ?1 AND run_id = ?2 AND effect_id = ?3 LIMIT 1");
+        statement.bind_text(1, owner_scope_);
         statement.bind_text(2, run_id);
         statement.bind_text(3, effect_id);
-        const bool already_present = statement.step_row();
-        statement.reset();
-        if (already_present) return false;
+        return statement.step_row();
     }
-    return true;
-}
-
-bool valid_effect_outbox_binding(const ProgramRunRecord& run,
-                                 const std::vector<ProgramEffectOutboxEntry>& effects) {
-    if (effects.empty()) return true;
-    const auto pending = run.pending_effect();
-    return pending && (pending->state() == ProgramPendingState::Awaiting ||
-                       (pending->state() == ProgramPendingState::Ambiguous &&
-                        run.continuation().state == ContinuationState::AmbiguousEffect)) &&
-           effects.size() == 1 &&
-           effects.front().effect() == *pending;
-}
-
-bool same_command_coordinate(const ProgramJavaScriptCommandJournalEntry& lhs,
-                             const ProgramJavaScriptCommandJournalEntry& rhs) {
-    return lhs.bundle_id() == rhs.bundle_id() &&
-           lhs.command_ordinal() == rhs.command_ordinal() &&
-           lhs.coordinate_id() == rhs.coordinate_id() &&
-           detail::canonical_json_bytes(lhs.command().to_json()) ==
-               detail::canonical_json_bytes(rhs.command().to_json()) &&
-           lhs.effect_identity() == rhs.effect_identity();
-}
-
-bool valid_command_history_append(
-    const ProgramRunRecord&                                  run,
-    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const std::vector<ProgramJavaScriptCommandJournalEntry>& new_commands) {
-    if (new_commands.empty()) return true;
-    auto prior = old_commands;
-    std::uint64_t expected_sequence = 0;
-    std::uint64_t highest_ordinal = 0;
-    for (const auto& existing : prior) {
-        if (existing.bundle_id() != run.bundle_id() ||
-            existing.sequence() != expected_sequence + 1)
-            return false;
-        ++expected_sequence;
-        highest_ordinal = std::max(highest_ordinal, existing.command_ordinal());
-    }
-    for (const auto& entry : new_commands) {
-        if (entry.bundle_id() != run.bundle_id() ||
-            entry.sequence() != expected_sequence + 1) {
-            return false;
-        }
-        ++expected_sequence;
-        const auto found = std::find_if(
-            prior.rbegin(), prior.rend(), [&](const auto& previous) {
-                return previous.command_ordinal() == entry.command_ordinal();
-            });
-        if (found == prior.rend()) {
-            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
-                entry.settled_members() || entry.await_started_at() ||
-                (!prior.empty() && prior.back().pending()))
-                return false;
-            highest_ordinal = entry.command_ordinal();
-            prior.push_back(entry);
-            continue;
-        }
-        // A paused join may record its settled members, and an await its
-        // start (#391), as further pending entries of the same coordinate
-        // before its one terminal result.
-        if (!found->pending() || !same_command_coordinate(*found, entry) ||
-            (!entry.completed() && !entry.settled_members() && !entry.await_started_at())) {
-            return false;
-        }
-        prior.push_back(entry);
-    }
-    return true;
-}
-bool budget_is_empty(const RunBudget& budget) noexcept {
-    return budget == RunBudget{};
-}
-
-bool budget_increased(const RunBudget& next, const RunBudget& previous) noexcept {
-    return next.wall_time_ms > previous.wall_time_ms || next.model_tokens > previous.model_tokens ||
-           next.monetary_microunits > previous.monetary_microunits ||
-           next.max_concurrency > previous.max_concurrency ||
-           next.max_program_operations > previous.max_program_operations ||
-           next.max_core_steps > previous.max_core_steps ||
-           next.max_dynamic_compiles > previous.max_dynamic_compiles ||
-           next.max_child_depth > previous.max_child_depth ||
-           next.max_total_children > previous.max_total_children ||
-           !detail::node_retries_within(next.max_node_retries, previous.max_node_retries);
-}
-
-std::optional<ProgramUsage> command_terminal_usage(
-    const ProgramJavaScriptCommandJournalEntry& entry) {
-    const auto terminal_result = entry.terminal_result();
-    if (!entry.completed() || !terminal_result || !terminal_result->contains("usage") ||
-        !terminal_result->at("usage").is_object()) {
-        return std::nullopt;
-    }
-    const auto& usage = terminal_result->at("usage");
-    const auto  read  = [&](std::string_view key) -> std::optional<std::uint64_t> {
-        const std::string owned(key);
-        if (!usage.contains(owned) || !usage.at(owned).is_number_unsigned()) return std::nullopt;
-        return usage.at(owned).get<std::uint64_t>();
-    };
-    const auto wall       = read("wall_time_ms");
-    const auto model      = read("model_tokens");
-    const auto money      = read("monetary_microunits");
-    const auto operations = read("program_operations");
-    const auto steps      = read("core_steps");
-    const auto peak       = read("peak_concurrency");
-    if (!wall || !model || !money || !operations || !steps || !peak ||
-        *peak > std::numeric_limits<std::uint32_t>::max())
-        return std::nullopt;
-    // Program operations are charged before the resource reservation is staged.
-    return ProgramUsage{*wall, *model, *money, 0, *steps, static_cast<std::uint32_t>(*peak)};
-}
-
-bool checkpoint_event_matches(const std::vector<ProgramEvent>&             events,
-                              const std::optional<CoreCheckpointIdentity>& checkpoint) {
-    if (!checkpoint) return false;
-    return std::any_of(events.begin(), events.end(), [&](const auto& event) {
-        return event.kind == ProgramEventKind::CheckpointPublished &&
-               std::get<ProgramCheckpointEvent>(event.payload).checkpoint == *checkpoint;
-    });
-}
-
-bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&                     run,
-                                             const ProgramJavaScriptCommandJournalEntry& pending,
-                                             const CoreCheckpointIdentity& checkpoint) {
-    const auto thread_for = [&](std::string_view operation_id) {
-        std::string identity(run.run_id());
-        identity.push_back('\0');
-        identity.append(operation_id);
-        identity.push_back('\0');
-        identity.append(checkpoint.core_generation_id);
-        return detail::sha256_identity("program-core-thread/v1", identity);
-    };
-    std::function<bool(const JavaScriptCommand&, std::string, std::size_t)> matches;
-    matches = [&](const JavaScriptCommand& command, std::string operation_id, std::size_t depth) {
-        if (depth > 32) return false;
-        if (command.kind() == JavaScriptCommandKind::CallCore) {
-            const auto arguments = command.arguments();
-            return arguments.contains("name") && arguments.at("name").is_string() &&
-                   arguments.at("name").get<std::string>() == checkpoint.core_name &&
-                   thread_for(operation_id) == checkpoint.core_thread_id;
-        }
-        const auto arguments = command.arguments();
-        if (command.kind() == JavaScriptCommandKind::Await) {
-            return matches(JavaScriptCommand::from_json(arguments.at("command")),
-                           operation_id + "/await", depth + 1);
-        }
-        if (command.kind() == JavaScriptCommandKind::Join) {
-            const auto& members = arguments.at("members");
-            for (std::size_t index = 0; index < members.size(); ++index)
-                if (matches(JavaScriptCommand::from_json(members.at(index)),
-                            operation_id + "/member/" + std::to_string(index), depth + 1))
-                    return true;
-        }
-        return false;
-    };
-    return matches(pending.command(),
-                   "root.javascript." + std::to_string(pending.command_ordinal()), 0);
-}
-
-bool valid_command_reservation_transition(
-    const ProgramRunRecord&                                  previous_run,
-    const ProgramJournalRecord&                              previous_journal,
-    const ProgramJournalRecord&                              next_journal,
-    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const ProgramTransitionPublication&                      publication,
-    const ProgramGraphSafePointEvidence*                     safe_point_evidence,
-    const GraphMigrationCapsule*                             safe_point_capsule,
-    const ProgramExecutionLease*                             execution_lease) {
-    const bool increased =
-        budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
-    const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
-    const auto completed = std::find_if(publication.commands.begin(), publication.commands.end(),
-                                        [](const auto& entry) { return entry.completed(); });
-    const bool checkpoint_changed =
-        previous_journal.core_checkpoint != next_journal.core_checkpoint;
-    if (completed != publication.commands.end()) {
-        if (publication.commands.size() != 1 || !budget_is_empty(next_journal.inflight_reservation))
-            return false;
-        if (checkpoint_changed &&
-            (!checkpoint_event_matches(publication.events, next_journal.core_checkpoint) ||
-             !next_journal.core_checkpoint ||
-             !javascript_call_core_checkpoint_matches(publication.run_record, *completed,
-                                                      *next_journal.core_checkpoint))) {
-            return false;
-        }
-        if (budget_is_empty(previous_journal.inflight_reservation)) return ordinary && !increased;
-        const auto usage = command_terminal_usage(*completed);
-        return usage && is_valid_program_journal_reservation_settlement(previous_journal,
-                                                                        next_journal, *usage);
-    }
-    if (!increased) {
-        if (safe_point_evidence && safe_point_capsule && execution_lease) {
-            return is_valid_program_graph_safe_point_transition(
-                previous_run, previous_journal, publication, *safe_point_evidence,
-                *safe_point_capsule, *execution_lease);
-        }
-        return ordinary;
-    }
-    if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
-        publication.run_record.continuation().state != ContinuationState::Interrupted ||
-        !publication.run_record.terminal_result() ||
-        publication.run_record.terminal_result()->status() != ProgramTerminalStatus::Interrupted ||
-        !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
-        !publication.run_record.exact_checkpoint() ||
-        !javascript_call_core_checkpoint_matches(publication.run_record, old_commands.back(),
-                                                 *publication.run_record.exact_checkpoint()) ||
-        (previous_journal.core_checkpoint &&
-         previous_journal.core_checkpoint == next_journal.core_checkpoint))
-        return false;
-    auto usage               = publication.run_record.terminal_result()->usage();
-    usage.program_operations = 0;
-    return is_valid_program_journal_reservation_release(previous_journal, next_journal, usage);
-}
-
-bool valid_initial_publication(const ProgramTransitionPublication& publication) {
-    const auto& journal = publication.journal_record;
-    const auto  terminal = publication.run_record.terminal_result();
-    const bool  terminal_event = !publication.events.empty() &&
-                                 publication.events.back().kind == ProgramEventKind::Terminal;
-    return journal.previous_id.empty() && journal.sequence == 1 &&
-           budget_is_empty(journal.inflight_reservation) && !publication.events.empty() &&
-           publication.events.front().kind == ProgramEventKind::Started &&
-           publication.run_record.event_sequence() == publication.events.size() &&
-           publication.run_record.effect_sequence() == publication.effects.size() &&
-           publication.events.front().sequence == 1 &&
-           (publication.effects.empty() || publication.effects.front().sequence() == 1) &&
-           valid_command_history_append(publication.run_record, {}, publication.commands) &&
-           (!terminal || terminal_event) &&
-           (!publication.run_record.fork_receipt() || publication.migration_plan.has_value());
-}
-
-bool valid_increment(sqlite3* db, std::string_view owner_scope,
-                      const StoredHead& old_head,
-                       const ProgramTransitionPublication& next_publication,
-                       std::string_view expected_journal_head,
-                       const ProgramGraphSafePointEvidence* safe_point_evidence,
-                       const GraphMigrationCapsule* safe_point_capsule,
-                       const ProgramExecutionLease* execution_lease) {
-    const auto& old_run      = old_head.run_record;
-    const auto& next_run     = next_publication.run_record;
-    const auto& old_journal  = old_head.journal_record;
-    const auto& next_journal = next_publication.journal_record;
-    const auto  old_terminal = old_run.terminal_result();
-    const auto  new_terminal = next_run.terminal_result();
-    const bool  terminal_event = !next_publication.events.empty() &&
-                                 next_publication.events.back().kind == ProgramEventKind::Terminal;
-
-    if ((old_terminal && is_final(old_run.continuation().state) && !new_terminal) ||
-        (new_terminal && (!old_terminal || old_terminal->id() != new_terminal->id()) &&
-         !terminal_event))
-        return false;
-    if (old_journal.id != expected_journal_head ||
-        next_journal.previous_id != expected_journal_head ||
-        next_run.created_at_ms() != old_run.created_at_ms() ||
-        next_run.updated_at_ms() < old_run.updated_at_ms() ||
-        next_run.binding_fingerprint() != old_run.binding_fingerprint() ||
-        !same_fork(old_run, next_run) ||
-        next_run.recorded_binding_set_fingerprint() != old_run.recorded_binding_set_fingerprint() ||
-        next_run.invocation() != old_run.invocation() ||
-        next_run.logical_run_id() != old_run.logical_run_id() ||
-        (next_run.exact_checkpoint() == old_run.exact_checkpoint() &&
-         next_run.exact_checkpoint_content_id() != old_run.exact_checkpoint_content_id()) ||
-        !valid_children_transition(old_run, next_run) ||
-        next_run.event_sequence() != old_run.event_sequence() + next_publication.events.size() ||
-        next_run.effect_sequence() != old_run.effect_sequence() + next_publication.effects.size())
-        return false;
-    if (!next_publication.events.empty() &&
-        next_publication.events.front().sequence != old_run.event_sequence() + 1)
-        return false;
-    if (!next_publication.effects.empty() &&
-        next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
-        return false;
-    if (!effect_ids_are_new(db, owner_scope, old_run.run_id(), next_publication.effects))
-        return false;
-    std::vector<ProgramJavaScriptCommandJournalEntry> old_commands;
-    {
+    std::optional<Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>> command_log(
+        std::string_view run_id) override {
+        std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         Statement statement(
-            db, "SELECT coordinate_id, canonical_bytes FROM "
-                "program_transition_javascript_command_log_v2 "
-                "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
-        statement.bind_text(1, owner_scope);
-        statement.bind_text(2, old_run.run_id());
+            db_, "SELECT coordinate_id, canonical_bytes FROM "
+                 "program_transition_javascript_command_log_v2 "
+                 "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
+        statement.bind_text(1, owner_scope_);
+        statement.bind_text(2, run_id);
         while (statement.step_row()) {
             auto entry = ProgramJavaScriptCommandJournalEntry::parse(
                 column_blob(statement.get(), 1));
-            if (column_text(statement.get(), 0) != entry.coordinate_id()) return false;
-            old_commands.push_back(std::move(entry));
+            if (column_text(statement.get(), 0) != entry.coordinate_id()) return std::nullopt;
+            commands.push_back(std::move(entry));
         }
+        return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(std::move(commands));
     }
-    if (!valid_command_history_append(old_run, old_commands, next_publication.commands) ||
-        !valid_command_reservation_transition(old_run, old_journal, next_journal,
-                                               old_commands, next_publication,
-                                               safe_point_evidence, safe_point_capsule,
-                                               execution_lease))
-        return false;
-    if (next_publication.migration_plan &&
-        (!old_head.migration_plan ||
-         next_publication.migration_plan->id() != old_head.migration_plan->id()))
-        return false;
-    return true;
-}
+    std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(
+        std::string_view run_id) override {
+        return load_latest_javascript_command(db_, owner_scope_, run_id);
+    }
+    std::optional<ProgramRunRecord> run_record(std::string_view run_id, Lock) override {
+        auto head = load_head(db_, owner_scope_, run_id);
+        if (!head) return std::nullopt;
+        return std::move(head->run_record);
+    }
+    std::optional<ProgramRunLineage> lineage_head(std::string_view lineage_id, Lock) override {
+        return load_current_lineage_head(db_, owner_scope_, lineage_id);
+    }
+    std::optional<ProgramRunGeneration> generation(std::string_view lineage_id,
+                                                   std::uint64_t    ordinal) override {
+        return load_generation_record(db_, owner_scope_, lineage_id, ordinal);
+    }
+    std::optional<std::string> run_lineage_id(std::string_view run_id) override {
+        return load_run_lineage_id(db_, owner_scope_, run_id);
+    }
+    Borrowed<std::vector<ProgramContextPublication>> context_history(
+        std::string_view run_id) override {
+        return Borrowed<std::vector<ProgramContextPublication>>(
+            load_context_publication_history(db_, owner_scope_, run_id));
+    }
+    bool context_history_is_intact(const std::vector<ProgramContextPublication>& history) override {
+        return valid_context_history(history);
+    }
+    Borrowed<std::vector<ProgramChildSynthesisRecord>> synthesis_heads(
+        std::string_view run_id) override {
+        return Borrowed<std::vector<ProgramChildSynthesisRecord>>(
+            load_synthesis_heads(db_, owner_scope_, run_id));
+    }
+    Borrowed<std::vector<HookOutboxEntry>> hook_heads(std::string_view       run_id,
+                                                      const ProgramRunRecord& run) override {
+        return Borrowed<std::vector<HookOutboxEntry>>(
+            load_hook_outbox_heads(db_, owner_scope_, run_id, run));
+    }
+
+private:
+    sqlite3*         db_;
+    std::string_view owner_scope_;
+};
+
 
 void create_v2_schema(sqlite3* db) {
     exec(db, "CREATE TABLE IF NOT EXISTS program_transition_run_heads_v2 ("
@@ -876,108 +586,6 @@ void create_v2_schema(sqlite3* db) {
              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, lease_id TEXT NOT NULL, "
              "lease_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, run_id))");
 }
-
-bool fork_binds_predecessor(const ProgramRunRecord&     target,
-                            const ProgramRunGeneration& predecessor,
-                            const ProgramRunLineage&    lineage,
-                            const ProgramRunRecord&     source) noexcept {
-    const auto receipt = target.fork_receipt();
-    if (!receipt) return false;
-    const auto checkpoint = source.exact_checkpoint();
-    const auto resume_binds = [&]() noexcept {
-        if (receipt->storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
-            return true;
-        }
-        try {
-            if (const auto source_pending = source.pending_input()) {
-                const auto target_pending = target.pending_input();
-                const auto result =
-                    target_pending ? target_pending->consumed_result() : std::nullopt;
-                if (!target_pending || !result || target.pending_effect() ||
-                    !receipt->matches_initial_resume(target_pending->call_id(), *result)) {
-                    return false;
-                }
-                const auto applied =
-                    source_pending->submit(target_pending->call_id(), *result,
-                                           static_cast<std::uint64_t>(target.created_at_ms()));
-                return applied.disposition == ProgramPendingDisposition::Applied &&
-                       applied.value == *target_pending;
-            }
-            if (const auto source_pending = source.pending_effect()) {
-                const auto target_pending = target.pending_effect();
-                const auto result =
-                    target_pending ? target_pending->reconciled_result() : std::nullopt;
-                if (!target_pending || !result || target.pending_input() ||
-                    !receipt->matches_initial_resume(target_pending->call_id(), *result)) {
-                    return false;
-                }
-                const auto applied = source_pending->submit(
-                    target_pending->call_id(), target_pending->effect_id(), *result,
-                    static_cast<std::uint64_t>(target.created_at_ms()));
-                return applied.disposition == ProgramPendingDisposition::Applied &&
-                       applied.value == *target_pending;
-            }
-            return !target.pending_input() && !target.pending_effect() &&
-                   receipt->initial_resume_binding() &&
-                   !receipt->initial_resume_binding()->target_pending_id;
-        } catch (const std::exception&) {
-            return false;
-        }
-    };
-    return checkpoint && target.run_id() != source.run_id() && source.child_depth() == 0 &&
-           target.created_at_ms() >= source.updated_at_ms() &&
-           source.invocation().parent_run_id.empty() &&
-           source.continuation().state == ContinuationState::Interrupted &&
-           lineage.committed_descendant_budget() == RunBudget{} && receipt->compatible() &&
-           receipt->owner_scope() == target.owner_scope() &&
-           receipt->source_run_id() == predecessor.run_id() &&
-           receipt->source_program_version_id() == predecessor.program_version_id() &&
-           receipt->source_checkpoint_id() == checkpoint->checkpoint_id &&
-           receipt->target_program_version_id() == target.program_version_id() && resume_binds() &&
-           source.id() == lineage.active_run_record_id() &&
-           source.journal_head() == lineage.active_journal_head();
-}
-
-// A fork's allocation: its max_concurrency is its own limit, up to the
-// source's, and the source keeps its own (#414). The other fields are amounts.
-bool fork_allocation_fits(const ProgramRunLineage& previous,
-                          const ProgramRunLineage& debited,
-                          const RunBudget&         target) noexcept {
-    const auto fits = [](auto before, auto after, auto allocated) {
-        return after <= before && allocated == before - after;
-    };
-    return debited.active_generation() == previous.active_generation() &&
-           debited.active_generation_id() == previous.active_generation_id() &&
-           debited.active_run_record_id() == previous.active_run_record_id() &&
-           debited.active_journal_head() == previous.active_journal_head() &&
-           debited.inflight_reservation() == previous.inflight_reservation() &&
-           debited.committed_descendant_budget() == previous.committed_descendant_budget() &&
-           fits(previous.remaining_budget().wall_time_ms,
-                debited.remaining_budget().wall_time_ms, target.wall_time_ms) &&
-           fits(previous.remaining_budget().model_tokens,
-                debited.remaining_budget().model_tokens, target.model_tokens) &&
-           fits(previous.remaining_budget().monetary_microunits,
-                debited.remaining_budget().monetary_microunits, target.monetary_microunits) &&
-           debited.remaining_budget().max_concurrency ==
-               previous.remaining_budget().max_concurrency &&
-           target.max_concurrency <= previous.remaining_budget().max_concurrency &&
-           fits(previous.remaining_budget().max_program_operations,
-                debited.remaining_budget().max_program_operations,
-                target.max_program_operations) &&
-           fits(previous.remaining_budget().max_core_steps,
-                debited.remaining_budget().max_core_steps, target.max_core_steps) &&
-           fits(previous.remaining_budget().max_dynamic_compiles,
-                debited.remaining_budget().max_dynamic_compiles,
-                target.max_dynamic_compiles) &&
-           fits(previous.remaining_budget().max_child_depth,
-                debited.remaining_budget().max_child_depth, target.max_child_depth) &&
-           fits(previous.remaining_budget().max_total_children,
-                debited.remaining_budget().max_total_children, target.max_total_children) &&
-           // A child's retry ceiling is its own; the parent's is never debited.
-           debited.remaining_budget().max_node_retries ==
-               previous.remaining_budget().max_node_retries;
-}
-
 
 void insert_lineage_head(sqlite3* db, const ProgramRunLineage& lineage) {
     Statement statement(
@@ -1671,303 +1279,45 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     const GraphMigrationCapsule* safe_point_capsule,
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
-    std::string publication_bytes;
-    try {
-        if (publication.run_record.owner_scope() != owner_scope ||
-            static_cast<bool>(safe_point_evidence) !=
-                static_cast<bool>(safe_point_capsule) ||
-            (safe_point_evidence && (!expected_lease || next_lease)))
-            throw std::invalid_argument("Program transition owner scope does not match the publication");
-        if (!valid_effect_outbox_binding(publication.run_record, publication.effects))
-            return ProgramTransitionPublishResult::Conflict;
-        publication_bytes = publication.serialize_canonical();
-    } catch (const std::invalid_argument&) {
-        return ProgramTransitionPublishResult::Conflict;
-    }
+    const auto publication_bytes = detail::transition::prepare_transition(
+        owner_scope, publication, safe_point_evidence, safe_point_capsule, expected_lease,
+        next_lease);
+    if (!publication_bytes) return ProgramTransitionPublishResult::Conflict;
 
     const std::string run_id = publication.run_record.run_id();
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
     const auto current = load_head(impl_->db, owner_scope, run_id);
     const auto current_lease = load_execution_lease_record(impl_->db, owner_scope, run_id);
-    if (safe_point_evidence && !current) {
-        transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
 
-    if (current && current->last_publication_bytes == publication_bytes) {
-        if (safe_point_capsule) {
-            const auto stored = load_graph_migration_capsule_record(
-                impl_->db, owner_scope, publication.run_record.run_id(),
-                safe_point_capsule->source_lineage_head_id());
-            if (!stored || stored->id() != safe_point_capsule->id()) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-        }
-        const bool lease_result_matches = next_lease
-            ? current_lease && current_lease->id() == next_lease->id()
-            : !expected_lease || !current_lease;
-        if (!lease_result_matches) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-        const auto result = expected_journal_head == publication.journal_record.previous_id
-                                ? ProgramTransitionPublishResult::AlreadyPresent
-                                : ProgramTransitionPublishResult::Conflict;
-        transaction.commit();
-        return result;
-    }
-    if (expected_lease) {
-        if (!current_lease || current_lease->id() != expected_lease->id() || !current ||
-            expected_lease->owner_scope() != owner_scope ||
-            expected_lease->run_id() != run_id ||
-            expected_lease->attempt() != current->run_record.continuation().attempt ||
-            expected_lease->program_version_id() != current->run_record.program_version_id() ||
-            expected_lease->bundle_id() != current->run_record.bundle_id()) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    } else if (current_lease) {
+    std::optional<detail::transition::CurrentHead> head;
+    if (current)
+        head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
+                                                     current->migration_plan,
+                                                     current->last_publication_bytes});
+    SqliteReads                        reads(impl_->db, owner_scope);
+    detail::transition::TransitionPlan plan;
+    switch (detail::transition::validate_transition(
+        {owner_scope, expected_journal_head, publication, *publication_bytes, safe_point_evidence,
+         safe_point_capsule, expected_lease, next_lease},
+        head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, plan)) {
+    case detail::transition::TransitionVerdict::Conflict:
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
-    }
-    if (next_lease && !does_program_execution_lease_bind(*next_lease, publication, expected_lease)) {
+    case detail::transition::TransitionVerdict::AlreadyPresent:
         transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
-    if (!current && publication.fork_source_lineage) {
-        const auto fork = publication.run_record.fork_receipt();
-        if (!fork ||
-            fork->storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    }
-
-    if (!current) {
-        if (!expected_journal_head.empty() || !valid_initial_publication(publication)) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    } else if (!valid_increment(impl_->db, owner_scope, *current, publication,
-                                 expected_journal_head, safe_point_evidence,
-                                 safe_point_capsule, expected_lease)) {
-        transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
-
-    for (const auto& child : publication.run_record.children()) {
-        if (!child.terminal_generation ||
-            (publication.run_generation && publication.run_generation->replacement_receipt()))
-            continue;
-        bool unchanged = false;
-        if (current)
-            for (const auto& old : current->run_record.children())
-                if (old.child_run_id == child.child_run_id &&
-                    old.terminal_generation == child.terminal_generation && old.terminal_result &&
-                    child.terminal_result &&
-                    old.terminal_result->id() == child.terminal_result->id())
-                    unchanged = true;
-        if (unchanged) continue;
-        const auto lineage_id = program_run_lineage_id(owner_scope, child.child_run_id);
-        const auto lineage    = load_current_lineage_head(impl_->db, owner_scope, lineage_id);
-        const auto generation =
-            load_generation_record(impl_->db, owner_scope, lineage_id, child.terminal_generation);
-        const auto run =
-            generation ? load_head(impl_->db, owner_scope, generation->run_id()) : std::nullopt;
-        if (!lineage || !generation || !run ||
-            !does_program_child_generation_result_bind(publication.run_record, child, *generation,
-                                                       *lineage, run->run_record))
-            return ProgramTransitionPublishResult::Conflict;
-    }
-
-    const auto context_history = load_context_publication_history(
-        impl_->db, owner_scope, run_id);
-    if (!valid_context_history(context_history) ||
-        !is_valid_program_context_history_append(context_history, publication.context_publication)) {
-        transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
-    if (!publication.child_synthesis_records.empty() &&
-        !is_valid_program_child_synthesis_publication(
-            load_synthesis_heads(impl_->db, owner_scope, run_id),
-            current ? &current->run_record : nullptr, publication))
-        return ProgramTransitionPublishResult::Conflict;
-    const auto hook_heads = load_hook_outbox_heads(impl_->db, owner_scope, run_id,
-                                                   current ? current->run_record : publication.run_record);
-    if (!is_valid_program_hook_history_append(hook_heads, publication.hook_outbox_entries,
-                                              publication.run_record)) {
-        transaction.commit(); return ProgramTransitionPublishResult::Conflict;
-    }
-
-    const auto run_lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id);
-    const bool adopting_legacy_lineage = current && !run_lineage_id && publication.run_lineage;
-    if (current && run_lineage_id) {
-        if (!publication.run_lineage ||
-            *run_lineage_id != publication.run_lineage->lineage_id()) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    } else if (run_lineage_id) {
-        transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
-
-    std::optional<ProgramRunLineage> current_lineage;
-    if (publication.run_lineage) {
-        current_lineage = load_current_lineage_head(
-            impl_->db, owner_scope, publication.run_lineage->lineage_id());
-        if (!current_lineage) {
-            if (!publication.run_generation ||
-                !is_valid_program_run_lineage_initial(*publication.run_lineage,
-                                                      *publication.run_generation)) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-        } else if (adopting_legacy_lineage) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        } else if (!is_valid_program_run_lineage_transition(
-                       *current_lineage, *publication.run_lineage,
-                       publication.run_generation)) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-        if (current_lineage && !publication.run_generation) {
-            const auto active = load_generation_record(
-                impl_->db, owner_scope, publication.run_lineage->lineage_id(),
-                publication.run_lineage->active_generation());
-            if (!active || !does_program_run_generation_bind(
-                               *active, *publication.run_lineage, publication.run_record)) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-        }
-        if (current_lineage && publication.run_generation) {
-            const auto active = load_generation_record(
-                impl_->db, owner_scope, publication.run_lineage->lineage_id(),
-                current_lineage->active_generation());
-            if (!active || active->child_depth() != publication.run_generation->child_depth()) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-            const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
-                                        : std::nullopt;
-            if (!source) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-            const auto graph_migration =
-                publication.run_generation->graph_migration_receipt();
-            const auto source_contexts = load_context_publication_history(
-                impl_->db, owner_scope, active->run_id());
-            const auto source_hooks = load_hook_outbox_heads(
-                impl_->db, owner_scope, active->run_id(), source->run_record);
-            bool valid_successor = is_valid_program_runtime_state_transfer(
-                publication.run_generation->runtime_state_transfer_receipt(), *active,
-                *current_lineage, source->run_record, source_contexts, source_hooks,
-                *publication.run_generation, publication.run_record,
-                publication.context_publication);
-            if (valid_successor && graph_migration) {
-                const auto command = load_latest_javascript_command(
-                    impl_->db, owner_scope, active->run_id());
-                const auto durable_capsule = load_graph_migration_capsule_record(
-                    impl_->db, owner_scope, active->run_id(), current_lineage->id());
-                valid_successor = durable_capsule && next_lease && !command &&
-                    publication.commands.empty() &&
-                    publication.effects.empty() && publication.events.size() == 1 &&
-                    does_program_graph_migration_started_event_bind(
-                        publication.events.front(), publication.run_record) &&
-                    publication.run_record.event_sequence() == 1 &&
-                    publication.migration_plan &&
-                    is_valid_program_graph_migration_transition(
-                        *active, *current_lineage, source->run_record, *durable_capsule,
-                        *publication.migration_plan, *publication.run_generation,
-                        *publication.run_lineage, publication.run_record);
-            } else if (valid_successor) {
-                const auto checkpoint = load_latest_javascript_command(
-                    impl_->db, owner_scope, active->run_id());
-                valid_successor = checkpoint &&
-                    is_valid_program_replacement_transition(
-                        *active, *current_lineage, source->run_record, *checkpoint,
-                        *publication.run_generation, *publication.run_lineage,
-                        publication.run_record);
-            }
-            if (!valid_successor) {
-                transaction.commit();
-                return ProgramTransitionPublishResult::Conflict;
-            }
-        }
-        if (publication.run_generation && current_lineage &&
-            load_generation_record(impl_->db, owner_scope,
-                                   publication.run_lineage->lineage_id(),
-                                   publication.run_generation->generation())) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    }
-
-    std::optional<ProgramRunLineage> current_fork_source;
-    if (publication.fork_source_lineage) {
-        current_fork_source = load_current_lineage_head(
-            impl_->db, owner_scope, publication.fork_source_lineage->lineage_id());
-        if (!current_fork_source ||
-            !is_valid_program_run_lineage_transition(
-                *current_fork_source, *publication.fork_source_lineage) ||
-            !fork_allocation_fits(*current_fork_source, *publication.fork_source_lineage,
-                                  publication.journal_record.remaining_budget)) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-        const auto active = load_generation_record(
-            impl_->db, owner_scope, current_fork_source->lineage_id(),
-            current_fork_source->active_generation());
-        const auto source = active ? load_head(impl_->db, owner_scope, active->run_id())
-                                    : std::nullopt;
-        const auto source_contexts = active
-            ? load_context_publication_history(impl_->db, owner_scope, active->run_id())
-            : std::vector<ProgramContextPublication>{};
-        if (!active || !source ||
-            has_blocking_hook_obligation(load_hook_outbox_heads(
-                impl_->db, owner_scope, active->run_id(), source->run_record)) ||
-            !is_valid_program_runtime_context_clone(
-                source_contexts, publication.run_record, publication.context_publication) ||
-            !fork_binds_predecessor(publication.run_record, *active, *current_fork_source,
-                                    source->run_record)) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
-    } else if (!current && publication.run_record.fork_receipt()) {
-        transaction.commit();
-        return ProgramTransitionPublishResult::Conflict;
-    }
-    if (publication.recorded_replay_source) {
-        const auto& receipt = *publication.recorded_replay_source;
-        const auto lineage = load_current_lineage_head(
-            impl_->db, owner_scope, publication.recorded_replay_source_lineage->lineage_id());
-        const auto source = load_head(impl_->db, owner_scope, receipt.run_id);
-        const auto contexts = load_context_publication_history(
-            impl_->db, owner_scope, receipt.run_id);
-        if (current || !lineage || !source ||
-            has_blocking_hook_obligation(load_hook_outbox_heads(
-                impl_->db, owner_scope, receipt.run_id, source->run_record)) ||
-            !is_valid_program_runtime_context_clone(
-                contexts, publication.run_record, publication.context_publication) ||
-            !is_valid_program_recorded_replay_allocation(
-                publication, *lineage, source->run_record)) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
-        }
+        return ProgramTransitionPublishResult::AlreadyPresent;
+    case detail::transition::TransitionVerdict::Proceed:
+        break;
     }
 
     const auto& migration_plan = current ? current->migration_plan : publication.migration_plan;
     if (current)
         update_head(impl_->db, owner_scope, publication.run_record, publication.journal_record,
-                    migration_plan, publication_bytes);
+                    migration_plan, *publication_bytes);
     else
         insert_head(impl_->db, owner_scope, publication.run_record, publication.journal_record,
-                    migration_plan, publication_bytes);
+                    migration_plan, *publication_bytes);
     append_events(impl_->db, owner_scope, run_id, publication.events);
     append_effects(impl_->db, owner_scope, run_id, publication.effects);
     append_javascript_commands(impl_->db, owner_scope, run_id, publication.commands);
@@ -1975,7 +1325,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     append_synthesis_records(impl_->db, owner_scope, run_id, publication.child_synthesis_records);
     append_hook_outbox_entries(impl_->db, owner_scope, run_id, publication.hook_outbox_entries);
     if (publication.run_lineage) {
-        if (current_lineage)
+        if (plan.lineage_head_exists)
             update_lineage_head(impl_->db, *publication.run_lineage);
         else
             insert_lineage_head(impl_->db, *publication.run_lineage);
@@ -1983,9 +1333,9 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         if (publication.run_generation) {
             insert_generation(impl_->db, *publication.run_generation);
             insert_generation_initial_publication(
-                impl_->db, *publication.run_generation, publication_bytes);
+                impl_->db, *publication.run_generation, *publication_bytes);
         }
-        if (!run_lineage_id)
+        if (!plan.run_lineage_recorded)
             insert_run_lineage(impl_->db, owner_scope, run_id,
                                publication.run_lineage->lineage_id());
     }
