@@ -493,6 +493,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/failure_routing.cpp
     src/core/text_safety.cpp
     src/core/graph_loader.cpp
+    src/core/endpoint_nodes.cpp
     src/core/graph_checkpoint.cpp
     src/core/managed_budget_journal.cpp
     src/core/react_graph.cpp

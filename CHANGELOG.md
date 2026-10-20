@@ -19,6 +19,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The calls run on the provider's own SchemaProvider client, which its chat calls share, and the descriptor policy admits each endpoint per origin.
   - They replace the typed clients that 0.16.0 removes. Python, graph nodes and Program calls follow.
   - `Provider` gained a virtual member, `endpoint_runtime()`, so rebuild C++ subclasses of `Provider` against the new header (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
+- **Endpoint nodes in graphs (#531).**
+  - The built-in node types `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe` and `translate` make one endpoint call each. They read their inputs from channels the node's config names, and write the result to one channel: provider media JSON, vectors, rankings, verdicts, answers or text.
+  - `job_submit` and `job_collect` run a video job. The collect node polls once each time it runs and interrupts the run until the job has finished.
+  - The token usage a call reports is recorded on the run. A budgeted run refuses the nodes until Program calls broker them.
 
 ### Changed
 - **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable. The decision is the roundtable of 2026-10-20.

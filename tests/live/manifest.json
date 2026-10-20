@@ -6,6 +6,7 @@
  },
  "cases": [
   "cpp:LiveEndpoints.AnthropicTokenCount",
+  "cpp:LiveEndpoints.EndpointNodesInAGraph",
   "cpp:LiveEndpoints.OpenAIEmbeddings",
   "cpp:LiveEndpoints.OpenAIModeration",
   "cpp:LiveEndpoints.OpenRouterEmbeddingsAsync",
