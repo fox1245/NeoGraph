@@ -15,6 +15,7 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
   - Gemini speech, buffered and streamed, and a Lyria clip, with the Generate response modalities and speech settings;
   - an OpenAI Responses hosted web search, buffered and streamed;
   - the Anthropic Messages controls: thinking modes and effort, tool choice, the temperature rule, prompt caching, and the same controls through OpenRouter;
+  - long Anthropic agent runs in a graph (`test_live_anthropic_agent.py`): dependent tool chains, conversations of up to six turns that must recall their first turn, signed and redacted thinking carried through tool rounds and into a later turn, parallel tool calls, tool errors and retries, a person who reviews or approves each tool call, prompt caching over a conversation, Claude 5.5 adaptive thinking, and the same loops streamed, asynchronous and through OpenRouter;
   - typed failures: an invalid key, a cancelled stream, an expired deadline;
   - SchemaProvider endpoints through `Provider` (#531): OpenAI embeddings, OpenRouter embeddings awaited, and OpenAI moderation.
 - **C++** (`tests/live_e2e_test.cpp`, target `neograph_live_e2e_tests`):

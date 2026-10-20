@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=5d770788b0a501980908c34cff89d2b5b340fcc2fe986fc0084d77305b9e2479 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,6 +16,7 @@
   - Generate의 응답 modality와 음성 설정을 쓰는 Gemini 음성 합성(버퍼와 스트림)과 Lyria 클립;
   - OpenAI Responses의 hosted 웹 검색(버퍼와 스트림);
   - Anthropic Messages 제어: thinking 모드와 effort, tool choice, temperature 규칙, 프롬프트 캐시, 그리고 OpenRouter를 거친 같은 제어;
+  - 그래프에서 실행하는 긴 Anthropic 에이전트 실행(`test_live_anthropic_agent.py`): 서로 의존하는 도구 연쇄, 첫 턴을 기억해야 하는 최대 여섯 턴의 대화, 도구 라운드를 거쳐 다음 턴까지 이어지는 서명된 thinking과 redacted thinking, 병렬 도구 호출, 도구 오류와 재시도, 사람이 도구 호출마다 검토하거나 승인하는 흐름, 대화 전체에 걸친 프롬프트 캐시, Claude 5.5 adaptive thinking, 그리고 같은 루프를 스트림·비동기·OpenRouter로 실행;
   - 타입이 정해진 실패: 잘못된 키, 취소된 스트림, 이미 지난 deadline;
   - `Provider`를 거치는 SchemaProvider 엔드포인트(#531): OpenAI 임베딩, await로 기다리는 OpenRouter 임베딩, OpenAI moderation.
 - **C++** (`tests/live_e2e_test.cpp`, 타깃 `neograph_live_e2e_tests`):
