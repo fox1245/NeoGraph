@@ -276,6 +276,64 @@ class ChatTest(unittest.TestCase):
                 provider.shutdown()
                 thread.join()
 
+    def test_reasoning_effort_default_is_a_model_catalogue_entry_not_a_model_name(self):
+        seen = []
+
+        class Provider(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                seen.append(request)
+                proposal = request.get("response_format", {}).get("type") == "json_object"
+                content = json.dumps({"plan": "direct", "reason": "stay", "confidence": 0}) if proposal else "Answer"
+                response = {"id": "fixture", "object": "chat.completion", "model": "fixture-model", "created": 1,
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
+                                 "finish_reason": "stop"}]}
+                body = json.dumps(response).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        # The shipped live overlay, given the limits a bounded call needs: this fixture supplies no
+        # model facts of its own. Its entry names the model and its default effort.
+        shipped = json.loads((Path(__file__).parent / "live-models.json").read_text(encoding="utf-8"))
+        [entry] = shipped["models"]
+        limits = {"input_limit": 4096, "output_limit": 65536}
+        overlay = {"version": 1, "models": [dict(entry, **limits)]}
+        plain = {"version": 1, "models": [{"id": entry["id"], "families": entry["families"], **limits}]}
+
+        def sent_effort(catalogue, extra=()):
+            path = Path(self.temp.name) / ("models-" + uuid.uuid4().hex + ".json")
+            path.write_text(json.dumps(catalogue), encoding="utf-8")
+            seen.clear()
+            s = self.server(["--live", "--allow-loopback-provider", "--model-catalogue", str(path), *extra], {
+                "OPENROUTER_API_KEY": "local-fixture-only", "OPENROUTER_MODEL": entry["id"],
+                "NEOGRAPH_CHAT_BASE_URL": f"http://127.0.0.1:{provider.server_port}/v1"})
+            s.turn("alice", "a1", "hello")
+            self.assertGreaterEqual(len(seen), 1)
+            self.assertEqual(seen[0]["model"], entry["id"])
+            return seen[0].get("reasoning_effort")
+
+        with http.server.ThreadingHTTPServer(("127.0.0.1", 0), Provider) as provider:
+            thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            thread.start()
+            try:
+                expected = entry["defaults"]["openai.chat"]["reasoning_effort"]
+                self.assertEqual(sent_effort(overlay), expected)
+                self.assertEqual(sent_effort(overlay, ["--reasoning-effort", "default"]), expected)
+                self.assertEqual(sent_effort(overlay, ["--reasoning-effort", "high"]), "high")
+                # The same model without the catalogue default: nothing is sent.
+                self.assertIsNone(sent_effort(plain))
+            finally:
+                provider.shutdown()
+                thread.join()
+
     def test_nullable_usage_and_native_history_survive_restart(self):
         seen = []
         details = [{"type": "reasoning.text", "text": "fixture-native-detail", "signature": "sig",

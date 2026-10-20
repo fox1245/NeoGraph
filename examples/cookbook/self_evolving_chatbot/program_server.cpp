@@ -27,7 +27,6 @@ int main(int argc, char** argv) {
         evolving_chat::Options options;
         std::string            env_file;
         bool                   no_env             = false;
-        bool                   reasoning_override = false;
         unsigned               port               = 8768;
         std::string            script;
         bool                   crash_after_script = false;
@@ -76,7 +75,6 @@ int main(int argc, char** argv) {
             else if (arg == "--reasoning-effort") {
                 options.reasoning_effort = value();
                 if (options.reasoning_effort == "default") options.reasoning_effort.clear();
-                reasoning_override = true;
             } else if (arg == "--script")
                 script = value();
             else if (arg == "--crash-after-script")
@@ -100,8 +98,8 @@ int main(int argc, char** argv) {
                        "the embedded SDK codec resource snapshot; default: built-in policy.\n"
                        "--model-catalogue PATH layers host-owned model facts (limits, defaults) "
                        "over the embedded SDK model catalogue.\n"
-                       "GLM 5.3 Flash chat defaults to low reasoning effort; --reasoning-effort "
-                       "default omits the override.\n"
+                       "--reasoning-effort EFFORT sends that effort on every call; without it, "
+                       "or with 'default', the model catalogue's default applies.\n"
                        "--script JSON_FILE runs [{tenant,request_id,message,force_swap?}, ...].\n"
                        "--crash-after-script exits without cancelling runs for recovery testing.\n";
                 return 0;
@@ -129,8 +127,6 @@ int main(int argc, char** argv) {
         options.api_key = setting("OPENROUTER_API_KEY");
         if (options.model.empty()) options.model = setting("OPENROUTER_MODEL");
         if (!options.mock && options.model.empty()) options.model = "z-ai/glm-5.3-flash";
-        if (!reasoning_override && options.model == "z-ai/glm-5.3-flash")
-            options.reasoning_effort = "low";
         options.postgres_url = setting("NEOGRAPH_CHAT_POSTGRES_URL");
         if (!setting("NEOGRAPH_CHAT_BASE_URL").empty())
             options.base_url = setting("NEOGRAPH_CHAT_BASE_URL");

@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "families": ["openai.chat"],
+      "defaults": {
+        "openai.chat": {
+          "reasoning_effort": "low"
+        }
+      }
+    }
+  ]
+}
