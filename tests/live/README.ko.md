@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=c5347b2c688d007f5f292498aef1fda3129548c02944ec85f55face0555e0ce0 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,3 +54,10 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 3. Wheels 워크플로는 PyPI에 게시하기 전에 릴리스 태그에서 같은 검사를 합니다.
 
 케이스를 추가하거나 지우면 `python scripts/live_e2e.py manifest --python … --pythonpath … --cxx …`가 스위트가 수집한 케이스로 매니페스트를 다시 쓰고, 알려진 빈틈은 그대로 둡니다. 커밋하기 전에 차이를 검토하세요.
+
+## master에서
+
+`Live e2e report` 워크플로는 master에 푸시가 들어올 때마다 실제 키로 스위트 전체도 실행합니다. 그래서 공급자 쪽 변화나 회귀가 다음 릴리스가 아니라 들어온 그날 드러납니다. 실행 결과 `report.json`은 빌드 아티팩트로 올라갑니다. 리포트를 커밋하지 않으며, 릴리스를 승인하지도 않습니다.
+
+- **키.** 네 키는 master만 쓸 수 있는 GitHub 환경 `live-e2e`의 시크릿입니다. GitHub은 시크릿 값을 누구에게도 보여 주지 않고, 로그에서 가리며, 풀 리퀘스트 워크플로에는 넘기지 않습니다. 잡은 러너 사용자만 읽을 수 있는 파일에 키를 쓰고, 잡이 끝나면 그 파일을 지웁니다.
+- **한 번에 하나.** master의 실행은 중간에 취소되지 않습니다. 실행 중에 들어온 푸시는 기다리며, 기다리는 푸시 가운데 가장 새것만 다음에 실행됩니다.

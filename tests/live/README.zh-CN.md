@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=c5347b2c688d007f5f292498aef1fda3129548c02944ec85f55face0555e0ce0 -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,3 +54,10 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 3. Wheels 工作流在发布到 PyPI 之前，会在发布标签上进行同样的检查。
 
 增删用例后，`python scripts/live_e2e.py manifest --python … --pythonpath … --cxx …` 会根据套件收集到的用例重写清单，并保留已知缺口。提交前请检查差异。
+
+## 在 master 上
+
+每次推送到 master 后，`Live e2e report` 工作流还会用真实密钥运行整个套件。这样，提供方的变化或回归会在合入当天暴露，而不是等到下一次发布。运行会把 `report.json` 作为构建产物上传。它不会提交报告，也不会批准发布。
+
+- **密钥。** 四个密钥是 GitHub 环境 `live-e2e` 的机密，只有 master 可以使用该环境。GitHub 不向任何人显示机密的值，会在日志中遮盖它，也不会把它交给拉取请求的工作流。作业把密钥写入只有运行器用户可读的文件，并在作业结束时删除该文件。
+- **一次一个。** master 上的运行不会中途取消。运行期间到达的推送会等待，等待中的推送只有最新的那一个会接着运行。

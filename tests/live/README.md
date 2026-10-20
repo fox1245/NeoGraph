@@ -53,3 +53,10 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 3. The Wheels workflow runs the same check on the release tag before it publishes to PyPI.
 
 When cases are added or removed, `python scripts/live_e2e.py manifest --python … --pythonpath … --cxx …` rewrites the manifest from what the suite collects and keeps the known gaps. Review the difference before committing it.
+
+## On master
+
+After every push to master, the `Live e2e report` workflow also runs the whole suite with real keys. A provider change or a regression then shows up on the day it lands, not at the next release. The run uploads `report.json` as a build artifact. It does not commit the report, and it does not approve a release.
+
+- **Keys.** The four keys are secrets of the `live-e2e` GitHub environment, which only master may use. GitHub shows a secret's value to no one, masks it in logs, and gives it to no pull request workflow. The job writes the keys to a file that only the runner's user can read, and deletes the file when the job ends.
+- **One run at a time.** A run on master is never cancelled midway. A push that arrives during a run waits, and only the newest waiting push runs next.
