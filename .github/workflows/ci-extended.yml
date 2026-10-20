@@ -231,6 +231,13 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+      # The ASan tree of every test, example and the Python module is about 76 GB. The hosted
+      # image has 85 GB free; these preinstalled toolchains are not used here and free 22 GB more.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -257,6 +264,9 @@ jobs:
         env:
           NEOGRAPH_TEST_POSTGRES_URL: postgresql://postgres:test@localhost:5432/neograph_test
         run: python scripts/verify_ci.py asan --work-dir build-asan --jobs auto --ccache
+      - name: Disk usage
+        if: always()
+        run: df -h /
       - name: ccache stats
         if: always()
         run: ccache --show-stats
