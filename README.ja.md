@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=95dcfaea2d1e943caf027838dec4ec2e1463e50b96b75736e25814569468af80 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=9cad6efa3db9b5f3166d7c9c9ac08dabc8fb0322f0542fb48c44debd81ff4840 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -394,6 +394,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `msvc-asan` | Windows で直列に実行する Program/QuickJS のカナリア。有効化した `cl >=19.50`(VS2026)が必要で、MSVC 19.44 では動きません。 |
 | `grpc` | gRPC のグラフ契約。gRPC/Protobuf のコンパイラとライブラリが必要。 |
 | `benchmark` | Linux Release で4つのワークロードを見るリグレッションゲート。スループット、レイテンシー、目標 RSS の元の上限を適用。 |
+| `bench-ab` | Linux Release。`benchmarks/ci_ab_gates.json` のベンチマークを、このビルドと `--base <ref>`（`--base head` はビルドを自分自身と比較）で交互に実行し、ケースごとの許容値と比較。[CIの性能ゲート](benchmarks/README.md#ci-performance-gates)を参照。 |
 | `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。上限は CI の hosted x86-64 ランナー基準のため、より遅いハードウェアでは回帰がなくても `javascript_wrapped_core` が失敗することがある。`--base <ref>` を指定すると、そのコミットもビルドし、同じマシンでケースごとに比較する。 |
 | `fuzz` | Linux の Clang/libFuzzer による60秒のカナリア。コーパスは自分が所有する出力にコピーします。 |
 | `install` | 隔離したエクスポート先で ABI・シンボル・C++・C11・衝突・再配置を検査するコンシューマー。Git/Bash は不要。任意の `--shared`、`--core-only`、`--program`。`--quickjs` には `--program` と ELF/Mach-O の検査が必要で、Windows の行にはありません。 |

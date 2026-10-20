@@ -403,6 +403,7 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `msvc-asan` | Serial Windows Program/QuickJS canary; activated `cl >=19.50` (VS2026), not MSVC 19.44. |
 | `grpc` | gRPC graph contract; provision gRPC/Protobuf compiler and libraries. |
 | `benchmark` | Linux Release four-workload regression gate; original throughput, latency and target-RSS limits. |
+| `bench-ab` | Linux Release; the benchmarks of `benchmarks/ci_ab_gates.json` on this build and on `--base <ref>` (`--base head` compares the build with itself), interleaved, against a tolerance per case; see [CI performance gates](benchmarks/README.md#ci-performance-gates). |
 | `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. Ceilings are calibrated on CI's hosted x86-64 runners: on slower hardware `javascript_wrapped_core` can fail without a regression. `--base <ref>` also builds that commit and compares each case with it on the same machine. |
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |

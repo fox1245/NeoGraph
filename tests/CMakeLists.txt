@@ -769,6 +769,12 @@ add_test(NAME public_text_guard_selftest
 set_tests_properties(public_text_guard public_text_guard_selftest
     PROPERTIES LABELS "hygiene" TIMEOUT 120)
 
+# The benchmark A/B gate runner, the script that checks the absolute limits, and their data file
+# (benchmarks/ci_ab_gates.json) against stand-in benchmarks.
+add_test(NAME ci_ab_gates_selftest
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_ci_ab_gates.py)
+set_tests_properties(ci_ab_gates_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
+
 if(TARGET neograph_program_tests)
     if(NEOGRAPH_BUILD_POSTGRES)
         # Keep the Program PostgreSQL store integration cases off the shared

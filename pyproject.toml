@@ -90,11 +90,11 @@ sdist.include = [
     "bindings/python/examples/*.py", "bindings/python/examples/README.md",
     "tests/**", "examples/**",
     "benchmarks/**/*.cpp", "benchmarks/*.cmake",
-    "benchmarks/quickjs_performance_preregistration.json",
+    "benchmarks/quickjs_performance_preregistration.json", "benchmarks/ci_ab_gates.json",
     "skills/neograph-harness-authoring/SKILL.md",
     "skills/neograph-harness-authoring/references/chat-template-proposals.md",
     "scripts/verify_ci.py", "scripts/check_install_consumer.py",
-    "scripts/check_ci_benchmarks.py", "scripts/run_quickjs_performance.py",
+    "scripts/check_ci_benchmarks.py", "scripts/run_quickjs_performance.py", "scripts/run_ci_ab_gates.py",
     "scripts/audit_legacy_drain.py", "scripts/check_cross_repository_compatibility.py",
 ]
 sdist.exclude = [

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=95dcfaea2d1e943caf027838dec4ec2e1463e50b96b75736e25814569468af80 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=9cad6efa3db9b5f3166d7c9c9ac08dabc8fb0322f0542fb48c44debd81ff4840 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -394,6 +394,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `msvc-asan` | Windows에서 직렬로 실행하는 Program/QuickJS 카나리. 활성화된 `cl >=19.50`(VS2026)이 필요하며 MSVC 19.44는 안 됩니다. |
 | `grpc` | gRPC 그래프 계약. gRPC/Protobuf 컴파일러와 라이브러리 필요. |
 | `benchmark` | Linux Release에서 워크로드 네 가지를 보는 회귀 게이트. 처리량, 지연, 목표 RSS의 원래 한도 적용. |
+| `bench-ab` | Linux Release. `benchmarks/ci_ab_gates.json`의 벤치마크를 이 빌드와 `--base <ref>`(`--base head`는 빌드를 자기 자신과 비교)에서 번갈아 실행해 케이스별 허용 오차와 비교. [CI 성능 게이트](benchmarks/README.md#ci-performance-gates) 참고. |
 | `quickjs-performance` | Linux에서 켜짐/꺼짐 빌드를 맞춰 비교. 불변 출처 정보를 위해 실제 소스 루트 Git 체크아웃 필요. 상한은 CI의 hosted x86-64 러너 기준이라, 더 느린 하드웨어에서는 회귀가 없어도 `javascript_wrapped_core`가 실패할 수 있음. `--base <ref>`를 주면 그 커밋도 빌드해 같은 머신에서 케이스별로 비교함. |
 | `fuzz` | Linux Clang/libFuzzer 60초 카나리. 코퍼스를 본인 소유 출력으로 복사. |
 | `install` | 격리된 내보내기 접두사에서 ABI·심볼·C++·C11·충돌·재배치를 검사하는 소비자. Git/Bash 불필요. 선택 옵션 `--shared`, `--core-only`, `--program`. `--quickjs`는 `--program`과 ELF/Mach-O 검사가 필요하며 Windows 행에는 없습니다. |

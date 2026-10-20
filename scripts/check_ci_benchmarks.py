@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run the four original CI benchmark commands and enforce their gates."""
+"""Run the four original CI benchmark commands and enforce their absolute limits.
+
+The workloads and limits are in benchmarks/ci_ab_gates.json. The limits are a last-resort
+floor; scripts/run_ci_ab_gates.py compares each case with a base build.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+
+from run_ci_ab_gates import DEFAULT_GATES, ConfigurationError, load_gates
 
 
 class BenchmarkError(RuntimeError):
@@ -39,7 +45,13 @@ def positive_integer(text: str, label: str) -> int:
     return int(text)
 
 
-def parse_async(output: str, *, http: bool) -> dict[str, str]:
+def option(arguments: list[str], name: str) -> str:
+    if name not in arguments or arguments.index(name) + 1 >= len(arguments):
+        raise BenchmarkError(f"the workload arguments lack {name}")
+    return arguments[arguments.index(name) + 1]
+
+
+def parse_async(output: str, arguments: list[str], *, http: bool) -> dict[str, str]:
     # Match the complete printf record, not a substring that could conceal a
     # second metric, a truncated value, or another benchmark's output.
     threads = (
@@ -56,11 +68,12 @@ def parse_async(output: str, *, http: bool) -> dict[str, str]:
     if match is None:
         raise BenchmarkError("expected exactly one complete async benchmark record")
     values = match.groupdict()
-    expected = (
-        {"mode": "async_pool", "concur": "1000", "rounds": "5", "lat_ms": "5"}
-        if http else
-        {"mode": "async", "concur": "50000", "rounds": "5", "lat_ms": "50"}
-    )
+    expected = {
+        "mode": option(arguments, "--mode"),
+        "concur": option(arguments, "--concur"),
+        "rounds": option(arguments, "--rounds"),
+        "lat_ms": option(arguments, "--latency-ms"),
+    }
     for key, value in expected.items():
         if values[key] != value:
             raise BenchmarkError(f"async {key}: expected {value!r}, got {values[key]!r}")
@@ -161,10 +174,24 @@ def ceiling(value: float, maximum: float, label: str) -> None:
     print(f"ok: {label} {value:g} <= {maximum:g}")
 
 
+def limit_of(cases: dict[str, dict], case_id: str, value: float, label: str) -> None:
+    """Hold the head's value to the case's absolute limit, in the direction the case improves."""
+    case = cases[case_id]
+    limit = case["floor"]["limit"]
+    if case["direction"] == "higher_is_better":
+        floor(value, limit, label)
+    else:
+        ceiling(value, limit, label)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build_dir", type=Path, help="directory containing the three benchmark executables")
+    parser.add_argument("--gates", type=Path, default=DEFAULT_GATES,
+                        help="workloads and absolute limits (default: benchmarks/ci_ab_gates.json)")
     args = parser.parse_args()
+    document, cases = load_gates(args.gates)
+    workloads = {workload["id"]: workload for workload in document["workloads"]}
     build_dir = args.build_dir.resolve()
     suffix = ".exe" if os.name == "nt" else ""
     binaries = {
@@ -175,25 +202,28 @@ def main() -> int:
         if not binary.is_file() or not os.access(binary, os.X_OK):
             raise BenchmarkError(f"missing benchmark executable: {binary}")
 
-    http = parse_async(run_benchmark(binaries["bench_async_http"], [
-        "--mode", "async_pool", "--concur", "1000", "--rounds", "5", "--latency-ms", "5"
-    ]), http=True)
-    floor(number(http["ops"], "HTTP ops/s"), 12000, "HTTP ops/s")
+    workload = workloads["async_http_loopback"]
+    http = parse_async(run_benchmark(binaries["bench_async_http"], workload["args"],
+                                     workload.get("environment")), workload["args"], http=True)
+    limit_of(cases, "http_ops_per_second", number(http["ops"], "HTTP ops/s"), "HTTP ops/s")
 
-    fanout = parse_async(run_benchmark(binaries["bench_async_fanout"], [
-        "--concur", "50000"
-    ]), http=False)
-    floor(number(fanout["ops"], "fanout ops/s"), 300000, "fanout ops/s")
-    ceiling(number(fanout["rss"], "fanout rss_mb"), 120, "fanout RSS MB")
+    workload = workloads["async_fanout"]
+    fanout = parse_async(run_benchmark(binaries["bench_async_fanout"], workload["args"],
+                                       workload.get("environment")), workload["args"], http=False)
+    limit_of(cases, "fanout_ops_per_second", number(fanout["ops"], "fanout ops/s"), "fanout ops/s")
+    limit_of(cases, "fanout_rss_mb", number(fanout["rss"], "fanout rss_mb"), "fanout RSS MB")
 
     # worker=1 deliberately measures serial fan-out, so the engine always prints its
-    # informational "fan-out is serial" notice; the engine documents this switch for it.
-    # Every other stderr diagnostic still fails the gate, including in the auto run below.
-    timings = parse_neograph(run_benchmark(binaries["bench_neograph"], [
-        "10000", "5000", "1"
-    ], {"NEOGRAPH_SUPPRESS_FANOUT_WARNING": "1"}), 10000, 5000, "1")
-    ceiling(timings["seq"], 60, "seq us/op")
-    ceiling(timings["par"], 300, "par us/op")
+    # informational "fan-out is serial" notice; the workload sets the switch the engine
+    # documents for it. Every other stderr diagnostic still fails the gate, including in
+    # the auto run below.
+    workload = workloads["core_run_workers_1"]
+    seq_iters, par_iters, workers = workload["args"][:3]
+    timings = parse_neograph(run_benchmark(binaries["bench_neograph"], workload["args"],
+                                           workload.get("environment")),
+                             int(seq_iters), int(par_iters), workers)
+    limit_of(cases, "core_seq_us", timings["seq"], "seq us/op")
+    limit_of(cases, "core_par_us", timings["par"], "par us/op")
 
     parse_neograph(run_benchmark(binaries["bench_neograph"], [
         "100", "50", "auto"
@@ -205,6 +235,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (BenchmarkError, OSError, UnicodeError) as error:
+    except (BenchmarkError, ConfigurationError, OSError, UnicodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1)

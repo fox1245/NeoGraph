@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "id": "ci-ab-gates-v1",
+  "methodology": {
+    "statistic": "median",
+    "order": "Head and base alternate first position by sample index; every sample is one new process.",
+    "base_rule": "A branch is compared with its merge base on master, master with the latest release tag before it, and a dispatch can name another commit or tag. The base is built from its own tree with the same options on the same runner. A case whose benchmark or output the base build lacks has no base: it is reported, and only its absolute limit applies.",
+    "decision": "A case fails when the ratio of the head median to the base median is above its tolerance (lower is better) or below it (higher is better). A workload with a failing case is measured once more with fresh samples, and only the rerun decides.",
+    "floor_policy": "An absolute limit on the head median stays beside the tolerance as a last resort: it does not depend on the base build, and removing one is a gate failure. scripts/check_ci_benchmarks.py (bench-regression) enforces the same limits in a single run.",
+    "minimum_noise_margin": 1.5,
+    "calibration_policy": "a_a_noise is the largest distance from 1 of a head/base median ratio when the base is the head build itself (an A/A run) on the runner that gates. A tolerance is 1 plus the larger of 0.15 and twice that noise, rounded up to 0.05 (minus it when higher is better); the loader refuses one that leaves less than minimum_noise_margin times the noise. Noise differs between machines, so the hosted calibration decides; the local one was taken on a busy workstation and only shows how far a case can move under load."
+  },
+  "calibrations": {
+    "hosted": {
+      "machine": "GitHub-hosted ubuntu-24.04, 4 vCPUs (AMD EPYC 7763, 9V45 and 9V74 hosts)",
+      "date": "2026-10-20",
+      "runs": 9,
+      "note": "bench-ab on CI extended: two dispatches of the build against itself (bench_ab_base=head, three and five rounds) and one comparison of this branch with its merge base on master, which differs in no benchmark; three host CPU models"
+    },
+    "local": {
+      "machine": "AMD Ryzen 7 5800X, 16 logical CPUs, Linux on WSL2, with unrelated builds running (load average 6 to 17)",
+      "date": "2026-10-20",
+      "runs": 12,
+      "note": "two A/A calibrations of six rounds each; the largest distance from 1 per case, shown for comparison and not used for a tolerance",
+      "noise": {"canonical_json_ascii_us": 0.145, "canonical_json_escaped_us": 0.013, "canonical_json_mixed_us": 0.063, "checkpoint_memory_saves_per_second": 0.042, "checkpoint_sqlite_saves_per_second": 0.1, "core_events_us": 0.195, "core_par_auto_us": 0.068, "core_par_us": 0.193, "core_seq_sync_us": 0.218, "core_seq_us": 0.104, "core_stream_idle_us": 0.155, "fanout_ops_per_second": 0.019, "fanout_rss_mb": 0.001, "http_ops_per_second": 0.2, "program_dispatch_ns": 0.042, "program_run_us": 0.085, "provider_decode_agent_us": 0.061, "provider_decode_chat_us": 0.157, "provider_encode_agent_us": 0.101, "provider_encode_chat_us": 0.367, "sha256_identity_us": 0.005}
+    }
+  },
+  "workloads": [
+    {
+      "id": "core_run_workers_1",
+      "target": "bench_neograph",
+      "args": ["10000", "5000", "1"],
+      "environment": {"NEOGRAPH_SUPPRESS_FANOUT_WARNING": "1"},
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "Sequential chain, the same chain as a sync node, fan-out of five on the caller's executor, and the chain with a stream callback that receives nothing and one that receives every event.",
+      "cases": [
+        {"id": "core_seq_us", "extract": {"kind": "tsv", "row": ["seq"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "floor": {"limit": 60}, "a_a_noise": 0.009, "calibrated_on": "hosted"},
+        {"id": "core_seq_sync_us", "extract": {"kind": "tsv", "row": ["seq_sync"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.009, "calibrated_on": "hosted"},
+        {"id": "core_par_us", "extract": {"kind": "tsv", "row": ["par"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "floor": {"limit": 300}, "a_a_noise": 0.013, "calibrated_on": "hosted"},
+        {"id": "core_stream_idle_us", "extract": {"kind": "tsv", "row": ["seq_stream_idle"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.012, "calibrated_on": "hosted"},
+        {"id": "core_events_us", "extract": {"kind": "tsv", "row": ["seq_events"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.012, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "core_run_workers_auto",
+      "target": "bench_neograph",
+      "args": ["1000", "2000", "auto"],
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "Fan-out of five on the engine-owned worker pool, sized to the machine's CPUs.",
+      "cases": [
+        {"id": "core_par_auto_us", "extract": {"kind": "tsv", "row": ["par"], "column": 3}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.01, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "async_fanout",
+      "target": "bench_async_fanout",
+      "args": ["--mode", "async", "--concur", "50000", "--rounds", "5", "--latency-ms", "50"],
+      "samples": 11,
+      "timeout_seconds": 120,
+      "note": "50000 timer coroutines on an io_context; throughput is bounded by the 50 ms waits, so the figure moves with scheduling overhead and memory with the coroutine frames.",
+      "cases": [
+        {"id": "fanout_ops_per_second", "extract": {"kind": "keyvalue", "key": "ops/s"}, "unit": "ops/s", "direction": "higher_is_better", "tolerance": 0.85, "floor": {"limit": 300000}, "a_a_noise": 0.004, "calibrated_on": "hosted"},
+        {"id": "fanout_rss_mb", "extract": {"kind": "keyvalue", "key": "rss_mb"}, "unit": "MB", "direction": "lower_is_better", "tolerance": 1.15, "floor": {"limit": 120}, "a_a_noise": 0.001, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "async_http_loopback",
+      "target": "bench_async_http",
+      "args": ["--mode", "async_pool", "--concur", "1000", "--rounds", "5", "--latency-ms", "5"],
+      "samples": 11,
+      "timeout_seconds": 120,
+      "note": "1000 pooled HTTP/1.1 calls against an in-process server on the loopback interface.",
+      "cases": [
+        {"id": "http_ops_per_second", "extract": {"kind": "keyvalue", "key": "ops/s"}, "unit": "ops/s", "direction": "higher_is_better", "tolerance": 0.85, "floor": {"limit": 12000}, "a_a_noise": 0.023, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "program_dispatch",
+      "target": "bench_program_dispatch",
+      "args": ["100000", "10", "5"],
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "A walk over the typed dispatch descriptors of an immutable ProgramPlan; no engine, provider or journal.",
+      "cases": [
+        {"id": "program_dispatch_ns", "extract": {"kind": "tsv", "row": ["result", "dispatch_only"], "column": 4}, "unit": "ns/walk", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.018, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "program_runtime",
+      "target": "bench_program",
+      "args": ["200", "5", "3"],
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "A three-node chain through an admitted Program on in-memory stores, from start() to its terminal status.",
+      "cases": [
+        {"id": "program_run_us", "extract": {"kind": "tsv", "row": ["result", "program_single_call_core"], "column": 4}, "unit": "us/run", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.038, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "checkpoint_memory",
+      "target": "bench_checkpoint_store",
+      "args": ["--backends", "memory", "--threads", "4", "--iters", "4000"],
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "Saves of six-channel checkpoints from four threads into the in-memory store.",
+      "cases": [
+        {"id": "checkpoint_memory_saves_per_second", "extract": {"kind": "table", "header": "backend", "row": "memory", "column": "ops/sec"}, "unit": "saves/s", "direction": "higher_is_better", "tolerance": 0.85, "a_a_noise": 0.013, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "checkpoint_sqlite",
+      "target": "bench_checkpoint_store",
+      "args": ["--backends", "sqlite", "--threads", "1", "--iters", "300"],
+      "samples": 7,
+      "timeout_seconds": 120,
+      "note": "Saves into a SQLite database in the process's own temporary directory; each save is a committed transaction.",
+      "cases": [
+        {"id": "checkpoint_sqlite_saves_per_second", "extract": {"kind": "table", "header": "backend", "row": "sqlite", "column": "ops/sec"}, "unit": "saves/s", "direction": "higher_is_better", "tolerance": 0.8, "a_a_noise": 0.096, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "canonical_json_ascii",
+      "target": "bench_canonical_json",
+      "args": ["ascii", "65536", "400"],
+      "samples": 15,
+      "timeout_seconds": 120,
+      "note": "Canonical JSON bytes of a 64 KiB ascii string; the fastest of 400 timed calls per process.",
+      "cases": [
+        {"id": "canonical_json_ascii_us", "extract": {"kind": "json", "path": ["samples_us"], "reduce": "min"}, "unit": "us/call", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.006, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "canonical_json_mixed",
+      "target": "bench_canonical_json",
+      "args": ["mixed", "65536", "400"],
+      "samples": 15,
+      "timeout_seconds": 120,
+      "note": "Canonical JSON bytes of a 64 KiB mixed string; the fastest of 400 timed calls per process.",
+      "cases": [
+        {"id": "canonical_json_mixed_us", "extract": {"kind": "json", "path": ["samples_us"], "reduce": "min"}, "unit": "us/call", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.007, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "canonical_json_escaped",
+      "target": "bench_canonical_json",
+      "args": ["escaped", "65536", "400"],
+      "samples": 15,
+      "timeout_seconds": 120,
+      "note": "Canonical JSON bytes of a 64 KiB escaped string; the fastest of 400 timed calls per process.",
+      "cases": [
+        {"id": "canonical_json_escaped_us", "extract": {"kind": "json", "path": ["samples_us"], "reduce": "min"}, "unit": "us/call", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.007, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "sha256_identity",
+      "target": "bench_sha256",
+      "args": ["65536", "400"],
+      "samples": 15,
+      "timeout_seconds": 120,
+      "note": "The SHA-256 identity of a 64 KiB record, with its framing and hex encoding; the fastest of 400 timed calls per process.",
+      "cases": [
+        {"id": "sha256_identity_us", "extract": {"kind": "json", "path": ["samples_us"], "reduce": "min"}, "unit": "us/call", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.007, "calibrated_on": "hosted"}
+      ]
+    },
+    {
+      "id": "provider_outcome_codec",
+      "target": "bench_provider_outcome_codec",
+      "args": ["500", "20", "5"],
+      "samples": 9,
+      "timeout_seconds": 120,
+      "note": "Encoding and decoding of a provider outcome record (neograph.provider-outcome/v3), a single cited answer and a tool-calling turn; every decoded record is checked against its encoding before the timing.",
+      "cases": [
+        {"id": "provider_encode_chat_us", "extract": {"kind": "tsv", "row": ["result", "encode_chat"], "column": 3}, "unit": "us/op", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.012, "calibrated_on": "hosted"},
+        {"id": "provider_decode_chat_us", "extract": {"kind": "tsv", "row": ["result", "decode_chat"], "column": 3}, "unit": "us/op", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.018, "calibrated_on": "hosted"},
+        {"id": "provider_encode_agent_us", "extract": {"kind": "tsv", "row": ["result", "encode_agent"], "column": 3}, "unit": "us/op", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.015, "calibrated_on": "hosted"},
+        {"id": "provider_decode_agent_us", "extract": {"kind": "tsv", "row": ["result", "decode_agent"], "column": 3}, "unit": "us/op", "direction": "lower_is_better", "tolerance": 1.15, "a_a_noise": 0.008, "calibrated_on": "hosted"}
+      ]
+    }
+  ]
+}
