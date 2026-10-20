@@ -480,8 +480,8 @@ def test_every_tool_call_waits_for_a_person_and_the_loop_goes_on(extra):
 TITLES = {"old archive": "R-200", "draft": "R-100"}
 
 
-@pytest.mark.parametrize("approved", [case(True, keys=[KEYS[ANTHROPIC]], id="approved", gap="#544"),
-                                      case(False, keys=[KEYS[ANTHROPIC]], id="refused", gap="#544")])
+@pytest.mark.parametrize("approved", [case(True, keys=[KEYS[ANTHROPIC]], id="approved"),
+                                      case(False, keys=[KEYS[ANTHROPIC]], id="refused")])
 def test_gated_tool_call_resumes_with_the_operators_answer(approved):
     records = {"R-100": "draft", "R-200": "archived"}
     log = Tools()
