@@ -275,7 +275,10 @@ TEST(PricingBound, AnEstimateNeverExceedsItsReservation) {
         if (i % 2) {
             usage.extra["cache_creation.ephemeral_5m_input_tokens"] = count(write - hour);
             usage.extra["cache_creation.ephemeral_1h_input_tokens"] = count(hour);
-            usage.extra["candidatesTokensDetails.IMAGE"]           = count(below(output));
+            // Image output tokens bill at output_image. An entry with no such price has no total for them
+            // (SchemaProvider #149), which the next test pins.
+            if (sp::pricing::price_of(*entry).output_image)
+                usage.extra["candidatesTokensDetails.IMAGE"] = count(below(output));
         }
         const auto estimate = sp::pricing::estimate(entry == banded->entry("banded") ? *banded : *shipped_layer(),
                                                     "anthropic.messages", origin,
@@ -284,6 +287,34 @@ TEST(PricingBound, AnEstimateNeverExceedsItsReservation) {
         ASSERT_TRUE(estimate.total) << entry->id;
         EXPECT_LE(estimate.total->nano_usd, bound.total->nano_usd) << entry->id << " input " << input;
     }
+}
+
+// SchemaProvider #149: image output tokens reported by modality bill at output_image. An entry that lists no such
+// price leaves the estimate without a total, so a Program settlement holds the call instead of pricing the images
+// as text.
+TEST(PricingBound, ImageOutputTokensWithoutAnImagePriceLeaveNoTotal) {
+    const auto catalogue = catalogue_of(R"({"version":1,"models":[
+        {"id":"text-only","pricing":{"input":"0.000001","output":"0.000002"}},
+        {"id":"with-images","pricing":{"input":"0.000001","output":"0.000002","output_image":"0.00003"}}]})");
+    sp::Usage usage;
+    usage.stage          = sp::UsageStage::Final;
+    usage.quality        = sp::UsageQuality::Consistent;
+    usage.input_uncached = count(1'000);
+    usage.input_total    = count(1'000);
+    usage.output_total   = count(500);
+    const auto estimate_of = [&](const char* model) {
+        return sp::pricing::estimate(*catalogue, "google.generate", "https://generativelanguage.googleapis.com",
+                                     sp::ServedModel{model, model, sp::ServedRelation::Exact}, usage);
+    };
+    EXPECT_TRUE(estimate_of("text-only").total) << "text alone prices at output";
+    usage.extra["candidatesTokensDetails.IMAGE"] = count(200);
+    const auto text_only = estimate_of("text-only");
+    EXPECT_FALSE(text_only.total);
+    EXPECT_EQ(text_only.unpriced, std::vector<std::string>{"output_image"});
+    const auto with_images = estimate_of("with-images");
+    ASSERT_TRUE(with_images.total);
+    // 1,000 input tokens at 1,000, 300 text tokens at 2,000 and 200 image tokens at 30,000 nano-USD.
+    EXPECT_EQ(with_images.total->nano_usd, 1'000U * 1'000 + 300 * 2'000 + 200 * 30'000);
 }
 
 TEST(PricingAssess, TheHoldIsTheCatalogueBoundOfTheAdmittedRequest) {
