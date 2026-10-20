@@ -232,7 +232,11 @@ public:
     };
     std::optional<ForkProviderReplay> fork_provider_replay;
     /// #431: what ProgramHandle::notices() returns; set before the attempt starts.
+    /// #543: a broker may add notices while the attempt runs (add_notice), so read
+    /// them with notices_snapshot().
     std::vector<ProgramNotice> notices;
+    void                       add_notice(ProgramNotice notice);
+    std::vector<ProgramNotice> notices_snapshot() const;
 
     bool              cancel(CancellationCause cause) noexcept;
     CancellationCause cancellation_cause() const noexcept;
@@ -343,6 +347,8 @@ public:
 
 private:
     mutable std::mutex                    mutex_;
+    /// Guards notices; a broker adds one from the thread of its call (#543).
+    mutable std::mutex                    notices_mutex_;
     mutable std::condition_variable       cv_;
     std::optional<ProgramResult>           result_;
     std::vector<ProgramEvent>              events_;

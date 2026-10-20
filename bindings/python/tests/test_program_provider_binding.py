@@ -226,6 +226,17 @@ export function define() {
     assert (tmp_path / "runs" / "provider_calls.db").exists()
 
 
+def test_a_host_may_allow_a_fork_to_send_a_journaled_call_again(tmp_path):
+    # #543: a fork that cannot match the source's journaled call is refused unless the host allows it. The
+    # option is off by default and is a keyword of the host.
+    for allowed in (False, True):
+        host = ng.LocalProgramHost(registry(), "tenant:unit", ceiling(),
+                                   sqlite_directory=str(tmp_path / f"runs-{allowed}"),
+                                   fork_may_resend_provider_calls=allowed)
+        assert host.owner_scope == "tenant:unit"
+    assert ng.LocalProgramHost(registry(), "tenant:unit", ceiling()).owner_scope == "tenant:unit"
+
+
 def test_a_durable_binding_needs_native_custody(tmp_path):
     with pytest.raises(ValueError, match="native_history_archive"):
         bound_host(sqlite_directory=str(tmp_path / "runs"))

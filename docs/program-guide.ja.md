@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=593b4725bf9971dc00e8817fa162cc6025c46602ba4ff010d0f4362cf81e03c2 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=468e8ab98a982a856722c1e7779f8761e1af6e7e7ee0ff23055886e95a001a29 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -228,6 +228,8 @@ ProgramTerminalStatus.Failed release.held
 フォークの予算は、元の実行の残りの予算から切り分けた取り分です。`wall_time_ms`、`model_tokens`、`monetary_microunits`、`max_program_operations`、`max_core_steps`、`max_dynamic_compiles` は量です。フォークは元の実行に残っている量から自分の取り分を取り、残りは元の実行がそのまま持ちます。この例では、元の実行には、残りの `wall_time_ms` から 2,000 を引いた値と、残りの `max_core_steps` から 20 を引いた値が残ります。`max_concurrency` は量ではなく上限です。フォークは元の実行の上限以下で自分の上限を持ち、元の実行は自分の上限をそのまま保つので、フォークの 3 は元の実行から何も奪いません。フォークのせいで元の実行の `wall_time_ms` または `max_core_steps` が 0 になる場合、`fork` の呼び出しは `P_FORK_SOURCE_BUDGET` で拒否されます。元の実行に残っている量より大きいフォークは `P_FORK_BUDGET` で拒否されます。どちらの場合も、元の実行は変わりません。
 
 フォークで再び実行されるノードは、質問を出したノードのように、質問を出す前に行ったプロバイダー呼び出しを繰り返します。永続的なプロバイダー呼び出しのジャーナルがあれば、フォークはそれらをリプレイするので、再送も再課金もされません。`LocalProgramHost` は、`sqlite_directory` を指定するとこのジャーナルを持ちます。すべてをメモリ上に置くホストにはジャーナルがないため、そこでのフォークはそれらの呼び出しを再送し、再課金します。これはエラーではなく、フォークが送るものも課金するものも変わりませんが、フォークはそのことを知らせます。一時停止した試行が、止まっているオペレーションでプロバイダー呼び出しを記録していた場合、`fork` が返したハンドルの `handle.notices` に、コードが `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` の通知が1つ入ります。`witness` には、それらの呼び出し（`call_id`、`node`、`model`、`microunits`）と合計が並びます。そのうちフォークがどれを再実行するかは、通知からは分かりません。一時停止したステップで終わったノードの呼び出しは、そのステップに保存された書き込みからリプレイされ、再送されないからです。ジャーナルのあるホストでのフォークや、一時停止した試行がそのような呼び出しを記録していないフォークには、通知はありません。通知は実行とともには保存されないので、`reconnect` が返したハンドルにはありません。詳しくは、[Python バインディングガイド](python-binding.md#in-memory-state-and-resume)と[価格の証拠とモデルカタログ](reference-en.md#pricing-evidence-and-the-model-catalogue)を参照してください。
+
+ジャーナルは、呼び出しを、リクエストが求める内容で識別し、それを承認したpolicyでは識別しないので、フォークは、SchemaProviderのdescriptor policyが変わった後でも呼び出しをリプレイします。その場合、ハンドルに `P_PROVIDER_CALL_POLICY_CHANGED` の通知が付き、`wait()` の後に `handle.notices` で見られます。ジャーナルにソースの呼び出しがあっても、0.15が書いたジャーナルのようにそれを照合できない場合、フォークは呼び出しが異なることを示せません。呼び出しを再送して再課金する代わりに、`NG.ConfigError` で失敗します。`LocalProgramHost(fork_may_resend_provider_calls=True)` は再送を許可し、その場合ハンドルに `P_FORK_PROVIDER_CALL_RESENT` が付きます。
 
 ### 7. 答えで再開する
 

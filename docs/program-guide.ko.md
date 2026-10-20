@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=593b4725bf9971dc00e8817fa162cc6025c46602ba4ff010d0f4362cf81e03c2 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=468e8ab98a982a856722c1e7779f8761e1af6e7e7ee0ff23055886e95a001a29 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -228,6 +228,8 @@ ProgramTerminalStatus.Failed release.held
 포크의 예산은 원래 실행의 남은 예산에서 떼어 낸 몫입니다. `wall_time_ms`, `model_tokens`, `monetary_microunits`, `max_program_operations`, `max_core_steps`, `max_dynamic_compiles`는 양입니다. 포크는 원래 실행에 남은 양에서 자기 몫을 가져가고, 나머지는 원래 실행이 그대로 가집니다. 이 예에서 원래 실행에는 남은 `wall_time_ms`에서 2,000을 뺀 값과 남은 `max_core_steps`에서 20을 뺀 값이 남습니다. `max_concurrency`는 양이 아니라 한도입니다. 포크는 원래 실행의 한도 이하로 자기 한도를 받고, 원래 실행은 자기 한도를 그대로 유지하므로, 포크의 3은 원래 실행에서 아무것도 가져가지 않습니다. 포크 때문에 원래 실행의 `wall_time_ms`나 `max_core_steps`가 0이 되면 `fork` 호출이 `P_FORK_SOURCE_BUDGET`으로 거부하고, 원래 실행에 남은 양보다 큰 포크는 `P_FORK_BUDGET`으로 거부합니다. 어느 쪽도 원래 실행을 바꾸지 않습니다.
 
 fork에서 다시 실행되는 노드는, 질문한 노드처럼, 질문하기 전에 한 provider 호출을 반복합니다. 영속적인 provider 호출 저널이 있으면 fork가 그 호출을 재생(replay)하므로 다시 전송되거나 과금되지 않습니다. `LocalProgramHost`는 `sqlite_directory`가 있을 때 이 저널을 가집니다. 모든 것을 메모리에 두는 호스트에는 저널이 없으므로, 그런 호스트의 fork는 해당 호출을 다시 전송하고 다시 과금합니다. 오류는 아니며 fork가 전송하고 과금하는 내용도 달라지지 않지만, fork가 이 사실을 알려 줍니다. 일시 중지된 시도가 일시 중지된 연산에서 provider 호출을 기록했다면, `fork`가 반환한 핸들의 `handle.notices`에 코드가 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`인 알림이 하나 들어 있고, 그 `witness`에 해당 호출(`call_id`, `node`, `model`, `microunits`)과 합계가 나열됩니다. 알림만으로는 그 가운데 fork가 다시 실행하는 호출이 무엇인지 알 수 없습니다. 일시 중지된 스텝에서 끝난 노드의 호출은 그 스텝에 저장된 쓰기에서 재생되며 다시 전송되지 않기 때문입니다. 저널이 있는 호스트의 fork나, 일시 중지된 시도가 그런 호출을 기록하지 않은 fork에는 알림이 없습니다. 알림은 실행과 함께 저장되지 않으므로 `reconnect`가 반환한 핸들에는 없습니다. 자세한 내용은 [Python 바인딩 가이드](python-binding.md#in-memory-state-and-resume)와 [가격 증거와 모델 카탈로그](reference-en.md#pricing-evidence-and-the-model-catalogue)를 참고하세요.
+
+저널은 호출을 요청이 묻는 내용으로 식별하고 그 요청을 승인한 policy로는 식별하지 않으므로, fork는 SchemaProvider의 descriptor policy가 바뀐 뒤에도 호출을 재생합니다. 이때 핸들에 `P_PROVIDER_CALL_POLICY_CHANGED` 알림이 붙으며, `wait()` 뒤에 `handle.notices`로 볼 수 있습니다. 저널에 source의 호출이 있지만 0.15가 쓴 저널처럼 그 호출을 매칭할 수 없으면, fork는 호출이 다르다는 것을 보일 수 없습니다. 그러면 호출을 다시 전송하고 과금하는 대신 `NG.ConfigError`로 실패합니다. `LocalProgramHost(fork_may_resend_provider_calls=True)`는 재전송을 허용하며, 그때 핸들에 `P_FORK_PROVIDER_CALL_RESENT`가 붙습니다.
 
 ### 7. 답으로 재개하기
 

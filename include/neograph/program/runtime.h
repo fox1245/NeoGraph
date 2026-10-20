@@ -177,6 +177,17 @@ struct ProgramChildQuotaConfig {
       /// Host-owned SDK custody for native provider histories and outcomes.
       /// Null never enables a portable/native fallback during durable restore.
       std::shared_ptr<sp::NativeArchive> native_history_archive;
+      /// #543: a fork repeats the provider calls its paused invocation made, and
+      /// a durable journal replays them (SQLiteProgramProviderCallJournal). When
+      /// the journal has the source's call at the same position but can neither
+      /// adopt it nor show that the call differs from it, the fork would send a
+      /// call the provider has probably charged already. False, the default,
+      /// refuses that call before it is sent (ProgramProviderForkResendRefusedError).
+      /// True sends it, which the provider may charge again, and reports
+      /// P_FORK_PROVIDER_CALL_RESENT in ProgramHandle::notices(). It does not
+      /// override a source call that is the same call and whose outcome is
+      /// unknown: that stays uncertain until it is reconciled.
+      bool fork_may_resend_provider_calls = false;
   };
 /**
  * Experimental owner-scoped new-run selection. The activation is the exact

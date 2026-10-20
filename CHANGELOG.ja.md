@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8cbc12fad9dd02b4689341f51d4eb04ed8900d16210f8e1a3affceddedc4da2d -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,7 +14,14 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 変更
-
+- **プロバイダー呼び出しの identity は、リクエストが求める内容を指し、それを承認した SchemaProvider のポリシーを指しません (#543)。** Program のプロバイダー呼び出しジャーナルは、呼び出しを `Provider::request_digest` で識別していましたが、このダイジェストには SchemaProvider の descriptor ポリシーの identity が含まれます。そのため、内容が同じリクエストでも、ポリシー identity が違えば別の呼び出しになりました。resume やクラッシュ復旧は論理呼び出しのバインディング衝突に遭い、fork はソースの呼び出しを引き継がずに再送したので、支払い済みの呼び出しに再び費用がかかりました。interface 7 がすべてのポリシー identity を変えるため、0.16.0 でこの問題が表に出ました。ジャーナルは、リクエスト内容とポリシー identity を別々に保持するようになりました。
+  - **リクエスト内容。** `Provider::request_content_digest(prepared)` は、family、モデル、モード、origin を対象にします。エンドポイント呼び出しではそのエンドポイント、メソッド、URL を、アップロードではそのメタデータと送るバイト列のダイジェストを加え (#541)、エンコードされた本文も対象です。本文には、メッセージ（NeoGraph が入れるプロンプトのテキストを含む）、ツール、オプションが入っています。本文は正規化し、descriptor がモデル、メッセージ、ストリームのフラグ、出力上限に付けたメンバー名は役割ごとに分けて扱うので、ポリシーがその名前を変えても内容は変わりません。ポリシーの identity、descriptor のルートとヘッダー、リトライポリシー、オブザーバーの上限は内容に含まれません。`Provider::request_policy_identity(prepared)` はポリシー identity を返し、`Provider::request_digest` は変わりません。SchemaProvider には型付きリクエストの正規形がなく、NeoGraph で書くとすべてのリクエスト型のすべてのフィールドを追う必要があり、漏れたフィールドがあれば 2 つのリクエストが 1 つの呼び出しを共有してしまいます。そのため、エンコードされた本文が内容そのものであり、SDK が同じリクエストを別様にエンコードすれば別の内容として扱われ、安全側に倒れます（fail closed）。
+  - **ジャーナルの行。** 行は、内容の横にポリシー identity を記録します。新しい列 `identity_version`、`content_digest`、`policy_identity`、`producer`（リクエストをエンコードした NeoGraph のビルド）があり、行の `request_digest` は内容とポリシーをあわせて指します。`SQLiteProgramProviderCallJournal::Record` にも同じ 4 つのメンバーが加わり、`policy_changes()` は呼び出しに記録された変更を列挙します（テーブル `ng_program_provider_call_policy_changes`）。このバージョンが書いた行は 0.16.0 では照合されないため、ダウングレードするとバインディング衝突に遭います。
+  - **ポリシーの変更は衝突ではありません。** 同じ内容を別のポリシー identity のもとで見つけた resume、クラッシュ復旧、fork は、ジャーナルに記録された結果をリプレイまたは引き継ぎ、行を書き換えずに変更を記録し、実行のハンドル（`ProgramHandle::notices()`、Python では `handle.notices`）に通知 `P_PROVIDER_CALL_POLICY_CHANGED` を出します。通知は実行中に増えることがあるので、`wait()` の後に読んでください。内容が違う場合は、これまでどおり論理呼び出しのバインディング衝突です。ホストのものであれ NeoGraph 組み込みのものであれ、別のプロンプトのテキストを送ることになる resume は、何も送りません。
+  - **0.16.0 のジャーナルは引き続き再開できます。** その行にはポリシーを含むディスパッチダイジェストしかなく、従来どおり読まれます。ダイジェストが呼び出しのものと等しい行は一致するので、0.16.0 のジャーナルは書かれたときのポリシーのもとで再開でき、fork はその呼び出しを引き継ぎます。その後ポリシーが変わっていれば、ダイジェストはもう一致せず、resume はバインディング衝突に遭います。
+  - **0.15 のジャーナルは、依然として再開できません。** 0.15 のダイジェストには SchemaProvider 0.3 のポリシー identity とオブザーバーの上限が含まれ、0.4 はそれらを再計算できないため、どの 0.16.x も、そのような行のリクエストが呼び出しのものかどうかを判断できません。0.15 がジャーナルに記録した実行は 0.16 では再開できない、という 0.16.0 の記述は変わりません。変わったのは、そのような実行の fork で、黙って呼び出しを再送することはなくなりました（次の項目）。
+- **動作の変更: fork は、ソースの呼び出しと照合できないプロバイダー呼び出しを拒否します (#543)。** fork は、ソースの同じ位置の記録を探します。内容が同じ記録は引き継ぎます。ソースにその位置の記録がない場合、ソースの記録がプロバイダーが何も受け付けなかったことを証明する失敗である場合、内容が異なり、しかも同じ NeoGraph のビルドが両方をエンコードした場合は、呼び出しを送ります。記録を引き継ぐことも、呼び出しが異なることを示すこともできないときは、送れば同じ呼び出しに再び費用を払うことになるので、何かを送ったりジャーナルに記録したりする前に、`ProgramProviderForkResendRefusedError` で拒否します。`reason()` は、リクエスト内容の identity より前に書かれていてダイジェストが異なる行なら `Unverifiable`、内容が異なり別の NeoGraph のビルドが行をエンコードした場合は `EncoderDiffers`、内容は同じだがソースが別のプロバイダーデプロイメントのもとで記録した場合は `DeploymentDiffers` です。Core のノードの中では `NG.ConfigError` で、リトライもルーティングもされず、fork は失敗します。`RuntimeConfig::fork_may_resend_provider_calls`（既定値は `false`。Python では `LocalProgramHost(fork_may_resend_provider_calls=True)`）が再送を許可します。すると、fork は呼び出しを送り、プロバイダーが再び課金することがあり、ハンドルに `P_FORK_PROVIDER_CALL_RESENT` が付きます。結果が不明なソースの呼び出しは、フラグにかかわらず不確かなままです。したがって、0.15 のジャーナルの fork は既定では失敗します。以前は、その呼び出しに再び費用を払っていました。
+- **C++ の利用側を再ビルドしてください。メンバーが追加されました (#543)。** `RuntimeConfig` に `fork_may_resend_provider_calls` が、`ProgramCoreProviderCallReplaySource` に `may_resend` が、`ProgramCoreProviderCallContext` に `diagnostic` が、`SQLiteProgramProviderCallJournal::Record` に 4 つのメンバーが、`Provider` に静的関数が 2 つ加わりました。NeoGraph、C++ の利用側、Python 拡張を一緒に再ビルドしてください([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照)。
 - **C++ の利用側は再ビルドが必要です。`ToolExecutionPolicy` にメンバーが追加されました (#545)。** `ToolExecutionPolicy` に `error_limit_bytes` が追加されました。NeoGraph、C++ の利用側、Python 拡張をあわせて再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
 
 ### 修正

@@ -10,6 +10,7 @@
 #include "fixtures/fork_share.h"
 #include "fixtures/unique_temp_dir.h"
 
+#include <neograph/async/run_sync.h>
 #include <neograph/graph/node.h>
 #include <neograph/graph/types.h>
 #include <neograph/graph/sqlite_checkpoint.h>
@@ -148,14 +149,37 @@ neograph::test::FixtureModel priced_model(std::string family, const std::string&
     return fixture;
 }
 
-// The SDK policy with an input limit and prices for `model`; `origin` is the base URL.
+// Where the openai.chat family is in a descriptor policy document.
+std::size_t chat_family_index(const json& policy) {
+    const json families = policy["families"];
+    for (std::size_t i = 0; i < families.size(); ++i)
+        if (families[i]["family"].get<std::string>() == "openai.chat") return i;
+    throw std::logic_error("the policy has no openai.chat family");
+}
+
+// Edits of the descriptor policy that change its identity, which covers the facts that decide how sealed
+// history is written to and read from the wire: the stop reasons and the member names a request is written to.
+std::function<void(json&)> another_stop_reason(std::string raw) {
+    return [raw = std::move(raw)](json& policy) {
+        policy["families"][chat_family_index(policy)]["stop_reasons"][raw] = "EndTurn";
+    };
+}
+std::function<void(json&)> another_output_cap_member(std::string member) {
+    return [member = std::move(member)](json& policy) {
+        policy["families"][chat_family_index(policy)]["bindings"]["max_output_tokens"] = member;
+    };
+}
+
+// The SDK policy with an input limit and prices for `model`, edited by `edit`; `origin` is the base URL.
 std::shared_ptr<sp::runtime::Client> client_for(std::string origin, const std::string& model,
-                                                std::optional<std::uint64_t> input_limit) {
+                                                std::optional<std::uint64_t> input_limit,
+                                                const std::function<void(json&)>& edit = {}) {
     std::vector<neograph::test::FixtureModel> models;
     if (input_limit || !prices_of(model).empty()) models.push_back(priced_model("openai.chat", model, input_limit));
+    auto policy = json::parse(sp::config_defaults::descriptor_policy_json);
+    if (edit) edit(policy);
     return std::make_shared<sp::runtime::Client>(neograph::test::descriptor(
-        "openai.chat", std::move(origin),
-        neograph::test::policy_with_models(json::parse(sp::config_defaults::descriptor_policy_json), models)));
+        "openai.chat", std::move(origin), neograph::test::policy_with_models(policy, models)));
 }
 
 sp::Usage final_usage(std::uint64_t input, std::uint64_t output) {
@@ -173,9 +197,12 @@ struct Peer {
     std::atomic<int> transport{0};
     std::mutex       mutex;
     std::vector<std::string> models;
-    // The encoded body each request sent, and its Provider::request_digest.
+    // The encoded body each request sent, and its Provider::request_digest, request_content_digest and
+    // request_policy_identity.
     std::vector<std::string> bodies;
     std::vector<std::string> digests;
+    std::vector<std::string> contents;
+    std::vector<std::string> policies;
     // Answers request number `ordinal` (1-based).
     std::function<sp::runtime::Result(int ordinal, const ProviderRequest&)> reply =
         [](int, const ProviderRequest&) {
@@ -197,6 +224,8 @@ std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer>                pee
                 peer->models.push_back(std::get<sp::chat::Request>(request.payload).model);
                 peer->bodies.emplace_back(prepared.encoded_body());
                 peer->digests.push_back(Provider::request_digest(prepared));
+                peer->contents.push_back(Provider::request_content_digest(prepared));
+                peer->policies.push_back(Provider::request_policy_identity(prepared));
             }
             if (peer->on_transport) peer->on_transport(ordinal, request);
             co_return peer->reply(ordinal, request);
@@ -232,6 +261,9 @@ struct Script {
     std::string   upload_path;
     std::uint64_t upload_size = 0;
     std::string   upload_bytes;
+    // #543: what the "brokered_call" node asks, and the system text it puts before it (none when empty).
+    std::string   prompt = "probe";
+    std::string   system;
 };
 
 class BrokeredCall final : public graph::GraphNode {
@@ -243,8 +275,10 @@ public:
         const int run = ++script_->node_runs;
         if (script_->interrupt_before_call.load() && !in.ctx.resume_value)
             throw graph::NodeInterrupt("approve the model call", json{{"request", "approve"}});
-        auto request  = make_provider_request(*provider_, std::string(kModel),
-                                              {neograph::test::message("probe", sp::Role::User)});
+        std::vector<sp::Message> messages;
+        if (!script_->system.empty()) messages.push_back(neograph::test::message(script_->system, sp::Role::System));
+        messages.push_back(neograph::test::message(script_->prompt, sp::Role::User));
+        auto request  = make_provider_request(*provider_, std::string(kModel), std::move(messages));
         std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
         const auto broker = graph::provider_call_broker(in.ctx);
         if (!broker) throw std::logic_error("the Program provider broker is absent");
@@ -413,6 +447,10 @@ struct HostOptions {
     // #531: the durable journal's bind_priced, or bind, which journals calls without pricing them.
     bool          priced        = true;
     int           node_retries  = 0;
+    // #543: edits the descriptor policy the provider's client is admitted under, which changes its identity.
+    std::function<void(json&)> edit_policy;
+    // #543: RuntimeConfig::fork_may_resend_provider_calls.
+    bool          fork_may_resend = false;
     // Replaces the provider double: a real SDK client at a loopback peer.
     std::function<std::shared_ptr<Provider>()> provider;
     // The trusted native custody a durable journal needs for a real SDK client.
@@ -526,7 +564,8 @@ public:
             context.emplace();
             context->provider = options_.provider
                 ? options_.provider()
-                : make_provider(peer_, client_for(options_.origin, options_.model, options_.input_limit));
+                : make_provider(peer_, client_for(options_.origin, options_.model, options_.input_limit,
+                                                  options_.edit_policy));
             context->model = options_.model;
             context->provider_controls.max_output_tokens = options_.output_cap;
             context->provider_controls.service_tier      = options_.service_tier;
@@ -543,7 +582,9 @@ public:
         runtime.transitions       = transitions_;
         runtime.scheduler_threads = 2;
         runtime.require_core_provider_call_broker = true;
+        runtime.fork_may_resend_provider_calls    = options_.fork_may_resend;
         if (journal_) {
+            runtime.core_provider_calls_journaled = true;
             runtime.core_provider_call_resolver =
                 [journal = journal_, deployment = program::detail::provider_deployment_identity(options_.label),
                  priced = options_.priced](
@@ -1422,8 +1463,9 @@ TEST_P(Priced, TheSentRequestCarriesThePinnedCeilingAndTheJournalItsDigest) {
         ASSERT_EQ(result.monetary_records().size(), 1U);
         const auto row = h->journal().inspect(kOwner, result.monetary_records().front().call_id);
         ASSERT_TRUE(row);
-        EXPECT_EQ(row->request_digest, peer->digests[0])
+        EXPECT_EQ(row->content_digest, peer->contents[0])
             << "the journal records the pinned request that was sent, so a replay matches it";
+        EXPECT_EQ(row->policy_identity, peer->policies[0]);
     }
 
     // A direct origin is priced without max_price.
@@ -2363,4 +2405,769 @@ TEST(ProgramProviderBindingJournal, TheJournalAndCheckpointsHoldNoCredential) {
         ++scanned;
     }
     EXPECT_GE(scanned, 3U) << "the program, checkpoint and provider databases";
+}
+
+// ---------------------------------------------------------------------------
+// #543: a call is named by what it asks for, not by the policy that admitted it
+// ---------------------------------------------------------------------------
+
+namespace {
+using Journal = SQLiteProgramProviderCallJournal;
+using Refused = ProgramProviderForkResendRefusedError;
+
+void exec_sql(const std::string& file, const std::string& sql) {
+    Connection db(file, SQLITE_OPEN_READWRITE);
+    char*      error = nullptr;
+    const auto code  = sqlite3_exec(db.db, sql.c_str(), nullptr, nullptr, &error);
+    const std::string message = error ? error : "";
+    sqlite3_free(error);
+    if (code != SQLITE_OK) throw std::runtime_error("sql failed: " + message);
+}
+
+// A row as 0.16.0 and 0.15 wrote it: its request_digest is the dispatch digest, which includes the policy, and it
+// has no content, policy or producer.
+void as_written_before_content_identity(const std::string& provider_db, const std::string& dispatch_digest) {
+    exec_sql(provider_db, "UPDATE ng_program_provider_calls SET identity_version='1', content_digest='', "
+                          "policy_identity='', producer='', request_digest='" + dispatch_digest + "'");
+}
+
+// What the request of one built-in call asks: the same one whatever the policy.
+ProviderRequest ask(const Provider& provider, std::string text = "probe", std::string system = {},
+                    ProviderMode mode = ProviderMode::Collect) {
+    std::vector<sp::Message> messages;
+    if (!system.empty()) messages.push_back(neograph::test::message(std::move(system), sp::Role::System));
+    messages.push_back(neograph::test::message(std::move(text), sp::Role::User));
+    auto request = make_provider_request(provider, std::string(kModel), std::move(messages), {}, {}, mode);
+    std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
+    return request;
+}
+
+// A provider over a client admitted under the policy `edit` makes.
+std::shared_ptr<Provider> provider_under(std::shared_ptr<Peer> peer, const std::function<void(json&)>& edit = {},
+                                         std::string origin = std::string(kOpenRouter)) {
+    return make_provider(std::move(peer), client_for(std::move(origin), std::string(kModel), kInputLimit, edit));
+}
+
+// Where one call is made: a run, a Core thread and an attempt, and for a fork the run it repeats the calls of.
+struct Position {
+    std::string run, thread, operation = "root";
+    std::uint64_t attempt = 1;
+    std::optional<ProgramCoreProviderCallReplaySource> replay;
+    // What the broker told the host.
+    std::shared_ptr<std::vector<ProgramCoreProviderCallDiagnostic>> told =
+        std::make_shared<std::vector<ProgramCoreProviderCallDiagnostic>>();
+
+    ProgramCoreProviderCallContext context() const {
+        ProgramCoreProviderCallContext context{kOwner, "version:identity", run, operation, attempt};
+        context.replay_source = replay;
+        context.diagnostic    = [told = told](ProgramCoreProviderCallDiagnostic value) { told->push_back(std::move(value)); };
+        return context;
+    }
+    graph::ProviderCallIdentity identity() const {
+        return graph::ProviderCallIdentity{kOwner, run, thread, "s1:work", "work", 0};
+    }
+    std::string id() const { return Journal::logical_call_id(context(), identity()); }
+    std::vector<std::string> codes() const {
+        std::vector<std::string> codes;
+        for (const auto& value : *told) codes.push_back(value.code);
+        return codes;
+    }
+};
+
+Position source_position() { return Position{"run:source", "thread:source"}; }
+
+// The same position at a later attempt, with a record of what is told of its own.
+Position at_attempt(Position position, std::uint64_t attempt) {
+    position.attempt = attempt;
+    position.told    = std::make_shared<std::vector<ProgramCoreProviderCallDiagnostic>>();
+    return position;
+}
+
+// A fork of the source: its calls on `thread:fork` repeat the source's on `thread:source`.
+Position fork_position(bool may_resend = false) {
+    Position fork{"run:fork", "thread:fork"};
+    fork.replay = ProgramCoreProviderCallReplaySource{"run:source", "version:identity",
+                                                      {{"thread:fork", "thread:source"}}, 1, may_resend};
+    return fork;
+}
+
+sp::runtime::Result make_call(Journal& journal, const Position& at, std::shared_ptr<Provider> provider,
+                              ProviderRequest request, std::string deployment = digest('a')) {
+    auto binding = journal.bind(at.context(), std::move(deployment));
+    return neograph::async::run_sync(binding.broker->invoke(at.identity(), std::move(provider), std::move(request)));
+}
+
+std::string text_of(const sp::runtime::Result& result) { return neograph::test::text(result); }
+
+bool is_sha256(const std::string& value) {
+    return value.size() == 7 + 64 && value.starts_with("sha256:") &&
+           value.find_first_not_of("0123456789abcdef", 7) == std::string::npos;
+}
+}  // namespace
+
+TEST(ProgramProviderIdentity, TheContentDigestNamesTheRequestAndTheDispatchDigestAlsoNamesThePolicy) {
+    auto peer = std::make_shared<Peer>();
+    const auto prepare = [&](const std::function<void(json&)>& edit, std::string text = "probe",
+                             std::string system = {}, ProviderMode mode = ProviderMode::Collect,
+                             std::string origin = std::string(kOpenRouter)) {
+        auto provider = provider_under(peer, edit, std::move(origin));
+        auto prepared = provider->prepare(ask(*provider, std::move(text), std::move(system), mode));
+        EXPECT_TRUE(prepared.valid());
+        return prepared;
+    };
+    const auto base  = prepare({});
+    const auto again = prepare({});
+    EXPECT_EQ(Provider::request_content_digest(base), Provider::request_content_digest(again));
+    EXPECT_EQ(Provider::request_digest(base), Provider::request_digest(again));
+    EXPECT_EQ(Provider::request_policy_identity(base), Provider::request_policy_identity(again));
+    EXPECT_TRUE(is_sha256(Provider::request_content_digest(base)));
+    EXPECT_TRUE(is_sha256(Provider::request_policy_identity(base)));
+
+    // The policy changes: its identity and the dispatch digest change, what the request asks does not.
+    const auto stop = prepare(another_stop_reason("x_test_stop"));
+    EXPECT_NE(Provider::request_policy_identity(stop), Provider::request_policy_identity(base));
+    EXPECT_NE(Provider::request_digest(stop), Provider::request_digest(base));
+    EXPECT_EQ(Provider::request_content_digest(stop), Provider::request_content_digest(base));
+
+    // A policy that writes the output cap to another member changes the encoded body, and still not the content.
+    const auto cap = prepare(another_output_cap_member("max_completion_tokens"));
+    EXPECT_NE(cap.encoded_body(), base.encoded_body());
+    EXPECT_NE(Provider::request_policy_identity(cap), Provider::request_policy_identity(base));
+    EXPECT_EQ(Provider::request_content_digest(cap), Provider::request_content_digest(base));
+
+    // Anything the request says changes the content: the user's text, system text, the mode and the origin.
+    const auto content = Provider::request_content_digest(base);
+    EXPECT_NE(Provider::request_content_digest(prepare({}, "another question")), content);
+    EXPECT_NE(Provider::request_content_digest(prepare({}, "probe", "Answer in French.")), content);
+    EXPECT_NE(Provider::request_content_digest(prepare({}, "probe", {}, ProviderMode::Stream)), content);
+    EXPECT_NE(Provider::request_content_digest(prepare({}, "probe", {}, ProviderMode::Collect, "https://api.openai.com")),
+              content);
+    EXPECT_NE(Provider::request_content_digest(prepare({}, "probe", "Answer in French.")),
+              Provider::request_content_digest(prepare({}, "probe", "Answer in German.")))
+        << "the system text NeoGraph supplies is part of the request, so changing it changes the content";
+}
+
+TEST(ProgramProviderIdentity, ThePromptNeoGraphSuppliesIsPartOfTheContentOfTheCall) {
+    // The intent classifier writes its own system prompt when the host gives none. That text is part of the
+    // request, so it is part of the call's content: a NeoGraph that words it differently, or a host that
+    // replaces it, is another call, and a journaled call is not replayed for it.
+    auto peer = std::make_shared<Peer>();
+    const auto classify = [&](std::string prompt, std::vector<std::string> routes) {
+        graph::NodeContext context;
+        context.provider = provider_under(peer);
+        context.model    = std::string(kModel);
+        graph::IntentClassifierNode node("router", context, prompt, std::move(routes));
+        graph::GraphState           state;
+        state.init_channel("messages", graph::ReducerType::APPEND, graph::ReducerRegistry::instance().get("append"));
+        state.write("messages", json::array({json{{"role", "user"}, {"content", "where can I buy X?"}}}));
+        graph::RunContext run;
+        (void)neograph::async::run_sync(node.run(graph::NodeInput{state, run, nullptr}));
+        return peer->contents.back();
+    };
+    const auto built_in = classify("", {"shopping", "support"});
+    EXPECT_EQ(classify("", {"shopping", "support"}), built_in) << "the same prompt is the same content";
+    EXPECT_NE(classify("", {"shopping", "billing"}), built_in) << "the built-in prompt names the routes";
+    EXPECT_NE(classify("Pick one route.", {"shopping", "support"}), built_in);
+    EXPECT_EQ(peer->transport.load(), 4);
+}
+
+TEST(ProgramProviderIdentity, AReplayUnderAnotherPolicyIdentityIsTheSameCallAndSaysSo) {
+    TempDir files("identity-replay");
+    auto    peer = std::make_shared<Peer>();
+    auto    at   = source_position();
+    {
+        Journal journal(files.provider_db());
+        const auto first = make_call(journal, at, provider_under(peer), ask(*provider_under(peer)));
+        EXPECT_EQ(text_of(first), "answer");
+        const auto row = journal.inspect(kOwner, at.id());
+        ASSERT_TRUE(row);
+        EXPECT_EQ(row->identity_version, 2U);
+        EXPECT_TRUE(is_sha256(row->content_digest));
+        EXPECT_TRUE(is_sha256(row->policy_identity));
+        EXPECT_FALSE(row->producer.empty());
+        EXPECT_TRUE(at.told->empty());
+    }
+    // The next attempt runs under another policy identity: the same call, replayed and not sent again.
+    auto       later = at_attempt(at, 2);
+    Journal    reopened(files.provider_db());
+    auto       other = std::make_shared<Peer>();
+    const auto under_other = provider_under(other, another_stop_reason("x_test_stop"));
+    const auto replayed    = make_call(reopened, later, under_other, ask(*under_other));
+    EXPECT_EQ(text_of(replayed), "answer");
+    EXPECT_EQ(other->transport.load(), 0) << "the journaled call is replayed under the new policy";
+    EXPECT_EQ(peer->transport.load(), 1);
+    ASSERT_EQ(later.codes(), std::vector<std::string>{"P_PROVIDER_CALL_POLICY_CHANGED"});
+    const auto& witness = later.told->front().witness;
+    EXPECT_EQ(witness["via"].get<std::string>(), "replay");
+    EXPECT_EQ(witness["call_id"].get<std::string>(), at.id());
+    const auto changes = reopened.policy_changes(kOwner, at.id());
+    ASSERT_EQ(changes.size(), 1U);
+    EXPECT_EQ(changes[0].via, Journal::PolicyChange::Via::Replay);
+    EXPECT_EQ(changes[0].attempt, 2U);
+    EXPECT_EQ(changes[0].journaled_policy_identity, reopened.inspect(kOwner, at.id())->policy_identity);
+    EXPECT_NE(changes[0].observed_policy_identity, changes[0].journaled_policy_identity);
+    EXPECT_EQ(changes[0].observed_policy_identity, Provider::request_policy_identity(under_other->prepare(ask(*under_other))));
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"}) << "the row is not rewritten";
+
+    // The same policy again tells nothing, and a second change under the same policy is not noted twice.
+    auto third = at_attempt(at, 3);
+    (void)make_call(reopened, third, under_other, ask(*under_other));
+    EXPECT_EQ(third.codes(), std::vector<std::string>{"P_PROVIDER_CALL_POLICY_CHANGED"}) << "it is told each time";
+    EXPECT_EQ(reopened.policy_changes(kOwner, at.id()).size(), 1U) << "and noted once";
+    auto same = at_attempt(at, 4);
+    (void)make_call(reopened, same, provider_under(peer), ask(*provider_under(peer)));
+    EXPECT_TRUE(same.codes().empty());
+}
+
+TEST(ProgramProviderIdentity, ARequestWhoseContentChangedIsAConflictWhateverThePolicy) {
+    TempDir files("identity-conflict");
+    auto    peer = std::make_shared<Peer>();
+    auto    at   = source_position();
+    Journal journal(files.provider_db());
+    (void)make_call(journal, at, provider_under(peer), ask(*provider_under(peer)));
+    at.attempt = 2;
+    const auto count = [&](const std::function<void(json&)>& edit, std::string text, std::string system,
+                           std::string deployment = digest('a')) {
+        auto provider = provider_under(peer, edit);
+        EXPECT_THROW(make_call(journal, at, provider, ask(*provider, std::move(text), std::move(system)),
+                               std::move(deployment)),
+                     std::runtime_error);
+    };
+    count({}, "another question", {});
+    count(another_stop_reason("x_test_stop"), "another question", {});
+    count({}, "probe", "Answer in French.");
+    count({}, "probe", {}, digest('b'));
+    try {
+        auto provider = provider_under(peer);
+        (void)make_call(journal, at, provider, ask(*provider, "another question"));
+        FAIL() << "a changed question must not replay";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("binding conflict"), std::string::npos) << error.what();
+        EXPECT_NE(std::string(error.what()).find("content differs"), std::string::npos) << error.what();
+    }
+    EXPECT_EQ(peer->transport.load(), 1);
+    EXPECT_TRUE(at.told->empty());
+    EXPECT_TRUE(journal.policy_changes(kOwner, at.id()).empty());
+}
+
+TEST(ProgramProviderIdentity, AForkAdoptsTheSourcesCallUnderAnotherPolicyIdentity) {
+    TempDir files("identity-fork");
+    auto    peer = std::make_shared<Peer>();
+    auto    source = source_position();
+    Journal journal(files.provider_db());
+    (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+
+    auto       fork  = fork_position();
+    auto       other = std::make_shared<Peer>();
+    const auto under_other = provider_under(other, another_stop_reason("x_test_stop"));
+    const auto adopted     = make_call(journal, fork, under_other, ask(*under_other));
+    EXPECT_EQ(text_of(adopted), "answer");
+    EXPECT_EQ(other->transport.load(), 0) << "the call was paid for by the source and is not sent again";
+    EXPECT_EQ(peer->transport.load(), 1);
+    EXPECT_EQ(journal_states(files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+    const auto row = journal.inspect(kOwner, fork.id());
+    ASSERT_TRUE(row);
+    EXPECT_EQ(row->original_attempt, "1") << "the fork's row keeps the source's attempt, so it is not charged again";
+    EXPECT_EQ(row->identity_version, 2U);
+    EXPECT_EQ(row->content_digest, journal.inspect(kOwner, source.id())->content_digest);
+    EXPECT_NE(row->policy_identity, journal.inspect(kOwner, source.id())->policy_identity);
+    ASSERT_EQ(fork.codes(), std::vector<std::string>{"P_PROVIDER_CALL_POLICY_CHANGED"});
+    EXPECT_EQ(fork.told->front().witness["via"].get<std::string>(), "adoption");
+    EXPECT_EQ(fork.told->front().witness["source_call_id"].get<std::string>(), source.id());
+    const auto changes = journal.policy_changes(kOwner, fork.id());
+    ASSERT_EQ(changes.size(), 1U);
+    EXPECT_EQ(changes[0].via, Journal::PolicyChange::Via::Adoption);
+    EXPECT_EQ(changes[0].journaled_policy_identity, journal.inspect(kOwner, source.id())->policy_identity);
+    EXPECT_EQ(changes[0].observed_policy_identity, row->policy_identity);
+    EXPECT_TRUE(journal.policy_changes(kOwner, source.id()).empty());
+}
+
+TEST(ProgramProviderIdentity, AForkSendsACallWhoseRequestDiffersFromTheSources) {
+    // Another request at the same position is a new call: nothing the source paid for is sent again.
+    TempDir files("identity-fork-new");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    Journal journal(files.provider_db());
+    (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+
+    auto fork = fork_position();
+    const auto provider = provider_under(peer);
+    EXPECT_EQ(text_of(make_call(journal, fork, provider, ask(*provider, "another question"))), "answer");
+    EXPECT_EQ(peer->transport.load(), 2);
+    EXPECT_TRUE(fork.told->empty());
+    EXPECT_EQ(journal_states(files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+
+    // A call the source never made at its position is new too.
+    auto elsewhere = fork_position();
+    elsewhere.thread = "thread:elsewhere";
+    elsewhere.replay->threads = {{"thread:elsewhere", "thread:never-used"}};
+    EXPECT_EQ(text_of(make_call(journal, elsewhere, provider, ask(*provider))), "answer");
+    EXPECT_EQ(peer->transport.load(), 3);
+    EXPECT_TRUE(elsewhere.told->empty());
+}
+
+TEST(ProgramProviderIdentity, ARowFromBeforeContentIdentityMatchesWhileThePolicyIsUnchanged) {
+    // Journals written by 0.16.0 keep resuming: their request_digest is the dispatch digest, which the journal
+    // reads as it did.
+    TempDir files("identity-0160");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    {
+        Journal journal(files.provider_db());
+        (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+    }
+    ASSERT_EQ(peer->digests.size(), 1U);
+    as_written_before_content_identity(files.provider_db(), peer->digests.front());
+    Journal journal(files.provider_db());
+    const auto row = journal.inspect(kOwner, source.id());
+    ASSERT_TRUE(row);
+    EXPECT_EQ(row->identity_version, 1U);
+    EXPECT_EQ(row->request_digest, peer->digests.front());
+    EXPECT_TRUE(row->content_digest.empty() && row->policy_identity.empty() && row->producer.empty());
+
+    // The policy is unchanged: the resumed attempt replays the call and the fork adopts it.
+    auto later = at_attempt(source, 2);
+    auto none  = std::make_shared<Peer>();
+    EXPECT_EQ(text_of(make_call(journal, later, provider_under(none), ask(*provider_under(none)))), "answer");
+    auto fork = fork_position();
+    EXPECT_EQ(text_of(make_call(journal, fork, provider_under(none), ask(*provider_under(none)))), "answer");
+    EXPECT_EQ(none->transport.load(), 0);
+    EXPECT_TRUE(later.told->empty() && fork.told->empty());
+    EXPECT_EQ(journal.inspect(kOwner, fork.id())->identity_version, 2U) << "the fork's own row is written now";
+
+    // The policy changed since the row was written: its digest no longer matches, and it cannot say whether the
+    // policy or the request changed. A resume is a conflict.
+    auto       changed = at_attempt(source, 3);
+    const auto under_other = provider_under(none, another_stop_reason("x_test_stop"));
+    try {
+        (void)make_call(journal, changed, under_other, ask(*under_other));
+        FAIL() << "a row that cannot be matched must not replay";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("binding conflict"), std::string::npos) << error.what();
+        EXPECT_NE(std::string(error.what()).find("predates content identity"), std::string::npos) << error.what();
+    }
+    EXPECT_EQ(none->transport.load(), 0);
+}
+
+TEST(ProgramProviderIdentity, AForkRefusesAJournaledCallItCannotMatchAndSendsItOnlyWhenAllowed) {
+    // A journal from 0.15, or one from 0.16.0 whose policy has changed since: the source's digest names the old
+    // policy, and the fork cannot tell the same call under a new policy from a different call.
+    TempDir files("identity-refuse");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    {
+        Journal journal(files.provider_db());
+        (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+    }
+    as_written_before_content_identity(files.provider_db(), digest('7'));
+    Journal journal(files.provider_db());
+    auto    none = std::make_shared<Peer>();
+    const auto provider = provider_under(none);
+
+    auto refused = fork_position();
+    try {
+        (void)make_call(journal, refused, provider, ask(*provider));
+        FAIL() << "the fork must not send the call again";
+    } catch (const Refused& error) {
+        EXPECT_EQ(error.reason(), Refused::Reason::Unverifiable);
+        EXPECT_EQ(error.call_id(), refused.id());
+        EXPECT_EQ(error.source_run_id(), "run:source");
+        EXPECT_EQ(error.source_call_id(), source.id());
+        EXPECT_NE(std::string(error.what()).find("fork_may_resend_provider_calls"), std::string::npos) << error.what();
+        EXPECT_NE(dynamic_cast<const graph::ConfigurationFailure*>(&error), nullptr)
+            << "inside a Core node it is a configuration verdict: never retried, never routed";
+    }
+    EXPECT_EQ(none->transport.load(), 0);
+    EXPECT_FALSE(journal.inspect(kOwner, refused.id())) << "nothing is journaled for a refused call";
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+
+    // The host allows it: the call is sent, journaled under the fork and reported.
+    auto allowed = fork_position(true);
+    EXPECT_EQ(text_of(make_call(journal, allowed, provider, ask(*provider))), "answer");
+    EXPECT_EQ(none->transport.load(), 1);
+    ASSERT_EQ(allowed.codes(), std::vector<std::string>{"P_FORK_PROVIDER_CALL_RESENT"});
+    const auto& witness = allowed.told->front().witness;
+    EXPECT_EQ(witness["reason"].get<std::string>(), "unverifiable");
+    EXPECT_EQ(witness["source_run_id"].get<std::string>(), "run:source");
+    EXPECT_EQ(witness["call_id"].get<std::string>(), allowed.id());
+    EXPECT_EQ(journal.inspect(kOwner, allowed.id())->original_attempt, "1");
+    EXPECT_EQ(journal_states(files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+
+    // The resume of the source itself is a conflict, as it was.
+    auto later = at_attempt(source, 2);
+    EXPECT_THROW(make_call(journal, later, provider, ask(*provider)), std::runtime_error);
+}
+
+TEST(ProgramProviderIdentity, AForkTellsAChangedRequestFromAChangedEncoder) {
+    // A request that differs from the source's is a new call only when the same NeoGraph build encoded both. A
+    // source written by another build cannot show that the request, and not its encoding, changed.
+    TempDir files("identity-encoder");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    {
+        Journal journal(files.provider_db());
+        (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+    }
+    exec_sql(files.provider_db(), "UPDATE ng_program_provider_calls SET producer='neograph/0.0.1'");
+    Journal journal(files.provider_db());
+    auto    none = std::make_shared<Peer>();
+    const auto provider = provider_under(none);
+
+    // The same content is adopted, whichever build encoded it.
+    auto same = fork_position();
+    EXPECT_EQ(text_of(make_call(journal, same, provider, ask(*provider))), "answer");
+    EXPECT_EQ(none->transport.load(), 0);
+
+    // Different content from another build: refused.
+    auto refused = fork_position();
+    refused.run = "run:fork-2";
+    try {
+        (void)make_call(journal, refused, provider, ask(*provider, "another question"));
+        FAIL() << "the fork must not send a call that may be the source's";
+    } catch (const Refused& error) {
+        EXPECT_EQ(error.reason(), Refused::Reason::EncoderDiffers);
+    }
+    EXPECT_EQ(none->transport.load(), 0);
+    auto allowed = fork_position(true);
+    allowed.run  = "run:fork-3";
+    (void)make_call(journal, allowed, provider, ask(*provider, "another question"));
+    EXPECT_EQ(none->transport.load(), 1);
+    EXPECT_EQ(allowed.told->front().witness["reason"].get<std::string>(), "encoder_differs");
+
+    // The resume of the source is a conflict that names both builds.
+    auto later = at_attempt(source, 2);
+    try {
+        (void)make_call(journal, later, provider, ask(*provider, "another question"));
+        FAIL() << "a changed question must not replay";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("neograph/0.0.1"), std::string::npos) << error.what();
+    }
+}
+
+TEST(ProgramProviderIdentity, AForkRefusesACallTheSourceJournaledUnderAnotherDeployment) {
+    TempDir files("identity-deployment");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    Journal journal(files.provider_db());
+    (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+    auto       none = std::make_shared<Peer>();
+    const auto provider = provider_under(none);
+    auto       refused  = fork_position();
+    try {
+        (void)make_call(journal, refused, provider, ask(*provider), digest('b'));
+        FAIL() << "the fork must not pay for the call again under another deployment";
+    } catch (const Refused& error) {
+        EXPECT_EQ(error.reason(), Refused::Reason::DeploymentDiffers);
+    }
+    EXPECT_EQ(none->transport.load(), 0);
+    auto allowed = fork_position(true);
+    EXPECT_EQ(text_of(make_call(journal, allowed, provider, ask(*provider), digest('b'))), "answer");
+    EXPECT_EQ(none->transport.load(), 1);
+    EXPECT_EQ(allowed.told->front().witness["reason"].get<std::string>(), "deployment_differs");
+}
+
+TEST(ProgramProviderIdentity, AForkNeverSendsAgainACallWhoseSourceOutcomeIsUnknown) {
+    TempDir files("identity-uncertain");
+    auto    peer   = std::make_shared<Peer>();
+    peer->reply    = [](int, const ProviderRequest&) -> sp::runtime::Result {
+        throw std::runtime_error("transport disconnected after send");
+    };
+    auto source = source_position();
+    {
+        Journal journal(files.provider_db());
+        EXPECT_THROW(make_call(journal, source, provider_under(peer), ask(*provider_under(peer))), std::runtime_error);
+    }
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"reconciliation_required"});
+    Journal journal(files.provider_db());
+    auto    none = std::make_shared<Peer>();
+    const auto provider = provider_under(none);
+    // The same call: uncertain in the fork too, whatever the host allows.
+    for (const bool allowed : {false, true}) {
+        auto fork = fork_position(allowed);
+        fork.run  = allowed ? "run:fork-allowed" : "run:fork";
+        EXPECT_THROW(make_call(journal, fork, provider, ask(*provider)), ProgramProviderDispatchUncertainError);
+    }
+    EXPECT_EQ(none->transport.load(), 0);
+    // A different request is a new call.
+    auto fork = fork_position();
+    fork.run  = "run:fork-new";
+    EXPECT_EQ(text_of(make_call(journal, fork, provider, ask(*provider, "another question"))), "answer");
+    EXPECT_EQ(none->transport.load(), 1);
+    // A source call that could not be matched, and whose outcome is unknown, is refused.
+    as_written_before_content_identity(files.provider_db(), digest('7'));
+    Journal legacy(files.provider_db());
+    auto refused = fork_position();
+    refused.run  = "run:fork-legacy";
+    EXPECT_THROW(make_call(legacy, refused, provider, ask(*provider)), Refused);
+}
+
+TEST(ProgramProviderIdentity, AFailureTheProviderDidNotAcceptIsSentAgainByAFork) {
+    // A failure proven not accepted was not paid for, so a fork sends the call again without asking.
+    TempDir files("identity-failed");
+    auto    peer = std::make_shared<Peer>();
+    peer->reply  = [](int ordinal, const ProviderRequest&) -> sp::runtime::Result {
+        if (ordinal == 1) {
+            sp::Failure failure;
+            failure.error.kind         = sp::ErrorKind::Transport;
+            failure.error.retry_safety = sp::RetrySafety::NotSent;
+            return std::make_shared<const sp::Outcome>(std::move(failure));
+        }
+        return neograph::test::success("answer", with_cost(final_usage(21, 3), 1'234'567));
+    };
+    auto source = source_position();
+    {
+        Journal journal(files.provider_db());
+        const auto provider = provider_under(peer);
+        (void)make_call(journal, source, provider, ask(*provider));
+    }
+    ASSERT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"failed"});
+    as_written_before_content_identity(files.provider_db(), digest('7'));
+    Journal journal(files.provider_db());
+    const auto provider = provider_under(peer);
+    auto       fork     = fork_position();
+    EXPECT_EQ(text_of(make_call(journal, fork, provider, ask(*provider))), "answer");
+    EXPECT_EQ(peer->transport.load(), 2);
+}
+
+TEST(ProgramProviderIdentity, ATamperedIdentityIsCorruptNotAConflict) {
+    TempDir files("identity-tamper");
+    auto    peer   = std::make_shared<Peer>();
+    auto    source = source_position();
+    {
+        Journal journal(files.provider_db());
+        (void)make_call(journal, source, provider_under(peer), ask(*provider_under(peer)));
+    }
+    for (const auto& sql : std::vector<std::string>{
+             "UPDATE ng_program_provider_calls SET request_digest='" + digest('e') + "'",
+             "UPDATE ng_program_provider_calls SET content_digest='" + digest('e') + "'",
+             "UPDATE ng_program_provider_calls SET policy_identity='" + digest('e') + "'",
+             "UPDATE ng_program_provider_calls SET producer=''",
+             "UPDATE ng_program_provider_calls SET identity_version='1'",
+             "UPDATE ng_program_provider_calls SET identity_version='3'"}) {
+        SCOPED_TRACE(sql);
+        TempDir copy("identity-tamper-copy");
+        crash_image(files.path, copy.path);
+        exec_sql(copy.provider_db(), sql);
+        Journal journal(copy.provider_db());
+        auto at = at_attempt(source, 2);
+        EXPECT_ANY_THROW(make_call(journal, at, provider_under(peer), ask(*provider_under(peer))));
+        EXPECT_EQ(peer->transport.load(), 1);
+    }
+}
+
+namespace {
+// The notice with `code` on a handle, or null.
+const ProgramNotice* notice_with(const std::vector<ProgramNotice>& notices, std::string_view code) {
+    for (const auto& notice : notices)
+        if (notice.code == code) return &notice;
+    return nullptr;
+}
+
+// A run paused by its node after the model call was journaled, in a directory of its own.
+struct PausedWithJournaledCall {
+    explicit PausedWithJournaledCall(const std::string& name) : files(name), peer(std::make_shared<Peer>()) {
+        HostOptions options;
+        options.monetary = 100'000;
+        Host h(peer, options, &files);
+        h.script().interrupt_after_call = true;
+        result.emplace(h.run(Shape::Brokered, "identity-source"));
+    }
+    const ProgramResult& paused() const { return *result; }
+    TempDir                    files;
+    std::shared_ptr<Peer>      peer;
+    std::optional<ProgramResult> result;
+};
+
+ProgramHandle fork_from(Host& h, const ProgramResult& paused, const std::string& run_id) {
+    auto invocation   = h.invocation(run_id);
+    invocation.budget = neograph::test::fork_share(paused.remaining_budget());
+    return h.runtime().fork(kOwner,
+                            ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id},
+                            h.admit(Shape::Brokered), std::move(invocation),
+                            resume_after(paused, "trace-" + run_id));
+}
+}  // namespace
+
+TEST(ProgramProviderBindingJournal, AResumeUnderAnotherPolicyIdentityReplaysItsJournaledCall) {
+    // #543: SchemaProvider's descriptor policy changed between the journal and the resume. The request is the
+    // same, so the journaled call is replayed and not sent again, and the run says that the policy changed.
+    PausedWithJournaledCall source("policy-resume");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    ASSERT_EQ(source.peer->transport.load(), 1);
+
+    auto        other = std::make_shared<Peer>();
+    HostOptions options;
+    options.monetary    = 100'000;
+    options.edit_policy = another_stop_reason("x_test_stop");
+    Host h(other, options, &source.files);
+    auto handle = h.runtime().resume(kOwner, "identity-source", resume_after(source.paused(), "trace-policy"));
+    const auto done = handle.wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(other->transport.load(), 0) << "the journaled call is replayed under the new policy";
+    EXPECT_TRUE(done.monetary_records().empty()) << "the first attempt charged it";
+    const auto notices = handle.notices();
+    const auto* notice = notice_with(notices, "P_PROVIDER_CALL_POLICY_CHANGED");
+    ASSERT_NE(notice, nullptr);
+    EXPECT_EQ(notice->witness["via"].get<std::string>(), "replay");
+    const auto changes = h.journal().policy_changes(kOwner, notice->witness["call_id"].get<std::string>());
+    ASSERT_EQ(changes.size(), 1U);
+    EXPECT_EQ(changes[0].attempt, 2U);
+    EXPECT_NE(changes[0].journaled_policy_identity, changes[0].observed_policy_identity);
+    EXPECT_EQ(journal_states(source.files.provider_db()), std::vector<std::string>{"succeeded"});
+}
+
+TEST(ProgramProviderBindingJournal, AResumeThatWouldSendDifferentTextIsAConflictUnderEveryPolicy) {
+    // #543: only the policy is outside the call's identity. The question, and the system text that precedes it,
+    // are the request: a resume that would send other text finds a conflict and sends nothing.
+    PausedWithJournaledCall source("policy-text");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    struct Change {
+        const char* name;
+        std::function<void(Script&)> apply;
+    };
+    for (const auto& change : std::vector<Change>{
+             {"question", [](Script& script) { script.prompt = "another question"; }},
+             {"system text", [](Script& script) { script.system = "Answer in French."; }}}) {
+        for (const bool policy_changed : {false, true}) {
+            SCOPED_TRACE(std::string(change.name) + (policy_changed ? " and policy" : ""));
+            TempDir copy("policy-text-copy");
+            crash_image(source.files.path, copy.path);
+            auto        other = std::make_shared<Peer>();
+            HostOptions options;
+            options.monetary = 100'000;
+            if (policy_changed) options.edit_policy = another_stop_reason("x_test_stop");
+            Host h(other, options, &copy);
+            change.apply(h.script());
+            const auto failed =
+                h.runtime().resume(kOwner, "identity-source", resume_after(source.paused(), "trace-text")).wait();
+            ASSERT_EQ(failed.status(), ProgramTerminalStatus::Failed) << failure_text(failed);
+            EXPECT_NE(failure_text(failed).find("binding conflict"), std::string::npos) << failure_text(failed);
+            EXPECT_EQ(other->transport.load(), 0);
+            EXPECT_EQ(journal_states(copy.provider_db()), std::vector<std::string>{"succeeded"});
+        }
+    }
+}
+
+TEST(ProgramProviderBindingJournal, AForkUnderAnotherPolicyIdentityAdoptsTheSourcesCall) {
+    // #543: before, the fork did not recognise the source's call under the new policy and sent it again, so the
+    // call the source had paid for was paid for twice.
+    PausedWithJournaledCall source("policy-fork");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    ASSERT_TRUE(source.paused().checkpoint());
+
+    auto        other = std::make_shared<Peer>();
+    HostOptions options;
+    options.monetary    = 100'000;
+    options.edit_policy = another_stop_reason("x_test_stop");
+    Host h(other, options, &source.files);
+    auto       handle = fork_from(h, source.paused(), "identity-fork");
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+    EXPECT_EQ(other->transport.load(), 0) << "the source's call is adopted, not sent again";
+    EXPECT_EQ(source.peer->transport.load(), 1);
+    EXPECT_TRUE(forked.monetary_records().empty()) << "and not charged again";
+    EXPECT_EQ(forked.usage().monetary_microunits, 0U);
+    EXPECT_EQ(journal_states(source.files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+    const auto notices = handle.notices();
+    EXPECT_EQ(notice_with(notices, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED"), nullptr);
+    EXPECT_EQ(notice_with(notices, "P_FORK_PROVIDER_CALL_RESENT"), nullptr);
+    const auto* notice = notice_with(notices, "P_PROVIDER_CALL_POLICY_CHANGED");
+    ASSERT_NE(notice, nullptr);
+    EXPECT_EQ(notice->witness["via"].get<std::string>(), "adoption");
+}
+
+TEST(ProgramProviderBindingJournal, AJournalFromBeforeContentIdentityResumesAndForksWhileThePolicyIsUnchanged) {
+    // #543: the journal of 0.16.0 holds only the dispatch digest, which includes the policy. Under the policy it
+    // was written under, it resumes and a fork adopts its calls.
+    PausedWithJournaledCall source("policy-0160");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    ASSERT_EQ(source.peer->digests.size(), 1U);
+    as_written_before_content_identity(source.files.provider_db(), source.peer->digests.front());
+
+    HostOptions options;
+    options.monetary = 100'000;
+    {
+        TempDir copy("policy-0160-resume");
+        crash_image(source.files.path, copy.path);
+        auto other = std::make_shared<Peer>();
+        Host h(other, options, &copy);
+        auto handle = h.runtime().resume(kOwner, "identity-source", resume_after(source.paused(), "trace-0160"));
+        const auto done = handle.wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        EXPECT_EQ(other->transport.load(), 0);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+    {
+        auto other = std::make_shared<Peer>();
+        Host h(other, options, &source.files);
+        auto handle = fork_from(h, source.paused(), "identity-fork");
+        const auto forked = handle.wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+        EXPECT_EQ(other->transport.load(), 0);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+}
+
+TEST(ProgramProviderBindingJournal, AForkOfAJournalItCannotMatchIsRefusedUnlessTheHostAllowsIt) {
+    // #543: a journal written by 0.15 names its calls by a digest that includes the policy of 0.15, which 0.16
+    // cannot recompute. The fork cannot tell the source's call under the new policy from a different call, so it
+    // does not send it: the provider would charge it again.
+    PausedWithJournaledCall source("policy-0150");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    as_written_before_content_identity(source.files.provider_db(), digest('7'));
+
+    {
+        TempDir copy("policy-0150-refused");
+        crash_image(source.files.path, copy.path);
+        auto        other = std::make_shared<Peer>();
+        HostOptions options;
+        options.monetary = 100'000;
+        Host h(other, options, &copy);
+        auto handle = fork_from(h, source.paused(), "identity-fork");
+        const auto forked = handle.wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Failed) << failure_text(forked);
+        EXPECT_NE(failure_text(forked).find("would send a provider call its source run already journaled"),
+                  std::string::npos)
+            << failure_text(forked);
+        EXPECT_NE(failure_text(forked).find("fork_may_resend_provider_calls"), std::string::npos);
+        ASSERT_TRUE(forked.failure());
+        EXPECT_EQ(forked.failure()->code, "NG.ConfigError") << "a verdict, never retried";
+        EXPECT_EQ(other->transport.load(), 0);
+        EXPECT_EQ(journal_states(copy.provider_db()), std::vector<std::string>{"succeeded"});
+    }
+    {
+        TempDir copy("policy-0150-allowed");
+        crash_image(source.files.path, copy.path);
+        auto        other = std::make_shared<Peer>();
+        HostOptions options;
+        options.monetary        = 100'000;
+        options.fork_may_resend = true;
+        Host h(other, options, &copy);
+        auto handle = fork_from(h, source.paused(), "identity-fork");
+        const auto forked = handle.wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+        EXPECT_EQ(other->transport.load(), 1) << "the host allowed the second payment";
+        const auto notices = handle.notices();
+        const auto* notice = notice_with(notices, "P_FORK_PROVIDER_CALL_RESENT");
+        ASSERT_NE(notice, nullptr);
+        EXPECT_EQ(notice->witness["reason"].get<std::string>(), "unverifiable");
+        EXPECT_EQ(journal_states(copy.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+    }
+}
+
+TEST(ProgramProviderBindingJournal, AResumeOfAJournalItCannotMatchIsAConflict) {
+    // #543: the same journal resumed by its own run: it fails closed, as 0.16.0 does, and sends nothing.
+    PausedWithJournaledCall source("policy-0150-resume");
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    as_written_before_content_identity(source.files.provider_db(), digest('7'));
+    auto        other = std::make_shared<Peer>();
+    HostOptions options;
+    options.monetary = 100'000;
+    Host h(other, options, &source.files);
+    const auto failed =
+        h.runtime().resume(kOwner, "identity-source", resume_after(source.paused(), "trace-0150")).wait();
+    ASSERT_EQ(failed.status(), ProgramTerminalStatus::Failed) << failure_text(failed);
+    EXPECT_NE(failure_text(failed).find("binding conflict"), std::string::npos) << failure_text(failed);
+    EXPECT_NE(failure_text(failed).find("predates content identity"), std::string::npos) << failure_text(failed);
+    EXPECT_EQ(other->transport.load(), 0);
 }
