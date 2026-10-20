@@ -5238,6 +5238,9 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
     const auto target_input =
         json{{"handoff", handoff.value()}, {"previous_run_id", source.run_id()}};
     auto replacement_runtime = fixture.make_runtime();
+    // Wall time is counted in whole milliseconds from the source run's creation, so a replacement
+    // that lands in the same millisecond leaves the budget unchanged. Let a few pass.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     auto target = replacement_runtime->replace(
         "tenant:runtime", std::move(handoff), target_version,
         ProgramInvocation{target_input, source_boundary.remaining_budget(),
