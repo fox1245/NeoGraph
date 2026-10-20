@@ -1,124 +1,113 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=677a943827a8ac2e6d20cd23d1b1071ad0c3cade39c959acfc68762b7cad4abc -->
-# NeoGraph WASM 스모크 프로그램
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=4e62534e14c092fd8f32cd6e52366b4f1ae493d69de08a965bff04e45f5165ff -->
+# WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-`smoke.cpp`는 `DoubleNode` 하나로 이루어진 그래프를 컴파일하고, `doubled = seed * 2`를 기록한 뒤
-`InMemoryCheckpointStore`로 실행합니다. `seed = 21`이면 출력에 `doubled = 42`와 `trace = d`가
-나와야 합니다. 네트워크 호출이나 모델 호출은 하지 않습니다. 같은 빌드 결과물을 Node.js에서도,
-아래의 브라우저 하네스에서도 실행할 수 있습니다. 다만 브라우저용 SDK는 아닙니다.
+이 디렉터리에는 CI가 빌드하고 실행하는 WebAssembly 프로그램이 있습니다. `smoke.cpp`는 `DoubleNode` 하나로 이루어진
+그래프를 컴파일하고, `doubled = seed * 2`를 쓰며, `InMemoryCheckpointStore`로 실행합니다. `seed = 21`이면
+`doubled = 42`와 `trace = d`를 출력합니다. `checks.cpp`는 스레드가 없는 32비트 호스트에서 달라지는 점(아래)을
+검사합니다. 어느 쪽도 네트워크나 모델 호출을 하지 않습니다. 지금은 그래프 엔진이 WebAssembly 호스트에서 실행됩니다.
+모델 호출, Program, 저장소는 아직 아닙니다. 계획은 [#535](https://github.com/fox1245/NeoGraph/issues/535)에 있으며,
+이것은 브라우저 SDK가 아닙니다.
 
-## 현재 빌드 범위
+## 상태
 
-Core는 `NEOGRAPH_BUILD_LLM=OFF`여도 `SchemaProvider::runtime`에
-의존합니다. CMake 3.20 이상은 먼저 명시적으로 지정한 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을
-고르고, 없으면 설치된 런타임을, 그것도 없으면 버전이 고정된 공개 GitHub 소스 아카이브를
-선택합니다. 다운로드 대체 경로는 `NEOGRAPH_FETCH_SCHEMAPROVIDER`로 제어하며 기본값은 ON입니다.
-오프라인 패키지/소스 빌드에서는 OFF로 바꿉니다. Core는 SDK 런타임에 링크하며, SDK의 libcurl 전송
-계층에는 링크하지 않습니다. 확인한 SDK 고정 버전(pin)에서는 런타임 타깃이 CURL에 링크하지 않는데도,
-최상위 SDK CMake가 구성 단계에서 여전히 CURL을 요구합니다. OpenSSL은 런타임의 직접 의존성이
-아닙니다. 네이티브 SDK 라이브러리는 WebAssembly에 링크할 수 없습니다. Emscripten 타깃에서
-SDK 런타임, 아카이브 지원, C++ 표준 라이브러리가 동작해야 하며, 아래의 과거 스모크 결과가 현재
-코드의 빌드 성공을 보여 주지는 않습니다.
-
-현재 빌드에는 SDK `0.4.0`, 인터페이스 리비전/공유 라이브러리 세대 7이 필요하며,
-`cmake/NeoGraphSchemaProvider.cmake`가 고정한 SchemaProvider 커밋을 같은 타깃용으로
-빌드해야 합니다(WebAssembly 작업은 #535에서 추적합니다). 실제 Emscripten용 SDK 런타임 빌드가
-선행 조건이며, 이 문서는 현재 빌드의 성공을 보장하지 않습니다.
-
-### 지원 대상의 요구 사항
-
-Emscripten 툴체인과 C++ 표준 라이브러리는 `std::bit_cast`, `std::stop_token`을 포함한 SDK의
-C++20 계약을 지원해야 합니다. 네이티브 아카이브 보관(custody)에는 그 타깃에서 지원되는,
-덮어쓰지 않는(no-replace) 원자적 파일 시스템 백엔드가 필요합니다. 빌드를 통과시키려고 보관
-기능을 꺼서는 안 됩니다.
-
-새 빌드 디렉터리를 쓰고, SDK 구성 단계에 필요한 CURL 의존성을 포함해 같은 타깃용으로 만든 실제
-의존성을 사용합니다. 네이티브 라이브러리를 쓰거나 의존성이 있는 것처럼 꾸며서는 유효한 WebAssembly
-빌드가 되지 않습니다. 현재 Node.js와 브라우저에서의 실행은 아직 확인되지 않았습니다.
-
-## 과거 결과
-
-아래 값은 typed SDK 전환 이전에 실행한 스모크 결과입니다. 생성된 `.wasm`이나 `.js` 산출물은
-커밋되어 있지 않고, CI도 WASM 크기 아티팩트를 게시하지 않습니다. 이 크기는 당시 빌드의 값일 뿐
-현재 배포 비용이 아닙니다.
-
-| 항목 | 값 |
+| 항목 | 상태 |
 |---|---|
-| WASM 바이너리 (-O3 + LTO) | 712 KB |
-| Emscripten JS 런타임 | 92 KB |
-| JavaScript + WASM 합계 | ~800 KB |
-| 당시 실행에서 엔진 소스 diff | 0줄 |
-| 첫 실행 출력 | `doubled = 42, trace = d` |
+| 툴체인 | Emscripten 6.0.13. CI에서 emsdk 릴리스 커밋으로 고정합니다. |
+| 빌드 모드 | 싱글 스레드(WebAssembly의 기본값)와 pthread. 둘 다 CI에서 빌드하고 실행합니다. |
+| 런타임 | CI의 Node.js 22와 24. 브라우저, Cloudflare Workers, Deno, WASI는 검증하지 않았습니다. |
+| SDK | SchemaProvider 0.4.0, 인터페이스 리비전 7. `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋을 씁니다. libcurl 없이, 스레드 없이 빌드됩니다. |
+| 구성 요소 | Core, 그리고 선택적으로 Program. |
 
-## 타깃과 사전 요구 사항
+## 빌드
 
-이 타깃은 `neograph_core`에 직접 링크합니다. Core의 주 소스 목록, C++20 코루틴, 예외, Emscripten
-pthread를 사용합니다. 배포판(distro)에서 제공하는 Emscripten 3.1.x를 위해 CMake가 Asio의 코루틴
-인터페이스를 켜고, 지원되지 않는 스택 보호(stack-protector) 심볼은 WASM 타깃에서만 끕니다.
-네이티브 빌드의 하드닝 설정은 그대로입니다. 타깃은 `PTHREAD_POOL_SIZE=4`로 설정하지만 그래프는
-기본값인 `worker_count=1`을 씁니다. 단일 스레드 WASM 변형을 위한 CMake 옵션은 없습니다.
+빌드에는 Emscripten 6.0.13(C++20 코루틴, `<stop_token>`, `std::bit_cast`가 libc++에 있습니다), CMake 3.20 이상,
+Ninja가 필요합니다. LLM, ASYNC, MCP 클라이언트, A2A, gRPC, SQLite와 PostgreSQL 저장소는 WebAssembly 호스트가 제공하지
+않는 소켓, TLS, 시스템 라이브러리가 필요하므로 CMake가 거부하며, 아래에서는 꺼 둡니다.
 
-Emscripten으로 빌드한 SDK 런타임이 준비되면, 이 타깃의 구성/빌드/실행 순서는 다음과 같습니다.
+싱글 스레드, WebAssembly의 기본값:
 
 ```bash
-# For an emsdk install only: source /opt/emsdk/emsdk_env.sh
-# A distro installation with emcmake/em++ on PATH needs no emsdk script.
+source /path/to/emsdk/emsdk_env.sh
 
-emcmake cmake -S . -B build-wasm \
+emcmake cmake -S . -B build-wasm -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DNEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR="$SCHEMAPROVIDER_SOURCE_DIR" \
-  -DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF \
   -DNEOGRAPH_BUILD_WASM=ON \
-  -DNEOGRAPH_BUILD_ASYNC=OFF \
-  -DNEOGRAPH_BUILD_LLM=OFF \
-  -DNEOGRAPH_BUILD_MCP=OFF \
-  -DNEOGRAPH_BUILD_MCP_CLIENT=OFF \
-  -DNEOGRAPH_BUILD_MCP_SERVER=OFF \
-  -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
-  -DNEOGRAPH_BUILD_A2A=OFF \
-  -DNEOGRAPH_BUILD_ACP=OFF \
-  -DNEOGRAPH_BUILD_GRPC=OFF \
-  -DNEOGRAPH_BUILD_POSTGRES=OFF \
-  -DNEOGRAPH_BUILD_SQLITE=OFF \
-  -DNEOGRAPH_BUILD_UTIL=OFF \
-  -DNEOGRAPH_BUILD_EXAMPLES=OFF \
-  -DNEOGRAPH_BUILD_TESTS=OFF \
-  -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+  -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+  -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
+  -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
+  -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
   -DNEOGRAPH_USE_LIBCURL=OFF
-cmake --build build-wasm --target neograph_wasm_smoke -j
+cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks
 node build-wasm/wasm/smoke.js
+node build-wasm/wasm/checks.js
 ```
 
-`NEOGRAPH_USE_LIBCURL=OFF`는 NeoGraph의 선택 기능인 HTTP/2 백엔드를 끕니다. SDK 최상위의 CURL
-탐색은 없애지 않습니다. 이 순서를 따르려면 여전히 실제 Emscripten용 의존성이 필요하며, 현재
-빌드가 검증된 것은 아닙니다.
+pthread: configure 줄에 `-DNEOGRAPH_THREADS=ON`을 더하고 다른 빌드 디렉터리를 씁니다.
+`NEOGRAPH_BUILD_PROGRAM=ON`은 네이티브 플러그인 검사에만 필요합니다. 그래프 smoke만 빌드하려면 끄세요.
 
-생성된 로더가 `fetch`에 파일 시스템 경로를 넘기는 Node.js 버전에서는, 예전에 다음 로더 우회
-방법을 썼습니다.
+`NEOGRAPH_THREADS`가 두 모드를 가르는 유일한 스위치입니다. Emscripten과 WASI에서는 `OFF`, 그 밖에서는 `ON`입니다.
 
-```bash
-node -e 'const fs=require("fs"); WebAssembly.instantiateStreaming=undefined; global.fetch=async p=>({ok:true,arrayBuffer:async()=>fs.promises.readFile(p)}); require("./build-wasm/wasm/smoke.js");'
-```
+- **싱글 스레드(`OFF`).** `-pthread`도 `Threads::Threads`도 없습니다. `asio` 타깃이 `ASIO_DISABLE_THREADS`를 내보내고,
+  SDK도 같은 방식으로 빌드합니다(`SP_THREADS=OFF`, libcurl 트랜스포트 없음). 작업은 호스트가 제공하는
+  executor에서 실행됩니다.
+- **pthread(`ON`).** 모든 곳에 `-pthread`를 쓰고, smoke 프로그램에는 워커 4개짜리 풀을 둡니다. SDK는
+  `SP_THREADS=ON`으로 빌드되며, WebAssembly에서는 여전히 libcurl 트랜스포트가 없습니다.
+- **예외.** `-fexceptions`(JavaScript 기반 예외)를 C 소스를 포함한 모든 NeoGraph 타깃에 지정하고, SDK도 같은 플래그를
+  씁니다. 이미 `-fexceptions`나 `-fwasm-exceptions`를 지정한 설정은 그대로 두며, 예외가 꺼져 있으면 configure가
+  실패합니다.
+- **프로그램 하나에 설정 하나.** Asio는 헤더 전용이므로 스레드 설정이 서로 다른 번역 단위는 어떤 도구도 잡아내지 못하는
+  ODR 위반이 됩니다. 생성되는 `neograph/build_config.h`가 설정을 기록하고, 모든 공개 헤더가 `neograph/api.h`를 통해
+  이 헤더에 닿으며, 설정이 다른 번역 단위는 컴파일되지 않습니다. SDK도 자신의 설정을 같은 방식으로 기록하고
+  (`sp/build_config.h`), 두 설정이 다르면 configure가 실패합니다.
 
-## 브라우저 스모크
+## 측정한 크기
 
-실제 타깃을 빌드했다면, 표준 라이브러리만 쓰는 루프백 서버로 JS, WASM, 생성된 pthread 워커
-에셋을 서빙합니다.
+Release, `-O3 -flto`, Emscripten 6.0.13. 그래프 smoke는 Core 엔진과 SDK 런타임을 포함합니다.
 
-```sh
-python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
-# Open http://127.0.0.1:8765/smoke.html in a browser.
-```
+| 빌드 | `.wasm` | `.wasm` gzip -9 | `.js` |
+|---|---:|---:|---:|
+| 그래프 smoke, 싱글 스레드 | 5,484,652 B (5.2 MiB) | 1,601,090 B (1.5 MiB) | 83,223 B |
+| 그래프 smoke, pthread | 5,432,156 B (5.2 MiB) | 1,655,480 B (1.6 MiB) | 103,691 B |
+| Program을 포함한 checks, 싱글 스레드 | 5,017,721 B (4.8 MiB) | 1,554,991 B (1.5 MiB) | 83,031 B |
 
-서버는 `Cross-Origin-Opener-Policy: same-origin`과 `Cross-Origin-Embedder-Policy: require-corp`
-헤더를 보냅니다. 하네스는 cross-origin isolation / `SharedArrayBuffer`가 없으면 실행을
-거부하며, 대체 런타임이 아니라 실제로 생성된 `smoke.js`를 불러옵니다. 통과하려면 출력이
-`doubled = 42`, `trace = d`이고 종료 코드가 0이어야 하며, 이 결과는
-`document.body.dataset.result === "pass"`와 `dataset.exitCode === "0"`으로 노출됩니다. 브라우저와
-버전, 콘솔 오류, 관찰한 출력을 기록해 둡니다. Node.js 실행에 성공했다는 것만으로는 브라우저에서
-동작한다는 증거가 되지 않습니다.
+CI는 싱글 스레드 smoke를 `.wasm` 6,000,000바이트, gzip한 크기 1,750,000바이트(측정한 크기에 약 9%를 더한 값)로 제한하고, 크기를 잡 요약에 보고합니다.
+이전 버전의 이 문서에 있던 712 KB는 타입이 있는 SDK 이전에 잰 값이어서 더 이상 맞지 않습니다.
 
-이 하네스는 npm 패키지, Embind API, JS 그래프 콜백, provider 전송 계층을 제공하지 않습니다.
-호스팅 모델 접근, 로컬 추론, NeoProtocol Executor 통합은 모델을 쓰지 않는 이 스모크의
-범위 밖입니다.
+## 이 호스트에서 쓸 수 없는 것
+
+NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하고, 그렇지 않으면 빌드되지 않습니다.
+
+- **모델 호출.** LLM, ASYNC, MCP 클라이언트, A2A는 소켓과 TLS가 필요합니다. 호스트의 `fetch`를 통한 모델 호출은
+  #535의 M2에서 옵니다.
+- **Program.** Program 구성 요소는 컴파일되지만 `ProgramRuntime`이 스레드를 시작하므로, 싱글 스레드 빌드에서는 생성,
+  노드 attempt 타임아웃, `n > 1`인 `set_worker_count(n)`이 `thread: Not supported`로 실패합니다(#557). 호스트의
+  Program 저장소는 #556에서 다룹니다.
+- **네이티브 Program 컨트롤.** C v1 플러그인 ABI는 64비트 레이아웃이므로 wasm32에서
+  `NativeControlBinding::create`는 `NativeControlUnavailable`로 거부합니다.
+- **동기 체크포인트 저장소.** 비동기가 아닌 저장소는 각 연산을 워커 스레드 풀에서 실행합니다. 싱글 스레드 빌드에는
+  풀이 없으므로, 스레드를 기다리는 대신 `SynchronousCheckpointStoreUnavailable`로 연산을 거부합니다.
+  `AsyncCheckpointStore`를 구현하세요. 내장 인메모리 저장소는 체크포인트에 대해서는 비동기이지만 managed 예산 연산에
+  대해서는 아니므로, 저장소가 awaitable이 될 때까지(#556) `model_token_budget`이 있는 실행도 거부됩니다.
+- **기한이 있는 managed 예산.** 기한은 재시작 후에도 복구할 수 있는 시계 원점에 묶이는데 WebAssembly 호스트에는 그런
+  것이 없습니다. 실행은 저장소에 묻기 전에 `ManagedBudgetDeadlineClockUnavailable`로 거부됩니다.
+- **네이티브 아카이브.** 파일 보관(custody) 백엔드가 없어서 SDK가 `Unsupported` 오류로 거부합니다.
+- **서브프로세스 위임**(Harness CLI, stdio MCP 서버), **수신 소켓**, **gRPC**, **파일 경로 업로드**, **Python**.
+
+## 브라우저
+
+브라우저 하니스는 저장소에 없습니다. `serve_smoke.py`는 존재하지 않는 `smoke.html`을 기대하며, 브라우저 실행 기록도
+없습니다(#435). Node.js 실행은 브라우저에서 동작한다는 증거가 아닙니다.
+
+## 마일스톤
+
+툴체인 검토 뒤의 계획은 [#535](https://github.com/fox1245/NeoGraph/issues/535)에 있습니다.
+
+- **M0과 M1(이 문서).** wasm32 수정, 싱글 스레드 빌드, CI의 Node smoke와 크기 게이트.
+- **M2.** 호스트의 `fetch`를 통한 모델 호출. 브라우저와 Workers에서.
+- **M3.** 호스트 저장소 위의 Program([#557](https://github.com/fox1245/NeoGraph/issues/557),
+  [#556](https://github.com/fox1245/NeoGraph/issues/556)).
+- **M4.** 실시간 세션, WASI, 네이티브 아카이브용 보관 백엔드, 원격 Harness.

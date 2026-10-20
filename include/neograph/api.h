@@ -28,6 +28,10 @@
  */
 #pragma once
 
+// The thread setting of this build, and the check that a translation unit agrees with it. Every public header
+// that includes Asio reaches api.h.
+#include <neograph/build_config.h>
+
 #if defined(NEOGRAPH_STATIC_BUILD)
 // Static-only build: no decoration, every symbol is a normal
 // member of the static archive.

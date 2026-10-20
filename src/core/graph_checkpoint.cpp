@@ -57,6 +57,10 @@ void restore_checkpoint_storage_envelope(Checkpoint& checkpoint) {
     checkpoint.metadata = envelope.at("metadata");
 }
 
+SynchronousCheckpointStoreUnavailable::SynchronousCheckpointStoreUnavailable()
+    : std::runtime_error("A synchronous checkpoint store needs a worker thread, and this build has none: "
+                         "implement AsyncCheckpointStore") {}
+
 namespace {
 
 asio::thread_pool& blocking_checkpoint_pool() {
@@ -107,6 +111,8 @@ bool is_exact_in_memory_store(const InMemoryCheckpointStore& store) {
 
 template <typename Fn>
 asio::awaitable<void> run_blocking_checkpoint(Fn fn) {
+    // No worker thread exists to run `fn` on and none can be started: refuse, never wait for one.
+    if (!NEOGRAPH_BUILD_THREADS) throw SynchronousCheckpointStoreUnavailable();
     struct Result {
         std::exception_ptr error;
     };
@@ -140,6 +146,8 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn) {
 
 template <typename T, typename Fn>
 asio::awaitable<T> run_blocking_checkpoint(Fn fn) {
+    // No worker thread exists to run `fn` on and none can be started: refuse, never wait for one.
+    if (!NEOGRAPH_BUILD_THREADS) throw SynchronousCheckpointStoreUnavailable();
     struct Result {
         std::optional<T> value;
         std::exception_ptr error;

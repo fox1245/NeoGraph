@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2c41fb71106187731df452fc5d86afeea795b996280877c24155393dc8703f3a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 已添加
+- **图引擎的单线程 WebAssembly 构建，在 CI 中构建并运行 (#535)。**
+  - **`NEOGRAPH_THREADS`** 在 Emscripten 和 WASI 上为 `OFF`，其他平台为 `ON`。关闭时，NeoGraph 不使用操作系统线程构建：没有 `-pthread`，没有 `Threads::Threads`，`asio` 目标导出 `ASIO_DISABLE_THREADS`，SchemaProvider 以 `SP_THREADS=OFF` 且不带 libcurl 传输层构建。`NEOGRAPH_THREADS=ON` 则在 WebAssembly 上保留 pthread 构建。原生构建不变。
+  - **一个程序只有一种设置。** 生成的 `neograph/build_config.h` 记录该设置，并随头文件一起安装。与之不一致的翻译单元无法编译（与 SDK 的 `sp/build_config.h` 相同），NeoGraph 与 SDK 的设置不同时配置会失败。在 Emscripten 上每个目标都带 `-fexceptions`，异常被禁用时配置失败。需要套接字、TLS、系统库或线程的组件（ASYNC、LLM、MCP 客户端、A2A、gRPC、SQLite、PostgreSQL、Python）会被 CMake 拒绝。
+  - **CI**（`.github/workflows/wasm.yml`）用 Emscripten 6.0.13 以单线程模式构建图 smoke 和 wasm32 检查，并在 Node 22 和 24 上运行。smoke 的 `.wasm` 或其 gzip 超出既定预算时失败，并且会构建 pthread 版 smoke 并在 Node 24 上运行。命令、实测大小和这些宿主上不可用的功能见 [`wasm/README.md`](wasm/README.md)。图引擎在那里可以运行；模型调用、Program 和存储尚不可用。
 
 ### 变更
 - **提供方调用的 identity 标识的是请求所问的内容，而不是批准该请求的 SchemaProvider 策略 (#543)。** Program 提供方调用 journal 以 `Provider::request_digest` 标识调用，而这个摘要包含 SchemaProvider descriptor 策略的 identity。因此，内容相同的请求只要策略 identity 不同，就成了另一次调用：恢复或崩溃恢复会遇到逻辑调用绑定冲突，fork 则不会沿用来源运行的调用而是重新发送，已付费的调用于是被付费两次。interface 7 改变了所有策略 identity，0.16.0 就是这样遇到这个问题的。现在 journal 把请求内容和策略 identity 分开保存。
@@ -39,6 +45,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **失败的 Python 工具不再把回溯发送给 Provider (#545)。** Python 工具抛出异常时，模型读到的工具结果里带着异常的完整回溯，即主机文件的绝对路径和代码的栈帧，这段文本会发送给 Provider。现在结果只包含异常的类型和消息，例如 `ValueError: bad input`。回溯会以 WARNING 级别写入 `neograph_engine.tools` 日志记录器，异常作为 `exc_info`，主机可以把它保留在自己的日志里；未配置日志时，Python 的 last-resort 处理器会把它打印到 stderr。
   - **行为变更：所有工具的失败调用，其错误文本都有长度上限。** `ToolExecutionPolicy::error_limit_bytes`（Python 中为 `ToolExecutionPolicy.error_limit_bytes`）是失败调用的 `error` 最多可带的字节数，默认 2048，范围 1 字节到 1 MiB。更长的文本会在码点边界截断，并以 `... [truncated]` 结尾。
   - C++ 工具路径也按同样的方式检查过。C++ 工具的错误只是其异常的 `what()`，没有可泄露的回溯，但也没有上限：带有响应正文的异常会原样发送给 Provider。现在它和 MCP、gRPC 工具的错误一样受该上限约束。
+- **wasm32 修复 (#535)。**
+  - managed 预算日志现在从 SDK 的熵源（`sp::crypto::random_bytes`）获取 nonce，不再按平台调用系统接口。WebAssembly 构建没有这类调用，所以 managed 模型 token 预算无法在那里启动。
+  - **行为变更：期限时钟的拒绝有了类型。** 在没有可恢复时钟起点的宿主上（除 Linux 外的所有宿主，包括 WebAssembly），带期限的 managed 预算会抛出 `ManagedBudgetDeadlineClockUnavailable`，而不是普通的 `std::runtime_error`。它既是 `std::runtime_error`，也是 `ConfigurationFailure`。消息不变。不带期限的 managed 预算在那里照常运行。
+  - **wasm32 上的原生 Program 控件。** C v1 插件 ABI 保持 64 位布局。wasm32 把 `neograph_program_native_invoke_request_v1` 填充到 32 字节，而布局在 28 字节处结束，这使 `src/program/native.cpp` 无法构建。现在 `NativeControlBinding::create` 在那里抛出 `NativeControlUnavailable`（一个 `ConfigurationFailure`），`program::NATIVE_CONTROLS_AVAILABLE` 也会如实反映。其他目标不变。
+  - **单线程构建中的同步检查点存储不再挂起。** 在工作线程池中执行同步存储操作的适配器，会去等待单线程构建永远不会启动的线程，运行因此无法返回。现在该操作会抛出 `SynchronousCheckpointStoreUnavailable`（一个 `ConfigurationFailure`）。内置的内存存储也在该线程池中执行 managed 预算操作，所以在存储变为 awaitable 之前（#556），带 `model_token_budget` 的运行在那里会被拒绝。使用线程的构建不变。
 
 ## [0.16.0] - 2026-10-20
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=2c41fb71106187731df452fc5d86afeea795b996280877c24155393dc8703f3a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 추가됨
+- **그래프 엔진의 싱글 스레드 WebAssembly 빌드를 CI에서 빌드하고 실행합니다 (#535).**
+  - **`NEOGRAPH_THREADS`**는 Emscripten과 WASI에서 `OFF`, 그 밖에서는 `ON`입니다. 끄면 NeoGraph가 OS 스레드 없이 빌드됩니다. `-pthread`도 `Threads::Threads`도 없고, `asio` 타깃이 `ASIO_DISABLE_THREADS`를 내보내며, SchemaProvider는 `SP_THREADS=OFF`에 libcurl 트랜스포트 없이 빌드됩니다. `NEOGRAPH_THREADS=ON`이면 WebAssembly에서도 pthread 빌드를 유지합니다. 네이티브 빌드는 바뀌지 않습니다.
+  - **프로그램 하나에 설정 하나.** 생성되는 `neograph/build_config.h`가 설정을 기록하며 헤더와 함께 설치됩니다. 이 설정과 다른 번역 단위는 SDK의 `sp/build_config.h`처럼 컴파일되지 않고, NeoGraph와 SDK의 설정이 다르면 configure가 실패합니다. Emscripten에서는 모든 타깃에 `-fexceptions`가 붙고, 예외가 꺼져 있으면 configure가 실패합니다. 소켓, TLS, 시스템 라이브러리, 스레드가 필요한 구성 요소(ASYNC, LLM, MCP 클라이언트, A2A, gRPC, SQLite, PostgreSQL, Python)는 CMake가 거부합니다.
+  - **CI**(`.github/workflows/wasm.yml`)는 Emscripten 6.0.13으로 그래프 smoke와 wasm32 검사를 싱글 스레드 모드로 빌드해 Node 22와 24에서 실행합니다. smoke의 `.wasm`이나 그 gzip이 정해진 예산을 넘으면 실패하며, pthread smoke도 빌드해 Node 24에서 실행합니다. 명령, 측정한 크기, 이 호스트에서 쓸 수 없는 것은 [`wasm/README.md`](wasm/README.md)에 있습니다. 그래프 엔진은 여기서 실행되고, 모델 호출, Program, 저장소는 아직 아닙니다.
 
 ### 변경됨
 - **공급자 호출의 identity는 요청이 묻는 내용을 가리키며, 그 요청을 승인한 SchemaProvider 정책을 가리키지 않습니다 (#543).** Program 공급자 호출 저널은 호출을 `Provider::request_digest`로 식별했는데, 이 다이제스트에는 SchemaProvider descriptor 정책의 identity가 들어갑니다. 그래서 내용이 같은 요청도 정책 identity가 다르면 다른 호출이 되었습니다. 재개나 크래시 복구는 논리 호출 바인딩 충돌을 만났고, fork는 원본의 호출을 이어받지 않고 다시 보내서 이미 비용을 낸 호출에 다시 비용이 들었습니다. interface 7이 모든 정책 identity를 바꾸기 때문에 0.16.0에서 이 문제가 드러났습니다. 이제 저널은 요청 내용과 정책 identity를 따로 보관합니다.
@@ -39,6 +45,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **실패한 Python 도구가 트레이스백을 제공자에게 보내지 않습니다 (#545).** Python 도구가 예외를 던지면 모델이 읽는 도구 결과에 예외의 트레이스백 전체가, 곧 호스트 파일의 절대 경로와 코드의 프레임이 들어 있었고, 그 텍스트가 제공자로 전송되었습니다. 이제 결과에는 `ValueError: bad input`처럼 예외의 타입과 메시지만 들어갑니다. 트레이스백은 `neograph_engine.tools` 로거에 WARNING 수준으로, 예외를 `exc_info`로 달아 기록되므로 호스트가 자기 로그에 보관합니다. 로깅을 설정하지 않았다면 Python의 last-resort 핸들러가 stderr에 출력합니다.
   - **동작 변경: 실패한 호출의 오류 텍스트에는 모든 도구에 길이 상한이 있습니다.** `ToolExecutionPolicy::error_limit_bytes`(Python에서는 `ToolExecutionPolicy.error_limit_bytes`)는 실패한 호출의 `error`가 담을 수 있는 최대 바이트 수이며, 기본값은 2048이고 범위는 1바이트부터 1 MiB입니다. 더 긴 텍스트는 코드 포인트 경계에서 잘리고 `... [truncated]`로 끝납니다.
   - C++ 도구 경로도 같은 방식으로 점검했습니다. C++ 도구의 오류는 예외의 `what()`일 뿐이라 새어 나갈 트레이스백은 없었지만, 상한도 없었습니다. 응답 본문을 담은 예외가 제공자로 통째로 전송되었습니다. 이제 MCP나 gRPC 도구의 오류와 마찬가지로 상한이 적용됩니다.
+- **wasm32 수정 (#535).**
+  - managed 예산 저널이 플랫폼별 호출 대신 SDK의 엔트로피 원천(`sp::crypto::random_bytes`)에서 nonce를 뽑습니다. WebAssembly 빌드에는 그런 호출이 없어서 managed 모델 토큰 예산을 시작할 수 없었습니다.
+  - **동작 변경: 기한 시계 거부에 타입이 생겼습니다.** 복구할 수 있는 시계 원점이 없는 호스트(Linux 외의 모든 호스트, WebAssembly 포함)에서 기한이 있는 managed 예산은 일반 `std::runtime_error` 대신 `ManagedBudgetDeadlineClockUnavailable`을 던집니다. 이 예외는 `std::runtime_error`이면서 `ConfigurationFailure`입니다. 메시지는 그대로입니다. 기한이 없는 managed 예산은 그 호스트에서 실행됩니다.
+  - **wasm32의 네이티브 Program 컨트롤.** C v1 플러그인 ABI는 64비트 레이아웃을 유지합니다. wasm32는 `neograph_program_native_invoke_request_v1`을 레이아웃이 끝나는 28바이트가 아니라 32바이트로 패딩해서 `src/program/native.cpp`가 빌드되지 않았습니다. 이제 `NativeControlBinding::create`는 거기서 `NativeControlUnavailable`(`ConfigurationFailure`)을 던지고, `program::NATIVE_CONTROLS_AVAILABLE`이 이를 알려 줍니다. 다른 타깃은 바뀌지 않습니다.
+  - **싱글 스레드 빌드에서 동기 체크포인트 저장소가 더 이상 멈추지 않습니다.** 동기 저장소의 연산을 워커 스레드 풀에서 실행하는 어댑터가, 싱글 스레드 빌드에서는 시작되지 않는 스레드를 기다려서 실행이 끝나지 않았습니다. 이제 연산은 `SynchronousCheckpointStoreUnavailable`(`ConfigurationFailure`)을 던집니다. 내장 인메모리 저장소도 managed 예산 연산을 그 풀에서 실행하므로, 저장소가 awaitable이 될 때까지(#556) `model_token_budget`이 있는 실행은 거기서 거부됩니다. 스레드를 쓰는 빌드는 바뀌지 않습니다.
 
 ## [0.16.0] - 2026-10-20
 

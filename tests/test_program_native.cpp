@@ -432,6 +432,20 @@ TEST(NativeControlBindingTest, AsyncCompletionUsesPluginAllocatorOnCompletionThr
     EXPECT_EQ(state.output_releases.load(), 1U);
 }
 
+// wasm32 is the one target that refuses a native control (its v1 request struct is padded to 32 bytes where the
+// last field ends at 28); wasm/checks.cpp runs that refusal. Every other target takes the C v1 ABI, and the refusal
+// is a typed configuration failure.
+TEST(NativeControlBindingTest, ControlsAreAvailableAndTheRefusalIsATypedConfigurationFailure) {
+    EXPECT_TRUE(NATIVE_CONTROLS_AVAILABLE);
+    try {
+        throw NativeControlUnavailable();
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("64-bit"), std::string::npos);
+        EXPECT_NE(dynamic_cast<const NativeControlUnavailable*>(&error), nullptr);
+        EXPECT_NE(dynamic_cast<const ConfigurationFailure*>(&error), nullptr);
+    }
+}
+
 TEST(NativeControlBindingTest, TruncatedBindingAndResultAreRejectedBeforeCallbackReads) {
     PluginState state;
     auto raw = raw_binding(state);

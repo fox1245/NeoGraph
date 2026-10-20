@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 #include <neograph/graph/checkpoint.h>
 
+#include <algorithm>
+#include <stdexcept>
+#include <string>
+
 using namespace neograph::graph;
 using json = neograph::json;
 
@@ -195,4 +199,56 @@ TEST_F(CheckpointTest, PreVersionedSentinelRoundTrips) {
     EXPECT_EQ(loaded->schema_version, 0)
         << "store must not silently upgrade — migration is the caller's "
            "responsibility so the caller can log / one-shot convert";
+}
+
+// The managed-budget journal draws its actor and generation from the SDK's entropy source. A lease carries
+// both as 256-bit lower-case hex, and no two leases share one.
+namespace {
+bool lower_hex_64(const std::string& text) {
+    return text.size() == 64 && std::all_of(text.begin(), text.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    });
+}
+}  // namespace
+
+TEST_F(CheckpointTest, ManagedBudgetLeaseNoncesAreFresh256BitHex) {
+    ManagedBudgetLeaseScope scope;
+    scope.owner_scope = "nonce-owner";
+    scope.thread_id = "nonce-thread-1";
+    scope.graph_identity = "nonce-graph";
+    scope.original_ceiling = 100;
+    const auto first = store.acquire_managed_budget_lease(scope, "", "");
+    scope.thread_id = "nonce-thread-2";
+    const auto second = store.acquire_managed_budget_lease(scope, "", "");
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_TRUE(lower_hex_64(first->actor_id()));
+    EXPECT_TRUE(lower_hex_64(first->bank_generation()));
+    EXPECT_NE(first->actor_id(), first->bank_generation());
+    EXPECT_NE(first->actor_id(), second->actor_id());
+    EXPECT_NE(first->bank_generation(), second->bank_generation());
+}
+
+// A single-thread build refuses a synchronous checkpoint store, and a host without a deadline clock origin
+// (WebAssembly) refuses a managed budget with a deadline, with these types. A threaded Linux build does neither, so
+// the refusals themselves are exercised by wasm/checks.cpp; here the type is what a caller sees.
+TEST(SynchronousCheckpointStore, RefusalIsATypedConfigurationFailure) {
+    try {
+        throw SynchronousCheckpointStoreUnavailable();
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("AsyncCheckpointStore"), std::string::npos);
+        EXPECT_NE(dynamic_cast<const SynchronousCheckpointStoreUnavailable*>(&error), nullptr);
+        EXPECT_NE(dynamic_cast<const ConfigurationFailure*>(&error), nullptr);
+    }
+}
+
+TEST(ManagedBudgetDeadlineClock, RefusalIsATypedConfigurationFailure) {
+    try {
+        throw ManagedBudgetDeadlineClockUnavailable();
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("deadline clock"), std::string::npos);
+        EXPECT_NE(dynamic_cast<const ManagedBudgetDeadlineClockUnavailable*>(&error), nullptr);
+        EXPECT_NE(dynamic_cast<const ConfigurationFailure*>(&error), nullptr)
+            << "a deterministic verdict is never retried and never routed to a failure handler";
+    }
 }

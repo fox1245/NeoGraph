@@ -20,6 +20,8 @@
  */
 #pragma once
 
+#include <neograph/build_config.h>
+
 #include <asio/error.hpp>
 #include <asio/ssl/error.hpp>
 

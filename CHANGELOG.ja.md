@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=2c41fb71106187731df452fc5d86afeea795b996280877c24155393dc8703f3a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 追加
+- **グラフエンジンのシングルスレッド WebAssembly ビルドを CI でビルドして実行します (#535)。**
+  - **`NEOGRAPH_THREADS`** は Emscripten と WASI では `OFF`、それ以外では `ON` です。オフにすると、NeoGraph は OS スレッドなしでビルドされます。`-pthread` も `Threads::Threads` もなく、`asio` ターゲットが `ASIO_DISABLE_THREADS` をエクスポートし、SchemaProvider は `SP_THREADS=OFF` で libcurl トランスポートなしにビルドされます。`NEOGRAPH_THREADS=ON` なら WebAssembly でも pthread ビルドを使えます。ネイティブビルドは変わりません。
+  - **プログラムごとに設定は 1 つ。** 生成される `neograph/build_config.h` が設定を記録し、ヘッダーと一緒にインストールされます。この設定と食い違う翻訳単位は、SDK の `sp/build_config.h` と同じようにコンパイルされず、NeoGraph と SDK の設定が違えば configure が失敗します。Emscripten ではすべてのターゲットに `-fexceptions` が付き、例外が無効なら configure が失敗します。ソケット、TLS、システムライブラリ、スレッドを必要とするコンポーネント（ASYNC、LLM、MCP クライアント、A2A、gRPC、SQLite、PostgreSQL、Python）は CMake が拒否します。
+  - **CI**（`.github/workflows/wasm.yml`）は、Emscripten 6.0.13 でグラフ smoke と wasm32 のチェックをシングルスレッドでビルドし、Node 22 と 24 で実行します。smoke の `.wasm` またはその gzip が定めた予算を超えると失敗し、pthread の smoke もビルドして Node 24 で実行します。コマンド、測定したサイズ、これらのホストで使えないものは [`wasm/README.md`](wasm/README.md) にあります。グラフエンジンはそこで動きます。モデル呼び出し、Program、ストアはまだです。
 
 ### 変更
 - **プロバイダー呼び出しの identity は、リクエストが求める内容を指し、それを承認した SchemaProvider のポリシーを指しません (#543)。** Program のプロバイダー呼び出しジャーナルは、呼び出しを `Provider::request_digest` で識別していましたが、このダイジェストには SchemaProvider の descriptor ポリシーの identity が含まれます。そのため、内容が同じリクエストでも、ポリシー identity が違えば別の呼び出しになりました。resume やクラッシュ復旧は論理呼び出しのバインディング衝突に遭い、fork はソースの呼び出しを引き継がずに再送したので、支払い済みの呼び出しに再び費用がかかりました。interface 7 がすべてのポリシー identity を変えるため、0.16.0 でこの問題が表に出ました。ジャーナルは、リクエスト内容とポリシー identity を別々に保持するようになりました。
@@ -39,6 +45,11 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **失敗した Python ツールは、トレースバックをプロバイダーへ送らなくなりました (#545)。** Python ツールが例外を送出すると、モデルが読むツールの結果に例外のトレースバック全体、つまりホストのファイルの絶対パスとコードのフレームが入っており、そのテキストがプロバイダーへ送られていました。結果には、`ValueError: bad input` のような例外の型とメッセージだけが入ります。トレースバックは `neograph_engine.tools` ロガーへ WARNING で、例外を `exc_info` として書き出されるので、ホストは自分のログに残せます。ログを設定していない場合は、Python の last-resort ハンドラーが stderr に出力します。
   - **動作の変更: 失敗した呼び出しのエラーテキストには、すべてのツールで長さの上限があります。** `ToolExecutionPolicy::error_limit_bytes`（Python では `ToolExecutionPolicy.error_limit_bytes`）は、失敗した呼び出しの `error` が持てる最大バイト数で、既定値は 2048、範囲は 1 バイトから 1 MiB です。それより長いテキストはコードポイントの境界で切られ、`... [truncated]` で終わります。
   - C++ ツールの経路も同じ観点で確認しました。C++ ツールのエラーは例外の `what()` だけなので、漏れるトレースバックはありませんでしたが、上限もありませんでした。レスポンス本文を含む例外は、そのままプロバイダーへ送られていました。MCP や gRPC ツールのエラーと同じく、上限が適用されます。
+- **wasm32 の修正 (#535)。**
+  - managed 予算のジャーナルは、プラットフォームごとの呼び出しではなく、SDK のエントロピー源（`sp::crypto::random_bytes`）から nonce を取るようになりました。WebAssembly ビルドにはそれがなく、managed のモデルトークン予算を開始できませんでした。
+  - **動作の変更: 期限クロックの拒否に型が付きました。** 回復できるクロックの原点がないホスト（Linux 以外のすべて、WebAssembly を含む）で期限付きの managed 予算を使うと、素の `std::runtime_error` ではなく `ManagedBudgetDeadlineClockUnavailable` が投げられます。これは `std::runtime_error` であり `ConfigurationFailure` です。メッセージは変わりません。期限のない managed 予算は、そのホストでも動きます。
+  - **wasm32 のネイティブ Program コントロール。** C v1 プラグイン ABI は 64 ビットのレイアウトのままです。wasm32 は `neograph_program_native_invoke_request_v1` を、レイアウトが終わる 28 バイトではなく 32 バイトにパディングするため、`src/program/native.cpp` がビルドできませんでした。そこでは `NativeControlBinding::create` が `NativeControlUnavailable`（`ConfigurationFailure`）を投げ、`program::NATIVE_CONTROLS_AVAILABLE` がそれを示します。ほかのターゲットは変わりません。
+  - **シングルスレッドのビルドで、同期のチェックポイントストアが固まらなくなりました。** 同期ストアの操作をワーカースレッドのプールで実行するアダプターが、シングルスレッドのビルドでは起動しないスレッドを待っていたため、実行が戻りませんでした。操作は `SynchronousCheckpointStoreUnavailable`（`ConfigurationFailure`）を投げます。組み込みのインメモリストアも managed 予算の操作をそのプールで実行するため、ストアが awaitable になるまで（#556）、`model_token_budget` を指定した実行はそこで拒否されます。スレッドを使うビルドは変わりません。
 
 ## [0.16.0] - 2026-10-20
 
