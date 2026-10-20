@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=zh-CN source_sha256=cf231c5dd783ef2dc2e5ad572dd4bdcacd935c4da10414e7c5f754d6234143c6 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=zh-CN source_sha256=05fbc110d09704e01a8f8dd64767d56b589b973a31fb3fbda55f9077f2686930 -->
 # Program 节点的能力与受中介的副作用
 
 **Languages:** [English](PROGRAM_CAPABILITY_CONTEXT.md) | [한국어](PROGRAM_CAPABILITY_CONTEXT.ko.md) | [日本語](PROGRAM_CAPABILITY_CONTEXT.ja.md) | [简体中文](PROGRAM_CAPABILITY_CONTEXT.zh-CN.md)
@@ -14,10 +14,17 @@
 | 经宿主审阅的 `add_host_brokered_node` | 确切声明的 Provider | 确切声明的 Tool | 确切的元数据 |
 | 固定的 `add_core_llm_call` | 确切声明的 Provider | 确切声明的、用于模型定义的 Tool | 确切的元数据 |
 | 固定的 `add_core_tool_dispatch` | 无 | 确切声明的 Tool | 确切的元数据 |
+| 固定的 `add_core_endpoint_node` | 确切声明的 Provider | 无 | 确切的元数据 |
 | `TrustedNative` C++ 工厂 | 确切声明的 Provider | 确切声明的 Tool | 确切的元数据 |
 
-这两个固定的 Core 注册，构造的是 NeoGraph 自己的 `LLMCallNode` 和 `ToolDispatchNode`；
-它们不接受调用方提供的工厂。注册它们时，要配上确切的、不可变的需求解析器。
+这些固定的 Core 注册，构造的是 NeoGraph 自己的 `LLMCallNode`、`ToolDispatchNode`
+和 SchemaProvider 端点节点（`add_core_endpoint_node`，其 manifest 指明节点类型：
+`embed`、`image_generate`、...、`job_collect`，#531）；
+它们不接受调用方提供的工厂。端点节点的调用与 `llm_call` 的调用一样，走 Core 的 provider 路径：
+宿主的 provider 调用 broker 会把它们记入 journal 并重放，
+模型 token 预算会因为它们没有输出上限而拒绝它们，
+计价绑定则在模型目录能够为端点调用确定上限之前，以 `P_MONEY_UNMODELED` 拒绝它们。
+注册每个固定的 Core 节点时，都要配上确切的、不可变的需求解析器。
 模型编写的拓扑，可以选择已准入的类型和节点配置，但无法让任意的 brokered 工厂拿到原始的 Tool 指针。
 标准的分发节点仍然调用 `dispatch_tool_calls`，在调用已绑定的 Tool 之前，
 它会先询问这次运行的 `ToolGate` 和 `ToolExecutionController`。

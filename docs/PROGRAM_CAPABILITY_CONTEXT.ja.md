@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=ja source_sha256=cf231c5dd783ef2dc2e5ad572dd4bdcacd935c4da10414e7c5f754d6234143c6 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=ja source_sha256=05fbc110d09704e01a8f8dd64767d56b589b973a31fb3fbda55f9077f2686930 -->
 # Programのノードのcapabilityと、仲介される効果
 
 **Languages:** [English](PROGRAM_CAPABILITY_CONTEXT.md) | [한국어](PROGRAM_CAPABILITY_CONTEXT.ko.md) | [日本語](PROGRAM_CAPABILITY_CONTEXT.ja.md) | [简体中文](PROGRAM_CAPABILITY_CONTEXT.zh-CN.md)
@@ -11,9 +11,10 @@
 | ホストがレビューした `add_host_brokered_node` | 宣言されたProviderそのもの | 宣言されたToolそのもの | 正確なメタデータ |
 | 固定の `add_core_llm_call` | 宣言されたProviderそのもの | モデルの定義用に、宣言されたToolそのもの | 正確なメタデータ |
 | 固定の `add_core_tool_dispatch` | なし | 宣言されたToolそのもの | 正確なメタデータ |
+| 固定の `add_core_endpoint_node` | 宣言されたProviderそのもの | なし | 正確なメタデータ |
 | `TrustedNative` のC++ファクトリー | 宣言されたProviderそのもの | 宣言されたToolそのもの | 正確なメタデータ |
 
-固定の2つのCore登録は、NeoGraph自身の `LLMCallNode` と `ToolDispatchNode` を構築します。呼び出し側が渡したファクトリーは受け付けません。これらは、正確で変更できない要件リゾルバーとともに登録してください。モデルが書いたトポロジーは、admission済みのタイプとノードの設定を選べますが、任意のbrokeredファクトリーに、生のToolポインターを受け取らせることはできません。標準のディスパッチノードは、引き続き `dispatch_tool_calls` を呼び出します。これは、バインド済みのToolを呼び出す前に、その実行の `ToolGate` と `ToolExecutionController` に問い合わせます。
+固定のCore登録は、NeoGraph自身の `LLMCallNode`、`ToolDispatchNode`、SchemaProviderのエンドポイントノード（`add_core_endpoint_node`。そのマニフェストがノードタイプを指定します：`embed`、`image_generate`、...、`job_collect`、#531）を構築します。呼び出し側が渡したファクトリーは受け付けません。エンドポイントノードの呼び出しは、`llm_call` の呼び出しと同様に、Coreのプロバイダー経路をたどります。ホストのプロバイダー呼び出しブローカーがこれらをジャーナルに記録してリプレイし、モデルのトークン予算は出力の上限がないためこれらを拒否し、価格付きバインディングは、モデルカタログがエンドポイント呼び出しの上限を決められるようになるまで、`P_MONEY_UNMODELED` で拒否します。固定のCoreノードはすべて、正確で変更できない要件リゾルバーとともに登録してください。モデルが書いたトポロジーは、admission済みのタイプとノードの設定を選べますが、任意のbrokeredファクトリーに、生のToolポインターを受け取らせることはできません。標準のディスパッチノードは、引き続き `dispatch_tool_calls` を呼び出します。これは、バインド済みのToolを呼び出す前に、その実行の `ToolGate` と `ToolExecutionController` に問い合わせます。
 
 `TrustedNative` は、ホストが証明する、別の境界です。Programのadmissionは、すでに、`TrustedEmbedding` モードと、その効果モードに対応する、認証済みのCatalogホストIDを要求します。ネイティブのC++コードは、`NodeContext` の外で取得したリソースを保持したり、自分で効果を実行したりできます。これらの規則はcapabilityの減衰であり、プロセスのサンドボックスでも、任意のネイティブコードが副作用を持たないことの証明でもありません。ホストは、ネイティブファクトリーをレビューして固定し、その効果を正直に宣言する必要があります。
 

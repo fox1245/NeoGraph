@@ -23,7 +23,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **グラフ内のエンドポイントノード (#531).**
   - 組み込みのノードタイプ `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe`、`translate` は、それぞれエンドポイント呼び出しを 1 回行います。入力はノードの config が名前を指定するチャネルから読み、結果は 1 つのチャネルに書き込みます：provider のメディア JSON、ベクトル、ランキング、判定、回答、またはテキスト。
   - `job_submit` と `job_collect` は動画ジョブを実行します。collect ノードは実行されるたびに 1 回ポーリングし、ジョブが完了するまで実行に割り込みます。
-  - 呼び出しが報告したトークン使用量が実行に記録されます。予算付きの実行は、Program 呼び出しが仲介するようになるまで、これらのノードを拒否します。
+  - 呼び出しが報告したトークン使用量が実行に記録されます。
+- **Program 内のエンドポイント呼び出し (#531).**
+  - `make_endpoint_request` はエンドポイントのリクエストを `ProviderRequest` に入れ、エンドポイントノードはそれを通して呼び出します。そのため、エンドポイント呼び出しはチャット呼び出しと同じ経路をたどります：プロバイダー呼び出しブローカー、永続的なディスパッチのマーカー、SQLite ジャーナル、そして再開とフォークでのリプレイ。Program は `RegistrySnapshotBuilder::add_core_endpoint_node` でノードを登録します。
+  - model token 予算は、エンドポイント呼び出しに出力の上限がないため、送信する前にその呼び出しを拒否します。価格付きバインディングは、モデルカタログがまだエンドポイントのリクエストに価格を付けられないため、`P_MONEY_UNMODELED` で拒否します（fox1245/SchemaProvider#124）。
+  - エンドポイント呼び出しのディスパッチ identity には、そのエンドポイント、メソッド、URL も含まれます。チャット呼び出しの identity は変わらないため、ジャーナルは引き続き一致します。
+  - Program のプロバイダーラッパーと `OpenInferenceProvider` は、内側のプロバイダーのエンドポイントを転送します（`Provider::endpoint_runtime_of`）。
 
 ### 変更
 - **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。2026-10-20 の円卓会議で決めた構造です。
