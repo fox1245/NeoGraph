@@ -130,6 +130,9 @@ option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
 option(NEOGRAPH_BUILD_WASM
        "Build the Emscripten WASM smoke and check executables (Emscripten only)"
        OFF)
+option(NEOGRAPH_BUILD_WASM_JS
+       "Build neograph_js, the JavaScript module: graphs whose model calls go through the host's fetch (Emscripten, single-thread, needs NEOGRAPH_BUILD_LLM)"
+       OFF)
 # Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
 # while it is being qualified.  It is deliberately separate from the existing
 # Program operation-tree component so Core-only and legacy Program consumers do
@@ -219,13 +222,15 @@ else()
 endif()
 
 # Components that need sockets, TLS, libcurl or system libraries a WebAssembly host does not provide, or OS threads.
+# The LLM component is not among them: without SchemaProvider's libcurl transport it is built for a host that supplies
+# the SDK's executor and transport (host-only), and then needs neither OpenSSL nor neograph::async.
 set(_neograph_unavailable_components "")
 if(NEOGRAPH_WASM_HOST)
     set(_neograph_unavailable_components
-        ASYNC LLM MCP_CLIENT MCP_HTTP_SERVER A2A GRPC POSTGRES SQLITE PYBIND)
+        ASYNC MCP_CLIENT MCP_HTTP_SERVER A2A GRPC POSTGRES SQLITE PYBIND)
 elseif(NOT NEOGRAPH_THREADS)
     set(_neograph_unavailable_components
-        ASYNC LLM MCP_CLIENT MCP_HTTP_SERVER A2A GRPC PYBIND)
+        ASYNC MCP_CLIENT MCP_HTTP_SERVER A2A GRPC PYBIND)
 endif()
 foreach(_component IN LISTS _neograph_unavailable_components)
     if(NEOGRAPH_BUILD_${_component})
@@ -242,6 +247,29 @@ endforeach()
 unset(_neograph_unavailable_components)
 unset(_component)
 unset(_reason)
+
+# neograph::llm talks to the SDK through its libcurl transport and neograph::async where the SDK has a transport. A
+# WebAssembly or single-thread build has none, so neograph::llm is host-only there: SchemaProvider is constructed
+# with the host's executor and transport, and OpenSSL is not needed (TLS belongs to the host).
+if(NEOGRAPH_WASM_HOST OR NOT NEOGRAPH_THREADS)
+    set(NEOGRAPH_LLM_HOST_ONLY ON)
+else()
+    set(NEOGRAPH_LLM_HOST_ONLY OFF)
+endif()
+
+if(NEOGRAPH_BUILD_WASM_JS)
+    if(NOT EMSCRIPTEN)
+        message(FATAL_ERROR "NEOGRAPH_BUILD_WASM_JS=ON requires the Emscripten toolchain")
+    endif()
+    if(NEOGRAPH_THREADS)
+        message(FATAL_ERROR
+            "NEOGRAPH_BUILD_WASM_JS=ON needs the single-thread build: the JavaScript host runs on the one JavaScript "
+            "thread. Pass -DNEOGRAPH_THREADS=OFF (the default on WebAssembly).")
+    endif()
+    if(NOT NEOGRAPH_BUILD_LLM)
+        message(FATAL_ERROR "NEOGRAPH_BUILD_WASM_JS=ON needs NEOGRAPH_BUILD_LLM=ON")
+    endif()
+endif()
 
 # Exceptions. The engine reports failures by throwing and catching, so a build without them does not work.
 # Emscripten catches nothing unless asked to: every NeoGraph target, C sources included, gets -fexceptions
@@ -486,14 +514,20 @@ endif()
 
 # NeoGraph's HTTPS clients link OpenSSL::SSL and OpenSSL::Crypto themselves; the SDK
 # has no OpenSSL dependency. Reject incompatible component selections before linking.
-if(NOT NEOGRAPH_BUILD_ASYNC AND (NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
+# A host-only neograph::llm (WebAssembly, single-thread) links neither.
+if(NEOGRAPH_BUILD_LLM AND NOT NEOGRAPH_LLM_HOST_ONLY)
+    set(_neograph_llm_needs_async ON)
+else()
+    set(_neograph_llm_needs_async OFF)
+endif()
+if(NOT NEOGRAPH_BUILD_ASYNC AND (_neograph_llm_needs_async OR NEOGRAPH_BUILD_MCP_CLIENT OR NEOGRAPH_BUILD_A2A OR NEOGRAPH_BUILD_PYBIND))
     message(FATAL_ERROR
         "NEOGRAPH_BUILD_ASYNC=OFF is incompatible with "
         "NEOGRAPH_BUILD_LLM/MCP/A2A/PYBIND=ON — those targets link "
         "against neograph_async. Either flip ASYNC back ON, or turn "
         "the dependent components OFF in the same configure call.")
 endif()
-if(NEOGRAPH_BUILD_ASYNC OR NEOGRAPH_BUILD_LLM OR NEOGRAPH_BUILD_MCP_CLIENT OR
+if(NEOGRAPH_BUILD_ASYNC OR _neograph_llm_needs_async OR NEOGRAPH_BUILD_MCP_CLIENT OR
    NEOGRAPH_BUILD_MCP_HTTP_SERVER OR NEOGRAPH_BUILD_A2A)
     find_package(OpenSSL REQUIRED)
 endif()
@@ -559,6 +593,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/graph_invocation.cpp
     src/core/provider.cpp
     src/core/provider_wake.cpp
+    src/core/host_loop.cpp
     src/core/artifact_provider.cpp
     src/core/tool.cpp
     src/core/tool_execution.cpp
@@ -650,13 +685,11 @@ target_compile_features(neograph_core PUBLIC cxx_std_20)
 
 # Link the smoke program to the same core target as native builds so its
 # source list cannot drift when the engine gains a new core implementation.
-if(NEOGRAPH_BUILD_WASM)
+if(NEOGRAPH_BUILD_WASM OR NEOGRAPH_BUILD_WASM_JS)
     if(NOT EMSCRIPTEN)
         message(FATAL_ERROR
             "NEOGRAPH_BUILD_WASM=ON requires the Emscripten toolchain")
     endif()
-    add_executable(neograph_wasm_smoke wasm/smoke.cpp)
-    target_link_libraries(neograph_wasm_smoke PRIVATE neograph_core)
     # Emscripten 3.1.x supports C++20 coroutines but does not expose the
     # feature-test macro Asio uses to enable awaitable.hpp. Keep the public
     # header surface consistent with native builds for the WASM smoke target.
@@ -670,6 +703,10 @@ if(NEOGRAPH_BUILD_WASM)
         list(APPEND _neograph_wasm_link -sPTHREAD_POOL_SIZE=4)
     endif()
     target_compile_options(neograph_core PRIVATE ${_neograph_wasm_codegen})
+endif()
+if(NEOGRAPH_BUILD_WASM)
+    add_executable(neograph_wasm_smoke wasm/smoke.cpp)
+    target_link_libraries(neograph_wasm_smoke PRIVATE neograph_core)
     target_compile_options(neograph_wasm_smoke PRIVATE ${_neograph_wasm_codegen})
     target_link_options(neograph_wasm_smoke PRIVATE ${_neograph_wasm_link})
     set_target_properties(neograph_wasm_smoke PROPERTIES
@@ -965,12 +1002,46 @@ if(NEOGRAPH_BUILD_LLM)
     # constructs a client lives in SchemaProvider::transport, linked only here. It is PUBLIC so that
     # code constructing an sp::runtime::Client next to neograph::llm links it as well, also against
     # shared libraries, which do not pass PRIVATE dependencies on to executables.
-    target_link_libraries(neograph_llm
-        PUBLIC  neograph_core SchemaProvider::transport
-        PRIVATE neograph_async
-    )
+    target_link_libraries(neograph_llm PUBLIC neograph_core)
+    if(NEOGRAPH_LLM_HOST_ONLY)
+        # No libcurl transport and no neograph::async: SchemaProvider is built with the host's executor and
+        # transport (WebAssembly: sp_js_host), and TLS is the host's.
+        if(NEOGRAPH_BUILD_WASM OR NEOGRAPH_BUILD_WASM_JS)
+            target_compile_options(neograph_llm PRIVATE ${_neograph_wasm_codegen})
+        endif()
+    else()
+        target_link_libraries(neograph_llm
+            PUBLIC  SchemaProvider::transport
+            PRIVATE neograph_async
+        )
+        target_compile_definitions(neograph_llm PRIVATE NEOGRAPH_HAVE_SP_TRANSPORT)
+    endif()
 
     add_library(neograph::llm ALIAS neograph_llm)
+
+    # The wasm32 checks also run a blocking run against a host-pumped provider.
+    if(TARGET neograph_wasm_checks)
+        target_link_libraries(neograph_wasm_checks PRIVATE neograph_llm)
+        target_compile_definitions(neograph_wasm_checks PRIVATE NEOGRAPH_WASM_CHECKS_LLM)
+    endif()
+
+    # The JavaScript module (wasm/module.cpp, wasm/neograph.mjs): a graph engine whose model calls go through the
+    # host's fetch. Its glue and its .wasm are written to the build directory's wasm/.
+    if(NEOGRAPH_BUILD_WASM_JS)
+        add_executable(neograph_js wasm/module.cpp)
+        target_link_libraries(neograph_js PRIVATE neograph_llm neograph_core SchemaProvider::js_host)
+        target_compile_options(neograph_js PRIVATE ${_neograph_wasm_codegen})
+        target_link_options(neograph_js PRIVATE -O3 -flto -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576
+                            -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createNeoGraphModule
+                            -sENVIRONMENT=web,worker,node
+                            -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8 --no-entry)
+        set_target_properties(neograph_js PROPERTIES
+            OUTPUT_NAME neograph_module
+            SUFFIX ".mjs"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
+        # The API beside the module it wraps; a change to it reconfigures and copies it again.
+        configure_file("${PROJECT_SOURCE_DIR}/wasm/neograph.mjs" "${CMAKE_BINARY_DIR}/wasm/neograph.mjs" COPYONLY)
+    endif()
 endif()
 
 # ===========================================================================
@@ -2448,7 +2519,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     endif()
     string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES
         "find_dependency(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})")
-    if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
+    if(TARGET neograph_async OR (TARGET neograph_llm AND NOT NEOGRAPH_LLM_HOST_ONLY) OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
     if(TARGET neograph_postgres OR TARGET neograph_program_postgres)

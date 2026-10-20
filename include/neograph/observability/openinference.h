@@ -178,6 +178,7 @@ public:
 
     PreparedProviderRequest prepare(ProviderRequest request) override;
     std::string_view family() const noexcept override;
+    bool host_pumped() const noexcept override;
 
     std::string get_name() const override;
 

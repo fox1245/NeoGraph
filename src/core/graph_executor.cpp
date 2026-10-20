@@ -1,4 +1,5 @@
 #include <neograph/async/run_sync.h>
+#include <neograph/async/host_loop.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/engine.h>  // RunContext (forward-declared in executor.h)
 #include <neograph/graph/executor.h>
@@ -723,6 +724,7 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
         }
         if (done) break;
         timer->expires_at(wake_at);
+        async::note_deadline(executor, wake_at);
         co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
     }
     // A late completion settles as a timeout too; fence whatever is left.
@@ -1311,6 +1313,7 @@ asio::awaitable<void> retry_backoff(int delay_ms) {
     auto               ex = co_await asio::this_coro::executor;
     asio::steady_timer timer(ex);
     timer.expires_after(std::chrono::milliseconds(delay_ms));
+    async::note_deadline(ex, timer.expiry());
     co_await timer.async_wait(asio::use_awaitable);
 }
 

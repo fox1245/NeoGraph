@@ -16,6 +16,14 @@ if(NEOGRAPH_THREADS AND NOT NEOGRAPH_WASM_HOST)
     set(_neograph_sp_transport ON)
 endif()
 
+# The JavaScript module sends over the SDK's JavaScript host (an executor over setTimeout and an HTTP transport over
+# fetch). It is not part of the installed dependency list: only the module links it.
+set(_neograph_sp_required_components ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})
+if(NEOGRAPH_BUILD_WASM_JS)
+    list(APPEND _neograph_sp_required_components js_host)
+    set(SP_BUILD_JS_HOST ON CACHE BOOL "Build the SDK's JavaScript host (follows NEOGRAPH_BUILD_WASM_JS)" FORCE)
+endif()
+
 # A source build of the SDK takes NeoGraph's thread mode and transport. An SDK that is already built is checked
 # below. The values follow NEOGRAPH_THREADS, also in a build directory that changes it.
 set(SP_THREADS ${NEOGRAPH_THREADS} CACHE BOOL "Build SchemaProvider with OS threads (follows NEOGRAPH_THREADS)" FORCE)
@@ -24,7 +32,7 @@ set(SP_BUILD_TRANSPORT ${_neograph_sp_transport} CACHE STRING
 unset(_neograph_sp_transport)
 
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    find_package(SchemaProvider 0.4.0 EXACT CONFIG QUIET COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})
+    find_package(SchemaProvider 0.4.0 EXACT CONFIG QUIET COMPONENTS ${_neograph_sp_required_components})
     if(NOT SchemaProvider_FOUND)
         if(NOT NEOGRAPH_FETCH_SCHEMAPROVIDER)
             message(FATAL_ERROR
@@ -62,7 +70,7 @@ else()
     endif()
 endif()
 
-foreach(_component IN LISTS NEOGRAPH_SCHEMAPROVIDER_COMPONENTS)
+foreach(_component IN LISTS _neograph_sp_required_components)
     if(NOT TARGET SchemaProvider::${_component})
         message(FATAL_ERROR "SchemaProvider does not provide its required ${_component} target")
     endif()
@@ -83,3 +91,4 @@ elseif(NOT NEOGRAPH_THREADS)
         "Build both the same way.")
 endif()
 unset(_neograph_sp_definitions)
+unset(_neograph_sp_required_components)

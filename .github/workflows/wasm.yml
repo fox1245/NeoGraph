@@ -1,7 +1,9 @@
 name: WebAssembly
-# The graph engine for a WebAssembly host (#535): the single-thread Emscripten build of the graph smoke, with a
-# curl-free SchemaProvider and no LLM component, run under Node 22 and 24, plus the wasm32 checks and a size gate.
-# The pthread build is a second job. Both pin the Emscripten toolchain: 6.0.13, from the emsdk commit that
+# The graph engine for a WebAssembly host (#535): the single-thread Emscripten build of the graph smoke and of the
+# JavaScript module (model calls through the host's fetch), with a curl-free SchemaProvider and no OpenSSL, run under
+# Node 22 and 24: the smoke program, the wasm32 checks, the module against a local OpenAI-compatible server (no
+# network, no key), and the Workers example's fetch handler called in Node. Size gates for the smoke program and the
+# module. The pthread build is a second job. Both pin the Emscripten toolchain: 6.0.13, from the emsdk commit that
 # is that release.
 
 on:
@@ -43,12 +45,15 @@ jobs:
   single-thread:
     name: single-thread (Node 22 and 24)
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
-      # The size gate. Budgets are the measured size of the graph smoke (-O3 -flto, Release; 5.50 MB and 1.61 MB
-      # gzipped) plus about 9%.
+      # The size gates. Budgets are the measured size (-O3 -flto, Release) plus about 9%: the graph smoke is 5.51 MB
+      # and 1.61 MB gzipped. The JavaScript module adds the LLM component, the SDK's JavaScript host and the C API
+      # (6.27 MB and 1.84 MB gzipped).
       MAX_WASM_BYTES: 6000000
       MAX_GZIP_BYTES: 1750000
+      MAX_MODULE_WASM_BYTES: 6850000
+      MAX_MODULE_GZIP_BYTES: 2010000
     steps:
       - uses: actions/checkout@v4
       - name: Check out the pinned emsdk
@@ -70,14 +75,14 @@ jobs:
         run: |
           source emsdk/emsdk_env.sh
           emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DNEOGRAPH_BUILD_WASM=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
-            -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+            -DNEOGRAPH_BUILD_WASM=ON -DNEOGRAPH_BUILD_WASM_JS=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_MCP=OFF \
             -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
             -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
             -DNEOGRAPH_USE_LIBCURL=OFF
-      - name: Check that the configuration is single-thread, curl-free and uses exceptions
+      - name: Check that the configuration is single-thread, curl-free, OpenSSL-free and uses exceptions
         run: |
           fail() { echo "configuration check failed: $1"; exit 1; }
           if grep -q -e '-pthread' build-wasm/build.ninja; then fail "-pthread is on a command line"; fi
@@ -88,15 +93,18 @@ jobs:
           grep -Eq '^#define SP_BUILD_THREADS 0$' build-wasm/_deps/neograph_schemaprovider-build/generated/sp/build_config.h \
             || fail "sp/build_config.h does not record a single-thread build"
           if ninja -C build-wasm -t targets all | grep -q 'sp_transport'; then fail "sp_transport is configured"; fi
-      - name: Build the smoke program and the wasm32 checks
+          if grep -q -i -E 'openssl|libssl|libcrypto' build-wasm/build.ninja; then fail "OpenSSL is on a command line"; fi
+          ninja -C build-wasm -t targets all | grep -q 'neograph_llm' || fail "neograph_llm is not configured"
+          ninja -C build-wasm -t targets all | grep -q 'sp_js_host' || fail "sp_js_host is not configured"
+      - name: Build the smoke program, the wasm32 checks and the JavaScript module
         run: |
           source emsdk/emsdk_env.sh
-          time cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks --parallel
+          time cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks neograph_js --parallel
           ls -l build-wasm/wasm
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Run the smoke program and the checks on Node 22
+      - name: Run the smoke program, the checks and the module tests on Node 22
         run: |
           node --version
           node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
@@ -104,10 +112,14 @@ jobs:
           grep -q '^trace = d' smoke.out
           node build-wasm/wasm/checks.js > checks.out && cat checks.out
           grep -q '^all checks passed$' checks.out
+          node wasm/test/llm_host_test.mjs build-wasm/wasm | tee module.out
+          tail -n 1 module.out | grep -q '^all checks passed$'
+          node wasm/test/workers_test.mjs build-wasm/wasm | tee workers.out
+          tail -n 1 workers.out | grep -q '^all checks passed$'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Run the smoke program and the checks on Node 24
+      - name: Run the smoke program, the checks and the module tests on Node 24
         run: |
           node --version
           node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
@@ -115,11 +127,18 @@ jobs:
           grep -q '^trace = d' smoke.out
           node build-wasm/wasm/checks.js > checks.out && cat checks.out
           grep -q '^all checks passed$' checks.out
+          node wasm/test/llm_host_test.mjs build-wasm/wasm | tee module.out
+          tail -n 1 module.out | grep -q '^all checks passed$'
+          node wasm/test/workers_test.mjs build-wasm/wasm | tee workers.out
+          tail -n 1 workers.out | grep -q '^all checks passed$'
       - name: Size gate
         run: |
           python3 wasm/size_gate.py --label "Graph smoke, single-thread, Emscripten $EMSCRIPTEN_VERSION" \
             --wasm build-wasm/wasm/smoke.wasm --js build-wasm/wasm/smoke.js \
             --max-wasm "$MAX_WASM_BYTES" --max-gzip "$MAX_GZIP_BYTES"
+          python3 wasm/size_gate.py --label "JavaScript module, single-thread, Emscripten $EMSCRIPTEN_VERSION" \
+            --wasm build-wasm/wasm/neograph_module.wasm --js build-wasm/wasm/neograph_module.mjs \
+            --max-wasm "$MAX_MODULE_WASM_BYTES" --max-gzip "$MAX_MODULE_GZIP_BYTES"
 
   pthread:
     name: pthread (Node 24)

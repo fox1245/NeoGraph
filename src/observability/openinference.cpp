@@ -527,6 +527,10 @@ std::string_view OpenInferenceProvider::family() const noexcept {
     return impl_->inner->family();
 }
 
+bool OpenInferenceProvider::host_pumped() const noexcept {
+    return impl_->inner->host_pumped();
+}
+
 std::shared_ptr<sp::runtime::Client> OpenInferenceProvider::endpoint_runtime() const {
     return endpoint_runtime_of(*impl_->inner);
 }

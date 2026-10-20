@@ -1,0 +1,10 @@
+# A template. It holds no secret: the key is a Worker secret (`wrangler secret put API_KEY`).
+name = "neograph-worker"
+main = "worker.mjs"
+compatibility_date = "2026-10-01"
+
+# Where the model is. An OpenAI-compatible Chat Completions endpoint: the origin, the route and the model.
+[vars]
+BASE_URL = "https://api.example.com"
+API_PATH = "/v1/chat/completions"
+MODEL = "your-model"
