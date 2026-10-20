@@ -3,6 +3,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/registry.h>
 #include <neograph/graph/state.h>
+#include "endpoint_nodes.h"
 
 #include <algorithm>
 #include <fstream>
@@ -332,6 +333,9 @@ NodeFactory::NodeFactory() {
             },
             "required": ["definition"]
         })JSON"));
+
+    // SchemaProvider endpoint nodes (#531).
+    register_endpoint_nodes(*this);
 }
 
 void NodeFactory::register_type(const std::string& type, NodeFactoryFn fn) {

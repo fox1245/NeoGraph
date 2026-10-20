@@ -1,7 +1,7 @@
 // Provider's SchemaProvider endpoint calls (#531): they run on the provider's own client, the descriptor policy
 // admits them, and the async form neither blocks a thread nor needs the provider to outlive it.
 #include <gtest/gtest.h>
-#include "fixtures/typed_wire_peer.h"
+#include "fixtures/endpoint_peer.h"
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
@@ -34,37 +34,10 @@ static_assert(forwarded<sp::tokens::Count>() && forwarded<sp::generations::Get>(
 // Chat goes through Provider::prepare.
 static_assert(!EndpointRequest<sp::runtime::Request> && !EndpointRequest<sp::chat::Request>);
 
-// The built-in policy, with every list that names the OpenAI origin also naming `origin`.
-sp::descriptor::PolicySnapshot policy_at(const std::string& origin) {
-    auto policy = json::parse(sp::config_defaults::descriptor_policy_json).dump();
-    const std::string openai = "\"https://api.openai.com\"";
-    for (auto at = policy.find(openai); at != std::string::npos; at = policy.find(openai, at + 1)) {
-        const auto added = openai + ",\"" + origin + "\"";
-        policy.replace(at, openai.size(), added);
-        at += added.size() - 1;
-    }
-    auto admitted = sp::descriptor::load_policy(policy, sp::config_defaults::codec_defaults_json);
-    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&admitted))
-        throw std::invalid_argument(error->pointer + ": " + error->message);
-    return std::get<sp::descriptor::PolicySnapshot>(std::move(admitted));
-}
-
 std::shared_ptr<llm::SchemaProvider> provider_at(const wire::Peer& peer, bool admitted = true) {
-    sp::runtime::Options options;
-    options.api_key = "fixture-key";
-    options.default_timeout = 5s;
-    options.retry_tokens = 0;
-    options.retry_tokens_per_second = 0;
-    auto policy = admitted ? policy_at(peer.origin()) : sp::descriptor::builtin_policy();
-    return std::make_shared<llm::SchemaProvider>(
-        test::descriptor("openai.chat", peer.origin(), std::move(policy)), std::move(options));
+    return test::endpoints::provider_at(peer.origin(), admitted);
 }
-
-std::string embedding_body() {
-    return json{{"object", "list"}, {"model", "fixture-embed"},
-                {"data", json::array({{{"object", "embedding"}, {"index", 0}, {"embedding", {0.25, -0.5}}}})},
-                {"usage", {{"prompt_tokens", 3}, {"total_tokens", 3}}}}.dump();
-}
+using test::endpoints::embedding_body;
 
 sp::embeddings::Request embed(std::string text = "hello") {
     sp::embeddings::Request request;
@@ -176,9 +149,7 @@ TEST(ProviderEndpoints, CancellingTheAwaitingCoroutineCancelsTheCall) {
 }
 
 TEST(ProviderEndpoints, ImagesComeBackAsMedia) {
-    const std::string png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
-    wire::Peer peer(json{{"created", 1}, {"data", json::array({{{"b64_json", png}}})},
-                         {"usage", {{"input_tokens", 5}, {"output_tokens", 7}, {"total_tokens", 12}}}}.dump());
+    wire::Peer peer(test::endpoints::image_body());
     auto provider = provider_at(peer);
     sp::images::Request request;
     request.model = "fixture-image";

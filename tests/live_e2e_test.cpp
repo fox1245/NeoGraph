@@ -4,6 +4,7 @@
 // Keys are read from the environment only and never printed. scripts/live_e2e.py runs this binary for the
 // release report; it is built with the tests but not registered with CTest.
 #include <neograph/llm/schema_provider.h>
+#include <neograph/graph/engine.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
@@ -217,6 +218,36 @@ TEST(LiveEndpoints, OpenAIModeration) {
     ASSERT_EQ(result->verdicts.size(), 1u);
     EXPECT_FALSE(result->verdicts[0].flagged);
     EXPECT_FALSE(result->verdicts[0].categories.empty());
+}
+
+// The endpoint nodes in a compiled graph: one embedding, then one moderation of the same text.
+TEST(LiveEndpoints, EndpointNodesInAGraph) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    neograph::graph::NodeContext context;
+    context.provider = std::make_shared<SchemaProvider>(descriptor("openai.chat", "https://api.openai.com",
+        "/v1/chat/completions", "/v1/chat/completions"), options);
+    const json graph = {{"name", "live-endpoint-nodes"},
+        {"channels", {{"input", {{"reducer", "overwrite"}}}, {"embeddings", {{"reducer", "overwrite"}}},
+                      {"moderation", {{"reducer", "overwrite"}}}}},
+        {"nodes", {{"embed", {{"type", "embed"}, {"model", "text-embedding-3-small"}}},
+                   {"moderate", {{"type", "moderate"}, {"model", "omni-moderation-latest"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "embed"}}, json{{"from", "embed"}, {"to", "moderate"}},
+                               json{{"from", "moderate"}, {"to", "__end__"}}})}};
+    auto engine = neograph::graph::GraphEngine::compile(graph, context);
+    neograph::graph::RunConfig config;
+    config.thread_id = "live-endpoint-nodes";
+    config.input = {{"input", "I would like a cup of tea."}};
+    const auto result = engine->run(config);
+    const auto embeddings = result.output["channels"]["embeddings"]["value"];
+    ASSERT_EQ(embeddings.size(), 1u);
+    EXPECT_GT(embeddings[0].size(), 100u);
+    const auto moderation = result.output["channels"]["moderation"]["value"];
+    ASSERT_EQ(moderation.size(), 1u);
+    EXPECT_EQ(moderation[0]["flagged"], false);
+    ASSERT_TRUE(result.usage.input_total);
+    EXPECT_GT(result.usage.input_total->value, 0u);
 }
 
 TEST(LiveEndpoints, AnthropicTokenCount) {

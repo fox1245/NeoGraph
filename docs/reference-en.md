@@ -2697,6 +2697,31 @@ The library pre-registers the following components:
 | `"tool_dispatch"` | `ToolDispatchNode` | Dispatches tool calls from the latest assistant message |
 | `"intent_classifier"` | `IntentClassifierNode` | LLM-based intent classification. Reads `prompt` and `valid_routes` from `config` |
 | `"subgraph"` | `SubgraphNode` | Runs a compiled subgraph. Reads `input_map` and `output_map` from `config` |
+| `"image_generate"`, `"image_edit"` | endpoint node | Generates or edits images (see "Endpoint nodes") |
+| `"embed"`, `"rerank"`, `"moderate"`, `"decide"` | endpoint node | Embeds text, ranks documents, checks text, or answers structured questions |
+| `"speak"`, `"transcribe"`, `"translate"` | endpoint node | Speaks text, or transcribes or translates speech |
+| `"job_submit"`, `"job_collect"` | endpoint node | Submits a video job, then collects it |
+
+#### Endpoint nodes
+
+The endpoint nodes (#531) make one SchemaProvider endpoint call each on the node context's provider (`Provider::complete_endpoint_async`).
+- **Config.** `model` is required. A node takes its endpoint's options under the SDK request's member names (`size`, `quality`, `dimensions`, `voice`, `top`, ...), and `extensions` for the members the provider policy admits. It also takes the names of the channels it reads and writes; `output` names the channel it writes. A strict graph (`schema_version` 1) refuses an unknown key. Because the channels are configuration, the validator's effect analysis does not run on a graph with endpoint nodes.
+- **Text.** `embed` and `moderate` read a string or an array of strings (channel `input`), `speak` reads a string (`text`), and `rerank` reads a query string (`query`) and an array of documents (`documents`).
+- **Media.** Media channels hold a base64 data URL, an https URL, or the media JSON of the provider outcome format v3. Nodes write media in the v3 form: `image_generate` and `image_edit` write `images`, `speak` writes `audio` and `job_collect` writes `video`. `image_edit` reads the images to edit from `references`; `transcribe` and `translate` read `audio`.
+- **Other results.**
+  - `embed` writes one array of numbers per input (`embeddings`).
+  - `rerank` writes `[{index, relevance}]`, most relevant first (`ranking`).
+  - `moderate` writes `[{flagged, categories, scores}]` (`moderation`).
+  - `transcribe` and `translate` write the text (`transcript`, `translation`).
+- **`decide`.** It reads any JSON as the evidence (`input`) and takes `questions`: each is `{name, kind, instructions, options, when_true, when_false}`, where `kind` is `predicate`, `choice`, `score` or `box`. It writes the answers (`decisions`).
+- **Video jobs.**
+  - `job_submit` reads a prompt (`prompt`) and writes the job's handle (`job`).
+  - `job_collect` polls the handle once each time it runs. A completed job's outputs are downloaded into `video`, and a failed, cancelled or expired job fails the node.
+  - A job still running raises `NodeInterrupt` with `{"job", "status", "raw_status"}`. The host resumes the run when it chooses, and the node polls again. Nothing polls inside a step, and the submit is not sent again.
+- **Usage, budgets, cancellation.**
+  - The token usage a call reports is added to the run's usage. A call that reports none (moderation, a download) adds nothing, so it does not erase the totals of the run's other calls.
+  - Endpoint calls are not budgeted yet, so a run with a model-token budget, a managed budget lease or a provider call broker (a Program) refuses an endpoint node before it sends anything.
+  - The run's cancel token and deadline reach the call.
 
 ### Topology Schema Export (issue #56)
 
