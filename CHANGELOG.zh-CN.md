@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -72,6 +72,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **Python 导出 `provider_model_catalogue_json`。** 原生模块里有它，但 `neograph_engine` 里没有。
   - **cookbook 聊天机器人不再按模型名称分支。** 其默认模型的低 reasoning effort 现在是一个模型目录条目（`live-models.json`），通过 `--model-catalogue` 传入；没有该条目时，调用不发送 reasoning effort。
   - **参考文档。** 按实际情况描述端点节点的调用路径（把 `make_endpoint_request` 交给 `invoke_provider`），并在 `P_MONEY_UNMODELED` 表中加入端点调用。
+- **带值恢复不再破坏受门控工具调用之后的下一次模型调用（#544）。** 带有 `messages` 通道的图会在该通道里以用户消息的形式收到 `resume()` 的值（#94）。当运行停在工具门，或停在 tools 节点的 `interrupt_before` 暂停处时，历史以一个工具调用尚无结果的助手轮次结尾，这条消息就落在调用与随后 tools 步骤写入的结果之间。所有提供方家族都要求结果紧跟在调用之后，因此下一次模型调用在本地即被以 `InvalidRequest` 拒绝，没有任何内容被发送。现在，只要历史中存在没有结果的客户端工具调用，引擎就不再把该值写入 `messages`；`has_tool_calls` 路由和 tools 节点使用的是同一判定。工具门仍从 `ToolGateContext::resume_value` 读取回答，节点仍从 `ctx.resume_value` 读取，而带有 `messages` 通道的图在其他情况下仍会以用户消息的形式收到该值。
+- **失败或被拒绝的工具调用不再使下一次 Responses 调用在本地失败（#544）。** NeoGraph 会把失败调用的结果标记为错误，而 Responses 的线路格式没有可承载该标记的字段：SchemaProvider 会以 `Unsupported` 拒绝带有该标记的请求。门控的拒绝、抛出异常的工具、未知的工具和已过期的调用，都会在下一次模型调用时终止运行。现在请求把失败作为结果的文本发送，该文本已包含错误、状态以及该调用是否可重试。其他家族不受影响。
 
 ## [0.15.1] - 2026-10-19
 

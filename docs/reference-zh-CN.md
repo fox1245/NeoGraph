@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -808,8 +808,10 @@ if (r.interrupted) {
 ```
 
 当图有 `messages` 通道时，`resume_value` 也作为一个用户轮次到达，这是聊天
-形态图始终接收它的方式。`ctx.resume_value` 是通用路径 — 无论图的通道如何
-命名，它都能工作。
+形态图始终接收它的方式。但当助手轮次的工具调用还没有结果时（例如工具门中断
+之后），它不会到达：那里的用户轮次会插在调用与其结果之间，下一次模型调用将被
+拒绝 (#544)。工具门从 `ToolGateContext::resume_value` 读取回答。
+`ctx.resume_value` 是通用路径 — 无论图的通道如何命名，它都能工作。
 
 这是*动态*形式的中断。*静态*形式 — 图定义中的 `interrupt_before` /
 `interrupt_after` — 在编写图时选择的节点处暂停，无法表达"仅当模型请求

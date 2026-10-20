@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -72,6 +72,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **Python이 `provider_model_catalogue_json`을 내보냅니다.** 네이티브 모듈에는 있었지만 `neograph_engine`에는 없었습니다.
   - **cookbook 챗봇이 모델 이름으로 분기하지 않습니다.** 기본 모델의 낮은 reasoning effort는 이제 모델 카탈로그 항목(`live-models.json`)이며 `--model-catalogue`로 전달합니다. 이 항목이 없으면 호출은 reasoning effort를 보내지 않습니다.
   - **레퍼런스.** 엔드포인트 노드의 호출 경로(`make_endpoint_request`를 `invoke_provider`로 보냄)를 실제대로 설명하고, `P_MONEY_UNMODELED` 표에 엔드포인트 호출을 추가했습니다.
+- **값을 주고 재개해도 게이트된 도구 호출 뒤의 다음 모델 호출이 더 이상 깨지지 않습니다 (#544).** `messages` 채널이 있는 그래프는 `resume()`의 값을 그 채널에 사용자 메시지로 받습니다 (#94). 실행이 도구 게이트에서, 또는 tools 노드의 `interrupt_before` 일시 중지에서 멈춘 경우 히스토리는 도구 호출에 아직 결과가 없는 어시스턴트 턴으로 끝나 있었고, 그 메시지가 호출과 이후 tools 스텝이 쓴 결과 사이에 들어갔습니다. 모든 프로바이더 패밀리는 결과가 호출 바로 뒤에 오기를 요구하므로, 다음 모델 호출은 `InvalidRequest`로 로컬에서 거부되어 아무것도 전송되지 않았습니다. 이제 엔진은 히스토리에 결과 없는 클라이언트 도구 호출이 있는 동안 그 값을 `messages`에 쓰지 않습니다. `has_tool_calls` 라우트와 tools 노드가 쓰는 것과 같은 판정입니다. 게이트는 여전히 `ToolGateContext::resume_value`에서, 노드는 `ctx.resume_value`에서 응답을 읽으며, `messages` 채널이 있는 그래프는 그 밖의 경우 여전히 그 값을 사용자 메시지로 받습니다.
+- **실패했거나 거부된 도구 호출이 더 이상 다음 Responses 호출을 로컬에서 실패시키지 않습니다 (#544).** NeoGraph는 실패한 호출의 결과에 오류 표시를 붙이는데, Responses 와이어에는 이를 담을 필드가 없습니다. SchemaProvider는 오류 표시가 붙은 요청을 `Unsupported`로 거부합니다. 게이트의 거부, 예외를 던진 도구, 알 수 없는 도구, 만료된 호출은 모두 다음 모델 호출에서 실행을 끝냈습니다. 이제 요청은 실패를 결과의 텍스트로 보냅니다. 그 텍스트에는 이미 오류, 상태, 재시도 가능 여부가 들어 있습니다. 다른 패밀리는 달라지지 않습니다.
 
 ## [0.15.1] - 2026-10-19
 

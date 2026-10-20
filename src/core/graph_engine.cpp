@@ -480,6 +480,19 @@ std::string answered_interrupt(const ResumeContext& checkpoint, const std::strin
     return requested;
 }
 
+// #544: whether the "messages" history holds client tool calls that no result
+// answers yet: the state a tool gate or an interrupt_before pause leaves in
+// front of the step that runs them. The router (has_tool_calls) and the
+// tool_dispatch node use the same test. A history this cannot read is left to
+// the node that reads it.
+bool holds_unanswered_tool_calls(const GraphState& state) {
+    try {
+        return !pending_client_tool_calls(state.get_provider_messages()).empty();
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 }  // namespace
 
 std::unique_ptr<GraphEngine> GraphEngine::link_impl(CompiledGraph   cg,
@@ -2087,9 +2100,14 @@ GraphEngine::execute_graph_async(
         // for anything that isn't a chat — including the approval prompt
         // dynamic interrupts exist for. Every node now reads the answer
         // from ``ctx.resume_value`` regardless; this write stays for the
-        // graphs that were relying on it (issue #94).
+        // graphs that were relying on it (issue #94). Not while an assistant
+        // turn's tool calls wait for their results: a user turn there would
+        // come between the calls and the results, which every provider
+        // family refuses, and the answer belongs to the gate that asked
+        // (issue #544).
         if (resume_value && !resume_value->is_null()
-            && state.has_channel("messages")) {
+            && state.has_channel("messages")
+            && !holds_unanswered_tool_calls(state)) {
             // Build the resume message outside the brace-init that
             // would otherwise nest inside the coroutine body. Same
             // GCC 13 ICE shape; same workaround.

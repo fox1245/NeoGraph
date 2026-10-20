@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -72,6 +72,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **Python が `provider_model_catalogue_json` を公開します。** ネイティブモジュールにはありましたが、`neograph_engine` にはありませんでした。
   - **cookbook のチャットボットがモデル名で分岐しません。** 既定モデルの低い reasoning effort は、モデルカタログの項目（`live-models.json`）になり、`--model-catalogue` で渡します。この項目がなければ、呼び出しは reasoning effort を送りません。
   - **リファレンス。** エンドポイントノードの呼び出し経路（`make_endpoint_request` を `invoke_provider` に渡す）を実際のとおりに説明し、`P_MONEY_UNMODELED` の表にエンドポイント呼び出しを加えました。
+- **値を付けた再開が、ゲートされたツール呼び出しの後の次のモデル呼び出しを壊さなくなりました (#544)。** `messages` チャネルを持つグラフは、`resume()` の値をそこにユーザーメッセージとして受け取ります (#94)。実行がツールゲートで、または tools ノードの `interrupt_before` による一時停止で止まっていた場合、履歴はツール呼び出しにまだ結果がないアシスタントターンで終わっており、そのメッセージが呼び出しと、その後に tools ステップが書く結果の間に入っていました。どのプロバイダーファミリーも結果が呼び出しの直後に続くことを要求するため、次のモデル呼び出しは `InvalidRequest` でローカルに拒否され、何も送信されませんでした。エンジンは、履歴に結果のないクライアントツール呼び出しがある間、その値を `messages` に書かなくなりました。`has_tool_calls` ルートと tools ノードが使うのと同じ判定です。ゲートは従来どおり `ToolGateContext::resume_value` から、ノードは `ctx.resume_value` から回答を読み、`messages` チャネルを持つグラフは、それ以外のときは従来どおりその値をユーザーメッセージとして受け取ります。
+- **失敗した、または拒否されたツール呼び出しが、次の Responses 呼び出しをローカルで失敗させなくなりました (#544)。** NeoGraph は失敗した呼び出しの結果にエラーの印を付けますが、Responses のワイヤにはそれを載せるフィールドがありません。SchemaProvider は印の付いたリクエストを `Unsupported` で拒否します。ゲートによる拒否、例外を投げたツール、未知のツール、期限切れの呼び出しは、いずれも次のモデル呼び出しで実行を終わらせていました。リクエストは失敗を結果のテキストとして送るようになりました。そのテキストには、エラー、ステータス、再試行できるかどうかがすでに含まれています。他のファミリーは変わりません。
 
 ## [0.15.1] - 2026-10-19
 

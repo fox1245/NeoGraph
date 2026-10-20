@@ -53,6 +53,7 @@ add_executable(neograph_tests
     test_sends_interrupt_order.cpp
     test_dynamic_interrupt.cpp
     test_tool_gate.cpp
+    test_resume_tool_calls.cpp
     test_multi_send_events.cpp
     test_multi_send_routing.cpp
     test_schema_provider_concurrent.cpp

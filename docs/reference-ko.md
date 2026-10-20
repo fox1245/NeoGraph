@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -808,10 +808,13 @@ if (r.interrupted) {
 }
 ```
 
-`resume_value` also arrives as a user turn on a `messages` channel when the
-graph has one, which is how chat-shaped graphs have always received it.
-`ctx.resume_value` is the general path — it works whatever the graph's channels
-are called.
+`resume_value`는 그래프에 `messages` 채널이 있으면 그 채널에 사용자 턴으로도
+전달되며, 채팅 형태의 그래프는 예전부터 이 방식으로 값을 받아 왔다. 다만 도구
+게이트가 인터럽트한 뒤처럼 어시스턴트 턴의 도구 호출에 아직 결과가 없을 때는
+전달되지 않는다. 그 자리의 사용자 턴은 호출과 결과 사이에 끼어들어 다음 모델
+호출이 거부되기 때문이다(#544). 게이트는 `ToolGateContext::resume_value`에서
+응답을 읽는다. `ctx.resume_value`는 일반 경로이며, 그래프의 채널 이름과
+상관없이 동작한다.
 
 This is the *dynamic* form of interruption. The *static* form —
 `interrupt_before` / `interrupt_after` in the graph definition — pauses at a
