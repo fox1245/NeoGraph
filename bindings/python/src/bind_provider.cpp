@@ -246,6 +246,15 @@ void init_provider(py::module_& m) {
         .def("prepare", [](Provider& self, ProviderRequest request) { return std::make_shared<PreparedHandle>(self.prepare(std::move(request))); }, py::arg("request"))
         .def("dispatch", [](Provider& self, PreparedHandle& prepared) { auto request = prepared.take(); py::gil_scoped_release release; return self.dispatch(std::move(request)); }, py::arg("prepared"))
         .def("invoke", [](Provider& self, ProviderRequest request) { py::gil_scoped_release release; return self.invoke(std::move(request)); }, py::arg("request"))
+        .def("prepare_endpoint", &prepare_endpoint, py::arg("request"), py::arg("timeout_seconds") = py::none(),
+             "Prepares a SchemaProvider endpoint call (embeddings, images, files, batches, ...) on this provider's "
+             "client and returns a PreparedEndpoint. RuntimeError when the provider has no endpoints, or no preparation slot "
+             "is free.")
+        .def("complete_endpoint", &complete_endpoint, py::arg("request"), py::arg("timeout_seconds") = py::none(),
+             "Runs an endpoint request or a PreparedEndpoint and returns its result object or a ProviderFailure. "
+             "The GIL is released while the call runs.")
+        .def("complete_endpoint_async", &complete_endpoint_async, py::arg("request"), py::arg("timeout_seconds") = py::none(),
+             "Awaitable peer of complete_endpoint. Cancelling it cancels the call.")
         .def_static("request_digest", [](const PreparedHandle& request) { return Provider::request_digest(request.get()); })
         .def_static("conservative_token_upper_bound", [](const PreparedHandle& request) { return Provider::conservative_token_upper_bound(request.get()); });
     m.def("make_provider_request", &make_provider_request, py::arg("provider"), py::arg("model"), py::arg("messages"), py::arg("tools") = std::vector<ChatTool>{}, py::arg("controls") = ProviderControls{}, py::arg("mode") = ProviderMode::Collect);

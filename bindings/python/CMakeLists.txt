@@ -75,6 +75,7 @@ pybind11_add_module(_neograph
     src/bind_provider_values.cpp
     src/bind_provider_controls.cpp
     src/bind_provider_families.cpp
+    src/bind_provider_endpoints.cpp
     src/bind_openinference.cpp
     src/bind_artifact.cpp
     src/bind_state.cpp
@@ -220,6 +221,7 @@ configure_file(neograph_engine/state_view.py    "${_NEOGRAPH_PY_PKG_DIR}/state_v
 configure_file(neograph_engine/openinference.py "${_NEOGRAPH_PY_PKG_DIR}/openinference.py" COPYONLY)
 configure_file(neograph_engine/protocol.py      "${_NEOGRAPH_PY_PKG_DIR}/protocol.py"      COPYONLY)
 configure_file(neograph_engine/provider_controls.py "${_NEOGRAPH_PY_PKG_DIR}/provider_controls.py" COPYONLY)
+configure_file(neograph_engine/provider_endpoints.py "${_NEOGRAPH_PY_PKG_DIR}/provider_endpoints.py" COPYONLY)
 
 # Install rule for the wheel build. Tagged with the same component as
 # the engine .so files in the root CMakeLists, so a single
@@ -245,6 +247,7 @@ install(FILES
     neograph_engine/openinference.py
     neograph_engine/protocol.py
     neograph_engine/provider_controls.py
+    neograph_engine/provider_endpoints.py
     DESTINATION neograph_engine)
 
 # Make smoke tests runnable straight from the build tree:

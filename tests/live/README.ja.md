@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=ad1342183f4ed785446bb9e1ad229fa82969da6557f52beee7bb313a6d961138 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=6372355bab3b86363a732b0efb0c03cb120a9fa9357513267f574c998c2dd508 -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -15,6 +15,7 @@
   - OpenRouter Chat と Gemini Generate が生成した画像の保持。
   - Anthropic Messages の制御：thinking モードと effort、tool choice、temperature の規則、プロンプトキャッシュ、そして OpenRouter 経由の同じ制御。
   - 型付きの失敗：無効なキー、キャンセルしたストリーム、期限切れの deadline。
+  - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI の埋め込み、await する OpenRouter の埋め込み、OpenAI の moderation。
 - **C++**（`tests/live_e2e_test.cpp`、ターゲット `neograph_live_e2e_tests`）：
   - Claude 5.5 のサーバーツール、生成画像、Interactions を使うプロバイダーアダプター。
   - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI と OpenRouter の埋め込み、OpenAI の moderation、Anthropic のトークン数カウント。

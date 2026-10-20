@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,7 +17,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **SchemaProvider 엔드포인트를 `Provider`에서 부릅니다 (#531).**
   - `prepare_endpoint`, `complete_endpoint`, `complete_endpoint_async`가 SchemaProvider의 비채팅 엔드포인트를 실행합니다: 이미지, decisions, 임베딩, rerank, moderation, 음성 합성, 전사와 번역, 비디오 job, 파일, 배치, 토큰 수 세기, OpenRouter 생성 통계.
   - 호출은 채팅 호출이 함께 쓰는 provider 자신의 SchemaProvider 클라이언트에서 실행되며, descriptor 정책이 origin별로 각 엔드포인트를 승인합니다.
-  - 0.16.0이 제거하는 타입 클라이언트를 대신합니다. Python, 그래프 노드, Program 호출은 뒤따릅니다.
+  - 0.16.0이 제거하는 타입 클라이언트를 대신합니다.
+  - **Python.** `Provider.prepare_endpoint`, `complete_endpoint`, `complete_endpoint_async`는 SDK의 요청 클래스(`EmbeddingsRequest`, `ImagesRequest`, `FileUpload`, `BatchSubmit`, `TokenCount` 등)를 받아 해당 결과 클래스나 `ProviderFailure`를 반환합니다. 모든 요청 클래스에는 엄격한 `from_dict`가 있습니다. `complete_endpoint_async`는 바인딩의 하나뿐인 asio 런타임에서 실행되는 호출의 `asyncio.Future`를 반환하며, 이를 취소하면 호출이 취소됩니다. `batch_jsonl`, `batch_decode_line`, `files_media`, `verify_webhook`은 모듈 함수입니다.
   - `Provider`에 가상 멤버 `endpoint_runtime()`이 생겼으므로 `Provider`의 C++ 하위 클래스는 새 헤더로 다시 빌드해야 합니다 ([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 - **그래프의 엔드포인트 노드 (#531).**
   - 내장 노드 타입 `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe`, `translate`는 각각 엔드포인트 호출을 한 번 합니다. 입력은 노드의 config가 이름을 지정한 채널에서 읽고, 결과는 채널 하나에 씁니다: provider 미디어 JSON, 벡터, 순위, 판정, 답변 또는 텍스트.

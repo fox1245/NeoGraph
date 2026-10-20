@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,7 +17,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **可从 `Provider` 调用 SchemaProvider 端点 (#531)。**
   - `prepare_endpoint`、`complete_endpoint` 和 `complete_endpoint_async` 运行 SchemaProvider 的非聊天端点：图像、decisions、嵌入、rerank、moderation、语音合成、转写与翻译、视频任务、文件、批处理、token 计数和 OpenRouter 生成统计。
   - 调用在 provider 自己的 SchemaProvider 客户端上运行，与其聊天调用共用该客户端，descriptor 策略按 origin 准入每个端点。
-  - 它们取代 0.16.0 移除的类型化客户端。Python、图节点和 Program 调用随后跟进。
+  - 它们取代 0.16.0 移除的类型化客户端。
+  - **Python。** `Provider.prepare_endpoint`、`complete_endpoint` 和 `complete_endpoint_async` 接受 SDK 的请求类（`EmbeddingsRequest`、`ImagesRequest`、`FileUpload`、`BatchSubmit`、`TokenCount` 等），返回对应的结果类或 `ProviderFailure`。每个请求类都有严格的 `from_dict`。`complete_endpoint_async` 返回绑定唯一的 asio 运行时上的 `asyncio.Future`，取消它会取消调用。`batch_jsonl`、`batch_decode_line`、`files_media` 和 `verify_webhook` 是模块函数。
   - `Provider` 新增了虚成员 `endpoint_runtime()`，因此 `Provider` 的 C++ 子类必须用新头文件重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **图中的端点节点 (#531)。**
   - 内置节点类型 `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe` 和 `translate` 各自发起一次端点调用。它们从节点 config 所指定名称的通道读取输入，并把结果写入一个通道：provider 媒体 JSON、向量、排名、判定、答案或文本。

@@ -3,6 +3,7 @@
 #include "json_bridge.h"
 #include "node_failure_bridge.h"
 #include "provider_bridge.h"
+#include "sdk_members.h"
 #include "interpreter_exit.h"
 #include <core/native.h>
 #include <core/native_archive.h>
@@ -12,17 +13,6 @@
 namespace py = pybind11;
 namespace neograph::pybind {
 namespace {
-py::object document_view(const std::shared_ptr<const sp::json::Document>& value) {
-    if (!value) return py::none();
-    return py::module_::import("json").attr("loads")(value->root().dump());
-}
-std::shared_ptr<const sp::json::Document> document_from(py::object value) {
-    if (value.is_none()) return {};
-    auto parsed = sp::json::parse(py_to_json(value).dump());
-    auto* document = std::get_if<sp::json::Document>(&parsed);
-    if (!document) throw py::value_error("Invalid or oversized SDK JSON data");
-    return std::make_shared<const sp::json::Document>(std::move(*document));
-}
 struct NativeReplayView { std::shared_ptr<const sp::NativeReplay> value; };
 struct NativeContextView { std::shared_ptr<const sp::NativeContext> value; };
 struct OwnedDelta { sp::LocalId part; sp::PartKind kind; std::string bytes; sp::DeltaChannel channel; };

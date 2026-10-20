@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=b1d8f9b4364dcc543a4c2c52e194847b7791d164e521f99cd5e1a744cc6968ef -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=e2edc5477cee0bc3013f3f7f639072dd7ae5ca185ba9fdd3ad9b9d0866347cdd -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -242,6 +242,51 @@ SDK 실패는 예외가 아니라 반환되는 데이터입니다. 호스트 obs
 `UsageAccumulator`는 토큰만 집계합니다. 보고서가 하나뿐이면 금액 메타데이터가 그대로 유지되지만, 두 번째 보고서가 들어오면 스냅샷의 `provider_cost`는 첫 호출의 오래된 비용도 합계도 아닌 정규 Missing/None으로 명시적으로 초기화됩니다. 그 스냅샷을 복원해도 비용이 되살아나지 않고 토큰 권한이 갱신되지도 않습니다. 정확한 금액 증거는 원래의 각 결과(outcome)나 provider 저널 항목에서 읽어야 합니다.
 
 재개하거나 이어 갈 때 `RunResult.provider_outcomes`에는 원래의 결과가 순서대로 먼저 오고, 그 뒤에 새로 만들어진 결과가 붙습니다. `RunResult.usage`는 현재 사용 중인 회계 bank의 값을 반영하며, 이 bank는 체크포인트에서 이전 보고서를 복원할 수 있습니다. 따라서 새 provider 호출 없이 재개했더라도 사용량이 `None`이나 0이라는 보장은 없습니다. 증거를 복원할 때 원래의 provider 요청을 다시 디스패치해서는 안 되고, 같은 비용을 두 번 청구해서도 안 됩니다. 보관된 보고서는 이전 호출을 설명할 뿐이며 새로운 지출 허용량을 부여하지 않습니다.
+
+### 엔드포인트 호출
+
+`Provider`는 채팅 호출이 쓰는 클라이언트에서, 자신의 origin에 있는 SchemaProvider의 비채팅 엔드포인트도 실행합니다:
+
+| 영역 | 요청 | 결과 |
+|---|---|---|
+| 이미지, decisions, 임베딩 | `ImagesRequest`, `DecisionsRequest` (`DecisionQuestion`, `DecisionOption`), `EmbeddingsRequest` (`EmbeddingInput`) | `ImagesResult`, `DecisionsResult` (`DecisionAnswer`), `EmbeddingsResult` |
+| rerank, moderation | `RerankRequest`, `ModerationRequest` (`ModerationInput`) | `RerankResult` (`RerankRanked`), `ModerationResult` (`ModerationVerdict`) |
+| 음성 합성, 전사 | `SpeechRequest`, `TranscriptionRequest` | `SpeechResult`, `TranscriptionResult` |
+| 비디오 job | `VideoRequest`, `JobPoll`, `JobDownload` (`JobHandle`) | `JobState` (`JobStatus`), `JobContent` |
+| 파일 | `FileUpload` (`FileSource`), `FileGet`, `FileList`, `FileDelete`, `FileDownload`; 청크 방식: `FileUploadStart`, `FileUploadPart`, `FileUploadComplete`, `FileUploadQuery`, `FileUploadCancel` (`FileUploadSession`) | `ProviderFile` (`FileState`), `FilePage`, `FileDeleted`, `JobContent`, `FileUploadProgress` |
+| 배치 | `BatchSubmit` (`BatchItem`), `BatchGet`, `BatchCancel`, `BatchDelete`, `BatchResults` | `Batch` (`BatchCounts`), `BatchDeleted`, `JobContent` |
+| 토큰 수 세기, 생성 통계 | `TokenCount`, `GenerationGet` | `TokenCountResult`, `GenerationResult` |
+
+```python
+request = ng.EmbeddingsRequest.from_dict({
+    "model": "text-embedding-3-small",
+    "inputs": [{"text": "A graph of agents."}, {"text": "A list of chores."}],
+})
+result = provider.complete_endpoint(request)  # blocks without the GIL
+if isinstance(result, ng.ProviderFailure):
+    raise RuntimeError(result.error.safe_message)
+vectors = result.vectors  # one list of floats per input
+
+# Without blocking a thread; cancelling the awaiting task cancels the call.
+result = await provider.complete_endpoint_async(request, timeout_seconds=30)
+
+# Inspect, or journal, a call before it runs.
+prepared = provider.prepare_endpoint(request)
+print(prepared.endpoint, prepared.model, prepared.error)  # "embeddings", the model, None
+result = provider.complete_endpoint(prepared)
+```
+
+`complete_endpoint`는 요청의 결과 객체 또는 `ProviderFailure`를 반환합니다. 실패는 채팅과 마찬가지로 반환되는 데이터입니다. descriptor 정책은 호출을 준비할 때 origin별로 각 엔드포인트를 승인(admission)합니다. 정책이 거부한 호출은 자신의 오류(`prepared.error`)를 가지며, 네트워크에 닿지 않은 채 `ProviderFailure`로 완료됩니다. 기본 정책은 엔드포인트를 그것을 제공하는 provider origin에서는 승인하지만, 루프백 테스트 origin에서는 승인하지 않습니다.
+
+- **요청.** 요청은 기본 생성자로 만든 뒤 필드를 대입하거나 `from_dict`로 만듭니다. `from_dict`는 모르는 키를 거부하고, enum은 멤버 이름(`"Choice"`)으로 받으며, 중첩된 값은 타입에 따라 만듭니다: `{"inputs": [{"text": "hello"}]}`. 미디어(`ProviderMedia`), `Batch`, `ProviderRequest`는 객체로 넘깁니다. `extensions`는 SDK 정책이 해당 origin에 승인하는 최상위 멤버이며, 평범한 Python 데이터가 그대로 전송됩니다. 요청이 반환하는 리스트는 분리된 복사본이므로, 리스트를 만든 다음 대입합니다.
+- **결과.** 결과 클래스의 속성은 읽기 전용이며 복사본을 반환하므로, 루프 안에서 `result.vectors`를 읽지 말고 변수에 담아 둡니다. 재사용하는 타입은 `ProviderMedia`, `ProviderUsage`, `ProviderServedModel`, `ProviderAttemptEvidence`, `ProviderRawWire`(`raw_events`)입니다. 쌍은 튜플의 리스트입니다(`ModerationVerdict.categories`, `DecisionAnswer.probabilities`).
+- **준비.** `prepare_endpoint(request, timeout_seconds=None)`는 `endpoint`, `model`, `error`, `consumed`를 가진 `PreparedEndpoint`를 반환합니다. `timeout_seconds`는 준비 시점부터 세는 호출의 데드라인입니다. 준비된 호출은 자기 데드라인을 유지하므로, 완료 호출에 데드라인을 넘기면 `ValueError`가 납니다. `PreparedEndpoint`는 한 번만 완료할 수 있으며, 두 번째 완료는 `ValueError`를 냅니다. 준비 슬롯이 하나도 비어 있지 않으면 `prepare_endpoint`가 `RuntimeError`를 내고, 이때 완료 호출은 대신 SDK의 `ProviderFailure`를 반환합니다.
+- **블로킹 없이.** `complete_endpoint_async`는 `asyncio.Future`를 반환하며 실행 중인 루프가 필요합니다. `run_async`가 쓰는 단일 asio 워커 스레드에서 실행됩니다. 기다리는 태스크를 취소하면 호출과 provider로의 연결이 취소되고, 그때 SDK가 보고하는 결과(`Cancelled` 실패)는 버려집니다.
+- **그대로 전송.** `SchemaProviderDefaults`는 채팅 호출에만 적용됩니다. 이 호출들은 호출을 저널에 기록하지 않으며, 예산을 예약하거나 청구하지도 않습니다.
+- **엔드포인트가 없는 provider.** Python으로 작성한 `Provider` 서브클래스에는 엔드포인트가 없습니다. `prepare_endpoint`와 완료 호출은 `RuntimeError`를 냅니다.
+- **job, 파일, 세션.** `JobHandle`과 `FileUploadSession`은 호출 사이에 저널에 기록하고 재시작한 뒤 다시 만들 수 있는 평범한 값입니다. Google 세션의 `url`이 있으면 누구나 API 키 없이 파일을 쓸 수 있으므로, 자격 증명만큼 비공개로 유지해야 합니다. `FileSource`는 `bytes`를 담거나, 로컬 파일 `path`의 `offset`부터 `size` 바이트를 담으며, 이 바이트는 전송하는 동안 읽습니다.
+- **배치와 토큰 수 세기.** `BatchItem.request`와 `TokenCount.request`는 `make_provider_request`가 Chat, Responses, Messages, Generate provider용으로 만든 `ProviderRequest`로 설정하며(Interactions 요청은 `ValueError`를 냅니다), 다시 읽을 수 없습니다. `batch_jsonl(descriptor, items)`는 계열 descriptor에 대한 OpenAI의 입력 파일을 쓰고, `batch_custom_id(line)`은 결과 줄이 응답하는 요청을 가리키며, `batch_decode_line(descriptor, request, line)`은 그 줄을 해당 요청의 결과(outcome)로 디코딩합니다(`BatchLine.outcome`은 `ProviderOutcome`입니다). `batch_inline_lines(batch)`는 Google 배치의 인라인 결과를 나열합니다.
+- **미디어로서의 파일, webhook.** `files_media(file, origin, now)`는 활성 상태이며 만료되지 않은 `ProviderFile`을 채팅 요청이 지정하는 `ProviderMedia` 참조로 바꾸고, 다른 origin이면 `ValueError`를 냅니다. `verify_webhook(secret, headers, body, now, tolerance=300)`은 서명된 webhook(OpenAI가 보내는 것과 같은 형식)을 검사해 `WebhookEvent`를 반환하며, 잘못되었거나 오래된 webhook은 `ValueError`를 냅니다. 호스트는 원문 body와 자기 시계를 넘기고, 재전송(replay)을 거부하기 위해 이미 처리한 전달 id를 기억해 둡니다.
 
 ### 네이티브 기록과 이식 가능한 내보내기
 
