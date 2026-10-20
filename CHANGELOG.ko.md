@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1ad94dc3f8605b5b07d82e043845a53f9adfe1a49a97319a18c1c59081c7925c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3b760c8f01646060d52a2e89fb43debb7be9345562fa347f5bd39bd00309a4ae -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+## [0.16.0] - 2026-10-20
 
 ### 추가됨
 - **SchemaProvider 엔드포인트를 `Provider`에서 부릅니다 (#531).**
@@ -27,7 +29,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **Program의 엔드포인트 호출 (#531).**
   - `make_endpoint_request`는 엔드포인트 요청을 `ProviderRequest`에 담으며, 엔드포인트 노드가 이를 통해 호출합니다. 그래서 엔드포인트 호출은 채팅 호출이 거치는 경로를 따릅니다: provider 호출 broker, 영속적인 디스패치 마커, SQLite 저널, 그리고 재개와 fork에서의 재생. Program은 `RegistrySnapshotBuilder::add_core_endpoint_node`로 노드를 등록합니다.
   - 모델 토큰 예산은 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부합니다. 가격을 매기는 binding은 모델 카탈로그가 아직 엔드포인트 요청의 가격을 매길 수 없으므로 `P_MONEY_UNMODELED`로 거부합니다 (fox1245/SchemaProvider#124).
-  - 엔드포인트 호출의 디스패치 identity에는 그 엔드포인트, 메서드, URL도 들어갑니다. 채팅 호출의 identity는 그대로이므로 저널이 계속 일치합니다.
+  - 엔드포인트 호출의 디스패치 identity에는 그 엔드포인트, 메서드, URL도 들어갑니다. 채팅 호출의 identity에는 이 항목들이 더해지지 않습니다.
   - 업로드의 디스패치 identity에는 파일 이름, MIME 타입, purpose, 만료 시간과, 보내는 바이트의 SHA-256, 오프셋, 크기도 들어갑니다. 파일 경로는 들어가지 않습니다(#541). 이전에는 파일에서 읽는 업로드의 identity가 파일, 이름, purpose와 상관없이 같았고, 메모리에서 보내는 업로드는 SDK의 무작위 multipart 경계가 본문에 들어가서 준비할 때마다 identity가 달랐습니다. 파일이 없거나 조각보다 짧으면 호출을 준비할 때 거부됩니다. 또 모델 이름이 없는 호출(업로드 등)의 저널 행을 재개가 읽을 때 손상된 것으로 거부하지 않습니다.
   - 엔드포인트 읽기(GET: job 폴링이나 다운로드, 파일이나 배치 조회)는 과금되지 않고 다시 보내도 안전하므로, 저널은 이를 매번 보냅니다(`PreparedProviderRequest::is_endpoint_read()`). 그래서 실행 중인 비디오 job에서 멈춘 Program은 재개될 때 첫 폴링을 replay하지 않고 job이 끝난 것을 봅니다.
   - Program provider 래퍼와 `OpenInferenceProvider`는 안쪽 provider의 엔드포인트를 전달합니다(`Provider::endpoint_runtime_of`).
@@ -45,10 +47,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **정산.** 보고된 비용이 없으면 `sp::pricing::estimate`가 hold에 가격을 매길 때의 카탈로그 스냅샷으로 호출의 가격을 매기고, 예약된 서버 도구 요금은 cap만큼 청구됩니다.
   - **동작 변경: 레코드.** `ProgramMonetaryRecord::origin`은 provider의 base URL입니다(`https://openrouter.ai`, 이전에는 `openrouter`). `catalog_version`은 카탈로그의 digest와 함께 `sp-model-catalogue/1`이고, 새 `pricing`(Python `record.pricing`)은 항목, 그 가격 행, service tier, 예약된 도구 사용, 추정의 가정을 담습니다. 0.16.0 이전에 journal에 기록된 레코드는 바이트가 그대로입니다.
   - **동작 변경: `P_MONEY_UNKNOWN_ORIGIN`**은 이제 승인된 descriptor가 없는 provider만 뜻합니다. base URL에서 카탈로그가 가격을 매기지 않는 모델은 `P_MONEY_UNKNOWN_MODEL`입니다.
-- **SchemaProvider interface 7을 채택합니다 (#512).** NeoGraph는 interface 7 헤더와 7세대 라이브러리(`libsp_*.so.7`)로 빌드합니다. SchemaProvider 0.4.0이 출시될 때까지 빌드는 `main` 브랜치(패키지 버전 0.3.0)에 고정되며, 0.16.0 출시 전에 0.4.0 릴리스로 옮겨집니다.
+- **SchemaProvider interface 7을 채택합니다 (#512).** NeoGraph는 interface 7 헤더와 7세대 라이브러리(`libsp_*.so.7`)로 빌드합니다. 빌드는 SchemaProvider 0.4.0의 릴리스 커밋 `f47548fed63038d926aad7dc840bfaf701a8f1fc`에 고정되며, 설치된 SDK는 정확히 0.4.0이어야 합니다(`find_package(SchemaProvider 0.4.0 EXACT)`).
   - **동작 변경: 타입이 있는 미디어.** `sp::Image`는 `sp::Media`가 됩니다. 이미지·오디오·비디오·문서이며, 인라인이거나 URL 또는 provider 파일에 있습니다. `ChatMessage::image_urls`는 인라인 이미지를 이전처럼 data URL로 투영하고, 이제 URL 이미지도 투영합니다. `portable_message`는 https 항목을 provider가 가져갈 URL 미디어로 보냅니다. 생성된 이미지(Chat `message.images`, Responses `image_generation_call`, Gemini `inlineData`)는 `Opaque`가 아니라 `Media` 파트이며, wire 항목은 native 출력에 그대로 남습니다.
   - **Provider outcome 포맷 v3.** `neograph.provider-outcome/v3`와 `neograph.provider-message/v3`(`schemas/*-v3.schema.json`)는 미디어 파트, 텍스트 인용, 타입이 있는 도구 결과 내용, 에러의 `reason`, 실제 응답한 `model`을 더합니다. v2 포맷의 레코드(Program 저널, 체크포인트, 런타임 히스토리)도 계속 읽습니다. 이미지 파트는 인라인 이미지 미디어가 되고 새 멤버는 비어 있습니다. 새 레코드는 v3로 쓰며, NeoGraph 0.15는 이를 읽을 수 없습니다.
   - **런타임 히스토리 레코드**는 저장 버전 3입니다. 버전 2 레코드는 저장된 바이트와 id 그대로 읽으므로 피드의 predecessor 체인이 바뀌지 않습니다. Program provider 저널 행은 기록될 때의 digest 도메인을 유지합니다.
+  - **동작 변경: 0.15의 Program 저널은 재개되지 않습니다 (#543).** 공급자 호출의 디스패치 identity에는 SchemaProvider 정책 identity가 들어가는데, interface 7이 이를 바꿉니다. 그래서 0.15가 저널에 기록한 실행은 0.16에서 재개할 수 없습니다. 저널이 논리 호출 바인딩 충돌을 보고합니다. 그런 실행을 fork하면 호출을 이어받지 않고 다시 보내므로, 이미 비용을 낸 호출에 다시 비용이 듭니다. 업그레이드 전에 그런 실행을 끝내거나 버리세요.
   - **동작 변경: 0.15의 native 히스토리는 재생되지 않습니다.** interface 7은 모든 정책 identity를 바꾸므로, 0.15가 봉인한 native 히스토리를 이어 가면 `ReplayIneligible`입니다. 이식 가능한 히스토리는 영향이 없습니다.
   - **모델 정보는 카탈로그 데이터입니다.** descriptor 정책에는 `models` 목록이 없으며, 모델 한도와 모델별 기본값은 SDK 모델 카탈로그의 항목입니다(`sp::descriptor::load_catalogue`, `merge_catalogues`, `DescriptorPolicy::with_catalogue`). cookbook 챗봇은 `--model-catalogue PATH`를 받고 `demo-policy.json` 대신 `demo-models.json`을 제공하며, 세션은 카탈로그를 포함한 정책의 content digest에 묶입니다.
   - **Python.** `ProviderImage`를 `ProviderMedia`가 대체합니다. `ProviderMedia.image(...)`, `.audio`, `.video`, `.document`, `.url`, `.file`이 있고, `kind`, `source`, `mime`, `data`, `reference`, `name`, `detail`, `id`, `transcript`와 열거형 `ProviderMediaKind`, `ProviderMediaSource`가 있습니다. 새로 생긴 것: `Text.citations`(`ProviderCitation`), `ProviderToolResult.content_parts`, `ProviderError.reason`, `ProviderCompletion.model`과 `ProviderPartialCompletion.model`(`ProviderServedModel`, `ProviderServedRelation`), `ProviderPartHeader.media`, `ProviderPartSeal.citations`, `ProviderStopKind.Pending`과 `Compaction`, `ProviderPartKind.Media`, `ProviderCostRounding.CeilingCatalogueProduct`. `load_provider_policy`는 내장 카탈로그 위에 얹는 선택적 `model_catalogue_json`을 받고, `provider_model_catalogue_json()`은 내장 카탈로그를 돌려줍니다.

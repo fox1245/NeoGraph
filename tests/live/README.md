@@ -21,6 +21,7 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
 - **C++** (`tests/live_e2e_test.cpp`, target `neograph_live_e2e_tests`):
   - the provider adapter with a Claude 5.5 server tool, generated images and Interactions;
   - SchemaProvider endpoints through `Provider` (#531): OpenAI and OpenRouter embeddings, OpenAI moderation, an Anthropic token count, an OpenAI image, OpenAI speech transcribed back to text, a Gemini file named in a request, and Anthropic and OpenAI batches from submission to cancellation;
+  - SchemaProvider realtime transcription sessions at OpenAI and Google, fed with speech from OpenAI's speech endpoint, each committing one user turn with the words spoken;
   - the model catalogue refreshed from all four providers' listings, a call to a model that only the refreshed catalogue lists, and a model that no catalogue lists, which is still sent;
 - **Known gaps** of the release line are cases that must fail (strict xfail). `tests/live/manifest.json` lists them with the issue that fixes them. When a fix lands, the case starts to pass and the manifest has to change with it.
 

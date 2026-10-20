@@ -1,127 +1,357 @@
 {
  "format": "neograph.live-e2e/v1",
- "neograph": "0.15.1",
- "python_module": "0.15.1",
- "schemaprovider": "060f52c9ab0fbbc6b785b097785a17bdf16d7773",
- "commit": "14a886d36934d6908658fe3013e8d242404ed688",
- "tree": "fbc132d63afac5f842cb4644f5c695e0207454ec52f588dfa30503bd0a59fa7a",
+ "neograph": "0.16.0",
+ "python_module": "0.16.0",
+ "schemaprovider": "f47548fed63038d926aad7dc840bfaf701a8f1fc",
+ "commit": "9d0270f451f0a2741a45ad72cc3cafb7a1c47d03",
+ "tree": "a4be8e5b3cd39552624d13d3656f97fb76d5307a86c1c8400ac2695544da25ac",
  "dirty": false,
- "finished": "2026-10-18T19:24:46Z",
- "seconds": 220.8,
+ "finished": "2026-10-20T10:39:11Z",
+ "seconds": 432.8,
  "cases": {
-  "cpp:LiveTypedClients.DecisionsShippedCatalogue": {
+  "cpp:LiveCatalogue.RefreshFromEveryListing": {
    "status": "passed",
-   "seconds": 24.14,
+   "seconds": 6.17,
    "message": ""
   },
-  "cpp:LiveTypedClients.ImagesGptImage2": {
+  "cpp:LiveCatalogue.UnlistedModelIsSent": {
    "status": "passed",
-   "seconds": 9.02,
+   "seconds": 0.28,
    "message": ""
   },
-  "cpp:LiveTypedClients.ImagesShippedGeminiConfiguration": {
+  "cpp:LiveEndpoints.AnthropicBatchLifecycle": {
    "status": "passed",
-   "seconds": 2.89,
+   "seconds": 14.14,
    "message": ""
   },
-  "cpp:LiveTypedClients.VeoShippedConfiguration": {
+  "cpp:LiveEndpoints.AnthropicTokenCount": {
    "status": "passed",
-   "seconds": 35.4,
+   "seconds": 0.36,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.EndpointNodesInAGraph": {
+   "status": "passed",
+   "seconds": 0.56,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.GeminiFileInAGenerateRequest": {
+   "status": "passed",
+   "seconds": 4.8,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenAIBatchFromAnUploadedFile": {
+   "status": "passed",
+   "seconds": 2.75,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenAIEmbeddings": {
+   "status": "passed",
+   "seconds": 1.47,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenAIImageGeneration": {
+   "status": "passed",
+   "seconds": 7.76,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenAIModeration": {
+   "status": "passed",
+   "seconds": 0.42,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenAISpeechThenTranscription": {
+   "status": "passed",
+   "seconds": 3.47,
+   "message": ""
+  },
+  "cpp:LiveEndpoints.OpenRouterEmbeddingsAsync": {
+   "status": "passed",
+   "seconds": 1.46,
+   "message": ""
+  },
+  "cpp:LiveRealtime.GoogleTranscriptionSession": {
+   "status": "passed",
+   "seconds": 15.97,
+   "message": ""
+  },
+  "cpp:LiveRealtime.OpenAITranscriptionSession": {
+   "status": "passed",
+   "seconds": 9.43,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Collect": {
    "status": "passed",
-   "seconds": 6.13,
+   "seconds": 6.79,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Stream": {
    "status": "passed",
-   "seconds": 5.1,
+   "seconds": 6.44,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Collect": {
    "status": "passed",
-   "seconds": 3.25,
+   "seconds": 3.89,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Stream": {
    "status": "passed",
-   "seconds": 3.29,
+   "seconds": 4.12,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.InteractionsText/Collect": {
    "status": "passed",
-   "seconds": 0.73,
+   "seconds": 1.22,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.InteractionsText/Stream": {
    "status": "passed",
-   "seconds": 0.87,
+   "seconds": 1.18,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.OpenRouterChatKeepsGeneratedImages/Collect": {
    "status": "passed",
-   "seconds": 3.19,
+   "seconds": 3.9,
    "message": ""
   },
   "cpp:Mode/LiveAdapter.OpenRouterChatKeepsGeneratedImages/Stream": {
    "status": "passed",
+   "seconds": 4.18,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_a_remembered_fact_drives_a_later_tool_call[anthropic]": {
+   "status": "passed",
+   "seconds": 2.91,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_a_tool_error_result_is_read_and_the_call_retried[anthropic]": {
+   "status": "passed",
+   "seconds": 2.74,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_a_tool_that_raises_is_an_error_result_the_model_answers_from[anthropic]": {
+   "status": "passed",
+   "seconds": 2.16,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_async_run_completes_a_tool_loop[async-collect]": {
+   "status": "passed",
+   "seconds": 4.12,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_async_run_completes_a_tool_loop[async-stream]": {
+   "status": "passed",
+   "seconds": 4.1,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_claude_5_5_adaptive_thinking_with_tools[collect]": {
+   "status": "passed",
+   "seconds": 4.33,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_claude_5_5_adaptive_thinking_with_tools[stream]": {
+   "status": "passed",
+   "seconds": 3.15,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_concurrent_conversations_keep_their_own_history[anthropic]": {
+   "status": "passed",
+   "seconds": 1.39,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_conversation_remembers_its_first_turn[anthropic]": {
+   "status": "passed",
+   "seconds": 4.14,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_dependent_tool_calls_feed_each_other[anthropic]": {
+   "status": "passed",
+   "seconds": 4.39,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_every_tool_call_waits_for_a_person_and_the_loop_goes_on[plain]": {
+   "status": "passed",
+   "seconds": 3.9,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_every_tool_call_waits_for_a_person_and_the_loop_goes_on[thinking]": {
+   "status": "passed",
+   "seconds": 4.57,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_gated_tool_call_resumes_with_the_operators_answer[approved]": {
+   "status": "passed",
+   "seconds": 3.06,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_gated_tool_call_resumes_with_the_operators_answer[refused]": {
+   "status": "passed",
+   "seconds": 3.87,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_inventory_tasks_across_turns[anthropic-thinking]": {
+   "status": "passed",
+   "seconds": 10.26,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_inventory_tasks_across_turns[anthropic]": {
+   "status": "passed",
+   "seconds": 8.08,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_inventory_tasks_across_turns[openrouter]": {
+   "status": "passed",
+   "seconds": 12.81,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_long_tool_chain_visits_every_link[collect]": {
+   "status": "passed",
+   "seconds": 8.29,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_long_tool_chain_visits_every_link[stream]": {
+   "status": "passed",
+   "seconds": 8.27,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_manual_thinking_survives_tool_rounds_and_a_later_turn[anthropic-collect]": {
+   "status": "passed",
+   "seconds": 5.13,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_manual_thinking_survives_tool_rounds_and_a_later_turn[anthropic-stream]": {
+   "status": "passed",
+   "seconds": 4.98,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_manual_thinking_survives_tool_rounds_and_a_later_turn[openrouter-collect]": {
+   "status": "passed",
+   "seconds": 8.48,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_manual_thinking_survives_tool_rounds_and_a_later_turn[openrouter-stream]": {
+   "status": "passed",
+   "seconds": 9.31,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_parallel_tool_calls_in_one_turn[collect]": {
+   "status": "passed",
+   "seconds": 2.69,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_parallel_tool_calls_in_one_turn[stream]": {
+   "status": "passed",
+   "seconds": 2.43,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_prompt_cache_grows_over_a_conversation[claude-haiku-4-5]": {
+   "status": "passed",
+   "seconds": 2.89,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_prompt_cache_grows_over_a_conversation[claude-haiku-5-5]": {
+   "status": "passed",
+   "seconds": 4.18,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_provider_message_list_replays_a_thinking_tool_turn[anthropic]": {
+   "status": "passed",
+   "seconds": 2.3,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_redacted_thinking_survives_tool_rounds[collect]": {
+   "status": "passed",
+   "seconds": 4.37,
+   "message": ""
+  },
+  "py:test_live_anthropic_agent::test_redacted_thinking_survives_tool_rounds[stream]": {
+   "status": "passed",
+   "seconds": 4.28,
+   "message": ""
+  },
+  "py:test_live_endpoints::test_openai_embeddings[text-embedding-3-small]": {
+   "status": "passed",
    "seconds": 3.19,
+   "message": ""
+  },
+  "py:test_live_endpoints::test_openai_moderation[omni-moderation-latest]": {
+   "status": "passed",
+   "seconds": 1.38,
+   "message": ""
+  },
+  "py:test_live_endpoints::test_openrouter_embeddings_async[openai/text-embedding-3-small]": {
+   "status": "passed",
+   "seconds": 1.32,
    "message": ""
   },
   "py:test_live_matrix::test_claude_5_5_text[claude-haiku-5-5-collect]": {
    "status": "passed",
-   "seconds": 0.7,
+   "seconds": 0.79,
    "message": ""
   },
   "py:test_live_matrix::test_claude_5_5_text[claude-haiku-5-5-stream]": {
    "status": "passed",
-   "seconds": 0.77,
+   "seconds": 0.9,
    "message": ""
   },
   "py:test_live_matrix::test_claude_5_5_text[claude-sonnet-5-5-collect]": {
    "status": "passed",
-   "seconds": 1.05,
+   "seconds": 1.16,
    "message": ""
   },
   "py:test_live_matrix::test_claude_5_5_text[claude-sonnet-5-5-stream]": {
    "status": "passed",
-   "seconds": 0.93,
+   "seconds": 1.25,
    "message": ""
   },
   "py:test_live_matrix::test_gemini_generate_image_output[collect]": {
    "status": "passed",
-   "seconds": 3.32,
+   "seconds": 3.65,
    "message": ""
   },
   "py:test_live_matrix::test_gemini_generate_image_output[stream]": {
    "status": "passed",
-   "seconds": 3.13,
+   "seconds": 3.55,
    "message": ""
   },
-  "py:test_live_matrix::test_known_gap_gemini_media[lyria-clip]": {
-   "status": "xfailed",
-   "seconds": 0.41,
-   "message": "known gap, fox1245/SchemaProvider#45"
+  "py:test_live_matrix::test_gemini_tts[collect]": {
+   "status": "passed",
+   "seconds": 2.58,
+   "message": ""
   },
-  "py:test_live_matrix::test_known_gap_gemini_media[tts]": {
-   "status": "xfailed",
-   "seconds": 0.35,
-   "message": "known gap, fox1245/SchemaProvider#55, interface 6 has no speech_config"
+  "py:test_live_matrix::test_gemini_tts[stream]": {
+   "status": "passed",
+   "seconds": 1.07,
+   "message": ""
+  },
+  "py:test_live_matrix::test_lyria_clip[lyria-clip]": {
+   "status": "passed",
+   "seconds": 10.25,
+   "message": ""
   },
   "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[collect]": {
    "status": "passed",
-   "seconds": 3.96,
+   "seconds": 3.86,
    "message": ""
   },
   "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[stream]": {
    "status": "passed",
-   "seconds": 4.72,
+   "seconds": 3.69,
+   "message": ""
+  },
+  "py:test_live_matrix::test_responses_hosted_web_search[collect]": {
+   "status": "passed",
+   "seconds": 5.47,
+   "message": ""
+  },
+  "py:test_live_matrix::test_responses_hosted_web_search[stream]": {
+   "status": "passed",
+   "seconds": 8.24,
    "message": ""
   },
   "py:test_live_matrix::test_text[anthropic.messages-collect]": {
    "status": "passed",
-   "seconds": 0.9,
+   "seconds": 0.7,
    "message": ""
   },
   "py:test_live_matrix::test_text[anthropic.messages-stream]": {
@@ -131,72 +361,72 @@
   },
   "py:test_live_matrix::test_text[google.generate-collect]": {
    "status": "passed",
-   "seconds": 0.92,
+   "seconds": 1.08,
    "message": ""
   },
   "py:test_live_matrix::test_text[google.generate-stream]": {
    "status": "passed",
-   "seconds": 1.15,
+   "seconds": 1.06,
    "message": ""
   },
   "py:test_live_matrix::test_text[google.interactions-collect]": {
    "status": "passed",
-   "seconds": 1.05,
+   "seconds": 0.93,
    "message": ""
   },
   "py:test_live_matrix::test_text[google.interactions-stream]": {
    "status": "passed",
-   "seconds": 0.72,
+   "seconds": 1.2,
    "message": ""
   },
   "py:test_live_matrix::test_text[openai.chat-collect]": {
    "status": "passed",
-   "seconds": 2.96,
+   "seconds": 2.4,
    "message": ""
   },
   "py:test_live_matrix::test_text[openai.chat-stream]": {
    "status": "passed",
-   "seconds": 1.07,
+   "seconds": 1.58,
    "message": ""
   },
   "py:test_live_matrix::test_text[openai.responses-collect]": {
    "status": "passed",
-   "seconds": 1.97,
+   "seconds": 1.87,
    "message": ""
   },
   "py:test_live_matrix::test_text[openai.responses-stream]": {
    "status": "passed",
-   "seconds": 1.98,
+   "seconds": 1.9,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.chat-collect]": {
    "status": "passed",
-   "seconds": 0.74,
+   "seconds": 1.03,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.chat-stream]": {
    "status": "passed",
-   "seconds": 1.91,
+   "seconds": 0.38,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.messages-collect]": {
    "status": "passed",
-   "seconds": 1.45,
+   "seconds": 1.41,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.messages-stream]": {
    "status": "passed",
-   "seconds": 1.46,
+   "seconds": 1.35,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.responses-collect]": {
    "status": "passed",
-   "seconds": 0.59,
+   "seconds": 0.6,
    "message": ""
   },
   "py:test_live_matrix::test_text[openrouter.responses-stream]": {
    "status": "passed",
-   "seconds": 1.81,
+   "seconds": 1.82,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[anthropic.messages]": {
@@ -206,27 +436,27 @@
   },
   "py:test_live_matrix::test_tool_call[google.generate]": {
    "status": "passed",
-   "seconds": 0.77,
+   "seconds": 0.98,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[google.interactions]": {
    "status": "passed",
-   "seconds": 1.08,
+   "seconds": 1.11,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[openai.chat]": {
    "status": "passed",
-   "seconds": 1.25,
+   "seconds": 1.21,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[openai.responses]": {
    "status": "passed",
-   "seconds": 2.22,
+   "seconds": 2.54,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[openrouter.chat]": {
    "status": "passed",
-   "seconds": 1.17,
+   "seconds": 3.29,
    "message": ""
   },
   "py:test_live_matrix::test_tool_call[openrouter.messages]": {
@@ -236,37 +466,37 @@
   },
   "py:test_live_matrix::test_tool_call[openrouter.responses]": {
    "status": "passed",
-   "seconds": 2.46,
+   "seconds": 3.9,
    "message": ""
   },
   "py:test_live_matrix::test_vision_input[anthropic.messages]": {
    "status": "passed",
-   "seconds": 0.72,
+   "seconds": 0.7,
    "message": ""
   },
   "py:test_live_matrix::test_vision_input[google.generate]": {
    "status": "passed",
-   "seconds": 1.17,
+   "seconds": 1.68,
    "message": ""
   },
   "py:test_live_matrix::test_vision_input[openai.chat]": {
    "status": "passed",
-   "seconds": 1.21,
+   "seconds": 0.96,
    "message": ""
   },
   "py:test_live_messages_controls::test_adaptive_thinking_high_effort[collect]": {
    "status": "passed",
-   "seconds": 0.81,
+   "seconds": 0.83,
    "message": ""
   },
   "py:test_live_messages_controls::test_adaptive_thinking_high_effort[stream]": {
    "status": "passed",
-   "seconds": 0.83,
+   "seconds": 1.74,
    "message": ""
   },
   "py:test_live_messages_controls::test_adaptive_thinking_low_effort[collect]": {
    "status": "passed",
-   "seconds": 0.89,
+   "seconds": 0.87,
    "message": ""
   },
   "py:test_live_messages_controls::test_adaptive_thinking_low_effort[stream]": {
@@ -276,47 +506,47 @@
   },
   "py:test_live_messages_controls::test_disabled_thinking_has_no_thinking_part[collect]": {
    "status": "passed",
-   "seconds": 0.69,
+   "seconds": 0.94,
    "message": ""
   },
   "py:test_live_messages_controls::test_disabled_thinking_has_no_thinking_part[stream]": {
    "status": "passed",
-   "seconds": 0.72,
+   "seconds": 0.97,
    "message": ""
   },
   "py:test_live_messages_controls::test_manual_thinking_budget_returns_signed_thinking[collect]": {
    "status": "passed",
-   "seconds": 1.14,
+   "seconds": 1.58,
    "message": ""
   },
   "py:test_live_messages_controls::test_manual_thinking_budget_returns_signed_thinking[stream]": {
    "status": "passed",
-   "seconds": 1.19,
+   "seconds": 1.57,
    "message": ""
   },
   "py:test_live_messages_controls::test_openrouter_manual_thinking_budget[collect]": {
    "status": "passed",
-   "seconds": 1.76,
+   "seconds": 1.75,
    "message": ""
   },
   "py:test_live_messages_controls::test_openrouter_manual_thinking_budget[stream]": {
    "status": "passed",
-   "seconds": 2.01,
+   "seconds": 1.68,
    "message": ""
   },
   "py:test_live_messages_controls::test_openrouter_tool_choice_named_tool[collect]": {
    "status": "passed",
-   "seconds": 1.68,
+   "seconds": 1.5,
    "message": ""
   },
   "py:test_live_messages_controls::test_openrouter_tool_choice_named_tool[stream]": {
    "status": "passed",
-   "seconds": 1.76,
+   "seconds": 1.06,
    "message": ""
   },
   "py:test_live_messages_controls::test_prompt_cache_is_written_then_read[collect]": {
    "status": "passed",
-   "seconds": 1.77,
+   "seconds": 2.27,
    "message": ""
   },
   "py:test_live_messages_controls::test_temperature_is_refused_before_dispatch_where_the_model_forbids_it[collect]": {
@@ -326,22 +556,22 @@
   },
   "py:test_live_messages_controls::test_temperature_is_sent_where_the_model_allows_it[collect]": {
    "status": "passed",
-   "seconds": 0.74,
+   "seconds": 0.7,
    "message": ""
   },
   "py:test_live_messages_controls::test_tool_choice_any[collect]": {
    "status": "passed",
-   "seconds": 0.89,
+   "seconds": 0.91,
    "message": ""
   },
   "py:test_live_messages_controls::test_tool_choice_any[stream]": {
    "status": "passed",
-   "seconds": 0.88,
+   "seconds": 0.86,
    "message": ""
   },
   "py:test_live_messages_controls::test_tool_choice_named_tool[collect]": {
    "status": "passed",
-   "seconds": 0.96,
+   "seconds": 0.92,
    "message": ""
   },
   "py:test_live_messages_controls::test_tool_choice_named_tool[stream]": {
@@ -356,27 +586,27 @@
   },
   "py:test_live_messages_controls::test_tool_choice_none[stream]": {
    "status": "passed",
-   "seconds": 0.64,
+   "seconds": 0.6,
    "message": ""
   },
   "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[anthropic]": {
    "status": "passed",
-   "seconds": 2.58,
+   "seconds": 3.21,
    "message": ""
   },
   "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[gemini]": {
    "status": "passed",
-   "seconds": 7.64,
+   "seconds": 10.2,
    "message": ""
   },
   "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[openai]": {
    "status": "passed",
-   "seconds": 1.62,
+   "seconds": 2.24,
    "message": ""
   },
   "py:test_live_provider::test_live_cancel_in_the_middle_of_a_stream_returns_promptly[openrouter]": {
    "status": "passed",
-   "seconds": 0.82,
+   "seconds": 1.03,
    "message": ""
   },
   "py:test_live_provider::test_live_expired_deadline_is_deadline_exceeded[anthropic]": {
@@ -401,82 +631,82 @@
   },
   "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[anthropic]": {
    "status": "passed",
-   "seconds": 0.26,
+   "seconds": 0.25,
    "message": ""
   },
   "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[gemini]": {
    "status": "passed",
-   "seconds": 0.18,
+   "seconds": 0.17,
    "message": ""
   },
   "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[openai]": {
    "status": "passed",
-   "seconds": 0.76,
+   "seconds": 0.49,
    "message": ""
   },
   "py:test_live_provider::test_live_invalid_key_is_a_typed_authentication_failure_without_key_material[openrouter]": {
    "status": "passed",
-   "seconds": 0.18,
+   "seconds": 0.07,
    "message": ""
   },
   "py:test_live_provider::test_live_plain_completion_reports_usage[anthropic]": {
    "status": "passed",
-   "seconds": 0.73,
+   "seconds": 1.27,
    "message": ""
   },
   "py:test_live_provider::test_live_plain_completion_reports_usage[gemini]": {
    "status": "passed",
-   "seconds": 2.55,
+   "seconds": 2.39,
    "message": ""
   },
   "py:test_live_provider::test_live_plain_completion_reports_usage[openai]": {
    "status": "passed",
-   "seconds": 6.6,
+   "seconds": 2.26,
    "message": ""
   },
   "py:test_live_provider::test_live_plain_completion_reports_usage[openrouter]": {
    "status": "passed",
-   "seconds": 0.85,
+   "seconds": 0.88,
    "message": ""
   },
   "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[anthropic]": {
    "status": "passed",
-   "seconds": 0.82,
+   "seconds": 1.36,
    "message": ""
   },
   "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[gemini]": {
    "status": "passed",
-   "seconds": 2.62,
+   "seconds": 3.44,
    "message": ""
   },
   "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[openai]": {
    "status": "passed",
-   "seconds": 1.85,
+   "seconds": 2.04,
    "message": ""
   },
   "py:test_live_provider::test_live_stream_deltas_equal_the_final_text[openrouter]": {
    "status": "passed",
-   "seconds": 2.58,
+   "seconds": 0.72,
    "message": ""
   },
   "py:test_live_provider::test_live_tool_round_trip[anthropic]": {
    "status": "passed",
-   "seconds": 1.62,
+   "seconds": 3.24,
    "message": ""
   },
   "py:test_live_provider::test_live_tool_round_trip[gemini]": {
    "status": "passed",
-   "seconds": 4.71,
+   "seconds": 5.91,
    "message": ""
   },
   "py:test_live_provider::test_live_tool_round_trip[openai]": {
    "status": "passed",
-   "seconds": 2.38,
+   "seconds": 26.0,
    "message": ""
   },
   "py:test_live_provider::test_live_tool_round_trip[openrouter]": {
    "status": "passed",
-   "seconds": 4.23,
+   "seconds": 1.74,
    "message": ""
   }
  }

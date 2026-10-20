@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=71fbb3a8a5072ec0c169fa310440fc595239f0635bbff040c3facdb97589f484 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=95dcfaea2d1e943caf027838dec4ec2e1463e50b96b75736e25814569468af80 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -17,7 +17,7 @@ NeoGraph 是一个 C++20 库，用来运行以图描述的工作流。节点负�
 - 要在 C++ 服务中运行这类工作流，或通过 MCP、A2A、ACP 把它们开放给其他智能体和工具的团队。
 - 熟悉 LangGraph 的读者：带归约器的通道、`Send`、`Command` 和检查点是相同的概念，所以[核心概念指南](docs/concepts.md)读起来会很快。
 
-NeoGraph 是 alpha 阶段的软件（版本 0.15.1）。C++ 二进制接口可能在 0.x 版本之间变化，见 [ABI 政策](docs/ABI_POLICY.md)。它不训练模型，也不能替代数值计算库；模型调用只是节点能做的事情之一。
+NeoGraph 是 alpha 阶段的软件（版本 0.16.0）。C++ 二进制接口可能在 0.x 版本之间变化，见 [ABI 政策](docs/ABI_POLICY.md)。它不训练模型，也不能替代数值计算库；模型调用只是节点能做的事情之一。
 
 ## 快速开始
 
@@ -70,7 +70,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-PyPI 上的 wheel 是由 0.15.1 版本构建的。[变更日志](CHANGELOG.md)中 *Unreleased* 下列出的变更不在其中；要使用它们，请从源码构建（见[构建配置](#build-configuration-and-further-reading)）。
+PyPI 上的 wheel 是由 0.16.0 版本构建的。[变更日志](CHANGELOG.md)中 *Unreleased* 下列出的变更不在其中；要使用它们，请从源码构建（见[构建配置](#build-configuration-and-further-reading)）。
 
 ### C++
 
@@ -306,7 +306,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植的投影。真正的原生历史可以连同原生检查点旁路数据留在内存中；持久化的原生历史则需要真正的 `sp::NativeArchive` 和受保护的、仅限所有者的保管。可移植的 JSON 无法重建这种权限。归档用独立的密钥认证保管状态，它既不是加密，也不是对厂商签发者的认证。不要公开归档正文、密钥、原生 blob 或原始的线路观测值。关于持久化失败、观察者、受管预算库和重放边界，见 [provider 参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)。
 
-这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.5` alpha，固定在公开提交 `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3（`spna3`）保持不变；可移植 JSON 以 `provider-message-v3`、`provider-outcome-v3` 和 `runtime-history-record-v3` 写出，v2 格式的记录仍可读取。这一代不声明稳定的 SDK 接口。
+这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.4.0` alpha，使用 `cmake/NeoGraphSchemaProvider.cmake` 所固定的公开提交（`main` 分支），接口修订版为 7，共享 ABI 为 7。带类型的媒体和新的请求控制改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3（`spna3`）保持不变；可移植 JSON 以 `provider-message-v3`、`provider-outcome-v3` 和 `runtime-history-record-v3` 写出，v2 格式的记录仍可读取。这一代不声明稳定的 SDK 接口。
 
 ## Python
 
@@ -361,7 +361,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 在另一个项目里，把快速开始中的 `FetchContent` 几行换成 `find_package(NeoGraph CONFIG REQUIRED)`，并用 `-DCMAKE_PREFIX_PATH="$HOME/neograph"` 配置。使用已安装版本的项目只链接它需要的已启用组件：
 
 ```cmake
-find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -397,7 +397,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux 上对比开启与关闭的两个匹配构建；为得到不可变的来源信息，需要真实的源码根目录 Git 检出。上限以 CI 的托管 x86-64 运行器为基准，在更慢的硬件上即使没有回归，`javascript_wrapped_core` 也可能失败。指定 `--base <ref>` 时，还会构建该提交并在同一台机器上逐个用例进行比较。 |
 | `fuzz` | Linux Clang/libFuzzer 的 60 秒金丝雀测试；语料会复制到你拥有的输出目录。 |
 | `install` | 在隔离的导出前缀中检查 ABI、符号、C++、C11、冲突和重定位的使用方；不需要 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需要 `--program` 以及 ELF/Mach-O 检查，Windows 行没有它。 |
-| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.15.1`。 |
+| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.16.0`。 |
 | `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==2.23.0 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
 | `runtime-archive` | 共享 SDK 原生归档的可移植性目标/CTest。需要 Ninja 和平台运行时依赖。 |
 

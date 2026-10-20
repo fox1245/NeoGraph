@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1ad94dc3f8605b5b07d82e043845a53f9adfe1a49a97319a18c1c59081c7925c -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3b760c8f01646060d52a2e89fb43debb7be9345562fa347f5bd39bd00309a4ae -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+## [0.16.0] - 2026-10-20
 
 ### 已添加
 - **可从 `Provider` 调用 SchemaProvider 端点 (#531)。**
@@ -27,7 +29,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program 中的端点调用 (#531)。**
   - `make_endpoint_request` 把端点请求放进 `ProviderRequest`，端点节点通过它发起调用。因此端点调用走的是聊天调用所走的路径：provider 调用 broker、持久的分发标记、SQLite journal，以及在恢复和 fork 时的重放。Program 用 `RegistrySnapshotBuilder::add_core_endpoint_node` 注册这些节点。
   - 模型 token 预算会在发送之前拒绝端点调用，因为它没有输出上限。计价绑定以 `P_MONEY_UNMODELED` 拒绝它，因为模型目录目前还无法为端点请求计价（fox1245/SchemaProvider#124）。
-  - 端点调用的分发标识中还包含它的端点、方法和 URL。聊天调用的标识不变，所以 journal 仍然能匹配。
+  - 端点调用的分发标识中还包含它的端点、方法和 URL。聊天调用的标识不会加入这些成员。
   - 上传的分发标识中还包含文件名、MIME 类型、purpose 和过期时间，以及所发送字节的 SHA-256、偏移量和大小，但不包含文件路径（#541）。此前，从文件读取的上传无论文件、名称或 purpose 如何，标识都相同；从内存发送的上传，其请求体带有 SDK 随机生成的 multipart 边界，因此每次准备时标识都不同。文件缺失或短于其切片时，会在准备调用时被拒绝。此外，恢复运行时读取没有模型名的调用（例如上传）的 journal 行，不再把它当作已损坏而拒绝。
   - 端点读取（GET：任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此 journal 每次都发送它（`PreparedProviderRequest::is_endpoint_read()`）。因此，在运行中的视频任务上暂停的 Program 恢复后会看到任务完成，而不是重放第一次轮询。
   - Program provider 包装器和 `OpenInferenceProvider` 会转发其内部 provider 的端点（`Provider::endpoint_runtime_of`）。
@@ -45,10 +47,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **结算。** 没有报告的费用时，`sp::pricing::estimate` 按计价其 hold 时的目录快照为调用计价，预留的服务器工具费用按其上限收取。
   - **行为变更：记录。** `ProgramMonetaryRecord::origin` 是 provider 的 base URL（`https://openrouter.ai`，原先是 `openrouter`），`catalog_version` 是 `sp-model-catalogue/1` 并附带目录的 digest，新增的 `pricing`（Python 为 `record.pricing`）保存条目、其价格行、service tier、预留的工具使用和估算的假设。0.16.0 之前写入 journal 的记录字节保持不变。
   - **行为变更：`P_MONEY_UNKNOWN_ORIGIN`** 现在只表示没有已准入 descriptor 的 provider。目录在 base URL 上没有给出价格的模型是 `P_MONEY_UNKNOWN_MODEL`。
-- **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。在 SchemaProvider 0.4.0 发布之前，构建固定在其 `main` 分支（包版本 0.3.0）；0.16.0 发布前会改为 0.4.0 正式版。
+- **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。构建固定在 SchemaProvider 0.4.0 的发布提交 `f47548fed63038d926aad7dc840bfaf701a8f1fc`，已安装的 SDK 必须恰好是 0.4.0（`find_package(SchemaProvider 0.4.0 EXACT)`）。
   - **行为变更：带类型的媒体。** `sp::Image` 变为 `sp::Media`：图像、音频、视频或文档，可以是内联数据，也可以位于 URL 或 provider 文件中。`ChatMessage::image_urls` 仍把内联图像投影为 data URL，现在也投影 URL 图像；`portable_message` 把 https 条目作为由 provider 获取的 URL 媒体发送。生成的图像（Chat 的 `message.images`、Responses 的 `image_generation_call`、Gemini 的 `inlineData`）是 `Media` 部件而不是 `Opaque` 部件；其 wire 条目保留在 native 输出中。
   - **Provider outcome 格式 v3。** `neograph.provider-outcome/v3` 和 `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）增加了媒体部件、文本引用、带类型的工具结果内容、错误的 `reason` 和实际响应的 `model`。v2 格式的记录（Program 日志、检查点、运行时历史）仍可读取：图像部件变为内联图像媒体，新成员为空。新记录以 v3 写入，NeoGraph 0.15 无法读取。
   - **运行时历史记录**的存储版本为 3。版本 2 的记录按其存储的字节和 id 读取，因此 feed 的 predecessor 链不变。Program provider 日志的行保留写入时的 digest 域。
+  - **行为变更：0.15 的 Program journal 无法恢复 (#543)。** 提供方调用的分发标识包含 SchemaProvider 的策略 identity，而 interface 7 改变了它。因此 0.15 记入 journal 的运行无法由 0.16 恢复，journal 会报告逻辑调用绑定冲突。对这样的运行进行 fork 时，不会沿用其调用而是重新发送，已付费的调用会再次付费。请在升级前完成或放弃这些运行。
   - **行为变更：0.15 的 native 历史不再重放。** interface 7 改变了每个策略 identity，因此继续使用 0.15 封存的 native 历史会得到 `ReplayIneligible`。可移植历史不受影响。
   - **模型信息是目录数据。** descriptor 策略不再有 `models` 列表；模型上限和按模型的默认值是 SDK 模型目录的条目（`sp::descriptor::load_catalogue`、`merge_catalogues`、`DescriptorPolicy::with_catalogue`）。cookbook 聊天机器人接受 `--model-catalogue PATH`，以 `demo-models.json` 取代 `demo-policy.json`，会话绑定包含目录在内的策略 content digest。
   - **Python。** `ProviderMedia` 取代 `ProviderImage`：有 `ProviderMedia.image(...)`、`.audio`、`.video`、`.document`、`.url` 和 `.file`，以及 `kind`、`source`、`mime`、`data`、`reference`、`name`、`detail`、`id`、`transcript` 和枚举 `ProviderMediaKind`、`ProviderMediaSource`。新增：`Text.citations`（`ProviderCitation`）、`ProviderToolResult.content_parts`、`ProviderError.reason`、`ProviderCompletion.model` 和 `ProviderPartialCompletion.model`（`ProviderServedModel`、`ProviderServedRelation`）、`ProviderPartHeader.media`、`ProviderPartSeal.citations`、`ProviderStopKind.Pending` 和 `Compaction`、`ProviderPartKind.Media` 以及 `ProviderCostRounding.CeilingCatalogueProduct`。`load_provider_policy` 接受叠加在内置目录之上的可选 `model_catalogue_json`，`provider_model_catalogue_json()` 返回内置目录。

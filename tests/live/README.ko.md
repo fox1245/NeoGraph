@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=c5347b2c688d007f5f292498aef1fda3129548c02944ec85f55face0555e0ce0 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=6609f9bbff22820b3ae714325bbd73fc21c22d31cea6cb45f3e12a35c29b90df -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,6 +22,7 @@
 - **C++** (`tests/live_e2e_test.cpp`, 타깃 `neograph_live_e2e_tests`):
   - Claude 5.5 서버 툴, 생성 이미지, Interactions를 쓰는 공급자 어댑터;
   - `Provider`를 거치는 SchemaProvider 엔드포인트(#531): OpenAI·OpenRouter 임베딩, OpenAI moderation, Anthropic 토큰 수 세기, OpenAI 이미지, 텍스트로 다시 전사되는 OpenAI 음성, 요청에서 참조하는 Gemini 파일, 제출부터 취소까지의 Anthropic·OpenAI 배치;
+  - OpenAI와 Google의 SchemaProvider 실시간 전사 세션. OpenAI 음성 엔드포인트가 만든 음성을 넣고, 각 세션이 말한 단어가 담긴 사용자 턴 하나를 커밋하는지 확인합니다;
   - 네 공급자의 목록 전체에서 갱신한 모델 카탈로그, 갱신된 카탈로그에만 있는 모델 호출, 어느 카탈로그에도 없지만 그래도 전송되는 모델;
 - **알려진 빈틈**은 그 릴리스 라인에서 반드시 실패해야 하는 케이스입니다(strict xfail). `tests/live/manifest.json`이 고칠 이슈와 함께 이를 나열합니다. 수정이 들어오면 케이스가 통과하기 시작하므로 매니페스트도 함께 바꿔야 합니다.
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=cc968fbc2daa742f2a323bdc9a2d8bcfb4a5024073b991cc6288e9b24bd8ab77 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=558a3d220a020e45aea614ff6e68dc7a9c19e2271e2f03dac8718845069ae9d9 -->
 # NeoGraph와 Python 그래프/파이프라인 프레임워크 비교 — 엔진 오버헤드 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,7 +8,7 @@ I/O, sleep, 모델 호출이 없는 동일한 소규모 워크로드로 NeoGraph
 측정 범위에는 노드 디스패치, 상태 채널 쓰기, 리듀서 호출이 들어갑니다.
 날짜가 붙은 표에는 당시의 엔진 이름과 의존성 버전이 그대로 남아 있습니다.
 이 표는 현재 패키지 버전을 나타내지 않습니다.
-현재 NeoGraph `0.15.1` 레시피는 alpha SDK `0.3.5`과, 인터페이스 리비전·공유 세대(generation) 6에 맞는
+현재 NeoGraph `0.16.0` 레시피는 alpha SDK `0.4.0`과, 인터페이스 리비전·공유 세대(generation) 7에 맞는
 헤더와 라이브러리를 요구합니다.
 
 Program 승인(admission), JavaScript 제어, SQLite/PostgreSQL 런타임 비용은
@@ -206,8 +206,8 @@ CMake 3.20 이상에서는 명시한 `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`을 먼
 OFF로 설정합니다.
 아래 재현 명령은 현재 유지보수하는 타깃을 빌드하며, 과거의 바이너리를 다시 만들지도, 표에 나온 Python 버전을
 자동으로 고정하지도 않습니다.
-직접 지정한 체크아웃이나 설치된 패키지는 인터페이스·공유 세대가 6이어야 합니다.
-새 결과는 따로 저장해야 합니다. 과거의 표와 JSON 파일은 SDK 0.3.5으로 측정한 결과가 아닙니다.
+직접 지정한 체크아웃이나 설치된 패키지는 인터페이스·공유 세대가 7이어야 합니다.
+새 결과는 따로 저장해야 합니다. 과거의 표와 JSON 파일은 SDK 0.4.0으로 측정한 결과가 아닙니다.
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for

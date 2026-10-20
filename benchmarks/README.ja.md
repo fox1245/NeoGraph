@@ -1,11 +1,11 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=cc968fbc2daa742f2a323bdc9a2d8bcfb4a5024073b991cc6288e9b24bd8ab77 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=558a3d220a020e45aea614ff6e68dc7a9c19e2271e2f03dac8718845069ae9d9 -->
 # NeoGraphとPythonのグラフ／パイプラインフレームワークの比較 — エンジンのオーバーヘッドベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
 I/O、スリープ、モデル呼び出しのない小さな同等のワークロードで、NeoGraphとPythonのオーケストレーションフレームワークについて、1回の呼び出しあたりのエンジンのオーバーヘッドを測定します。測定の対象は、ノードのディスパッチ、ステートチャネルへの書き込み、リデューサーの呼び出しです。
 日付付きの表に載っているエンジンのラベルと依存バージョンは、当時のものです。現在のパッケージのバージョンを示すものではありません。
-現在のNeoGraph `0.15.1` のレシピには、alpha SDK `0.3.5`（インターフェースのリビジョンと共有世代は6）と、それに合ったヘッダーおよびライブラリーが必要です。
+現在のNeoGraph `0.16.0` のレシピには、alpha SDK `0.4.0`（インターフェースのリビジョンと共有世代は7）と、それに合ったヘッダーおよびライブラリーが必要です。
 
 Programのadmission、JavaScriptによる制御、SQLite／PostgreSQLのランタイムのコストについては、[Programのコストの測定](../docs/PROGRAM_COST_MEASUREMENT.md)を参照してください。
 そちらのマトリクスにはジャーナルとチェックポイントの処理が含まれているので、下のチェックポイントなしのCoreの比較と並べて示してはいけません。
@@ -146,7 +146,7 @@ NeoGraphはデフォルトのworker=1で測定しました。そのため、`par
 
 現在のソースビルドには、Core単体のベンチマークも含めて、外部の `SchemaProvider::runtime` パッケージが必要です。CMake 3.20以降は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、リビジョンを固定した公開GitHubのソースアーカイブの順に選びます。`NEOGRAPH_FETCH_SCHEMAPROVIDER` のデフォルトはONです。インストール済みのパッケージか明示したソースを使ってオフラインでビルドするときは、OFFにしてください。
 再現用のコマンドがビルドするのは、現在メンテナンスしているターゲットです。過去のバイナリを再生成することも、表に載せたPythonのバージョンを自動で固定することもありません。
-明示的に指定するチェックアウトやインストール済みのパッケージは、インターフェースと共有世代が6のものでなければなりません。新しい出力は別に保存してください。過去の表とJSONファイルは、SDK 0.3.5で測定した結果ではありません。
+明示的に指定するチェックアウトやインストール済みのパッケージは、インターフェースと共有世代が7のものでなければなりません。新しい出力は別に保存してください。過去の表とJSONファイルは、SDK 0.4.0で測定した結果ではありません。
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for

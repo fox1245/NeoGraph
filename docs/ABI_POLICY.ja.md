@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=e9c13d7f86936784ced0b9f500f737a386fbabc518e974150c9ea0ce3c1da6cd -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ja source_sha256=03f09d9ead6f5529e387139eb3c5ff330eeea4e551e13bb01c8d33e13ef9d89e -->
 # バイナリ互換性ポリシー
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -33,9 +33,9 @@ CheckpointStoreは、アダプターへの明示的な移行のために、従�
 
 ## SDKとPythonの境界
 
-Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.3.5` alphaで、公開されている `maint/interface6` のコミット `0437853529b5932e7097a38629a95779d08f03aa`、インターフェースリビジョン `6`、共有ライブラリのABIリビジョン `6` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.6` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
+Coreは、LLMノードを無効にしても、外部の `SchemaProvider::runtime` を必要とします。採用しているSDKのリリースは `0.4.0` alphaで、公開されているSDKの `main` ラインのうち `cmake/NeoGraphSchemaProvider.cmake` が固定するコミット、インターフェースリビジョン `7`、共有ライブラリのABIリビジョン `7` です。capabilityのチェックはアウトオブラインです。これは、安定したインターフェースだという主張ではありません。対応するSDKのコンポーネントは、まとめてインストールしてください。`libsp_*.so.7` の世代は、NeoGraphのローダーの世代とも、Pythonの `abi3` wheelタグとも別のものです。
 
-インターフェース6では、公開されている使用量のレイアウトに、プロバイダーが報告する金額のメタデータ（固定サイズ）が加わりました。また、ブロッキングのSDK呼び出しと非同期のSDK呼び出しは、1つの非同期パイプラインを使います。採用しているコミットでは、リビジョン6の中で、`sp::OpenRouterRouting` も拡張されました（`max_price` が追加されています）。Chat、Messages、Responsesのリクエストのレイアウトも拡張されています。capabilityビット `OpenRouterRoutingMaxPrice` は、`RequiredProvider` の一部で、NeoGraphのハンドシェイクが要求するものです。このビットによって、これより前のインターフェース6のライブラリは拒否されます。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース6とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）は変わりません。ポータブルJSONは独立したバージョンを持つ別の形式で、NeoGraphはプロバイダーのメッセージ、プロバイダーの結果、runtime history recordをv3で書き出し、v2のレコードも引き続き読み込みます。正規の結果の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。
+インターフェース7では、メディアが型付きになります。メッセージ、結果、イベントで、`sp::Media` が `sp::Image` に代わります。また、リクエストの制御が各familyに固有の型へ拡張され、チャット以外のエンドポイントとリアルタイムセッションがクライアントに加わりました。公開されているレイアウトは全体にわたって変わり、NeoGraphのハンドシェイクは、`RequiredProvider` のcapabilityを含めて、インターフェース7を要求します。SDKのコンシューマー、NeoGraph、Pythonの拡張は、まとめて再ビルドしてください。これより前のヘッダーやライブラリは、インターフェース7とは互換性がありません。ブロッキングのラッパーは、SDKのイベントループとコールバックのワーカーへの再入を、引き続き拒否します。ネイティブarchive v3（`spna3`）は変わりません。ポータブルJSONは独立したバージョンを持つ別の形式で、NeoGraphはプロバイダーのメッセージ、プロバイダーの結果、runtime history recordをv3で書き出し、v2のレコードも引き続き読み込みます。v2のレコードのバイト列は保たれます。v3のプロバイダーの結果には、メディアパート、引用、型付きのツール結果の内容、エラーの理由、実際に応答したモデルが加わります。正規の結果の使用量に、省略可能な `provider_cost` が加わるのは、金額のメタデータがある場合だけです。メタデータがないだけの過去のレコードは、元のバイト列を保ち、コストを捏造することはありません。
 
 Pythonは、準備済みのハンドルや変更できない結果を含む、型付きのプロバイダー契約を公開します。従来のcompletionの互換シムはありません。拡張と、それに対応するライブラリは、1つのwheelとしてインストールしてください。同梱されているNeoGraphやSDKのライブラリを、1つだけ置き換えてはいけません。グラフ向けの便宜的な値であるChatMessageは、ネイティブなProviderMessageの保管の代わりにはなりません。詳しくは[Pythonバインディング](python-binding.md)を参照してください。
 

@@ -14,6 +14,8 @@
   "cpp:LiveEndpoints.OpenAIModeration",
   "cpp:LiveEndpoints.OpenAISpeechThenTranscription",
   "cpp:LiveEndpoints.OpenRouterEmbeddingsAsync",
+  "cpp:LiveRealtime.GoogleTranscriptionSession",
+  "cpp:LiveRealtime.OpenAITranscriptionSession",
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Collect",
   "cpp:Mode/LiveAdapter.ClaudeWebFetch20260318Completes/Stream",
   "cpp:Mode/LiveAdapter.GeminiGeneratedImage/Collect",
