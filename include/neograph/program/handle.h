@@ -69,12 +69,18 @@ public:
     ProgramHandoff                        next_handoff() const;
     ProgramRunRecord                      snapshot() const;
     /**
-     * Notices the runtime gave when the call that returned this handle
-     * created the run. Only ProgramRuntime::fork gives one: a fork that
-     * cannot replay provider calls (RuntimeConfig::core_provider_calls_journaled)
-     * names the calls of the paused operation it may send and charge again.
-     * Empty for every other handle, including one from reconnect() or from
-     * a repeated fork() of the same run.
+     * Notices about the run, none of them an error. ProgramRuntime::fork gives
+     * one when it creates the run: a fork that cannot replay provider calls
+     * (RuntimeConfig::core_provider_calls_journaled) names the calls of the
+     * paused operation it may send and charge again. A handle from reconnect()
+     * or from a repeated fork() of the same run has none of these.
+     * A durable provider-call journal reports others as the run executes
+     * (#543), on any handle, so read them after wait() to see every one:
+     * P_PROVIDER_CALL_POLICY_CHANGED, when a resume or a fork found a call
+     * under another SchemaProvider descriptor policy identity and used the
+     * journaled outcome, and P_FORK_PROVIDER_CALL_RESENT, when a fork sent a
+     * call its source had already journaled because
+     * RuntimeConfig::fork_may_resend_provider_calls allows it.
      */
     std::vector<ProgramNotice>            notices() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;

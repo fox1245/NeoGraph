@@ -399,6 +399,72 @@ PreparedProviderRequest Provider::observe_prepared(
     } catch (...) {}
     return request;
 }
+namespace {
+// The descriptor policy's identity as 64 lowercase hex digits.
+std::string policy_identity_hex(const sp::descriptor::ValidatedDescriptor& descriptor) {
+    const auto identity = descriptor.policy()->identity();
+    if (identity.size() != 32) throw std::invalid_argument("Provider preparation has no valid policy identity");
+    constexpr char digits[] = "0123456789abcdef";
+    std::string hex;
+    hex.reserve(64);
+    for (const auto raw : identity) {
+        const auto byte = static_cast<unsigned char>(raw);
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 15]);
+    }
+    return hex;
+}
+// A JSON body with the members the descriptor names set apart by role, so that a descriptor policy that renames
+// one, such as the output cap's, does not change what the request asks for. Any other body is named by its bytes.
+json canonical_body(std::string_view body, const sp::descriptor::ValidatedDescriptor& descriptor) {
+    try {
+        auto parsed = detail::parse_json_strict(body);
+        if (!parsed.is_object()) return json{{"json", std::move(parsed)}};
+        const std::pair<std::string_view, const char*> roles[] = {
+            {descriptor.request_model_member(), "model"}, {descriptor.request_messages_member(), "messages"},
+            {descriptor.request_stream_member(), "stream"}, {descriptor.max_output_tokens_member(), "output_cap"}};
+        json named = json::object(), rest = json::object();
+        for (const auto& [key, item] : parsed.items()) {
+            const auto role = std::find_if(std::begin(roles), std::end(roles),
+                [&](const auto& entry) { return !entry.first.empty() && entry.first == key; });
+            if (role == std::end(roles)) rest[key] = item;
+            else named[std::string(role->second)] = item;
+        }
+        return json{{"members", std::move(rest)}, {"roles", std::move(named)}};
+    } catch (const std::exception&) {
+        return json{{"bytes", detail::sha256_identity("NeoGraph Provider request content identity v1",
+                                                      "provider-body-bytes/v1", body)}};
+    }
+}
+}  // namespace
+
+std::string Provider::request_policy_identity(const PreparedProviderRequest& request) {
+    if (!request.valid()) throw std::invalid_argument("Cannot digest an invalid provider preparation");
+    const auto* descriptor = request.impl_->prepared.descriptor();
+    if (!descriptor) throw std::invalid_argument("Provider preparation has no admitted binding");
+    return "sha256:" + policy_identity_hex(*descriptor);
+}
+std::string Provider::request_content_digest(const PreparedProviderRequest& request) {
+    if (!request.valid()) throw std::invalid_argument("Cannot digest an invalid provider preparation");
+    const auto* descriptor = request.impl_->prepared.descriptor();
+    if (!descriptor) throw std::invalid_argument("Provider preparation has no admitted binding");
+    json identity{{"family", request.family()}, {"model", request.model()},
+                  {"mode", request.mode() == ProviderMode::Stream ? "stream" : "collect"},
+                  {"origin", descriptor->base_url()},
+                  {"body", canonical_body(request.encoded_body(), *descriptor)}};
+    // An endpoint call is also named by its endpoint, method and URL. An upload has no body that names it: its
+    // metadata and the digest of the bytes it sends do (#541).
+    if (const auto endpoint = request.impl_->prepared.endpoint(); !endpoint.empty()) {
+        identity["endpoint"] = {{"name", endpoint}, {"method", request.impl_->prepared.method()},
+                                {"url", request.impl_->prepared.url()}};
+        if (request.impl_->upload) {
+            identity["body"] = nullptr;
+            identity["endpoint"]["upload"] = *request.impl_->upload;
+        }
+    }
+    return detail::sha256_identity("NeoGraph Provider request content identity v1", "provider-content/v1",
+        detail::canonical_json_bytes(identity));
+}
 std::string Provider::request_digest(const PreparedProviderRequest& request) {
     if (!request.valid()) throw std::invalid_argument("Cannot digest an invalid provider preparation");
     if (!request.impl_->digest.empty()) return request.impl_->digest;
@@ -407,16 +473,7 @@ std::string Provider::request_digest(const PreparedProviderRequest& request) {
     if (!descriptor || !retry) throw std::invalid_argument("Provider preparation has no admitted binding");
     json headers = json::array();
     for (const auto& [name, value] : descriptor->headers()) headers.push_back({name, value});
-    const auto policy_identity = descriptor->policy()->identity();
-    char policy_hex[64];
-    if (policy_identity.size() != sizeof(policy_hex) / 2)
-        throw std::invalid_argument("Provider preparation has no valid policy identity");
-    constexpr char digits[] = "0123456789abcdef";
-    for (std::size_t i = 0; i < policy_identity.size(); ++i) {
-        const auto byte = static_cast<unsigned char>(policy_identity[i]);
-        policy_hex[2 * i] = digits[byte >> 4];
-        policy_hex[2 * i + 1] = digits[byte & 15];
-    }
+    const auto policy_hex = policy_identity_hex(*descriptor);
     json stop_mappings = json::array();
     for (const auto& [name, kind] : descriptor->stop_mappings())
         stop_mappings.push_back({name, static_cast<unsigned>(kind)});
@@ -426,7 +483,7 @@ std::string Provider::request_digest(const PreparedProviderRequest& request) {
             {"descriptor", {{"id", descriptor->id()}, {"revision", descriptor->revision()},
                 {"origin", descriptor->base_url()}, {"buffered_path", descriptor->path(false)},
                 {"streaming_path", descriptor->path(true)}, {"headers", std::move(headers)},
-                {"policy", std::string_view(policy_hex, sizeof(policy_hex))},
+                {"policy", policy_hex},
                 {"model_member", descriptor->request_model_member()},
                 {"messages_member", descriptor->request_messages_member()},
                 {"stream_member", descriptor->request_stream_member()},

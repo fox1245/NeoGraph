@@ -659,7 +659,9 @@ if(NEOGRAPH_BUILD_PROGRAM)
                 $<INSTALL_INTERFACE:include>
         )
         target_compile_features(neograph_program_sqlite PUBLIC cxx_std_20)
-        target_compile_definitions(neograph_program_sqlite PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+        # The journal records which NeoGraph build encoded a call (#543).
+        target_compile_definitions(neograph_program_sqlite PRIVATE NEOGRAPH_BUILDING_PROGRAM
+            NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
         target_link_libraries(neograph_program_sqlite
             PUBLIC neograph_program
             PRIVATE SQLite::SQLite3

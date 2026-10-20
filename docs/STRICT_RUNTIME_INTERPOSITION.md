@@ -216,11 +216,16 @@ durable database on restart/reconnect.
 Also set `RuntimeConfig::core_provider_calls_journaled = true`. A fork replays
 provider calls from this journal, and the flag keeps a fork on this host from
 reporting `P_FORK_PROVIDER_CALLS_NOT_JOURNALED` in `ProgramHandle::notices()`.
+A fork that finds the source's call at the same position but can neither adopt it
+nor show that the call differs is refused, unless
+`RuntimeConfig::fork_may_resend_provider_calls` is true (see the reference).
 
 The journal keys each call by owner, immutable Program version, run, operation,
-Core thread/task/node and built-in call ordinal, **not** request content or
-Program attempt. It commits the marker with SQLite FULL synchronization before
-transport. The marker means transport *may* have occurred, not that the provider
+Core thread/task/node and built-in call ordinal, **not** Program attempt. It
+records the call's request content digest and the descriptor policy identity beside
+the key and matches a call by its content (#543), so the same request under another
+SchemaProvider descriptor policy identity is the same call. It commits the marker
+with SQLite FULL synchronization before transport. The marker means transport *may* have occurred, not that the provider
 received it or that the effect happened exactly once. Full immutable SDK
 Completion/Failure outcomes are stored with encoding version 2 for exact-bound
 replay. A Failure proven not accepted (not sent, or declined by a completed HTTP
@@ -232,7 +237,7 @@ silently re-dispatches. Use
 a full Completion outcome. Replayed streaming calls return the captured outcome
 without synthesizing stream events.
 
-A larger output cap is a new semantic call, not a transport retry or replay of the same journal slot. Native replay configuration excludes that cap; the prepared-request digest and conservative resource claim still include it. Give each admitted call a distinct deterministic ordinal, retain every attempt's outcome/accounting and the original deadline, and obtain admission from the same resource bank. A changed digest in an existing slot rejects; neither native history nor a cursor renews credit or authorizes another send after uncertain delivery, observer or settlement failure.
+A larger output cap is a new semantic call, not a transport retry or replay of the same journal slot. Native replay configuration excludes that cap; the prepared-request digest and conservative resource claim still include it. Give each admitted call a distinct deterministic ordinal, retain every attempt's outcome/accounting and the original deadline, and obtain admission from the same resource bank. A changed content digest in an existing slot rejects; neither native history nor a cursor renews credit or authorizes another send after uncertain delivery, observer or settlement failure.
 
 Ordered message parts, raw observations, nullable usage, attempt metadata, and
 native continuation remain part of the stored result. Native outcomes require

@@ -418,7 +418,8 @@ public:
                      std::optional<std::string> sqlite_directory,
                      bool soundness_check,
                      std::size_t soundness_state_cap,
-                     py::object failure_text_redactor)
+                     py::object failure_text_redactor,
+                     bool fork_may_resend_provider_calls)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
@@ -467,6 +468,7 @@ public:
         config.transitions = stores_.transitions;
         config.scheduler_threads = scheduler_threads;
         config.native_history_archive = std::move(native_history_archive);
+        config.fork_may_resend_provider_calls = fork_may_resend_provider_calls;
         if (node_context) {
             // Every built-in provider call goes through a pricing broker: the
             // SQLite journal when the host is durable, in process otherwise.
@@ -995,10 +997,15 @@ void init_program(py::module_& m) {
         .def_property_readonly("program_version_id", &ProgramHandle::program_version_id)
         .def_property_readonly("attempt", &ProgramHandle::attempt)
         .def_property_readonly("notices", &ProgramHandle::notices,
-            "Notices the runtime gave when the call that returned this handle created the run. "
-            "Only host.fork() gives one: P_FORK_PROVIDER_CALLS_NOT_JOURNALED, when the host has "
-            "no durable provider-call journal (no sqlite_directory) and the paused attempt "
-            "recorded provider calls in the paused operation. Empty for every other handle.")
+            "Facts the runtime reports about the run, as ProgramNotice values; none is an error. "
+            "host.fork() gives P_FORK_PROVIDER_CALLS_NOT_JOURNALED when the host has no durable "
+            "provider-call journal (no sqlite_directory) and the paused attempt recorded provider "
+            "calls in the paused operation. A host with a journal reports, as the run executes, "
+            "P_PROVIDER_CALL_POLICY_CHANGED when a resume or a fork found a provider call under "
+            "another SchemaProvider descriptor policy identity and used the journaled outcome, and "
+            "P_FORK_PROVIDER_CALL_RESENT when a fork sent a call its source had already journaled "
+            "because fork_may_resend_provider_calls allows it. Read them after wait() to see "
+            "every one.")
         .def("cancel", &ProgramHandle::cancel)
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())
         .def("try_result", &ProgramHandle::try_result);
@@ -1030,11 +1037,17 @@ void init_program(py::module_& m) {
         "checkpoints and a provider-call journal in SQLite files there, so a run "
         "survives the process (reconnect, resume). failure_text_redactor is the #364 "
         "hook for the free text of failure records (see GraphEngine.compile); "
-        "without it no text is written.")
+        "without it no text is written. fork_may_resend_provider_calls (#543): a fork "
+        "repeats the provider calls of its paused invocation, and the provider-call "
+        "journal replays them. When the journal has the source's call at the same "
+        "position but can neither adopt it nor show that the call differs, the fork "
+        "would send a call the provider has probably charged already. False, the default, "
+        "refuses it before it is sent, and the fork fails; True sends it, which the "
+        "provider may charge again, and the handle's notices say so.")
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
                       std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
                       std::size_t, py::object, std::optional<std::string>,
-                      std::optional<std::string>, bool, std::size_t, py::object>(),
+                      std::optional<std::string>, bool, std::size_t, py::object, bool>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
@@ -1047,7 +1060,8 @@ void init_program(py::module_& m) {
              py::arg("sqlite_directory") = py::none(),
              py::arg("soundness_check") = false,
              py::arg("soundness_state_cap") = 100000,
-             py::arg("failure_text_redactor") = py::none())
+             py::arg("failure_text_redactor") = py::none(),
+             py::arg("fork_may_resend_provider_calls") = false)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
         .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
              "Continue a run that a stopped process left running, from this host's "

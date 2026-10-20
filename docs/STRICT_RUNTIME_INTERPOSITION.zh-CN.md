@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=b0839d08e680afa37876cb1515bd58a87a65063e453cbf63e7fb1e195d33a9e6 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=4f67e53baad10b4739eb2f462ac5cce18e493494d091ff6e1eb5690f2fc395db -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -177,10 +177,10 @@ Program 使用内置的 Core LLM 节点时，宿主可以设置
 `<neograph/program/sqlite_provider_call_broker.h>` 返回
 `SQLiteProgramProviderCallJournal::bind(context, deployment_identity)`；需要链接 `neograph::program_sqlite`。
 部署标识必须是由宿主持有的、对实际 provider 路由、模型部署和权限（包括凭据版本）求出的 SHA-256 标识；
-broker 不会从 `Provider` 对象中自行发现这些信息。重启或重新连接时，要重新绑定同一个持久数据库。还要设置 `RuntimeConfig::core_provider_calls_journaled = true`。fork 会从这个 journal 重放 provider 调用，设置该标志后，这个宿主上的 fork 就不会在 `ProgramHandle::notices()` 中报告 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`。
+broker 不会从 `Provider` 对象中自行发现这些信息。重启或重新连接时，要重新绑定同一个持久数据库。还要设置 `RuntimeConfig::core_provider_calls_journaled = true`。fork 会从这个 journal 重放 provider 调用，设置该标志后，这个宿主上的 fork 就不会在 `ProgramHandle::notices()` 中报告 `P_FORK_PROVIDER_CALLS_NOT_JOURNALED`。fork 如果找到了 source 在同一位置的调用，却既不能接管它，也无法证明该调用不同，就会被拒绝，除非 `RuntimeConfig::fork_may_resend_provider_calls` 为 true（见参考文档）。
 
 journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线程/任务/节点以及内置调用的序号，
-作为每次调用的键，**而不是**请求内容或 Program 的尝试。它在传输之前，用 SQLite FULL 同步提交标记。
+作为每次调用的键，**而不是** Program 的尝试。它在键的旁边记录调用的请求内容摘要和 descriptor policy identity，并按内容来匹配调用（#543），所以同一个请求在另一个 SchemaProvider descriptor policy identity 之下，仍是同一次调用。它在传输之前，用 SQLite FULL 同步提交标记。
 这个标记表示传输*可能*已经发生，并不表示 provider 收到了它，也不表示副作用恰好发生了一次。
 完整的、不可变的 SDK Completion/Failure outcome，以编码版本 2 存储，用于精确绑定的重放。
 已证明未被接受的 Failure（未发送，或被已完成的 HTTP 4xx 响应拒绝）记录为 `Failed`；送达状态不确定、发生异常，或在结算之前崩溃，
@@ -189,7 +189,7 @@ journal 以 owner、不可变的 Program 版本、运行、操作、Core 的线�
 只有在拿到经独立验证的 provider 一侧证据和完整的 Completion outcome 时，
 才能使用 `reconcile_success`。重放流式调用时，返回的是已捕获的 outcome，不会合成流事件。
 
-更大的输出上限，是一次新的语义调用，不是传输层的重试，也不是对同一个 journal 槽位的重放。native replay 的配置中不包含这个上限；已准备请求的摘要和保守的资源预留额度仍然包含它。给每个已准入的调用一个不同的、确定性的序号，保留每次尝试的 outcome 和核算以及原来的截止时间，并从同一个资源 bank 获得准入。已有槽位里的摘要发生变化，会被拒绝；送达状态不确定、observer 失败或结算失败之后，native 历史和游标都既不能续期额度，也不能授权再次发送。
+更大的输出上限，是一次新的语义调用，不是传输层的重试，也不是对同一个 journal 槽位的重放。native replay 的配置中不包含这个上限；已准备请求的摘要和保守的资源预留额度仍然包含它。给每个已准入的调用一个不同的、确定性的序号，保留每次尝试的 outcome 和核算以及原来的截止时间，并从同一个资源 bank 获得准入。已有槽位里的请求内容摘要发生变化，会被拒绝；送达状态不确定、observer 失败或结算失败之后，native 历史和游标都既不能续期额度，也不能授权再次发送。
 
 有序的消息 parts、原始观测、可为空的用量、尝试元数据和 native 续接状态，
 仍然是已存储结果的一部分。native outcome 需要把宿主的 `sp::NativeArchive`

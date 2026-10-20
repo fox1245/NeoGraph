@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <functional>
 #include <exception>
 #include <map>
 #include <set>
@@ -19,6 +20,10 @@
 #include <mutex>
 #include <stdexcept>
 #include <utility>
+
+#ifndef NEOGRAPH_VERSION_STR
+#define NEOGRAPH_VERSION_STR "unknown"
+#endif
 
 namespace neograph::program {
 namespace {
@@ -28,6 +33,14 @@ constexpr std::string_view slot_domain = "program-core-provider-call/v1";
 constexpr std::string_view outcome_domain = "program-core-provider-outcome/v3";
 // Rows written before interface 7 hold v2 outcomes under the v2 domain; they are read, not rewritten.
 constexpr std::string_view legacy_outcome_domain = "program-core-provider-outcome/v2";
+
+// #543: the build that encodes a request. A fork finds that a call differs from its source's only when the
+// same encoder wrote both digests, since an SDK or a built-in prompt that changes can change the bytes of a
+// request that did not.
+const std::string& producer_identity() {
+    static const std::string producer = std::string("neograph/") + NEOGRAPH_VERSION_STR;
+    return producer;
+}
 
 [[noreturn]] void sql_error(sqlite3* db) {
     throw std::runtime_error(std::string("Program provider journal SQLite error: ") + sqlite3_errmsg(db));
@@ -149,6 +162,19 @@ struct SQLiteProgramProviderCallJournal::Impl {
             // provisional record with the dispatched marker, replaced by the
             // settled record with the outcome, emptied when nothing was sent.
             add_column("monetary_record", "ALTER TABLE ng_program_provider_calls ADD COLUMN monetary_record TEXT NOT NULL DEFAULT ''");
+            // The call's identity (#543). A row written before it keeps identity version 1: its request_digest is
+            // the dispatch digest, which includes the descriptor policy, and it has no content, policy or
+            // producer. A row written now is version 2.
+            add_column("identity_version", "ALTER TABLE ng_program_provider_calls ADD COLUMN identity_version TEXT NOT NULL DEFAULT '1'");
+            add_column("content_digest", "ALTER TABLE ng_program_provider_calls ADD COLUMN content_digest TEXT NOT NULL DEFAULT ''");
+            add_column("policy_identity", "ALTER TABLE ng_program_provider_calls ADD COLUMN policy_identity TEXT NOT NULL DEFAULT ''");
+            add_column("producer", "ALTER TABLE ng_program_provider_calls ADD COLUMN producer TEXT NOT NULL DEFAULT ''");
+            // The times a call was matched to its record under another policy identity. A row is never rewritten.
+            execute(db, "CREATE TABLE IF NOT EXISTS ng_program_provider_call_policy_changes("
+                        "owner_scope TEXT NOT NULL, dispatch_id TEXT NOT NULL,"
+                        "journaled_policy TEXT NOT NULL, observed_policy TEXT NOT NULL,"
+                        "attempt TEXT NOT NULL, via TEXT NOT NULL,"
+                        "PRIMARY KEY(owner_scope,dispatch_id,journaled_policy,observed_policy))");
             execute(db, "CREATE INDEX IF NOT EXISTS ng_program_provider_scope ON ng_program_provider_calls(owner_scope,logical_scope)");
         } catch (...) {
             sqlite3_close_v2(db);
@@ -173,6 +199,9 @@ struct Stored {
     std::string scope;
     std::uint64_t claim = 0, committed = 0;
     std::string monetary;
+    // #543. Version 2: `request` names `content` and `policy` together. Version 1: `request` is the dispatch
+    // digest of the writer, and the three are empty. `legacy` is the dispatch digest of the call being made.
+    std::string identity_version = "2", content, policy, producer, legacy;
 };
 std::uint64_t parse_amount(std::string_view value) {
     std::uint64_t result = 0;
@@ -186,6 +215,10 @@ std::string scope_digest(const json& slot) {
     return hash("scope", {{"owner_scope", slot.at("owner_scope")},
                           {"program_version_id", slot.at("program_version_id")},
                           {"run_id", slot.at("run_id")}, {"operation_id", slot.at("operation_id")}});
+}
+// The version 2 request_digest: the content and the policy that admitted it, as one name.
+std::string identity_of(std::string_view content, std::string_view policy) {
+    return hash("identity", {{"content", std::string(content)}, {"policy", std::string(policy)}});
 }
 std::string accounting_key(std::string_view owner, std::string_view id, const Stored& row) {
     return hash("accounting", {{"owner_scope", owner}, {"dispatch_id", id},
@@ -218,7 +251,8 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
     Statement query(db, "SELECT slot,request_digest,provider_binding_identity,model,"
                         "original_attempt,state,completion,outcome_digest,evidence_identity,"
                         "encoding_version,provider_name,family,mode,original_deadline,"
-                        "logical_scope,claim_amount,committed_amount,monetary_record "
+                        "logical_scope,claim_amount,committed_amount,monetary_record,"
+                        "identity_version,content_digest,policy_identity,producer "
                         "FROM ng_program_provider_calls WHERE owner_scope=?1 AND dispatch_id=?2");
     query.bind(1, owner);
     query.bind(2, id);
@@ -229,7 +263,8 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                query.column(4), query.column(5), query.column(6), query.column(7), query.column(8),
                query.column(9), query.column(10), query.column(11), query.column(12), query.column(13),
                query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16)),
-               query.column(17)};
+               query.column(17), query.column(18), query.column(19), query.column(20),
+               query.column(21)};
     if (query.next()) throw std::runtime_error("Duplicate Program provider journal slot");
     // A call that names no model, such as a file upload, stores an empty one; the model is compared with the
     // call's own whenever the row is used.
@@ -244,6 +279,17 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
         (!row.evidence.empty() && !neograph::detail::is_sha256_identity(row.evidence)) ||
         row.scope != scope_digest(slot_value))
         throw std::runtime_error("Corrupt Program provider journal dispatch binding");
+    if (row.identity_version == "1") {
+        if (!row.content.empty() || !row.policy.empty() || !row.producer.empty())
+            throw std::runtime_error("Corrupt Program provider journal dispatch binding");
+    } else if (row.identity_version == "2") {
+        if (!neograph::detail::is_sha256_identity(row.content) ||
+            !neograph::detail::is_sha256_identity(row.policy) || row.producer.empty() ||
+            row.request != identity_of(row.content, row.policy))
+            throw std::runtime_error("Corrupt Program provider journal dispatch binding");
+    } else {
+        throw std::runtime_error("Incompatible Program provider journal identity; external reconciliation required");
+    }
     if (archive && archive->owner_scope() != owner)
         throw std::runtime_error("Program provider archive owner scope mismatch");
     if (row.state != "dispatched" && row.state != "succeeded" && row.state != "failed" &&
@@ -424,17 +470,99 @@ void save_outcome(sqlite3* db, std::string_view owner, std::string_view id,
     update.done();
     if (sqlite3_changes(db) != 1) throw std::runtime_error("Program provider journal settlement conflict");
 }
+// #543: how a journaled row relates to the call being made at its position.
+enum class Relation {
+    Same,           // the same content, admitted by the same policy
+    PolicyChanged,  // the same content, admitted by another descriptor policy
+    Different,      // another request: its model, family, mode or content differs and the encoder is the same
+    Unknown,        // cannot tell: the encoder may differ, or the row predates content identity
+};
+Relation relation_of(const Stored& row, const Stored& call) {
+    // These are the call's own facts, not an encoder's, so a difference proves another request.
+    if (row.model != call.model || row.family != call.family || row.mode != call.mode)
+        return Relation::Different;
+    if (row.identity_version == "2") {
+        if (row.content == call.content)
+            return row.policy == call.policy ? Relation::Same : Relation::PolicyChanged;
+        return row.producer == call.producer ? Relation::Different : Relation::Unknown;
+    }
+    // A version 1 row names its call by the dispatch digest, which includes the policy: equal digests prove
+    // the same call, and unequal ones do not tell a changed policy from a changed request.
+    return row.request == call.legacy ? Relation::Same : Relation::Unknown;
+}
+
+std::string conflict_text(const Stored& row, const Stored& call, Relation relation) {
+    std::string text = "Program provider journal logical call binding conflict";
+    if (relation == Relation::Unknown && row.identity_version != "2")
+        text += ": the journaled call predates content identity (written by 0.16.0 or earlier) and its dispatch "
+                "digest differs, so the request or SchemaProvider's descriptor policy changed";
+    else if (relation == Relation::Unknown)
+        text += ": the request content differs, and the journaled call was encoded by " + row.producer +
+                ", not by " + call.producer;
+    else if (relation == Relation::Different)
+        text += ": the request content differs";
+    return text;
+}
+
+// What a call tells the host, kept until its journal write is committed.
+using Diagnostics = std::vector<ProgramCoreProviderCallDiagnostic>;
+
+void report(const std::function<void(ProgramCoreProviderCallDiagnostic)>& sink, Diagnostics& pending) noexcept {
+    auto reported = std::move(pending);
+    pending.clear();
+    if (!sink) return;
+    for (auto& value : reported) {
+        try { sink(std::move(value)); } catch (...) {}
+    }
+}
+
+// Notes that a call was matched to its record under another descriptor policy identity.
+void note_policy_change(sqlite3* db, std::string_view owner, std::string_view id,
+                        const Stored& row, const Stored& call, std::uint64_t attempt, bool adoption,
+                        std::string_view node, std::string_view source_id, Diagnostics& pending) {
+    Statement insert(db, "INSERT OR IGNORE INTO ng_program_provider_call_policy_changes"
+                         "(owner_scope,dispatch_id,journaled_policy,observed_policy,attempt,via) "
+                         "VALUES(?1,?2,?3,?4,?5,?6)");
+    insert.bind(1, owner); insert.bind(2, id); insert.bind(3, row.policy); insert.bind(4, call.policy);
+    insert.bind(5, std::to_string(attempt)); insert.bind(6, adoption ? "adoption" : "replay");
+    insert.done();
+    json witness{{"call_id", std::string(id)}, {"node", std::string(node)},
+                 {"via", adoption ? "adoption" : "replay"},
+                 {"journaled_policy_identity", row.policy}, {"observed_policy_identity", call.policy}};
+    if (adoption) witness["source_call_id"] = std::string(source_id);
+    pending.push_back(
+        {"P_PROVIDER_CALL_POLICY_CHANGED",
+         std::string("A provider call was found again under another SchemaProvider descriptor policy "
+                     "identity. Its request content is the same, so the journaled outcome was ") +
+             (adoption ? "adopted by the fork." : "replayed."),
+         std::move(witness)});
+}
+
+const char* to_string(ProgramProviderForkResendRefusedError::Reason reason) noexcept {
+    switch (reason) {
+        case ProgramProviderForkResendRefusedError::Reason::Unverifiable: return "unverifiable";
+        case ProgramProviderForkResendRefusedError::Reason::EncoderDiffers: return "encoder_differs";
+        case ProgramProviderForkResendRefusedError::Reason::DeploymentDiffers: return "deployment_differs";
+    }
+    return "unverifiable";
+}
+
 // #405: a fork repeats the provider calls its source's paused invocation made
 // before the fork. When the source journaled the same request at the same
 // slot (its own run and Core thread), the fork adopts that record: the
 // outcome is re-encoded under the fork's dispatch id, the monetary record
 // names the fork's call, and the row keeps the source's attempt, so neither
 // this attempt nor a restart of it charges the call again. Returns the
-// replayed outcome, or nothing when the source has no such record.
+// replayed outcome, or nothing when the call is a new one.
+//
+// #543: the same request is the same content, whatever descriptor policy
+// admitted it. A source record that is there but is not shown to differ, and
+// cannot be adopted, is a call the fork would send again and pay again: it is
+// refused unless the host allows it.
 std::optional<sp::runtime::Result> adopt_source_call(
     SQLiteProgramProviderCallJournal::Impl& impl, std::string_view owner, std::string_view id,
     const Stored& admitted, std::string_view operation, const graph::ProviderCallIdentity& identity,
-    const ProgramCoreProviderCallReplaySource& source) {
+    const ProgramCoreProviderCallReplaySource& source, std::uint64_t attempt, Diagnostics& pending) {
     // The source's thread of the same derivation as this call's.
     std::string           source_id;
     std::optional<Stored> row;
@@ -449,10 +577,28 @@ std::optional<sp::runtime::Result> adopt_source_call(
         if (row) break;
     }
     if (!row || row_attempt(*row) > source.max_attempt) return std::nullopt;
-    if (row->request != admitted.request || row->provider != admitted.provider ||
-        row->model != admitted.model || row->provider_name != admitted.provider_name ||
-        row->family != admitted.family || row->mode != admitted.mode)
+    const auto relation = relation_of(*row, admitted);
+    if (relation == Relation::Different) return std::nullopt;
+    // A call proven not accepted was not paid for: nothing is sent again.
+    if (row->state == "failed") return std::nullopt;
+    using Reason = ProgramProviderForkResendRefusedError::Reason;
+    std::optional<Reason> refusal;
+    if (relation == Relation::Unknown)
+        refusal = row->identity_version == "2" ? Reason::EncoderDiffers : Reason::Unverifiable;
+    else if (row->provider != admitted.provider || row->provider_name != admitted.provider_name)
+        refusal = Reason::DeploymentDiffers;
+    if (refusal) {
+        if (!source.may_resend)
+            throw ProgramProviderForkResendRefusedError(*refusal, std::string(id), source.run_id, source_id);
+        pending.push_back(
+            {"P_FORK_PROVIDER_CALL_RESENT",
+             "The fork sends a provider call that its source had already journaled at the same position, "
+             "because the host allows it; the provider may charge it again.",
+             json{{"call_id", std::string(id)}, {"node", identity.node_name},
+                  {"reason", to_string(*refusal)}, {"source_run_id", source.run_id},
+                  {"source_call_id", source_id}}});
         return std::nullopt;
+    }
     if (row->state == "dispatched" || row->state == "reconciliation_required")
         throw ProgramProviderDispatchUncertainError(
             "Program provider journal dispatch outcome of the forked call is uncertain; "
@@ -478,8 +624,10 @@ std::optional<sp::runtime::Result> adopt_source_call(
                      "(owner_scope,dispatch_id,slot,request_digest,provider_binding_identity,"
                      "model,original_attempt,state,completion,outcome_digest,evidence_identity,"
                      "encoding_version,provider_name,family,mode,original_deadline,"
-                     "logical_scope,claim_amount,committed_amount,monetary_record)"
-                     " VALUES(?1,?2,?3,?4,?5,?6,?7,'succeeded',?8,?9,?10,'2',?11,?12,?13,?14,?15,?16,?17,?18)");
+                     "logical_scope,claim_amount,committed_amount,monetary_record,"
+                     "identity_version,content_digest,policy_identity,producer)"
+                     " VALUES(?1,?2,?3,?4,?5,?6,?7,'succeeded',?8,?9,?10,'2',?11,?12,?13,?14,?15,?16,?17,?18,"
+                     "'2',?19,?20,?21)");
     insert.bind(1, owner); insert.bind(2, id); insert.bind(3, adopted.slot);
     insert.bind(4, adopted.request); insert.bind(5, adopted.provider);
     insert.bind(6, adopted.model); insert.bind(7, adopted.attempt);
@@ -488,7 +636,11 @@ std::optional<sp::runtime::Result> adopt_source_call(
     insert.bind(13, adopted.mode); insert.bind(14, adopted.deadline);
     insert.bind(15, adopted.scope); insert.bind(16, std::to_string(adopted.claim));
     insert.bind(17, std::to_string(adopted.committed)); insert.bind(18, monetary);
+    insert.bind(19, adopted.content); insert.bind(20, adopted.policy); insert.bind(21, adopted.producer);
     insert.done();
+    if (relation == Relation::PolicyChanged)
+        note_policy_change(impl.db, owner, id, *row, admitted, attempt, true, identity.node_name, source_id,
+                           pending);
     return result;
 }
 
@@ -500,13 +652,14 @@ public:
           run_(context.run_id), operation_(context.operation_id), attempt_(context.attempt),
           provider_identity_(std::move(provider_identity)),
           monetary_(std::move(context.monetary_account)),
-          replay_(std::move(context.replay_source)) {}
+          replay_(std::move(context.replay_source)),
+          diagnostic_(std::move(context.diagnostic)) {}
 
     asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
                                                std::shared_ptr<Provider> provider,
                                                ProviderRequest request) override {
         return invoke_owned(impl_, owner_, version_, run_, operation_, attempt_,
-                            provider_identity_, monetary_, replay_, std::move(identity),
+                            provider_identity_, monetary_, replay_, diagnostic_, std::move(identity),
                             std::move(provider), std::move(request));
     }
 private:
@@ -516,6 +669,7 @@ private:
         std::uint64_t attempt, std::string provider_identity,
         std::shared_ptr<ProgramMonetaryAccount> monetary,
         std::optional<ProgramCoreProviderCallReplaySource> replay,
+        std::function<void(ProgramCoreProviderCallDiagnostic)> diagnostic,
         graph::ProviderCallIdentity identity, std::shared_ptr<Provider> provider,
         ProviderRequest request) {
         if (!provider || identity.owner_scope != owner || identity.run_id != run ||
@@ -557,7 +711,13 @@ private:
             {"operation_id", operation}, {"thread_id", identity.thread_id},
             {"task_id", identity.task_id}, {"node_name", identity.node_name},
             {"call_ordinal", identity.call_ordinal}});
-        admitted.request = Provider::request_digest(prepared);
+        // The call is named by what it asks for, with the policy that admitted it recorded beside (#543).
+        admitted.identity_version = "2";
+        admitted.content = Provider::request_content_digest(prepared);
+        admitted.policy = Provider::request_policy_identity(prepared);
+        admitted.producer = producer_identity();
+        admitted.legacy = Provider::request_digest(prepared);
+        admitted.request = identity_of(admitted.content, admitted.policy);
         admitted.provider = provider_identity;
         admitted.provider_name = provider_name;
         admitted.model = std::string(prepared.model());
@@ -569,15 +729,19 @@ private:
         admitted.scope = hash("scope", {{"owner_scope", owner}, {"program_version_id", version},
                                         {"run_id", run}, {"operation_id", operation}});
         ProviderBudgetClaim claim;
+        Diagnostics pending;
         {
             std::lock_guard lock(impl->mutex);
             Transaction tx(impl->db);
             const auto existing = load(impl->db, owner, id, impl->archive);
-            if (existing && (existing->slot != admitted.slot || existing->request != admitted.request ||
-                    existing->provider != admitted.provider || existing->model != admitted.model ||
+            auto relation = Relation::Same;
+            if (existing) {
+                relation = relation_of(*existing, admitted);
+                if (existing->slot != admitted.slot || existing->provider != admitted.provider ||
                     existing->provider_name != admitted.provider_name ||
-                    existing->family != admitted.family || existing->mode != admitted.mode))
-                throw std::runtime_error("Program provider journal logical call binding conflict");
+                    relation == Relation::Different || relation == Relation::Unknown)
+                    throw std::runtime_error(conflict_text(*existing, admitted, relation));
+            }
             sp::runtime::Result restored;
             hydrate_scope(*impl, owner, admitted.scope, identity, attempt, id,
                           existing ? &*existing : nullptr, restored);
@@ -587,7 +751,11 @@ private:
                     if (!restored) restored = restore_outcome(*existing, owner, id, impl->archive);
                     if (committed_amount(*restored, existing->claim) != existing->committed)
                         throw std::runtime_error("Program provider persisted authority differs from the full outcome");
+                    if (relation == Relation::PolicyChanged)
+                        note_policy_change(impl->db, owner, id, *existing, admitted, attempt, false,
+                                           identity.node_name, {}, pending);
                     tx.commit();
+                    report(diagnostic, pending);
                     // Replay preserves the entire outcome and emits no events.
                     co_return restored;
                 }
@@ -596,8 +764,9 @@ private:
             }
             if (replay) {
                 if (auto adopted = adopt_source_call(*impl, owner, id, admitted, operation,
-                                                     identity, *replay)) {
+                                                     identity, *replay, attempt, pending)) {
                     tx.commit();
+                    report(diagnostic, pending);
                     co_return std::move(*adopted);
                 }
             }
@@ -623,8 +792,10 @@ private:
             Statement insert(impl->db, "INSERT INTO ng_program_provider_calls "
                              "(owner_scope,dispatch_id,slot,request_digest,provider_binding_identity,"
                              "model,original_attempt,state,encoding_version,provider_name,family,mode,original_deadline,"
-                             "logical_scope,claim_amount,committed_amount,monetary_record)"
-                             " VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched','2',?8,?9,?10,?11,?12,?13,?14,?15)");
+                             "logical_scope,claim_amount,committed_amount,monetary_record,"
+                             "identity_version,content_digest,policy_identity,producer)"
+                             " VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched','2',?8,?9,?10,?11,?12,?13,?14,?15,"
+                             "'2',?16,?17,?18)");
             insert.bind(1, owner); insert.bind(2, id); insert.bind(3, admitted.slot);
             insert.bind(4, admitted.request); insert.bind(5, admitted.provider);
             insert.bind(6, admitted.model); insert.bind(7, admitted.attempt);
@@ -633,8 +804,11 @@ private:
             insert.bind(12, admitted.scope); insert.bind(13, std::to_string(admitted.claim));
             insert.bind(14, std::to_string(admitted.committed));
             insert.bind(15, admitted.monetary);
+            insert.bind(16, admitted.content); insert.bind(17, admitted.policy);
+            insert.bind(18, admitted.producer);
             insert.done();
             tx.commit();  // write-ahead barrier: no transport before durable commit
+            report(diagnostic, pending);
             claim.mark_dispatched();
             hold.mark_dispatched();
             hold.remember(monetary_key(owner, id));
@@ -723,6 +897,7 @@ private:
     std::string provider_identity_;
     std::shared_ptr<ProgramMonetaryAccount> monetary_;
     std::optional<ProgramCoreProviderCallReplaySource> replay_;
+    std::function<void(ProgramCoreProviderCallDiagnostic)> diagnostic_;
 };
 }  // namespace
 
@@ -730,6 +905,22 @@ SQLiteProgramProviderCallJournal::SQLiteProgramProviderCallJournal(
     std::string path, std::shared_ptr<sp::NativeArchive> archive)
     : impl_(std::make_shared<Impl>(path, std::move(archive))) {}
 SQLiteProgramProviderCallJournal::~SQLiteProgramProviderCallJournal() = default;
+
+ProgramProviderForkResendRefusedError::ProgramProviderForkResendRefusedError(
+    Reason reason, std::string call_id, std::string source_run_id, std::string source_call_id)
+    : std::runtime_error(
+          std::string("Program provider journal: the fork would send a provider call its source run already "
+                      "journaled at the same position, and ") +
+          (reason == Reason::DeploymentDiffers
+               ? "the source journaled it under another provider deployment"
+               : reason == Reason::EncoderDiffers
+                     ? "the request content differs from the source's although another NeoGraph build encoded "
+                       "the source's, so the request may be the same"
+                     : "its journaled dispatch digest predates content identity and differs, so the call may "
+                       "be the same under another descriptor policy") +
+          "; set RuntimeConfig::fork_may_resend_provider_calls to send it again at the risk of paying twice"),
+      reason_(reason), call_id_(std::move(call_id)), source_run_id_(std::move(source_run_id)),
+      source_call_id_(std::move(source_call_id)) {}
 
 std::string SQLiteProgramProviderCallJournal::logical_call_id(
     const ProgramCoreProviderCallContext& context,
@@ -803,7 +994,28 @@ SQLiteProgramProviderCallJournal::inspect(std::string_view owner, std::string_vi
                   : State::ReconciliationRequired,
                   stored->request, stored->provider, stored->attempt, stored->outcome,
                   stored->provider_name, stored->model, stored->family, stored->mode,
-                  stored->deadline, 2, stored->claim, stored->committed, std::move(monetary)};
+                  stored->deadline, 2, stored->claim, stored->committed, std::move(monetary),
+                  stored->identity_version == "2" ? 2U : 1U, stored->content, stored->policy,
+                  stored->producer};
+}
+
+std::vector<SQLiteProgramProviderCallJournal::PolicyChange>
+SQLiteProgramProviderCallJournal::policy_changes(std::string_view owner, std::string_view id) const {
+    std::lock_guard lock(impl_->mutex);
+    Statement rows(impl_->db, "SELECT journaled_policy,observed_policy,attempt,via "
+                              "FROM ng_program_provider_call_policy_changes "
+                              "WHERE owner_scope=?1 AND dispatch_id=?2 ORDER BY rowid");
+    rows.bind(1, owner);
+    rows.bind(2, id);
+    std::vector<PolicyChange> changes;
+    while (rows.next()) {
+        const auto via = rows.column(3);
+        if (via != "replay" && via != "adoption")
+            throw std::runtime_error("Corrupt Program provider journal policy change");
+        changes.push_back({rows.column(0), rows.column(1), parse_amount(rows.column(2)),
+                           via == "adoption" ? PolicyChange::Via::Adoption : PolicyChange::Via::Replay});
+    }
+    return changes;
 }
 
 void SQLiteProgramProviderCallJournal::reconcile_success(

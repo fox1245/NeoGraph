@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8cbc12fad9dd02b4689341f51d4eb04ed8900d16210f8e1a3affceddedc4da2d -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,7 +14,14 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 变更
-
+- **提供方调用的 identity 标识的是请求所问的内容，而不是批准该请求的 SchemaProvider 策略 (#543)。** Program 提供方调用 journal 以 `Provider::request_digest` 标识调用，而这个摘要包含 SchemaProvider descriptor 策略的 identity。因此，内容相同的请求只要策略 identity 不同，就成了另一次调用：恢复或崩溃恢复会遇到逻辑调用绑定冲突，fork 则不会沿用来源运行的调用而是重新发送，已付费的调用于是被付费两次。interface 7 改变了所有策略 identity，0.16.0 就是这样遇到这个问题的。现在 journal 把请求内容和策略 identity 分开保存。
+  - **请求内容。** `Provider::request_content_digest(prepared)` 涵盖 family、模型、模式和 origin；端点调用还有它的端点、方法和 URL，上传还有它的元数据和所发送字节的摘要 (#541)；以及编码后的请求体。请求体中有消息（包括 NeoGraph 提供的 prompt 文本）、工具和选项。请求体会被规范化，descriptor 为模型、消息、流式标志和输出上限所指定的成员名按角色单独放置，所以策略即使改了其中一个名字，内容也不会变。策略的 identity、descriptor 的路由和请求头、重试策略以及 observer 上限都不属于请求内容。`Provider::request_policy_identity(prepared)` 返回策略 identity，`Provider::request_digest` 保持不变。SchemaProvider 没有带类型请求的规范形式；在 NeoGraph 里自己写一个，就得跟进每种请求类型的每个字段，漏掉一个字段，两个请求就会共用同一次调用。所以编码后的请求体就是内容，SDK 如果把同一个请求编码得不一样，就算作不同的内容，结果是安全失败（fail closed）。
+  - **journal 的行。** 行会在内容旁边记录策略 identity。它有新列 `identity_version`、`content_digest`、`policy_identity` 和 `producer`（编码该请求的 NeoGraph 构建），行的 `request_digest` 同时标识内容和策略。`SQLiteProgramProviderCallJournal::Record` 也新增了这四个成员，`policy_changes()` 列出为某次调用记下的变化（表 `ng_program_provider_call_policy_changes`）。本版本写入的行，0.16.0 无法匹配，所以降级会遇到绑定冲突。
+  - **策略变化不是冲突。** 发现同样内容出现在另一个策略 identity 之下的恢复、崩溃恢复或 fork，会重放或接管 journal 中已记录的结果，在不改写该行的情况下记下这一变化，并在运行的句柄上（`ProgramHandle::notices()`，Python 为 `handle.notices`）给出通知 `P_PROVIDER_CALL_POLICY_CHANGED`。通知可能在运行执行期间增加，所以请在 `wait()` 之后读取。内容不同仍然是逻辑调用绑定冲突：无论是宿主的还是 NeoGraph 内置的，只要恢复会发送不同的 prompt 文本，就什么都不发送。
+  - **0.16.0 的 journal 仍可恢复。** 其中的行只有包含策略的分发摘要，读取方式和以前一样：摘要与调用的摘要相等的行可以匹配，所以 0.16.0 的 journal 在写入时的策略之下可以恢复，fork 也会接管其中的调用。如果此后策略变了，摘要就不再匹配，恢复会遇到绑定冲突。
+  - **0.15 的 journal 仍然无法恢复。** 0.15 的摘要包含 SchemaProvider 0.3 的策略 identity 和 observer 上限，0.4 无法重新计算，所以任何 0.16.x 都无法判断这样一行的请求是否就是这次调用的请求。0.16.0 中“0.15 记入 journal 的运行无法由 0.16 恢复”的说明依然成立。变化的是对这类运行的 fork：它不再悄悄地重新发送其中的调用（见下一条）。
+- **行为变更：fork 会拒绝无法与来源运行匹配的提供方调用 (#543)。** fork 会在来源运行的同一位置查找记录，并接管内容相同的记录。来源在该位置没有记录、来源的记录是已证明提供方未接受任何内容的失败，或者内容不同且由同一个 NeoGraph 构建编码时，fork 才发送调用。既不能接管记录，又无法证明调用不同时，发送就会让同一次调用再次付费，所以它会在发送或记录任何内容之前，以 `ProgramProviderForkResendRefusedError` 拒绝。`reason()` 在行早于请求内容 identity 且摘要不同时为 `Unverifiable`，在内容不同且该行由另一个 NeoGraph 构建编码时为 `EncoderDiffers`，在内容相同但来源是在另一个提供方部署之下记录时为 `DeploymentDiffers`。在 Core 节点中它是 `NG.ConfigError`，既不重试也不路由，fork 会失败。`RuntimeConfig::fork_may_resend_provider_calls`（默认 `false`；Python 为 `LocalProgramHost(fork_may_resend_provider_calls=True)`）允许重新发送：fork 会发送该调用，提供方可能再次计费，它的句柄上带有 `P_FORK_PROVIDER_CALL_RESENT`。结果未知的来源调用，无论标志如何，都保持不确定。因此对 0.15 journal 的 fork 默认会失败，而以前它会为这些调用再次付费。
+- **需要重新构建 C++ 使用方：新增了成员 (#543)。** `RuntimeConfig` 新增 `fork_may_resend_provider_calls`，`ProgramCoreProviderCallReplaySource` 新增 `may_resend`，`ProgramCoreProviderCallContext` 新增 `diagnostic`，`SQLiteProgramProviderCallJournal::Record` 新增四个成员，`Provider` 新增两个静态函数。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：`ToolExecutionPolicy` 新增了成员 (#545)。** `ToolExecutionPolicy` 新增了 `error_limit_bytes`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复

@@ -378,7 +378,22 @@ public:
     asio::awaitable<sp::runtime::Result> dispatch_async(PreparedProviderRequest request);
     sp::runtime::Result invoke(ProviderRequest request);
     asio::awaitable<sp::runtime::Result> invoke_async(ProviderRequest request);
+    /// The dispatch digest of a prepared request: its content and everything the descriptor policy decided about
+    /// sending it, including the policy's identity. It changes when SchemaProvider's descriptor policy changes,
+    /// even for a request of the same content. A journal that must recognise the same call across policy
+    /// generations uses request_content_digest() and records request_policy_identity() beside it (#543).
     static std::string request_digest(const PreparedProviderRequest& request);
+    /// What the request asks for, apart from the policy that admitted it: its family, model, mode and origin, its
+    /// encoded body with the members the descriptor names set apart by role (model, messages, stream and output
+    /// cap), and for an endpoint call its endpoint, method, URL and upload (#541). It does not change with the
+    /// descriptor policy, the descriptor's routes, headers and member names, the retry policy or the observer
+    /// limits. The body is the one complete statement of what is sent, so a different prompt, tool, option or
+    /// message text, built in or the host's, is a different digest; an SDK that encodes the same request
+    /// differently is too.
+    static std::string request_content_digest(const PreparedProviderRequest& request);
+    /// The identity of the SchemaProvider descriptor policy that admitted the request, "sha256:" and 64 hex
+    /// digits. A journal records it beside request_content_digest().
+    static std::string request_policy_identity(const PreparedProviderRequest& request);
     static std::optional<std::uint64_t> conservative_token_upper_bound(const PreparedProviderRequest& request);
     /// Most model invocations one dispatch of this request can bill: the
     /// request's model invocations times the transport attempts its retry

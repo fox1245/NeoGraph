@@ -355,8 +355,8 @@ TEST(ProviderEndpoints, AnUploadIsSentFromTheFileItsIdentityNames) {
 TEST(ProviderEndpoints, TheDispatchIdentityOfEverythingButAnUploadIsUnchanged) {
     // Pinned from before uploads were named (#541), so a journal written then still matches. The observer limits are
     // set because their defaults follow the size of the SDK's event type, which differs between standard libraries.
-    // A change of the descriptor policy or of an SDK resource limit moves these digests too, and with them the
-    // identity of every journaled call.
+    // A change of the descriptor policy or of an SDK resource limit moves these digests too. A journal names its
+    // calls by the content digest instead (#543), which the next test pins.
     auto provider = test::endpoints::provider_at(kFixedOrigin);
     constexpr ProviderObserverLimits limits{64, 65536};
     auto chat_request = test::wire::request();
@@ -369,6 +369,27 @@ TEST(ProviderEndpoints, TheDispatchIdentityOfEverythingButAnUploadIsUnchanged) {
     auto get = provider->prepare(std::move(get_request));
     ASSERT_TRUE(get.valid());
     EXPECT_EQ(Provider::request_digest(get), "sha256:8a5fe0c5401985f8cdf4d412b2c305148a150a43e9c7a4992f655af2d11825a5");
+}
+
+TEST(ProviderEndpoints, TheContentIdentityOfACallIsPinnedAndDoesNotMoveWithTheObserverLimits) {
+    // The identity a journal names its calls by (#543). It is pinned here: a change moves the identity of every
+    // journaled call, so a journal written before it stops matching. Unlike the dispatch digest it does not
+    // follow the descriptor policy or an SDK resource limit, so the observer limits are left to their defaults.
+    auto provider = test::endpoints::provider_at(kFixedOrigin);
+    auto chat = provider->prepare(test::wire::request());
+    ASSERT_TRUE(chat.valid());
+    EXPECT_EQ(Provider::request_content_digest(chat), "sha256:f049c6f624189bf5670aec25a16712403d2202748a6977f3f4104d046c19a482");
+    auto get = provider->prepare(make_endpoint_request(sp::files::Get{"file-a"}));
+    ASSERT_TRUE(get.valid());
+    EXPECT_EQ(Provider::request_content_digest(get), "sha256:ec2f36007d06ae07a188728fc16cef7bae25284aa8c14ae03ac07bc9ca53c972");
+
+    constexpr ProviderObserverLimits limits{64, 65536};
+    auto limited_request = test::wire::request();
+    limited_request.observer_limits = limits;
+    const auto limited = provider->prepare(std::move(limited_request));
+    ASSERT_TRUE(limited.valid());
+    EXPECT_NE(Provider::request_digest(limited), Provider::request_digest(chat)) << "the dispatch digest follows them";
+    EXPECT_EQ(Provider::request_content_digest(limited), Provider::request_content_digest(chat));
 }
 
 TEST(ProviderEndpoints, AStreamedEndpointRequestIsRefusedBeforeItIsSent) {

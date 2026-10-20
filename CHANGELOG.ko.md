@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8cbc12fad9dd02b4689341f51d4eb04ed8900d16210f8e1a3affceddedc4da2d -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,7 +14,14 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 변경됨
-
+- **공급자 호출의 identity는 요청이 묻는 내용을 가리키며, 그 요청을 승인한 SchemaProvider 정책을 가리키지 않습니다 (#543).** Program 공급자 호출 저널은 호출을 `Provider::request_digest`로 식별했는데, 이 다이제스트에는 SchemaProvider descriptor 정책의 identity가 들어갑니다. 그래서 내용이 같은 요청도 정책 identity가 다르면 다른 호출이 되었습니다. 재개나 크래시 복구는 논리 호출 바인딩 충돌을 만났고, fork는 원본의 호출을 이어받지 않고 다시 보내서 이미 비용을 낸 호출에 다시 비용이 들었습니다. interface 7이 모든 정책 identity를 바꾸기 때문에 0.16.0에서 이 문제가 드러났습니다. 이제 저널은 요청 내용과 정책 identity를 따로 보관합니다.
+  - **요청 내용.** `Provider::request_content_digest(prepared)`는 family, 모델, 모드, origin을 다룹니다. 엔드포인트 호출이면 엔드포인트, 메서드, URL을, 업로드면 메타데이터와 보내는 바이트의 다이제스트를(#541) 더하고, 인코딩된 본문도 다룹니다. 본문에는 메시지(NeoGraph가 넣는 prompt 텍스트 포함), 도구, 옵션이 들어 있습니다. 본문은 정규화(canonicalize)하고, descriptor가 모델, 메시지, 스트림 플래그, 출력 상한에 붙인 멤버 이름은 역할별로 따로 두므로, 정책이 그 이름을 바꿔도 요청 내용은 바뀌지 않습니다. 정책의 identity, descriptor의 경로와 헤더, 재시도 정책, observer 한도는 요청 내용에 들어가지 않습니다. `Provider::request_policy_identity(prepared)`는 정책 identity를 돌려주고, `Provider::request_digest`는 그대로입니다. SchemaProvider에는 타입이 있는 요청의 정규형이 없고, NeoGraph에서 만들면 모든 요청 타입의 모든 필드를 따라가야 하며 빠뜨린 필드가 있으면 서로 다른 두 요청이 한 호출을 공유하게 됩니다. 그래서 인코딩된 본문이 곧 내용이며, SDK가 같은 요청을 다르게 인코딩하면 다른 내용으로 취급하고 안전한 쪽으로 실패합니다(fail closed).
+  - **저널 행.** 행은 요청 내용 옆에 정책 identity를 기록합니다. 새 열 `identity_version`, `content_digest`, `policy_identity`, `producer`(요청을 인코딩한 NeoGraph 빌드)가 있고, 행의 `request_digest`는 내용과 정책을 함께 가리킵니다. `SQLiteProgramProviderCallJournal::Record`에도 같은 네 멤버가 생겼고, `policy_changes()`는 호출에 기록된 변경을 나열합니다(테이블 `ng_program_provider_call_policy_changes`). 이 버전이 쓴 행은 0.16.0이 매칭하지 못하므로, 다운그레이드하면 바인딩 충돌을 만납니다.
+  - **정책 변경은 충돌이 아닙니다.** 같은 내용을 다른 정책 identity 아래에서 발견한 재개, 크래시 복구, fork는 저널에 기록된 결과를 재생하거나 이어받고, 행을 고쳐 쓰지 않은 채 변경을 기록하며, 실행의 핸들(`ProgramHandle::notices()`, Python `handle.notices`)에 알림 `P_PROVIDER_CALL_POLICY_CHANGED`를 알립니다. 알림은 실행되는 동안 추가될 수 있으므로 `wait()` 뒤에 읽으세요. 내용이 다르면 여전히 논리 호출 바인딩 충돌입니다. 호스트의 것이든 NeoGraph에 내장된 것이든 다른 prompt 텍스트를 보내게 될 재개는 아무것도 보내지 않습니다.
+  - **0.16.0의 저널은 계속 재개됩니다.** 그 행에는 정책이 들어 있는 디스패치 다이제스트만 있으며 예전처럼 읽습니다. 다이제스트가 호출의 것과 같은 행은 매칭되므로, 0.16.0 저널은 기록될 때의 정책 아래에서 재개되고 fork는 그 호출을 이어받습니다. 그 뒤 정책이 바뀌었다면 다이제스트가 더는 맞지 않아 재개가 바인딩 충돌을 만납니다.
+  - **0.15의 저널은 여전히 재개되지 않습니다.** 0.15의 다이제스트에는 SchemaProvider 0.3의 정책 identity와 observer 한도가 들어 있어 0.4가 다시 계산할 수 없으므로, 어떤 0.16.x도 그런 행의 요청이 해당 호출의 것인지 판별할 수 없습니다. 0.15가 저널에 기록한 실행은 0.16에서 재개할 수 없다는 0.16.0의 설명은 그대로입니다. 달라진 것은 그런 실행의 fork로, 이제 알리지 않고 호출을 다시 보내지 않습니다(다음 항목).
+- **동작 변경: fork는 원본의 호출로 매칭할 수 없는 공급자 호출을 거부합니다 (#543).** fork는 같은 위치에서 원본의 기록을 찾습니다. 내용이 같은 기록은 이어받습니다. 원본에 그 위치의 기록이 없을 때, 원본의 기록이 공급자가 아무것도 받아들이지 않았음을 증명하는 실패일 때, 내용이 다르고 둘을 같은 NeoGraph 빌드가 인코딩했을 때는 호출을 보냅니다. 기록을 이어받을 수도, 호출이 다르다는 것을 보일 수도 없으면 보내는 것은 같은 호출에 다시 비용을 내는 일이므로, 아무것도 보내거나 저널에 기록하기 전에 `ProgramProviderForkResendRefusedError`로 거부합니다. `reason()`은 요청 내용 identity 이전에 쓰였고 다이제스트가 다른 행이면 `Unverifiable`, 내용이 다르고 다른 NeoGraph 빌드가 행을 인코딩했으면 `EncoderDiffers`, 내용은 같지만 원본이 다른 공급자 배포 아래에서 기록했으면 `DeploymentDiffers`입니다. Core 노드 안에서는 `NG.ConfigError`로 재시도도 라우팅도 되지 않고, fork는 실패합니다. `RuntimeConfig::fork_may_resend_provider_calls`(기본값 `false`, Python은 `LocalProgramHost(fork_may_resend_provider_calls=True)`)가 재전송을 허용합니다. 그러면 fork가 호출을 보내고 공급자가 다시 과금할 수 있으며 핸들에 `P_FORK_PROVIDER_CALL_RESENT`가 붙습니다. 결과를 알 수 없는 원본 호출은 플래그와 관계없이 불확실한 상태로 남습니다. 따라서 0.15 저널의 fork는 기본적으로 실패하며, 예전에는 호출에 다시 비용을 냈습니다.
+- **C++ 사용 코드를 재빌드해야 합니다. 멤버가 추가되었습니다 (#543).** `RuntimeConfig`에 `fork_may_resend_provider_calls`가, `ProgramCoreProviderCallReplaySource`에 `may_resend`가, `ProgramCoreProviderCallContext`에 `diagnostic`이, `SQLiteProgramProviderCallJournal::Record`에 멤버 네 개가, `Provider`에 정적 함수 두 개가 추가되었습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조).
 - **C++ 사용 코드를 재빌드해야 합니다. `ToolExecutionPolicy`에 member가 추가되었습니다 (#545).** `ToolExecutionPolicy`에 `error_limit_bytes`가 추가되었습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조).
 
 ### 수정됨

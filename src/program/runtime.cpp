@@ -2288,6 +2288,16 @@ void RunControl::set_core_provider_call_resolver(ProgramCoreProviderCallResolver
     require_core_provider_call_broker_ = required;
 }
 
+void RunControl::add_notice(ProgramNotice notice) {
+    std::lock_guard lock(notices_mutex_);
+    notices.push_back(std::move(notice));
+}
+
+std::vector<ProgramNotice> RunControl::notices_snapshot() const {
+    std::lock_guard lock(notices_mutex_);
+    return notices;
+}
+
 void RunControl::set_monetary_account(std::shared_ptr<ProgramMonetaryAccount> account) {
     std::lock_guard lock(mutex_);
     monetary_account_ = std::move(account);
@@ -2347,6 +2357,12 @@ std::shared_ptr<graph::ProviderCallBroker> RunControl::resolve_core_provider_cal
         }
         context.replay_source = std::move(source);
     }
+    // #543: what a broker tells the host about a call goes to the run's handle.
+    context.diagnostic = [weak = weak_from_this()](ProgramCoreProviderCallDiagnostic diagnostic) {
+        if (const auto control = std::const_pointer_cast<RunControl>(weak.lock()))
+            control->add_notice(ProgramNotice{std::move(diagnostic.code), std::move(diagnostic.message),
+                                              std::move(diagnostic.witness)});
+    };
     const auto binding = resolver(context);
     if (!binding || binding->owner_scope != owner_scope ||
         binding->program_version_id != program_version_id ||
@@ -4495,7 +4511,7 @@ ProgramRunRecord ProgramHandle::snapshot() const {
     return control_->snapshot();
 }
 std::vector<ProgramNotice> ProgramHandle::notices() const {
-    return control_->notices;
+    return control_->notices_snapshot();
 }
 ProgramHandle ProgramHandle::resume(ProgramRuntime& runtime, ProgramResume resume_value) const {
     return runtime.resume(control_->owner_scope, control_->run_id, std::move(resume_value));
@@ -4508,6 +4524,16 @@ ProgramHandle ProgramHandle::reconcile(ProgramRuntime&         runtime,
 struct ProgramRuntime::Impl {
     explicit Impl(RuntimeConfig runtime_config)
         : config(std::move(runtime_config)), pool(config.scheduler_threads) {
+        // #543: a fork may send a call its source journaled and the journal cannot adopt only when the host says so.
+        if (config.fork_may_resend_provider_calls && config.core_provider_call_resolver) {
+            config.core_provider_call_resolver =
+                [inner = std::move(config.core_provider_call_resolver)](
+                    const ProgramCoreProviderCallContext& context) {
+                    auto allowed = context;
+                    if (allowed.replay_source) allowed.replay_source->may_resend = true;
+                    return inner(allowed);
+                };
+        }
         global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
         process_state      = process_runtime_state(*config.transitions);
     }

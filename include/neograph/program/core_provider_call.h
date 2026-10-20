@@ -37,6 +37,25 @@ struct ProgramCoreProviderCallReplaySource {
     std::vector<std::pair<std::string, std::string>> threads;
     /// Only calls the source journaled up to this attempt, before the fork.
     std::uint64_t max_attempt = 0;
+    /// #543: whether the fork may send a call the source already journaled at the
+    /// same position when it can neither adopt the record nor show that the
+    /// call differs. False, the default, refuses such a call before it is sent
+    /// (RuntimeConfig::fork_may_resend_provider_calls sets it).
+    bool may_resend = false;
+};
+
+/**
+ * #543: a fact about a provider call that a broker reports to the host as it
+ * happens. It is not an error: the call is neither refused nor changed. The
+ * runtime puts it on the handle of the run (ProgramHandle::notices()).
+ */
+struct ProgramCoreProviderCallDiagnostic {
+    /// Stable identifier, for example P_PROVIDER_CALL_POLICY_CHANGED.
+    std::string code;
+    /// One sentence for a person.
+    std::string message;
+    /// The facts the message summarizes, as JSON.
+    json        witness;
 };
 
 /** Exact Program operation requesting a host-owned Core provider broker. */
@@ -57,6 +76,10 @@ struct ProgramCoreProviderCallContext {
     /// #405: set on a fork for the calls it repeats; see
     /// ProgramCoreProviderCallReplaySource. Brokers that do not journal ignore it.
     std::optional<ProgramCoreProviderCallReplaySource> replay_source;
+    /// #543: where a broker reports a ProgramCoreProviderCallDiagnostic. The
+    /// runtime sets it for every Core provider call; a broker may ignore it. It may
+    /// be called from any thread, while the broker's call runs.
+    std::function<void(ProgramCoreProviderCallDiagnostic)> diagnostic;
 };
 
 /** Host binding for one Program operation. No credential is stored here. */
