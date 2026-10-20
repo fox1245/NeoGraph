@@ -7,8 +7,24 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
     "34fd00f7e0eb3e43878cdc11b4e84d5b44d21d46")
 
+# What NeoGraph needs of the SDK: the runtime, and the libcurl transport wherever the SDK can have one. The
+# transport runs its own I/O threads, so a single-thread build has none, and neither has a WebAssembly host.
+set(NEOGRAPH_SCHEMAPROVIDER_COMPONENTS runtime)
+set(_neograph_sp_transport OFF)
+if(NEOGRAPH_THREADS AND NOT NEOGRAPH_WASM_HOST)
+    list(APPEND NEOGRAPH_SCHEMAPROVIDER_COMPONENTS transport)
+    set(_neograph_sp_transport ON)
+endif()
+
+# A source build of the SDK takes NeoGraph's thread mode and transport. An SDK that is already built is checked
+# below. The values follow NEOGRAPH_THREADS, also in a build directory that changes it.
+set(SP_THREADS ${NEOGRAPH_THREADS} CACHE BOOL "Build SchemaProvider with OS threads (follows NEOGRAPH_THREADS)" FORCE)
+set(SP_BUILD_TRANSPORT ${_neograph_sp_transport} CACHE STRING
+    "Build the libcurl transport (follows NEOGRAPH_THREADS)" FORCE)
+unset(_neograph_sp_transport)
+
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    find_package(SchemaProvider 0.4.0 EXACT CONFIG QUIET COMPONENTS runtime transport)
+    find_package(SchemaProvider 0.4.0 EXACT CONFIG QUIET COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})
     if(NOT SchemaProvider_FOUND)
         if(NOT NEOGRAPH_FETCH_SCHEMAPROVIDER)
             message(FATAL_ERROR
@@ -46,6 +62,24 @@ else()
     endif()
 endif()
 
-if(NOT TARGET SchemaProvider::runtime OR NOT TARGET SchemaProvider::transport)
-    message(FATAL_ERROR "SchemaProvider does not provide its required runtime and transport targets")
+foreach(_component IN LISTS NEOGRAPH_SCHEMAPROVIDER_COMPONENTS)
+    if(NOT TARGET SchemaProvider::${_component})
+        message(FATAL_ERROR "SchemaProvider does not provide its required ${_component} target")
+    endif()
+endforeach()
+
+# The SDK exports ASIO_DISABLE_THREADS from a single-thread build. Its headers refuse a translation unit that
+# disagrees, so say so at configure time instead of at the first include.
+get_target_property(_neograph_sp_definitions SchemaProvider::runtime INTERFACE_COMPILE_DEFINITIONS)
+if(_neograph_sp_definitions AND "ASIO_DISABLE_THREADS" IN_LIST _neograph_sp_definitions)
+    if(NEOGRAPH_THREADS)
+        message(FATAL_ERROR
+            "SchemaProvider was built without threads (SP_THREADS=OFF), but NEOGRAPH_THREADS=ON. "
+            "Build both the same way.")
+    endif()
+elseif(NOT NEOGRAPH_THREADS)
+    message(FATAL_ERROR
+        "SchemaProvider was built with threads (SP_THREADS=ON), but NEOGRAPH_THREADS=OFF. "
+        "Build both the same way.")
 endif()
+unset(_neograph_sp_definitions)

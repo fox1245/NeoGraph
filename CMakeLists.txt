@@ -128,7 +128,7 @@ endif()
 option(NEOGRAPH_BUILD_ASYNC    "Build neograph::async (asio::ssl HTTP/HTTPS/WS client)" ON)
 option(NEOGRAPH_BUILD_PROGRAM  "Build optional neograph::program component" OFF)
 option(NEOGRAPH_BUILD_WASM
-       "Build the Emscripten WASM smoke executable (Emscripten only)"
+       "Build the Emscripten WASM smoke and check executables (Emscripten only)"
        OFF)
 # Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
 # while it is being qualified.  It is deliberately separate from the existing
@@ -188,12 +188,105 @@ elseif(APPLE)
 endif()
 
 # ===========================================================================
+# Build modes: threads and exceptions
+# ===========================================================================
+# A WebAssembly host (Emscripten, WASI) has no OS threads unless the build asks for them, so the core is
+# single-thread there by default: no -pthread, no Threads::Threads, and ASIO_DISABLE_THREADS exported with the
+# asio target. The option reaches SchemaProvider (SP_THREADS, and no libcurl transport). Asio is header-only, so
+# two translation units that disagree are a one-definition violation that nothing diagnoses: the generated
+# neograph/build_config.h records the setting, and a translation unit that disagrees with it does not compile.
+set(NEOGRAPH_WASM_HOST OFF)
+if(EMSCRIPTEN OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
+    set(NEOGRAPH_WASM_HOST ON)
+endif()
+set(_neograph_threads_default ON)
+if(NEOGRAPH_WASM_HOST)
+    set(_neograph_threads_default OFF)
+endif()
+option(NEOGRAPH_THREADS
+       "Build with OS threads. OFF builds a single-thread core for a host-supplied executor (the default on WebAssembly hosts): no -pthread, ASIO_DISABLE_THREADS defined"
+       ${_neograph_threads_default})
+if(NEOGRAPH_THREADS)
+    set(_neograph_build_threads 1)
+    if(EMSCRIPTEN)
+        # Every object of one Emscripten program has to be compiled with -pthread, the SDK's and the vendored C
+        # sources included: Threads::Threads carries no flag there.
+        add_compile_options(-pthread)
+        add_link_options(-pthread)
+    endif()
+else()
+    set(_neograph_build_threads 0)
+endif()
+
+# Components that need sockets, TLS, libcurl or system libraries a WebAssembly host does not provide, or OS threads.
+set(_neograph_unavailable_components "")
+if(NEOGRAPH_WASM_HOST)
+    set(_neograph_unavailable_components
+        ASYNC LLM MCP_CLIENT MCP_HTTP_SERVER A2A GRPC POSTGRES SQLITE PYBIND)
+elseif(NOT NEOGRAPH_THREADS)
+    set(_neograph_unavailable_components
+        ASYNC LLM MCP_CLIENT MCP_HTTP_SERVER A2A GRPC PYBIND)
+endif()
+foreach(_component IN LISTS _neograph_unavailable_components)
+    if(NEOGRAPH_BUILD_${_component})
+        if(NEOGRAPH_WASM_HOST)
+            set(_reason "needs sockets, TLS or system libraries that a WebAssembly host does not provide")
+        else()
+            set(_reason "needs OS threads")
+        endif()
+        message(FATAL_ERROR
+            "NEOGRAPH_BUILD_${_component}=ON ${_reason}; pass -DNEOGRAPH_BUILD_${_component}=OFF. "
+            "See wasm/README.md for the WebAssembly configuration.")
+    endif()
+endforeach()
+unset(_neograph_unavailable_components)
+unset(_component)
+unset(_reason)
+
+# Exceptions. The engine reports failures by throwing and catching, so a build without them does not work.
+# Emscripten catches nothing unless asked to: every NeoGraph target, C sources included, gets -fexceptions
+# (JavaScript-based exceptions) unless the configuration already chose -fexceptions or -fwasm-exceptions.
+# SchemaProvider adds the same flag, so the objects of one program agree.
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _neograph_build_type_upper)
+if("${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${_neograph_build_type_upper}}" MATCHES "-fno-exceptions")
+    message(FATAL_ERROR "NeoGraph needs C++ exceptions: remove -fno-exceptions from the compiler flags")
+endif()
+if(NEOGRAPH_WASM_HOST)
+    set(_neograph_exception_flags "")
+    if(EMSCRIPTEN AND NOT "${CMAKE_C_FLAGS} ${CMAKE_CXX_FLAGS}" MATCHES "-f(wasm-)?exceptions")
+        set(_neograph_exception_flags -fexceptions)
+        add_compile_options(-fexceptions)
+        add_link_options(-fexceptions)
+    endif()
+    include(CheckCXXSourceCompiles)
+    set(_neograph_required_flags_saved "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${_neograph_exception_flags}")
+    check_cxx_source_compiles("int main() { try { throw 1; } catch (int) { return 0; } return 1; }"
+                              NEOGRAPH_EXCEPTIONS_AVAILABLE)
+    set(CMAKE_REQUIRED_FLAGS "${_neograph_required_flags_saved}")
+    unset(_neograph_required_flags_saved)
+    unset(_neograph_exception_flags)
+    if(NOT NEOGRAPH_EXCEPTIONS_AVAILABLE)
+        message(FATAL_ERROR "NeoGraph needs C++ exceptions, and this compiler configuration does not compile a try/catch")
+    endif()
+endif()
+unset(_neograph_build_type_upper)
+
+# ===========================================================================
 # Dependencies
 # ===========================================================================
-find_package(Threads REQUIRED)
+if(NEOGRAPH_THREADS)
+    find_package(Threads REQUIRED)
+endif()
 
 set(DEPS_DIR ${PROJECT_SOURCE_DIR}/deps)
 include(cmake/NeoGraphSchemaProvider.cmake)
+
+# The record of the thread setting, reached by every public header through neograph/api.h. It is installed with
+# the headers and found through the asio target, which every library that includes the public headers links.
+set(NEOGRAPH_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file("${PROJECT_SOURCE_DIR}/cmake/build_config.h.in"
+               "${NEOGRAPH_GENERATED_INCLUDE_DIR}/neograph/build_config.h" @ONLY)
 
 # yyjson (C, compiled) — used by all modules for JSON parse/write
 # GNUInstallDirs early: the vendored targets below need CMAKE_INSTALL_INCLUDEDIR
@@ -268,6 +361,7 @@ target_include_directories(cppdotenv INTERFACE
 add_library(asio INTERFACE)
 target_include_directories(asio INTERFACE
     $<BUILD_INTERFACE:${DEPS_DIR}/asio/include>
+    $<BUILD_INTERFACE:${NEOGRAPH_GENERATED_INCLUDE_DIR}>
     $<INSTALL_INTERFACE:${NEOGRAPH_VENDOR_INSTALL_INCLUDEDIR}>)
 target_compile_definitions(asio INTERFACE ASIO_STANDALONE ASIO_NO_DEPRECATED)
 # Windows: target Windows 10+ so httplib compiles (it hard-errors on
@@ -279,8 +373,12 @@ if(WIN32)
         WIN32_LEAN_AND_MEAN
         NOMINMAX)
 endif()
-find_package(Threads REQUIRED)
-target_link_libraries(asio INTERFACE Threads::Threads)
+if(NEOGRAPH_THREADS)
+    target_link_libraries(asio INTERFACE Threads::Threads)
+else()
+    # Exported with the target, so a consumer that links it agrees with the build (neograph/build_config.h).
+    target_compile_definitions(asio INTERFACE ASIO_DISABLE_THREADS)
+endif()
 
 # QuickJS 2026-06-04 — private implementation detail of the experimental
 # JavaScript control runtime.  Do not add quickjs-libc.c: it supplies the
@@ -361,7 +459,9 @@ if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
             target_include_directories(${target} PRIVATE
                 "${_neograph_quickjs_msvc_output_dir}")
         endif()
-        target_link_libraries(${target} PRIVATE Threads::Threads)
+        if(NEOGRAPH_THREADS)
+            target_link_libraries(${target} PRIVATE Threads::Threads)
+        endif()
         if(UNIX AND NOT APPLE)
             target_link_libraries(${target} PRIVATE m)
         endif()
@@ -539,8 +639,11 @@ target_compile_definitions(neograph_core PRIVATE
     NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}")
 
 target_link_libraries(neograph_core
-    PUBLIC yyjson Threads::Threads asio SchemaProvider::runtime
+    PUBLIC yyjson asio SchemaProvider::runtime
 )
+if(NEOGRAPH_THREADS)
+    target_link_libraries(neograph_core PUBLIC Threads::Threads)
+endif()
 
 # Owned provider requests/results and asio coroutines are public C++20 contracts.
 target_compile_features(neograph_core PUBLIC cxx_std_20)
@@ -559,15 +662,16 @@ if(NEOGRAPH_BUILD_WASM)
     # header surface consistent with native builds for the WASM smoke target.
     target_compile_definitions(neograph_core PUBLIC
         ASIO_HAS_CO_AWAIT=1)
-    target_compile_options(neograph_core PRIVATE
-        -O3 -flto -fexceptions -pthread -fno-stack-protector)
-    target_compile_options(neograph_wasm_smoke PRIVATE
-        -O3 -flto -fexceptions -pthread -fno-stack-protector)
-    target_link_options(neograph_wasm_smoke PRIVATE
-        -O3 -flto -fexceptions -pthread
-        -sALLOW_MEMORY_GROWTH=1
-        -sPTHREAD_POOL_SIZE=4
-        -sEXIT_RUNTIME=1)
+    # -fexceptions and, for the pthread build (NEOGRAPH_THREADS=ON), -pthread are set for every target (build modes
+    # above). The pthread smoke programs add a pool of four workers; the single-thread build has no -pthread at all.
+    set(_neograph_wasm_codegen -O3 -flto -fno-stack-protector)
+    set(_neograph_wasm_link -O3 -flto -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1)
+    if(NEOGRAPH_THREADS)
+        list(APPEND _neograph_wasm_link -sPTHREAD_POOL_SIZE=4)
+    endif()
+    target_compile_options(neograph_core PRIVATE ${_neograph_wasm_codegen})
+    target_compile_options(neograph_wasm_smoke PRIVATE ${_neograph_wasm_codegen})
+    target_link_options(neograph_wasm_smoke PRIVATE ${_neograph_wasm_link})
     set_target_properties(neograph_wasm_smoke PROPERTIES
         OUTPUT_NAME smoke
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
@@ -688,6 +792,21 @@ if(NEOGRAPH_BUILD_PROGRAM)
         )
         add_library(neograph::program_postgres ALIAS neograph_program_postgres)
     endif()
+endif()
+
+# The wasm32 checks (wasm/checks.cpp). They also exercise the Program native-plugin refusal when Program is built.
+if(NEOGRAPH_BUILD_WASM)
+    add_executable(neograph_wasm_checks wasm/checks.cpp)
+    target_link_libraries(neograph_wasm_checks PRIVATE neograph_core)
+    if(TARGET neograph_program)
+        target_link_libraries(neograph_wasm_checks PRIVATE neograph_program)
+        target_compile_definitions(neograph_wasm_checks PRIVATE NEOGRAPH_WASM_CHECKS_PROGRAM)
+    endif()
+    target_compile_options(neograph_wasm_checks PRIVATE ${_neograph_wasm_codegen})
+    target_link_options(neograph_wasm_checks PRIVATE ${_neograph_wasm_link})
+    set_target_properties(neograph_wasm_checks PROPERTIES
+        OUTPUT_NAME checks
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
 endif()
 
 # ===========================================================================
@@ -1831,6 +1950,9 @@ endif()
 # Benchmarks (opt-in)
 # ===========================================================================
 option(NEOGRAPH_BUILD_BENCHMARKS "Build micro/load benchmark binaries" OFF)
+if(NEOGRAPH_BUILD_BENCHMARKS AND NOT NEOGRAPH_THREADS)
+    message(FATAL_ERROR "NEOGRAPH_BUILD_BENCHMARKS=ON needs OS threads (NEOGRAPH_THREADS=ON)")
+endif()
 # Transport-only codec benchmark. Default OFF: it probes optional protobuf and
 # Cap'n Proto dependencies only when explicitly requested.
 option(NEOGRAPH_BUILD_PROGRAM_CODEC_POC
@@ -2148,6 +2270,9 @@ endif()
 # Tests (Google Test)
 # ===========================================================================
 option(NEOGRAPH_BUILD_TESTS "Build unit tests" OFF)
+if(NEOGRAPH_BUILD_TESTS AND NOT NEOGRAPH_THREADS)
+    message(FATAL_ERROR "NEOGRAPH_BUILD_TESTS=ON needs OS threads (NEOGRAPH_THREADS=ON)")
+endif()
 
 if(NEOGRAPH_BUILD_TESTS)
     include(FetchContent)
@@ -2216,6 +2341,8 @@ option(NEOGRAPH_INSTALL_HEADERS
 if(NEOGRAPH_INSTALL_HEADERS)
     install(DIRECTORY include/neograph
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES "${NEOGRAPH_GENERATED_INCLUDE_DIR}/neograph/build_config.h"
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/neograph)
 
     install(DIRECTORY schemas/
         DESTINATION ${CMAKE_INSTALL_DATADIR}/neograph/schemas)
@@ -2315,7 +2442,12 @@ if(NEOGRAPH_INSTALL_EXPORT)
     # linked. Writing these out per-build rather than hardcoding them is the
     # point: an install that was built without libpq must not make its consumers
     # hunt for PostgreSQL.
-    set(NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\nfind_dependency(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)")
+    set(NEOGRAPH_CONFIG_DEPENDENCIES "")
+    if(NEOGRAPH_THREADS)
+        string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "find_dependency(Threads)\n")
+    endif()
+    string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES
+        "find_dependency(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})")
     if(TARGET neograph_async OR TARGET neograph_llm OR TARGET neograph_mcp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()

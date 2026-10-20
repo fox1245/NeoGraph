@@ -9,6 +9,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/graph/types.h>
 
 #include <asio/awaitable.hpp>
@@ -31,6 +32,28 @@ class NativeGraphCheckpoint;
 struct NodeResult;
 struct ChannelWrite;
 namespace detail { class ManagedBudgetJournalAccess; }
+
+/// A managed model-token budget with a deadline binds the deadline to the clock it counts on, so that a restart can
+/// tell whether it is still the same clock. A host without such a clock identity (WebAssembly; only Linux has one
+/// today) refuses the combination before the run starts, and a stored scope that carries a deadline cannot resume
+/// there. A managed budget without a deadline is not affected. It is also a ConfigurationFailure: running it again
+/// reproduces it, so it is never retried and never routed to a failure handler.
+class NEOGRAPH_API ManagedBudgetDeadlineClockUnavailable final : public std::runtime_error,
+                                                                public ConfigurationFailure {
+public:
+    ManagedBudgetDeadlineClockUnavailable();
+};
+
+/// A checkpoint store that is not asynchronous (it implements CheckpointStoreCore, or a CheckpointStore operation
+/// without an async form) runs each operation on a pool of worker threads and resumes the run on its executor. A
+/// single-thread build has no workers, so the operation is refused with this type instead of waiting for a thread
+/// that never starts. Implement AsyncCheckpointStore to use a store there. It is also a ConfigurationFailure:
+/// running it again reproduces it.
+class NEOGRAPH_API SynchronousCheckpointStoreUnavailable final : public std::runtime_error,
+                                                                 public ConfigurationFailure {
+public:
+    SynchronousCheckpointStoreUnavailable();
+};
 
 struct ManagedBudgetLeaseScope {
     std::string owner_scope;

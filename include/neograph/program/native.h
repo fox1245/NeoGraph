@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/program/bundle.h>
 #include <neograph/program/native_abi.h>
 
@@ -13,9 +14,33 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 
 namespace neograph::program {
+/**
+ * Whether this build can load a native control plugin. The C v1 ABI is the 64-bit layout, and
+ * wasm32 pads `neograph_program_native_invoke_request_v1` to 32 bytes where the last field ends
+ * at 28, so a plugin built to the ABI could not be called correctly there. Such a build refuses
+ * `NativeControlBinding::create` with NativeControlUnavailable.
+ */
+#if defined(__wasm32__)
+inline constexpr bool NATIVE_CONTROLS_AVAILABLE = false;
+#else
+inline constexpr bool NATIVE_CONTROLS_AVAILABLE = true;
+#endif
+
+/**
+ * Thrown by `NativeControlBinding::create` where NATIVE_CONTROLS_AVAILABLE is false. It is also a
+ * graph::ConfigurationFailure: running it again reproduces it, so it is never retried and never
+ * routed to a failure handler.
+ */
+class NEOGRAPH_PROGRAM_API NativeControlUnavailable final : public std::runtime_error,
+                                                            public graph::ConfigurationFailure {
+public:
+    NativeControlUnavailable();
+};
+
 /**
  * Import slots below this value are reserved by the versioned `ng` command
  * module. Native controls must be explicitly sealed at or above this boundary.
@@ -140,6 +165,7 @@ public:
     NativeControlBinding& operator=(NativeControlBinding&&) noexcept;
     ~NativeControlBinding();
 
+    /// Throws NativeControlUnavailable where NATIVE_CONTROLS_AVAILABLE is false.
     static NativeControlBinding create(neograph_program_native_binding_v1 binding,
                                        NativeControlMetadata              metadata);
 

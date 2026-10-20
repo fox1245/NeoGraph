@@ -1,0 +1,174 @@
+name: WebAssembly
+# The graph engine for a WebAssembly host (#535): the single-thread Emscripten build of the graph smoke, with a
+# curl-free SchemaProvider and no LLM component, run under Node 22 and 24, plus the wasm32 checks and a size gate.
+# The pthread build is a second job. Both pin the Emscripten toolchain: 6.0.13, from the emsdk commit that
+# is that release.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'deps/**'
+      - 'wasm/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/wasm.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'include/**'
+      - 'deps/**'
+      - 'wasm/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/wasm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSCRIPTEN_VERSION: 6.0.13
+  # The emsdk release commit of 6.0.13; `emsdk install` then fetches exactly that toolchain.
+  EMSDK_COMMIT: 35659964bc2762fffec0d257997fb61475f765b7
+
+jobs:
+  single-thread:
+    name: single-thread (Node 22 and 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # The size gate. Budgets are the measured size of the graph smoke (-O3 -flto, Release; 5,484,652 B and 1,601,090 B
+      # gzipped) plus about 9%.
+      MAX_WASM_BYTES: 6000000
+      MAX_GZIP_BYTES: 1750000
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the pinned emsdk
+        uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          ref: ${{ env.EMSDK_COMMIT }}
+          path: emsdk
+      - name: Install Emscripten
+        run: |
+          ./emsdk/emsdk install "$EMSCRIPTEN_VERSION"
+          ./emsdk/emsdk activate "$EMSCRIPTEN_VERSION"
+      - name: Record the toolchain
+        run: |
+          source emsdk/emsdk_env.sh
+          emcc --version | head -n 1
+          cmake --version | head -n 1
+      - name: Configure the single-thread build
+        run: |
+          source emsdk/emsdk_env.sh
+          emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_BUILD_WASM=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+            -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+            -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+            -DNEOGRAPH_USE_LIBCURL=OFF
+      - name: Check that the configuration is single-thread, curl-free and uses exceptions
+        run: |
+          fail() { echo "configuration check failed: $1"; exit 1; }
+          if grep -q -e '-pthread' build-wasm/build.ninja; then fail "-pthread is on a command line"; fi
+          grep -q 'ASIO_DISABLE_THREADS' build-wasm/build.ninja || fail "ASIO_DISABLE_THREADS is not defined"
+          grep -q -e '-fexceptions' build-wasm/build.ninja || fail "-fexceptions is not set"
+          grep -Eq '^#define NEOGRAPH_BUILD_THREADS 0$' build-wasm/generated/neograph/build_config.h \
+            || fail "neograph/build_config.h does not record a single-thread build"
+          grep -Eq '^#define SP_BUILD_THREADS 0$' build-wasm/_deps/neograph_schemaprovider-build/generated/sp/build_config.h \
+            || fail "sp/build_config.h does not record a single-thread build"
+          if ninja -C build-wasm -t targets all | grep -q 'sp_transport'; then fail "sp_transport is configured"; fi
+      - name: Build the smoke program and the wasm32 checks
+        run: |
+          source emsdk/emsdk_env.sh
+          time cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks --parallel
+          ls -l build-wasm/wasm
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run the smoke program and the checks on Node 22
+        run: |
+          node --version
+          node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
+          grep -q '^doubled = 42$' smoke.out
+          grep -q '^trace = d' smoke.out
+          node build-wasm/wasm/checks.js > checks.out && cat checks.out
+          grep -q '^all checks passed$' checks.out
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run the smoke program and the checks on Node 24
+        run: |
+          node --version
+          node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
+          grep -q '^doubled = 42$' smoke.out
+          grep -q '^trace = d' smoke.out
+          node build-wasm/wasm/checks.js > checks.out && cat checks.out
+          grep -q '^all checks passed$' checks.out
+      - name: Size gate
+        run: |
+          python3 wasm/size_gate.py --label "Graph smoke, single-thread, Emscripten $EMSCRIPTEN_VERSION" \
+            --wasm build-wasm/wasm/smoke.wasm --js build-wasm/wasm/smoke.js \
+            --max-wasm "$MAX_WASM_BYTES" --max-gzip "$MAX_GZIP_BYTES"
+
+  pthread:
+    name: pthread (Node 24)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the pinned emsdk
+        uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          ref: ${{ env.EMSDK_COMMIT }}
+          path: emsdk
+      - name: Install Emscripten
+        run: |
+          ./emsdk/emsdk install "$EMSCRIPTEN_VERSION"
+          ./emsdk/emsdk activate "$EMSCRIPTEN_VERSION"
+      - name: Configure the pthread build
+        run: |
+          source emsdk/emsdk_env.sh
+          emcmake cmake -S . -B build-wasm-pthread -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DNEOGRAPH_THREADS=ON -DNEOGRAPH_BUILD_WASM=ON \
+            -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=OFF -DNEOGRAPH_BUILD_MCP=OFF \
+            -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
+            -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
+            -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
+            -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
+            -DNEOGRAPH_USE_LIBCURL=OFF
+      - name: Check that the configuration is threaded
+        run: |
+          fail() { echo "configuration check failed: $1"; exit 1; }
+          grep -q -e '-pthread' build-wasm-pthread/build.ninja || fail "-pthread is not on a command line"
+          if grep -q 'ASIO_DISABLE_THREADS' build-wasm-pthread/build.ninja; then fail "ASIO_DISABLE_THREADS is defined"; fi
+          grep -Eq '^#define NEOGRAPH_BUILD_THREADS 1$' build-wasm-pthread/generated/neograph/build_config.h \
+            || fail "neograph/build_config.h does not record a threaded build"
+      - name: Build the smoke program
+        run: |
+          source emsdk/emsdk_env.sh
+          time cmake --build build-wasm-pthread --target neograph_wasm_smoke --parallel
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run the smoke program on Node 24
+        run: |
+          node --version
+          node build-wasm-pthread/wasm/smoke.js > smoke.out && cat smoke.out
+          grep -q '^doubled = 42$' smoke.out
+          grep -q '^trace = d' smoke.out
+      - name: Report the sizes
+        run: |
+          python3 wasm/size_gate.py --label "Graph smoke, pthread, Emscripten $EMSCRIPTEN_VERSION" \
+            --wasm build-wasm-pthread/wasm/smoke.wasm --js build-wasm-pthread/wasm/smoke.js

@@ -29,9 +29,14 @@ constexpr std::size_t kMinimumResultSize =
     offsetof(neograph_program_native_result_v1, payload_json) +
     sizeof(neograph_program_native_owned_bytes_v1);
 
+// The v1 layouts are the 64-bit ones. wasm32 aligns uint64_t to eight bytes but a pointer is four,
+// so the request is 32 bytes where its last field ends at 28; native controls are not available
+// there (NATIVE_CONTROLS_AVAILABLE), and nothing below the refusal in create() is reached.
+#if !defined(__wasm32__)
 static_assert(kMinimumCancellationSize == sizeof(neograph_program_native_cancellation_v1));
 static_assert(kMinimumRequestSize == sizeof(neograph_program_native_invoke_request_v1));
 static_assert(kMinimumResultSize == sizeof(neograph_program_native_result_v1));
+#endif
 
 std::string bounded_message(const std::exception& error) {
     constexpr std::size_t kMaxMessageBytes = 1024;
@@ -544,8 +549,13 @@ NativeControlBinding& NativeControlBinding::operator=(const NativeControlBinding
 NativeControlBinding& NativeControlBinding::operator=(NativeControlBinding&&) noexcept = default;
 NativeControlBinding::~NativeControlBinding()                                             = default;
 
+NativeControlUnavailable::NativeControlUnavailable()
+    : std::runtime_error(
+          "Native Program controls are unavailable on this target: the C v1 plugin ABI is a 64-bit layout") {}
+
 NativeControlBinding NativeControlBinding::create(neograph_program_native_binding_v1 binding,
                                                    NativeControlMetadata metadata) {
+    if (!NATIVE_CONTROLS_AVAILABLE) throw NativeControlUnavailable();
     validate_binding(binding);
     validate_metadata(metadata);
     auto impl      = std::make_shared<detail::NativeControlBindingImpl>();

@@ -10,6 +10,9 @@
  * allocated for that versioned value.  A consumer must reject a value whose
  * size does not cover every field it reads, and must ignore fields beyond the
  * known v1 prefix so a later ABI can append fields safely.
+ *
+ * The v1 layouts are the 64-bit ones. A wasm32 build does not load plugins:
+ * `NativeControlBinding::create` refuses (see program/native.h).
  */
 #pragma once
 

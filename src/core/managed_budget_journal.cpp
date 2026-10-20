@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <fstream>
 #include <limits>
@@ -15,16 +14,12 @@
 #include <stdexcept>
 #include <utility>
 
-#if defined(__linux__)
-#include <sys/random.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-#include <stdlib.h>
-#elif defined(_WIN32)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#endif
+// The SDK's entropy primitive (crypto/crypto.h, which the SDK does not install; the function is in its libsp_json).
+// It reads the operating system's CSPRNG on every platform, getentropy on WebAssembly hosts, and reports a failure
+// instead of falling back to another generator.
+namespace sp::crypto {
+[[nodiscard]] bool random_bytes(void* data, std::size_t size) noexcept;
+}
 
 namespace neograph::graph {
 
@@ -73,6 +68,8 @@ struct ManagedBudgetEffectReceipt::Impl {
 };
 
 OwnedManagedBudgetLease::OwnedManagedBudgetLease(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
+ManagedBudgetDeadlineClockUnavailable::ManagedBudgetDeadlineClockUnavailable()
+    : std::runtime_error("Managed budget deadline clock recovery is unsupported on this platform") {}
 const ManagedBudgetLeaseScope& OwnedManagedBudgetLease::scope() const noexcept { return impl_->scope; }
 const std::string& OwnedManagedBudgetLease::execution_thread_id() const noexcept {
     return impl_->execution_thread;
@@ -253,27 +250,8 @@ std::uint64_t add(std::uint64_t left, std::uint64_t right) {
 }
 std::string nonce() {
     std::array<unsigned char, 32> bytes{};
-#if defined(__linux__)
-    std::size_t offset = 0;
-    while (offset != bytes.size()) {
-        const auto count = ::getrandom(bytes.data() + offset, bytes.size() - offset, 0);
-        if (count < 0 && errno == EINTR) continue;
-        require(count > 0, "Managed budget journal requires platform cryptographic entropy");
-        offset += static_cast<std::size_t>(count);
-    }
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    ::arc4random_buf(bytes.data(), bytes.size());
-#elif defined(_WIN32)
-    const auto library = ::LoadLibraryW(L"advapi32.dll");
-    require(library != nullptr, "Managed budget journal requires platform cryptographic entropy");
-    using Random = BOOLEAN (APIENTRY*)(PVOID, ULONG);
-    const auto random = reinterpret_cast<Random>(::GetProcAddress(library, "SystemFunction036"));
-    const bool accepted = random && random(bytes.data(), static_cast<ULONG>(bytes.size()));
-    ::FreeLibrary(library);
-    require(accepted, "Managed budget journal requires platform cryptographic entropy");
-#else
-    throw std::runtime_error("Managed budget journal platform entropy is unsupported");
-#endif
+    require(sp::crypto::random_bytes(bytes.data(), bytes.size()),
+            "Managed budget journal requires platform cryptographic entropy");
     constexpr char digits[] = "0123456789abcdef";
     std::string result(bytes.size() * 2, '0');
     for (std::size_t index = 0; index != bytes.size(); ++index) {
@@ -488,7 +466,7 @@ std::string managed_budget_deadline_clock_identity() {
     require(offsets.eof() && found, "Managed budget monotonic clock origin cannot be recovered");
     return "linux:CLOCK_MONOTONIC:boot:" + boot + ":offset:" + origin;
 #else
-    throw std::runtime_error("Managed budget deadline clock recovery is unsupported on this platform");
+    throw ManagedBudgetDeadlineClockUnavailable();
 #endif
 }
 
