@@ -939,6 +939,15 @@ if(TARGET neograph::llm)
     neograph_discover_tests(neograph_example_support_tests)
 endif()
 
+if(TARGET neograph::llm)
+    # The engine on a host's event loop (#535): async::HostLoop pumps the io_context from tasks the host runs, and a
+    # SchemaProvider built over the SDK's host seam sends through the host's transport. A manual executor stands for
+    # the host; no network, no thread.
+    add_executable(neograph_host_loop_tests test_host_loop.cpp)
+    target_link_libraries(neograph_host_loop_tests PRIVATE neograph::core neograph::llm GTest::gtest_main)
+    neograph_discover_tests(neograph_host_loop_tests PROPERTIES TIMEOUT 60 LABELS "host;model-free")
+endif()
+
 if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph::llm)
     add_executable(neograph_program_provider_journal_runtime_tests
         test_program_provider_journal_runtime.cpp)

@@ -1,4 +1,5 @@
 #include <neograph/host_admission.h>
+#include <neograph/async/host_loop.h>
 
 #include <asio/error.hpp>
 #include <asio/redirect_error.hpp>
@@ -903,6 +904,7 @@ asio::awaitable<HostResourceLease> HostAdmissionController::reserve_async(
         }
         poll.expires_after(std::min(std::chrono::milliseconds{2},
                                     std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+        async::note_deadline(executor, poll.expiry());
         asio::error_code error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, error));
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);

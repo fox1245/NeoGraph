@@ -260,6 +260,7 @@ struct PreparedProviderRequest::Impl {
     std::optional<sp::Error> error;
     std::string digest;
     std::optional<json> upload;
+    bool host_pumped = false;
     std::shared_ptr<DispatchHooks> hooks;
     std::shared_ptr<StopChannel> stop;
     std::size_t event_count_limit = 0, event_byte_limit = 0;
@@ -296,11 +297,13 @@ bool PreparedProviderRequest::is_endpoint_read() const noexcept {
     return impl_ && !impl_->prepared.endpoint().empty() && impl_->prepared.method() == "GET";
 }
 
-PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::Client> client, ProviderRequest request) {
+PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::Client> client, ProviderRequest request,
+                                                  bool host_pumped) {
     sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, sp::capability::RequiredProvider);
     if (!client) throw std::invalid_argument("Provider runtime is unavailable");
     auto impl = std::make_unique<PreparedProviderRequest::Impl>();
     impl->client = std::move(client);
+    impl->host_pumped = host_pumped;
     impl->mode = request.mode;
     impl->cancel_token = std::move(request.cancel_token);
     impl->on_event = std::move(request.on_event);
@@ -562,6 +565,8 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
         if (!result) throw std::invalid_argument("Local provider returned no owned outcome");
         co_return result;
     }
+    // A blocking bridge waits for the host's event loop on the one thread that can run it.
+    if (impl->host_pumped && detail::on_blocking_bridge(executor)) co_return detail::blocking_bridge_refusal();
     detail::ProviderWakeReader wake(executor);
     auto bridge = std::make_shared<Bridge>(impl->event_count_limit, impl->event_byte_limit);
     // Late SDK callbacks retain only SDK/client data, never the outer executor.
@@ -649,6 +654,15 @@ std::shared_ptr<sp::runtime::Client> Provider::require_endpoint_runtime() const 
     auto client = endpoint_runtime();
     if (!client) throw std::logic_error("Provider has no SchemaProvider endpoints");
     return client;
+}
+bool detail::on_blocking_bridge(const asio::any_io_executor& executor) noexcept {
+    return async::detail::on_serial_io_context(executor);
+}
+sp::runtime::Result detail::blocking_bridge_refusal() {
+    auto error = local_error(sp::ErrorKind::Misuse,
+        "A synchronous call cannot wait for a provider on a host-pumped executor; use the async form on the host's loop");
+    error.reason = std::string(sp::runtime::blocking_host_pumped_reason);
+    return failure(std::move(error));
 }
 asio::awaitable<void> detail::await_endpoint(EndpointStart start) {
     ProviderWakeReader wake(co_await asio::this_coro::executor);

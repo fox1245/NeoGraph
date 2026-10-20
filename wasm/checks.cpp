@@ -8,6 +8,9 @@
 //              needs a worker thread; a single-thread build has none, so the operation is refused with a typed
 //              error instead of waiting for it.
 //   plugin     A native Program control plugin is refused with a typed error (the v1 ABI is a 64-bit layout).
+//   transport  The libcurl constructor of SchemaProvider is refused with the SDK's typed error (no transport here).
+//   blocking   A synchronous run that reaches a provider on a host-pumped executor is refused with the SDK's typed
+//              reason, and nothing is sent. Waiting for the host's event loop would hang the one thread.
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/configuration_failure.h>
@@ -19,6 +22,11 @@
 
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM
 #include <neograph/program/native.h>
+#endif
+#ifdef NEOGRAPH_WASM_CHECKS_LLM
+#include <neograph/llm/schema_provider.h>
+#include <descriptor/descriptor.h>
+#include <runtime/host.h>
 #endif
 
 #include <algorithm>
@@ -195,6 +203,96 @@ void check_native_plugin() {
 }
 #endif
 
+#ifdef NEOGRAPH_WASM_CHECKS_LLM
+// A host that never runs: it declares itself pumped, queues what it is given and starts no request.
+class PumpedExecutor final : public sp::runtime::Executor {
+public:
+    void post(Task) override {}
+    Timer schedule(sp::runtime::SteadyTime, Task) override { return 0; }
+    void cancel(Timer) noexcept override {}
+    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+    bool in_thread() const noexcept override { return false; }
+    bool host_pumped() const noexcept override { return true; }
+    void shutdown() noexcept override {}
+};
+class CountingTransport final : public sp::runtime::HostTransport {
+public:
+    std::unique_ptr<sp::runtime::HostAttempt> start(sp::transport::HttpRequest, sp::transport::Callbacks) override {
+        ++starts;
+        throw std::logic_error("a refused call must not send");
+    }
+    void shutdown() noexcept override {}
+    int starts = 0;
+};
+
+std::string provider_failure_reason(std::exception_ptr error) {
+    for (int depth = 0; error && depth < 8; ++depth) {
+        try {
+            std::rethrow_exception(error);
+        } catch (const NodeExecutionError& failure) {
+            error = failure.cause();
+        } catch (const ProviderFailure& failure) {
+            return std::get<sp::Failure>(*failure.outcome()).error.reason;
+        } catch (...) {
+            return {};
+        }
+    }
+    return {};
+}
+
+void check_libcurl_constructor() {
+    // This build has no libcurl transport: the constructor that would use it names what is missing.
+    try {
+        auto loaded = sp::descriptor::load(
+            R"({"descriptor_version":1,"revision":1,"id":"wasm-checks","family":"openai.chat","connection":{"base_url":"https://api.example.test","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}}})");
+        llm::SchemaProvider provider(std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+                                     sp::runtime::Options::with_api_key("key"));
+        check(false, "transport: the libcurl constructor is refused", "the provider was built");
+    } catch (const sp::descriptor::ConfigError& error) {
+        check(error.pointer == "/transport", "transport: the libcurl constructor is refused with the SDK's typed error");
+    } catch (const std::exception& error) {
+        check(false, "transport: the libcurl constructor is refused with the SDK's typed error", error.what());
+    }
+}
+
+void check_blocking_run() {
+    try {
+        auto loaded = sp::descriptor::load(
+            R"({"descriptor_version":1,"revision":1,"id":"wasm-checks","family":"openai.chat","connection":{"base_url":"https://api.example.test","paths":{"buffered":"/v1/chat/completions","streaming":"/v1/chat/completions"}}})");
+        auto transport = std::make_shared<CountingTransport>();
+        auto provider = std::make_shared<llm::SchemaProvider>(
+            std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded)),
+            sp::runtime::Options::with_api_key("key"), std::make_shared<PumpedExecutor>(), transport);
+        json defn = {
+            {"name", "wasm_checks_llm"},
+            {"channels", {{"messages", {{"reducer", "append"}}}}},
+            {"nodes", {{"llm", {{"type", "llm_call"}}}}},
+            {"edges", json::array({{{"from", "__start__"}, {"to", "llm"}}, {{"from", "llm"}, {"to", "__end__"}}})},
+        };
+        NodeContext context;
+        context.provider = provider;
+        context.model = "model";
+        auto engine = GraphEngine::compile(defn, context);
+        RunConfig cfg;
+        cfg.thread_id = "blocking-1";
+        cfg.provider_messages = std::vector<sp::Message>{portable_message(ChatMessage{"user", "hello"})};
+        std::exception_ptr failure;
+        try {
+            engine->run(cfg);
+        } catch (...) {
+            failure = std::current_exception();
+        }
+        check(failure != nullptr, "blocking: a synchronous run on a host-pumped provider is refused");
+        check(provider_failure_reason(failure) == "runtime.blocking.host_pumped",
+              "blocking: the refusal carries the SDK's reason");
+        check(transport->starts == 0, "blocking: nothing is sent");
+    } catch (const std::exception& error) {
+        check(false, "blocking: a synchronous run on a host-pumped provider is refused", error.what());
+    }
+}
+#endif
+
 }  // namespace
 
 int main() {
@@ -204,6 +302,10 @@ int main() {
     check_budget_with_deadline();
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM
     check_native_plugin();
+#endif
+#ifdef NEOGRAPH_WASM_CHECKS_LLM
+    check_libcurl_constructor();
+    check_blocking_run();
 #endif
     std::printf("%s\n", failures == 0 ? "all checks passed" : "checks failed");
     return failures == 0 ? 0 : 1;

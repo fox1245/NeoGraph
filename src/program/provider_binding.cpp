@@ -32,6 +32,7 @@ public:
     PreparedProviderRequest prepare(ProviderRequest request) override {
         return inner_->prepare(std::move(request));
     }
+    bool host_pumped() const noexcept override { return inner_->host_pumped(); }
 
 protected:
     std::shared_ptr<sp::runtime::Client> endpoint_runtime() const override { return endpoint_runtime_of(*inner_); }

@@ -25,6 +25,7 @@
 
 #include <neograph/graph/cancel.h>
 
+#include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
@@ -33,6 +34,7 @@
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/query.hpp>
 #include <asio/system_error.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/traits/static_query.hpp>
@@ -59,6 +61,12 @@ namespace detail {
 inline const asio::execution_context*& serial_io_context() noexcept {
     static thread_local const asio::execution_context* context = nullptr;
     return context;
+}
+
+/// Whether `executor` runs on the private io_context of a blocking bridge on this thread (`run_sync`,
+/// `GraphEngine::run`). A coroutine there that waits for the host's event loop would wait for ever.
+inline bool on_serial_io_context(const asio::any_io_executor& executor) noexcept {
+    return &asio::query(executor, asio::execution::context) == serial_io_context();
 }
 
 class SerialIoContextScope {

@@ -4,6 +4,7 @@
 #include <neograph/types.h>
 #include <runtime/client.h>
 #include <core/request_controls.h>
+#include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 #include <cstdint>
 #include <atomic>
@@ -363,6 +364,12 @@ using EndpointStart = std::function<std::function<void()>(std::function<void()> 
 /// Runs `start` and resumes once the call's outcome callback has run. A
 /// cancelled awaiting coroutine cancels the call and still waits for it.
 NEOGRAPH_API asio::awaitable<void> await_endpoint(EndpointStart start);
+/// Whether `executor` is the private io_context of a blocking bridge (`GraphEngine::run`, `Provider::dispatch`). A
+/// call there to a provider on a host-pumped executor (Provider::host_pumped) would wait for the host's event loop,
+/// which only this thread can run.
+NEOGRAPH_API bool on_blocking_bridge(const asio::any_io_executor& executor) noexcept;
+/// The SDK's refusal of such a call: Misuse, `runtime.blocking.host_pumped`, nothing sent.
+NEOGRAPH_API sp::runtime::Result blocking_bridge_refusal();
 } // namespace detail
 
 /// Capability identity plus a single prepared, owned operation contract.
@@ -403,6 +410,13 @@ public:
     /// Whether this provider forwards SchemaProvider endpoint calls.
     bool has_endpoints() const { return endpoint_runtime() != nullptr; }
 
+    /// Whether the SDK client behind this provider runs on a host-pumped executor (a WebAssembly host's event loop,
+    /// #535). Its calls finish only when the host runs its loop, so a synchronous entry point that waits for them on
+    /// the calling thread (`GraphEngine::run`, `Provider::dispatch`, `complete_endpoint`) cannot work. The dispatch
+    /// of such a call fails with the SDK's `runtime.blocking.host_pumped` refusal, nothing sent; use the `_async`
+    /// forms on async::HostLoop.
+    virtual bool host_pumped() const noexcept { return false; }
+
     /// SchemaProvider's non-chat endpoints at this provider's origin (#531). They
     /// run on the client its chat calls use, with the same credential, admission
     /// slots, retry budget, deadlines and error classification. The descriptor
@@ -431,13 +445,13 @@ public:
     /// outcome is then the SDK's Cancelled failure.
     template <class Outcome>
     asio::awaitable<Outcome> complete_endpoint_async(sp::runtime::PreparedEndpoint<Outcome> prepared) {
-        return run_endpoint(require_endpoint_runtime(), std::move(prepared));
+        return run_endpoint(require_endpoint_runtime(), std::move(prepared), host_pumped());
     }
     template <EndpointRequest Request>
     asio::awaitable<EndpointOutcomeOf<Request>> complete_endpoint_async(
         Request request, sp::runtime::RunOptions options = {}) {
         auto client = require_endpoint_runtime();
-        try { return run_endpoint(client, client->prepare(std::move(request), std::move(options))); }
+        try { return run_endpoint(client, client->prepare(std::move(request), std::move(options)), host_pumped()); }
         catch (const sp::runtime::AdmissionError& error) { return refused_endpoint<EndpointOutcomeOf<Request>>(error); }
     }
 protected:
@@ -453,8 +467,10 @@ protected:
         const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)>;
     static PreparedProviderRequest prepare_local(
         std::shared_ptr<sp::runtime::Client> client, ProviderRequest request, LocalDispatch dispatch);
+    /// `host_pumped` is the client's executor (see host_pumped()): the prepared request then refuses to be
+    /// dispatched from a blocking bridge.
     static PreparedProviderRequest prepare_runtime(
-        std::shared_ptr<sp::runtime::Client> client, ProviderRequest request);
+        std::shared_ptr<sp::runtime::Client> client, ProviderRequest request, bool host_pumped = false);
     static PreparedProviderRequest reject_preparation(sp::Error error);
     static PreparedProviderRequest observe_prepared(
         PreparedProviderRequest request,
@@ -468,18 +484,29 @@ private:
     std::shared_ptr<sp::runtime::Client> require_endpoint_runtime() const;
     template <class Outcome>
     static asio::awaitable<Outcome> run_endpoint(
-        std::shared_ptr<sp::runtime::Client> client, sp::runtime::PreparedEndpoint<Outcome> prepared) {
+        std::shared_ptr<sp::runtime::Client> client, sp::runtime::PreparedEndpoint<Outcome> prepared,
+        bool host_pumped) {
+        if (host_pumped && detail::on_blocking_bridge(co_await asio::this_coro::executor))
+            co_return sp::runtime::detail::typed_outcome(*detail::blocking_bridge_refusal(),
+                                                         static_cast<const Outcome*>(nullptr));
         sp::runtime::EndpointCall<Outcome> call;
+        auto delivered = std::make_shared<std::optional<Outcome>>();
         try {
             co_await detail::await_endpoint([&](std::function<void()> notify) {
                 // The callback keeps the client alive until the SDK has delivered.
-                call = client->start(std::move(prepared), [client, notify = std::move(notify)](Outcome) { notify(); });
+                call = client->start(std::move(prepared),
+                                     [client, delivered, notify = std::move(notify)](Outcome outcome) {
+                                         *delivered = std::move(outcome);
+                                         notify();
+                                     });
                 return std::function<void()>([&call] { call.cancel(); });
             });
         } catch (const sp::runtime::AdmissionError& error) {
             co_return sp::runtime::detail::typed_outcome(*error.outcome(), static_cast<const Outcome*>(nullptr));
         }
-        // The callback has run; join fences the slot release and returns the outcome it was given.
+        // The callback has run; join fences the slot release and returns the outcome it was given. A host-pumped
+        // executor refuses to wait, and the callback's outcome is the call's.
+        if (host_pumped && *delivered) co_return std::move(**delivered);
         co_return call.join();
     }
     template <class Outcome>

@@ -1,6 +1,7 @@
 #include <neograph/tool_execution.h>
 
 #include <neograph/graph/cancel.h>
+#include <neograph/async/host_loop.h>
 #include <neograph/tool.h>
 
 #include "pipe_write.h"
@@ -970,6 +971,7 @@ asio::awaitable<ResourceLease> ResourceArbiter::acquire_async(
         poll.expires_after(std::min(std::chrono::milliseconds{1},
                                     std::chrono::duration_cast<std::chrono::milliseconds>(
                                         deadline - now)));
+        async::note_deadline(executor, poll.expiry());
         asio::error_code wait_error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
         if (wait_error && wait_error != asio::error::operation_aborted) {
@@ -1127,6 +1129,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                         std::chrono::milliseconds{1},
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             deadline - now)));
+                    async::note_deadline(executor, poll.expiry());
                     asio::error_code wait_error;
                     co_await poll.async_wait(
                         asio::redirect_error(asio::use_awaitable, wait_error));
@@ -1177,6 +1180,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             const auto executor = co_await asio::this_coro::executor;
             asio::steady_timer timer(executor);
             timer.expires_after(policy.execution_timeout);
+            async::note_deadline(executor, timer.expiry());
             try {
                 auto result = co_await (
                     invoke() || timer.async_wait(asio::use_awaitable));
@@ -1231,6 +1235,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     auto executor = co_await asio::this_coro::executor;
                     asio::steady_timer backoff(executor);
                     backoff.expires_after(policy.retry_backoff);
+                    async::note_deadline(executor, backoff.expiry());
                     co_await backoff.async_wait(asio::use_awaitable);
                 }
             }
