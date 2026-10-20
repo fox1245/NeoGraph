@@ -6,15 +6,21 @@
 #include <neograph/llm/schema_provider.h>
 #include <neograph/graph/engine.h>
 
+#include <descriptor/catalogue.h>
+#include <transport/catalogue_refresh.h>
+
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_future.hpp>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <thread>
 
 namespace {
 using neograph::json;
@@ -38,10 +44,11 @@ template <class T> T run(asio::awaitable<T> operation) {
 }
 
 sp::descriptor::ValidatedDescriptor descriptor(const std::string& family, const std::string& origin,
-                                               const std::string& buffered, const std::string& streaming) {
+                                               const std::string& buffered, const std::string& streaming,
+                                               sp::descriptor::PolicySnapshot policy = sp::descriptor::builtin_policy()) {
     const json document = {{"descriptor_version", 1}, {"revision", 1}, {"id", "live-cpp"}, {"family", family},
         {"connection", {{"base_url", origin}, {"paths", {{"buffered", buffered}, {"streaming", streaming}}}}}};
-    auto loaded = sp::descriptor::load(document.dump());
+    auto loaded = sp::descriptor::load(document.dump(), std::move(policy));
     return std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded));
 }
 
@@ -264,5 +271,255 @@ TEST(LiveEndpoints, AnthropicTokenCount) {
     const auto* result = std::get_if<sp::tokens::Result>(&outcome);
     ASSERT_NE(result, nullptr) << failure_text(outcome);
     EXPECT_GT(result->input, 0u);
+}
+std::string lower(std::string text) {
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) { return std::tolower(c); });
+    return text;
+}
+
+std::string completion_text(const sp::Completion& completion) {
+    std::string text;
+    for (const auto& message : completion.messages)
+        for (const auto& part : message.parts)
+            if (const auto* value = std::get_if<sp::Text>(&part)) text += value->value;
+    return text;
+}
+
+SchemaProvider openai_provider(const std::string& key) {
+    sp::runtime::Options options;
+    options.api_key = key;
+    return SchemaProvider(descriptor("openai.chat", "https://api.openai.com", "/v1/chat/completions",
+                                     "/v1/chat/completions"), options);
+}
+
+TEST(LiveEndpoints, OpenAIImageGeneration) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    auto provider = openai_provider(key);
+    sp::images::Request request;
+    request.model = "gpt-image-1-mini";
+    request.prompt = "A flat red circle on a white background.";
+    request.size = "1024x1024";
+    request.quality = "low";
+    const auto outcome = provider.complete_endpoint(std::move(request));
+    const auto* result = std::get_if<sp::images::Result>(&outcome);
+    ASSERT_NE(result, nullptr) << failure_text(outcome);
+    ASSERT_EQ(result->images.size(), 1u);
+    EXPECT_EQ(result->images[0].mime.rfind("image/", 0), 0u);
+    ASSERT_TRUE(result->images[0].data);
+    EXPECT_GT(result->images[0].data->size(), 1000u);
+}
+
+// Speech made by one endpoint is transcribed by another, and the words survive the round trip.
+TEST(LiveEndpoints, OpenAISpeechThenTranscription) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    auto provider = openai_provider(key);
+    sp::speech::Request speech;
+    speech.model = "gpt-4o-mini-tts";
+    speech.input = "The quick brown fox jumps over the lazy dog.";
+    speech.voice = "alloy";
+    speech.format = "mp3";
+    const auto spoken = provider.complete_endpoint(std::move(speech));
+    const auto* audio = std::get_if<sp::speech::Result>(&spoken);
+    ASSERT_NE(audio, nullptr) << failure_text(spoken);
+    EXPECT_EQ(audio->audio.mime.rfind("audio/", 0), 0u);
+    ASSERT_TRUE(audio->audio.data);
+    EXPECT_GT(audio->audio.data->size(), 1000u);
+
+    sp::transcription::Request transcription;
+    transcription.model = "gpt-4o-mini-transcribe";
+    transcription.audio = audio->audio;
+    transcription.language = "en";
+    const auto heard = provider.complete_endpoint(std::move(transcription));
+    const auto* text = std::get_if<sp::transcription::Result>(&heard);
+    ASSERT_NE(text, nullptr) << failure_text(heard);
+    EXPECT_NE(lower(text->text).find("fox"), std::string::npos) << text->text;
+    EXPECT_NE(lower(text->text).find("dog"), std::string::npos) << text->text;
+}
+
+// A file uploaded to Gemini is named by a generateContent request, read back, and deleted.
+TEST(LiveEndpoints, GeminiFileInAGenerateRequest) {
+    LIVE_KEY(key, "GEMINI_API_KEY");
+    const std::string origin = "https://generativelanguage.googleapis.com";
+    const std::string model = "gemini-3.1-flash-lite";
+    sp::runtime::Options options;
+    options.api_key = key;
+    SchemaProvider provider(descriptor("google.generate", origin, "/v1beta/models/" + model + ":generateContent",
+        "/v1beta/models/" + model + ":streamGenerateContent?alt=sse"), options);
+    sp::files::Upload upload;
+    upload.source.bytes = std::make_shared<const std::string>("Inventory note. The code word is tangerine.\n");
+    upload.filename = "note.txt";
+    upload.mime = "text/plain";
+    auto uploaded = provider.complete_endpoint(std::move(upload));
+    auto* file = std::get_if<sp::files::File>(&uploaded);
+    ASSERT_NE(file, nullptr) << failure_text(uploaded);
+    for (int i = 0; i != 20 && file->state == sp::files::State::Processing; ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        uploaded = provider.complete_endpoint(sp::files::Get{file->id});
+        file = std::get_if<sp::files::File>(&uploaded);
+        ASSERT_NE(file, nullptr) << failure_text(uploaded);
+    }
+    ASSERT_EQ(file->state, sp::files::State::Active);
+    const auto now = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    auto reference = sp::files::media(*file, origin, now);
+    ASSERT_TRUE(std::holds_alternative<sp::Media>(reference)) << std::get<sp::Error>(reference).safe_message;
+
+    sp::gemini::Request request;
+    request.model = model;
+    request.max_output_tokens = 32;
+    request.messages.push_back(sp::Message{"", sp::Role::User, {std::get<sp::Media>(std::move(reference)),
+        sp::Text{"What is the code word in the note? Reply with the word only."}}});
+    sp::runtime::Result result;
+    EXPECT_NE(lower(completion_text(invoke(provider, std::move(request), false, result))).find("tangerine"),
+              std::string::npos);
+
+    const auto deleted = provider.complete_endpoint(sp::files::Delete{file->id});
+    EXPECT_TRUE(std::holds_alternative<sp::files::Deleted>(deleted)) << failure_text(deleted);
+}
+
+bool ended(sp::jobs::Status status) {
+    return status == sp::jobs::Status::Completed || status == sp::jobs::Status::Cancelled ||
+           status == sp::jobs::Status::Failed || status == sp::jobs::Status::Expired;
+}
+
+// An inline Anthropic batch is submitted, read, cancelled, and deleted once it ended.
+TEST(LiveEndpoints, AnthropicBatchLifecycle) {
+    LIVE_KEY(key, "ANTHROPIC_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    SchemaProvider provider(descriptor("anthropic.messages", "https://api.anthropic.com", "/v1/messages",
+                                       "/v1/messages"), options);
+    sp::messages::Request item;
+    item.model = "claude-haiku-4-5-20251001";
+    item.max_tokens = 16;
+    item.messages.push_back(sp::Message{"", sp::Role::User, {sp::Text{"Reply with one word."}}});
+    sp::batches::Submit submit;
+    submit.items.push_back({"live-1", std::move(item)});
+    const auto submitted = provider.complete_endpoint(std::move(submit));
+    const auto* batch = std::get_if<sp::batches::Batch>(&submitted);
+    ASSERT_NE(batch, nullptr) << failure_text(submitted);
+    EXPECT_EQ(batch->id.rfind("msgbatch_", 0), 0u);
+    EXPECT_EQ(batch->counts.total, 1u);
+    const auto id = batch->id;
+
+    const auto read = provider.complete_endpoint(sp::batches::Get{id});
+    ASSERT_TRUE(std::holds_alternative<sp::batches::Batch>(read)) << failure_text(read);
+    EXPECT_EQ(std::get<sp::batches::Batch>(read).id, id);
+    auto state = provider.complete_endpoint(sp::batches::Cancel{id});
+    ASSERT_TRUE(std::holds_alternative<sp::batches::Batch>(state)) << failure_text(state);
+    for (int i = 0; i != 60 && !ended(std::get<sp::batches::Batch>(state).status); ++i) {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        state = provider.complete_endpoint(sp::batches::Get{id});
+        ASSERT_TRUE(std::holds_alternative<sp::batches::Batch>(state)) << failure_text(state);
+    }
+    ASSERT_TRUE(ended(std::get<sp::batches::Batch>(state).status)) << std::get<sp::batches::Batch>(state).raw_status;
+    const auto deleted = provider.complete_endpoint(sp::batches::Delete{id});
+    EXPECT_TRUE(std::holds_alternative<sp::batches::Deleted>(deleted)) << failure_text(deleted);
+}
+
+// An OpenAI batch reads its requests from an uploaded JSONL file; the batch is cancelled and the file deleted.
+TEST(LiveEndpoints, OpenAIBatchFromAnUploadedFile) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    auto provider = openai_provider(key);
+    sp::chat::Request item;
+    item.model = "gpt-5-nano";
+    item.reasoning_effort = "low";
+    item.max_output_tokens = 200;
+    item.messages.push_back(sp::chat::InputMessage{sp::Role::User, "Reply with one word."});
+    const auto lines = sp::batches::jsonl(
+        descriptor("openai.chat", "https://api.openai.com", "/v1/chat/completions", "/v1/chat/completions"),
+        {sp::batches::Item{"live-1", std::move(item)}});
+    ASSERT_TRUE(std::holds_alternative<std::string>(lines)) << std::get<sp::Error>(lines).safe_message;
+
+    sp::files::Upload upload;
+    upload.source.bytes = std::make_shared<const std::string>(std::get<std::string>(lines));
+    upload.filename = "live-batch.jsonl";
+    upload.mime = "application/jsonl";
+    upload.purpose = "batch";
+    const auto uploaded = provider.complete_endpoint(std::move(upload));
+    const auto* file = std::get_if<sp::files::File>(&uploaded);
+    ASSERT_NE(file, nullptr) << failure_text(uploaded);
+    EXPECT_EQ(file->purpose, "batch");
+
+    sp::batches::Submit submit;
+    submit.input_file = file->id;
+    submit.endpoint = "/v1/chat/completions";
+    const auto submitted = provider.complete_endpoint(std::move(submit));
+    const auto* batch = std::get_if<sp::batches::Batch>(&submitted);
+    EXPECT_NE(batch, nullptr) << failure_text(submitted);
+    if (batch) {
+        EXPECT_EQ(batch->id.rfind("batch_", 0), 0u);
+        const auto cancelled = provider.complete_endpoint(sp::batches::Cancel{batch->id});
+        ASSERT_TRUE(std::holds_alternative<sp::batches::Batch>(cancelled)) << failure_text(cancelled);
+        EXPECT_EQ(std::get<sp::batches::Batch>(cancelled).id, batch->id);
+    }
+    const auto deleted = provider.complete_endpoint(sp::files::Delete{file->id});
+    EXPECT_TRUE(std::holds_alternative<sp::files::Deleted>(deleted)) << failure_text(deleted);
+}
+
+// The model catalogue refreshed from the four providers' listings (SchemaProvider's refresh_catalogue): every
+// listing answers, a second refresh over the first finds no change, and a policy carrying the refreshed catalogue
+// serves a model that only the refresh lists.
+TEST(LiveCatalogue, RefreshFromEveryListing) {
+    LIVE_KEY(openai, "OPENAI_API_KEY");
+    LIVE_KEY(anthropic, "ANTHROPIC_API_KEY");
+    LIVE_KEY(gemini, "GEMINI_API_KEY");
+    LIVE_KEY(openrouter, "OPENROUTER_API_KEY");
+    using sp::descriptor::Listing;
+    sp::transport::RefreshRequest request;
+    request.sources = {{Listing::OpenRouter, {}, openrouter, {}}, {Listing::Gemini, {}, gemini, {}},
+                       {Listing::Anthropic, {}, anthropic, {}}, {Listing::OpenAI, {}, openai, {}}};
+    request.overlays.push_back(sp::descriptor::builtin_catalogue());
+    sp::transport::Transport transport;
+    auto first = sp::transport::refresh_catalogue(transport, request);
+    ASSERT_TRUE(std::holds_alternative<sp::transport::RefreshResult>(first));
+    const auto refreshed = std::get<sp::transport::RefreshResult>(std::move(first));
+    ASSERT_EQ(refreshed.sources.size(), 4u);
+    for (const auto& source : refreshed.sources) {
+        EXPECT_TRUE(source.ok) << sp::descriptor::listing_name(source.listing) << ": " << source.error;
+        EXPECT_GT(source.models, 0u) << sp::descriptor::listing_name(source.listing);
+    }
+
+    request.previous = refreshed.generated;
+    auto second = sp::transport::refresh_catalogue(transport, request);
+    ASSERT_TRUE(std::holds_alternative<sp::transport::RefreshResult>(second));
+    const auto& again = std::get<sp::transport::RefreshResult>(second).diff;
+    EXPECT_TRUE(again.removed.empty()) << again.removed.size() << " removed";
+    EXPECT_LT(again.added.size() + again.changed.size(), 5u);
+
+    const std::string model = "gpt-5-nano";
+    const auto& builtin = sp::descriptor::builtin_catalogue()->entries();
+    EXPECT_TRUE(std::none_of(builtin.begin(), builtin.end(), [&](const auto& entry) { return entry.id == model; }));
+    const auto& listed = refreshed.catalogue->entries();
+    EXPECT_TRUE(std::any_of(listed.begin(), listed.end(), [&](const auto& entry) { return entry.id == model; }));
+    auto policy = sp::descriptor::builtin_policy()->with_catalogue(refreshed.catalogue);
+    ASSERT_TRUE(std::holds_alternative<sp::descriptor::PolicySnapshot>(policy));
+    sp::runtime::Options options;
+    options.api_key = openai;
+    SchemaProvider provider(descriptor("openai.chat", "https://api.openai.com", "/v1/chat/completions",
+        "/v1/chat/completions", std::get<sp::descriptor::PolicySnapshot>(std::move(policy))), options);
+    sp::chat::Request chat;
+    chat.model = model;
+    chat.reasoning_effort = "low";
+    chat.max_output_tokens = 300;
+    chat.messages.push_back(sp::chat::InputMessage{sp::Role::User, "Reply with the single word: ok"});
+    sp::runtime::Result result;
+    EXPECT_GT(text_size(invoke(provider, std::move(chat), false, result)), 0u);
+}
+
+// A model no catalogue lists is still sent: the provider, not the SDK, answers that it does not exist.
+TEST(LiveCatalogue, UnlistedModelIsSent) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    auto provider = openai_provider(key);
+    sp::chat::Request chat;
+    chat.model = "live-unlisted-model";
+    chat.max_output_tokens = 16;
+    chat.messages.push_back(sp::chat::InputMessage{sp::Role::User, "Reply with one word."});
+    neograph::ProviderRequest call;
+    call.payload = std::move(chat);
+    const auto outcome = provider.invoke(std::move(call));
+    const auto* failure = std::get_if<sp::Failure>(outcome.get());
+    ASSERT_NE(failure, nullptr);
+    EXPECT_EQ(failure->error.http_status, 404);
 }
 } // namespace
