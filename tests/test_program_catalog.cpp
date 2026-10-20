@@ -19,11 +19,15 @@
 #include "catalog_access.h"
 #include "canonical_json.h"
 #include "registry_access.h"
+#include "fixtures/program_store_backends.h"
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <cstdint>
+#include <future>
+#include <optional>
 #include <functional>
 #include <memory>
 #include <string>
@@ -1881,3 +1885,306 @@ TEST(ProgramCatalogTest, PostgreSQLProgramStoreReopensActivationAndOwnerVisibili
     }
 }
 #endif
+
+// ---------------------------------------------------------------------------
+// The contract every ProgramStore meets, run on each backend in
+// tests/fixtures/program_store_backends.h. The in-memory store is the reference;
+// a clause it cannot meet is skipped for it with its reason, and PostgreSQL
+// cases skip without NEOGRAPH_TEST_POSTGRES_URL.
+// ---------------------------------------------------------------------------
+
+namespace {
+using neograph::program::test_support::CatalogWriteStage;
+using neograph::program::test_support::StoreBackend;
+using neograph::program::test_support::StoreDeployment;
+
+constexpr const char* CATALOG_OWNER = "tenant:catalog";
+
+// One bundle admitted under two policies: two versions an activation can move between.
+struct ConformanceVersions {
+    CatalogFixture fixture{registry()};
+    ProgramBundle  bundle = compile(fixture.snapshot);
+    ProgramVersion first  = fixture.catalog.admit(bundle, fixture.request());
+    ProgramVersion second = fixture.catalog.admit(
+        bundle, ProgramAdmission{CATALOG_OWNER, fixture.admission, next_policy(fixture), {}});
+
+    static PolicySnapshot next_policy(const CatalogFixture& fixture) {
+        PolicySnapshotBuilder builder;
+        builder.id("catalog-policy-next")
+            .semantic_version("1.0.0")
+            .owner_scope(CATALOG_OWNER)
+            .admission_profile(fixture.admission)
+            .budget_ceiling(BudgetLimits{1000, 100, 100, 1, 1, 20, 1, 1, 1});
+        return std::move(builder).build();
+    }
+
+    static std::string policy_hash(const ProgramVersion& version) {
+        return version.policy_snapshot().fingerprint();
+    }
+};
+
+class ProgramStoreConformance : public ::testing::TestWithParam<StoreBackend> {
+protected:
+    void SetUp() override {
+        if (const auto reason = neograph::program::test_support::backend_unavailable_reason(GetParam()))
+            GTEST_SKIP() << *reason;
+        deployment_.emplace(GetParam());
+        store_ = deployment_->program_store();
+    }
+    void TearDown() override {
+        store_.reset();
+        deployment_.reset();
+    }
+
+    StoreDeployment& deployment() { return *deployment_; }
+    ProgramStore&    primary_store() { return *store_; }
+    std::shared_ptr<ProgramStore> second_store() { return deployment_->program_store(); }
+    // Closes the primary store and opens another over the same data, as after a process restart.
+    void restart_store() {
+        store_.reset();
+        store_ = deployment_->program_store();
+    }
+
+private:
+    std::optional<StoreDeployment> deployment_;
+    std::shared_ptr<ProgramStore>  store_;
+};
+
+constexpr const char* CATALOG_NOT_DURABLE =
+    "the in-memory store keeps typed values in the process: durability, restart and "
+    "stored-byte tamper detection need a durable backend (declared capability, #556)";
+constexpr const char* CATALOG_NO_FAULT_POINT =
+    "the in-memory store has no point to fail one of its writes at, so unit atomicity is "
+    "checked on the database backends only (#556)";
+
+INSTANTIATE_TEST_SUITE_P(
+    Backends, ProgramStoreConformance,
+    ::testing::ValuesIn(neograph::program::test_support::store_backends()),
+    [](const ::testing::TestParamInfo<StoreBackend>& info) {
+        return std::string(neograph::program::test_support::backend_name(info.param));
+    });
+}  // namespace
+
+// Own writes and owner isolation: a published tuple is readable by id and by owner, and a
+// wrong owner cannot tell it from an absent one.
+TEST_P(ProgramStoreConformance, PublishedTupleIsReadableByItsOwnerOnly) {
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    ASSERT_TRUE(store.get_bundle(v.bundle.id()));
+    ASSERT_TRUE(store.get_version(v.first.id()));
+    EXPECT_EQ(store.get_version(v.first.id())->serialize_canonical(), v.first.serialize_canonical());
+    EXPECT_EQ(store.get_bundle(v.bundle.id())->serialize_canonical(), v.bundle.serialize_canonical());
+    ASSERT_TRUE(store.get_version(CATALOG_OWNER, v.first.id()));
+    ASSERT_TRUE(store.get_bundle(CATALOG_OWNER, v.bundle.id()));
+    EXPECT_FALSE(store.get_version("tenant:other", v.first.id()));
+    EXPECT_FALSE(store.get_bundle("tenant:other", v.bundle.id()));
+    EXPECT_FALSE(store.get_version("", v.first.id()));
+    EXPECT_FALSE(store.get_version(digest('9')));
+    EXPECT_FALSE(store.get_bundle(CATALOG_OWNER, digest('9')));
+
+    const auto versions = store.list_versions(CATALOG_OWNER);
+    ASSERT_EQ(versions.size(), 1U);
+    EXPECT_EQ(versions.front().id(), v.first.id());
+    EXPECT_TRUE(store.list_versions("tenant:other").empty());
+    EXPECT_THROW((void)store.list_versions(""), std::invalid_argument);
+}
+
+TEST_P(ProgramStoreConformance, RepublishingTheSameTupleIsIdempotent) {
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    EXPECT_NO_THROW(store.publish_admitted(v.bundle, v.first));
+    EXPECT_NO_THROW(store.publish_admitted(v.bundle, v.second));
+    EXPECT_EQ(store.list_versions(CATALOG_OWNER).size(), 2U);
+}
+
+// Duplicate and stale refusal: an activation moves only from the generation the caller saw,
+// only to a published version of the same owner, and only with that version's policy.
+TEST_P(ProgramStoreConformance, ActivationIsACompareAndSwapOnTheGeneration) {
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    store.publish_admitted(v.bundle, v.second);
+    const auto first_policy  = ConformanceVersions::policy_hash(v.first);
+    const auto second_policy = ConformanceVersions::policy_hash(v.second);
+
+    EXPECT_FALSE(store.get_activation(CATALOG_OWNER));
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 0, v.first.id(), first_policy),
+              ProgramActivationResult::Activated);
+    ASSERT_TRUE(store.get_activation(CATALOG_OWNER));
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->generation(), 1U);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->active_version_id(), v.first.id());
+
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 0, v.second.id(), second_policy),
+              ProgramActivationResult::Conflict);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->active_version_id(), v.first.id());
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 1, v.second.id(), second_policy),
+              ProgramActivationResult::Activated);
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 2, v.second.id(), second_policy),
+              ProgramActivationResult::AlreadyPresent);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->generation(), 2U);
+
+    EXPECT_THROW((void)store.compare_activate(CATALOG_OWNER, 2, v.first.id(), digest('z')),
+                 std::invalid_argument);
+    EXPECT_THROW((void)store.compare_activate("tenant:other", 0, v.first.id(), first_policy),
+                 std::invalid_argument);
+    EXPECT_THROW((void)store.compare_activate(CATALOG_OWNER, 2, digest('9'), first_policy),
+                 std::invalid_argument);
+    EXPECT_THROW((void)store.compare_activate("", 0, v.first.id(), first_policy),
+                 std::invalid_argument);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->generation(), 2U);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->active_version_id(), v.second.id());
+
+    const auto binding = store.get_active_binding(CATALOG_OWNER);
+    ASSERT_TRUE(binding);
+    EXPECT_EQ(binding->activation.active_version_id(), v.second.id());
+    EXPECT_EQ(binding->version.id(), v.second.id());
+    EXPECT_FALSE(store.get_activation("tenant:other"));
+    EXPECT_FALSE(store.get_active_binding("tenant:other"));
+}
+
+// One writer: two stores race for the same activation generation and exactly one wins.
+TEST_P(ProgramStoreConformance, ConcurrentActivationHasOneWinner) {
+    auto&                     store = primary_store();
+    const auto                other = second_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    store.publish_admitted(v.bundle, v.second);
+
+    std::barrier ready(3);
+    auto         activate = [&](ProgramStore& writer, const ProgramVersion& version) {
+        ready.arrive_and_wait();
+        return writer.compare_activate(CATALOG_OWNER, 0, version.id(),
+                                       ConformanceVersions::policy_hash(version));
+    };
+    auto a = std::async(std::launch::async, [&] { return activate(store, v.first); });
+    auto b = std::async(std::launch::async, [&] { return activate(*other, v.second); });
+    ready.arrive_and_wait();
+    const auto ar = a.get();
+    const auto br = b.get();
+    EXPECT_TRUE((ar == ProgramActivationResult::Activated && br == ProgramActivationResult::Conflict) ||
+                (br == ProgramActivationResult::Activated && ar == ProgramActivationResult::Conflict));
+    const auto activation = store.get_activation(CATALOG_OWNER);
+    ASSERT_TRUE(activation);
+    EXPECT_EQ(activation->generation(), 1U);
+    EXPECT_EQ(activation->active_version_id(),
+              ar == ProgramActivationResult::Activated ? v.first.id() : v.second.id());
+}
+
+// Retention: the active version and explicit pins survive; the rest of that owner scope's
+// versions go, and a bundle goes with its last version. A bad pin changes nothing.
+TEST_P(ProgramStoreConformance, RetentionKeepsTheActiveVersionAndPinsAndIsOwnerScoped) {
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    store.publish_admitted(v.bundle, v.second);
+    ASSERT_EQ(store.compare_activate(CATALOG_OWNER, 0, v.second.id(),
+                                     ConformanceVersions::policy_hash(v.second)),
+              ProgramActivationResult::Activated);
+
+    EXPECT_THROW((void)store.collect_garbage(CATALOG_OWNER, {digest('9')}), std::invalid_argument);
+    EXPECT_THROW((void)store.collect_garbage("tenant:other", {v.first.id()}), std::invalid_argument);
+    EXPECT_THROW((void)store.collect_garbage("", {}), std::invalid_argument);
+    EXPECT_TRUE(store.get_version(v.first.id()));
+    EXPECT_TRUE(store.get_version(v.second.id()));
+
+    const auto report = store.collect_garbage(CATALOG_OWNER, {});
+    EXPECT_EQ(report.versions_removed, 1U);
+    EXPECT_EQ(report.bundles_removed, 0U);
+    const std::vector<ProgramRetentionReference> expected{{v.second.id(), "active_pointer"}};
+    EXPECT_EQ(report.references, expected);
+    EXPECT_FALSE(store.get_version(v.first.id()));
+    EXPECT_TRUE(store.get_version(v.second.id()));
+    EXPECT_TRUE(store.get_bundle(v.bundle.id()));
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->active_version_id(), v.second.id());
+
+    // A collection that finds nothing to remove removes nothing.
+    EXPECT_EQ(store.collect_garbage(CATALOG_OWNER, {v.second.id()}).versions_removed, 0U);
+    EXPECT_EQ(store.collect_garbage("tenant:other", {}).versions_removed, 0U);
+    EXPECT_TRUE(store.get_version(v.second.id()));
+}
+
+// Unit atomicity: a bundle and its version are published together, so a failed write of the
+// version leaves neither visible, and the same tuple publishes once the fault is gone.
+TEST_P(ProgramStoreConformance, FailedVersionWriteLeavesNeitherBundleNorVersion) {
+    if (!deployment().can_fault_catalog()) GTEST_SKIP() << CATALOG_NO_FAULT_POINT;
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    deployment().arm_catalog_fault(CatalogWriteStage::Version);
+    EXPECT_THROW(store.publish_admitted(v.bundle, v.first), std::runtime_error);
+    deployment().disarm_faults();
+    EXPECT_FALSE(store.get_bundle(v.bundle.id()));
+    EXPECT_FALSE(store.get_version(v.first.id()));
+    EXPECT_TRUE(store.list_versions(CATALOG_OWNER).empty());
+    EXPECT_NO_THROW(store.publish_admitted(v.bundle, v.first));
+    EXPECT_TRUE(store.get_bundle(v.bundle.id()));
+    EXPECT_TRUE(store.get_version(v.first.id()));
+}
+
+TEST_P(ProgramStoreConformance, FailedActivationWriteLeavesTheActivationAsItWas) {
+    if (!deployment().can_fault_catalog()) GTEST_SKIP() << CATALOG_NO_FAULT_POINT;
+    auto&                     store = primary_store();
+    const ConformanceVersions v;
+    store.publish_admitted(v.bundle, v.first);
+    store.publish_admitted(v.bundle, v.second);
+    ASSERT_EQ(store.compare_activate(CATALOG_OWNER, 0, v.first.id(),
+                                     ConformanceVersions::policy_hash(v.first)),
+              ProgramActivationResult::Activated);
+    deployment().arm_catalog_fault(CatalogWriteStage::Activation);
+    EXPECT_THROW((void)store.compare_activate(CATALOG_OWNER, 1, v.second.id(),
+                                              ConformanceVersions::policy_hash(v.second)),
+                 std::runtime_error);
+    deployment().disarm_faults();
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->generation(), 1U);
+    EXPECT_EQ(store.get_activation(CATALOG_OWNER)->active_version_id(), v.first.id());
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 1, v.second.id(),
+                                     ConformanceVersions::policy_hash(v.second)),
+              ProgramActivationResult::Activated);
+}
+
+// Durability and restart: the tuple and the activation are still there, and a stale
+// activation is still refused, after the store is closed and opened again.
+TEST_P(ProgramStoreConformance, PublishedStateAndActivationSurviveRestart) {
+    if (!deployment().durable()) GTEST_SKIP() << CATALOG_NOT_DURABLE;
+    const ConformanceVersions v;
+    primary_store().publish_admitted(v.bundle, v.first);
+    primary_store().publish_admitted(v.bundle, v.second);
+    ASSERT_EQ(primary_store().compare_activate(CATALOG_OWNER, 0, v.first.id(),
+                                               ConformanceVersions::policy_hash(v.first)),
+              ProgramActivationResult::Activated);
+    restart_store();
+    auto& store = primary_store();
+    ASSERT_TRUE(store.get_bundle(v.bundle.id()));
+    ASSERT_TRUE(store.get_version(CATALOG_OWNER, v.second.id()));
+    EXPECT_FALSE(store.get_version("tenant:other", v.second.id()));
+    const auto activation = store.get_activation(CATALOG_OWNER);
+    ASSERT_TRUE(activation);
+    EXPECT_EQ(activation->generation(), 1U);
+    EXPECT_EQ(activation->active_version_id(), v.first.id());
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 0, v.second.id(),
+                                     ConformanceVersions::policy_hash(v.second)),
+              ProgramActivationResult::Conflict);
+    EXPECT_EQ(store.compare_activate(CATALOG_OWNER, 1, v.first.id(),
+                                     ConformanceVersions::policy_hash(v.first)),
+              ProgramActivationResult::AlreadyPresent);
+    EXPECT_EQ(store.list_versions(CATALOG_OWNER).size(), 2U);
+}
+
+// Fail closed and tamper detection: stored bytes that are not canonical are never read as a
+// valid version, and an activation that points at one never resolves.
+TEST_P(ProgramStoreConformance, TamperedStoredVersionFailsClosed) {
+    if (!deployment().durable()) GTEST_SKIP() << CATALOG_NOT_DURABLE;
+    const ConformanceVersions v;
+    primary_store().publish_admitted(v.bundle, v.first);
+    ASSERT_EQ(primary_store().compare_activate(CATALOG_OWNER, 0, v.first.id(),
+                                               ConformanceVersions::policy_hash(v.first)),
+              ProgramActivationResult::Activated);
+    deployment().corrupt_program_version(v.first.id());
+    restart_store();
+    auto& store = primary_store();
+    EXPECT_THROW((void)store.get_version(v.first.id()), std::exception);
+    EXPECT_THROW((void)store.get_version(CATALOG_OWNER, v.first.id()), std::exception);
+    EXPECT_THROW((void)store.get_active_binding(CATALOG_OWNER), std::exception);
+    EXPECT_THROW(store.publish_admitted(v.bundle, v.first), std::exception);
+}
