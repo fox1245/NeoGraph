@@ -11,6 +11,9 @@ re-enters the node from the top — would then run them a second time. Approving
 an `rm -rf` would double-commit the `git commit` beside it.
 """
 
+import sys
+from pathlib import Path
+
 import neograph_engine as ng
 import pytest
 
@@ -209,3 +212,126 @@ def test_a_refusal_is_an_answer_too(agent):
     assert not done.interrupted
     assert shell.runs == 0, "a refused tool must not execute"
     assert read.runs == 1, "refusing one call must not block the others"
+
+
+# ── The model call after a gated call is answered (issue #544) ─────────────
+#
+# A graph with a `messages` channel also receives the resume value as a user
+# turn. With tool calls waiting for their results that turn came between the
+# calls and the results, and the next model call was refused locally.
+
+@pytest.fixture
+def examples_on_path():
+    examples = str(Path(__file__).resolve().parents[1] / "examples")
+    sys.path.insert(0, examples)
+    yield
+    sys.path.remove(examples)
+
+
+class _DeleteRecord(ng.Tool):
+    def __init__(self):
+        super().__init__()
+        self.runs = 0
+
+    def get_name(self):
+        return "delete_record"
+
+    def get_definition(self):
+        return ng.ChatTool(
+            name="delete_record", description="Delete a record.",
+            parameters={"type": "object", "properties": {"record_id": {"type": "string"}},
+                        "required": ["record_id"]})
+
+    def execute(self, arguments):
+        self.runs += 1
+        return '{"deleted": "R-200"}'
+
+
+AGENT_DEFINITION = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION,
+    "name": "gated_agent",
+    "channels": {"messages": {"reducer": "append"}},
+    "nodes": {"llm": {"type": "llm_call"}, "tools": {"type": "tool_dispatch"}},
+    "edges": [{"from": ng.START_NODE, "to": "llm"}, {"from": "tools", "to": "llm"}],
+    "conditional_edges": [{"from": "llm", "condition": "has_tool_calls",
+                           "routes": {"true": "tools", "false": ng.END_NODE}}],
+}
+
+
+def _gated_run(family, answer, examples_on_path):
+    from _scripted import ScriptedModel, call_tool, say
+
+    delete = _DeleteRecord()
+    with ScriptedModel([call_tool("delete_record", record_id="R-200"), say("All done.")],
+                       family=family) as model:
+        engine = ng.GraphEngine.compile(
+            AGENT_DEFINITION,
+            ng.NodeContext(provider=model.provider(), model="m", tools=[delete]),
+            ng.InMemoryCheckpointStore())
+
+        def gate(_call, gctx):
+            if gctx.resume_value is None:
+                return ng.ToolDecision.interrupt("delete_record needs an operator")
+            if gctx.resume_value.get("approved"):
+                return ng.ToolDecision.allow()
+            return ng.ToolDecision.deny("the operator declined")
+
+        engine.set_tool_gate(gate)
+        config = ng.RunConfig(thread_id="gated", input={
+            "messages": [{"role": "user", "content": "Delete R-200."}]})
+        assert engine.run(config).interrupted
+        done = engine.resume("gated", answer)
+        return done, delete, model
+
+
+@pytest.mark.parametrize("family", ["chat", "responses"])
+def test_the_model_is_called_again_after_a_gated_call_is_approved(family, examples_on_path):
+    done, delete, model = _gated_run(family, {"approved": True}, examples_on_path)
+
+    assert not done.interrupted
+    assert delete.runs == 1
+    assert model.call_count == 2, "the model call after the resume was refused"
+    messages = _messages(done)
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"], \
+        "the answer was written as a user turn between the call and its result"
+    assert messages[-1]["content"] == "All done."
+
+
+@pytest.mark.parametrize("family", ["chat", "responses"])
+def test_the_model_sees_a_refusal_as_the_calls_result(family, examples_on_path):
+    done, delete, model = _gated_run(family, {"approved": False}, examples_on_path)
+
+    assert not done.interrupted
+    assert delete.runs == 0
+    assert model.call_count == 2, "the model call after the resume was refused"
+    messages = _messages(done)
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
+    assert "the operator declined" in messages[2]["content"]
+
+
+def test_a_chat_graph_still_receives_the_value_as_a_user_turn():
+    class Ask(ng.GraphNode):
+        def get_name(self):
+            return "ask"
+
+        def run(self, input):
+            if input.ctx.resume_value is None:
+                raise ng.NodeInterrupt({}, reason="needs an answer")
+            return []
+
+    ng.NodeFactory.register_type("tg_ask", lambda _n, _c, _x: Ask())
+    definition = {
+        "name": "py_user_turn",
+        "channels": {"messages": {"reducer": "append"}},
+        "nodes": {"ask": {"type": "tg_ask"}},
+        "edges": [{"from": "__start__", "to": "ask"}, {"from": "ask", "to": "__end__"}],
+    }
+    engine = ng.GraphEngine.compile(definition, ng.NodeContext(), ng.InMemoryCheckpointStore())
+    assert engine.run(ng.RunConfig(thread_id="turn", input={"messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "Shall I go on?"}]})).interrupted
+
+    done = engine.resume("turn", "yes")
+
+    assert [(m["role"], m["content"]) for m in _messages(done)] == [
+        ("user", "hi"), ("assistant", "Shall I go on?"), ("user", "yes")]

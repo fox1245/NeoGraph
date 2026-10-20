@@ -807,9 +807,12 @@ if (r.interrupted) {
 ```
 
 `resume_value` also arrives as a user turn on a `messages` channel when the
-graph has one, which is how chat-shaped graphs have always received it.
-`ctx.resume_value` is the general path — it works whatever the graph's channels
-are called.
+graph has one, which is how chat-shaped graphs have always received it. It does
+not while an assistant turn's tool calls still have no results, as after a tool
+gate's interrupt: a user turn there would come between the calls and their
+results, and the next model call would be refused (#544). The gate reads its
+answer from `ToolGateContext::resume_value`. `ctx.resume_value` is the general
+path — it works whatever the graph's channels are called.
 
 This is the *dynamic* form of interruption. The *static* form —
 `interrupt_before` / `interrupt_after` in the graph definition — pauses at a

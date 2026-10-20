@@ -635,6 +635,18 @@ static void group_tool_results(std::vector<sp::Message>& messages) {
     messages.resize(write);
 }
 
+// A Responses function_call_output has no error field, and the SDK refuses a
+// result marked as an error. NeoGraph writes a failed call's error, status and
+// retryability into the result's own text (tool_failure.h), so that text is what
+// the request carries (#544). Native replay is indivisible.
+static void send_tool_errors_as_text(std::vector<sp::Message>& messages) {
+    for (auto& message : messages) {
+        if (message.native || message.wire_output) continue;
+        for (auto& part : message.parts)
+            if (auto* result = std::get_if<sp::ToolResult>(&part)) result->is_error = false;
+    }
+}
+
 namespace {
 // A deprecated flat control moves into its family nest; setting both is ambiguous.
 template <class T> void adopt(std::optional<T>& nest, std::optional<T>& alias, const char* name) {
@@ -889,6 +901,7 @@ void set_provider_request_messages(ProviderRequest& request, std::vector<sp::Mes
             payload.messages.clear();
             payload.canonical_messages = std::move(messages);
         } else if constexpr (std::is_same_v<T, sp::responses::Request>) {
+            send_tool_errors_as_text(messages);
             payload.messages = std::move(messages);
         } else {
             if constexpr (std::is_same_v<T, sp::messages::Request> ||

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -754,6 +754,9 @@ if (r.interrupted) {
 
 `resume_value` は `messages` チャネルがある場合、そのユーザーターンとしても届きます。
 これはチャット形式のグラフが従来から値を受け取ってきた方法です。
+ただし、ツールゲートが中断した後のように、アシスタントターンのツール呼び出しにまだ結果がない間は届きません。
+そこにユーザーターンが入ると呼び出しと結果の間に割り込み、次のモデル呼び出しが拒否されるためです (#544)。
+ゲートは `ToolGateContext::resume_value` から回答を読みます。
 `ctx.resume_value` は一般的な経路であり、グラフのチャネル名に関係なく利用できます。
 これは *動的* な中断形式です。*静的* な形式である
 グラフ定義の `interrupt_before` / `interrupt_after` は、グラフ作成時に選んだノードで一時停止します。
