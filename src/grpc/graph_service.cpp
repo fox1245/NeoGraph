@@ -26,8 +26,8 @@
 #include <unordered_map>
 #include <neograph/graph/execution.h>
 
-#ifndef NEOGRAPH_VERSION_STRING
-#define NEOGRAPH_VERSION_STRING "dev"
+#ifndef NEOGRAPH_VERSION_STR
+#define NEOGRAPH_VERSION_STR "unknown"
 #endif
 
 namespace neograph::grpc {
@@ -177,7 +177,7 @@ public:
                           const pb::HealthRequest* /*req*/,
                           pb::HealthResponse* resp) override {
         resp->set_ok(true);
-        resp->set_version(NEOGRAPH_VERSION_STRING);
+        resp->set_version(NEOGRAPH_VERSION_STR);
         resp->set_has_default_graph(!default_def_.empty());
         return ::grpc::Status::OK;
     }
