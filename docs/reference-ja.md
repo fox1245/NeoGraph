@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fac3eca036504cdb2245854cdb495e37b7e9752e4acddd7c9e1fd2346015da55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -204,7 +204,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json) で、v2 形式のレコードも引き続き読み込めます。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
+`ChatMessage` / `ChatTool` と JSON は portable projection であり native 権限ではありません。Portable 形式は [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`provider-outcome-v3`](../schemas/provider-outcome-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json) で、v2 形式のレコードも引き続き読み込めます。真正な C++ checkpoint sidecar はメモリ内の native seal を保持します。永続 native 履歴には host-owned `sp::NativeArchive` が必要です。closed v3 / `spna3` は独立キーによる認証済み owner-private custody で、archive v2 は更新・解釈せず拒否します。認証は全 semantic descriptor 選択（origin/path/header、policy、要求 field mapping、usage path、stop mapping）、owner と正確な custody binding を結び付けます。暗号化や vendor-issuer 認証ではありません。archive 本文・キー・native blob・raw wire 観測は公開しません。Archive は証拠保存であり、金銭 grant や spending lease ではありません。Program/external bank は独立 journal が所有し、snapshot コピーで credit は作れません。
 
 `RuntimeHistoryRecord` の引数なしの `serialize_canonical()` はポータブルなレコードを扱います。永続ネイティブ履歴には `serialize_canonical(archive, owner_id)` と、その ID に所有者範囲が一致するアーカイブを使います。Python も同じオーバーロードと `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")` を公開します。ポータブルなレコード用の既定引数は、一致するアーカイブなしでのネイティブ復元を許可しません。Python のパースとアーカイブ対応の直列化はネイティブ処理中に GIL を解放します。JSON の観測データと、アーカイブで認証された保管権限は区別されます。
 
@@ -401,7 +401,7 @@ Generate の既定は `NativeOnly` です。明示 `PortableForeign` は native 
 
 #### Output caps and native continuation
 
-output generation cap は呼出しごとの承認 resource で、native replay config digest からこの cap だけを除外します。content/prefix、origin/route、policy identity、tools、reasoning controls など他の binding は維持します（文書化された per-turn tool selection/cursor 動作を除く）。encoded/prepared request は effective cap を保持し、request digest、journal slot、元 shared bank と絶対 deadline は拘束し続けます。cap を増やす semantic call は同じ grant の下で新しい call ordinal・admission が必要です。seal repair、deadline 更新、旧 effect replay は認めません。native archive は `spna3`/v3、portable JSON は v2 です。
+output generation cap は呼出しごとの承認 resource で、native replay config digest からこの cap だけを除外します。content/prefix、origin/route、policy identity、tools、reasoning controls など他の binding は維持します（文書化された per-turn tool selection/cursor 動作を除く）。encoded/prepared request は effective cap を保持し、request digest、journal slot、元 shared bank と絶対 deadline は拘束し続けます。cap を増やす semantic call は同じ grant の下で新しい call ordinal・admission が必要です。seal repair、deadline 更新、旧 effect replay は認めません。native archive は `spna3`/v3 のままで、portable JSON は v3 で書き出し、v2 のレコードも引き続き読み込めます。
 
 Python は `ChatReasoningOptions`, `ResponsesVerbosity`, `ResponsesTruncation`, `ResponsesInclude`, `MessagesThinkingMode`, `MessagesOutputEffort`, `MessagesCacheControl`, `MessagesCacheTtl`, `MessagesToolChoice`, `MessagesToolChoiceMode`, `GeminiHistoryMode`, `GeminiThinkingLevel`, `GeminiSafetySetting`, `GeminiSafetyCategory`, `GeminiSafetyThreshold`, `GeminiToolChoice`, `GeminiToolChoiceMode` を公開します。enum は同じ値で C++ `None` のみ Python `None_` です。optional class control と message/safety/history vector は detached snapshot なので編集を再代入します。`ProviderControls.previous_response_history` は authentic `ProviderMessage` リストで、仮の単一 response ではありません。
 
@@ -467,7 +467,7 @@ dispatch の前に broker は、provider の descriptor ポリシーが持つ Sc
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider に許可された descriptor がなく、カタログが分からない |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | カタログが base URL のそのモデルに価格を付けていない、またはその OpenRouter fallback のいずれかに価格を付けていない |
-| `P_MONEY_UNMODELED` | `Failed` | 項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、あるいはリクエストが OpenRouter の plugin を使う |
+| `P_MONEY_UNMODELED` | `Failed` | リクエストが SchemaProvider のエンドポイント呼び出しである（catalogue はまだ価格を付けられない）、項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、あるいはリクエストが OpenRouter の plugin を使う |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | カタログがそのモデルの入力上限もコンテキストウィンドウも知らない |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | サーバーツールや hosted tool に使用 cap がない（Messages の `max_uses`、Responses の `max_tool_calls`。Gemini の組み込みツールと、ポリシーが `max_uses` を認めない Messages の型である `mcp_toolset`、`tool_search_tool_*`、`code_execution_*` などにはない）、router alias のように OpenRouter の項目に route ceiling がない、または route ceiling を `provider.max_price` として固定できない |
@@ -2346,7 +2346,7 @@ public:
 
 #### エンドポイントノード
 
-エンドポイントノード (#531) は、それぞれノードコンテキストの provider で SchemaProvider のエンドポイントを 1 回呼び出します（`Provider::complete_endpoint_async`）。
+エンドポイントノード (#531) は、それぞれノードコンテキストの provider で SchemaProvider のエンドポイントを 1 回呼び出します。ノードは `make_endpoint_request` を `invoke_provider` に渡します。これはチャット呼び出しと同じ経路で、実行の provider 呼び出し broker（Program ではジャーナル）とトークン予算があればそれが適用され、なければ provider が呼び出しを直接受けます。
 - **設定。** `model` は必須です。ノードは、エンドポイントのオプションを SDK リクエストのメンバー名（`size`、`quality`、`dimensions`、`voice`、`top`、...）で受け取り、provider ポリシーが許可するメンバーは `extensions` で受け取ります。読み書きするチャネルの名前も受け取り、`output` は書き込むチャネルの名前です。厳密なグラフ（`schema_version` 1）は未知のキーを拒否します。チャネルは設定で指定されるため、エンドポイントノードを含むグラフでは、検証器の効果分析は実行されません。
 - **テキスト。** `embed` と `moderate` は文字列または文字列の配列（チャネル `input`）を、`speak` は文字列（`text`）を、`rerank` はクエリ文字列（`query`）とドキュメントの配列（`documents`）を読みます。
 - **メディア。** メディアのチャネルには、base64 の data URL、https URL、または provider の outcome format v3 のメディア JSON が入ります。ノードはメディアを v3 形式で書き込みます。`image_generate` と `image_edit` は `images` に、`speak` は `audio` に、`job_collect` は `video` に書き込みます。`image_edit` は編集する画像を `references` から読み、`transcribe` と `translate` は `audio` を読みます。

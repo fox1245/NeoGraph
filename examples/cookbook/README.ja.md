@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=1ba2435bb0bde68ce969a20064ff5577a3e61d0fc1705b904627a8ec4c2c649e -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=2c4e2880e25052ede124b7446b33531356216dc639497fb782cf45998acde03c -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@ native リプレイ権限ではありません。prepare は一度だけ行い�
 local wait の終了は remote model が停止した、または請求しない証拠ではありません。durable receipt は自動 redispatch を防ぎますが external effect の exactly-once は保証しません。
 出力 JSON から history を再構築したり、failure を最終テキストに縮約しないでください。
 
-canonical persistence は `provider-message-v2`/`runtime-history-record-v2` を使用し、
+canonical persistence は `provider-message-v3`/`runtime-history-record-v3` を使用し、
 portable 要約は native record を置換しません。optional control は呼出元が選び、暗黙に clamp しません。
 bounded call には真正 model fact が必要で、欠落は `LimitUnknown` です。
 reservation/charged/held は nullable provider usage と別で、budget 更新、価格、forecast、invoice ではありません。

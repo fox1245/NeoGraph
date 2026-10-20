@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=c91d45d63240864a0784379f2d83e77b71cae1ad10655d83eeb3e31377ee2d81 -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ prepare는 정확히 한 번 수행합니다. durable 호출자는
 `Provider::request_digest(prepared)`에 claim/receipt를 연결하고 같은 handle을 dispatch합니다.
 출력 JSON으로 history를 재구성하거나 failure를 최종 텍스트로 축소하지 않습니다.
 
-canonical persistence는 `provider-message-v2`/`runtime-history-record-v2`를 사용하며
+canonical persistence는 `provider-message-v3`/`runtime-history-record-v3`를 사용하며
 portable 요약은 native record를 대체하지 않습니다. optional control은 호출자가 선택하고
 조용히 clamp하지 않습니다. bounded call에는 진짜 model fact가 필요하며 누락은 `LimitUnknown`입니다.
 reservation/charged/held 값은 nullable provider usage와 별개이며 budget 갱신, 가격, forecast, invoice가 아닙니다.

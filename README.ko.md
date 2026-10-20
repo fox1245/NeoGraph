@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=10b70b5eed979e3c819fab1dc88d6df418d373544bcc69ccdf9e49a10f5ea17a -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=71fbb3a8a5072ec0c169fa310440fc595239f0635bbff040c3facdb97589f484 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -300,13 +300,13 @@ sp::runtime::Result first_call(
 
 준비된 요청은 한 번만 소비됩니다. `sp::runtime::Result`는 `Completion` 또는 `Failure`를 담은 불변 `sp::Outcome`을 소유합니다. 순서 있는 메시지와 파트, 네이티브 연속 정보, 원시 관찰값, 중단 근거, 시도 메타데이터, 실패 시의 부분 결과가 필요하면 이 결과를 그대로 보관하세요. 사용량 카운터는 null일 수 있습니다. 없으면 알 수 없다는 뜻이고, 관찰된 0은 0입니다. 사용량 보고와 예산 차감은 별개의 기록이며, 이식 가능한 보고서로는 지출 권한을 줄 수 없습니다.
 
-`usage.provider_cost`는 provider가 보고한 nanoUSD 금액, 필드별 상태, 출처, 품질, BYOK 근거, 파싱한 binary64 값을 올림한 내역을 보관합니다. 청구서, 토큰 수, 추정치, 지출 권한이 아닙니다. 빠진 금액 메타데이터는 표준 v2 JSON에서도 빠진 채로 남습니다. 보고된 0이나 `is_byok=false`는 여전히 근거입니다. 알 수 없는 통화와 서로 충돌하거나 형식이 잘못된 보고는 USD나 토큰으로 변환하지 않고 그대로 보관합니다. 블로킹 provider 호출도 단일 비동기 SDK 파이프라인을 구동하며, SDK 이벤트 루프나 콜백 워커로의 재진입은 거부됩니다.
+`usage.provider_cost`는 provider가 보고한 nanoUSD 금액, 필드별 상태, 출처, 품질, BYOK 근거, 파싱한 binary64 값을 올림한 내역을 보관합니다. 청구서, 토큰 수, 추정치, 지출 권한이 아닙니다. 빠진 금액 메타데이터는 표준 JSON에서도 빠진 채로 남습니다. 보고된 0이나 `is_byok=false`는 여전히 근거입니다. 알 수 없는 통화와 서로 충돌하거나 형식이 잘못된 보고는 USD나 토큰으로 변환하지 않고 그대로 보관합니다. 블로킹 provider 호출도 단일 비동기 SDK 파이프라인을 구동하며, SDK 이벤트 루프나 콜백 워커로의 재진입은 거부됩니다.
 
 `first_call`이 반환한 뒤에는 `std::get_if<sp::Completion>(result.get())`로 완료 결과의 `messages`, `stop`, `usage`를 확인합니다. 완료가 아니면 `std::get<sp::Failure>(*result)`가 `error.kind`, `error.safe_message`, 재시도 근거, 그리고 `partial`에 담긴 부분 메시지와 사용량을 제공합니다. 예를 들어 `completion.usage.output_total`이 없으면 출력 토큰 수를 알 수 없다는 뜻이고, 있고 `value`가 `0`이면 0을 보고한 것입니다. 표시용 텍스트는 보관된 결과의 한 가지 보기일 뿐입니다.
 
 `ChatMessage`, `ChatTool`, JSON은 이식 가능한 투영입니다. 진짜 네이티브 이력은 네이티브 체크포인트 사이드카와 함께 메모리에 둘 수 있고, 영속적인 네이티브 이력에는 실제 `sp::NativeArchive`와 소유자 전용 보호 보관이 필요합니다. 이식 가능한 JSON으로는 그 권한을 다시 만들 수 없습니다. 아카이브는 독립된 키로 보관 상태를 인증합니다. 암호화도 아니고 벤더 발급자 인증도 아닙니다. 아카이브 본문, 키, 네이티브 블롭, 원시 와이어 관찰값은 공개하지 마세요. 영속성 실패, 옵저버, 관리되는 예산 뱅크, 재생 경계는 [provider 레퍼런스](docs/reference-en.md)와 [마이그레이션 가이드](docs/migration-v0.4-to-v1.0.md)를 보세요.
 
-타입 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거되었습니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 이전하세요. 호환용 별칭은 없습니다. SDK 패키지는 `0.3.5` 알파이며, 공개 커밋 `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6` 브랜치)에 고정되어 있고, 인터페이스 리비전 6, 공유 ABI 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로, SDK를 쓰는 코드, NeoGraph, Python 확장을 함께 다시 빌드하세요. 네이티브 아카이브 v3과 이식 가능한 JSON v2는 그대로입니다. 이 세대는 안정적인 SDK 인터페이스를 선언하지 않습니다.
+타입 전환으로 `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, 디스크립터 인터프리터, Responses WebSocket 경로가 제거되었습니다. C++ 사용 코드를 다시 컴파일하고 사용자 정의 provider를 이전하세요. 호환용 별칭은 없습니다. SDK 패키지는 `0.3.5` 알파이며, 공개 커밋 `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6` 브랜치)에 고정되어 있고, 인터페이스 리비전 6, 공유 ABI 6입니다. 금액 사용량 메타데이터가 공개 레이아웃을 바꾸므로, SDK를 쓰는 코드, NeoGraph, Python 확장을 함께 다시 빌드하세요. 네이티브 아카이브 v3(`spna3`)는 그대로입니다. 이식 가능한 JSON은 `provider-message-v3`, `provider-outcome-v3`, `runtime-history-record-v3`로 기록하며, v2 형식의 레코드도 계속 읽습니다. 이 세대는 안정적인 SDK 인터페이스를 선언하지 않습니다.
 
 ## Python
 

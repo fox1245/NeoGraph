@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=10b70b5eed979e3c819fab1dc88d6df418d373544bcc69ccdf9e49a10f5ea17a -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=71fbb3a8a5072ec0c169fa310440fc595239f0635bbff040c3facdb97589f484 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -300,13 +300,13 @@ sp::runtime::Result first_call(
 
 准备好的请求只能消费一次。`sp::runtime::Result` 拥有一个不可变的 `sp::Outcome`，其中是 `Completion` 或 `Failure`。需要有序的消息与片段、原生延续信息、原始观测值、停止依据、尝试元数据或失败时的部分结果时，请保留这个结果。用量计数器可以为空：缺失表示未知，观测到的 0 就是 0。用量报告与预算扣减是两种不同的记录；可移植的报告不能授予支出权限。
 
-`usage.provider_cost` 保留 provider 报告的 nanoUSD 金额、各字段的状态、来源、质量、BYOK 依据，以及对解析出的 binary64 值向上取整的结果。它不是发票、令牌数、估算值，也不是支出权限。缺失的金额元数据在规范化的 v2 JSON 中仍然缺失；报告的 0 或 `is_byok=false` 依然是依据。未知的币种以及互相冲突或格式错误的报告会原样保留，不会换算成 USD 或令牌。阻塞式 provider 调用同样驱动唯一的异步 SDK 管线，并拒绝从 SDK 事件循环或回调工作线程重入。
+`usage.provider_cost` 保留 provider 报告的 nanoUSD 金额、各字段的状态、来源、质量、BYOK 依据，以及对解析出的 binary64 值向上取整的结果。它不是发票、令牌数、估算值，也不是支出权限。缺失的金额元数据在规范化的 JSON 中仍然缺失；报告的 0 或 `is_byok=false` 依然是依据。未知的币种以及互相冲突或格式错误的报告会原样保留，不会换算成 USD 或令牌。阻塞式 provider 调用同样驱动唯一的异步 SDK 管线，并拒绝从 SDK 事件循环或回调工作线程重入。
 
 `first_call` 返回之后，用 `std::get_if<sp::Completion>(result.get())` 查看完成结果的 `messages`、`stop` 和 `usage`。否则，`std::get<sp::Failure>(*result)` 会给出 `error.kind`、`error.safe_message`、重试依据，以及 `partial` 中的部分消息和用量。例如，没有 `completion.usage.output_total` 表示输出令牌数未知；有这个计数器且 `value` 为 `0`，则表示报告的是 0。展示用的文本只是保留结果的一种视图。
 
 `ChatMessage`、`ChatTool` 和 JSON 是可移植的投影。真正的原生历史可以连同原生检查点旁路数据留在内存中；持久化的原生历史则需要真正的 `sp::NativeArchive` 和受保护的、仅限所有者的保管。可移植的 JSON 无法重建这种权限。归档用独立的密钥认证保管状态，它既不是加密，也不是对厂商签发者的认证。不要公开归档正文、密钥、原生 blob 或原始的线路观测值。关于持久化失败、观察者、受管预算库和重放边界，见 [provider 参考](docs/reference-en.md)和[迁移指南](docs/migration-v0.4-to-v1.0.md)。
 
-这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.5` alpha，固定在公开提交 `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3 和可移植 JSON v2 保持不变；这一代不声明稳定的 SDK 接口。
+这次带类型的切换移除了 `CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、描述符解释器以及 Responses 的 WebSocket 路径。请重新编译 C++ 使用方并迁移自定义 provider；没有兼容别名。SDK 包是 `0.3.5` alpha，固定在公开提交 `0437853529b5932e7097a38629a95779d08f03aa`（`maint/interface6` 分支），接口修订版为 6，共享 ABI 为 6。金额用量元数据改变了公开布局：请把使用 SDK 的代码、NeoGraph 和 Python 扩展一起重新构建。原生归档 v3（`spna3`）保持不变；可移植 JSON 以 `provider-message-v3`、`provider-outcome-v3` 和 `runtime-history-record-v3` 写出，v2 格式的记录仍可读取。这一代不声明稳定的 SDK 接口。
 
 ## Python
 

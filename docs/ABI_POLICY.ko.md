@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=0aa8a3350cef51685bd88b7feb1501b90260a4f43baa4c55529104dfa6b47483 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=ko source_sha256=e9c13d7f86936784ced0b9f500f737a386fbabc518e974150c9ea0ce3c1da6cd -->
 # 바이너리 호환 정책
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -35,7 +35,7 @@ CheckpointStore는 명시적인 어댑터 마이그레이션을 위해 기존 �
 
 Core는 LLM 노드를 꺼 두더라도 외부 `SchemaProvider::runtime`이 필요합니다. 선택된 SDK 릴리스는 `0.3.5` 알파이고, 공개 `maint/interface6` 커밋 `0437853529b5932e7097a38629a95779d08f03aa`, 인터페이스 리비전 `6`, 공유 라이브러리 ABI 리비전 `6`이며 out-of-line capability 검사를 사용합니다. 안정적인 인터페이스라는 주장은 아닙니다. 맞는 SDK 구성 요소는 함께 설치해야 합니다. SDK의 `libsp_*.so.6` 세대는 NeoGraph의 로더 세대, Python의 `abi3` wheel 태그와 각각 별개입니다.
 
-인터페이스 6은 공개 usage 레이아웃에 provider가 보고하는 고정 크기 금액 메타데이터를 추가하고, 블로킹 SDK 호출과 비동기 SDK 호출에 비동기 파이프라인 하나를 함께 사용합니다. 선택된 커밋은 리비전 6 안에서 `sp::OpenRouterRouting`에 `max_price`를 추가해 그 크기를 늘렸고, Chat, Messages, Responses 요청 레이아웃도 함께 커졌습니다. capability 비트 `OpenRouterRoutingMaxPrice`는 `RequiredProvider`에 속하고 NeoGraph의 핸드셰이크가 요구하므로, 이보다 이전의 인터페이스 6 라이브러리는 거부됩니다. SDK 소비자, NeoGraph, Python 확장을 함께 다시 빌드해야 하며, 이전의 헤더나 라이브러리는 인터페이스 6과 호환되지 않습니다. 블로킹 래퍼는 SDK 이벤트 루프와 콜백 워커로의 재진입을 계속 거부합니다. 네이티브 archive v3 / `spna3`와 이식 가능한 JSON v2는 독립적인 형식이며 바뀌지 않았습니다. 정규 outcome v2의 usage는 금액 메타데이터가 있을 때에 한해 선택 필드 `provider_cost`를 추가합니다. 금액 메타데이터가 없던 과거 기록은 원래 바이트를 그대로 유지하며 비용을 지어내지 않습니다.
+인터페이스 6은 공개 usage 레이아웃에 provider가 보고하는 고정 크기 금액 메타데이터를 추가하고, 블로킹 SDK 호출과 비동기 SDK 호출에 비동기 파이프라인 하나를 함께 사용합니다. 선택된 커밋은 리비전 6 안에서 `sp::OpenRouterRouting`에 `max_price`를 추가해 그 크기를 늘렸고, Chat, Messages, Responses 요청 레이아웃도 함께 커졌습니다. capability 비트 `OpenRouterRoutingMaxPrice`는 `RequiredProvider`에 속하고 NeoGraph의 핸드셰이크가 요구하므로, 이보다 이전의 인터페이스 6 라이브러리는 거부됩니다. SDK 소비자, NeoGraph, Python 확장을 함께 다시 빌드해야 하며, 이전의 헤더나 라이브러리는 인터페이스 6과 호환되지 않습니다. 블로킹 래퍼는 SDK 이벤트 루프와 콜백 워커로의 재진입을 계속 거부합니다. 네이티브 archive v3 / `spna3`는 바뀌지 않았습니다. 이식 가능한 JSON은 버전이 따로 있는 별개의 형식으로, NeoGraph는 provider 메시지, provider outcome, runtime history record를 v3로 기록하고 v2 레코드도 계속 읽습니다. 정규 outcome의 usage는 금액 메타데이터가 있을 때에 한해 선택 필드 `provider_cost`를 추가합니다. 금액 메타데이터가 없던 과거 기록은 원래 바이트를 그대로 유지하며 비용을 지어내지 않습니다.
 
 Python은 준비된 핸들과 불변 outcome을 포함한 타입 기반 provider 계약을 공개하며, 기존 completion shim은 없습니다. 확장 모듈과 거기에 맞는 라이브러리는 wheel 하나로 함께 설치합니다. wheel에 포함된 NeoGraph 라이브러리나 SDK 라이브러리를 개별적으로 교체해서는 안 됩니다. 그래프의 ChatMessage 편의 값은 네이티브 ProviderMessage의 보관(custody)을 대체하지 않습니다. [Python 바인딩](python-binding.md)을 참고하세요.
 
