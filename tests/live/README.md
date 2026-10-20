@@ -24,7 +24,7 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
   - the model catalogue refreshed from all four providers' listings, a call to a model that only the refreshed catalogue lists, and a model that no catalogue lists, which is still sent;
 - **Known gaps** of the release line are cases that must fail (strict xfail). `tests/live/manifest.json` lists them with the issue that fixes them. When a fix lands, the case starts to pass and the manifest has to change with it.
 
-Each call uses a cheap model and a small cap. A full run costs a few US cents.
+Each call uses a cheap model and a small cap. A full run takes about eight minutes and costs about 30 US cents, most of it the Anthropic agent runs.
 
 ## Running it
 

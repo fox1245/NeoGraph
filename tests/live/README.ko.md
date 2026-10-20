@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,7 +25,7 @@
   - 네 공급자의 목록 전체에서 갱신한 모델 카탈로그, 갱신된 카탈로그에만 있는 모델 호출, 어느 카탈로그에도 없지만 그래도 전송되는 모델;
 - **알려진 빈틈**은 그 릴리스 라인에서 반드시 실패해야 하는 케이스입니다(strict xfail). `tests/live/manifest.json`이 고칠 이슈와 함께 이를 나열합니다. 수정이 들어오면 케이스가 통과하기 시작하므로 매니페스트도 함께 바꿔야 합니다.
 
-호출마다 싼 모델과 작은 상한을 씁니다. 전체 실행 비용은 몇 미국 센트입니다.
+호출마다 싼 모델과 작은 상한을 씁니다. 전체 실행은 약 8분 걸리고 비용은 약 30미국 센트이며, 대부분은 Anthropic 에이전트 실행입니다.
 
 ## 실행
 
