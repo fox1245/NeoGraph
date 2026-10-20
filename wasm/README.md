@@ -22,9 +22,9 @@ Native SDK libraries cannot be linked into WebAssembly. The SDK runtime, its
 archive support and the C++ standard library must work on the Emscripten target;
 the historical smoke below does not show that the current code builds.
 
-Current builds require SDK `0.3.5`, interface revision/shared generation 6,
-at SchemaProvider `maint/interface6` commit `0437853529b5932e7097a38629a95779d08f03aa`,
-built for the same target. A genuine Emscripten build of the SDK
+Current builds require SDK `0.4.0`, interface revision/shared generation 7,
+at the SchemaProvider commit that `cmake/NeoGraphSchemaProvider.cmake` pins,
+built for the same target (#535 tracks the WebAssembly work). A genuine Emscripten build of the SDK
 runtime is a prerequisite, and this page does not guarantee that a current
 build succeeds.
 

@@ -307,7 +307,7 @@ manually. There are no shortcuts.
 
 # Migration 2: Typed lossless Provider cutover (mandatory recompile)
 
-This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.3.5`, interface revision 6 / shared ABI 6, with out-of-line capability checks; that is not a stable release claim.
+This is a source and binary break: recompile every C++ consumer and custom provider with matching new headers/libraries. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter and Responses WebSocket path are removed, with no aliases or compatibility bridges. The SDK is alpha `0.4.0`, interface revision 7 / shared ABI 7, with out-of-line capability checks; that is not a stable release claim.
 
 Replace removed `Provider::complete`, `complete_async`, `complete_stream` and `complete_stream_async` callsites with explicit-mode requests and `invoke` / `dispatch` (or their C++ async peers). `Agent::complete` remains a separate one-turn API returning an owned outcome.
 
