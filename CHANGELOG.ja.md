@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=d1e8605da45985624b1f77a313c987f1559c617fbc056be6d2b80d4a9918f3d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - 呼び出しはチャット呼び出しと共有する provider 自身の SchemaProvider クライアントで実行され、descriptor ポリシーが origin ごとに各エンドポイントを許可します。
   - 0.16.0 で削除される型付きクライアントの代わりです。Python、グラフノード、Program からの呼び出しは後に続きます。
   - `Provider` に仮想メンバー `endpoint_runtime()` が加わったため、`Provider` の C++ サブクラスは新しいヘッダーで再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
+- **グラフ内のエンドポイントノード (#531).**
+  - 組み込みのノードタイプ `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe`、`translate` は、それぞれエンドポイント呼び出しを 1 回行います。入力はノードの config が名前を指定するチャネルから読み、結果は 1 つのチャネルに書き込みます：provider のメディア JSON、ベクトル、ランキング、判定、回答、またはテキスト。
+  - `job_submit` と `job_collect` は動画ジョブを実行します。collect ノードは実行されるたびに 1 回ポーリングし、ジョブが完了するまで実行に割り込みます。
+  - 呼び出しが報告したトークン使用量が実行に記録されます。予算付きの実行は、Program 呼び出しが仲介するようになるまで、これらのノードを拒否します。
 
 ### 変更
 - **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。2026-10-20 の円卓会議で決めた構造です。

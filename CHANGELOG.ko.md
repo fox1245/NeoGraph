@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d1e8605da45985624b1f77a313c987f1559c617fbc056be6d2b80d4a9918f3d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -19,6 +19,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - 호출은 채팅 호출이 함께 쓰는 provider 자신의 SchemaProvider 클라이언트에서 실행되며, descriptor 정책이 origin별로 각 엔드포인트를 승인합니다.
   - 0.16.0이 제거하는 타입 클라이언트를 대신합니다. Python, 그래프 노드, Program 호출은 뒤따릅니다.
   - `Provider`에 가상 멤버 `endpoint_runtime()`이 생겼으므로 `Provider`의 C++ 하위 클래스는 새 헤더로 다시 빌드해야 합니다 ([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
+- **그래프의 엔드포인트 노드 (#531).**
+  - 내장 노드 타입 `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe`, `translate`는 각각 엔드포인트 호출을 한 번 합니다. 입력은 노드의 config가 이름을 지정한 채널에서 읽고, 결과는 채널 하나에 씁니다: provider 미디어 JSON, 벡터, 순위, 판정, 답변 또는 텍스트.
+  - `job_submit`과 `job_collect`는 비디오 job을 실행합니다. collect 노드는 실행될 때마다 한 번 폴링하며, job이 끝날 때까지 실행을 인터럽트합니다.
+  - 호출이 보고한 토큰 사용량이 실행에 기록됩니다. 예산이 있는 실행은 Program 호출이 중개할 때까지 이 노드를 거부합니다.
 
 ### 변경됨
 - **SchemaProvider interface 7의 모든 요청 제어를 C++와 Python에서 family별 nest로 쓸 수 있습니다 (#512, #513).** `ProviderControls`에 `chat`, `responses`, `messages`, `generate`, `interactions`(`ChatControls` … `InteractionsControls`)가 생겨 family 고유 제어를 SDK 타입 그대로 담으며, 평평한 멤버는 이식 가능한 제어로 남습니다. 2026-10-20 원탁회의에서 정한 구조입니다.

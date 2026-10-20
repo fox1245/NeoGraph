@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d5164064f1180f9307875fa50c67c56a7d233ab3cfc2d91e6216c1aaefb0ad00 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2603,6 +2603,31 @@ public:
 | `"tool_dispatch"` | `ToolDispatchNode` | 从最新的 assistant 消息分发工具调用 |
 | `"intent_classifier"` | `IntentClassifierNode` | 基于 LLM 的意图分类。从 `config` 读取 `prompt` 和 `valid_routes` |
 | `"subgraph"` | `SubgraphNode` | 运行已编译的子图。从 `config` 读取 `input_map` 和 `output_map` |
+| `"image_generate"`, `"image_edit"` | 端点节点 | 生成或编辑图像（见“端点节点”） |
+| `"embed"`, `"rerank"`, `"moderate"`, `"decide"` | 端点节点 | 嵌入文本、对文档排序、检查文本，或回答结构化问题 |
+| `"speak"`, `"transcribe"`, `"translate"` | 端点节点 | 将文本合成为语音，或转写、翻译语音 |
+| `"job_submit"`, `"job_collect"` | 端点节点 | 提交视频任务，然后收集它 |
+
+#### 端点节点
+
+端点节点（#531）各自在节点上下文的 provider 上发起一次 SchemaProvider 端点调用（`Provider::complete_endpoint_async`）。
+- **配置。** `model` 是必需的。节点按 SDK 请求的成员名称接收其端点的选项（`size`、`quality`、`dimensions`、`voice`、`top`、...），并通过 `extensions` 接收 provider 策略准入的成员。它还接收其读取和写入的通道名称；`output` 指定其写入的通道。严格图（`schema_version` 1）会拒绝未知的键。由于通道是配置，验证器的效果分析不会在含有端点节点的图上运行。
+- **文本。** `embed` 和 `moderate` 读取字符串或字符串数组（通道 `input`），`speak` 读取字符串（`text`），`rerank` 读取查询字符串（`query`）和文档数组（`documents`）。
+- **媒体。** 媒体通道保存 base64 data URL、https URL，或 provider outcome format v3 的媒体 JSON。节点以 v3 形式写入媒体：`image_generate` 和 `image_edit` 写入 `images`，`speak` 写入 `audio`，`job_collect` 写入 `video`。`image_edit` 从 `references` 读取要编辑的图像；`transcribe` 和 `translate` 读取 `audio`。
+- **其他结果。**
+  - `embed` 为每个输入写入一个数字数组（`embeddings`）。
+  - `rerank` 写入 `[{index, relevance}]`，最相关的在前（`ranking`）。
+  - `moderate` 写入 `[{flagged, categories, scores}]`（`moderation`）。
+  - `transcribe` 和 `translate` 写入文本（`transcript`、`translation`）。
+- **`decide`。** 它读取任意 JSON 作为证据（`input`），并接收 `questions`：每个问题是 `{name, kind, instructions, options, when_true, when_false}`，其中 `kind` 为 `predicate`、`choice`、`score` 或 `box`。它写入答案（`decisions`）。
+- **视频任务。**
+  - `job_submit` 读取提示词（`prompt`），写入任务的句柄（`job`）。
+  - `job_collect` 每次运行时对句柄轮询一次。已完成任务的输出会下载到 `video`，失败、已取消或已过期的任务会使该节点失败。
+  - 仍在运行的任务会抛出 `NodeInterrupt`，其内容为 `{"job", "status", "raw_status"}`。宿主在其选择的时候恢复运行，节点再次轮询。步骤内部不做任何轮询，也不会再次发送提交。
+- **用量、预算、取消。**
+  - 调用报告的 token 用量会计入运行的用量。不报告用量的调用（moderation、下载）不计入任何内容，因此不会抹去运行中其他调用的合计。
+  - 端点调用目前不受预算约束，因此带有模型 token 预算、managed budget lease 或 provider 调用 broker（Program）的运行，会在端点节点发送任何内容之前拒绝它。
+  - 运行的取消 token 和 deadline 会传到该调用。
 
 <a id="topology-schema-export-issue-56"></a>
 ### 拓扑 Schema 导出（issue #56）

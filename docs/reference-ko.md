@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d5164064f1180f9307875fa50c67c56a7d233ab3cfc2d91e6216c1aaefb0ad00 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2640,12 +2640,37 @@ The library pre-registers the following components:
 
 **Node types:**
 
-| Type | Class | Description |
+| 타입 | 클래스 | 설명 |
 |------|-------|-------------|
-| `"llm_call"` | `LLMCallNode` | Calls the LLM with current conversation state |
-| `"tool_dispatch"` | `ToolDispatchNode` | Dispatches tool calls from the latest assistant message |
-| `"intent_classifier"` | `IntentClassifierNode` | LLM-based intent classification. Reads `prompt` and `valid_routes` from `config` |
-| `"subgraph"` | `SubgraphNode` | Runs a compiled subgraph. Reads `input_map` and `output_map` from `config` |
+| `"llm_call"` | `LLMCallNode` | 현재 대화 상태로 LLM을 호출한다 |
+| `"tool_dispatch"` | `ToolDispatchNode` | 최신 assistant 메시지의 도구 호출을 실행한다 |
+| `"intent_classifier"` | `IntentClassifierNode` | LLM 기반 의도 분류. `config`에서 `prompt`와 `valid_routes`를 읽는다 |
+| `"subgraph"` | `SubgraphNode` | 컴파일된 서브그래프를 실행한다. `config`에서 `input_map`과 `output_map`을 읽는다 |
+| `"image_generate"`, `"image_edit"` | 엔드포인트 노드 | 이미지를 생성하거나 편집한다 ("엔드포인트 노드" 참고) |
+| `"embed"`, `"rerank"`, `"moderate"`, `"decide"` | 엔드포인트 노드 | 텍스트를 임베딩하거나, 문서의 순위를 매기거나, 텍스트를 검사하거나, 구조화된 질문에 답한다 |
+| `"speak"`, `"transcribe"`, `"translate"` | 엔드포인트 노드 | 텍스트를 음성으로 합성하거나, 음성을 전사하거나 번역한다 |
+| `"job_submit"`, `"job_collect"` | 엔드포인트 노드 | 비디오 job을 제출한 다음 수집한다 |
+
+#### 엔드포인트 노드
+
+엔드포인트 노드(#531)는 노드 컨텍스트의 provider에서 SchemaProvider 엔드포인트를 각각 한 번 호출한다(`Provider::complete_endpoint_async`).
+- **설정.** `model`은 필수다. 노드는 엔드포인트의 옵션을 SDK 요청의 멤버 이름(`size`, `quality`, `dimensions`, `voice`, `top`, ...)으로 받고, provider 정책이 승인하는 멤버는 `extensions`로 받는다. 읽고 쓰는 채널의 이름도 받으며, `output`은 노드가 쓰는 채널의 이름이다. 엄격한 그래프(`schema_version` 1)는 모르는 키를 거부한다. 채널이 설정이므로, 엔드포인트 노드가 있는 그래프에서는 검증기의 효과 분석이 실행되지 않는다.
+- **텍스트.** `embed`와 `moderate`는 문자열 또는 문자열 배열(채널 `input`)을 읽고, `speak`는 문자열(`text`)을 읽으며, `rerank`는 질의 문자열(`query`)과 문서 배열(`documents`)을 읽는다.
+- **미디어.** 미디어 채널에는 base64 data URL, https URL 또는 provider outcome format v3의 미디어 JSON이 들어간다. 노드는 미디어를 v3 형식으로 쓴다. `image_generate`와 `image_edit`는 `images`에, `speak`는 `audio`에, `job_collect`는 `video`에 쓴다. `image_edit`는 편집할 이미지를 `references`에서 읽고, `transcribe`와 `translate`는 `audio`를 읽는다.
+- **그 밖의 결과.**
+  - `embed`는 입력마다 숫자 배열 하나를 쓴다(`embeddings`).
+  - `rerank`는 `[{index, relevance}]`를 관련도가 높은 순으로 쓴다(`ranking`).
+  - `moderate`는 `[{flagged, categories, scores}]`를 쓴다(`moderation`).
+  - `transcribe`와 `translate`는 텍스트를 쓴다(`transcript`, `translation`).
+- **`decide`.** 임의의 JSON을 증거(`input`)로 읽고 `questions`를 받는다. 각 질문은 `{name, kind, instructions, options, when_true, when_false}`이며, `kind`는 `predicate`, `choice`, `score`, `box` 중 하나다. 답은 `decisions`에 쓴다.
+- **비디오 job.**
+  - `job_submit`은 프롬프트(`prompt`)를 읽고 job의 핸들(`job`)을 쓴다.
+  - `job_collect`는 실행될 때마다 핸들을 한 번 폴링한다. 완료된 job의 출력은 `video`로 다운로드되고, 실패했거나 취소되었거나 만료된 job은 노드를 실패시킨다.
+  - 아직 실행 중인 job이면 `{"job", "status", "raw_status"}`를 담은 `NodeInterrupt`를 던진다. 호스트는 원하는 때에 실행을 재개하고, 노드는 다시 폴링한다. step 안에서는 아무것도 폴링하지 않으며, 제출은 다시 보내지 않는다.
+- **사용량, 예산, 취소.**
+  - 호출이 보고한 토큰 사용량은 실행의 사용량에 더해진다. 사용량을 보고하지 않는 호출(moderation, 다운로드)은 아무것도 더하지 않으므로, 실행의 다른 호출이 남긴 합계를 지우지 않는다.
+  - 엔드포인트 호출에는 아직 예산이 적용되지 않으므로, 모델 토큰 예산, managed budget lease, provider 호출 broker(Program)가 있는 실행은 엔드포인트 노드가 무언가를 보내기 전에 이를 거부한다.
+  - 실행의 취소 토큰과 deadline은 호출에 전달된다.
 
 ### Topology Schema Export (issue #56)
 
