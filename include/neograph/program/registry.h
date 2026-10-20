@@ -139,6 +139,14 @@ public:
     RegistrySnapshotBuilder& add_core_tool_dispatch(
         ExecutableManifest manifest,
         ExecutableRequirementResolver requirement_resolver);
+    /// A built-in SchemaProvider endpoint node (#531): the manifest names its
+    /// type (`embed`, `image_generate`, ..., `job_collect`). Its calls take the
+    /// Core provider path, as llm_call's do: the host's provider call broker
+    /// journals them, and a priced binding refuses them until the model
+    /// catalogue can bound an endpoint call.
+    RegistrySnapshotBuilder& add_core_endpoint_node(
+        ExecutableManifest manifest,
+        ExecutableRequirementResolver requirement_resolver);
     RegistrySnapshotBuilder& add_reducer(ExecutableManifest manifest, graph::ReducerFn reducer);
     RegistrySnapshotBuilder& add_condition(ExecutableManifest                  manifest,
                                            graph::ConditionFn                  condition,

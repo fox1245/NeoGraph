@@ -360,7 +360,8 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **Preparing.** `prepare_endpoint` returns the SDK's `PreparedEndpoint`. A host can inspect it (`prepared().endpoint()`, `prepared().model()`, `error()`) or journal it before `complete_endpoint` runs it. It throws `sp::runtime::AdmissionError` when no preparation slot is free.
 - **Without blocking.** `complete_endpoint_async` does not block a thread. The awaitable owns the client and the call, so neither the request nor the provider has to outlive it. Cancelling the awaiting coroutine cancels the call, and the outcome is then the SDK's `Cancelled` failure.
 - **Sent as given.** `SchemaProvider::Defaults` apply to chat calls only. Nothing here journals a call or reserves or charges a budget.
-- **Providers without endpoints.** A `Provider` without SchemaProvider endpoints throws `std::logic_error`. A subclass forwards its own client by overriding `endpoint_runtime()`.
+- **Providers without endpoints.** A `Provider` without SchemaProvider endpoints throws `std::logic_error`. A subclass forwards its own client by overriding `endpoint_runtime()`, and a provider that wraps another returns `endpoint_runtime_of(inner)`. `has_endpoints()` tells whether a provider has them.
+- **On the chat path.** `make_endpoint_request(request)` puts an endpoint request in a `ProviderRequest`, so `prepare`, `dispatch` and `invoke` take it like a chat call: dispatch hooks, observers, a provider call broker and its journal, and token budgets. The outcome is untyped; the endpoint's `typed()` (`sp::embeddings::typed`, ...) types it. The call is buffered, so `ProviderMode::Stream` is refused, and a local provider (`prepare_local`) refuses it. Its dispatch identity (`request_digest`) also names the endpoint, method and URL, since several operations share an endpoint and a read has no body.
 
 ### ProviderRequest / ProviderControls
 
@@ -2720,7 +2721,9 @@ The endpoint nodes (#531) make one SchemaProvider endpoint call each on the node
   - A job still running raises `NodeInterrupt` with `{"job", "status", "raw_status"}`. The host resumes the run when it chooses, and the node polls again. Nothing polls inside a step, and the submit is not sent again.
 - **Usage, budgets, cancellation.**
   - The token usage a call reports is added to the run's usage. A call that reports none (moderation, a download) adds nothing, so it does not erase the totals of the run's other calls.
-  - Endpoint calls are not budgeted yet, so a run with a model-token budget, a managed budget lease or a provider call broker (a Program) refuses an endpoint node before it sends anything.
+  - The calls take the path a chat call takes (`make_endpoint_request`). A run's provider call broker journals and replays them; in a Program the host registers the nodes with `add_core_endpoint_node`.
+  - A model-token budget or a managed budget lease refuses an endpoint call before it is sent, because it has no output cap. A priced Program binding refuses it with `P_MONEY_UNMODELED`.
+  - Strict Runtime interposition takes chat calls only, so it refuses an endpoint node instead of being bypassed.
   - The run's cancel token and deadline reach the call.
 
 ### Topology Schema Export (issue #56)

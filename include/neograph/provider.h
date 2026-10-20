@@ -161,10 +161,24 @@ struct ProviderObserverLimits {
     std::optional<std::size_t> max_bytes;
 };
 
+namespace detail {
+/// An endpoint request a ProviderRequest carries instead of a chat payload
+/// (#531): it prepares itself on the provider's SDK client.
+class EndpointPayload {
+public:
+    virtual ~EndpointPayload() = default;
+    virtual sp::runtime::PreparedRequest prepare(sp::runtime::Client& client,
+                                                 sp::runtime::RunOptions options) const = 0;
+};
+} // namespace detail
+
 /// Portable request controls remain the SDK's declared, family-specific fields.
 /// No raw JSON field override or callback-selected streaming mode is admitted.
 struct ProviderRequest {
     sp::runtime::Request payload;
+    /// An endpoint call instead of a chat call (#531, make_endpoint_request).
+    /// `payload` is then unused, and the call is buffered.
+    std::shared_ptr<const detail::EndpointPayload> endpoint;
     ProviderMode mode = ProviderMode::Collect;
     sp::runtime::RunOptions options;
     std::shared_ptr<graph::CancelToken> cancel_token;
@@ -308,6 +322,17 @@ template <EndpointRequest Request>
 using EndpointOutcomeOf = typename EndpointOutcome<Request>::type;
 
 namespace detail {
+template <EndpointRequest Request>
+class TypedEndpointPayload final : public EndpointPayload {
+public:
+    explicit TypedEndpointPayload(Request request) : request_(std::move(request)) {}
+    sp::runtime::PreparedRequest prepare(sp::runtime::Client& client,
+                                         sp::runtime::RunOptions options) const override {
+        return client.prepare(request_, std::move(options)).release();
+    }
+private:
+    Request request_;
+};
 /// Starts one SDK endpoint call. It receives the function the call's outcome
 /// callback runs, and returns the function that cancels the call.
 using EndpointStart = std::function<std::function<void()>(std::function<void()> notify)>;
@@ -335,6 +360,9 @@ public:
     /// request's model invocations times the transport attempts its retry
     /// policy allows. Empty when the prepared request does not state them.
     static std::optional<std::uint64_t> invocation_upper_bound(const PreparedProviderRequest& request);
+
+    /// Whether this provider forwards SchemaProvider endpoint calls.
+    bool has_endpoints() const { return endpoint_runtime() != nullptr; }
 
     /// SchemaProvider's non-chat endpoints at this provider's origin (#531). They
     /// run on the client its chat calls use, with the same credential, admission
@@ -377,6 +405,11 @@ protected:
     /// The SchemaProvider client whose endpoints this provider forwards, the same
     /// one for the provider's lifetime. Null, the default, means none.
     virtual std::shared_ptr<sp::runtime::Client> endpoint_runtime() const { return nullptr; }
+    /// For a provider that wraps another: forward the inner provider's endpoints
+    /// by returning this from endpoint_runtime().
+    static std::shared_ptr<sp::runtime::Client> endpoint_runtime_of(const Provider& inner) {
+        return inner.endpoint_runtime();
+    }
     using LocalDispatch = std::function<asio::awaitable<sp::runtime::Result>(
         const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)>;
     static PreparedProviderRequest prepare_local(
@@ -415,6 +448,19 @@ private:
         co_return sp::runtime::detail::typed_outcome(*error.outcome(), static_cast<const Outcome*>(nullptr));
     }
 };
+
+/// An endpoint call as a ProviderRequest (#531), so it takes every path a chat
+/// call takes: dispatch hooks, observers, the provider call broker and its
+/// journal, and token budgets, which refuse it because it has no output cap.
+/// Its outcome is untyped; the endpoint's typed() (sp::images::typed, ...) or
+/// sp::runtime::detail::typed_outcome types it. A provider without SchemaProvider
+/// endpoints refuses it when it is prepared.
+template <EndpointRequest Request>
+ProviderRequest make_endpoint_request(Request request) {
+    ProviderRequest result;
+    result.endpoint = std::make_shared<const detail::TypedEndpointPayload<Request>>(std::move(request));
+    return result;
+}
 
 NEOGRAPH_API ProviderRequest make_provider_request(
     const Provider& provider, std::string model, std::vector<sp::Message> messages,

@@ -527,6 +527,10 @@ std::string_view OpenInferenceProvider::family() const noexcept {
     return impl_->inner->family();
 }
 
+std::shared_ptr<sp::runtime::Client> OpenInferenceProvider::endpoint_runtime() const {
+    return endpoint_runtime_of(*impl_->inner);
+}
+
 namespace {
 const char* role_name(sp::Role role) noexcept {
     switch (role) {

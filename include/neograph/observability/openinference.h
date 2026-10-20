@@ -181,6 +181,10 @@ public:
 
     std::string get_name() const override;
 
+protected:
+    /// The inner provider's SchemaProvider endpoints (#531).
+    std::shared_ptr<sp::runtime::Client> endpoint_runtime() const override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

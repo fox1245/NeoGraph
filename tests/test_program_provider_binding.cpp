@@ -19,6 +19,7 @@
 #include <neograph/program/sqlite_transition_store.h>
 
 #include "fixtures/typed_provider.h"
+#include "fixtures/endpoint_peer.h"
 #include "fixtures/typed_wire_peer.h"
 #include "monetary.h"
 #include "provider_binding.h"
@@ -341,7 +342,11 @@ enum class Shape {
     // #387: the model, then a check.
     LlmThenCheck,
     // #420: three model calls in a row.
-    ThreeLlmsInARow
+    ThreeLlmsInARow,
+    // #531: an endpoint node and a check in one fan-out step.
+    EmbedBesideCheck,
+    // #531: an endpoint node alone.
+    Embed
 };
 
 struct HostOptions {
@@ -357,6 +362,8 @@ struct HostOptions {
     bool          child_capable = false;     // recovery from checkpoints, not leases
     std::size_t   workers       = 1;
     bool          bind_provider = true;
+    // #531: the durable journal's bind_priced, or bind, which journals calls without pricing them.
+    bool          priced        = true;
     int           node_retries  = 0;
     // Replaces the provider double: a real SDK client at a loopback peer.
     std::function<std::shared_ptr<Provider>()> provider;
@@ -393,6 +400,8 @@ public:
         builder.add_provider(manifest(kProviderIdentity), ProviderMetadata{json::object(), json::object()});
         builder.add_core_llm_call(
             manifest({ExecutableKind::Node, "llm_call", "1.0.0", digest('2')}, {kProviderIdentity}), {});
+        builder.add_core_endpoint_node(
+            manifest({ExecutableKind::Node, "embed", "1.0.0", digest('a')}, {kProviderIdentity}), {});
         builder.add_host_brokered_node(
             manifest({ExecutableKind::Node, "brokered_call", "1.0.0", digest('3')}, {kProviderIdentity}),
             [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
@@ -478,10 +487,11 @@ public:
         runtime.require_core_provider_call_broker = true;
         if (journal_) {
             runtime.core_provider_call_resolver =
-                [journal = journal_, deployment = program::detail::provider_deployment_identity(options_.label)](
+                [journal = journal_, deployment = program::detail::provider_deployment_identity(options_.label),
+                 priced = options_.priced](
                     const ProgramCoreProviderCallContext& context)
                 -> std::optional<ProgramCoreProviderCallBinding> {
-                return journal->bind_priced(context, deployment);
+                return priced ? journal->bind_priced(context, deployment) : journal->bind(context, deployment);
             };
         } else {
             runtime.core_provider_call_resolver = [](const ProgramCoreProviderCallContext& context)
@@ -563,6 +573,22 @@ public:
                 definition["edges"] = json::array(
                     {edge("__start__", "fan"), edge("fan", "__end__"), edge("work", "__end__")});
                 break;
+            case Shape::EmbedBesideCheck:
+            case Shape::Embed: {
+                definition["channels"]["text"] = {{"reducer", "overwrite"}, {"initial", "a cup of tea"}};
+                definition["channels"]["embeddings"] = {{"reducer", "overwrite"}, {"initial", json::array()}};
+                const json embed = {{"type", "embed"}, {"model", "fixture-embed"}, {"input", "text"},
+                                    {"output", "embeddings"}};
+                if (shape == Shape::Embed) {
+                    definition["nodes"] = {{"embed", embed}};
+                    definition["edges"] = json::array({edge("__start__", "embed"), edge("embed", "__end__")});
+                } else {
+                    definition["nodes"] = {{"embed", embed}, {"check", {{"type", "check"}}}};
+                    definition["edges"] = json::array({edge("__start__", "embed"), edge("__start__", "check"),
+                                                       edge("embed", "__end__"), edge("check", "__end__")});
+                }
+                break;
+            }
         }
         return definition;
     }
@@ -2069,3 +2095,76 @@ TEST(ProgramProviderBindingJournal, APlanQuorumResumeNeverResendsOrRechargesAFin
 }
 
 }  // namespace
+
+namespace {
+// #531: a host whose provider is a real SDK client at a loopback peer that admits the OpenAI endpoint facts.
+HostOptions endpoint_options(const neograph::test::wire::Peer& peer) {
+    HostOptions options;
+    options.provider = [origin = peer.origin()] {
+        return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(origin));
+    };
+    options.model_tokens = 0;
+    options.monetary     = 0;
+    options.priced       = false;
+    return options;
+}
+}  // namespace
+
+TEST(ProgramProviderBindingJournal, AnEndpointCallIsJournaledAndAForkReplaysIt) {
+    // #531: an endpoint node takes the Core provider path. The journal keeps its untyped outcome, and a fork of
+    // the paused run replays it instead of sending it again.
+    TempDir                    files("endpoint-fork");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    auto                       options = endpoint_options(peer);
+    options.workers                    = 2;
+    Host       h(std::make_shared<Peer>(), options, &files);
+    const auto version = h.admit(Shape::EmbedBesideCheck);
+    h.script().ask_thread = program_root_core_thread_id(
+        "endpoint-source", version.core_materialization_receipt().plans.front().compiled_plan_identity);
+
+    const auto paused = h.runtime().run(kOwner, version, h.invocation("endpoint-source"));
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    ASSERT_TRUE(paused.interrupt() && paused.checkpoint());
+    EXPECT_EQ(peer.state->entered, 1U);
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+
+    auto invocation   = h.invocation("endpoint-fork");
+    invocation.budget = neograph::test::fork_share(paused.remaining_budget());
+    const auto forked =
+        h.runtime()
+            .fork(kOwner, ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id},
+                  version, std::move(invocation), resume_after(paused, "trace-endpoint-fork"))
+            .wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+    EXPECT_EQ(peer.state->entered, 1U) << "the finished endpoint call replays in the fork";
+    EXPECT_NE(forked.output().dump().find("-0.5"), std::string::npos) << "the fork keeps the replayed vectors";
+}
+
+TEST(ProgramProviderBindingJournal, APricedBindingRefusesAnEndpointCallBeforeItIsSent) {
+    // #531: the model catalogue cannot bound an endpoint call yet (SchemaProvider#124).
+    TempDir                    files("endpoint-priced");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    auto                       options = endpoint_options(peer);
+    options.priced                     = true;
+    options.monetary                   = 100'000;
+    Host       h(std::make_shared<Peer>(), options, &files);
+    const auto result = h.run(Shape::Embed, "endpoint-priced");
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_NE(failure_text(result).find("P_MONEY_UNMODELED"), std::string::npos) << failure_text(result);
+    EXPECT_EQ(peer.state->entered, 0U);
+    EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
+}
+
+TEST(ProgramProviderBindingJournal, AModelTokenBudgetRefusesAnEndpointCallItCannotBound) {
+    // #531: an endpoint call has no output cap, so a run with a model-token ceiling cannot reserve it.
+    TempDir                    files("endpoint-tokens");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    auto                       options = endpoint_options(peer);
+    options.model_tokens               = 1'000'000;
+    Host       h(std::make_shared<Peer>(), options, &files);
+    const auto result = h.run(Shape::Embed, "endpoint-tokens");
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    EXPECT_NE(failure_text(result).find("ceilings"), std::string::npos) << failure_text(result);
+    EXPECT_EQ(peer.state->entered, 0U);
+    EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
+}

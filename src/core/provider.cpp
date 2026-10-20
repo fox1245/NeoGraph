@@ -304,13 +304,17 @@ PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::C
         impl->error = local_error(sp::ErrorKind::InvalidRequest, "Observer limits must be positive");
     else if (impl->cancel_token && impl->cancel_token->is_cancelled())
         impl->error = local_error(sp::ErrorKind::Cancelled, "Provider request cancelled before admission");
+    else if (request.endpoint && request.mode != ProviderMode::Collect)
+        impl->error = local_error(sp::ErrorKind::InvalidRequest, "Endpoint calls are buffered");
     else {
         try {
             impl->stop = std::make_shared<StopChannel>();
             if (request.options.stop_token.stop_possible())
                 impl->stop->external.emplace(request.options.stop_token, ForwardStop{impl->stop->source});
             request.options.stop_token = impl->stop->source.get_token();
-            impl->prepared = impl->client->prepare(std::move(request.payload), std::move(request.options));
+            impl->prepared = request.endpoint
+                ? request.endpoint->prepare(*impl->client, std::move(request.options))
+                : impl->client->prepare(std::move(request.payload), std::move(request.options));
         }
         catch (const sp::runtime::AdmissionError& error) {
             impl->error = std::get<sp::Failure>(*error.outcome()).error;
@@ -351,6 +355,9 @@ PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::C
 PreparedProviderRequest Provider::prepare_local(
     std::shared_ptr<sp::runtime::Client> client, ProviderRequest request, LocalDispatch dispatch) {
     if (!dispatch) throw std::invalid_argument("Local provider dispatch must be present");
+    // A local dispatch answers chat requests; an endpoint call would get a chat outcome.
+    if (request.endpoint)
+        return reject_preparation(local_error(sp::ErrorKind::Unsupported, "A local provider has no SchemaProvider endpoints"));
     auto prepared = prepare_runtime(std::move(client), std::move(request));
     prepared.impl_->local_dispatch = std::move(dispatch);
     return prepared;
@@ -399,8 +406,7 @@ std::string Provider::request_digest(const PreparedProviderRequest& request) {
     json stop_mappings = json::array();
     for (const auto& [name, kind] : descriptor->stop_mappings())
         stop_mappings.push_back({name, static_cast<unsigned>(kind)});
-    return detail::sha256_identity("NeoGraph Provider dispatch identity v1", "provider-request/v3",
-        detail::canonical_json_bytes(json{
+    json identity{
             {"family", request.family()}, {"model", request.model()},
             {"mode", request.mode() == ProviderMode::Stream ? "stream" : "collect"},
             {"descriptor", {{"id", descriptor->id()}, {"revision", descriptor->revision()},
@@ -418,7 +424,14 @@ std::string Provider::request_digest(const PreparedProviderRequest& request) {
                 {"max_delay_ms", retry->max_delay.count()}}},
             {"observer_limits", {{"max_events", request.impl_->event_count_limit},
                 {"max_bytes", request.impl_->event_byte_limit}}},
-            {"encoded_body", request.encoded_body()}}));
+            {"encoded_body", request.encoded_body()}};
+    // An endpoint call is also named by what it sends: several operations share an endpoint, and a read or a
+    // file upload has no body to tell them apart. A chat call's identity is unchanged.
+    if (const auto endpoint = request.impl_->prepared.endpoint(); !endpoint.empty())
+        identity["endpoint"] = {{"name", endpoint}, {"method", request.impl_->prepared.method()},
+                                {"url", request.impl_->prepared.url()}};
+    return detail::sha256_identity("NeoGraph Provider dispatch identity v1", "provider-request/v3",
+        detail::canonical_json_bytes(identity));
 }
 asio::awaitable<sp::runtime::Result> Provider::dispatch_async(PreparedProviderRequest request) {
     return dispatch_impl(std::move(request));

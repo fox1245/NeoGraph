@@ -164,3 +164,59 @@ TEST(ProviderEndpoints, ImagesComeBackAsMedia) {
     EXPECT_EQ(peer.state->paths[0], "/v1/images/generations");
     EXPECT_EQ(peer.state->requests[0]["prompt"], "a square");
 }
+
+TEST(ProviderEndpoints, AnEndpointRequestTakesTheChatPathAndItsOutcomeIsTyped) {
+    wire::Peer peer(embedding_body());
+    auto provider = provider_at(peer);
+    auto prepared = provider->prepare(make_endpoint_request(embed()));
+    ASSERT_TRUE(prepared.valid());
+    ASSERT_EQ(prepared.error(), nullptr);
+    EXPECT_EQ(prepared.model(), "fixture-embed");
+    const auto result = provider->dispatch(std::move(prepared));
+    ASSERT_TRUE(result);
+    expect_vector(sp::embeddings::typed(*result));
+}
+
+TEST(ProviderEndpoints, TheDispatchIdentityNamesWhatAnEndpointCallSends) {
+    wire::Peer peer(embedding_body());
+    auto provider = provider_at(peer);
+    const auto digest = [&](auto request) {
+        auto prepared = provider->prepare(make_endpoint_request(std::move(request)));
+        EXPECT_EQ(prepared.error(), nullptr);
+        return Provider::request_digest(prepared);
+    };
+    // Same endpoint, no body: only the method and URL tell these apart.
+    const auto first = digest(sp::files::Get{"file-a"});
+    EXPECT_NE(first, digest(sp::files::Get{"file-b"}));
+    EXPECT_NE(first, digest(sp::files::Delete{"file-a"}));
+    EXPECT_EQ(first, digest(sp::files::Get{"file-a"}));
+    EXPECT_EQ(peer.state->entered, 0u);
+}
+
+TEST(ProviderEndpoints, AStreamedEndpointRequestIsRefusedBeforeItIsSent) {
+    wire::Peer peer(embedding_body());
+    auto provider = provider_at(peer);
+    auto streamed = make_endpoint_request(embed());
+    streamed.mode = ProviderMode::Stream;
+    const auto refused = provider->prepare(std::move(streamed));
+    ASSERT_NE(refused.error(), nullptr);
+    EXPECT_EQ(refused.error()->kind, sp::ErrorKind::InvalidRequest);
+    EXPECT_EQ(peer.state->entered, 0u);
+}
+
+TEST(ProviderEndpoints, ALocalProviderRefusesAnEndpointRequest) {
+    // A local dispatch answers chat requests; it would hand an endpoint call a chat outcome.
+    class Local final : public Provider {
+    public:
+        std::string get_name() const override { return "local"; }
+        std::string_view family() const noexcept override { return "openai.chat"; }
+        PreparedProviderRequest prepare(ProviderRequest request) override {
+            return prepare_local(test::client(), std::move(request),
+                [](const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)
+                    -> asio::awaitable<sp::runtime::Result> { co_return nullptr; });
+        }
+    } local;
+    const auto refused = local.prepare(make_endpoint_request(embed()));
+    ASSERT_NE(refused.error(), nullptr);
+    EXPECT_EQ(refused.error()->kind, sp::ErrorKind::Unsupported);
+}
