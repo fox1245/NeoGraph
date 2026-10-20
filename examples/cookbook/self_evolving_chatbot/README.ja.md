@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=c7857297daccf819804962b55d2f6ed035f4cc6d255c419e68c9f9c262ebae2e -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=5e8b456c422e1632b7dc164f60229dd3372717aa002db3a96e9789dddf02c5c4 -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -93,13 +93,15 @@ live OpenRouter の key と利用可能 model を設定します：
 ```bash
 export OPENROUTER_API_KEY='...'
 export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
-./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 # Or read an existing dotenv file without printing its values:
 ./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
-  --model z-ai/glm-5.3-flash --session glm-demo
+  --model z-ai/glm-5.3-flash --session glm-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 ```
 
-既定は `z-ai/glm-5.3-flash`。`--model` は `OPENROUTER_MODEL`、process 環境は dotenv に優先します。`--env-file` がなければ working directory に近い `.env` を探し、`--no-env` は探索を止めます。named chatbot setting だけを読み、file は data として parse し shell source しません。GLM 5.3 Flash chat は output cap 内に visible reply を残すため `reasoning_effort=low` が既定。`--reasoning-effort default` は override を省略し、explicit 値は model/provider の対応が必要です。DSL capability evaluator は別の generation 設定です。
+既定は `z-ai/glm-5.3-flash`。`--model` は `OPENROUTER_MODEL`、process 環境は dotenv に優先します。`--env-file` がなければ working directory に近い `.env` を探し、`--no-env` は探索を止めます。named chatbot setting だけを読み、file は data として parse し shell source しません。同梱の [live-models.json](live-models.json) は model catalogue overlay で、`z-ai/glm-5.3-flash` の既定 `reasoning_effort` を `low` にし、output cap 内に visible reply の余地を残します。プログラムはモデル名を見ません。この項目がない場合や `--model-catalogue` を指定しない場合、呼び出しは reasoning effort を送りません。`--reasoning-effort EFFORT` は代わりにその値をすべての呼び出しで送り、`--reasoning-effort default` は catalogue の既定値をそのままにします。explicit 値は model/provider の対応が必要です。DSL capability evaluator は別の generation 設定です。
 
 ZDR eligible route が必要です。token price を仮定しません。DSL/DB/HTTP body/source に credential を入れないでください。provider、model、skill、output cap、build の変更は新 `--session` が必要で、再開は既存 budget limit を保持します。`NEOGRAPH_CHAT_BASE_URL` は互換 endpoint を指定でき、plain HTTP は literal loopback と `--allow-loopback-provider` が必要な protocol test 用です。
 

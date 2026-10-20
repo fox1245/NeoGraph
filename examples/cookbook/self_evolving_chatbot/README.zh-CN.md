@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=c7857297daccf819804962b55d2f6ed035f4cc6d255c419e68c9f9c262ebae2e -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=5e8b456c422e1632b7dc164f60229dd3372717aa002db3a96e9789dddf02c5c4 -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -88,13 +88,15 @@ cmake --build build-chat --target cookbook_program_chatbot -j 4
 ```bash
 export OPENROUTER_API_KEY='...'
 export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
-./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 # Or read an existing dotenv file without printing its values:
 ./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
-  --model z-ai/glm-5.3-flash --session glm-demo
+  --model z-ai/glm-5.3-flash --session glm-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 ```
 
-默认 `z-ai/glm-5.3-flash`。`--model` 优先于 `OPENROUTER_MODEL`，process environment 优先于 dotenv。未指定 `--env-file` 时查找 working directory 最近的 `.env`，`--no-env` 关闭查找。只读取 named chatbot setting，将文件作为 data parse，不作 shell source。GLM 5.3 Flash chat 默认 `reasoning_effort=low`，在 output cap 留出 visible reply 空间。`--reasoning-effort default` 省略 override，explicit 值须由 model/provider 支持。DSL capability evaluator 的 generation 设置独立。
+默认 `z-ai/glm-5.3-flash`。`--model` 优先于 `OPENROUTER_MODEL`，process environment 优先于 dotenv。未指定 `--env-file` 时查找 working directory 最近的 `.env`，`--no-env` 关闭查找。只读取 named chatbot setting，将文件作为 data parse，不作 shell source。随附的 [live-models.json](live-models.json) 是 model catalogue overlay，为 `z-ai/glm-5.3-flash` 设定默认 `reasoning_effort` 为 `low`，在 output cap 内留出 visible reply 的空间。程序不检查模型名称；没有该条目或未指定 `--model-catalogue` 时，调用不发送 reasoning effort。`--reasoning-effort EFFORT` 改为在每次调用中发送该值，`--reasoning-effort default` 保留 catalogue 的默认值。explicit 值须由 model/provider 支持。DSL capability evaluator 的 generation 设置独立。
 
 需要 ZDR eligible route，不假定 token price。不要把 credential 放入 DSL/DB/HTTP body/source。provider、model、skill、output cap、build 改变需要新 `--session`，重开保留已有 budget limit。`NEOGRAPH_CHAT_BASE_URL` 可指定兼容 endpoint，plain HTTP 需 literal loopback 和 `--allow-loopback-provider`，仅用于 protocol test。
 

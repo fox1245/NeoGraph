@@ -126,10 +126,12 @@ For OpenRouter, set credentials and an available model in the environment:
 ```bash
 export OPENROUTER_API_KEY='...'
 export OPENROUTER_MODEL='z-ai/glm-5.3-flash'
-./build-chat/cookbook_program_chatbot --live --session openrouter-demo
+./build-chat/cookbook_program_chatbot --live --session openrouter-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 # Or read an existing dotenv file without printing its values:
 ./build-chat/cookbook_program_chatbot --live --env-file /path/to/.env \
-  --model z-ai/glm-5.3-flash --session glm-demo
+  --model z-ai/glm-5.3-flash --session glm-demo \
+  --model-catalogue examples/cookbook/self_evolving_chatbot/live-models.json
 ```
 
 The live CLI defaults to `z-ai/glm-5.3-flash`. `--model` overrides
@@ -137,9 +139,13 @@ The live CLI defaults to `z-ai/glm-5.3-flash`. `--model` overrides
 `--env-file`, the CLI discovers the nearest `.env` from the working directory.
 `--no-env` disables this discovery. Only named chatbot settings are consumed;
 the file is parsed as data, not sourced as a shell script.
-For GLM 5.3 Flash, chat calls default to `reasoning_effort=low` to leave room for
-visible replies within the output cap. `--reasoning-effort default` omits this
-override; other explicit values must be supported by the chosen model/provider.
+The shipped [live-models.json](live-models.json) is a model-catalogue overlay: it gives
+`z-ai/glm-5.3-flash` a default `reasoning_effort` of `low`, to leave room for visible
+replies within the output cap. The program does not look at the model name; without
+that entry, or without `--model-catalogue`, a call sends no reasoning effort.
+`--reasoning-effort EFFORT` sends that value on every call instead, and
+`--reasoning-effort default` leaves the catalogue's default in place; explicit values
+must be supported by the chosen model/provider.
 The DSL capability evaluator keeps its separate generation configuration.
 
 OpenRouter uses the existing cookbook's ZDR routing option. Choose a model with
