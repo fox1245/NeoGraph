@@ -19,6 +19,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -136,6 +137,62 @@ program::detail::MonetaryRequestFacts with_tools(std::vector<std::string> types,
     program::detail::MonetaryRequestFacts facts;
     facts.tools.push_back({std::move(types), uses});
     return facts;
+}
+
+constexpr std::string_view kMessagesOrigin = "https://api.anthropic.com";
+
+// Anthropic Messages whose catalogue prices tokens and, for `priced`, one server tool; `bare` lists no tool fee.
+std::shared_ptr<Provider> messages_provider() {
+    neograph::test::FixtureModel priced{"anthropic.messages", "priced", 100'000};
+    priced.pricing = json{{"input", "0.000001"}, {"output", "0.000002"}, {"tool:web_search_20250305", "0.01"}};
+    neograph::test::FixtureModel bare{"anthropic.messages", "bare", 100'000};
+    bare.pricing = kListed;
+    return provider_at("anthropic.messages", std::string(kMessagesOrigin), {std::move(priced), std::move(bare)});
+}
+
+sp::messages::ToolDefinition typed_tool(std::string type, std::string name, std::optional<std::uint64_t> max_uses = {}) {
+    sp::messages::ToolDefinition tool;
+    tool.type     = std::move(type);
+    tool.name     = std::move(name);
+    tool.max_uses = max_uses;
+    return tool;
+}
+
+// A Messages request carrying `tools`, assessed the way both pricing brokers assess it.
+program::detail::PricedPreparation priced_messages(Provider& provider, std::vector<sp::messages::ToolDefinition> tools,
+                                                   const std::string& model = "priced",
+                                                   std::vector<sp::messages::McpServer> servers = {}) {
+    auto request = make_provider_request(provider, model, {neograph::test::message("q", sp::Role::User)});
+    auto& payload       = std::get<sp::messages::Request>(request.payload);
+    payload.max_tokens  = 100;
+    payload.tools       = std::move(tools);
+    payload.mcp_servers = std::move(servers);
+    return program::detail::prepare_priced_call(provider, std::move(request), true);
+}
+
+// The tool types the policy lists for Messages, split by who runs them.
+std::vector<sp::descriptor::ServerToolFact> messages_tool_facts(bool client) {
+    std::vector<sp::descriptor::ServerToolFact> facts;
+    for (const auto& fact : sp::descriptor::builtin_policy()->family("anthropic.messages")->server_tools)
+        if (fact.client == client) facts.push_back(fact);
+    return facts;
+}
+
+// Every alternative of `Variant`, default-constructed.
+template <class Variant, std::size_t... I>
+std::vector<Variant> alternatives(std::index_sequence<I...>) {
+    return {Variant{std::in_place_index<I>}...};
+}
+template <class Variant>
+std::vector<Variant> alternatives() {
+    return alternatives<Variant>(std::make_index_sequence<std::variant_size_v<Variant>>{});
+}
+
+// The tool type each alternative bills under, one cap per request member.
+std::vector<std::string> billed_types(const program::detail::MonetaryRequestFacts& facts) {
+    std::vector<std::string> types;
+    for (const auto& cap : facts.tools) types.insert(types.end(), cap.types.begin(), cap.types.end());
+    return types;
 }
 
 }  // namespace
@@ -359,6 +416,7 @@ TEST(PricingAssess, RequestFactsComeFromTheTypedRequest) {
     ASSERT_EQ(facts.tools.size(), 1U);
     EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search", "file_search"}));
     EXPECT_EQ(facts.tools[0].uses, 4U);
+    EXPECT_EQ(facts.tools[0].member, "max_tool_calls");
 
     ProviderRequest messages;
     sp::messages::Request messages_payload;
@@ -374,6 +432,7 @@ TEST(PricingAssess, RequestFactsComeFromTheTypedRequest) {
     ASSERT_EQ(facts.tools.size(), 1U) << "a client tool bills only tokens";
     EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search_20250305"}));
     EXPECT_EQ(facts.tools[0].uses, 2U);
+    EXPECT_EQ(facts.tools[0].member, "max_uses");
 
     ProviderRequest generate;
     sp::gemini::Request generate_payload;
@@ -383,6 +442,130 @@ TEST(PricingAssess, RequestFactsComeFromTheTypedRequest) {
     ASSERT_EQ(facts.tools.size(), 1U);
     EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"google_search"}));
     EXPECT_FALSE(facts.tools[0].uses) << "Gemini's built-in tools take no use cap";
+    EXPECT_TRUE(facts.tools[0].member.empty());
+}
+
+TEST(PricingAssess, EveryToolVariantIsPricedUnderItsOwnWireType) {
+    // monetary.cpp matches each alternative of these variants without a default, so one SchemaProvider adds
+    // later does not build until it is mapped; this pins what the current ones bill under.
+    ProviderRequest generate;
+    sp::gemini::Request generate_payload;
+    generate_payload.builtin_tools = alternatives<sp::gemini::BuiltinTool>();
+    generate.payload               = generate_payload;
+    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(generate)),
+              (std::vector<std::string>{"google_search", "url_context", "code_execution", "google_maps", "computer_use",
+                                        "file_search"}));
+
+    ProviderRequest interactions;
+    sp::interactions::Request interactions_payload;
+    interactions_payload.builtin_tools = alternatives<sp::interactions::BuiltinTool>();
+    interactions.payload               = interactions_payload;
+    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(interactions)),
+              (std::vector<std::string>{"google_search", "url_context", "code_execution"}));
+
+    ProviderRequest responses;
+    sp::responses::Request responses_payload;
+    responses_payload.hosted_tools = alternatives<sp::responses::HostedTool>();
+    std::get<sp::responses::OpenRouterServerTool>(responses_payload.hosted_tools[9]).type = "openrouter:web_search";
+    std::get<sp::responses::GenericHostedTool>(responses_payload.hosted_tools[10]).type   = "generic_tool";
+    responses.payload = responses_payload;
+    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(responses)),
+              (std::vector<std::string>{"web_search", "image_generation", "file_search", "tool_search", "shell",
+                                        "code_interpreter", "mcp", "computer", "computer_use_preview",
+                                        "openrouter:web_search", "generic_tool"}));
+}
+
+TEST(PricingAssess, AMessagesClientToolBillsOnlyTokens) {
+    // The policy marks the tools the caller runs (memory, bash, the toolsets). They take no max_uses, and the
+    // catalogue lists no fee for them: a request that carries one is priced as the same request without it.
+    auto       provider = messages_provider();
+    const auto clients  = messages_tool_facts(true);
+    ASSERT_FALSE(clients.empty());
+    const auto plain = priced_messages(*provider, {});
+    ASSERT_TRUE(plain.quote);
+    ASSERT_TRUE(plain.quote->blocker.empty()) << plain.quote->blocker_message;
+    for (const auto& fact : clients) {
+        SCOPED_TRACE(fact.type);
+        const auto priced = priced_messages(*provider, {typed_tool(fact.type, fact.name)});
+        ASSERT_TRUE(priced.prepared.valid()) << (priced.prepared.error() ? priced.prepared.error()->safe_message : "");
+        ASSERT_TRUE(priced.quote);
+        EXPECT_TRUE(priced.quote->blocker.empty()) << priced.quote->blocker_message;
+        EXPECT_EQ(priced.quote->hold, plain.quote->hold);
+        EXPECT_EQ(priced.quote->tool_fees_nano_usd, 0U);
+        EXPECT_FALSE(priced.quote->pricing.contains("tool_uses"));
+    }
+
+    // Beside a server tool it joins neither the caps nor the fees: only the server tool is reserved and charged.
+    const auto& client = clients.front();
+    const auto  mixed  = priced_messages(*provider, {typed_tool(client.type, client.name),
+                                                     typed_tool("web_search_20250305", "web_search", 3)});
+    ASSERT_TRUE(mixed.quote);
+    ASSERT_TRUE(mixed.quote->blocker.empty()) << mixed.quote->blocker_message;
+    EXPECT_EQ(mixed.quote->tool_fees_nano_usd, 30'000'000U);
+    EXPECT_EQ(mixed.quote->pricing.at("tool_uses"), (json{{"web_search_20250305", 3}}));
+
+    // A client tool settles for its tokens alone.
+    const program::detail::MonetaryCallSite site{"call", "operation", "node"};
+    const auto outcome     = neograph::test::success("answer", neograph::test::usage(300, 40, 340));
+    const auto with_client = priced_messages(*provider, {typed_tool(client.type, client.name)});
+    ASSERT_TRUE(with_client.quote);
+    const auto settled  = program::detail::settle_monetary_call(*with_client.quote, site, outcome);
+    const auto baseline = program::detail::settle_monetary_call(*plain.quote, site, outcome);
+    ASSERT_TRUE(settled);
+    ASSERT_TRUE(baseline);
+    EXPECT_EQ(settled->microunits, baseline->microunits);
+    EXPECT_FALSE(settled->pricing.contains("tool_uses"));
+}
+
+TEST(PricingAssess, AMessagesServerToolNeedsItsUseCapAndItsFee) {
+    auto provider = messages_provider();
+    // Without max_uses the fees have no upper bound.
+    const auto uncapped = priced_messages(*provider, {typed_tool("web_search_20250305", "web_search")});
+    ASSERT_TRUE(uncapped.quote);
+    EXPECT_EQ(uncapped.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_NE(uncapped.quote->blocker_message.find("'web_search_20250305' has no use cap (max_uses)"), std::string::npos)
+        << uncapped.quote->blocker_message;
+    EXPECT_EQ(uncapped.quote->witness.at("unmodeled"), "server tool 'web_search_20250305'");
+
+    // With it, three uses at the catalogue's fee are reserved.
+    const auto capped = priced_messages(*provider, {typed_tool("web_search_20250305", "web_search", 3)});
+    ASSERT_TRUE(capped.quote);
+    ASSERT_TRUE(capped.quote->blocker.empty()) << capped.quote->blocker_message;
+    EXPECT_EQ(capped.quote->tool_fees_nano_usd, 30'000'000U);
+
+    // A model whose entry lists no fee for the tool is not priced.
+    const auto unlisted = priced_messages(*provider, {typed_tool("web_search_20250305", "web_search", 3)}, "bare");
+    ASSERT_TRUE(unlisted.quote);
+    EXPECT_EQ(unlisted.quote->blocker, "P_MONEY_UNMODELED");
+}
+
+TEST(PricingAssess, AMessagesServerToolThatAdmitsNoMaxUsesCannotBeBoundedAndSaysSo) {
+    // The policy lists types the service runs that take no max_uses (a tool search, code execution). Setting
+    // max_uses fails at prepare, so the refusal must not ask for one.
+    auto        provider = messages_provider();
+    std::size_t refused  = 0;
+    for (const auto& fact : messages_tool_facts(false)) {
+        if (fact.max_uses || !fact.beta.empty() || fact.options) continue;
+        SCOPED_TRACE(fact.type);
+        const auto priced = priced_messages(*provider, {typed_tool(fact.type, fact.name)});
+        ASSERT_TRUE(priced.quote);
+        EXPECT_EQ(priced.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
+        EXPECT_NE(priced.quote->blocker_message.find("'" + fact.type + "' admits no max_uses"), std::string::npos)
+            << priced.quote->blocker_message;
+        ++refused;
+    }
+    EXPECT_GT(refused, 0U);
+
+    // An MCP toolset: the service calls the servers' tools without a declared limit.
+    auto toolset    = typed_tool("mcp_toolset", "");
+    toolset.options = neograph::test::document(R"({"mcp_server_name":"ctx"})");
+    const auto mcp  = priced_messages(*provider, {toolset}, "priced",
+                                      {sp::messages::McpServer{"ctx", "https://mcp.example.test/mcp", {}}});
+    ASSERT_TRUE(mcp.prepared.valid()) << (mcp.prepared.error() ? mcp.prepared.error()->safe_message : "");
+    ASSERT_TRUE(mcp.quote);
+    EXPECT_EQ(mcp.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_NE(mcp.quote->blocker_message.find("'mcp_toolset' admits no max_uses"), std::string::npos)
+        << mcp.quote->blocker_message;
 }
 
 TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {

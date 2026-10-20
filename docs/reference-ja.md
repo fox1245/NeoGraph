@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=31343b5416c78d73d764c92762e72e15b10f3ef4f17fa5968112ddabb57e6b8b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fac3eca036504cdb2245854cdb495e37b7e9752e4acddd7c9e1fd2346015da55 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -461,7 +461,7 @@ Python SDK の vector/map getter は独立した値を返します: `ProviderMes
 
 Program 実行の `monetary_microunits` 予算は micro-USD（1 microunit = 1e-6 USD）を数えます。ホストが組み込み `llm_call` ノードの provider 呼び出しを価格付け broker に通すと、その呼び出しに価格が付きます。プロセス内では `bind_priced_provider_call(context)`、クラッシュに安全な再生が必要なら `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)` を使います。ランタイムは各 broker に attempt の金額アカウントを `ProgramCoreProviderCallContext::monetary_account` で渡します。Python の `LocalProgramHost(node_context=..., binding_label=...)` は常に呼び出しに価格を付けます（[Python ガイド](python-binding.md#model-calling-nodes)）。すべての `RunBudget` フィールドと同じく `monetary_microunits` は実行に与えられる量で、`0` は何も与えません。子と fork の予算は親の量から切り出され、`model_tokens = 0` でモデルトークンを使った完了実行は `BudgetExhausted` と報告されます。`monetary_microunits = 0` の実行は、価格の付くすべての呼び出しを送信前に拒否します。価格付けのコードは内部用（`src/program/monetary.h`）で、ABI を約束しません。
 
-dispatch の前に broker は、provider の descriptor ポリシーが持つ SchemaProvider のモデルカタログから準備済みリクエストに価格を付けます。それ以外は使いません。項目は、ポリシーが family、base URL、許可されたモデルに対して、id、alias、または origin の範囲で対応づけるものです。hold は、項目の価格に対する `sp::pricing::upper_bound` に、1 回の dispatch が請求しうるモデル呼び出し数（`Provider::invocation_upper_bound`）を掛けた値です。この上限は、リクエストの入力上限と出力 cap、使用 cap までのサーバーツール、OpenRouter の origin では項目の route ceiling を含みます。入力上限は、カタログがそのモデルについて知っている最小の入力上限、つまり `input_limit` または `context_window` です。すべての入力トークンは最も高い入力料金、すべての出力トークンは最も高い出力料金で計算し、上限内の呼び出しが届きうるすべての帯にわたって適用します。OpenRouter のモデル fallback（`models`）は最も高い候補を予約します。上限を決められない呼び出しや、hold が残り予算に収まらない呼び出しは、リクエストや journal marker ができる前に拒否されます。ノードは未送信を示す合成 provider 失敗で失敗し、実行の `ProgramFailure` が理由を示します。`failure.witness["monetary"]` には origin、model、項目、上限、カタログの digest が入ります。
+dispatch の前に broker は、provider の descriptor ポリシーが持つ SchemaProvider のモデルカタログから準備済みリクエストに価格を付けます。それ以外は使いません。項目は、ポリシーが family、base URL、許可されたモデルに対して、id、alias、または origin の範囲で対応づけるものです。hold は、項目の価格に対する `sp::pricing::upper_bound` に、1 回の dispatch が請求しうるモデル呼び出し数（`Provider::invocation_upper_bound`）を掛けた値です。この上限は、リクエストの入力上限と出力 cap、使用 cap までのサーバーツール、OpenRouter の origin では項目の route ceiling を含みます。ポリシーが client ツールとして示す Messages のツール（`memory_*`、`bash_*`、`text_editor_*`、computer と browser の toolset）は呼び出し側が実行し、トークンだけが請求されるため、使用 cap も料金も必要ありません。入力上限は、カタログがそのモデルについて知っている最小の入力上限、つまり `input_limit` または `context_window` です。すべての入力トークンは最も高い入力料金、すべての出力トークンは最も高い出力料金で計算し、上限内の呼び出しが届きうるすべての帯にわたって適用します。OpenRouter のモデル fallback（`models`）は最も高い候補を予約します。上限を決められない呼び出しや、hold が残り予算に収まらない呼び出しは、リクエストや journal marker ができる前に拒否されます。ノードは未送信を示す合成 provider 失敗で失敗し、実行の `ProgramFailure` が理由を示します。`failure.witness["monetary"]` には origin、model、項目、上限、カタログの digest が入ります。
 
 | コード | ステータス | 拒否の理由 |
 |---|---|---|
@@ -470,7 +470,7 @@ dispatch の前に broker は、provider の descriptor ポリシーが持つ Sc
 | `P_MONEY_UNMODELED` | `Failed` | 項目にリクエストの service tier の価格がない、またはサーバーツールや hosted tool のいずれかの料金（`tool:<type>`）がない、あるいはリクエストが OpenRouter の plugin を使う |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | リクエストに出力トークン cap がない |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | カタログがそのモデルの入力上限もコンテキストウィンドウも知らない |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | サーバーツールや hosted tool に使用 cap がない（Messages の `max_uses`、Responses の `max_tool_calls`。Gemini の組み込みツールにはない）、router alias のように OpenRouter の項目に route ceiling がない、または route ceiling を `provider.max_price` として固定できない |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | サーバーツールや hosted tool に使用 cap がない（Messages の `max_uses`、Responses の `max_tool_calls`。Gemini の組み込みツールと、ポリシーが `max_uses` を認めない Messages の型である `mcp_toolset`、`tool_search_tool_*`、`code_execution_*` などにはない）、router alias のように OpenRouter の項目に route ceiling がない、または route ceiling を `provider.max_price` として固定できない |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold が残りの `monetary_microunits` に収まらない（請求額が予算を超えて終わった実行も同じコードで、その場合は `failure.witness["monetary"]` に `granted`、`used`、`over_by` が入る） |
 
 結果が出ると hold はちょうど 1 回精算され、attempt の `ProgramResult::monetary_records()`（Python では `result.monetary_records`）に呼び出しごとに `ProgramMonetaryRecord` が 1 つ追加されます。フィールドは `call_id`（journal の論理呼び出し slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason`、`pricing`（項目、その価格行、service tier、予約したツールの使用、推定の前提）です。`ProgramUsage::monetary_microunits` は attempt の請求額とまだ開いている hold の合計です。

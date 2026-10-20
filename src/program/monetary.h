@@ -146,10 +146,14 @@ struct MonetaryRequestFacts {
     std::vector<std::string> fallback_models;
     /// Server and hosted tool types that share one per-request use cap:
     /// Messages' max_uses per tool, Responses' max_tool_calls for all its
-    /// hosted tools. No cap leaves the call without an upper bound.
+    /// hosted tools. No cap leaves the call without an upper bound. A type
+    /// the family policy marks as a client tool (Messages' memory, bash and
+    /// toolsets) is run by the caller; assess_monetary_call() prices none of it.
     struct ToolCap {
         std::vector<std::string>     types;
         std::optional<std::uint64_t> uses;
+        /// The request member that states `uses`; empty where the family has none.
+        std::string                  member;
     };
     std::vector<ToolCap> tools;
     /// A feature the catalogue cannot price at all (OpenRouter plugins).

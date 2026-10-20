@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **Program 的价格只来自 provider 策略中的 SchemaProvider 模型目录 (#520)。** 2026-10-20 的定价圆桌会议确定了设计：route ceiling、tier 费率和工具费用都是目录单位与目录层，而不是 NeoGraph 自带的价格文件。
   - **行为变更：价格由宿主提供。** 内置的 SchemaProvider 目录不列出任何价格，因此在 provider 的策略带有为该模型计价的目录层之前，有预算的运行会拒绝每一个被计价的调用：使用 `sp::descriptor::load_policy(..., catalogue)` 或 `with_catalogue`，在 Python 中使用 `load_provider_policy(..., model_catalogue_json)`。条目的 `pricing` 给出每单位的十进制 USD（`input`、`output`，缓存、推理和图像单位）、OpenRouter 的 route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context 档（`input+200000`）和服务器工具费用（`tool:<type>`）。
   - **拒绝与否由目录决定。** service tier 需要自己的单位。OpenRouter 回退（`models`）要求每个候选都有价格，hold 取最贵候选的值。服务器工具或 hosted tool 需要费用（`"0"` 声明免费）和使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`）。当模型的输入限制达到 long-context 档时，该档会被预留。没有使用上限的 OpenRouter plugin 和 Gemini 内置工具，在有预算的运行中会被拒绝。
+  - **client 工具只按 token 计费 (#540)。** 策略标为 client 工具的 Messages 工具（`memory_*`、`bash_*`、`text_editor_*`、computer 和 browser toolset）由调用方执行，因此带有它们的计价请求既不需要使用上限，也不需要费用。不允许 `max_uses` 的服务器工具类型（`mcp_toolset`、`tool_search_tool_*`、`code_execution_*`）仍会被拒绝，拒绝信息会说明原因。Responses hosted tool 和 Gemini 内置工具的 wire type 是穷举匹配的，因此 SchemaProvider 以后新增的工具会使构建失败，而不会被当作 `file_search` 计价。
   - **结算。** 没有报告的费用时，`sp::pricing::estimate` 按计价其 hold 时的目录快照为调用计价，预留的服务器工具费用按其上限收取。
   - **行为变更：记录。** `ProgramMonetaryRecord::origin` 是 provider 的 base URL（`https://openrouter.ai`，原先是 `openrouter`），`catalog_version` 是 `sp-model-catalogue/1` 并附带目录的 digest，新增的 `pricing`（Python 为 `record.pricing`）保存条目、其价格行、service tier、预留的工具使用和估算的假设。0.16.0 之前写入 journal 的记录字节保持不变。
   - **行为变更：`P_MONEY_UNKNOWN_ORIGIN`** 现在只表示没有已准入 descriptor 的 provider。目录在 base URL 上没有给出价格的模型是 `P_MONEY_UNKNOWN_MODEL`。

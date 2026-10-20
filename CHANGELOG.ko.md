@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **Program 가격은 provider 정책의 SchemaProvider 모델 카탈로그에서만 옵니다 (#520).** 2026-10-20의 가격 라운드테이블이 설계를 정했습니다. route ceiling, 티어 요율, 도구 요금은 NeoGraph 가격 파일이 아니라 카탈로그 단위와 레이어입니다.
   - **동작 변경: 호스트가 가격을 공급합니다.** 내장 SchemaProvider 카탈로그에는 가격이 하나도 없으므로, provider 정책에 모델에 가격을 매기는 카탈로그 레이어가 생기기 전까지 예산이 있는 실행은 가격이 매겨지는 모든 호출을 거부합니다. `sp::descriptor::load_policy(..., catalogue)` 또는 `with_catalogue`를 쓰고, Python에서는 `load_provider_policy(..., model_catalogue_json)`을 씁니다. 항목의 `pricing`은 단위당 십진 USD(`input`, `output`, 캐시·추론·이미지 단위), OpenRouter의 route ceiling(`ceiling_input`, `ceiling_output`), service tier(`input/flex`), long-context 구간(`input+200000`), 서버 도구 요금(`tool:<type>`)을 줍니다.
   - **무엇을 거부할지는 카탈로그가 정합니다.** service tier에는 자체 단위가 필요합니다. OpenRouter fallback(`models`)은 모든 후보에 가격이 있어야 하며 hold는 가장 비싼 후보의 값입니다. 서버 도구나 hosted tool에는 요금(`"0"`은 무료임을 선언합니다)과 사용 cap(Messages `max_uses`, Responses `max_tool_calls`)이 필요합니다. long-context 구간은 모델의 입력 한도가 그 구간에 닿을 때 예약됩니다. 사용 cap이 없는 OpenRouter plugin과 Gemini 내장 도구는 예산이 있는 실행에서 거부됩니다.
+  - **client 도구는 토큰만 청구합니다 (#540).** 정책이 client 도구로 표시한 Messages 도구(`memory_*`, `bash_*`, `text_editor_*`, computer·browser toolset)는 호출자가 실행하므로, 이를 담은 가격 책정 요청에는 사용 cap도 요금도 필요 없습니다. `max_uses`를 허용하지 않는 서버 도구 타입(`mcp_toolset`, `tool_search_tool_*`, `code_execution_*`)은 여전히 거부되며, 거부 메시지가 그 이유를 밝힙니다. Responses hosted tool과 Gemini 내장 도구의 wire type은 빠짐없이 매칭하므로, SchemaProvider가 나중에 추가하는 도구는 `file_search`로 가격이 매겨지지 않고 빌드가 실패합니다.
   - **정산.** 보고된 비용이 없으면 `sp::pricing::estimate`가 hold에 가격을 매길 때의 카탈로그 스냅샷으로 호출의 가격을 매기고, 예약된 서버 도구 요금은 cap만큼 청구됩니다.
   - **동작 변경: 레코드.** `ProgramMonetaryRecord::origin`은 provider의 base URL입니다(`https://openrouter.ai`, 이전에는 `openrouter`). `catalog_version`은 카탈로그의 digest와 함께 `sp-model-catalogue/1`이고, 새 `pricing`(Python `record.pricing`)은 항목, 그 가격 행, service tier, 예약된 도구 사용, 추정의 가정을 담습니다. 0.16.0 이전에 journal에 기록된 레코드는 바이트가 그대로입니다.
   - **동작 변경: `P_MONEY_UNKNOWN_ORIGIN`**은 이제 승인된 descriptor가 없는 provider만 뜻합니다. base URL에서 카탈로그가 가격을 매기지 않는 모델은 `P_MONEY_UNKNOWN_MODEL`입니다.
