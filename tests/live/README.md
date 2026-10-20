@@ -12,6 +12,8 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
   - image input;
   - a forced tool call on every preset and a full tool round trip;
   - generated images kept from OpenRouter Chat and Gemini Generate;
+  - Gemini speech, buffered and streamed, and a Lyria clip, with the Generate response modalities and speech settings;
+  - an OpenAI Responses hosted web search, buffered and streamed;
   - the Anthropic Messages controls: thinking modes and effort, tool choice, the temperature rule, prompt caching, and the same controls through OpenRouter;
   - typed failures: an invalid key, a cancelled stream, an expired deadline;
   - SchemaProvider endpoints through `Provider` (#531): OpenAI embeddings, OpenRouter embeddings awaited, and OpenAI moderation.

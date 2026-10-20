@@ -99,17 +99,51 @@ def test_gemini_generate_image_output(stream):
     assert _inline_bytes(run) > 10_000
 
 
-# Known gaps: they must fail; when one starts to pass, update tests/live/manifest.json. Both need the
-# Generate response modalities and speech settings, which are not reachable from Python yet (#512).
-GAPS = [
-    case("lyria-3-clip-preview", "A short bright chiptune loop. Instrumental only.", keys=["GEMINI_API_KEY"],
-         id="lyria-clip", gap="#512, Python cannot set response_modalities"),
-    case("gemini-3.8-flash-lite-tts", "Say: hello.", keys=["GEMINI_API_KEY"], id="tts",
-         gap="#512, Python cannot set speech_config"),
-]
+def _generate(*modalities, voice=None):
+    generate = ng.GenerateControls()
+    generate.response_modalities = list(modalities)
+    if voice:
+        speech = ng.GeminiSpeechConfig()
+        speech.voice_config = ng.GeminiVoiceConfig()
+        speech.voice_config.prebuilt_voice_name = voice
+        generate.speech_config = speech
+    return generate
 
 
-@pytest.mark.parametrize("model, prompt", GAPS)
-def test_known_gap_gemini_media(model, prompt):
-    run = Run(provider("google.generate", model), model, [user(prompt)])
+def _audio(run):
+    return [part for part in run.parts() if isinstance(part, ng.ProviderMedia) and part.kind == ng.ProviderMediaKind.Audio]
+
+
+# Gemini speech, buffered and streamed (SchemaProvider#55): the Generate response modalities and speech settings
+# reach the wire from Python (#512).
+@pytest.mark.parametrize("stream", [case(s, keys=["GEMINI_API_KEY"], id=n) for n, s in MODES])
+def test_gemini_tts(stream):
+    model = "gemini-3.8-flash-lite-tts"
+    run = Run(provider("google.generate", model), model, [user("Say: hello.")], stream=stream,
+              generate=_generate(ng.GeminiResponseModality.Audio, voice="Kore"))
+    audio = _audio(run)
+    assert audio and audio[0].mime.startswith("audio/") and audio[0].data
+
+
+# A Lyria clip on Generate, which needs its audio response modality.
+@pytest.mark.parametrize("model", [case("lyria-3-clip-preview", keys=["GEMINI_API_KEY"], id="lyria-clip")])
+def test_lyria_clip(model):
+    run = Run(provider("google.generate", model), model,
+              [user("A short bright chiptune loop. Instrumental only.")],
+              generate=_generate(ng.GeminiResponseModality.Audio))
     assert _inline_bytes(run) > 0
+
+
+# A Responses hosted tool from Python (SchemaProvider#54, #513): OpenAI web search, buffered and streamed.
+@pytest.mark.parametrize("stream", [case(s, keys=["OPENAI_API_KEY"], id=n) for n, s in MODES])
+def test_responses_hosted_web_search(stream):
+    model, values = TEXT_MODELS["openai.responses"]
+    responses = ng.ResponsesControls()
+    responses.hosted_tools = [ng.ResponsesWebSearchTool()]
+    run = Run(provider("openai.responses", model), model,
+              [user("Use web search: what is the title of the page at https://example.com? Answer in five words.")],
+              stream=stream, responses=responses, **{**values, "max_output_tokens": 1200})
+    assert run.text().strip()
+    searched = [part for part in run.parts() if isinstance(part, ng.ServerToolResult)] or \
+        [citation for part in run.parts() if isinstance(part, ng.Text) for citation in part.citations]
+    assert searched, "the answer shows the web search: a server tool result or a citation"

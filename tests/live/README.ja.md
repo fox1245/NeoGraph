@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=6372355bab3b86363a732b0efb0c03cb120a9fa9357513267f574c998c2dd508 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=be533332bd699ac71134ef16c08b418aeaf8803e2bdf6a870e2f695394d269fe -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,6 +13,8 @@
   - 画像入力。
   - すべてのプリセットでの強制ツール呼び出しと、ツールの往復全体。
   - OpenRouter Chat と Gemini Generate が生成した画像の保持。
+  - Generate の応答モダリティと音声設定を使う Gemini の音声合成（バッファとストリーム）と Lyria のクリップ。
+  - OpenAI Responses の hosted ウェブ検索（バッファとストリーム）。
   - Anthropic Messages の制御：thinking モードと effort、tool choice、temperature の規則、プロンプトキャッシュ、そして OpenRouter 経由の同じ制御。
   - 型付きの失敗：無効なキー、キャンセルしたストリーム、期限切れの deadline。
   - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI の埋め込み、await する OpenRouter の埋め込み、OpenAI の moderation。
