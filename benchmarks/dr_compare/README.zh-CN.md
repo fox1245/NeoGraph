@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=ea63be6cd17b56be2e5ea326d79c607c7e457528db43a905d2b59e17a86894c6 -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=69f7c20709c2c0405d4aa839668b7aeb6c74d582143b3548b9e378066d2c318c -->
 # dr_compare：深度研究编排对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -8,9 +8,8 @@
 ## 文件与依赖
 
 `dr_neograph.py`、`dr_langgraph.py`、`bench.py`、`bench_mock.py`、`mem_probe.py`、`mem_prod_stack.py`、`sweep.sh`、`_run_single.py` 覆盖了真实调用、纯文本的 mock 工作负载、内存探测、参数扫描和一次性的问题诊断。请按 [Python 绑定指南](../../docs/python-binding.md)安装与当前源码匹配的 wheel；带有 `CompletionParams`/`OpenAIProvider` 的旧 wheel，不是当前的 API。从源码构建时，即使只用 Core，也需要外部的 SchemaProvider SDK。
-当前的构建需要与 SDK `0.3.5`、接口修订版/共享库代数 6 相匹配的 wheel 或原生构建，
-对应 SchemaProvider `maint/interface6` 提交
-`0437853529b5932e7097a38629a95779d08f03aa`。
+当前的构建需要与 SDK `0.4.0`、接口修订版/共享库代数 7 相匹配的 wheel 或原生构建，
+对应 `cmake/NeoGraphSchemaProvider.cmake` 所固定的 SchemaProvider 提交。
 这个对比用的 runner，与内置的 Deep Research 恢复路径是分开的。
 
 这个工作流会 import requests、LangGraph 和 langchain-openai；内存探测使用 psutil。PostgreSQL 模式还需要相应的检查点包，以及一个正在运行的数据库。`mem_prod_stack.py` 会为它命名的各个技术栈 import 额外的 web、数据库和可观测性包；它不是只针对裸引擎的 RSS 探测。

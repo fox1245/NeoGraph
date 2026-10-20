@@ -13,6 +13,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ## [未发布]
 
+## [0.16.0] - 2026-10-20
+
 ### 已添加
 - **可从 `Provider` 调用 SchemaProvider 端点 (#531)。**
   - `prepare_endpoint`、`complete_endpoint` 和 `complete_endpoint_async` 运行 SchemaProvider 的非聊天端点：图像、decisions、嵌入、rerank、moderation、语音合成、转写与翻译、视频任务、文件、批处理、token 计数和 OpenRouter 生成统计。

@@ -40,8 +40,8 @@ The current OpenAI comparison constructs `SchemaProvider` from an admitted HTTP 
 Both clients use the same private HTTP loopback peer and Chat route, with a canned response whose text is `ok`. The peer checks route, model, and prompt. It requires no hosted credentials, custom CA, or paid calls. This is an HTTP/1.0 local protocol workload, not a TLS/HTTP2 transport qualification or native replay benchmark. Canned token usage is provider-reported fixture data, not measured tokens or a budget charge.
 
 Install a wheel matching the current source using the [Python binding guide](../../docs/python-binding.md), then install the comparison SDKs below. Source builds require external `SchemaProvider::runtime` even for Core; follow the [build guide](../../README.md). Python wrappers alone cannot add the typed native API to an old wheel.
-For NeoGraph `0.15.1`, the wheel and native consumers must match alpha SDK
-`0.3.5`, interface revision/shared generation 6.
+For NeoGraph `0.16.0`, the wheel and native consumers must match alpha SDK
+`0.4.0`, interface revision/shared generation 7.
 
 ## Running a new cohort
 

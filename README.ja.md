@@ -17,7 +17,7 @@ NeoGraph は、グラフとして記述したワークフローを実行する C
 - そうしたワークフローを C++ のサービス内で動かす、または MCP・A2A・ACP で他のエージェントやツールに公開するチーム。
 - LangGraph を知っている読者。リデューサー付きのチャネル、`Send`、`Command`、チェックポイントは同じ考え方なので、[コンセプトガイド](docs/concepts.md)は早く読み進められるはずです。
 
-NeoGraph はアルファ版のソフトウェアです(バージョン 0.15.1)。C++ のバイナリインターフェースは 0.x のリリース間で変わることがあります。[ABI ポリシー](docs/ABI_POLICY.md)を参照してください。モデルの学習や数値計算ライブラリの代わりはしません。モデル呼び出しは、ノードがすることの1つにすぎません。
+NeoGraph はアルファ版のソフトウェアです(バージョン 0.16.0)。C++ のバイナリインターフェースは 0.x のリリース間で変わることがあります。[ABI ポリシー](docs/ABI_POLICY.md)を参照してください。モデルの学習や数値計算ライブラリの代わりはしません。モデル呼び出しは、ノードがすることの1つにすぎません。
 
 ## クイックスタート
 
@@ -70,7 +70,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-PyPI のホイールは、リリース 0.15.1 からビルドされたものです。[変更履歴](CHANGELOG.md)の *Unreleased* に載っている変更は含まれていません。それらを使うには、ソースからビルドしてください([ビルド設定](#build-configuration-and-further-reading)を参照)。
+PyPI のホイールは、リリース 0.16.0 からビルドされたものです。[変更履歴](CHANGELOG.md)の *Unreleased* に載っている変更は含まれていません。それらを使うには、ソースからビルドしてください([ビルド設定](#build-configuration-and-further-reading)を参照)。
 
 ### C++
 
@@ -306,7 +306,7 @@ sp::runtime::Result first_call(
 
 `ChatMessage`、`ChatTool`、JSON は、持ち運べる射影です。本物のネイティブ履歴は、ネイティブのチェックポイントサイドカーとともにメモリ上に置けます。永続的なネイティブ履歴には、本物の `sp::NativeArchive` と、所有者専用の保護された保管が必要です。持ち運べる JSON から、その権限を再現することはできません。アーカイブは独立した鍵で保管状態を認証します。暗号化でも、ベンダー発行者の認証でもありません。アーカイブの本体、鍵、ネイティブの blob、生のワイヤ観測値は公開しないでください。永続化の失敗、オブザーバー、管理される予算バンク、リプレイの境界については、[provider リファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きへの切り替えで、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、Responses の WebSocket 経路が削除されました。C++ の利用側を再コンパイルし、カスタム provider を移行してください。互換用のエイリアスはありません。SDK パッケージは `0.3.5` アルファで、公開コミット `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6` ブランチ)に固定されており、インターフェースのリビジョンは 6、共有 ABI は 6 です。金額の使用量メタデータが公開レイアウトを変えるため、SDK の利用側、NeoGraph、Python 拡張はあわせて再ビルドしてください。ネイティブアーカイブ v3（`spna3`）は変わりません。持ち運べる JSON は `provider-message-v3`、`provider-outcome-v3`、`runtime-history-record-v3` として書き出し、v2 形式のレコードも引き続き読み込みます。この世代は、安定した SDK インターフェースを宣言していません。
+型付きへの切り替えで、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、Responses の WebSocket 経路が削除されました。C++ の利用側を再コンパイルし、カスタム provider を移行してください。互換用のエイリアスはありません。SDK パッケージは `0.4.0` アルファで、`cmake/NeoGraphSchemaProvider.cmake` が固定する公開コミット(`main` ライン)を使い、インターフェースのリビジョンは 7、共有 ABI は 7 です。金額の使用量メタデータが公開レイアウトを変えるため、SDK の利用側、NeoGraph、Python 拡張はあわせて再ビルドしてください。ネイティブアーカイブ v3（`spna3`）は変わりません。持ち運べる JSON は `provider-message-v3`、`provider-outcome-v3`、`runtime-history-record-v3` として書き出し、v2 形式のレコードも引き続き読み込みます。この世代は、安定した SDK インターフェースを宣言していません。
 
 ## Python
 
@@ -361,7 +361,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 別のプロジェクトでは、クイックスタートの `FetchContent` の行を `find_package(NeoGraph CONFIG REQUIRED)` に置き換え、`-DCMAKE_PREFIX_PATH="$HOME/neograph"` を付けて configure します。インストール済みのものを使う側は、必要なコンポーネントだけをリンクします。
 
 ```cmake
-find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -397,7 +397,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。上限は CI の hosted x86-64 ランナー基準のため、より遅いハードウェアでは回帰がなくても `javascript_wrapped_core` が失敗することがある。`--base <ref>` を指定すると、そのコミットもビルドし、同じマシンでケースごとに比較する。 |
 | `fuzz` | Linux の Clang/libFuzzer による60秒のカナリア。コーパスは自分が所有する出力にコピーします。 |
 | `install` | 隔離したエクスポート先で ABI・シンボル・C++・C11・衝突・再配置を検査するコンシューマー。Git/Bash は不要。任意の `--shared`、`--core-only`、`--program`。`--quickjs` には `--program` と ELF/Mach-O の検査が必要で、Windows の行にはありません。 |
-| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.15.1`。 |
+| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.16.0`。 |
 | `wheel` | 修復を経たインストール済みホイール。cibuildwheel==2.23.0 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 

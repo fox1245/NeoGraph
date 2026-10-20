@@ -7,8 +7,8 @@ frameworks on matched small workloads with no I/O, sleep, or model calls.
 The measurements include node dispatch, state-channel writes, and reducer calls.
 The dated tables retain historical engine labels and dependency versions;
 they do not identify the current package version.
-Current NeoGraph `0.15.1` recipes require alpha SDK `0.3.5`, interface revision/shared
-generation 6, with matching headers and libraries.
+Current NeoGraph `0.16.0` recipes require alpha SDK `0.4.0`, interface revision/shared
+generation 7, with matching headers and libraries.
 
 For Program admission, JavaScript control, and SQLite/PostgreSQL runtime costs,
 see [Measuring Program costs](../docs/PROGRAM_COST_MEASUREMENT.md). That separate
@@ -230,8 +230,8 @@ public GitHub source archive. `NEOGRAPH_FETCH_SCHEMAPROVIDER` defaults to ON;
 set it OFF for offline builds using an installed package or explicit source.
 The reproduction commands build maintained targets; they do not recreate the
 historical binary or automatically pin the Python versions from the tables.
-An explicit checkout or installed package must provide interface/shared generation 6.
-Save new outputs separately; the historical tables and JSON files were not measured with SDK 0.3.5.
+An explicit checkout or installed package must provide interface/shared generation 7.
+Save new outputs separately; the historical tables and JSON files were not measured with SDK 0.4.0.
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for

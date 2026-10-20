@@ -16,7 +16,7 @@ The same engine is available from C++ and from Python (`pip install neograph-eng
 - Teams that run such workflows inside a C++ service, or expose them to other agents and tools over MCP, A2A or ACP.
 - Readers who know LangGraph: channels with reducers, `Send`, `Command` and checkpoints are the same ideas, so the [concepts guide](docs/concepts.md) should read quickly.
 
-NeoGraph is alpha software (version 0.15.1). The C++ binary interface can change between 0.x releases; see the [ABI policy](docs/ABI_POLICY.md). It does not train models or replace a numerical library, and a model call is only one kind of node.
+NeoGraph is alpha software (version 0.16.0). The C++ binary interface can change between 0.x releases; see the [ABI policy](docs/ABI_POLICY.md). It does not train models or replace a numerical library, and a model call is only one kind of node.
 
 ## Quickstart
 
@@ -69,7 +69,7 @@ python hello.py
 [{'role': 'assistant', 'content': 'Hello, NeoGraph!'}]
 ```
 
-The wheel on PyPI is built from release 0.15.1. Changes listed under *Unreleased* in the [changelog](CHANGELOG.md) are not in it; build from source to use them (see [Build configuration](#build-configuration-and-further-reading)).
+The wheel on PyPI is built from release 0.16.0. Changes listed under *Unreleased* in the [changelog](CHANGELOG.md) are not in it; build from source to use them (see [Build configuration](#build-configuration-and-further-reading)).
 
 ### C++
 
@@ -303,7 +303,7 @@ After `first_call` returns, use `std::get_if<sp::Completion>(result.get())` to i
 
 `ChatMessage`, `ChatTool`, and JSON are portable projections. Authentic native history can stay in memory with its native checkpoint sidecar; durable native history requires a real `sp::NativeArchive` and protected owner-private custody. Portable JSON cannot recreate that authority. The archive authenticates custody with an independent key; it is neither encryption nor vendor-issuer authentication. Do not publish archive bodies, keys, native blobs, or raw wire observations. See the [provider reference](docs/reference-en.md) and [migration guide](docs/migration-v0.4-to-v1.0.md) for persistence failures, observers, managed budget banks, and replay boundaries.
 
-The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.3.5` alpha, pinned to public commit `0437853529b5932e7097a38629a95779d08f03aa` on its `maint/interface6` branch, with interface revision 6 and shared ABI 6. Monetary usage metadata changes public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 (`spna3`) is unchanged. Portable JSON is written as `provider-message-v3`, `provider-outcome-v3` and `runtime-history-record-v3`, and records in the v2 formats are still read. The generation does not declare a stable SDK interface.
+The typed cutover removes `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, the descriptor interpreter, and the Responses WebSocket path. Recompile C++ consumers and migrate custom providers; there are no compatibility aliases. The SDK package is `0.4.0` alpha, at the public commit that `cmake/NeoGraphSchemaProvider.cmake` pins, on its `main` line, with interface revision 7 and shared ABI 7. Monetary usage metadata changes public layouts: rebuild SDK consumers, NeoGraph and Python extensions together. Native archive v3 (`spna3`) is unchanged. Portable JSON is written as `provider-message-v3`, `provider-outcome-v3` and `runtime-history-record-v3`, and records in the v2 formats are still read. The generation does not declare a stable SDK interface.
 
 ## Python
 
@@ -357,7 +357,7 @@ cmake --install NeoGraph/build-install --prefix "$HOME/neograph"
 In the other project, replace the `FetchContent` lines of the Quickstart with `find_package(NeoGraph CONFIG REQUIRED)` and configure with `-DCMAKE_PREFIX_PATH="$HOME/neograph"`. Installed consumers link only the enabled components they need:
 
 ```cmake
-find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -406,7 +406,7 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. Ceilings are calibrated on CI's hosted x86-64 runners: on slower hardware `javascript_wrapped_core` can fail without a regression. `--base <ref>` also builds that commit and compares each case with it on the same machine. |
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
-| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.15.1`. |
+| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.16.0`. |
 | `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
 

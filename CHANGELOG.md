@@ -13,6 +13,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-20
+
 ### Added
 - **SchemaProvider's endpoints on `Provider` (#531).**
   - `prepare_endpoint`, `complete_endpoint` and `complete_endpoint_async` run SchemaProvider's non-chat endpoints: images, decisions, embeddings, rerank, moderation, speech, transcription and translation, video jobs, files, batches, token counts and OpenRouter generation statistics.

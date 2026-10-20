@@ -13,6 +13,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-20
+
 ### 추가됨
 - **SchemaProvider 엔드포인트를 `Provider`에서 부릅니다 (#531).**
   - `prepare_endpoint`, `complete_endpoint`, `complete_endpoint_async`가 SchemaProvider의 비채팅 엔드포인트를 실행합니다: 이미지, decisions, 임베딩, rerank, moderation, 음성 합성, 전사와 번역, 비디오 job, 파일, 배치, 토큰 수 세기, OpenRouter 생성 통계.
