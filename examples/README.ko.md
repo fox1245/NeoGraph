@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -438,6 +438,6 @@ tool search, `shell.environment`의 skills, shell(`container_auto`)입니다.
 순서 있는 타입/raw event와 전체 terminal을 유지합니다. hosted tool은 route에 따라 지원되지 않거나
 추가 비용이 발생할 수 있습니다. 타입 admission은 live 호환성 보장이 아닙니다.
 WebSocket/primitive 실행 예제는 유지하지 않습니다.
-이미지, 비디오, decisions는 SchemaProvider 엔드포인트이며 `<codecs/images.h>`, `<codecs/videos.h>`,
-`<codecs/decisions.h>`를 통해 `sp::runtime::Client`에서 호출합니다. NeoGraph 0.16.0은 타입 클라이언트
+이미지, 비디오, decisions는 SchemaProvider 엔드포인트이며 `Provider::complete_endpoint`로 호출합니다
+(레퍼런스의 "엔드포인트 호출" 참고). NeoGraph 0.16.0은 타입 클라이언트
 `ImagesClient`, `VeoClient`, `DecisionsClient`를 제거했습니다. CHANGELOG를 참고하세요.

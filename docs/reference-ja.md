@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=851dc97f4653b8bcf2e2af6712b5b8f1915bfa559d320daf9c354062c5619640 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=d5164064f1180f9307875fa50c67c56a7d233ab3cfc2d91e6216c1aaefb0ad00 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -283,8 +283,54 @@ public:
     static std::string request_digest(const PreparedProviderRequest& request);
     static std::optional<std::uint64_t> conservative_token_upper_bound(
         const PreparedProviderRequest& request);
+
+    // SchemaProvider endpoints at the provider's origin (#531).
+    template <EndpointRequest Request>
+    sp::runtime::PreparedEndpoint<EndpointOutcomeOf<Request>> prepare_endpoint(
+        Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    Outcome complete_endpoint(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    EndpointOutcomeOf<Request> complete_endpoint(Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    asio::awaitable<Outcome> complete_endpoint_async(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    asio::awaitable<EndpointOutcomeOf<Request>> complete_endpoint_async(
+        Request request, sp::runtime::RunOptions options = {});
 };
 ```
+
+### エンドポイント呼び出し
+
+`Provider` は自身の origin にある SchemaProvider の非チャット・エンドポイントも転送します。
+- 画像、decisions、埋め込み、rerank、moderation
+- 音声合成、文字起こし、翻訳
+- 動画ジョブ（投入、ポーリング、ダウンロード）
+- ファイル（一括アップロードと再開可能なアップロード、取得、一覧、削除、ダウンロード）
+- バッチ、トークン数のカウント、OpenRouter の生成統計
+
+`EndpointOutcomeOf<Request>` は各リクエストの型付き結果を表します。単発のエンドポイントでは `std::variant<Result, sp::Failure>`、ジョブ・ファイル・バッチではそれぞれの状態です。
+
+呼び出しは provider 自身のクライアントで実行され、チャット呼び出しと同じ認証情報、admission スロット、リトライ予算、deadline、エラー分類を使います。descriptor ポリシーは呼び出しを準備するときに origin ごとに各エンドポイントを許可します。拒否された呼び出しはそのエラーを持ち、ネットワークに届かないまま `Failure` で終わります。
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+
+std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<std::string> texts) {
+    sp::embeddings::Request request;
+    request.model = "text-embedding-3-small";
+    for (auto& text : texts) request.inputs.push_back({std::move(text)});
+    auto outcome = provider.complete_endpoint(std::move(request));
+    if (const auto* failure = std::get_if<sp::Failure>(&outcome))
+        throw std::runtime_error(failure->error.safe_message);
+    return std::get<sp::embeddings::Result>(std::move(outcome)).vectors;
+}
+```
+
+- **準備。** `prepare_endpoint` は SDK の `PreparedEndpoint` を返します。ホストは `complete_endpoint` が実行する前に、これを確認する（`prepared().endpoint()`、`prepared().model()`、`error()`）ことも、ジャーナルに記録することもできます。準備スロットに空きがなければ `sp::runtime::AdmissionError` を投げます。
+- **スレッドを止めない呼び出し。** `complete_endpoint_async` はスレッドを止めません。awaitable がクライアントと呼び出しを所有するため、リクエストも provider もそれより長く生きる必要はありません。待機中のコルーチンをキャンセルすると呼び出しもキャンセルされ、結果は SDK の `Cancelled` 失敗になります。
+- **そのまま送信。** `SchemaProvider::Defaults` はチャット呼び出しにだけ適用されます。ここでは呼び出しをジャーナルに記録せず、予算の予約も課金もしません。
+- **エンドポイントを持たない provider。** SchemaProvider のエンドポイントを持たない `Provider` は `std::logic_error` を投げます。サブクラスは `endpoint_runtime()` をオーバーライドして自身のクライアントを転送します。
 
 ### ProviderRequest / ProviderControls
 

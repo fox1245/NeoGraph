@@ -269,6 +269,53 @@ private:
         const PreparedProviderRequest&, ProviderDispatchBudget);
 };
 
+/// The typed outcome of each SchemaProvider endpoint request that
+/// Provider::prepare_endpoint takes (#531): images, decisions, embeddings,
+/// rerank, moderation, speech, transcription and translation, video jobs,
+/// files, batches, token counts and OpenRouter generation statistics. A chat
+/// request is not one; it goes through Provider::prepare.
+template <class Request> struct EndpointOutcome {};
+template <> struct EndpointOutcome<sp::images::Request> { using type = sp::images::Outcome; };
+template <> struct EndpointOutcome<sp::decisions::Request> { using type = sp::decisions::Outcome; };
+template <> struct EndpointOutcome<sp::embeddings::Request> { using type = sp::embeddings::Outcome; };
+template <> struct EndpointOutcome<sp::rerank::Request> { using type = sp::rerank::Outcome; };
+template <> struct EndpointOutcome<sp::moderation::Request> { using type = sp::moderation::Outcome; };
+template <> struct EndpointOutcome<sp::speech::Request> { using type = sp::speech::Outcome; };
+template <> struct EndpointOutcome<sp::transcription::Request> { using type = sp::transcription::Outcome; };
+template <> struct EndpointOutcome<sp::videos::Request> { using type = sp::jobs::Outcome; };
+template <> struct EndpointOutcome<sp::jobs::Poll> { using type = sp::jobs::Outcome; };
+template <> struct EndpointOutcome<sp::jobs::Download> { using type = sp::jobs::DownloadOutcome; };
+template <> struct EndpointOutcome<sp::files::Upload> { using type = sp::files::Outcome; };
+template <> struct EndpointOutcome<sp::files::Get> { using type = sp::files::Outcome; };
+template <> struct EndpointOutcome<sp::files::List> { using type = sp::files::PageOutcome; };
+template <> struct EndpointOutcome<sp::files::Delete> { using type = sp::files::DeleteOutcome; };
+template <> struct EndpointOutcome<sp::files::Download> { using type = sp::jobs::DownloadOutcome; };
+template <> struct EndpointOutcome<sp::files::Start> { using type = sp::files::ProgressOutcome; };
+template <> struct EndpointOutcome<sp::files::Part> { using type = sp::files::ProgressOutcome; };
+template <> struct EndpointOutcome<sp::files::Complete> { using type = sp::files::ProgressOutcome; };
+template <> struct EndpointOutcome<sp::files::Query> { using type = sp::files::ProgressOutcome; };
+template <> struct EndpointOutcome<sp::files::Cancel> { using type = sp::files::ProgressOutcome; };
+template <> struct EndpointOutcome<sp::batches::Submit> { using type = sp::batches::Outcome; };
+template <> struct EndpointOutcome<sp::batches::Get> { using type = sp::batches::Outcome; };
+template <> struct EndpointOutcome<sp::batches::Cancel> { using type = sp::batches::Outcome; };
+template <> struct EndpointOutcome<sp::batches::Delete> { using type = sp::batches::DeleteOutcome; };
+template <> struct EndpointOutcome<sp::batches::Results> { using type = sp::jobs::DownloadOutcome; };
+template <> struct EndpointOutcome<sp::tokens::Count> { using type = sp::tokens::Outcome; };
+template <> struct EndpointOutcome<sp::generations::Get> { using type = sp::generations::Outcome; };
+template <class Request>
+concept EndpointRequest = requires { typename EndpointOutcome<Request>::type; };
+template <EndpointRequest Request>
+using EndpointOutcomeOf = typename EndpointOutcome<Request>::type;
+
+namespace detail {
+/// Starts one SDK endpoint call. It receives the function the call's outcome
+/// callback runs, and returns the function that cancels the call.
+using EndpointStart = std::function<std::function<void()>(std::function<void()> notify)>;
+/// Runs `start` and resumes once the call's outcome callback has run. A
+/// cancelled awaiting coroutine cancels the call and still waits for it.
+NEOGRAPH_API asio::awaitable<void> await_endpoint(EndpointStart start);
+} // namespace detail
+
 /// Capability identity plus a single prepared, owned operation contract.
 /// Returned awaitables own all operation state, including the runtime client;
 /// neither request nor Provider object must survive coroutine scheduling.
@@ -288,7 +335,48 @@ public:
     /// request's model invocations times the transport attempts its retry
     /// policy allows. Empty when the prepared request does not state them.
     static std::optional<std::uint64_t> invocation_upper_bound(const PreparedProviderRequest& request);
+
+    /// SchemaProvider's non-chat endpoints at this provider's origin (#531). They
+    /// run on the client its chat calls use, with the same credential, admission
+    /// slots, retry budget, deadlines and error classification. The descriptor
+    /// policy admits each endpoint when the call is prepared; a refused call
+    /// carries its error and completes as a Failure without reaching the network.
+    /// Calls are buffered and sent as given: SchemaProvider::Defaults apply to
+    /// chat calls only, and nothing here journals, reserves or charges a budget.
+    /// A provider without SchemaProvider endpoints throws std::logic_error.
+    /// Preparation throws sp::runtime::AdmissionError when no slot is free.
+    template <EndpointRequest Request>
+    sp::runtime::PreparedEndpoint<EndpointOutcomeOf<Request>> prepare_endpoint(
+        Request request, sp::runtime::RunOptions options = {}) {
+        return require_endpoint_runtime()->prepare(std::move(request), std::move(options));
+    }
+    /// Runs a prepared call on this provider's client and blocks for its outcome.
+    template <class Outcome>
+    Outcome complete_endpoint(sp::runtime::PreparedEndpoint<Outcome> prepared) {
+        return require_endpoint_runtime()->complete(std::move(prepared));
+    }
+    template <EndpointRequest Request>
+    EndpointOutcomeOf<Request> complete_endpoint(Request request, sp::runtime::RunOptions options = {}) {
+        return require_endpoint_runtime()->complete(std::move(request), std::move(options));
+    }
+    /// The same call without blocking a thread. The awaitable owns the client and
+    /// the call; cancelling the awaiting coroutine cancels the call, and its
+    /// outcome is then the SDK's Cancelled failure.
+    template <class Outcome>
+    asio::awaitable<Outcome> complete_endpoint_async(sp::runtime::PreparedEndpoint<Outcome> prepared) {
+        return run_endpoint(require_endpoint_runtime(), std::move(prepared));
+    }
+    template <EndpointRequest Request>
+    asio::awaitable<EndpointOutcomeOf<Request>> complete_endpoint_async(
+        Request request, sp::runtime::RunOptions options = {}) {
+        auto client = require_endpoint_runtime();
+        try { return run_endpoint(client, client->prepare(std::move(request), std::move(options))); }
+        catch (const sp::runtime::AdmissionError& error) { return refused_endpoint<EndpointOutcomeOf<Request>>(error); }
+    }
 protected:
+    /// The SchemaProvider client whose endpoints this provider forwards, the same
+    /// one for the provider's lifetime. Null, the default, means none.
+    virtual std::shared_ptr<sp::runtime::Client> endpoint_runtime() const { return nullptr; }
     using LocalDispatch = std::function<asio::awaitable<sp::runtime::Result>(
         const PreparedProviderRequest&, const std::function<void(const sp::Event&)>&)>;
     static PreparedProviderRequest prepare_local(
@@ -305,6 +393,27 @@ protected:
 private:
     static asio::awaitable<sp::runtime::Result> dispatch_impl(PreparedProviderRequest request);
     static asio::awaitable<sp::runtime::Result> dispatch_operation(PreparedProviderRequest request);
+    std::shared_ptr<sp::runtime::Client> require_endpoint_runtime() const;
+    template <class Outcome>
+    static asio::awaitable<Outcome> run_endpoint(
+        std::shared_ptr<sp::runtime::Client> client, sp::runtime::PreparedEndpoint<Outcome> prepared) {
+        sp::runtime::EndpointCall<Outcome> call;
+        try {
+            co_await detail::await_endpoint([&](std::function<void()> notify) {
+                // The callback keeps the client alive until the SDK has delivered.
+                call = client->start(std::move(prepared), [client, notify = std::move(notify)](Outcome) { notify(); });
+                return std::function<void()>([&call] { call.cancel(); });
+            });
+        } catch (const sp::runtime::AdmissionError& error) {
+            co_return sp::runtime::detail::typed_outcome(*error.outcome(), static_cast<const Outcome*>(nullptr));
+        }
+        // The callback has run; join fences the slot release and returns the outcome it was given.
+        co_return call.join();
+    }
+    template <class Outcome>
+    static asio::awaitable<Outcome> refused_endpoint(sp::runtime::AdmissionError error) {
+        co_return sp::runtime::detail::typed_outcome(*error.outcome(), static_cast<const Outcome*>(nullptr));
+    }
 };
 
 NEOGRAPH_API ProviderRequest make_provider_request(

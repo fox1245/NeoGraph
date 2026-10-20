@@ -13,6 +13,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **SchemaProvider's endpoints on `Provider` (#531).**
+  - `prepare_endpoint`, `complete_endpoint` and `complete_endpoint_async` run SchemaProvider's non-chat endpoints: images, decisions, embeddings, rerank, moderation, speech, transcription and translation, video jobs, files, batches, token counts and OpenRouter generation statistics.
+  - The calls run on the provider's own SchemaProvider client, which its chat calls share, and the descriptor policy admits each endpoint per origin.
+  - They replace the typed clients that 0.16.0 removes. Python, graph nodes and Program calls follow.
+
 ### Changed
 - **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable. The decision is the roundtable of 2026-10-20.
   - **New controls.** Chat modalities, audio output, OpenRouter image output and plugins; Responses hosted tools (web search, image generation, file search, tool search, shell, code interpreter, MCP, computer use, OpenRouter server tools and policy-admitted tools), output modalities, image output, plugins, include names and MCP approvals; Messages server and typed client tools, container, skills, betas and MCP servers; Generate response modalities, speech, image output, audio transcription, audio format, built-in tools, MCP servers, server tool invocations and retrieval; Interactions response formats, speech, transcription, built-in tools, `previous_interaction_id`, `video_task`, `agent` and `background` (the portable `store` now applies to Interactions too). Each nest has `extensions`, top-level members the SDK policy admits for the origin.
@@ -42,7 +48,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Removed
 - **The compiled price catalog (#520).** `data/pricing/catalog.json`, the internal `PriceCatalog` (`src/program/pricing.h`), `scripts/check_price_drift.py` and the weekly `Price drift` workflow are gone; prices are catalogue data the host supplies. `tests/fixtures/pricing/model_prices.json` keeps the 13 entries as a catalogue layer for the tests.
-- **The typed `ImagesClient`, `VeoClient` and `DecisionsClient` (#510).** They were deprecated in 0.15.1. Images, video and decisions are SchemaProvider endpoints: call them on `sp::runtime::Client` with `<codecs/images.h>`, `<codecs/videos.h>` and `<codecs/decisions.h>`. Their headers (`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), the shipped configurations (`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py` and their tests are gone. The live suite drops its four typed-client cases.
+- **The typed `ImagesClient`, `VeoClient` and `DecisionsClient` (#510).** They were deprecated in 0.15.1. Images, video and decisions are SchemaProvider endpoints: call them with `Provider::complete_endpoint` (#531). Their headers (`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), the shipped configurations (`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py` and their tests are gone. The live suite drops its four typed-client cases.
 
 ## [0.15.1] - 2026-10-19
 

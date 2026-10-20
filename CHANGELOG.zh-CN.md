@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8e5574f4efe58a6728845cc78d0a9f8e3cbc7e180130ad5eef46ce53a542dbeb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a1d4a032a28674cd52ebc47f3a57beda7ba4f35a35dbecf29a1ac8b868e0111a -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 已添加
+- **可从 `Provider` 调用 SchemaProvider 端点 (#531)。**
+  - `prepare_endpoint`、`complete_endpoint` 和 `complete_endpoint_async` 运行 SchemaProvider 的非聊天端点：图像、decisions、嵌入、rerank、moderation、语音合成、转写与翻译、视频任务、文件、批处理、token 计数和 OpenRouter 生成统计。
+  - 调用在 provider 自己的 SchemaProvider 客户端上运行，与其聊天调用共用该客户端，descriptor 策略按 origin 准入每个端点。
+  - 它们取代 0.16.0 移除的类型化客户端。Python、图节点和 Program 调用随后跟进。
 
 ### 变更
 - **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。
@@ -42,7 +48,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 已移除
 - **移除编译进来的价格目录 (#520)。** `data/pricing/catalog.json`、内部的 `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py` 以及每周的 `Price drift` 工作流均已删除；价格是宿主提供的目录数据。`tests/fixtures/pricing/model_prices.json` 把这 13 个条目保留为供测试使用的目录层。
-- **移除类型化客户端 `ImagesClient`、`VeoClient` 和 `DecisionsClient` (#510)。** 它们已在 0.15.1 中弃用。图像、视频和 decisions 是 SchemaProvider 端点：通过 `<codecs/images.h>`、`<codecs/videos.h>` 和 `<codecs/decisions.h>` 在 `sp::runtime::Client` 上调用。其头文件（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、随附的配置（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py` 以及相关测试均已删除。实时套件中去掉了四个类型化客户端用例。
+- **移除类型化客户端 `ImagesClient`、`VeoClient` 和 `DecisionsClient` (#510)。** 它们已在 0.15.1 中弃用。图像、视频和 decisions 是 SchemaProvider 端点：通过 `Provider::complete_endpoint` 调用 (#531)。其头文件（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、随附的配置（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py` 以及相关测试均已删除。实时套件中去掉了四个类型化客户端用例。
 
 ## [0.15.1] - 2026-10-19
 

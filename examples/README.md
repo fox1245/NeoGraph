@@ -486,7 +486,7 @@ All ordered typed/raw events and full terminals are retained. Hosted tools may
 be unsupported by the chosen route or incur additional charges; typed admission
 is not a live compatibility guarantee. No WebSocket/primitive runnable example
 is retained.
-Images, video and decisions are SchemaProvider endpoints, called on `sp::runtime::Client`
-through `<codecs/images.h>`, `<codecs/videos.h>` and `<codecs/decisions.h>`.
+Images, video and decisions are SchemaProvider endpoints, called with
+`Provider::complete_endpoint` (see the reference's "Endpoint calls").
 NeoGraph 0.16.0 removed its typed `ImagesClient`, `VeoClient` and `DecisionsClient`;
 see the CHANGELOG.

@@ -73,6 +73,7 @@ add_executable(neograph_tests
     test_async_http_stream.cpp
     test_async_http_options.cpp
     test_prepared_provider.cpp
+    test_provider_endpoints.cpp
     test_artifact_provider.cpp
     test_run_context_store.cpp
     test_runtime_context.cpp

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=851dc97f4653b8bcf2e2af6712b5b8f1915bfa559d320daf9c354062c5619640 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d5164064f1180f9307875fa50c67c56a7d233ab3cfc2d91e6216c1aaefb0ad00 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -313,8 +313,54 @@ public:
     static std::string request_digest(const PreparedProviderRequest& request);
     static std::optional<std::uint64_t> conservative_token_upper_bound(
         const PreparedProviderRequest& request);
+
+    // SchemaProvider endpoints at the provider's origin (#531).
+    template <EndpointRequest Request>
+    sp::runtime::PreparedEndpoint<EndpointOutcomeOf<Request>> prepare_endpoint(
+        Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    Outcome complete_endpoint(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    EndpointOutcomeOf<Request> complete_endpoint(Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    asio::awaitable<Outcome> complete_endpoint_async(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    asio::awaitable<EndpointOutcomeOf<Request>> complete_endpoint_async(
+        Request request, sp::runtime::RunOptions options = {});
 };
 ```
+
+### 端点调用
+
+`Provider` 也会转发其 origin 上 SchemaProvider 的非聊天端点：
+- 图像、decisions、嵌入、rerank 和 moderation；
+- 语音合成、转写和翻译；
+- 视频任务（提交、轮询、下载）；
+- 文件（整体上传和可续传上传、获取、列出、删除、下载）；
+- 批处理、token 计数和 OpenRouter 生成统计。
+
+`EndpointOutcomeOf<Request>` 表示每种请求的类型化结果：一次性端点是 `std::variant<Result, sp::Failure>`，任务、文件和批处理则是各自的状态。
+
+调用在 provider 自己的客户端上运行，使用与其聊天调用相同的凭据、admission 槽位、重试预算、deadline 和错误分类。descriptor 策略在准备调用时按 origin 准入每个端点。被拒绝的调用带有其错误，并在不触及网络的情况下以 `Failure` 结束。
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+
+std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<std::string> texts) {
+    sp::embeddings::Request request;
+    request.model = "text-embedding-3-small";
+    for (auto& text : texts) request.inputs.push_back({std::move(text)});
+    auto outcome = provider.complete_endpoint(std::move(request));
+    if (const auto* failure = std::get_if<sp::Failure>(&outcome))
+        throw std::runtime_error(failure->error.safe_message);
+    return std::get<sp::embeddings::Result>(std::move(outcome)).vectors;
+}
+```
+
+- **准备。** `prepare_endpoint` 返回 SDK 的 `PreparedEndpoint`。在 `complete_endpoint` 运行它之前，宿主可以检查它（`prepared().endpoint()`、`prepared().model()`、`error()`）或将其写入日志。没有空闲的准备槽位时，它抛出 `sp::runtime::AdmissionError`。
+- **不阻塞线程的调用。** `complete_endpoint_async` 不会阻塞线程。awaitable 拥有客户端和调用，因此请求和 provider 都不必比它活得更久。取消正在等待的协程会取消调用，此时结果是 SDK 的 `Cancelled` 失败。
+- **按原样发送。** `SchemaProvider::Defaults` 只适用于聊天调用。这里不会把调用写入日志，也不会预留或扣除预算。
+- **没有端点的 provider。** 没有 SchemaProvider 端点的 `Provider` 会抛出 `std::logic_error`。子类通过重写 `endpoint_runtime()` 转发自己的客户端。
 
 ### ProviderRequest / ProviderControls
 
