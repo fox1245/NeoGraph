@@ -2129,6 +2129,18 @@ HostOptions endpoint_options(const std::string& origin,
 }
 }  // namespace
 
+TEST(ProgramProviderBinding, AnEndpointNodeDeclaresNoEffectContractSoNoChannelAnalysisRuns) {
+    // #531: an endpoint node's channels are its configuration. Registered with an empty effects object, a
+    // Program compile counted it as a node that reads and writes nothing, and reported its channels as dead.
+    // Without an effect contract the validator skips the analysis, as it does for the same node in a Core graph.
+    Host       h(std::make_shared<Peer>(), HostOptions{});
+    const auto bundle = h.compile(Shape::EmbedBesideCheck);
+    for (const auto& diagnostic : bundle.diagnostics())
+        EXPECT_NE(diagnostic.code, "P_CORE_E6") << diagnostic.message << " (sealed)";
+    for (const auto& diagnostic : bundle.compile_diagnostics())
+        EXPECT_NE(diagnostic.code, "P_CORE_E6") << diagnostic.message;
+}
+
 TEST(ProgramProviderBindingJournal, AnEndpointCallIsJournaledAndAForkReplaysIt) {
     // #531: an endpoint node takes the Core provider path. The journal keeps its untyped outcome, and a fork of
     // the paused run replays it instead of sending it again.
