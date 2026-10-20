@@ -1,9 +1,6 @@
 {
  "format": "neograph.live-e2e-manifest/v1",
- "known_gaps": {
-  "py:test_live_anthropic_agent::test_gated_tool_call_resumes_with_the_operators_answer[approved]": "Resuming a gated tool call with a value breaks the next model call (#544).",
-  "py:test_live_anthropic_agent::test_gated_tool_call_resumes_with_the_operators_answer[refused]": "Resuming a gated tool call with a value breaks the next model call (#544)."
- },
+ "known_gaps": {},
  "cases": [
   "cpp:LiveCatalogue.RefreshFromEveryListing",
   "cpp:LiveCatalogue.UnlistedModelIsSent",
