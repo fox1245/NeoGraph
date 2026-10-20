@@ -1126,8 +1126,10 @@ if(NEOGRAPH_BUILD_GRPC)
             $<BUILD_INTERFACE:${_ng_grpc_gen}>
             $<INSTALL_INTERFACE:include>
     )
+    # Health reports the library's version.
     target_compile_definitions(neograph_grpc
         PRIVATE NEOGRAPH_BUILDING_LIBRARY
+                NEOGRAPH_VERSION_STR="${NEOGRAPH_VERSION}"
         PUBLIC  NEOGRAPH_HAVE_GRPC)
     target_link_libraries(neograph_grpc
         PUBLIC  neograph_core protobuf::libprotobuf gRPC::grpc++

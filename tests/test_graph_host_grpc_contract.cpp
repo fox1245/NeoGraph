@@ -855,6 +855,29 @@ TEST(GraphHostGRPCContract, BuiltInServersAnswerHealthAndStop) {
     }
 }
 
+// GraphService.Health reports the version the library was built as.
+TEST(GraphHostGRPCContract, HealthReportsTheLibraryVersion) {
+    auto service = neograph::grpc::make_graph_service(NodeContext{});
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+    ASSERT_TRUE(server);
+    auto stub = pb::GraphService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    pb::HealthResponse response;
+    const auto status = stub->Health(&context, pb::HealthRequest{}, &response);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    EXPECT_TRUE(response.ok());
+    EXPECT_EQ(response.version(), NEOGRAPH_EXPECTED_VERSION);
+    EXPECT_FALSE(response.has_default_graph());
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
 // A stop gives a call in flight the grace to finish.
 TEST(GraphHostGRPCContract, StoppingABuiltInServerLetsACallInFlightFinish) {
     std::unordered_map<std::string, neograph::grpc::ToolFn> tools{

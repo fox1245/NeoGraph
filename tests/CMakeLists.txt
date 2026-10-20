@@ -459,6 +459,8 @@ if(NEOGRAPH_BUILD_GRPC)
         test_graph_host_grpc_contract.cpp)
     target_link_libraries(neograph_grpc_graph_contract_tests PRIVATE
         neograph::grpc SchemaProvider::transport GTest::gtest_main)
+    target_compile_definitions(neograph_grpc_graph_contract_tests PRIVATE
+        NEOGRAPH_EXPECTED_VERSION="${NEOGRAPH_VERSION}")
     add_test(NAME neograph.grpc_graph_contract
              COMMAND neograph_grpc_graph_contract_tests)
 
