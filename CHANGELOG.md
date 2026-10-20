@@ -63,6 +63,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The compiled price catalog (#520).** `data/pricing/catalog.json`, the internal `PriceCatalog` (`src/program/pricing.h`), `scripts/check_price_drift.py` and the weekly `Price drift` workflow are gone; prices are catalogue data the host supplies. `tests/fixtures/pricing/model_prices.json` keeps the 13 entries as a catalogue layer for the tests.
 - **The typed `ImagesClient`, `VeoClient` and `DecisionsClient` (#510).** They were deprecated in 0.15.1. Images, video and decisions are SchemaProvider endpoints: call them with `Provider::complete_endpoint` (#531). Their headers (`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), the shipped configurations (`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py` and their tests are gone. The live suite drops its four typed-client cases.
 
+### Fixed
+- **Small fixes from the 0.16.0 review (#542).**
+  - **Native history records validate against their schema.** `schemas/runtime-history-record-v3.schema.json` required an `spna2:` archive reference, but the SDK writes `spna3:`, so every native record failed the schema. The v2 schema had the same pattern. A test now validates a record written with a real archive.
+  - **Portable JSON is v3.** The README, the ABI policy, the reference and the example READMEs said portable JSON "remains v2". NeoGraph writes `provider-message-v3`, `provider-outcome-v3` and `runtime-history-record-v3` and still reads their v2 records; the native archive stays `spna3`.
+  - **An endpoint node registered in a Program has no effect contract (#531).** `add_core_endpoint_node` declared an empty effects object, which Program compilation counted as a node that reads and writes nothing, and it sealed warnings about the node's channels (E6) into the bundle. It now declares none, as the same node does in a Core graph, so the validator skips the analysis.
+  - **gRPC `Health` reports the library version.** It read a macro the build never defines, so it always answered `dev`.
+  - **Python exports `provider_model_catalogue_json`.** The native module had it, `neograph_engine` did not.
+  - **The cookbook chatbot does not branch on a model name.** The low reasoning effort of its default model is now a model-catalogue entry, `live-models.json`, which is passed with `--model-catalogue`. Without that entry a call sends no reasoning effort.
+  - **Reference.** It describes the call path of the endpoint nodes as it is (`make_endpoint_request` through `invoke_provider`), and the `P_MONEY_UNMODELED` table lists endpoint calls.
+
 ## [0.15.1] - 2026-10-19
 
 ### Added

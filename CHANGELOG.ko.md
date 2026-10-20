@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -62,6 +62,16 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 삭제됨
 - **컴파일된 가격 카탈로그를 제거했습니다 (#520).** `data/pricing/catalog.json`, 내부 `PriceCatalog`(`src/program/pricing.h`), `scripts/check_price_drift.py`, 주간 `Price drift` 워크플로가 없어졌습니다. 가격은 호스트가 공급하는 카탈로그 데이터입니다. `tests/fixtures/pricing/model_prices.json`은 13개 항목을 테스트용 카탈로그 레이어로 유지합니다.
 - **타입 클라이언트 `ImagesClient`, `VeoClient`, `DecisionsClient`를 제거했습니다 (#510).** 0.15.1에서 폐기 예정이었습니다. 이미지, 비디오, decisions는 SchemaProvider 엔드포인트이므로 `Provider::complete_endpoint`로 호출합니다 (#531). 헤더(`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), 함께 배포하던 설정(`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py`, 그리고 관련 테스트가 없어졌습니다. 라이브 스위트에서 타입 클라이언트 케이스 네 개가 빠집니다.
+
+### 수정됨
+- **0.16.0 점검에서 나온 작은 수정들 (#542).**
+  - **네이티브 history record가 자신의 스키마를 통과합니다.** `schemas/runtime-history-record-v3.schema.json`은 `spna2:` 아카이브 참조를 요구했지만 SDK는 `spna3:`를 기록하므로, 모든 네이티브 record가 스키마 검사에서 실패했습니다. v2 스키마도 같은 패턴이었습니다. 이제 실제 아카이브로 기록한 record를 검증하는 테스트가 있습니다.
+  - **이식 가능한 JSON은 v3입니다.** README, ABI 정책, 레퍼런스, 예제 README는 이식 가능한 JSON이 "v2로 유지된다"고 적고 있었습니다. NeoGraph는 `provider-message-v3`, `provider-outcome-v3`, `runtime-history-record-v3`를 기록하고 v2 record도 계속 읽습니다. 네이티브 아카이브는 `spna3` 그대로입니다.
+  - **Program에 등록한 엔드포인트 노드는 effect 계약이 없습니다 (#531).** `add_core_endpoint_node`는 빈 effects 객체를 선언했고, Program 컴파일은 이를 아무것도 읽거나 쓰지 않는 노드로 취급해 그 노드의 채널에 대한 경고(E6)를 번들에 봉인했습니다. 이제 Core 그래프의 같은 노드처럼 아무것도 선언하지 않으며, 검증기가 분석을 건너뜁니다.
+  - **gRPC `Health`가 라이브러리 버전을 알립니다.** 빌드가 정의하지 않는 매크로를 읽어서 항상 `dev`로 답했습니다.
+  - **Python이 `provider_model_catalogue_json`을 내보냅니다.** 네이티브 모듈에는 있었지만 `neograph_engine`에는 없었습니다.
+  - **cookbook 챗봇이 모델 이름으로 분기하지 않습니다.** 기본 모델의 낮은 reasoning effort는 이제 모델 카탈로그 항목(`live-models.json`)이며 `--model-catalogue`로 전달합니다. 이 항목이 없으면 호출은 reasoning effort를 보내지 않습니다.
+  - **레퍼런스.** 엔드포인트 노드의 호출 경로(`make_endpoint_request`를 `invoke_provider`로 보냄)를 실제대로 설명하고, `P_MONEY_UNMODELED` 표에 엔드포인트 호출을 추가했습니다.
 
 ## [0.15.1] - 2026-10-19
 

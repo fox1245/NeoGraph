@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -62,6 +62,16 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ### 削除
 - **コンパイル済みの価格カタログを削除しました (#520).** `data/pricing/catalog.json`、内部の `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py`、週次の `Price drift` ワークフローはなくなりました。価格はホストが供給するカタログのデータです。`tests/fixtures/pricing/model_prices.json` は、13 個の項目をテスト用のカタログレイヤーとして保持します。
 - **型付きクライアント `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました (#510).** 0.15.1 で非推奨になっていました。画像、動画、decisions は SchemaProvider のエンドポイントで、`Provider::complete_endpoint` で呼び出します (#531)。ヘッダー（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、同梱の設定（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py`、およびそれらのテストはなくなりました。ライブスイートから型付きクライアントの 4 ケースがなくなります。
+
+### 修正
+- **0.16.0 のレビューで見つかった小さな修正 (#542)。**
+  - **ネイティブの履歴レコードが自身のスキーマを通ります。** `schemas/runtime-history-record-v3.schema.json` は `spna2:` のアーカイブ参照を要求していましたが、SDK は `spna3:` を書き出すため、ネイティブのレコードはすべてスキーマで失敗していました。v2 のスキーマも同じパターンでした。実際のアーカイブで書き出したレコードを検証するテストを追加しました。
+  - **持ち運べる JSON は v3 です。** README、ABI ポリシー、リファレンス、サンプルの README は、持ち運べる JSON は「v2 のまま」と書いていました。NeoGraph は `provider-message-v3`、`provider-outcome-v3`、`runtime-history-record-v3` を書き出し、v2 のレコードも引き続き読み込みます。ネイティブアーカイブは `spna3` のままです。
+  - **Program に登録したエンドポイントノードには effect の契約がありません (#531)。** `add_core_endpoint_node` は空の effects オブジェクトを宣言しており、Program のコンパイルはこれを何も読み書きしないノードとみなして、そのノードのチャネルについての警告（E6）をバンドルに封印していました。今は Core グラフの同じノードと同様に何も宣言せず、バリデーターは分析を行いません。
+  - **gRPC の `Health` がライブラリのバージョンを返します。** ビルドが定義しないマクロを読んでいたため、常に `dev` と答えていました。
+  - **Python が `provider_model_catalogue_json` を公開します。** ネイティブモジュールにはありましたが、`neograph_engine` にはありませんでした。
+  - **cookbook のチャットボットがモデル名で分岐しません。** 既定モデルの低い reasoning effort は、モデルカタログの項目（`live-models.json`）になり、`--model-catalogue` で渡します。この項目がなければ、呼び出しは reasoning effort を送りません。
+  - **リファレンス。** エンドポイントノードの呼び出し経路（`make_endpoint_request` を `invoke_provider` に渡す）を実際のとおりに説明し、`P_MONEY_UNMODELED` の表にエンドポイント呼び出しを加えました。
 
 ## [0.15.1] - 2026-10-19
 

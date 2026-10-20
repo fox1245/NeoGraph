@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=18cecdbc3a9febdfe3aa575f45c9aec87b0db3072920efdc79c575dc892d7e4e -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -62,6 +62,16 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 已移除
 - **移除编译进来的价格目录 (#520)。** `data/pricing/catalog.json`、内部的 `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py` 以及每周的 `Price drift` 工作流均已删除；价格是宿主提供的目录数据。`tests/fixtures/pricing/model_prices.json` 把这 13 个条目保留为供测试使用的目录层。
 - **移除类型化客户端 `ImagesClient`、`VeoClient` 和 `DecisionsClient` (#510)。** 它们已在 0.15.1 中弃用。图像、视频和 decisions 是 SchemaProvider 端点：通过 `Provider::complete_endpoint` 调用 (#531)。其头文件（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、随附的配置（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py` 以及相关测试均已删除。实时套件中去掉了四个类型化客户端用例。
+
+### 修复
+- **0.16.0 评审中发现的若干小问题（#542）。**
+  - **原生 history record 能通过自己的 schema。** `schemas/runtime-history-record-v3.schema.json` 要求 `spna2:` 归档引用，而 SDK 写出的是 `spna3:`，因此每条原生 record 都无法通过 schema。v2 schema 的模式相同。现在有一个测试，用真实归档写出的 record 做校验。
+  - **可移植 JSON 是 v3。** README、ABI 策略、参考文档和示例 README 曾写可移植 JSON“保持 v2”。NeoGraph 写出 `provider-message-v3`、`provider-outcome-v3` 和 `runtime-history-record-v3`，并仍可读取它们的 v2 记录；原生归档仍为 `spna3`。
+  - **在 Program 中注册的端点节点没有 effect 契约（#531）。** `add_core_endpoint_node` 声明了一个空的 effects 对象，Program 编译把它当作不读也不写任何通道的节点，并把关于该节点通道的警告（E6）封入 bundle。现在它与 Core 图中的同一节点一样不声明任何 effect，验证器会跳过分析。
+  - **gRPC `Health` 报告库的版本。** 它读取的宏在构建中从未定义，因此总是返回 `dev`。
+  - **Python 导出 `provider_model_catalogue_json`。** 原生模块里有它，但 `neograph_engine` 里没有。
+  - **cookbook 聊天机器人不再按模型名称分支。** 其默认模型的低 reasoning effort 现在是一个模型目录条目（`live-models.json`），通过 `--model-catalogue` 传入；没有该条目时，调用不发送 reasoning effort。
+  - **参考文档。** 按实际情况描述端点节点的调用路径（把 `make_endpoint_request` 交给 `invoke_provider`），并在 `P_MONEY_UNMODELED` 表中加入端点调用。
 
 ## [0.15.1] - 2026-10-19
 
