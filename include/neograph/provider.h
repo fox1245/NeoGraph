@@ -10,6 +10,7 @@
 #include <functional>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <string>
 #include <stdexcept>
 #include <utility>
@@ -162,13 +163,20 @@ struct ProviderObserverLimits {
 };
 
 namespace detail {
+/// What an endpoint payload prepared. `error` stops the call before the SDK is asked (an upload whose file cannot
+/// be read). `upload` names what an upload sends that its encoded body cannot (#541): the SDK reads a file slice
+/// while it sends it, and puts a random boundary in the body of an upload from memory.
+struct EndpointPreparation {
+    sp::runtime::PreparedRequest prepared;
+    std::optional<sp::Error> error;
+    std::optional<json> upload;
+};
 /// An endpoint request a ProviderRequest carries instead of a chat payload
 /// (#531): it prepares itself on the provider's SDK client.
 class EndpointPayload {
 public:
     virtual ~EndpointPayload() = default;
-    virtual sp::runtime::PreparedRequest prepare(sp::runtime::Client& client,
-                                                 sp::runtime::RunOptions options) const = 0;
+    virtual EndpointPreparation prepare(sp::runtime::Client& client, sp::runtime::RunOptions options) const = 0;
 };
 } // namespace detail
 
@@ -327,12 +335,24 @@ using EndpointOutcomeOf = typename EndpointOutcome<Request>::type;
 
 namespace detail {
 template <EndpointRequest Request>
+EndpointPreparation prepare_endpoint_call(sp::runtime::Client& client, sp::runtime::RunOptions options,
+                                          const Request& request) {
+    return {client.prepare(request, std::move(options)).release(), std::nullopt, std::nullopt};
+}
+/// An upload (#541) is named by its metadata and by the SHA-256, offset and size of the bytes it sends, whether they
+/// are in memory or a slice of a file, and never by the file's path. The slice is read, in bounded pieces, when the
+/// call is prepared; a file that is missing or shorter than the slice is the preparation's `error`, and the SDK is
+/// told the digest so the file it sends is the one that was hashed.
+NEOGRAPH_API EndpointPreparation prepare_endpoint_call(sp::runtime::Client& client, sp::runtime::RunOptions options,
+                                                       const sp::files::Upload& request);
+NEOGRAPH_API EndpointPreparation prepare_endpoint_call(sp::runtime::Client& client, sp::runtime::RunOptions options,
+                                                       const sp::files::Part& request);
+template <EndpointRequest Request>
 class TypedEndpointPayload final : public EndpointPayload {
 public:
     explicit TypedEndpointPayload(Request request) : request_(std::move(request)) {}
-    sp::runtime::PreparedRequest prepare(sp::runtime::Client& client,
-                                         sp::runtime::RunOptions options) const override {
-        return client.prepare(request_, std::move(options)).release();
+    EndpointPreparation prepare(sp::runtime::Client& client, sp::runtime::RunOptions options) const override {
+        return prepare_endpoint_call(client, std::move(options), request_);
     }
 private:
     Request request_;

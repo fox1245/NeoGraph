@@ -231,13 +231,15 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16)),
                query.column(17)};
     if (query.next()) throw std::runtime_error("Duplicate Program provider journal slot");
+    // A call that names no model, such as a file upload, stores an empty one; the model is compared with the
+    // call's own whenever the row is used.
     const auto slot_value = neograph::detail::parse_json_strict(row.slot);
     if (neograph::detail::canonical_json_bytes(slot_value) != row.slot ||
         hash("slot", slot_value) != id ||
         slot_value.at("owner_scope").get<std::string>() != owner ||
         !neograph::detail::is_sha256_identity(row.request) ||
         !neograph::detail::is_sha256_identity(row.provider) ||
-        row.model.empty() || row.attempt.empty() || row.provider_name.empty() ||
+        row.attempt.empty() || row.provider_name.empty() ||
         row.family.empty() || (row.mode != "collect" && row.mode != "stream") || row.deadline.empty() ||
         (!row.evidence.empty() && !neograph::detail::is_sha256_identity(row.evidence)) ||
         row.scope != scope_digest(slot_value))

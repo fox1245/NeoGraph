@@ -5,6 +5,7 @@
 #include "typed_wire_peer.h"
 #include <algorithm>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -84,6 +85,37 @@ public:
     std::atomic<std::size_t> polls_seen{0};
 private:
     std::vector<std::string> polls_;
+    httplib::Server server_;
+    int port_ = 0;
+    std::thread worker_;
+};
+// OpenAI files: each upload answers a file numbered by the uploads so far, and the peer keeps the bytes it received.
+class UploadPeer {
+public:
+    UploadPeer() {
+        server_.Post("/v1/files", [this](const httplib::Request& request, httplib::Response& response) {
+            std::lock_guard lock(mutex_);
+            const auto file = request.form.get_file("file");
+            received_.push_back(file.content);
+            response.set_content(
+                json{{"object", "file"}, {"id", "file-" + std::to_string(received_.size())},
+                     {"purpose", request.form.get_field("purpose")}, {"filename", file.filename},
+                     {"bytes", file.content.size()}, {"created_at", 1}, {"status", "processed"}}.dump(),
+                "application/json");
+        });
+        port_ = server_.bind_to_any_port("127.0.0.1");
+        worker_ = std::thread([this] { server_.listen_after_bind(); });
+        for (int i = 0; i != 200 && !server_.is_running(); ++i) std::this_thread::sleep_for(5ms);
+    }
+    ~UploadPeer() { server_.stop(); worker_.join(); }
+    std::string origin() const { return "http://127.0.0.1:" + std::to_string(port_); }
+    std::vector<std::string> received() const {
+        std::lock_guard lock(mutex_);
+        return received_;
+    }
+private:
+    mutable std::mutex mutex_;
+    std::vector<std::string> received_;
     httplib::Server server_;
     int port_ = 0;
     std::thread worker_;

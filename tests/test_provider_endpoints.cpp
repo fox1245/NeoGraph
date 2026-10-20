@@ -2,10 +2,13 @@
 // admits them, and the async form neither blocks a thread nor needs the provider to outlive it.
 #include <gtest/gtest.h>
 #include "fixtures/endpoint_peer.h"
+#include "fixtures/unique_temp_dir.h"
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/use_future.hpp>
+#include <filesystem>
+#include <fstream>
 #include <type_traits>
 
 using namespace neograph;
@@ -53,6 +56,70 @@ void expect_vector(const sp::embeddings::Outcome& outcome) {
     EXPECT_EQ(result->vectors[0], (std::vector<float>{0.25f, -0.5f}));
     ASSERT_TRUE(result->usage.input_total);
     EXPECT_EQ(result->usage.input_total->value, 3u);
+}
+
+// Where an upload's files live; the directory goes with the object.
+class Sources {
+public:
+    Sources() : dir_("neograph-upload-identity-") {}
+    std::string write(const std::string& name, const std::string& bytes) const {
+        const auto path = dir_.path() / name;
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream(path, std::ios::binary) << bytes;
+        return path.string();
+    }
+    std::string directory() const { return dir_.path().string(); }
+private:
+    graph::test_support::UniqueTempDir dir_;
+};
+
+constexpr auto kFixedOrigin = "http://127.0.0.1:1";
+
+sp::files::Upload file_upload(std::string path, std::uint64_t offset, std::uint64_t size) {
+    sp::files::Upload upload;
+    upload.source.file = {std::move(path), offset, size};
+    upload.filename = "data.bin";
+    upload.mime = "application/octet-stream";
+    upload.purpose = "user_data";
+    return upload;
+}
+
+sp::files::Upload memory_upload(std::string bytes) {
+    sp::files::Upload upload;
+    upload.source.bytes = std::make_shared<const std::string>(std::move(bytes));
+    upload.filename = "data.bin";
+    upload.mime = "application/octet-stream";
+    upload.purpose = "user_data";
+    return upload;
+}
+
+sp::files::Part file_part(std::string path, std::uint64_t offset, std::uint64_t size) {
+    sp::files::Part part;
+    part.session.origin = kFixedOrigin;
+    part.session.shape = "openai";
+    part.session.id = "upload-1";
+    part.session.size = 4096;
+    part.source.file = {std::move(path), offset, size};
+    return part;
+}
+
+// The dispatch identity of a call prepared on `provider`, or the error that refused it.
+template <class Request>
+std::string digest_of(Provider& provider, Request request) {
+    auto prepared = provider.prepare(make_endpoint_request(std::move(request)));
+    EXPECT_EQ(prepared.error(), nullptr);
+    return prepared.valid() ? Provider::request_digest(prepared) : std::string{};
+}
+
+template <class Request>
+std::string refusal_of(Provider& provider, Request request) {
+    const auto prepared = provider.prepare(make_endpoint_request(std::move(request)));
+    EXPECT_FALSE(prepared.valid());
+    EXPECT_NE(prepared.error(), nullptr);
+    if (!prepared.error()) return {};
+    EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);
+    EXPECT_EQ(prepared.error()->retry_safety, sp::RetrySafety::NotSent);
+    return prepared.error()->safe_message;
 }
 
 class NoEndpoints final : public Provider {
@@ -191,6 +258,117 @@ TEST(ProviderEndpoints, TheDispatchIdentityNamesWhatAnEndpointCallSends) {
     EXPECT_NE(first, digest(sp::files::Delete{"file-a"}));
     EXPECT_EQ(first, digest(sp::files::Get{"file-a"}));
     EXPECT_EQ(peer.state->entered, 0u);
+}
+
+TEST(ProviderEndpoints, TheDispatchIdentityNamesTheBytesAnUploadSendsNotTheirPath) {
+    Sources sources;
+    const auto a = sources.write("a.bin", std::string(100, 'a'));
+    const auto b = sources.write("b.bin", std::string(100, 'b'));
+    const auto moved = sources.write("elsewhere/a.bin", std::string(100, 'a'));
+    const auto both = sources.write("both.bin", std::string(100, 'a') + std::string(100, 'b'));
+    auto provider = test::endpoints::provider_at(kFixedOrigin);
+    const auto first = digest_of(*provider, file_upload(a, 0, 100));
+    EXPECT_FALSE(first.empty());
+    EXPECT_NE(first, digest_of(*provider, file_upload(b, 0, 100))) << "another file";
+    EXPECT_EQ(first, digest_of(*provider, file_upload(moved, 0, 100))) << "the same bytes at another path";
+    EXPECT_EQ(first, digest_of(*provider, file_upload(a, 0, 100))) << "prepared again";
+    EXPECT_NE(first, digest_of(*provider, file_upload(a, 0, 50))) << "fewer bytes";
+    EXPECT_NE(digest_of(*provider, file_upload(both, 0, 100)), digest_of(*provider, file_upload(both, 100, 100)))
+        << "another part of the file";
+    // What the file slice's prefix carries is named too.
+    const auto named = [&](auto edit) {
+        auto upload = file_upload(a, 0, 100);
+        edit(upload);
+        return digest_of(*provider, std::move(upload));
+    };
+    EXPECT_NE(first, named([](auto& upload) { upload.filename = "other.bin"; }));
+    EXPECT_NE(first, named([](auto& upload) { upload.mime = "text/plain"; }));
+    EXPECT_NE(first, named([](auto& upload) { upload.purpose = "batch"; }));
+    EXPECT_NE(first, named([](auto& upload) { upload.expires_after = 3600; }));
+    // A chunk of a chunked upload is named by its bytes in the same way.
+    const auto part = digest_of(*provider, file_part(a, 0, 100));
+    EXPECT_NE(part, digest_of(*provider, file_part(b, 0, 100)));
+    EXPECT_EQ(part, digest_of(*provider, file_part(moved, 0, 100)));
+    EXPECT_NE(part, first) << "a part is not a whole-file upload";
+}
+
+TEST(ProviderEndpoints, AnUploadFromMemoryHasOneIdentityNoMatterHowOftenItIsPrepared) {
+    // The SDK's multipart boundary is random, and an upload from memory carries it in its encoded body.
+    auto provider = test::endpoints::provider_at(kFixedOrigin);
+    const auto first = digest_of(*provider, memory_upload(std::string(100, 'a')));
+    EXPECT_FALSE(first.empty());
+    EXPECT_EQ(first, digest_of(*provider, memory_upload(std::string(100, 'a'))));
+    EXPECT_NE(first, digest_of(*provider, memory_upload(std::string(100, 'b'))));
+}
+
+TEST(ProviderEndpoints, AnUploadWhoseFileCannotBeReadAsDeclaredIsRefusedWhenItIsPrepared) {
+    Sources sources;
+    const auto a = sources.write("a.bin", std::string(100, 'a'));
+    auto provider = test::endpoints::provider_at(kFixedOrigin);
+    const auto expect_source = [&](const std::string& message) {
+        EXPECT_NE(message.find("upload source"), std::string::npos) << message;
+        EXPECT_EQ(message.find(sources.directory()), std::string::npos) << "the message holds no path: " << message;
+    };
+    expect_source(refusal_of(*provider, file_upload(sources.directory() + "/missing.bin", 0, 100)));
+    expect_source(refusal_of(*provider, file_upload(sources.directory(), 0, 100)));
+    expect_source(refusal_of(*provider, file_upload(a, 0, 101)));
+    expect_source(refusal_of(*provider, file_upload(a, 60, 50)));
+    expect_source(refusal_of(*provider, file_upload(a, 101, 1)));
+    expect_source(refusal_of(*provider, file_part(a, 90, 20)));
+    // A declared digest is checked against the bytes, and a matching one changes nothing.
+    auto declared = file_upload(a, 0, 100);
+    declared.source.file.sha256 = std::string(64, '0');
+    expect_source(refusal_of(*provider, declared));
+    // SHA-256 of one hundred 'a' bytes.
+    declared.source.file.sha256 = "2816597888e4a0d3a36b82b83316ab32680eb8f00f8cd3b904d681246d285a0e";
+    EXPECT_EQ(digest_of(*provider, declared), digest_of(*provider, file_upload(a, 0, 100)));
+    // What the SDK refuses on its own terms stays its refusal.
+    auto nothing = file_upload(a, 0, 0);
+    EXPECT_FALSE(provider->prepare(make_endpoint_request(std::move(nothing))).valid());
+}
+
+TEST(ProviderEndpoints, AnUploadIsSentFromTheFileItsIdentityNames) {
+    Sources sources;
+    test::endpoints::UploadPeer peer;
+    auto provider = test::endpoints::provider_at(peer.origin());
+    const auto path = sources.write("a.bin", "first bytes");
+    auto prepared = provider->prepare(make_endpoint_request(file_upload(path, 0, 11)));
+    ASSERT_TRUE(prepared.valid());
+    // The file changes after the call was named. Its new bytes are not sent under that name.
+    sources.write("a.bin", "other bytes");
+    const auto changed = provider->dispatch(std::move(prepared));
+    ASSERT_TRUE(changed);
+    const auto* failure = std::get_if<sp::Failure>(&*changed);
+    ASSERT_NE(failure, nullptr);
+    EXPECT_EQ(failure->error.kind, sp::ErrorKind::InvalidRequest);
+    EXPECT_TRUE(peer.received().empty());
+    // Prepared again, the call names the file as it is, and sends it.
+    const auto sent = provider->dispatch(provider->prepare(make_endpoint_request(file_upload(path, 0, 11))));
+    ASSERT_TRUE(sent);
+    const auto outcome = sp::files::typed(*sent);
+    const auto* file = std::get_if<sp::files::File>(&outcome);
+    ASSERT_NE(file, nullptr);
+    EXPECT_EQ(file->id, "file-1");
+    EXPECT_EQ(peer.received(), std::vector<std::string>{"other bytes"});
+}
+
+TEST(ProviderEndpoints, TheDispatchIdentityOfEverythingButAnUploadIsUnchanged) {
+    // Pinned from before uploads were named (#541), so a journal written then still matches. The observer limits are
+    // set because their defaults follow the size of the SDK's event type, which differs between standard libraries.
+    // A change of the descriptor policy or of an SDK resource limit moves these digests too, and with them the
+    // identity of every journaled call.
+    auto provider = test::endpoints::provider_at(kFixedOrigin);
+    constexpr ProviderObserverLimits limits{64, 65536};
+    auto chat_request = test::wire::request();
+    chat_request.observer_limits = limits;
+    auto chat = provider->prepare(std::move(chat_request));
+    ASSERT_TRUE(chat.valid());
+    EXPECT_EQ(Provider::request_digest(chat), "sha256:7b05f3fac1c26a6be86fe6d8a6dc47df83fc3b5493fd4c84c12206c5e14f4305");
+    auto get_request = make_endpoint_request(sp::files::Get{"file-a"});
+    get_request.observer_limits = limits;
+    auto get = provider->prepare(std::move(get_request));
+    ASSERT_TRUE(get.valid());
+    EXPECT_EQ(Provider::request_digest(get), "sha256:8a5fe0c5401985f8cdf4d412b2c305148a150a43e9c7a4992f655af2d11825a5");
 }
 
 TEST(ProviderEndpoints, AStreamedEndpointRequestIsRefusedBeforeItIsSent) {

@@ -1,7 +1,9 @@
 #include "sha256.h"
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
+#include <cstring>
 #include <stdexcept>
 
 #if !defined(NEOGRAPH_DISABLE_SHA256_ACCELERATION) && (defined(__x86_64__) || defined(_M_X64)) && \
@@ -191,20 +193,21 @@ bool sha256_hardware_available() noexcept {
 #endif
 }
 
-std::array<std::uint8_t, 32> sha256_digest(std::string_view input, Sha256Backend backend) {
+Sha256Stream::Sha256Stream(Sha256Backend backend)
+    : state_{0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+             0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u} {
     static const Compressor automatic = automatic_compressor();
-    Compressor              compress;
     switch (backend) {
         case Sha256Backend::Automatic:
-            compress = automatic;
+            compress_ = automatic;
             break;
         case Sha256Backend::Portable:
-            compress = compress_portable;
+            compress_ = compress_portable;
             break;
         case Sha256Backend::X86Sha:
 #if defined(NEOGRAPH_SHA256_X86)
             if (sha256_hardware_available()) {
-                compress = compress_x86_sha;
+                compress_ = compress_x86_sha;
                 break;
             }
 #endif
@@ -212,35 +215,62 @@ std::array<std::uint8_t, 32> sha256_digest(std::string_view input, Sha256Backend
         default:
             throw std::invalid_argument("Unknown SHA-256 backend");
     }
-    std::array<std::uint32_t, 8> state = {
-        0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
-    };
-    const auto full_blocks = input.size() / 64;
-    if (full_blocks)
-        compress(state.data(), reinterpret_cast<const std::uint8_t*>(input.data()), full_blocks);
-    std::array<std::uint8_t, 128> tail{};
-    const auto                    remainder = input.size() % 64;
-    for (std::size_t i = 0; i < remainder; ++i) {
-        tail[i] =
-            static_cast<std::uint8_t>(static_cast<unsigned char>(input[full_blocks * 64 + i]));
+}
+
+void Sha256Stream::update(std::string_view input) {
+    if (finished_) throw std::logic_error("SHA-256 hash is finished");
+    if (input.empty()) return;
+    length_ += input.size();
+    auto        data = reinterpret_cast<const std::uint8_t*>(input.data());
+    std::size_t size = input.size();
+    if (filled_) {
+        const auto take = std::min(size, block_.size() - filled_);
+        std::memcpy(block_.data() + filled_, data, take);
+        filled_ += take;
+        data += take;
+        size -= take;
+        if (filled_ < block_.size()) return;
+        compress_(state_.data(), block_.data(), 1);
+        filled_ = 0;
     }
-    tail[remainder]              = 0x80;
-    const std::size_t tail_size  = remainder < 56 ? 64 : 128;
-    const auto        bit_length = static_cast<std::uint64_t>(input.size()) * 8;
+    if (const auto blocks = size / block_.size()) {
+        compress_(state_.data(), data, blocks);
+        data += blocks * block_.size();
+        size -= blocks * block_.size();
+    }
+    if (size) {
+        std::memcpy(block_.data(), data, size);
+        filled_ = size;
+    }
+}
+
+std::array<std::uint8_t, 32> Sha256Stream::finish() {
+    if (finished_) throw std::logic_error("SHA-256 hash is finished");
+    finished_ = true;
+    std::array<std::uint8_t, 128> tail{};
+    std::memcpy(tail.data(), block_.data(), filled_);
+    tail[filled_]               = 0x80;
+    const std::size_t tail_size = filled_ < 56 ? 64 : 128;
+    const auto        bit_length = length_ * 8;
     for (std::size_t i = 0; i < 8; ++i) {
         tail[tail_size - 1 - i] = static_cast<std::uint8_t>(bit_length >> (i * 8));
     }
-    compress(state.data(), tail.data(), tail_size / 64);
+    compress_(state_.data(), tail.data(), tail_size / 64);
 
     std::array<std::uint8_t, 32> digest{};
-    for (std::size_t i = 0; i < state.size(); ++i) {
-        digest[i * 4]     = static_cast<std::uint8_t>(state[i] >> 24);
-        digest[i * 4 + 1] = static_cast<std::uint8_t>(state[i] >> 16);
-        digest[i * 4 + 2] = static_cast<std::uint8_t>(state[i] >> 8);
-        digest[i * 4 + 3] = static_cast<std::uint8_t>(state[i]);
+    for (std::size_t i = 0; i < state_.size(); ++i) {
+        digest[i * 4]     = static_cast<std::uint8_t>(state_[i] >> 24);
+        digest[i * 4 + 1] = static_cast<std::uint8_t>(state_[i] >> 16);
+        digest[i * 4 + 2] = static_cast<std::uint8_t>(state_[i] >> 8);
+        digest[i * 4 + 3] = static_cast<std::uint8_t>(state_[i]);
     }
     return digest;
+}
+
+std::array<std::uint8_t, 32> sha256_digest(std::string_view input, Sha256Backend backend) {
+    Sha256Stream hash(backend);
+    hash.update(input);
+    return hash.finish();
 }
 
 }  // namespace neograph::detail

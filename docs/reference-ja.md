@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=0bd0ee42a488b1894ec47377e203668050f2afecae7709b1139cbada393274a6 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -331,7 +331,7 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **スレッドを止めない呼び出し。** `complete_endpoint_async` はスレッドを止めません。awaitable がクライアントと呼び出しを所有するため、リクエストも provider もそれより長く生きる必要はありません。待機中のコルーチンをキャンセルすると呼び出しもキャンセルされ、結果は SDK の `Cancelled` 失敗になります。
 - **そのまま送信。** `SchemaProvider::Defaults` はチャット呼び出しにだけ適用されます。ここでは呼び出しをジャーナルに記録せず、予算の予約も課金もしません。
 - **エンドポイントを持たない provider。** SchemaProvider のエンドポイントを持たない `Provider` は `std::logic_error` を投げます。サブクラスは `endpoint_runtime()` をオーバーライドして自身のクライアントを転送し、別の provider を包む provider は `endpoint_runtime_of(inner)` を返します。`has_endpoints()` は provider がエンドポイントを持つかどうかを知らせます。
-- **チャット経路で。** `make_endpoint_request(request)` はエンドポイントのリクエストを `ProviderRequest` に入れるため、`prepare`、`dispatch`、`invoke` はこれをチャット呼び出しと同じように扱います：dispatch の Hook、観測者、provider 呼び出し broker とそのジャーナル、トークン予算。結果は型なしで、エンドポイントの `typed()`（`sp::embeddings::typed`、...）がそれに型を付けます。呼び出しはバッファリングされるため、`ProviderMode::Stream` は拒否され、ローカル provider（`prepare_local`）もこれを拒否します。dispatch identity（`request_digest`）にはエンドポイント、メソッド、URL も含まれます。1 つのエンドポイントを複数の操作が共有し、読み取りには本文がないためです。 エンドポイントの読み取り（`PreparedProviderRequest::is_endpoint_read()`：ジョブのポーリングやダウンロード、ファイルやバッチの参照などの GET）は課金されず、再送しても安全なため、ジャーナルを記録する broker はこれをリプレイせず毎回送ります。
+- **チャット経路で。** `make_endpoint_request(request)` はエンドポイントのリクエストを `ProviderRequest` に入れるため、`prepare`、`dispatch`、`invoke` はこれをチャット呼び出しと同じように扱います：dispatch の Hook、観測者、provider 呼び出し broker とそのジャーナル、トークン予算。結果は型なしで、エンドポイントの `typed()`（`sp::embeddings::typed`、...）がそれに型を付けます。呼び出しはバッファリングされるため、`ProviderMode::Stream` は拒否され、ローカル provider（`prepare_local`）もこれを拒否します。dispatch identity（`request_digest`）にはエンドポイント、メソッド、URL も含まれます。1 つのエンドポイントを複数の操作が共有し、読み取りには本文がないためです。アップロードの identity には、エンコードされた本文では表せないものも含まれます。送るバイト列の SHA-256、オフセット、サイズと、ファイル全体のアップロード（`sp::files::Upload`）ではファイル名、MIME タイプ、purpose、有効期限です。バイト列は、メモリから来る場合もファイルの一部から来る場合も、呼び出しを prepare するときにハッシュされます。ファイルのパスは identity に含まれないため、内容が変わったファイルは別の呼び出しになり、移動しただけのファイルは同じ呼び出しです。ファイルが存在しない場合やスライスより短い場合は、呼び出しの prepare 時に拒否されます（`ErrorKind::InvalidRequest`）。 エンドポイントの読み取り（`PreparedProviderRequest::is_endpoint_read()`：ジョブのポーリングやダウンロード、ファイルやバッチの参照などの GET）は課金されず、再送しても安全なため、ジャーナルを記録する broker はこれをリプレイせず毎回送ります。
 
 ### ProviderRequest / ProviderControls
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=1ad94dc3f8605b5b07d82e043845a53f9adfe1a49a97319a18c1c59081c7925c -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - `make_endpoint_request` 把端点请求放进 `ProviderRequest`，端点节点通过它发起调用。因此端点调用走的是聊天调用所走的路径：provider 调用 broker、持久的分发标记、SQLite journal，以及在恢复和 fork 时的重放。Program 用 `RegistrySnapshotBuilder::add_core_endpoint_node` 注册这些节点。
   - 模型 token 预算会在发送之前拒绝端点调用，因为它没有输出上限。计价绑定以 `P_MONEY_UNMODELED` 拒绝它，因为模型目录目前还无法为端点请求计价（fox1245/SchemaProvider#124）。
   - 端点调用的分发标识中还包含它的端点、方法和 URL。聊天调用的标识不变，所以 journal 仍然能匹配。
+  - 上传的分发标识中还包含文件名、MIME 类型、purpose 和过期时间，以及所发送字节的 SHA-256、偏移量和大小，但不包含文件路径（#541）。此前，从文件读取的上传无论文件、名称或 purpose 如何，标识都相同；从内存发送的上传，其请求体带有 SDK 随机生成的 multipart 边界，因此每次准备时标识都不同。文件缺失或短于其切片时，会在准备调用时被拒绝。此外，恢复运行时读取没有模型名的调用（例如上传）的 journal 行，不再把它当作已损坏而拒绝。
   - 端点读取（GET：任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此 journal 每次都发送它（`PreparedProviderRequest::is_endpoint_read()`）。因此，在运行中的视频任务上暂停的 Program 恢复后会看到任务完成，而不是重放第一次轮询。
   - Program provider 包装器和 `OpenInferenceProvider` 会转发其内部 provider 的端点（`Provider::endpoint_runtime_of`）。
 

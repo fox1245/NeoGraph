@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=0bd0ee42a488b1894ec47377e203668050f2afecae7709b1139cbada393274a6 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -360,7 +360,7 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **스레드를 막지 않는 호출.** `complete_endpoint_async`는 스레드를 막지 않는다. awaitable이 클라이언트와 호출을 소유하므로 요청도 provider도 그보다 오래 살 필요가 없다. 기다리는 코루틴을 취소하면 호출이 취소되고, 결과는 SDK의 `Cancelled` 실패다.
 - **주어진 그대로 전송.** `SchemaProvider::Defaults`는 채팅 호출에만 적용된다. 여기서는 어떤 호출도 저널에 남기지 않고, 예산을 예약하거나 차감하지도 않는다.
 - **엔드포인트가 없는 provider.** SchemaProvider 엔드포인트가 없는 `Provider`는 `std::logic_error`를 던진다. 하위 클래스는 `endpoint_runtime()`을 재정의해 자기 클라이언트를 전달하고, 다른 provider를 감싸는 provider는 `endpoint_runtime_of(inner)`를 반환한다. `has_endpoints()`는 provider에 엔드포인트가 있는지 알려 준다.
-- **채팅 경로에서.** `make_endpoint_request(request)`는 엔드포인트 요청을 `ProviderRequest`에 담으므로, `prepare`, `dispatch`, `invoke`가 이를 채팅 호출과 똑같이 처리한다: dispatch Hook, 관측자, provider 호출 broker와 그 저널, 토큰 예산. 결과는 타입이 없으며, 엔드포인트의 `typed()`(`sp::embeddings::typed`, ...)가 결과에 타입을 부여한다. 호출은 버퍼링되므로 `ProviderMode::Stream`은 거부되며, 로컬 provider(`prepare_local`)도 이를 거부한다. dispatch identity(`request_digest`)에는 엔드포인트, 메서드, URL도 들어간다. 하나의 엔드포인트를 여러 연산이 공유하고, 읽기에는 본문이 없기 때문이다. 엔드포인트 읽기(`PreparedProviderRequest::is_endpoint_read()`: job 폴링이나 다운로드, 파일이나 배치 조회 같은 GET)는 과금되지 않고 다시 보내도 안전하므로, 저널을 남기는 broker는 이를 replay하지 않고 매번 보낸다.
+- **채팅 경로에서.** `make_endpoint_request(request)`는 엔드포인트 요청을 `ProviderRequest`에 담으므로, `prepare`, `dispatch`, `invoke`가 이를 채팅 호출과 똑같이 처리한다: dispatch Hook, 관측자, provider 호출 broker와 그 저널, 토큰 예산. 결과는 타입이 없으며, 엔드포인트의 `typed()`(`sp::embeddings::typed`, ...)가 결과에 타입을 부여한다. 호출은 버퍼링되므로 `ProviderMode::Stream`은 거부되며, 로컬 provider(`prepare_local`)도 이를 거부한다. dispatch identity(`request_digest`)에는 엔드포인트, 메서드, URL도 들어간다. 하나의 엔드포인트를 여러 연산이 공유하고, 읽기에는 본문이 없기 때문이다. 업로드의 identity에는 인코딩된 본문이 담을 수 없는 것도 들어간다. 업로드가 보내는 바이트의 SHA-256, 오프셋, 크기이고, 파일 전체 업로드(`sp::files::Upload`)라면 파일 이름, MIME 타입, purpose, 만료 시간도 들어간다. 바이트는 메모리에서 오든 파일 조각에서 오든 호출을 prepare할 때 해시된다. 파일 경로는 identity에 포함되지 않으므로, 내용이 바뀐 파일은 다른 호출이 되고 옮기기만 한 파일은 같은 호출이다. 파일이 없거나 조각보다 짧으면 호출을 prepare할 때 거부된다(`ErrorKind::InvalidRequest`). 엔드포인트 읽기(`PreparedProviderRequest::is_endpoint_read()`: job 폴링이나 다운로드, 파일이나 배치 조회 같은 GET)는 과금되지 않고 다시 보내도 안전하므로, 저널을 남기는 broker는 이를 replay하지 않고 매번 보낸다.
 
 ### ProviderRequest / ProviderControls
 

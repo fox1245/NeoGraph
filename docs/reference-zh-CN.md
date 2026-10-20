@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=c7bacdf01dc7eb88947e3ad01b254a06bbd6ce2c526284ab8879aef35da49a1e -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=0bd0ee42a488b1894ec47377e203668050f2afecae7709b1139cbada393274a6 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -361,7 +361,7 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **不阻塞线程的调用。** `complete_endpoint_async` 不会阻塞线程。awaitable 拥有客户端和调用，因此请求和 provider 都不必比它活得更久。取消正在等待的协程会取消调用，此时结果是 SDK 的 `Cancelled` 失败。
 - **按原样发送。** `SchemaProvider::Defaults` 只适用于聊天调用。这里不会把调用写入日志，也不会预留或扣除预算。
 - **没有端点的 provider。** 没有 SchemaProvider 端点的 `Provider` 会抛出 `std::logic_error`。子类通过重写 `endpoint_runtime()` 转发自己的客户端，包装另一个 provider 的 provider 则返回 `endpoint_runtime_of(inner)`。`has_endpoints()` 告知 provider 是否有端点。
-- **在聊天路径上。** `make_endpoint_request(request)` 把端点请求放进 `ProviderRequest`，因此 `prepare`、`dispatch` 和 `invoke` 像处理聊天调用一样处理它：dispatch Hook、观察者、provider 调用 broker 及其 journal，以及 token 预算。结果没有类型；由端点的 `typed()`（`sp::embeddings::typed`，...）为它赋予类型。该调用是缓冲的，所以 `ProviderMode::Stream` 会被拒绝，本地 provider（`prepare_local`）也会拒绝它。它的 dispatch identity（`request_digest`）还包含端点、方法和 URL，因为多个操作共用同一个端点，而读取没有请求体。 端点读取（`PreparedProviderRequest::is_endpoint_read()`：GET，例如任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此记录 journal 的 broker 每次都发送它，而不是重放。
+- **在聊天路径上。** `make_endpoint_request(request)` 把端点请求放进 `ProviderRequest`，因此 `prepare`、`dispatch` 和 `invoke` 像处理聊天调用一样处理它：dispatch Hook、观察者、provider 调用 broker 及其 journal，以及 token 预算。结果没有类型；由端点的 `typed()`（`sp::embeddings::typed`，...）为它赋予类型。该调用是缓冲的，所以 `ProviderMode::Stream` 会被拒绝，本地 provider（`prepare_local`）也会拒绝它。它的 dispatch identity（`request_digest`）还包含端点、方法和 URL，因为多个操作共用同一个端点，而读取没有请求体。上传的 identity 还包含其编码后的请求体无法表达的内容：所发送字节的 SHA-256、偏移量和大小；对于整文件上传（`sp::files::Upload`），还包括文件名、MIME 类型、purpose 和过期时间。无论这些字节来自内存还是文件切片，都会在准备调用时计算哈希。文件路径不属于该 identity，因此内容变化的文件是另一次调用，而仅被移动的文件不是。文件缺失或短于其切片时，会在准备调用时被拒绝（`ErrorKind::InvalidRequest`）。 端点读取（`PreparedProviderRequest::is_endpoint_read()`：GET，例如任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此记录 journal 的 broker 每次都发送它，而不是重放。
 
 ### ProviderRequest / ProviderControls
 
