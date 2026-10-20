@@ -33,6 +33,9 @@ public:
         return inner_->prepare(std::move(request));
     }
 
+protected:
+    std::shared_ptr<sp::runtime::Client> endpoint_runtime() const override { return endpoint_runtime_of(*inner_); }
+
 private:
     std::string               name_;
     std::shared_ptr<Provider> inner_;

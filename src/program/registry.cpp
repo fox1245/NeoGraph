@@ -1,6 +1,8 @@
+#include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/program/registry.h>
 
+#include "../core/endpoint_nodes.h"
 #include "canonical_json.h"
 #include "registry_access.h"
 
@@ -403,6 +405,21 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_tool_dispatch(
         json{{"type", "object"}},
         json{{"reads", json::array({"messages"})},
              {"writes", json::array({"messages"})}},
+        std::move(requirement_resolver), true);
+}
+
+RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_endpoint_node(
+    ExecutableManifest manifest, ExecutableRequirementResolver requirement_resolver) {
+    const auto type = manifest.identity.name;
+    if (manifest.effect_mode != EffectMode::Brokered || !graph::is_endpoint_node_type(type))
+        throw std::invalid_argument("Core endpoint node must be a brokered endpoint node type");
+    // The node's channels are its configuration, so it declares no fixed effects.
+    return add_node_impl(
+        std::move(manifest),
+        [type](const std::string& name, const json& config, const graph::NodeContext& context) {
+            return graph::NodeFactory::instance().create(type, name, config, context);
+        },
+        graph::NodeFactory::instance().config_schema(type), json::object(),
         std::move(requirement_resolver), true);
 }
 

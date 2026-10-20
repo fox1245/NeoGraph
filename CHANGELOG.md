@@ -23,7 +23,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Endpoint nodes in graphs (#531).**
   - The built-in node types `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe` and `translate` make one endpoint call each. They read their inputs from channels the node's config names, and write the result to one channel: provider media JSON, vectors, rankings, verdicts, answers or text.
   - `job_submit` and `job_collect` run a video job. The collect node polls once each time it runs and interrupts the run until the job has finished.
-  - The token usage a call reports is recorded on the run. A budgeted run refuses the nodes until Program calls broker them.
+  - The token usage a call reports is recorded on the run.
+- **Endpoint calls in Programs (#531).**
+  - `make_endpoint_request` puts an endpoint request in a `ProviderRequest`, and the endpoint nodes call through it. So an endpoint call takes the path a chat call takes: the provider call broker, the durable dispatched marker, the SQLite journal, and replay on resume and fork. A Program registers the nodes with `RegistrySnapshotBuilder::add_core_endpoint_node`.
+  - A model-token budget refuses an endpoint call before it is sent, since it has no output cap. A priced binding refuses it with `P_MONEY_UNMODELED`, because the model catalogue cannot price an endpoint request yet (fox1245/SchemaProvider#124).
+  - An endpoint call's dispatch identity also names its endpoint, method and URL. A chat call's identity is unchanged, so journals keep matching.
+  - The Program provider wrapper and `OpenInferenceProvider` forward their inner provider's endpoints (`Provider::endpoint_runtime_of`).
 
 ### Changed
 - **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable. The decision is the roundtable of 2026-10-20.

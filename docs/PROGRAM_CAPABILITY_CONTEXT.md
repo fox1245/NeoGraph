@@ -15,10 +15,17 @@ node is not an implicit capability of this node.
 | Host-reviewed `add_host_brokered_node` | Exact declared Provider | Exact declared Tools | Exact metadata |
 | Fixed `add_core_llm_call` | Exact declared Provider | Exact declared Tools for model definitions | Exact metadata |
 | Fixed `add_core_tool_dispatch` | None | Exact declared Tools | Exact metadata |
+| Fixed `add_core_endpoint_node` | Exact declared Provider | None | Exact metadata |
 | `TrustedNative` C++ factory | Exact declared Provider | Exact declared Tools | Exact metadata |
 
-The two fixed Core registrations construct NeoGraph's own `LLMCallNode` and
-`ToolDispatchNode`; they do not accept a caller-supplied factory. Register them
+The fixed Core registrations construct NeoGraph's own `LLMCallNode`,
+`ToolDispatchNode` and SchemaProvider endpoint nodes (`add_core_endpoint_node`, whose
+manifest names the node type: `embed`, `image_generate`, ..., `job_collect`, #531);
+they do not accept a caller-supplied factory. An endpoint node's calls take the
+Core provider path, as `llm_call`'s do: the host's provider call broker journals
+and replays them, a model-token budget refuses them because they have no output
+cap, and a priced binding refuses them with `P_MONEY_UNMODELED` until the model
+catalogue can bound an endpoint call. Register every fixed Core node
 with exact, immutable requirement resolvers. A model-authored topology can
 select an admitted type and node configuration, but cannot make an arbitrary
 brokered factory receive a raw Tool pointer. The standard dispatch node still

@@ -360,6 +360,11 @@ void bounded_text(const std::string& value, std::string_view field, bool may_be_
 
 MonetaryRequestFacts monetary_request_facts(const ProviderRequest& request) {
     MonetaryRequestFacts facts;
+    // The catalogue prices chat tokens only; nothing bounds an endpoint request yet (SchemaProvider#124).
+    if (request.endpoint) {
+        facts.unpriced = "SchemaProvider endpoint calls";
+        return facts;
+    }
     std::visit(
         [&](const auto& payload) {
             using T = std::decay_t<decltype(payload)>;

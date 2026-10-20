@@ -1,7 +1,7 @@
 // The built-in SchemaProvider endpoint nodes (#531). Each reads its inputs from channels, makes one call on the
-// node context's provider (Provider::complete_endpoint_async) and writes the result to one channel. A video job
-// takes two nodes: job_submit writes the job's handle, and job_collect polls it once per run of the node,
-// interrupting until the job has finished.
+// node context's provider, on the path a chat call takes (make_endpoint_request), and writes the result to one
+// channel. A video job takes two nodes: job_submit writes the job's handle, and job_collect polls it once per run
+// of the node, interrupting until the job has finished.
 #include "endpoint_nodes.h"
 
 #include <neograph/graph/cancel.h>
@@ -9,6 +9,7 @@
 #include <neograph/graph/node.h>
 #include <neograph/graph/run_context.h>
 #include <neograph/provider_outcome_codec.h>
+#include <neograph/runtime_interposition_consumer.h>
 
 #include <limits>
 #include <optional>
@@ -157,39 +158,55 @@ const char* status_name(sp::jobs::Status status) {
 }
 
 // What every endpoint node shares: the provider, the output channel, and the checks before a call.
-class EndpointNode : public GraphNode {
+class EndpointNode : public GraphNode, public ::neograph::RuntimeInterpositionConsumer {
 public:
     EndpointNode(std::string name, const NodeContext& context, const Settings& settings, std::string type,
                  const char* output)
         : name_(std::move(name)), type_(std::move(type)), provider_(context.provider),
           output_(settings.channel("output", output)) {}
     std::string get_name() const override { return name_; }
+    void set_runtime_interposition(std::shared_ptr<RuntimeInterpositionController> controller) override {
+        interposed_ = controller != nullptr;
+        RuntimeInterpositionConsumer::set_runtime_interposition(std::move(controller));
+    }
 
 protected:
-    // Endpoint calls are not brokered or budgeted yet, so a budgeted run refuses them before dispatch.
-    sp::runtime::RunOptions admit(const RunContext& ctx) const {
+    void admit() const {
         if (!provider_)
             throw std::invalid_argument(type_ + " node '" + name_ +
                                         "' has no provider; set NodeContext::provider before compiling");
-        if (ctx.model_token_budget != 0 || ctx.managed_budget_lease || provider_call_broker(ctx))
+        if (!provider_->has_endpoints())
+            throw std::invalid_argument(type_ + " node '" + name_ + "': the provider has no SchemaProvider endpoints");
+    }
+    // One endpoint call on the path a chat call takes: the run's provider call broker (a Program's journal), its
+    // token budget, which refuses a call it cannot bound, or the provider itself. Strict Runtime interposition
+    // takes chat calls only, so it refuses the node rather than be bypassed.
+    template <EndpointRequest Request>
+    asio::awaitable<EndpointOutcomeOf<Request>> call(Request request, const RunContext& ctx) const {
+        admit();
+        if (interposed_)
             throw std::invalid_argument(type_ + " node '" + name_ +
-                                        "': endpoint calls are not budgeted, so a run with a model-token "
-                                        "budget, a managed budget or a provider call broker refuses them");
-        sp::runtime::RunOptions options;
-        options.deadline = ctx.deadline;
-        if (ctx.cancel_token) options.stop_token = ctx.cancel_token->stop_token();
-        return options;
+                                        "': Strict Runtime interposition does not take endpoint calls");
+        auto provider_request = make_endpoint_request(std::move(request));
+        provider_request.cancel_token = ctx.cancel_token;
+        provider_request.options.deadline = ctx.deadline;
+        auto result = co_await invoke_provider(provider_, std::move(provider_request), {}, {},
+                                               provider_call_broker(ctx), make_provider_call_identity(ctx, name_));
+        if (!result) throw std::runtime_error("Provider returned no outcome");
+        co_return sp::runtime::detail::typed_outcome(*result, static_cast<const EndpointOutcomeOf<Request>*>(nullptr));
     }
     // The call's result, with the token usage it reports recorded on the run; a failure throws ProviderFailure.
-    // A call that reports no usage (moderation, a download) adds nothing, so it does not erase the totals of
-    // the run's other calls. These nodes refuse budgeted runs, so the totals are evidence, not a budget.
+    // As for a chat call, a budget or a broker accounts for the call itself. A call that reports no usage
+    // (moderation, a download) adds nothing, so it does not erase the totals of the run's other calls.
     template <class Result, class Outcome>
     Result take(Outcome outcome, const RunContext& ctx) const {
         if (auto* failure = std::get_if<sp::Failure>(&outcome))
             throw ProviderFailure(std::make_shared<const sp::Outcome>(std::move(*failure)));
         auto result = std::get<Result>(std::move(outcome));
         if constexpr (requires { result.usage; })
-            if (ctx.usage && result.usage.stage != sp::UsageStage::Missing) ctx.usage->add(result.usage);
+            if (ctx.usage && ctx.model_token_budget == 0 && !provider_call_broker(ctx) &&
+                result.usage.stage != sp::UsageStage::Missing)
+                ctx.usage->add(result.usage);
         return result;
     }
     NodeOutput write(json value) const {
@@ -208,6 +225,7 @@ protected:
     std::string name_, type_;
     std::shared_ptr<Provider> provider_;
     std::string output_;
+    bool interposed_ = false;
 };
 
 class EmbedNode final : public EndpointNode {
@@ -221,13 +239,12 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         auto request = request_;
         const Settings checks(json::object(), type_, name_);
         for (auto& text : texts(read(in, input_), checks, "channel '" + input_ + "'"))
             request.inputs.push_back({std::move(text)});
         auto result = take<sp::embeddings::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         auto vectors = json::array();
         for (const auto& vector : result.vectors) {
             auto values = json::array();
@@ -251,7 +268,6 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         const Settings checks(json::object(), type_, name_);
         auto request = request_;
         const auto query = read(in, query_);
@@ -259,7 +275,7 @@ public:
         request.query = query.get<std::string>();
         request.documents = texts(read(in, documents_), checks, "channel '" + documents_ + "'");
         auto result = take<sp::rerank::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         auto ranking = json::array();
         for (const auto& ranked : result.ranked)
             ranking.push_back({{"index", ranked.index}, {"relevance", ranked.relevance}});
@@ -279,13 +295,12 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         auto request = request_;
         const Settings checks(json::object(), type_, name_);
         for (auto& text : texts(read(in, input_), checks, "channel '" + input_ + "'"))
             request.inputs.push_back({std::move(text)});
         auto result = take<sp::moderation::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         auto verdicts = json::array();
         for (const auto& verdict : result.verdicts) {
             auto categories = json::object(), scores = json::object();
@@ -318,7 +333,6 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         const Settings checks(json::object(), type_, name_);
         auto request = request_;
         const auto prompt = read(in, prompt_);
@@ -328,7 +342,7 @@ public:
             request.references = media_list(read(in, references_), sp::MediaKind::Image, checks,
                                             "channel '" + references_ + "'");
         auto result = take<sp::images::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         co_return write(media_json(result.images));
     }
 private:
@@ -351,13 +365,12 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         auto request = request_;
         const auto text = read(in, input_);
         if (!text.is_string()) Settings(json::object(), type_, name_).fail("channel '" + input_ + "' must hold a string");
         request.input = text.get<std::string>();
         auto result = take<sp::speech::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         co_return write(provider_codec::detail::media_part(result.audio));
     }
 private:
@@ -379,12 +392,11 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         auto request = request_;
         request.audio = media(read(in, input_), sp::MediaKind::Audio, Settings(json::object(), type_, name_),
                               "channel '" + input_ + "'");
         auto result = take<sp::transcription::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         co_return write(result.text);
     }
 private:
@@ -453,12 +465,11 @@ public:
         }
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         auto request = request_;
         request.input = Settings(json::object(), type_, name_).document(read(in, input_),
                                                                         "channel '" + input_ + "'");
         auto result = take<sp::decisions::Result>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         auto answers = json::array();
         for (const auto& answer : result.answers) {
             auto probabilities = json::object();
@@ -492,7 +503,6 @@ public:
         request_.extensions = settings.extensions();
     }
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         const Settings checks(json::object(), type_, name_);
         auto request = request_;
         const auto prompt = read(in, prompt_);
@@ -502,7 +512,7 @@ public:
             request.references = media_list(read(in, references_), sp::MediaKind::Image, checks,
                                             "channel '" + references_ + "'");
         auto state = take<sp::jobs::State>(
-            co_await provider_->complete_endpoint_async(std::move(request), std::move(options)), in.ctx);
+            co_await call(std::move(request), in.ctx), in.ctx);
         co_return write(handle_json(state.handle));
     }
 private:
@@ -518,11 +528,10 @@ public:
         : EndpointNode(std::move(name), context, settings, "job_collect", "video"),
           input_(settings.channel("input", "job")) {}
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        auto options = admit(in.ctx);
         const Settings checks(json::object(), type_, name_);
         auto handle = handle_from(read(in, input_), checks);
         auto state = take<sp::jobs::State>(
-            co_await provider_->complete_endpoint_async(sp::jobs::Poll{handle}, options), in.ctx);
+            co_await call(sp::jobs::Poll{handle}, in.ctx), in.ctx);
         switch (state.status) {
         case sp::jobs::Status::Completed: break;
         case sp::jobs::Status::Failed:
@@ -539,7 +548,7 @@ public:
         std::vector<sp::Media> outputs;
         for (std::size_t index = 0; index < state.outputs; ++index) {
             auto content = take<sp::jobs::Content>(
-                co_await provider_->complete_endpoint_async(sp::jobs::Download{handle, index}, options), in.ctx);
+                co_await call(sp::jobs::Download{handle, index}, in.ctx), in.ctx);
             if (!content.media) checks.fail("job output " + std::to_string(index) + " came back without media");
             outputs.push_back(std::move(*content.media));
         }
