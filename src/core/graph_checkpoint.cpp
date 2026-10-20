@@ -11,6 +11,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <iomanip>
 #include <memory>
@@ -56,6 +57,11 @@ void restore_checkpoint_storage_envelope(Checkpoint& checkpoint) {
     }
     checkpoint.metadata = envelope.at("metadata");
 }
+
+static std::atomic<std::uint64_t> blocking_hops{0};
+namespace detail {
+std::uint64_t blocking_checkpoint_hops() noexcept { return blocking_hops.load(std::memory_order_relaxed); }
+}  // namespace detail
 
 SynchronousCheckpointStoreUnavailable::SynchronousCheckpointStoreUnavailable()
     : std::runtime_error("A synchronous checkpoint store needs a worker thread, and this build has none: "
@@ -113,6 +119,7 @@ template <typename Fn>
 asio::awaitable<void> run_blocking_checkpoint(Fn fn) {
     // No worker thread exists to run `fn` on and none can be started: refuse, never wait for one.
     if (!NEOGRAPH_BUILD_THREADS) throw SynchronousCheckpointStoreUnavailable();
+    blocking_hops.fetch_add(1, std::memory_order_relaxed);
     struct Result {
         std::exception_ptr error;
     };
@@ -148,6 +155,7 @@ template <typename T, typename Fn>
 asio::awaitable<T> run_blocking_checkpoint(Fn fn) {
     // No worker thread exists to run `fn` on and none can be started: refuse, never wait for one.
     if (!NEOGRAPH_BUILD_THREADS) throw SynchronousCheckpointStoreUnavailable();
+    blocking_hops.fetch_add(1, std::memory_order_relaxed);
     struct Result {
         std::optional<T> value;
         std::exception_ptr error;
@@ -941,6 +949,59 @@ asio::awaitable<bool> InMemoryCheckpointStore::requires_managed_budget_async(std
     if (!is_exact_in_memory_store(*this))
         co_return co_await CheckpointStore::requires_managed_budget_async(std::move(thread_id));
     co_return requires_managed_budget(thread_id);
+}
+
+// The managed-budget operations of the exact in-memory store, as the checkpoint operations above: on the calling
+// thread. A subclass may override the synchronous forms, so it takes the base class's path.
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> InMemoryCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id, std::string expected_checkpoint_commitment) {
+    if (!is_exact_in_memory_store(*this))
+        co_return co_await CheckpointStore::acquire_managed_budget_lease_async(
+            std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment));
+    co_return acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment);
+}
+asio::awaitable<ManagedBudgetEffectReceipt> InMemoryCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id, std::uint64_t exact_claim_amount,
+    std::string prepared_request_digest) {
+    if (!is_exact_in_memory_store(*this))
+        co_return co_await CheckpointStore::begin_managed_budget_effect_async(
+            std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest));
+    co_return begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest);
+}
+asio::awaitable<void> InMemoryCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::settle_managed_budget_effect_async(
+            std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
+        co_return;
+    }
+    settle_managed_budget_effect(lease, effect, genuine_outcome, authority);
+}
+asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
+        co_return;
+    }
+    publish_managed_budget_checkpoint(lease, checkpoint);
+}
+asio::awaitable<void> InMemoryCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::release_managed_budget_lease_async(std::move(lease));
+        co_return;
+    }
+    release_managed_budget_lease(lease);
+}
+asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::publish_managed_budget_fork_async(
+            std::move(authenticated_source), std::move(genuine_shared_bank_fork));
+        co_return;
+    }
+    publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork);
 }
 
 const InMemoryCheckpointStore::ManagedBudgetBranchHead&

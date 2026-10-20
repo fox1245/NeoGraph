@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=777d0c3387648257ce23677d70c8b431fff7ebc86ba56775cfa834958dfd60e2 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -49,7 +49,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - managed 予算のジャーナルは、プラットフォームごとの呼び出しではなく、SDK のエントロピー源（`sp::crypto::random_bytes`）から nonce を取るようになりました。WebAssembly ビルドにはそれがなく、managed のモデルトークン予算を開始できませんでした。
   - **動作の変更: 期限クロックの拒否に型が付きました。** 回復できるクロックの原点がないホスト（Linux 以外のすべて、WebAssembly を含む）で期限付きの managed 予算を使うと、素の `std::runtime_error` ではなく `ManagedBudgetDeadlineClockUnavailable` が投げられます。これは `std::runtime_error` であり `ConfigurationFailure` です。メッセージは変わりません。期限のない managed 予算は、そのホストでも動きます。
   - **wasm32 のネイティブ Program コントロール。** C v1 プラグイン ABI は 64 ビットのレイアウトのままです。wasm32 は `neograph_program_native_invoke_request_v1` を、レイアウトが終わる 28 バイトではなく 32 バイトにパディングするため、`src/program/native.cpp` がビルドできませんでした。そこでは `NativeControlBinding::create` が `NativeControlUnavailable`（`ConfigurationFailure`）を投げ、`program::NATIVE_CONTROLS_AVAILABLE` がそれを示します。ほかのターゲットは変わりません。
-  - **シングルスレッドのビルドで、同期のチェックポイントストアが固まらなくなりました。** 同期ストアの操作をワーカースレッドのプールで実行するアダプターが、シングルスレッドのビルドでは起動しないスレッドを待っていたため、実行が戻りませんでした。操作は `SynchronousCheckpointStoreUnavailable`（`ConfigurationFailure`）を投げます。組み込みのインメモリストアも managed 予算の操作をそのプールで実行するため、ストアが awaitable になるまで（#556）、`model_token_budget` を指定した実行はそこで拒否されます。スレッドを使うビルドは変わりません。
+  - **シングルスレッドのビルドで、同期のチェックポイントストアが固まらなくなりました。** 同期ストアの操作をワーカースレッドのプールで実行するアダプターが、シングルスレッドのビルドでは起動しないスレッドを待っていたため、実行が戻りませんでした。操作は `SynchronousCheckpointStoreUnavailable`（`ConfigurationFailure`）を投げます。スレッドを使うビルドは変わりません。
+  - **インメモリのチェックポイントストアは、managed 予算の操作を呼び出したスレッドで実行します。** `InMemoryCheckpointStore` は、ほかの操作をすでにその場で実行していましたが、リース、プロバイダー呼び出しのクレームと精算、チェックポイントの公開、解放、フォークはそのプールで実行していました。これらもその場で実行されるため、`model_token_budget` を指定した実行がシングルスレッドのビルドで動作し、スレッドを使うビルドではワーカースレッドを待たなくなります。同期形式をオーバーライドするサブクラスは、引き続きプールを通ります。
 
 ## [0.16.0] - 2026-10-20
 

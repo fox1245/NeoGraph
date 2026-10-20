@@ -31,7 +31,12 @@ namespace neograph::graph {
 class NativeGraphCheckpoint;
 struct NodeResult;
 struct ChannelWrite;
-namespace detail { class ManagedBudgetJournalAccess; }
+namespace detail {
+class ManagedBudgetJournalAccess;
+/// How many operations of a synchronous checkpoint store have been handed to the pool of worker threads so far.
+/// A diagnostic for tests: an operation that runs on the calling thread does not count.
+NEOGRAPH_API std::uint64_t blocking_checkpoint_hops() noexcept;
+}  // namespace detail
 
 /// A managed model-token budget with a deadline binds the deadline to the clock it counts on, so that a restart can
 /// tell whether it is still the same clock. A host without such a clock identity (WebAssembly; only Linux has one
@@ -667,6 +672,25 @@ public:
     bool retains_native_checkpoint() const noexcept override { return true; }
     void publish_managed_budget_fork(
         const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork) override;
+
+    // The managed-budget operations run on the calling thread, as the checkpoint operations above do: this store
+    // is memory, so there is nothing to wait for and no worker thread to hand them to. A single-thread build has
+    // none, and the engine runs a budgeted graph on this store there.
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment) override;
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override;
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override;
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override;
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease) override;
+    asio::awaitable<void> publish_managed_budget_fork_async(
+        Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork) override;
 
     /**
      * @brief Get the total number of stored checkpoints (test helper).

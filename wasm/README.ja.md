@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=4e62534e14c092fd8f32cd6e52366b4f1ae493d69de08a965bff04e45f5165ff -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=8e7b97974a770ba4d847ca114f60b481fbf19ceec801c1203da661cdf6b459af -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -70,9 +70,9 @@ Release、`-O3 -flto`、Emscripten 6.0.13。グラフ smoke には Core エン�
 
 | ビルド | `.wasm` | `.wasm` gzip -9 | `.js` |
 |---|---:|---:|---:|
-| グラフ smoke、シングルスレッド | 5,484,652 B (5.2 MiB) | 1,601,090 B (1.5 MiB) | 83,223 B |
-| グラフ smoke、pthread | 5,432,156 B (5.2 MiB) | 1,655,480 B (1.6 MiB) | 103,691 B |
-| Program を含む checks、シングルスレッド | 5,017,721 B (4.8 MiB) | 1,554,991 B (1.5 MiB) | 83,031 B |
+| グラフ smoke、シングルスレッド | 5,502,805 B (5.2 MiB) | 1,607,052 B (1.5 MiB) | 83,223 B |
+| グラフ smoke、pthread | 5,448,684 B (5.2 MiB) | 1,660,246 B (1.6 MiB) | 103,691 B |
+| Program を含む checks、シングルスレッド | 5,035,831 B (4.8 MiB) | 1,559,615 B (1.5 MiB) | 83,031 B |
 
 CI はシングルスレッドの smoke を `.wasm` 6,000,000 バイト、gzip 後 1,750,000 バイト（測定したサイズに約 9% を足した値）で制限し、サイズをジョブのサマリーに報告します。
 このページの以前の版にあった 712 KB は、型付き SDK より前に測った値で、今は当てはまりません。
@@ -90,9 +90,8 @@ NeoGraph が呼び出しを所有している場合は型付きのエラーで�
   `NativeControlBinding::create` が `NativeControlUnavailable` で拒否します。
 - **同期のチェックポイントストア。** 非同期でないストアは、各操作をワーカースレッドのプールで実行します。
   シングルスレッドのビルドにはプールがないため、スレッドを待たずに `SynchronousCheckpointStoreUnavailable` で操作を
-  拒否します。`AsyncCheckpointStore` を実装してください。組み込みのインメモリストアは、チェックポイントについては
-  非同期ですが managed 予算の操作についてはそうではないため、ストアが awaitable になるまで（#556）、
-  `model_token_budget` を指定した実行も拒否されます。
+  拒否します。`AsyncCheckpointStore` を実装してください。組み込みのインメモリストアは、managed 予算を含むすべての操作を
+  呼び出したスレッドで実行するため、`model_token_budget` を指定した実行がその上で動作します。
 - **期限付きの managed 予算。** 期限は、再起動後も回復できるクロックの原点に結び付けられますが、WebAssembly ホストには
   それがありません。実行は、ストアに問い合わせる前に `ManagedBudgetDeadlineClockUnavailable` で拒否されます。
 - **ネイティブアーカイブ。** ファイルの保管（custody）バックエンドがなく、SDK は `Unsupported` エラーで拒否します。
