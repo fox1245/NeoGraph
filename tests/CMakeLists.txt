@@ -1200,8 +1200,8 @@ endif()
 
 # Program pricing from the SchemaProvider model catalogue (#520): parity with
 # the 0.15 price catalog, reservation bounds, refusals and settlement. No
-# network.
-if(NEOGRAPH_BUILD_PROGRAM)
+# network. Built with the LLM component, whose provider types it prices.
+if(NEOGRAPH_BUILD_PROGRAM AND TARGET neograph::llm)
     add_executable(neograph_pricing_tests test_pricing.cpp)
     target_include_directories(neograph_pricing_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
     target_link_libraries(neograph_pricing_tests PRIVATE
