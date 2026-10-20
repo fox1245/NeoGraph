@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fac3eca036504cdb2245854cdb495e37b7e9752e4acddd7c9e1fd2346015da55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -229,7 +229,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v3`](../schemas/provider-message-v3.schema.json), [`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)이며 v2 포맷 레코드도 계속 읽을 수 있다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
+`ChatMessage` / `ChatTool`과 JSON은 portable projection이지 native 권한이 아니다. Portable 포맷은 [`provider-message-v3`](../schemas/provider-message-v3.schema.json), [`provider-outcome-v3`](../schemas/provider-outcome-v3.schema.json), [`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)이며 v2 포맷 레코드도 계속 읽을 수 있다. 실제 C++ checkpoint sidecar는 메모리에서 native seal을 보존한다. 영속 native 기록에는 host-owned `sp::NativeArchive`가 필요하다. closed v3 / `spna3`는 독립 키를 쓰는 인증된 owner-private custody이며 archive v2는 업그레이드하거나 해석하지 않고 거부한다. 인증은 모든 semantic descriptor 선택(origin/path/header, policy, 요청 field mapping, usage path, stop mapping), owner와 정확한 custody binding을 결합한다. 암호화나 vendor-issuer 인증은 아니다. archive 본문·키·native blob·raw wire 관측을 공개하지 않는다. Archive는 증거 저장소이지 돈의 grant나 spending lease가 아니다. Program/external bank는 독립 journal 소유이며 snapshot 복사로 credit을 만들 수 없다.
 
 `RuntimeHistoryRecord`의 인자 없는 `serialize_canonical()`은 이식 가능한 기록을 지원한다. 영속 네이티브 이력에는 `serialize_canonical(archive, owner_id)`와 해당 ID에 소유자 범위가 일치하는 아카이브를 사용한다. Python도 같은 오버로드와 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`를 제공한다. 이식 가능한 기록용 기본 인자는 일치하는 아카이브 없이 네이티브 복원을 허가하지 않는다. Python의 파싱과 아카이브를 사용하는 직렬화는 네이티브 작업 중 GIL을 해제한다. JSON 관찰 데이터와 아카이브로 인증된 보관 권한은 구별된다.
 
@@ -430,7 +430,7 @@ Generate 기본은 `NativeOnly`다. 명시적 `PortableForeign`은 native seal, 
 
 #### Output caps and native continuation
 
-output generation cap은 호출별 승인 resource이며 native replay config digest에서 이 cap만 제외한다. content/prefix, origin/route, policy identity, tools, reasoning controls 등 다른 binding은 유지한다(문서화된 per-turn tool selection/cursor 동작 제외). 각 encoded/prepared request는 effective cap을 보존하며 request digest, journal slot, 원래 shared bank와 절대 deadline은 계속 구속한다. cap을 높인 semantic call은 같은 grant 아래 새 call ordinal·admission이 필요하다. seal repair, deadline 갱신, 이전 effect replay가 아니다. native archive는 `spna3`/v3, portable JSON은 v2다.
+output generation cap은 호출별 승인 resource이며 native replay config digest에서 이 cap만 제외한다. content/prefix, origin/route, policy identity, tools, reasoning controls 등 다른 binding은 유지한다(문서화된 per-turn tool selection/cursor 동작 제외). 각 encoded/prepared request는 effective cap을 보존하며 request digest, journal slot, 원래 shared bank와 절대 deadline은 계속 구속한다. cap을 높인 semantic call은 같은 grant 아래 새 call ordinal·admission이 필요하다. seal repair, deadline 갱신, 이전 effect replay가 아니다. native archive는 `spna3`/v3 그대로이고, portable JSON은 v3로 기록하며 v2 레코드도 계속 읽을 수 있다.
 
 Python은 `ChatReasoningOptions`, `ResponsesVerbosity`, `ResponsesTruncation`, `ResponsesInclude`, `MessagesThinkingMode`, `MessagesOutputEffort`, `MessagesCacheControl`, `MessagesCacheTtl`, `MessagesToolChoice`, `MessagesToolChoiceMode`, `GeminiHistoryMode`, `GeminiThinkingLevel`, `GeminiSafetySetting`, `GeminiSafetyCategory`, `GeminiSafetyThreshold`, `GeminiToolChoice`, `GeminiToolChoiceMode`를 제공한다. enum 값은 같되 C++ `None`은 Python `None_`다. optional class control과 message/safety/history vector는 detached snapshot이므로 수정 후 재대입한다. `ProviderControls.previous_response_history`는 authentic `ProviderMessage` 목록이며 provisional 단일 response가 아니다.
 
@@ -496,7 +496,7 @@ dispatch 전에 broker는 provider descriptor 정책의 SchemaProvider 모델 �
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider에 승인된 descriptor가 없어서 카탈로그를 알 수 없다 |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | 카탈로그가 base URL의 그 모델에 가격을 주지 않거나, 그 OpenRouter fallback 중 하나에 가격을 주지 않는다 |
-| `P_MONEY_UNMODELED` | `Failed` | 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 또는 요청이 OpenRouter plugin을 쓴다 |
+| `P_MONEY_UNMODELED` | `Failed` | 요청이 SchemaProvider 엔드포인트 호출이다(catalogue는 아직 가격을 매기지 못한다), 항목에 요청의 service tier 가격이 없거나 서버 도구·hosted tool 중 하나의 요금(`tool:<type>`)이 없다, 또는 요청이 OpenRouter plugin을 쓴다 |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 요청에 출력 토큰 cap이 없다 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 카탈로그가 그 모델의 입력 한도나 context window를 알지 못한다 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | 서버 도구나 hosted tool에 사용 cap이 없거나(Messages `max_uses`, Responses `max_tool_calls`이며 Gemini의 내장 도구와, 정책이 `max_uses`를 허용하지 않는 Messages 타입인 `mcp_toolset`, `tool_search_tool_*`, `code_execution_*` 등에는 없다), router alias처럼 OpenRouter 항목에 route ceiling이 없거나, route ceiling을 `provider.max_price`로 고정할 수 없다 |
@@ -2654,7 +2654,7 @@ The library pre-registers the following components:
 
 #### 엔드포인트 노드
 
-엔드포인트 노드(#531)는 노드 컨텍스트의 provider에서 SchemaProvider 엔드포인트를 각각 한 번 호출한다(`Provider::complete_endpoint_async`).
+엔드포인트 노드(#531)는 노드 컨텍스트의 provider에서 SchemaProvider 엔드포인트를 각각 한 번 호출한다. 노드는 `make_endpoint_request`를 `invoke_provider`로 보내며, 이는 채팅 호출이 거치는 경로다. 실행의 provider 호출 broker(Program에서는 저널)와 토큰 예산이 있으면 적용되고, 없으면 provider가 호출을 직접 받는다.
 - **설정.** `model`은 필수다. 노드는 엔드포인트의 옵션을 SDK 요청의 멤버 이름(`size`, `quality`, `dimensions`, `voice`, `top`, ...)으로 받고, provider 정책이 승인하는 멤버는 `extensions`로 받는다. 읽고 쓰는 채널의 이름도 받으며, `output`은 노드가 쓰는 채널의 이름이다. 엄격한 그래프(`schema_version` 1)는 모르는 키를 거부한다. 채널이 설정이므로, 엔드포인트 노드가 있는 그래프에서는 검증기의 효과 분석이 실행되지 않는다.
 - **텍스트.** `embed`와 `moderate`는 문자열 또는 문자열 배열(채널 `input`)을 읽고, `speak`는 문자열(`text`)을 읽으며, `rerank`는 질의 문자열(`query`)과 문서 배열(`documents`)을 읽는다.
 - **미디어.** 미디어 채널에는 base64 data URL, https URL 또는 provider outcome format v3의 미디어 JSON이 들어간다. 노드는 미디어를 v3 형식으로 쓴다. `image_generate`와 `image_edit`는 `images`에, `speak`는 `audio`에, `job_collect`는 `video`에 쓴다. `image_edit`는 편집할 이미지를 `references`에서 읽고, `transcribe`와 `translate`는 `audio`를 읽는다.

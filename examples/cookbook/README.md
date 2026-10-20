@@ -15,7 +15,7 @@ Durable receipts prevent automatic redispatch; they do not promise exactly-once
 external effects.
 Do not reconstruct history from printed JSON or flatten failures to final text.
 
-Canonical persistence uses `provider-message-v2` and `runtime-history-record-v2`;
+Canonical persistence uses `provider-message-v3` and `runtime-history-record-v3`;
 portable summaries never replace native records. Optional controls are caller-chosen,
 not silently clamped. Bounded calls require genuine model facts; missing facts are
 `LimitUnknown`. Reservation/charged/held amounts are distinct from nullable provider

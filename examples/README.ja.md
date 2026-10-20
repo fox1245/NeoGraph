@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=c91d45d63240864a0784379f2d83e77b71cae1ad10655d83eeb3e31377ee2d81 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ native リプレイ権限ではありません。prepare は一度だけ行い�
 `Provider::request_digest(prepared)` に claim/receipt を結び付け、同じ handle を dispatch します。
 出力 JSON から history を再構築したり、failure を最終テキストに縮約しないでください。
 
-canonical persistence は `provider-message-v2`/`runtime-history-record-v2` を使用し、
+canonical persistence は `provider-message-v3`/`runtime-history-record-v3` を使用し、
 portable 要約は native record を置換しません。optional control は呼出元が選び、暗黙に clamp しません。
 bounded call には真正 model fact が必要で、欠落は `LimitUnknown` です。
 reservation/charged/held は nullable provider usage と別で、budget 更新、価格、forecast、invoice ではありません。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=1ba2435bb0bde68ce969a20064ff5577a3e61d0fc1705b904627a8ec4c2c649e -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=2c4e2880e25052ede124b7446b33531356216dc639497fb782cf45998acde03c -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@ prepare는 정확히 한 번 수행합니다. durable 호출자는
 로컬 wait가 끝나도 원격 model이 중지되었거나 청구하지 않는다는 증거는 아닙니다. durable receipt는 자동 redispatch를 막지만 external effect의 exactly-once를 보장하지 않습니다.
 출력 JSON으로 history를 재구성하거나 failure를 최종 텍스트로 축소하지 않습니다.
 
-canonical persistence는 `provider-message-v2`/`runtime-history-record-v2`를 사용하며
+canonical persistence는 `provider-message-v3`/`runtime-history-record-v3`를 사용하며
 portable 요약은 native record를 대체하지 않습니다. optional control은 호출자가 선택하고
 조용히 clamp하지 않습니다. bounded call에는 진짜 model fact가 필요하며 누락은 `LimitUnknown`입니다.
 reservation/charged/held 값은 nullable provider usage와 별개이며 budget 갱신, 가격, forecast, invoice가 아닙니다.

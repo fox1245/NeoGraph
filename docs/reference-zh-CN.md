@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fac3eca036504cdb2245854cdb495e37b7e9752e4acddd7c9e1fd2346015da55 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=d4761eb177783f9a49d5dc2e2224395d511cead68e067d0c28e2207f71640fbc -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -228,7 +228,7 @@ struct ChatTool {
 
 ### Portable projections
 
-`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式为 [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)；v2 格式的记录仍可读取。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
+`ChatMessage` / `ChatTool` 和 JSON 只是 portable projection，不是 native 权限。Portable 格式为 [`provider-message-v3`](../schemas/provider-message-v3.schema.json)、[`provider-outcome-v3`](../schemas/provider-outcome-v3.schema.json)、[`runtime-history-record-v3`](../schemas/runtime-history-record-v3.schema.json)；v2 格式的记录仍可读取。真实 C++ checkpoint sidecar 保留内存 native seal。持久 native 历史需要 host-owned `sp::NativeArchive`：closed v3 / `spna3` 使用独立密钥提供经认证的 owner-private custody；archive v2 被拒绝，不升级或解释。认证绑定全部 semantic descriptor 选择（origin/path/header、policy、请求 field mapping、usage path、stop mapping）、owner 和精确 custody binding。这不是加密或 vendor-issuer 认证；不得公开 archive 正文、密钥、native blob 或 raw wire 观测。Archive 是证据存储，不是资金 grant 或 spending lease。Program/external bank 仍由独立 journal 拥有，复制 snapshot 不能创建 credit。
 
 `RuntimeHistoryRecord` 的无参数 `serialize_canonical()` 支持可移植记录。持久原生历史须使用 `serialize_canonical(archive, owner_id)`，并提供所有者范围与该 ID 一致的存档。Python 暴露同一重载以及 `RuntimeHistoryRecord.parse(stored_bytes, archive=None, owner_id="")`；面向可移植记录的默认参数不会在缺少匹配存档时授权原生恢复。Python 的解析和存档感知序列化会在原生工作期间释放 GIL。JSON 观测数据仍与存档认证的保管权限不同。
 
@@ -431,7 +431,7 @@ Generate 默认为 `NativeOnly`。显式 `PortableForeign` 仅允许不含 nativ
 
 #### Output caps and native continuation
 
-output generation cap 是每次调用获准的 resource，仅这个 cap 从 native replay config digest 排除。其他 binding 均保留，包括 content/prefix、origin/route、policy identity、tools、reasoning controls（文档规定的 per-turn tool selection/cursor 行为除外）。encoded/prepared request 仍保存 effective cap；request digest、journal slot、原 shared bank、绝对 deadline 仍有约束。增大 cap 的 semantic call 需要同一 grant 下的新 call ordinal 与 admission，不允许 seal repair、更新 deadline 或 replay 旧 effect。native archive 仍为 `spna3`/v3，portable JSON 仍为 v2。
+output generation cap 是每次调用获准的 resource，仅这个 cap 从 native replay config digest 排除。其他 binding 均保留，包括 content/prefix、origin/route、policy identity、tools、reasoning controls（文档规定的 per-turn tool selection/cursor 行为除外）。encoded/prepared request 仍保存 effective cap；request digest、journal slot、原 shared bank、绝对 deadline 仍有约束。增大 cap 的 semantic call 需要同一 grant 下的新 call ordinal 与 admission，不允许 seal repair、更新 deadline 或 replay 旧 effect。native archive 仍为 `spna3`/v3，portable JSON 以 v3 写出，v2 记录仍可读取。
 
 Python 公开 `ChatReasoningOptions`, `ResponsesVerbosity`, `ResponsesTruncation`, `ResponsesInclude`, `MessagesThinkingMode`, `MessagesOutputEffort`, `MessagesCacheControl`, `MessagesCacheTtl`, `MessagesToolChoice`, `MessagesToolChoiceMode`, `GeminiHistoryMode`, `GeminiThinkingLevel`, `GeminiSafetySetting`, `GeminiSafetyCategory`, `GeminiSafetyThreshold`, `GeminiToolChoice`, `GeminiToolChoiceMode`。enum 值相同，唯 C++ `None` 使用 Python `None_`。optional class control 与 message/safety/history vector 返回 detached snapshot，修改后重新赋值。`ProviderControls.previous_response_history` 是 authentic `ProviderMessage` 列表，不是临时单个 response。
 
@@ -497,7 +497,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 |---|---|---|
 | `P_MONEY_UNKNOWN_ORIGIN` | `Failed` | provider 没有已准入的 descriptor，因此不知道它的目录 |
 | `P_MONEY_UNKNOWN_MODEL` | `Failed` | 目录没有给出该模型在 base URL 上的价格，或没有给出其某个 OpenRouter 回退的价格 |
-| `P_MONEY_UNMODELED` | `Failed` | 条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin |
+| `P_MONEY_UNMODELED` | `Failed` | 请求是 SchemaProvider 端点调用（catalogue 目前还无法为其定价），或条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 目录不知道该模型的输入限制或上下文窗口 |
 | `P_MONEY_NO_UPPER_BOUND` | `Failed` | 服务器工具或 hosted tool 没有使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`；Gemini 的内置工具，以及策略不允许 `max_uses` 的 Messages 类型，如 `mcp_toolset`、`tool_search_tool_*` 和 `code_execution_*`，都没有这类上限），OpenRouter 条目没有 route ceiling（例如 router alias），或 route ceiling 无法作为 `provider.max_price` 固定 |
@@ -2611,7 +2611,7 @@ public:
 
 #### 端点节点
 
-端点节点（#531）各自在节点上下文的 provider 上发起一次 SchemaProvider 端点调用（`Provider::complete_endpoint_async`）。
+端点节点（#531）各自在节点上下文的 provider 上发起一次 SchemaProvider 端点调用。节点把 `make_endpoint_request` 交给 `invoke_provider`，这与聊天调用走的路径相同：运行的 provider 调用 broker（Program 中为 journal）和 token 预算（如果有）会生效，否则由 provider 直接接收该调用。
 - **配置。** `model` 是必需的。节点按 SDK 请求的成员名称接收其端点的选项（`size`、`quality`、`dimensions`、`voice`、`top`、...），并通过 `extensions` 接收 provider 策略准入的成员。它还接收其读取和写入的通道名称；`output` 指定其写入的通道。严格图（`schema_version` 1）会拒绝未知的键。由于通道是配置，验证器的效果分析不会在含有端点节点的图上运行。
 - **文本。** `embed` 和 `moderate` 读取字符串或字符串数组（通道 `input`），`speak` 读取字符串（`text`），`rerank` 读取查询字符串（`query`）和文档数组（`documents`）。
 - **媒体。** 媒体通道保存 base64 data URL、https URL，或 provider outcome format v3 的媒体 JSON。节点以 v3 形式写入媒体：`image_generate` 和 `image_edit` 写入 `images`，`speak` 写入 `audio`，`job_collect` 写入 `video`。`image_edit` 从 `references` 读取要编辑的图像；`transcribe` 和 `translate` 读取 `audio`。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=0aa8a3350cef51685bd88b7feb1501b90260a4f43baa4c55529104dfa6b47483 -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=e9c13d7f86936784ced0b9f500f737a386fbabc518e974150c9ea0ce3c1da6cd -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
@@ -35,7 +35,7 @@ CheckpointStore 为了显式的适配器迁移而保留旧的布局。同步的�
 
 即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.3.5` alpha，公开的 `maint/interface6` 提交 `0437853529b5932e7097a38629a95779d08f03aa`，接口修订版 `6`，共享库 ABI 修订版 `6`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.6` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
 
-接口 6 在公共的 usage 布局里，增加了定长的、由 provider 上报的金额元数据，并让阻塞和异步的 SDK 调用共用同一条异步流水线。选定的提交还在修订版 6 之内，扩大了 `sp::OpenRouterRouting`（新增了 `max_price`）以及 Chat、Messages 和 Responses 的请求布局；它的 capability 位 `OpenRouterRoutingMaxPrice` 属于 `RequiredProvider`，NeoGraph 的握手要求具备它，因此更早的接口 6 库会被拒绝。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 6 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 和可移植 JSON v2 是各自独立、保持不变的格式。规范的 outcome v2 usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
+接口 6 在公共的 usage 布局里，增加了定长的、由 provider 上报的金额元数据，并让阻塞和异步的 SDK 调用共用同一条异步流水线。选定的提交还在修订版 6 之内，扩大了 `sp::OpenRouterRouting`（新增了 `max_price`）以及 Chat、Messages 和 Responses 的请求布局；它的 capability 位 `OpenRouterRoutingMaxPrice` 属于 `RequiredProvider`，NeoGraph 的握手要求具备它，因此更早的接口 6 库会被拒绝。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 6 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 保持不变。可移植 JSON 是版本独立的另一种格式：NeoGraph 以 v3 写出 provider 消息、provider outcome 和 runtime history record，并仍可读取它们的 v2 记录。规范的 outcome usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
 
 Python 暴露了带类型的 provider 契约，包括已准备的句柄和不可变的 outcome；没有保留旧的 completion 兼容层。扩展和与之匹配的库要作为同一个 wheel 安装。不要单独替换捆绑在其中的某个 NeoGraph 或 SDK 库。图使用的 ChatMessage 便捷值，不能替代 native ProviderMessage 的托管。参见 [Python 绑定](python-binding.md)。
 

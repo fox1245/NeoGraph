@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=c91d45d63240864a0784379f2d83e77b71cae1ad10655d83eeb3e31377ee2d81 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ auto provider = examples::choose_provider(argc, argv, scripted);    // --live sw
 `Provider::request_digest(prepared)`，并 dispatch 同一个 handle。
 不要从打印的 JSON 重建 history，也不要把 failure 简化为最终文本。
 
-canonical persistence 使用 `provider-message-v2`/`runtime-history-record-v2`；
+canonical persistence 使用 `provider-message-v3`/`runtime-history-record-v3`；
 portable 摘要不能替代 native record。optional control 由调用者选择，不暗中 clamp。
 bounded call 需要真实 model fact；缺失为 `LimitUnknown`。
 reservation/charged/held 与 nullable provider usage 独立，不更新 budget，也不是价格、forecast 或 invoice。

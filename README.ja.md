@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=10b70b5eed979e3c819fab1dc88d6df418d373544bcc69ccdf9e49a10f5ea17a -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=71fbb3a8a5072ec0c169fa310440fc595239f0635bbff040c3facdb97589f484 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -300,13 +300,13 @@ sp::runtime::Result first_call(
 
 準備済みのリクエストは1回だけ消費されます。`sp::runtime::Result` は、`Completion` または `Failure` を含む不変の `sp::Outcome` を所有します。順序付きのメッセージとパート、ネイティブの継続情報、生の観測値、停止の根拠、試行のメタデータ、失敗時の部分的な結果が必要なら、この結果をそのまま保持してください。使用量カウンターは null になりえます。ないときは不明という意味で、観測された 0 は 0 です。使用量の報告と予算の差し引きは別の記録であり、持ち運べる報告から支出の権限を与えることはできません。
 
-`usage.provider_cost` は、provider が報告した nanoUSD 単位の金額、フィールドごとの状態、出所、品質、BYOK の根拠、パースした binary64 値の切り上げを保持します。請求書でも、トークン数でも、見積もりでも、支出の権限でもありません。欠けている金額のメタデータは、正規形の v2 JSON でも欠けたままです。報告された 0 や `is_byok=false` は、それ自体が根拠です。不明な通貨や、矛盾した、または形式の誤った報告は、USD やトークンに変換せず、そのまま保持します。ブロッキングの provider 呼び出しも、単一の非同期 SDK パイプラインを駆動し、SDK のイベントループやコールバックワーカーからの再入は拒否されます。
+`usage.provider_cost` は、provider が報告した nanoUSD 単位の金額、フィールドごとの状態、出所、品質、BYOK の根拠、パースした binary64 値の切り上げを保持します。請求書でも、トークン数でも、見積もりでも、支出の権限でもありません。欠けている金額のメタデータは、正規形の JSON でも欠けたままです。報告された 0 や `is_byok=false` は、それ自体が根拠です。不明な通貨や、矛盾した、または形式の誤った報告は、USD やトークンに変換せず、そのまま保持します。ブロッキングの provider 呼び出しも、単一の非同期 SDK パイプラインを駆動し、SDK のイベントループやコールバックワーカーからの再入は拒否されます。
 
 `first_call` が返ったあとは、`std::get_if<sp::Completion>(result.get())` で完了結果の `messages`、`stop`、`usage` を調べます。完了でなければ、`std::get<sp::Failure>(*result)` から `error.kind`、`error.safe_message`、リトライの根拠、そして `partial` 内の部分的なメッセージと使用量が得られます。たとえば `completion.usage.output_total` がなければ出力トークン数は不明で、あって `value` が `0` なら 0 を報告したことになります。表示用のテキストは、保持された結果を見る方法の1つにすぎません。
 
 `ChatMessage`、`ChatTool`、JSON は、持ち運べる射影です。本物のネイティブ履歴は、ネイティブのチェックポイントサイドカーとともにメモリ上に置けます。永続的なネイティブ履歴には、本物の `sp::NativeArchive` と、所有者専用の保護された保管が必要です。持ち運べる JSON から、その権限を再現することはできません。アーカイブは独立した鍵で保管状態を認証します。暗号化でも、ベンダー発行者の認証でもありません。アーカイブの本体、鍵、ネイティブの blob、生のワイヤ観測値は公開しないでください。永続化の失敗、オブザーバー、管理される予算バンク、リプレイの境界については、[provider リファレンス](docs/reference-en.md)と[移行ガイド](docs/migration-v0.4-to-v1.0.md)を参照してください。
 
-型付きへの切り替えで、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、Responses の WebSocket 経路が削除されました。C++ の利用側を再コンパイルし、カスタム provider を移行してください。互換用のエイリアスはありません。SDK パッケージは `0.3.5` アルファで、公開コミット `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6` ブランチ)に固定されており、インターフェースのリビジョンは 6、共有 ABI は 6 です。金額の使用量メタデータが公開レイアウトを変えるため、SDK の利用側、NeoGraph、Python 拡張はあわせて再ビルドしてください。ネイティブアーカイブ v3 と持ち運べる JSON v2 は変わりません。この世代は、安定した SDK インターフェースを宣言していません。
+型付きへの切り替えで、`CompletionParams`、`ChatCompletion`、`CompletionProvider`、`OpenAIProvider`、`RateLimitedProvider`、`SchemaPrimitiveRegistry`、ディスクリプターのインタープリター、Responses の WebSocket 経路が削除されました。C++ の利用側を再コンパイルし、カスタム provider を移行してください。互換用のエイリアスはありません。SDK パッケージは `0.3.5` アルファで、公開コミット `0437853529b5932e7097a38629a95779d08f03aa`(`maint/interface6` ブランチ)に固定されており、インターフェースのリビジョンは 6、共有 ABI は 6 です。金額の使用量メタデータが公開レイアウトを変えるため、SDK の利用側、NeoGraph、Python 拡張はあわせて再ビルドしてください。ネイティブアーカイブ v3（`spna3`）は変わりません。持ち運べる JSON は `provider-message-v3`、`provider-outcome-v3`、`runtime-history-record-v3` として書き出し、v2 形式のレコードも引き続き読み込みます。この世代は、安定した SDK インターフェースを宣言していません。
 
 ## Python
 

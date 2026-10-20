@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=1ba2435bb0bde68ce969a20064ff5577a3e61d0fc1705b904627a8ec4c2c649e -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=2c4e2880e25052ede124b7446b33531356216dc639497fb782cf45998acde03c -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,7 +13,7 @@
 local wait 结束不证明 remote model 已停止或不会计费。durable receipt 阻止自动 redispatch，但不保证 external effect 的 exactly-once。
 不要从打印的 JSON 重建 history，也不要把 failure 简化为最终文本。
 
-canonical persistence 使用 `provider-message-v2`/`runtime-history-record-v2`；
+canonical persistence 使用 `provider-message-v3`/`runtime-history-record-v3`；
 portable 摘要不能替代 native record。optional control 由调用者选择，不暗中 clamp。
 bounded call 需要真实 model fact；缺失为 `LimitUnknown`。
 reservation/charged/held 与 nullable provider usage 独立，不更新 budget，也不是价格、forecast 或 invoice。
