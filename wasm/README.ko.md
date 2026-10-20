@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=4e62534e14c092fd8f32cd6e52366b4f1ae493d69de08a965bff04e45f5165ff -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=8e7b97974a770ba4d847ca114f60b481fbf19ceec801c1203da661cdf6b459af -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -70,9 +70,9 @@ Release, `-O3 -flto`, Emscripten 6.0.13. 그래프 smoke는 Core 엔진과 SDK �
 
 | 빌드 | `.wasm` | `.wasm` gzip -9 | `.js` |
 |---|---:|---:|---:|
-| 그래프 smoke, 싱글 스레드 | 5,484,652 B (5.2 MiB) | 1,601,090 B (1.5 MiB) | 83,223 B |
-| 그래프 smoke, pthread | 5,432,156 B (5.2 MiB) | 1,655,480 B (1.6 MiB) | 103,691 B |
-| Program을 포함한 checks, 싱글 스레드 | 5,017,721 B (4.8 MiB) | 1,554,991 B (1.5 MiB) | 83,031 B |
+| 그래프 smoke, 싱글 스레드 | 5,502,805 B (5.2 MiB) | 1,607,052 B (1.5 MiB) | 83,223 B |
+| 그래프 smoke, pthread | 5,448,684 B (5.2 MiB) | 1,660,246 B (1.6 MiB) | 103,691 B |
+| Program을 포함한 checks, 싱글 스레드 | 5,035,831 B (4.8 MiB) | 1,559,615 B (1.5 MiB) | 83,031 B |
 
 CI는 싱글 스레드 smoke를 `.wasm` 6,000,000바이트, gzip한 크기 1,750,000바이트(측정한 크기에 약 9%를 더한 값)로 제한하고, 크기를 잡 요약에 보고합니다.
 이전 버전의 이 문서에 있던 712 KB는 타입이 있는 SDK 이전에 잰 값이어서 더 이상 맞지 않습니다.
@@ -90,8 +90,8 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
   `NativeControlBinding::create`는 `NativeControlUnavailable`로 거부합니다.
 - **동기 체크포인트 저장소.** 비동기가 아닌 저장소는 각 연산을 워커 스레드 풀에서 실행합니다. 싱글 스레드 빌드에는
   풀이 없으므로, 스레드를 기다리는 대신 `SynchronousCheckpointStoreUnavailable`로 연산을 거부합니다.
-  `AsyncCheckpointStore`를 구현하세요. 내장 인메모리 저장소는 체크포인트에 대해서는 비동기이지만 managed 예산 연산에
-  대해서는 아니므로, 저장소가 awaitable이 될 때까지(#556) `model_token_budget`이 있는 실행도 거부됩니다.
+  `AsyncCheckpointStore`를 구현하세요. 내장 인메모리 저장소는 managed 예산을 포함한 모든 연산을 호출한 스레드에서
+  실행하므로, `model_token_budget`이 있는 실행이 그 위에서 동작합니다.
 - **기한이 있는 managed 예산.** 기한은 재시작 후에도 복구할 수 있는 시계 원점에 묶이는데 WebAssembly 호스트에는 그런
   것이 없습니다. 실행은 저장소에 묻기 전에 `ManagedBudgetDeadlineClockUnavailable`로 거부됩니다.
 - **네이티브 아카이브.** 파일 보관(custody) 백엔드가 없어서 SDK가 `Unsupported` 오류로 거부합니다.

@@ -812,6 +812,51 @@ TEST(GraphProviderBrokerTest, SealedToolHistorySurvivesInMemoryCheckpointWithout
     EXPECT_EQ(config.usage->total_tokens_wide(), 27u);
 }
 
+// The exact in-memory store runs every managed-budget operation on the calling thread, never on the pool of worker
+// threads that synchronous stores use (a single-thread build has none). A subclass may override the synchronous forms,
+// so it still goes through the pool, which the counter shows.
+TEST(GraphProviderBrokerTest, ManagedBudgetOnTheInMemoryStoreNeverHopsToTheBlockingPool) {
+    struct SubclassedStore final : InMemoryCheckpointStore {};
+    const auto run_budgeted = [](std::shared_ptr<InMemoryCheckpointStore> checkpoints) {
+        auto provider = std::make_shared<test::LocalProvider>(
+            [](ProviderRequest, const PreparedProviderRequest&,
+               const test::LocalProvider::EventCallback&) -> asio::awaitable<sp::runtime::Result> {
+                co_return test::success("ok", test::usage(2, 1, 3));
+            }, "managed-hops-provider", test::bounded_client("managed-model", 8));
+        NodeContext context;
+        context.provider = provider;
+        context.model = "managed-model";
+        context.provider_controls.max_output_tokens = 1;
+        const json definition = {
+            {"name", "managed-hops"},
+            {"channels", {{"messages", {{"reducer", "append"}}}}},
+            {"nodes", {{"first", {{"type", "llm_call"}}}, {"second", {{"type", "llm_call"}}}}},
+            {"edges", json::array({
+                {{"from", "__start__"}, {"to", "first"}},
+                {{"from", "first"}, {"to", "second"}},
+                {{"from", "second"}, {"to", "__end__"}}})},
+            {"interrupt_after", json::array({"first"})}};
+        auto engine = GraphEngine::compile(definition, context, checkpoints);
+        RunConfig config;
+        config.thread_id = "managed-hops-thread";
+        config.model_token_budget = 30;
+        config.input = {{"messages", json::array({{{"role", "user"}, {"content", "hi"}}})}};
+        const auto interrupted = engine->run(config);
+        ASSERT_TRUE(interrupted.interrupted);
+        auto resumed = config;
+        resumed.model_token_budget = 0;
+        const auto completed = engine->resume_from(resumed, interrupted.checkpoint_id);
+        EXPECT_FALSE(completed.interrupted);
+    };
+
+    const auto hops = [] { return neograph::graph::detail::blocking_checkpoint_hops(); };
+    const auto before = hops();
+    run_budgeted(std::make_shared<InMemoryCheckpointStore>());
+    EXPECT_EQ(hops(), before) << "a lease, a provider call, a checkpoint and a release ran on the in-memory store";
+    run_budgeted(std::make_shared<SubclassedStore>());
+    EXPECT_GT(hops(), before) << "the counter sees the operations that do hop";
+}
+
 TEST(GraphProviderBrokerTest, ManagedInMemoryBudgetSurvivesResumeAndForkWithoutRenewal) {
     auto calls = std::make_shared<unsigned>(0);
     auto provider = std::make_shared<test::LocalProvider>(

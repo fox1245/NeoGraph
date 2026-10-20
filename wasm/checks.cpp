@@ -4,8 +4,9 @@
 //   nonce      The managed-budget journal draws its nonce from the SDK's entropy source (getentropy here).
 //   deadline   A managed budget with a deadline needs a clock origin a restart can recover. This host has none,
 //              so the run is refused with a typed error.
-//   store      A synchronous checkpoint store needs a worker thread. A single-thread build has none, so the
-//              operation is refused with a typed error instead of waiting for it.
+//   store      The in-memory store runs a managed budget on the calling thread. A synchronous checkpoint store
+//              needs a worker thread; a single-thread build has none, so the operation is refused with a typed
+//              error instead of waiting for it.
 //   plugin     A native Program control plugin is refused with a typed error (the v1 ABI is a 64-bit layout).
 
 #include <neograph/graph/checkpoint.h>
@@ -62,7 +63,7 @@ private:
     std::string name_;
 };
 
-std::unique_ptr<GraphEngine> make_engine() {
+std::unique_ptr<GraphEngine> make_engine(std::shared_ptr<CheckpointStore> store = nullptr) {
     static const bool registered = [] {
         NodeFactory::instance().register_type(
             "doubler",
@@ -85,7 +86,7 @@ std::unique_ptr<GraphEngine> make_engine() {
         })},
     };
     auto engine = GraphEngine::compile(defn, NodeContext());
-    engine->set_checkpoint_store(std::make_shared<InMemoryCheckpointStore>());
+    engine->set_checkpoint_store(store ? std::move(store) : std::make_shared<InMemoryCheckpointStore>());
     return engine;
 }
 
@@ -119,18 +120,31 @@ void check_nonce() {
     }
 }
 
-void check_budget_with_a_synchronous_store() {
-    // The built-in stores run their managed-budget operations on a pool of worker threads. This build has none,
-    // so the run is refused where it used to wait for a thread that never started.
+void check_budget_on_the_in_memory_store() {
+    // The in-memory store runs its managed-budget operations on the calling thread, so a budgeted graph runs here.
     try {
         auto engine = make_engine();
-        engine->run(budgeted_run("budget-1"));
-        check(false, "store: a managed budget on a synchronous store is refused", "the run was accepted");
+        const auto result = engine->run(budgeted_run("budget-1"));
+        check(result.output["channels"]["doubled"]["value"].get<int>() == 42,
+              "store: a managed budget runs on the in-memory store");
+    } catch (const std::exception& error) {
+        check(false, "store: a managed budget runs on the in-memory store", error.what());
+    }
+}
+
+void check_synchronous_store() {
+    // A store that is not the in-memory one hands its operations to a pool of worker threads. This build has none,
+    // so the run is refused where it used to wait for a thread that never started.
+    struct SynchronousStore final : InMemoryCheckpointStore {};
+    try {
+        auto engine = make_engine(std::make_shared<SynchronousStore>());
+        engine->run(budgeted_run("budget-3"));
+        check(false, "store: a synchronous store is refused", "the run was accepted");
     } catch (const SynchronousCheckpointStoreUnavailable& error) {
         check(dynamic_cast<const ConfigurationFailure*>(&error) != nullptr,
-              "store: a managed budget on a synchronous store is refused with a typed error");
+              "store: a synchronous store is refused with a typed error");
     } catch (const std::exception& error) {
-        check(false, "store: a managed budget on a synchronous store is refused with a typed error", error.what());
+        check(false, "store: a synchronous store is refused with a typed error", error.what());
     }
 }
 
@@ -185,7 +199,8 @@ void check_native_plugin() {
 
 int main() {
     check_nonce();
-    check_budget_with_a_synchronous_store();
+    check_budget_on_the_in_memory_store();
+    check_synchronous_store();
     check_budget_with_deadline();
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM
     check_native_plugin();

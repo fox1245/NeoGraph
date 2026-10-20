@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=4e62534e14c092fd8f32cd6e52366b4f1ae493d69de08a965bff04e45f5165ff -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=8e7b97974a770ba4d847ca114f60b481fbf19ceec801c1203da661cdf6b459af -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -66,9 +66,9 @@ Release，`-O3 -flto`，Emscripten 6.0.13。图 smoke 包含 Core 引擎和 SDK 
 
 | 构建 | `.wasm` | `.wasm` gzip -9 | `.js` |
 |---|---:|---:|---:|
-| 图 smoke，单线程 | 5,484,652 B (5.2 MiB) | 1,601,090 B (1.5 MiB) | 83,223 B |
-| 图 smoke，pthread | 5,432,156 B (5.2 MiB) | 1,655,480 B (1.6 MiB) | 103,691 B |
-| 含 Program 的 checks，单线程 | 5,017,721 B (4.8 MiB) | 1,554,991 B (1.5 MiB) | 83,031 B |
+| 图 smoke，单线程 | 5,502,805 B (5.2 MiB) | 1,607,052 B (1.5 MiB) | 83,223 B |
+| 图 smoke，pthread | 5,448,684 B (5.2 MiB) | 1,660,246 B (1.6 MiB) | 103,691 B |
+| 含 Program 的 checks，单线程 | 5,035,831 B (4.8 MiB) | 1,559,615 B (1.5 MiB) | 83,031 B |
 
 CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 字节（实测大小加约 9%）以内，并在作业摘要中报告大小。
 本页旧版本中的 712 KB 是在带类型的 SDK 之前测得的，现已不适用。
@@ -84,8 +84,7 @@ CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 �
   `NativeControlUnavailable` 拒绝。
 - **同步检查点存储。** 非异步的存储会在工作线程池中执行每个操作。单线程构建没有线程池，因此操作会以
   `SynchronousCheckpointStoreUnavailable` 被拒绝，而不是等待线程；请实现 `AsyncCheckpointStore`。内置的内存存储在
-  检查点上是异步的，但在 managed 预算操作上不是，所以在存储变为 awaitable 之前（#556），带 `model_token_budget` 的运行
-  同样会被拒绝。
+  调用线程上执行其全部操作（包括 managed 预算），所以带 `model_token_budget` 的运行可以在它上面工作。
 - **带期限的 managed 预算。** 期限绑定到重启后仍可恢复的时钟起点，而 WebAssembly 宿主没有这样的起点。
   运行会在询问存储之前，以 `ManagedBudgetDeadlineClockUnavailable` 被拒绝。
 - **原生归档。** 没有文件保管（custody）后端，SDK 会以 `Unsupported` 错误拒绝。

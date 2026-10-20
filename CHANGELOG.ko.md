@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=777d0c3387648257ce23677d70c8b431fff7ebc86ba56775cfa834958dfd60e2 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -49,7 +49,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - managed 예산 저널이 플랫폼별 호출 대신 SDK의 엔트로피 원천(`sp::crypto::random_bytes`)에서 nonce를 뽑습니다. WebAssembly 빌드에는 그런 호출이 없어서 managed 모델 토큰 예산을 시작할 수 없었습니다.
   - **동작 변경: 기한 시계 거부에 타입이 생겼습니다.** 복구할 수 있는 시계 원점이 없는 호스트(Linux 외의 모든 호스트, WebAssembly 포함)에서 기한이 있는 managed 예산은 일반 `std::runtime_error` 대신 `ManagedBudgetDeadlineClockUnavailable`을 던집니다. 이 예외는 `std::runtime_error`이면서 `ConfigurationFailure`입니다. 메시지는 그대로입니다. 기한이 없는 managed 예산은 그 호스트에서 실행됩니다.
   - **wasm32의 네이티브 Program 컨트롤.** C v1 플러그인 ABI는 64비트 레이아웃을 유지합니다. wasm32는 `neograph_program_native_invoke_request_v1`을 레이아웃이 끝나는 28바이트가 아니라 32바이트로 패딩해서 `src/program/native.cpp`가 빌드되지 않았습니다. 이제 `NativeControlBinding::create`는 거기서 `NativeControlUnavailable`(`ConfigurationFailure`)을 던지고, `program::NATIVE_CONTROLS_AVAILABLE`이 이를 알려 줍니다. 다른 타깃은 바뀌지 않습니다.
-  - **싱글 스레드 빌드에서 동기 체크포인트 저장소가 더 이상 멈추지 않습니다.** 동기 저장소의 연산을 워커 스레드 풀에서 실행하는 어댑터가, 싱글 스레드 빌드에서는 시작되지 않는 스레드를 기다려서 실행이 끝나지 않았습니다. 이제 연산은 `SynchronousCheckpointStoreUnavailable`(`ConfigurationFailure`)을 던집니다. 내장 인메모리 저장소도 managed 예산 연산을 그 풀에서 실행하므로, 저장소가 awaitable이 될 때까지(#556) `model_token_budget`이 있는 실행은 거기서 거부됩니다. 스레드를 쓰는 빌드는 바뀌지 않습니다.
+  - **싱글 스레드 빌드에서 동기 체크포인트 저장소가 더 이상 멈추지 않습니다.** 동기 저장소의 연산을 워커 스레드 풀에서 실행하는 어댑터가, 싱글 스레드 빌드에서는 시작되지 않는 스레드를 기다려서 실행이 끝나지 않았습니다. 이제 연산은 `SynchronousCheckpointStoreUnavailable`(`ConfigurationFailure`)을 던집니다. 스레드를 쓰는 빌드는 바뀌지 않습니다.
+  - **인메모리 체크포인트 저장소는 managed 예산 연산을 호출한 스레드에서 실행합니다.** `InMemoryCheckpointStore`는 다른 연산은 이미 제자리에서 실행하면서도, 리스, 공급자 호출의 클레임과 정산, 체크포인트 게시, 해제, 포크는 그 풀에서 실행했습니다. 이제 이것들도 제자리에서 실행되므로 `model_token_budget`이 있는 실행이 싱글 스레드 빌드에서 동작하고, 스레드를 쓰는 빌드에서는 워커 스레드를 기다리지 않습니다. 동기 형태를 오버라이드하는 하위 클래스는 여전히 풀을 거칩니다.
 
 ## [0.16.0] - 2026-10-20
 

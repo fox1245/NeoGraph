@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ff7e56dbf5bdf989cc2a0b1fd64315473187aabc3477bdbb7ce2ee1855d33304 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=777d0c3387648257ce23677d70c8b431fff7ebc86ba56775cfa834958dfd60e2 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -49,7 +49,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - managed 预算日志现在从 SDK 的熵源（`sp::crypto::random_bytes`）获取 nonce，不再按平台调用系统接口。WebAssembly 构建没有这类调用，所以 managed 模型 token 预算无法在那里启动。
   - **行为变更：期限时钟的拒绝有了类型。** 在没有可恢复时钟起点的宿主上（除 Linux 外的所有宿主，包括 WebAssembly），带期限的 managed 预算会抛出 `ManagedBudgetDeadlineClockUnavailable`，而不是普通的 `std::runtime_error`。它既是 `std::runtime_error`，也是 `ConfigurationFailure`。消息不变。不带期限的 managed 预算在那里照常运行。
   - **wasm32 上的原生 Program 控件。** C v1 插件 ABI 保持 64 位布局。wasm32 把 `neograph_program_native_invoke_request_v1` 填充到 32 字节，而布局在 28 字节处结束，这使 `src/program/native.cpp` 无法构建。现在 `NativeControlBinding::create` 在那里抛出 `NativeControlUnavailable`（一个 `ConfigurationFailure`），`program::NATIVE_CONTROLS_AVAILABLE` 也会如实反映。其他目标不变。
-  - **单线程构建中的同步检查点存储不再挂起。** 在工作线程池中执行同步存储操作的适配器，会去等待单线程构建永远不会启动的线程，运行因此无法返回。现在该操作会抛出 `SynchronousCheckpointStoreUnavailable`（一个 `ConfigurationFailure`）。内置的内存存储也在该线程池中执行 managed 预算操作，所以在存储变为 awaitable 之前（#556），带 `model_token_budget` 的运行在那里会被拒绝。使用线程的构建不变。
+  - **单线程构建中的同步检查点存储不再挂起。** 在工作线程池中执行同步存储操作的适配器，会去等待单线程构建永远不会启动的线程，运行因此无法返回。现在该操作会抛出 `SynchronousCheckpointStoreUnavailable`（一个 `ConfigurationFailure`）。使用线程的构建不变。
+  - **内存检查点存储在调用线程上执行其 managed 预算操作。** `InMemoryCheckpointStore` 的其他操作原本就在原地执行，但租约、provider 调用的申领与结算、检查点发布、释放和分叉却交给了那个线程池。现在它们也在原地执行，所以带 `model_token_budget` 的运行可以在单线程构建中工作，在使用线程的构建中也不再等待工作线程。覆盖同步形式的子类仍然经过线程池。
 
 ## [0.16.0] - 2026-10-20
 

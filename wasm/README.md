@@ -69,9 +69,9 @@ Release, `-O3 -flto`, Emscripten 6.0.13. The graph smoke contains the Core engin
 
 | Build | `.wasm` | `.wasm` gzip -9 | `.js` |
 |---|---:|---:|---:|
-| Graph smoke, single-thread | 5,484,652 B (5.2 MiB) | 1,601,090 B (1.5 MiB) | 83,223 B |
-| Graph smoke, pthread | 5,432,156 B (5.2 MiB) | 1,655,480 B (1.6 MiB) | 103,691 B |
-| Checks with Program, single-thread | 5,017,721 B (4.8 MiB) | 1,554,991 B (1.5 MiB) | 83,031 B |
+| Graph smoke, single-thread | 5,502,805 B (5.2 MiB) | 1,607,052 B (1.5 MiB) | 83,223 B |
+| Graph smoke, pthread | 5,448,684 B (5.2 MiB) | 1,660,246 B (1.6 MiB) | 103,691 B |
+| Checks with Program, single-thread | 5,035,831 B (4.8 MiB) | 1,559,615 B (1.5 MiB) | 83,031 B |
 
 CI fails the single-thread smoke above 6,000,000 bytes of `.wasm` or 1,750,000 bytes gzipped (the measured size plus
 about 9%), and reports the sizes in the job summary.
@@ -90,9 +90,8 @@ Calls into these fail with a typed error where NeoGraph owns the call, and are n
   wasm32 with `NativeControlUnavailable`.
 - **Synchronous checkpoint stores.** A store that is not asynchronous runs each operation on a pool of worker threads.
   A single-thread build has none, so the operation is refused with `SynchronousCheckpointStoreUnavailable` instead of
-  waiting for a thread; implement `AsyncCheckpointStore`. The built-in in-memory store is asynchronous for checkpoints
-  but not for managed-budget operations, so a run with `model_token_budget` is refused too, until the stores are
-  awaitable (#556).
+  waiting for a thread; implement `AsyncCheckpointStore`. The built-in in-memory store runs its operations, managed
+  budgets included, on the calling thread, so a run with `model_token_budget` works on it.
 - **A managed budget with a deadline.** The deadline is bound to a clock origin that a restart can recover, and a
   WebAssembly host has none. The run is refused with `ManagedBudgetDeadlineClockUnavailable`, before the store is
   asked.

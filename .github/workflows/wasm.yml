@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      # The size gate. Budgets are the measured size of the graph smoke (-O3 -flto, Release; 5,484,652 B and 1,601,090 B
+      # The size gate. Budgets are the measured size of the graph smoke (-O3 -flto, Release; 5.50 MB and 1.61 MB
       # gzipped) plus about 9%.
       MAX_WASM_BYTES: 6000000
       MAX_GZIP_BYTES: 1750000
