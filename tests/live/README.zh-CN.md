@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,7 +25,7 @@
   - 从全部四个提供方的列表刷新的模型目录、只有刷新后的目录才列出的模型的调用，以及任何目录都未列出但仍会发送的模型；
 - **已知缺口**是该版本线上必须失败的用例（strict xfail）。`tests/live/manifest.json` 列出了它们以及修复它们的 issue。修复合入后，用例开始通过，清单必须随之修改。
 
-每次调用都使用便宜的模型和较小的上限。完整运行的费用是几美分。
+每次调用都使用便宜的模型和较小的上限。完整运行约需八分钟，费用约 30 美分，其中大部分来自 Anthropic 智能体运行。
 
 ## 运行
 

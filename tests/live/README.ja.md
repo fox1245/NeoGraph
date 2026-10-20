@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -25,7 +25,7 @@
   - 4 つのプロバイダーすべての一覧から更新したモデルカタログ、更新後のカタログにだけあるモデルの呼び出し、どのカタログにもないがそれでも送信されるモデル。
 - **既知のギャップ**は、そのリリースラインで必ず失敗しなければならないケースです（strict xfail）。`tests/live/manifest.json` が、それを直す issue とともに一覧にしています。修正が入るとケースが通り始めるので、マニフェストも合わせて変える必要があります。
 
-呼び出しごとに安いモデルと小さな上限を使います。全体の実行費用は数米セントです。
+呼び出しごとに安いモデルと小さな上限を使います。全体の実行には約 8 分かかり、費用は約 30 米セントで、その大半は Anthropic エージェントの実行です。
 
 ## 実行
 
