@@ -47,7 +47,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **结算。** 没有报告的费用时，`sp::pricing::estimate` 按计价其 hold 时的目录快照为调用计价，预留的服务器工具费用按其上限收取。
   - **行为变更：记录。** `ProgramMonetaryRecord::origin` 是 provider 的 base URL（`https://openrouter.ai`，原先是 `openrouter`），`catalog_version` 是 `sp-model-catalogue/1` 并附带目录的 digest，新增的 `pricing`（Python 为 `record.pricing`）保存条目、其价格行、service tier、预留的工具使用和估算的假设。0.16.0 之前写入 journal 的记录字节保持不变。
   - **行为变更：`P_MONEY_UNKNOWN_ORIGIN`** 现在只表示没有已准入 descriptor 的 provider。目录在 base URL 上没有给出价格的模型是 `P_MONEY_UNKNOWN_MODEL`。
-- **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。构建固定在 SchemaProvider 0.4.0 的发布提交 `7910ef6e87f550da487239f750affca1c9e11c35`，已安装的 SDK 必须恰好是 0.4.0（`find_package(SchemaProvider 0.4.0 EXACT)`）。
+- **采用 SchemaProvider interface 7 (#512)。** NeoGraph 使用 interface 7 的头文件和第 7 代库（`libsp_*.so.7`）构建。构建固定在 SchemaProvider 0.4.0 的发布提交 `f47548fed63038d926aad7dc840bfaf701a8f1fc`，已安装的 SDK 必须恰好是 0.4.0（`find_package(SchemaProvider 0.4.0 EXACT)`）。
   - **行为变更：带类型的媒体。** `sp::Image` 变为 `sp::Media`：图像、音频、视频或文档，可以是内联数据，也可以位于 URL 或 provider 文件中。`ChatMessage::image_urls` 仍把内联图像投影为 data URL，现在也投影 URL 图像；`portable_message` 把 https 条目作为由 provider 获取的 URL 媒体发送。生成的图像（Chat 的 `message.images`、Responses 的 `image_generation_call`、Gemini 的 `inlineData`）是 `Media` 部件而不是 `Opaque` 部件；其 wire 条目保留在 native 输出中。
   - **Provider outcome 格式 v3。** `neograph.provider-outcome/v3` 和 `neograph.provider-message/v3`（`schemas/*-v3.schema.json`）增加了媒体部件、文本引用、带类型的工具结果内容、错误的 `reason` 和实际响应的 `model`。v2 格式的记录（Program 日志、检查点、运行时历史）仍可读取：图像部件变为内联图像媒体，新成员为空。新记录以 v3 写入，NeoGraph 0.15 无法读取。
   - **运行时历史记录**的存储版本为 3。版本 2 的记录按其存储的字节和 id 读取，因此 feed 的 predecessor 链不变。Program provider 日志的行保留写入时的 digest 域。
