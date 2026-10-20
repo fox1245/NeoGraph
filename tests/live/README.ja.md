@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=5d770788b0a501980908c34cff89d2b5b340fcc2fe986fc0084d77305b9e2479 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,6 +16,7 @@
   - Generate の応答モダリティと音声設定を使う Gemini の音声合成（バッファとストリーム）と Lyria のクリップ。
   - OpenAI Responses の hosted ウェブ検索（バッファとストリーム）。
   - Anthropic Messages の制御：thinking モードと effort、tool choice、temperature の規則、プロンプトキャッシュ、そして OpenRouter 経由の同じ制御。
+  - グラフで実行する長い Anthropic エージェント実行（`test_live_anthropic_agent.py`）：互いに依存するツールの連鎖、最初のターンを覚えていなければならない最大 6 ターンの会話、ツールラウンドを経て後のターンまで引き継がれる署名付き thinking と redacted thinking、並列ツール呼び出し、ツールのエラーと再試行、人がツール呼び出しごとに確認または承認する流れ、会話全体にわたるプロンプトキャッシュ、Claude 5.5 の adaptive thinking、そして同じループのストリーム・非同期・OpenRouter 経由での実行。
   - 型付きの失敗：無効なキー、キャンセルしたストリーム、期限切れの deadline。
   - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI の埋め込み、await する OpenRouter の埋め込み、OpenAI の moderation。
 - **C++**（`tests/live_e2e_test.cpp`、ターゲット `neograph_live_e2e_tests`）：

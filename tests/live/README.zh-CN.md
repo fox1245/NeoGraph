@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=5d770788b0a501980908c34cff89d2b5b340fcc2fe986fc0084d77305b9e2479 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=d2668fcbffe27c2bd966674f75a512d956d0459cc3ca6afefe3e18b9cb6a47c2 -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -16,6 +16,7 @@
   - 使用 Generate 响应模态和语音设置的 Gemini 语音合成（缓冲和流式）以及 Lyria 片段；
   - OpenAI Responses 的 hosted 网页搜索（缓冲和流式）；
   - Anthropic Messages 的控制项：thinking 模式和 effort、tool choice、temperature 规则、提示缓存，以及经 OpenRouter 的相同控制项；
+  - 在图中运行的长 Anthropic 智能体运行（`test_live_anthropic_agent.py`）：相互依赖的工具链、必须记住第一轮的最多六轮对话、经过工具轮次并延续到后续轮次的签名 thinking 和 redacted thinking、并行工具调用、工具错误与重试、由人逐个审阅或批准工具调用的流程、贯穿整个对话的提示缓存、Claude 5.5 adaptive thinking，以及以流式、异步和经 OpenRouter 方式运行的相同循环；
   - 类型化的失败：无效密钥、被取消的流、已过期的 deadline；
   - 通过 `Provider` 调用的 SchemaProvider 端点（#531）：OpenAI 嵌入、以 await 等待的 OpenRouter 嵌入和 OpenAI moderation。
 - **C++**（`tests/live_e2e_test.cpp`，目标 `neograph_live_e2e_tests`）：
