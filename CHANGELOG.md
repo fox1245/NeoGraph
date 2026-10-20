@@ -28,6 +28,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `make_endpoint_request` puts an endpoint request in a `ProviderRequest`, and the endpoint nodes call through it. So an endpoint call takes the path a chat call takes: the provider call broker, the durable dispatched marker, the SQLite journal, and replay on resume and fork. A Program registers the nodes with `RegistrySnapshotBuilder::add_core_endpoint_node`.
   - A model-token budget refuses an endpoint call before it is sent, since it has no output cap. A priced binding refuses it with `P_MONEY_UNMODELED`, because the model catalogue cannot price an endpoint request yet (fox1245/SchemaProvider#124).
   - An endpoint call's dispatch identity also names its endpoint, method and URL. A chat call's identity is unchanged, so journals keep matching.
+  - An endpoint read (a GET: a job poll or download, a file or batch lookup) is never charged and is safe to send again, so the journal sends it each time (`PreparedProviderRequest::is_endpoint_read()`). A Program paused on a running video job therefore sees the job finish when it is resumed, instead of replaying the first poll.
   - The Program provider wrapper and `OpenInferenceProvider` forward their inner provider's endpoints (`Provider::endpoint_runtime_of`).
 
 ### Changed

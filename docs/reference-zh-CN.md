@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fefc16f0f32b4f9bf8921842c8709e1e7f48c574fa2e1a5b5b2a268ed31d1ece -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=31343b5416c78d73d764c92762e72e15b10f3ef4f17fa5968112ddabb57e6b8b -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -361,7 +361,7 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **不阻塞线程的调用。** `complete_endpoint_async` 不会阻塞线程。awaitable 拥有客户端和调用，因此请求和 provider 都不必比它活得更久。取消正在等待的协程会取消调用，此时结果是 SDK 的 `Cancelled` 失败。
 - **按原样发送。** `SchemaProvider::Defaults` 只适用于聊天调用。这里不会把调用写入日志，也不会预留或扣除预算。
 - **没有端点的 provider。** 没有 SchemaProvider 端点的 `Provider` 会抛出 `std::logic_error`。子类通过重写 `endpoint_runtime()` 转发自己的客户端，包装另一个 provider 的 provider 则返回 `endpoint_runtime_of(inner)`。`has_endpoints()` 告知 provider 是否有端点。
-- **在聊天路径上。** `make_endpoint_request(request)` 把端点请求放进 `ProviderRequest`，因此 `prepare`、`dispatch` 和 `invoke` 像处理聊天调用一样处理它：dispatch Hook、观察者、provider 调用 broker 及其 journal，以及 token 预算。结果没有类型；由端点的 `typed()`（`sp::embeddings::typed`，...）为它赋予类型。该调用是缓冲的，所以 `ProviderMode::Stream` 会被拒绝，本地 provider（`prepare_local`）也会拒绝它。它的 dispatch identity（`request_digest`）还包含端点、方法和 URL，因为多个操作共用同一个端点，而读取没有请求体。
+- **在聊天路径上。** `make_endpoint_request(request)` 把端点请求放进 `ProviderRequest`，因此 `prepare`、`dispatch` 和 `invoke` 像处理聊天调用一样处理它：dispatch Hook、观察者、provider 调用 broker 及其 journal，以及 token 预算。结果没有类型；由端点的 `typed()`（`sp::embeddings::typed`，...）为它赋予类型。该调用是缓冲的，所以 `ProviderMode::Stream` 会被拒绝，本地 provider（`prepare_local`）也会拒绝它。它的 dispatch identity（`request_digest`）还包含端点、方法和 URL，因为多个操作共用同一个端点，而读取没有请求体。 端点读取（`PreparedProviderRequest::is_endpoint_read()`：GET，例如任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此记录 journal 的 broker 每次都发送它，而不是重放。
 
 ### ProviderRequest / ProviderControls
 
@@ -2625,6 +2625,7 @@ public:
   - `job_submit` 读取提示词（`prompt`），写入任务的句柄（`job`）。
   - `job_collect` 每次运行时对句柄轮询一次。已完成任务的输出会下载到 `video`，失败、已取消或已过期的任务会使该节点失败。
   - 仍在运行的任务会抛出 `NodeInterrupt`，其内容为 `{"job", "status", "raw_status"}`。宿主在其选择的时候恢复运行，节点再次轮询。步骤内部不做任何轮询，也不会再次发送提交。
+  - 在 Program 中，运行以同样的方式暂停。它的 journal 保留提交，而每次都重新发送轮询和下载，因此恢复的运行看到的是任务现在的状态。
 - **用量、预算、取消。**
   - 调用报告的 token 用量会计入运行的用量。不报告用量的调用（moderation、下载）不计入任何内容，因此不会抹去运行中其他调用的合计。
   - 这些调用走聊天调用所走的路径（`make_endpoint_request`）。运行的 provider 调用 broker 会把它们记入 journal 并重放；在 Program 中，宿主用 `add_core_endpoint_node` 注册这些节点。

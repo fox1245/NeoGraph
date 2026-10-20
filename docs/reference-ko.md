@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fefc16f0f32b4f9bf8921842c8709e1e7f48c574fa2e1a5b5b2a268ed31d1ece -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=31343b5416c78d73d764c92762e72e15b10f3ef4f17fa5968112ddabb57e6b8b -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -360,7 +360,7 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **스레드를 막지 않는 호출.** `complete_endpoint_async`는 스레드를 막지 않는다. awaitable이 클라이언트와 호출을 소유하므로 요청도 provider도 그보다 오래 살 필요가 없다. 기다리는 코루틴을 취소하면 호출이 취소되고, 결과는 SDK의 `Cancelled` 실패다.
 - **주어진 그대로 전송.** `SchemaProvider::Defaults`는 채팅 호출에만 적용된다. 여기서는 어떤 호출도 저널에 남기지 않고, 예산을 예약하거나 차감하지도 않는다.
 - **엔드포인트가 없는 provider.** SchemaProvider 엔드포인트가 없는 `Provider`는 `std::logic_error`를 던진다. 하위 클래스는 `endpoint_runtime()`을 재정의해 자기 클라이언트를 전달하고, 다른 provider를 감싸는 provider는 `endpoint_runtime_of(inner)`를 반환한다. `has_endpoints()`는 provider에 엔드포인트가 있는지 알려 준다.
-- **채팅 경로에서.** `make_endpoint_request(request)`는 엔드포인트 요청을 `ProviderRequest`에 담으므로, `prepare`, `dispatch`, `invoke`가 이를 채팅 호출과 똑같이 처리한다: dispatch Hook, 관측자, provider 호출 broker와 그 저널, 토큰 예산. 결과는 타입이 없으며, 엔드포인트의 `typed()`(`sp::embeddings::typed`, ...)가 결과에 타입을 부여한다. 호출은 버퍼링되므로 `ProviderMode::Stream`은 거부되며, 로컬 provider(`prepare_local`)도 이를 거부한다. dispatch identity(`request_digest`)에는 엔드포인트, 메서드, URL도 들어간다. 하나의 엔드포인트를 여러 연산이 공유하고, 읽기에는 본문이 없기 때문이다.
+- **채팅 경로에서.** `make_endpoint_request(request)`는 엔드포인트 요청을 `ProviderRequest`에 담으므로, `prepare`, `dispatch`, `invoke`가 이를 채팅 호출과 똑같이 처리한다: dispatch Hook, 관측자, provider 호출 broker와 그 저널, 토큰 예산. 결과는 타입이 없으며, 엔드포인트의 `typed()`(`sp::embeddings::typed`, ...)가 결과에 타입을 부여한다. 호출은 버퍼링되므로 `ProviderMode::Stream`은 거부되며, 로컬 provider(`prepare_local`)도 이를 거부한다. dispatch identity(`request_digest`)에는 엔드포인트, 메서드, URL도 들어간다. 하나의 엔드포인트를 여러 연산이 공유하고, 읽기에는 본문이 없기 때문이다. 엔드포인트 읽기(`PreparedProviderRequest::is_endpoint_read()`: job 폴링이나 다운로드, 파일이나 배치 조회 같은 GET)는 과금되지 않고 다시 보내도 안전하므로, 저널을 남기는 broker는 이를 replay하지 않고 매번 보낸다.
 
 ### ProviderRequest / ProviderControls
 
@@ -2668,6 +2668,7 @@ The library pre-registers the following components:
   - `job_submit`은 프롬프트(`prompt`)를 읽고 job의 핸들(`job`)을 쓴다.
   - `job_collect`는 실행될 때마다 핸들을 한 번 폴링한다. 완료된 job의 출력은 `video`로 다운로드되고, 실패했거나 취소되었거나 만료된 job은 노드를 실패시킨다.
   - 아직 실행 중인 job이면 `{"job", "status", "raw_status"}`를 담은 `NodeInterrupt`를 던진다. 호스트는 원하는 때에 실행을 재개하고, 노드는 다시 폴링한다. step 안에서는 아무것도 폴링하지 않으며, 제출은 다시 보내지 않는다.
+  - Program에서도 실행은 같은 방식으로 멈춘다. 그 저널은 제출을 보관하고 폴링과 다운로드는 매번 다시 보내므로, 재개된 실행은 job의 지금 상태를 본다.
 - **사용량, 예산, 취소.**
   - 호출이 보고한 토큰 사용량은 실행의 사용량에 더해진다. 사용량을 보고하지 않는 호출(moderation, 다운로드)은 아무것도 더하지 않으므로, 실행의 다른 호출이 남긴 합계를 지우지 않는다.
   - 호출은 채팅 호출이 거치는 경로를 따른다(`make_endpoint_request`). 실행의 provider 호출 broker가 이를 저널에 남기고 재생하며, Program에서는 호스트가 `add_core_endpoint_node`로 노드를 등록한다.

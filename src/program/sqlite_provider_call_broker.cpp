@@ -531,6 +531,10 @@ private:
         auto priced = program::detail::prepare_priced_call(*provider, std::move(request), monetary != nullptr);
         auto prepared = std::move(priced.prepared);
         if (!prepared.valid()) co_return program::detail::preparation_failure_outcome(prepared);
+        // An endpoint read (a job poll or download) is never charged and is safe to send again, so it is sent each
+        // time rather than journaled: a resumed poll must see the job as it is now, not replay what it was. A
+        // priced binding still refuses it below, as it refuses every endpoint call it cannot price.
+        if (prepared.is_endpoint_read() && !priced.quote) co_return co_await provider->dispatch_async(std::move(prepared));
         const ProgramCoreProviderCallContext context{owner, version, run, operation, attempt};
         const auto id = dispatch_id(context, identity);
         program::detail::MonetaryHold hold;

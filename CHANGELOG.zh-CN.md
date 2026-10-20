@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - `make_endpoint_request` 把端点请求放进 `ProviderRequest`，端点节点通过它发起调用。因此端点调用走的是聊天调用所走的路径：provider 调用 broker、持久的分发标记、SQLite journal，以及在恢复和 fork 时的重放。Program 用 `RegistrySnapshotBuilder::add_core_endpoint_node` 注册这些节点。
   - 模型 token 预算会在发送之前拒绝端点调用，因为它没有输出上限。计价绑定以 `P_MONEY_UNMODELED` 拒绝它，因为模型目录目前还无法为端点请求计价（fox1245/SchemaProvider#124）。
   - 端点调用的分发标识中还包含它的端点、方法和 URL。聊天调用的标识不变，所以 journal 仍然能匹配。
+  - 端点读取（GET：任务的轮询或下载、文件或批处理的查询）不会被计费，再次发送也是安全的，因此 journal 每次都发送它（`PreparedProviderRequest::is_endpoint_read()`）。因此，在运行中的视频任务上暂停的 Program 恢复后会看到任务完成，而不是重放第一次轮询。
   - Program provider 包装器和 `OpenInferenceProvider` 会转发其内部 provider 的端点（`Provider::endpoint_runtime_of`）。
 
 ### 变更

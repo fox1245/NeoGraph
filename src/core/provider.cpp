@@ -286,6 +286,9 @@ bool PreparedProviderRequest::requires_native_custody() const noexcept {
 const sp::descriptor::ValidatedDescriptor* PreparedProviderRequest::admitted_descriptor() const noexcept {
     return impl_ ? impl_->prepared.descriptor() : nullptr;
 }
+bool PreparedProviderRequest::is_endpoint_read() const noexcept {
+    return impl_ && !impl_->prepared.endpoint().empty() && impl_->prepared.method() == "GET";
+}
 
 PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::Client> client, ProviderRequest request) {
     sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, sp::capability::RequiredProvider);
