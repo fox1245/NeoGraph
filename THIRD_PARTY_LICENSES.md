@@ -145,13 +145,17 @@ replacement and LGPL 2.1 modification/reverse-engineering rights. The archive
 contains actual library inputs, not the unrelated unknown-grant upstream tests.
 Its old-cohort repair mapping must be checked against each final release wheel;
 the release must also attach this exact source asset beside its Linux binaries.
-NeoGraph 0.15.1 ships this asset unchanged: its name and digest are those
+NeoGraph 0.16.0 ships this asset unchanged: its name and digest are those
 published with 0.13.0. The Linux wheel gate replaces the bundled libraries
 from it and runs the installed-wheel tests, and the bundled LGPL libraries
-of the 0.15.1 wheels are compared with the 0.15.0 wheels before publication.
+of the 0.16.0 wheels are compared with the 0.15.1 wheels before publication.
 For the x86_64 CPython 3.12 wheel built from the pinned image, all nineteen
 bundled libraries, including the LGPL `keyutils-libs` and `libxcrypt`, are
-byte-identical to the 0.15.0 wheel's, so the table above applies unchanged.
+byte-identical to the 0.15.1 wheel's, so the table above applies unchanged.
+The CPython 3.12 macOS 14 arm64 and Windows AMD64 wheels were compared the
+same way: all twenty-two dylibs in `neograph_engine/.dylibs` and all ten DLLs
+in `neograph_engine.libs` are byte-identical to the 0.15.1 wheels', so what this
+file says of the macOS and Windows closures for 0.15.1 still holds.
 
 ## LLVM 20.1.8 macOS runtime notices
 
