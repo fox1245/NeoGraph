@@ -140,6 +140,11 @@ void require_kind(const ExecutableManifest& manifest, ExecutableKind expected) {
     }
 }
 
+// A host node declares its effects as an object; only a built-in endpoint node has none.
+void require_effects_object(const json& effects) {
+    if (!effects.is_object()) throw std::invalid_argument("Node config_schema and effects must be objects");
+}
+
 struct SnapshotEntry {
     ExecutableManifest            manifest;
     json                          metadata;
@@ -359,6 +364,7 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node(
     json                          effects,
     ExecutableRequirementResolver requirement_resolver) {
     const bool allow_executable_bindings = manifest.effect_mode == EffectMode::TrustedNative;
+    require_effects_object(effects);
     return add_node_impl(std::move(manifest), std::move(factory), std::move(config_schema),
                          std::move(effects), std::move(requirement_resolver),
                          allow_executable_bindings);
@@ -372,6 +378,7 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_host_brokered_node(
     ExecutableRequirementResolver requirement_resolver) {
     if (manifest.effect_mode != EffectMode::Brokered)
         throw std::invalid_argument("Host broker node must declare Brokered effects");
+    require_effects_object(effects);
     return add_node_impl(std::move(manifest), std::move(factory), std::move(config_schema),
                          std::move(effects), std::move(requirement_resolver), true);
 }
@@ -413,13 +420,15 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_core_endpoint_node(
     const auto type = manifest.identity.name;
     if (manifest.effect_mode != EffectMode::Brokered || !graph::is_endpoint_node_type(type))
         throw std::invalid_argument("Core endpoint node must be a brokered endpoint node type");
-    // The node's channels are its configuration, so it declares no fixed effects.
+    // The node's channels are its configuration, so it has no effect contract: null, as for the same node
+    // type in a Core graph, and the validator skips its channel analysis. An empty object would instead
+    // declare a node that reads and writes nothing.
     return add_node_impl(
         std::move(manifest),
         [type](const std::string& name, const json& config, const graph::NodeContext& context) {
             return graph::NodeFactory::instance().create(type, name, config, context);
         },
-        graph::NodeFactory::instance().config_schema(type), json::object(),
+        graph::NodeFactory::instance().config_schema(type), json(nullptr),
         std::move(requirement_resolver), true);
 }
 
@@ -433,22 +442,24 @@ RegistrySnapshotBuilder& RegistrySnapshotBuilder::add_node_impl(
     require_kind(manifest, ExecutableKind::Node);
     validate_manifest(manifest);
     if (!factory) throw std::invalid_argument("Node factory must not be empty");
-    if (!config_schema.is_object() || !effects.is_object()) {
+    if (!config_schema.is_object() || !(effects.is_object() || effects.is_null())) {
         throw std::invalid_argument("Node config_schema and effects must be objects");
     }
     config_schema = detail::owned_json_copy(config_schema);
     effects       = detail::owned_json_copy(effects);
     auto requirements = manifest.required_executables;
-    impl_->registry.register_type(
-        manifest.identity.name,
+    auto node_factory =
         [factory = std::move(factory), requirements = std::move(requirements),
          requirement_resolver, allow_executable_bindings](const std::string& name, const json& config,
                                                 const graph::NodeContext& context) {
             auto narrowed = node_capability_context(context, requirements, requirement_resolver,
                                                     config, allow_executable_bindings);
             return factory(name, config, narrowed);
-        },
-        config_schema, effects);
+        };
+    if (effects.is_null())
+        impl_->registry.register_type(manifest.identity.name, std::move(node_factory), config_schema);
+    else
+        impl_->registry.register_type(manifest.identity.name, std::move(node_factory), config_schema, effects);
     impl_->entries.push_back(
         SnapshotEntry{std::move(manifest),
                       detail::owned_json_copy(
