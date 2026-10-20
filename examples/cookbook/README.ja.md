@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=2c4e2880e25052ede124b7446b33531356216dc639497fb782cf45998acde03c -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=09508fa650f13a6172729a396ae7f833b3b77ffb9eaacce83827c4ed19ac7b29 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

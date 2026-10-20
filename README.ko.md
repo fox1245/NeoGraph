@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=71fbb3a8a5072ec0c169fa310440fc595239f0635bbff040c3facdb97589f484 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=95dcfaea2d1e943caf027838dec4ec2e1463e50b96b75736e25814569468af80 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)

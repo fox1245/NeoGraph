@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=e9c13d7f86936784ced0b9f500f737a386fbabc518e974150c9ea0ce3c1da6cd -->
+<!-- neograph-i18n: source=docs/ABI_POLICY.md locale=zh-CN source_sha256=03f09d9ead6f5529e387139eb3c5ff330eeea4e551e13bb01c8d33e13ef9d89e -->
 # 二进制兼容性策略
 
 **Languages:** [English](ABI_POLICY.md) | [한국어](ABI_POLICY.ko.md) | [日本語](ABI_POLICY.ja.md) | [简体中文](ABI_POLICY.zh-CN.md)
