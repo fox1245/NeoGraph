@@ -1,4 +1,5 @@
 #include "fixtures/unique_temp_dir.h"
+#include "json_schema_lite.h"
 
 #include <neograph/sqlite_runtime_stores.h>
 #include <neograph/async/run_sync.h>
@@ -26,12 +27,16 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
+#ifndef NEOGRAPH_SOURCE_DIR
+#error "NEOGRAPH_SOURCE_DIR must name the repository root"
+#endif
 #ifdef __linux__
 #include <cerrno>
 #include <cstdlib>
@@ -526,6 +531,45 @@ TEST(SQLiteRuntimeStores, NativeHistoryRejectsTamperedProjectionEvenWithAuthenti
     ASSERT_EQ(sqlite3_step(update.get()), SQLITE_DONE);
     EXPECT_THROW(store.hydrate_records(range), std::invalid_argument);
     EXPECT_THROW(store.history_record_by_message_id(feed, "native-message"), std::invalid_argument);
+}
+
+TEST(SQLiteRuntimeStores, NativeHistoryRecordWithItsArchiveReferenceValidatesAgainstItsSchema) {
+    ToolEffectTestFiles files;
+    const auto descriptor = test::descriptor("anthropic.messages");
+    const std::string owner = "owner";
+    const auto first = record(1);
+    const auto second = native_record(captured_native_message(descriptor), first);
+    auto activation = sp::NativeArchive::provision(files.archive(), files.key(), owner, descriptor);
+    ASSERT_TRUE(std::holds_alternative<std::shared_ptr<sp::NativeArchive>>(activation));
+    const auto archive = std::get<std::shared_ptr<sp::NativeArchive>>(std::move(activation));
+
+    const auto read_schema = [](const std::string& name) {
+        std::ifstream input(std::filesystem::path(NEOGRAPH_SOURCE_DIR) / "schemas" / name, std::ios::binary);
+        if (!input) throw std::runtime_error("cannot open schema " + name);
+        return json::parse(std::string(std::istreambuf_iterator<char>(input), {}));
+    };
+    json_schema_lite::Checker checker(read_schema("runtime-history-record-v3.schema.json"), read_schema);
+    const auto errors_of = [](const std::vector<std::string>& errors) {
+        std::string joined;
+        for (const auto& error : errors) joined += "\n  " + error;
+        return joined;
+    };
+
+    const auto stored = json::parse(second.serialize_canonical(archive, owner));
+    ASSERT_TRUE(stored.contains("native_archive_reference"));
+    EXPECT_EQ(stored.at("native_archive_reference").get<std::string>().rfind("spna3:", 0), 0u);
+    EXPECT_TRUE(checker.check(stored).empty()) << errors_of(checker.check(stored));
+    // A record without native custody carries no reference.
+    const auto portable = json::parse(first.serialize_canonical());
+    EXPECT_TRUE(checker.check(portable).empty()) << errors_of(checker.check(portable));
+    // The schema holds the pattern to the archive format the SDK writes, and a native record to its reference.
+    auto other_format = stored;
+    other_format["native_archive_reference"] = "spna2:" + std::string(64, '0');
+    EXPECT_FALSE(checker.check(other_format).empty());
+    auto without_reference = json::object();
+    for (const auto& [key, field] : stored.items())
+        if (key != "native_archive_reference") without_reference[key] = field;
+    EXPECT_FALSE(checker.check(without_reference).empty());
 }
 #endif
 

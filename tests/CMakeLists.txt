@@ -502,6 +502,9 @@ endif()
 if(NEOGRAPH_BUILD_SQLITE)
     target_sources(neograph_tests PRIVATE test_sqlite_checkpoint.cpp test_evidence_ledger.cpp test_sqlite_runtime_stores.cpp)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_SQLITE)
+    # The runtime-store tests read the schemas under schemas/.
+    set_source_files_properties(test_sqlite_runtime_stores.cpp PROPERTIES
+        COMPILE_DEFINITIONS NEOGRAPH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 endif()
 
 target_sources(neograph_tests PRIVATE test_provider_constructor_exception_safety.cpp)

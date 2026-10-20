@@ -17,7 +17,7 @@
     "source_payload": {},
     "source_media_type": { "$ref": "#/$defs/token" },
     "predecessor_id": { "$ref": "#/$defs/sha256" },
-    "native_archive_reference": { "type": "string", "pattern": "^spna2:[0-9a-f]{64}$" }
+    "native_archive_reference": { "type": "string", "pattern": "^spna3:[0-9a-f]{64}$" }
   },
   "allOf": [
     {
