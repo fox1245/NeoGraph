@@ -22,6 +22,8 @@ public:
     PreparedProviderRequest prepare(ProviderRequest request) override;
     std::string_view family() const noexcept override;
     std::string get_name() const override;
+protected:
+    std::shared_ptr<sp::runtime::Client> endpoint_runtime() const override { return client_; }
 private:
     std::string family_;
     std::string name_;

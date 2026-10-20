@@ -554,6 +554,36 @@ asio::awaitable<sp::runtime::Result> Provider::dispatch_operation(PreparedProvid
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);
     }
 }
+std::shared_ptr<sp::runtime::Client> Provider::require_endpoint_runtime() const {
+    auto client = endpoint_runtime();
+    if (!client) throw std::logic_error("Provider has no SchemaProvider endpoints");
+    return client;
+}
+asio::awaitable<void> detail::await_endpoint(EndpointStart start) {
+    ProviderWakeReader wake(co_await asio::this_coro::executor);
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto cancel = start([done, signal = wake.signal()] {
+        done->store(true, std::memory_order_release);
+        signal->notify();
+    });
+    // As for a chat call, a cancelled wait cancels the call and keeps awaiting
+    // its authoritative outcome instead of spinning on an aborted wait.
+    const bool throw_on_cancel = co_await asio::this_coro::throw_if_cancelled();
+    co_await asio::this_coro::throw_if_cancelled(false);
+    bool cancelled = false;
+    for (;;) {
+        auto cancellation = co_await asio::this_coro::cancellation_state;
+        if (!cancelled && cancellation.cancelled() != asio::cancellation_type::none) {
+            cancelled = true;
+            cancel();
+        }
+        wake.consume();
+        if (done->load(std::memory_order_acquire)) break;
+        const auto error = co_await wake.wait(cancelled ? asio::cancellation_slot{} : cancellation.slot());
+        if (error && error != asio::error::operation_aborted) throw asio::system_error(error);
+    }
+    co_await asio::this_coro::throw_if_cancelled(throw_on_cancel);
+}
 // Normalize only portable client results; native replay and mixed messages are
 // indivisible, and a system message remains a boundary even when lifted out.
 static void group_tool_results(std::vector<sp::Message>& messages) {

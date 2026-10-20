@@ -152,4 +152,86 @@ TEST_P(LiveAdapter, GeminiGeneratedImage) {
                 encoded += media->data->size();
     EXPECT_GT(encoded, 10000u);
 }
+
+// SchemaProvider endpoints through Provider (#531), on the provider's own client.
+template <class Outcome> std::string failure_text(const Outcome& outcome) {
+    const auto* failure = std::get_if<sp::Failure>(&outcome);
+    if (!failure) return {};
+    return "provider failure kind " + std::to_string(static_cast<int>(failure->error.kind)) + " http " +
+           std::to_string(failure->error.http_status) + ": " + failure->error.safe_message;
+}
+
+sp::embeddings::Request embedding_request(std::string model) {
+    sp::embeddings::Request request;
+    request.model = std::move(model);
+    request.inputs.push_back({"A graph of agents."});
+    request.inputs.push_back({"A list of chores."});
+    return request;
+}
+
+void expect_two_vectors(const sp::embeddings::Outcome& outcome) {
+    const auto* result = std::get_if<sp::embeddings::Result>(&outcome);
+    ASSERT_NE(result, nullptr) << failure_text(outcome);
+    ASSERT_EQ(result->vectors.size(), 2u);
+    EXPECT_GT(result->vectors[0].size(), 100u);
+    EXPECT_EQ(result->vectors[0].size(), result->vectors[1].size());
+    ASSERT_TRUE(result->usage.input_total);
+    EXPECT_GT(result->usage.input_total->value, 0u);
+}
+
+TEST(LiveEndpoints, OpenAIEmbeddings) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    SchemaProvider provider(descriptor("openai.chat", "https://api.openai.com", "/v1/chat/completions",
+                                       "/v1/chat/completions"), options);
+    expect_two_vectors(provider.complete_endpoint(embedding_request("text-embedding-3-small")));
+}
+
+TEST(LiveEndpoints, OpenRouterEmbeddingsAsync) {
+    LIVE_KEY(key, "OPENROUTER_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    auto provider = std::make_shared<SchemaProvider>(descriptor("openai.chat", "https://openrouter.ai",
+        "/api/v1/chat/completions", "/api/v1/chat/completions"), options);
+    auto awaitable = provider->complete_endpoint_async(embedding_request("openai/text-embedding-3-small"));
+    provider.reset();
+    expect_two_vectors(run(std::move(awaitable)));
+}
+
+TEST(LiveEndpoints, OpenAIModeration) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    SchemaProvider provider(descriptor("openai.chat", "https://api.openai.com", "/v1/chat/completions",
+                                       "/v1/chat/completions"), options);
+    sp::moderation::Request request;
+    request.model = "omni-moderation-latest";
+    request.inputs.push_back({"I would like a cup of tea."});
+    auto prepared = provider.prepare_endpoint(std::move(request));
+    ASSERT_EQ(prepared.error(), nullptr);
+    EXPECT_EQ(prepared.prepared().endpoint(), "moderation");
+    const auto outcome = provider.complete_endpoint(std::move(prepared));
+    const auto* result = std::get_if<sp::moderation::Result>(&outcome);
+    ASSERT_NE(result, nullptr) << failure_text(outcome);
+    ASSERT_EQ(result->verdicts.size(), 1u);
+    EXPECT_FALSE(result->verdicts[0].flagged);
+    EXPECT_FALSE(result->verdicts[0].categories.empty());
+}
+
+TEST(LiveEndpoints, AnthropicTokenCount) {
+    LIVE_KEY(key, "ANTHROPIC_API_KEY");
+    sp::runtime::Options options;
+    options.api_key = key;
+    SchemaProvider provider(descriptor("anthropic.messages", "https://api.anthropic.com", "/v1/messages",
+                                       "/v1/messages"), options);
+    sp::messages::Request request;
+    request.model = "claude-haiku-5-5";
+    request.max_tokens = 16;
+    request.messages.push_back(sp::Message{"", sp::Role::User, {sp::Text{"Count the tokens of this sentence."}}});
+    const auto outcome = run(provider.complete_endpoint_async(sp::tokens::Count{std::move(request)}));
+    const auto* result = std::get_if<sp::tokens::Result>(&outcome);
+    ASSERT_NE(result, nullptr) << failure_text(outcome);
+    EXPECT_GT(result->input, 0u);
+}
 } // namespace

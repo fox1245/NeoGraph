@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -430,6 +430,6 @@ tool search、`shell.environment` 的 skills 和 shell(`container_auto`)。
 `openai-spreadsheets` skill。本 inspection demo 只声明 function tool，不在本地执行。
 保留全部有序类型化/raw event 和完整 terminal。hosted tool 可能得不到所选 route 的支持，或产生额外费用；
 类型化准入(admission)不是 live 兼容保证。不保留 WebSocket/primitive 可运行示例。
-图像、视频和 decisions 是 SchemaProvider 端点，通过 `<codecs/images.h>`、`<codecs/videos.h>` 和
-`<codecs/decisions.h>` 在 `sp::runtime::Client` 上调用。NeoGraph 0.16.0 已移除类型化客户端
+图像、视频和 decisions 是 SchemaProvider 端点，通过 `Provider::complete_endpoint` 调用
+（参见参考文档的“端点调用”）。NeoGraph 0.16.0 已移除类型化客户端
 `ImagesClient`、`VeoClient` 和 `DecisionsClient`；参见 CHANGELOG。

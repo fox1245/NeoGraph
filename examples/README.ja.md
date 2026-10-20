@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=7c5fbeeeb566269d572320377d76aa7e4871c4de549f2a7689695725a1806d01 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=d97d45dad13fedabcfb16afaacea9023f577ce627dad1dc37b4ceea7b07a5bda -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -440,6 +440,6 @@ tool search、`shell.environment` の skills、shell(`container_auto`) です。
 `openai-spreadsheets` skill を置換します。この inspection demo は function tool を宣言するだけでローカル実行しません。
 順序付き型付き/raw event と完全な terminal を保持します。hosted tool は route によって未対応または追加費用となり、
 型付き admission は live 互換性保証ではありません。WebSocket/primitive 実行例は残しません。
-画像、動画、decisions は SchemaProvider のエンドポイントで、`<codecs/images.h>`、`<codecs/videos.h>`、
-`<codecs/decisions.h>` を通じて `sp::runtime::Client` で呼び出します。NeoGraph 0.16.0 は型付きクライアント
+画像、動画、decisions は SchemaProvider のエンドポイントで、`Provider::complete_endpoint` で呼び出します
+（リファレンスの「エンドポイント呼び出し」を参照）。NeoGraph 0.16.0 は型付きクライアント
 `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました。CHANGELOG を参照してください。

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=8e5574f4efe58a6728845cc78d0a9f8e3cbc7e180130ad5eef46ce53a542dbeb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a1d4a032a28674cd52ebc47f3a57beda7ba4f35a35dbecf29a1ac8b868e0111a -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 추가됨
+- **SchemaProvider 엔드포인트를 `Provider`에서 부릅니다 (#531).**
+  - `prepare_endpoint`, `complete_endpoint`, `complete_endpoint_async`가 SchemaProvider의 비채팅 엔드포인트를 실행합니다: 이미지, decisions, 임베딩, rerank, moderation, 음성 합성, 전사와 번역, 비디오 job, 파일, 배치, 토큰 수 세기, OpenRouter 생성 통계.
+  - 호출은 채팅 호출이 함께 쓰는 provider 자신의 SchemaProvider 클라이언트에서 실행되며, descriptor 정책이 origin별로 각 엔드포인트를 승인합니다.
+  - 0.16.0이 제거하는 타입 클라이언트를 대신합니다. Python, 그래프 노드, Program 호출은 뒤따릅니다.
 
 ### 변경됨
 - **SchemaProvider interface 7의 모든 요청 제어를 C++와 Python에서 family별 nest로 쓸 수 있습니다 (#512, #513).** `ProviderControls`에 `chat`, `responses`, `messages`, `generate`, `interactions`(`ChatControls` … `InteractionsControls`)가 생겨 family 고유 제어를 SDK 타입 그대로 담으며, 평평한 멤버는 이식 가능한 제어로 남습니다. 2026-10-20 원탁회의에서 정한 구조입니다.
@@ -42,7 +48,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 삭제됨
 - **컴파일된 가격 카탈로그를 제거했습니다 (#520).** `data/pricing/catalog.json`, 내부 `PriceCatalog`(`src/program/pricing.h`), `scripts/check_price_drift.py`, 주간 `Price drift` 워크플로가 없어졌습니다. 가격은 호스트가 공급하는 카탈로그 데이터입니다. `tests/fixtures/pricing/model_prices.json`은 13개 항목을 테스트용 카탈로그 레이어로 유지합니다.
-- **타입 클라이언트 `ImagesClient`, `VeoClient`, `DecisionsClient`를 제거했습니다 (#510).** 0.15.1에서 폐기 예정이었습니다. 이미지, 비디오, decisions는 SchemaProvider 엔드포인트이므로 `<codecs/images.h>`, `<codecs/videos.h>`, `<codecs/decisions.h>`를 통해 `sp::runtime::Client`에서 호출합니다. 헤더(`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), 함께 배포하던 설정(`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py`, 그리고 관련 테스트가 없어졌습니다. 라이브 스위트에서 타입 클라이언트 케이스 네 개가 빠집니다.
+- **타입 클라이언트 `ImagesClient`, `VeoClient`, `DecisionsClient`를 제거했습니다 (#510).** 0.15.1에서 폐기 예정이었습니다. 이미지, 비디오, decisions는 SchemaProvider 엔드포인트이므로 `Provider::complete_endpoint`로 호출합니다 (#531). 헤더(`neograph/llm/images_client.h`, `veo_client.h`, `decisions_client.h`, `endpoint_types.h`), 함께 배포하던 설정(`schemas/typed-*-client.json`), `scripts/sync_model_catalogues.py`, 그리고 관련 테스트가 없어졌습니다. 라이브 스위트에서 타입 클라이언트 케이스 네 개가 빠집니다.
 
 ## [0.15.1] - 2026-10-19
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=8e5574f4efe58a6728845cc78d0a9f8e3cbc7e180130ad5eef46ce53a542dbeb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a1d4a032a28674cd52ebc47f3a57beda7ba4f35a35dbecf29a1ac8b868e0111a -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 追加
+- **SchemaProvider のエンドポイントを `Provider` から呼び出せます (#531).**
+  - `prepare_endpoint`、`complete_endpoint`、`complete_endpoint_async` が SchemaProvider の非チャット・エンドポイントを実行します：画像、decisions、埋め込み、rerank、moderation、音声合成、文字起こしと翻訳、動画ジョブ、ファイル、バッチ、トークン数のカウント、OpenRouter の生成統計。
+  - 呼び出しはチャット呼び出しと共有する provider 自身の SchemaProvider クライアントで実行され、descriptor ポリシーが origin ごとに各エンドポイントを許可します。
+  - 0.16.0 で削除される型付きクライアントの代わりです。Python、グラフノード、Program からの呼び出しは後に続きます。
 
 ### 変更
 - **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。2026-10-20 の円卓会議で決めた構造です。
@@ -42,7 +48,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 削除
 - **コンパイル済みの価格カタログを削除しました (#520).** `data/pricing/catalog.json`、内部の `PriceCatalog`（`src/program/pricing.h`）、`scripts/check_price_drift.py`、週次の `Price drift` ワークフローはなくなりました。価格はホストが供給するカタログのデータです。`tests/fixtures/pricing/model_prices.json` は、13 個の項目をテスト用のカタログレイヤーとして保持します。
-- **型付きクライアント `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました (#510).** 0.15.1 で非推奨になっていました。画像、動画、decisions は SchemaProvider のエンドポイントで、`<codecs/images.h>`、`<codecs/videos.h>`、`<codecs/decisions.h>` を通じて `sp::runtime::Client` で呼び出します。ヘッダー（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、同梱の設定（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py`、およびそれらのテストはなくなりました。ライブスイートから型付きクライアントの 4 ケースがなくなります。
+- **型付きクライアント `ImagesClient`、`VeoClient`、`DecisionsClient` を削除しました (#510).** 0.15.1 で非推奨になっていました。画像、動画、decisions は SchemaProvider のエンドポイントで、`Provider::complete_endpoint` で呼び出します (#531)。ヘッダー（`neograph/llm/images_client.h`、`veo_client.h`、`decisions_client.h`、`endpoint_types.h`）、同梱の設定（`schemas/typed-*-client.json`）、`scripts/sync_model_catalogues.py`、およびそれらのテストはなくなりました。ライブスイートから型付きクライアントの 4 ケースがなくなります。
 
 ## [0.15.1] - 2026-10-19
 

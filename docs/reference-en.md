@@ -313,8 +313,54 @@ public:
     static std::string request_digest(const PreparedProviderRequest& request);
     static std::optional<std::uint64_t> conservative_token_upper_bound(
         const PreparedProviderRequest& request);
+
+    // SchemaProvider endpoints at the provider's origin (#531).
+    template <EndpointRequest Request>
+    sp::runtime::PreparedEndpoint<EndpointOutcomeOf<Request>> prepare_endpoint(
+        Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    Outcome complete_endpoint(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    EndpointOutcomeOf<Request> complete_endpoint(Request request, sp::runtime::RunOptions options = {});
+    template <class Outcome>
+    asio::awaitable<Outcome> complete_endpoint_async(sp::runtime::PreparedEndpoint<Outcome> prepared);
+    template <EndpointRequest Request>
+    asio::awaitable<EndpointOutcomeOf<Request>> complete_endpoint_async(
+        Request request, sp::runtime::RunOptions options = {});
 };
 ```
+
+### Endpoint calls
+
+`Provider` also forwards SchemaProvider's non-chat endpoints at its origin:
+- images, decisions, embeddings, rerank and moderation;
+- speech, transcription and translation;
+- video jobs (submit, poll, download);
+- files (whole and resumable uploads, get, list, delete, download);
+- batches, token counts and OpenRouter generation statistics.
+
+`EndpointOutcomeOf<Request>` names each request's typed outcome. That is `std::variant<Result, sp::Failure>` for the one-shot endpoints, or the job, file or batch state.
+
+A call runs on the provider's own client, with the credential, admission slots, retry budget, deadlines and error classification of its chat calls. The descriptor policy admits each endpoint per origin when the call is prepared. A call it refuses carries its error and completes as a `Failure` without reaching the network.
+
+```cpp
+#include <neograph/llm/schema_provider.h>
+
+std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<std::string> texts) {
+    sp::embeddings::Request request;
+    request.model = "text-embedding-3-small";
+    for (auto& text : texts) request.inputs.push_back({std::move(text)});
+    auto outcome = provider.complete_endpoint(std::move(request));
+    if (const auto* failure = std::get_if<sp::Failure>(&outcome))
+        throw std::runtime_error(failure->error.safe_message);
+    return std::get<sp::embeddings::Result>(std::move(outcome)).vectors;
+}
+```
+
+- **Preparing.** `prepare_endpoint` returns the SDK's `PreparedEndpoint`. A host can inspect it (`prepared().endpoint()`, `prepared().model()`, `error()`) or journal it before `complete_endpoint` runs it. It throws `sp::runtime::AdmissionError` when no preparation slot is free.
+- **Without blocking.** `complete_endpoint_async` does not block a thread. The awaitable owns the client and the call, so neither the request nor the provider has to outlive it. Cancelling the awaiting coroutine cancels the call, and the outcome is then the SDK's `Cancelled` failure.
+- **Sent as given.** `SchemaProvider::Defaults` apply to chat calls only. Nothing here journals a call or reserves or charges a budget.
+- **Providers without endpoints.** A `Provider` without SchemaProvider endpoints throws `std::logic_error`. A subclass forwards its own client by overriding `endpoint_runtime()`.
 
 ### ProviderRequest / ProviderControls
 
