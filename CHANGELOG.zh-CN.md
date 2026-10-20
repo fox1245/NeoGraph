@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a1d4a032a28674cd52ebc47f3a57beda7ba4f35a35dbecf29a1ac8b868e0111a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=d1e8605da45985624b1f77a313c987f1559c617fbc056be6d2b80d4a9918f3d4 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -18,6 +18,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - `prepare_endpoint`、`complete_endpoint` 和 `complete_endpoint_async` 运行 SchemaProvider 的非聊天端点：图像、decisions、嵌入、rerank、moderation、语音合成、转写与翻译、视频任务、文件、批处理、token 计数和 OpenRouter 生成统计。
   - 调用在 provider 自己的 SchemaProvider 客户端上运行，与其聊天调用共用该客户端，descriptor 策略按 origin 准入每个端点。
   - 它们取代 0.16.0 移除的类型化客户端。Python、图节点和 Program 调用随后跟进。
+  - `Provider` 新增了虚成员 `endpoint_runtime()`，因此 `Provider` 的 C++ 子类必须用新头文件重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 变更
 - **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。

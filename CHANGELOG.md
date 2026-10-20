@@ -18,6 +18,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `prepare_endpoint`, `complete_endpoint` and `complete_endpoint_async` run SchemaProvider's non-chat endpoints: images, decisions, embeddings, rerank, moderation, speech, transcription and translation, video jobs, files, batches, token counts and OpenRouter generation statistics.
   - The calls run on the provider's own SchemaProvider client, which its chat calls share, and the descriptor policy admits each endpoint per origin.
   - They replace the typed clients that 0.16.0 removes. Python, graph nodes and Program calls follow.
+  - `Provider` gained a virtual member, `endpoint_runtime()`, so rebuild C++ subclasses of `Provider` against the new header (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
 
 ### Changed
 - **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable. The decision is the roundtable of 2026-10-20.

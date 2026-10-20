@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a1d4a032a28674cd52ebc47f3a57beda7ba4f35a35dbecf29a1ac8b868e0111a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=d1e8605da45985624b1f77a313c987f1559c617fbc056be6d2b80d4a9918f3d4 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -18,6 +18,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - `prepare_endpoint`, `complete_endpoint`, `complete_endpoint_async`가 SchemaProvider의 비채팅 엔드포인트를 실행합니다: 이미지, decisions, 임베딩, rerank, moderation, 음성 합성, 전사와 번역, 비디오 job, 파일, 배치, 토큰 수 세기, OpenRouter 생성 통계.
   - 호출은 채팅 호출이 함께 쓰는 provider 자신의 SchemaProvider 클라이언트에서 실행되며, descriptor 정책이 origin별로 각 엔드포인트를 승인합니다.
   - 0.16.0이 제거하는 타입 클라이언트를 대신합니다. Python, 그래프 노드, Program 호출은 뒤따릅니다.
+  - `Provider`에 가상 멤버 `endpoint_runtime()`이 생겼으므로 `Provider`의 C++ 하위 클래스는 새 헤더로 다시 빌드해야 합니다 ([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ### 변경됨
 - **SchemaProvider interface 7의 모든 요청 제어를 C++와 Python에서 family별 nest로 쓸 수 있습니다 (#512, #513).** `ProviderControls`에 `chat`, `responses`, `messages`, `generate`, `interactions`(`ChatControls` … `InteractionsControls`)가 생겨 family 고유 제어를 SDK 타입 그대로 담으며, 평평한 멤버는 이식 가능한 제어로 남습니다. 2026-10-20 원탁회의에서 정한 구조입니다.
