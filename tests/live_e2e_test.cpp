@@ -7,7 +7,9 @@
 #include <neograph/graph/engine.h>
 
 #include <descriptor/catalogue.h>
+#include <descriptor/presets.h>
 #include <transport/catalogue_refresh.h>
+#include <transport/realtime_session.h>
 
 #include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <thread>
@@ -521,5 +524,131 @@ TEST(LiveCatalogue, UnlistedModelIsSent) {
     const auto* failure = std::get_if<sp::Failure>(outcome.get());
     ASSERT_NE(failure, nullptr);
     EXPECT_EQ(failure->error.http_status, 404);
+}
+
+// SchemaProvider realtime transcription sessions (#512): speech made by OpenAI's speech endpoint goes in, and a
+// final transcript and one committed user turn come out.
+std::string from_base64(const std::string& text) {
+    std::string out;
+    unsigned value = 0;
+    int bits = 0;
+    for (const unsigned char c : text) {
+        int digit = -1;
+        if (c >= 'A' && c <= 'Z') digit = c - 'A';
+        else if (c >= 'a' && c <= 'z') digit = c - 'a' + 26;
+        else if (c >= '0' && c <= '9') digit = c - '0' + 52;
+        else if (c == '+') digit = 62;
+        else if (c == '/') digit = 63;
+        if (digit < 0) continue;
+        value = (value << 6) | static_cast<unsigned>(digit);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<char>((value >> bits) & 0xff));
+        }
+    }
+    return out;
+}
+
+// 16-bit little-endian mono PCM resampled from 24 kHz to 16 kHz by linear interpolation.
+std::string pcm_16k(const std::string& pcm_24k) {
+    const auto sample = [&](std::size_t i) {
+        return static_cast<std::int16_t>(static_cast<unsigned char>(pcm_24k[2 * i]) |
+                                         (static_cast<unsigned char>(pcm_24k[2 * i + 1]) << 8));
+    };
+    const std::size_t samples = pcm_24k.size() / 2;
+    std::string out;
+    for (std::size_t i = 0; 3 * i + 2 < 2 * samples; ++i) {
+        const std::size_t at = 3 * i / 2;
+        const double fraction = (3.0 * i / 2.0) - static_cast<double>(at);
+        const double value = sample(at) * (1.0 - fraction) + (at + 1 < samples ? sample(at + 1) : 0) * fraction;
+        const auto rounded = static_cast<std::int16_t>(value);
+        out.push_back(static_cast<char>(rounded & 0xff));
+        out.push_back(static_cast<char>((rounded >> 8) & 0xff));
+    }
+    return out;
+}
+
+// Speech from OpenAI's speech endpoint as raw 24 kHz PCM.
+std::string spoken_pcm(const std::string& key, const std::string& text) {
+    auto provider = openai_provider(key);
+    sp::speech::Request speech;
+    speech.model = "gpt-4o-mini-tts";
+    speech.input = text;
+    speech.voice = "alloy";
+    speech.format = "pcm";
+    const auto spoken = provider.complete_endpoint(std::move(speech));
+    const auto* audio = std::get_if<sp::speech::Result>(&spoken);
+    if (!audio || !audio->audio.data) {
+        ADD_FAILURE() << failure_text(spoken);
+        return {};
+    }
+    return from_base64(*audio->audio.data);
+}
+
+// A SchemaProvider transcription session (no output modality): the speech goes in, a final transcript and one
+// committed user turn come out.
+std::string transcribe_live(const sp::descriptor::ValidatedDescriptor& descriptor, const std::string& key,
+                            std::string model, const std::string& pcm, std::size_t chunk) {
+    sp::realtime::Setup setup;
+    setup.model = std::move(model);
+    setup.output = {};
+    sp::realtime::Options options;
+    options.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    options.media_bytes = std::size_t{1} << 20;
+    options.renew = [](const sp::Usage&) { return true; };
+    sp::transport::Transport transport;
+    auto opened = sp::realtime::open(transport, descriptor, key, setup, options);
+    if (const auto* error = std::get_if<sp::Error>(&opened)) {
+        ADD_FAILURE() << "open refused: " << error->safe_message;
+        return {};
+    }
+    auto& session = std::get<sp::realtime::Session>(opened);
+    std::string transcript;
+    bool ready = false, committed = false;
+    for (int i = 0; i < 600 && !committed && !session.ended(); ++i) {
+        const auto event = session.next_event(std::chrono::milliseconds(100));
+        if (!event) continue;
+        if (std::holds_alternative<sp::realtime::Ready>(*event) && !ready) {
+            ready = true;
+            for (std::size_t at = 0; at < pcm.size(); at += chunk)
+                session.send(sp::realtime::Audio{pcm.substr(at, chunk)});
+            session.send(sp::realtime::Audio{std::string(chunk * 10, '\0')});
+            session.send(sp::realtime::EndAudio{});
+        } else if (const auto* text = std::get_if<sp::realtime::Transcript>(&*event); text && !text->partial) {
+            transcript += text->text;
+        } else if (const auto* turn = std::get_if<sp::realtime::TurnCommitted>(&*event)) {
+            committed = true;
+            EXPECT_EQ(turn->turn.messages.at(0).role, sp::Role::User);
+        } else if (const auto* error = std::get_if<sp::realtime::ProviderError>(&*event)) {
+            ADD_FAILURE() << "provider error: " << error->error.safe_message;
+        }
+    }
+    session.close();
+    const auto outcome = session.join();
+    EXPECT_TRUE(committed);
+    EXPECT_EQ(outcome.media_dropped, 0u);
+    EXPECT_FALSE(outcome.error) << outcome.error->safe_message;
+    return transcript;
+}
+
+TEST(LiveRealtime, OpenAITranscriptionSession) {
+    LIVE_KEY(key, "OPENAI_API_KEY");
+    const auto pcm = spoken_pcm(key, "The quick brown fox jumps over the lazy dog.");
+    ASSERT_GT(pcm.size(), 10000u);
+    const auto text = lower(transcribe_live(sp::descriptor::presets::openai_chat(), key, "gpt-live-transcribe", pcm, 4800));
+    EXPECT_NE(text.find("fox"), std::string::npos) << text;
+    EXPECT_NE(text.find("dog"), std::string::npos) << text;
+}
+
+TEST(LiveRealtime, GoogleTranscriptionSession) {
+    LIVE_KEY(openai, "OPENAI_API_KEY");
+    LIVE_KEY(gemini, "GEMINI_API_KEY");
+    const auto pcm = pcm_16k(spoken_pcm(openai, "The quick brown fox jumps over the lazy dog."));
+    ASSERT_GT(pcm.size(), 10000u);
+    const auto text = lower(transcribe_live(sp::descriptor::presets::google_generate(), gemini,
+                                            "gemini-3.5-transcribe-live", pcm, 3200));
+    EXPECT_NE(text.find("fox"), std::string::npos) << text;
+    EXPECT_NE(text.find("dog"), std::string::npos) << text;
 }
 } // namespace
