@@ -17,7 +17,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **SchemaProvider's endpoints on `Provider` (#531).**
   - `prepare_endpoint`, `complete_endpoint` and `complete_endpoint_async` run SchemaProvider's non-chat endpoints: images, decisions, embeddings, rerank, moderation, speech, transcription and translation, video jobs, files, batches, token counts and OpenRouter generation statistics.
   - The calls run on the provider's own SchemaProvider client, which its chat calls share, and the descriptor policy admits each endpoint per origin.
-  - They replace the typed clients that 0.16.0 removes. Python, graph nodes and Program calls follow.
+  - They replace the typed clients that 0.16.0 removes.
+  - **Python.** `Provider.prepare_endpoint`, `complete_endpoint` and `complete_endpoint_async` take the SDK's request classes (`EmbeddingsRequest`, `ImagesRequest`, `FileUpload`, `BatchSubmit`, `TokenCount`, ...) and return their result classes or a `ProviderFailure`. Each request class has a strict `from_dict`. `complete_endpoint_async` returns an `asyncio.Future` on the binding's one asio runtime, and cancelling it cancels the call. `batch_jsonl`, `batch_decode_line`, `files_media` and `verify_webhook` are module functions.
   - `Provider` gained a virtual member, `endpoint_runtime()`, so rebuild C++ subclasses of `Provider` against the new header (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
 - **Endpoint nodes in graphs (#531).**
   - The built-in node types `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe` and `translate` make one endpoint call each. They read their inputs from channels the node's config names, and write the result to one channel: provider media JSON, vectors, rankings, verdicts, answers or text.

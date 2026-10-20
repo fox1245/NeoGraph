@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=ad1342183f4ed785446bb9e1ad229fa82969da6557f52beee7bb313a6d961138 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=6372355bab3b86363a732b0efb0c03cb120a9fa9357513267f574c998c2dd508 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -14,7 +14,8 @@
   - 모든 프리셋에서 강제 툴 호출, 그리고 툴 왕복 전체;
   - OpenRouter Chat과 Gemini Generate가 생성한 이미지의 보존;
   - Anthropic Messages 제어: thinking 모드와 effort, tool choice, temperature 규칙, 프롬프트 캐시, 그리고 OpenRouter를 거친 같은 제어;
-  - 타입이 정해진 실패: 잘못된 키, 취소된 스트림, 이미 지난 deadline.
+  - 타입이 정해진 실패: 잘못된 키, 취소된 스트림, 이미 지난 deadline;
+  - `Provider`를 거치는 SchemaProvider 엔드포인트(#531): OpenAI 임베딩, await로 기다리는 OpenRouter 임베딩, OpenAI moderation.
 - **C++** (`tests/live_e2e_test.cpp`, 타깃 `neograph_live_e2e_tests`):
   - Claude 5.5 서버 툴, 생성 이미지, Interactions를 쓰는 공급자 어댑터;
   - `Provider`를 거치는 SchemaProvider 엔드포인트(#531): OpenAI·OpenRouter 임베딩, OpenAI moderation, Anthropic 토큰 수 세기;

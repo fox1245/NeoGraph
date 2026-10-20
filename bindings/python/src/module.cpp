@@ -52,6 +52,7 @@ void translate_system_error(std::exception_ptr error) {
 } // namespace
 
 void init_provider(py::module_& m);
+void init_provider_endpoints(py::module_& m);
 void init_openinference(py::module_& m);
 void init_artifact(py::module_& m);
 void init_state(py::module_& m);
@@ -126,6 +127,7 @@ PYBIND11_MODULE(_neograph, m) {
 
     neograph::pybind::init_opaque_vectors(m);
     neograph::pybind::init_provider(m);
+    neograph::pybind::init_provider_endpoints(m);
     neograph::pybind::init_openinference(m);
     neograph::pybind::init_state(m);
     neograph::pybind::init_graph(m);

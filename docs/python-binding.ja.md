@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=b1d8f9b4364dcc543a4c2c52e194847b7791d164e521f99cd5e1a744cc6968ef -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=e2edc5477cee0bc3013f3f7f639072dd7ae5ca185ba9fdd3ad9b9d0866347cdd -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -243,6 +243,51 @@ SDKの失敗は、戻り値として返るデータです。ホストのオブ�
 `UsageAccumulator` は、トークンだけを集計します。レポートが1件だけなら、金額のメタデータもそのまま保持されます。2件目のレポートを受け取ると、スナップショットの `provider_cost` は、正規のMissing/Noneに明示的にリセットされます。古い1回目の費用でも、合計金額でもありません。このスナップショットを復元しても、費用は再現されず、トークンの権限も更新されません。正確な金額のエビデンスは、元のそれぞれの結果、またはプロバイダーのジャーナルの項目から読んでください。
 
 再開や継続のとき、`RunResult.provider_outcomes` には、元の結果が順序どおりに残り、その後ろに新しく得られた結果が並びます。`RunResult.usage` は、現在の会計バンクを反映します。このバンクは、チェックポイントから以前のレポートを復元することがあります。新しいプロバイダー呼び出しがない再開でも、使用量が `None` やゼロになるとは限りません。エビデンスの復元で、元のプロバイダーリクエストを再ディスパッチしたり、二重に課金したりしてはいけません。保持されたレポートは、過去の呼び出しを記録したものです。新しい支出枠を与えるものではありません。
+
+### エンドポイントの呼び出し
+
+`Provider` は、チャット呼び出しが使うクライアントで、自身のoriginにあるSchemaProviderの非チャット・エンドポイントも実行します：
+
+| 領域 | リクエスト | 結果 |
+|---|---|---|
+| 画像、decisions、埋め込み | `ImagesRequest`, `DecisionsRequest` (`DecisionQuestion`, `DecisionOption`), `EmbeddingsRequest` (`EmbeddingInput`) | `ImagesResult`, `DecisionsResult` (`DecisionAnswer`), `EmbeddingsResult` |
+| rerank、moderation | `RerankRequest`, `ModerationRequest` (`ModerationInput`) | `RerankResult` (`RerankRanked`), `ModerationResult` (`ModerationVerdict`) |
+| 音声合成、文字起こし | `SpeechRequest`, `TranscriptionRequest` | `SpeechResult`, `TranscriptionResult` |
+| 動画ジョブ | `VideoRequest`, `JobPoll`, `JobDownload` (`JobHandle`) | `JobState` (`JobStatus`), `JobContent` |
+| ファイル | `FileUpload` (`FileSource`), `FileGet`, `FileList`, `FileDelete`, `FileDownload`; チャンク方式: `FileUploadStart`, `FileUploadPart`, `FileUploadComplete`, `FileUploadQuery`, `FileUploadCancel` (`FileUploadSession`) | `ProviderFile` (`FileState`), `FilePage`, `FileDeleted`, `JobContent`, `FileUploadProgress` |
+| バッチ | `BatchSubmit` (`BatchItem`), `BatchGet`, `BatchCancel`, `BatchDelete`, `BatchResults` | `Batch` (`BatchCounts`), `BatchDeleted`, `JobContent` |
+| トークン数のカウント、生成統計 | `TokenCount`, `GenerationGet` | `TokenCountResult`, `GenerationResult` |
+
+```python
+request = ng.EmbeddingsRequest.from_dict({
+    "model": "text-embedding-3-small",
+    "inputs": [{"text": "A graph of agents."}, {"text": "A list of chores."}],
+})
+result = provider.complete_endpoint(request)  # blocks without the GIL
+if isinstance(result, ng.ProviderFailure):
+    raise RuntimeError(result.error.safe_message)
+vectors = result.vectors  # one list of floats per input
+
+# Without blocking a thread; cancelling the awaiting task cancels the call.
+result = await provider.complete_endpoint_async(request, timeout_seconds=30)
+
+# Inspect, or journal, a call before it runs.
+prepared = provider.prepare_endpoint(request)
+print(prepared.endpoint, prepared.model, prepared.error)  # "embeddings", the model, None
+result = provider.complete_endpoint(prepared)
+```
+
+`complete_endpoint` は、リクエストの結果オブジェクトか `ProviderFailure` を返します。チャットと同じく、失敗は戻り値として返るデータです。ディスクリプターのポリシーは、呼び出しを準備するときに、originごとに各エンドポイントを許可（admission）します。ポリシーが拒否した呼び出しは、そのエラー（`prepared.error`）を持ち、ネットワークに到達しないまま `ProviderFailure` として完了します。標準のポリシーは、エンドポイントを、それを提供するプロバイダーのoriginでは許可し、ループバックのテスト用originでは許可しません。
+
+- **リクエスト。** リクエストは、デフォルトコンストラクターで作ってフィールドを代入するか、`from_dict` で組み立てます。`from_dict` は未知のキーを拒否し、enumはメンバー名（`"Choice"`）で受け取り、入れ子の値は型に従って組み立てます：`{"inputs": [{"text": "hello"}]}`。メディア（`ProviderMedia`）、`Batch`、`ProviderRequest` はオブジェクトとして渡します。`extensions` は、SDKのポリシーがoriginに対して許可するトップレベルのメンバーで、素のPythonデータがそのまま送られます。リクエストが返すリストは独立したコピーです。リストを作ってから代入してください。
+- **結果。** 結果クラスのプロパティは読み取り専用で、コピーを返します。そのため `result.vectors` はループの中で読まず、変数に保持してください。再利用される型は `ProviderMedia`、`ProviderUsage`、`ProviderServedModel`、`ProviderAttemptEvidence`、`ProviderRawWire`（`raw_events`）です。ペアはタプルのリストです（`ModerationVerdict.categories`、`DecisionAnswer.probabilities`）。
+- **準備。** `prepare_endpoint(request, timeout_seconds=None)` は、`endpoint`、`model`、`error`、`consumed` を持つ `PreparedEndpoint` を返します。`timeout_seconds` は、準備の時点から数える呼び出しのデッドラインです。準備済みの呼び出しは自分のデッドラインを持つので、完了の呼び出しにデッドラインを渡すと `ValueError` が送出されます。`PreparedEndpoint` は1回だけ完了でき、2回目の完了は `ValueError` を送出します。準備のスロットに空きがないときは `prepare_endpoint` が `RuntimeError` を送出し、その場合の完了の呼び出しは代わりにSDKの `ProviderFailure` を返します。
+- **ブロックしない呼び出し。** `complete_endpoint_async` は `asyncio.Future` を返し、実行中のループが必要です。`run_async` が使う、1つのasioワーカースレッド上で動きます。待機しているタスクをキャンセルすると、呼び出しとプロバイダーへの接続がキャンセルされ、そのときSDKが報告する結果（`Cancelled` の失敗）は破棄されます。
+- **指定したとおりに送信。** `SchemaProviderDefaults` はチャット呼び出しにだけ適用されます。ここでは、呼び出しをジャーナルに記録することも、予算を予約したり課金したりすることもありません。
+- **エンドポイントを持たないプロバイダー。** Pythonで書いた `Provider` のサブクラスにはエンドポイントがありません。`prepare_endpoint` と完了の呼び出しは `RuntimeError` を送出します。
+- **ジョブ、ファイル、セッション。** `JobHandle` と `FileUploadSession` は、呼び出しの間にジャーナルへ記録し、再起動後に組み立て直せる素の値です。Googleのセッションの `url` があれば、誰でもAPIキーなしでファイルを書き込めます。認証情報と同じように非公開にしてください。`FileSource` は `bytes` を保持するか、ローカルファイル `path` の `offset` から `size` バイトを保持し、これらは送信中に読み込まれます。
+- **バッチとトークン数のカウント。** `BatchItem.request` と `TokenCount.request` は、`make_provider_request` がChat、Responses、Messages、Generateのプロバイダー向けに作った `ProviderRequest` から設定します（Interactionsのリクエストは `ValueError` を送出します）。読み戻すことはできません。`batch_jsonl(descriptor, items)` はファミリーのディスクリプター向けにOpenAIの入力ファイルを書き出し、`batch_custom_id(line)` は結果の行がどのリクエストへの応答かを示し、`batch_decode_line(descriptor, request, line)` はその行をそのリクエストの結果（outcome）としてデコードします（`BatchLine.outcome` は `ProviderOutcome` です）。`batch_inline_lines(batch)` はGoogleのバッチのインライン結果を一覧にします。
+- **メディアとしてのファイル、webhook。** `files_media(file, origin, now)` は、有効で期限切れでない `ProviderFile` を、チャットのリクエストが指定する `ProviderMedia` の参照に変換し、別のoriginの場合は `ValueError` を送出します。`verify_webhook(secret, headers, body, now, tolerance=300)` は、署名付きのwebhook（OpenAIが送るもの）を検証して `WebhookEvent` を返し、不正なものや古いものは `ValueError` を送出します。ホストは生のbodyと自分の時計を渡し、リプレイを拒否するために、処理済みの配信idを記憶しておきます。
 
 ### ネイティブ履歴とポータブルなエクスポート
 

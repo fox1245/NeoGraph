@@ -10,6 +10,7 @@ Each class below gets a strict ``from_dict(data)`` classmethod:
 
 ``FIELDS`` is the table every ``from_dict`` reads. ``tests/test_provider_controls_from_dict.py`` checks it
 against the bound properties, so a field added to the binding without the table fails the tests.
+``neograph_engine.provider_endpoints`` installs its own table the same way (``install``).
 """
 
 from __future__ import annotations
@@ -205,6 +206,9 @@ FIELDS: dict[str, dict[str, Any]] = {
 }
 
 
+_TABLES: dict[str, dict[str, Any]] = {}  # every installed FIELDS table, by class name
+
+
 def _resolve(name: str):
     target: Any = _ng
     for part in name.split("."):
@@ -220,7 +224,7 @@ def _build(name: str, value: Any, path: str):
     cls = _resolve(name)
     if isinstance(value, cls):
         return value
-    fields = FIELDS.get(name)
+    fields = _TABLES.get(name)
     if fields is None or not isinstance(value, dict):
         expected = f"a dict or {name}" if fields is not None else f"a {name}"
         raise TypeError(f"{path}: expected {expected}, got {type(value).__name__}")
@@ -298,11 +302,17 @@ def _convert(spec: Any, value: Any, path: str):
         if not isinstance(value, str):
             raise TypeError(f"{path}: expected a str")
         return value
+    if spec is bytes:
+        if not isinstance(value, (bytes, bytearray)):
+            raise TypeError(f"{path}: expected bytes")
+        return bytes(value)
     raise AssertionError(f"{path}: no conversion for {spec!r}")
 
 
-def _install() -> None:
-    for name in FIELDS:
+def install(fields: dict[str, dict[str, Any]]) -> None:
+    """Gives each class of a FIELDS table its strict ``from_dict``, and lets the tables name each other's classes."""
+    _TABLES.update(fields)
+    for name in fields:
         cls = _resolve(name)
 
         def from_dict(cls, data, _name=name):
@@ -312,4 +322,4 @@ def _install() -> None:
         cls.from_dict = classmethod(from_dict)
 
 
-_install()
+install(FIELDS)

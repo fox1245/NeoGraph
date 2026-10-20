@@ -243,6 +243,51 @@ Usage counters are `UsageCount` values with `value` and `evidence`, or `None` wh
 
 On resume or continuation, `RunResult.provider_outcomes` preserves the ordered original outcomes followed by newly produced outcomes. `RunResult.usage` reflects the active accounting bank, which can restore prior reports from a checkpoint; a resume with no new provider call does not guarantee `None` or zero usage. Restoring evidence must neither redispatch the original provider request nor charge it twice. Retained reports describe prior calls; they do not grant a new spending allowance.
 
+### Endpoint calls
+
+`Provider` also runs SchemaProvider's non-chat endpoints at its origin, on the client its chat calls use:
+
+| Area | Requests | Results |
+|---|---|---|
+| Images, decisions, embeddings | `ImagesRequest`, `DecisionsRequest` (`DecisionQuestion`, `DecisionOption`), `EmbeddingsRequest` (`EmbeddingInput`) | `ImagesResult`, `DecisionsResult` (`DecisionAnswer`), `EmbeddingsResult` |
+| Rerank, moderation | `RerankRequest`, `ModerationRequest` (`ModerationInput`) | `RerankResult` (`RerankRanked`), `ModerationResult` (`ModerationVerdict`) |
+| Speech, transcription | `SpeechRequest`, `TranscriptionRequest` | `SpeechResult`, `TranscriptionResult` |
+| Video jobs | `VideoRequest`, `JobPoll`, `JobDownload` (`JobHandle`) | `JobState` (`JobStatus`), `JobContent` |
+| Files | `FileUpload` (`FileSource`), `FileGet`, `FileList`, `FileDelete`, `FileDownload`; chunked: `FileUploadStart`, `FileUploadPart`, `FileUploadComplete`, `FileUploadQuery`, `FileUploadCancel` (`FileUploadSession`) | `ProviderFile` (`FileState`), `FilePage`, `FileDeleted`, `JobContent`, `FileUploadProgress` |
+| Batches | `BatchSubmit` (`BatchItem`), `BatchGet`, `BatchCancel`, `BatchDelete`, `BatchResults` | `Batch` (`BatchCounts`), `BatchDeleted`, `JobContent` |
+| Token counts, generation statistics | `TokenCount`, `GenerationGet` | `TokenCountResult`, `GenerationResult` |
+
+```python
+request = ng.EmbeddingsRequest.from_dict({
+    "model": "text-embedding-3-small",
+    "inputs": [{"text": "A graph of agents."}, {"text": "A list of chores."}],
+})
+result = provider.complete_endpoint(request)  # blocks without the GIL
+if isinstance(result, ng.ProviderFailure):
+    raise RuntimeError(result.error.safe_message)
+vectors = result.vectors  # one list of floats per input
+
+# Without blocking a thread; cancelling the awaiting task cancels the call.
+result = await provider.complete_endpoint_async(request, timeout_seconds=30)
+
+# Inspect, or journal, a call before it runs.
+prepared = provider.prepare_endpoint(request)
+print(prepared.endpoint, prepared.model, prepared.error)  # "embeddings", the model, None
+result = provider.complete_endpoint(prepared)
+```
+
+`complete_endpoint` returns the request's result object, or a `ProviderFailure`: a failure is returned data, as for chat. The descriptor policy admits each endpoint per origin when the call is prepared. A call it refuses carries its error (`prepared.error`) and completes as a `ProviderFailure` without reaching the network. The stock policy admits an endpoint at the provider origins that serve it, not at a loopback test origin.
+
+- **Requests.** Default-construct a request and assign fields, or build it with `from_dict`, which refuses unknown keys, takes enum member names (`"Choice"`) and builds nested values by type: `{"inputs": [{"text": "hello"}]}`. Media (`ProviderMedia`), a `Batch` and a `ProviderRequest` are passed as objects. `extensions` are top-level members the SDK policy admits for the origin, plain Python data sent as given. Lists a request returns are detached copies: build a list, then assign it.
+- **Results.** Result classes have read-only properties that return copies, so keep `result.vectors` in a variable instead of reading it in a loop. Reused types: `ProviderMedia`, `ProviderUsage`, `ProviderServedModel`, `ProviderAttemptEvidence` and `ProviderRawWire` (`raw_events`). Pairs are lists of tuples (`ModerationVerdict.categories`, `DecisionAnswer.probabilities`).
+- **Preparing.** `prepare_endpoint(request, timeout_seconds=None)` returns a `PreparedEndpoint` with `endpoint`, `model`, `error` and `consumed`. `timeout_seconds` is the call's deadline, counted from preparation; a prepared call keeps its own, so passing one to the completion raises `ValueError`. A `PreparedEndpoint` completes once, and a second completion raises `ValueError`. `prepare_endpoint` raises `RuntimeError` when no preparation slot is free; the completions return the SDK's `ProviderFailure` instead.
+- **Without blocking.** `complete_endpoint_async` returns an `asyncio.Future` and needs a running loop. It runs on the one asio worker thread that `run_async` uses. Cancelling the awaiting task cancels the call and the connection to the provider, and the outcome the SDK then reports (a `Cancelled` failure) is dropped.
+- **Sent as given.** `SchemaProviderDefaults` apply to chat calls only. Nothing here journals a call or reserves or charges a budget.
+- **Providers without endpoints.** A `Provider` subclass written in Python has none: `prepare_endpoint` and the completions raise `RuntimeError`.
+- **Jobs, files and sessions.** A `JobHandle` and a `FileUploadSession` are plain values to journal between calls and rebuild after a restart. A Google session's `url` lets anyone write the file without the API key: keep it as private as a credential. `FileSource` holds `bytes`, or `size` bytes of the local file `path` from `offset`, read while they are sent.
+- **Batches and token counts.** `BatchItem.request` and `TokenCount.request` are set from a `ProviderRequest` that `make_provider_request` built for a Chat, Responses, Messages or Generate provider (an Interactions request raises `ValueError`), and cannot be read back. `batch_jsonl(descriptor, items)` writes OpenAI's input file for a family descriptor, `batch_custom_id(line)` names the request a result line answers, and `batch_decode_line(descriptor, request, line)` decodes it as that request's outcome (`BatchLine.outcome` is a `ProviderOutcome`). `batch_inline_lines(batch)` lists a Google batch's inline results.
+- **Files as media, webhooks.** `files_media(file, origin, now)` turns an active, unexpired `ProviderFile` into the `ProviderMedia` reference a chat request names, and raises `ValueError` for another origin. `verify_webhook(secret, headers, body, now, tolerance=300)` checks a signed webhook (as OpenAI sends them) and returns a `WebhookEvent`; a bad or stale one raises `ValueError`. The host passes the raw body and its clock, and remembers the delivery ids it has handled to refuse a replay.
+
 ### Native history and portable exports
 
 Returned `ProviderMessage` values carry full typed parts and authentic native replay state. Their native replay and wire output are read-only. For a direct provider continuation, preserve the original request's entire `request.messages` prefix and append `outcome.messages`, which contains the returned output rather than the full input history. With `request` and `outcome` from the first-call example, construct `history = request.messages + outcome.messages`, then build the next request with `ng.make_provider_request(provider, "example-model", history, controls=controls)`. This construction sends nothing; any next turn must also include its new user message or required tool results.

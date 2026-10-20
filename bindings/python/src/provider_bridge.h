@@ -35,6 +35,14 @@ pybind11::object provider_cause(const std::exception_ptr& cause);
 void init_provider_values(pybind11::module_& module);
 void init_provider_controls(pybind11::module_& module);
 void init_provider_families(pybind11::module_& module);
+void init_provider_endpoints(pybind11::module_& module);
+
+// Provider's SchemaProvider endpoint calls (bind_provider_endpoints.cpp). `request` is an endpoint request or, for
+// the two completions, a PreparedEndpoint.
+pybind11::object prepare_endpoint(Provider& provider, pybind11::object request, std::optional<double> timeout_seconds);
+pybind11::object complete_endpoint(Provider& provider, pybind11::object request, std::optional<double> timeout_seconds);
+pybind11::object complete_endpoint_async(Provider& provider, pybind11::object request,
+                                         std::optional<double> timeout_seconds);
 } // namespace neograph::pybind
 
 // All binding units use the same ownership conversion for SDK outcomes. No

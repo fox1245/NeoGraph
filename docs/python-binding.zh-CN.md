@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=b1d8f9b4364dcc543a4c2c52e194847b7791d164e521f99cd5e1a744cc6968ef -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=e2edc5477cee0bc3013f3f7f639072dd7ae5ca185ba9fdd3ad9b9d0866347cdd -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -243,6 +243,51 @@ SDK 的失败是作为数据返回的。宿主的 observer 或预算结算失败
 `UsageAccumulator` 是只统计 token 的聚合。只有一份报告时，它保留这份报告的金额元数据；收到第二份报告后，快照的 `provider_cost` 会被明确重置为规范的 Missing/None，既不是过期的首次调用成本，也不是两者之和。恢复这份快照，不会重建成本，也不会续期 token 权限。要读取确切的金额证据，请到每个原始 outcome 或 provider 的 journal 条目里去找。
 
 恢复运行或续接时，`RunResult.provider_outcomes` 先按顺序保留原来的 outcome，后面接着新产生的 outcome。`RunResult.usage` 反映的是当前生效的核算 bank，它可以从检查点恢复之前的报告；所以，没有新的 provider 调用的恢复，也不保证 usage 为 `None` 或零。恢复证据时，既不能重新分发原来的 provider 请求，也不能重复计费。保留下来的报告描述的是之前的调用，不会授予新的消费额度。
+
+### Endpoint 调用
+
+`Provider` 还会在自己的 origin 上，通过其聊天调用所用的客户端，运行 SchemaProvider 的非聊天 endpoint：
+
+| 领域 | 请求 | 结果 |
+|---|---|---|
+| 图像、decisions、嵌入 | `ImagesRequest`, `DecisionsRequest` (`DecisionQuestion`, `DecisionOption`), `EmbeddingsRequest` (`EmbeddingInput`) | `ImagesResult`, `DecisionsResult` (`DecisionAnswer`), `EmbeddingsResult` |
+| rerank、moderation | `RerankRequest`, `ModerationRequest` (`ModerationInput`) | `RerankResult` (`RerankRanked`), `ModerationResult` (`ModerationVerdict`) |
+| 语音合成、转写 | `SpeechRequest`, `TranscriptionRequest` | `SpeechResult`, `TranscriptionResult` |
+| 视频任务 | `VideoRequest`, `JobPoll`, `JobDownload` (`JobHandle`) | `JobState` (`JobStatus`), `JobContent` |
+| 文件 | `FileUpload` (`FileSource`), `FileGet`, `FileList`, `FileDelete`, `FileDownload`; 分块方式: `FileUploadStart`, `FileUploadPart`, `FileUploadComplete`, `FileUploadQuery`, `FileUploadCancel` (`FileUploadSession`) | `ProviderFile` (`FileState`), `FilePage`, `FileDeleted`, `JobContent`, `FileUploadProgress` |
+| 批处理 | `BatchSubmit` (`BatchItem`), `BatchGet`, `BatchCancel`, `BatchDelete`, `BatchResults` | `Batch` (`BatchCounts`), `BatchDeleted`, `JobContent` |
+| token 计数、生成统计 | `TokenCount`, `GenerationGet` | `TokenCountResult`, `GenerationResult` |
+
+```python
+request = ng.EmbeddingsRequest.from_dict({
+    "model": "text-embedding-3-small",
+    "inputs": [{"text": "A graph of agents."}, {"text": "A list of chores."}],
+})
+result = provider.complete_endpoint(request)  # blocks without the GIL
+if isinstance(result, ng.ProviderFailure):
+    raise RuntimeError(result.error.safe_message)
+vectors = result.vectors  # one list of floats per input
+
+# Without blocking a thread; cancelling the awaiting task cancels the call.
+result = await provider.complete_endpoint_async(request, timeout_seconds=30)
+
+# Inspect, or journal, a call before it runs.
+prepared = provider.prepare_endpoint(request)
+print(prepared.endpoint, prepared.model, prepared.error)  # "embeddings", the model, None
+result = provider.complete_endpoint(prepared)
+```
+
+`complete_endpoint` 返回该请求对应的结果对象，或者 `ProviderFailure`：与聊天一样，失败是作为数据返回的。描述符策略在准备调用时，按 origin 准入每个 endpoint。被策略拒绝的调用会携带它的错误（`prepared.error`），并以 `ProviderFailure` 结束，不会到达网络。默认策略在提供某个 endpoint 的 provider origin 上准入它，但不会在回环测试 origin 上准入。
+
+- **请求。** 请求可以用默认构造函数创建后再给字段赋值，也可以用 `from_dict` 构建；`from_dict` 会拒绝未知的键，枚举按成员名接受（`"Choice"`），并按类型构建嵌套的值：`{"inputs": [{"text": "hello"}]}`。媒体（`ProviderMedia`）、`Batch` 和 `ProviderRequest` 按对象传入。`extensions` 是 SDK 策略对该 origin 准入的顶层成员，是原样发送的普通 Python 数据。请求返回的列表是分离的副本：先构建一个列表，再赋值回去。
+- **结果。** 结果类的属性是只读的，返回的是副本，所以要把 `result.vectors` 存进变量，不要在循环里反复读取。复用的类型有：`ProviderMedia`、`ProviderUsage`、`ProviderServedModel`、`ProviderAttemptEvidence` 和 `ProviderRawWire`（`raw_events`）。成对的值是元组的列表（`ModerationVerdict.categories`、`DecisionAnswer.probabilities`）。
+- **准备。** `prepare_endpoint(request, timeout_seconds=None)` 返回一个 `PreparedEndpoint`，带有 `endpoint`、`model`、`error` 和 `consumed`。`timeout_seconds` 是调用的截止时间，从准备时开始计时；已准备的调用保留自己的截止时间，因此向完成调用再传入截止时间会抛出 `ValueError`。`PreparedEndpoint` 只能完成一次，第二次完成会抛出 `ValueError`。没有空闲的准备槽位时，`prepare_endpoint` 会抛出 `RuntimeError`；此时完成调用则改为返回 SDK 的 `ProviderFailure`。
+- **不阻塞。** `complete_endpoint_async` 返回 `asyncio.Future`，需要有正在运行的事件循环。它运行在 `run_async` 所用的那个 asio worker 线程上。取消正在等待的任务，会取消调用以及与 provider 的连接，此时 SDK 报告的结果（`Cancelled` 失败）会被丢弃。
+- **原样发送。** `SchemaProviderDefaults` 只应用于聊天调用。这里的调用不会把调用记入 journal，也不会预留预算或向预算计费。
+- **没有 endpoint 的 provider。** 用 Python 编写的 `Provider` 子类没有 endpoint：`prepare_endpoint` 和完成调用会抛出 `RuntimeError`。
+- **任务、文件与会话。** `JobHandle` 和 `FileUploadSession` 是普通的值，可以在调用之间记入 journal，并在重启后重新构建。Google 会话的 `url` 能让任何人不带 API key 就写入文件：要像对待凭据一样保密。`FileSource` 保存 `bytes`，或者保存本地文件 `path` 中从 `offset` 开始的 `size` 个字节，这些字节在发送时才读取。
+- **批处理与 token 计数。** `BatchItem.request` 和 `TokenCount.request` 由 `make_provider_request` 为 Chat、Responses、Messages 或 Generate provider 构建的 `ProviderRequest` 设置（Interactions 请求会抛出 `ValueError`），且不能读回。`batch_jsonl(descriptor, items)` 为某个请求族的描述符写出 OpenAI 的输入文件，`batch_custom_id(line)` 指明结果行所应答的请求，`batch_decode_line(descriptor, request, line)` 把该行解码为该请求的 outcome（`BatchLine.outcome` 是 `ProviderOutcome`）。`batch_inline_lines(batch)` 列出 Google 批处理的内联结果。
+- **作为媒体的文件、webhook。** `files_media(file, origin, now)` 把处于有效状态、未过期的 `ProviderFile` 转成聊天请求所指定的 `ProviderMedia` 引用，对其他 origin 则抛出 `ValueError`。`verify_webhook(secret, headers, body, now, tolerance=300)` 校验已签名的 webhook（如 OpenAI 发送的那种）并返回 `WebhookEvent`；无效或过期的会抛出 `ValueError`。宿主传入原始 body 和自己的时钟，并记住已处理过的投递 id，以拒绝重放。
 
 ### Native 历史与可移植导出
 

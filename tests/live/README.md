@@ -13,7 +13,8 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
   - a forced tool call on every preset and a full tool round trip;
   - generated images kept from OpenRouter Chat and Gemini Generate;
   - the Anthropic Messages controls: thinking modes and effort, tool choice, the temperature rule, prompt caching, and the same controls through OpenRouter;
-  - typed failures: an invalid key, a cancelled stream, an expired deadline.
+  - typed failures: an invalid key, a cancelled stream, an expired deadline;
+  - SchemaProvider endpoints through `Provider` (#531): OpenAI embeddings, OpenRouter embeddings awaited, and OpenAI moderation.
 - **C++** (`tests/live_e2e_test.cpp`, target `neograph_live_e2e_tests`):
   - the provider adapter with a Claude 5.5 server tool, generated images and Interactions;
   - SchemaProvider endpoints through `Provider` (#531): OpenAI and OpenRouter embeddings, OpenAI moderation and an Anthropic token count;

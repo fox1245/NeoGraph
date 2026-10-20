@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=72f28ec084019f1f3c9b5e4fe05ac2054b1048ed3351dbde8cdf7dca62c93cd0 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -17,7 +17,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **SchemaProvider のエンドポイントを `Provider` から呼び出せます (#531).**
   - `prepare_endpoint`、`complete_endpoint`、`complete_endpoint_async` が SchemaProvider の非チャット・エンドポイントを実行します：画像、decisions、埋め込み、rerank、moderation、音声合成、文字起こしと翻訳、動画ジョブ、ファイル、バッチ、トークン数のカウント、OpenRouter の生成統計。
   - 呼び出しはチャット呼び出しと共有する provider 自身の SchemaProvider クライアントで実行され、descriptor ポリシーが origin ごとに各エンドポイントを許可します。
-  - 0.16.0 で削除される型付きクライアントの代わりです。Python、グラフノード、Program からの呼び出しは後に続きます。
+  - 0.16.0 で削除される型付きクライアントの代わりです。
+  - **Python。** `Provider.prepare_endpoint`、`complete_endpoint`、`complete_endpoint_async` は、SDK のリクエストクラス（`EmbeddingsRequest`、`ImagesRequest`、`FileUpload`、`BatchSubmit`、`TokenCount` など）を受け取り、対応する結果クラスか `ProviderFailure` を返します。各リクエストクラスには厳格な `from_dict` があります。`complete_endpoint_async` はバインディングの唯一の asio ランタイム上で動く呼び出しの `asyncio.Future` を返し、これをキャンセルすると呼び出しもキャンセルされます。`batch_jsonl`、`batch_decode_line`、`files_media`、`verify_webhook` はモジュール関数です。
   - `Provider` に仮想メンバー `endpoint_runtime()` が加わったため、`Provider` の C++ サブクラスは新しいヘッダーで再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
 - **グラフ内のエンドポイントノード (#531).**
   - 組み込みのノードタイプ `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe`、`translate` は、それぞれエンドポイント呼び出しを 1 回行います。入力はノードの config が名前を指定するチャネルから読み、結果は 1 つのチャネルに書き込みます：provider のメディア JSON、ベクトル、ランキング、判定、回答、またはテキスト。
