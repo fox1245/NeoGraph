@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=1ad94dc3f8605b5b07d82e043845a53f9adfe1a49a97319a18c1c59081c7925c -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - `make_endpoint_request` はエンドポイントのリクエストを `ProviderRequest` に入れ、エンドポイントノードはそれを通して呼び出します。そのため、エンドポイント呼び出しはチャット呼び出しと同じ経路をたどります：プロバイダー呼び出しブローカー、永続的なディスパッチのマーカー、SQLite ジャーナル、そして再開とフォークでのリプレイ。Program は `RegistrySnapshotBuilder::add_core_endpoint_node` でノードを登録します。
   - model token 予算は、エンドポイント呼び出しに出力の上限がないため、送信する前にその呼び出しを拒否します。価格付きバインディングは、モデルカタログがまだエンドポイントのリクエストに価格を付けられないため、`P_MONEY_UNMODELED` で拒否します（fox1245/SchemaProvider#124）。
   - エンドポイント呼び出しのディスパッチ identity には、そのエンドポイント、メソッド、URL も含まれます。チャット呼び出しの identity は変わらないため、ジャーナルは引き続き一致します。
+  - アップロードのディスパッチ identity には、ファイル名、MIME タイプ、purpose、有効期限と、送るバイト列の SHA-256、オフセット、サイズも含まれます。ファイルのパスは含まれません（#541）。以前は、ファイルから読むアップロードの identity はファイルや名前、purpose にかかわらず同じで、メモリから送るアップロードには SDK のランダムな multipart 境界が本文に入るため、準備のたびに identity が変わっていました。ファイルが存在しない場合やスライスより短い場合は、呼び出しの準備時に拒否されます。また、モデル名を持たない呼び出し（アップロードなど）のジャーナル行を、再開時に読み込んでも破損として拒否しなくなりました。
   - エンドポイントの読み取り（GET：ジョブのポーリングやダウンロード、ファイルやバッチの参照）は課金されず、再送しても安全なため、ジャーナルはこれを毎回送ります（`PreparedProviderRequest::is_endpoint_read()`）。そのため、実行中の動画ジョブで一時停止した Program は、再開すると最初のポーリングをリプレイせず、ジョブの完了を見ます。
   - Program のプロバイダーラッパーと `OpenInferenceProvider` は、内側のプロバイダーのエンドポイントを転送します（`Provider::endpoint_runtime_of`）。
 

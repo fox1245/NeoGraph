@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9e59c6c13e6b7192b5ce7368457f0438906b7b7b745d47bf0ef435575d309c05 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=1ad94dc3f8605b5b07d82e043845a53f9adfe1a49a97319a18c1c59081c7925c -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - `make_endpoint_request`는 엔드포인트 요청을 `ProviderRequest`에 담으며, 엔드포인트 노드가 이를 통해 호출합니다. 그래서 엔드포인트 호출은 채팅 호출이 거치는 경로를 따릅니다: provider 호출 broker, 영속적인 디스패치 마커, SQLite 저널, 그리고 재개와 fork에서의 재생. Program은 `RegistrySnapshotBuilder::add_core_endpoint_node`로 노드를 등록합니다.
   - 모델 토큰 예산은 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부합니다. 가격을 매기는 binding은 모델 카탈로그가 아직 엔드포인트 요청의 가격을 매길 수 없으므로 `P_MONEY_UNMODELED`로 거부합니다 (fox1245/SchemaProvider#124).
   - 엔드포인트 호출의 디스패치 identity에는 그 엔드포인트, 메서드, URL도 들어갑니다. 채팅 호출의 identity는 그대로이므로 저널이 계속 일치합니다.
+  - 업로드의 디스패치 identity에는 파일 이름, MIME 타입, purpose, 만료 시간과, 보내는 바이트의 SHA-256, 오프셋, 크기도 들어갑니다. 파일 경로는 들어가지 않습니다(#541). 이전에는 파일에서 읽는 업로드의 identity가 파일, 이름, purpose와 상관없이 같았고, 메모리에서 보내는 업로드는 SDK의 무작위 multipart 경계가 본문에 들어가서 준비할 때마다 identity가 달랐습니다. 파일이 없거나 조각보다 짧으면 호출을 준비할 때 거부됩니다. 또 모델 이름이 없는 호출(업로드 등)의 저널 행을 재개가 읽을 때 손상된 것으로 거부하지 않습니다.
   - 엔드포인트 읽기(GET: job 폴링이나 다운로드, 파일이나 배치 조회)는 과금되지 않고 다시 보내도 안전하므로, 저널은 이를 매번 보냅니다(`PreparedProviderRequest::is_endpoint_read()`). 그래서 실행 중인 비디오 job에서 멈춘 Program은 재개될 때 첫 폴링을 replay하지 않고 job이 끝난 것을 봅니다.
   - Program provider 래퍼와 `OpenInferenceProvider`는 안쪽 provider의 엔드포인트를 전달합니다(`Provider::endpoint_runtime_of`).
 

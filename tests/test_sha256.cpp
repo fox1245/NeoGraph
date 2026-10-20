@@ -9,6 +9,7 @@
 
 namespace {
 using neograph::detail::Sha256Backend;
+using neograph::detail::Sha256Stream;
 using neograph::detail::sha256_digest;
 
 std::string hex(const std::array<std::uint8_t, 32>& digest) {
@@ -60,6 +61,32 @@ TEST(Sha256Test, IndependentBinaryVectorsCoverPaddingAndUnalignedInputs) {
             }
         }
     }
+}
+
+TEST(Sha256Test, AStreamGivesTheDigestOfItsPiecesWhateverTheirSize) {
+    for (const auto& vector : SHA256_BINARY_VECTORS) {
+        const auto input = ramp(vector.size);
+        for (const auto backend : backends()) {
+            for (const std::size_t piece : {1U, 7U, 63U, 64U, 65U, 1000U}) {
+                Sha256Stream hash(backend);
+                for (std::size_t at = 0; at < input.size(); at += piece)
+                    hash.update(std::string_view(input).substr(at, piece));
+                hash.update(std::string_view{});
+                EXPECT_EQ(hex(hash.finish()), vector.raw) << "size=" << vector.size << " piece=" << piece;
+            }
+        }
+    }
+    Sha256Stream empty;
+    EXPECT_EQ(hex(empty.finish()), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+}
+
+TEST(Sha256Test, AFinishedStreamTakesNoMoreInput) {
+    Sha256Stream hash;
+    hash.update("abc");
+    EXPECT_EQ(hex(hash.finish()), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    EXPECT_THROW(hash.update("d"), std::logic_error);
+    EXPECT_THROW((void)hash.finish(), std::logic_error);
+    EXPECT_THROW((void)Sha256Stream(static_cast<Sha256Backend>(99)), std::invalid_argument);
 }
 
 TEST(Sha256Test, IdentityFramingMatchesIndependentKnownBytes) {

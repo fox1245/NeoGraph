@@ -5,12 +5,17 @@
 #include <neograph/graph/provider_call_broker.h>
 #include "canonical_json.h"
 #include "provider_wake.h"
+#include "sha256.h"
 #include <json/json.h>
 #include <core/native.h>
 
 #include <asio/cancellation_state.hpp>
 #include <algorithm>
+#include <array>
+#include <filesystem>
+#include <fstream>
 #include <type_traits>
+#include <variant>
 #include <utility>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
@@ -254,6 +259,7 @@ struct PreparedProviderRequest::Impl {
     ProviderObserverLimits observer_limits;
     std::optional<sp::Error> error;
     std::string digest;
+    std::optional<json> upload;
     std::shared_ptr<DispatchHooks> hooks;
     std::shared_ptr<StopChannel> stop;
     std::size_t event_count_limit = 0, event_byte_limit = 0;
@@ -315,9 +321,14 @@ PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::C
             if (request.options.stop_token.stop_possible())
                 impl->stop->external.emplace(request.options.stop_token, ForwardStop{impl->stop->source});
             request.options.stop_token = impl->stop->source.get_token();
-            impl->prepared = request.endpoint
-                ? request.endpoint->prepare(*impl->client, std::move(request.options))
-                : impl->client->prepare(std::move(request.payload), std::move(request.options));
+            if (request.endpoint) {
+                auto call = request.endpoint->prepare(*impl->client, std::move(request.options));
+                impl->prepared = std::move(call.prepared);
+                impl->upload = std::move(call.upload);
+                impl->error = std::move(call.error);
+            } else {
+                impl->prepared = impl->client->prepare(std::move(request.payload), std::move(request.options));
+            }
         }
         catch (const sp::runtime::AdmissionError& error) {
             impl->error = std::get<sp::Failure>(*error.outcome()).error;
@@ -430,9 +441,16 @@ std::string Provider::request_digest(const PreparedProviderRequest& request) {
             {"encoded_body", request.encoded_body()}};
     // An endpoint call is also named by what it sends: several operations share an endpoint, and a read or a
     // file upload has no body to tell them apart. A chat call's identity is unchanged.
-    if (const auto endpoint = request.impl_->prepared.endpoint(); !endpoint.empty())
+    if (const auto endpoint = request.impl_->prepared.endpoint(); !endpoint.empty()) {
         identity["endpoint"] = {{"name", endpoint}, {"method", request.impl_->prepared.method()},
                                 {"url", request.impl_->prepared.url()}};
+        // An upload's encoded body is empty when its file is read as it is sent, and otherwise holds a boundary
+        // that differs on every preparation. Its metadata and content name it instead (#541).
+        if (request.impl_->upload) {
+            identity["encoded_body"] = "";
+            identity["endpoint"]["upload"] = *request.impl_->upload;
+        }
+    }
     return detail::sha256_identity("NeoGraph Provider dispatch identity v1", "provider-request/v3",
         detail::canonical_json_bytes(identity));
 }
@@ -599,6 +617,107 @@ asio::awaitable<void> detail::await_endpoint(EndpointStart start) {
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);
     }
     co_await asio::this_coro::throw_if_cancelled(throw_on_cancel);
+}
+namespace {
+// The size of one read of an upload's file: the file is hashed in pieces, never held whole.
+constexpr std::size_t kUploadReadBytes = std::size_t{256} << 10;
+
+std::string hex_digest(const std::array<std::uint8_t, 32>& digest) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string hex;
+    for (const auto byte : digest) {
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 15]);
+    }
+    return hex;
+}
+
+sp::Error upload_source_error(const char* message) {
+    return local_error(sp::ErrorKind::InvalidRequest, message);
+}
+
+// The SHA-256 of the `slice.size` bytes at `slice.offset` of the file, or why they cannot be read. The messages
+// hold no path.
+std::variant<std::string, sp::Error> hash_file_slice(const sp::endpoints::FileSlice& slice) {
+    try {
+        std::error_code ignored;
+        const auto length = std::filesystem::file_size(std::filesystem::path(slice.path), ignored);
+        if (ignored) return upload_source_error("upload source unreadable");
+        if (slice.offset > length || slice.size > length - slice.offset)
+            return upload_source_error("upload source is shorter than its slice");
+        std::ifstream file(std::filesystem::path(slice.path), std::ios::binary);
+        if (!file || !file.seekg(static_cast<std::streamoff>(slice.offset)))
+            return upload_source_error("upload source unreadable");
+        detail::Sha256Stream hash;
+        std::vector<char> piece(static_cast<std::size_t>(std::min<std::uint64_t>(slice.size, kUploadReadBytes)));
+        for (auto left = slice.size; left;) {
+            const auto take = static_cast<std::size_t>(std::min<std::uint64_t>(left, piece.size()));
+            if (!file.read(piece.data(), static_cast<std::streamsize>(take)))
+                return upload_source_error("upload source unreadable");
+            hash.update(std::string_view(piece.data(), take));
+            left -= take;
+        }
+        return hex_digest(hash.finish());
+    } catch (const std::exception&) {
+        return upload_source_error("upload source unreadable");
+    }
+}
+
+// Prepares an upload (`files::Upload` or `files::Part`) whose identity is `identity` plus its content's.
+template <class Request>
+detail::EndpointPreparation prepare_upload(sp::runtime::Client& client, sp::runtime::RunOptions options,
+                                           const Request& original, json identity) {
+    detail::EndpointPreparation call;
+    auto request = original;
+    auto& source = request.source;
+    const bool in_memory = source.bytes && source.file.path.empty();
+    // A source the SDK refuses (no bytes, no size, or both kinds) is left to the SDK's own refusal.
+    if (in_memory || (!source.bytes && !source.file.path.empty() && source.file.size)) {
+        std::string digest;
+        std::uint64_t offset = 0, size = 0;
+        if (in_memory) {
+            detail::Sha256Stream hash;
+            hash.update(*source.bytes);
+            digest = hex_digest(hash.finish());
+            size = source.bytes->size();
+        } else {
+            auto hashed = hash_file_slice(source.file);
+            if (auto* error = std::get_if<sp::Error>(&hashed)) {
+                call.error = std::move(*error);
+                return call;
+            }
+            digest = std::move(std::get<std::string>(hashed));
+            if (!source.file.sha256.empty() && source.file.sha256 != digest) {
+                call.error = upload_source_error("upload source does not match its SHA-256");
+                return call;
+            }
+            // The SDK checks the digest before the last bytes are sent, so a file that changes after it was hashed
+            // is not uploaded under the identity of the bytes that were.
+            source.file.sha256 = digest;
+            offset = source.file.offset;
+            size = source.file.size;
+        }
+        identity["sha256"] = digest;
+        identity["offset"] = offset;
+        identity["size"] = size;
+        call.upload = std::move(identity);
+    }
+    call.prepared = client.prepare(std::move(request), std::move(options)).release();
+    return call;
+}
+}  // namespace
+detail::EndpointPreparation detail::prepare_endpoint_call(
+    sp::runtime::Client& client, sp::runtime::RunOptions options, const sp::files::Upload& request) {
+    json identity = json::object();
+    identity["filename"] = request.filename;
+    identity["mime"] = request.mime;
+    identity["purpose"] = request.purpose;
+    identity["expires_after"] = request.expires_after ? json(*request.expires_after) : json(nullptr);
+    return prepare_upload(client, std::move(options), request, std::move(identity));
+}
+detail::EndpointPreparation detail::prepare_endpoint_call(
+    sp::runtime::Client& client, sp::runtime::RunOptions options, const sp::files::Part& request) {
+    return prepare_upload(client, std::move(options), request, json::object());
 }
 // Normalize only portable client results; native replay and mixed messages are
 // indivisible, and a system message remains a boundary even when lifted out.

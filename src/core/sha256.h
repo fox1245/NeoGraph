@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -22,5 +23,23 @@ constexpr bool sha256_x86_features_supported(std::uint32_t maximum_leaf,
 NEOGRAPH_API bool sha256_hardware_available() noexcept;
 NEOGRAPH_API std::array<std::uint8_t, 32> sha256_digest(
     std::string_view input, Sha256Backend backend = Sha256Backend::Automatic);
+
+// SHA-256 of input given in pieces of any size, so a large file is hashed without being held in memory.
+// finish() returns the digest of everything given to update(); a finished hash takes no more input.
+class NEOGRAPH_API Sha256Stream {
+public:
+    explicit Sha256Stream(Sha256Backend backend = Sha256Backend::Automatic);
+    void update(std::string_view input);
+    std::array<std::uint8_t, 32> finish();
+
+private:
+    using Compressor = void (*)(std::uint32_t*, const std::uint8_t*, std::size_t) noexcept;
+    Compressor                   compress_;
+    std::array<std::uint32_t, 8> state_;
+    std::array<std::uint8_t, 64> block_{};
+    std::size_t                  filled_   = 0;
+    std::uint64_t                length_   = 0;
+    bool                         finished_ = false;
+};
 
 }  // namespace neograph::detail

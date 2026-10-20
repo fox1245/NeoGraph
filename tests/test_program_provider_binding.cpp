@@ -227,6 +227,11 @@ struct Script {
     std::atomic<int> checks_asked{0};
     std::atomic<int> checks_finished{0};
     std::atomic<int> checks_answered{0};
+    // #541: what the "file_upload" node uploads: `upload_size` bytes of the file at `upload_path`, or
+    // `upload_bytes` from memory when there are any.
+    std::string   upload_path;
+    std::uint64_t upload_size = 0;
+    std::string   upload_bytes;
 };
 
 class BrokeredCall final : public graph::GraphNode {
@@ -253,6 +258,43 @@ public:
             throw graph::NodeInterrupt("approve the model output", json{{"request", "approve"}});
         graph::NodeOutput output;
         output.writes.push_back(graph::ChannelWrite{"value", neograph::test::text(outcome_or_throw(result))});
+        co_return output;
+    }
+
+private:
+    std::string               name_;
+    std::shared_ptr<Provider> provider_;
+    std::shared_ptr<Script>   script_;
+};
+
+// #541: uploads a file through the Program provider broker, then asks until it is resumed.
+class UploadCall final : public graph::GraphNode {
+public:
+    UploadCall(std::string name, std::shared_ptr<Provider> provider, std::shared_ptr<Script> script)
+        : name_(std::move(name)), provider_(std::move(provider)), script_(std::move(script)) {}
+    std::string get_name() const override { return name_; }
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        ++script_->node_runs;
+        sp::files::Upload upload;
+        if (script_->upload_bytes.empty())
+            upload.source.file = {script_->upload_path, 0, script_->upload_size};
+        else
+            upload.source.bytes = std::make_shared<const std::string>(script_->upload_bytes);
+        upload.filename = "data.bin";
+        upload.mime     = "application/octet-stream";
+        upload.purpose  = "user_data";
+        const auto broker = graph::provider_call_broker(in.ctx);
+        if (!broker) throw std::logic_error("the Program provider broker is absent");
+        auto result = co_await graph::observe_provider_result(
+            in.ctx, broker->invoke(graph::make_provider_call_identity(in.ctx, name_), provider_,
+                                   make_endpoint_request(std::move(upload))));
+        if (!result) throw std::runtime_error("the upload returned no outcome");
+        const auto outcome = sp::files::typed(*result);
+        if (const auto* failure = std::get_if<sp::Failure>(&outcome)) throw std::runtime_error(failure->error.safe_message);
+        if (script_->interrupt_after_call.load() && !in.ctx.resume_value)
+            throw graph::NodeInterrupt("approve the upload", json{{"request", "approve"}});
+        graph::NodeOutput output;
+        output.writes.push_back(graph::ChannelWrite{"value", std::get<sp::files::File>(outcome).id});
         co_return output;
     }
 
@@ -350,7 +392,9 @@ enum class Shape {
     // #531: an endpoint node alone.
     Embed,
     // #531: a video job submitted, then collected.
-    VideoJob
+    VideoJob,
+    // #541: a file uploaded by a host node.
+    FileUpload
 };
 
 struct HostOptions {
@@ -410,6 +454,12 @@ public:
             manifest({ExecutableKind::Node, "job_submit", "1.0.0", digest('b')}, {kProviderIdentity}), {});
         builder.add_core_endpoint_node(
             manifest({ExecutableKind::Node, "job_collect", "1.0.0", digest('c')}, {kProviderIdentity}), {});
+        builder.add_host_brokered_node(
+            manifest({ExecutableKind::Node, "file_upload", "1.0.0", digest('d')}, {kProviderIdentity}),
+            [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
+                return std::make_unique<UploadCall>(name, context.provider, script);
+            },
+            json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
         builder.add_host_brokered_node(
             manifest({ExecutableKind::Node, "brokered_call", "1.0.0", digest('3')}, {kProviderIdentity}),
             [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
@@ -597,6 +647,10 @@ public:
                 }
                 break;
             }
+            case Shape::FileUpload:
+                definition["nodes"] = {{"upload", {{"type", "file_upload"}}}};
+                definition["edges"] = json::array({edge("__start__", "upload"), edge("upload", "__end__")});
+                break;
             case Shape::VideoJob:
                 definition["channels"]["prompt"] = {{"reducer", "overwrite"}, {"initial", "waves at dusk"}};
                 definition["channels"]["job"] = {{"reducer", "overwrite"}, {"initial", json::object()}};
@@ -2221,6 +2275,73 @@ TEST(ProgramProviderBindingJournal, AVideoJobPausesTheProgramAndAResumePollsItAg
     EXPECT_EQ(peer.downloads.load(), 1);
     EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
     EXPECT_NE(done.output().dump().find("video/mp4"), std::string::npos) << done.output().dump();
+}
+
+namespace {
+void write_file(const std::filesystem::path& path, const std::string& bytes) {
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << bytes;
+}
+}  // namespace
+
+TEST(ProgramProviderBindingJournal, AnUploadIsReplayedAfterAResumeWhereverItsFileIsNow) {
+    // #541: the journal names an upload by the bytes it sends, not by the path they were read from.
+    TempDir                              files("endpoint-upload-moved");
+    neograph::test::endpoints::UploadPeer peer;
+    Host h(std::make_shared<Peer>(), endpoint_options(peer.origin()), &files);
+    const auto source = files.path / "source.bin";
+    write_file(source, "the first contents");
+    h.script().upload_path           = source.string();
+    h.script().upload_size           = 18;
+    h.script().interrupt_after_call  = true;
+    const auto paused = h.run(Shape::FileUpload, "upload-moved");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    EXPECT_EQ(peer.received(), std::vector<std::string>{"the first contents"});
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+
+    const auto moved = files.path / "moved.bin";
+    std::filesystem::rename(source, moved);
+    h.script().upload_path = moved.string();
+    const auto done = h.runtime().resume(kOwner, "upload-moved", resume_after(paused, "trace-upload-moved")).wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.received().size(), 1U) << "the journaled upload replays from its new path";
+    EXPECT_NE(done.output().dump().find("file-1"), std::string::npos) << done.output().dump();
+}
+
+TEST(ProgramProviderBindingJournal, AnUploadWhoseFileChangedBeforeTheResumeIsNotReplayed) {
+    // #541: the file keeps its path and its size, but not its bytes, so the resumed call is not the journaled one.
+    TempDir                              files("endpoint-upload-changed");
+    neograph::test::endpoints::UploadPeer peer;
+    Host h(std::make_shared<Peer>(), endpoint_options(peer.origin()), &files);
+    const auto source = files.path / "source.bin";
+    write_file(source, "the first contents");
+    h.script().upload_path           = source.string();
+    h.script().upload_size           = 18;
+    h.script().interrupt_after_call  = true;
+    const auto paused = h.run(Shape::FileUpload, "upload-changed");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    ASSERT_EQ(peer.received().size(), 1U);
+
+    write_file(source, "the other contents");
+    const auto resumed =
+        h.runtime().resume(kOwner, "upload-changed", resume_after(paused, "trace-upload-changed")).wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Failed) << failure_text(resumed);
+    EXPECT_NE(failure_text(resumed).find("binding conflict"), std::string::npos) << failure_text(resumed);
+    EXPECT_EQ(peer.received().size(), 1U) << "the changed file is not sent under the journaled call";
+}
+
+TEST(ProgramProviderBindingJournal, AnUploadFromMemoryIsReplayedAfterAResume) {
+    // #541: the SDK's multipart boundary is random, so the body of an upload from memory differs on every
+    // preparation; its identity must not.
+    TempDir                              files("endpoint-upload-memory");
+    neograph::test::endpoints::UploadPeer peer;
+    Host h(std::make_shared<Peer>(), endpoint_options(peer.origin()), &files);
+    h.script().upload_bytes          = "bytes in memory";
+    h.script().interrupt_after_call  = true;
+    const auto paused = h.run(Shape::FileUpload, "upload-memory");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    const auto done = h.runtime().resume(kOwner, "upload-memory", resume_after(paused, "trace-upload-memory")).wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.received(), std::vector<std::string>{"bytes in memory"}) << "uploaded once";
 }
 
 TEST(ProgramProviderBindingJournal, TheJournalAndCheckpointsHoldNoCredential) {
