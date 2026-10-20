@@ -1,9 +1,6 @@
 {
  "format": "neograph.live-e2e-manifest/v1",
- "known_gaps": {
-  "py:test_live_matrix::test_known_gap_gemini_media[lyria-clip]": "Python cannot set the Generate response_modalities Lyria needs (#512).",
-  "py:test_live_matrix::test_known_gap_gemini_media[tts]": "Python cannot set the Generate speech_config and response_modalities (#512)."
- },
+ "known_gaps": {},
  "cases": [
   "cpp:LiveEndpoints.AnthropicTokenCount",
   "cpp:LiveEndpoints.EndpointNodesInAGraph",
@@ -27,10 +24,13 @@
   "py:test_live_matrix::test_claude_5_5_text[claude-sonnet-5-5-stream]",
   "py:test_live_matrix::test_gemini_generate_image_output[collect]",
   "py:test_live_matrix::test_gemini_generate_image_output[stream]",
-  "py:test_live_matrix::test_known_gap_gemini_media[lyria-clip]",
-  "py:test_live_matrix::test_known_gap_gemini_media[tts]",
+  "py:test_live_matrix::test_gemini_tts[collect]",
+  "py:test_live_matrix::test_gemini_tts[stream]",
+  "py:test_live_matrix::test_lyria_clip[lyria-clip]",
   "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[collect]",
   "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[stream]",
+  "py:test_live_matrix::test_responses_hosted_web_search[collect]",
+  "py:test_live_matrix::test_responses_hosted_web_search[stream]",
   "py:test_live_matrix::test_text[anthropic.messages-collect]",
   "py:test_live_matrix::test_text[anthropic.messages-stream]",
   "py:test_live_matrix::test_text[google.generate-collect]",

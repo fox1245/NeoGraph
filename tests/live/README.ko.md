@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=6372355bab3b86363a732b0efb0c03cb120a9fa9357513267f574c998c2dd508 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=be533332bd699ac71134ef16c08b418aeaf8803e2bdf6a870e2f695394d269fe -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,6 +13,8 @@
   - 이미지 입력;
   - 모든 프리셋에서 강제 툴 호출, 그리고 툴 왕복 전체;
   - OpenRouter Chat과 Gemini Generate가 생성한 이미지의 보존;
+  - Generate의 응답 modality와 음성 설정을 쓰는 Gemini 음성 합성(버퍼와 스트림)과 Lyria 클립;
+  - OpenAI Responses의 hosted 웹 검색(버퍼와 스트림);
   - Anthropic Messages 제어: thinking 모드와 effort, tool choice, temperature 규칙, 프롬프트 캐시, 그리고 OpenRouter를 거친 같은 제어;
   - 타입이 정해진 실패: 잘못된 키, 취소된 스트림, 이미 지난 deadline;
   - `Provider`를 거치는 SchemaProvider 엔드포인트(#531): OpenAI 임베딩, await로 기다리는 OpenRouter 임베딩, OpenAI moderation.

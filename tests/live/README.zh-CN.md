@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=6372355bab3b86363a732b0efb0c03cb120a9fa9357513267f574c998c2dd508 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=be533332bd699ac71134ef16c08b418aeaf8803e2bdf6a870e2f695394d269fe -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -13,6 +13,8 @@
   - 图像输入；
   - 每个预设上的强制工具调用，以及完整的工具往返；
   - 保留 OpenRouter Chat 和 Gemini Generate 生成的图像；
+  - 使用 Generate 响应模态和语音设置的 Gemini 语音合成（缓冲和流式）以及 Lyria 片段；
+  - OpenAI Responses 的 hosted 网页搜索（缓冲和流式）；
   - Anthropic Messages 的控制项：thinking 模式和 effort、tool choice、temperature 规则、提示缓存，以及经 OpenRouter 的相同控制项；
   - 类型化的失败：无效密钥、被取消的流、已过期的 deadline；
   - 通过 `Provider` 调用的 SchemaProvider 端点（#531）：OpenAI 嵌入、以 await 等待的 OpenRouter 嵌入和 OpenAI moderation。
