@@ -322,9 +322,13 @@ def sanitizer(args):
         if re.search(r"^\s*leak:.*(?:neograph::|NeoGraph)", suppression.read_text(), re.MULTILINE):
             raise RuntimeError("LSan suppressions must never match NeoGraph symbols")
         flags = "-fsanitize=address,undefined -fno-omit-frame-pointer -O1"
+        # Line tables only: sanitizer reports keep their function, file and line. The tree of every
+        # test, example and the Python module is about 76 GB; with -g the build had used 107 GB when it
+        # ran out of disk, still unfinished.
         options += definitions(NEOGRAPH_BUILD_COOKBOOK_JARVIS="ON", NEOGRAPH_JARVIS_FORCE_MOCK="ON",
                                NEOGRAPH_BUILD_PROGRAM="ON", NEOGRAPH_BUILD_QUICKJS_CONTROL="ON",
                                NEOGRAPH_BUILD_PYBIND="ON", CMAKE_C_FLAGS=flags, CMAKE_CXX_FLAGS=flags,
+                               CMAKE_C_FLAGS_DEBUG="-g1", CMAKE_CXX_FLAGS_DEBUG="-g1",
                                CMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined")
         env.update(ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=0:strict_init_order=1",
                    UBSAN_OPTIONS="print_stacktrace=1:halt_on_error=1",
