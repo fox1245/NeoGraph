@@ -244,6 +244,10 @@ public:
     std::optional<std::uint64_t> max_output_tokens() const noexcept;
     bool requires_native_custody() const noexcept;
     const sp::descriptor::ValidatedDescriptor* admitted_descriptor() const noexcept;
+    /// An endpoint read (#531): a GET, such as a job poll or download or a file
+    /// or batch lookup. The provider never charges one, and it can be sent again,
+    /// so a journaling broker sends it each time instead of replaying it.
+    bool is_endpoint_read() const noexcept;
 private:
     struct Impl;
     explicit PreparedProviderRequest(std::unique_ptr<Impl>);

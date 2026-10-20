@@ -30,6 +30,8 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -346,7 +348,9 @@ enum class Shape {
     // #531: an endpoint node and a check in one fan-out step.
     EmbedBesideCheck,
     // #531: an endpoint node alone.
-    Embed
+    Embed,
+    // #531: a video job submitted, then collected.
+    VideoJob
 };
 
 struct HostOptions {
@@ -402,6 +406,10 @@ public:
             manifest({ExecutableKind::Node, "llm_call", "1.0.0", digest('2')}, {kProviderIdentity}), {});
         builder.add_core_endpoint_node(
             manifest({ExecutableKind::Node, "embed", "1.0.0", digest('a')}, {kProviderIdentity}), {});
+        builder.add_core_endpoint_node(
+            manifest({ExecutableKind::Node, "job_submit", "1.0.0", digest('b')}, {kProviderIdentity}), {});
+        builder.add_core_endpoint_node(
+            manifest({ExecutableKind::Node, "job_collect", "1.0.0", digest('c')}, {kProviderIdentity}), {});
         builder.add_host_brokered_node(
             manifest({ExecutableKind::Node, "brokered_call", "1.0.0", digest('3')}, {kProviderIdentity}),
             [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
@@ -589,6 +597,15 @@ public:
                 }
                 break;
             }
+            case Shape::VideoJob:
+                definition["channels"]["prompt"] = {{"reducer", "overwrite"}, {"initial", "waves at dusk"}};
+                definition["channels"]["job"] = {{"reducer", "overwrite"}, {"initial", json::object()}};
+                definition["channels"]["video"] = {{"reducer", "overwrite"}, {"initial", json::array()}};
+                definition["nodes"] = {{"submit", {{"type", "job_submit"}, {"model", "fixture-video"}, {"duration", 4}}},
+                                       {"collect", {{"type", "job_collect"}}}};
+                definition["edges"] = json::array(
+                    {edge("__start__", "submit"), edge("submit", "collect"), edge("collect", "__end__")});
+                break;
         }
         return definition;
     }
@@ -2097,11 +2114,13 @@ TEST(ProgramProviderBindingJournal, APlanQuorumResumeNeverResendsOrRechargesAFin
 }  // namespace
 
 namespace {
-// #531: a host whose provider is a real SDK client at a loopback peer that admits the OpenAI endpoint facts.
-HostOptions endpoint_options(const neograph::test::wire::Peer& peer) {
+// #531: a host whose provider is a real SDK client at a loopback peer that admits the endpoint facts of
+// `providers`' origins.
+HostOptions endpoint_options(const std::string& origin,
+                             std::vector<std::string> providers = {"https://api.openai.com"}) {
     HostOptions options;
-    options.provider = [origin = peer.origin()] {
-        return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(origin));
+    options.provider = [origin, providers] {
+        return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(origin, true, providers));
     };
     options.model_tokens = 0;
     options.monetary     = 0;
@@ -2115,7 +2134,7 @@ TEST(ProgramProviderBindingJournal, AnEndpointCallIsJournaledAndAForkReplaysIt) 
     // the paused run replays it instead of sending it again.
     TempDir                    files("endpoint-fork");
     neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
-    auto                       options = endpoint_options(peer);
+    auto                       options = endpoint_options(peer.origin());
     options.workers                    = 2;
     Host       h(std::make_shared<Peer>(), options, &files);
     const auto version = h.admit(Shape::EmbedBesideCheck);
@@ -2144,7 +2163,7 @@ TEST(ProgramProviderBindingJournal, APricedBindingRefusesAnEndpointCallBeforeItI
     // #531: the model catalogue cannot bound an endpoint call yet (SchemaProvider#124).
     TempDir                    files("endpoint-priced");
     neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
-    auto                       options = endpoint_options(peer);
+    auto                       options = endpoint_options(peer.origin());
     options.priced                     = true;
     options.monetary                   = 100'000;
     Host       h(std::make_shared<Peer>(), options, &files);
@@ -2159,7 +2178,7 @@ TEST(ProgramProviderBindingJournal, AModelTokenBudgetRefusesAnEndpointCallItCann
     // #531: an endpoint call has no output cap, so a run with a model-token ceiling cannot reserve it.
     TempDir                    files("endpoint-tokens");
     neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
-    auto                       options = endpoint_options(peer);
+    auto                       options = endpoint_options(peer.origin());
     options.model_tokens               = 1'000'000;
     Host       h(std::make_shared<Peer>(), options, &files);
     const auto result = h.run(Shape::Embed, "endpoint-tokens");
@@ -2167,4 +2186,48 @@ TEST(ProgramProviderBindingJournal, AModelTokenBudgetRefusesAnEndpointCallItCann
     EXPECT_NE(failure_text(result).find("ceilings"), std::string::npos) << failure_text(result);
     EXPECT_EQ(peer.state->entered, 0U);
     EXPECT_TRUE(journal_states(files.provider_db()).empty()) << "no marker";
+}
+
+TEST(ProgramProviderBindingJournal, AVideoJobPausesTheProgramAndAResumePollsItAgain) {
+    // #531: the submit is journaled once. A poll is a read the provider never charges, so the journal sends it
+    // each time: the resumed run sees the job finished instead of replaying the first answer forever.
+    TempDir                              files("endpoint-job");
+    neograph::test::endpoints::VideoPeer peer({"in_progress", "completed"});
+    Host h(std::make_shared<Peer>(), endpoint_options(peer.origin(), {"https://openrouter.ai"}), &files);
+    const auto paused = h.run(Shape::VideoJob, "job-run");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    ASSERT_TRUE(paused.interrupt());
+    EXPECT_EQ(paused.interrupt()->core_node, "collect");
+    EXPECT_EQ(peer.submits.load(), 1);
+    EXPECT_EQ(peer.polls_seen.load(), 1U);
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"}) << "the submit only";
+
+    const auto done = h.runtime().resume(kOwner, "job-run", resume_after(paused, "trace-job")).wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.submits.load(), 1) << "the submit is not sent again";
+    EXPECT_EQ(peer.polls_seen.load(), 2U);
+    EXPECT_EQ(peer.downloads.load(), 1);
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+    EXPECT_NE(done.output().dump().find("video/mp4"), std::string::npos) << done.output().dump();
+}
+
+TEST(ProgramProviderBindingJournal, TheJournalAndCheckpointsHoldNoCredential) {
+    // #531: an endpoint call's API key travels in its authorization header, never in what is stored.
+    TempDir                    files("endpoint-secrets");
+    neograph::test::wire::Peer peer(neograph::test::endpoints::embedding_body());
+    Host                       h(std::make_shared<Peer>(), endpoint_options(peer.origin()), &files);
+    const auto                 result = h.run(Shape::Embed, "secret-run");
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(peer.state->authorization.back(), "Bearer fixture-key");
+    h.close();
+    std::size_t scanned = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(files.path)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(bytes.find("fixture-key"), std::string::npos) << entry.path();
+        EXPECT_EQ(bytes.find("Bearer"), std::string::npos) << entry.path();
+        ++scanned;
+    }
+    EXPECT_GE(scanned, 3U) << "the program, checkpoint and provider databases";
 }

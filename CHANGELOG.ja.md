@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - `make_endpoint_request` はエンドポイントのリクエストを `ProviderRequest` に入れ、エンドポイントノードはそれを通して呼び出します。そのため、エンドポイント呼び出しはチャット呼び出しと同じ経路をたどります：プロバイダー呼び出しブローカー、永続的なディスパッチのマーカー、SQLite ジャーナル、そして再開とフォークでのリプレイ。Program は `RegistrySnapshotBuilder::add_core_endpoint_node` でノードを登録します。
   - model token 予算は、エンドポイント呼び出しに出力の上限がないため、送信する前にその呼び出しを拒否します。価格付きバインディングは、モデルカタログがまだエンドポイントのリクエストに価格を付けられないため、`P_MONEY_UNMODELED` で拒否します（fox1245/SchemaProvider#124）。
   - エンドポイント呼び出しのディスパッチ identity には、そのエンドポイント、メソッド、URL も含まれます。チャット呼び出しの identity は変わらないため、ジャーナルは引き続き一致します。
+  - エンドポイントの読み取り（GET：ジョブのポーリングやダウンロード、ファイルやバッチの参照）は課金されず、再送しても安全なため、ジャーナルはこれを毎回送ります（`PreparedProviderRequest::is_endpoint_read()`）。そのため、実行中の動画ジョブで一時停止した Program は、再開すると最初のポーリングをリプレイせず、ジョブの完了を見ます。
   - Program のプロバイダーラッパーと `OpenInferenceProvider` は、内側のプロバイダーのエンドポイントを転送します（`Provider::endpoint_runtime_of`）。
 
 ### 変更

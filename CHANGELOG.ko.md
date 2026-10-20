@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=65d252a90ef498e9d45de4a4f0f505413edc037de81c8294d52bc0ac5db533da -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -28,6 +28,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - `make_endpoint_request`는 엔드포인트 요청을 `ProviderRequest`에 담으며, 엔드포인트 노드가 이를 통해 호출합니다. 그래서 엔드포인트 호출은 채팅 호출이 거치는 경로를 따릅니다: provider 호출 broker, 영속적인 디스패치 마커, SQLite 저널, 그리고 재개와 fork에서의 재생. Program은 `RegistrySnapshotBuilder::add_core_endpoint_node`로 노드를 등록합니다.
   - 모델 토큰 예산은 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부합니다. 가격을 매기는 binding은 모델 카탈로그가 아직 엔드포인트 요청의 가격을 매길 수 없으므로 `P_MONEY_UNMODELED`로 거부합니다 (fox1245/SchemaProvider#124).
   - 엔드포인트 호출의 디스패치 identity에는 그 엔드포인트, 메서드, URL도 들어갑니다. 채팅 호출의 identity는 그대로이므로 저널이 계속 일치합니다.
+  - 엔드포인트 읽기(GET: job 폴링이나 다운로드, 파일이나 배치 조회)는 과금되지 않고 다시 보내도 안전하므로, 저널은 이를 매번 보냅니다(`PreparedProviderRequest::is_endpoint_read()`). 그래서 실행 중인 비디오 job에서 멈춘 Program은 재개될 때 첫 폴링을 replay하지 않고 job이 끝난 것을 봅니다.
   - Program provider 래퍼와 `OpenInferenceProvider`는 안쪽 provider의 엔드포인트를 전달합니다(`Provider::endpoint_runtime_of`).
 
 ### 변경됨
