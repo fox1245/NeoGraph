@@ -76,9 +76,9 @@ using ProgramCoreProviderCallResolver = std::function<
 /**
  * In-process broker for built-in Core provider calls that applies the
  * attempt's token budget and its monetary account: each call is priced from
- * the compiled-in price catalog, its upper bound is reserved before dispatch
- * (a call that cannot be bounded, or does not fit, is refused before it is
- * sent), and it is settled once from its outcome. It keeps no durable
+ * the model catalogue of its provider's descriptor policy, its upper bound is
+ * reserved before dispatch (a call that cannot be bounded, or does not fit, is
+ * refused before it is sent), and it is settled once from its outcome. It keeps no durable
  * journal, so a node that runs again sends its calls again, and so does a fork;
  * SQLiteProgramProviderCallJournal::bind_priced adds crash-safe replay.
  */
