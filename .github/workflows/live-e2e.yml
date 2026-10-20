@@ -1,10 +1,17 @@
 name: Live e2e report
 # A release must pass the live end-to-end suite with real provider keys (tests/live/README.md).
 # The maintainer runs scripts/live_e2e.py on the release commit and commits tests/live/report.json
-# in the release pull request; this workflow only checks that report, so it needs no key and calls
-# no provider. The same check runs on the release tag in wheels.yml before PyPI publishing.
+# in the release pull request; the `report` job only checks that report, so it needs no key and
+# calls no provider. The same check runs on the release tag in wheels.yml before PyPI publishing.
+#
+# The `live` job runs the whole live suite with real keys on every push to master (and on demand).
+# Its keys are secrets of the `live-e2e` environment, which only master may use, so neither a pull
+# request (from a fork or not) nor another branch receives them. Keys go to the test processes
+# only; scripts/live_e2e.py never prints them and scrubs them from failure messages.
 
 on:
+  push:
+    branches: [master]
   pull_request:
     branches: [master]
   workflow_dispatch:
@@ -12,13 +19,16 @@ on:
 permissions:
   contents: read
 
+# A newer pull request push cancels the older check. On master a run with keys is never cancelled
+# midway: the next push waits, and only the newest waiting push runs after it.
 concurrency:
   group: live-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   script:
     name: Report checker self-test
+    if: github.event_name != 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -42,3 +52,67 @@ jobs:
         with:
           python-version: '3.12'
       - run: python scripts/live_e2e.py verify
+
+  live:
+    name: Live suite with real keys
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    environment: live-e2e
+    timeout-minutes: 90
+    steps:
+      # Pinned to commits: this job holds the keys.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install build and test dependencies
+        run: |
+          bash scripts/ci_apt_install.sh cmake build-essential ninja-build libsqlite3-dev libssl-dev \
+            libcurl4-openssl-dev pkg-config ccache
+          python -m pip install -U pytest pydantic certifi
+      - name: Restore ccache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.ccache
+          key: ccache-live-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-live-${{ runner.os }}-
+      # The build stays outside the checkout: scripts/live_e2e.py refuses a tree with changes.
+      - name: Build the Python extension and the C++ live tests
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache --max-size=500M
+          cmake -S . -B "$RUNNER_TEMP/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DNEOGRAPH_BUILD_PYBIND=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_TESTS=ON -DNEOGRAPH_BUILD_EXAMPLES=OFF
+          cmake --build "$RUNNER_TEMP/build" --target _neograph neograph_live_e2e_tests -j "$(nproc)"
+      - name: Write the key file
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          umask 077
+          {
+            printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'ANTHROPIC_API_KEY=%s\n' "$ANTHROPIC_API_KEY"
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'OPENROUTER_API_KEY=%s\n' "$OPENROUTER_API_KEY"
+          } > "$RUNNER_TEMP/live.env"
+      - name: Run the live suite
+        run: |
+          python scripts/live_e2e.py run --env-file "$RUNNER_TEMP/live.env" --python python \
+            --pythonpath "$RUNNER_TEMP/build" --cxx "$RUNNER_TEMP/build/tests/neograph_live_e2e_tests"
+      - name: Remove the key file
+        if: always()
+        run: rm -f "$RUNNER_TEMP/live.env"
+      # The report holds results and scrubbed failure messages only.
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: live-e2e-report
+          path: tests/live/report.json
+          if-no-files-found: ignore

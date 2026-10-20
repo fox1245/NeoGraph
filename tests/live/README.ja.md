@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d181ec301994d8e5e1e2efdbc6da6ecfe37c6cab0525b0390c1d2ef038bb08e1 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=c5347b2c688d007f5f292498aef1fda3129548c02944ec85f55face0555e0ce0 -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -54,3 +54,10 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 3. Wheels ワークフローは、PyPI に公開する前にリリースタグで同じ検査をします。
 
 ケースを追加または削除したら、`python scripts/live_e2e.py manifest --python … --pythonpath … --cxx …` が、スイートが収集したケースからマニフェストを書き直し、既知のギャップはそのまま残します。コミットする前に差分を確認してください。
+
+## master では
+
+`Live e2e report` ワークフローは、master へのプッシュのたびに実際のキーでスイート全体も実行します。そのため、プロバイダー側の変化や回帰は次のリリースではなく、入ったその日にわかります。実行結果の `report.json` はビルドアーティファクトとしてアップロードされます。レポートをコミットすることはなく、リリースを承認することもありません。
+
+- **キー.** 4 つのキーは、master だけが使える GitHub 環境 `live-e2e` のシークレットです。GitHub はシークレットの値を誰にも表示せず、ログではマスクし、プルリクエストのワークフローには渡しません。ジョブはランナーのユーザーだけが読めるファイルにキーを書き、ジョブの終了時にそのファイルを削除します。
+- **一度に 1 つ.** master での実行が途中で取り消されることはありません。実行中に来たプッシュは待機し、待機中のプッシュのうち最新のものだけが次に実行されます。
