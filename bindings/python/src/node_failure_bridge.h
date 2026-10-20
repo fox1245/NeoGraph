@@ -10,6 +10,7 @@
 
 #include <exception>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -38,6 +39,15 @@ class PythonNodeConfigurationFailure final : public PythonNodeFailure,
                                              public graph::ConfigurationFailure {
 public:
     using PythonNodeFailure::PythonNodeFailure;
+};
+
+/// A Python exception raised by a tool body, as the failure the tool
+/// dispatcher reports (#545). what() is the text the model reads: the exception
+/// type and message, never the traceback, whose file paths and frames are the
+/// host's. The traceback goes to the `neograph_engine.tools` logger.
+class PythonToolFailure final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
 };
 
 }  // namespace neograph::pybind

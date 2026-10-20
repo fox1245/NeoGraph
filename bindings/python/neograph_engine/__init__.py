@@ -602,6 +602,14 @@ class Tool:
                 import ast, operator
                 tree = ast.parse(arguments["expression"], mode="eval")
                 return str(eval(compile(tree, "", "eval")))
+
+    **When ``execute`` raises.** The model reads a failed call as a tool result
+    whose ``error`` is the exception's type and message, such as
+    ``ValueError: bad input``, cut to ``ToolExecutionPolicy.error_limit_bytes``
+    (2048 bytes by default). The traceback, with the file paths and frames of
+    your code, is not sent to the provider: it is logged on the
+    ``neograph_engine.tools`` logger at WARNING, with the exception as
+    ``exc_info``. Put what the model should read in the message.
     """
 
     def get_name(self) -> str:

@@ -6,11 +6,16 @@ raised by a tool (for example from a nested engine whose mandatory Hook
 blocked) fails it with its invocation id and state, and cancelling the run's
 token cancels it. Every other exception becomes a tool result with a typed
 status that the model reads. Each case runs for one call and for a batch, and
-for both ``Tool`` (serial) and ``AsyncTool`` (offloaded) subclasses.
+for both ``Tool`` (serial) and ``AsyncTool`` (offloaded) subclasses. What the
+provider reads of a Python tool's failure is its exception type and message,
+bounded, and never its traceback (#545).
 """
 
 import json
+import logging
+import pathlib
 import time
+import traceback
 
 import neograph_engine as ng
 import pytest
@@ -330,6 +335,169 @@ def test_a_hook_block_from_a_python_node_stops_the_run_unretried():
         engine.run(ng.RunConfig(thread_id=_next_type("outer")))
     assert raised.value.state == "failed"
     assert len(attempts) == 1, "a Hook block from a Python node was retried"
+
+
+# ── What the provider reads of a failed Python tool (#545) ───────────────────
+
+TOOL_LOGGER = "neograph_engine.tools"
+
+# A real model loop: the first answer asks for the tool, the second ends the turn.
+AGENT = {
+    "schema_version": ng.TOPOLOGY_SCHEMA_VERSION, "name": "python_tool_error_text",
+    "channels": {"messages": {"reducer": "append"}},
+    "nodes": {"llm": {"type": "llm_call"}, "tools": {"type": "tool_dispatch"}},
+    "edges": [{"from": ng.START_NODE, "to": "llm"}, {"from": "tools", "to": "llm"}],
+    "conditional_edges": [{"from": "llm", "condition": "has_tool_calls",
+                           "routes": {"true": "tools", "false": ng.END_NODE}}],
+}
+
+
+def _agent_reply(request):
+    body = request["body"]
+    if any(message.get("role") == "tool" for message in body["messages"]):
+        message, finish = {"role": "assistant", "content": "done"}, "stop"
+    else:
+        message, finish = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call-target", "type": "function",
+             "function": {"name": "target", "arguments": "{}"}}]}, "tool_calls"
+    return 200, {"id": "chat-local", "object": "chat.completion", "model": body["model"],
+                 "created": 1, "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+                 "choices": [{"index": 0, "message": message, "finish_reason": finish}]}, \
+        "application/json"
+
+
+def _provider_read(typed_peer, tool, policy=None):
+    """Run the model loop over a local provider.
+
+    Returns the content of the tool message in the provider's second request, and that
+    request's raw body: everything the provider was sent.
+    """
+    typed_peer.responder = _agent_reply
+    context = ng.NodeContext(provider=typed_peer.provider("openai.chat"), model="fixture-model",
+                             tools=[tool])
+    engine = ng.GraphEngine.compile(AGENT, context)
+    if policy is not None:
+        policies = ng.ToolExecutionPolicyRegistry()
+        policies.upsert("target", policy)
+        engine.set_tool_execution_controller(ng.ToolExecutionController(policies))
+    result = engine.run(ng.RunConfig(thread_id=_next_type("provider_read"),
+                                     input={"messages": [{"role": "user", "content": "go"}]}))
+    assert result.status == ng.RunStatus.Completed
+    _asked, answered = typed_peer.requests
+    [message] = [m for m in answered["body"]["messages"] if m.get("role") == "tool"]
+    return message["content"], answered["raw_body"].decode()
+
+
+class _LedgerBusy(Exception):
+    pass
+
+
+def _load_account():
+    raise ValueError("bad input from the model")
+
+
+def _call_through_helpers():
+    _load_account()
+
+
+def _chained():
+    try:
+        raise KeyError("account")
+    except KeyError as error:
+        raise RuntimeError("could not load the ledger") from error
+
+
+def _custom():
+    raise _LedgerBusy("the ledger is busy; call again")
+
+
+def _without_message():
+    raise LookupError()
+
+
+FAILURES = [
+    pytest.param(_call_through_helpers, "ValueError: bad input from the model", id="plain"),
+    pytest.param(_chained, "RuntimeError: could not load the ledger", id="chained"),
+    pytest.param(_custom, "_LedgerBusy: the ledger is busy; call again", id="custom-class"),
+    pytest.param(_without_message, "LookupError", id="no-message"),
+]
+
+
+@pytest.mark.parametrize("raiser, expected", FAILURES)
+@pytest.mark.parametrize("base", BASES)
+def test_the_provider_reads_the_exception_type_and_message_not_the_traceback(
+        typed_peer, base, raiser, expected):
+    content, request = _provider_read(typed_peer, _tool(base, "target", lambda _a: raiser()))
+    error = json.loads(content)
+    assert error["error"] == expected
+    assert error["status"] == "reconciliation_required"
+    # Nothing of the traceback reached the provider: not its frames (functions, files)
+    # and not a path of the host.
+    here = pathlib.Path(__file__).resolve()
+    for leaked in ("Traceback", "At:", 'File "', "<lambda>", raiser.__name__, ".py",
+                   here.name, str(here.parent)):
+        assert leaked not in request, f"{leaked!r} reached the provider: {request}"
+
+
+@pytest.mark.parametrize("base", BASES)
+def test_the_traceback_stays_with_the_host_in_the_log(typed_peer, caplog, base):
+    with caplog.at_level(logging.WARNING, logger=TOOL_LOGGER):
+        _provider_read(typed_peer, _tool(base, "target", lambda _a: _call_through_helpers()))
+    [record] = [r for r in caplog.records if r.name == TOOL_LOGGER]
+    assert record.levelno == logging.WARNING
+    assert "target" in record.getMessage()
+    assert "ValueError: bad input from the model" in record.getMessage()
+    assert record.exc_info[0] is ValueError
+    written = "".join(traceback.format_exception(*record.exc_info))
+    assert "Traceback" in written and "_load_account" in written and "_call_through_helpers" in written
+    assert pathlib.Path(__file__).name in written
+
+
+def test_a_tool_that_succeeds_logs_nothing(typed_peer, caplog):
+    with caplog.at_level(logging.DEBUG, logger=TOOL_LOGGER):
+        content, _ = _provider_read(typed_peer, _tool(ng.Tool, "target", lambda _a: "target ok"))
+    assert content == "target ok"
+    assert not [r for r in caplog.records if r.name == TOOL_LOGGER]
+
+
+@pytest.mark.parametrize("base", BASES)
+def test_a_long_message_is_cut_to_the_default_limit(typed_peer, base):
+    limit = ng.ToolExecutionPolicy().error_limit_bytes
+
+    def fail(_args):
+        raise ValueError("x" * (50 * limit))
+
+    content, _ = _provider_read(typed_peer, _tool(base, "target", fail))
+    error = json.loads(content)
+    assert len(error["error"].encode()) == limit
+    assert error["error"].startswith("ValueError: xxxx")
+    assert error["error"].endswith("[truncated]")
+
+
+def test_the_policy_sets_the_limit_and_the_cut_keeps_whole_characters(typed_peer):
+    def fail(_args):
+        raise ValueError("\u00e9" * 5000)
+
+    policy = ng.ToolExecutionPolicy()
+    policy.error_limit_bytes = 64
+    content, _ = _provider_read(typed_peer, _tool(ng.Tool, "target", fail), policy)
+    error = json.loads(content)
+    sent = error["error"].encode()
+    assert 63 <= len(sent) <= 64
+    assert error["error"].startswith("ValueError: \u00e9\u00e9")
+    assert error["error"].endswith("[truncated]")
+    assert "\ufffd" not in error["error"], "a character was split"
+
+
+def test_an_error_limit_outside_its_range_is_refused():
+    policy = ng.ToolExecutionPolicy()
+    assert policy.error_limit_bytes == 2048
+    for refused in (0, 1024 * 1024 + 1):
+        policy.error_limit_bytes = refused
+        with pytest.raises(ValueError, match="error_limit_bytes"):
+            policy.validate()
+    policy.error_limit_bytes = 1
+    policy.validate()
 
 
 # ── Text crosses the Python boundary as UTF-8, U+FFFD for ill-formed bytes ──

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=015cc990b51c1c2403436bd3cc5bbbc9efa60b591dca6a185467c5687832f336 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=6efb6ab20695444f59b2f5e32b1bc3970ed3209a211179bc1b64f848bcafe92d -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -676,7 +676,7 @@ engine.set_hook_runtime(runtime)
 
 在 `FailClosed` 下，回调失败会阻塞受保护的运行时边界。只有在可以接受观测数据丢失的情况下，才能使用 `Continue`。
 
-`HookBoundaryBlocked` 带有被阻塞的 Hook 的 `invocation_id` 和它的 `state`（`"failed"`、`"timed_out"` 等）。Python 工具遵循[工具失败契约](reference-en.md#tool-failure-contract)：在工具内部抛出的 `HookBoundaryBlocked`（例如由嵌套的引擎运行抛出）会终止运行，`NodeInterrupt` 会让运行暂停，其他任何异常都会变成模型能读到的工具结果。
+`HookBoundaryBlocked` 带有被阻塞的 Hook 的 `invocation_id` 和它的 `state`（`"failed"`、`"timed_out"` 等）。Python 工具遵循[工具失败契约](reference-en.md#tool-failure-contract)：在工具内部抛出的 `HookBoundaryBlocked`（例如由嵌套的引擎运行抛出）会终止运行，`NodeInterrupt` 会让运行暂停，其他任何异常都会变成模型能读到的工具结果。该结果带有异常的类型和消息（例如 `ValueError: bad input`），按 `ToolExecutionPolicy.error_limit_bytes`（默认 2048 字节）截断；回溯不会发送给 Provider，而是以 WARNING 级别记录到 `neograph_engine.tools` 日志记录器。
 
 ## 运行时上下文、Skill 与严格分发
 

@@ -719,6 +719,9 @@ void init_graph(py::module_& m) {
         .def_readwrite("max_pending", &ToolExecutionPolicy::max_pending)
         .def_readwrite("resource_key_template",
                        &ToolExecutionPolicy::resource_key_template)
+        .def_readwrite("error_limit_bytes", &ToolExecutionPolicy::error_limit_bytes,
+                       "The most bytes of error text a failed call carries to the model "
+                       "(2048 by default); longer text is cut and ends with a marker.")
         .def("validate", &ToolExecutionPolicy::validate);
 
     py::class_<ToolExecutionPolicyRegistry,

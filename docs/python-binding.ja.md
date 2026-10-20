@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=015cc990b51c1c2403436bd3cc5bbbc9efa60b591dca6a185467c5687832f336 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=6efb6ab20695444f59b2f5e32b1bc3970ed3209a211179bc1b64f848bcafe92d -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -684,7 +684,7 @@ engine.set_hook_runtime(runtime)
 
 `FailClosed` では、コールバックが失敗すると、保護されたランタイム境界がブロックされます。`Continue` を使えるのは、観測データが失われてもかまわない場合だけです。
 
-`HookBoundaryBlocked` は、ブロックされたHookの `invocation_id` と `state`（`"failed"`、`"timed_out"` など）を保持します。Pythonのツールは、[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)に従います。ツールの中で（たとえば入れ子のエンジン実行によって）`HookBoundaryBlocked` が送出されると、実行が止まり、`NodeInterrupt` が送出されると、実行が一時停止します。それ以外の例外は、モデルが読むツールの結果になります。
+`HookBoundaryBlocked` は、ブロックされたHookの `invocation_id` と `state`（`"failed"`、`"timed_out"` など）を保持します。Pythonのツールは、[ツールの失敗に関する契約](reference-en.md#tool-failure-contract)に従います。ツールの中で（たとえば入れ子のエンジン実行によって）`HookBoundaryBlocked` が送出されると、実行が止まり、`NodeInterrupt` が送出されると、実行が一時停止します。それ以外の例外は、モデルが読むツールの結果になります。その結果に入るのは、`ValueError: bad input` のような例外の型とメッセージを `ToolExecutionPolicy.error_limit_bytes`（既定 2048 バイト）で切ったもので、トレースバックはプロバイダーへ送られず、`neograph_engine.tools` ロガーへ WARNING で記録されます。
 
 ## ランタイムコンテキスト、Skill、strictディスパッチ
 

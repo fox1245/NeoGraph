@@ -48,6 +48,22 @@ constexpr std::size_t kMaximumResourceKeyBytes = 512;
 constexpr std::size_t kMaximumResourceComponentBytes = 256;
 constexpr std::size_t kMaximumPolicyQueueDepth = 65'536;
 constexpr std::size_t kMaximumOutputBytes = 64U * 1024U * 1024U;
+constexpr std::size_t kMaximumErrorBytes = 1U * 1024U * 1024U;
+
+// Ends error text that was cut to the policy's error_limit_bytes.
+constexpr std::string_view kErrorTruncationMarker = "... [truncated]";
+
+// The error text of a failed call, at most the policy's error_limit_bytes long
+// (the marker counts).
+std::string bound_error_text(std::string text, std::size_t limit) {
+    if (text.size() <= limit) return text;
+    if (limit <= kErrorTruncationMarker.size())
+        return detail::truncate_utf8(text, limit, detail::InvalidUtf8Policy::Replace);
+    auto kept = detail::truncate_utf8(text, limit - kErrorTruncationMarker.size(),
+                                      detail::InvalidUtf8Policy::Replace);
+    kept += kErrorTruncationMarker;
+    return kept;
+}
 
 struct SingleFlightState {
     mutable std::mutex mutex;
@@ -267,6 +283,9 @@ void ToolExecutionPolicy::validate() const {
     }
     if (output_limit_bytes == 0 || output_limit_bytes > kMaximumOutputBytes) {
         throw std::invalid_argument("tool execution output_limit_bytes must be 1..64MiB");
+    }
+    if (error_limit_bytes == 0 || error_limit_bytes > kMaximumErrorBytes) {
+        throw std::invalid_argument("tool execution error_limit_bytes must be 1..1MiB");
     }
     if (concurrency == ToolConcurrency::KeyedExclusive
         || concurrency == ToolConcurrency::Exclusive
@@ -1046,7 +1065,8 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     auto publish_singleflight = [&, this](ToolExecutionResult result) {
         // Text leaves the boundary as well-formed UTF-8 (text_safety.h).
         result.output = detail::valid_utf8(std::move(result.output));
-        result.error = detail::valid_utf8(std::move(result.error));
+        result.error = bound_error_text(detail::valid_utf8(std::move(result.error)),
+                                         policy.error_limit_bytes);
         if (!singleflight_leader) return result;
         std::lock_guard<std::mutex> map_lock(impl_->singleflight_mutex);
         const auto found = impl_->singleflight.find(singleflight_key);

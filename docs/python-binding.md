@@ -681,7 +681,7 @@ engine.set_hook_runtime(runtime)
 
 A callback failure under `FailClosed` blocks the protected runtime boundary. `Continue` is available only when observational loss is acceptable.
 
-`HookBoundaryBlocked` carries the blocked Hook's `invocation_id` and its `state` (`"failed"`, `"timed_out"`, ...). Python tools follow the [tool failure contract](reference-en.md#tool-failure-contract): a `HookBoundaryBlocked` raised inside a tool (for example by a nested engine run) stops the run and a `NodeInterrupt` pauses it, while any other exception becomes a tool result the model reads.
+`HookBoundaryBlocked` carries the blocked Hook's `invocation_id` and its `state` (`"failed"`, `"timed_out"`, ...). Python tools follow the [tool failure contract](reference-en.md#tool-failure-contract): a `HookBoundaryBlocked` raised inside a tool (for example by a nested engine run) stops the run and a `NodeInterrupt` pauses it, while any other exception becomes a tool result the model reads. That result carries the exception's type and message, such as `ValueError: bad input`, cut to `ToolExecutionPolicy.error_limit_bytes` (2048 bytes by default); the traceback is not sent to the provider but logged on the `neograph_engine.tools` logger at WARNING.
 
 ## Runtime context, Skills and strict dispatch
 

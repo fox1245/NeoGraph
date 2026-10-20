@@ -214,6 +214,8 @@ struct ToolEffectGrantIdentity {
  */
 struct ToolExecutionPolicy {
     static constexpr std::uint32_t SCHEMA_VERSION = 2;
+    /// The default of error_limit_bytes.
+    static constexpr std::size_t DEFAULT_ERROR_LIMIT_BYTES = 2048;
 
     std::uint32_t schema_version = SCHEMA_VERSION;
     std::string   policy_id;
@@ -231,6 +233,12 @@ struct ToolExecutionPolicy {
     std::uint32_t retry_max_attempts = 1;
     std::chrono::milliseconds retry_backoff{0};
     std::size_t output_limit_bytes = 16U * 1024U * 1024U;
+    /// The most bytes of error text a failed call carries (ToolExecutionResult::error,
+    /// and so the `error` of the tool message the model reads). A tool's
+    /// exception can embed a response body or a payload, so longer text is cut
+    /// on a code-point boundary and ends with a marker; the result, marker
+    /// included, is at most this long. validate() accepts 1 byte to 1 MiB.
+    std::size_t error_limit_bytes = DEFAULT_ERROR_LIMIT_BYTES;
     std::string resource_key_template{"tool:{tool}"};
     /**
      * Host-wide reservation held while the tool implementation executes. For

@@ -13,6 +13,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Rebuild C++ consumers: `ToolExecutionPolicy` gained a member (#545).** `ToolExecutionPolicy` gained `error_limit_bytes`. Rebuild NeoGraph, C++ consumers and Python extensions together (see [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)).
+
+### Fixed
+
+- **A failed Python tool no longer sends its traceback to the provider (#545).** When a Python tool raised, the tool result the model read held the exception's whole traceback, with the absolute paths of the host's files and the frames of its code, and that text went to the provider. The result now holds the exception's type and message, such as `ValueError: bad input`. The traceback is written to the `neograph_engine.tools` logger at WARNING, with the exception as `exc_info`, so the host keeps it in its logs; where logging is not configured, Python's last-resort handler prints it to stderr.
+  - **Behavior change: the error text of a failed call is bounded for every tool.** `ToolExecutionPolicy::error_limit_bytes` (`ToolExecutionPolicy.error_limit_bytes` in Python) is the most bytes the `error` of a failed call carries: 2048 by default, 1 byte to 1 MiB. Longer text is cut on a code-point boundary and ends with `... [truncated]`.
+  - The C++ tool path was checked the same way. A C++ tool's error is its exception's `what()` and nothing else, so it had no traceback to leak, but it had no bound either: an exception that embedded a response body went to the provider whole. It has the bound now, like an MCP or gRPC tool's error.
+
 ## [0.16.0] - 2026-10-20
 
 ### Added

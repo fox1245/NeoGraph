@@ -65,7 +65,7 @@ constexpr const char* kSiblingCall = "call-sibling";
 
 // ── Tools ──────────────────────────────────────────────────────────────────
 
-enum class Act { Succeed, Throw, ThrowNonStd, ThrowHookBlock, ThrowInterrupt, CancelRun, Sleep };
+enum class Act { Succeed, Throw, ThrowLong, ThrowNonStd, ThrowHookBlock, ThrowInterrupt, CancelRun, Sleep };
 
 struct Probe {
     std::shared_ptr<CancelToken> run_token;
@@ -92,6 +92,9 @@ public:
                 co_return "target ok";
             case Act::Throw:
                 throw std::runtime_error("target failed: \"quoted\"");
+            case Act::ThrowLong:
+                // A tool whose error embeds a response body or a payload.
+                throw std::runtime_error("target failed: " + std::string(100'000, 'x'));
             case Act::ThrowNonStd:
                 throw 42;
             case Act::ThrowHookBlock:
@@ -300,10 +303,12 @@ struct Expect {
     std::optional<HookExecutionState> state;  // HookBlocked
     std::string payload_key;                  // Interrupted: a payload member to check
     std::string payload_value;
+    std::size_t max_error_bytes = 0;          // ToolResult: the error is cut to this (0: not checked)
 };
 
-Expect tool_result(std::string status, std::string text) {
-    return {Expect::Kind::ToolResult, std::move(status), std::move(text), {}, {}, {}};
+Expect tool_result(std::string status, std::string text, std::size_t max_error_bytes = 0) {
+    return {Expect::Kind::ToolResult, std::move(status), std::move(text), {}, {}, {},
+            max_error_bytes};
 }
 Expect hook_blocked(std::string invocation, std::optional<HookExecutionState> state) {
     return {Expect::Kind::HookBlocked, {}, std::move(invocation), state, {}, {}};
@@ -327,6 +332,7 @@ struct Scenario {
     bool expired_deadline = false; // the run deadline passed before the Hook could run
     bool policy_timeout = false;   // the tool's execution policy times out
     bool read_only = false;        // the tool's policy declares a read-only effect
+    std::size_t error_limit = 0;   // the tool's policy sets error_limit_bytes (0: the default)
     bool anonymous = false;        // Hooks are configured but the run has no owner scope
     Expect expect;
     std::optional<Expect> brokered;  // override for paths with a ToolEffectBroker
@@ -339,6 +345,14 @@ const std::vector<Scenario>& scenarios() {
         // A read-only tool that throws has had no effect worth reconciling.
         row({.name = "tool_exception", .act = Act::Throw, .read_only = true,
              .expect = tool_result("failed", "target failed: \"quoted\"")});
+        // The model reads a failed call's text, so it is bounded (#545): by the
+        // default error_limit_bytes, or by the tool's policy.
+        row({.name = "tool_exception_long_text", .act = Act::ThrowLong, .read_only = true,
+             .expect = tool_result("failed", "target failed: xxxx",
+                                   ToolExecutionPolicy::DEFAULT_ERROR_LIMIT_BYTES)});
+        row({.name = "tool_exception_long_text_policy_limit", .act = Act::ThrowLong,
+             .read_only = true, .error_limit = 100,
+             .expect = tool_result("failed", "target failed: xxxx", 100)});
         // The default policy does not know the effect, so a tool that threw
         // after it started may have acted: the model is told so, and a
         // brokered run pauses for reconciliation instead.
@@ -469,9 +483,10 @@ Setup make_setup(const Scenario& scenario, const Path& path) {
         setup.owner_scope.clear();
     }
     if (scenario.expired_deadline) setup.deadline = std::chrono::steady_clock::now() - 1ms;
-    if (scenario.policy_timeout || scenario.read_only) {
+    if (scenario.policy_timeout || scenario.read_only || scenario.error_limit) {
         auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
         ToolExecutionPolicy policy;
+        if (scenario.error_limit) policy.error_limit_bytes = scenario.error_limit;
         if (scenario.policy_timeout) {
             policy.execution_timeout = 20ms;
             policy.queue_timeout = 5s;
@@ -828,6 +843,12 @@ void check(const Expect& expect, const Outcome& outcome) {
             ASSERT_TRUE(body.is_object()) << target->content;
             EXPECT_NE(body.value("error", "").find(expect.text), std::string::npos) << target->content;
             EXPECT_EQ(body.value("status", ""), expect.status) << target->content;
+            if (expect.max_error_bytes) {
+                const auto error = body.value("error", "");
+                EXPECT_LE(error.size(), expect.max_error_bytes) << "the error text is not bounded";
+                EXPECT_EQ(error.size(), expect.max_error_bytes) << "more was cut than the bound needs";
+                EXPECT_NE(error.find("[truncated]"), std::string::npos) << "the cut is not shown";
+            }
             break;
         }
         case Expect::Kind::HookBlocked: {
