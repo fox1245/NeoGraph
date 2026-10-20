@@ -42,10 +42,10 @@ CMake 3.20 이상이 필요하다. Core가 소유 typed provider 계약을 공�
 
 SDK imported target이 `include/SchemaProvider` include root를 제공한다. 공개 예시는 recipe 전용 helper 없이 `<descriptor/descriptor.h>`, `<runtime/client.h>`, `<neograph/llm/schema_provider.h>`를 직접 사용한다.
 
-설치 SDK package는 정확히 `0.3.5`이어야 하며 interface revision 6 header와 shared-library generation 6이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
+설치 SDK package는 정확히 `0.4.0`이어야 하며 interface revision 7 header와 shared-library generation 7이 일치해야 한다. 버전 일치만으로 이전 interface/ABI binary를 승인하지 않는다.
 
 ```cmake
-find_package(SchemaProvider 0.3.5 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
+find_package(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS runtime transport)
 find_package(NeoGraph CONFIG REQUIRED)
 target_link_libraries(app PRIVATE neograph::core neograph::llm SchemaProvider::runtime)
 ```
@@ -476,7 +476,7 @@ sp::runtime::Result dispatch_admitted(
 ```
 
 
-소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.3.5`, interface revision 6 / shared-library generation 6이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
+소스 및 바이너리 단절이다. 모든 C++ 소비자와 사용자 공급자를 새 헤더/라이브러리로 재컴파일한다. `CompletionParams`, `ChatCompletion`, `CompletionProvider`, `OpenAIProvider`, `RateLimitedProvider`, `SchemaPrimitiveRegistry`, descriptor interpreter와 Responses WebSocket은 alias/호환 bridge 없이 제거되었다. SDK는 alpha `0.4.0`, interface revision 7 / shared-library generation 7이며 out-of-line capability check를 사용한다. 안정 릴리스 선언이 아니다. Linux/POSIX가 검증된 플랫폼이다. Windows NTFS와 macOS 구현이 있으나 이 SDK로 검증하지 않았으며, WASM provider runtime 지원은 확립되지 않았다.
 
 Python도 C++과 같은 소유 request/outcome 경계를 제공한다: `make_provider_request`, `Provider.prepare`, `dispatch`, `invoke`. Provider 기록에는 typed part를 가진 `ProviderMessage`를 사용하며 `ChatMessage`는 그래프 편의 projection으로 남는다. SDK 실패는 `ProviderOutcome.failure`로 읽고 host observer/settlement 예외는 `outcome`과 `cause`를 보존한다. 생성자와 GIL/콜백 동작은 [Python binding 안내](python-binding.md)를 참조한다.
 

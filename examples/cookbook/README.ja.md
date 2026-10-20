@@ -24,7 +24,7 @@ Core-only を含むすべての native ビルドには `SchemaProvider::runtime`
 または immutable public SDK archive fallback を使います。offline のインストール済み/source SDK では
 `-DNEOGRAPH_FETCH_SCHEMAPROVIDER=OFF` で fetching を止めます。
 インストール include root は `include/SchemaProvider` です。interface/capability 検査を行い、
-SDK `0.3.5` alpha の interface revision/shared ABI は6です。
+SDK `0.4.0` alpha の interface revision/shared ABI は7です。
 
 保存済み interface-3 model-free 実行では Assembly の実際のローカル A2A member サーバー四つと C++ speaker、
 JARVIS CLI synthetic turn とメモリ永続化、Beast strict Core コンパイル・進化・チェックポイント rollback、

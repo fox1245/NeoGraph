@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=0bffaa29ee89124513d8673fc9573584da522c5526d7efde94524e9757a1bd79 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=677a943827a8ac2e6d20cd23d1b1071ad0c3cade39c959acfc68762b7cad4abc -->
 # NeoGraph WASM 스모크 프로그램
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,10 +21,10 @@ Core는 `NEOGRAPH_BUILD_LLM=OFF`여도 `SchemaProvider::runtime`에
 SDK 런타임, 아카이브 지원, C++ 표준 라이브러리가 동작해야 하며, 아래의 과거 스모크 결과가 현재
 코드의 빌드 성공을 보여 주지는 않습니다.
 
-현재 빌드에는 SDK `0.3.5`, 인터페이스 리비전/공유 라이브러리 세대 6이 필요하며, SchemaProvider
-`maint/interface6`의 커밋 `0437853529b5932e7097a38629a95779d08f03aa`를 같은 타깃용으로 빌드해야
-합니다. 실제 Emscripten용 SDK 런타임 빌드가 선행 조건이며,
-이 문서는 현재 빌드의 성공을 보장하지 않습니다.
+현재 빌드에는 SDK `0.4.0`, 인터페이스 리비전/공유 라이브러리 세대 7이 필요하며,
+`cmake/NeoGraphSchemaProvider.cmake`가 고정한 SchemaProvider 커밋을 같은 타깃용으로
+빌드해야 합니다(WebAssembly 작업은 #535에서 추적합니다). 실제 Emscripten용 SDK 런타임 빌드가
+선행 조건이며, 이 문서는 현재 빌드의 성공을 보장하지 않습니다.
 
 ### 지원 대상의 요구 사항
 

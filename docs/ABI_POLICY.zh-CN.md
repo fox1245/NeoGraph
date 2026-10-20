@@ -35,7 +35,7 @@ CheckpointStore 为了显式的适配器迁移而保留旧的布局。同步的�
 
 即使禁用了 LLM 节点，Core 仍然需要外部的 `SchemaProvider::runtime`。选定的 SDK 版本是 `0.4.0` alpha，公开的 SDK `main` 分支上由 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交，接口修订版 `7`，共享库 ABI 修订版 `7`，并带有非内联的 capability 检查；这不表示接口已稳定。请把匹配的 SDK 组件一起安装。它的 `libsp_*.so.7` 代数，与 NeoGraph 的加载器代数、Python 的 `abi3` wheel 标签，都是各自独立的。
 
-接口 6 在公共的 usage 布局里，增加了定长的、由 provider 上报的金额元数据，并让阻塞和异步的 SDK 调用共用同一条异步流水线。选定的提交还在修订版 6 之内，扩大了 `sp::OpenRouterRouting`（新增了 `max_price`）以及 Chat、Messages 和 Responses 的请求布局；它的 capability 位 `OpenRouterRoutingMaxPrice` 属于 `RequiredProvider`，NeoGraph 的握手要求具备它，因此更早的接口 6 库会被拒绝。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 6 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 保持不变。可移植 JSON 是版本独立的另一种格式：NeoGraph 以 v3 写出 provider 消息、provider outcome 和 runtime history record，并仍可读取它们的 v2 记录。规范的 outcome usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
+接口 7 让媒体带上类型：在消息、outcome 和事件中，`sp::Media` 取代了 `sp::Image`。它还把请求控制扩展为各 family 自己的类型，并给客户端增加了非聊天端点和实时会话。公共布局全面改变，NeoGraph 的握手要求接口 7 及其 `RequiredProvider` 的 capability。SDK 的使用方、NeoGraph 和 Python 扩展要一起重新构建；更早的头文件或库与接口 7 不能互换。阻塞式包装器仍然拒绝从 SDK 的事件循环和回调 worker 中重入。native archive v3 / `spna3` 保持不变。可移植 JSON 是版本独立的另一种格式：NeoGraph 以 v3 写出 provider 消息、provider outcome 和 runtime history record，并仍可读取它们的 v2 记录，且保留其字节。v3 的 provider outcome 增加了媒体部件、引用、带类型的工具结果内容、错误原因和实际响应的模型。规范的 outcome usage，只有在存在金额元数据时才增加可选的 `provider_cost`；只是缺失该字段的历史记录保留原有字节，不会伪造成本。
 
 Python 暴露了带类型的 provider 契约，包括已准备的句柄和不可变的 outcome；没有保留旧的 completion 兼容层。扩展和与之匹配的库要作为同一个 wheel 安装。不要单独替换捆绑在其中的某个 NeoGraph 或 SDK 库。图使用的 ChatMessage 便捷值，不能替代 native ProviderMessage 的托管。参见 [Python 绑定](python-binding.md)。
 
