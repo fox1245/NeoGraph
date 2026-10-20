@@ -23,7 +23,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **그래프의 엔드포인트 노드 (#531).**
   - 내장 노드 타입 `image_generate`, `image_edit`, `embed`, `rerank`, `moderate`, `decide`, `speak`, `transcribe`, `translate`는 각각 엔드포인트 호출을 한 번 합니다. 입력은 노드의 config가 이름을 지정한 채널에서 읽고, 결과는 채널 하나에 씁니다: provider 미디어 JSON, 벡터, 순위, 판정, 답변 또는 텍스트.
   - `job_submit`과 `job_collect`는 비디오 job을 실행합니다. collect 노드는 실행될 때마다 한 번 폴링하며, job이 끝날 때까지 실행을 인터럽트합니다.
-  - 호출이 보고한 토큰 사용량이 실행에 기록됩니다. 예산이 있는 실행은 Program 호출이 중개할 때까지 이 노드를 거부합니다.
+  - 호출이 보고한 토큰 사용량이 실행에 기록됩니다.
+- **Program의 엔드포인트 호출 (#531).**
+  - `make_endpoint_request`는 엔드포인트 요청을 `ProviderRequest`에 담으며, 엔드포인트 노드가 이를 통해 호출합니다. 그래서 엔드포인트 호출은 채팅 호출이 거치는 경로를 따릅니다: provider 호출 broker, 영속적인 디스패치 마커, SQLite 저널, 그리고 재개와 fork에서의 재생. Program은 `RegistrySnapshotBuilder::add_core_endpoint_node`로 노드를 등록합니다.
+  - 모델 토큰 예산은 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부합니다. 가격을 매기는 binding은 모델 카탈로그가 아직 엔드포인트 요청의 가격을 매길 수 없으므로 `P_MONEY_UNMODELED`로 거부합니다 (fox1245/SchemaProvider#124).
+  - 엔드포인트 호출의 디스패치 identity에는 그 엔드포인트, 메서드, URL도 들어갑니다. 채팅 호출의 identity는 그대로이므로 저널이 계속 일치합니다.
+  - Program provider 래퍼와 `OpenInferenceProvider`는 안쪽 provider의 엔드포인트를 전달합니다(`Provider::endpoint_runtime_of`).
 
 ### 변경됨
 - **SchemaProvider interface 7의 모든 요청 제어를 C++와 Python에서 family별 nest로 쓸 수 있습니다 (#512, #513).** `ProviderControls`에 `chat`, `responses`, `messages`, `generate`, `interactions`(`ChatControls` … `InteractionsControls`)가 생겨 family 고유 제어를 SDK 타입 그대로 담으며, 평평한 멤버는 이식 가능한 제어로 남습니다. 2026-10-20 원탁회의에서 정한 구조입니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=ko source_sha256=cf231c5dd783ef2dc2e5ad572dd4bdcacd935c4da10414e7c5f754d6234143c6 -->
+<!-- neograph-i18n: source=docs/PROGRAM_CAPABILITY_CONTEXT.md locale=ko source_sha256=05fbc110d09704e01a8f8dd64767d56b589b973a31fb3fbda55f9077f2686930 -->
 # Program 노드의 capability와 중개되는 효과
 
 **Languages:** [English](PROGRAM_CAPABILITY_CONTEXT.md) | [한국어](PROGRAM_CAPABILITY_CONTEXT.ko.md) | [日本語](PROGRAM_CAPABILITY_CONTEXT.ja.md) | [简体中文](PROGRAM_CAPABILITY_CONTEXT.zh-CN.md)
@@ -11,9 +11,10 @@
 | 호스트가 검토한 `add_host_brokered_node` | 선언한 Provider 그대로 | 선언한 Tool 그대로 | 메타데이터 그대로 |
 | 고정된 `add_core_llm_call` | 선언한 Provider 그대로 | 모델 정의용으로 선언한 Tool 그대로 | 메타데이터 그대로 |
 | 고정된 `add_core_tool_dispatch` | 없음 | 선언한 Tool 그대로 | 메타데이터 그대로 |
+| 고정된 `add_core_endpoint_node` | 선언한 Provider 그대로 | 없음 | 메타데이터 그대로 |
 | `TrustedNative` C++ 팩토리 | 선언한 Provider 그대로 | 선언한 Tool 그대로 | 메타데이터 그대로 |
 
-고정된 Core 등록 두 개는 NeoGraph 자체의 `LLMCallNode`와 `ToolDispatchNode`를 만들며, 호출자가 제공한 팩토리는 받지 않습니다. 이 둘은 정확하고 변경할 수 없는 요구 사항 resolver와 함께 등록해야 합니다. 모델이 작성한 토폴로지는 승인(admission)된 타입과 노드 설정을 고를 수는 있지만, 임의의 brokered 팩토리가 원시 Tool 포인터를 받게 만들 수는 없습니다. 표준 dispatch 노드는 바인딩된 Tool을 호출하기 전에 항상 `dispatch_tool_calls`를 거치며, 이 함수가 그 실행의 `ToolGate`와 `ToolExecutionController`를 확인합니다.
+고정된 Core 등록은 NeoGraph 자체의 `LLMCallNode`, `ToolDispatchNode`, SchemaProvider 엔드포인트 노드(`add_core_endpoint_node`이며, 매니페스트가 노드 타입을 지정합니다: `embed`, `image_generate`, ..., `job_collect`, #531)를 만들며, 호출자가 제공한 팩토리는 받지 않습니다. 엔드포인트 노드의 호출은 `llm_call`의 호출처럼 Core provider 경로를 따릅니다. 호스트의 provider 호출 broker가 이를 저널에 기록하고 재생하며, 모델 토큰 예산은 출력 상한이 없으므로 이를 거부하고, 가격을 매기는 binding은 모델 카탈로그가 엔드포인트 호출의 상한을 정할 수 있을 때까지 `P_MONEY_UNMODELED`로 거부합니다. 고정된 Core 노드는 모두 정확하고 변경할 수 없는 요구 사항 resolver와 함께 등록해야 합니다. 모델이 작성한 토폴로지는 승인(admission)된 타입과 노드 설정을 고를 수는 있지만, 임의의 brokered 팩토리가 원시 Tool 포인터를 받게 만들 수는 없습니다. 표준 dispatch 노드는 바인딩된 Tool을 호출하기 전에 항상 `dispatch_tool_calls`를 거치며, 이 함수가 그 실행의 `ToolGate`와 `ToolExecutionController`를 확인합니다.
 
 `TrustedNative`는 호스트가 보증(attest)하는 별도의 경계입니다. Program 승인(admission)은 이 효과 모드에 대해 이미 `TrustedEmbedding` 모드와, 일치하는 인증된 Catalog 호스트 식별자를 요구합니다. 네이티브 C++ 코드는 `NodeContext` 밖에서 캡처한 리소스를 계속 쥐고 있거나 자체 효과를 일으킬 수 있습니다. 여기서 설명하는 규칙은 capability를 줄이는 것(attenuation)일 뿐 프로세스 샌드박스가 아니며, 임의의 네이티브 코드가 순수하다는 증명도 아닙니다. 호스트는 네이티브 팩토리를 검토해 고정(pin)하고, 그 효과를 있는 그대로 선언해야 합니다.
 

@@ -23,7 +23,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **图中的端点节点 (#531)。**
   - 内置节点类型 `image_generate`、`image_edit`、`embed`、`rerank`、`moderate`、`decide`、`speak`、`transcribe` 和 `translate` 各自发起一次端点调用。它们从节点 config 所指定名称的通道读取输入，并把结果写入一个通道：provider 媒体 JSON、向量、排名、判定、答案或文本。
   - `job_submit` 和 `job_collect` 运行一个视频任务。collect 节点每次运行时轮询一次，并在任务完成之前中断运行。
-  - 调用报告的 token 用量会记录到运行中。有预算的运行会拒绝这些节点，直到 Program 调用中介它们为止。
+  - 调用报告的 token 用量会记录到运行中。
+- **Program 中的端点调用 (#531)。**
+  - `make_endpoint_request` 把端点请求放进 `ProviderRequest`，端点节点通过它发起调用。因此端点调用走的是聊天调用所走的路径：provider 调用 broker、持久的分发标记、SQLite journal，以及在恢复和 fork 时的重放。Program 用 `RegistrySnapshotBuilder::add_core_endpoint_node` 注册这些节点。
+  - 模型 token 预算会在发送之前拒绝端点调用，因为它没有输出上限。计价绑定以 `P_MONEY_UNMODELED` 拒绝它，因为模型目录目前还无法为端点请求计价（fox1245/SchemaProvider#124）。
+  - 端点调用的分发标识中还包含它的端点、方法和 URL。聊天调用的标识不变，所以 journal 仍然能匹配。
+  - Program provider 包装器和 `OpenInferenceProvider` 会转发其内部 provider 的端点（`Provider::endpoint_runtime_of`）。
 
 ### 变更
 - **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。

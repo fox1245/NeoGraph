@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=fefc16f0f32b4f9bf8921842c8709e1e7f48c574fa2e1a5b5b2a268ed31d1ece -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -330,7 +330,8 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **準備。** `prepare_endpoint` は SDK の `PreparedEndpoint` を返します。ホストは `complete_endpoint` が実行する前に、これを確認する（`prepared().endpoint()`、`prepared().model()`、`error()`）ことも、ジャーナルに記録することもできます。準備スロットに空きがなければ `sp::runtime::AdmissionError` を投げます。
 - **スレッドを止めない呼び出し。** `complete_endpoint_async` はスレッドを止めません。awaitable がクライアントと呼び出しを所有するため、リクエストも provider もそれより長く生きる必要はありません。待機中のコルーチンをキャンセルすると呼び出しもキャンセルされ、結果は SDK の `Cancelled` 失敗になります。
 - **そのまま送信。** `SchemaProvider::Defaults` はチャット呼び出しにだけ適用されます。ここでは呼び出しをジャーナルに記録せず、予算の予約も課金もしません。
-- **エンドポイントを持たない provider。** SchemaProvider のエンドポイントを持たない `Provider` は `std::logic_error` を投げます。サブクラスは `endpoint_runtime()` をオーバーライドして自身のクライアントを転送します。
+- **エンドポイントを持たない provider。** SchemaProvider のエンドポイントを持たない `Provider` は `std::logic_error` を投げます。サブクラスは `endpoint_runtime()` をオーバーライドして自身のクライアントを転送し、別の provider を包む provider は `endpoint_runtime_of(inner)` を返します。`has_endpoints()` は provider がエンドポイントを持つかどうかを知らせます。
+- **チャット経路で。** `make_endpoint_request(request)` はエンドポイントのリクエストを `ProviderRequest` に入れるため、`prepare`、`dispatch`、`invoke` はこれをチャット呼び出しと同じように扱います：dispatch の Hook、観測者、provider 呼び出し broker とそのジャーナル、トークン予算。結果は型なしで、エンドポイントの `typed()`（`sp::embeddings::typed`、...）がそれに型を付けます。呼び出しはバッファリングされるため、`ProviderMode::Stream` は拒否され、ローカル provider（`prepare_local`）もこれを拒否します。dispatch identity（`request_digest`）にはエンドポイント、メソッド、URL も含まれます。1 つのエンドポイントを複数の操作が共有し、読み取りには本文がないためです。
 
 ### ProviderRequest / ProviderControls
 
@@ -2361,7 +2362,9 @@ public:
   - まだ実行中のジョブは、`{"job", "status", "raw_status"}` とともに `NodeInterrupt` を送出します。ホストは好きなときに実行を再開し、ノードは再びポーリングします。ステップの中ではポーリングせず、投入は再送されません。
 - **使用量、予算、キャンセル。**
   - 呼び出しが報告したトークン使用量は、実行の使用量に加算されます。使用量を報告しない呼び出し（moderation、ダウンロード）は何も加算しないため、実行のほかの呼び出しの合計を消しません。
-  - エンドポイント呼び出しにはまだ予算が適用されないため、model token 予算、managed budget lease、または provider 呼び出し broker（Program）を持つ実行は、エンドポイントノードが何かを送信する前にそれを拒否します。
+  - 呼び出しはチャット呼び出しと同じ経路をたどります（`make_endpoint_request`）。実行の provider 呼び出し broker がこれらをジャーナルに記録してリプレイし、Program ではホストが `add_core_endpoint_node` でノードを登録します。
+  - model token 予算または managed budget lease は、エンドポイント呼び出しに出力の上限がないため、送信する前にその呼び出しを拒否します。価格付きの Program バインディングは `P_MONEY_UNMODELED` で拒否します。
+  - Strict ランタイムのインターポジションはチャット呼び出しだけを対象とするため、エンドポイントノードは迂回させずに拒否します。
   - 実行のキャンセルトークンと deadline は呼び出しに届きます。
 
 <a id="topology-schema-export-issue-56"></a>

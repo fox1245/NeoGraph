@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fefc16f0f32b4f9bf8921842c8709e1e7f48c574fa2e1a5b5b2a268ed31d1ece -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -360,7 +360,8 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **准备。** `prepare_endpoint` 返回 SDK 的 `PreparedEndpoint`。在 `complete_endpoint` 运行它之前，宿主可以检查它（`prepared().endpoint()`、`prepared().model()`、`error()`）或将其写入日志。没有空闲的准备槽位时，它抛出 `sp::runtime::AdmissionError`。
 - **不阻塞线程的调用。** `complete_endpoint_async` 不会阻塞线程。awaitable 拥有客户端和调用，因此请求和 provider 都不必比它活得更久。取消正在等待的协程会取消调用，此时结果是 SDK 的 `Cancelled` 失败。
 - **按原样发送。** `SchemaProvider::Defaults` 只适用于聊天调用。这里不会把调用写入日志，也不会预留或扣除预算。
-- **没有端点的 provider。** 没有 SchemaProvider 端点的 `Provider` 会抛出 `std::logic_error`。子类通过重写 `endpoint_runtime()` 转发自己的客户端。
+- **没有端点的 provider。** 没有 SchemaProvider 端点的 `Provider` 会抛出 `std::logic_error`。子类通过重写 `endpoint_runtime()` 转发自己的客户端，包装另一个 provider 的 provider 则返回 `endpoint_runtime_of(inner)`。`has_endpoints()` 告知 provider 是否有端点。
+- **在聊天路径上。** `make_endpoint_request(request)` 把端点请求放进 `ProviderRequest`，因此 `prepare`、`dispatch` 和 `invoke` 像处理聊天调用一样处理它：dispatch Hook、观察者、provider 调用 broker 及其 journal，以及 token 预算。结果没有类型；由端点的 `typed()`（`sp::embeddings::typed`，...）为它赋予类型。该调用是缓冲的，所以 `ProviderMode::Stream` 会被拒绝，本地 provider（`prepare_local`）也会拒绝它。它的 dispatch identity（`request_digest`）还包含端点、方法和 URL，因为多个操作共用同一个端点，而读取没有请求体。
 
 ### ProviderRequest / ProviderControls
 
@@ -2626,7 +2627,9 @@ public:
   - 仍在运行的任务会抛出 `NodeInterrupt`，其内容为 `{"job", "status", "raw_status"}`。宿主在其选择的时候恢复运行，节点再次轮询。步骤内部不做任何轮询，也不会再次发送提交。
 - **用量、预算、取消。**
   - 调用报告的 token 用量会计入运行的用量。不报告用量的调用（moderation、下载）不计入任何内容，因此不会抹去运行中其他调用的合计。
-  - 端点调用目前不受预算约束，因此带有模型 token 预算、managed budget lease 或 provider 调用 broker（Program）的运行，会在端点节点发送任何内容之前拒绝它。
+  - 这些调用走聊天调用所走的路径（`make_endpoint_request`）。运行的 provider 调用 broker 会把它们记入 journal 并重放；在 Program 中，宿主用 `add_core_endpoint_node` 注册这些节点。
+  - 模型 token 预算或 managed budget lease 会在发送之前拒绝端点调用，因为它没有输出上限。计价的 Program 绑定以 `P_MONEY_UNMODELED` 拒绝它。
+  - 严格的运行时拦截只处理聊天调用，所以它会拒绝端点节点，而不是被绕过。
   - 运行的取消 token 和 deadline 会传到该调用。
 
 <a id="topology-schema-export-issue-56"></a>

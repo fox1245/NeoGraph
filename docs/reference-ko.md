@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=215dab6420f471931c26bf054c15f5f7a768b09ac696a9711b687f228a23b639 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=fefc16f0f32b4f9bf8921842c8709e1e7f48c574fa2e1a5b5b2a268ed31d1ece -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -359,7 +359,8 @@ std::vector<std::vector<float>> embed(neograph::Provider& provider, std::vector<
 - **준비.** `prepare_endpoint`는 SDK의 `PreparedEndpoint`를 돌려준다. 호스트는 `complete_endpoint`가 실행하기 전에 이를 살펴보거나(`prepared().endpoint()`, `prepared().model()`, `error()`) 저널에 남길 수 있다. 준비 슬롯이 비어 있지 않으면 `sp::runtime::AdmissionError`를 던진다.
 - **스레드를 막지 않는 호출.** `complete_endpoint_async`는 스레드를 막지 않는다. awaitable이 클라이언트와 호출을 소유하므로 요청도 provider도 그보다 오래 살 필요가 없다. 기다리는 코루틴을 취소하면 호출이 취소되고, 결과는 SDK의 `Cancelled` 실패다.
 - **주어진 그대로 전송.** `SchemaProvider::Defaults`는 채팅 호출에만 적용된다. 여기서는 어떤 호출도 저널에 남기지 않고, 예산을 예약하거나 차감하지도 않는다.
-- **엔드포인트가 없는 provider.** SchemaProvider 엔드포인트가 없는 `Provider`는 `std::logic_error`를 던진다. 하위 클래스는 `endpoint_runtime()`을 재정의해 자기 클라이언트를 전달한다.
+- **엔드포인트가 없는 provider.** SchemaProvider 엔드포인트가 없는 `Provider`는 `std::logic_error`를 던진다. 하위 클래스는 `endpoint_runtime()`을 재정의해 자기 클라이언트를 전달하고, 다른 provider를 감싸는 provider는 `endpoint_runtime_of(inner)`를 반환한다. `has_endpoints()`는 provider에 엔드포인트가 있는지 알려 준다.
+- **채팅 경로에서.** `make_endpoint_request(request)`는 엔드포인트 요청을 `ProviderRequest`에 담으므로, `prepare`, `dispatch`, `invoke`가 이를 채팅 호출과 똑같이 처리한다: dispatch Hook, 관측자, provider 호출 broker와 그 저널, 토큰 예산. 결과는 타입이 없으며, 엔드포인트의 `typed()`(`sp::embeddings::typed`, ...)가 결과에 타입을 부여한다. 호출은 버퍼링되므로 `ProviderMode::Stream`은 거부되며, 로컬 provider(`prepare_local`)도 이를 거부한다. dispatch identity(`request_digest`)에는 엔드포인트, 메서드, URL도 들어간다. 하나의 엔드포인트를 여러 연산이 공유하고, 읽기에는 본문이 없기 때문이다.
 
 ### ProviderRequest / ProviderControls
 
@@ -2669,7 +2670,9 @@ The library pre-registers the following components:
   - 아직 실행 중인 job이면 `{"job", "status", "raw_status"}`를 담은 `NodeInterrupt`를 던진다. 호스트는 원하는 때에 실행을 재개하고, 노드는 다시 폴링한다. step 안에서는 아무것도 폴링하지 않으며, 제출은 다시 보내지 않는다.
 - **사용량, 예산, 취소.**
   - 호출이 보고한 토큰 사용량은 실행의 사용량에 더해진다. 사용량을 보고하지 않는 호출(moderation, 다운로드)은 아무것도 더하지 않으므로, 실행의 다른 호출이 남긴 합계를 지우지 않는다.
-  - 엔드포인트 호출에는 아직 예산이 적용되지 않으므로, 모델 토큰 예산, managed budget lease, provider 호출 broker(Program)가 있는 실행은 엔드포인트 노드가 무언가를 보내기 전에 이를 거부한다.
+  - 호출은 채팅 호출이 거치는 경로를 따른다(`make_endpoint_request`). 실행의 provider 호출 broker가 이를 저널에 남기고 재생하며, Program에서는 호스트가 `add_core_endpoint_node`로 노드를 등록한다.
+  - 모델 토큰 예산이나 managed budget lease는 엔드포인트 호출에 출력 상한이 없으므로 호출을 보내기 전에 거부한다. 가격을 매기는 Program binding은 `P_MONEY_UNMODELED`로 거부한다.
+  - Strict Runtime 인터포지션은 채팅 호출만 대상으로 하므로, 엔드포인트 노드가 우회되도록 두지 않고 거부한다.
   - 실행의 취소 토큰과 deadline은 호출에 전달된다.
 
 ### Topology Schema Export (issue #56)
