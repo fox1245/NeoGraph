@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=31343b5416c78d73d764c92762e72e15b10f3ef4f17fa5968112ddabb57e6b8b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=fac3eca036504cdb2245854cdb495e37b7e9752e4acddd7c9e1fd2346015da55 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -491,7 +491,7 @@ Python SDK 的 vector/map getter 返回独立值：`ProviderMessage.parts`、`Pr
 
 Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit = 1e-6 USD）。当主机把内置 `llm_call` 节点的 provider 调用交给计价 broker 时，调用才会被计价：进程内使用 `bind_priced_provider_call(context)`，需要崩溃安全的重放时使用 `SQLiteProgramProviderCallJournal::bind_priced(context, deployment)`。运行时通过 `ProgramCoreProviderCallContext::monetary_account` 把 attempt 的金额账户交给每个 broker。Python 的 `LocalProgramHost(node_context=..., binding_label=...)` 总是为其调用计价（[Python 指南](python-binding.md#model-calling-nodes)）。与所有 `RunBudget` 字段一样，`monetary_microunits` 是授予运行的数量，`0` 表示什么也不授予：子运行与 fork 的预算从父运行的数量中划出，使用了模型 token 却以 `model_tokens = 0` 完成的运行会报告为 `BudgetExhausted`。`monetary_microunits = 0` 的运行会在发送前拒绝每一个被计价的调用。计价代码是内部的（`src/program/monetary.h`），不承诺 ABI。
 
-分发之前，broker 只用 provider 的 descriptor 策略所带的 SchemaProvider 模型目录为已准备的请求计价，不用其他来源。条目是策略针对 family、base URL 和已准入的模型，按 id、alias 或 origin 范围匹配到的那一条。hold 是 `sp::pricing::upper_bound` 对条目价格算出的值，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。该上限涵盖请求的输入上限与输出上限、按使用上限计的服务器工具，以及在 OpenRouter origin 上条目的 route ceiling。输入上限是目录所知该模型的最小输入限制：其 `input_limit` 或 `context_window`。每个输入 token 按最贵的输入费率计价，每个输出 token 按最贵的输出费率计价，并且覆盖上限之内的调用可能到达的每一档。OpenRouter 模型回退（`models`）预留最贵的候选。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、条目、上限与目录 digest：
+分发之前，broker 只用 provider 的 descriptor 策略所带的 SchemaProvider 模型目录为已准备的请求计价，不用其他来源。条目是策略针对 family、base URL 和已准入的模型，按 id、alias 或 origin 范围匹配到的那一条。hold 是 `sp::pricing::upper_bound` 对条目价格算出的值，乘以一次分发可能计费的模型调用次数（`Provider::invocation_upper_bound`）。该上限涵盖请求的输入上限与输出上限、按使用上限计的服务器工具，以及在 OpenRouter origin 上条目的 route ceiling。策略标为 client 工具的 Messages 工具（`memory_*`、`bash_*`、`text_editor_*`、computer 和 browser toolset）由调用方执行，只按 token 计费，因此既不需要使用上限，也不需要费用。输入上限是目录所知该模型的最小输入限制：其 `input_limit` 或 `context_window`。每个输入 token 按最贵的输入费率计价，每个输出 token 按最贵的输出费率计价，并且覆盖上限之内的调用可能到达的每一档。OpenRouter 模型回退（`models`）预留最贵的候选。无法确定上限的调用，或 hold 超出剩余预算的调用，会在产生任何请求或 journal marker 之前被拒绝。节点以表示未发送的合成 provider 失败而失败，运行的 `ProgramFailure` 写明原因；`failure.witness["monetary"]` 包含 origin、model、条目、上限与目录 digest：
 
 | 代码 | 状态 | 拒绝原因 |
 |---|---|---|
@@ -500,7 +500,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 | `P_MONEY_UNMODELED` | `Failed` | 条目没有请求的 service tier 的价格，或没有某个服务器工具或 hosted tool 的费用（`tool:<type>`），或请求使用了 OpenRouter plugin |
 | `P_MONEY_NO_OUTPUT_CAP` | `Failed` | 请求没有输出 token 上限 |
 | `P_MONEY_NO_INPUT_BOUND` | `Failed` | 目录不知道该模型的输入限制或上下文窗口 |
-| `P_MONEY_NO_UPPER_BOUND` | `Failed` | 服务器工具或 hosted tool 没有使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`；Gemini 的内置工具没有这类上限），OpenRouter 条目没有 route ceiling（例如 router alias），或 route ceiling 无法作为 `provider.max_price` 固定 |
+| `P_MONEY_NO_UPPER_BOUND` | `Failed` | 服务器工具或 hosted tool 没有使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`；Gemini 的内置工具，以及策略不允许 `max_uses` 的 Messages 类型，如 `mcp_toolset`、`tool_search_tool_*` 和 `code_execution_*`，都没有这类上限），OpenRouter 条目没有 route ceiling（例如 router alias），或 route ceiling 无法作为 `provider.max_price` 固定 |
 | `P_MONEY_BUDGET` | `BudgetExhausted` | hold 超出剩余的 `monetary_microunits`（收费超出预算而结束的运行也用同一个错误码，此时 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by`） |
 
 得到结果后，hold 恰好结算一次，attempt 的 `ProgramResult::monetary_records()`（Python 为 `result.monetary_records`）为每次调用增加一条 `ProgramMonetaryRecord`，字段为 `call_id`（journal 的逻辑调用 slot）、`operation_id`、`node`、`origin`（base URL）、`model`、`evidence`、`microunits`、`reserved_microunits`、`basis`、`catalog_version`、`catalog_digest`、`conservative`、`may_undercount`、`replayed`、`reason` 与 `pricing`（条目、其价格行、service tier、预留的工具使用和估算的假设）。`ProgramUsage::monetary_microunits` 是该 attempt 的收费与仍未结束的 hold 之和：

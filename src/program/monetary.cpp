@@ -141,6 +141,11 @@ std::string joined(const std::vector<std::string>& values) {
     return out;
 }
 
+// False for every T: a tool variant without a branch below fails to compile
+// instead of being priced as another tool.
+template <class>
+inline constexpr bool kUnpricedToolVariant = false;
+
 // The wire type of a Responses hosted tool, the `tool:<type>` its fee is listed under.
 std::string hosted_tool_type(const sp::responses::HostedTool& tool) {
     return std::visit(
@@ -155,7 +160,9 @@ std::string hosted_tool_type(const sp::responses::HostedTool& tool) {
             else if constexpr (std::is_same_v<T, sp::responses::McpTool>) return "mcp";
             else if constexpr (std::is_same_v<T, sp::responses::ComputerTool>) return "computer";
             else if constexpr (std::is_same_v<T, sp::responses::ComputerUsePreviewTool>) return "computer_use_preview";
-            else return item.type;  // OpenRouterServerTool, GenericHostedTool
+            else if constexpr (std::is_same_v<T, sp::responses::OpenRouterServerTool> ||
+                               std::is_same_v<T, sp::responses::GenericHostedTool>) return item.type;
+            else static_assert(kUnpricedToolVariant<T>, "a Responses hosted tool has no wire type here");
         },
         tool);
 }
@@ -174,9 +181,19 @@ std::string builtin_tool_type(const Tool& tool) {
                                std::is_same_v<T, sp::interactions::CodeExecutionTool>) return "code_execution";
             else if constexpr (std::is_same_v<T, sp::gemini::GoogleMapsTool>) return "google_maps";
             else if constexpr (std::is_same_v<T, sp::gemini::ComputerUseTool>) return "computer_use";
-            else return "file_search";
+            else if constexpr (std::is_same_v<T, sp::gemini::FileSearchTool>) return "file_search";
+            else static_assert(kUnpricedToolVariant<T>, "a Gemini built-in tool has no wire type here");
         },
         tool);
+}
+
+// The policy's fact for a server tool type of the family, if it lists one.
+const sp::descriptor::ServerToolFact* server_tool_fact(const sp::descriptor::FamilyPolicy* family,
+                                                       std::string_view                    type) {
+    if (!family) return nullptr;
+    const auto found = std::find_if(family->server_tools.begin(), family->server_tools.end(),
+                                    [&](const auto& fact) { return fact.type == type; });
+    return found == family->server_tools.end() ? nullptr : &*found;
 }
 
 json price_rows(const sp::descriptor::CatalogueEntry& entry) {
@@ -376,23 +393,26 @@ MonetaryRequestFacts monetary_request_facts(const ProviderRequest& request) {
             if constexpr (std::is_same_v<T, sp::responses::Request>) {
                 if (!payload.hosted_tools.empty()) {
                     MonetaryRequestFacts::ToolCap cap;
-                    cap.uses = payload.max_tool_calls;
+                    cap.uses   = payload.max_tool_calls;
+                    cap.member = "max_tool_calls";
                     for (const auto& tool : payload.hosted_tools) cap.types.push_back(hosted_tool_type(tool));
                     facts.tools.push_back(std::move(cap));
                 }
             }
             if constexpr (std::is_same_v<T, sp::messages::Request>) {
+                // A typed tool is a server tool unless the family policy marks it a client tool;
+                // assess_monetary_call() reads that fact, as the request is not prepared yet.
                 for (const auto& tool : payload.tools)
-                    if (!tool.type.empty()) facts.tools.push_back({{tool.type}, tool.max_uses});
+                    if (!tool.type.empty()) facts.tools.push_back({{tool.type}, tool.max_uses, "max_uses"});
             }
             if constexpr (std::is_same_v<T, sp::gemini::Request> || std::is_same_v<T, sp::interactions::Request>) {
                 // Gemini's built-in tools take no use cap.
                 for (const auto& tool : payload.builtin_tools)
-                    facts.tools.push_back({{builtin_tool_type(tool)}, std::nullopt});
+                    facts.tools.push_back({{builtin_tool_type(tool)}, std::nullopt, {}});
             }
             if constexpr (std::is_same_v<T, sp::gemini::Request>) {
                 for (const auto& server : payload.mcp_servers)
-                    facts.tools.push_back({{"mcp:" + server.name}, std::nullopt});
+                    facts.tools.push_back({{"mcp:" + server.name}, std::nullopt, {}});
             }
         },
         request.payload);
@@ -441,18 +461,38 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
               "the request has no output token cap, so its cost has no upper bound");
         return quote;
     }
+    // The tools the service runs. The family policy marks the ones the caller runs
+    // (Messages' memory, bash and toolsets): they bill only tokens, and take no cap.
+    const auto* family_policy = policy.family(quote.family);
+    std::vector<MonetaryRequestFacts::ToolCap> server_tools;
+    for (const auto& cap : facts.tools) {
+        MonetaryRequestFacts::ToolCap kept{{}, cap.uses, cap.member};
+        for (const auto& type : cap.types) {
+            const auto* fact = server_tool_fact(family_policy, type);
+            if (!fact || !fact->client) kept.types.push_back(type);
+        }
+        if (!kept.types.empty()) server_tools.push_back(std::move(kept));
+    }
+    for (const auto& cap : server_tools) {
+        if (cap.uses) continue;
+        const auto& type = cap.types.front();
+        const auto* fact = server_tool_fact(family_policy, type);
+        quote.witness["unmodeled"] = "server tool '" + type + "'";
+        std::string reason;
+        if (cap.member.empty())
+            reason = "takes no use cap";
+        else if (cap.member == "max_uses" && fact && !fact->max_uses)
+            reason = "admits no max_uses";
+        else
+            reason = "has no use cap (" + cap.member + ")";
+        block(quote, "P_MONEY_NO_UPPER_BOUND",
+              "server tool '" + type + "' " + reason + ", so its fees have no upper bound");
+        return quote;
+    }
     const auto invocations = Provider::invocation_upper_bound(prepared);
     if (!invocations) {
         block(quote, "P_MONEY_NO_UPPER_BOUND",
               "the prepared request does not state how many invocations it can bill");
-        return quote;
-    }
-    for (const auto& cap : facts.tools) {
-        if (cap.uses) continue;
-        quote.witness["unmodeled"] = "server tool '" + cap.types.front() + "'";
-        block(quote, "P_MONEY_NO_UPPER_BOUND",
-              "server tool '" + cap.types.front() +
-                  "' has no use cap (Messages max_uses, Responses max_tool_calls), so its fees have no upper bound");
         return quote;
     }
 
@@ -536,7 +576,7 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
         // Each group of tools that shares a cap is bounded at its dearest fee.
         std::vector<std::pair<std::string, std::uint64_t>> uses;
         sp::pricing::ModelPrice                            fees;
-        for (const auto& cap : facts.tools) {
+        for (const auto& cap : server_tools) {
             std::optional<std::pair<std::string, std::uint64_t>> group;
             for (const auto& type : cap.types) {
                 const auto found = std::find_if(candidate.price.tool_fees.begin(), candidate.price.tool_fees.end(),

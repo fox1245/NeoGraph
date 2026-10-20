@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=99cf54086e0357ea19ac892a77c7896d17745f33d80ad5b50310e960616d9696 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=12f3456879f2400decd5925edf0900f801db22e4fc54e06aca34be1448e274e2 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -40,6 +40,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **Program の価格は、プロバイダーのポリシーが持つ SchemaProvider のモデルカタログからのみ得られます (#520).** 2026-10-20 の価格ラウンドテーブルが設計を決めました。route ceiling、tier の料率、ツール料金は NeoGraph の価格ファイルではなく、カタログの単位とレイヤーです。
   - **動作の変更: ホストが価格を供給します。** 組み込みの SchemaProvider カタログには価格が一つもないので、予算付きの実行は、プロバイダーのポリシーがそのモデルに価格を付けるカタログレイヤーを持つまで、価格の付くすべての呼び出しを拒否します。`sp::descriptor::load_policy(..., catalogue)` または `with_catalogue` を使い、Python では `load_provider_policy(..., model_catalogue_json)` を使います。項目の `pricing` は、単位あたりの10進 USD（`input`、`output`、キャッシュ・推論・画像の単位）、OpenRouter の route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context の帯（`input+200000`）、サーバーツールの料金（`tool:<type>`）を与えます。
   - **何を拒否するかはカタログで決まります。** service tier には固有の単位が必要です。OpenRouter の fallback（`models`）はすべての候補に価格が必要で、hold は最も高い候補の値です。サーバーツールまたは hosted tool には料金（`"0"` は無料の宣言）と使用 cap（Messages の `max_uses`、Responses の `max_tool_calls`）が必要です。long-context の帯は、モデルの入力上限がそこに届くときに予約されます。使用 cap を持たない OpenRouter の plugin と Gemini の組み込みツールは、予算付きの実行では拒否されます。
+  - **client ツールはトークンだけを請求します (#540)。** ポリシーが client ツールとして示す Messages のツール（`memory_*`、`bash_*`、`text_editor_*`、computer と browser の toolset）は呼び出し側が実行するため、それを含む価格付きリクエストには使用 cap も料金も必要ありません。`max_uses` を認めないサーバーツールの型（`mcp_toolset`、`tool_search_tool_*`、`code_execution_*`）は引き続き拒否され、拒否メッセージがその理由を示します。Responses の hosted tool と Gemini の組み込みツールの wire type は漏れなく対応づけられるため、SchemaProvider が後から追加するツールは `file_search` として価格が付けられず、ビルドが失敗します。
   - **精算。** 報告された費用がない場合、`sp::pricing::estimate` が hold に価格を付けたカタログのスナップショットから呼び出しの価格を求め、予約したサーバーツール料金は cap の分だけ請求されます。
   - **動作の変更: レコード。** `ProgramMonetaryRecord::origin` はプロバイダーの base URL です（`https://openrouter.ai`、以前は `openrouter`）。`catalog_version` はカタログの digest とともに `sp-model-catalogue/1` で、新しい `pricing`（Python では `record.pricing`）は項目、その価格行、service tier、予約したツールの使用、推定の前提を持ちます。0.16.0 より前に journal に記録されたレコードはバイトが変わりません。
   - **動作の変更: `P_MONEY_UNKNOWN_ORIGIN`** は、許可された descriptor がないプロバイダーだけを意味するようになりました。base URL でカタログが価格を付けていないモデルは `P_MONEY_UNKNOWN_MODEL` です。
