@@ -1,12 +1,14 @@
 // A small JSON Schema (draft 2020-12) checker for tests: the keywords the
 // NeoGraph schemas under schemas/ use. Unknown keywords are annotations.
-// Only local references ("#/$defs/...") are resolved.
+// Local references ("#/$defs/...") are resolved; a reference to another schema file
+// ("other.schema.json", optionally with a fragment) only when a loader supplies that file.
 #pragma once
 
 #include <neograph/json.h>
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <regex>
 #include <set>
 #include <string>
@@ -18,7 +20,10 @@ using neograph::json;
 
 class Checker {
 public:
-    explicit Checker(json root) : root_(std::move(root)) {}
+    /// Reads the schema file a relative reference names.
+    using Loader = std::function<json(const std::string&)>;
+
+    explicit Checker(json root, Loader loader = {}) : root_(std::move(root)), loader_(std::move(loader)) {}
 
     /// Every violation, each as "<instance pointer>: <keyword> ...".
     std::vector<std::string> check(const json& value) const {
@@ -89,7 +94,19 @@ private:
         if (!schema.is_object()) throw std::invalid_argument("schema must be an object or boolean");
         const auto fail = [&](const std::string& message) { errors.push_back(at + ": " + message); };
 
-        if (schema.contains("$ref")) visit(value, resolve(schema["$ref"].get<std::string>()), at, errors, depth + 1);
+        if (schema.contains("$ref")) {
+            const auto reference = schema["$ref"].get<std::string>();
+            if (reference.rfind('#', 0) == 0 || !loader_) {
+                visit(value, resolve(reference), at, errors, depth + 1);
+            } else {
+                // The other file's references resolve against its own root.
+                const auto fragment = reference.find('#');
+                Checker    other(loader_(reference.substr(0, fragment)), loader_);
+                const auto target =
+                    fragment == std::string::npos ? other.root_ : other.resolve(reference.substr(fragment));
+                other.visit(value, target, at, errors, depth + 1);
+            }
+        }
         if (schema.contains("type")) {
             const auto& type = schema["type"];
             bool        ok   = false;
@@ -195,7 +212,8 @@ private:
         }
     }
 
-    json root_;
+    json   root_;
+    Loader loader_;
 };
 
 }  // namespace json_schema_lite
