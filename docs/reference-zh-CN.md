@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=b36f5252664d1d0c4ec3acfc047d7c0edccc64c4bf7436974d4ef8f42f34d710 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=7d0099863b3f1ce14c46b3f149afdceb66d78bc04044ac1f3fc593828fd3a8c4 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -612,6 +612,8 @@ public:
 | 在 `ToolEffectBroker` 下效果不确定的工具结果 | 运行以 payload `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt` 暂停。 |
 
 前三行永远不会到达模型。工具结果会设置 `tool_status`，失败的结果无论是单个调用还是 batch 都带有 `{"error", "status", "retryable", "effect_uncertain"}`。在 batch 中，其他调用会先执行完毕；当多个调用都使运行停止时，取消优先于 Hook 阻断，Hook 阻断优先于中断。工具代码抛出的 `NodeInterrupt` 不会阻止其兄弟调用运行，恢复时整个 batch 会再次运行；若要在任何调用运行之前询问，请使用 `ToolGate`。运行截止时间（`RunMetadata::deadline`）约束 Hook、Provider 调用以及每个工具调用的开始，包括其在准入队列中的等待；工具自身的限制是其策略的 `execution_timeout` 与 `queue_timeout`。工具代码在开始之后抛出的系统错误是工具自身的失败（`failed` 或 `reconciliation_required`），而不是准入判定；主机准入与资源仲裁器一样，以 `rejected`（队列已满、没有容量）或 `expired`（队列等待耗尽）拒绝。从未开始的调用（`cancelled_before_start`、`expired`、`rejected`：`tool_call_not_started()`）没有产生任何效果：每个 `ToolEffectBroker`（包括持久的 `SQLiteToolEffectBroker`）都按原状态将其作为终态且效果确定的结果返回，并释放其槽位，因此它既不会为对账而暂停运行，也不会阻挡同一槽位之后的调用。
+
+**失败文本。** 失败结果的 `error` 有长度上限，因为模型会读它，而工具的异常可能带有响应正文、载荷或路径。文本按策略的 `ToolExecutionPolicy::error_limit_bytes`（Python 中为 `ToolExecutionPolicy.error_limit_bytes`；默认 2048，范围 1 字节到 1 MiB）在码点边界截断，并以 `... [truncated]` 结尾，所以连标记在内，文本不超过该长度。C++ 工具的错误就是其异常的 `what()`，没有别的内容。Python 工具的错误是异常的类型和消息，例如 `ValueError: bad input`，从不包含回溯：回溯里有主机的文件路径和代码的栈帧，因此绑定把它写到 `neograph_engine.tools` 日志记录器（WARNING 级别，异常作为 `exc_info`），供主机的日志使用。希望模型读到的内容放在异常消息里，其余放进日志。
 
 **被拒绝的请求，结果是已知的。** `ToolRequestRejected`（`<neograph/tool_execution.h>`）是工具确知自己的调用没有运行时抛出的异常；像 `MCPError` 这样有自己基类的异常类型，则改为实现 `ToolRequestRefusal` 接口。`retryable()` 表示再次发送同一请求是否可能成功。对于服务器在运行工具之前拒绝请求的 JSON-RPC 错误（`-32700`、`-32600`、`-32601`、`-32602`），`MCPTool` 抛出同时也是拒绝的 `MCPError`，因此捕获 `MCPError` 的调用方仍能拿到错误码和数据。`_meta["io.neograph/failure"].code` 为 `NG.InvalidRequest` 的 `isError` 结果会抛出 `ToolRequestRejected`；`MCPServer` 就是这样报告不符合工具输入 schema 的参数的。`GrpcRemoteTool` 对状态 `NOT_FOUND` 与 `INVALID_ARGUMENT` 抛出 `ToolRequestRejected`。控制器把拒绝转为 `failed`：同一请求还会被拒绝，需要模型修改请求，所以 `retryable` 为 false，`effect_uncertain` 也为 false。其他失败的结果未知（服务器可能运行了工具之后才失败：普通的 `isError` 结果、`-32603`、`-32000` 等服务器错误），因此除非工具的策略排除了效果，否则仍为 `reconciliation_required`。节点失败分类器把拒绝视为普通失败，`retryable()` 为 false 时不重试。
 

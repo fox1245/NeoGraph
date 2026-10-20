@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3b760c8f01646060d52a2e89fb43debb7be9345562fa347f5bd39bd00309a4ae -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,16 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ---
 
 ## [未リリース]
+
+### 変更
+
+- **C++ の利用側は再ビルドが必要です。`ToolExecutionPolicy` にメンバーが追加されました (#545)。** `ToolExecutionPolicy` に `error_limit_bytes` が追加されました。NeoGraph、C++ の利用側、Python 拡張をあわせて再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
+
+### 修正
+
+- **失敗した Python ツールは、トレースバックをプロバイダーへ送らなくなりました (#545)。** Python ツールが例外を送出すると、モデルが読むツールの結果に例外のトレースバック全体、つまりホストのファイルの絶対パスとコードのフレームが入っており、そのテキストがプロバイダーへ送られていました。結果には、`ValueError: bad input` のような例外の型とメッセージだけが入ります。トレースバックは `neograph_engine.tools` ロガーへ WARNING で、例外を `exc_info` として書き出されるので、ホストは自分のログに残せます。ログを設定していない場合は、Python の last-resort ハンドラーが stderr に出力します。
+  - **動作の変更: 失敗した呼び出しのエラーテキストには、すべてのツールで長さの上限があります。** `ToolExecutionPolicy::error_limit_bytes`（Python では `ToolExecutionPolicy.error_limit_bytes`）は、失敗した呼び出しの `error` が持てる最大バイト数で、既定値は 2048、範囲は 1 バイトから 1 MiB です。それより長いテキストはコードポイントの境界で切られ、`... [truncated]` で終わります。
+  - C++ ツールの経路も同じ観点で確認しました。C++ ツールのエラーは例外の `what()` だけなので、漏れるトレースバックはありませんでしたが、上限もありませんでした。レスポンス本文を含む例外は、そのままプロバイダーへ送られていました。MCP や gRPC ツールのエラーと同じく、上限が適用されます。
 
 ## [0.16.0] - 2026-10-20
 

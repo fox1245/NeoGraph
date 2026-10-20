@@ -5,6 +5,8 @@
 #include <neograph/tool_execution.h>
 #include <neograph/graph/types.h>
 
+#include "../src/core/canonical_json.h"
+
 #include <asio/steady_timer.hpp>
 #include <asio/use_awaitable.hpp>
 #include <algorithm>
@@ -15,6 +17,7 @@
 #include <future>
 #include <system_error>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -91,6 +94,25 @@ public:
 
 private:
     std::atomic<int> calls_{0};
+};
+
+// Throws an exception with the given text, as a tool that embeds a response
+// body or a payload in its error does.
+class ThrowingTextTool final : public Tool {
+public:
+    explicit ThrowingTextTool(std::string text) : text_(std::move(text)) {}
+
+    ChatTool get_definition() const override {
+        return {"thrower", "error text probe",
+                json{{"type", "object"}, {"properties", json::object()}}};
+    }
+
+    std::string execute(const json&) override { throw std::runtime_error(text_); }
+
+    std::string get_name() const override { return "thrower"; }
+
+private:
+    std::string text_;
 };
 
 class SlowContextualTool final : public Tool, public ContextualAsyncTool {
@@ -503,6 +525,73 @@ TEST(ToolExecutionController, OutputOverTheLimitOfAnEffectfulToolIsEffectUncerta
         EXPECT_EQ(result.effect_uncertain, c.uncertain);
         EXPECT_NE(result.error.find("output_limit_bytes"), std::string::npos) << result.error;
     }
+}
+
+// The text a failed call carries is what the model reads, and a tool's exception
+// can embed a response body or a payload (#545): it is cut to the policy's
+// error_limit_bytes, on a code-point boundary, and says so.
+ToolExecutionResult run_throwing_tool(const std::string& text, std::optional<std::size_t> limit) {
+    ThrowingTextTool tool(text);
+    auto policies = std::make_shared<ToolExecutionPolicyRegistry>();
+    if (limit) {
+        ToolExecutionPolicy policy;
+        policy.implementation = ToolExecutionImplementation::BlockingThread;
+        policy.error_limit_bytes = *limit;
+        policies->upsert("thrower", policy);
+    }
+    auto controller = std::make_shared<ToolExecutionController>(
+        ToolExecutionControllerConfig{policies, std::make_shared<ResourceArbiter>()});
+    return neograph::async::run_sync(
+        controller->execute_result_async(tool, json::object(), {}));
+}
+
+TEST(ToolExecutionController, ErrorTextIsCutToTheDefaultLimit) {
+    EXPECT_EQ(ToolExecutionPolicy{}.error_limit_bytes, ToolExecutionPolicy::DEFAULT_ERROR_LIMIT_BYTES);
+    const auto result = run_throwing_tool(std::string(100'000, 'x'), std::nullopt);
+    EXPECT_EQ(result.status, ToolTerminalStatus::ReconciliationRequired);
+    EXPECT_EQ(result.error.size(), ToolExecutionPolicy::DEFAULT_ERROR_LIMIT_BYTES);
+    EXPECT_EQ(result.error.compare(0, 8, "xxxxxxxx"), 0);
+    EXPECT_NE(result.error.find("[truncated]"), std::string::npos) << result.error;
+}
+
+TEST(ToolExecutionController, ErrorTextWithinTheLimitIsKeptWhole) {
+    const std::string text(ToolExecutionPolicy::DEFAULT_ERROR_LIMIT_BYTES, 'y');
+    EXPECT_EQ(run_throwing_tool(text, std::nullopt).error, text);
+    EXPECT_EQ(run_throwing_tool("short", 5).error, "short");
+}
+
+TEST(ToolExecutionController, ErrorLimitIsThePolicysAndCutsOnACodePointBoundary) {
+    // Two-byte code points: a cut at an odd byte would split one.
+    std::string text;
+    for (int i = 0; i < 500; ++i) text += "\xC3\xA9";
+    for (const std::size_t limit : {64U, 63U, 31U, 16U, 15U, 2U, 1U}) {
+        SCOPED_TRACE(limit);
+        const auto result = run_throwing_tool(text, limit);
+        EXPECT_LE(result.error.size(), limit);
+        EXPECT_NO_THROW(detail::validate_utf8(result.error)) << "a code point was split";
+        if (limit > 16) {
+            EXPECT_GE(result.error.size(), limit - 1) << "more than a byte was cut";
+            EXPECT_NE(result.error.find("[truncated]"), std::string::npos) << result.error;
+        }
+    }
+}
+
+TEST(ToolExecutionController, RejectsAnErrorLimitOutsideItsRange) {
+    ToolExecutionPolicy policy;
+    EXPECT_NO_THROW(policy.validate());
+    policy.error_limit_bytes = 1;
+    EXPECT_NO_THROW(policy.validate());
+    policy.error_limit_bytes = 1024U * 1024U;
+    EXPECT_NO_THROW(policy.validate());
+    policy.error_limit_bytes = 0;
+    EXPECT_THROW(policy.validate(), std::invalid_argument);
+    policy.error_limit_bytes = 1024U * 1024U + 1;
+    EXPECT_THROW(policy.validate(), std::invalid_argument);
+
+    // A registry refuses such a policy, so the controller never meets one.
+    ToolExecutionPolicyRegistry registry;
+    EXPECT_THROW(registry.upsert("thrower", policy), std::invalid_argument);
+    EXPECT_THROW(registry.set_default(policy), std::invalid_argument);
 }
 
 TEST(ToolExecutionController, RejectsUnsafeSingleFlightPolicies) {

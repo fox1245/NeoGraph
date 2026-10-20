@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3b760c8f01646060d52a2e89fb43debb7be9345562fa347f5bd39bd00309a4ae -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,16 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ---
 
 ## [Unreleased]
+
+### 변경됨
+
+- **C++ 사용 코드를 재빌드해야 합니다. `ToolExecutionPolicy`에 member가 추가되었습니다 (#545).** `ToolExecutionPolicy`에 `error_limit_bytes`가 추가되었습니다. NeoGraph, C++ 사용 코드, Python 확장을 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조).
+
+### 수정됨
+
+- **실패한 Python 도구가 트레이스백을 제공자에게 보내지 않습니다 (#545).** Python 도구가 예외를 던지면 모델이 읽는 도구 결과에 예외의 트레이스백 전체가, 곧 호스트 파일의 절대 경로와 코드의 프레임이 들어 있었고, 그 텍스트가 제공자로 전송되었습니다. 이제 결과에는 `ValueError: bad input`처럼 예외의 타입과 메시지만 들어갑니다. 트레이스백은 `neograph_engine.tools` 로거에 WARNING 수준으로, 예외를 `exc_info`로 달아 기록되므로 호스트가 자기 로그에 보관합니다. 로깅을 설정하지 않았다면 Python의 last-resort 핸들러가 stderr에 출력합니다.
+  - **동작 변경: 실패한 호출의 오류 텍스트에는 모든 도구에 길이 상한이 있습니다.** `ToolExecutionPolicy::error_limit_bytes`(Python에서는 `ToolExecutionPolicy.error_limit_bytes`)는 실패한 호출의 `error`가 담을 수 있는 최대 바이트 수이며, 기본값은 2048이고 범위는 1바이트부터 1 MiB입니다. 더 긴 텍스트는 코드 포인트 경계에서 잘리고 `... [truncated]`로 끝납니다.
+  - C++ 도구 경로도 같은 방식으로 점검했습니다. C++ 도구의 오류는 예외의 `what()`일 뿐이라 새어 나갈 트레이스백은 없었지만, 상한도 없었습니다. 응답 본문을 담은 예외가 제공자로 통째로 전송되었습니다. 이제 MCP나 gRPC 도구의 오류와 마찬가지로 상한이 적용됩니다.
 
 ## [0.16.0] - 2026-10-20
 

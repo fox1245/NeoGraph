@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3b760c8f01646060d52a2e89fb43debb7be9345562fa347f5bd39bd00309a4ae -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=154d7f66f69b921d114d5277057f553a6f73f91319d33198bacd85b0c02c5d62 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -12,6 +12,16 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ---
 
 ## [未发布]
+
+### 变更
+
+- **C++ 使用方需要重新构建：`ToolExecutionPolicy` 新增了成员 (#545)。** `ToolExecutionPolicy` 新增了 `error_limit_bytes`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+
+### 修复
+
+- **失败的 Python 工具不再把回溯发送给 Provider (#545)。** Python 工具抛出异常时，模型读到的工具结果里带着异常的完整回溯，即主机文件的绝对路径和代码的栈帧，这段文本会发送给 Provider。现在结果只包含异常的类型和消息，例如 `ValueError: bad input`。回溯会以 WARNING 级别写入 `neograph_engine.tools` 日志记录器，异常作为 `exc_info`，主机可以把它保留在自己的日志里；未配置日志时，Python 的 last-resort 处理器会把它打印到 stderr。
+  - **行为变更：所有工具的失败调用，其错误文本都有长度上限。** `ToolExecutionPolicy::error_limit_bytes`（Python 中为 `ToolExecutionPolicy.error_limit_bytes`）是失败调用的 `error` 最多可带的字节数，默认 2048，范围 1 字节到 1 MiB。更长的文本会在码点边界截断，并以 `... [truncated]` 结尾。
+  - C++ 工具路径也按同样的方式检查过。C++ 工具的错误只是其异常的 `what()`，没有可泄露的回溯，但也没有上限：带有响应正文的异常会原样发送给 Provider。现在它和 MCP、gRPC 工具的错误一样受该上限约束。
 
 ## [0.16.0] - 2026-10-20
 

@@ -410,6 +410,9 @@ private:
     std::shared_ptr<neograph::Tool> tool_;
 };
 
+// The logger that receives the traceback of a failed Python tool call (#545).
+constexpr const char* kPythonToolLogger = "neograph_engine.tools";
+
 class PyToolOwner final : public neograph::Tool {
 public:
     explicit PyToolOwner(py::object py_obj)
@@ -437,16 +440,19 @@ public:
 
     std::string execute(const json& arguments) override {
         PythonToolControlSignal signal;
+        std::string failure;
         {
             EngineGil g;
             try {
                 return call_python(arguments);
             } catch (py::error_already_set& e) {
                 signal = translate_tool_control_signal(e);
-                if (!signal) throw;   // an ordinary failure: the model sees it
+                // An ordinary failure: the model sees its type and message.
+                if (!signal) failure = report_failure(e);
             }
         }
-        signal.raise();
+        if (signal) signal.raise();
+        throw PythonToolFailure(std::move(failure));
     }
 
     // The whole of issue #96 is this override.
@@ -476,6 +482,42 @@ public:
     }
 
 private:
+    /// What the model reads of a failed call: the exception's type and message
+    /// (#545). The traceback carries the host's file paths and the frames of
+    /// its code, so it goes to the host's log instead, on the logger kPythonToolLogger at WARNING with
+    /// the exception as `exc_info`. The text's length is bounded where the tool
+    /// result is made (ToolExecutionPolicy::error_limit_bytes). Reading the
+    /// exception runs Python code (`__str__`), and any error there leaves that
+    /// part out. Must be called inside the catch block that holds @p e, with
+    /// the GIL held.
+    std::string report_failure(py::error_already_set& e) const {
+        std::string type = "Exception";
+        std::string message;
+        std::string name = "<unnamed>";
+        try {
+            type = py::str(e.type().attr("__name__")).cast<std::string>();
+        } catch (const py::error_already_set&) {
+        }
+        try {
+            message = py_to_utf8(e.value());
+        } catch (const py::error_already_set&) {
+        }
+        try {
+            name = py_obj_.attr("get_name")().cast<std::string>();
+        } catch (const py::error_already_set&) {
+        }
+        std::string text = message.empty() ? type : type + ": " + message;
+        try {
+            py::object trace = e.trace();
+            py::object info = py::make_tuple(e.type(), e.value(),
+                                             trace ? trace : py::object(py::none()));
+            py::module_::import("logging").attr("getLogger")(kPythonToolLogger).attr("warning")(
+                "Python tool %s failed: %s", name, text, py::arg("exc_info") = info);
+        } catch (const py::error_already_set&) {
+        }
+        return text;
+    }
+
     /// GIL must be held.
     std::string call_python(const json& arguments) {
         py::object args_py = json_to_py(arguments);
