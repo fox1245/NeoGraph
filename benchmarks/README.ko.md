@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=558a3d220a020e45aea614ff6e68dc7a9c19e2271e2f03dac8718845069ae9d9 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ko source_sha256=ad94d181c2cac62338e50b62f279053c11de72ffdeba6dec2249f4e3ee7fef7d -->
 # NeoGraph와 Python 그래프/파이프라인 프레임워크 비교 — 엔진 오버헤드 벤치마크
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -291,6 +291,53 @@ python3 -m venv /tmp/bench_venv
 출력 형식은 탭으로 구분한 `config`, `runtime`, `header`, `result`, `metric` 레코드입니다.
 네이티브 result 행에는 전체 시간의 중앙값과 반복당 시간이 들어 있습니다.
 Python 스크립트는 예전 형식 그대로 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` 행을 출력합니다.
+
+## CI 성능 게이트
+
+`CI extended` 워크플로의 두 작업이 벤치마크 결과를 검사합니다. 이 워크플로는 매일 밤, 수동 실행 시, 그리고 게이트 파일이 바뀔 때 실행됩니다.
+
+* **`bench-ab`**는 테스트 대상 커밋과 기준(base) 커밋을 같은 러너에서 빌드하고, [`ci_ab_gates.json`](ci_ab_gates.json)에 적힌 벤치마크를 양쪽에서 실행해 케이스별로 중앙값을 비교합니다. 호스티드 러너 사이의 차이는 잡아낼 가치가 있는 회귀보다 크므로, 한 머신에서 두 빌드를 나란히 측정해야만 수십 퍼센트의 속도 저하를 볼 수 있습니다.
+* **`bench-regression`**(`scripts/check_ci_benchmarks.py`)은 HTTP, 팬아웃, 코어 벤치마크를 한 번씩 실행해 절대 한도와 비교합니다. 호스티드 러너에서 이 한도는 여유가 크기 때문에 최후의 보루로만 남아 있습니다.
+
+`bench-ab`가 실행하는 것:
+
+| 워크로드 | 벤치마크 | 케이스 |
+|---|---|---|
+| 코어 실행 경로 | `bench_neograph` | 순차 체인, 같은 체인을 sync 노드로 구성한 경우, 호출자의 executor와 엔진의 워커 풀에서 실행하는 5갈래 팬아웃, 아무것도 받지 않는 스트림 콜백과 모든 이벤트를 받는 스트림 콜백을 붙인 체인 |
+| 비동기 팬아웃 | `bench_async_fanout` | 타이머 코루틴 50,000개의 처리량과 최대 메모리 |
+| HTTP | `bench_async_http` | 루프백 인터페이스의 프로세스 내 서버로 보내는 풀링된 호출의 처리량 |
+| Program | `bench_program_dispatch`, `bench_program` | 플랜의 디스패치 디스크립터 순회, 인메모리 스토어에서 admission을 마친 Program의 `start()`와 전체 실행 |
+| 체크포인트 스토어 | `bench_checkpoint_store` | 인메모리 스토어와 SQLite(프로세스 전용 임시 디렉터리)에 대한 초당 저장 횟수 |
+| Canonical JSON과 identity | `bench_canonical_json`, `bench_sha256` | ASCII, 혼합, 이스케이프 64 KiB 문자열의 canonical 바이트, 64 KiB 레코드의 SHA-256 identity |
+| 프로바이더 outcome | `bench_provider_outcome_codec` | 채팅 outcome과 도구 호출 턴의 인코딩과 디코딩 |
+
+어느 것도 루프백 인터페이스를 넘어서는 네트워크나 키, 데이터베이스 서비스를 필요로 하지 않습니다.
+
+### 비교가 진행되는 방식
+
+1. **기준.** 브랜치나 풀 리퀘스트는 master와의 merge base와, master는 그 이전의 가장 최근 릴리스 태그와 비교합니다. 수동 실행에서는 다른 커밋이나 태그, 또는 빌드를 자기 자신과 비교하는 `head`(A/A 실행)를 지정할 수 있습니다. 기준은 자체 소스 트리에서 같은 옵션으로 빌드합니다.
+2. **샘플.** 각 워크로드는 항목에 적힌 횟수만큼, 샘플마다 새 프로세스로 실행합니다. 샘플 인덱스에 따라 head와 base가 번갈아 먼저 실행되므로, 실행 중 머신 속도가 서서히 바뀌어도 양쪽에 똑같이 영향을 줍니다.
+3. **판정.** 각 케이스는 head 샘플의 중앙값과 base 샘플의 중앙값을 비교합니다. 비율이 `tolerance`보다 크거나(낮을수록 좋은 경우) 작거나(높을수록 좋은 경우), head 중앙값이 `floor`의 절대 한도를 넘으면 실패입니다.
+4. **재확인.** 실패한 케이스가 있는 워크로드는 새 샘플로 한 번 더 실행하고, 재실행 결과만 판정에 반영합니다. 실패했다가 통과한 케이스는 경고로 보고합니다.
+5. **base 없음.** base 빌드에 해당 벤치마크나 출력이 없는 워크로드는 base 없음으로 보고하며 실패로 처리하지 않으므로, 새 벤치마크를 추가할 수 있습니다. 절대 한도는 그대로 적용됩니다.
+6. **리포트.** 작업 로그와 스텝 요약에 비율 표가 남고, 작업은 모든 샘플, 비율, 머신, 각 바이너리의 SHA-256을 담은 JSON 파일 `bench-ab-report`를 업로드합니다.
+
+### 허용 오차
+
+[`ci_ab_gates.json`](ci_ab_gates.json)에는 게이트가 의존하는 모든 것이 들어 있습니다. 워크로드마다 벤치마크 타깃, 인자, 샘플 수가 있고, 케이스마다 출력에서 읽을 값, 방향, 허용 오차(tolerance), 선택 사항인 절대 한도, 그리고 허용 오차를 보정할 때 기준으로 삼은 노이즈(`calibrated_on`이 가리키는 실행에서 측정한 `a_a_noise`)가 있습니다. `a_a_noise`는 A/A 실행에서 중앙값 비율이 1에서 가장 멀리 벗어난 거리입니다. 러너는 허용 오차가 그 거리의 `minimum_noise_margin`(1.5)배보다 작은 파일, 그리고 원래 게이트의 절대 한도가 하나라도 빠진 파일을 거부합니다.
+
+노이즈는 머신에 따라 다르므로, 게이트로 쓰는 러너에서 보정하세요. `bench_ab_base`를 `head`로 지정해 `CI extended`를 실행하면, 재실행 없이 빌드를 자기 자신과 다섯 번 비교하고 리포트에 각 비율을 나열합니다. 허용 오차는 1에 0.15와 노이즈의 2배 중 큰 값을 더한 값입니다(높을수록 좋은 경우에는 그 값을 뺀 값). 의도적으로 케이스를 허용 오차 밖으로 움직이는 변경은, 같은 풀 리퀘스트에서 허용 오차와 보정 값을 함께 고쳐 기록합니다.
+
+### 로컬에서 실행하기
+
+```bash
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab --jobs 4 --base v0.15.1
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab-aa --jobs 4 --base head --calibrate 5
+# Two build directories that already exist:
+python3 scripts/run_ci_ab_gates.py --head-dir build --base-dir build-base --output report.json
+```
+
+`verify_ci.py bench-ab`는 파일에 적힌 벤치마크 타깃만 빌드합니다. 머신이 컴파일도 하는 동안에는 측정값이 흔들리므로, 절대 시간 대신 비율을 보거나 조용한 머신을 쓰세요.
 
 ## 2026-04-19 수치를 측정한 환경
 

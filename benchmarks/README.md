@@ -322,6 +322,53 @@ Output format is tab-separated `config`, `runtime`, `header`, `result`, or
 per-iteration time; Python scripts retain their historical
 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` rows.
 
+## CI performance gates
+
+Two jobs of the `CI extended` workflow check benchmark results. The workflow runs every night, on demand, and when a gate file changes.
+
+* **`bench-ab`** builds the commit under test and a base commit on the same runner, runs the benchmarks of [`ci_ab_gates.json`](ci_ab_gates.json) on both, and compares the medians case by case. Hosted runners differ from one another by more than the regressions worth catching, so only two builds measured side by side on one machine can show a slowdown of tens of percent.
+* **`bench-regression`** (`scripts/check_ci_benchmarks.py`) runs the HTTP, fan-out and core benchmarks once and holds them to absolute limits. The limits stay as a last resort, since they leave a wide margin on hosted runners.
+
+What `bench-ab` runs:
+
+| Workload | Benchmark | Cases |
+|---|---|---|
+| Core run path | `bench_neograph` | the sequential chain; the same chain with a sync node; the fan-out of five on the caller's executor and on the engine's worker pool; the chain with an idle stream callback and with every event |
+| Async fan-out | `bench_async_fanout` | throughput and peak memory of 50,000 timer coroutines |
+| HTTP | `bench_async_http` | throughput of pooled calls to an in-process server on the loopback interface |
+| Program | `bench_program_dispatch`, `bench_program` | a walk over the dispatch descriptors of a plan; `start()` and the whole run of an admitted Program on in-memory stores |
+| Checkpoint stores | `bench_checkpoint_store` | saves per second into the in-memory store and into SQLite, in a temporary directory of the process |
+| Canonical JSON and identity | `bench_canonical_json`, `bench_sha256` | canonical bytes of ASCII, mixed and escaped 64 KiB strings; the SHA-256 identity of a 64 KiB record |
+| Provider outcomes | `bench_provider_outcome_codec` | encoding and decoding of a chat outcome and of a tool-calling turn |
+
+None of them needs the network beyond the loopback interface, a key or a database service.
+
+### How a comparison runs
+
+1. **Base.** A branch or pull request is compared with its merge base on master, and master with the latest release tag before it. A manual run can name another commit or tag, or `head`, which compares the build with itself (an A/A run). The base is built from its own tree with the same options.
+2. **Samples.** Every workload runs as many times as its entry says, one new process per sample. Head and base alternate first position by sample index, so a drift of the machine's speed during the run affects both alike.
+3. **Decision.** Each case compares the median of the head samples with the median of the base samples. It fails when the ratio is above its `tolerance` (lower is better) or below it (higher is better), or when the head median is beyond the absolute limit in its `floor`.
+4. **Confirmation.** A workload with a failing case runs once more with fresh samples, and only the rerun decides. A case that failed and then passed is reported as a warning.
+5. **No base.** A workload whose benchmark or output the base build lacks is reported as having no base and does not fail, so new benchmarks can be added. Its absolute limits still apply.
+6. **Report.** The job log and the step summary hold a table of the ratios, and the job uploads `bench-ab-report`, a JSON file with every sample, the ratios, the machine and the SHA-256 of each binary.
+
+### Tolerances
+
+[`ci_ab_gates.json`](ci_ab_gates.json) holds everything a gate depends on: the benchmark target, arguments and sample count of each workload, and for each case the value to read from the output, its direction, its tolerance, an optional absolute limit, and the noise the tolerance was calibrated against (`a_a_noise`, from the run named in `calibrated_on`). `a_a_noise` is the largest distance from 1 of the median ratio in A/A runs. The runner refuses a file with a tolerance that leaves less than `minimum_noise_margin` (1.5) times that distance, and one without the absolute limit of any of the original gates.
+
+Noise depends on the machine, so calibrate on the runner that gates: dispatch `CI extended` with `bench_ab_base` set to `head`. That run compares the build with itself five times, without reruns, and the report lists each ratio. A tolerance is 1 plus the larger of 0.15 and twice the noise (minus it when higher is better). A change that moves a case beyond its tolerance on purpose is recorded in the same pull request by changing the tolerance and its calibration.
+
+### Run it locally
+
+```bash
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab --jobs 4 --base v0.15.1
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab-aa --jobs 4 --base head --calibrate 5
+# Two build directories that already exist:
+python3 scripts/run_ci_ab_gates.py --head-dir build --base-dir build-base --output report.json
+```
+
+`verify_ci.py bench-ab` builds only the benchmark targets of the file. Timings move while the machine is also compiling: read the ratios rather than the absolute times, or use a quiet machine.
+
 ## Environment used for the 2026-04-19 numbers
 
 ```

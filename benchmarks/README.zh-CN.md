@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=558a3d220a020e45aea614ff6e68dc7a9c19e2271e2f03dac8718845069ae9d9 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=zh-CN source_sha256=ad94d181c2cac62338e50b62f279053c11de72ffdeba6dec2249f4e3ee7fef7d -->
 # NeoGraph 与 Python 图/流水线框架对比：引擎开销基准测试
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -297,6 +297,53 @@ python3 -m venv /tmp/bench_venv
 输出格式是以制表符分隔的 `config`、`runtime`、`header`、`result` 或 `metric` 记录。
 原生的 result 行包含总耗时的中位数和每次迭代的耗时；Python 脚本仍然输出历史上的
 `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` 行。
+
+## CI 性能关卡
+
+`CI extended` 工作流中的两个作业会检查基准测试结果。该工作流每晚运行，也可以手动触发，并且在关卡文件发生变化时运行。
+
+* **`bench-ab`** 在同一台运行器上构建被测提交和基准（base）提交，在两者上运行 [`ci_ab_gates.json`](ci_ab_gates.json) 中列出的基准测试，并逐个用例比较中位数。托管运行器之间的差异大于值得发现的回归，所以只有在同一台机器上并排测量两个构建，才能看出几十个百分点的变慢。
+* **`bench-regression`**（`scripts/check_ci_benchmarks.py`）把 HTTP、扇出和核心基准各运行一次，并与绝对限值比较。这些限值在托管运行器上留有很大余量，所以只作为最后一道防线保留。
+
+`bench-ab` 运行的内容：
+
+| 工作负载 | 基准测试 | 用例 |
+|---|---|---|
+| 核心运行路径 | `bench_neograph` | 顺序链；同一条链改用 sync 节点；在调用方 executor 和引擎工作线程池上执行的五路扇出；挂上空闲流回调和接收全部事件的流回调的链 |
+| 异步扇出 | `bench_async_fanout` | 50,000 个定时器协程的吞吐量和峰值内存 |
+| HTTP | `bench_async_http` | 通过回环接口，向进程内服务器发送池化调用的吞吐量 |
+| Program | `bench_program_dispatch`、`bench_program` | 遍历计划的分派描述符；在内存存储上运行已准入的 Program 时的 `start()` 和整个运行 |
+| 检查点存储 | `bench_checkpoint_store` | 写入内存存储和 SQLite（进程自己的临时目录）的每秒保存次数 |
+| 规范 JSON 与标识 | `bench_canonical_json`、`bench_sha256` | ASCII、混合和转义的 64 KiB 字符串的规范字节；64 KiB 记录的 SHA-256 标识 |
+| 提供方 outcome | `bench_provider_outcome_codec` | 聊天 outcome 和带工具调用的轮次的编码与解码 |
+
+它们都不需要回环接口之外的网络、密钥或数据库服务。
+
+### 比较如何进行
+
+1. **基准。** 分支或拉取请求与它在 master 上的 merge base 比较，master 与其之前最近的发布标签比较。手动运行时可以指定其他提交或标签，也可以指定 `head`，即把构建与自身比较（A/A 运行）。基准用它自己的源码树，以相同的选项构建。
+2. **样本。** 每个工作负载按条目中写明的次数运行，每个样本使用一个新进程。head 与 base 按样本序号交替先后顺序，所以运行期间机器速度的缓慢漂移会对两者产生同样的影响。
+3. **判定。** 每个用例比较 head 样本的中位数与 base 样本的中位数。当比值高于 `tolerance`（越低越好时）或低于它（越高越好时），或者 head 中位数超出 `floor` 中的绝对限值，用例即为失败。
+4. **复核。** 含有失败用例的工作负载会用新的样本再运行一次，只由重跑的结果决定。先失败后通过的用例会作为警告报告。
+5. **无 base。** base 构建中没有该基准测试或输出的工作负载，会被报告为无 base，且不算失败，因此可以添加新的基准测试。它的绝对限值仍然适用。
+6. **报告。** 作业日志和步骤摘要中有比值表，作业还会上传 `bench-ab-report`，这是一个 JSON 文件，包含每个样本、比值、机器信息和每个二进制文件的 SHA-256。
+
+### 容差
+
+[`ci_ab_gates.json`](ci_ab_gates.json) 包含关卡依赖的一切：每个工作负载的基准目标、参数和样本数；每个用例要从输出中读取的值、方向、容差（tolerance）、可选的绝对限值，以及校准容差所依据的噪声（`a_a_noise`，来自 `calibrated_on` 所指的那次运行）。`a_a_noise` 是 A/A 运行中中位数比值偏离 1 的最大距离。如果某个容差留出的空间小于该距离的 `minimum_noise_margin`（1.5）倍，或者缺少任何一个原有关卡的绝对限值，运行器都会拒绝这个文件。
+
+噪声因机器而异，所以要在作为关卡的运行器上校准：触发 `CI extended` 并把 `bench_ab_base` 设为 `head`。这次运行会把构建与自身比较五次，不做重跑，报告会列出每次的比值。容差是 1 加上 0.15 与噪声两倍中较大者（越高越好时则是 1 减去它）。如果某项改动是有意让某个用例超出容差，就在同一个拉取请求里修改容差和对应的校准值来记录。
+
+### 在本地运行
+
+```bash
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab --jobs 4 --base v0.15.1
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab-aa --jobs 4 --base head --calibrate 5
+# Two build directories that already exist:
+python3 scripts/run_ci_ab_gates.py --head-dir build --base-dir build-base --output report.json
+```
+
+`verify_ci.py bench-ab` 只构建文件中列出的基准目标。机器同时在编译时，测量值会波动：请看比值而不是绝对时间，或者换一台安静的机器。
 
 ## 2026-04-19 的数据所用的环境
 

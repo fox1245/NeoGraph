@@ -1,21 +1,33 @@
 name: CI extended
 # Verification that is valuable but too heavy for every push: sanitizers (ASan/UBSan/LSan, TSan,
-# MSVC ASan), the libFuzzer canary, benchmark and QuickJS performance gates, native ARM64, the
-# gRPC contract, and the rest of the installed-consumer matrix.
+# MSVC ASan), the libFuzzer canary, benchmark, benchmark A/B and QuickJS performance gates, native
+# ARM64, the gRPC contract, and the rest of the installed-consumer matrix.
 #
-# It runs every night, on demand (Actions -> CI extended -> Run workflow), and when this file or the
-# reusable consumer workflow changes. Run it on the release candidate before tagging a release.
+# It runs every night, on demand (Actions -> CI extended -> Run workflow), and when this file, the
+# reusable consumer workflow or the benchmark gate files change. Run it on the release candidate
+# before tagging a release.
 
 on:
   schedule:
     - cron: '0 18 * * *'
   workflow_dispatch:
+    inputs:
+      bench_ab_base:
+        description: >-
+          bench-ab base: empty compares with the merge base (the previous release on master);
+          a commit or tag names another; head compares the build with itself, five times,
+          to measure the runner's noise (A/A)
+        required: false
+        default: ''
   pull_request:
     paths:
       - '.github/workflows/ci-extended.yml'
       - '.github/workflows/install-consumable.yml'
       - '.github/workflows/windows-asan.yml'
       - '.github/actions/**'
+      - 'benchmarks/ci_ab_gates.json'
+      - 'scripts/run_ci_ab_gates.py'
+      - 'scripts/check_ci_benchmarks.py'
 
 # A newer push or dispatch cancels the run in progress for the same ref. The
 # nightly schedule does not: it queues behind a dispatched run instead of
@@ -109,6 +121,57 @@ jobs:
         run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
       - name: Verify original four benchmark gates
         run: python scripts/verify_ci.py benchmark --work-dir build-bench --jobs auto
+
+  # The benchmarks of benchmarks/ci_ab_gates.json on this commit and on a base built on the same
+  # runner, interleaved, with a tolerance per case (#549). bench-regression keeps the absolute
+  # limits as a last resort.
+  bench-ab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The comparison builds an older commit as its base.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build dependencies
+        run: bash scripts/ci_apt_install.sh cmake build-essential libssl-dev libcurl4-openssl-dev libsqlite3-dev pkg-config
+      - name: Choose the A/B comparison base
+        id: base
+        env:
+          REQUESTED_BASE: ${{ inputs.bench_ab_base }}
+        # As in quickjs-performance: a branch compares with its merge base on master; master
+        # itself with the latest release before it. A dispatch can name another base, or head.
+        run: |
+          if [ -n "$REQUESTED_BASE" ]; then
+            base="$REQUESTED_BASE"
+          else
+            git fetch --no-tags --quiet origin master
+            base=$(git merge-base HEAD origin/master)
+            if [ "$base" = "$(git rev-parse HEAD)" ]; then
+              base=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || git rev-parse HEAD^)
+            fi
+          fi
+          echo "ref=$base" >> "$GITHUB_OUTPUT"
+          if [ "$base" = head ]; then echo "A/B base: head (A/A run)"
+          else echo "A/B base: $base ($(git log -1 --format=%s "$base"))"; fi
+      - name: Verify benchmark A/B gates
+        env:
+          BASE_REF: ${{ steps.base.outputs.ref }}
+        run: |
+          extra=()
+          if [ "$BASE_REF" = head ]; then extra=(--calibrate 5); fi
+          python scripts/verify_ci.py bench-ab --work-dir "$RUNNER_TEMP/neograph-bench-ab" --jobs auto --base "$BASE_REF" "${extra[@]}"
+      - name: Upload benchmark A/B report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-ab-report
+          path: ${{ runner.temp }}/neograph-bench-ab/bench-ab.json
+          if-no-files-found: error
+          retention-days: 90
 
   quickjs-performance:
     runs-on: ubuntu-24.04

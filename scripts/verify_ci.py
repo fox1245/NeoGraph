@@ -25,7 +25,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = (
     "native-linux", "native-posix", "native-windows", "asan", "tsan",
-    "msvc-asan", "grpc", "benchmark", "quickjs-performance", "fuzz",
+    "msvc-asan", "grpc", "benchmark", "bench-ab", "quickjs-performance", "fuzz",
     "install", "sdist", "wheel", "runtime-archive",
 )
 ASAN_EXAMPLES = (
@@ -387,6 +387,67 @@ def msvc_asan(args):
           timeout=SANITIZER_TEST_TIMEOUT)
 
 
+def archive_commit(ref, work_dir, name):
+    """The tree of a commit exported beside the build directories: (commit, source directory).
+
+    git archive leaves the checkout without another worktree.
+    """
+    commit = run(["git", "rev-parse", "--verify", ref + "^{commit}"], capture=True).stdout.strip()
+    archive = work_dir / (name + ".tar")
+    source = work_dir / name
+    run(["git", "archive", "--format=tar", "-o", archive, commit])
+    source.mkdir()
+    with tarfile.open(archive) as tree:
+        if hasattr(tarfile, "data_filter"):
+            tree.extractall(source, filter="data")
+        else:
+            tree.extractall(source)
+    archive.unlink()
+    return commit, source
+
+
+def configured_targets(build):
+    """Names of the targets a configured build directory can build."""
+    if "CMAKE_GENERATOR:INTERNAL=Ninja" in (build / "CMakeCache.txt").read_text(errors="replace"):
+        listing = run(["ninja", "-C", build, "-t", "targets", "all"], capture=True).stdout
+    else:
+        listing = run(["cmake", "--build", build, "--target", "help"], capture=True).stdout
+    return set(re.findall(r"^(?:\.\.\. )?([^\s:]+)", listing, re.MULTILINE))
+
+
+def bench_ab(args):
+    """The benchmarks of benchmarks/ci_ab_gates.json on this build and a base build, side by side."""
+    require_platform("Linux")
+    require_tools("git")
+    from run_ci_ab_gates import load_gates
+    document, _ = load_gates()
+    targets = list(dict.fromkeys(workload["target"] for workload in document["workloads"]))
+    options = definitions(CMAKE_BUILD_TYPE="Release", NEOGRAPH_BUILD_BENCHMARKS="ON", NEOGRAPH_BUILD_PROGRAM="ON",
+        NEOGRAPH_BUILD_POSTGRES="OFF", NEOGRAPH_BUILD_TESTS="OFF", NEOGRAPH_BUILD_EXAMPLES="OFF")
+    head = args.work_dir / "head"
+    configure(head, options)
+    build_targets(head, args.jobs, *targets)
+    comparison = []
+    if args.base == "head":
+        # An A/A run: the head against itself, to measure the noise of this machine.
+        comparison = ["--base-dir", head]
+    elif args.base:
+        base_commit, source = archive_commit(args.base, args.work_dir, "base-source")
+        base = args.work_dir / "base"
+        configure(base, options, source=source)
+        # An older base may lack a benchmark; the runner reports its cases as having no base.
+        present = [target for target in targets if target in configured_targets(base)]
+        absent = [target for target in targets if target not in present]
+        if absent:
+            print(f"base {base_commit[:12]} has no target {', '.join(absent)}", flush=True)
+        build_targets(base, args.jobs, *present)
+        comparison = ["--base-dir", base, "--base-commit", base_commit]
+    if args.calibrate:
+        comparison += ["--calibrate", args.calibrate]
+    run([sys.executable, ROOT / "scripts/run_ci_ab_gates.py", "--head-dir", head, *comparison,
+         "--output", args.work_dir / "bench-ab.json"])
+
+
 def quickjs_performance(args):
     require_platform("Linux")
     require_tools("git")
@@ -406,20 +467,8 @@ def quickjs_performance(args):
     comparison = []
     if args.base:
         # The base commit's own tree and benchmarks, built beside the head's
-        # and measured on this machine (#476). git archive leaves the
-        # checkout without another worktree.
-        base_commit = run(["git", "rev-parse", "--verify", args.base + "^{commit}"],
-                          capture=True).stdout.strip()
-        archive = args.work_dir / "quickjs-base-source.tar"
-        source = args.work_dir / "quickjs-base-source"
-        run(["git", "archive", "--format=tar", "-o", archive, base_commit])
-        source.mkdir()
-        with tarfile.open(archive) as tree:
-            if hasattr(tarfile, "data_filter"):
-                tree.extractall(source, filter="data")
-            else:
-                tree.extractall(source)
-        archive.unlink()
+        # and measured on this machine (#476).
+        base_commit, source = archive_commit(args.base, args.work_dir, "quickjs-base-source")
         base = args.work_dir / "quickjs-base"
         configure(base, options + definitions(NEOGRAPH_BUILD_QUICKJS_CONTROL="ON"), source=source)
         build_targets(base, args.jobs, "bench_quickjs_primitives", "bench_quickjs_control")
@@ -542,7 +591,8 @@ def main():
     parser.add_argument("--arch", choices=("x86_64", "aarch64", "arm64", "AMD64"), help="wheel: exact cibuildwheel matrix architecture")
     parser.add_argument("--generator", help="native-windows: CMake generator (default Ninja; for example \"Visual Studio 17 2022\")")
     parser.add_argument("--python", help="wheel: build only this CPython tag, for example cp312 (default: every tag in pyproject.toml)")
-    parser.add_argument("--base", help="quickjs-performance: also build this commit and compare each case with it on this machine")
+    parser.add_argument("--base", help="quickjs-performance, bench-ab: also build this commit and compare each case with it on this machine; bench-ab also takes head, which compares the build with itself")
+    parser.add_argument("--calibrate", type=int, metavar="ROUNDS", help="bench-ab: compare ROUNDS times without reruns and report each ratio (needs --base)")
     args = parser.parse_args()
     atexit.register(write_timing_summary, args.profile)
     if args.jobs < 1:
@@ -557,8 +607,12 @@ def main():
         parser.error("--arch applies to wheel; --release-tag applies to sdist")
     if args.generator and args.profile != "native-windows":
         parser.error("--generator applies to native-windows")
-    if args.base and args.profile != "quickjs-performance":
-        parser.error("--base applies to quickjs-performance")
+    if args.base and args.profile not in ("quickjs-performance", "bench-ab"):
+        parser.error("--base applies to quickjs-performance and bench-ab")
+    if args.base == "head" and args.profile != "bench-ab":
+        parser.error("--base head applies to bench-ab")
+    if args.calibrate and (args.profile != "bench-ab" or not args.base):
+        parser.error("--calibrate applies to bench-ab and needs --base")
     if args.python and (args.profile != "wheel" or not re.fullmatch(r"cp3\d{1,2}", args.python)):
         parser.error("--python applies to wheel and must look like cp312")
     args.work_dir = args.work_dir.resolve()
@@ -575,6 +629,8 @@ def main():
         msvc_asan(args)
     elif args.profile == "quickjs-performance":
         quickjs_performance(args)
+    elif args.profile == "bench-ab":
+        bench_ab(args)
     elif args.profile == "install":
         from check_install_consumer import check_install
         check_install(args)

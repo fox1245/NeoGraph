@@ -1844,6 +1844,8 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     target_link_libraries(bench_canonical_json PRIVATE neograph::core)
     add_executable(bench_sha256 benchmarks/bench_sha256.cpp)
     target_link_libraries(bench_sha256 PRIVATE neograph::core)
+    add_executable(bench_provider_outcome_codec benchmarks/bench_provider_outcome_codec.cpp)
+    target_link_libraries(bench_provider_outcome_codec PRIVATE neograph::core)
     add_executable(bench_core_quickjs_probe
         benchmarks/bench_core_quickjs_probe.cpp)
     target_link_libraries(bench_core_quickjs_probe PRIVATE neograph::core)
@@ -2038,7 +2040,8 @@ if(NEOGRAPH_BUILD_BENCHMARKS)
     if(_neograph_benchmark_build_type STREQUAL "")
         set(_neograph_benchmark_build_type "unspecified")
     endif()
-    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe bench_canonical_json bench_sha256)
+    set(_neograph_benchmark_targets bench_neograph bench_core_quickjs_probe bench_canonical_json bench_sha256
+        bench_provider_outcome_codec)
     if(NEOGRAPH_BUILD_PROGRAM)
         list(APPEND _neograph_benchmark_targets
             bench_program bench_program_dispatch

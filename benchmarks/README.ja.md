@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=558a3d220a020e45aea614ff6e68dc7a9c19e2271e2f03dac8718845069ae9d9 -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=ad94d181c2cac62338e50b62f279053c11de72ffdeba6dec2249f4e3ee7fef7d -->
 # NeoGraphとPythonのグラフ／パイプラインフレームワークの比較 — エンジンのオーバーヘッドベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -213,6 +213,53 @@ python3 -m venv /tmp/bench_venv
 サービスを使うチェックポイント、HTTP、並行実行のDockerベンチマークは、別の実験です。上で説明した、決定的なネイティブのCore／Programの実行には、これらは不要です。
 
 出力形式は、タブ区切りの `config`、`runtime`、`header`、`result`、`metric` のレコードです。ネイティブの結果の行には、合計時間の中央値と1反復あたりの時間が入ります。Pythonのスクリプトは、従来どおり `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` の行を出力します。
+
+## CIの性能ゲート
+
+`CI extended` ワークフローの2つのジョブが、ベンチマークの結果を検査します。このワークフローは、毎晩、手動実行のとき、ゲートのファイルが変わったときに動きます。
+
+* **`bench-ab`** は、テスト対象のコミットとベース（base）のコミットを同じランナーでビルドし、[`ci_ab_gates.json`](ci_ab_gates.json) に書かれたベンチマークを両方で実行して、ケースごとに中央値を比較します。ホステッドランナー同士の差は、検出する価値のある回帰よりも大きいので、1台のマシンで2つのビルドを並べて測らなければ、数十パーセントの速度低下は見えません。
+* **`bench-regression`**（`scripts/check_ci_benchmarks.py`）は、HTTP、ファンアウト、Coreのベンチマークを1回ずつ実行し、絶対的な上限・下限と照らし合わせます。ホステッドランナーでは余裕が大きいので、これらの限界値は最後の砦としてだけ残してあります。
+
+`bench-ab` が実行するもの:
+
+| ワークロード | ベンチマーク | ケース |
+|---|---|---|
+| Coreの実行経路 | `bench_neograph` | 直列のチェーン、同じチェーンをsyncノードにしたもの、呼び出し側のexecutorとエンジンのワーカープールで動かす5本のファンアウト、何も受け取らないストリームコールバックとすべてのイベントを受け取るストリームコールバックを付けたチェーン |
+| 非同期のファンアウト | `bench_async_fanout` | タイマーコルーチン50,000個のスループットとピークメモリ |
+| HTTP | `bench_async_http` | ループバックインターフェースのプロセス内サーバーへ、プールした接続で送る呼び出しのスループット |
+| Program | `bench_program_dispatch`、`bench_program` | プランのディスパッチ記述子の走査、インメモリのストアでadmission済みのProgramを動かしたときの `start()` と実行全体 |
+| チェックポイントのストア | `bench_checkpoint_store` | インメモリのストアとSQLite（プロセス専用の一時ディレクトリ）への1秒あたりの保存回数 |
+| canonical JSONとidentity | `bench_canonical_json`、`bench_sha256` | ASCII、混在、エスケープの64 KiB文字列のcanonicalバイト列、64 KiBレコードのSHA-256 identity |
+| プロバイダーのoutcome | `bench_provider_outcome_codec` | チャットのoutcomeとツール呼び出しを含むターンのエンコードとデコード |
+
+どれも、ループバックインターフェースを超えるネットワーク、キー、データベースサービスは必要としません。
+
+### 比較の進め方
+
+1. **ベース。** ブランチやプルリクエストはmasterとのmerge baseと、masterはその直前の最新のリリースタグと比較します。手動実行では、別のコミットやタグ、あるいはビルドを自分自身と比べる `head`（A/A実行）を指定できます。ベースは、そのコミット自身のツリーから同じオプションでビルドします。
+2. **サンプル。** 各ワークロードは、エントリに書かれた回数だけ、サンプルごとに新しいプロセスで実行します。サンプルの番号に応じてheadとbaseが交互に先に走るので、実行中にマシンの速度が少しずつ変わっても、両方に同じように影響します。
+3. **判定。** 各ケースで、headのサンプルの中央値とbaseのサンプルの中央値を比べます。比が `tolerance` を上回る（小さいほど良い場合）か下回る（大きいほど良い場合）とき、またはheadの中央値が `floor` の絶対的な限界を超えたときは失敗です。
+4. **再確認。** 失敗したケースがあるワークロードは、新しいサンプルでもう1回実行し、再実行の結果だけで判定します。失敗してから合格したケースは、警告として報告します。
+5. **baseなし。** baseのビルドにそのベンチマークや出力がないワークロードは、baseなしとして報告し、失敗にはしません。新しいベンチマークを追加できるようにするためです。絶対的な限界は引き続き適用されます。
+6. **レポート。** ジョブのログとステップのサマリーに比の表が残り、ジョブは、すべてのサンプル、比、マシン、各バイナリのSHA-256を含むJSONファイル `bench-ab-report` をアップロードします。
+
+### 許容値
+
+[`ci_ab_gates.json`](ci_ab_gates.json) には、ゲートが依存するものがすべて入っています。ワークロードごとのベンチマークのターゲット、引数、サンプル数、そしてケースごとの、出力から読む値、方向、許容値（tolerance）、任意の絶対的な限界、許容値の較正に使ったノイズ（`calibrated_on` が指す実行で測った `a_a_noise`）です。`a_a_noise` は、A/A実行で中央値の比が1から最も離れた距離です。ランナーは、許容値がその距離の `minimum_noise_margin`（1.5）倍に満たないファイルと、元のゲートの絶対的な限界が1つでも欠けているファイルを受け付けません。
+
+ノイズはマシンによって違うので、ゲートに使うランナーで較正してください。`bench_ab_base` を `head` にして `CI extended` を実行すると、再実行なしでビルドを自分自身と5回比較し、レポートに各回の比が並びます。許容値は、1に、0.15とノイズの2倍のうち大きいほうを足した値です（大きいほど良い場合は、その値を引いた値）。あるケースを許容値の外へ意図的に動かす変更は、同じプルリクエストで許容値と較正の値を直して記録します。
+
+### ローカルでの実行
+
+```bash
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab --jobs 4 --base v0.15.1
+python3 scripts/verify_ci.py bench-ab --work-dir /tmp/bench-ab-aa --jobs 4 --base head --calibrate 5
+# Two build directories that already exist:
+python3 scripts/run_ci_ab_gates.py --head-dir build --base-dir build-base --output report.json
+```
+
+`verify_ci.py bench-ab` がビルドするのは、ファイルに書かれたベンチマークのターゲットだけです。マシンがコンパイルも行っている間は測定値がぶれるので、絶対的な時間ではなく比を読むか、静かなマシンを使ってください。
 
 ## 2026-04-19の数値を測定した環境
 
