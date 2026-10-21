@@ -51,7 +51,8 @@ KEEP_PAIRS = 3
 #   raw_volatile  the block is appended to the RAW feed as a user message instead of being an artifact
 #   compact_at  turn at which the oldest exchanges leave the RAW window and a summary joins
 #   tool_calls  parallel tool calls the model makes in every turn before it answers
-Layout = namedtuple("Layout", "volatile raw_volatile compact_at tool_calls")
+#   slow_system  a second System block, a rule declared Slow, behind the fixed one (stable-first layouts only)
+Layout = namedtuple("Layout", "volatile raw_volatile compact_at tool_calls slow_system", defaults=(False,))
 KIND = ng.ContextArtifactKind
 PLACE = ng.ContextPlacement
 LAYOUTS = {
@@ -63,9 +64,10 @@ LAYOUTS = {
     "system-hoist": Layout((KIND.HardConstraint, PLACE.AfterHistory), False, 0, 0),
     "tool-regroup": Layout(None, False, 0, 2),
     "compaction": Layout((KIND.DerivedContext, PLACE.AfterHistory), False, 10, 0),
+    "stable-system": Layout((KIND.DerivedContext, PLACE.AfterHistory), False, 0, 0, True),
 }
 
-Call = namedtuple("Call", "turn body items")
+Call = namedtuple("Call", "turn body items receipt", defaults=(None,))
 # One comparison of a call with the one before it. Ratios are shares of the new body; change_at is the
 # index of the first prompt item (tools, system, then the messages) that differs from the previous call's, and
 # before_last the byte range of the previous body's last message.
@@ -130,8 +132,16 @@ def summary_text(exchanges):
     return "\n".join(rows)
 
 
-def make_artifact(kind, producer, text, placement, priority, required=False, covers=None):
+SLOW_RULE_PRIORITY = 40
+
+
+def slow_rule_text():
+    return "Standing rule, declared Slow: quote the unit once and never abbreviate it. " * 6
+
+
+def make_artifact(kind, producer, text, placement, priority, required=False, covers=None, declared=None):
     data = ng.ContextArtifactData()
+    data.stability_class = declared
     data.kind = kind
     data.producer_id = producer
     data.source_digest = sha_identity(text)
@@ -149,7 +159,8 @@ def make_artifact(kind, producer, text, placement, priority, required=False, cov
 class Conversation:
     """One scripted conversation: its RAW feed, its artifacts, and one assembled request per call."""
 
-    def __init__(self, preset, layout, turns=18, extra_artifacts=(), run_id="trace-run"):
+    def __init__(self, preset, layout, turns=18, extra_artifacts=(), run_id="trace-run", assembly="legacy",
+                 volatile_salt="", claims=True):
         family, origin, buffered, streaming = PRESETS[preset]
         document = {"descriptor_version": 1, "revision": 1, "id": "trace-" + preset.replace(".", "-"),
                     "family": family, "connection": {"base_url": origin, "paths": {"buffered": buffered,
@@ -171,6 +182,20 @@ class Conversation:
         for artifact in extra_artifacts:
             self.store.put_artifact(OWNER, artifact)
             self.stable.append(artifact)
+        # "stable_first" lays the artifacts out ahead of the history in the order the epoch records, and the
+        # volatile ones behind it; "legacy" is the layout the runtime has always used.
+        self.stable_first = assembly == "stable_first"
+        self.volatile_salt = volatile_salt
+        self.claims = claims
+        self.slow = []
+        if self.layout.slow_system:
+            rule = make_artifact(KIND.HardConstraint, "trace-slow-rule", slow_rule_text(), PLACE.BeforeHistory,
+                                 SLOW_RULE_PRIORITY, required=True, declared=ng.StabilityClass.Slow)
+            self.store.put_artifact(OWNER, rule)
+            self.slow.append(rule)
+        self.previous = None
+        self.compacted_now = False
+        self.epochs = []
         self.assembler = ng.RuntimeTurnAssembler(self.store, [fixed.id], 0)
         self.calls = 0
         self.epoch = None
@@ -210,7 +235,8 @@ class Conversation:
     def volatile_artifact(self, turn):
         kind, placement = self.layout.volatile
         required = kind == KIND.HardConstraint
-        artifact = make_artifact(kind, "trace-live", dynamic_text(turn), placement, 0, required=required)
+        text = dynamic_text(turn) + (f" [{self.volatile_salt}]" if self.volatile_salt else "")
+        artifact = make_artifact(kind, "trace-live", text, placement, 0, required=required)
         self.store.put_artifact(OWNER, artifact)
         return artifact
 
@@ -218,13 +244,15 @@ class Conversation:
         summarized = self.exchanges[:-KEEP_PAIRS]
         last = self.exchange_ends[len(summarized) - 1]
         summary = make_artifact(KIND.DerivedContext, "trace-summary", summary_text(summarized), PLACE.BeforeHistory,
-                                SUMMARY_PRIORITY, covers=(self.window_start, last))
+                                SUMMARY_PRIORITY, covers=(self.window_start, last),
+                                declared=ng.StabilityClass.Slow if self.stable_first else None)
         self.store.put_artifact(OWNER, summary)
         self.summary = summary
         self.window_start = last + 1
+        self.compacted_now = True
 
     def provider_call(self, turn):
-        artifacts = list(self.stable)
+        artifacts = list(self.stable) + list(self.slow)
         if self.layout.volatile:
             artifacts.append(self.volatile_artifact(turn))
         if self.summary is not None:
@@ -240,14 +268,32 @@ class Conversation:
         data.raw_window_digest = self.store.snapshot_history(self.feed, self.window_start, self.sequence).digest
         data.artifact_ids = [artifact.id for artifact in artifacts]
         data.guarantee_profile = ng.RuntimeGuaranteeProfile.Recorded
-        self.epoch = ng.ContextEpoch.create(data)
+        if self.stable_first:
+            # The order is the total order of the layout: class, priority, producer, then a key that a host
+            # chooses; here the position at which the artifact was made.
+            keyed = [(artifact, f"{index:04d}") for index, artifact in enumerate(artifacts)]
+            data.ordered_artifact_ids = ng.order_context_artifacts(keyed)
+            data.assembly_layout = ng.AssemblyLayout.StableFirst
+            if self.previous is not None and self.claims:
+                if self.compacted_now:
+                    data.prefix_claim = ng.ContextPrefixClaim.Breaks
+                    data.break_reason = ng.ContextBreakReason.Compaction
+                else:
+                    data.prefix_claim = ng.ContextPrefixClaim.Extends
+        self.compacted_now = False
+        epoch = ng.ContextEpoch.create(data)
+        if self.stable_first and self.previous is not None and self.claims:
+            ng.verify_context_epoch_claim(epoch, artifacts, *self.previous)
+        self.epoch = epoch
+        self.previous = (epoch, artifacts)
+        self.epochs.append((epoch, artifacts))
         request = ng.make_provider_request(self.provider, "model", [], tools=self.tools, controls=self.controls,
                                            mode=ng.ProviderMode.Collect)
-        prepared, _ = self.assembler.assemble(self.provider, OWNER, self.epoch, request)
+        prepared, receipt = self.assembler.assemble(self.provider, OWNER, self.epoch, request)
         if not prepared.valid:
             raise RuntimeError(f"the provider refused the request: {prepared.error}")
         body = prepared.encoded_body
-        self.bodies.append(Call(turn, body, logical_items(body)))
+        self.bodies.append(Call(turn, body, logical_items(body), receipt))
         return body
 
     def run(self):
@@ -285,8 +331,8 @@ class Conversation:
             self.append(ng.ProviderRole.Tool, [result], ng.RuntimeTrustClass.ToolOutput)
 
 
-def run_trace(preset, layout, turns=18):
-    return Conversation(preset, layout, turns).run()
+def run_trace(preset, layout, turns=18, assembly="legacy"):
+    return Conversation(preset, layout, turns, assembly=assembly).run()
 
 
 # What marks each artifact of sibling_bodies in the text of a prompt.
@@ -302,6 +348,21 @@ def sibling_bodies(preset, kind, mutations=100):
                            PLACE.BeforeHistory, 0, required=required)
              for name in ("alpha", "bravo")]
     conversation = Conversation(preset, Layout((kind, PLACE.BeforeHistory), False, 0, 0), extra_artifacts=fixed)
+    conversation.append(ng.ProviderRole.User, [ng.Text(question_text(1))], ng.RuntimeTrustClass.UntrustedInput)
+    return [conversation.provider_call(turn) for turn in range(1, mutations + 1)]
+
+
+def sibling_bodies_stable_first(preset, kind, mutations=100):
+    """The bodies of sibling_bodies under the stable-first layout. A User block is Volatile and sits behind the
+    history; a System block is Stable and sits in front of it. In both the epoch records the order of the three,
+    made from their class, priority, producer and a key, never from their text."""
+    placement = PLACE.BeforeHistory if kind == KIND.HardConstraint else PLACE.AfterHistory
+    required = kind == KIND.HardConstraint
+    fixed = [make_artifact(kind, "trace-live", f"Standing note {name}: " + f"{name} stays as written. " * 12,
+                           placement, 0, required=required)
+             for name in ("alpha", "bravo")]
+    conversation = Conversation(preset, Layout((kind, placement), False, 0, 0), extra_artifacts=fixed,
+                                assembly="stable_first", claims=False)
     conversation.append(ng.ProviderRole.User, [ng.Text(question_text(1))], ng.RuntimeTrustClass.UntrustedInput)
     return [conversation.provider_call(turn) for turn in range(1, mutations + 1)]
 
