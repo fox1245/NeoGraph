@@ -83,6 +83,16 @@ public:
      * RuntimeConfig::fork_may_resend_provider_calls allows it. A resume reports
      * P_PROVIDER_UPLOAD_RESTARTED when it sent again the call that opens a
      * chunked upload's session, whose URL the journal does not hold (#541).
+     * A pricing broker (bind_priced_provider_call, or the journal's
+     * bind_priced) reports P_MONEY_OVER_HOLD (#428) for each call it charged
+     * more than the reservation it made for the call, which happens when the
+     * response reports more than the reservation priced, for example an
+     * upstream that returned more output than the request's output cap. The
+     * witness is {call_id, operation_id, node, model, evidence,
+     * reserved_microunits, microunits, over_by}, with evidence `reported` or
+     * `estimated`. The call is charged as reported and the run's status and
+     * budgets are as they would be without the notice; a call that a durable
+     * journal replays, and a `held` call, give none.
      */
     std::vector<ProgramNotice>            notices() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;

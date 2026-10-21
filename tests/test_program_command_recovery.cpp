@@ -300,10 +300,22 @@ TEST(ProgramCommandRecovery, AForkOfAPausedPlanCallReplaysItsProviderCall) {
 // fork runs again, and the fork's handle says so (ProgramHandle::notices()).
 namespace {
 
+// The fixture's reply always costs 1,234,567 nano-USD, which is more than the hold of a call against its small
+// input limit. A call that the fork sends again is therefore also reported as P_MONEY_OVER_HOLD (#428); the
+// notice about the host is the one that is not.
+std::size_t over_hold_notices(const ProgramHandle& handle) {
+    std::size_t count = 0;
+    for (const auto& notice : handle.notices())
+        if (notice.code == "P_MONEY_OVER_HOLD") ++count;
+    return count;
+}
+
 ProgramNotice only_notice(const ProgramHandle& handle) {
-    auto notices = handle.notices();
-    EXPECT_EQ(notices.size(), 1u);
-    return notices.empty() ? ProgramNotice{} : std::move(notices.front());
+    std::vector<ProgramNotice> others;
+    for (auto& notice : handle.notices())
+        if (notice.code != "P_MONEY_OVER_HOLD") others.push_back(std::move(notice));
+    EXPECT_EQ(others.size(), 1u);
+    return others.empty() ? ProgramNotice{} : std::move(others.front());
 }
 
 }  // namespace
@@ -330,6 +342,7 @@ TEST(ProgramForkNotice, AForkWithoutAProviderJournalSendsTheCallAgainAndSaysSo) 
     EXPECT_LT(forked.remaining_budget().model_tokens, paused.remaining_budget().model_tokens);
     EXPECT_LT(forked.remaining_budget().monetary_microunits, paused.remaining_budget().monetary_microunits);
 
+    EXPECT_EQ(over_hold_notices(handle), 1u) << "the call sent again is a call of its own";
     const auto notice = only_notice(handle);
     EXPECT_EQ(notice.code, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED");
     EXPECT_FALSE(notice.message.empty());
@@ -405,6 +418,7 @@ TEST(ProgramForkNotice, AForkOfAPausedPlanCallWithoutAProviderJournalSaysSo) {
     ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << describe(forked);
     EXPECT_EQ(sent_to(*peer, "a"), 2);
 
+    EXPECT_EQ(over_hold_notices(handle), 1u) << "the call sent again is a call of its own";
     const auto notice = only_notice(handle);
     EXPECT_EQ(notice.code, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED");
     EXPECT_EQ(notice.witness.at("operation_id"), json(paused.interrupt()->pending_input->operation_id()));

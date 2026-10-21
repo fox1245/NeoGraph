@@ -60,6 +60,7 @@
 #include <descriptor/catalogue.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -285,15 +286,33 @@ NEOGRAPH_PROGRAM_API void validate_monetary_record(const ProgramMonetaryRecord& 
 NEOGRAPH_PROGRAM_API std::string provider_call_slot_id(
     const ProgramCoreProviderCallContext& context, const graph::ProviderCallIdentity& call);
 
+/// The code of the notice for a call charged more than its reservation (#428).
+inline constexpr std::string_view kOverHoldNotice = "P_MONEY_OVER_HOLD";
+
+/**
+ * The notice for a settled call that was charged more than its reservation:
+ * a `reported` or `estimated` record whose amount is above its
+ * reserved_microunits. A `held` record is charged its hold and is never above
+ * it; neither is a record that is within its reservation. The witness names
+ * the call and its amounts, and holds nothing of its request or reply.
+ */
+NEOGRAPH_PROGRAM_API std::optional<ProgramCoreProviderCallDiagnostic> over_hold_notice(
+    const ProgramMonetaryRecord& record);
+
 /**
  * The hold of one dispatch on a monetary account: reserved at preflight and
- * then either released (not sent) or settled exactly once.
+ * then either released (not sent) or settled exactly once. When it is settled
+ * with a record charged above the reservation, the hold reports
+ * over_hold_notice() to `diagnostic` after the charge is made; a sink that
+ * throws changes nothing.
  */
 class NEOGRAPH_PROGRAM_API MonetaryHold final {
 public:
+    using DiagnosticSink = std::function<void(ProgramCoreProviderCallDiagnostic)>;
+
     MonetaryHold() = default;
     MonetaryHold(std::shared_ptr<ProgramMonetaryAccount> account, MonetaryQuote quote,
-                 MonetaryCallSite site);
+                 MonetaryCallSite site, DiagnosticSink diagnostic = {});
     MonetaryHold(MonetaryHold&& other) noexcept;
     MonetaryHold& operator=(MonetaryHold&& other) noexcept;
     MonetaryHold(const MonetaryHold&)            = delete;
@@ -330,6 +349,7 @@ private:
     std::shared_ptr<ProgramMonetaryAccount> account_;
     MonetaryQuote                           quote_;
     MonetaryCallSite                        site_;
+    DiagnosticSink                          diagnostic_;
     std::uint64_t                           reserved_   = 0;
     bool                                    dispatched_ = false;
     bool                                    done_       = true;

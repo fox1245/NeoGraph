@@ -964,6 +964,92 @@ def test_a_reported_cost_within_the_money_grant_leaves_no_failure(peer):
     assert result.usage.monetary_microunits == HOLD
 
 
+# ---------------------------------------------------------------------------
+# A call charged more than its reservation is reported on the handle (#428)
+# ---------------------------------------------------------------------------
+
+OVER_HOLD = "P_MONEY_OVER_HOLD"
+
+
+def start_bound(peer, run_budget=None, host=None):
+    """Start the one-call chat Program; give back its host, which must outlive the run, and its handle."""
+    host = host or make_bound_host(peer.base_url)
+    run_budget = run_budget or priced_budget()
+    version = admit(host, CHAT, run_budget, "chat.js")
+    return host, host.start(version, QUESTION, run_budget)
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in-memory", "sqlite-journal"])
+def test_a_reported_cost_above_the_reservation_gives_a_notice_on_the_handle(peer, tmp_path, durable):
+    if durable and sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD + OVERSHOOT)}
+    _host, handle = start_bound(peer, host=durable_bound_host(peer, tmp_path) if durable else None)
+    result = handle.wait()
+
+    # The notice is information: the run completes and the call is charged as reported.
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert result.failure is None
+    [record] = result.monetary_records
+    assert record.evidence == "reported"
+    assert (record.reserved_microunits, record.microunits) == (HOLD, HOLD + OVERSHOOT)
+    assert result.usage.monetary_microunits == HOLD + OVERSHOOT
+
+    [notice] = handle.notices
+    assert isinstance(notice, ng.ProgramNotice)
+    assert notice.code == OVER_HOLD
+    assert str(HOLD + OVERSHOOT) in notice.message
+    assert notice.witness == {
+        "call_id": record.call_id, "operation_id": record.operation_id, "node": "llm",
+        "model": PRICED_MODEL, "evidence": "reported", "reserved_microunits": HOLD,
+        "microunits": HOLD + OVERSHOOT, "over_by": OVERSHOOT}
+    text = notice.message + json.dumps(notice.witness)
+    assert "Paris" not in text and "capital" not in text, "neither the reply nor the request is in the notice"
+    assert handle.notices == handle.notices, "reading the notices again gives the same list"
+
+
+def test_an_estimated_cost_above_the_reservation_gives_a_notice(peer):
+    # No reported cost: the catalogue prices the usage of the reply, which is far above the output cap.
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 40_000, "total_tokens": 40_021}
+    _host, handle = start_bound(peer)
+    result = handle.wait()
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [record] = result.monetary_records
+    assert record.evidence == "estimated"
+    assert record.microunits > record.reserved_microunits == HOLD
+    [notice] = handle.notices
+    assert notice.code == OVER_HOLD
+    assert notice.witness["evidence"] == "estimated"
+    assert notice.witness["microunits"] == record.microunits
+    assert notice.witness["over_by"] == record.microunits - HOLD
+
+
+def test_a_call_within_its_reservation_gives_no_notice(peer):
+    _host, handle = start_bound(peer)
+
+    assert handle.wait().status == ng.ProgramTerminalStatus.Completed
+    assert handle.notices == []
+
+
+def test_a_notice_leaves_the_budget_behaviour_as_it_was(peer):
+    # The grant is the reservation, so the charge above it ends the run over its money budget as before,
+    # and the notice is beside the failure record.
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD + OVERSHOOT)}
+    _host, handle = start_bound(peer, priced_budget(monetary_microunits=HOLD))
+    result = handle.wait()
+
+    assert result.status == ng.ProgramTerminalStatus.BudgetExhausted, describe(result)
+    assert result.failure.code == "P_MONEY_BUDGET"
+    assert result.failure.witness["monetary"] == {
+        "granted": HOLD, "used": HOLD + OVERSHOOT, "over_by": OVERSHOOT}
+    [notice] = handle.notices
+    assert notice.code == OVER_HOLD
+    assert notice.witness["over_by"] == OVERSHOOT
+
+
 @pytest.mark.parametrize("calls", [
     pytest.param(2, id="the-last-reply-takes-the-run-over"),
     pytest.param(3, id="the-run-stops-before-the-third-call"),

@@ -898,13 +898,33 @@ std::string provider_call_slot_id(const ProgramCoreProviderCallContext& context,
 // MonetaryHold
 // ---------------------------------------------------------------------------
 
+std::optional<ProgramCoreProviderCallDiagnostic> over_hold_notice(const ProgramMonetaryRecord& record) {
+    if (record.evidence == ProgramMonetaryEvidence::Held || record.microunits <= record.reserved_microunits)
+        return std::nullopt;
+    const auto over_by = record.microunits - record.reserved_microunits;
+    return ProgramCoreProviderCallDiagnostic{
+        std::string(kOverHoldNotice),
+        "A priced call was charged " + std::to_string(record.microunits) +
+            " microunits, above its reservation of " + std::to_string(record.reserved_microunits) + ".",
+        json{{"call_id", record.call_id},
+             {"operation_id", record.operation_id},
+             {"node", record.node},
+             {"model", record.model},
+             {"evidence", std::string(to_string(record.evidence))},
+             {"reserved_microunits", record.reserved_microunits},
+             {"microunits", record.microunits},
+             {"over_by", over_by}}};
+}
+
 MonetaryHold::MonetaryHold(std::shared_ptr<ProgramMonetaryAccount> account, MonetaryQuote quote,
-                           MonetaryCallSite site)
-    : account_(std::move(account)), quote_(std::move(quote)), site_(std::move(site)) {}
+                           MonetaryCallSite site, DiagnosticSink diagnostic)
+    : account_(std::move(account)), quote_(std::move(quote)), site_(std::move(site)),
+      diagnostic_(std::move(diagnostic)) {}
 
 MonetaryHold::MonetaryHold(MonetaryHold&& other) noexcept
     : account_(std::move(other.account_)), quote_(std::move(other.quote_)),
-      site_(std::move(other.site_)), reserved_(std::exchange(other.reserved_, 0)),
+      site_(std::move(other.site_)), diagnostic_(std::move(other.diagnostic_)),
+      reserved_(std::exchange(other.reserved_, 0)),
       dispatched_(other.dispatched_), done_(std::exchange(other.done_, true)) {}
 
 MonetaryHold& MonetaryHold::operator=(MonetaryHold&& other) noexcept {
@@ -913,6 +933,7 @@ MonetaryHold& MonetaryHold::operator=(MonetaryHold&& other) noexcept {
         account_    = std::move(other.account_);
         quote_      = std::move(other.quote_);
         site_       = std::move(other.site_);
+        diagnostic_ = std::move(other.diagnostic_);
         reserved_   = std::exchange(other.reserved_, 0);
         dispatched_ = other.dispatched_;
         done_       = std::exchange(other.done_, true);
@@ -967,10 +988,18 @@ void MonetaryHold::settle(const sp::runtime::Result& outcome) { settle_record(re
 void MonetaryHold::settle_record(std::optional<ProgramMonetaryRecord> record) {
     if (!account_ || done_) return;
     done_ = true;
-    if (record)
-        account_->settle(reserved_, std::move(*record));
-    else
+    if (!record) {
         account_->release(reserved_);
+        return;
+    }
+    auto notice = diagnostic_ ? over_hold_notice(*record) : std::nullopt;
+    account_->settle(reserved_, std::move(*record));
+    if (!notice) return;
+    try {
+        diagnostic_(std::move(*notice));
+    } catch (...) {
+        // A notice is not part of the outcome: the call is charged either way.
+    }
 }
 
 void MonetaryHold::settle_unknown(std::string reason) noexcept {
@@ -1006,12 +1035,12 @@ public:
     explicit PricedProviderCallBroker(const ProgramCoreProviderCallContext& context)
         : owner_(context.owner_scope), version_(context.program_version_id),
           run_(context.run_id), operation_(context.operation_id), attempt_(context.attempt),
-          account_(context.monetary_account) {}
+          account_(context.monetary_account), diagnostic_(context.diagnostic) {}
 
     asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
                                                std::shared_ptr<Provider>   provider,
                                                ProviderRequest             request) override {
-        return invoke_owned(owner_, version_, run_, operation_, attempt_, account_,
+        return invoke_owned(owner_, version_, run_, operation_, attempt_, account_, diagnostic_,
                             std::move(identity), std::move(provider), std::move(request));
     }
 
@@ -1019,6 +1048,7 @@ private:
     static asio::awaitable<sp::runtime::Result> invoke_owned(
         std::string owner, std::string version, std::string run, std::string operation,
         std::uint64_t attempt, std::shared_ptr<ProgramMonetaryAccount> account,
+        std::function<void(ProgramCoreProviderCallDiagnostic)> diagnostic,
         graph::ProviderCallIdentity identity, std::shared_ptr<Provider> provider,
         ProviderRequest request) {
         if (!provider || identity.owner_scope != owner || identity.run_id != run ||
@@ -1033,7 +1063,8 @@ private:
             hold = detail::MonetaryHold(
                 account, std::move(*priced.quote),
                 detail::MonetaryCallSite{detail::provider_call_slot_id(context, identity),
-                                         operation, identity.node_name});
+                                         operation, identity.node_name},
+                std::move(diagnostic));
             if (auto refused = hold.preflight()) co_return refused;
         }
         ProviderBudgetClaim claim;
@@ -1079,6 +1110,7 @@ private:
     std::string                             owner_, version_, run_, operation_;
     std::uint64_t                           attempt_;
     std::shared_ptr<ProgramMonetaryAccount> account_;
+    std::function<void(ProgramCoreProviderCallDiagnostic)> diagnostic_;
 };
 
 }  // namespace

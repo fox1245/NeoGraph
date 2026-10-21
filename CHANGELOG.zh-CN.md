@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cf677c7dc90b5912d96293a6b20c0260438ca7aaab9c22362fa940e6c181aabb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7fab9a5433c8d0c40247b30ecef21c3bdc889c251f525cbec4643bcf92b57a2e -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -31,6 +31,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **在宿主驱动的提供方上，`complete_endpoint_async` 取用 SDK 交付的结果。** 以前它从 `EndpointCall::join()` 取结果，而宿主驱动的 executor 会拒绝它，所以提供方已接受的调用会被报告为被拒绝。
   - **JavaScript 模块**（`NEOGRAPH_BUILD_WASM_JS=ON`：`neograph_module.wasm`、其加载器和 `wasm/neograph.mjs`）从 JSON 编译图，用在运行时给出基础 URL、路由、密钥和模型的提供方运行它，返回最终状态，并在需要时流式输出图事件。API 是五个 C 函数和一个小的 ES 模块（`load`、`compile`、`run`，以及接受 `onEvent`、`signal` 和 `timeoutMs` 的 `Graph.run`），密钥不在二进制文件中。`wasm/examples/` 中有一个 Node 程序，以及一个带不含机密的 `wrangler.toml` 模板的 Cloudflare Workers 风格处理程序。
   - **CI** 在 Node 22 和 24 下，不需要网络和密钥，针对本地的 OpenAI 兼容服务器运行该模块，包括缓冲和服务器发送事件两种方式：检查最终状态、流式事件的顺序、被切在两个数据块之间的字符、提供方的拒绝、通过 `AbortSignal` 取消、超时、并发运行，以及调用进行期间宿主的定时器仍在运行。Workers 示例的 `fetch` 处理程序在 Node 中以 `Request` 针对同一服务器调用，尚未在 workerd 上运行。wasm32 检查新增了对同步运行被拒绝的检查。模块有大小门禁（`.wasm` 6.27 MB，gzip 后 1.84 MB；图 smoke 从 5,502,805 字节增至 5,509,570 字节）。`tests/test_host_loop.cpp` 针对手动 executor 在原生环境中验证循环和宿主接缝提供方。引擎与宿主循环如何衔接见 [`wasm/README.md`](wasm/README.md)。
+- **费用超过预留额的计价调用会以 notice 报告 (#428)。** 计价调用的 hold 按最贵的输出费率计算请求的输出 cap，`provider.max_price` 限制的是 endpoint 的价格，而不是它返回多少 token。忽略 cap 的 upstream（例如忽略 `max_tokens` 的 OpenRouter upstream）可能返回比 hold 所预留的更多的输出，该调用按响应报告的金额收费。
+  - **notice。** `ProgramHandle::notices()`（Python 中为 `handle.notices`，在 `wait()` 之后读取）中，无论证据是 `reported` 还是 `estimated`，费用超过预留额的每个调用都有一条 `P_MONEY_OVER_HOLD` notice。witness 是 `{call_id, operation_id, node, model, evidence, reserved_microunits, microunits, over_by}`，不含请求或响应的任何内容。节点重试的每次尝试是各自独立的调用。`held` 的调用按 hold 收费，没有 notice；在 resume、恢复或 fork 中由持久 journal 重放的调用也没有。
+  - **其他都不变。** 调用按报告收费，运行的 status、预算和 `P_MONEY_BUDGET` 与以前一样。notice 不随运行保存，所以保存下来的是 `result.monetary_records`（`microunits` 高于 `reserved_microunits`）。
+  - **不拒绝 route，也还没有 upstream。** NeoGraph 没有在出现超出后拒绝某条 route 的设置，避开哪些 route 是宿主的策略。处理调用的 upstream 目前还不会记录在 notice 或记录里。
+  - **文档。** 参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南、Python 指南和故障排查表说明 hold 只对在 cap 处停下的 upstream 才是上界，并列出宿主可以做的事：用 `only`、`order` 和 `ignore` 限定 route，对 notice 和记录作出反应，并且授予的额度低于自己能承受的损失。
 
 ### 变更
 - **提供方调用的 identity 标识的是请求所问的内容，而不是批准该请求的 SchemaProvider 策略 (#543)。** Program 提供方调用 journal 以 `Provider::request_digest` 标识调用，而这个摘要包含 SchemaProvider descriptor 策略的 identity。因此，内容相同的请求只要策略 identity 不同，就成了另一次调用：恢复或崩溃恢复会遇到逻辑调用绑定冲突，fork 则不会沿用来源运行的调用而是重新发送，已付费的调用于是被付费两次。interface 7 改变了所有策略 identity，0.16.0 就是这样遇到这个问题的。现在 journal 把请求内容和策略 identity 分开保存。
@@ -55,7 +60,6 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK 可以不依赖 libcurl 和线程，为 Emscripten 和 WASI 构建（`SP_BUILD_TRANSPORT`、`SP_THREADS`）；`sp::crypto::random_bytes` 在这些宿主上可用，超出目标 `std::size_t` 的 admission 上限会被截断。NeoGraph 自身的 WebAssembly 构建将在 #535 中继续。
   - **宿主 seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` 现已公开：`Executor`（带 `host_pumped()`）、`HostTransport`，以及由 `sp_runtime` 定义、不依赖 libcurl 和线程的 `Client(descriptor, options, executor, transport)`。无法工作的阻塞调用（`Client::complete`、`Operation::join`、realtime 会话的 `next_event`）现在不再等待，而是立即返回 `Misuse` 失败（`runtime.blocking.host_pumped` 或 `runtime.blocking.in_thread`）；此前线程内的拒绝没有原因。`SP_BUILD_JS_HOST` 为 Emscripten 构建基于 `fetch` 的参考宿主。NeoGraph 在其 WebAssembly 模块中使用这个 seam（见“已添加”）。
 - **公开文本检查器现在也检查文档。** `scripts/check_public_text.py` 及其 ctest 条目 `public_text_guard` 会扫描 Markdown、`docs/`、README 和 CHANGELOG 文件（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 选项已移除），并新增两条规则，标记叙述内部决定及其过程的措辞。
-- **文档：金额 hold 假定 upstream 会遵守输出 cap (#428)。** 只改了文档，行为没有变化。hold 按最贵的输出费率计算调用的输出 cap，`provider.max_price` 限制的是 endpoint 的价格，而不是它返回多少 token。忽略 cap 的 upstream（例如忽略 `max_tokens` 的 OpenRouter upstream）可能返回比 hold 所预留的更多的输出。该调用按响应报告的金额收费，这个金额可能高于它的 `reserved_microunits`。超出的部分本身不是错误，费用超出 `monetary_microunits` 的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南和故障排查表现在都写明了这一点，并列出宿主可以做的事：用 `only`、`order` 和 `ignore` 限定 route，每次运行后在 `result.monetary_records` 中比较 `microunits` 与 `reserved_microunits`，并且授予的额度低于自己能承受的损失。NeoGraph 没有针对超出的事件，也没有在出现一次超出后拒绝某条 route 的选项。
 
 ### 修复
 
