@@ -80,7 +80,9 @@ public:
      * under another SchemaProvider descriptor policy identity and used the
      * journaled outcome, and P_FORK_PROVIDER_CALL_RESENT, when a fork sent a
      * call its source had already journaled because
-     * RuntimeConfig::fork_may_resend_provider_calls allows it.
+     * RuntimeConfig::fork_may_resend_provider_calls allows it. A resume reports
+     * P_PROVIDER_UPLOAD_RESTARTED when it sent again the call that opens a
+     * chunked upload's session, whose URL the journal does not hold (#541).
      */
     std::vector<ProgramNotice>            notices() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;

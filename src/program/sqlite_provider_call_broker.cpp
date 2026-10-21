@@ -169,6 +169,9 @@ struct SQLiteProgramProviderCallJournal::Impl {
             add_column("content_digest", "ALTER TABLE ng_program_provider_calls ADD COLUMN content_digest TEXT NOT NULL DEFAULT ''");
             add_column("policy_identity", "ALTER TABLE ng_program_provider_calls ADD COLUMN policy_identity TEXT NOT NULL DEFAULT ''");
             add_column("producer", "ALTER TABLE ng_program_provider_calls ADD COLUMN producer TEXT NOT NULL DEFAULT ''");
+            // #541: the identity of a secret the outcome's typed result needs and the journal never stores (a
+            // resumable upload's session URL). Empty when the outcome has none.
+            add_column("withheld_secret", "ALTER TABLE ng_program_provider_calls ADD COLUMN withheld_secret TEXT NOT NULL DEFAULT ''");
             // The times a call was matched to its record under another policy identity. A row is never rewritten.
             execute(db, "CREATE TABLE IF NOT EXISTS ng_program_provider_call_policy_changes("
                         "owner_scope TEXT NOT NULL, dispatch_id TEXT NOT NULL,"
@@ -201,7 +204,12 @@ struct Stored {
     std::string monetary;
     // #543. Version 2: `request` names `content` and `policy` together. Version 1: `request` is the dispatch
     // digest of the writer, and the three are empty. `legacy` is the dispatch digest of the call being made.
-    std::string identity_version = "2", content, policy, producer, legacy;
+    std::string identity_version = "2", content, policy, producer;
+    // #541: secret_identity() of the secret the outcome carried and the journal did not keep. Empty for none.
+    std::string withheld;
+    std::string legacy;
+    // Not stored: the call being made opens a chunked upload's session, and nothing else bounds it (#541).
+    bool opens_upload = false;
 };
 std::uint64_t parse_amount(std::string_view value) {
     std::uint64_t result = 0;
@@ -219,6 +227,10 @@ std::string scope_digest(const json& slot) {
 // The version 2 request_digest: the content and the policy that admitted it, as one name.
 std::string identity_of(std::string_view content, std::string_view policy) {
     return hash("identity", {{"content", std::string(content)}, {"policy", std::string(policy)}});
+}
+// A secret the live call holds, named without being kept (#541).
+std::string secret_identity(std::string_view secret) {
+    return neograph::detail::sha256_identity("program-core-provider-secret/v1", "secret", secret);
 }
 std::string accounting_key(std::string_view owner, std::string_view id, const Stored& row) {
     return hash("accounting", {{"owner_scope", owner}, {"dispatch_id", id},
@@ -252,7 +264,7 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                         "original_attempt,state,completion,outcome_digest,evidence_identity,"
                         "encoding_version,provider_name,family,mode,original_deadline,"
                         "logical_scope,claim_amount,committed_amount,monetary_record,"
-                        "identity_version,content_digest,policy_identity,producer "
+                        "identity_version,content_digest,policy_identity,producer,withheld_secret "
                         "FROM ng_program_provider_calls WHERE owner_scope=?1 AND dispatch_id=?2");
     query.bind(1, owner);
     query.bind(2, id);
@@ -264,7 +276,7 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                query.column(9), query.column(10), query.column(11), query.column(12), query.column(13),
                query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16)),
                query.column(17), query.column(18), query.column(19), query.column(20),
-               query.column(21)};
+               query.column(21), query.column(22)};
     if (query.next()) throw std::runtime_error("Duplicate Program provider journal slot");
     // A call that names no model, such as a file upload, stores an empty one; the model is compared with the
     // call's own whenever the row is used.
@@ -290,6 +302,9 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
     } else {
         throw std::runtime_error("Incompatible Program provider journal identity; external reconciliation required");
     }
+    if (!row.withheld.empty() &&
+        (!neograph::detail::is_sha256_identity(row.withheld) || row.state != "succeeded"))
+        throw std::runtime_error("Corrupt Program provider journal dispatch binding");
     if (archive && archive->owner_scope() != owner)
         throw std::runtime_error("Program provider archive owner scope mismatch");
     if (row.state != "dispatched" && row.state != "succeeded" && row.state != "failed" &&
@@ -455,18 +470,19 @@ void hydrate_scope(SQLiteProgramProviderCallJournal::Impl& impl,
 void save_outcome(sqlite3* db, std::string_view owner, std::string_view id,
                   std::string_view state, std::string_view completion,
                   std::string_view outcome, std::string_view evidence, std::uint64_t committed,
-                  std::optional<std::string_view> monetary = std::nullopt) {
+                  std::optional<std::string_view> monetary = std::nullopt,
+                  std::string_view withheld = {}) {
     Statement update(db, monetary
         ? "UPDATE ng_program_provider_calls SET state=?3,completion=?4,"
-          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7,monetary_record=?8 "
+          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7,withheld_secret=?8,monetary_record=?9 "
           "WHERE owner_scope=?1 AND dispatch_id=?2 AND state IN ('dispatched','reconciliation_required')"
         : "UPDATE ng_program_provider_calls SET state=?3,completion=?4,"
-          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7 "
+          "outcome_digest=?5,evidence_identity=?6,committed_amount=?7,withheld_secret=?8 "
           "WHERE owner_scope=?1 AND dispatch_id=?2 AND state IN ('dispatched','reconciliation_required')");
     update.bind(1, owner); update.bind(2, id); update.bind(3, state);
     update.bind(4, completion); update.bind(5, outcome); update.bind(6, evidence);
-    update.bind(7, std::to_string(committed));
-    if (monetary) update.bind(8, *monetary);
+    update.bind(7, std::to_string(committed)); update.bind(8, withheld);
+    if (monetary) update.bind(9, *monetary);
     update.done();
     if (sqlite3_changes(db) != 1) throw std::runtime_error("Program provider journal settlement conflict");
 }
@@ -538,6 +554,32 @@ void note_policy_change(sqlite3* db, std::string_view owner, std::string_view id
          std::move(witness)});
 }
 
+// #541: the first call after `identity` that the journal holds for the same node task, in any state. A node
+// that opens a chunked upload's session makes the calls that send its parts after it, with the session it
+// holds, so a call the journal holds after the opening may have written into that session. Empty when there
+// is none.
+std::optional<std::string> later_call(sqlite3* db, std::string_view owner, std::string_view scope,
+                                      const graph::ProviderCallIdentity& identity) {
+    Statement rows(db, "SELECT dispatch_id,slot FROM ng_program_provider_calls "
+                       "WHERE owner_scope=?1 AND (logical_scope=?2 OR logical_scope='')");
+    rows.bind(1, owner);
+    rows.bind(2, scope);
+    std::optional<std::string> first;
+    std::uint64_t              first_ordinal = 0;
+    while (rows.next()) {
+        const auto id   = rows.column(0);
+        const auto slot = neograph::detail::parse_json_strict(rows.column(1));
+        if (scope_digest(slot) != scope || slot.at("thread_id") != identity.thread_id ||
+            slot.at("task_id") != identity.task_id || slot.at("node_name") != identity.node_name)
+            continue;
+        const auto ordinal = slot.at("call_ordinal").get<std::uint64_t>();
+        if (ordinal <= identity.call_ordinal || (first && ordinal >= first_ordinal)) continue;
+        first         = id;
+        first_ordinal = ordinal;
+    }
+    return first;
+}
+
 const char* to_string(ProgramProviderForkResendRefusedError::Reason reason) noexcept {
     switch (reason) {
         case ProgramProviderForkResendRefusedError::Reason::Unverifiable: return "unverifiable";
@@ -577,6 +619,9 @@ std::optional<sp::runtime::Result> adopt_source_call(
         if (row) break;
     }
     if (!row || row_attempt(*row) > source.max_attempt) return std::nullopt;
+    // #541: a fork opens a session of its own. The source's was named by a URL that only its live call held, and
+    // opening one charges nothing, so the fork sends the call whatever became of the source's.
+    if (admitted.opens_upload && !(row->state == "succeeded" && row->withheld.empty())) return std::nullopt;
     const auto relation = relation_of(*row, admitted);
     if (relation == Relation::Different) return std::nullopt;
     // A call proven not accepted was not paid for: nothing is sent again.
@@ -716,6 +761,7 @@ private:
         admitted.content = Provider::request_content_digest(prepared);
         admitted.policy = Provider::request_policy_identity(prepared);
         admitted.producer = producer_identity();
+        admitted.opens_upload = prepared.opens_upload_session();
         admitted.legacy = Provider::request_digest(prepared);
         admitted.request = identity_of(admitted.content, admitted.policy);
         admitted.provider = provider_identity;
@@ -731,7 +777,7 @@ private:
         ProviderBudgetClaim claim;
         Diagnostics pending;
         {
-            std::lock_guard lock(impl->mutex);
+            std::unique_lock lock(impl->mutex);
             Transaction tx(impl->db);
             const auto existing = load(impl->db, owner, id, impl->archive);
             auto relation = Relation::Same;
@@ -747,7 +793,32 @@ private:
                           existing ? &*existing : nullptr, restored);
             hydrate_monetary_scope(impl->db, owner, admitted.scope, impl->archive, monetary);
             if (existing) {
-                if (!existing->completion.empty()) {
+                const bool answered = !existing->completion.empty();
+                // #541: the call opens a chunked upload's session, and the journal cannot give the session back:
+                // its URL, which only the live call held, is not stored, or the answer is not known at all. The
+                // session was opened to be written into, so when no call of the node after the opening is
+                // journaled nothing was written, and opening a session charges nothing: the call is sent again,
+                // and the row stays as it was. A later call may have written into the session, and its position
+                // is bound to that session, so the upload has to be sent again from the start. A priced or
+                // token-budgeted binding refuses every endpoint call before it is journaled, so no such row exists
+                // under one today; the conditions keep an upload that is priced one day from skipping its claim.
+                if (admitted.opens_upload && !hold.active() && identity.model_token_budget == 0 &&
+                    (!answered || !existing->withheld.empty())) {
+                    if (auto later = later_call(impl->db, owner, admitted.scope, identity))
+                        throw ProgramProviderUploadResendRequiredError(id, std::move(*later));
+                    pending.push_back(
+                        {"P_PROVIDER_UPLOAD_RESTARTED",
+                         "A chunked upload was resumed before any part of it was sent. The journal does not hold "
+                         "its session's URL, so the call that opens the upload was sent again and the earlier "
+                         "session was left unused.",
+                         json{{"call_id", std::string(id)}, {"node", identity.node_name},
+                              {"reason", answered ? "session_not_stored" : "outcome_unknown"}}});
+                    tx.commit();
+                    lock.unlock();
+                    report(diagnostic, pending);
+                    co_return co_await provider->dispatch_async(std::move(prepared));
+                }
+                if (answered) {
                     if (!restored) restored = restore_outcome(*existing, owner, id, impl->archive);
                     if (committed_amount(*restored, existing->claim) != existing->committed)
                         throw std::runtime_error("Program provider persisted authority differs from the full outcome");
@@ -876,11 +947,17 @@ private:
             const auto* failure = std::get_if<sp::Failure>(result.get());
             const auto state = !failure ? "succeeded"
                 : provider_failure_proves_not_accepted(*failure) ? "failed" : "reconciliation_required";
+            // #541: the secret the opening of a session answers with reaches the live call only. The row says
+            // that the answer it holds is short of it.
+            const auto* completion = std::get_if<sp::Completion>(result.get());
+            const auto withheld = admitted.opens_upload && completion && !completion->secret.empty()
+                ? secret_identity(completion->secret) : std::string();
             std::lock_guard lock(impl->mutex);
             Transaction tx(impl->db);
             save_outcome(impl->db, owner, id, state, canonical, outcome, "", admitted.committed,
                          monetary_bytes ? std::optional<std::string_view>(*monetary_bytes)
-                                        : std::nullopt);
+                                        : std::nullopt,
+                         withheld);
             tx.commit();
         } catch (...) {
             // Preserve the actual model result and original storage cause;
@@ -921,6 +998,15 @@ ProgramProviderForkResendRefusedError::ProgramProviderForkResendRefusedError(
           "; set RuntimeConfig::fork_may_resend_provider_calls to send it again at the risk of paying twice"),
       reason_(reason), call_id_(std::move(call_id)), source_run_id_(std::move(source_run_id)),
       source_call_id_(std::move(source_call_id)) {}
+
+ProgramProviderUploadResendRequiredError::ProgramProviderUploadResendRequiredError(
+    std::string call_id, std::string later_call_id)
+    : std::runtime_error(
+          "Program provider journal: a chunked upload cannot continue after a resume. The call that opened "
+          "its session is journaled without the session's URL, which a journal never stores, and the journal "
+          "holds a later call of the same node, which the first session still binds. Send the upload again "
+          "from its start, from a new run or at call ordinals the journal has not used"),
+      call_id_(std::move(call_id)), later_call_id_(std::move(later_call_id)) {}
 
 std::string SQLiteProgramProviderCallJournal::logical_call_id(
     const ProgramCoreProviderCallContext& context,

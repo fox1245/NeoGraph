@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a5ae3a2e8a27690487384684cf5b841b3b11c4ee0371f29db32294e81d30f206 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5ec52369fa475a2d3012dd3e5ba300bb539eed40cff12ce04b8d43f30fef3965 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -44,6 +44,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **需要重新构建 C++ 使用方：新增了成员 (#543)。** `RuntimeConfig` 新增 `fork_may_resend_provider_calls`，`ProgramCoreProviderCallReplaySource` 新增 `may_resend`，`ProgramCoreProviderCallContext` 新增 `diagnostic`，`SQLiteProgramProviderCallJournal::Record` 新增四个成员，`Provider` 新增两个静态函数。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：`Provider` 新增了虚函数 (#535)。** `Provider::host_pumped()` 是新增的虚函数，`OpenInferenceProvider` 重写了它，受保护的 `Provider::prepare_runtime` 新增了带默认值的参数。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：`ToolExecutionPolicy` 新增了成员 (#545)。** `ToolExecutionPolicy` 新增了 `error_limit_bytes`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **C++ 使用方需要重新构建：新增了虚函数 (#541)。** `detail::EndpointPayload` 新增了 `opens_upload_session()`，`PreparedProviderRequest` 新增了同名的成员函数。打开提供方调用 journal 时，它的表会增加一列 `withheld_secret`；早先的构建仍按原样读取这样的 journal。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **采用 SchemaProvider `34fd00f7e0eb3e43878cdc11b4e84d5b44d21d46`，即其 `main` 分支上的 0.4.x 修复 (#535)。**
   - **兼容性。** 包仍是 0.4.0，接口修订版和共享库代数仍为 7，因此 `find_package(SchemaProvider 0.4.0 EXACT)` 和 NeoGraph 检查的接口契约都没有变化。新的 capability 位 `capability::HostSeam` 不在 NeoGraph 所要求的 `RequiredProvider` 之内。策略的重放 identity 没有变化：0.16.0 写出的 native 历史和 Program 日志仍可重放、可恢复。内置策略新增了 fact，所以它的 content digest 会变化；固定在旧 digest 上的地方（`expected_sha256_hex`）需要换成新值。SDK 的部分结构体变大了（`EndpointFact`、`ModelPrice`、`CostEstimate`、realtime 的 `Options`）。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
   - **定价（[SchemaProvider #149](https://github.com/fox1245/SchemaProvider/pull/149)）。** `sp::pricing::estimate` 不再对无法定价的用量给出看似完整的总价。音频输入和输出 token 按各自的单价（`input_audio`、`output_audio`）计费；缺少音频或图像输出单价，或者出现 Gemini 的 `toolUsePromptTokenCount`，就不给出总价，并在 `unpriced` 中写明名称；单价为 0 的单位照常应用，并记录为假设；只在所请求服务层级之外有价格的条目，给出原因 `tier`。用量没有总价的 Program 调用会被挂起，原因中带有未定价的计数器。
@@ -63,6 +64,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **`HostLoop` 不再丢失宿主先于 Asio 到达的定时器 (#535)。** 在已记录的截止时间之后轮询、却没有就绪处理程序的回合，会假定 Asio 已分发了到那时为止所有到期的定时器，并丢弃该截止时间。但这由 Asio 决定，宿主的定时器可能先运行：Asio 的 Windows reactor 由自己的线程得知定时器已到期，所以在截止时间上做的轮询可能发现定时器尚未分发，宿主的时钟也可能比 Asio 的时钟快。该回合丢弃了截止时间，使循环在等待仍未结束时进入空闲，于是等待重试退避或其他 `HostTimer` 的运行永远不会结束。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` 和 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` 曾在 CI 的 Windows 作业中间歇性失败。
   - **截止时间在 Asio 分发其定时器之前一直保持已记录。** 循环用自己的定时器在最早的截止时间上等待，Asio 分发它时，丢弃到该时间为止的截止时间。在此之前运行的回合会在 1 毫秒后再次查看。记录时在宿主时钟上已经到期的截止时间也同样保留，而以前会被丢弃。
   - API 没有变化。在定时器按时触发的宿主上，循环的行为与以前相同。回归测试让手动 executor 的时钟比 Asio 的快；它们在以前的引擎上于 Linux 即失败，现在通过。
+- **在分块的 Google 上传过程中被恢复的 Program，要么重新开始上传，要么被带类型的错误拒绝，并且任何记录都不含上传的会话 URL (#541)。** Google 的可续传上传用一个 URL 指称会话，有了这个 URL，任何人不需要 API 密钥就能写入文件。SchemaProvider 只把它交给运行中的调用（`Completion::secret`），不放进模型，也不放进 raw 事件。因此 journal 给恢复后的 Program 的，是打开会话那次调用的响应，其中没有 URL，下一个分块在准备时就被拒绝（`InvalidRequest`，什么都没有发送），而没有任何地方说明上传需要重新发送。
+  - **任何记录都不含该 URL。** 测试会运行带 journal 的上传：从文件、从内存、通过回环的 Google 对端分块（包括某个分块失败的情况），并在 Program、检查点和提供方调用数据库（含它们的 write-ahead 日志）的每个字节，以及结果和失败文本中查找这些 URL、API 密钥和文件路径。一个也没有找到：`provider_codec::encode_outcome` 不会编码 `secret`。这个测试守住这一点。
+  - **journal 在打开会话的那次调用上做决定。** 当 `files::Start` 的响应带有密值时，该行现在会记录它的 identity（新列 `withheld_secret`：带域分隔的 SHA-256，绝不是密值本身）。恢复时遇到这样的行，或遇到答案未知的会话打开调用，会查看其后同一节点任务的调用，不论其状态：
+    - **没有。** 会话中没有写入任何内容，打开会话也不计费，所以重新发送这次调用并打开一个新会话。该行不会被重写，句柄上带有通知 `P_PROVIDER_UPLOAD_RESTARTED`，witness 为 `{call_id, node, reason}`（`reason` 为 `session_not_stored`；进程在请求传输途中终止时为 `outcome_unknown`，后者以前是 `NG.EffectUncertain`）。
+    - **一个或多个**（已发送、已失败或已完成文件的分块）。恢复会在发送或记录任何内容之前，以新的 `ProgramProviderUploadResendRequiredError`（`call_id()`、`later_call_id()`）失败。分块的调用位置以 URL 的摘要指称第一个会话，所以另一个会话无法接替它们。在 Core 节点中它是 `NG.ConfigError`，既不重试也不路由。上传需要从新的运行重新发送，或者由捕获该错误并使用 journal 尚未用过的调用序号进行上传的节点重新发送。已完成的上传同样被拒绝：文件虽然在提供方那里，但恢复后的节点没有会话 URL，就无法重放分块。
+  - **不变的部分。** OpenAI 的上传用 id 指称会话，该 id 在已记录的响应中，所以恢复后的 Program 会重放它的调用并继续往下走。fork 会打开自己的会话并发送自己的分块。
 - **Program 存储在过去不一致的地方现在对齐，并且每一处都以 fail-closed 处理 (#556)。** 共享的转换校验器保留了内存、SQLite 和 PostgreSQL 存储之间的四处差异。其中三处现在遵循契约，第四处是内存存储的已声明限制。
   - **格式错误的期望头在所有存储中都会在读取已存状态之前被拒绝。** 不是 SHA-256 标识的头不可能与已存的头匹配，因此 `compare_publish` 不读取就返回 `Conflict`。内存存储原本就是这样。SQL 存储是在读取运行记录之后、比较头时才得到同样的 `Conflict`，所以只要有读不出的已存记录，它们就会抛出异常而不是返回 `Conflict`。
   - **坐标列与字节内容不一致的已存命令行，在所有存储中都视为损坏。** PostgreSQL 存储对此会抛出 `std::invalid_argument`。SQLite 存储读取同一行时会抛出异常，但在发布检查中却像调用方持有过期的头一样返回 `Conflict`。现在两种存储在发布检查中也都抛出 `std::invalid_argument`。

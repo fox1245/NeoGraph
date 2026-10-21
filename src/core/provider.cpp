@@ -260,6 +260,7 @@ struct PreparedProviderRequest::Impl {
     std::optional<sp::Error> error;
     std::string digest;
     std::optional<json> upload;
+    bool opens_upload_session = false;
     bool host_pumped = false;
     std::shared_ptr<DispatchHooks> hooks;
     std::shared_ptr<StopChannel> stop;
@@ -296,6 +297,7 @@ const sp::descriptor::ValidatedDescriptor* PreparedProviderRequest::admitted_des
 bool PreparedProviderRequest::is_endpoint_read() const noexcept {
     return impl_ && !impl_->prepared.endpoint().empty() && impl_->prepared.method() == "GET";
 }
+bool PreparedProviderRequest::opens_upload_session() const noexcept { return impl_ && impl_->opens_upload_session; }
 
 PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::Client> client, ProviderRequest request,
                                                   bool host_pumped) {
@@ -325,6 +327,7 @@ PreparedProviderRequest Provider::prepare_runtime(std::shared_ptr<sp::runtime::C
                 impl->stop->external.emplace(request.options.stop_token, ForwardStop{impl->stop->source});
             request.options.stop_token = impl->stop->source.get_token();
             if (request.endpoint) {
+                impl->opens_upload_session = request.endpoint->opens_upload_session();
                 auto call = request.endpoint->prepare(*impl->client, std::move(request.options));
                 impl->prepared = std::move(call.prepared);
                 impl->upload = std::move(call.upload);

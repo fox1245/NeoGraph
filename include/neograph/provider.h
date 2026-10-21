@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace neograph::graph {
@@ -178,6 +179,9 @@ class EndpointPayload {
 public:
     virtual ~EndpointPayload() = default;
     virtual EndpointPreparation prepare(sp::runtime::Client& client, sp::runtime::RunOptions options) const = 0;
+    /// Whether the call opens a chunked upload's session (`files::Start`, #541). The provider may answer with a
+    /// value that only the live call holds, so a journal that cannot replay it sends the call again.
+    virtual bool opens_upload_session() const noexcept { return false; }
 };
 } // namespace detail
 
@@ -257,6 +261,10 @@ public:
     /// or batch lookup. The provider never charges one, and it can be sent again,
     /// so a journaling broker sends it each time instead of replaying it.
     bool is_endpoint_read() const noexcept;
+    /// An endpoint call that opens a chunked upload's session (`files::Start`, #541). Starting a session charges
+    /// nothing and sends no file bytes, so a journal that cannot give the session back to a resumed Program sends
+    /// the call again (see SQLiteProgramProviderCallJournal).
+    bool opens_upload_session() const noexcept;
 private:
     struct Impl;
     explicit PreparedProviderRequest(std::unique_ptr<Impl>);
@@ -355,6 +363,7 @@ public:
     EndpointPreparation prepare(sp::runtime::Client& client, sp::runtime::RunOptions options) const override {
         return prepare_endpoint_call(client, std::move(options), request_);
     }
+    bool opens_upload_session() const noexcept override { return std::is_same_v<Request, sp::files::Start>; }
 private:
     Request request_;
 };
