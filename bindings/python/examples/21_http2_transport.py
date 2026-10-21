@@ -6,7 +6,7 @@ needs a TLS endpoint and a libcurl build with HTTP/2 support; an HTTP/1-only
 local peer cannot qualify it. No HTTP/3 or WebSocket capability is implied.
 
 Run:
-    OPENAI_API_KEY=... OPENAI_MODEL=gpt-4.1-mini python 21_http2_transport.py
+    OPENAI_API_KEY=... OPENAI_MODEL=gpt-6-luna python 21_http2_transport.py
 
 For a no-key run, route OPENAI_API_BASE to a local TLS peer that negotiates
 both h2 and http/1.1, and set NG_EXAMPLE_CA_FILE to its trusted CA file.

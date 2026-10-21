@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=8ef0a27fc5b648e7e294366dfc190837efd181346df40166952ecff3d34d3803 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=cdc4300edb845368b427f2b90eb0051e74fae14610f7039ae415a5bf6ed69281 -->
 # Python API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -177,7 +177,7 @@ with example_provider(script) as chosen:
 
 스크립트는 `turn.last_user_text`, `turn.system_text`, `turn.last_tool_result`를 읽는 함수 `(turn) -> Reply`일 수도 있습니다. `chosen.scripted.call_count`로 모델 호출이 몇 번 있었는지 단언할 수 있습니다. 규칙은 `_scripted.py`의 docstring에 있습니다.
 
-`--live`, `NG_EXAMPLE_LIVE=1`, `OPENAI_API_BASE`, `NG_PROVIDER_DESCRIPTOR` 중 하나를 쓰면 설정된 엔드포인트를 대신 선택합니다. 호스팅 엔드포인트에는 `OPENAI_API_KEY`가 필요하고 선택적으로 `OPENAI_MODEL`(기본값 `gpt-4.1-mini`)을 쓰며, 둘 다 프로세스 환경에서만 읽습니다. `_common.py`는 `.env` 파일을 읽지 않으며, 키가 없으면 성공한 실행이 아니라 오류입니다. `_common.py`는 닫힌 OpenAI Chat 또는 Responses descriptor를 승인(admission)한 뒤 `SchemaProvider`를 만듭니다. 타입 SDK는 libcurl HTTP를 쓰며, 제거된 provider 클래스, completion 파라미터, WebSocket 경로, 전송 백엔드 선택기는 사용할 수 없습니다. `OPENAI_API_BASE`는 origin 또는 게이트웨이 접두사이며 전체 `/v1/chat/completions` 경로가 아닙니다. 시스템 신뢰 저장소에 CA가 없는 HTTPS peer는 `NG_EXAMPLE_CA_FILE`도 필요합니다. 대신 `NG_PROVIDER_DESCRIPTOR`로 승인된 완전한 descriptor JSON 파일을 지정할 수도 있습니다. 타입 요청과 outcome 계약은 [Python 바인딩 가이드](../../../docs/python-binding.md)를 참고하세요.
+`--live`, `NG_EXAMPLE_LIVE=1`, `OPENAI_API_BASE`, `NG_PROVIDER_DESCRIPTOR` 중 하나를 쓰면 설정된 엔드포인트를 대신 선택합니다. 호스팅 엔드포인트에는 `OPENAI_API_KEY`가 필요하고 선택적으로 `OPENAI_MODEL`(기본값 `gpt-6-luna`)을 쓰며, 둘 다 프로세스 환경에서만 읽습니다. `_common.py`는 `.env` 파일을 읽지 않으며, 키가 없으면 성공한 실행이 아니라 오류입니다. `_common.py`는 닫힌 OpenAI Chat 또는 Responses descriptor를 승인(admission)한 뒤 `SchemaProvider`를 만듭니다. 타입 SDK는 libcurl HTTP를 쓰며, 제거된 provider 클래스, completion 파라미터, WebSocket 경로, 전송 백엔드 선택기는 사용할 수 없습니다. `OPENAI_API_BASE`는 origin 또는 게이트웨이 접두사이며 전체 `/v1/chat/completions` 경로가 아닙니다. 시스템 신뢰 저장소에 CA가 없는 HTTPS peer는 `NG_EXAMPLE_CA_FILE`도 필요합니다. 대신 `NG_PROVIDER_DESCRIPTOR`로 승인된 완전한 descriptor JSON 파일을 지정할 수도 있습니다. 타입 요청과 outcome 계약은 [Python 바인딩 가이드](../../../docs/python-binding.md)를 참고하세요.
 
 ## 상태와 스케줄링
 

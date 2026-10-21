@@ -128,7 +128,7 @@ def example_provider(script, schema: str = "openai"):
 
 def example_model() -> str:
     """Keep the explicit request/llm_call model selection in one place."""
-    return os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    return os.getenv("OPENAI_MODEL", "gpt-6-luna")
 
 
 def provider_messages(messages):

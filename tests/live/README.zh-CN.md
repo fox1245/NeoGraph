@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=6609f9bbff22820b3ae714325bbd73fc21c22d31cea6cb45f3e12a35c29b90df -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=d070bdadf35ee78dc34c18c461907a2517aa6657ecf3e800a66831be19bb35fc -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,8 +21,8 @@
   - 通过 `Provider` 调用的 SchemaProvider 端点（#531）：OpenAI 嵌入、以 await 等待的 OpenRouter 嵌入和 OpenAI moderation。
 - **C++**（`tests/live_e2e_test.cpp`，目标 `neograph_live_e2e_tests`）：
   - 使用 Claude 5.5 服务器工具、生成图像和 Interactions 的提供商适配器；
-  - 通过 `Provider` 调用的 SchemaProvider 端点（#531）：OpenAI 和 OpenRouter 嵌入、OpenAI moderation、Anthropic token 计数、OpenAI 图像、再转写回文本的 OpenAI 语音、在请求中引用的 Gemini 文件，以及从提交到取消的 Anthropic 和 OpenAI 批处理；
-  - OpenAI 和 Google 上的 SchemaProvider 实时转写会话：输入由 OpenAI 语音端点生成的语音，每个会话提交一个包含所说内容的用户轮次；
+  - 通过 `Provider` 调用的 SchemaProvider 端点（#531）：OpenAI 和 OpenRouter 嵌入、OpenAI moderation、Anthropic token 计数、OpenAI 图像、再转写回文本的 OpenAI 语音（语音端点唯一的实时测试）、在请求中引用的 Gemini 文件，以及从提交到取消的 Anthropic 和 OpenAI 批处理；
+  - OpenAI 和 Google 上的 SchemaProvider 实时转写会话：输入由 OpenAI Realtime 会话朗读出的语音，每个会话提交一个包含所说内容的用户轮次；
   - 从全部四个提供方的列表刷新的模型目录、只有刷新后的目录才列出的模型的调用，以及任何目录都未列出但仍会发送的模型；
 - **已知缺口**是该版本线上必须失败的用例（strict xfail）。`tests/live/manifest.json` 列出了它们以及修复它们的 issue。修复合入后，用例开始通过，清单必须随之修改。
 

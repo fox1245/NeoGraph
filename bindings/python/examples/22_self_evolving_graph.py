@@ -50,7 +50,7 @@ class PromptedLLMNode(ng.GraphNode):
         text = ask_text(self._ctx.provider, messages=[
             ng.ChatMessage(role="system", content=self._config["system_prompt"]),
             ng.ChatMessage(role="user", content=self._config["user_template"].format_map(values)),
-        ], temperature=0.4, max_output_tokens=400)
+        ], max_output_tokens=400)
         return [ng.ChannelWrite(self._config["output_channel"], text)]
 
 

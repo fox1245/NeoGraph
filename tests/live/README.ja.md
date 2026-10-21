@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=6609f9bbff22820b3ae714325bbd73fc21c22d31cea6cb45f3e12a35c29b90df -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d070bdadf35ee78dc34c18c461907a2517aa6657ecf3e800a66831be19bb35fc -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,8 +21,8 @@
   - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI の埋め込み、await する OpenRouter の埋め込み、OpenAI の moderation。
 - **C++**（`tests/live_e2e_test.cpp`、ターゲット `neograph_live_e2e_tests`）：
   - Claude 5.5 のサーバーツール、生成画像、Interactions を使うプロバイダーアダプター。
-  - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI と OpenRouter の埋め込み、OpenAI の moderation、Anthropic のトークン数カウント、OpenAI の画像、テキストに書き起こし直す OpenAI の音声、リクエストで参照する Gemini のファイル、投入から取り消しまでの Anthropic と OpenAI のバッチ。
-  - OpenAI と Google での SchemaProvider リアルタイム書き起こしセッション。OpenAI の音声エンドポイントが作った音声を入力し、各セッションが話された言葉を含むユーザーターンを 1 つコミットすることを確かめます。
+  - `Provider` を通した SchemaProvider のエンドポイント（#531）：OpenAI と OpenRouter の埋め込み、OpenAI の moderation、Anthropic のトークン数カウント、OpenAI の画像、テキストに書き起こし直す OpenAI の音声（音声エンドポイントの唯一のライブテスト）、リクエストで参照する Gemini のファイル、投入から取り消しまでの Anthropic と OpenAI のバッチ。
+  - OpenAI と Google での SchemaProvider リアルタイム書き起こしセッション。OpenAI の Realtime セッションが読み上げた音声を入力し、各セッションが話された言葉を含むユーザーターンを 1 つコミットすることを確かめます。
   - 4 つのプロバイダーすべての一覧から更新したモデルカタログ、更新後のカタログにだけあるモデルの呼び出し、どのカタログにもないがそれでも送信されるモデル。
 - **既知のギャップ**は、そのリリースラインで必ず失敗しなければならないケースです（strict xfail）。`tests/live/manifest.json` が、それを直す issue とともに一覧にしています。修正が入るとケースが通り始めるので、マニフェストも合わせて変える必要があります。
 

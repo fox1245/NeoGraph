@@ -69,7 +69,7 @@ TEST(LiveLLMCancelFanout, MultiSendBranchesAbortAtSocketLayer) {
     const auto* key = std::getenv("OPENAI_API_KEY");
     if (!key || !*key) GTEST_SKIP() << "Live-model credential not configured";
     const auto* configured_model = std::getenv("OPENAI_MODEL");
-    const auto model = std::string(configured_model ? configured_model : "gpt-4o-mini");
+    const auto model = std::string(configured_model ? configured_model : "gpt-6-luna");
     const auto* configured_origin = std::getenv("OPENAI_API_BASE");
     const auto origin = std::string(configured_origin ? configured_origin : "https://api.openai.com");
     sp::runtime::Options options; options.api_key = key; options.default_timeout = 20s;

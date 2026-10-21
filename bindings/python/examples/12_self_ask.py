@@ -61,8 +61,7 @@ class DecomposeNode(ng.GraphNode):
         completion = ask_text(self._provider, messages=[
             ng.ChatMessage(role="system", content=SELF_ASK_SYSTEM),
             ng.ChatMessage(role="user", content=prompt),
-        ],
-        temperature=0.0,)
+        ])
         text = completion.strip()
 
         if "Follow up:" in text:
@@ -104,8 +103,7 @@ class AnswerIntermediateNode(ng.GraphNode):
         completion = ask_text(self._provider, messages=[
             ng.ChatMessage(role="system", content=INTERMEDIATE_SYSTEM),
             ng.ChatMessage(role="user", content=follow_up),
-        ],
-        temperature=0.0,)
+        ])
         answer = completion.strip()
 
         scratchpad = input.state.get("scratchpad") or ""

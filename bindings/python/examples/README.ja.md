@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=8ef0a27fc5b648e7e294366dfc190837efd181346df40166952ecff3d34d3803 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ja source_sha256=cdc4300edb845368b427f2b90eb0051e74fae14610f7039ae415a5bf6ed69281 -->
 # Python API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -177,7 +177,7 @@ with example_provider(script) as chosen:
 
 スクリプトは、`turn.last_user_text`、`turn.system_text`、`turn.last_tool_result` を読む関数 `(turn) -> Reply` にもできます。`chosen.scripted.call_count` で、モデル呼び出しが何回あったかを検証できます。規則は `_scripted.py` の docstring にあります。
 
-`--live`、`NG_EXAMPLE_LIVE=1`、`OPENAI_API_BASE`、`NG_PROVIDER_DESCRIPTOR` のいずれかを使うと、代わりに設定済みのエンドポイントが選ばれます。ホスト型のエンドポイントには `OPENAI_API_KEY` が必要で、任意で `OPENAI_MODEL`(既定は `gpt-4.1-mini`)を使います。どちらもプロセスの環境からのみ読みます。`_common.py` は `.env` ファイルを読み込まず、キーがない場合は成功した実行ではなくエラーです。`_common.py` は、closed な OpenAI の Chat または Responses ディスクリプターを admission に通してから `SchemaProvider` を構築します。型付き SDK は libcurl の HTTP を使い、削除済みのプロバイダークラス、completion パラメーター、WebSocket 経路、トランスポートバックエンドの選択子は使えません。`OPENAI_API_BASE` は origin またはゲートウェイのプレフィックスであり、完全な `/v1/chat/completions` 経路ではありません。CA がシステムの信頼ストアにない HTTPS ピアには、`NG_EXAMPLE_CA_FILE` も必要です。代わりに `NG_PROVIDER_DESCRIPTOR` で、admission を通る完全なディスクリプター JSON ファイルを指定することもできます。型付きリクエストと outcome の契約は、[Python バインディングガイド](../../../docs/python-binding.md)を参照してください。
+`--live`、`NG_EXAMPLE_LIVE=1`、`OPENAI_API_BASE`、`NG_PROVIDER_DESCRIPTOR` のいずれかを使うと、代わりに設定済みのエンドポイントが選ばれます。ホスト型のエンドポイントには `OPENAI_API_KEY` が必要で、任意で `OPENAI_MODEL`(既定は `gpt-6-luna`)を使います。どちらもプロセスの環境からのみ読みます。`_common.py` は `.env` ファイルを読み込まず、キーがない場合は成功した実行ではなくエラーです。`_common.py` は、closed な OpenAI の Chat または Responses ディスクリプターを admission に通してから `SchemaProvider` を構築します。型付き SDK は libcurl の HTTP を使い、削除済みのプロバイダークラス、completion パラメーター、WebSocket 経路、トランスポートバックエンドの選択子は使えません。`OPENAI_API_BASE` は origin またはゲートウェイのプレフィックスであり、完全な `/v1/chat/completions` 経路ではありません。CA がシステムの信頼ストアにない HTTPS ピアには、`NG_EXAMPLE_CA_FILE` も必要です。代わりに `NG_PROVIDER_DESCRIPTOR` で、admission を通る完全なディスクリプター JSON ファイルを指定することもできます。型付きリクエストと outcome の契約は、[Python バインディングガイド](../../../docs/python-binding.md)を参照してください。
 
 ## 状態とスケジューリング
 

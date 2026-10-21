@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=a2f70c5c7ae7b15b71b3100c33a0d19f06e4d43608c08fed14ead30ef4ddf60b -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=5572793b5a713e0ea4a2a80ec87febf5661aa42b3ad5fce426f865f427997cd7 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -116,7 +116,7 @@ reasoning.effort = "low"
 reasoning.enabled = True
 controls.chat.reasoning = reasoning
 controls.chat.usage_include = True
-controls.chat.models = ["openai/gpt-4.1", "openai/gpt-4.1-mini"]
+controls.chat.models = ["openai/gpt-6-luna", "openai/gpt-5.6-luna"]
 routing = ng.OpenRouterRouting()
 price = ng.OpenRouterMaxPrice()
 price.prompt_nano_usd = 75_000_000       # 0.075 USD per million prompt tokens
