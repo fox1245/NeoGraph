@@ -47,6 +47,15 @@ Modes:
   (default)   live: sends the requests with the key named by the preset's
               environment variable and reports the usage the provider returned.
 
+  --prefix-ladder LEVELS
+              live only, instead of the scenarios: where does the provider's cache stop? For each
+              level (a number of shared turns) four requests share the fixed block and that many
+              turns of history and differ in the block after it: X, Y, Z and X again. A request
+              that reads up to the end of the shared history shows a cache that follows the longest
+              shared prefix; one that reads only the fixed block shows a cache that keeps nothing
+              between the fixed block and the end of a request. A calibration request with another
+              fixed block gives the size of the fixed block and its token count.
+
 The key is read from the environment and is never printed or written.
 """
 
@@ -618,6 +627,86 @@ def render_summary(results, offline):
     return "\n".join(lines)
 
 
+LADDER_VARIANTS = (("X", 7), ("Y", 23), ("Z", 41), ("X again", 7))
+
+
+def ladder_history(conversation, turns):
+    """The RAW history that the requests of one ladder level share: `turns` questions, a reply between each two."""
+    args = conversation.args
+    for turn in range(1, turns + 1):
+        conversation.history.append(ng.ProviderRole.User, [ng.Text(user_text(turn, args.bible_entries, args.seed))],
+                                    ng.RuntimeTrustClass.UntrustedInput)
+        if turn < turns:
+            conversation.history.append(ng.ProviderRole.Assistant, [ng.Text(scripted_reply(turn))],
+                                        ng.RuntimeTrustClass.ModelOutput)
+
+
+def ladder_worst_case_usd(args, rates, levels):
+    if not rates:
+        return None
+    input_rate = max(rates.get(key) or 0 for key in ("input", "cache_write"))
+    output = min(args.max_output_tokens, OUTPUT_TOKENS_ESTIMATE) if args.max_output_tokens else OUTPUT_TOKENS_ESTIMATE
+    base = args.bible_entries * TOKENS_PER_ENTRY + args.dynamic_lines * TOKENS_PER_LINE
+    calls = [(base - args.dynamic_lines * TOKENS_PER_LINE, 1)]
+    calls += [(base + HISTORY_TOKENS_PER_TURN * level, len(LADDER_VARIANTS)) for level in levels]
+    return sum(count * (tokens * input_rate + output * (rates.get("output") or 0)) / 1e6 for tokens, count in calls)
+
+
+def run_prefix_ladder(args, provider, budget, rates):
+    """Live requests that show where the provider's cache stops; returns one row per request."""
+    rows = []
+
+    def send(conversation, label, level, turn):
+        row, _ = conversation.provider_call(turn, [])
+        row.update(level=level, request=label)
+        cost = row.get("provider_cost_usd")
+        if cost is None:
+            cost = call_cost(rates, row)
+        if cost is not None:
+            row["cost_usd"] = cost
+            budget["spent"] += cost
+        rows.append(row)
+        if args.pause_ms:
+            time.sleep(args.pause_ms / 1000)
+        return "error" not in row and not (budget["limit"] is not None and budget["spent"] > budget["limit"])
+
+    # Another session marker puts different bytes at the start, so nothing of it can be read by the levels.
+    calibration = Conversation(args, provider, "none")
+    ladder_history(calibration, 1)
+    if not send(calibration, "calibration", 0, 0):
+        return rows
+    for level in args.prefix_ladder:
+        conversation = Conversation(args, provider, "after-history")
+        ladder_history(conversation, level)
+        for label, turn in LADDER_VARIANTS:
+            if not send(conversation, label, level, turn):
+                return rows
+    return rows
+
+
+def render_ladder(rows):
+    calibration = rows[0].get("input_total") if rows else None
+    levels = [row["level"] for row in rows if row["level"]]
+    first = next((row for row in rows if row["request"] == "X" and levels and row["level"] == min(levels)), None)
+    lines = ["### Prefix ladder", "",
+             "| shared turns | request | input | cache read | cache write | read / input "
+             "| history tokens beyond the first level | read - calibration input |",
+             "|---:|:---|---:|---:|---:|---:|---:|---:|"]
+    for row in rows:
+        total, read = row.get("input_total"), row.get("cache_read")
+        ratio = None if not total or read is None else read / total
+        beyond = "-"
+        if first is not None and row["request"] == "X" and total is not None and first.get("input_total") is not None:
+            beyond = str(total - first["input_total"])
+        versus = "-" if calibration is None or not read or row["level"] == 0 else str(read - calibration)
+        shown = lambda key: "-" if row.get(key) is None else str(row[key])  # noqa: E731
+        lines.append(f"| {row['level']} | {row['request']} | {shown('input_total')} | {shown('cache_read')} | "
+                     f"{shown('cache_write')} | {percent(ratio)} | {beyond} | {versus} |")
+        if "error" in row:
+            lines.append(f"|  | error: {row['error']} | | | | | | |")
+    return "\n".join(lines)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--preset", choices=sorted(ROUTES), required=True)
@@ -634,6 +723,10 @@ def main(argv=None):
                         help=f"lines of the per-turn dynamic block; about {TOKENS_PER_LINE} tokens each")
     parser.add_argument("--tool-rounds", type=int, default=0,
                         help="offline only: tool call and result pairs inside every turn")
+    parser.add_argument("--prefix-ladder", type=lambda text: [int(item) for item in text.split(",") if item],
+                        metavar="LEVELS", help="live only, instead of the scenarios: for each level (a number of "
+                        "shared turns, for example 1,2,4) send four requests that share the fixed block and that "
+                        "much history and differ after it, to see where the provider's cache stops")
     parser.add_argument("--max-output-tokens", type=int, default=120)
     parser.add_argument("--control", action="append", default=[], metavar="NAME=VALUE",
                         help="a ProviderControls field, dotted for a family nest; the value is read as JSON "
@@ -655,6 +748,8 @@ def main(argv=None):
     parser.add_argument("--out", help="write the per-call records as JSON")
     args = parser.parse_args(argv)
 
+    if args.prefix_ladder is not None:
+        return main_prefix_ladder(args)
     scenarios = [name for name in args.scenarios.split(",") if name]
     try:
         compacting = [split_scenario(name)[1] for name in scenarios]
@@ -698,6 +793,30 @@ def main(argv=None):
                 "estimated_spend_usd": budget["spent"]}
         with open(args.out, "w", encoding="utf-8") as handle:
             json.dump({"meta": meta, "scenarios": results}, handle, indent=1)
+
+
+def main_prefix_ladder(args):
+    if args.offline or args.session or not args.prefix_ladder or min(args.prefix_ladder) < 1:
+        sys.exit("--prefix-ladder is a live mode: no --offline, no --session (every level needs its own fixed "
+                 "block), and levels of 1 or more shared turns")
+    rates = rates_for(args)
+    if not rates:
+        sys.exit("a live run needs --rates, so that it can bound and report its spend")
+    worst = ladder_worst_case_usd(args, rates, args.prefix_ladder)
+    print("rates (USD per million tokens):", rates)
+    print(f"worst-case spend if nothing is cached: ${worst:.4f}")
+    if args.budget_usd is not None and worst > args.budget_usd:
+        sys.exit(f"the worst case is not within --budget-usd {args.budget_usd}")
+    provider = build_provider(args)
+    budget = {"spent": 0.0, "limit": args.budget_usd}
+    rows = run_prefix_ladder(args, provider, budget, rates)
+    print(render_ladder(rows))
+    print(f"\nestimated spend: ${budget['spent']:.4f}")
+    if args.out:
+        meta = {"preset": args.preset, "model": args.model, "prefix_ladder": args.prefix_ladder,
+                "controls": args.control, "rates": rates, "estimated_spend_usd": budget["spent"]}
+        with open(args.out, "w", encoding="utf-8") as handle:
+            json.dump({"meta": meta, "rows": rows}, handle, indent=1)
 
 
 if __name__ == "__main__":
