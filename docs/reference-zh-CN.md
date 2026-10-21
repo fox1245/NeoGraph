@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=4081cf5418e571d682d10da73c75deb1ad8a9a178c138cb7df85e39389695d06 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=0215ed560e6878fb8d2d75ba76f4c2cd5999447782398dfa318156600b6c1292 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -514,7 +514,7 @@ Program 运行的 `monetary_microunits` 预算按 micro-USD 计数（1 microunit
 | `estimated` | 没有报告费用的最终且一致的 usage。 | `sp::pricing::estimate` 按计价 hold 时所用的目录快照计算，再加上按使用上限预留的服务器工具费用，每次调用向上取整一次。Messages 的 1 小时缓存写入和 Gemini 的图像 token 按各自的费率计费，OpenRouter 调用按 route ceiling 计费。记录写明 `sp-model-catalogue/1`、目录 digest 以及用于计价的行。 |
 | `held` | 结果未知（transport 异常、取消、超时）、调用失败时可能已有工作开始（HTTP 408、425、429 或 5xx 响应、被切断的流、请求发出后的 transport 失败）、SDK 重发了 transport 尝试，或 usage 不完整或不一致。 | hold。 |
 
-证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用（当报告的费用包含固定上限不限制的部分时可能出现，例如 BYOK 的 upstream 费用）按报告收费，费用超出预算的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
+证明 provider 什么也没有接受的失败会释放 hold 且不留记录：请求没有发出，或者 provider 以已完成的 HTTP 4xx 响应（408、425、429 除外）拒绝了请求。金额 hold 和模型 token 预留都不会收费。超过 hold 的费用按报告收费，费用超出预算的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。报告的费用包含固定上限不限制的部分（例如 BYOK 的 upstream 费用）时，以及 upstream 返回的输出多于请求的输出 cap 时，都会出现这种情况（见下面关于输出 cap 的段落）。并发调用（`ng.all`、`ng.race`、`ng.quorum`、并行节点）在同一个账户上预留，放不下的成员会被拒绝。节点重试在自己的 effect namespace（`task#a<k>`）下调用，因此每次尝试的调用都是新调用，会再次收费。
 
 `bind_priced` 把调用的记录写入其 journal 行：随 dispatched marker 写入 held 记录，随结果写入结算后的记录。同一 Program attempt 在进程停止前记录的调用，会在恢复后的 attempt 绑定该 operation 时收费一次并标记为 `replayed`，无论 Core 是否再次调用它；这也包括通过 execution lease 过期而恢复的仅 define() 运行。较早 attempt 记录的调用已由该 attempt 的结果结算进剩余预算，后续 attempt 重放其结果时不会再次收费。recorded replay 从不花钱。
 
@@ -535,6 +535,11 @@ fork 会在 source 的同一位置查找记录，并接管内容相同的记录�
 fork 会打开自己的会话并发送自己的分块，因为 source 打开的会话由只有 source 运行中的调用持有的 URL 指称；source 中答案未知的打开会话调用也会被重新发送。 `reconcile_success()` 会拒绝打开会话的调用（行中带标记，`Record::opens_upload_session`）的两类记录：一类是已被重新发送的记录，因为恢复会自行重新发送或拒绝上传；另一类是其 completion 的会话既没有上传 id 也没有 URL 的记录，因为 journal 不保存 URL，下一次恢复会重放一个无法继续的会话。带有 URL 的 completion（`Completion::secret`）会被接受，但 URL 不会被保存；该行随后记下它的答案缺少 URL，下一次恢复会重新开始上传。在标记出现之前写入的行没有这种处理：0.16.0 记录的会话打开调用仍像以前一样不带 URL 重放。
 
 在 OpenRouter origin 上，broker 会在把请求准备为待发送之前，将 route ceiling 固定到请求上。OpenRouter 的 `provider.max_price` 以每百万 token 的精确十进制 USD 写入条目的 `ceiling_input` 作为 `prompt`、`ceiling_output` 作为 `completion`；对于每百万 token 0.44 USD 和 1.32 USD 的 ceiling，请求体带有 `"provider":{"max_price":{"prompt":0.44,"completion":1.32}}`。有回退时，固定值是最贵候选的 ceiling，逐字段取值。OpenRouter 只会路由到标价不高于这些价格的 endpoint，没有时请求失败，因此预留限定了 endpoint 的 token 价格。宿主已通过 `ProviderControls::provider` 或 `SchemaProvider::Defaults::provider` 发送的 `max_price`（请求自身的值取代默认值）在更低的字段上保留，broker 不固定的金额（`image`、`audio`、`request`）保持宿主的值。被固定的是 Chat Completions、Responses 和 Messages 请求；其他 origin 不会带 `max_price`。计价使用把对话替换为一条用户消息的请求 probe，probe 不会发送。请求以固定后的形式只准备一次，因此 provider journal 记录的是实际发送请求的 digest，重放与之一致。在固定值下捕获了 native history 的后续轮次也带同样的固定值。如果 SDK policy 不允许在该 base URL 上使用 OpenRouter routing，或费率超过 `max_price` 允许的 2^53 nanoUSD，导致 route ceiling 无法固定，调用会以 `P_MONEY_NO_UPPER_BOUND` 被拒绝。
+
+**hold 假定 upstream 会遵守输出 cap（#428）。** 固定值限制的是处理调用的 endpoint 每个 token 的价格，而不是它返回多少 token。hold 的输出部分是请求的输出 cap（例如 Chat Completions 请求的 `max_tokens`）按最贵的输出费率计算的金额，所以只有在 cap 处停下的 upstream，hold 才是上界。NeoGraph 会发送 cap，但无法在调用之前或调用期间确认 upstream 是否应用了它，也没有遵守 cap 的 upstream 清单。忽略 cap 的 upstream 可能返回比 hold 所预留的更多的输出。调用按响应报告的内容结算：`reported` 证据按报告的费用，`estimated` 证据按报告的 usage 计算出的目录估算值。两者都不受 hold 限制，因此记录的 `microunits` 可能高于其 `reserved_microunits`。`held` 的调用按 hold 收费，运行看不到 upstream 在此之外多收的部分。超出的部分会计入运行，本身不是错误：之后的调用剩余的预算相应减少，费用超出 `monetary_microunits` 的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。在预算之内运行继续，该调用留下的标记只有它的记录。NeoGraph 不会为超出单独发出事件，也没有在出现一次超出后拒绝某条 route 的设置。依赖 cap 的宿主可以：
+- 限定 route。在已有的 routing（`ProviderControls::provider`、`SchemaProvider::Defaults::provider`，Python 中为 `ng.OpenRouterRouting`）里，把信任的 upstream provider 写入 `only` 或 `order`，或用 `ignore` 排除某个。SDK 会把这些字段写入请求的 `provider` 对象，broker 在宿主的 routing 上加入 `max_price`，其他字段保持原样。哪些 upstream 遵守 cap 是宿主掌握的信息，而不是 NeoGraph 的。
+- 调用之后结算。每次运行后读取 `result.monetary_records`，逐个调用比较 `microunits` 与 `reserved_microunits`。记录给出调用、节点和模型，不给出处理该调用的 upstream，所以要找出超出的 upstream，需要一次只允许一个 upstream 的 route。
+- 留出余量。`monetary_microunits` 限制的是 NeoGraph 预留和记录的金额。面对可能忽略 cap 的 upstream，它不是 provider 实际计费的上限，所以授予的额度要低于宿主能承受的损失。
 
 价格是宿主提供的数据。内置的 SchemaProvider 目录不列出任何价格，所以在宿主给 provider 一个其目录为该模型计价的策略之前，有预算的运行会拒绝每一个被计价的调用。在 C++ 中使用 `sp::descriptor::load_policy(family, resources, catalogue)` 或 `DescriptorPolicy::with_catalogue`，宿主的层由 `sp::descriptor::merge_catalogues` 合并。在 Python 中，`load_provider_policy(family_json, resource_json, model_catalogue_json)` 把给定的目录叠加在内置目录之上。条目的 `pricing` 把单位映射到每单位的十进制 USD（SchemaProvider 的 USAGE，"Pricing by the catalogue"）：
 - `input`、`output`、`cache_read`、`cache_write`、`cache_write_1h`、`reasoning`、`output_image` 和 `request`。

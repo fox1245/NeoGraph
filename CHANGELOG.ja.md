@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e0eabb1944621fb740e1a4632719a9d9d97e384523993dc5a1d1e9adda39e4f6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=cf677c7dc90b5912d96293a6b20c0260438ca7aaab9c22362fa940e6c181aabb -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -55,7 +55,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK は libcurl とスレッドなしで Emscripten と WASI 向けにビルドできます（`SP_BUILD_TRANSPORT`、`SP_THREADS`）。これらのホストでも `sp::crypto::random_bytes` が動作し、ターゲットの `std::size_t` を超える admission の上限は切り詰められます。NeoGraph 自身の WebAssembly ビルドは #535 で続きます。
   - **ホスト seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` が公開されました。`Executor`（`host_pumped()` つき）、`HostTransport`、そして libcurl もスレッドも使わずに `sp_runtime` が定義する `Client(descriptor, options, executor, transport)` です。動作できないブロッキング呼び出し（`Client::complete`、`Operation::join`、realtime セッションの `next_event`）は、待たずにすぐ `Misuse` の失敗（`runtime.blocking.host_pumped` または `runtime.blocking.in_thread`）を返します。in-thread の拒否には、以前は理由がありませんでした。`SP_BUILD_JS_HOST` は Emscripten 向けに `fetch` ベースの参照ホストをビルドします。NeoGraph は WebAssembly モジュールでこの seam を使います（「追加」を参照）。
 - **公開テキストのガードがドキュメントも検査します。** `scripts/check_public_text.py` とその ctest エントリ `public_text_guard` が Markdown、`docs/`、README、CHANGELOG のファイルを検査し（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` オプションは削除されました）、新しい 2 つのルールが内部の決定とその過程を述べる文言を検出します。
-
+- **ドキュメント: 金額の hold は upstream が出力 cap を守ることを前提とします (#428)。** 変更はドキュメントだけで、動作は変わりません。hold は呼び出しの出力 cap を最も高い出力レートで見積もり、`provider.max_price` は endpoint の価格を抑えますが、endpoint が返すトークン数は抑えません。cap を無視する upstream（たとえば `max_tokens` を無視する OpenRouter の upstream）は、hold が見込んだよりも多い出力を返すことがあります。その呼び出しは応答が報告した額で請求され、その額は `reserved_microunits` を上回ることがあります。超過分はそれ自体エラーではなく、請求額が `monetary_microunits` を超えた実行は `P_MONEY_BUDGET` とともに `BudgetExhausted` で終わります。リファレンス（[価格の証拠とモデルカタログ](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program ガイド、トラブルシューティングの表がこれを説明し、ホストにできることを挙げています。`only`、`order`、`ignore` で route を絞ること、実行のたびに `result.monetary_records` で `microunits` と `reserved_microunits` を比べること、失ってもよい額より少なく付与することです。NeoGraph には超過のイベントも、超過があった route を拒否するオプションもありません。
 
 ### 修正
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=000755d33741ace41037f6b7bf5f292a198ed3d37603aba0ae7f5caf4d38b641 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=48a11c5c625c9a37fce603f834ab9196fdc4306e3eff38e29d7e1d2d38f5437c -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -109,7 +109,7 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 列出的某个上限字段为零 | 改成正数，即使 Program 从不调用模型 |
 | `ng.ProgramAdmissionError` 中的 `P_ADMIT_PROVIDER` | 某个 `llm_call` 节点需要的 provider 没有在宿主中绑定，或者 `llm_call`、`intent_classifier` 节点注册时没带 `provider=` | 注册 `add_provider(...)` 和 `add_registered_node("llm_call", ..., provider=...)`，并给 `LocalProgramHost` 传入 `node_context=` 和 `binding_label=` |
 | `P_MONEY_BUDGET`（`BudgetExhausted`），或其他 `P_MONEY_*` 错误码（`Failed`），且 provider 没有收到任何请求 | 该次调用的预留额度超出了 `monetary_microunits`（0 表示什么都不授予），或者调用无法确定上限：provider 策略的目录没有该模型的价格、路由别名没有路由上限、没有输出上限、不知道输入上限、service tier 或服务器工具没有价格，或者工具没有使用上限 | 调高 `monetary_microunits`，设置 `provider_controls.max_output_tokens`，或者在 provider 策略的目录层中为该模型定价；参见[计价证据与模型目录](reference-en.md#pricing-evidence-and-the-model-catalogue) |
-| 出现 `P_MONEY_BUDGET`（`BudgetExhausted`），且 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by` | provider 收到了请求，其响应报告的费用高于预留额，使运行的收费超出了 `monetary_microunits` | 调高 `monetary_microunits`，或降低调用的费用 |
+| 出现 `P_MONEY_BUDGET`（`BudgetExhausted`），且 `failure.witness["monetary"]` 含有 `granted`、`used` 和 `over_by` | provider 收到了请求，其响应报告的费用高于预留额（例如 upstream 返回的输出多于请求的输出 cap），使运行的收费超出了 `monetary_microunits` | 调高 `monetary_microunits`，降低调用的费用，或只把调用路由到遵守输出 cap 的 upstream（provider routing 中的 `only` 或 `order`）。`result.monetary_records` 中 `microunits` 高于 `reserved_microunits` 的记录就是该调用 |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
 | `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e0eabb1944621fb740e1a4632719a9d9d97e384523993dc5a1d1e9adda39e4f6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=cf677c7dc90b5912d96293a6b20c0260438ca7aaab9c22362fa940e6c181aabb -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -55,7 +55,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK 可以不依赖 libcurl 和线程，为 Emscripten 和 WASI 构建（`SP_BUILD_TRANSPORT`、`SP_THREADS`）；`sp::crypto::random_bytes` 在这些宿主上可用，超出目标 `std::size_t` 的 admission 上限会被截断。NeoGraph 自身的 WebAssembly 构建将在 #535 中继续。
   - **宿主 seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` 现已公开：`Executor`（带 `host_pumped()`）、`HostTransport`，以及由 `sp_runtime` 定义、不依赖 libcurl 和线程的 `Client(descriptor, options, executor, transport)`。无法工作的阻塞调用（`Client::complete`、`Operation::join`、realtime 会话的 `next_event`）现在不再等待，而是立即返回 `Misuse` 失败（`runtime.blocking.host_pumped` 或 `runtime.blocking.in_thread`）；此前线程内的拒绝没有原因。`SP_BUILD_JS_HOST` 为 Emscripten 构建基于 `fetch` 的参考宿主。NeoGraph 在其 WebAssembly 模块中使用这个 seam（见“已添加”）。
 - **公开文本检查器现在也检查文档。** `scripts/check_public_text.py` 及其 ctest 条目 `public_text_guard` 会扫描 Markdown、`docs/`、README 和 CHANGELOG 文件（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 选项已移除），并新增两条规则，标记叙述内部决定及其过程的措辞。
-
+- **文档：金额 hold 假定 upstream 会遵守输出 cap (#428)。** 只改了文档，行为没有变化。hold 按最贵的输出费率计算调用的输出 cap，`provider.max_price` 限制的是 endpoint 的价格，而不是它返回多少 token。忽略 cap 的 upstream（例如忽略 `max_tokens` 的 OpenRouter upstream）可能返回比 hold 所预留的更多的输出。该调用按响应报告的金额收费，这个金额可能高于它的 `reserved_microunits`。超出的部分本身不是错误，费用超出 `monetary_microunits` 的运行以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南和故障排查表现在都写明了这一点，并列出宿主可以做的事：用 `only`、`order` 和 `ignore` 限定 route，每次运行后在 `result.monetary_records` 中比较 `microunits` 与 `reserved_microunits`，并且授予的额度低于自己能承受的损失。NeoGraph 没有针对超出的事件，也没有在出现一次超出后拒绝某条 route 的选项。
 
 ### 修复
 
