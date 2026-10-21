@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=51b508679964df1fb2ef42232399a26a5a4d63fbb6eef4c7d0ab0ac7fd3343a6 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -51,6 +51,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Python バインディングが `ContextPlacement.AfterHistory` と `ContextPlacement.BeforeHistory` を公開します (#329)。** この enum は `BeforeLatestUser` と `AfterLatestUser` しかバインドしておらず、C++ のアセンブラは 4 つの配置をすべて並べるにもかかわらず、Python ホストは履歴の前や後ろに置くコンテキストアーティファクトを作れませんでした。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` は配置ごとに 1 つのアーティファクトをコントローラ経由で組み立て、プロバイダーが受け取る順序を確認します。
 - **`HostLoop` が、ホストが Asio より先に到達したタイマーを失わなくなりました (#535)。** 記録された期限の後にポーリングして準備のできたハンドラーがなかったターンは、その時点で期限の来た Asio のタイマーをすべてディスパッチ済みと見なして期限を捨てていました。これを決めるのは Asio で、ホストのタイマーが先に動くことがあります。Asio の Windows 用リアクターはタイマーが満了したことを専用のスレッドから知らされるため、期限に合わせたポーリングはタイマーがまだディスパッチされていない状態に出会うことがあり、ホストの時計は Asio の時計より進んでいることもあります。そのターンは期限を捨て、待機が残ったままループをアイドルにしたため、リトライのバックオフなど `HostTimer` を待つ実行が終わりませんでした。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` と `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` が CI の Windows ジョブで断続的に失敗していました。
   - **期限は Asio がそのタイマーをディスパッチするまで記録されたままです。** ループは最も早い期限に自分のタイマーで待ち、Asio がそれをディスパッチした時点で、そこまでの期限を捨てます。それより前に動いたターンは 1 ms 後にもう一度確認します。記録した時点ですでにホストの時計で期限が過ぎていた期限も同じように保持されます。以前は捨てられていました。
   - API は変わりません。タイマーが時刻どおりに発火するホストでは、ループはこれまでと同じに動きます。回帰テストは手動 executor の時計を Asio の時計より進ませ、以前のエンジンでは Linux でも失敗し、今は通ります。

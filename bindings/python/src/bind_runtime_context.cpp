@@ -75,7 +75,9 @@ void init_runtime_context(py::module_& m) {
         .value("HardConstraint", ContextArtifactKind::HardConstraint);
     py::enum_<ContextPlacement>(m, "ContextPlacement")
         .value("BeforeLatestUser", ContextPlacement::BeforeLatestUser)
-        .value("AfterLatestUser", ContextPlacement::AfterLatestUser);
+        .value("AfterLatestUser", ContextPlacement::AfterLatestUser)
+        .value("AfterHistory", ContextPlacement::AfterHistory)
+        .value("BeforeHistory", ContextPlacement::BeforeHistory);
     py::enum_<RuntimeGuaranteeProfile>(m, "RuntimeGuaranteeProfile")
         .value("Legacy", RuntimeGuaranteeProfile::Legacy)
         .value("Recorded", RuntimeGuaranteeProfile::Recorded)

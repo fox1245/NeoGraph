@@ -138,6 +138,63 @@ def test_controlled_path_assembles_epoch_and_keeps_dependencies_alive(provider_p
     assert len(receipts.outcomes) == 1
 
 
+def test_every_context_placement_is_bound_and_assembles_in_its_documented_place(provider_peer):
+    provider = provider_peer.provider()
+    contexts = ng.InMemoryContextStore()
+    feed = ng.ContextStoreFeed("owner", "feed")
+    previous = None
+    for sequence, (role, trust, text) in enumerate([
+            (ng.ProviderRole.User, ng.RuntimeTrustClass.UntrustedInput, "u1"),
+            (ng.ProviderRole.Assistant, ng.RuntimeTrustClass.ModelOutput, "a1"),
+            (ng.ProviderRole.User, ng.RuntimeTrustClass.UntrustedInput, "u2"),
+            (ng.ProviderRole.Assistant, ng.RuntimeTrustClass.ModelOutput, "a2")], start=1):
+        data = ng.RuntimeHistoryRecordData()
+        data.feed_id = "feed"
+        data.sequence = sequence
+        data.message_id = f"message-{sequence}"
+        data.trust = trust
+        data.message = ng.ProviderMessage(role, [ng.Text(text)])
+        data.predecessor_id = previous
+        record = ng.RuntimeHistoryRecord.create(data)
+        assert contexts.append_history(feed, record, previous) == ng.ContextStoreAppendResult.Appended
+        previous = record.id
+
+    artifact_ids = []
+    for placement, text in [(ng.ContextPlacement.AfterHistory, "after-history"),
+                            (ng.ContextPlacement.BeforeHistory, "before-history"),
+                            (ng.ContextPlacement.AfterLatestUser, "after-user"),
+                            (ng.ContextPlacement.BeforeLatestUser, "before-user")]:
+        data = ng.ContextArtifactData()
+        data.kind = ng.ContextArtifactKind.DerivedContext
+        data.producer_id = "python-placement"
+        data.source_digest = _sha("7")
+        data.media_type = "text/plain"
+        data.placement = placement
+        data.content = text
+        artifact = ng.ContextArtifact.create(data)
+        assert artifact.placement == placement
+        assert contexts.put_artifact("owner", artifact) == ng.ContextArtifactPutResult.Stored
+        artifact_ids.append(artifact.id)
+
+    epoch_data = ng.ContextEpochData()
+    epoch_data.run_id = "placement-run"
+    epoch_data.sequence = 1
+    epoch_data.feed_id = "feed"
+    epoch_data.raw_from_sequence = 1
+    epoch_data.raw_through_sequence = 4
+    epoch_data.raw_window_digest = contexts.snapshot_history(feed, 1, 4).digest
+    epoch_data.artifact_ids = artifact_ids
+    controller = ng.RuntimeInterpositionController(
+        provider, contexts, ng.InMemoryProviderDispatchReceiptStore(), _sha("9"))
+    controller.activate("owner", ng.ContextEpoch.create(epoch_data))
+
+    assert controller.invoke(ng.make_provider_request(provider, "model", [])).failure is None
+    logical, = provider_peer.logical_requests
+    assert [(message["role"], message["text"]) for message in logical] == [
+        ("user", "before-history"), ("user", "u1"), ("assistant", "a1"), ("user", "before-user"),
+        ("user", "u2"), ("user", "after-user"), ("assistant", "a2"), ("user", "after-history")]
+
+
 def test_controller_retains_shared_provider_and_store_dependencies(provider_peer):
     provider = provider_peer.provider()
     contexts = ng.InMemoryContextStore()

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=51b508679964df1fb2ef42232399a26a5a4d63fbb6eef4c7d0ab0ac7fd3343a6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -51,6 +51,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Python 绑定公开 `ContextPlacement.AfterHistory` 和 `ContextPlacement.BeforeHistory` (#329)。** 该枚举只绑定了 `BeforeLatestUser` 和 `AfterLatestUser`，因此尽管 C++ 组装器会排列全部四种位置，Python 宿主仍无法创建放在历史之前或之后的上下文制品。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` 为每种位置通过控制器组装一个制品，并检查提供方收到的顺序。
 - **`HostLoop` 不再丢失宿主先于 Asio 到达的定时器 (#535)。** 在已记录的截止时间之后轮询、却没有就绪处理程序的回合，会假定 Asio 已分发了到那时为止所有到期的定时器，并丢弃该截止时间。但这由 Asio 决定，宿主的定时器可能先运行：Asio 的 Windows reactor 由自己的线程得知定时器已到期，所以在截止时间上做的轮询可能发现定时器尚未分发，宿主的时钟也可能比 Asio 的时钟快。该回合丢弃了截止时间，使循环在等待仍未结束时进入空闲，于是等待重试退避或其他 `HostTimer` 的运行永远不会结束。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` 和 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` 曾在 CI 的 Windows 作业中间歇性失败。
   - **截止时间在 Asio 分发其定时器之前一直保持已记录。** 循环用自己的定时器在最早的截止时间上等待，Asio 分发它时，丢弃到该时间为止的截止时间。在此之前运行的回合会在 1 毫秒后再次查看。记录时在宿主时钟上已经到期的截止时间也同样保留，而以前会被丢弃。
   - API 没有变化。在定时器按时触发的宿主上，循环的行为与以前相同。回归测试让手动 executor 的时钟比 Asio 的快；它们在以前的引擎上于 Linux 即失败，现在通过。
