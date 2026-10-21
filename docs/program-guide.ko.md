@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=468e8ab98a982a856722c1e7779f8761e1af6e7e7ee0ff23055886e95a001a29 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=f80bdd8fa9a5f5678567d140bdd6773420157fd6283ab66c794191c2752b0a87 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -363,6 +363,8 @@ python restart.py state resume run-...
 | `max_core_steps` | `BudgetExhausted` | `P_CORE_STEP_BUDGET` | `core_steps` |
 
 예산이 실행을 도중에 멈췄든 실행이 예산을 넘긴 채 끝났든 기록은 같습니다. 사용량은 plan이 끝난 뒤에 정산되므로 plan이 허용량을 넘겨 끝날 수 있습니다. 응답의 비용이 그 호출에 예약한 금액보다 클 수 있고, 취소를 무시하는 노드가 마감 뒤에 반환할 수 있으며, 서브그래프 노드의 스텝은 그 노드를 담은 그래프를 멈추지 않으면서 실행의 Core 스텝에 더해집니다. 실행이 예산 여러 개를 넘기면 witness에 각각의 항목이 들어가고, status와 코드는 표에서 가장 앞에 있는 예산(예산 필드의 순서)을 따릅니다. 마감은 다른 사용량과 상관없이 실행을 `TimedOut`으로 끝내므로 wall time이 맨 앞에 있습니다. 가격이 매겨지는 호출이 전송 전에 거부되면 거부의 증거가 `monetary` 아래에 남습니다. 예약액, `ceiling`, `used`입니다.
+
+가격이 매겨지는 호출의 예약액은 호출의 출력 cap을 가장 비싼 출력 요율로 계산한 값이며, 모델의 upstream이 cap에서 멈출 때만 지출의 상한이 됩니다. NeoGraph는 cap을 보내지만 upstream이 그것을 적용하는지 확인할 수 없으므로, cap을 무시하는 upstream의 응답은 예약액보다 비쌀 수 있습니다. 그 호출은 응답이 보고한 금액으로 청구되고, 실행에 남은 `monetary_microunits`는 그만큼 줄며, 청구액이 허용량을 넘긴 실행은 위와 같이 `P_MONEY_BUDGET`과 함께 `BudgetExhausted`로 끝납니다. 허용량 안에서는 실행이 계속되고, 초과의 유일한 표시는 `result.monetary_records`에 있는 그 호출의 기록이며 거기서 `microunits`가 `reserved_microunits`보다 큽니다. cap에 의존하는 호스트는 OpenRouter 호출을 cap을 지킨다고 아는 upstream으로만 보내고(provider routing의 `only`나 `order`), 실행마다 기록을 읽고, 잃어도 감당할 수 있는 금액보다 적게 부여할 수 있습니다. 자세한 내용은 [가격 증거와 모델 카탈로그](reference-en.md#pricing-evidence-and-the-model-catalogue)의 출력 cap 단락에 있습니다.
 
 ## 동작을 검증하는 테스트
 
