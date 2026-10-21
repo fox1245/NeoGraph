@@ -1,9 +1,9 @@
 #include <neograph/tool_execution.h>
 
 #include <neograph/graph/cancel.h>
-#include <neograph/async/host_loop.h>
 #include <neograph/tool.h>
 
+#include "host_timer.h"
 #include "pipe_write.h"
 #include "text_safety.h"
 #include "tool_failure.h"
@@ -15,7 +15,6 @@
 #include <asio/error.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
@@ -944,7 +943,7 @@ asio::awaitable<ResourceLease> ResourceArbiter::acquire_async(
 
     PendingGuard pending{impl_, std::move(registration.waiter)};
     const auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer poll(executor);
+    async::HostTimer poll(executor);
     const auto deadline = std::chrono::steady_clock::now() + queue_timeout;
 
     for (;;) {
@@ -968,10 +967,9 @@ asio::awaitable<ResourceLease> ResourceArbiter::acquire_async(
 
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) throw asio::system_error(asio::error::timed_out);
-        poll.expires_after(std::min(std::chrono::milliseconds{1},
-                                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        deadline - now)));
-        async::note_deadline(executor, poll.expiry());
+        poll.arm_after(std::min(std::chrono::milliseconds{1},
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    deadline - now)));
         asio::error_code wait_error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
         if (wait_error && wait_error != asio::error::operation_aborted) {
@@ -1107,7 +1105,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
 
             if (!singleflight_leader) {
                 const auto executor = co_await asio::this_coro::executor;
-                asio::steady_timer poll(executor);
+                async::HostTimer poll(executor);
                 auto deadline =
                     std::chrono::steady_clock::now() + policy.queue_timeout;
                 if (context.deadline) deadline = std::min(deadline, *context.deadline);
@@ -1125,11 +1123,10 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     if (now >= deadline) {
                         throw asio::system_error(asio::error::timed_out);
                     }
-                    poll.expires_after(std::min(
+                    poll.arm_after(std::min(
                         std::chrono::milliseconds{1},
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             deadline - now)));
-                    async::note_deadline(executor, poll.expiry());
                     asio::error_code wait_error;
                     co_await poll.async_wait(
                         asio::redirect_error(asio::use_awaitable, wait_error));
@@ -1178,9 +1175,8 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             }
             using asio::experimental::awaitable_operators::operator||;
             const auto executor = co_await asio::this_coro::executor;
-            asio::steady_timer timer(executor);
-            timer.expires_after(policy.execution_timeout);
-            async::note_deadline(executor, timer.expiry());
+            async::HostTimer timer(executor);
+            timer.arm_after(policy.execution_timeout);
             try {
                 auto result = co_await (
                     invoke() || timer.async_wait(asio::use_awaitable));
@@ -1233,9 +1229,8 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                 }
                 if (policy.retry_backoff > std::chrono::milliseconds::zero()) {
                     auto executor = co_await asio::this_coro::executor;
-                    asio::steady_timer backoff(executor);
-                    backoff.expires_after(policy.retry_backoff);
-                    async::note_deadline(executor, backoff.expiry());
+                    async::HostTimer backoff(executor);
+                    backoff.arm_after(policy.retry_backoff);
                     co_await backoff.async_wait(asio::use_awaitable);
                 }
             }

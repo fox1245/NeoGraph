@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=bc86c1517c7fd9e5993fbaff32747ad839a0cfd34435186ee87fb98af403cc31 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=b356aef7a1ba972201c4a1d99a2769c2bd587dd8e021fee6ec4084c036b068cf -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -134,9 +134,11 @@ NeoGraph 的图引擎是 Asio `io_context` 上的一组协程。WebAssembly 宿�
 - **如何在不阻塞的情况下驱动 `run_async` 到结束。** `HostLoop::spawn(awaitable, done)` 就是 `co_spawn` 加一个回合：它立即
   返回，`done(exception, result)` 在之后的回合中被调用。模块的 `ng_run` 返回，宿主事件循环继续，运行结束时 JavaScript 的
   `Promise` 由 `ng_js_done` 兑现。
-- **Asio 定时器。** 重试退避或资源等待轮询都是 Asio 定时器，而宿主的循环看不到 Asio 的定时器队列。引擎的等待会把自己的
-  截止时间告知循环（`async::note_deadline`），循环为最早的截止时间设置一个宿主定时器。在 `HostLoop` 下等待 Asio 定时器的
-  代码也要这样做。
+- **Asio 定时器。** 重试退避或资源等待轮询都是 Asio 定时器，而宿主的循环看不到 Asio 的定时器队列。引擎通过
+  `async::HostTimer`（`src/core/host_timer.h`）等待，它在设置 Asio 定时器的同一次调用中把截止时间告知循环
+  （`async::note_deadline`），循环为最早的截止时间设置一个宿主定时器。`src/` 或 `include/` 中未经包装的 Asio 定时器在宿主上
+  永远不会触发，因此 `host_timer_guard` 测试会拒绝它，从不在宿主循环上运行的代码列在 `scripts/host_timer_allowlist.txt`
+  中。在 `HostLoop` 下等待 Asio 定时器的自有代码需要自己调用 `async::note_deadline`。
 
 同步入口保留符号并予以拒绝。`GraphEngine::run`、`resume`、`Provider::dispatch` 和 `invoke` 以及同步的端点调用会驱动一个私有的
 `io_context` 直到调用结束，这会去等待一个只有等待者所在线程才能运行的宿主循环。当这样的调用到达宿主驱动 executor 上的提供方

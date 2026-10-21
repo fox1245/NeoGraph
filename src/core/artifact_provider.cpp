@@ -1,13 +1,13 @@
 #include <neograph/artifact_provider.h>
 
 #include <neograph/async/run_sync.h>
-#include <neograph/async/host_loop.h>
+
+#include "host_timer.h"
 
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
 #include <asio/post.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -235,11 +235,10 @@ ArtifactProvider::execute_unbound(ArtifactRequest request, ArtifactEventCallback
     validate_nonterminal_operation(operation);
 
     const auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer timer(executor);
+    async::HostTimer timer(executor);
     for (std::uint32_t attempt = 0; attempt < poll.max_attempts; ++attempt) {
         if (cancel) cancel->throw_if_cancelled("Artifact operation poll wait");
-        timer.expires_after(poll.interval);
-        async::note_deadline(executor, timer.expiry());
+        timer.arm_after(poll.interval);
         co_await timer.async_wait(asio::use_awaitable);
         if (cancel) cancel->throw_if_cancelled("Artifact operation poll");
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=bc86c1517c7fd9e5993fbaff32747ad839a0cfd34435186ee87fb98af403cc31 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=b356aef7a1ba972201c4a1d99a2769c2bd587dd8e021fee6ec4084c036b068cf -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -148,8 +148,11 @@ NeoGraph의 그래프 엔진은 Asio `io_context` 위의 코루틴 집합입니�
   것입니다. 즉시 돌아오고, `done(exception, result)`는 이후의 턴에서 호출됩니다. 모듈의 `ng_run`이 돌아오고 호스트의
   이벤트 루프가 계속되며, 실행이 끝나면 `ng_js_done`에서 JavaScript `Promise`가 이행됩니다.
 - **Asio 타이머.** 재시도 백오프나 자원 대기 폴링은 Asio 타이머이고, 호스트의 루프는 Asio의 타이머 큐를 볼 수 없습니다.
-  엔진의 대기는 루프에 자신의 기한을 알리고(`async::note_deadline`), 루프는 가장 이른 기한에 호스트 타이머 하나를
-  설정합니다. `HostLoop` 아래에서 Asio 타이머를 기다리는 코드는 같은 일을 해야 합니다.
+  엔진은 `async::HostTimer`(`src/core/host_timer.h`)로 기다리며, 이 타이머는 Asio 타이머를 설정하는 호출 하나로
+  루프에 기한을 알리고(`async::note_deadline`), 루프는 가장 이른 기한에 호스트 타이머 하나를 설정합니다. `src/`나
+  `include/`의 일반 Asio 타이머는 호스트에서 절대 발화하지 않으므로 `host_timer_guard` 테스트가 이를 거부하며,
+  호스트 루프에서 실행되지 않는 코드는 `scripts/host_timer_allowlist.txt`에 나열됩니다. `HostLoop` 아래에서 Asio
+  타이머를 기다리는 직접 작성한 코드는 `async::note_deadline`을 스스로 호출합니다.
 
 동기 진입점은 심볼을 유지한 채 거부합니다. `GraphEngine::run`, `resume`, `Provider::dispatch`와 `invoke`, 동기 엔드포인트 호출은
 호출이 끝날 때까지 전용 `io_context`를 구동하는데, 이는 기다리는 그 스레드만 실행할 수 있는 호스트 루프를 기다리게

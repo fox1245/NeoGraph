@@ -1,5 +1,4 @@
 #include <neograph/async/run_sync.h>
-#include <neograph/async/host_loop.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/engine.h>  // RunContext (forward-declared in executor.h)
 #include <neograph/graph/executor.h>
@@ -9,6 +8,7 @@
 
 #include "canonical_json.h"
 #include "failure_routing.h"
+#include "host_timer.h"
 #include "run_context_runtime.h"
 #include "text_safety.h"
 #include "tool_failure.h"
@@ -21,7 +21,6 @@
 #include <asio/error.hpp>
 #include <asio/experimental/parallel_group.hpp>
 #include <asio/post.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
@@ -682,7 +681,7 @@ void start_dispatched_body(const std::shared_ptr<DispatchedAttempt>& unit) {
 asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
                                        std::chrono::milliseconds          stop_grace) {
     const auto executor = co_await asio::this_coro::executor;
-    auto       timer    = std::make_shared<asio::steady_timer>(executor);
+    auto       timer    = std::make_shared<async::HostTimer>(executor);
     {
         std::lock_guard lock(unit->mutex);
         unit->wake = [executor, timer] { asio::post(executor, [timer] { timer->cancel(); }); };
@@ -723,8 +722,7 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
             unit->token->cancel();
         }
         if (done) break;
-        timer->expires_at(wake_at);
-        async::note_deadline(executor, wake_at);
+        timer->arm_at(wake_at);
         co_await timer->async_wait(asio::as_tuple(asio::use_awaitable));
     }
     // A late completion settles as a timeout too; fence whatever is left.
@@ -1310,10 +1308,9 @@ int settle_failed_attempt(const AttemptFailureEnv& env, const RetryPolicy& polic
 }
 
 asio::awaitable<void> retry_backoff(int delay_ms) {
-    auto               ex = co_await asio::this_coro::executor;
-    asio::steady_timer timer(ex);
-    timer.expires_after(std::chrono::milliseconds(delay_ms));
-    async::note_deadline(ex, timer.expiry());
+    auto             ex = co_await asio::this_coro::executor;
+    async::HostTimer timer(ex);
+    timer.arm_after(std::chrono::milliseconds(delay_ms));
     co_await timer.async_wait(asio::use_awaitable);
 }
 
