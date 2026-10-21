@@ -1,9 +1,11 @@
 #include <neograph/runtime_turn_assembler.h>
 
 #include "canonical_json.h"
+#include "prompt_prefix.h"
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <type_traits>
@@ -112,6 +114,114 @@ std::optional<std::string> tools_digest(std::string_view encoded_body) {
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+// The text of the message that marks where a prefix ends when the request is encoded again.
+constexpr std::string_view PREFIX_MARKER = "neograph-prefix-boundary-marker-6f1d0c";
+
+// The body of the request encoded with only the first `count` assembled messages and the marker after them.
+// Nothing is sent and nothing is claimed: a probe that cannot be encoded is simply absent.
+std::optional<std::string> encode_prefix_probe(
+    Provider& provider, const ProviderRequest& request_template,
+    const std::vector<sp::Message>& assembled, std::size_t count) {
+    try {
+        auto probe = request_template;
+        probe.on_event = nullptr;
+        std::vector<sp::Message> messages(assembled.begin(),
+                                          assembled.begin() + static_cast<std::ptrdiff_t>(count));
+        sp::Message marker;
+        marker.role = sp::Role::User;
+        marker.parts.emplace_back(sp::Text{std::string(PREFIX_MARKER)});
+        messages.push_back(std::move(marker));
+        set_provider_request_messages(probe, std::move(messages));
+        auto prepared = provider.prepare(std::move(probe));
+        if (!prepared.valid() || prepared.error()) return std::nullopt;
+        return std::string(prepared.encoded_body());
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+struct PrefixEncodings {
+    std::optional<std::string> stable;
+    std::optional<std::string> prefix;
+};
+
+[[noreturn]] void boundary_unavailable(const std::string& why) {
+    throw ContextStabilityError(
+        ContextStabilityRefusal::PrefixBoundaryUnavailable,
+        "The encoded request does not show the prefix boundaries of the stable-first layout: " + why);
+}
+
+struct PrefixFields {
+    std::optional<ContextPrefixBoundary> stable_boundary;
+    std::optional<ContextPrefixBoundary> prefix_boundary;
+    std::string prefix_digest;
+};
+
+// Read the two boundaries from the body of the full request and the bodies of the probes.
+struct PrefixShape {
+    std::size_t messages = 0;      // assembled messages
+    std::size_t stable_end = 0;    // host instructions and Stable artifacts
+    std::size_t prefix_end = 0;    // everything in front of the Volatile artifacts
+    bool system_after_stable = false;  // a Slow artifact renders as a System message
+};
+
+PrefixFields read_prefix_fields(
+    const PreparedProviderRequest& prepared, const PrefixEncodings& probes, const PrefixShape& shape) {
+    const auto stable_end = shape.stable_end;
+    const auto prefix_end = shape.prefix_end;
+    const auto* descriptor = prepared.admitted_descriptor();
+    if (!descriptor) boundary_unavailable("the request carries no admitted descriptor");
+    const detail::WireMembers members{std::string(descriptor->request_messages_member()),
+                                      std::string(descriptor->request_stream_member()),
+                                      std::string(descriptor->max_output_tokens_member())};
+    json full;
+    try {
+        full = detail::parse_json_strict(prepared.encoded_body());
+    } catch (const std::exception&) {
+        boundary_unavailable("the body is not JSON");
+    }
+    if (prepared.encoded_body().find(PREFIX_MARKER) != std::string_view::npos) {
+        boundary_unavailable("the conversation contains the text that marks a boundary");
+    }
+    const auto read = [&](const std::optional<std::string>& body) {
+        if (!body) boundary_unavailable("the prefix could not be encoded");
+        return detail::locate_prefix_boundary(full, detail::parse_json_strict(*body), members, PREFIX_MARKER);
+    };
+
+    PrefixFields fields;
+    std::vector<std::string> container;
+    if (prefix_end == shape.messages) {
+        fields.prefix_boundary = detail::whole_body_boundary(full, members);
+    } else {
+        const auto located = read(probes.prefix);
+        if (located.status != detail::PrefixProbe::Located) {
+            boundary_unavailable(located.status == detail::PrefixProbe::MembersDiffer
+                                     ? "a member outside the messages changes behind the prefix"
+                                     : "the marker is not where the prefix ends");
+        }
+        fields.prefix_boundary = located.boundary;
+        container = located.container;
+    }
+    if (stable_end == prefix_end) {
+        fields.stable_boundary = fields.prefix_boundary;
+    } else if (stable_end > 0) {
+        const auto located = read(probes.stable);
+        if (located.status == detail::PrefixProbe::Located) {
+            fields.stable_boundary = located.boundary;
+        } else if (located.status == detail::PrefixProbe::MembersDiffer && shape.system_after_stable) {
+            // A Slow System text shares the system field with the Stable one, and the field is one block:
+            // the end of the Stable part cannot be marked on this family.
+        } else {
+            boundary_unavailable("the marker is not where the Stable part ends");
+        }
+    }
+    if (fields.stable_boundary && *fields.prefix_boundary < *fields.stable_boundary) {
+        boundary_unavailable("the Stable part ends behind the prefix");
+    }
+    fields.prefix_digest = detail::wire_prefix_digest(full, members, *fields.prefix_boundary, container);
+    return fields;
 }
 
 void normalize_required_ids(std::vector<std::string>& ids,
@@ -251,7 +361,18 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         selected.push_back({*artifact});
         receipt_artifacts.push_back(*artifact);
     }
-    std::sort(selected.begin(), selected.end(), artifact_less);
+    const bool stable_first = epoch.assembly_layout() == AssemblyLayout::StableFirst;
+    if (stable_first) {
+        // The epoch records the order and nothing about the content takes part in it.
+        validate_context_layout(epoch, receipt_artifacts);
+        std::map<std::string, std::size_t> position;
+        for (const auto& id : *epoch.ordered_artifact_ids()) position.emplace(id, position.size());
+        std::sort(selected.begin(), selected.end(), [&](const SelectedArtifact& lhs, const SelectedArtifact& rhs) {
+            return position.at(lhs.artifact.id()) < position.at(rhs.artifact.id());
+        });
+    } else {
+        std::sort(selected.begin(), selected.end(), artifact_less);
+    }
     const bool needs_latest_user = std::any_of(
         selected.begin(), selected.end(), [](const SelectedArtifact& item) {
             return item.artifact.placement() == ContextPlacement::BeforeLatestUser ||
@@ -324,6 +445,46 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         if (!duplicate_raw) assembled.push_back(message);
     }
     const auto window_digest = identity("assembled-message-window/v2", messages_json(assembled));
+
+    // Stable-first: where the Stable part and the append-only part end in the assembled messages. A System
+    // message is hoisted into the start of the request by some families, so only the host instructions and
+    // the Stable and Slow artifacts may be one: a RAW or supplemental System message would move the start.
+    PrefixShape shape;
+    PrefixEncodings probes;
+    if (stable_first) {
+        const auto hosts = host_instructions.size();
+        const auto stable_count = static_cast<std::size_t>(std::count_if(
+            selected.begin(), selected.end(), [](const SelectedArtifact& item) {
+                return item.artifact.stability_class() == StabilityClass::Stable;
+            }));
+        shape.messages = assembled.size();
+        shape.stable_end = hosts + stable_count;
+        shape.prefix_end = hosts + before_history.size() + raw_messages.size();
+        for (std::size_t index = 0; index < assembled.size(); ++index) {
+            const bool head = index < hosts + before_history.size();
+            if (assembled[index].role == sp::Role::System && !head) {
+                throw ContextStabilityError(
+                    ContextStabilityRefusal::VolatileSystemText,
+                    "The stable-first layout allows a System message only as a host instruction or as a "
+                    "Stable or Slow artifact; message " + std::to_string(index) + " is neither");
+            }
+        }
+        const auto expected = *epoch.ordered_artifact_ids();
+        std::vector<std::string> placed = before_history_ids;
+        placed.insert(placed.end(), after_history_ids.begin(), after_history_ids.end());
+        if (placed != expected) throw std::logic_error("Stable-first assembly did not follow the recorded artifact order");
+        // Encoded before the request itself, so that the request a provider fixture sees last is the real one.
+        for (std::size_t index = shape.stable_end; index < shape.prefix_end; ++index) {
+            if (assembled[index].role == sp::Role::System) shape.system_after_stable = true;
+        }
+        if (shape.prefix_end < shape.messages) {
+            probes.prefix = encode_prefix_probe(provider, request, assembled, shape.prefix_end);
+        }
+        if (shape.stable_end > 0 && shape.stable_end < shape.prefix_end) {
+            probes.stable = encode_prefix_probe(provider, request, assembled, shape.stable_end);
+        }
+    }
+
     set_provider_request_messages(request, std::move(assembled));
     auto prepared = provider.prepare(std::move(request));
     if (!prepared.valid() || prepared.error()) {
@@ -358,6 +519,12 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     receipt_data.encoder_family = std::string(prepared.family());
     receipt_data.tools_digest = tools_digest(prepared.encoded_body());
     receipt_data.break_reason = epoch.break_reason();
+    if (stable_first) {
+        auto fields = read_prefix_fields(prepared, probes, shape);
+        receipt_data.stable_boundary = fields.stable_boundary;
+        receipt_data.prefix_boundary = fields.prefix_boundary;
+        receipt_data.prefix_digest = std::move(fields.prefix_digest);
+    }
     if (impl_->max_input_tokens != 0 &&
         receipt_data.estimated_input_tokens > impl_->max_input_tokens) {
         throw ContextBudgetBlocked();

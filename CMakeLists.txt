@@ -607,6 +607,7 @@ set(NEOGRAPH_CORE_SOURCES
     src/core/context_store.cpp
     src/core/context_transform.cpp
     src/core/runtime_turn_assembler.cpp
+    src/core/prompt_prefix.cpp
     src/core/controlled_provider.cpp
     src/core/runtime_interposition_controller.cpp
     src/core/strict_runtime.cpp
