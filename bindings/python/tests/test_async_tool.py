@@ -25,6 +25,9 @@ no matter how many threads it is handed. `TheBoundaryCpuBoundToolsDoNotOverlap`
 pins that, so the docs cannot quietly start promising otherwise.
 """
 
+import contextlib
+import sys
+import threading
 import time
 
 import neograph_engine as ng
@@ -174,41 +177,93 @@ def test_twenty_async_tools_still_take_about_one_sleep():
         f"20 async tools took {elapsed:.2f}s; serial is {20 * SLEEP:.1f}s")
 
 
+class _SpanTool(ng.AsyncTool):
+    """Records the (start, end) of its body on the monotonic clock."""
+
+    def __init__(self, name, body, spans):
+        super().__init__()
+        self._name = name
+        self._body = body
+        self._spans = spans
+
+    def get_definition(self):
+        d = ng.ChatTool()
+        d.name = self._name
+        d.description = "records when it ran"
+        return d
+
+    def execute(self, arguments):
+        started = time.perf_counter()
+        try:
+            self._body()
+        finally:
+            self._spans.append((started, time.perf_counter()))
+        return '{"ok": true}'
+
+    def get_name(self):
+        return self._name
+
+
+@contextlib.contextmanager
+def _no_timed_gil_handoff():
+    """Stop the interpreter from asking a running thread to give up the GIL.
+
+    By default a waiting thread asks the holder to yield every 5 ms, so three
+    CPU-bound bodies interleave and their spans overlap even though only one
+    of them runs at any instant. With no timed handoff, a body that never
+    blocks keeps the GIL from its first line to its last, and its span cannot
+    overlap another's.
+    """
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(60.0)
+    try:
+        yield
+    finally:
+        sys.setswitchinterval(previous)
+
+
+def _run_spans(body, count):
+    """Run `count` async tools once each; return the (start, end) of each body."""
+    spans = []
+    tools = [_SpanTool(f"span{i}", body, spans) for i in range(count)]
+    with _no_timed_gil_handoff():
+        _time_dispatch(tools)
+    assert len(spans) == count, "not every tool body ran"
+    return sorted(spans)
+
+
+def _any_overlap(spans):
+    """True if two spans share an instant. `spans` is sorted by start."""
+    return any(later[0] < earlier[1] for earlier, later in zip(spans, spans[1:]))
+
+
 def test_the_boundary_cpu_bound_tools_do_not_overlap():
     """The honest boundary, so the docs cannot quietly overpromise.
 
     A Python tool that burns CPU holds the GIL for its whole body. It will not
     overlap however many threads it is given — declaring it async buys nothing.
     Only tools that block on I/O (and so release the GIL) get the speedup.
+
+    Read off the recorded spans, not off two wall-clock totals: a loaded
+    machine stretches a total, and cannot move one body inside another.
     """
+    count = 3
 
-    class _BurnTool(ng.AsyncTool):
-        def __init__(self, name):
-            super().__init__()
-            self._name = name
+    # The control: the same recorder sees every body in flight at once when
+    # the bodies wait. Without it, "no overlap" below could just mean the
+    # dispatch ran the tools one after another.
+    gate = threading.Barrier(count, timeout=10)
+    waiting = _run_spans(gate.wait, count)
+    assert _any_overlap(waiting), (
+        "tools that wait did not overlap, so the span check below proves nothing")
 
-        def get_definition(self):
-            d = ng.ChatTool()
-            d.name = self._name
-            d.description = "burns cpu"
-            return d
+    def burn():
+        # Pure-Python arithmetic: the GIL is held throughout.
+        total = 0
+        for i in range(1_000_000):
+            total += i
 
-        def execute(self, arguments):
-            # Pure-Python arithmetic: the GIL is held throughout.
-            total = 0
-            for i in range(6_000_000):
-                total += i
-            return '{"ok": true}'
-
-        def get_name(self):
-            return self._name
-
-    one = _time_dispatch([_BurnTool("burn0")])
-    three = _time_dispatch([_BurnTool(f"burn{i}") for i in range(3)])
-
-    print(f"\n[MEASURE] cpu-bound: 1 tool {one:.2f}s, 3 tools {three:.2f}s "
-          f"(ratio {three / one:.1f}x — overlap would make this ~1.0x)")
-
-    assert three > 2 * one * (1 - TOLERANCE), (
+    burning = _run_spans(burn, count)
+    assert not _any_overlap(burning), (
         "CPU-bound Python tools appear to have overlapped, which would mean the "
-        "GIL was released somewhere it should not have been")
+        f"GIL was released somewhere it should not have been: {burning}")
