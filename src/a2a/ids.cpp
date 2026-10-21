@@ -118,15 +118,17 @@ std::optional<std::int64_t> parse_timestamp_ms(std::string_view text) {
             !read_digits(text, pos, 2, om) || oh > 23 || om > 59) {
             return std::nullopt;
         }
-        offset_minutes = sign * (oh * 60 + om);
+        offset_minutes = sign * (std::int64_t{oh} * 60 + om);
     } else {
         return std::nullopt;
     }
     if (pos != text.size()) return std::nullopt;
     const auto days = days_from_civil(year, static_cast<unsigned>(month),
                                       static_cast<unsigned>(day));
-    const std::int64_t secs = days * 86400 + hour * 3600 + minute * 60 + second -
-                              offset_minutes * 60;
+    // Every term is computed in int64_t. The fields are range-checked above, so no int product
+    // could overflow, but the arithmetic does not rely on that.
+    const std::int64_t secs = days * 86400 + std::int64_t{hour} * 3600 + std::int64_t{minute} * 60 +
+                              second - offset_minutes * 60;
     return secs * 1000 + millis;
 }
 
