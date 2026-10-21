@@ -4,8 +4,9 @@ test_prompt_prefix_wire.py pins what the legacy layout does. These tests run the
 through the stable-first layout, where the epoch records the order of its artifacts and the layout puts the
 host instructions, the Stable and the Slow artifacts in front of the history and the Volatile ones behind it:
 
-  * where both layouts mean the same prompt, the bodies are byte for byte those of the legacy layout, for
-    every call of every family (stable-only, append, replace-tail, tool-regroup, compaction);
+  * the legacy layout still writes the bodies it wrote before the layout existed, by hash, for every call of
+    every family and every trace (legacy_bodies_golden.py), and where both layouts mean the same prompt the
+    stable-first bodies are those bodies, for stable-only, append, replace-tail, tool-regroup and compaction;
   * a placement the layout cannot honour is refused with a typed error, not moved: a changing block in front
     of the history, one at the default placement, a System block behind the history;
   * the receipt names the two boundaries, read from the encoded body after hoisting and regrouping, and a
@@ -14,16 +15,20 @@ host instructions, the Stable and the Slow artifacts in front of the history and
     over the 18 turns, and the order of equal siblings does not depend on their text.
 """
 
+import hashlib
 import json
 
 import neograph_engine as ng
 import pytest
 
 import prefix_trace as pt
+from legacy_bodies_golden import GOLDEN
 
 PRESET_IDS = list(pt.PRESETS)
 HOISTING = {"anthropic.messages", "google.generate"}
 SAME_AS_LEGACY = ["stable-only", "append", "replace-tail", "tool-regroup", "compaction"]
+LEGACY_TRACES = ["stable-only", "append", "replace-tail", "volatile-front", "before-latest-user", "system-hoist",
+                 "tool-regroup", "compaction"]
 REFUSED = {"volatile-front": ng.ContextStabilityRefusal.VolatileOutsideTail,
            "before-latest-user": ng.ContextStabilityRefusal.VolatileOutsideTail,
            "system-hoist": ng.ContextStabilityRefusal.StableOutsideHistoryHead}
@@ -50,6 +55,30 @@ def run(preset, layout, assembly):
         conversation.run()
         _traces[key] = conversation
     return _traces[key]
+
+
+def digests(bodies):
+    return [hashlib.sha256(body.encode()).hexdigest()[:16] for body in bodies]
+
+
+@parametrize_cases(*LEGACY_TRACES)
+def test_the_legacy_layout_writes_the_bodies_it_wrote_before_the_layout_existed(preset, layout):
+    """Compared with hashes taken before the stable-first layout was written, not with another run of this code."""
+    bodies = [call.body for call in run(preset, layout, "legacy").bodies]
+    assert digests(bodies) == GOLDEN[f"{preset}/{layout}"]
+
+
+@pytest.mark.parametrize("kind", [pt.KIND.DerivedContext, pt.KIND.HardConstraint], ids=["user", "system"])
+@pytest.mark.parametrize("preset", ["openai.chat", "anthropic.messages"])
+def test_the_legacy_bodies_of_equal_siblings_are_the_stored_ones(preset, kind):
+    assert digests(pt.sibling_bodies(preset, kind)) == GOLDEN[f"{preset}/siblings/{kind.name}"]
+
+
+def test_the_golden_covers_every_trace():
+    expected = {f"{preset}/{layout}" for preset, layout in cases(*LEGACY_TRACES)}
+    expected |= {f"{preset}/siblings/{kind}" for preset in ("openai.chat", "anthropic.messages")
+                 for kind in ("DerivedContext", "HardConstraint")}
+    assert set(GOLDEN) == expected
 
 
 @parametrize_cases(*SAME_AS_LEGACY)
@@ -168,6 +197,18 @@ def test_the_prefix_digest_follows_the_prefix_and_not_the_volatile_text(preset):
     assert [call.receipt.prefix_digest for call in salted] == [call.receipt.prefix_digest for call in plain]
     digests = [call.receipt.prefix_digest for call in plain]
     assert len(set(digests)) == len(digests), "the history grows, so the prefix is another one every call"
+
+
+@pytest.mark.parametrize("preset", PRESET_IDS)
+def test_the_output_cap_is_not_in_the_prefix_digest_where_the_descriptor_names_it_at_the_top(preset):
+    """The descriptor names the stream flag and the output cap as members of the body. Gemini keeps its cap inside
+    generationConfig, so there it is part of the digest like any other member."""
+    digests = []
+    for cap in (120, 777):
+        conversation = pt.Conversation(preset, "replace-tail", turns=2, assembly="stable_first")
+        conversation.controls.max_output_tokens = cap
+        digests.append(conversation.run()[-1].receipt.prefix_digest)
+    assert (digests[0] != digests[1]) == (preset == "google.generate")
 
 
 @pytest.mark.parametrize("preset", PRESET_IDS)

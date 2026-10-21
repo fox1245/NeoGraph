@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=a6837ba97c87a975689aac8038004f408ccde630e28e01cd8cc5173ad84663ae -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -211,10 +211,10 @@ trusted supplemental input
 ```
 
 - **에포크의 목록이 곧 순서입니다.** `order_context_artifacts`가 아티팩트로부터 이 목록을 만듭니다. 안정성 클래스, 그다음 높은 `priority`, 그다음 `producer_id`, 그다음 호스트가 주는 키 순입니다. 내용의 해시는 관여하지 않으므로 텍스트가 바뀌는 형제 아티팩트도 자리를 지키며, 네 가지가 모두 같은 두 아티팩트는 모호하다며 거부됩니다.
-- **배치는 클래스를 따릅니다.** `Stable`과 `Slow` 아티팩트는 `BeforeHistory`에, `Volatile` 아티팩트는 `AfterHistory`에 두고, 목록은 `Stable`, `Slow`, `Volatile` 순으로 나열해야 합니다. 그 밖의 경우(예: 기본 배치 `BeforeLatestUser`로 만든 아티팩트)는 옮겨 주지 않고 `ContextStabilityError`로 거부됩니다.
+- **배치는 클래스를 따릅니다.** `Stable`과 `Slow` 아티팩트는 `BeforeHistory`에, `Volatile` 아티팩트는 `AfterHistory`에 두고, 목록은 `Stable`, `Slow`, `Volatile` 순으로 나열해야 합니다. 그 밖의 경우(예: 기본 배치 `BeforeLatestUser`로 만든 아티팩트)는 옮겨 주지 않고 `ContextStabilityError`로 거부됩니다. 어셈블러가 검사하는 클래스는 아티팩트가 선언한 클래스이며, 선언하지 않았다면 조립하는 빌드의 `derive_stability_class`가 주는 클래스입니다. 이 레이아웃의 에포크를 저장하는 호스트는 모든 아티팩트의 클래스를 선언해야 합니다. 그렇지 않으면 파생 규칙이 나중에 바뀔 때 어셈블러가 저장된 에포크를 거부할 수 있습니다.
 - **System 텍스트는 앞에 머뭅니다.** System 메시지는 호스트 지침이거나 `Stable` 또는 `Slow` 아티팩트일 수만 있습니다. RAW나 보조 입력의 System 메시지는 `anthropic.messages`, `google.generate`, `google.interactions`에서 system 필드로 옮겨져 요청의 시작을 바꾸므로 거부됩니다. 옮겨진 텍스트는 `Stable`, `Slow` 순입니다.
 - **레이아웃 변경은 단절입니다.** 연속한 두 에포크의 레이아웃이 다르려면 뒤의 에포크가 이유 `LayoutChange`와 함께 `Breaks`를 선언해야 합니다. 그렇지 않으면 `verify_context_epoch_claim`이 거부하며, 레이아웃이 바뀌는 지점을 가로지르는 `Extends` 선언도 거부합니다.
-- **본문에서 읽은 두 경계.** 영수증은 `Stable` 부분(호스트 지침과 `Stable` 아티팩트)이 끝나는 곳, 추가만 되는 부분(`Volatile` 아티팩트 앞의 모든 것)이 끝나는 곳, 그리고 두 번째 경계까지의 요청 다이제스트를 기록합니다. 경계는 인코딩된 본문에서 프리픽스에 속하지 않는 첫 메시지와 파트이므로, System 텍스트를 옮기는 계열에서 `{0, 0}`은 도구와 system 필드만의 프리픽스입니다. 위치는 System 텍스트를 옮기고 도구 결과를 다시 묶은 뒤의 본문 기준입니다. 어셈블러는 프리픽스의 메시지와 그 뒤의 표식 메시지만으로 요청을 두 번째, 세 번째 인코딩해 위치를 찾으며, 인코딩된 본문들이 서로 맞지 않으면 `ContextStabilityError`로 에포크를 거부합니다. `Slow` System 텍스트가 `Stable` 텍스트와 system 필드를 함께 쓰면 필드가 한 블록이므로 `Stable` 경계는 기록되지 않습니다. 다이제스트는 스트림 플래그와 출력 상한을 뺀 본문의 모든 멤버를 담고, 메시지는 경계에서 잘립니다. 레거시 에포크에는 경계가 없습니다.
+- **본문에서 읽은 두 경계.** 영수증은 `Stable` 부분(호스트 지침과 `Stable` 아티팩트)이 끝나는 곳, 추가만 되는 부분(`Volatile` 아티팩트 앞의 모든 것)이 끝나는 곳, 그리고 두 번째 경계까지의 요청 다이제스트를 기록합니다. 경계는 인코딩된 본문에서 프리픽스에 속하지 않는 첫 메시지와 파트이므로, System 텍스트를 옮기는 계열에서 `{0, 0}`은 도구와 system 필드만의 프리픽스입니다. 위치는 System 텍스트를 옮기고 도구 결과를 다시 묶은 뒤의 본문 기준입니다. 어셈블러는 프리픽스의 메시지와 그 뒤의 표식 메시지만으로 요청을 두 번째, 세 번째 인코딩해 위치를 찾으며, 인코딩된 본문들이 서로 맞지 않으면 `ContextStabilityError`로 에포크를 거부합니다. `Slow` System 텍스트가 `Stable` 텍스트와 system 필드를 함께 쓰면 필드가 한 블록이므로 `Stable` 경계는 기록되지 않습니다. 다이제스트는 스트림 플래그와 출력 상한을 뺀 본문의 모든 멤버를 담고, 메시지는 경계에서 잘립니다. 이 두 멤버는 계열의 디스크립터가 본문 최상위에서 이름으로 지정한 멤버이며, `google.generate`는 출력 상한을 `generationConfig` 안에 두므로 다이제스트가 이를 덮습니다. 레거시 에포크에는 경계가 없습니다.
 
 ## 런타임 개발자 지침
 
