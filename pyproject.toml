@@ -29,7 +29,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 # certifi supplies a relocatable TLS trust store; pydantic backs StateView.
-dependencies = ["certifi", "pydantic>=2.0"]
+dependencies = ["certifi>=2026.10.19", "pydantic>=2.0"]
 
 # Official protocol SDKs require Python 3.10; the core package supports 3.9.
 [project.optional-dependencies]

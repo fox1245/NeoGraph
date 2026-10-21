@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=76561768a1dc7ab22839e68512c6095c5bd6c4f67f05dfd62307d3677d5f2f64 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e0eabb1944621fb740e1a4632719a9d9d97e384523993dc5a1d1e9adda39e4f6 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -85,6 +85,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **wasm32 上的原生 Program 控件。** C v1 插件 ABI 保持 64 位布局。wasm32 把 `neograph_program_native_invoke_request_v1` 填充到 32 字节，而布局在 28 字节处结束，这使 `src/program/native.cpp` 无法构建。现在 `NativeControlBinding::create` 在那里抛出 `NativeControlUnavailable`（一个 `ConfigurationFailure`），`program::NATIVE_CONTROLS_AVAILABLE` 也会如实反映。其他目标不变。
   - **单线程构建中的同步检查点存储不再挂起。** 在工作线程池中执行同步存储操作的适配器，会去等待单线程构建永远不会启动的线程，运行因此无法返回。现在该操作会抛出 `SynchronousCheckpointStoreUnavailable`（一个 `ConfigurationFailure`）。使用线程的构建不变。
   - **内存检查点存储在调用线程上执行其 managed 预算操作。** `InMemoryCheckpointStore` 的其他操作原本就在原地执行，但租约、provider 调用的申领与结算、检查点发布、释放和分叉却交给了那个线程池。现在它们也在原地执行，所以带 `model_token_budget` 的运行可以在单线程构建中工作，在使用线程的构建中也不再等待工作线程。覆盖同步形式的子类仍然经过线程池。
+
+### 安全
+
+- **Python 包要求 certifi 2026.10.19 或更高版本（[GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)）。** 导入时，如果既没有设置 `SSL_CERT_FILE`，也没有设置 `NEOGRAPH_SKIP_CERT_AUTOFIX`，`neograph_engine` 会把 `SSL_CERT_FILE` 指向 certifi 的 CA 包，因此原生传输层默认信任该包。公告指出，链到 certifi 包中所含 `emSign ECC Root CA - G3` 根证书的 8 个 eMudhra 中间 CA 证书，其私钥已泄露。公告把 2019.03.09 起、早于 2026.10.19 的 certifi 列为受影响范围，并将 2026.10.19 列为第一个修复版本；2026.10.18 移除了所有 emSign 根，2026.10.19 恢复了未受影响的根。`pyproject.toml` 现在声明 `certifi>=2026.10.19`，因此安装 `neograph-engine` 会升级旧的 certifi；MCP 互操作测试的依赖固定为 2026.10.19。自行设置 `SSL_CERT_FILE` 的宿主继续使用自己的包，应自行检查该包。
 
 ## [0.16.0] - 2026-10-20
 

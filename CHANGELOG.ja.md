@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=76561768a1dc7ab22839e68512c6095c5bd6c4f67f05dfd62307d3677d5f2f64 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e0eabb1944621fb740e1a4632719a9d9d97e384523993dc5a1d1e9adda39e4f6 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -85,6 +85,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **wasm32 のネイティブ Program コントロール。** C v1 プラグイン ABI は 64 ビットのレイアウトのままです。wasm32 は `neograph_program_native_invoke_request_v1` を、レイアウトが終わる 28 バイトではなく 32 バイトにパディングするため、`src/program/native.cpp` がビルドできませんでした。そこでは `NativeControlBinding::create` が `NativeControlUnavailable`（`ConfigurationFailure`）を投げ、`program::NATIVE_CONTROLS_AVAILABLE` がそれを示します。ほかのターゲットは変わりません。
   - **シングルスレッドのビルドで、同期のチェックポイントストアが固まらなくなりました。** 同期ストアの操作をワーカースレッドのプールで実行するアダプターが、シングルスレッドのビルドでは起動しないスレッドを待っていたため、実行が戻りませんでした。操作は `SynchronousCheckpointStoreUnavailable`（`ConfigurationFailure`）を投げます。スレッドを使うビルドは変わりません。
   - **インメモリのチェックポイントストアは、managed 予算の操作を呼び出したスレッドで実行します。** `InMemoryCheckpointStore` は、ほかの操作をすでにその場で実行していましたが、リース、プロバイダー呼び出しのクレームと精算、チェックポイントの公開、解放、フォークはそのプールで実行していました。これらもその場で実行されるため、`model_token_budget` を指定した実行がシングルスレッドのビルドで動作し、スレッドを使うビルドではワーカースレッドを待たなくなります。同期形式をオーバーライドするサブクラスは、引き続きプールを通ります。
+
+### セキュリティ
+
+- **Python パッケージは certifi 2026.10.19 以降を必要とします（[GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)）。** `neograph_engine` はインポート時に、`SSL_CERT_FILE` も `NEOGRAPH_SKIP_CERT_AUTOFIX` も設定されていなければ `SSL_CERT_FILE` を certifi の CA バンドルに向けるため、ネイティブのトランスポートは既定でそのバンドルを信頼します。アドバイザリによると、certifi のバンドルに含まれていた `emSign ECC Root CA - G3` ルートにつながる eMudhra の中間 CA 証明書 8 件は、秘密鍵が漏洩しています。アドバイザリは certifi 2019.03.09 以上 2026.10.19 未満を影響範囲とし、2026.10.19 を最初の修正リリースとしています。2026.10.18 は emSign のルートをすべて削除し、2026.10.19 は影響を受けないルートを復元しました。`pyproject.toml` は `certifi>=2026.10.19` を宣言するようになったため、`neograph-engine` をインストールすると古い certifi は更新されます。MCP 相互運用テストの要件は 2026.10.19 に固定しました。`SSL_CERT_FILE` を自分で設定するホストは自分のバンドルを使い続けるため、そのバンドルを確認してください。
 
 ## [0.16.0] - 2026-10-20
 

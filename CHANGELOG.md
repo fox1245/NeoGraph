@@ -85,6 +85,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - **A synchronous checkpoint store in a single-thread build no longer hangs.** The adapter that runs a synchronous store's operations on a pool of worker threads waited for a thread that a single-thread build never starts; the run never returned. The operation now throws `SynchronousCheckpointStoreUnavailable` (a `ConfigurationFailure`). Threaded builds are unchanged.
   - **The in-memory checkpoint store runs its managed-budget operations on the calling thread.** `InMemoryCheckpointStore` ran a lease, a provider call's claim and settlement, a checkpoint publication, a release and a fork on that pool, while its other operations already ran in place. They run in place too, so a run with `model_token_budget` works in a single-thread build, and in a threaded one it no longer waits for a worker thread. A subclass that overrides the synchronous forms still goes through the pool.
 
+### Security
+
+- **The Python package requires certifi 2026.10.19 or later ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)).** On import, `neograph_engine` points `SSL_CERT_FILE` at certifi's CA bundle unless `SSL_CERT_FILE` or `NEOGRAPH_SKIP_CERT_AUTOFIX` is already set, so the native transport trusts that bundle by default. The advisory reports that eight eMudhra intermediate CA certificates chaining to the `emSign ECC Root CA - G3` root, which certifi's bundle carried, have compromised private keys. It lists certifi `>= 2019.03.09, < 2026.10.19` as affected and 2026.10.19 as the first patched release; 2026.10.18 removed every emSign root, and 2026.10.19 restored the ones that are not affected. `pyproject.toml` now declares `certifi>=2026.10.19`, so installing `neograph-engine` upgrades an older certifi, and the MCP interop test requirements pin 2026.10.19. A host that sets `SSL_CERT_FILE` itself keeps its own bundle and should check it.
+
 ## [0.16.0] - 2026-10-20
 
 ### Added

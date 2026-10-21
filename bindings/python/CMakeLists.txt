@@ -18,7 +18,7 @@
 #   PYTHONPATH=build python -c "import neograph_engine; print(neograph_engine.__version__)"
 #
 # The build tree installs none of the package's Python dependencies
-# (pyproject.toml `dependencies`): `pip install 'pydantic>=2' certifi` first.
+# (pyproject.toml `dependencies`): `pip install 'pydantic>=2' 'certifi>=2026.10.19'` first.
 # The import fails without pydantic; without certifi, TLS uses the host's
 # trust store.
 #
