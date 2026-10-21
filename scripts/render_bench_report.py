@@ -63,10 +63,13 @@ T: dict[str, tuple[str, str, str, str]] = {
         "スレッドプール経路なし: ステップはコルーチンで、通常の関数は拒否される",
         "没有线程池路径：步骤是协程，普通函数会被拒绝"),
     "pool_na_llamaindex": (
-        "no thread-pool path: steps are coroutines on one event loop",
-        "스레드 풀 경로 없음: 스텝은 하나의 이벤트 루프 위의 코루틴",
-        "スレッドプール経路なし: ステップは 1 つのイベントループ上のコルーチン",
-        "没有线程池路径：步骤是单个事件循环上的协程"),
+        "not timed: plain `def` steps are accepted and run on the event loop's default executor, a thread-pool path "
+        "that this cohort does not measure",
+        "측정하지 않음: 일반 `def` 스텝을 받아 이벤트 루프의 기본 실행기에서 실행하며, 이 코호트는 그 스레드 풀 경로를 "
+        "측정하지 않음",
+        "未計測: 通常の `def` ステップを受け付けてイベントループの既定のエグゼキューターで実行するスレッドプール経路があるが、"
+        "このコホートでは計測していない",
+        "未测量：接受普通 `def` 步骤并在事件循环的默认执行器上运行，这条线程池路径不在本次测量范围内"),
     "pool_na_autogen": (
         "no thread-pool path: one single-threaded agent runtime",
         "스레드 풀 경로 없음: 단일 스레드 에이전트 런타임 하나",
@@ -140,6 +143,8 @@ T: dict[str, tuple[str, str, str, str]] = {
     "size_note": ("What is counted", "집계 대상", "計測対象", "统计内容"),
     "unit_binary": ("one native executable", "네이티브 실행 파일 하나", "ネイティブ実行ファイル 1 つ",
                     "一个原生可执行文件"),
+    "unit_shared_set": ("an executable and its shared libraries", "실행 파일과 그 공유 라이브러리",
+                        "実行ファイルとその共有ライブラリ", "可执行文件及其共享库"),
     "unit_library": ("one library file", "라이브러리 파일 하나", "ライブラリファイル 1 つ", "一个库文件"),
     "unit_wasm": ("one WebAssembly module", "WebAssembly 모듈 하나", "WebAssembly モジュール 1 つ",
                   "一个 WebAssembly 模块"),
@@ -160,18 +165,39 @@ T: dict[str, tuple[str, str, str, str]] = {
                   "CPU ガバナー: {governor}。",
                   "主机：{cpu}，{count} 核，内核 {kernel}，Python {python}，构建 NeoGraph 的编译器 {compiler}；"
                   "CPU 调频策略：{governor}。"),
-    "session_line": ("Session: {start} to {end} UTC; load average before {before} and after {after}; "
+    "session_line": ("Session: {start} to {end} UTC; 1-minute load average {before} when the first phase started (after the "
+                     "wait for an idle host) and {after} at the end, which includes the session's own processes; "
                      "{rounds} interleaved rounds; record `{record}`.",
-                     "세션: {start} ~ {end} UTC; 시작 전 부하 {before}, 종료 후 {after}; "
-                     "교차 라운드 {rounds}회; 기록 `{record}`.",
-                     "セッション: {start} ～ {end} UTC; 開始前の負荷 {before}、終了後 {after}; "
-                     "インターリーブラウンド {rounds} 回; 記録 `{record}`。",
-                     "会话：{start} 至 {end} UTC；开始前负载 {before}，结束后 {after}；"
-                     "{rounds} 轮交错运行；记录 `{record}`。"),
-    "engine_line": ("NeoGraph engine: commit `{commit}`; harness tree: commit `{harness}`.",
-                    "NeoGraph 엔진: 커밋 `{commit}`; 하니스 트리: 커밋 `{harness}`.",
-                    "NeoGraph エンジン: コミット `{commit}`; ハーネスツリー: コミット `{harness}`。",
-                    "NeoGraph 引擎：提交 `{commit}`；测试工具树：提交 `{harness}`。"),
+                     "세션: {start} ~ {end} UTC; 1분 부하 평균은 첫 단계 시작 시 {before}(유휴 상태를 기다린 뒤), 종료 시 {after}"
+                     "(세션 자신의 프로세스 포함); 교차 라운드 {rounds}회; 기록 `{record}`.",
+                     "セッション: {start} ～ {end} UTC; 1 分間のロードアベレージは、最初のフェーズの開始時（アイドルになるのを待った後）が "
+                     "{before}、終了時が {after}（セッション自身のプロセスを含む）; インターリーブラウンド {rounds} 回; 記録 `{record}`。",
+                     "会话：{start} 至 {end} UTC；1 分钟平均负载在第一阶段开始时（等待主机空闲之后）为 {before}，结束时为 {after}"
+                     "（含会话自身的进程）；{rounds} 轮交错运行；记录 `{record}`。"),
+    # The exception list in this text is a statement about the record that is checked in (benchmarks/records/CURRENT):
+    # which harness files differ from the sha256 values that record holds. A new record needs its own text.
+    "engine_line": ("NeoGraph engine: commit `{commit}`; harness tree: commit `{harness}`. The harness commit is the "
+                    "local commit the session ran from and may not exist in this repository's history; the record is "
+                    "never edited, and it holds the sha256 of every harness script, which identifies the files. The "
+                    "files in this tree are byte-identical to the hashed ones except `scripts/render_bench_report.py` "
+                    "(the version that rendered these tables is hashed below) and `port_llamaindex.py` and "
+                    "`port_autogen.py` in `benchmarks/compare/` (one comment each, corrected after the session).",
+                    "NeoGraph 엔진: 커밋 `{commit}`; 하니스 트리: 커밋 `{harness}`. 하니스 커밋은 세션을 실행한 로컬 "
+                    "커밋이므로 이 저장소의 기록에 없을 수 있습니다. 기록은 수정하지 않으며, 하니스 스크립트마다 sha256이 "
+                    "들어 있어 파일을 식별합니다. 이 트리의 파일은 해시된 파일과 바이트 단위로 같습니다. 예외는 "
+                    "`scripts/render_bench_report.py`(이 표를 렌더링한 버전의 해시는 아래에 있음)와 "
+                    "`benchmarks/compare/`의 `port_llamaindex.py`, `port_autogen.py`(각각 세션 뒤에 주석을 하나 고침)입니다.",
+                    "NeoGraph エンジン: コミット `{commit}`; ハーネスツリー: コミット `{harness}`。ハーネスのコミットは"
+                    "セッションの実行元のローカルコミットで、このリポジトリの履歴に存在しない場合があります。記録は編集せず、"
+                    "記録にはハーネスの各スクリプトの sha256 が入っていて、ファイルを特定できます。このツリーのファイルは、"
+                    "ハッシュされたファイルとバイト単位で一致します。例外は `scripts/render_bench_report.py`"
+                    "（これらの表を生成したバージョンのハッシュは下に示します）と、`benchmarks/compare/` の "
+                    "`port_llamaindex.py`・`port_autogen.py`（それぞれセッション後にコメントを 1 か所修正）です。",
+                    "NeoGraph 引擎：提交 `{commit}`；测试工具树：提交 `{harness}`。该测试工具提交是运行本次会话的本地提交，"
+                    "可能不在本仓库的历史中；记录不会被修改，其中保存了每个测试工具脚本的 sha256，据此可确定文件。"
+                    "本树中的文件与已哈希的文件逐字节相同，例外是 `scripts/render_bench_report.py`"
+                    "（渲染这些表格的版本的哈希见下方）以及 `benchmarks/compare/` 中的 `port_llamaindex.py` 和 "
+                    "`port_autogen.py`（会话之后各修正了一处注释）。"),
     "render_line": ("Tables rendered by `scripts/render_bench_report.py` (sha256 `{sha}`…).",
                     "표는 `scripts/render_bench_report.py`(sha256 `{sha}`…)가 렌더링했습니다.",
                     "表は `scripts/render_bench_report.py`（sha256 `{sha}`…）が生成しました。",
@@ -539,9 +565,9 @@ def head_label(agg: Agg, framework: str) -> str:
         m = re.search(r"git\+https://github.com/([^@]+)@([0-9a-f]{40})", line)
         if m:
             repo, sha = m.group(1), m.group(2)[:7]
-            if sha not in [p[0] for p in pieces]:
-                pieces.append((sha, dates.get(repo)))
-    commits = ", ".join(f"`{sha}`" + (f" ({date})" if date else "") for sha, date in pieces)
+            if (repo, sha) not in [(p[0], p[1]) for p in pieces]:
+                pieces.append((repo, sha, dates.get(repo)))
+    commits = ", ".join(f"`{repo.split('/')[-1]}@{sha}`" + (f" ({date})" if date else "") for repo, sha, date in pieces)
     return f"{version}; {commits}" if commits else version
 
 
@@ -562,11 +588,12 @@ def source_label(agg: Agg, framework: str, source: str, locale: str) -> str:
         section = parse_requirements(text).get(f"{framework}-head")
         sha = ""
         if section:
-            for line in section["lines"]:
-                m = re.search(r"@([0-9a-f]{40})", line)
-                if m:
-                    sha = m.group(1)[:7]
-                    break
+            main = next(iter(versions), "")
+            lines = section["lines"]
+            chosen = next((ln for ln in lines if ln.split(" @ ")[0].strip() == main), lines[0] if lines else "")
+            m = re.search(r"@([0-9a-f]{40})", chosen)
+            if m:
+                sha = m.group(1)[:7]
         return f"{tr('head', locale)} `{sha}` ({ver})" if sha else f"{tr('head', locale)} ({ver})"
     return f"{tr('release', locale)} {ver}"
 
@@ -586,10 +613,16 @@ def order_by_speed(agg: Agg, frameworks: list[str], role: str) -> list[str]:
     return sorted(frameworks, key=key)
 
 
-def script_sha() -> str:
+def normalized_sha(data: bytes) -> str:
+    """sha256 of a script's text with LF line endings, so that a checkout with CRLF endings (core.autocrlf) prints the
+    hash that the repository's own files give."""
     import hashlib
 
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
+    return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()[:16]
+
+
+def script_sha() -> str:
+    return normalized_sha(Path(__file__).read_bytes())
 
 
 def block_cohort(agg: Agg, locale: str) -> str:
@@ -613,7 +646,8 @@ def block_cohort(agg: Agg, locale: str) -> str:
                     governor=tr("governor_na", locale) if host["cpu"]["governor"] == "not exposed by the host"
                     else host["cpu"]["governor"]))
     lines.append("")
-    load0 = session["loadavg_start"][0]
+    phases = session.get("phases") or []
+    load0 = (phases[0]["loadavg_start"] if phases else session["loadavg_start"])[0]
     load1 = session["loadavg_end"][0]
     lines.append(tr("session_line", locale, start=session["utc_start"], end=session["utc_end"],
                     before=f"{load0:.2f}", after=f"{load1:.2f}", rounds=agg.rounds(),
@@ -861,7 +895,7 @@ def block_footprint(agg: Agg, locale: str) -> str:
         srows.append([tr("item_shared_exe", locale), tr("unit_binary", locale), mb(exe.get("stripped_bytes")),
                       tr("note_exe_only", locale)])
         if own:
-            srows.append([tr("item_shared_deploy", locale), tr("unit_library", locale),
+            srows.append([tr("item_shared_deploy", locale), tr("unit_shared_set", locale),
                           mb((exe.get("stripped_bytes") or 0) + sum(v or 0 for v in own.values())),
                           tr("note_shared_deploy", locale, n=len(own))])
     wasm = agg.record.get("wasm")
@@ -1075,11 +1109,14 @@ def block_dr_compare(agg: Agg, locale: str) -> str:
                      fmt("neograph"), fmt("langgraph"), f"{ratio:.2f}×" if ratio else "—"])
     header = [tr("dr_cfg", locale), tr("dr_fanout", locale), tr("dr_delay", locale), tr("dr_width", locale),
               tr("dr_ng", locale), tr("dr_lg", locale), tr("dr_ratio", locale)]
-    config = next(iter(plan["configs"].values()))
+    groups: dict[int, list[str]] = {}
+    for name, config in plan["configs"].items():
+        groups.setdefault(config["iters"], []).append(name)
+    iters_text = "; ".join(f"{n} ({', '.join(names)})" for n, names in groups.items())
     module = dr["provenance"].get("neograph_module", {})
     prov = dr["provenance"]
     out = [md_table(header, rows, ["l", "r", "r", "r", "r", "r", "r"]), "",
-           tr("dr_line", locale, rounds=plan["rounds"], warmup=plan["warmup"], iters=config["iters"],
+           tr("dr_line", locale, rounds=plan["rounds"], warmup=plan["warmup"], iters=iters_text,
               version=module.get("version", "?"), compiler=(module.get("build") or {}).get("compiler_version", "?")),
            "", tr("host_line", locale, cpu=prov["host"]["cpu"]["model"], count=prov["host"]["cpu"]["count"],
                   kernel=prov["host"]["kernel"], python=prov["python"]["version"],

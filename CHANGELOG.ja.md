@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=948c20da5544a9fc544c652e81c54682b7569914a7e1193754793da317f94abe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=9b7f8d6b006e19ca2a68d6d2bbc6b15a88ab43c634812248c986d233eb92fa76 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -66,6 +66,13 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **テスト。** 3 つの適合性スイート（`ProgramTransitionStoreConformance`、`ProgramStoreConformance`、グラフ移行カプセルの行）は、すべてのバックエンドを 2 つの形式で実行します。`Direct` は同期ストア自身の操作を、`Awaited` は awaitable な操作を呼びます。最初の 2 つのスイートには、コルーチンで操作を await するケースが 1 つずつあります。`tests/test_program_store_awaitable.cpp` はストアの契約を扱います。インラインのストアは中断せずに完了し、プールに回すストアは待っているコルーチンを自分の executor で再開し、ブロッキングビューはタイマーや別のスレッドで完了するストアを待ち、拒否するポリシーはストアに届きません。`tests/test_program_runtime_executor.cpp` は、プールに回す遷移ストアの上で Program を実行し、ストア呼び出しを待つ run が自分の executor をほかの run に空けること、あとで完了するストアがホストループで Program を実行する場所では拒否され、自前のプールを持つランタイムでは使えることを示します。wasm32 のチェックは、ホストのターンで awaitable なストアから run を読み戻します。PostgreSQL のケースはどこでもビルドされ、`NEOGRAPH_TEST_POSTGRES_URL` が設定された環境で実行されます。
 
 ### 変更
+- **フレームワーク間のベンチマーク表は、チェックイン済みの記録からスクリプトが生成する 1 つのコホートになりました。**`benchmarks/README.md` には、手で入力した表や数値を固定したチャートはもうありません。
+  - **1 つのセッション、1 台のマシン、インターリーブしたラウンド。**NeoGraph（`origin/master` のコミットを、既定のハードニング付き Release ビルドと、エンジンの上限としてのハードニングなしのビルドで）と、Python のフレームワーク 5 つ（各既定ブランチの先頭を git から正確なコミットでインストールしたもの、および対応セルには最新リリース）を、静かな Arm のマシン 1 台で、シャッフルしたラウンドで、セルごとに新しいプロセス 1 つで実行しました。`benchmarks/records/` に、生のサンプルと来歴（コミット、コンパイラとフラグ、CPU、カーネル、パッケージのバージョン、ロードアベレージ、スクリプトの sha256）を含む記録があります。`scripts/render_bench_report.py` がその記録から表とチャートを 4 言語で生成し、ドキュメントが記録と食い違うと `bench_report_current` が失敗します。
+  - **比率は対応するレジームの間だけ。**`worker_count=1` の NeoGraph は各フレームワークの `async def` ノードによるコルーチン経路と、`set_worker_count_auto()` は各スレッドプール経路（LangGraph の `invoke`、同期コンポーネントを使う Haystack の `run_async`）と比べます。pydantic-graph と AutoGen にはスレッドプール経路がなく、LlamaIndex の経路（イベントループの既定のエグゼキューターで動く通常の `def` ステップ）は計測していないため、3 つとも `該当なし` と表示します。各フレームワークのドキュメントが最初に示す API は、絶対時間だけで別に報告し、比率は作りません。NeoGraph の 2 つのワーカーモードを並べて示すので、「N 倍速い」という 1 つの数値は公開しません。
+  - **新しい表。**空のランタイムのベースライン、アイドルからの増加、実行中の run あたりの限界メモリを含むプロセス全体のメモリ、コールドスタート、NeoGraph のバイナリ・ライブラリ・WebAssembly モジュールのサイズと各フレームワークのインストールサイズ（デプロイ単位が異なるものとして表記）、そしてプローブ（LlamaIndex のインスタンスの再利用、LangGraph のファンアウトのスレッド、pydantic-graph のファンアウトが本物か、ハードニングのコスト、以前の 2 つの pydantic-graph の数値が食い違った理由）です。
+  - **2026-04 の表は履歴です。**現在では無効と分かっている項目（セッションの混在、インラインディスパッチと比べたスレッドプール、レガシーの pydantic-graph API、反復ごとに作り直した LlamaIndex のインスタンス、異なるプロセスのプロセス全体のメモリ）の注記とともに `benchmarks/history/` に移しました。
+- **撤回：バーストのガイドの P50 と P99 の列とレイテンシーのチャート、LlamaIndex の multiprocessing の行、multiprocessing のメモリの数値。**パーセンタイルはサービス時間とシステム滞在時間を混ぜており、LlamaIndex のハーネスはハンドラーをイベントループの外で作ったためすべての呼び出しが失敗し、メモリは親プロセスだけを数えたものでした。壁時計時間の列は、クローズドな単一のバーストとして表記して残し、修正したハーネスでの再測定は未実施です。`dr_compare` の FANOUT=50 の比較は、プールが揃っていなかったためエンジンの比較としては撤回し、幅を揃えて再測定しました。
+- **`dr_compare` は 2 つのランナーのプールの幅を揃えます。**`LG_MAX_CONCURRENCY`（既定は NeoGraph のワーカー数）が LangGraph のプールの幅を決め、ランナーは幅が異なる実行を拒否し、`session.py` はモックモデルのマトリクスを実行して記録を書き出します。LangGraph のランナーは同期の `invoke` で、以前は asyncio と呼ばれていました。
 - **プロバイダー呼び出しの identity は、リクエストが求める内容を指し、それを承認した SchemaProvider のポリシーを指しません (#543)。** Program のプロバイダー呼び出しジャーナルは、呼び出しを `Provider::request_digest` で識別していましたが、このダイジェストには SchemaProvider の descriptor ポリシーの identity が含まれます。そのため、内容が同じリクエストでも、ポリシー identity が違えば別の呼び出しになりました。resume やクラッシュ復旧は論理呼び出しのバインディング衝突に遭い、fork はソースの呼び出しを引き継がずに再送したので、支払い済みの呼び出しに再び費用がかかりました。interface 7 がすべてのポリシー identity を変えるため、0.16.0 でこの問題が表に出ました。ジャーナルは、リクエスト内容とポリシー identity を別々に保持するようになりました。
   - **リクエスト内容。** `Provider::request_content_digest(prepared)` は、family、モデル、モード、origin を対象にします。エンドポイント呼び出しではそのエンドポイント、メソッド、URL を、アップロードではそのメタデータと送るバイト列のダイジェストを加え (#541)、エンコードされた本文も対象です。本文には、メッセージ（NeoGraph が入れるプロンプトのテキストを含む）、ツール、オプションが入っています。本文は正規化し、descriptor がモデル、メッセージ、ストリームのフラグ、出力上限に付けたメンバー名は役割ごとに分けて扱うので、ポリシーがその名前を変えても内容は変わりません。ポリシーの identity、descriptor のルートとヘッダー、リトライポリシー、オブザーバーの上限は内容に含まれません。`Provider::request_policy_identity(prepared)` はポリシー identity を返し、`Provider::request_digest` は変わりません。SchemaProvider には型付きリクエストの正規形がなく、NeoGraph で書くとすべてのリクエスト型のすべてのフィールドを追う必要があり、漏れたフィールドがあれば 2 つのリクエストが 1 つの呼び出しを共有してしまいます。そのため、エンコードされた本文が内容そのものであり、SDK が同じリクエストを別様にエンコードすれば別の内容として扱われ、安全側に倒れます（fail closed）。
   - **ジャーナルの行。** 行は、内容の横にポリシー identity を記録します。新しい列 `identity_version`、`content_digest`、`policy_identity`、`producer`（リクエストをエンコードした NeoGraph のビルド）があり、行の `request_digest` は内容とポリシーをあわせて指します。`SQLiteProgramProviderCallJournal::Record` にも同じ 4 つのメンバーが加わり、`policy_changes()` は呼び出しに記録された変更を列挙します（テーブル `ng_program_provider_call_policy_changes`）。このバージョンが書いた行は 0.16.0 では照合されないため、ダウングレードするとバインディング衝突に遭います。
@@ -903,7 +910,7 @@ CIは、これらのターゲットをadd_executablesとして検出せず、(Do
     | autogen         | mp-pool-8     | 22428   | 82361       | 49.1    | 10000/0 |
     | LlamaIndex      | asyncio       | 26303   | 25912204    | 582.7   | 10000/0 |
 
-NG vs LangGraph（マーケティング比較軸): **237倍高速**、p99 **4134倍高速**、ピークRSS **12倍低減**。
+NG vs LangGraph（マーケティング比較軸): **237倍高速**、p99 **4134倍高速**、ピークRSS **12倍低減**。 撤回：p99 は、NeoGraph のワーカー内のサービス時間を Python の行のシステム滞在時間と比較したもので、LangGraph の multiprocessing のメモリは親プロセスだけを数えた値です。[`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md) を参照してください。
 
 **過酷なシナリオ**(並行度=10000、1 CPU / 512 MiB):
     - NG: 8 ms / 5.2 MB / 0 err / **ok**
@@ -1309,8 +1316,9 @@ FastAPI SSEチャットデモ評価中に報告された本番コスト漏れの
 - `par` エンジンオーバーヘッド（5ワーカーfan-out + サマライザー）：呼び出しあたり **約11.8 µs**。
 - ベンチプロセス全体のピークRSS（ウォームアップ＋seq＋parイテレーション）：**4.8 MB**。
 - 同じワークロードでのLangGraph 1.1.9との比較: イテレーションあたり**seqで131倍、parで199倍高速**、RSS約12倍軽量。
+- 訂正：`par` の数値は、LangGraph の同期 `invoke`（ファンアウトを呼び出しごとに作るスレッドプールで実行）と NeoGraph のインラインディスパッチ（`worker_count=1`）を比較したもので、2026-04-29 の再測定（LangGraph 1.1.10 対 `set_worker_count_auto()`）でのプール対プールの比率は 8.1 倍でした。メモリの数値は、ネイティブのプロセスと、インタプリタを含む Python のプロセスの比較です。どちらも現在の結果ではなく、対応する比率とメモリのベースラインは [`benchmarks/README.md`](benchmarks/README.md) にあります。
 
-このCHANGELOGの以前のドラフトでは、「約46 µs シーケンシャル / 約114 µs パラレル」を3.0のリグレッションとして挙げていました。これらの数値は、`CMAKE_BUILD_TYPE` が未設定のビルドツリーからのものであり、ベンチバイナリが `-O3 -DNDEBUG` なしでコンパイルされていました。適切なReleaseビルドでは、非同期ピアの統合は2.0のTaskflow同期パス（2.0 READMEが同じホスト上で20.65 µs シーケンシャル / 150.7 µs パラレルと宣伝していた）に対して**有利**です。修正されたチャートは [`docs/images/bench-engine-overhead.png`](docs/images/bench-engine-overhead.png) にあります。
+このCHANGELOGの以前のドラフトでは、「約46 µs シーケンシャル / 約114 µs パラレル」を3.0のリグレッションとして挙げていました。これらの数値は、`CMAKE_BUILD_TYPE` が未設定のビルドツリーからのものであり、ベンチバイナリが `-O3 -DNDEBUG` なしでコンパイルされていました。適切なReleaseビルドでは、非同期ピアの統合は2.0のTaskflow同期パス（2.0 READMEが同じホスト上で20.65 µs シーケンシャル / 150.7 µs パラレルと宣伝していた）に対して**有利**です。この項目のチャートは、現在のベンチマーク記録から生成したチャートに置き換えました。[`benchmarks/README.md`](benchmarks/README.md) を参照してください。
 
 ### 移行
 

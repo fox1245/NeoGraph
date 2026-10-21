@@ -24,6 +24,7 @@ The workflow imports requests, LangGraph, and langchain-openai; memory probes us
 | `USE_INMEMORY_CP` | `0` | 1 selects in-memory checkpoints; mock mode also selects them. |
 | `NG_TRANSPORT` | `http-chat` | NG: http-chat or http-responses. No WebSocket; Responses changes wire API. |
 | `NG_WORKER_COUNT` | `4` | NG worker count for fan-out. |
+| `LG_MAX_CONCURRENCY` | `NG_WORKER_COUNT`, else `4` | LangGraph pool width (`max_concurrency` of `invoke`). The default matches NeoGraph's, and `bench_mock.py` refuses unmatched widths unless `--allow-unmatched-widths` is given. |
 | `DR_MODEL` | `gpt-5.4-mini` | Explicit model for real calls on both sides. |
 | `DR_PLAN_TEMPERATURE` | unset | Planner temperature on both sides; unset sends none, because reasoning models such as `gpt-5.4-mini` reject it. |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | Per-call output cap on both NG and LG; never raised automatically. |
@@ -39,9 +40,37 @@ The workflow imports requests, LangGraph, and langchain-openai; memory probes us
 2. Initial hosted-model round: NG p50 23.90 s (sd 5.90 s), LG 21.95 s (sd 1.23 s).
 3. The historical connection diagnosis recorded 21 `connect()` syscalls in a seven-model-call NG run. That count alone does not prove 21 TLS sessions, HTTP versions, or payload equivalence.
 4. Historical pooling changes identified as commits `6da4810` / `bc2ab4f` were associated with NG p90 35.34 s → 25.28 s and sd 5.90 s → 1.28 s. Those changes concerned removed provider implementations; current typed SchemaProvider uses the external SDK/libcurl runtime.
-5. A worker-count experiment reported NG 307 ms vs LG asyncio 711 ms at FANOUT=50 and LLM_MOCK_MS=100 with NG_WORKER_COUNT=50. This is a separate workload, not a general server-capacity result.
+5. A worker-count experiment reported NG 307 ms against 711 ms for LangGraph at FANOUT=50 and LLM_MOCK_MS=100 with NG_WORKER_COUNT=50. The LangGraph runner is the synchronous `invoke` on a thread pool that langchain-core creates for every call, not asyncio (the old label was wrong), and its pool kept the default width, `min(32, CPUs + 4)`, while NeoGraph's was widened to 50. The pools were not matched, so this is withdrawn as an engine comparison; the re-run below matches them.
 
 The old claim that NeoGraph still needs HTTP/2 support is obsolete. These timings were recorded before the new SDK and the current Python wheel; they do not apply to other platforms or predict remote inference speedups. Mock mode measures orchestration and configured sleep only; it creates no provider evidence. Real mode extracts visible text from typed owned outcomes but does not benchmark native replay, portable history export, or provider-report/budget-charge settlement.
+
+## Re-run with matched pool widths
+
+Both runners fan out through a thread pool: NeoGraph's worker pool (`NG_WORKER_COUNT`) and, for LangGraph's synchronous `invoke`, the pool that langchain-core creates for every call (`LG_MAX_CONCURRENCY`, passed as `max_concurrency`). The re-run gives both sides the same width in every configuration, with the mock model (a sleep per call), canned search evidence and in-memory checkpoints: no key and no network. A failed run, or a run on unmatched widths, makes its cell an error and is left out of the table.
+
+<!-- bench-record:begin dr_compare -->
+| Configuration | Fan-out | Model delay per call (ms) | Pool width, both sides | NeoGraph, ms per run | LangGraph, ms per run | LangGraph ÷ NeoGraph |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: no model delay (the engine floor) | 5 | 0 | 4 | 1.39 [1.37, 1.40] | 6.23 [6.11, 6.34] | 4.47× |
+| B: five researchers | 5 | 100 | 4 | 402 [402, 402] | 407 [407, 407] | 1.01× |
+| C: fifty researchers, pool as wide as the fan-out | 50 | 100 | 50 | 307 [307, 308] | 329 [328, 329] | 1.07× |
+| D: fifty researchers, narrow pool | 50 | 100 | 4 | 1,508 [1,508, 1,508] | 1,516 [1,516, 1,516] | 1.01× |
+
+Mock model (a sleep per call), canned search evidence, in-memory checkpoints, no key and no network; median of 5 interleaved rounds with [min, max] across rounds, each round one fresh process per configuration with 3 warmup and 50 (A); 20 (B, C, D) measured runs per side; neograph_engine 0.16.0, built with g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0. Both sides use the same pool width: `NG_WORKER_COUNT` and `LG_MAX_CONCURRENCY`.
+
+Host: ARM Neoverse-N1, 4 cores, kernel 6.17.0-1018-oracle, Python 3.12.3, NeoGraph built with g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; CPU governor: not exposed by the host.
+<!-- bench-record:end dr_compare -->
+
+`session.py` runs the four configurations of the table in interleaved rounds, one fresh `bench_mock.py` process per configuration, and writes a record with the raw samples and its provenance; the table above is generated from that record by `scripts/render_bench_report.py`.
+
+```sh
+# Environment: the dr_compare section of benchmarks/requirements-compare.txt (benchmarks/compare/setup_venvs.sh creates it).
+# The NeoGraph Python module is built from the source tree (-DNEOGRAPH_BUILD_PYBIND=ON, shared libraries) in $WORK/build-pybind.
+python3 benchmarks/dr_compare/session.py --python "$WORK/venvs/dr_compare/bin/python" \
+    --pythonpath "$WORK/build-pybind" --build-dir "$WORK/build-pybind" --out dr-record.json --rounds 5 \
+    --harness-commit "$(git rev-parse HEAD)" --engine-commit "$(git rev-parse HEAD)"
+python3 scripts/render_bench_report.py --dr-record dr-record.json --docs benchmarks/dr_compare/README
+```
 
 ## Running a new cohort
 

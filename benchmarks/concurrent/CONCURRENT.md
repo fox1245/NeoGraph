@@ -2,47 +2,57 @@
 
 **Languages:** [English](CONCURRENT.md) | [한국어](CONCURRENT.ko.md) | [日本語](CONCURRENT.ja.md) | [简体中文](CONCURRENT.zh-CN.md)
 
-This page preserves the April 2026 counter-chain comparison. It has not been rerun with the current SchemaProvider SDK or Python bindings. “NeoGraph 3.0” is the recorded cohort label, not the current package version.
+This page preserves the April 2026 counter-chain comparison, reduced to what its recorded data supports. It has not been rerun with the current SchemaProvider SDK or Python bindings, and the harnesses in this directory have since been corrected (see [Withdrawn and corrected](#withdrawn-and-corrected)): a re-measurement with the corrected harness is pending. “NeoGraph 3.0” is the recorded cohort label, not the current package version.
 
 ## Workload and timing
 
 Three nodes increment an overwrite counter channel (`a → b → c`), with no model calls, sleep, network I/O, or checkpoint store. The matrix submits N ∈ {10, 100, 1000, 10000} under Docker profiles of 1 CPU / 512 MB and 2 CPU / 1 GB, with swap capped at the memory limit.
 
-NeoGraph uses a caller-side `asio::thread_pool` sized to `max(hardware_concurrency(), 1)`. Per-request timing starts inside the worker: P50/P99 exclude caller-queue waiting. `total_wall_ms` includes submission and the full burst drain. Do not compare the microsecond P99 directly with an end-to-end server SLO.
+NeoGraph uses a caller-side `asio::thread_pool` sized to `max(hardware_concurrency(), 1)`. The workload is a **closed, single burst**: all N runs are submitted at once and the burst is drained; nothing models arrivals over time. `Wall` is the time from the first submission to the last completion. The old harness recorded it in whole milliseconds, so the NeoGraph points below 20 ms are not used for any chart or ratio. The per-request columns of the old data are withdrawn.
 
 The historical Python field used LangGraph 1.1.9, Haystack 2.27.0, pydantic-graph 1.84.1, LlamaIndex Workflow 0.14.20, and AutoGen GraphFlow 0.7.5 in asyncio and multiprocessing modes. These versions describe the old cohort, not current Docker dependency resolution.
 
 ## Historical results: 1 CPU / 512 MB
 
-Charts and table preserve NeoGraph results reported on 2026-04-22 and Python results on 2026-04-19. The N=10,000 table is engine-only, not provider transport or inference. Missing metrics remain missing.
+The table and the charts below are generated from the archived [`results.jsonl`](results.jsonl) by `scripts/render_bench_report.py` and keep only the wall-time column and the single-process memory column. NeoGraph results were reported on 2026-04-22 and Python results on 2026-04-19. The N=10,000 table is engine-only, not provider transport or inference.
 
-![Throughput — requests per second](../../docs/images/bench-concurrent-throughput.png)
+![Burst throughput: requests completed per second of wall time, closed single burst](../../docs/images/bench-concurrent-throughput.svg)
 
-![Tail latency — P99 per request](../../docs/images/bench-concurrent-latency.png)
+![Peak resident memory of one process, closed single burst](../../docs/images/bench-concurrent-rss.svg)
 
-![Peak resident memory](../../docs/images/bench-concurrent-rss.png)
+<!-- bench-record:begin concurrent_wall -->
+| N | Engine and mode | Wall time of the closed burst | Peak RSS, one process (MiB) | OK / Err |
+| ---: | :--- | ---: | ---: | ---: |
+| 10,000 | NeoGraph threadpool | 52 ms | 5.5 | 10000 / 0 |
+| 10,000 | pydantic-graph asyncio | 886 ms | 42.6 | 10000 / 0 |
+| 10,000 | pydantic-graph mp-pool-7 | 2.8 s | withdrawn: the process tree is not counted | 10000 / 0 |
+| 10,000 | Haystack mp-pool-7 | 2.9 s | withdrawn: the process tree is not counted | 10000 / 0 |
+| 10,000 | Haystack asyncio | 3.1 s | 130.7 | 10000 / 0 |
+| 10,000 | LangGraph mp-pool-7 | 8.0 s | withdrawn: the process tree is not counted | 10000 / 0 |
+| 10,000 | LangGraph asyncio | 23.4 s | 416.2 | 10000 / 0 |
+| 10,000 | AutoGen mp-pool-7 | 46.8 s | withdrawn: the process tree is not counted | 10000 / 0 |
+| 10,000 | LlamaIndex asyncio | OOM killed | — | — |
+| 10,000 | AutoGen asyncio | OOM killed | — | — |
+<!-- bench-record:end concurrent_wall -->
 
-| N | Engine + mode | Wall | P50 | P99 | Peak RSS | OK / Err |
-|---|---------------|------|-----|-----|----------|---------|
-| 10,000 | NeoGraph 3.0 (historical label) | 52 ms | 4 µs | 7 µs | 5.5 MB | 10000 / 0 |
-| 10,000 | LangGraph asyncio | 23.4 s | 20.2 s | 23.0 s | 416.2 MB | 10000 / 0 |
-| 10,000 | LangGraph mp-pool-7 | 8.0 s | 737 µs | 88.4 ms | 60.3 MB | 10000 / 0 |
-| 10,000 | Haystack asyncio | 3.1 s | 1.7 s | 2.9 s | 130.7 MB | 10000 / 0 |
-| 10,000 | Haystack mp-pool-7 | 2.9 s | 167 µs | 84.7 ms | 68.1 MB | 10000 / 0 |
-| 10,000 | pydantic-graph asyncio | 886 ms | 71 µs | 158 µs | 42.6 MB | 10000 / 0 |
-| 10,000 | pydantic-graph mp-pool-7 | 2.8 s | 253 µs | 83.8 ms | 36.7 MB | 10000 / 0 |
-| 10,000 | LlamaIndex asyncio | OOM killed | — | — | — | — |
-| 10,000 | LlamaIndex mp-pool-7 | 6.6 s | — | — | 102.5 MB | 0 / 10000 |
-| 10,000 | AutoGen asyncio | OOM killed | — | — | — | — |
-| 10,000 | AutoGen mp-pool-7 | 46.8 s | 4.6 ms | 97.1 ms | 49.1 MB | 10000 / 0 |
+The full matrix is archived in [`results.jsonl`](results.jsonl). The recorded LlamaIndex and AutoGen asyncio cells were classified as OOM kills: ten thousand simultaneous per-call instances did not fit in 512 MB. Those observations do not establish universal framework limits. The LangGraph asyncio row calls `ainvoke` with a plain `def` node, which LangGraph runs on a thread pool; with `async def` nodes it is a different regime (see the [engine-overhead guide](../README.md)).
 
-The full matrix is archived in [`results.jsonl`](results.jsonl). The recorded LlamaIndex and AutoGen asyncio cells were classified as OOM kills; all LlamaIndex multiprocessing invocations in this row failed. Those observations do not establish universal framework limits or diagnose every failure.
+## Withdrawn and corrected
+
+Withdrawn from this page, with the reason for each:
+
+* **The P50 and P99 columns and the latency chart.** They put the in-worker service time of NeoGraph, of the multiprocessing rows and of pydantic-graph (whose runs never suspend) next to the time in the system, from task creation, of the other asyncio rows, so the gaps measured how often a framework yields, not how fast it is.
+* **The LlamaIndex multiprocessing rows.** Every call failed (0 of 10,000 completed) because the harness created the workflow handler outside a running event loop; the 6.6 s and the memory figure belonged to the exception.
+* **The multiprocessing memory figures.** The harness counted the parent process only, not the worker processes.
+* **The NeoGraph throughput points at N=10 and N=100.** The wall time was truncated to whole milliseconds and the renderer clamped it to 1 ms, so those points were not measured.
+
+The harnesses in this directory now record, for every cell, the completions, the failures and a check of each result; a cell with a failure has status `error`, no percentiles and a non-zero exit. They record the service time and the response time from one common submit instant, wall time in microseconds, and a process-tree memory peak for multiprocessing. The Docker matrix has not been re-run with them: re-measurement is pending. The Docker images now pin the latest releases of [`requirements-compare.txt`](../requirements-compare.txt); the earlier LangGraph pin, 1.1.7, has been yanked from PyPI.
 
 ## Interpretation boundaries
 
 GIL-enabled CPython serializes Python bytecode, but event-loop scheduling, framework work, process serialization, and worker count also affect throughput. This benchmark does not isolate one cause, establish a universal asyncio ceiling, or predict free-threaded Python performance.
 
-Docker CPU quota need not change the cores visible to `hardware_concurrency()`. Record caller pool size and host topology. Peak RSS comes from Linux `/proc/self/status`; zero on an unsupported platform means unavailable measurement. Read multiprocessing memory numbers with each runner’s accounting scope. No 256 MB experiment, bare-metal projection, persistence comparison, or remote-LLM capacity guarantee follows from this table.
+Docker CPU quota need not change the cores visible to `hardware_concurrency()`. Record caller pool size and host topology. Peak RSS comes from Linux `/proc/self/status` of one process; zero on an unsupported platform means unavailable measurement. NeoGraph holds at most one run per pool thread while the Python asyncio rows hold all N runs in flight, so the memory columns are not like-for-like. No 256 MB experiment, bare-metal projection, persistence comparison, or remote-LLM capacity guarantee follows from this table.
 
 ## Current dependencies and reproduction status
 
@@ -60,8 +70,8 @@ docker run --rm --cpus=1 --memory=512m --memory-swap=512m ng-concurrent 10000
 # Full matrix; a NEW path preserves the archived results.jsonl.
 bash benchmarks/concurrent/run_matrix.sh benchmarks/concurrent/results-new.jsonl
 
-# Render the archived default results.jsonl, not the new output.
-node benchmarks/render_concurrent.js
+# Render the tables and charts from the archived results.jsonl, not from the new output.
+python3 scripts/render_bench_report.py
 ```
 
 The following JSON illustrates field shape only, not an additional measured result.

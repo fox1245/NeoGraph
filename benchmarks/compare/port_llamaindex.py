@@ -19,8 +19,9 @@ Variants:
                   documentation shows first. The construction and the validation of the step graph are part of
                   the timed call. Idiomatic default; absolute times only.
 
-LlamaIndex steps are coroutines (`async def`) and the runtime is one event loop; the framework has no thread-pool
-regime (a sync step function is not accepted by the step decorator for the workflows runtime).
+Every step here is a coroutine (`async def`) on one event loop. The workflows runtime also accepts a plain `def` step
+and runs it on the event loop's default executor (a thread-pool path, in llama-index-workflows 2.26.0); that path is
+not part of this cohort, so there is no pool variant.
 """
 
 PACKAGES = ["llama-index-core", "llama-index-workflows"]

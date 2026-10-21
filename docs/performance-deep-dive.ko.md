@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=2d15a0b62d2881a1880f92dc7b5d24e9e499ffc57b27fd02b0bb365c20ce9225 -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=ko source_sha256=1441793955b212960f5bb907b65dda7705de92ccfbfa4877fb40810066ac2ea7 -->
 # 성능 심층 분석
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -9,41 +9,19 @@
 
 이 측정값으로는 클라우드 비용, 워커 수, 용량을 보장할 수 없습니다. 패키지 버전뿐 아니라 wheel 해시와 네이티브 의존성도 고정해야 합니다. 버전 문자열만으로는 배포를 재현할 수 없습니다.
 
-## 엔진 단독 워크로드, 2026년 4월
+## 엔진 단독 워크로드
 
-토폴로지를 같게 맞추고 한 번만 컴파일했으며, 모델, 네트워크, sleep은 없습니다. seq는 노드 세 개짜리 체인이고, par는 5갈래 fan-out에 join을 더한 구조입니다. 이 행들은 2026-04-22에 x86_64 Linux에서 측정했습니다. NeoGraph는 GCC 13 Release `-O3 -DNDEBUG`로 빌드해 10회 실행의 중앙값을 쓰고, Python은 CPython 3.12.3에서 3회 실행의 중앙값을 썼습니다. pydantic-graph의 par 행은 네이티브 fan-out이 아니라 노드 여섯 개를 직렬로 흉내 낸 값입니다.
+현재의 프레임워크 간 비교 표(매칭 레짐과 관용 기본값, 메모리, 시작 시간, 크기)는 체크인된 기록에서 생성되며 [벤치마크 가이드](../benchmarks/README.md)에 있습니다. 이 페이지가 되풀이하던 2026년 4월의 표는 버전을 섞어 여러 세션에서 측정한 것이어서, 현재 무효로 알려진 항목에 대한 설명과 함께 [이력](../benchmarks/history/engine-overhead-2026-04.md)에 보존합니다. I/O가 전혀 없는 엔진 비교로는 모델 서비스의 지연 시간을 예측할 수 없습니다.
 
-| 프레임워크 (2026-04-22) | seq µs | par µs |
-|---|---:|---:|
-| NeoGraph, 당시 master | 5.0 | 11.8 |
-| Haystack 2.28.0 | 144.1 | 290.0 |
-| pydantic-graph 1.85.1 | 235.9 | 286.1 |
-| LangGraph 1.1.9 | 656.7 | 2348.7 |
-| LlamaIndex Workflow 0.14.21 | 1780.3 | 4683.5 |
-| AutoGen GraphFlow 0.7.5 | 3209.2 | 7292.7 |
+## 버스트 동시성
 
-과거에 워밍업과 seq 10000회, par 5000회를 실행했을 때 NeoGraph는 약 0.16 s와 4.8 MB, Haystack은 2.91 s와 80.3 MB, AutoGen은 68.29 s와 52.4 MB를 기록했습니다. I/O가 전혀 없는 엔진 비교로는 모델 서비스의 지연 시간을 예측할 수 없습니다.
-
-## 과거 버스트 동시성
-
-요청 10000개를 한꺼번에 제출했고, CPU 1개와 RAM 512 MB로 제한한 Docker cgroup 안에서 실행했습니다. Python 행은 asyncio를 사용했습니다. 이 결과는 그 워크로드와 환경에 한정되며, Python/GIL의 보편적인 확장성 법칙을 보여 주지는 않습니다.
-
-| 프레임워크 | Wall | P99 | 최대 RSS | 결과 |
-|---|---:|---:|---:|---|
-| NeoGraph, 당시 master | 52 ms | 7 µs | 5.5 MB | 10000건 완료 |
-| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000건 완료 |
-| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000건 완료 |
-| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000건 완료 |
-| LlamaIndex | — | — | — | OOM으로 종료 |
-| AutoGen | — | — | — | OOM으로 종료 |
-
-측정 방법과 프로세스 풀 비교는 [동시성 벤치마크](../benchmarks/concurrent/CONCURRENT.md)를 참고하세요.
+요청 1만 건을 한꺼번에 제출하고(닫힌 단일 버스트) CPU 1개와 RAM 512 MB로 제한한 Docker cgroup 안에서 실행했습니다. 기록된 데이터가 뒷받침하는 wall 시간 열과, 철회한 열과 행 및 그 이유는 [동시성 벤치마크](../benchmarks/concurrent/CONCURRENT.md)에 있습니다. 이 결과는 그 워크로드와 환경에 한정되며, Python/GIL의 보편적인 확장성 법칙을 보여 주지는 않습니다.
 
 ## 과거 캐시 시뮬레이션
 
 Cachegrind로 Ryzen 7 5800X의 캐시 계층을 시뮬레이션했습니다. 32 KB L1 명령어/데이터 캐시(8-way), 32 MB 마지막 레벨 캐시(16-way), 64바이트 라인입니다. 과거 동시성 벤치마크는 다음 결과를 보고했습니다.
 
-| N | 명령어 참조 수 | 마지막 레벨 명령어 미스 | 네이티브 p50 |
+| N | 명령어 참조 수 | 마지막 레벨 명령어 미스 | 네이티브 p50(워커 안의 서비스 시간) |
 |---|---:|---:|---:|
 | 1 | 5.3 M | 4313 | 17 µs |
 | 10 | 5.9 M | 4304 | 16 µs |
