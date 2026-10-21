@@ -1,10 +1,16 @@
 #include <neograph/async/host_loop.h>
 
+#include <asio/error_code.hpp>
 #include <asio/execution_context.hpp>
+#include <asio/steady_timer.hpp>
 
+#include <chrono>
+#include <cstdint>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace neograph::async {
 namespace detail {
@@ -32,6 +38,7 @@ public:
         if (!host_) throw std::invalid_argument("HostLoop needs a host executor");
         if (options_.turn_handlers == 0) options_.turn_handlers = 1;
         io_.emplace();
+        sentinel_.emplace(*io_);
         asio::make_service<HostLoopService>(*io_, this);
     }
 
@@ -44,6 +51,7 @@ public:
         closed_ = true;
         disarm();
         deadlines_.clear();
+        sentinel_.reset();
         // Destroys the coroutines that have not finished. Their frames may wake the loop, which is closed.
         io_.reset();
     }
@@ -59,15 +67,19 @@ public:
         }
     }
 
+    // The deadline stays noted until Asio has dispatched the timers up to it (see watch), whatever the host's clock
+    // says.
     void wake_at(sp::runtime::SteadyTime at) noexcept {
         if (closed_) return;
         try {
+            deadlines_.emplace(at, ++noted_);
+            watch();
+            if (running_) return;  // the turn that is running arms the host timer when it ends
             if (at <= host_->now()) {
                 wake();
-                return;
+            } else {
+                arm();
             }
-            deadlines_.insert(at);
-            if (!running_) arm();
         } catch (...) {
         }
     }
@@ -81,16 +93,12 @@ private:
         running_ = true;
         const auto started = host_->now();
         bool more = false;
-        bool drained = false;
         std::exception_ptr failure;
         try {
             io_->restart();
             std::size_t handled = 0;
             for (;;) {
-                if (io_->poll_one() == 0) {
-                    drained = true;
-                    break;
-                }
+                if (io_->poll_one() == 0) break;
                 if (++handled == options_.turn_handlers) {
                     more = true;
                     break;
@@ -101,8 +109,6 @@ private:
             more = true;
         }
         running_ = false;
-        // A poll that ran dry ran the reactor after `started`, so every timer due by then has fired.
-        if (drained) deadlines_.erase(deadlines_.begin(), deadlines_.upper_bound(started));
         if (failure && options_.on_error) {
             try {
                 options_.on_error(failure);
@@ -111,17 +117,50 @@ private:
         }
         if (closed_) return;
         if (more) wake();
-        arm();
+        arm(started);
     }
 
-    // The host timer follows the earliest noted deadline.
-    void arm() noexcept {
+    // Asio decides when a timer is dispatched, and a poll at the host's deadline can find it not dispatched yet:
+    // Asio's Windows reactor learns that a timer is due from a thread of its own, and a host's clock can run ahead
+    // of Asio's. So a poll that ran dry does not retire a deadline. The loop waits on a timer of its own at the
+    // earliest one instead. Asio dispatches every timer that is due in one step, so when that timer's handler runs,
+    // the timers that expire by then and were waiting before it was set have been dispatched, and their deadlines
+    // are done.
+    void watch() noexcept {
+        try {
+            if (!sentinel_ || deadlines_.empty()) return;
+            const auto next = deadlines_.begin()->first;
+            if (watching_ && watched_ == next) return;
+            sentinel_->expires_at(next);  // a wait that is pending ends with operation_aborted
+            watching_ = true;
+            watched_ = next;
+            sentinel_->async_wait([this, next, covers = noted_](const asio::error_code& error) {
+                if (!error) dispatched(next, covers);
+            });
+        } catch (...) {
+            watching_ = false;
+        }
+    }
+
+    void dispatched(sp::runtime::SteadyTime up_to, std::uint64_t covers) {
+        if (closed_) return;
+        if (watched_ <= up_to) watching_ = false;
+        for (auto it = deadlines_.begin(); it != deadlines_.end() && it->first <= up_to;)
+            it = it->second <= covers ? deadlines_.erase(it) : std::next(it);
+        watch();
+    }
+
+    // The host timer follows the earliest deadline that Asio has not been seen to dispatch. `polled` is when the
+    // turn that has just run started: an earlier deadline that is still noted was not dispatched by that turn, so
+    // look again soon instead of at a time that has passed.
+    void arm(sp::runtime::SteadyTime polled = {}) noexcept {
         try {
             if (deadlines_.empty()) {
                 disarm();
                 return;
             }
-            const auto next = *deadlines_.begin();
+            auto next = deadlines_.begin()->first;
+            if (next <= polled) next = host_->now() + redispatch_delay;
             if (timer_ != 0 && armed_at_ == next) return;
             disarm();
             timer_ = host_->schedule(next, [self = shared_from_this()] { self->timer_fired(); });
@@ -143,10 +182,18 @@ private:
         wake();
     }
 
+    // How soon a turn looks again for a timer that Asio has not dispatched at its deadline.
+    static constexpr std::chrono::milliseconds redispatch_delay{1};
+
     std::shared_ptr<sp::runtime::Executor> host_;
     HostLoop::Options options_;
     std::optional<asio::io_context> io_;
-    std::multiset<sp::runtime::SteadyTime> deadlines_;
+    std::optional<asio::steady_timer> sentinel_;
+    // Deadlines whose timers Asio has not been seen to dispatch, each with the order it was noted in.
+    std::set<std::pair<sp::runtime::SteadyTime, std::uint64_t>> deadlines_;
+    std::uint64_t noted_ = 0;
+    sp::runtime::SteadyTime watched_{};
+    bool watching_ = false;
     sp::runtime::Executor::Timer timer_ = 0;
     sp::runtime::SteadyTime armed_at_{};
     bool scheduled_ = false, running_ = false, closed_ = false;

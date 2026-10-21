@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=23f9435c4737b5e0ae23f2c50291e2cd4cb569e64d2b7cbbddc51a1e3f0b726d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=111632043ee21775a3a6b7fb870eac6c77f89281fe9499048640164cd4b2d49b -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -50,6 +50,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **`HostLoop` 不再丢失宿主先于 Asio 到达的定时器 (#535)。** 在已记录的截止时间之后轮询、却没有就绪处理程序的回合，会假定 Asio 已分发了到那时为止所有到期的定时器，并丢弃该截止时间。但这由 Asio 决定，宿主的定时器可能先运行：Asio 的 Windows reactor 由自己的线程得知定时器已到期，所以在截止时间上做的轮询可能发现定时器尚未分发，宿主的时钟也可能比 Asio 的时钟快。该回合丢弃了截止时间，使循环在等待仍未结束时进入空闲，于是等待重试退避或其他 `HostTimer` 的运行永远不会结束。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` 和 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` 曾在 CI 的 Windows 作业中间歇性失败。
+  - **截止时间在 Asio 分发其定时器之前一直保持已记录。** 循环用自己的定时器在最早的截止时间上等待，Asio 分发它时，丢弃到该时间为止的截止时间。在此之前运行的回合会在 1 毫秒后再次查看。记录时在宿主时钟上已经到期的截止时间也同样保留，而以前会被丢弃。
+  - API 没有变化。在定时器按时触发的宿主上，循环的行为与以前相同。回归测试让手动 executor 的时钟比 Asio 的快；它们在以前的引擎上于 Linux 即失败，现在通过。
 - **Program 存储在过去不一致的地方现在对齐，并且每一处都以 fail-closed 处理 (#556)。** 共享的转换校验器保留了内存、SQLite 和 PostgreSQL 存储之间的四处差异。其中三处现在遵循契约，第四处是内存存储的已声明限制。
   - **格式错误的期望头在所有存储中都会在读取已存状态之前被拒绝。** 不是 SHA-256 标识的头不可能与已存的头匹配，因此 `compare_publish` 不读取就返回 `Conflict`。内存存储原本就是这样。SQL 存储是在读取运行记录之后、比较头时才得到同样的 `Conflict`，所以只要有读不出的已存记录，它们就会抛出异常而不是返回 `Conflict`。
   - **坐标列与字节内容不一致的已存命令行，在所有存储中都视为损坏。** PostgreSQL 存储对此会抛出 `std::invalid_argument`。SQLite 存储读取同一行时会抛出异常，但在发布检查中却像调用方持有过期的头一样返回 `Conflict`。现在两种存储在发布检查中也都抛出 `std::invalid_argument`。

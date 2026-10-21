@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=b356aef7a1ba972201c4a1d99a2769c2bd587dd8e021fee6ec4084c036b068cf -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=af08dda8e4780898848c6ccf35b39f7c895ee49d16baa4bf157795491950c3cf -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -136,7 +136,9 @@ NeoGraph 的图引擎是 Asio `io_context` 上的一组协程。WebAssembly 宿�
   `Promise` 由 `ng_js_done` 兑现。
 - **Asio 定时器。** 重试退避或资源等待轮询都是 Asio 定时器，而宿主的循环看不到 Asio 的定时器队列。引擎通过
   `async::HostTimer`（`src/core/host_timer.h`）等待，它在设置 Asio 定时器的同一次调用中把截止时间告知循环
-  （`async::note_deadline`），循环为最早的截止时间设置一个宿主定时器。`src/` 或 `include/` 中未经包装的 Asio 定时器在宿主上
+  （`async::note_deadline`），循环为最早的截止时间设置一个宿主定时器。该定时器可能先于 Asio 分发在同一时刻到期的定时器而运行
+  （Asio 的 Windows reactor 由自己的线程得知定时器已到期，宿主的时钟也可能比 Asio 的时钟快），所以循环会保留截止时间，直到
+  Asio 分发了该时间之前到期的定时器，在此之前每隔 1 毫秒再查看一次。`src/` 或 `include/` 中未经包装的 Asio 定时器在宿主上
   永远不会触发，因此 `host_timer_guard` 测试会拒绝它，从不在宿主循环上运行的代码列在 `scripts/host_timer_allowlist.txt`
   中。在 `HostLoop` 下等待 Asio 定时器的自有代码需要自己调用 `async::note_deadline`。
 

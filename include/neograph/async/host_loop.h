@@ -146,7 +146,9 @@ private:
 
 /// Tells the loop that runs `executor` about an Asio timer that expires at `at`, so that a turn is scheduled then. A
 /// timer cannot do that itself: the host's loop does not see Asio's timer queue. Does nothing for an executor that
-/// no HostLoop runs. Code that waits on an Asio timer under a HostLoop calls it, as the engine's own waits do.
+/// no HostLoop runs. Code that waits on an Asio timer under a HostLoop calls it, as the engine's own waits do. A turn
+/// can run before Asio dispatches the timer, because the host's clock runs ahead of Asio's or Asio learns that the
+/// timer is due from a thread of its own; the loop then looks again shortly, until Asio has dispatched it.
 NEOGRAPH_API void note_deadline(const asio::any_io_executor& executor,
                                 std::chrono::steady_clock::time_point at) noexcept;
 
