@@ -669,6 +669,138 @@ TEST(PricingSettle, ByokAddsTheUpstreamCharge) {
     EXPECT_EQ(program::detail::reported_cost_microunits(direct), 50U);
 }
 
+namespace {
+
+// A priced fixture call and the usage that settles it, for the records that name an upstream.
+struct SettledCall {
+    SettledCall()
+        : provider(provider_at("openai.chat", std::string(kDirect), {model_with("vendor/model", 1'000, kListed)})),
+          quote(program::detail::assess_monetary_call({}, prepared(*provider, "vendor/model"))) {}
+    std::shared_ptr<Provider>               provider;
+    program::detail::MonetaryQuote          quote;
+    program::detail::MonetaryCallSite       site{"call", "operation", "node"};
+    std::optional<ProgramMonetaryRecord> settle(const sp::runtime::Result& outcome) const {
+        return program::detail::settle_monetary_call(quote, site, outcome);
+    }
+};
+
+sp::Usage reported_usage() {
+    auto usage = neograph::test::usage(300, 40, 340);
+    usage.provider_cost.source      = sp::CostSource::OpenRouterUsd;
+    usage.provider_cost.total       = sp::UsdAmount{1'234'567};
+    usage.provider_cost.status[0]   = sp::CostStatus::Available;
+    usage.provider_cost.is_byok     = false;
+    usage.provider_cost.byok_status = sp::CostStatus::Available;
+    return usage;
+}
+
+}  // namespace
+
+TEST(PricingSettle, EveryRecordNamesTheUpstreamItsResponseNamed) {
+    const SettledCall call;
+    ASSERT_TRUE(call.quote.blocker.empty()) << call.quote.blocker_message;
+    const auto named = std::optional<std::string>("Fixture Upstream");
+
+    const auto estimated = call.settle(neograph::test::naming_upstream(
+        neograph::test::success("answer", neograph::test::usage(300, 40, 340)), "Fixture Upstream"));
+    ASSERT_TRUE(estimated);
+    EXPECT_EQ(estimated->evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(estimated->served_by, named);
+
+    const auto reported = call.settle(
+        neograph::test::naming_upstream(neograph::test::success("answer", reported_usage()), "Fixture Upstream"));
+    ASSERT_TRUE(reported);
+    EXPECT_EQ(reported->evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(reported->served_by, named);
+
+    // A call held for its usage was answered by the upstream all the same.
+    const auto partial = call.settle(neograph::test::naming_upstream(
+        neograph::test::success("answer",
+                                neograph::test::usage(300, std::nullopt, std::nullopt, sp::UsageStage::Partial)),
+        "Fixture Upstream"));
+    ASSERT_TRUE(partial);
+    EXPECT_EQ(partial->evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(partial->served_by, named);
+
+    // A failure after the request left keeps the name on its partial result, and the held record takes it.
+    sp::Failure failure;
+    failure.error.kind                          = sp::ErrorKind::Transport;
+    failure.error.retry_safety                  = sp::RetrySafety::PossiblyAccepted;
+    failure.error.attempt.request_may_have_left = true;
+    const auto cut = call.settle(neograph::test::naming_upstream(
+        std::make_shared<const sp::Outcome>(std::move(failure)), "Fixture Upstream"));
+    ASSERT_TRUE(cut);
+    EXPECT_EQ(cut->evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(cut->served_by, named);
+
+    // A response that names none, and a call whose outcome is not known, record none.
+    const auto unnamed = call.settle(neograph::test::success("answer", reported_usage()));
+    ASSERT_TRUE(unnamed);
+    EXPECT_FALSE(unnamed->served_by);
+    EXPECT_FALSE(call.settle(nullptr)->served_by);
+    EXPECT_FALSE(program::detail::unknown_outcome_record(call.quote, call.site, "the outcome is unknown").served_by);
+
+    // The name changes nothing the record charges or says apart from itself.
+    auto without = *reported;
+    without.served_by.reset();
+    EXPECT_EQ(without, *unnamed);
+}
+
+TEST(PricingSettle, AnUpstreamNameTheRecordCannotHoldIsLeftOutAndTheCallStillCharged) {
+    const SettledCall call;
+    ASSERT_TRUE(call.quote.blocker.empty()) << call.quote.blocker_message;
+    const std::string longest(256, 'u');
+    const auto        kept = call.settle(
+        neograph::test::naming_upstream(neograph::test::success("answer", reported_usage()), longest));
+    ASSERT_TRUE(kept);
+    EXPECT_EQ(kept->served_by, std::optional<std::string>(longest)) << "the SDK's own bound is the record's";
+    for (const std::string name : {std::string(), std::string(257, 'u'), std::string("two\nlines"),
+                                   std::string("nul\0byte", 8), std::string("\x7f"), std::string("\xff\xfe")}) {
+        SCOPED_TRACE(name.size());
+        const auto record = call.settle(
+            neograph::test::naming_upstream(neograph::test::success("answer", reported_usage()), name));
+        ASSERT_TRUE(record) << "a name never discards a billed response";
+        EXPECT_EQ(record->evidence, ProgramMonetaryEvidence::Reported);
+        EXPECT_EQ(record->microunits, 1'235U);
+        EXPECT_FALSE(record->served_by);
+    }
+}
+
+TEST(PricingRecord, AnUpstreamIsInTheEncodedRecordOnlyWhenThereIsOne) {
+    const auto old_record = json::parse(
+        R"({"call_id":"call","operation_id":"op","node":"llm","origin":"https://openrouter.ai","model":"vendor/model",)"
+        R"("evidence":"reported","microunits":14,"reserved_microunits":1000,"basis":"provider_reported",)"
+        R"("catalog_version":"sp-model-catalogue/1","catalog_digest":"sha256:)" + std::string(64, 'a') +
+        R"(","conservative":false,"may_undercount":false,"replayed":false,"reason":""})");
+    // A record without one decodes without one and encodes to the bytes it had.
+    const auto plain = program::detail::decode_monetary_record(old_record);
+    EXPECT_FALSE(plain.served_by);
+    EXPECT_EQ(program::detail::encode_monetary_record(plain).dump(), old_record.dump());
+
+    auto named = old_record;
+    named["served_by"] = "Fixture Upstream";
+    const auto decoded = program::detail::decode_monetary_record(named);
+    EXPECT_EQ(decoded.served_by, std::optional<std::string>("Fixture Upstream"));
+    EXPECT_EQ(program::detail::encode_monetary_record(decoded).dump(), named.dump());
+    EXPECT_NE(decoded, plain);
+    // The name is the only difference.
+    auto without = decoded;
+    without.served_by.reset();
+    EXPECT_EQ(without, plain);
+
+    // A stored name outside the bounds the record keeps is corrupt, not ignored.
+    for (const json bad : {json(""), json(std::string(257, 'u')), json("two\nlines"), json(7), json(nullptr),
+                           json::array()}) {
+        SCOPED_TRACE(bad.dump());
+        auto corrupt = old_record;
+        corrupt["served_by"] = bad;
+        EXPECT_THROW((void)program::detail::decode_monetary_record(corrupt), std::invalid_argument);
+    }
+    auto unusable = plain;
+    unusable.served_by = std::string("\xff");
+    EXPECT_THROW(program::detail::validate_monetary_record(unusable), std::invalid_argument);
+}
+
 TEST(PricingRecord, A015RecordKeepsItsBytesAndANewOneCarriesItsPricing) {
     // A record journaled by 0.15 decodes and encodes to the same canonical bytes.
     const auto old_record = json::parse(

@@ -294,7 +294,8 @@ inline constexpr std::string_view kOverHoldNotice = "P_MONEY_OVER_HOLD";
  * a `reported` or `estimated` record whose amount is above its
  * reserved_microunits. A `held` record is charged its hold and is never above
  * it; neither is a record that is within its reservation. The witness names
- * the call and its amounts, and holds nothing of its request or reply.
+ * the call and its amounts, and the record's served_by when it has one; it
+ * holds nothing else of its request or reply.
  */
 NEOGRAPH_PROGRAM_API std::optional<ProgramCoreProviderCallDiagnostic> over_hold_notice(
     const ProgramMonetaryRecord& record);

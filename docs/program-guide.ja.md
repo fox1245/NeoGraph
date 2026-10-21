@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=0b98e23b8164da773ac5ea7771f57b925ef650234ba8c2a5569679616ce68dce -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=139912a5df70aababcb5da41715f1e4b1b21f77fc5853718745b48b9f1461e64 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -364,7 +364,7 @@ python restart.py state resume run-...
 
 予算が実行を途中で止めた場合も、実行が予算を超えたまま終わった場合も、記録は同じです。使用量は plan の完了後に精算されるため、plan が許可量を超えて終わることがあります。応答のコストが、その呼び出しに予約した額を上回ることがあります。キャンセルを無視するノードが期限の後に戻ることがあります。サブグラフノードのステップは、そのノードを含むグラフを止めずに、実行の Core ステップに加算されます。実行が複数の予算を超えた場合、witness にはそれぞれの項目が入り、ステータスとコードは表で最初に来る予算（予算フィールドの並び順）のものになります。期限は、ほかに何を使っていても実行を `TimedOut` で終わらせるため、wall time が先頭です。料金のかかる呼び出しが送信前に拒否された場合、拒否の証拠は `monetary` の下に残ります。予約額、`ceiling`、`used` です。
 
-料金のかかる呼び出しの予約額は、呼び出しの出力 cap を最も高い出力レートで見積もった額です。モデルの upstream が cap で止まる場合にだけ、これが支出の上限になります。NeoGraph は cap を送りますが、upstream がそれを適用するかは確認できないため、cap を無視する upstream の応答は予約額より高くなることがあります。その呼び出しは応答が報告した額で請求され、実行に残る `monetary_microunits` はその分だけ減り、請求額が許可量を超えた実行は、上と同じく `P_MONEY_BUDGET` とともに `BudgetExhausted` で終わります。許可量の範囲内なら実行は続きます。NeoGraph はそのような呼び出しごとに、実行のハンドルへ `P_MONEY_OVER_HOLD` notice を出し（`handle.notices`、`wait()` の後に読みます）、`result.monetary_records` にあるその呼び出しの記録は `microunits` が `reserved_microunits` を上回ります。notice はほかに何も変えず、NeoGraph は notice の後で route を拒否しません。それはホストのポリシーです。cap に頼るホストは、OpenRouter の呼び出しを cap を守ると分かっている upstream にだけ向け（provider の routing の `only` または `order`）、実行のたびに notice と記録に対応し、失ってもよい額より少なく付与できます。詳細は [価格の証拠とモデルカタログ](reference-en.md#pricing-evidence-and-the-model-catalogue) の出力 cap の段落にあります。
+料金のかかる呼び出しの予約額は、呼び出しの出力 cap を最も高い出力レートで見積もった額です。モデルの upstream が cap で止まる場合にだけ、これが支出の上限になります。NeoGraph は cap を送りますが、upstream がそれを適用するかは確認できないため、cap を無視する upstream の応答は予約額より高くなることがあります。その呼び出しは応答が報告した額で請求され、実行に残る `monetary_microunits` はその分だけ減り、請求額が許可量を超えた実行は、上と同じく `P_MONEY_BUDGET` とともに `BudgetExhausted` で終わります。許可量の範囲内なら実行は続きます。NeoGraph はそのような呼び出しごとに、実行のハンドルへ `P_MONEY_OVER_HOLD` notice を出し（`handle.notices`、`wait()` の後に読みます）、`result.monetary_records` にあるその呼び出しの記録は `microunits` が `reserved_microunits` を上回ります。どちらも、応答が名前を示す場合は、呼び出しを処理したアップストリーム（`served_by`）を持ちます。notice はほかに何も変えず、NeoGraph は notice の後で route を拒否しません。それはホストのポリシーです。cap に頼るホストは、OpenRouter の呼び出しを cap を守ると分かっている upstream にだけ向け（provider の routing の `only` または `order`）、実行のたびに notice と記録に対応し、失ってもよい額より少なく付与できます。詳細は [価格の証拠とモデルカタログ](reference-en.md#pricing-evidence-and-the-model-catalogue) の出力 cap の段落にあります。
 
 ## Program の作業が動く場所（C++ ホスト）
 

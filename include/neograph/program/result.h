@@ -130,6 +130,16 @@ struct ProgramMonetaryRecord {
     /// `tool_uses` (the server-tool types and caps reserved) and
     /// `assumptions` (sp::pricing::CostEstimate::assumptions).
     json                    pricing = json::object();
+    /// The upstream a routing gateway named as having served the call, as the
+    /// SDK reports it: OpenRouter's `provider` on a Chat or Messages response,
+    /// buffered or streamed, at an origin the policy declares a gateway. Unset
+    /// when the response names none (or a name the SDK does not accept), when
+    /// the origin is not a gateway, and when the outcome is unknown. It is
+    /// metadata of the record only: it is outside the call's journal identity
+    /// and digests, and a record restored from the journal, or adopted by a
+    /// fork, keeps the value it was stored with. Records written before it was
+    /// added have none.
+    std::optional<std::string> served_by;
 
     bool operator==(const ProgramMonetaryRecord&) const = default;
 };

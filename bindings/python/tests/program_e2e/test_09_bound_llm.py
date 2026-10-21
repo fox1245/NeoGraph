@@ -107,6 +107,49 @@ def test_without_a_reported_cost_the_catalog_estimate_names_its_catalog(peer):
     assert result.usage.monetary_microunits == 14
 
 
+def test_the_record_names_the_upstream_the_response_named(peer):
+    peer.served_by = "Fixture Upstream"
+    _host, _version, result = run_bound(peer)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [record] = result.monetary_records
+    assert record.evidence == "reported"
+    assert record.microunits == 1235
+    # OpenRouter's `provider` of the stream's chunks: the built-in node streams inside a Program.
+    assert record.served_by == "Fixture Upstream"
+    [sent] = peer.requests
+    assert sent["body"].get("stream") is True
+    # Nothing else of the reply is kept: the record has no member for it, and the run's result is the same.
+    assert "Fixture Upstream" not in json.dumps(last_reply(result))
+
+
+def test_a_response_that_names_no_upstream_leaves_the_record_without_one(peer):
+    _host, _version, result = run_bound(peer)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [record] = result.monetary_records
+    assert record.evidence == "reported"
+    assert record.served_by is None
+
+
+def test_a_stored_record_keeps_the_upstream_it_was_stored_with(peer, tmp_path):
+    if sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    peer.served_by = "Fixture Upstream"
+    host = durable_bound_host(peer, tmp_path)
+    run_budget = priced_budget()
+    version = admit(host, CHAT, run_budget, "chat.js")
+
+    result = host.run(version, QUESTION, run_budget)
+
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    assert [r.served_by for r in result.monetary_records] == ["Fixture Upstream"]
+    # The terminal result is read back from the store: the record is the one that was stored.
+    again = host.reconnect(result.run_id).wait()
+    assert [r.served_by for r in again.monetary_records] == ["Fixture Upstream"]
+    assert peer.request_count() == 1
+
+
 def test_a_ceiling_too_small_for_the_reservation_is_refused_before_sending(peer):
     run_budget = priced_budget(monetary_microunits=HOLD - 1)
     _host, _version, result = run_bound(peer, run_budget=run_budget)
@@ -378,8 +421,8 @@ print(json.dumps({
     "status": str(result.status), "attempt": result.attempt,
     "monetary": result.usage.monetary_microunits,
     "remaining": result.remaining_budget.monetary_microunits,
-    "records": [{"evidence": r.evidence, "microunits": r.microunits, "replayed": r.replayed}
-                for r in result.monetary_records],
+    "records": [{"evidence": r.evidence, "microunits": r.microunits, "replayed": r.replayed,
+                 "served_by": r.served_by} for r in result.monetary_records],
     "trace": result.execution_trace,
     "failure": s.describe(result),
 }), flush=True)
@@ -405,9 +448,33 @@ def test_a_call_journaled_before_a_crash_is_charged_once_after_recovery(peer, tm
     assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome["failure"]
     assert outcome["attempt"] == 2
     assert peer.request_count() == 1, "recovery replays the journaled reply, it never resends"
-    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True}]
+    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True,
+                                   "served_by": None}]
     assert outcome["monetary"] == 1235, "charged once, and not lost"
     assert outcome["remaining"] == 1_000_000 - 1235
+
+
+@slow
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="NativeArchive custody needs an owner-only protected directory")
+def test_a_record_restored_after_a_crash_keeps_the_upstream_it_was_stored_with(peer, tmp_path):
+    peer.served_by = "Fixture Upstream"
+    store = str(tmp_path / "runs")
+    crashed = run_python(_CRASHING_PROCESS, peer.base_url, store, "first", timeout=120)
+    assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
+    lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
+    assert peer.request_count() == 1, "the model call happened before the crash"
+
+    recovered = run_python(_RECOVERING_PROCESS, peer.base_url, store, "again", lines[0]["run_id"],
+                           timeout=120)
+    assert recovered.returncode == 0, recovered.stderr[-2000:]
+    outcome = last_json_line(recovered.stdout)
+    assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome["failure"]
+    assert peer.request_count() == 1, "recovery replays the journaled reply, it never resends"
+    # The replayed outcome comes from the archive and does not carry the name; the record stored with
+    # the call does, and recovery charges that record.
+    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True,
+                                   "served_by": "Fixture Upstream"}]
 
 
 # A resume value that feeds the request: Core appends it to "messages" as a
@@ -448,7 +515,8 @@ def test_recovery_of_a_resumed_attempt_rebuilds_the_journaled_request(peer, tmp_
     assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome["failure"]
     assert outcome["attempt"] == 2
     assert peer.request_count() == 1, "the peer saw exactly the requests of an uncrashed run"
-    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True}]
+    assert outcome["records"] == [{"evidence": "reported", "microunits": 1235, "replayed": True,
+                                   "served_by": None}]
     assert outcome["monetary"] == 1235
 
 
@@ -1007,6 +1075,48 @@ def test_a_reported_cost_above_the_reservation_gives_a_notice_on_the_handle(peer
     text = notice.message + json.dumps(notice.witness)
     assert "Paris" not in text and "capital" not in text, "neither the reply nor the request is in the notice"
     assert handle.notices == handle.notices, "reading the notices again gives the same list"
+
+
+@pytest.mark.parametrize("durable", [False, True], ids=["in-memory", "sqlite-journal"])
+def test_the_notice_names_the_upstream_when_the_record_does(peer, tmp_path, durable):
+    if durable and sys.platform == "win32":
+        pytest.skip("NativeArchive custody needs an owner-only protected directory")
+    peer.served_by = "Fixture Upstream"
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD + OVERSHOOT)}
+    _host, handle = start_bound(peer, host=durable_bound_host(peer, tmp_path) if durable else None)
+    result = handle.wait()
+
+    # The built-in node streams inside a Program, so this is the streamed form; the C++ tests have the buffered one.
+    [sent] = peer.requests
+    assert sent["body"].get("stream") is True
+    assert result.status == ng.ProgramTerminalStatus.Completed, describe(result)
+    [record] = result.monetary_records
+    assert record.served_by == "Fixture Upstream"
+    [notice] = handle.notices
+    assert notice.code == OVER_HOLD
+    assert notice.witness == {
+        "call_id": record.call_id, "operation_id": record.operation_id, "node": "llm",
+        "model": PRICED_MODEL, "evidence": "reported", "reserved_microunits": HOLD,
+        "microunits": HOLD + OVERSHOOT, "over_by": OVERSHOOT, "served_by": "Fixture Upstream"}
+    text = notice.message + json.dumps(notice.witness)
+    assert "Paris" not in text and "capital" not in text, "neither the reply nor the request is in the notice"
+    # The record is the stored view; the notice is not stored with the run.
+    assert [r.served_by for r in result.monetary_records] == ["Fixture Upstream"]
+
+
+def test_the_witness_of_a_notice_has_no_served_by_when_the_record_has_none(peer):
+    peer.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
+                  "cost": reported_cost(HOLD + OVERSHOOT)}
+    _host, handle = start_bound(peer)
+    result = handle.wait()
+
+    [record] = result.monetary_records
+    assert record.served_by is None
+    [notice] = handle.notices
+    assert "served_by" not in notice.witness
+    assert set(notice.witness) == {"call_id", "operation_id", "node", "model", "evidence",
+                                   "reserved_microunits", "microunits", "over_by"}
 
 
 def test_an_estimated_cost_above_the_reservation_gives_a_notice(peer):

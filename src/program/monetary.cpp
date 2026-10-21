@@ -362,6 +362,32 @@ bool bool_field(const json& value, const char* field) {
     return item.get<bool>();
 }
 
+// The longest upstream name the SDK records (ServedModel::served_by).
+constexpr std::size_t kServedByLimit = 256;
+
+// A name the record can hold: nonempty, at most the SDK's bound, UTF-8, no control character.
+bool usable_served_by(const std::string& name) noexcept {
+    if (name.empty() || name.size() > kServedByLimit) return false;
+    for (unsigned char c : name)
+        if (c < 0x20 || c == 0x7f) return false;
+    try {
+        neograph::detail::validate_utf8(name);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+// The upstream an outcome names, from the completion or from what a failure kept. A name that does not meet the
+// record's bound is left out: the metadata never changes what a billed call is charged.
+std::optional<std::string> served_by_of(const sp::runtime::Result& outcome) {
+    if (!outcome) return std::nullopt;
+    const auto* completion = std::get_if<sp::Completion>(outcome.get());
+    const auto& name = completion ? completion->model.served_by : std::get<sp::Failure>(*outcome).partial.model.served_by;
+    if (!name || !usable_served_by(*name)) return std::nullopt;
+    return name;
+}
+
 void bounded_text(const std::string& value, std::string_view field, bool may_be_empty) {
     if ((!may_be_empty && value.empty()) || value.size() > 512)
         throw std::invalid_argument("Program monetary record " + std::string(field) +
@@ -739,9 +765,12 @@ std::optional<std::uint64_t> reported_cost_microunits(const sp::ProviderReported
     return ceil_microunits(nano);
 }
 
-std::optional<ProgramMonetaryRecord> settle_monetary_call(const MonetaryQuote&       quote,
-                                                          const MonetaryCallSite&    site,
-                                                          const sp::runtime::Result& outcome) {
+namespace {
+
+// The record of one dispatched call's outcome, without the serving upstream.
+std::optional<ProgramMonetaryRecord> settle_amount(const MonetaryQuote&       quote,
+                                                   const MonetaryCallSite&    site,
+                                                   const sp::runtime::Result& outcome) {
     if (!outcome) return unknown_outcome_record(quote, site, "no outcome");
     if (const auto* failure = std::get_if<sp::Failure>(outcome.get())) {
         if (provider_failure_proves_not_accepted(*failure)) return std::nullopt;
@@ -795,6 +824,17 @@ std::optional<ProgramMonetaryRecord> settle_monetary_call(const MonetaryQuote&  
     return record;
 }
 
+}  // namespace
+
+std::optional<ProgramMonetaryRecord> settle_monetary_call(const MonetaryQuote&       quote,
+                                                          const MonetaryCallSite&    site,
+                                                          const sp::runtime::Result& outcome) {
+    auto record = settle_amount(quote, site, outcome);
+    // Whatever the record charges, it also names the upstream the response named. Nothing else of the response is kept.
+    if (record) record->served_by = served_by_of(outcome);
+    return record;
+}
+
 ProgramMonetaryRecord unknown_outcome_record(const MonetaryQuote& quote, const MonetaryCallSite& site,
                                              std::string reason) {
     return held_record(quote, site, std::move(reason));
@@ -818,6 +858,8 @@ json encode_monetary_record(const ProgramMonetaryRecord& record) {
                 {"reason", record.reason}};
     // Records before 0.16.0 have no pricing and keep their exact bytes.
     if (!record.pricing.empty()) value["pricing"] = record.pricing;
+    // Likewise a record without a serving upstream keeps its exact bytes.
+    if (record.served_by) value["served_by"] = *record.served_by;
     return value;
 }
 
@@ -828,7 +870,7 @@ ProgramMonetaryRecord decode_monetary_record(const json& value) {
         value, "Program monetary record",
         {"call_id", "operation_id", "node", "origin", "model", "evidence", "microunits",
          "reserved_microunits", "basis", "catalog_version", "catalog_digest", "conservative",
-         "may_undercount", "replayed", "reason", "pricing"});
+         "may_undercount", "replayed", "reason", "pricing", "served_by"});
     ProgramMonetaryRecord record;
     record.call_id             = string_field(value, "call_id");
     record.operation_id        = string_field(value, "operation_id");
@@ -846,6 +888,7 @@ ProgramMonetaryRecord decode_monetary_record(const json& value) {
     record.replayed            = bool_field(value, "replayed");
     record.reason              = string_field(value, "reason");
     if (value.contains("pricing")) record.pricing = value.at("pricing");
+    if (value.contains("served_by")) record.served_by = string_field(value, "served_by");
     validate_monetary_record(record);
     return record;
 }
@@ -861,6 +904,9 @@ void validate_monetary_record(const ProgramMonetaryRecord& record) {
     bounded_text(record.reason, "reason", true);
     if (!record.pricing.is_object() || neograph::detail::canonical_json_bytes(record.pricing).size() > 16384)
         throw std::invalid_argument("Program monetary record pricing must be an object of at most 16 KiB");
+    if (record.served_by && !usable_served_by(*record.served_by))
+        throw std::invalid_argument(
+            "Program monetary record served_by is empty, too long, not UTF-8 or contains a control character");
     if (!record.basis.empty() && record.basis != "provider_reported" &&
         record.basis != "list_rates" && record.basis != "route_ceiling")
         throw std::invalid_argument("Program monetary record basis is unknown");
@@ -902,18 +948,21 @@ std::optional<ProgramCoreProviderCallDiagnostic> over_hold_notice(const ProgramM
     if (record.evidence == ProgramMonetaryEvidence::Held || record.microunits <= record.reserved_microunits)
         return std::nullopt;
     const auto over_by = record.microunits - record.reserved_microunits;
+    json witness{{"call_id", record.call_id},
+                 {"operation_id", record.operation_id},
+                 {"node", record.node},
+                 {"model", record.model},
+                 {"evidence", std::string(to_string(record.evidence))},
+                 {"reserved_microunits", record.reserved_microunits},
+                 {"microunits", record.microunits},
+                 {"over_by", over_by}};
+    // The upstream the record names, when it names one: the one a host leaves out of its routing.
+    if (record.served_by) witness["served_by"] = *record.served_by;
     return ProgramCoreProviderCallDiagnostic{
         std::string(kOverHoldNotice),
         "A priced call was charged " + std::to_string(record.microunits) +
             " microunits, above its reservation of " + std::to_string(record.reserved_microunits) + ".",
-        json{{"call_id", record.call_id},
-             {"operation_id", record.operation_id},
-             {"node", record.node},
-             {"model", record.model},
-             {"evidence", std::string(to_string(record.evidence))},
-             {"reserved_microunits", record.reserved_microunits},
-             {"microunits", record.microunits},
-             {"over_by", over_by}}};
+        std::move(witness)};
 }
 
 MonetaryHold::MonetaryHold(std::shared_ptr<ProgramMonetaryAccount> account, MonetaryQuote quote,

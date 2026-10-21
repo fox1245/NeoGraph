@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3e647c497a386acc778354516d0f40d69537caf2fc5ebc0840287a3b92368637 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=948c20da5544a9fc544c652e81c54682b7569914a7e1193754793da317f94abe -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -39,10 +39,16 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **JavaScript 模块**（`NEOGRAPH_BUILD_WASM_JS=ON`：`neograph_module.wasm`、其加载器和 `wasm/neograph.mjs`）从 JSON 编译图，用在运行时给出基础 URL、路由、密钥和模型的提供方运行它，返回最终状态，并在需要时流式输出图事件。API 是五个 C 函数和一个小的 ES 模块（`load`、`compile`、`run`，以及接受 `onEvent`、`signal` 和 `timeoutMs` 的 `Graph.run`），密钥不在二进制文件中。`wasm/examples/` 中有一个 Node 程序，以及一个带不含机密的 `wrangler.toml` 模板的 Cloudflare Workers 风格处理程序。
   - **CI** 在 Node 22 和 24 下，不需要网络和密钥，针对本地的 OpenAI 兼容服务器运行该模块，包括缓冲和服务器发送事件两种方式：检查最终状态、流式事件的顺序、被切在两个数据块之间的字符、提供方的拒绝、通过 `AbortSignal` 取消、超时、并发运行，以及调用进行期间宿主的定时器仍在运行。Workers 示例的 `fetch` 处理程序在 Node 中以 `Request` 针对同一服务器调用，尚未在 workerd 上运行。wasm32 检查新增了对同步运行被拒绝的检查。模块有大小门禁（`.wasm` 6.27 MB，gzip 后 1.84 MB；图 smoke 从 5,502,805 字节增至 5,509,570 字节）。`tests/test_host_loop.cpp` 针对手动 executor 在原生环境中验证循环和宿主接缝提供方。引擎与宿主循环如何衔接见 [`wasm/README.md`](wasm/README.md)。
 - **费用超过预留额的计价调用会以 notice 报告 (#428)。** 计价调用的 hold 按最贵的输出费率计算请求的输出 cap，`provider.max_price` 限制的是 endpoint 的价格，而不是它返回多少 token。忽略 cap 的 upstream（例如忽略 `max_tokens` 的 OpenRouter upstream）可能返回比 hold 所预留的更多的输出，该调用按响应报告的金额收费。
-  - **notice。** `ProgramHandle::notices()`（Python 中为 `handle.notices`，在 `wait()` 之后读取）中，无论证据是 `reported` 还是 `estimated`，费用超过预留额的每个调用都有一条 `P_MONEY_OVER_HOLD` notice。witness 是 `{call_id, operation_id, node, model, evidence, reserved_microunits, microunits, over_by}`，不含请求或响应的任何内容。节点重试的每次尝试是各自独立的调用。`held` 的调用按 hold 收费，没有 notice；在 resume、恢复或 fork 中由持久 journal 重放的调用也没有。
+  - **notice。** `ProgramHandle::notices()`（Python 中为 `handle.notices`，在 `wait()` 之后读取）中，无论证据是 `reported` 还是 `estimated`，费用超过预留额的每个调用都有一条 `P_MONEY_OVER_HOLD` notice。witness 是 `{call_id, operation_id, node, model, evidence, reserved_microunits, microunits, over_by}`，调用的记录带有 `served_by`（处理该调用的上游）时再加上它，此外不含请求或响应的任何内容。节点重试的每次尝试是各自独立的调用。`held` 的调用按 hold 收费，没有 notice；在 resume、恢复或 fork 中由持久 journal 重放的调用也没有。
   - **其他都不变。** 调用按报告收费，运行的 status、预算和 `P_MONEY_BUDGET` 与以前一样。notice 不随运行保存，所以保存下来的是 `result.monetary_records`（`microunits` 高于 `reserved_microunits`）。
-  - **不拒绝 route，也还没有 upstream。** NeoGraph 没有在出现超出后拒绝某条 route 的设置，避开哪些 route 是宿主的策略。处理调用的 upstream 目前还不会记录在 notice 或记录里。
+  - **不拒绝 route。** NeoGraph 没有在出现超出后拒绝某条 route 的设置，避开哪些 route 是宿主的策略。notice 和记录都带有处理该调用的 upstream（`served_by`，见下），宿主因此可以看出是哪个 upstream 超出了。
   - **文档。** 参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南、Python 指南和故障排查表说明 hold 只对在 cap 处停下的 upstream 才是上界，并列出宿主可以做的事：用 `only`、`order` 和 `ignore` 限定 route，对 notice 和记录作出反应，并且授予的额度低于自己能承受的损失。
+- **Program 的金额记录会写明处理该调用的上游 (#428)。** `ProgramMonetaryRecord::served_by`（Python 中为 `record.served_by`）是 OpenRouter 为 Chat 或 Messages 响应（缓冲或流式）给出的上游名称，即 SchemaProvider 在 `ServedModel::served_by` 中报告的值。某次调用被收取的金额高于其预留（hold）的宿主，可以从记录里读出是哪个上游处理的，从而把它排除在路由之外。
+  - **来源。** 每条结算响应的记录都会带上这个名称：`reported`、`estimated`，以及响应或失败的部分响应给出了名称的 `held` 记录。当响应没有给出名称、origin 不是路由网关、是 Responses 回复、结果未知，或名称是记录无法保存的（空、超过 SDK 的 256 字节、不是 UTF-8 或含控制字符）时，它不被设置。名称不会改变该调用的收费，响应的其他内容也不会被保存。
+  - **仅是记录的元数据。** 名称位于调用的 identity、journal 的摘要和重放 identity 之外，从归档形式恢复的 journal outcome 也不带有它。与调用一起存储的记录带有它，所以重启或崩溃后恢复的记录，以及 fork 从其 source 接管的记录，都保持存储时的值。
+  - **notice。** 上一条中 `P_MONEY_OVER_HOLD` 的 witness，在调用的记录带有 `served_by` 时包含它，没有时则不含。只有 `reported` 或 `estimated` 的调用才会给出 notice，所以 notice 带有记录中的名称。它只是 notice 的内容，不进入任何 identity 或摘要；notice 也不像记录那样随运行一起保存。
+  - **编码。** 有名称的记录带有成员 `served_by`，没有名称的记录字节与以往相同。`served_by` 不是符合该限制的字符串的已存记录会被拒绝。在这一变更之前的构建会拒绝含有 `served_by` 的已存结果或 journal 行，因此降级含有它的存储时会遇到损坏的记录。
+  - **文档。** 参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南、Python 指南和故障排除表列出了这个字段，并说明 notice 带有它。
 - **ProgramRuntime 在宿主提供的执行器（executor）上运行，不再拥有自己的线程 (#557)。**
   - 新增 **`RuntimeConfig::executor`**（`asio::any_io_executor`）和 **`executor_identity`**。尝试（attempt）、截止时间定时器和等待者都在这个执行器上运行，没有任何东西在调用方线程上内联执行。未设置时，原生构建沿用原有线程池（尝试用 `scheduler_threads` 个线程，截止时间用 1 个），这些线程池现在是执行器的一种实现。没有线程的构建（`NEOGRAPH_THREADS=OFF`）必须提供执行器，否则构造函数抛出 `ProgramExecutorRequired`（一个 `ConfigurationFailure`）。销毁运行时会取消其运行；在注入的执行器上它不会等待这些运行结束，尝试会持有运行时的状态直到结束，所以要让执行器一直运行，直到各句柄进入终态。
   - **`ProgramExecutorIdentity`** 告诉运行时它从执行器里看不出的两件事：`host_pumped`（由宿主的事件循环驱动）和 `running_in_this_thread`。对基于 `io_context` 或 `thread_pool` 的执行器、它们的 strand，以及 `async::HostLoop` 的执行器，两者都会自动检测（新增 `async::is_host_pumped`）。
@@ -90,6 +96,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **行为变更：各块指明不同服务上游的响应会失败（[SchemaProvider #165](https://github.com/fox1245/SchemaProvider/pull/165)）。** 在已声明的路由网关上，SchemaProvider 以前不读取 Chat 或 Messages 响应的 `provider` 成员。现在，后面的块或对象若指明了与第一个不同的上游，就是 `ProtocolCorrupt`，原因为 id 或 model 改变（`chat.identity.changed`、`messages.identity.changed`），失败的 partial 结果保留第一个名称。省略该成员的块不算矛盾。其他 origin 不变，仍不读取该成员。
   - **文档。** [SchemaProvider #162](https://github.com/fox1245/SchemaProvider/pull/162) 只修改了文档。
 - **C++ 使用方需要重新构建：SDK 的布局变大了。** SchemaProvider 的 `Text`、`Media`、`ToolResult`、`ServedModel`、`messages::ToolDefinition` 和 `messages::Request` 新增了成员。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **C++ 使用方需要重新构建：`ProgramMonetaryRecord` 新增了成员 (#428)。** `ProgramMonetaryRecord` 新增了 `served_by`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **公开文本检查器现在也检查文档。** `scripts/check_public_text.py` 及其 ctest 条目 `public_text_guard` 会扫描 Markdown、`docs/`、README 和 CHANGELOG 文件（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 选项已移除），并新增两条规则，标记叙述内部决定及其过程的措辞。
 
 - **实时测试、Python 示例和文档不再使用 OpenAI 列为即将停用的模型名称。** 停用日期是 OpenAI 在其[停用说明页面](https://developers.openai.com/api/docs/deprecations)上给出的日期，本项目不对日期作任何承诺。每个替代模型在使用前都用真实密钥调用过一次。库代码中没有按名称使用这些模型的地方。

@@ -106,6 +106,14 @@ inline sp::runtime::Result failure(sp::ErrorKind kind, sp::PartialCompletion par
     result.partial = std::move(partial);
     return std::make_shared<const sp::Outcome>(std::move(result));
 }
+// `result` as a routing gateway answered it: the response names `upstream` as having served the call
+// (ServedModel::served_by). A failure keeps the name on its partial result.
+inline sp::runtime::Result naming_upstream(const sp::runtime::Result& result, std::string upstream) {
+    auto named = *result;
+    if (auto* done = std::get_if<sp::Completion>(&named)) done->model.served_by = std::move(upstream);
+    else std::get<sp::Failure>(named).partial.model.served_by = std::move(upstream);
+    return std::make_shared<const sp::Outcome>(std::move(named));
+}
 inline const sp::Completion& completion(const sp::runtime::Result& result) {
     if (!result) throw std::logic_error("missing provider outcome");
     return std::get<sp::Completion>(*result);
