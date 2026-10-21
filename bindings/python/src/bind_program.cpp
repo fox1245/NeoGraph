@@ -1004,8 +1004,11 @@ void init_program(py::module_& m) {
             "P_PROVIDER_CALL_POLICY_CHANGED when a resume or a fork found a provider call under "
             "another SchemaProvider descriptor policy identity and used the journaled outcome, and "
             "P_FORK_PROVIDER_CALL_RESENT when a fork sent a call its source had already journaled "
-            "because fork_may_resend_provider_calls allows it. Read them after wait() to see "
-            "every one.")
+            "because fork_may_resend_provider_calls allows it. A priced call that was charged more "
+            "than its reservation gives P_MONEY_OVER_HOLD, with the witness call_id, operation_id, "
+            "node, model, evidence ('reported' or 'estimated'), reserved_microunits, microunits and "
+            "over_by; the call is charged as reported and the run's status and budgets are as they "
+            "would be without the notice. Read them after wait() to see every one.")
         .def("cancel", &ProgramHandle::cancel)
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())
         .def("try_result", &ProgramHandle::try_result);

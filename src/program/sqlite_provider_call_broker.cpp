@@ -785,7 +785,7 @@ private:
         if (priced.quote)
             hold = program::detail::MonetaryHold(
                 monetary, std::move(*priced.quote),
-                program::detail::MonetaryCallSite{id, operation, identity.node_name});
+                program::detail::MonetaryCallSite{id, operation, identity.node_name}, diagnostic);
         if (prepared.requires_native_custody() && !impl->archive)
             throw std::invalid_argument("Program provider requires configured trusted native custody");
         if (impl->archive) {

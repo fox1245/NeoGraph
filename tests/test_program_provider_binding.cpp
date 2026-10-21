@@ -861,6 +861,12 @@ public:
         return runtime_->run(kOwner, version, invocation(run_id));
     }
 
+    // The handle of the run, for its notices.
+    ProgramHandle start(Shape shape, const std::string& run_id = "run-1") {
+        const auto version = admit(shape);
+        return runtime_->start(kOwner, version, invocation(run_id));
+    }
+
     ProgramRuntime&                   runtime() { return *runtime_; }
     SQLiteProgramProviderCallJournal& journal() { return *journal_; }
     Script&                           script() { return *script_; }
@@ -1850,6 +1856,247 @@ TEST_P(Priced, ATimedOutCallKeepsItsHold) {
     const auto result = h->run(Shape::Llm);
     EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut) << failure_text(result);
     EXPECT_EQ(result.usage().monetary_microunits, expected_hold());
+}
+
+// ---------------------------------------------------------------------------
+// #428: a call charged more than its reservation says so
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr std::string_view kOverHold = "P_MONEY_OVER_HOLD";
+
+std::size_t notices_with(const std::vector<ProgramNotice>& notices, std::string_view code) {
+    std::size_t count = 0;
+    for (const auto& notice : notices)
+        if (notice.code == code) ++count;
+    return count;
+}
+
+// A reply whose reported cost is `over` microunits above the hold of the fixture call.
+std::function<sp::runtime::Result(int, const ProviderRequest&)> reply_over_the_hold(std::uint64_t over) {
+    const auto hold = expected_hold();
+    return [hold, over](int, const ProviderRequest&) {
+        return neograph::test::success("answer", with_cost(final_usage(21, 3), (hold + over) * 1000));
+    };
+}
+
+// What the notice for `record` holds, and nothing of the request or the reply.
+json over_hold_witness(const ProgramMonetaryRecord& record, std::string evidence) {
+    return json{{"call_id", record.call_id},
+                {"operation_id", record.operation_id},
+                {"node", record.node},
+                {"model", std::string(kModel)},
+                {"evidence", std::move(evidence)},
+                {"reserved_microunits", record.reserved_microunits},
+                {"microunits", record.microunits},
+                {"over_by", record.microunits - record.reserved_microunits}};
+}
+}  // namespace
+
+TEST_P(Priced, AReportedCostAboveTheReservationGivesOneNotice) {
+    const auto hold = expected_hold();
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = reply_over_the_hold(500);
+    auto h          = host(peer);
+    auto handle     = h->start(Shape::Llm);
+    const auto result = handle.wait();
+    // The notice changes nothing: the run completes, and the call is charged as reported.
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_FALSE(result.failure());
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(record.reserved_microunits, hold);
+    EXPECT_EQ(record.microunits, hold + 500);
+    EXPECT_EQ(result.usage().monetary_microunits, hold + 500);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - hold - 500);
+
+    const auto notices = handle.notices();
+    ASSERT_EQ(notices.size(), 1U);
+    EXPECT_EQ(notices.front().code, kOverHold);
+    EXPECT_EQ(notices.front().witness, over_hold_witness(record, "reported"));
+    EXPECT_EQ(notices.front().witness.at("over_by").get<std::uint64_t>(), 500U);
+    EXPECT_NE(notices.front().message.find(std::to_string(hold + 500)), std::string::npos) << notices.front().message;
+    // Neither the request ("question") nor the reply ("answer") is in the notice.
+    const auto text = notices.front().message + notices.front().witness.dump();
+    EXPECT_EQ(text.find("question"), std::string::npos) << text;
+    EXPECT_EQ(text.find("answer"), std::string::npos) << text;
+    EXPECT_EQ(handle.notices(), notices) << "reading the notices again gives the same list";
+}
+
+TEST_P(Priced, AnEstimatedCostAboveTheReservationGivesOneNotice) {
+    // No reported cost: the catalogue prices the usage the reply reports. An upstream that returned far more
+    // output than the request's output cap gives an estimate above the reservation.
+    const auto hold = expected_hold();
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = [](int, const ProviderRequest&) {
+        return neograph::test::success("answer", final_usage(21, 40'000));
+    };
+    auto       h      = host(peer);
+    auto       handle = h->start(Shape::Llm);
+    const auto result = handle.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_EQ(record.reserved_microunits, hold);
+    EXPECT_GT(record.microunits, hold) << "40,000 output tokens at the ceiling cost more than the hold";
+    EXPECT_EQ(result.usage().monetary_microunits, record.microunits);
+
+    const auto notices = handle.notices();
+    ASSERT_EQ(notices.size(), 1U);
+    EXPECT_EQ(notices.front().code, kOverHold);
+    EXPECT_EQ(notices.front().witness, over_hold_witness(record, "estimated"));
+}
+
+TEST_P(Priced, ACallWithinItsReservationGivesNoNotice) {
+    const auto hold = expected_hold();
+    {
+        // The default reply: a reported cost far below the hold.
+        auto       peer   = std::make_shared<Peer>();
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-1");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Reported);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+    {
+        // An estimate below the hold.
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = [](int, const ProviderRequest&) {
+            return neograph::test::success("answer", final_usage(21, 3));
+        };
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-2");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Estimated);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+    {
+        // Exactly the reservation is not above it.
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = reply_over_the_hold(0);
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-3");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        EXPECT_EQ(result.monetary_records().front().microunits, hold);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+    {
+        // One microunit above it is.
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = reply_over_the_hold(1);
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-4");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        const auto notices = handle.notices();
+        ASSERT_EQ(notices.size(), 1U);
+        EXPECT_EQ(notices.front().witness.at("over_by").get<std::uint64_t>(), 1U);
+    }
+}
+
+TEST_P(Priced, AHeldCallGivesNoNotice) {
+    // A held call is charged its hold, which is not above it, whatever the provider may have billed.
+    {
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = [](int, const ProviderRequest&) {
+            return neograph::test::success(
+                "answer", neograph::test::usage(21, std::nullopt, std::nullopt, sp::UsageStage::Partial));
+        };
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-5");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Held);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+    {
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = [](int, const ProviderRequest&) {
+            sp::Failure failure;
+            failure.error.kind                          = sp::ErrorKind::Transport;
+            failure.error.retry_safety                  = sp::RetrySafety::PossiblyAccepted;
+            failure.error.attempt.request_may_have_left = true;
+            return std::make_shared<const sp::Outcome>(std::move(failure));
+        };
+        auto       h      = host(peer);
+        auto       handle = h->start(Shape::Llm, "run-6");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Held);
+        EXPECT_TRUE(handle.notices().empty());
+    }
+}
+
+TEST_P(Priced, ANoticeLeavesTheBudgetBehaviourAsItWas) {
+    // The budget is the hold, so a charge above it ends the run over its budget, as it did before the notice
+    // existed (AReportedCostAboveTheCeilingExhaustsTheRun). The notice is beside the failure, not in place of it.
+    const auto hold = expected_hold();
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = reply_over_the_hold(10);
+    HostOptions options;
+    options.monetary  = hold;
+    auto       h      = host(peer, options);
+    auto       handle = h->start(Shape::Llm);
+    const auto result = handle.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_MONEY_BUDGET");
+    EXPECT_EQ(result.failure()->witness["monetary"],
+              (json{{"granted", hold}, {"used", hold + 10}, {"over_by", 10}}));
+    EXPECT_EQ(result.usage().monetary_microunits, hold + 10);
+    const auto notices = handle.notices();
+    ASSERT_EQ(notices.size(), 1U);
+    EXPECT_EQ(notices.front().code, kOverHold);
+    EXPECT_EQ(notices.front().witness.at("over_by").get<std::uint64_t>(), 10U);
+}
+
+TEST_P(Priced, EachCallChargedAboveItsReservationGivesItsOwnNotice) {
+    const auto hold = expected_hold();
+    {
+        // Two calls in one step.
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = reply_over_the_hold(500);
+        HostOptions options;
+        options.workers  = 2;
+        options.monetary = 4 * hold;
+        auto       h      = host(peer, options);
+        auto       handle = h->start(Shape::TwoLlms, "run-two");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        ASSERT_EQ(result.monetary_records().size(), 2U);
+        const auto notices = handle.notices();
+        ASSERT_EQ(notices.size(), 2U);
+        std::set<std::string> from_notices, from_records;
+        for (const auto& notice : notices) {
+            EXPECT_EQ(notice.code, kOverHold);
+            from_notices.insert(notice.witness.at("call_id").get<std::string>());
+        }
+        for (const auto& record : result.monetary_records()) from_records.insert(record.call_id);
+        EXPECT_EQ(from_notices.size(), 2U);
+        EXPECT_EQ(from_notices, from_records);
+    }
+    {
+        // A node retry calls again: a new call, charged again, and noticed again.
+        auto peer   = std::make_shared<Peer>();
+        peer->reply = reply_over_the_hold(500);
+        HostOptions options;
+        options.node_retries = 1;
+        auto h = host(peer, options);
+        h->script().fail_first_attempts = 1;
+        auto       handle = h->start(Shape::Brokered, "run-retry");
+        const auto result = handle.wait();
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        ASSERT_EQ(result.monetary_records().size(), 2U);
+        const auto notices = handle.notices();
+        ASSERT_EQ(notices.size(), 2U);
+        EXPECT_NE(notices[0].witness.at("call_id"), notices[1].witness.at("call_id"));
+        EXPECT_EQ(result.usage().monetary_microunits, 2 * (hold + 500));
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(Brokers, Priced, ::testing::Bool(),
@@ -4062,4 +4309,149 @@ TEST(ProgramProviderUploadResume, AJournalWithoutTheRestartTableOrTheMarkersIsMi
     (void)fresh.open();
     EXPECT_EQ(column_of(files.provider_db(), "opens_upload").back(), "1");
     EXPECT_TRUE(is_sha256(column_of(files.provider_db(), "withheld_secret").back()));
+}
+
+// ---------------------------------------------------------------------------
+// #428 with the durable journal: replay, recovery and a fork do not notice again
+// ---------------------------------------------------------------------------
+
+TEST(ProgramProviderBindingJournal, AnOvershootingCallReplayedByALaterAttemptIsNeitherChargedNorNoticedAgain) {
+    const auto  hold = expected_hold();
+    TempDir     files("over-hold-replay");
+    auto        peer = std::make_shared<Peer>();
+    peer->reply      = reply_over_the_hold(500);
+    HostOptions options;
+    options.monetary = 100'000;
+    Host h(peer, options, &files);
+    h.script().interrupt_after_call = true;
+    auto       sent  = h.start(Shape::Brokered, "over-run");
+    const auto first = sent.wait();
+    ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_text(first);
+    ASSERT_EQ(first.monetary_records().size(), 1U);
+    EXPECT_EQ(first.usage().monetary_microunits, hold + 500);
+    EXPECT_EQ(notices_with(sent.notices(), kOverHold), 1U) << "the attempt that sent the call says so";
+
+    auto       again  = h.runtime().resume(kOwner, "over-run", resume_after(first, "trace-resume"));
+    const auto second = again.wait();
+    ASSERT_EQ(second.status(), ProgramTerminalStatus::Completed) << failure_text(second);
+    EXPECT_EQ(second.attempt(), 2U);
+    EXPECT_EQ(peer->transport.load(), 1) << "attempt 2 replays the journaled outcome";
+    EXPECT_TRUE(second.monetary_records().empty()) << "attempt 1 already charged it";
+    EXPECT_EQ(second.usage().monetary_microunits, 0U);
+    EXPECT_EQ(second.remaining_budget().monetary_microunits, 100'000U - hold - 500);
+    EXPECT_EQ(notices_with(again.notices(), kOverHold), 0U) << "a replayed call is not noticed again";
+    EXPECT_EQ(notices_with(sent.notices(), kOverHold), 1U);
+}
+
+TEST(ProgramProviderBindingJournal, AProcessThatDiesAfterAnOvershootingCallIsChargedOnceAndNoticedOnce) {
+    const auto  hold = expected_hold();
+    TempDir     files("over-hold-crash");
+    TempDir     image("over-hold-crash-image");
+    auto        peer = std::make_shared<Peer>();
+    peer->reply      = reply_over_the_hold(500);
+    HostOptions options;
+    options.child_capable = true;  // recovery resumes from the run's checkpoint
+    options.monetary      = 100'000;
+    {
+        Host h(peer, options, &files);
+        h.script().interrupt_before_call = true;
+        bool taken = false;
+        h.script().after = [&](const std::string&) {
+            if (taken) return;
+            taken = true;
+            crash_image(files.path, image.path);  // the call is journaled; the process "dies" here
+        };
+        const auto paused = h.run(Shape::BrokeredThenAfter, "crash-run");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        auto       resumed = h.runtime().resume(kOwner, "crash-run", resume_after(paused, "trace-crash"));
+        const auto done    = resumed.wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        ASSERT_TRUE(taken);
+        ASSERT_EQ(peer->transport.load(), 1);
+        EXPECT_EQ(notices_with(resumed.notices(), kOverHold), 1U) << "the attempt that sent the call says so";
+    }
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
+    auto recovery = std::make_shared<Peer>();
+    Host restarted(recovery, options, &image);
+    restarted.script().interrupt_before_call = true;
+    auto       recovered = restarted.runtime().reconnect(kOwner, "crash-run");
+    const auto result    = recovered.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(recovery->transport.load(), 0) << "the journaled request is not sent again";
+    ASSERT_EQ(result.monetary_records().size(), 1U) << "charged once";
+    EXPECT_TRUE(result.monetary_records().front().replayed);
+    EXPECT_EQ(result.monetary_records().front().microunits, hold + 500);
+    EXPECT_EQ(result.usage().monetary_microunits, hold + 500) << "and not lost";
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 100'000U - hold - 500);
+    EXPECT_EQ(notices_with(recovered.notices(), kOverHold), 0U) << "a recovered charge is not noticed again";
+}
+
+TEST(ProgramProviderBindingJournal, AForkThatReplaysAnOvershootingCallNeitherChargesNorNoticesIt) {
+    // #390: llm calls the model and finishes, check asks. The fork carries the step's pending writes, so llm
+    // replays from them on either kind of host: its request is not sent and it is neither charged nor noticed.
+    const auto hold = expected_hold();
+    for (const bool durable : {false, true}) {
+        SCOPED_TRACE(durable ? "SQLite journal" : "in memory");
+        TempDir     files("over-hold-fork");
+        auto        peer = std::make_shared<Peer>();
+        peer->reply      = reply_over_the_hold(500);
+        HostOptions options;
+        options.monetary = 100'000;
+        options.workers  = 2;
+        Host       h(peer, options, durable ? &files : nullptr);
+        const auto version = h.admit(Shape::LlmBesideCheck);
+        h.script().ask_thread = program_root_core_thread_id(
+            "fork-source",
+            version.core_materialization_receipt().plans.front().compiled_plan_identity);
+
+        auto       source = h.runtime().start(kOwner, version, h.invocation("fork-source"));
+        const auto paused = source.wait();
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        ASSERT_TRUE(paused.checkpoint());
+        EXPECT_EQ(paused.usage().monetary_microunits, hold + 500);
+        EXPECT_EQ(notices_with(source.notices(), kOverHold), 1U);
+
+        auto invocation   = h.invocation("fork-target");
+        invocation.budget = neograph::test::fork_share(paused.remaining_budget());
+        auto forked_handle = h.runtime().fork(
+            kOwner, ExactProgramCheckpointReference{paused.run_id(), paused.checkpoint()->checkpoint_id},
+            version, std::move(invocation), resume_after(paused, "trace-fork-resume"));
+        const auto forked = forked_handle.wait();
+        ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+        EXPECT_EQ(peer->transport.load(), 1) << "the finished call replays in the fork";
+        EXPECT_TRUE(forked.monetary_records().empty());
+        EXPECT_EQ(forked.usage().monetary_microunits, 0U);
+        EXPECT_EQ(notices_with(forked_handle.notices(), kOverHold), 0U);
+    }
+}
+
+TEST(ProgramProviderBindingJournal, AForkOnAHostWithoutAJournalNoticesTheOvershootOfTheCallItSendsAgain) {
+    // Without a journal the node that asked runs again in the fork and sends its call again. That is a new call,
+    // charged again, and its own overshoot is noticed, beside the notice that the host cannot replay calls.
+    const auto hold = expected_hold();
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = reply_over_the_hold(500);
+    HostOptions options;
+    options.monetary = 400'000;  // the fork's share must hold the call it sends again
+    Host h(peer, options);
+    h.script().interrupt_after_call = true;
+    auto       source = h.start(Shape::Brokered, "over-source");
+    const auto paused = source.wait();
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    ASSERT_TRUE(paused.checkpoint());
+    EXPECT_EQ(notices_with(source.notices(), kOverHold), 1U);
+
+    auto       fork = fork_from(h, paused, "over-fork");
+    const auto forked = fork.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+    EXPECT_EQ(peer->transport.load(), 2) << "the fork sent the call again";
+    ASSERT_EQ(forked.monetary_records().size(), 1U);
+    EXPECT_EQ(forked.monetary_records().front().microunits, hold + 500);
+    const auto notices = fork.notices();
+    EXPECT_NE(notice_with(notices, "P_FORK_PROVIDER_CALLS_NOT_JOURNALED"), nullptr);
+    ASSERT_EQ(notices_with(notices, kOverHold), 1U);
+    const auto* over = notice_with(notices, kOverHold);
+    EXPECT_EQ(over->witness.at("call_id").get<std::string>(), forked.monetary_records().front().call_id);
+    EXPECT_NE(over->witness.at("call_id").get<std::string>(), paused.monetary_records().front().call_id)
+        << "the fork's call is a call of its own";
 }
