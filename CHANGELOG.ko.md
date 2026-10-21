@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=51b508679964df1fb2ef42232399a26a5a4d63fbb6eef4c7d0ab0ac7fd3343a6 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -51,6 +51,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Python 바인딩이 `ContextPlacement.AfterHistory`와 `ContextPlacement.BeforeHistory`를 노출합니다 (#329).** 이 enum은 `BeforeLatestUser`와 `AfterLatestUser`만 바인딩해서, C++ 조립기가 네 가지 배치를 모두 정렬하는데도 Python 호스트는 히스토리 앞이나 뒤에 놓이는 컨텍스트 아티팩트를 만들 수 없었습니다. `test_every_context_placement_is_bound_and_assembles_in_its_documented_place`는 배치마다 아티팩트 하나를 컨트롤러로 조립하고, 제공자가 받는 순서를 확인합니다.
 - **`HostLoop`이 호스트가 Asio보다 먼저 도달한 타이머를 더 이상 잃지 않습니다 (#535).** 기록된 기한 뒤에 폴링했는데 준비된 핸들러가 없던 턴은, 그 시점까지 기한이 된 타이머를 Asio가 모두 디스패치했다고 가정하고 기한을 버렸습니다. 이를 정하는 것은 Asio이고 호스트의 타이머가 먼저 실행될 수 있습니다. Asio의 Windows 리액터는 타이머가 만료되었음을 자체 스레드로부터 전달받으므로 기한에 맞춰 한 폴링은 타이머가 아직 디스패치되지 않은 상태를 만날 수 있고, 호스트의 시계는 Asio의 시계보다 앞설 수 있습니다. 그 턴은 기한을 버리고 대기가 걸린 채로 루프를 유휴 상태로 두었으며, 그래서 재시도 백오프나 다른 `HostTimer`를 기다리는 실행이 끝나지 않았습니다. `HostLoop.ARetryBackoffWaitsOnTheHostsTimer`와 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer`가 CI의 Windows 잡에서 간헐적으로 실패했습니다.
   - **기한은 Asio가 그 타이머를 디스패치할 때까지 기록된 채로 남습니다.** 루프는 가장 이른 기한에 자신의 타이머로 기다리다가, Asio가 그 타이머를 디스패치하면 거기까지의 기한을 버립니다. 그 전에 실행된 턴은 1 ms 뒤에 다시 확인합니다. 기록하는 시점에 이미 호스트의 시계로 기한이 지난 기한도 같은 방식으로 유지되며, 전에는 버려졌습니다.
   - API는 바뀌지 않습니다. 타이머가 제때 발화하는 호스트에서는 루프가 전과 같이 동작합니다. 회귀 테스트는 수동 executor의 시계를 Asio의 시계보다 앞서게 하며, 이전 엔진에서는 Linux에서도 실패했고 지금은 통과합니다.
