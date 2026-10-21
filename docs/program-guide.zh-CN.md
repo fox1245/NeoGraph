@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=0b98e23b8164da773ac5ea7771f57b925ef650234ba8c2a5569679616ce68dce -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=139912a5df70aababcb5da41715f1e4b1b21f77fc5853718745b48b9f1461e64 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -364,7 +364,7 @@ python restart.py state resume run-...
 
 无论是预算在中途停下了运行，还是运行在超出预算后才结束，记录都是一样的。用量在 plan 完成之后才结算，所以 plan 可能超出额度才结束：响应的费用可能高于为该调用预留的金额，忽略取消的节点可能在截止时间之后才返回，子图节点的步骤会计入运行的 Core 步骤，却不会让包含它的图停下来。运行同时超出多项预算时，witness 为每一项各有一条，status 和错误码取自表中排在最前的那一项（即预算字段的顺序）。无论运行还用了什么，截止时间都会使运行以 `TimedOut` 结束，所以 wall time 排在最前。需要计价的调用在发送前被拒绝时，拒绝的证据保存在 `monetary` 之下：预留额、`ceiling` 和 `used`。
 
-需要计价的调用的预留额，按最贵的输出费率计算该调用的输出 cap，只有当模型的 upstream 在 cap 处停下时，它才是支出的上界。NeoGraph 会发送 cap，但无法确认 upstream 是否应用了它，所以忽略 cap 的 upstream 的响应可能比预留额更贵。该调用按响应报告的金额收费，运行剩余的 `monetary_microunits` 相应减少，费用超出额度的运行如上所述以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。在额度之内运行继续。NeoGraph 会为每个这样的调用在运行的句柄上给出一条 `P_MONEY_OVER_HOLD` notice（`handle.notices`，在 `wait()` 之后读取），`result.monetary_records` 中该调用的记录的 `microunits` 高于 `reserved_microunits`。notice 不改变其他任何事，NeoGraph 也不会在它之后拒绝某条 route，那是宿主的策略。依赖 cap 的宿主可以只把 OpenRouter 调用路由到已知遵守 cap 的 upstream（provider routing 中的 `only` 或 `order`），每次运行后对 notice 和记录作出反应，并且授予的额度低于自己能承受的损失。详见 [计价证据与模型目录](reference-en.md#pricing-evidence-and-the-model-catalogue) 中关于输出 cap 的段落。
+需要计价的调用的预留额，按最贵的输出费率计算该调用的输出 cap，只有当模型的 upstream 在 cap 处停下时，它才是支出的上界。NeoGraph 会发送 cap，但无法确认 upstream 是否应用了它，所以忽略 cap 的 upstream 的响应可能比预留额更贵。该调用按响应报告的金额收费，运行剩余的 `monetary_microunits` 相应减少，费用超出额度的运行如上所述以 `BudgetExhausted` 和 `P_MONEY_BUDGET` 结束。在额度之内运行继续。NeoGraph 会为每个这样的调用在运行的句柄上给出一条 `P_MONEY_OVER_HOLD` notice（`handle.notices`，在 `wait()` 之后读取），`result.monetary_records` 中该调用的记录的 `microunits` 高于 `reserved_microunits`。两者在响应给出名称时，都带有处理该调用的上游（`served_by`）。notice 不改变其他任何事，NeoGraph 也不会在它之后拒绝某条 route，那是宿主的策略。依赖 cap 的宿主可以只把 OpenRouter 调用路由到已知遵守 cap 的 upstream（provider routing 中的 `only` 或 `order`），每次运行后对 notice 和记录作出反应，并且授予的额度低于自己能承受的损失。详见 [计价证据与模型目录](reference-en.md#pricing-evidence-and-the-model-catalogue) 中关于输出 cap 的段落。
 
 ## Program 的工作在哪里运行（C++ 宿主）
 

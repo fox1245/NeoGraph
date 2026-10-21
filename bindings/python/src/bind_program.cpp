@@ -737,7 +737,8 @@ void init_program(py::module_& m) {
         "'reported' (the provider's own cost), 'estimated' (the provider policy's model catalogue "
         "applied to the reported tokens; catalog_version and catalog_digest name it, pricing holds "
         "the entry and price rows) or 'held' (outcome or usage unknown, so the reservation is "
-        "charged; reason says why).")
+        "charged; reason says why). served_by is the upstream a routing gateway named as having "
+        "served the call (OpenRouter's provider), or None when the response named none.")
         .def_readonly("call_id", &ProgramMonetaryRecord::call_id)
         .def_readonly("operation_id", &ProgramMonetaryRecord::operation_id)
         .def_readonly("node", &ProgramMonetaryRecord::node)
@@ -758,6 +759,7 @@ void init_program(py::module_& m) {
         .def_property_readonly("pricing", [](const ProgramMonetaryRecord& value) {
             return json_to_py(value.pricing);
         })
+        .def_readonly("served_by", &ProgramMonetaryRecord::served_by)
         .def("__repr__", [](const ProgramMonetaryRecord& value) {
             return "<ProgramMonetaryRecord " + value.model + " " +
                    std::string(to_string(value.evidence)) + " " +
@@ -1007,7 +1009,8 @@ void init_program(py::module_& m) {
             "because fork_may_resend_provider_calls allows it. A priced call that was charged more "
             "than its reservation gives P_MONEY_OVER_HOLD, with the witness call_id, operation_id, "
             "node, model, evidence ('reported' or 'estimated'), reserved_microunits, microunits and "
-            "over_by; the call is charged as reported and the run's status and budgets are as they "
+            "over_by, and served_by (the upstream that served the call) when the call's record has "
+            "one; the call is charged as reported and the run's status and budgets are as they "
             "would be without the notice. Read them after wait() to see every one.")
         .def("cancel", &ProgramHandle::cancel)
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())

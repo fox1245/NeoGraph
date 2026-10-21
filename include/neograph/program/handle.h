@@ -90,7 +90,8 @@ public:
      * upstream that returned more output than the request's output cap. The
      * witness is {call_id, operation_id, node, model, evidence,
      * reserved_microunits, microunits, over_by}, with evidence `reported` or
-     * `estimated`. The call is charged as reported and the run's status and
+     * `estimated`, and served_by, the upstream that served the call, when the
+     * call's ProgramMonetaryRecord has one. The call is charged as reported and the run's status and
      * budgets are as they would be without the notice; a call that a durable
      * journal replays, and a `held` call, give none.
      */

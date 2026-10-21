@@ -120,6 +120,23 @@ std::vector<std::string> journal_states(const std::string& provider_db) {
     return states;
 }
 
+// The priced calls' records as the journal holds them, in the order its rows were written.
+std::vector<ProgramMonetaryRecord> journal_monetary_records(const std::string& provider_db) {
+    Connection    db(provider_db, SQLITE_OPEN_READONLY);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db.db,
+                           "SELECT monetary_record FROM ng_program_provider_calls "
+                           "WHERE monetary_record != '' ORDER BY rowid",
+                           -1, &stmt, nullptr) != SQLITE_OK)
+        return {};
+    std::vector<ProgramMonetaryRecord> records;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+        records.push_back(program::detail::decode_monetary_record(
+            json::parse(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)))));
+    sqlite3_finalize(stmt);
+    return records;
+}
+
 // ---------------------------------------------------------------------------
 // Provider double: a real SDK client, a local transport
 // ---------------------------------------------------------------------------
@@ -274,6 +291,8 @@ struct Script {
     // #543: what the "brokered_call" node asks, and the system text it puts before it (none when empty).
     std::string   prompt = "probe";
     std::string   system;
+    // The "brokered_call" node asks for a streamed reply instead of a collected one.
+    std::atomic<bool> stream{false};
 };
 
 class BrokeredCall final : public graph::GraphNode {
@@ -290,6 +309,7 @@ public:
         messages.push_back(neograph::test::message(script_->prompt, sp::Role::User));
         auto request  = make_provider_request(*provider_, std::string(kModel), std::move(messages));
         std::get<sp::chat::Request>(request.payload).max_output_tokens = kOutputCap;
+        if (script_->stream.load()) request.mode = ProviderMode::Stream;
         const auto broker = graph::provider_call_broker(in.ctx);
         if (!broker) throw std::logic_error("the Program provider broker is absent");
         auto result = co_await graph::observe_provider_result(
@@ -655,6 +675,7 @@ public:
         runtime.transitions       = transitions_;
         runtime.scheduler_threads = 2;
         runtime.require_core_provider_call_broker = true;
+        runtime.native_history_archive            = options_.archive;
         runtime.fork_may_resend_provider_calls    = options_.fork_may_resend;
         if (journal_) {
             runtime.core_provider_calls_journaled = true;
@@ -1150,6 +1171,40 @@ std::string error_body(int status) {
                            {"code", status}}}}.dump();
 }
 
+// A Chat Completions reply as OpenRouter sends it. `upstream` is its top-level `provider`, the upstream that served
+// the call. The model is the one the call asked for, so the reply is not about another model (SchemaProvider #165).
+json openrouter_reply(json body, bool streaming, const std::optional<std::string>& upstream) {
+    body["id"]      = "gen-fixture";
+    body["object"]  = streaming ? "chat.completion.chunk" : "chat.completion";
+    body["created"] = 1;
+    body["model"]   = std::string(kModel);
+    if (upstream) body["provider"] = *upstream;
+    return body;
+}
+
+// The usage OpenRouter reports, with its own cost in USD.
+json reported_usage(double cost_usd = 0.001234567) {
+    return json{{"prompt_tokens", 21}, {"completion_tokens", 3}, {"total_tokens", 24}, {"cost", cost_usd}};
+}
+
+std::string openrouter_chat_body(const std::optional<std::string>& upstream, double cost_usd = 0.001234567) {
+    return openrouter_reply(json{{"choices", json::array({json{{"index", 0},
+                                                                {"message", {{"role", "assistant"}, {"content", "answer"}}},
+                                                                {"finish_reason", "stop"}}})},
+                                 {"usage", reported_usage(cost_usd)}},
+                            false, upstream)
+        .dump();
+}
+
+// Every chunk of the stream names the upstream, as OpenRouter's do.
+std::string openrouter_chat_stream(const std::optional<std::string>& upstream, double cost_usd = 0.001234567) {
+    const auto frame = [&](json body) { return "data: " + openrouter_reply(std::move(body), true, upstream).dump() + "\n\n"; };
+    return frame(json{{"choices", json::array({json{{"index", 0},
+                                                    {"delta", {{"role", "assistant"}, {"content", "answer"}}},
+                                                    {"finish_reason", "stop"}}})}}) +
+           frame(json{{"choices", json::array()}, {"usage", reported_usage(cost_usd)}}) + "data: [DONE]\n\n";
+}
+
 std::size_t requests_seen(wire::Peer& peer) {
     std::lock_guard lock(peer.state->mutex);
     return peer.state->entered;
@@ -1221,6 +1276,105 @@ TEST_P(Priced, AnAnswerThatCanFollowStartedWorkKeepsTheHold) {
             EXPECT_EQ(journal_states(files.provider_db()),
                       std::vector<std::string>{"reconciliation_required"});
     }
+}
+
+// ---------------------------------------------------------------------------
+// The upstream that served a call (SchemaProvider #165) is metadata of its record
+// ---------------------------------------------------------------------------
+
+TEST_P(Priced, TheRecordNamesTheUpstreamThatServedTheCall) {
+#ifdef _WIN32
+    if (durable()) GTEST_SKIP() << "NativeArchive custody needs an owner-only protected directory";
+#endif
+    for (const bool streamed : {false, true}) {
+        SCOPED_TRACE(streamed ? "streamed" : "buffered");
+        TempDir    files("served-by");
+        wire::Peer remote(streamed ? openrouter_chat_stream("Fixture Upstream") : openrouter_chat_body("Fixture Upstream"),
+                          streamed);
+        auto       options = loopback_options(remote.origin(), durable() ? &files : nullptr);
+        Host       h(std::make_shared<Peer>(), options, durable() ? &files : nullptr);
+        h.script().stream = streamed;
+        const auto result = h.run(Shape::Brokered);
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        const auto& record = result.monetary_records().front();
+        EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Reported);
+        EXPECT_EQ(record.microunits, 1235U);
+        EXPECT_EQ(record.served_by, std::optional<std::string>("Fixture Upstream"));
+        EXPECT_EQ(requests_seen(remote), 1U);
+        {
+            std::lock_guard lock(remote.state->mutex);
+            EXPECT_EQ(remote.state->requests.front().value("stream", false), streamed)
+                << "the call went the way the node asked";
+        }
+        // The record is stored as it is, with the run's result and, for a durable host, in the journal's row.
+        const auto stored = ProgramResult::parse(result.serialize_canonical());
+        EXPECT_EQ(stored.monetary_records(), result.monetary_records());
+        EXPECT_EQ(stored.monetary_records().front().served_by, record.served_by);
+        if (durable()) {
+            const auto row = h.journal().inspect(kOwner, record.call_id);
+            ASSERT_TRUE(row);
+            ASSERT_TRUE(row->monetary_record);
+            EXPECT_EQ(*row->monetary_record, record);
+        }
+    }
+}
+
+TEST_P(Priced, ARecordWhoseResponseNamesNoUpstreamHasNone) {
+#ifdef _WIN32
+    if (durable()) GTEST_SKIP() << "NativeArchive custody needs an owner-only protected directory";
+#endif
+    for (const bool streamed : {false, true}) {
+        SCOPED_TRACE(streamed ? "streamed" : "buffered");
+        TempDir    files("served-by-none");
+        wire::Peer remote(streamed ? openrouter_chat_stream(std::nullopt) : openrouter_chat_body(std::nullopt), streamed);
+        auto       options = loopback_options(remote.origin(), durable() ? &files : nullptr);
+        Host       h(std::make_shared<Peer>(), options, durable() ? &files : nullptr);
+        h.script().stream = streamed;
+        const auto result = h.run(Shape::Brokered);
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        const auto& record = result.monetary_records().front();
+        EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Reported);
+        EXPECT_EQ(record.microunits, 1235U);
+        EXPECT_FALSE(record.served_by);
+        EXPECT_FALSE(program::detail::encode_monetary_record(record).contains("served_by"))
+            << "a record without one has the bytes it always had";
+        EXPECT_FALSE(ProgramResult::parse(result.serialize_canonical()).monetary_records().front().served_by);
+    }
+}
+
+TEST_P(Priced, AHeldCallStillNamesTheUpstreamItsResponseNamed) {
+    auto peer   = std::make_shared<Peer>();
+    peer->reply = [](int, const ProviderRequest&) {
+        return neograph::test::naming_upstream(
+            neograph::test::success("answer", neograph::test::usage(21, std::nullopt, std::nullopt,
+                                                                    sp::UsageStage::Partial)),
+            "Fixture Upstream");
+    };
+    auto       h      = host(peer);
+    const auto result = h->run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Held);
+    EXPECT_EQ(result.monetary_records().front().served_by, std::optional<std::string>("Fixture Upstream"));
+    EXPECT_EQ(result.usage().monetary_microunits, expected_hold());
+}
+
+TEST_P(Priced, AnUpstreamNameTheRecordCannotHoldNeverChangesTheCharge) {
+    auto peer   = std::make_shared<Peer>();
+    peer->reply = [](int, const ProviderRequest&) {
+        return neograph::test::naming_upstream(
+            neograph::test::success("answer", with_cost(final_usage(21, 3), 1'234'567)), "two\nlines");
+    };
+    auto       h      = host(peer);
+    const auto result = h->run(Shape::Llm);
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(result.monetary_records().front().microunits, 1235U);
+    EXPECT_FALSE(result.monetary_records().front().served_by);
+    EXPECT_EQ(result.usage().monetary_microunits, 1235U);
 }
 
 // ---------------------------------------------------------------------------
@@ -1887,14 +2041,17 @@ std::function<sp::runtime::Result(int, const ProviderRequest&)> reply_over_the_h
 
 // What the notice for `record` holds, and nothing of the request or the reply.
 json over_hold_witness(const ProgramMonetaryRecord& record, std::string evidence) {
-    return json{{"call_id", record.call_id},
-                {"operation_id", record.operation_id},
-                {"node", record.node},
-                {"model", std::string(kModel)},
-                {"evidence", std::move(evidence)},
-                {"reserved_microunits", record.reserved_microunits},
-                {"microunits", record.microunits},
-                {"over_by", record.microunits - record.reserved_microunits}};
+    json witness{{"call_id", record.call_id},
+                 {"operation_id", record.operation_id},
+                 {"node", record.node},
+                 {"model", std::string(kModel)},
+                 {"evidence", std::move(evidence)},
+                 {"reserved_microunits", record.reserved_microunits},
+                 {"microunits", record.microunits},
+                 {"over_by", record.microunits - record.reserved_microunits}};
+    // The upstream the record names, and no member at all when it names none.
+    if (record.served_by) witness["served_by"] = *record.served_by;
+    return witness;
 }
 }  // namespace
 
@@ -1952,6 +2109,73 @@ TEST_P(Priced, AnEstimatedCostAboveTheReservationGivesOneNotice) {
     ASSERT_EQ(notices.size(), 1U);
     EXPECT_EQ(notices.front().code, kOverHold);
     EXPECT_EQ(notices.front().witness, over_hold_witness(record, "estimated"));
+}
+
+TEST_P(Priced, AnEstimatedNoticeNamesTheUpstreamTheRecordNames) {
+    const auto hold = expected_hold();
+    auto       peer = std::make_shared<Peer>();
+    peer->reply     = [](int, const ProviderRequest&) {
+        return neograph::test::naming_upstream(neograph::test::success("answer", final_usage(21, 40'000)),
+                                               "Fixture Upstream");
+    };
+    auto       h      = host(peer);
+    auto       handle = h->start(Shape::Llm);
+    const auto result = handle.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Estimated);
+    EXPECT_GT(record.microunits, hold);
+    const auto notices = handle.notices();
+    ASSERT_EQ(notices.size(), 1U);
+    EXPECT_EQ(notices.front().witness, over_hold_witness(record, "estimated"));
+    EXPECT_EQ(notices.front().witness.at("served_by"), "Fixture Upstream");
+}
+
+TEST_P(Priced, TheNoticeNamesTheUpstreamThatServedTheCallWhenTheRecordDoesAndOtherwiseLeavesItOut) {
+#ifdef _WIN32
+    if (durable()) GTEST_SKIP() << "NativeArchive custody needs an owner-only protected directory";
+#endif
+    // A reported cost about 500 microunits above the hold, from a loopback peer that answers as OpenRouter does,
+    // buffered and streamed, with the upstream named and without.
+    const double cost_usd = static_cast<double>(expected_hold() + 500) / 1e6;
+    for (const bool streamed : {false, true}) {
+        for (const bool named : {true, false}) {
+            SCOPED_TRACE(std::string(streamed ? "streamed" : "buffered") + (named ? ", named" : ", unnamed"));
+            const std::optional<std::string> upstream = named ? std::optional<std::string>("Fixture Upstream")
+                                                              : std::nullopt;
+            TempDir    files("notice-served-by");
+            wire::Peer remote(streamed ? openrouter_chat_stream(upstream, cost_usd) : openrouter_chat_body(upstream, cost_usd),
+                              streamed);
+            auto       options = loopback_options(remote.origin(), durable() ? &files : nullptr);
+            Host       h(std::make_shared<Peer>(), options, durable() ? &files : nullptr);
+            h.script().stream = streamed;
+            auto       handle = h.start(Shape::Brokered);
+            const auto result = handle.wait();
+            ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+            ASSERT_EQ(result.monetary_records().size(), 1U);
+            const auto& record = result.monetary_records().front();
+            EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Reported);
+            EXPECT_EQ(record.served_by, upstream);
+            EXPECT_GT(record.microunits, record.reserved_microunits) << "the reported cost is above the hold";
+
+            const auto notices = handle.notices();
+            ASSERT_EQ(notices.size(), 1U);
+            EXPECT_EQ(notices.front().code, kOverHold);
+            EXPECT_EQ(notices.front().witness, over_hold_witness(record, "reported"));
+            EXPECT_EQ(notices.front().witness.contains("served_by"), named)
+                << "the member is there when the record names an upstream, and absent otherwise";
+            if (named) EXPECT_EQ(notices.front().witness.at("served_by"), "Fixture Upstream");
+            // Nothing else of the reply is in the notice: neither the text nor the response's id.
+            const auto text = notices.front().message + notices.front().witness.dump();
+            EXPECT_EQ(text.find("answer"), std::string::npos) << text;
+            EXPECT_EQ(text.find("gen-fixture"), std::string::npos) << text;
+            // The notice is not stored with the run, and the record in the stored result is unchanged by it.
+            const auto stored = ProgramResult::parse(result.serialize_canonical());
+            EXPECT_EQ(stored.monetary_records(), result.monetary_records());
+            EXPECT_EQ(result.serialize_canonical().find("P_MONEY_OVER_HOLD"), std::string::npos);
+        }
+    }
 }
 
 TEST_P(Priced, ACallWithinItsReservationGivesNoNotice) {
@@ -2309,6 +2533,102 @@ TEST(ProgramProviderBindingJournal, AProcessThatDiesAfterTheCallIsJournaledIsCha
     EXPECT_EQ(result.monetary_records().front().evidence, ProgramMonetaryEvidence::Reported);
     EXPECT_EQ(result.usage().monetary_microunits, 1235U) << "and not lost";
     EXPECT_EQ(result.remaining_budget().monetary_microunits, 100'000U - 1235U);
+}
+
+// A reply that costs what Peer's default does and names the upstream that served the call (SchemaProvider #165).
+sp::runtime::Result reply_naming(const std::optional<std::string>& upstream) {
+    auto answer = neograph::test::success("answer", with_cost(final_usage(21, 3), 1'234'567));
+    return upstream ? neograph::test::naming_upstream(answer, *upstream) : answer;
+}
+
+TEST(ProgramProviderBindingJournal, ARecordRestoredAfterACrashKeepsTheUpstreamItWasStoredWith) {
+    // The journal replays the call's outcome from its native archive form, which does not carry the upstream's
+    // name: a replayed completion names none. The record that was stored with the call does, and recovery
+    // charges that record.
+    TempDir     files("served-by-crash");
+    TempDir     image("served-by-crash-image");
+    auto        peer = std::make_shared<Peer>();
+    peer->reply      = [](int, const ProviderRequest&) { return reply_naming("Fixture Upstream"); };
+    HostOptions options;
+    options.child_capable = true;
+    options.monetary      = 100'000;
+    {
+        Host h(peer, options, &files);
+        h.script().interrupt_before_call = true;
+        bool taken                       = false;
+        h.script().after                 = [&](const std::string&) {
+            if (taken) return;
+            taken = true;
+            crash_image(files.path, image.path);
+        };
+        const auto paused = h.run(Shape::BrokeredThenAfter, "served-by-crash-run");
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+        const auto done = h.runtime().resume(kOwner, "served-by-crash-run", resume_after(paused, "trace")).wait();
+        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+        ASSERT_TRUE(taken);
+        ASSERT_EQ(done.monetary_records().size(), 1U);
+        EXPECT_EQ(done.monetary_records().front().served_by, std::optional<std::string>("Fixture Upstream"));
+    }
+    const auto stored = journal_monetary_records(image.provider_db());
+    ASSERT_EQ(stored.size(), 1U);
+    EXPECT_EQ(stored.front().served_by, std::optional<std::string>("Fixture Upstream"));
+
+    auto recovery = std::make_shared<Peer>();
+    Host restarted(recovery, options, &image);
+    restarted.script().interrupt_before_call = true;
+    const auto result = restarted.runtime().reconnect(kOwner, "served-by-crash-run").wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(recovery->transport.load(), 0) << "the journaled request is not sent again";
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    const auto& record = result.monetary_records().front();
+    EXPECT_TRUE(record.replayed);
+    EXPECT_EQ(record.served_by, std::optional<std::string>("Fixture Upstream"))
+        << "the restored record keeps the value it was stored with";
+    EXPECT_EQ(record.evidence, ProgramMonetaryEvidence::Reported);
+    EXPECT_EQ(result.usage().monetary_microunits, 1235U);
+    // The replayed record is the stored one but for the mark that it was replayed.
+    auto unreplayed     = record;
+    unreplayed.replayed = false;
+    EXPECT_EQ(unreplayed, stored.front());
+}
+
+TEST(ProgramProviderBindingJournal, TheUpstreamNameIsOutsideTheJournalsIdentity) {
+    // The same call twice: once answered by a gateway that names the upstream, once by one that does not. Nothing
+    // the journal identifies the call by, or seals the outcome with, differs, and the records differ by the name.
+    std::vector<ProgramMonetaryRecord>                        records;
+    std::vector<SQLiteProgramProviderCallJournal::Record> rows;
+    for (const bool named : {false, true}) {
+        SCOPED_TRACE(named ? "named" : "unnamed");
+        TempDir files("served-by-identity");
+        auto    peer = std::make_shared<Peer>();
+        peer->reply  = [named](int, const ProviderRequest&) {
+            return reply_naming(named ? std::optional<std::string>("Fixture Upstream") : std::nullopt);
+        };
+        HostOptions options;
+        options.monetary = 100'000;
+        Host       h(peer, options, &files);
+        const auto result = h.run(Shape::Brokered, "served-by-identity-run");
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+        ASSERT_EQ(result.monetary_records().size(), 1U);
+        records.push_back(result.monetary_records().front());
+        const auto row = h.journal().inspect(kOwner, records.back().call_id);
+        ASSERT_TRUE(row);
+        rows.push_back(*row);
+    }
+    ASSERT_EQ(records.size(), 2U);
+    EXPECT_FALSE(records[0].served_by);
+    EXPECT_EQ(records[1].served_by, std::optional<std::string>("Fixture Upstream"));
+    EXPECT_EQ(records[0].call_id, records[1].call_id);
+    EXPECT_EQ(rows[0].request_digest, rows[1].request_digest);
+    EXPECT_EQ(rows[0].content_digest, rows[1].content_digest);
+    EXPECT_EQ(rows[0].policy_identity, rows[1].policy_identity);
+    EXPECT_EQ(rows[0].provider_binding_identity, rows[1].provider_binding_identity);
+    EXPECT_EQ(rows[0].outcome_digest, rows[1].outcome_digest) << "the stored outcome does not carry the name";
+    EXPECT_EQ(rows[0].claim_amount, rows[1].claim_amount);
+    EXPECT_EQ(rows[0].committed_amount, rows[1].committed_amount);
+    auto unnamed = records[1];
+    unnamed.served_by.reset();
+    EXPECT_EQ(unnamed, records[0]) << "the name is the only difference between the two records";
 }
 
 TEST(ProgramProviderBindingJournal, AnExpiredLeaseStillChargesTheJournaledCall) {
@@ -3291,7 +3611,10 @@ const ProgramNotice* notice_with(const std::vector<ProgramNotice>& notices, std:
 
 // A run paused by its node after the model call was journaled, in a directory of its own.
 struct PausedWithJournaledCall {
-    explicit PausedWithJournaledCall(const std::string& name) : files(name), peer(std::make_shared<Peer>()) {
+    // `configure` sets up the peer that answers the call.
+    explicit PausedWithJournaledCall(const std::string& name, const std::function<void(Peer&)>& configure = {})
+        : files(name), peer(std::make_shared<Peer>()) {
+        if (configure) configure(*peer);
         HostOptions options;
         options.monetary = 100'000;
         Host h(peer, options, &files);
@@ -3313,6 +3636,34 @@ ProgramHandle fork_from(Host& h, const ProgramResult& paused, const std::string&
                             resume_after(paused, "trace-" + run_id));
 }
 }  // namespace
+
+TEST(ProgramProviderBindingJournal, AForkThatAdoptsTheSourcesCallKeepsTheUpstreamItsRecordNamed) {
+    PausedWithJournaledCall source("served-by-fork", [](Peer& peer) {
+        peer.reply = [](int, const ProviderRequest&) { return reply_naming("Fixture Upstream"); };
+    });
+    ASSERT_EQ(source.paused().status(), ProgramTerminalStatus::Interrupted) << failure_text(source.paused());
+    ASSERT_TRUE(source.paused().checkpoint());
+    ASSERT_EQ(source.paused().monetary_records().size(), 1U);
+    EXPECT_EQ(source.paused().monetary_records().front().served_by, std::optional<std::string>("Fixture Upstream"));
+
+    auto        other = std::make_shared<Peer>();  // it names no upstream, and is never asked
+    HostOptions options;
+    options.monetary = 100'000;
+    Host h(other, options, &source.files);
+    auto handle = fork_from(h, source.paused(), "served-by-fork-run");
+    const auto forked = handle.wait();
+    ASSERT_EQ(forked.status(), ProgramTerminalStatus::Completed) << failure_text(forked);
+    EXPECT_EQ(other->transport.load(), 0) << "the source's call is adopted, not sent again";
+    EXPECT_TRUE(forked.monetary_records().empty()) << "and not charged again";
+    // The fork's row holds the record the source stored, under the fork's call.
+    const auto rows = journal_monetary_records(source.files.provider_db());
+    ASSERT_EQ(rows.size(), 2U);
+    EXPECT_NE(rows[0].call_id, rows[1].call_id);
+    for (const auto& row : rows) EXPECT_EQ(row.served_by, std::optional<std::string>("Fixture Upstream"));
+    auto adopted    = rows[1];
+    adopted.call_id = rows[0].call_id;
+    EXPECT_EQ(adopted, rows[0]) << "apart from the call it names, the adopted record is the source's";
+}
 
 TEST(ProgramProviderBindingJournal, AResumeUnderAnotherPolicyIdentityReplaysItsJournaledCall) {
     // #543: SchemaProvider's descriptor policy changed between the journal and the resume. The request is the

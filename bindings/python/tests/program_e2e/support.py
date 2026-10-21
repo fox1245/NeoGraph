@@ -639,11 +639,14 @@ class ChatPeer:
     a key of `refusals` is answered with that HTTP status instead. A streaming
     request whose last user message contains cut_marker is answered with one
     chunk of the reply and then the connection ends: no finish reason, no usage
-    and no [DONE], a stream cut in the middle.
+    and no [DONE], a stream cut in the middle. served_by, when set, is the upstream
+    the reply names as having served the call: OpenRouter's top-level `provider`
+    member of the body and of every chunk.
     """
 
     def __init__(self):
         self.requests = []
+        self.served_by = None
         self.reply = "Paris."
         self.usage = {"prompt_tokens": 21, "completion_tokens": 3, "total_tokens": 24,
                       "cost": 0.001234567}
@@ -681,6 +684,8 @@ class ChatPeer:
                         pass
                     return
                 base = {"id": "chatcmpl-e2e", "created": 1, "model": body.get("model")}
+                if peer.served_by is not None:
+                    base["provider"] = peer.served_by
                 if body.get("stream") and peer.cut_marker and peer.cut_marker in str(last):
                     first = {**base, "object": "chat.completion.chunk",
                              "choices": [{"index": 0, "finish_reason": None,

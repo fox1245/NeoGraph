@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=8e71ee3b8404e9ce2011d4723a95dca7936e1a14993bc971778b8b865401e537 -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=059f7da5000cc79ba45e2bfb3ef2931da6781a19f6caa69b0f778ef2e27e19ff -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -109,7 +109,7 @@ worker_countのデフォルトは `1` で、エンジンが所有するプール
 | `ValueError: Every policy budget ceiling except child budgets must be positive; zero: ...` | 挙げられた上限のフィールドが0です | 正の値にします。Programがモデルを一切呼び出さない場合も同じです |
 | `ng.ProgramAdmissionError` の中の `P_ADMIT_PROVIDER` | `llm_call` ノードが、ホストが結び付けていないプロバイダーを必要としています。または、`llm_call` か `intent_classifier` のノードが、`provider=` なしで登録されています | `add_provider(...)` と `add_registered_node("llm_call", ..., provider=...)` を登録し、`LocalProgramHost` に `node_context=` と `binding_label=` を渡します |
 | `P_MONEY_BUDGET`（`BudgetExhausted`）、または別の `P_MONEY_*` コード（`Failed`）が出て、プロバイダーにリクエストが届いていない | 上限を決めた呼び出しの予約額が `monetary_microunits` に収まりません（0は何も許可しません）。または、呼び出しの上限を決められません。原因は、プロバイダーのポリシーのカタログにそのモデルの価格がないこと、ルートの上限がないルーターのエイリアス、出力の上限がないこと、入力の上限が分からないこと、価格のない service tier やサーバーツール、使用の上限がないツールのいずれかです | `monetary_microunits` を増やすか、`provider_controls.max_output_tokens` を設定するか、プロバイダーのポリシーのカタログレイヤーでそのモデルに価格を付けます。詳しくは[価格の証拠とモデルカタログ](reference-en.md#pricing-evidence-and-the-model-catalogue)を参照してください |
-| `P_MONEY_BUDGET`（`BudgetExhausted`）が出て、`failure.witness["monetary"]` に `granted`、`used`、`over_by` がある | プロバイダーがリクエストを受け取り、その応答が予約額を上回る費用を報告したため（たとえば upstream がリクエストの出力 cap より多い出力を返した場合）、実行の請求額が `monetary_microunits` を超えました | `monetary_microunits` を増やす、呼び出しの費用を下げる、または呼び出しを出力 cap を守る upstream にだけ向けます（provider の routing の `only` または `order`）。`handle.notices` にはそのような呼び出しごとに `P_MONEY_OVER_HOLD` notice があり、`result.monetary_records` で `microunits` が `reserved_microunits` を上回る記録が、その呼び出しです |
+| `P_MONEY_BUDGET`（`BudgetExhausted`）が出て、`failure.witness["monetary"]` に `granted`、`used`、`over_by` がある | プロバイダーがリクエストを受け取り、その応答が予約額を上回る費用を報告したため（たとえば upstream がリクエストの出力 cap より多い出力を返した場合）、実行の請求額が `monetary_microunits` を超えました | `monetary_microunits` を増やす、呼び出しの費用を下げる、または呼び出しを出力 cap を守る upstream にだけ向けます（provider の routing の `only` または `order`）。`handle.notices` にはそのような呼び出しごとに `P_MONEY_OVER_HOLD` notice があり、`result.monetary_records` で `microunits` が `reserved_microunits` を上回る記録が、その呼び出しです。どちらも、応答が名前を示す場合は、呼び出しを処理したアップストリーム（`served_by`）を持ちます |
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 実行時の予算が、`compile_admit` に渡した予算と異なります | 同じ予算を渡すか、コンパイルとadmissionをやり直します |
 | `ng.spawn` が出す `P_CHILD_BINDING` | `LocalProgramHost` に、子のバインディングを解決するリゾルバーがありません | 子Programは、C++のホストで実行します |
 | `resume()` が出す `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | その実行は、別の、または破棄済みの `LocalProgramHost` のものです | その実行を開始したホストを通して再開します |
