@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <functional>
+#include <optional>
+
 #include <neograph/runtime_turn_assembler.h>
 #include <neograph/graph/cancel.h>
 #include "fixtures/typed_provider.h"
@@ -10,7 +13,7 @@ namespace {
 
 std::string sha(char value) { return "sha256:" + std::string(64, value); }
 
-class AssemblyProvider final : public test::LocalProvider {
+class AssemblyProvider : public test::LocalProvider {
 public:
     AssemblyProvider()
         : LocalProvider([](ProviderRequest, const PreparedProviderRequest&,
@@ -747,4 +750,343 @@ TEST(RuntimeTurnAssembler, ReceiptNamesTheBreakItsEpochClaims) {
         provider, "owner", *extending.epoch, assembly_template());
     EXPECT_FALSE(extended.assembly_receipt.break_reason());
     EXPECT_TRUE(extended.assembly_receipt.assembled_artifact_ids());
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The stable-first layout (#329)
+// ---------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A feed of records and the epoch of the stable-first layout over it. The records are user messages unless
+// a message is given.
+struct LayoutFixture {
+    InMemoryContextStore store;
+    std::vector<ContextArtifact> artifacts;
+    std::optional<ContextEpoch> epoch;
+    std::vector<std::string> order;
+
+    LayoutFixture(std::vector<ContextArtifact> ordered, std::size_t records = 2,
+                  std::optional<sp::Message> system_record = std::nullopt,
+                  AssemblyLayout layout = AssemblyLayout::StableFirst)
+        : artifacts(std::move(ordered)) {
+        const ContextStoreFeed feed{"owner", "feed"};
+        std::optional<std::string> head;
+        for (std::size_t sequence = 1; sequence <= records; ++sequence) {
+            RuntimeHistoryRecordData data;
+            data.feed_id = "feed";
+            data.sequence = sequence;
+            data.message_id = "message_" + std::to_string(sequence);
+            data.trust = RuntimeTrustClass::UntrustedInput;
+            data.message = test::message("user_" + std::to_string(sequence), sp::Role::User);
+            if (system_record && sequence == 2) {
+                data.trust = RuntimeTrustClass::HostPolicy;
+                data.message = *system_record;
+            }
+            data.predecessor_id = head;
+            const auto record = RuntimeHistoryRecord::create(std::move(data));
+            EXPECT_EQ(store.append_history(feed, record, head), ContextStoreAppendResult::Appended);
+            head = record.id();
+        }
+        ContextEpochData data;
+        data.run_id = "run";
+        data.sequence = 1;
+        data.feed_id = "feed";
+        data.raw_from_sequence = 1;
+        data.raw_through_sequence = records;
+        data.raw_window_digest = store.snapshot_history(feed, 1, records).digest;
+        for (const auto& artifact : artifacts) {
+            EXPECT_EQ(store.put_artifact("owner", artifact), ContextArtifactPutResult::Stored);
+            data.artifact_ids.push_back(artifact.id());
+            order.push_back(artifact.id());
+        }
+        data.ordered_artifact_ids = order;
+        data.assembly_layout = layout;
+        epoch = ContextEpoch::create(std::move(data));
+    }
+};
+
+ContextArtifact head_skill(std::string text = "skill", ContextPlacement placement = ContextPlacement::BeforeHistory,
+                           int priority = 10) {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::RequiredSkill;
+    data.producer_id = "skill-resolver.v1";
+    data.source_digest = sha('a');
+    data.media_type = "text/plain";
+    data.placement = placement;
+    data.priority = priority;
+    data.required = true;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
+ContextArtifact slow_summary(ContextArtifactKind kind = ContextArtifactKind::DerivedContext,
+                             std::string text = "summary") {
+    ContextArtifactData data;
+    data.kind = kind;
+    data.producer_id = kind == ContextArtifactKind::DerivedContext ? std::string(COMPACTION_PRODUCER_ID)
+                                                                    : "summary-skill.v1";
+    data.source_digest = sha('c');
+    data.media_type = "text/plain";
+    data.placement = ContextPlacement::BeforeHistory;
+    data.required = kind == ContextArtifactKind::HardConstraint;
+    data.stability_class = StabilityClass::Slow;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
+ContextArtifact tail_note(std::string text, std::string producer = "hook-output.v1") {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::HookOutput;
+    data.producer_id = std::move(producer);
+    data.source_digest = sha('b');
+    data.media_type = "text/plain";
+    data.placement = ContextPlacement::AfterHistory;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
+RuntimeTurn assemble_for(LayoutFixture& fixture, AssemblyProvider& provider,
+                         std::vector<sp::Message> host = {}, std::vector<sp::Message> supplemental = {},
+                         ProviderMode mode = ProviderMode::Collect) {
+    std::vector<std::string> skills;
+    for (const auto& artifact : fixture.artifacts) {
+        if (artifact.kind() == ContextArtifactKind::RequiredSkill) skills.push_back(artifact.id());
+    }
+    return RuntimeTurnAssembler(fixture.store, skills).assemble(
+        provider, "owner", *fixture.epoch, assembly_template(mode), std::move(host), std::move(supplemental));
+}
+
+void expect_layout_refusal(ContextStabilityRefusal code, const std::function<void()>& call) {
+    try {
+        call();
+    } catch (const ContextStabilityError& error) {
+        EXPECT_EQ(error.code(), code) << error.what();
+        return;
+    } catch (const std::exception& error) {
+        ADD_FAILURE() << "expected a ContextStabilityError, got: " << error.what();
+        return;
+    }
+    ADD_FAILURE() << "expected a ContextStabilityError";
+}
+
+}  // namespace
+
+TEST(StableFirstAssembly, FollowsTheOrderTheEpochRecordsAndNotTheOrderOfAHash) {
+    const auto skill = head_skill();
+    const auto summary = slow_summary();
+    const auto first = tail_note("note one", "producer-a.v1");
+    const auto second = tail_note("note two", "producer-a.v1");
+    // Whatever the identities of the two notes are, the epoch puts the second in front of the first.
+    LayoutFixture fixture({skill, summary, second, first});
+    auto provider = assembly_provider();
+    const auto turn = assemble_for(fixture, provider);
+    const auto& messages = admitted_messages(provider, turn.request);
+    ASSERT_EQ(messages.size(), 6u);
+    expect_text(messages[0], sp::Role::System, "skill");
+    expect_text(messages[1], sp::Role::User, "summary");
+    expect_text(messages[2], sp::Role::User, "user_1");
+    expect_text(messages[3], sp::Role::User, "user_2");
+    expect_text(messages[4], sp::Role::User, "note two");
+    expect_text(messages[5], sp::Role::User, "note one");
+    EXPECT_EQ(turn.assembly_receipt.assembled_artifact_ids(), fixture.order);
+    EXPECT_EQ(turn.assembly_receipt.artifact_classes()->at(summary.id()), StabilityClass::Slow);
+
+    // The notes in the other order give the other prompt: nothing but the epoch decides.
+    LayoutFixture swapped({skill, summary, first, second});
+    const auto other = assemble_for(swapped, provider);
+    const auto& swapped_messages = admitted_messages(provider, other.request);
+    expect_text(swapped_messages[4], sp::Role::User, "note one");
+    expect_text(swapped_messages[5], sp::Role::User, "note two");
+    EXPECT_NE(turn.request.encoded_body(), other.request.encoded_body());
+}
+
+TEST(StableFirstAssembly, WritesTheBodyTheLegacyAssemblyWritesWhereTheTwoAgree) {
+    const auto skill = head_skill();
+    const auto note = tail_note("note");
+    LayoutFixture stable_first({skill, note});
+    LayoutFixture legacy({skill, note}, 2, std::nullopt, AssemblyLayout::Legacy);
+    auto stable_provider = assembly_provider();
+    auto legacy_provider = assembly_provider();
+    const auto from_stable_first = assemble_for(stable_first, stable_provider);
+    const auto from_legacy = assemble_for(legacy, legacy_provider);
+    ASSERT_NE(stable_first.epoch->id(), legacy.epoch->id());
+    EXPECT_EQ(from_stable_first.request.encoded_body(), from_legacy.request.encoded_body());
+    EXPECT_EQ(from_stable_first.assembly_receipt.normalized_request_digest(),
+              from_legacy.assembly_receipt.normalized_request_digest());
+    EXPECT_EQ(from_stable_first.assembly_receipt.message_window_digest(),
+              from_legacy.assembly_receipt.message_window_digest());
+    // Only the stable-first assembly names where its prefix ends.
+    EXPECT_FALSE(from_legacy.assembly_receipt.prefix_boundary());
+    EXPECT_FALSE(from_legacy.assembly_receipt.prefix_digest());
+    EXPECT_TRUE(from_stable_first.assembly_receipt.prefix_boundary());
+}
+
+TEST(StableFirstAssembly, RefusesWhatItCannotPlaceWithATypedError) {
+    auto provider = assembly_provider();
+    const auto note = tail_note("note");
+    for (const auto placement : {ContextPlacement::BeforeLatestUser, ContextPlacement::AfterLatestUser,
+                                 ContextPlacement::AfterHistory}) {
+        LayoutFixture fixture({head_skill("skill", placement), note});
+        expect_layout_refusal(ContextStabilityRefusal::StableOutsideHistoryHead,
+                              [&] { (void)assemble_for(fixture, provider); });
+    }
+    for (const auto placement : {ContextPlacement::BeforeHistory, ContextPlacement::BeforeLatestUser,
+                                 ContextPlacement::AfterLatestUser}) {
+        ContextArtifactData data;
+        data.kind = ContextArtifactKind::HookOutput;
+        data.producer_id = "hook-output.v1";
+        data.source_digest = sha('b');
+        data.media_type = "text/plain";
+        data.placement = placement;
+        data.content = "moved";
+        LayoutFixture fixture({head_skill(), ContextArtifact::create(data)});
+        expect_layout_refusal(ContextStabilityRefusal::VolatileOutsideTail,
+                              [&] { (void)assemble_for(fixture, provider); });
+    }
+    LayoutFixture misordered({note, head_skill()});
+    expect_layout_refusal(ContextStabilityRefusal::TierOrderViolated,
+                          [&] { (void)assemble_for(misordered, provider); });
+}
+
+TEST(StableFirstAssembly, AllowsASystemMessageOnlyAsAHostInstructionOrAStableOrSlowArtifact) {
+    auto provider = assembly_provider();
+    sp::Message system = test::message("standing rule", sp::Role::System);
+    // A host instruction, a Stable artifact and a Slow one may be System messages.
+    LayoutFixture accepted({head_skill(), slow_summary(ContextArtifactKind::HardConstraint, "slow rule"),
+                            tail_note("note")});
+    EXPECT_NO_THROW((void)assemble_for(accepted, provider, {system}));
+
+    // A RAW record or a supplemental input that is a System message would be hoisted to the start of the
+    // request on some families, so the layout does not take it.
+    LayoutFixture raw({head_skill(), tail_note("note")}, 2, system);
+    expect_layout_refusal(ContextStabilityRefusal::VolatileSystemText,
+                          [&] { (void)assemble_for(raw, provider); });
+    LayoutFixture supplemental({head_skill(), tail_note("note")});
+    expect_layout_refusal(ContextStabilityRefusal::VolatileSystemText,
+                          [&] { (void)assemble_for(supplemental, provider, {}, {system}); });
+}
+
+TEST(StableFirstAssembly, NamesWhereTheStableAndTheAppendOnlyPartsEndInTheEncodedBody) {
+    auto provider = assembly_provider();
+    const auto skill = head_skill();
+    const auto summary = slow_summary();
+    LayoutFixture fixture({skill, summary, tail_note("reading 1")});
+    const auto turn = assemble_for(fixture, provider);
+    const auto& receipt = turn.assembly_receipt;
+    // openai.chat: system(skill), user(summary), user(user_1), user(user_2), user(reading 1).
+    EXPECT_EQ(receipt.stable_boundary(), std::optional<ContextPrefixBoundary>({1, 0}));
+    EXPECT_EQ(receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({4, 0}));
+    ASSERT_TRUE(receipt.prefix_digest());
+
+    // The digest is the prefix's: a new volatile text leaves it as it was, a new RAW record moves it.
+    LayoutFixture next({skill, summary, tail_note("reading 2")});
+    const auto again = assemble_for(next, provider);
+    EXPECT_EQ(again.assembly_receipt.prefix_digest(), receipt.prefix_digest());
+    EXPECT_EQ(again.assembly_receipt.prefix_boundary(), receipt.prefix_boundary());
+    LayoutFixture longer({skill, summary, tail_note("reading 2")}, 3);
+    const auto grown = assemble_for(longer, provider);
+    EXPECT_NE(grown.assembly_receipt.prefix_digest(), receipt.prefix_digest());
+    EXPECT_EQ(grown.assembly_receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({5, 0}));
+    // A change of the Slow part moves the prefix digest and not the place of the boundaries.
+    LayoutFixture compacted({skill, slow_summary(ContextArtifactKind::DerivedContext, "another summary"),
+                             tail_note("reading 1")});
+    const auto changed = assemble_for(compacted, provider);
+    EXPECT_NE(changed.assembly_receipt.prefix_digest(), receipt.prefix_digest());
+    EXPECT_EQ(changed.assembly_receipt.stable_boundary(), receipt.stable_boundary());
+
+    // The receipt survives storage with its boundaries.
+    const auto stored = ContextAssemblyReceipt::parse(receipt.serialize_canonical(), *fixture.epoch, fixture.artifacts);
+    EXPECT_EQ(stored.id(), receipt.id());
+    EXPECT_EQ(stored.stable_boundary(), receipt.stable_boundary());
+    EXPECT_EQ(stored.prefix_boundary(), receipt.prefix_boundary());
+    EXPECT_EQ(stored.prefix_digest(), receipt.prefix_digest());
+}
+
+TEST(StableFirstAssembly, CountsHostInstructionsAndTheSupplementalInputInTheBoundaries) {
+    auto provider = assembly_provider();
+    const auto skill = head_skill();
+    LayoutFixture fixture({skill, tail_note("reading")});
+    const auto turn = assemble_for(fixture, provider, {test::message("host rule", sp::Role::System)},
+                                   {test::message("the task", sp::Role::User)});
+    // system(host rule), system(skill), user_1, user_2, reading, the task.
+    EXPECT_EQ(turn.assembly_receipt.stable_boundary(), std::optional<ContextPrefixBoundary>({2, 0}));
+    EXPECT_EQ(turn.assembly_receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({4, 0}));
+
+    // Nothing volatile at all: the prefix is the whole body, and it is also where the Stable part ends.
+    LayoutFixture stable_only({skill});
+    const auto whole = assemble_for(stable_only, provider);
+    EXPECT_EQ(whole.assembly_receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({3, 0}));
+    // Nothing Stable and nothing in front: no Stable boundary to mark.
+    LayoutFixture none({tail_note("reading")});
+    const auto bare = assemble_for(none, provider);
+    EXPECT_FALSE(bare.assembly_receipt.stable_boundary());
+    EXPECT_EQ(bare.assembly_receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({2, 0}));
+}
+
+TEST(StableFirstAssembly, ThePrefixDigestCoversEveryMemberButTheStreamFlagAndTheOutputCap) {
+    auto provider = assembly_provider();
+    LayoutFixture fixture({head_skill(), tail_note("reading")});
+    const auto buffered = assemble_for(fixture, provider);
+    const auto streamed = assemble_for(fixture, provider, {}, {}, ProviderMode::Stream);
+    ASSERT_NE(buffered.request.encoded_body(), streamed.request.encoded_body());
+    // A call repeats its digest; a streamed call carries members that a buffered one has not, such as the
+    // usage option of the stream, and they are part of the request start like any other member.
+    EXPECT_EQ(assemble_for(fixture, provider).assembly_receipt.prefix_digest(), buffered.assembly_receipt.prefix_digest());
+    EXPECT_EQ(assemble_for(fixture, provider, {}, {}, ProviderMode::Stream).assembly_receipt.prefix_digest(),
+              streamed.assembly_receipt.prefix_digest());
+    EXPECT_NE(buffered.assembly_receipt.prefix_digest(), streamed.assembly_receipt.prefix_digest());
+}
+
+namespace {
+
+// A provider that encodes every request except the ones that end with the marker message of a probe.
+class ProbeRefusingProvider final : public AssemblyProvider {
+public:
+    PreparedProviderRequest prepare(ProviderRequest request) override {
+        const auto& messages = provider_request_messages(request);
+        if (!messages.empty() && !messages.back().parts.empty()) {
+            if (const auto* text = std::get_if<sp::Text>(&messages.back().parts.front());
+                text && text->value.find("neograph-prefix-boundary-marker") != std::string::npos) {
+                sp::Error error;
+                error.kind = sp::ErrorKind::InvalidRequest;
+                error.safe_message = "probe refused";
+                return reject_preparation(std::move(error));
+            }
+        }
+        return AssemblyProvider::prepare(std::move(request));
+    }
+};
+
+}  // namespace
+
+TEST(StableFirstAssembly, RefusesTheEpochWhenTheEncodedRequestDoesNotShowItsBoundaries) {
+    LayoutFixture fixture({head_skill(), tail_note("reading")});
+    ProbeRefusingProvider provider;
+    std::vector<std::string> skills{fixture.artifacts.front().id()};
+    expect_layout_refusal(ContextStabilityRefusal::PrefixBoundaryUnavailable, [&] {
+        (void)RuntimeTurnAssembler(fixture.store, skills).assemble(
+            provider, "owner", *fixture.epoch, assembly_template());
+    });
+    // With nothing Stable and nothing Volatile the prefix is the whole body: nothing has to be encoded again.
+    LayoutFixture slow_only({slow_summary()});
+    const auto turn = RuntimeTurnAssembler(slow_only.store).assemble(
+        provider, "owner", *slow_only.epoch, assembly_template());
+    EXPECT_EQ(turn.assembly_receipt.prefix_boundary(), std::optional<ContextPrefixBoundary>({3, 0}));
+    EXPECT_FALSE(turn.assembly_receipt.stable_boundary());
+    // A Stable artifact needs its own marker to find the end of the Stable part.
+    LayoutFixture stable_only({head_skill()});
+    expect_layout_refusal(ContextStabilityRefusal::PrefixBoundaryUnavailable, [&] {
+        (void)RuntimeTurnAssembler(stable_only.store, std::vector<std::string>{stable_only.artifacts.front().id()})
+            .assemble(provider, "owner", *stable_only.epoch, assembly_template());
+    });
+}
+
+TEST(StableFirstAssembly, RefusesAConversationThatContainsTheTextOfTheMarker) {
+    auto provider = assembly_provider();
+    sp::Message user = test::message("neograph-prefix-boundary-marker-6f1d0c", sp::Role::User);
+    LayoutFixture fixture({head_skill(), tail_note("reading")});
+    expect_layout_refusal(ContextStabilityRefusal::PrefixBoundaryUnavailable, [&] {
+        (void)assemble_for(fixture, provider, {}, {user});
+    });
 }
