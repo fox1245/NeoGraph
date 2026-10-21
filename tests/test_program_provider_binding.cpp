@@ -1441,12 +1441,12 @@ TEST(ProgramProviderBinding, OnlyAnOpenRouterOriginIsPinned) {
     // An OpenRouter URL whose SDK policy admits no OpenRouter routing cannot
     // be pinned, so its route ceiling bounds nothing and the call is refused.
     auto source = json::parse(sp::config_defaults::descriptor_policy_json);
-    // Gateway facts (media, plugins, server tools) need a declared OpenRouter origin.
+    // Gateway facts (media, plugins, server tools, cache routes) need a declared OpenRouter origin.
     auto families = json::array();
     for (const auto& family : source.at("families")) {
         auto unrouted = json::object();
         for (const auto& [key, value] : family.items())
-            if (key != "openrouter_plugins" && key != "openrouter_server_tools") unrouted[key] = value;
+            if (key != "openrouter_plugins" && key != "openrouter_server_tools" && key != "cache") unrouted[key] = value;
         unrouted["openrouter_origins"] = json::array();
         unrouted["openrouter_media"] = nullptr;
         families.push_back(std::move(unrouted));

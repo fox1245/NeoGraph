@@ -5,7 +5,7 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 
 # Pin the SDK source, not a moving branch or release tag.
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
-    "34fd00f7e0eb3e43878cdc11b4e84d5b44d21d46")
+    "76afa3cf69b9ac81180217dfcc489572b9a59f4b")
 
 # What NeoGraph needs of the SDK: the runtime, and the libcurl transport wherever the SDK can have one. The
 # transport runs its own I/O threads, so a single-thread build has none, and neither has a WebAssembly host.

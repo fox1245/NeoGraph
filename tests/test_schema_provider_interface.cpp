@@ -209,6 +209,12 @@ TEST(SchemaProviderInterface, LinkedAbiGateAdmitsRealPreparedDispatch) {
     // monetary binding pins (#372); NeoGraph's handshakes require the bit.
     EXPECT_NE(sp::runtime::interface_contract().capabilities & sp::capability::OpenRouterRoutingMaxPrice, 0U);
     EXPECT_NE(sp::capability::RequiredProvider & sp::capability::OpenRouterRoutingMaxPrice, 0U);
+    // The part layouts carry the typed cache marks, and ServedModel the serving upstream. A library built before
+    // either has smaller layouts than these headers, so NeoGraph requires both bits and refuses it.
+    for (const auto bit : {sp::capability::PartCacheMarks, sp::capability::ServedByUpstream}) {
+        EXPECT_NE(sp::runtime::interface_contract().capabilities & bit, 0U);
+        EXPECT_NE(sp::capability::RequiredProvider & bit, 0U);
+    }
     wire::Peer peer(wire::chat_response());
     auto provider = wire::provider("openai.chat", peer.origin());
     const auto result = prepared_run(*provider, "openai.chat");
