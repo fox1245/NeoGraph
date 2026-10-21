@@ -1,3 +1,29 @@
+# With the vcpkg toolchain on Windows, every executable gets a post-link step that copies the DLLs it
+# imports next to it. The test executables share one output directory and link in parallel, so two of
+# those steps can write the same DLL at once, and the link that loses fails (#515). Copy the DLLs once,
+# here, before any target is built, and turn the toolchain's per-target step off for this directory.
+if(WIN32 AND VCPKG_APPLOCAL_DEPS AND VCPKG_INSTALLED_DIR AND VCPKG_TARGET_TRIPLET)
+    function(_neograph_stage_vcpkg_dlls config destination)
+        set(installed "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+        if(config MATCHES "^[Dd][Ee][Bb][Uu][Gg]$")
+            string(APPEND installed "/debug")
+        endif()
+        file(GLOB dlls "${installed}/bin/*.dll")
+        if(dlls)
+            file(COPY ${dlls} DESTINATION "${destination}")
+        endif()
+    endfunction()
+
+    if(CMAKE_CONFIGURATION_TYPES)
+        foreach(_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+            _neograph_stage_vcpkg_dlls("${_config}" "${CMAKE_CURRENT_BINARY_DIR}/${_config}")
+        endforeach()
+    else()
+        _neograph_stage_vcpkg_dlls("${CMAKE_BUILD_TYPE}" "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    set(VCPKG_APPLOCAL_DEPS OFF)
+endif()
+
 add_executable(neograph_tests
     test_canonical_json.cpp
     test_sha256.cpp
