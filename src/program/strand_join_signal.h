@@ -5,17 +5,18 @@
 #include <asio/cancellation_state.hpp>
 #include <asio/error.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/system_error.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
+
+#include "../core/host_timer.h"
 
 namespace neograph::program::detail {
 
 /**
  * One-shot completion signal for a join whose producers and single waiter all run on one strand.
  *
- * `asio::steady_timer::cancel()` wakes only waits that are already pending and leaves the expiry
+ * `async::HostTimer::cancel()` wakes only waits that are already pending and leaves the expiry
  * untouched. A bare "timer expiring at time_point::max, cancelled by the last worker" therefore
  * loses the wake-up when the last worker completes before the waiter initiates its wait, and the
  * waiter then sleeps forever. The flag records the signal so a late waiter returns at once; the
@@ -32,9 +33,7 @@ namespace neograph::program::detail {
  */
 class StrandJoinSignal final {
 public:
-    explicit StrandJoinSignal(const asio::any_io_executor& strand) : timer_(strand) {
-        timer_.expires_at((asio::steady_timer::time_point::max)());
-    }
+    explicit StrandJoinSignal(const asio::any_io_executor& strand) : timer_(strand) { timer_.arm_never(); }
 
     StrandJoinSignal(const StrandJoinSignal&)            = delete;
     StrandJoinSignal& operator=(const StrandJoinSignal&) = delete;
@@ -56,8 +55,8 @@ public:
     }
 
 private:
-    asio::steady_timer timer_;
-    bool               signalled_ = false;
+    async::HostTimer timer_;
+    bool             signalled_ = false;
 };
 
 }  // namespace neograph::program::detail

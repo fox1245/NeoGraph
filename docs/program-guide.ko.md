@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=1f0580f87656bc7f11c1de69b737bd20b7c7a7b178a24b48766db25554e328e7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=e3bfa0465dab0936930f60c26c76fc9116482656efd7b1c1066544a3477941f3 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -365,6 +365,29 @@ python restart.py state resume run-...
 예산이 실행을 도중에 멈췄든 실행이 예산을 넘긴 채 끝났든 기록은 같습니다. 사용량은 plan이 끝난 뒤에 정산되므로 plan이 허용량을 넘겨 끝날 수 있습니다. 응답의 비용이 그 호출에 예약한 금액보다 클 수 있고, 취소를 무시하는 노드가 마감 뒤에 반환할 수 있으며, 서브그래프 노드의 스텝은 그 노드를 담은 그래프를 멈추지 않으면서 실행의 Core 스텝에 더해집니다. 실행이 예산 여러 개를 넘기면 witness에 각각의 항목이 들어가고, status와 코드는 표에서 가장 앞에 있는 예산(예산 필드의 순서)을 따릅니다. 마감은 다른 사용량과 상관없이 실행을 `TimedOut`으로 끝내므로 wall time이 맨 앞에 있습니다. 가격이 매겨지는 호출이 전송 전에 거부되면 거부의 증거가 `monetary` 아래에 남습니다. 예약액, `ceiling`, `used`입니다.
 
 가격이 매겨지는 호출의 예약액은 호출의 출력 cap을 가장 비싼 출력 요율로 계산한 값이며, 모델의 upstream이 cap에서 멈출 때만 지출의 상한이 됩니다. NeoGraph는 cap을 보내지만 upstream이 그것을 적용하는지 확인할 수 없으므로, cap을 무시하는 upstream의 응답은 예약액보다 비쌀 수 있습니다. 그 호출은 응답이 보고한 금액으로 청구되고, 실행에 남은 `monetary_microunits`는 그만큼 줄며, 청구액이 허용량을 넘긴 실행은 위와 같이 `P_MONEY_BUDGET`과 함께 `BudgetExhausted`로 끝납니다. 허용량 안에서는 실행이 계속됩니다. NeoGraph는 그런 호출마다 실행 핸들에 `P_MONEY_OVER_HOLD` notice를 내고(`handle.notices`, `wait()` 뒤에 읽습니다), `result.monetary_records`에 있는 그 호출의 기록은 `microunits`가 `reserved_microunits`보다 큽니다. notice는 다른 것을 바꾸지 않으며, NeoGraph는 notice 뒤에 route를 거부하지 않습니다. 그것은 호스트의 정책입니다. cap에 의존하는 호스트는 OpenRouter 호출을 cap을 지킨다고 아는 upstream으로만 보내고(provider routing의 `only`나 `order`), 실행마다 notice와 기록에 대응하고, 잃어도 감당할 수 있는 금액보다 적게 부여할 수 있습니다. 자세한 내용은 [가격 증거와 모델 카탈로그](reference-en.md#pricing-evidence-and-the-model-catalogue)의 출력 cap 단락에 있습니다.
+
+## Program의 작업이 실행되는 곳 (C++ 호스트)
+
+C++ 호스트는 `RuntimeConfig`로 `ProgramRuntime`을 만듭니다. 호스트가 달리 지정하지 않으면 런타임은 attempt를
+`scheduler_threads`개 스레드의 풀에서, 데드라인 타이머를 스레드 하나에서 실행합니다. `LocalProgramHost(scheduler_threads=...)`가
+설정하는 것이 이것입니다. 자체 executor가 있는 호스트는 `RuntimeConfig::executor`를 설정합니다. 단일 스레드 `io_context`,
+다른 작업과 공유하는 `thread_pool`, WebAssembly 호스트라면 `async::HostLoop::executor()`입니다. 그러면 런타임은 스레드를
+시작하지 않으며, 모든 attempt, 데드라인 타이머, 대기자가 그 executor에서 실행되고, 어느 것도 시작한 호출 안에서 인라인으로
+실행되지 않습니다.
+
+- **모든 연산에 awaitable 짝이 있습니다.** `start_async`, `reconnect_async`, `resume_handle_async`, `fork_async`,
+  `replace_async`, `migrate_graph_async` 등은 런타임의 executor에서 실행되고 기다리는 코루틴의 executor에서 완료됩니다.
+  `run_async`와 `resume_async`는 결과를 기다립니다.
+- **동기 호출과 `ProgramHandle::wait`는 거부될 수 있습니다.** 호스트의 이벤트 루프가 구동하는 executor와 스레드가 없는
+  빌드에서는 Program을 실행해야 하는 스레드를 막게 되므로, 아무 일도 하기 전에 `ProgramBlockingCallRefused`를 던집니다.
+  `operation()`은 호출을, `alternative()`는 awaitable 형태를 알려 줍니다. 주입된 executor를 돌리는 스레드에서 한 대기도
+  거부됩니다. executor가 없는 네이티브 런타임은 바뀌지 않습니다.
+- **호스트가 executor를 주었다면 노드 본문은 자기 스레드를 막으면 안 됩니다.** 자기 워커가 필요한 노드 attempt는 그
+  executor의 strand에서 실행되며, 막히는 본문은 그 executor를 공유하는 모든 run을 붙잡습니다.
+- **런타임을 소멸시키면** 실행 중인 run이 취소되며, 주입된 executor에서는 끝나기를 기다리지 않습니다. 핸들이 종료 상태가 될
+  때까지 executor를 계속 돌리십시오.
+
+실행할 수 있는 점검이 있는 WebAssembly 쪽은 [`wasm/README.md`](../wasm/README.md)에 있습니다.
 
 ## 동작을 검증하는 테스트
 

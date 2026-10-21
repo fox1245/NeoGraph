@@ -1,0 +1,568 @@
+// ProgramRuntime on an executor the host supplies (#557): no thread of the runtime's own, attempts, deadlines and
+// waiters on that executor, the synchronous calls refused where they would hang a host loop, and an awaitable form
+// of every call. The host here is a manual executor that the test steps from its own thread, as a JavaScript host
+// runs its microtasks, so nothing waits and nothing runs on another thread.
+#include <gtest/gtest.h>
+
+#include "program_expansion_fixture.h"
+#include "operation_lock.h"
+
+#include <neograph/async/host_loop.h>
+#include <neograph/program/runtime.h>
+
+#include <runtime/host.h>
+
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/detached.hpp>
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/post.hpp>
+#include <asio/redirect_error.hpp>
+#include <asio/steady_timer.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
+#include <asio/use_future.hpp>
+
+#include <atomic>
+#include <chrono>
+#include <deque>
+#include <filesystem>
+#include <future>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+
+using namespace neograph;
+using namespace neograph::program;
+using namespace neograph::program_test;
+using namespace std::chrono_literals;
+
+namespace {
+
+std::mutex                  executor_threads_mutex;
+std::vector<std::thread::id> executor_node_threads;
+std::atomic<int>            executor_nodes_waiting{0};
+
+void note_node_thread() {
+    std::lock_guard lock(executor_threads_mutex);
+    executor_node_threads.push_back(std::this_thread::get_id());
+}
+
+std::vector<std::thread::id> node_threads() {
+    std::lock_guard lock(executor_threads_mutex);
+    return executor_node_threads;
+}
+
+void forget_node_threads() {
+    std::lock_guard lock(executor_threads_mutex);
+    executor_node_threads.clear();
+}
+
+class RecordNode final : public graph::GraphNode {
+public:
+    explicit RecordNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput) override {
+        note_node_thread();
+        graph::NodeOutput output;
+        output.writes.push_back(graph::ChannelWrite{"value", "recorded"});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// Waits on a timer for as long as the run lets it, and leaves when the run is cancelled.
+class WaitNode final : public graph::GraphNode {
+public:
+    explicit WaitNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput input) override {
+        note_node_thread();
+        executor_nodes_waiting.fetch_add(1);
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_after(5s);
+        async::note_deadline(co_await asio::this_coro::executor, timer.expiry());
+        asio::error_code ended;
+        co_await timer.async_wait(asio::bind_cancellation_slot(
+            input.ctx.cancel_token->slot(), asio::redirect_error(asio::use_awaitable, ended)));
+        executor_nodes_waiting.fetch_sub(1);
+        if (ended) throw asio::system_error(ended);
+        co_return graph::NodeOutput{};
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+RegistrySnapshot executor_registry(ExecutionGuarantee guarantee = ExecutionGuarantee::Strict) {
+    (void)guarantee;
+    RegistrySnapshotBuilder builder;
+    builder.add_node(
+        manifest(ExecutableKind::Node, "executor-record", '1'),
+        [](const std::string& name, const json&, const graph::NodeContext&) {
+            return std::make_unique<RecordNode>(name);
+        },
+        json{{"type", "object"}},
+        json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
+    builder.add_node(
+        manifest(ExecutableKind::Node, "executor-wait", '2'),
+        [](const std::string& name, const json&, const graph::NodeContext&) {
+            return std::make_unique<WaitNode>(name);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
+                        [](const json&, const json& incoming) { return json(incoming); });
+    return std::move(builder).build();
+}
+
+using ExecutorFixture = BasicAdmittedRuntime<executor_registry>;
+
+RunBudget grant(std::uint64_t wall_time_ms = 10000) {
+    return RunBudget{wall_time_ms, 1000, 1000, 1, 1, 20, 0, 0, 0};
+}
+
+ProgramInvocation invocation(std::string trace, std::uint64_t wall_time_ms = 10000) {
+    return ProgramInvocation{json::object(), grant(wall_time_ms), std::move(trace), {}};
+}
+
+std::size_t thread_count() {
+#ifdef __linux__
+    std::size_t count = 0;
+    for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator("/proc/self/task")) ++count;
+    return count;
+#else
+    return 0;
+#endif
+}
+
+RuntimeConfig runtime_config(ExecutorFixture& fixture) {
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    return config;
+}
+
+// A host's executor: work queues up, the host runs it from its own loop, and nothing runs inline.
+class ManualExecutor final : public sp::runtime::Executor {
+public:
+    void post(Task task) override { ready_.push_back(std::move(task)); }
+    Timer schedule(sp::runtime::SteadyTime at, Task task) override {
+        const auto id = ++last_timer_;
+        timers_.emplace(id, Timed{at, std::move(task)});
+        return id;
+    }
+    void cancel(Timer id) noexcept override { timers_.erase(id); }
+    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+    bool in_thread() const noexcept override { return running_ != 0; }
+    bool host_pumped() const noexcept override { return true; }
+    void shutdown() noexcept override {}
+
+    bool step() {
+        for (auto it = timers_.begin(); it != timers_.end();) {
+            if (it->second.at <= now()) {
+                ready_.push_back(std::move(it->second.task));
+                it = timers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (ready_.empty()) return false;
+        auto task = std::move(ready_.front());
+        ready_.pop_front();
+        ++running_;
+        try { task(); } catch (...) { --running_; throw; }
+        --running_;
+        return true;
+    }
+    std::size_t timers() const { return timers_.size(); }
+
+    // Runs the host until `done`, waiting for the next timer when nothing is ready. False if it took too long.
+    template <typename Done>
+    bool run_until(Done done, std::chrono::milliseconds limit = 10s) {
+        const auto stop = std::chrono::steady_clock::now() + limit;
+        while (!done()) {
+            if (std::chrono::steady_clock::now() > stop) return false;
+            if (!step()) std::this_thread::sleep_for(1ms);
+        }
+        return true;
+    }
+
+private:
+    struct Timed { sp::runtime::SteadyTime at; Task task; };
+    std::deque<Task> ready_;
+    std::map<Timer, Timed> timers_;
+    Timer last_timer_ = 0;
+    unsigned running_ = 0;
+};
+
+struct HostedRuntime {
+    std::shared_ptr<ManualExecutor> host = std::make_shared<ManualExecutor>();
+    async::HostLoop                 loop{host};
+};
+
+// co_spawn builds a default result for a failure, and a ProgramHandle has none: the handle is kept on the side.
+asio::awaitable<int> start_and_keep(ProgramRuntime& runtime, ProgramVersion version, ProgramInvocation invocation,
+                                    std::optional<ProgramHandle>& out) {
+    out.emplace(co_await runtime.start_async("tenant:runtime", std::move(version), std::move(invocation)));
+    co_return 0;
+}
+
+}  // namespace
+
+// ---- A single-thread io_context the test runs on its own thread ----
+
+TEST(ProgramRuntimeExecutorTest, AnInjectedIoContextRunsTheAttemptOnItsThread) {
+    forget_node_threads();
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    const auto       io_id = io_thread.get_id();
+
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    {
+        ProgramRuntime runtime(std::move(config));
+        auto           handle = runtime.start("tenant:runtime", version, invocation("trace-io"));
+        const auto     result = handle.wait();
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    }
+    const auto threads = node_threads();
+    ASSERT_EQ(threads.size(), 1U);
+    EXPECT_EQ(threads.front(), io_id);
+    EXPECT_NE(threads.front(), std::this_thread::get_id());
+    work.reset();
+    io_thread.join();
+}
+
+TEST(ProgramRuntimeExecutorTest, AWallTimeDeadlineFiresOnTheInjectedExecutor) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-wait");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    const auto started = std::chrono::steady_clock::now();
+    {
+        ProgramRuntime runtime(std::move(config));
+        auto           handle = runtime.start("tenant:runtime", version, invocation("trace-deadline", 200));
+        const auto     result = handle.wait();
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+    work.reset();
+    io_thread.join();
+}
+
+TEST(ProgramRuntimeExecutorTest, AWaitMadeOnTheExecutorsOwnThreadIsRefused) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-wait");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    ProgramRuntime runtime(std::move(config));
+    auto           handle = runtime.start("tenant:runtime", version, invocation("trace-own-thread"));
+
+    std::promise<std::string> verdict;
+    asio::post(io, [&] {
+        try {
+            (void)handle.wait();
+            verdict.set_value("waited");
+        } catch (const ProgramBlockingCallRefused& error) {
+            verdict.set_value(error.alternative());
+        } catch (...) {
+            verdict.set_value("other");
+        }
+    });
+    EXPECT_EQ(verdict.get_future().get(), "ProgramHandle::wait_async");
+    // Made from another thread, the same call waits, and ends when the run does.
+    handle.cancel();
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Cancelled);
+    work.reset();
+    io_thread.join();
+}
+
+// run and migrate_graph wait for work that only the executor can do. Made on a thread that runs it they would wait for
+// ever, so they are refused, and run is refused before it starts the Program.
+TEST(ProgramRuntimeExecutorTest, RunAndMigrateGraphAreRefusedOnTheExecutorsOwnThread) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-wait");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    ProgramRuntime runtime(std::move(config));
+    const int      waiting_before = executor_nodes_waiting.load();
+    auto           handle = runtime.start("tenant:runtime", version, invocation("trace-own-thread-calls"));
+    for (int tries = 0; executor_nodes_waiting.load() == waiting_before && tries < 5000; ++tries)
+        std::this_thread::sleep_for(1ms);
+    ASSERT_EQ(executor_nodes_waiting.load(), waiting_before + 1);
+
+    std::promise<std::vector<std::string>> verdicts;
+    asio::post(io, [&] {
+        std::vector<std::string> seen;
+        try {
+            (void)runtime.run("tenant:runtime", version, invocation("trace-own-thread-run"));
+            seen.push_back("run: ran");
+        } catch (const ProgramBlockingCallRefused& error) {
+            seen.push_back(error.alternative());
+        } catch (...) {
+            seen.push_back("run: other");
+        }
+        try {
+            (void)runtime.migrate_graph(handle, ProgramGraphMigrationTarget{version.id()});
+            seen.push_back("migrate_graph: ran");
+        } catch (const ProgramBlockingCallRefused& error) {
+            seen.push_back(error.alternative());
+        } catch (...) {
+            seen.push_back("migrate_graph: other");
+        }
+        verdicts.set_value(std::move(seen));
+    });
+    EXPECT_EQ(verdicts.get_future().get(),
+              (std::vector<std::string>{"ProgramRuntime::run_async", "ProgramRuntime::migrate_graph_async"}));
+    // The refused run started nothing: the node of the first run is the only one waiting.
+    std::this_thread::sleep_for(100ms);
+    EXPECT_EQ(executor_nodes_waiting.load(), waiting_before + 1);
+    handle.cancel();
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Cancelled);
+    work.reset();
+    io_thread.join();
+}
+
+// ---- The runtime's own pools, as before ----
+
+TEST(ProgramRuntimeExecutorTest, WithoutAnExecutorTheRuntimeKeepsItsPools) {
+    ExecutorFixture fixture(2);
+    const auto      version = fixture.admit("executor-record");
+    auto            handle  = fixture.runtime->start("tenant:runtime", version, invocation("trace-pools"));
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_NO_THROW((void)fixture.runtime->run("tenant:runtime", version, invocation("trace-pools-run")));
+}
+
+// ---- An executor that a host's event loop pumps ----
+
+TEST(ProgramRuntimeExecutorTest, SynchronousCallsAreRefusedOnAHostPumpedExecutor) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    EXPECT_TRUE(async::is_host_pumped(config.executor));
+    ProgramRuntime runtime(std::move(config));
+
+    try {
+        (void)runtime.start("tenant:runtime", version, invocation("trace-refused"));
+        FAIL() << "a synchronous start was accepted";
+    } catch (const ProgramBlockingCallRefused& error) {
+        EXPECT_EQ(error.operation(), "ProgramRuntime::start");
+        EXPECT_EQ(error.alternative(), "ProgramRuntime::start_async");
+        EXPECT_NE(std::string(error.what()).find("start_async"), std::string::npos);
+        EXPECT_NE(dynamic_cast<const graph::ConfigurationFailure*>(&error), nullptr);
+    }
+    EXPECT_THROW((void)runtime.run("tenant:runtime", version, invocation("trace-refused-run")),
+                 ProgramBlockingCallRefused);
+    EXPECT_THROW((void)runtime.reconnect("tenant:runtime", "run-absent"), ProgramBlockingCallRefused);
+    // Nothing was started: the executor has nothing to run.
+    EXPECT_FALSE(hosted.host->step());
+}
+
+TEST(ProgramRuntimeExecutorTest, AProgramRunsOnAHostPumpedExecutorWithoutAThread) {
+    forget_node_threads();
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    const auto threads_before = thread_count();
+    ProgramRuntime runtime(std::move(config));
+
+    bool                         done = false;
+    std::exception_ptr           failure;
+    std::optional<ProgramResult> result;
+    hosted.loop.spawn(
+        runtime.run_async("tenant:runtime", version, invocation("trace-host")),
+        [&](std::exception_ptr error, ProgramResult value) {
+            failure = error;
+            if (!error) result = std::move(value);
+            done = true;
+        });
+    ASSERT_TRUE(hosted.host->run_until([&] { return done; }));
+    if (failure) std::rethrow_exception(failure);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status(), ProgramTerminalStatus::Completed);
+
+    // The node ran in a host turn, on this thread, and the runtime started no thread.
+    const auto nodes = node_threads();
+    ASSERT_EQ(nodes.size(), 1U);
+    EXPECT_EQ(nodes.front(), std::this_thread::get_id());
+    if (threads_before != 0) EXPECT_EQ(thread_count(), threads_before);
+}
+
+TEST(ProgramRuntimeExecutorTest, AHandleCannotBeWaitedOnWhileTheHostLoopMustRunTheProgram) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-wait");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+
+    std::optional<ProgramHandle> handle;
+    std::exception_ptr           failure;
+    hosted.loop.spawn(start_and_keep(runtime, version, invocation("trace-wait"), handle),
+                      [&](std::exception_ptr error, int) { failure = error; });
+    ASSERT_TRUE(hosted.host->run_until([&] { return handle.has_value() || failure; }));
+    if (failure) std::rethrow_exception(failure);
+    // The node waits on a timer that only a later turn of the host loop can fire. A blocking wait here would wait for
+    // a turn that only this thread can run.
+    try {
+        (void)handle->wait();
+        FAIL() << "a blocking wait was accepted";
+    } catch (const ProgramBlockingCallRefused& error) {
+        EXPECT_EQ(error.alternative(), "ProgramHandle::wait_async");
+    }
+    EXPECT_FALSE(handle->try_result().has_value());
+    handle->cancel();
+    ASSERT_TRUE(hosted.host->run_until([&] { return handle->try_result().has_value(); }));
+    // With the result in, the same call returns it.
+    EXPECT_EQ(handle->wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+TEST(ProgramRuntimeExecutorTest, ADeadlineTimerFiresThroughTheHostLoop) {
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-wait");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+
+    bool                         done = false;
+    std::optional<ProgramResult> result;
+    const auto                   started = std::chrono::steady_clock::now();
+    hosted.loop.spawn(
+        runtime.run_async("tenant:runtime", version, invocation("trace-host-deadline", 200)),
+        [&](std::exception_ptr error, ProgramResult value) {
+            if (!error) result = std::move(value);
+            done = true;
+        });
+    ASSERT_TRUE(hosted.host->run_until([&] { return done; }));
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status(), ProgramTerminalStatus::TimedOut);
+    EXPECT_LT(std::chrono::steady_clock::now() - started, 4s);
+}
+
+TEST(ProgramRuntimeExecutorTest, EveryCallHasAnAwaitableFormThatRunsOnTheExecutor) {
+    forget_node_threads();
+    ExecutorFixture fixture(1);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+
+    bool               done = false;
+    std::exception_ptr failure;
+    std::string        run_id;
+    std::optional<ProgramResult> first;
+    std::optional<ProgramResult> reconnected;
+    auto flow = [&]() -> asio::awaitable<int> {
+        auto handle = co_await runtime.start_async("tenant:runtime", version, invocation("trace-flow"));
+        run_id      = handle.run_id();
+        first       = co_await handle.wait_async();
+        auto again  = co_await runtime.reconnect_async("tenant:runtime", run_id);
+        reconnected = co_await again.wait_async();
+        co_return 0;
+    };
+    hosted.loop.spawn(flow(), [&](std::exception_ptr error, int) {
+        failure = error;
+        done    = true;
+    });
+    ASSERT_TRUE(hosted.host->run_until([&] { return done; }));
+    if (failure) std::rethrow_exception(failure);
+    ASSERT_TRUE(first && reconnected);
+    EXPECT_EQ(first->status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(reconnected->status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(reconnected->run_id(), run_id);
+}
+
+// ---- The operation lock ----
+
+TEST(ProgramOperationLockTest, GrantsInOrderAndNeverToTwoHoldersAtOnce) {
+    neograph::program::detail::OperationLock lock;
+    asio::io_context      io;
+    std::vector<int>      order;
+    int                   inside = 0;
+    int                   peak   = 0;
+    auto contender = [&](int id) -> asio::awaitable<void> {
+        auto guard = co_await lock.lock_async();
+        ++inside;
+        peak = std::max(peak, inside);
+        order.push_back(id);
+        asio::steady_timer pause(co_await asio::this_coro::executor);
+        pause.expires_after(2ms);
+        co_await pause.async_wait(asio::use_awaitable);
+        --inside;
+    };
+    for (int id = 0; id < 5; ++id) asio::co_spawn(io, contender(id), asio::detached);
+    io.run();
+    EXPECT_EQ(peak, 1);
+    EXPECT_EQ(order, (std::vector<int>{0, 1, 2, 3, 4}));
+    EXPECT_TRUE(lock.try_lock().has_value());
+}
+
+TEST(ProgramOperationLockTest, ABlockingCallerWaitsForAnAwaitingHolder) {
+    neograph::program::detail::OperationLock lock;
+    asio::io_context      io;
+    auto                  work = asio::make_work_guard(io);
+    std::thread           io_thread([&] { io.run(); });
+    std::promise<void>    held;
+    std::promise<void>    release;
+    auto                  release_future = release.get_future().share();
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            auto guard = co_await lock.lock_async();
+            held.set_value();
+            asio::steady_timer pause(co_await asio::this_coro::executor);
+            pause.expires_after(50ms);
+            co_await pause.async_wait(asio::use_awaitable);
+        },
+        asio::detached);
+    held.get_future().get();
+    EXPECT_FALSE(lock.try_lock().has_value());
+    const auto started = std::chrono::steady_clock::now();
+    {
+        auto guard = lock.lock_blocking();
+        EXPECT_TRUE(guard.owns());
+        EXPECT_GE(std::chrono::steady_clock::now() - started, 30ms);
+    }
+    EXPECT_TRUE(lock.try_lock().has_value());
+    work.reset();
+    io_thread.join();
+}

@@ -9,5 +9,4 @@ src/mcp/client.cpp	The MCP client (sockets, subprocess pipes) is not built for a
 src/a2a/client.cpp	The A2A client (sockets and TLS) is not built for a WebAssembly host.
 src/grpc/*	The gRPC component is not built for a WebAssembly host.
 src/core/postgres_checkpoint.cpp	The PostgreSQL checkpoint store (libpq sockets) is not built for a WebAssembly host.
-src/program/*	ProgramRuntime runs on threads of its own and does not start in a single-thread build (#557). Move these timers to HostTimer when it takes a host executor, and remove this entry.
 src/core/host_loop.cpp	The HostLoop waits on a timer of its own to learn that Asio has dispatched the timers up to a deadline; telling itself of that deadline would only repeat it.

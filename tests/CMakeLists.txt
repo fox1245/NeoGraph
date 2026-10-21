@@ -152,6 +152,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_transition_store.cpp
         test_program_record_identity.cpp
         test_program_runtime.cpp
+        test_program_runtime_executor.cpp
         test_program_runtime_instruction.cpp
         test_program_invocation.cpp
         test_program_task_graph_proposal.cpp
@@ -949,7 +950,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
     target_include_directories(neograph_program_join_signal_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program)
     target_compile_features(neograph_program_join_signal_tests PRIVATE cxx_std_20)
-    target_link_libraries(neograph_program_join_signal_tests PRIVATE asio GTest::gtest_main)
+    target_link_libraries(neograph_program_join_signal_tests PRIVATE neograph::core asio GTest::gtest_main)
     neograph_discover_tests(neograph_program_join_signal_tests)
 endif()
 

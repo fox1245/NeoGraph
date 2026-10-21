@@ -6,6 +6,7 @@
 
 #include <neograph/api.h>
 #include <neograph/graph/checkpoint.h>
+#include <neograph/graph/configuration_failure.h>
 #include <neograph/graph/store.h>
 #include <neograph/host_admission.h>
 #include <neograph/hook_runtime.h>
@@ -22,12 +23,14 @@
 #include <neograph/program/invocation.h>
 #include <neograph/program/transition_store.h>
 
+#include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -120,6 +123,57 @@ struct ProgramChildQuotaConfig {
     std::uint64_t max_pending_spawn_requests_per_owner = 0;
 };
 
+/**
+ * What ProgramRuntime assumes about RuntimeConfig::executor (#557). Both members are detected for the executors the
+ * runtime can see into, so a host that gives an io_context, a thread_pool, a strand of either, or the executor of an
+ * async::HostLoop sets neither.
+ */
+struct ProgramExecutorIdentity {
+    /**
+     * A host's event loop runs the executor, one turn at a time, and no thread of the process can wait for work on
+     * it. A synchronous call that waits for a Program is then refused instead of hanging. Detected for the executor
+     * of an async::HostLoop (async::is_host_pumped); set it for another executor that a host pumps.
+     */
+    bool host_pumped = false;
+    /**
+     * True when the calling thread is one the executor runs handlers on. A call that waits for a Program, made from
+     * such a thread, waits for work only that thread can do, so it is refused. Detected for an executor over an
+     * io_context or a thread_pool; set it for any other executor that has threads.
+     */
+    std::function<bool()> running_in_this_thread;
+};
+
+/**
+ * Thrown by the ProgramRuntime constructor in a build without threads (NEOGRAPH_THREADS=OFF) when
+ * RuntimeConfig::executor is not set: the runtime's own pools need threads that this build does not have. It is also
+ * a graph::ConfigurationFailure: running it again reproduces it.
+ */
+class NEOGRAPH_PROGRAM_API ProgramExecutorRequired final : public std::runtime_error,
+                                                           public graph::ConfigurationFailure {
+public:
+    ProgramExecutorRequired();
+};
+
+/**
+ * Thrown by a synchronous call that would wait for a Program on a thread that cannot wait for it: the executor of
+ * RuntimeConfig::executor is pumped by a host's event loop, the build has no threads, or the call is made from a
+ * thread that runs that executor. Nothing is started or changed. alternative() names the awaitable form to use. It is
+ * also a graph::ConfigurationFailure: running it again reproduces it.
+ */
+class NEOGRAPH_PROGRAM_API ProgramBlockingCallRefused final : public std::runtime_error,
+                                                              public graph::ConfigurationFailure {
+public:
+    ProgramBlockingCallRefused(std::string operation, std::string alternative, std::string reason);
+    /// The refused call, for example "ProgramRuntime::start".
+    const std::string& operation() const noexcept { return operation_; }
+    /// The awaitable form that does the same without blocking, for example "ProgramRuntime::start_async".
+    const std::string& alternative() const noexcept { return alternative_; }
+
+private:
+    std::string operation_;
+    std::string alternative_;
+};
+
  struct RuntimeConfig {
      std::shared_ptr<ProgramCatalog>         catalog;
      std::shared_ptr<graph::CheckpointStore> checkpoints;
@@ -188,6 +242,25 @@ struct ProgramChildQuotaConfig {
       /// override a source call that is the same call and whose outcome is
       /// unknown: that stays uncertain until it is reconciled.
       bool fork_may_resend_provider_calls = false;
+      /**
+       * #557: the executor every attempt, deadline timer and waiter of this runtime runs on; nothing runs inline,
+       * and the runtime starts no thread of its own. Unset, a native build runs attempts on a pool of
+       * `scheduler_threads` threads and deadlines on a pool of one, as before (the pools are one implementation of an
+       * executor). It is required in a build without threads (NEOGRAPH_THREADS=OFF; see ProgramExecutorRequired),
+       * where it is typically async::HostLoop::executor().
+       *
+       * A node attempt that needs its own worker, one with a timeout among them, runs on a strand of this executor
+       * instead of the process-wide attempt pool, so a node body must not block the thread: a body that blocks holds
+       * every other run that shares the executor.
+       *
+       * The runtime keeps the executor alive until its last attempt has finished. Destroying the runtime cancels its
+       * runs and, on an injected executor, does not wait for them: keep running the executor until the handles are
+       * terminal. On a host-pumped executor the synchronous calls (start, resume, fork, replace, migrate_graph, run
+       * and the rest) and ProgramHandle::wait are refused with ProgramBlockingCallRefused; use the `_async` forms.
+       * A hook_runtime blocks its caller and is refused on a host-pumped executor with the same error type.
+       */
+      asio::any_io_executor                     executor;
+      ProgramExecutorIdentity                   executor_identity;
   };
 /**
  * Experimental owner-scoped new-run selection. The activation is the exact
@@ -347,14 +420,92 @@ public:
                       const ProgramVersion& version,
                       ProgramInvocation     invocation);
 
+    /**
+     * Awaitable forms of the operations above (#557). Each one does what its synchronous namesake does, on this
+     * runtime's executor, and completes on the executor of the coroutine that awaits it. They take their arguments by
+     * value, so nothing they read can dangle across a suspension; the exceptions are the ProgramHandoff that
+     * reserve_synthesis_async and prepare_child_synthesis_async refer to, which the caller keeps alive until the call
+     * completes (reserve_synthesis_async refreshes its journal head), and the ProgramRuntime itself, which must
+     * outlive the call as it does for the synchronous form.
+     *
+     * On a host-pumped executor the synchronous forms are refused (ProgramBlockingCallRefused). These are the way to
+     * use the runtime there. resume_async returns the Program's result, as it always has; resume_handle_async is the
+     * form that returns the handle, as `resume` does.
+     */
+    asio::awaitable<ProgramHandle> start_async(RunInvocation invocation,
+                                               std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramActiveRun> start_active_async(RunInvocation invocation,
+                                                         std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramHandle> start_async(std::string      owner_scope,
+                                               ProgramVersion   version,
+                                               ProgramInvocation invocation);
+    asio::awaitable<ProgramHandle> replay_recorded_async(std::string                       source_run_id,
+                                                         RunInvocation                     invocation,
+                                                         RecordedBindingSet                recorded,
+                                                         std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramHandle> start_child_async(std::string         owner_scope,
+                                                     ProgramHandle       parent,
+                                                     ModuleLinkReceipt   link,
+                                                     ProgramVersion      version,
+                                                     ProgramInvocation   invocation);
+    asio::awaitable<ProgramSynthesisReservation> reserve_synthesis_async(
+        std::string owner_scope, ProgramHandle source, ProgramHandoff& handoff,
+        ProgramSynthesisProposal proposal, std::string expected_lineage_head);
+    asio::awaitable<ProgramChildSynthesisRecord> prepare_child_synthesis_async(
+        std::string owner_scope, ProgramHandle parent, const ProgramHandoff& handoff,
+        ProgramSynthesisProposal proposal, ProgramChildSynthesisGrant grant, std::string binding_name);
+    asio::awaitable<ProgramChildSynthesisRecord> recover_child_synthesis_async(
+        std::string owner_scope, std::string parent_run_id, std::string proposal_id);
+    asio::awaitable<ProgramHandle> reconnect_async(std::string owner_scope, std::string run_id);
+    asio::awaitable<std::vector<ProgramHandle>> recover_children_async(std::string owner_scope,
+                                                                        std::string parent_run_id);
+    asio::awaitable<ProgramHandle> resume_handle_async(std::string owner_scope,
+                                                       std::string run_id,
+                                                       ProgramResume resume);
+    asio::awaitable<ProgramHandle> reconcile_async(std::string owner_scope,
+                                                   std::string run_id,
+                                                   ProgramEffectResolution resolution);
+    asio::awaitable<ProgramHandle> fork_async(ExactProgramCheckpointReference source,
+                                              RunInvocation                 invocation,
+                                              ProgramResume                 resume,
+                                              std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramHandle> fork_async(std::string                     owner_scope,
+                                              ExactProgramCheckpointReference source,
+                                              ProgramVersion                  target,
+                                              ProgramInvocation               invocation,
+                                              ProgramResume                   resume);
+    asio::awaitable<ProgramHandle> replace_async(ExactProgramHandoffReference source,
+                                                 RunInvocation                invocation,
+                                                 std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramHandle> replace_async(ProgramHandoff                 source,
+                                                 RunInvocation                  invocation,
+                                                 std::shared_ptr<ProgramEventSink> events = {});
+    asio::awaitable<ProgramHandle> replace_async(std::string                    owner_scope,
+                                                 ExactProgramHandoffReference   source,
+                                                 ProgramVersion                 target,
+                                                 ProgramInvocation              invocation);
+    asio::awaitable<ProgramHandle> replace_async(std::string                    owner_scope,
+                                                 ProgramHandoff                 source,
+                                                 ProgramVersion                 target,
+                                                 ProgramInvocation              invocation);
+    asio::awaitable<ProgramHandle> migrate_graph_async(ProgramHandle              source,
+                                                       ProgramGraphMigrationTarget target);
+
 private:
+    struct Impl;
+    struct Borrowed {};
+    /// A view of the same runtime for work that outlives a call: shares the state, never shuts it down.
+    ProgramRuntime(std::shared_ptr<Impl> impl, Borrowed) noexcept;
+    ProgramRuntime borrowed() const noexcept;
+
+    asio::awaitable<ProgramHandle> migrate_graph_core(ProgramHandle source, ProgramGraphMigrationTarget target);
     ProgramHandle start_resolved(std::string_view      owner_scope,
                                  const ProgramVersion& version,
                                  ProgramInvocation     invocation,
                                  bool                  active_selection = false);
 
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::shared_ptr<Impl> impl_;
+    bool                  borrowed_ = false;
 };
 
 }  // namespace neograph::program

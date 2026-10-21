@@ -11,6 +11,9 @@
 //   transport  The libcurl constructor of SchemaProvider is refused with the SDK's typed error (no transport here).
 //   blocking   A synchronous run that reaches a provider on a host-pumped executor is refused with the SDK's typed
 //              reason, and nothing is sent. Waiting for the host's event loop would hang the one thread.
+//   program    A ProgramRuntime without an executor is refused with a typed error (it has no thread to run on). On the
+//              executor of a host loop, the synchronous calls are refused naming the awaitable form, and a one-node
+//              Program with in-memory stores runs to its result through the awaitable calls, in the host's turns.
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/configuration_failure.h>
@@ -22,6 +25,14 @@
 
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM
 #include <neograph/program/native.h>
+#include <neograph/program/program.h>
+#include <neograph/program/store.h>
+#endif
+#if defined(NEOGRAPH_WASM_CHECKS_PROGRAM) && defined(NEOGRAPH_WASM_CHECKS_LLM)
+#define NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME 1
+#endif
+#ifdef NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME
+#include <neograph/async/host_loop.h>
 #endif
 #ifdef NEOGRAPH_WASM_CHECKS_LLM
 #include <neograph/llm/schema_provider.h>
@@ -32,8 +43,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <exception>
+#include <map>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -293,6 +307,209 @@ void check_blocking_run() {
 }
 #endif
 
+#ifdef NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME
+// The host's own loop: it queues what it is given and runs it when main() asks, as a JavaScript host runs its
+// microtasks and timers.
+class StepHost final : public sp::runtime::Executor {
+public:
+    void post(Task task) override { ready_.push_back(std::move(task)); }
+    Timer schedule(sp::runtime::SteadyTime at, Task task) override {
+        const auto id = ++last_timer_;
+        timers_.emplace(id, Timed{at, std::move(task)});
+        return id;
+    }
+    void cancel(Timer id) noexcept override { timers_.erase(id); }
+    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+    bool in_thread() const noexcept override { return running_ != 0; }
+    bool host_pumped() const noexcept override { return true; }
+    void shutdown() noexcept override {}
+
+    bool step() {
+        for (auto it = timers_.begin(); it != timers_.end();) {
+            if (it->second.at <= now()) {
+                ready_.push_back(std::move(it->second.task));
+                it = timers_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        if (ready_.empty()) return false;
+        auto task = std::move(ready_.front());
+        ready_.pop_front();
+        ++running_;
+        try { task(); } catch (...) { --running_; throw; }
+        --running_;
+        return true;
+    }
+
+private:
+    struct Timed { sp::runtime::SteadyTime at; Task task; };
+    std::deque<Task> ready_;
+    std::map<Timer, Timed> timers_;
+    Timer last_timer_ = 0;
+    unsigned running_ = 0;
+};
+
+class OneNode final : public GraphNode {
+public:
+    explicit OneNode(std::string name) : name_(std::move(name)) {}
+    std::string get_name() const override { return name_; }
+    asio::awaitable<NodeOutput> run(NodeInput) override {
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"value", json("hosted")});
+        co_return out;
+    }
+private:
+    std::string name_;
+};
+
+struct ProgramFixture {
+    program::RegistrySnapshot                       registry;
+    program::AdmissionProfile                       profile;
+    program::PolicySnapshot                         policy;
+    std::shared_ptr<program::InMemoryProgramStore>  store = std::make_shared<program::InMemoryProgramStore>();
+    std::shared_ptr<program::ProgramCatalog>        catalog;
+    std::shared_ptr<CheckpointStore>                checkpoints = std::make_shared<InMemoryCheckpointStore>();
+    std::shared_ptr<program::ProgramTransitionStore> transitions =
+        std::make_shared<program::InMemoryProgramTransitionStore>();
+    program::ProgramVersion                         version;
+
+    static program::ExecutableManifest manifest(program::ExecutableKind kind, std::string name, char implementation) {
+        return program::ExecutableManifest{{kind, std::move(name), "1.0.0", "sha256:" + std::string(64, implementation)},
+                                           program::EffectMode::Brokered, "attestation:wasm-checks", {}, {}, {}};
+    }
+
+    ProgramFixture()
+        : registry(make_registry()),
+          profile(make_profile(registry)),
+          policy(make_policy(profile)),
+          version(admit()) {}
+
+    static program::RegistrySnapshot make_registry() {
+        program::RegistrySnapshotBuilder builder;
+        builder.add_node(
+            manifest(program::ExecutableKind::Node, "wasm-one-node", '1'),
+            [](const std::string& name, const json&, const NodeContext&) { return std::make_unique<OneNode>(name); },
+            json{{"type", "object"}},
+            json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
+        builder.add_reducer(manifest(program::ExecutableKind::Reducer, "wasm-overwrite", '3'),
+                            [](const json&, const json& incoming) { return json(incoming); });
+        return std::move(builder).build();
+    }
+
+    static program::AdmissionProfile make_profile(const program::RegistrySnapshot& registry) {
+        program::AdmissionProfileBuilder profile_builder;
+        profile_builder.id("wasm-profile")
+            .semantic_version("1.0.0")
+            .registry(registry)
+            .mode(program::AdmissionMode::MultiTenant)
+            .max_program_schema_version(program::PROGRAM_SCHEMA_VERSION_V4)
+            .allow_source_kind(program::SourceKind::CppBuilder)
+            .allow_effect_mode(program::EffectMode::Brokered);
+        for (const auto& identity : registry.identities()) profile_builder.allow_executable(identity);
+        return std::move(profile_builder).build();
+    }
+
+    static program::PolicySnapshot make_policy(const program::AdmissionProfile& profile) {
+        program::PolicySnapshotBuilder policy_builder;
+        policy_builder.id("wasm-policy")
+            .semantic_version("1.0.0")
+            .owner_scope("wasm:tenant")
+            .admission_profile(profile)
+            .budget_ceiling(program::BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32});
+        return std::move(policy_builder).build();
+    }
+
+    program::ProgramVersion admit() {
+        catalog = std::make_shared<program::ProgramCatalog>(
+            program::CatalogConfig{store, registry, std::make_shared<program::EngineGenerationCache>(),
+                                   "wasm-checks/v1"});
+        const json document{
+            {"program_schema_version", 1},
+            {"input_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"output_contract", json{{"schema_version", 1}, {"schema", json::object()}}},
+            {"root",
+             json{{"op", "call_core"},
+                  {"name", "main"},
+                  {"definition",
+                   json{{"schema_version", 1},
+                        {"name", "main"},
+                        {"channels", json{{"value", json{{"reducer", "wasm-overwrite"}, {"initial", ""}}}}},
+                        {"nodes", json{{"work", json{{"type", "wasm-one-node"}}}}},
+                        {"edges", json::array({json{{"from", "__start__"}, {"to", "work"}},
+                                               json{{"from", "work"}, {"to", "__end__"}}})},
+                        {"conditional_edges", json::array()}}}}},
+            {"declared_budget_requirements",
+             json::array({
+                 json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 10000}},
+                 json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 1000}},
+                 json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 1000}},
+                 json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 1}},
+                 json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 1}},
+                 json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 20}},
+                 json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+                 json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+                 json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}},
+             })}};
+        program::ProgramCompiler compiler(registry, {"wasm-checks/v1"});
+        const auto bundle = compiler.compile(program::ProgramSource::from_cpp_builder("wasm:checks", 1, document));
+        return catalog->admit(bundle, program::ProgramAdmission{"wasm:tenant", profile, policy, {}});
+    }
+
+    program::RuntimeConfig config() const {
+        return program::RuntimeConfig{catalog, checkpoints, {}, transitions, 1};
+    }
+};
+
+void check_program_runtime() {
+    try {
+        ProgramFixture fixture;
+        try {
+            program::ProgramRuntime runtime(fixture.config());
+            check(false, "program: a runtime without an executor is refused", "the runtime was built");
+        } catch (const program::ProgramExecutorRequired& error) {
+            check(dynamic_cast<const ConfigurationFailure*>(&error) != nullptr,
+                  "program: a runtime without an executor is refused with a typed error");
+        }
+
+        auto host = std::make_shared<StepHost>();
+        async::HostLoop loop(host);
+        auto config     = fixture.config();
+        config.executor = loop.executor();
+        program::ProgramRuntime runtime(std::move(config));
+        const program::ProgramInvocation invocation{
+            json::object(), program::RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, "wasm-trace", {}};
+
+        try {
+            (void)runtime.start("wasm:tenant", fixture.version, invocation);
+            check(false, "program: a synchronous start is refused on a host loop", "the call was accepted");
+        } catch (const program::ProgramBlockingCallRefused& error) {
+            check(error.alternative() == "ProgramRuntime::start_async",
+                  "program: a synchronous start is refused, naming the awaitable form");
+        }
+
+        bool done = false;
+        std::exception_ptr failure;
+        std::optional<program::ProgramResult> result;
+        loop.spawn(runtime.run_async("wasm:tenant", fixture.version, invocation),
+                   [&](std::exception_ptr error, program::ProgramResult value) {
+                       failure = error;
+                       if (!error) result = std::move(value);
+                       done = true;
+                   });
+        for (int turns = 0; !done && turns < 100000; ++turns) host->step();
+        if (failure) std::rethrow_exception(failure);
+        check(done && result && result->status() == program::ProgramTerminalStatus::Completed,
+              "program: a one-node Program completes on the host loop with in-memory stores");
+        check(result && result->output()["channels"]["value"]["value"] == "hosted",
+              "program: the node's output is the Program's result");
+    } catch (const std::exception& error) {
+        check(false, "program: a Program runs on a host loop", error.what());
+    }
+}
+#endif
+
 }  // namespace
 
 int main() {
@@ -306,6 +523,9 @@ int main() {
 #ifdef NEOGRAPH_WASM_CHECKS_LLM
     check_libcurl_constructor();
     check_blocking_run();
+#endif
+#ifdef NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME
+    check_program_runtime();
 #endif
     std::printf("%s\n", failures == 0 ? "all checks passed" : "checks failed");
     return failures == 0 ? 0 : 1;

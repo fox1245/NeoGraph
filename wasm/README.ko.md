@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=af08dda8e4780898848c6ccf35b39f7c895ee49d16baa4bf157795491950c3cf -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=c14878b149d129d3bd6122457d44379277e4a7e64c5aa40c9376eba1f15b7b38 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,7 +22,7 @@
 | 빌드 모드 | 싱글 스레드(WebAssembly의 기본값)와 pthread. 둘 다 CI에서 빌드하고 실행합니다. JavaScript 모듈은 싱글 스레드입니다. |
 | 런타임 | CI의 Node.js 22와 24. Workers 예제는 `Request`를 넘겨 Node에서 실행하며, workerd에서는 실행하지 않았습니다. 브라우저, Deno, WASI는 검증하지 않았습니다. |
 | SDK | SchemaProvider 0.4.0, 인터페이스 리비전 7. `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋을 씁니다. libcurl 없이, 스레드 없이 빌드되며, SDK의 JavaScript 호스트(`sp_js_host`)가 모듈의 executor와 `fetch` 트랜스포트입니다. |
-| 구성 요소 | Core, LLM(호스트를 통한 모델 호출), 그리고 선택적으로 Program. |
+| 구성 요소 | Core, LLM(호스트를 통한 모델 호출), 그리고 선택적으로 Program(호스트 루프 위의 런타임, 인메모리 저장소). |
 
 ## 빌드
 
@@ -195,6 +195,40 @@ Embind는 라이브러리와 모든 타입의 등록을 더하게 되는데, 표
 돌아옵니다. 키는 `compile`에 넘기는 공급자 설명의 일부로, 그 그래프의 SDK 클라이언트가 보관합니다. 바이너리에도, 어떤
 결과에도, 오류 메시지에도 들어 있지 않습니다.
 
+## 호스트 루프 위의 Program
+
+`program::ProgramRuntime`은 루프의 executor를 받아 모든 것을 그 위에서 실행합니다. Program의 attempt, 데드라인 타이머,
+`ProgramHandle::wait_async`의 대기자가 그렇습니다. 스레드를 시작하지 않습니다. 현재 이 호스트들에서 Program 지원은
+이것이 전부이며, 저장소는 인메모리 저장소입니다.
+
+```cpp
+async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
+program::RuntimeConfig config{catalog, checkpoints, /*state_store=*/{}, transitions, /*scheduler_threads=*/1};
+config.executor = loop.executor();                    // required here: a build without threads has no pool to fall back to
+program::ProgramRuntime runtime(std::move(config));
+
+loop.spawn(runtime.run_async(owner, version, invocation),
+           [](std::exception_ptr error, program::ProgramResult result) { /* from a later turn */ });
+```
+
+- **필수.** `RuntimeConfig::executor`가 없으면 스레드 없는 빌드의 생성자는 `graph::ConfigurationFailure`인
+  `ProgramExecutorRequired`를 던집니다. 네이티브 빌드에서는 지정하지 않으면 런타임의 자체 풀을 예전처럼 씁니다.
+- **awaitable 형태.** 모든 연산에 있습니다. `start_async`, `reconnect_async`, `resume_handle_async`, `fork_async`,
+  `replace_async`, `migrate_graph_async` 등입니다. 루프에서 실행되고 기다리는 코루틴의 executor에서 완료됩니다.
+  `run_async`와 `resume_async`는 결과를 기다립니다.
+- **동기 호출은 거부됩니다.** `start`, `resume`, `fork`, `run` 같은 동기 호출과, 결과가 아직 없을 때의
+  `ProgramHandle::wait`는 Program을 실행해야 하는 스레드를 막게 됩니다. 이들은 아무 일도 하기 전에
+  `program::ProgramBlockingCallRefused`(`graph::ConfigurationFailure`)를 던집니다. `operation()`은 호출을,
+  `alternative()`는 awaitable 형태를 알려 줍니다. `hook_runtime`은 같은 이유로 생성자가 거부합니다.
+- **타이머.** 런타임은 `async::HostTimer`로만 기다립니다. 이 타이머는 루프에 데드라인을 알리고, 취소되거나 다시
+  설정되거나 소멸하면 그것을 거두므로 끝난 run은 호스트 타이머를 남기지 않습니다.
+- **노드 본문.** executor가 있으면 자기 워커가 필요한 노드 attempt는 32스레드 프로세스 전역 풀 대신 그 executor의
+  strand에서 실행되므로, 노드 본문은 자기 스레드를 막으면 안 됩니다.
+- **락.** 저장소에 닿는 임계 구역은 코루틴이 막히지 않고 기다릴 수 있는 `OperationLock`을 쥡니다. `std::mutex`는
+  메모리만 보호합니다.
+- **런타임을 소멸시키면** 실행 중인 run은 취소되지만 끝나기를 기다리지 않습니다. attempt가 끝날 때까지 런타임의
+  상태를 붙들고 있으므로, 핸들이 종료 상태가 될 때까지 루프를 계속 돌리십시오.
+
 ## 예제
 
 - `examples/node/chat.mjs`: Node에서 한 번 호출합니다.
@@ -214,6 +248,10 @@ CI는 모듈을 빌드해 Node 22와 24에서, 네트워크도 키도 없이 다
 - `test/workers_test.mjs`: Workers 예제가 내보내는 `fetch` 핸들러를 같은 서버를 상대로 `Request`와 함께 호출합니다.
   버퍼링과 스트리밍 모두입니다. 핸들러의 로직과 플랫폼 API 사용을 보여 줄 뿐, workerd에서 실행하는 것은 아닙니다.
 - `checks.cpp`(아래)는 호스트 펌프 공급자에 대한 동기 실행을 돌려 거부되는지, 아무것도 보내지 않았는지 확인합니다.
+- `checks.cpp`는 `HostLoop` 위에 `ProgramRuntime`도 만듭니다. 실행기 없는 런타임과 동기 `start`는 거부되고, 인메모리
+  저장소를 쓰는 노드 하나짜리 Program이 호스트의 턴에서 결과까지 실행됩니다.
+- `tests/test_program_runtime_executor.cpp`는 단일 스레드 `io_context`와 수동 실행기 위의 `HostLoop`에서 Program을
+  네이티브로 실행하므로, 네이티브 빌드도 같은 경로를 다룹니다.
 - `tests/test_host_loop.cpp`는 수동 executor를 상대로 루프와 호스트 seam 공급자를 네이티브로 실행하므로, 네이티브 빌드도
   같은 경로를 다룹니다.
 
@@ -241,9 +279,10 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
 - **호스트를 거치지 않는 모델 호출.** ASYNC, MCP 클라이언트, A2A는 소켓과 TLS가 필요합니다. 모델 호출은 위의 모듈로 호스트의
   `fetch`를 거칩니다. 다른 WebAssembly 호스트용 빌드는 자신의 executor와 트랜스포트를 `SchemaProvider`에 넘깁니다.
 - **호스트 펌프 공급자에 대한 블로킹 진입점.** `run()`, `Provider::dispatch` 등은 거부합니다(위).
-- **Program.** Program 구성 요소는 컴파일되지만 `ProgramRuntime`이 스레드를 시작하므로, 싱글 스레드 빌드에서는 생성,
-  노드 attempt 타임아웃, `n > 1`인 `set_worker_count(n)`이 `thread: Not supported`로 실패합니다(#557). 호스트의
-  Program 저장소는 #556에서 다룹니다.
+- **호스트 데이터베이스의 Program 저장소.** Program 런타임은 호스트 루프 위에서 실행되지만(위), 저장소는 인메모리
+  저장소입니다. SQLite와 PostgreSQL 저장소는 시스템 라이브러리가 필요하고, 호스트 데이터베이스에 닿는 저장소는 저장소
+  인터페이스가 awaitable이 되기를 기다립니다([#556](https://github.com/fox1245/NeoGraph/issues/556)). 동기 Program
+  호출은 호스트 루프에서 거부되므로 `_async` 형태를 쓰십시오.
 - **네이티브 Program 컨트롤.** C v1 플러그인 ABI는 64비트 레이아웃이므로 wasm32에서
   `NativeControlBinding::create`는 `NativeControlUnavailable`로 거부합니다.
 - **동기 체크포인트 저장소.** 비동기가 아닌 저장소는 각 연산을 워커 스레드 풀에서 실행합니다. 싱글 스레드 빌드에는
@@ -268,6 +307,6 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
 - **M0과 M1.** wasm32 수정, 싱글 스레드 빌드, CI의 Node smoke와 크기 게이트.
 - **M2(이 문서).** 호스트의 `fetch`를 통한 모델 호출. 호스트 루프, 호스트 seam 공급자, JavaScript 모듈, Node와 Workers 예제.
 - **M3.** 호스트 저장소 위의 Program([#557](https://github.com/fox1245/NeoGraph/issues/557),
-  [#556](https://github.com/fox1245/NeoGraph/issues/556)). `HostLoop::executor()`가 Program 런타임이 받게 될
-  `any_io_executor`입니다.
+  [#556](https://github.com/fox1245/NeoGraph/issues/556)). 런타임 쪽은 끝났습니다. `ProgramRuntime`이
+  `HostLoop::executor()` 위에서 실행됩니다(위의 "호스트 루프 위의 Program"). 저장소 쪽이 이어집니다. awaitable 저장소 인터페이스입니다.
 - **M4.** 실시간 세션, WASI, 네이티브 아카이브용 보관 백엔드, 원격 Harness.

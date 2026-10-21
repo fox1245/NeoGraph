@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=af08dda8e4780898848c6ccf35b39f7c895ee49d16baa4bf157795491950c3cf -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=c14878b149d129d3bd6122457d44379277e4a7e64c5aa40c9376eba1f15b7b38 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,7 +22,7 @@
 | ビルドモード | シングルスレッド（WebAssembly の既定）と pthread。どちらも CI でビルドして実行します。JavaScript モジュールはシングルスレッドです。 |
 | ランタイム | CI の Node.js 22 と 24。Workers の例は `Request` を渡して Node で実行しており、workerd では実行していません。ブラウザー、Deno、WASI は未検証です。 |
 | SDK | SchemaProvider 0.4.0、インターフェースのリビジョン 7。`cmake/NeoGraphSchemaProvider.cmake` が固定するコミットを使います。libcurl もスレッドも使わずにビルドされ、SDK の JavaScript ホスト（`sp_js_host`）がモジュールの executor と `fetch` トランスポートです。 |
-| コンポーネント | Core、LLM（ホストを通すモデル呼び出し）、および任意で Program。 |
+| コンポーネント | Core、LLM（ホストを通すモデル呼び出し）、および任意で Program（ホストのループ上のランタイム、インメモリのストア）。 |
 
 ## ビルド
 
@@ -194,6 +194,40 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 コールバック `Module.ngOnEvent` と `Module.ngOnDone` で返ります。キーは `compile` に渡すプロバイダー記述の一部で、そのグラフの
 SDK クライアントが保持します。バイナリにも、どの結果にも、エラーメッセージにも入りません。
 
+## ホストループ上の Program
+
+`program::ProgramRuntime` はループの executor を受け取り、すべてをその上で実行します。Program の attempt、デッドライン
+タイマー、`ProgramHandle::wait_async` の待機者がそうです。スレッドは起動しません。現時点でこれらのホストにおける
+Program のサポートはこれがすべてで、ストアはインメモリのものです。
+
+```cpp
+async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
+program::RuntimeConfig config{catalog, checkpoints, /*state_store=*/{}, transitions, /*scheduler_threads=*/1};
+config.executor = loop.executor();                    // required here: a build without threads has no pool to fall back to
+program::ProgramRuntime runtime(std::move(config));
+
+loop.spawn(runtime.run_async(owner, version, invocation),
+           [](std::exception_ptr error, program::ProgramResult result) { /* from a later turn */ });
+```
+
+- **必須。** `RuntimeConfig::executor` がないと、スレッドのないビルドのコンストラクターは `graph::ConfigurationFailure` である
+  `ProgramExecutorRequired` を投げます。ネイティブビルドでは、未設定ならランタイム自身のプールを従来どおり使います。
+- **awaitable 形式。** すべての操作にあります。`start_async`、`reconnect_async`、`resume_handle_async`、`fork_async`、
+  `replace_async`、`migrate_graph_async` などです。ループ上で実行され、待機しているコルーチンの executor で完了します。
+  `run_async` と `resume_async` は結果を待ちます。
+- **同期呼び出しは拒否されます。** `start`、`resume`、`fork`、`run` などの同期呼び出しと、結果がまだないときの
+  `ProgramHandle::wait` は、Program を動かすべきスレッドをブロックしてしまいます。これらは何かをする前に
+  `program::ProgramBlockingCallRefused`（`graph::ConfigurationFailure`）を投げます。`operation()` は呼び出しを、
+  `alternative()` は awaitable 形式を示します。`hook_runtime` は同じ理由でコンストラクターが拒否します。
+- **タイマー。** ランタイムは `async::HostTimer` だけで待ちます。このタイマーはデッドラインをループへ知らせ、
+  キャンセル、再設定、破棄のときに取り下げるので、終了した run がホストタイマーを残すことはありません。
+- **ノード本体。** executor があると、専用のワーカーが必要なノードの attempt は 32 スレッドのプロセス全体のプールではなく
+  その executor の strand で実行されるので、ノード本体は自分のスレッドをブロックしてはいけません。
+- **ロック。** ストアに触れる臨界区間は、コルーチンがブロックせずに待てる `OperationLock` を持ちます。`std::mutex` は
+  メモリだけを守ります。
+- **ランタイムを破棄すると** 実行中の run はキャンセルされますが、終了は待ちません。attempt が終わるまでランタイムの
+  状態を保持するので、ハンドルが終了状態になるまでループを回し続けてください。
+
 ## 例
 
 - `examples/node/chat.mjs`: Node からの 1 回の呼び出しです。
@@ -216,6 +250,10 @@ CI はモジュールをビルドし、Node 22 と 24 で、ネットワーク�
   workerd での実行ではありません。
 - `checks.cpp`（下記）は、ホストが回すプロバイダーに対する同期の実行を行い、拒否されること、何も送られなかったことを
   確認します。
+- `checks.cpp` は `HostLoop` の上に `ProgramRuntime` も作ります。実行器のないランタイムと同期の `start` は拒否され、
+  インメモリのストアを使うノード 1 つの Program がホストのターンで結果まで実行されます。
+- `tests/test_program_runtime_executor.cpp` は、シングルスレッドの `io_context` と手動の実行器の上の `HostLoop` で Program を
+  ネイティブに実行するので、ネイティブビルドも同じ経路を扱います。
 - `tests/test_host_loop.cpp` は、手動の executor を相手にループとホストシームのプロバイダーをネイティブで実行するので、
   ネイティブビルドも同じ経路を扱います。
 
@@ -244,9 +282,10 @@ NeoGraph が呼び出しを所有している場合は型付きのエラーで�
   モジュールでホストの `fetch` を通します。別の WebAssembly ホスト向けのビルドは、自前の executor とトランスポートを
   `SchemaProvider` に渡します。
 - **ホストが回すプロバイダーに対するブロッキングのエントリーポイント。** `run()`、`Provider::dispatch` などは拒否します（上記）。
-- **Program。** Program コンポーネントはコンパイルできますが、`ProgramRuntime` がスレッドを起動するため、シングルスレッドの
-  ビルドでは、その生成、ノードの attempt タイムアウト、`n > 1` の `set_worker_count(n)` が `thread: Not supported` で
-  失敗します（#557）。ホスト上の Program ストアは #556 で扱います。
+- **ホストのデータベース上の Program ストア。** Program ランタイムはホストループ上で動きます（上記）が、ストアはインメモリの
+  ものです。SQLite と PostgreSQL のストアはシステムライブラリを必要とし、ホストのデータベースに触れるストアは、ストアの
+  インターフェースが awaitable になるのを待っています（[#556](https://github.com/fox1245/NeoGraph/issues/556)）。
+  同期の Program 呼び出しはホストループで拒否されるので、`_async` 形式を使ってください。
 - **ネイティブ Program コントロール。** C v1 プラグイン ABI は 64 ビットのレイアウトなので、wasm32 では
   `NativeControlBinding::create` が `NativeControlUnavailable` で拒否します。
 - **同期のチェックポイントストア。** 非同期でないストアは、各操作をワーカースレッドのプールで実行します。
@@ -272,6 +311,6 @@ NeoGraph が呼び出しを所有している場合は型付きのエラーで�
 - **M2（このページ）。** ホストの `fetch` を通すモデル呼び出し。ホストループ、ホストシームのプロバイダー、JavaScript モジュール、
   Node と Workers の例。
 - **M3.** ホストのストア上の Program（[#557](https://github.com/fox1245/NeoGraph/issues/557)、
-  [#556](https://github.com/fox1245/NeoGraph/issues/556)）。`HostLoop::executor()` が Program ランタイムの受け取る
-  `any_io_executor` です。
+  [#556](https://github.com/fox1245/NeoGraph/issues/556)）。ランタイム側は完了しました。`ProgramRuntime` が
+  `HostLoop::executor()` の上で動きます（上の「ホストループ上の Program」）。ストア側が続きます。awaitable なストアのインターフェースです。
 - **M4.** リアルタイムセッション、WASI、ネイティブアーカイブ用の保管バックエンド、リモート Harness。

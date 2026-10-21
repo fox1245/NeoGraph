@@ -13,8 +13,10 @@
 #include <neograph/program/transition_store.h>
 #include <neograph/program/task_graph_fragment.h>
 #include "catalog_access.h"
+#include "../core/host_timer.h"
+#include "lock_audit.h"
+#include "operation_lock.h"
 #include <asio/any_io_executor.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/system_executor.hpp>
 
@@ -30,6 +32,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neograph::program::detail {
@@ -72,6 +75,46 @@ struct RunOutcome {
     std::vector<ProgramMonetaryRecord>    monetary_records;
 };
 
+/**
+ * The executors and the blocking rules of one ProgramRuntime, shared by every RunControl it creates (#557). Without
+ * RuntimeConfig::executor the three executors are the runtime's own pools (attempts on one, deadlines on another,
+ * waiters on the system executor), as they always were. With it, all three are that executor.
+ */
+struct RuntimeScheduler {
+    asio::any_io_executor attempts;
+    asio::any_io_executor deadlines;
+    asio::any_io_executor waiters;
+    /// RuntimeConfig::executor was given.
+    bool injected = false;
+    /// The executor is pumped by a host's event loop, or the build has no threads to wait on.
+    bool host_pumped = false;
+    /// RuntimeConfig::executor as the host gave it; the three above are adapted from it.
+    asio::any_io_executor host_executor;
+    /// RuntimeConfig::executor_identity.running_in_this_thread; empty: found from host_executor when it is the
+    /// executor of an io_context or a thread_pool, or a strand of either.
+    std::function<bool()> running_in_this_thread;
+
+    /// True when the calling thread runs the injected executor. Always false for the runtime's own pools.
+    bool on_executor_thread() const;
+    /// Throws ProgramBlockingCallRefused when a synchronous call, which does store work on the calling thread and
+    /// would hang a host loop, must not run here. A call made from inside the runtime is exempt (InternalCall).
+    void require_synchronous_call(std::string_view operation, std::string_view alternative) const;
+    /// Throws ProgramBlockingCallRefused when a call that waits for a Program's work must not wait here: on a
+    /// host-pumped executor, and on a thread that runs the injected executor.
+    void require_wait(std::string_view operation, std::string_view alternative) const;
+};
+
+/// While one is alive on a thread, a synchronous public call made on it is not refused: the runtime itself, or an
+/// awaitable form running its body on the runtime's executor, makes it.
+class InternalCall {
+public:
+    InternalCall() noexcept;
+    ~InternalCall();
+    InternalCall(const InternalCall&)            = delete;
+    InternalCall& operator=(const InternalCall&) = delete;
+    static bool active() noexcept;
+};
+
 class RunControl;
 // The last two arguments are a task-graph budget override and whether it is exact. An
 // inexact override (schema-1 fragments) reads 0 as "the link's whole ceiling"; an exact one
@@ -88,7 +131,7 @@ using ExistingChildReconnectCallback =
     std::function<std::shared_ptr<RunControl>(std::string_view, const json&, std::string_view)>;
 
 struct AsyncWaiter {
-    std::weak_ptr<asio::steady_timer> timer;
+    std::weak_ptr<async::HostTimer> timer;
 };
 
 struct HeldProgramHandoff {
@@ -119,7 +162,7 @@ public:
                std::string                                core_thread_id,
                std::uint64_t                              event_sequence,
                std::shared_ptr<ProgramEventSink>          sink,
-               asio::any_io_executor                      deadline_executor,
+               std::shared_ptr<const RuntimeScheduler>    scheduler,
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
                std::shared_ptr<ProgramTransitionStore>    transitions,
@@ -127,7 +170,8 @@ public:
                std::string                                logical_run_id  = {});
     RunControl(ProgramRunRecord record,
                std::shared_ptr<ProgramTransitionStore> transitions,
-               std::shared_ptr<sp::NativeArchive> archive);
+               std::shared_ptr<sp::NativeArchive> archive,
+               std::shared_ptr<const RuntimeScheduler> scheduler);
 
     using CompletionCallback = std::function<void(const ProgramResult&)>;
     using TerminalCleanup = std::function<void()>;
@@ -198,8 +242,9 @@ public:
     const RunBudget                                  granted_budget;
     const std::chrono::steady_clock::time_point      started_at;
     const std::chrono::steady_clock::time_point      deadline;
+    const std::shared_ptr<const RuntimeScheduler>    scheduler;
     const asio::any_io_executor                      deadline_executor;
-    const asio::strand<asio::system_executor>        waiter_strand;
+    const asio::strand<asio::any_io_executor>        waiter_strand;
     const std::string                                core_thread_id;
     const std::string                                trace_id;
     const std::shared_ptr<graph::CheckpointStore>    checkpoints;
@@ -311,7 +356,7 @@ public:
     std::optional<json>                   settled_branches() const;
     std::optional<ExactProgramHandoff>    latest_handoff() const;
     void set_handoff_coordination_mutex(
-        std::shared_ptr<std::recursive_mutex> coordination_mutex,
+        std::shared_ptr<ReentrantOperationLock> coordination_mutex,
         std::function<bool(const RunControl*)> admission);
     std::uint64_t                         request_handoff();
     HeldProgramHandoff                    wait_handoff(std::uint64_t request_id);
@@ -325,6 +370,8 @@ public:
     std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request() const;
     std::uint64_t request_graph_migration();
     GraphMigrationCapsule wait_graph_migration(std::uint64_t request_id);
+    /// As wait_graph_migration, without blocking a thread (#557).
+    asio::awaitable<GraphMigrationCapsule> wait_graph_migration_async(std::uint64_t request_id);
     asio::awaitable<void> hold_graph_migration(
         const graph::GraphSafePoint& safe_point,
         RunBudget remaining_budget);
@@ -346,10 +393,10 @@ public:
     void adopt_published_event(ProgramEvent event);
 
 private:
-    mutable std::mutex                    mutex_;
+    mutable PureMutex                     mutex_;
     /// Guards notices; a broker adds one from the thread of its call (#543).
-    mutable std::mutex                    notices_mutex_;
-    mutable std::condition_variable       cv_;
+    mutable PureMutex                     notices_mutex_;
+    mutable PureConditionVariable        cv_;
     std::optional<ProgramResult>           result_;
     std::vector<ProgramEvent>              events_;
     std::optional<CoreCheckpointIdentity>  latest_checkpoint_;
@@ -379,15 +426,16 @@ private:
     bool                                     terminal_decided_ = false;
     bool                                     completion_claimed_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
-    mutable std::condition_variable          handoff_cv_;
-    std::shared_ptr<std::recursive_mutex>     handoff_coordination_mutex_;
+    mutable PureConditionVariable             handoff_cv_;
+    std::shared_ptr<ReentrantOperationLock>   handoff_coordination_mutex_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;
     std::uint64_t                            handoff_request_id_ = 0;
     std::optional<ExactProgramHandoff>       held_handoff_;
-    std::weak_ptr<asio::steady_timer>        handoff_release_waiter_;
+    std::weak_ptr<async::HostTimer>        handoff_release_waiter_;
     mutable std::vector<AsyncWaiter>         handoff_waiters_;
-    mutable std::condition_variable          graph_migration_cv_;
+    mutable PureConditionVariable             graph_migration_cv_;
+    mutable std::vector<AsyncWaiter>         graph_migration_waiters_;
     std::shared_ptr<graph::GraphSafePointRequest> graph_safe_point_request_;
     std::uint64_t                            next_graph_migration_request_id_ = 1;
     std::uint64_t                            graph_migration_request_id_ = 0;
@@ -395,8 +443,12 @@ private:
     std::optional<GraphMigrationCapsule>      held_graph_migration_;
     mutable std::optional<ProgramExecutionLease> execution_lease_;
     std::string                              graph_migration_error_;
-    std::weak_ptr<asio::steady_timer>         graph_migration_release_waiter_;
+    std::weak_ptr<async::HostTimer>         graph_migration_release_waiter_;
 
+    /// Wakes the blocked thread and takes the coroutines that wait for a graph migration state change; the caller
+    /// passes them to wake_async_waiters after it unlocks mutex_.
+    void notify_graph_migration_locked(std::vector<AsyncWaiter>& async_waiters);
+    void wake_async_waiters(std::vector<AsyncWaiter> waiters) const;
     void abort_handoff() noexcept;
     void abort_graph_migration() noexcept;
     void renew_graph_safe_point_request_locked();
