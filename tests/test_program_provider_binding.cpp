@@ -3521,6 +3521,21 @@ TEST(ProgramProviderUploadResume, ACrashAfterTheSessionOpensStartsTheUploadAgain
     ASSERT_TRUE(after);
     EXPECT_EQ(after->outcome_digest, before->outcome_digest);
     EXPECT_EQ(after->original_attempt, before->original_attempt);
+    // The restart is a record of its own: the call, the attempt, why, and the record it replaced.
+    const auto restarts = journal.restarts(kOwner, at.id());
+    ASSERT_EQ(restarts.size(), 1U);
+    EXPECT_EQ(restarts[0].reason, Journal::Restart::Reason::SessionNotStored);
+    EXPECT_EQ(restarts[0].attempt, 2U);
+    EXPECT_EQ(restarts[0].replaced_state, Journal::State::Succeeded);
+    EXPECT_EQ(restarts[0].replaced_outcome_digest, before->outcome_digest);
+    EXPECT_EQ(after->restarts, 1U);
+    EXPECT_FALSE(after->superseded) << "the record has its answer";
+    EXPECT_TRUE(after->opens_upload_session);
+    const auto part = journal.inspect(kOwner, at.id(1));
+    ASSERT_TRUE(part);
+    EXPECT_FALSE(part->opens_upload_session);
+    EXPECT_EQ(part->restarts, 0U);
+    EXPECT_TRUE(journal.restarts(kOwner, at.id(1)).empty());
 }
 
 TEST(ProgramProviderUploadResume, ACrashWhileTheSessionOpensStartsTheUploadAgain) {
@@ -3739,4 +3754,312 @@ TEST(ProgramProviderUploadResume, AForkUploadsAgainWhenItsSourceNeverSawTheSessi
     UploadRun forked(journal, fork, provider, bytes, 40);
     ASSERT_TRUE(forked.finish().file) << "a session opening is sent again, never held as unknown";
     EXPECT_EQ(peer.starts(), 2);
+}
+
+namespace {
+// The answer to a call that opens a session, as the SDK delivers it to a live call: with the session's URL as its
+// secret, or without it, as a journal restores it.
+sp::runtime::Result opening_answer(const std::shared_ptr<Provider>& provider, std::uint64_t size,
+                                   std::string purpose = {}, bool keep_secret = true) {
+    const auto result = provider->dispatch(provider->prepare(make_endpoint_request(
+        sp::files::Start{"data.bin", "application/octet-stream", size, std::move(purpose)})));
+    auto completion = std::get<sp::Completion>(*result);
+    if (!keep_secret) completion.secret.clear();
+    return std::make_shared<const sp::Outcome>(std::move(completion));
+}
+
+// One column of the provider journal's rows, oldest first.
+std::vector<std::string> column_of(const std::string& provider_db, const std::string& column) {
+    Connection    db(provider_db, SQLITE_OPEN_READONLY);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db.db, ("SELECT " + column + " FROM ng_program_provider_calls ORDER BY rowid").c_str(), -1,
+                           &stmt, nullptr) != SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(db.db));
+    std::vector<std::string> values;
+    while (sqlite3_step(stmt) == SQLITE_ROW)
+        values.emplace_back(reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0)));
+    sqlite3_finalize(stmt);
+    return values;
+}
+
+// How many restarts a journal file records, for any call.
+int restart_rows(const std::string& provider_db) {
+    Connection    db(provider_db, SQLITE_OPEN_READONLY);
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db.db, "SELECT COUNT(*) FROM ng_program_provider_call_restarts", -1, &stmt, nullptr) !=
+        SQLITE_OK)
+        throw std::runtime_error(sqlite3_errmsg(db.db));
+    int count = -1;
+    if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return count;
+}
+
+// A journal whose process died with the call that opens the session on the wire: its record is Dispatched, in a
+// copy of the files taken when the peer received the request.
+struct OpeningOnTheWire {
+    explicit OpeningOnTheWire(const std::string& name, bool google = true)
+        : files(name), image(name + "-image"), provider(chunked_provider(peer, google)),
+          purpose(google ? "" : "user_data") {
+        peer.on_request([this](const std::string& what) {
+            if (what == "start" && !taken.exchange(true)) crash_image(files.path, image.path);
+        });
+        {
+            Journal   journal(files.provider_db());
+            UploadRun first(journal, at, provider, bytes, 40, purpose);
+            first.open();
+        }
+        peer.on_request({});
+    }
+    UploadRun resume(Journal& journal, const Position& position) {
+        return UploadRun(journal, position, provider, bytes, 40, purpose);
+    }
+    TempDir                   files, image;
+    ChunkedUploadPeer         peer;
+    std::atomic<bool>         taken{false};
+    std::shared_ptr<Provider> provider;
+    std::string               purpose;
+    std::string               bytes = pattern(100);
+    Position                  at    = source_position();
+};
+}  // namespace
+
+TEST(ProgramProviderUploadResume, TheRestartIsRecordedBeforeTheOpeningIsSent) {
+    // The record is committed in the transaction that precedes the call, so a peer that is already answering the
+    // sent-again opening finds it in the journal file.
+    TempDir           files("restart-recorded");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+    }
+    ASSERT_EQ(restart_rows(files.provider_db()), 0);
+    std::atomic<int> seen{-1};
+    peer.on_request([&](const std::string& what) {
+        if (what == "start") seen = restart_rows(files.provider_db());
+    });
+    auto    later = at_attempt(at, 2);
+    Journal journal(files.provider_db());
+    auto    resumed = UploadRun(journal, later, provider, bytes, 40);
+    (void)resumed.open();
+    peer.on_request({});
+    EXPECT_EQ(seen.load(), 1) << "committed before the request reached the peer";
+    EXPECT_EQ(restart_rows(files.provider_db()), 1);
+}
+
+TEST(ProgramProviderUploadResume, ADispatchedRecordThatWasRestartedIsNoLongerUncertain) {
+    OpeningOnTheWire crashed("restart-superseded");
+    ASSERT_EQ(journal_states(crashed.image.provider_db()), std::vector<std::string>{"dispatched"});
+    Journal journal(crashed.image.provider_db());
+    const auto before = journal.inspect(kOwner, crashed.at.id());
+    ASSERT_TRUE(before);
+    EXPECT_EQ(before->state, Journal::State::Dispatched);
+    EXPECT_TRUE(before->opens_upload_session) << "the marker is written with the dispatched marker";
+    EXPECT_EQ(before->restarts, 0U);
+    EXPECT_FALSE(before->superseded) << "until a resume sends the call again, it is uncertain";
+
+    auto later   = at_attempt(crashed.at, 2);
+    auto resumed = crashed.resume(journal, later);
+    (void)resumed.open();
+    const auto after = journal.inspect(kOwner, crashed.at.id());
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->state, Journal::State::Dispatched) << "the record is not rewritten";
+    EXPECT_EQ(after->outcome_digest, before->outcome_digest);
+    EXPECT_EQ(after->original_attempt, before->original_attempt);
+    EXPECT_EQ(after->restarts, 1U);
+    EXPECT_TRUE(after->superseded) << "and it no longer reads as an outcome that is unknown";
+    const auto restarts = journal.restarts(kOwner, crashed.at.id());
+    ASSERT_EQ(restarts.size(), 1U);
+    EXPECT_EQ(restarts[0].reason, Journal::Restart::Reason::OutcomeUnknown);
+    EXPECT_EQ(restarts[0].attempt, 2U);
+    EXPECT_EQ(restarts[0].replaced_state, Journal::State::Dispatched);
+    EXPECT_TRUE(restarts[0].replaced_outcome_digest.empty());
+    ASSERT_EQ(later.codes(), kRestarted);
+    EXPECT_EQ(later.told->front().witness["reason"].get<std::string>(), "outcome_unknown");
+}
+
+TEST(ProgramProviderUploadResume, ARestartedOpeningIsNotReconciled) {
+    // reconcile_success on the record would give it an answer without the URL: the next resume would replay it as a
+    // success, and the next part would be refused when it was prepared.
+    OpeningOnTheWire crashed("restart-reconcile");
+    Journal          journal(crashed.image.provider_db());
+    auto             later   = at_attempt(crashed.at, 2);
+    auto             resumed = crashed.resume(journal, later);
+    (void)resumed.open();
+    ASSERT_EQ(restart_rows(crashed.image.provider_db()), 1);
+
+    for (const bool keep_secret : {false, true}) {
+        const auto answer = opening_answer(crashed.provider, crashed.bytes.size(), {}, keep_secret);
+        try {
+            journal.reconcile_success(kOwner, crashed.at.id(), digest('e'), answer);
+            ADD_FAILURE() << "the restarted record was reconciled";
+        } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string(error.what()).find("again in place of its record"), std::string::npos)
+                << error.what();
+            EXPECT_NE(std::string(error.what()).find("needs no reconciliation"), std::string::npos) << error.what();
+        }
+    }
+    EXPECT_EQ(journal_states(crashed.image.provider_db()), std::vector<std::string>{"dispatched"});
+    EXPECT_EQ(column_of(crashed.image.provider_db(), "evidence_identity"), std::vector<std::string>{""});
+}
+
+TEST(ProgramProviderUploadResume, AnOpeningIsNotReconciledToAnAnswerWithoutAUrlOrAnId) {
+    // The journal knows the record opens a session. An answer a resume could not continue is refused; the same
+    // answer with its URL is accepted, the URL is not stored, and a resume then restarts the upload.
+    OpeningOnTheWire crashed("reconcile-opening");
+    Journal          journal(crashed.image.provider_db());
+    const auto       urlless = opening_answer(crashed.provider, crashed.bytes.size(), {}, false);
+    try {
+        journal.reconcile_success(kOwner, crashed.at.id(), digest('e'), urlless);
+        ADD_FAILURE() << "an answer without a URL was reconciled";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("neither an upload id nor a URL"), std::string::npos) << error.what();
+    }
+    EXPECT_EQ(journal_states(crashed.image.provider_db()), std::vector<std::string>{"dispatched"});
+    EXPECT_EQ(restart_rows(crashed.image.provider_db()), 0) << "nothing is recorded for a refusal";
+
+    const auto answer = opening_answer(crashed.provider, crashed.bytes.size());
+    EXPECT_NO_THROW(journal.reconcile_success(kOwner, crashed.at.id(), digest('e'), answer));
+    EXPECT_EQ(journal_states(crashed.image.provider_db()), std::vector<std::string>{"succeeded"});
+    const auto withheld = column_of(crashed.image.provider_db(), "withheld_secret");
+    ASSERT_EQ(withheld.size(), 1U);
+    EXPECT_TRUE(is_sha256(withheld[0])) << "the row says its answer is short of the URL";
+    EXPECT_GE(files_holding_none_of(crashed.image.path, secrets_of(crashed.peer)), 1U);
+
+    auto later   = at_attempt(crashed.at, 2);
+    auto resumed = crashed.resume(journal, later);
+    const int starts = crashed.peer.starts();
+    (void)resumed.open();
+    EXPECT_EQ(crashed.peer.starts(), starts + 1) << "the reconciled opening is sent again";
+    ASSERT_EQ(later.codes(), kRestarted);
+    EXPECT_EQ(later.told->front().witness["reason"].get<std::string>(), "session_not_stored");
+}
+
+TEST(ProgramProviderUploadResume, AnOpeningWhoseAnswerNamesAnUploadIdMayBeReconciled) {
+    // OpenAI names its upload by an id that the journaled answer holds, so a reconciled opening can be continued.
+    OpeningOnTheWire crashed("reconcile-openai", false);
+    Journal          journal(crashed.image.provider_db());
+    const auto       answer = opening_answer(crashed.provider, crashed.bytes.size(), "user_data");
+    EXPECT_NO_THROW(journal.reconcile_success(kOwner, crashed.at.id(), digest('e'), answer));
+    EXPECT_EQ(journal_states(crashed.image.provider_db()), std::vector<std::string>{"succeeded"});
+    EXPECT_EQ(column_of(crashed.image.provider_db(), "withheld_secret"), std::vector<std::string>{""});
+
+    auto       later   = at_attempt(crashed.at, 2);
+    auto       resumed = crashed.resume(journal, later);
+    const int  starts  = crashed.peer.starts();
+    const auto opened  = resumed.open();
+    EXPECT_EQ(crashed.peer.starts(), starts) << "replayed, not sent again";
+    EXPECT_FALSE(opened.session.id.empty());
+    EXPECT_TRUE(later.codes().empty());
+    EXPECT_EQ(restart_rows(crashed.image.provider_db()), 0);
+}
+
+TEST(ProgramProviderUploadResume, ASecondCrashAfterARestartedOpeningRestartsItAgain) {
+    TempDir           files("restart-twice");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+    }
+    {
+        Journal   journal(files.provider_db());
+        auto      second = at_attempt(at, 2);
+        UploadRun resumed(journal, second, provider, bytes, 40);
+        (void)resumed.open();  // sent again and not journaled; the process dies before a part
+        EXPECT_EQ(second.codes(), kRestarted);
+    }
+    auto    third = at_attempt(at, 3);
+    Journal journal(files.provider_db());
+    UploadRun last(journal, third, provider, bytes, 40);
+    const auto done = last.finish();
+    ASSERT_TRUE(done.file);
+    EXPECT_EQ(peer.starts(), 3);
+    EXPECT_EQ(peer.sessions().back().bytes, bytes);
+    ASSERT_EQ(third.codes(), kRestarted);
+    const auto restarts = journal.restarts(kOwner, at.id());
+    ASSERT_EQ(restarts.size(), 2U);
+    EXPECT_EQ(restarts[0].attempt, 2U);
+    EXPECT_EQ(restarts[1].attempt, 3U);
+    EXPECT_EQ(journal.inspect(kOwner, at.id())->restarts, 2U);
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(4, "succeeded"));
+}
+
+TEST(ProgramProviderUploadResume, ACrashAfterAPartOfARestartedUploadRefusesTheResume) {
+    TempDir           files("restart-then-part");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+    }
+    {
+        Journal   journal(files.provider_db());
+        auto      second = at_attempt(at, 2);
+        UploadRun resumed(journal, second, provider, bytes, 40);
+        (void)resumed.open();
+        (void)resumed.part();  // 40 bytes are in the second session; the process dies
+    }
+    Journal journal(files.provider_db());
+    auto    third = at_attempt(at, 3);
+    expect_refused(journal, third, provider, bytes, peer, 1);
+    EXPECT_EQ(journal.restarts(kOwner, at.id()).size(), 1U) << "a refusal records nothing";
+    EXPECT_EQ(peer.sessions().at(1).bytes, bytes.substr(0, 40));
+}
+
+TEST(ProgramProviderUploadResume, AJournalWithoutTheRestartTableOrTheMarkersIsMigrated) {
+    if (sqlite3_libversion_number() < 3035000) GTEST_SKIP() << "SQLite cannot drop a column";
+    TempDir           files("restart-migrate");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+        first.part();
+    }
+    // The journal as 0.16.0 left it: no restart table, no marker, no withheld secret.
+    exec_sql(files.provider_db(),
+             "DROP TABLE ng_program_provider_call_restarts;"
+             "ALTER TABLE ng_program_provider_calls DROP COLUMN opens_upload;"
+             "ALTER TABLE ng_program_provider_calls DROP COLUMN withheld_secret;");
+    Journal journal(files.provider_db());
+    EXPECT_EQ(restart_rows(files.provider_db()), 0) << "the table is created when the journal is opened";
+    EXPECT_EQ(column_of(files.provider_db(), "opens_upload"), (std::vector<std::string>{"", ""}));
+    EXPECT_EQ(column_of(files.provider_db(), "withheld_secret"), (std::vector<std::string>{"", ""}));
+    const auto row = journal.inspect(kOwner, at.id());
+    ASSERT_TRUE(row);
+    EXPECT_EQ(row->state, Journal::State::Succeeded);
+    EXPECT_FALSE(row->opens_upload_session) << "a row written before the marker says nothing";
+    EXPECT_EQ(row->restarts, 0U);
+    EXPECT_FALSE(row->superseded);
+    EXPECT_TRUE(journal.restarts(kOwner, at.id()).empty());
+
+    // Such a row replays as it did: its answer holds no URL and nothing says that it should. A call written after
+    // the migration carries the marker.
+    auto       later = at_attempt(at, 2);
+    UploadRun  resumed(journal, later, provider, bytes, 40);
+    const int  starts = peer.starts();
+    const auto opened = resumed.open();
+    EXPECT_EQ(peer.starts(), starts);
+    EXPECT_TRUE(opened.session.url.empty());
+    EXPECT_TRUE(later.codes().empty());
+    auto      other = source_position();
+    other.run       = "run:after-migration";
+    UploadRun fresh(journal, other, provider, bytes, 40);
+    (void)fresh.open();
+    EXPECT_EQ(column_of(files.provider_db(), "opens_upload").back(), "1");
+    EXPECT_TRUE(is_sha256(column_of(files.provider_db(), "withheld_secret").back()));
 }

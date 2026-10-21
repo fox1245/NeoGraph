@@ -172,12 +172,22 @@ struct SQLiteProgramProviderCallJournal::Impl {
             // #541: the identity of a secret the outcome's typed result needs and the journal never stores (a
             // resumable upload's session URL). Empty when the outcome has none.
             add_column("withheld_secret", "ALTER TABLE ng_program_provider_calls ADD COLUMN withheld_secret TEXT NOT NULL DEFAULT ''");
+            // #541: '1' for a call that opens a chunked upload's session, written with the dispatched marker.
+            add_column("opens_upload", "ALTER TABLE ng_program_provider_calls ADD COLUMN opens_upload TEXT NOT NULL DEFAULT ''");
             // The times a call was matched to its record under another policy identity. A row is never rewritten.
             execute(db, "CREATE TABLE IF NOT EXISTS ng_program_provider_call_policy_changes("
                         "owner_scope TEXT NOT NULL, dispatch_id TEXT NOT NULL,"
                         "journaled_policy TEXT NOT NULL, observed_policy TEXT NOT NULL,"
                         "attempt TEXT NOT NULL, via TEXT NOT NULL,"
                         "PRIMARY KEY(owner_scope,dispatch_id,journaled_policy,observed_policy))");
+            // #541: the times a resume sent a call that opens an upload's session again, in place of its record. A
+            // row is never rewritten: this table says what became of it. `restart` counts a call's restarts from
+            // 1; `replaced_state` and `replaced_outcome` are the record's, as the restart found it.
+            execute(db, "CREATE TABLE IF NOT EXISTS ng_program_provider_call_restarts("
+                        "owner_scope TEXT NOT NULL, dispatch_id TEXT NOT NULL, restart INTEGER NOT NULL,"
+                        "attempt TEXT NOT NULL, reason TEXT NOT NULL,"
+                        "replaced_state TEXT NOT NULL, replaced_outcome TEXT NOT NULL,"
+                        "PRIMARY KEY(owner_scope,dispatch_id,restart))");
             execute(db, "CREATE INDEX IF NOT EXISTS ng_program_provider_scope ON ng_program_provider_calls(owner_scope,logical_scope)");
         } catch (...) {
             sqlite3_close_v2(db);
@@ -208,7 +218,8 @@ struct Stored {
     // #541: secret_identity() of the secret the outcome carried and the journal did not keep. Empty for none.
     std::string withheld;
     std::string legacy;
-    // Not stored: the call being made opens a chunked upload's session, and nothing else bounds it (#541).
+    // #541: the call opens a chunked upload's session. For the call being made it is the request's; for a loaded
+    // row it is the marker written with the dispatched marker, empty on a row written before it.
     bool opens_upload = false;
 };
 std::uint64_t parse_amount(std::string_view value) {
@@ -264,7 +275,7 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                         "original_attempt,state,completion,outcome_digest,evidence_identity,"
                         "encoding_version,provider_name,family,mode,original_deadline,"
                         "logical_scope,claim_amount,committed_amount,monetary_record,"
-                        "identity_version,content_digest,policy_identity,producer,withheld_secret "
+                        "identity_version,content_digest,policy_identity,producer,withheld_secret,opens_upload "
                         "FROM ng_program_provider_calls WHERE owner_scope=?1 AND dispatch_id=?2");
     query.bind(1, owner);
     query.bind(2, id);
@@ -277,6 +288,9 @@ std::optional<Stored> load(sqlite3* db, std::string_view owner, std::string_view
                query.column(14), parse_amount(query.column(15)), parse_amount(query.column(16)),
                query.column(17), query.column(18), query.column(19), query.column(20),
                query.column(21), query.column(22)};
+    const auto marker = query.column(23);
+    if (marker != "" && marker != "1") throw std::runtime_error("Corrupt Program provider journal dispatch binding");
+    row.opens_upload = marker == "1";
     if (query.next()) throw std::runtime_error("Duplicate Program provider journal slot");
     // A call that names no model, such as a file upload, stores an empty one; the model is compared with the
     // call's own whenever the row is used.
@@ -554,6 +568,34 @@ void note_policy_change(sqlite3* db, std::string_view owner, std::string_view id
          std::move(witness)});
 }
 
+// #541: records, before the call is sent, that a resume sends the call that opens an upload's session again in
+// place of its record. The record is appended; the row it replaces is not touched.
+void note_restart(sqlite3* db, std::string_view owner, std::string_view id, const Stored& row,
+                  std::uint64_t attempt, std::string_view reason) {
+    Statement insert(db, "INSERT INTO ng_program_provider_call_restarts"
+                         "(owner_scope,dispatch_id,restart,attempt,reason,replaced_state,replaced_outcome) "
+                         "SELECT ?1,?2,COALESCE(MAX(restart),0)+1,?3,?4,?5,?6 "
+                         "FROM ng_program_provider_call_restarts WHERE owner_scope=?1 AND dispatch_id=?2");
+    insert.bind(1, owner); insert.bind(2, id); insert.bind(3, std::to_string(attempt));
+    insert.bind(4, reason); insert.bind(5, row.state); insert.bind(6, row.outcome);
+    insert.done();
+}
+std::uint64_t restart_count(sqlite3* db, std::string_view owner, std::string_view id) {
+    Statement count(db, "SELECT COUNT(*) FROM ng_program_provider_call_restarts "
+                        "WHERE owner_scope=?1 AND dispatch_id=?2");
+    count.bind(1, owner); count.bind(2, id);
+    if (!count.next()) return 0;
+    return parse_amount(count.column(0));
+}
+
+SQLiteProgramProviderCallJournal::State state_of(std::string_view state) {
+    using State = SQLiteProgramProviderCallJournal::State;
+    return state == "succeeded" ? State::Succeeded
+         : state == "dispatched" ? State::Dispatched
+         : state == "failed" ? State::Failed
+         : State::ReconciliationRequired;
+}
+
 // #541: the first call after `identity` that the journal holds for the same node task, in any state. A node
 // that opens a chunked upload's session makes the calls that send its parts after it, with the session it
 // holds, so a call the journal holds after the opening may have written into that session. Empty when there
@@ -670,9 +712,9 @@ std::optional<sp::runtime::Result> adopt_source_call(
                      "model,original_attempt,state,completion,outcome_digest,evidence_identity,"
                      "encoding_version,provider_name,family,mode,original_deadline,"
                      "logical_scope,claim_amount,committed_amount,monetary_record,"
-                     "identity_version,content_digest,policy_identity,producer)"
+                     "identity_version,content_digest,policy_identity,producer,opens_upload)"
                      " VALUES(?1,?2,?3,?4,?5,?6,?7,'succeeded',?8,?9,?10,'2',?11,?12,?13,?14,?15,?16,?17,?18,"
-                     "'2',?19,?20,?21)");
+                     "'2',?19,?20,?21,?22)");
     insert.bind(1, owner); insert.bind(2, id); insert.bind(3, adopted.slot);
     insert.bind(4, adopted.request); insert.bind(5, adopted.provider);
     insert.bind(6, adopted.model); insert.bind(7, adopted.attempt);
@@ -682,6 +724,7 @@ std::optional<sp::runtime::Result> adopt_source_call(
     insert.bind(15, adopted.scope); insert.bind(16, std::to_string(adopted.claim));
     insert.bind(17, std::to_string(adopted.committed)); insert.bind(18, monetary);
     insert.bind(19, adopted.content); insert.bind(20, adopted.policy); insert.bind(21, adopted.producer);
+    insert.bind(22, adopted.opens_upload ? "1" : "");
     insert.done();
     if (relation == Relation::PolicyChanged)
         note_policy_change(impl.db, owner, id, *row, admitted, attempt, true, identity.node_name, source_id,
@@ -798,7 +841,7 @@ private:
                 // its URL, which only the live call held, is not stored, or the answer is not known at all. The
                 // session was opened to be written into, so when no call of the node after the opening is
                 // journaled nothing was written, and opening a session charges nothing: the call is sent again,
-                // and the row stays as it was. A later call may have written into the session, and its position
+                // and the row stays as it was, with the restart recorded beside it. A later call may have written into the session, and its position
                 // is bound to that session, so the upload has to be sent again from the start. A priced or
                 // token-budgeted binding refuses every endpoint call before it is journaled, so no such row exists
                 // under one today; the conditions keep an upload that is priced one day from skipping its claim.
@@ -806,13 +849,16 @@ private:
                     (!answered || !existing->withheld.empty())) {
                     if (auto later = later_call(impl->db, owner, admitted.scope, identity))
                         throw ProgramProviderUploadResendRequiredError(id, std::move(*later));
+                    const char* const reason = answered ? "session_not_stored" : "outcome_unknown";
+                    // The restart is recorded in this transaction, before the call is sent. The row stays as it was.
+                    note_restart(impl->db, owner, id, *existing, attempt, reason);
                     pending.push_back(
                         {"P_PROVIDER_UPLOAD_RESTARTED",
                          "A chunked upload was resumed before any part of it was sent. The journal does not hold "
                          "its session's URL, so the call that opens the upload was sent again and the earlier "
                          "session was left unused.",
                          json{{"call_id", std::string(id)}, {"node", identity.node_name},
-                              {"reason", answered ? "session_not_stored" : "outcome_unknown"}}});
+                              {"reason", reason}}});
                     tx.commit();
                     lock.unlock();
                     report(diagnostic, pending);
@@ -864,9 +910,9 @@ private:
                              "(owner_scope,dispatch_id,slot,request_digest,provider_binding_identity,"
                              "model,original_attempt,state,encoding_version,provider_name,family,mode,original_deadline,"
                              "logical_scope,claim_amount,committed_amount,monetary_record,"
-                             "identity_version,content_digest,policy_identity,producer)"
+                             "identity_version,content_digest,policy_identity,producer,opens_upload)"
                              " VALUES(?1,?2,?3,?4,?5,?6,?7,'dispatched','2',?8,?9,?10,?11,?12,?13,?14,?15,"
-                             "'2',?16,?17,?18)");
+                             "'2',?16,?17,?18,?19)");
             insert.bind(1, owner); insert.bind(2, id); insert.bind(3, admitted.slot);
             insert.bind(4, admitted.request); insert.bind(5, admitted.provider);
             insert.bind(6, admitted.model); insert.bind(7, admitted.attempt);
@@ -876,7 +922,7 @@ private:
             insert.bind(14, std::to_string(admitted.committed));
             insert.bind(15, admitted.monetary);
             insert.bind(16, admitted.content); insert.bind(17, admitted.policy);
-            insert.bind(18, admitted.producer);
+            insert.bind(18, admitted.producer); insert.bind(19, admitted.opens_upload ? "1" : "");
             insert.done();
             tx.commit();  // write-ahead barrier: no transport before durable commit
             report(diagnostic, pending);
@@ -1074,15 +1120,37 @@ SQLiteProgramProviderCallJournal::inspect(std::string_view owner, std::string_vi
     if (!stored->monetary.empty())
         monetary = program::detail::decode_monetary_record(
             neograph::detail::parse_json_strict(stored->monetary));
-    return Record{stored->state == "succeeded" ? State::Succeeded
-                  : stored->state == "dispatched" ? State::Dispatched
-                  : stored->state == "failed" ? State::Failed
-                  : State::ReconciliationRequired,
+    const auto restarts = restart_count(impl_->db, owner, id);
+    const auto state = state_of(stored->state);
+    return Record{state,
                   stored->request, stored->provider, stored->attempt, stored->outcome,
                   stored->provider_name, stored->model, stored->family, stored->mode,
                   stored->deadline, 2, stored->claim, stored->committed, std::move(monetary),
                   stored->identity_version == "2" ? 2U : 1U, stored->content, stored->policy,
-                  stored->producer};
+                  stored->producer, stored->opens_upload, static_cast<std::uint32_t>(restarts),
+                  restarts != 0 && (state == State::Dispatched || state == State::ReconciliationRequired)};
+}
+
+std::vector<SQLiteProgramProviderCallJournal::Restart>
+SQLiteProgramProviderCallJournal::restarts(std::string_view owner, std::string_view id) const {
+    std::lock_guard lock(impl_->mutex);
+    Statement rows(impl_->db, "SELECT attempt,reason,replaced_state,replaced_outcome "
+                              "FROM ng_program_provider_call_restarts "
+                              "WHERE owner_scope=?1 AND dispatch_id=?2 ORDER BY restart");
+    rows.bind(1, owner);
+    rows.bind(2, id);
+    std::vector<Restart> restarts;
+    while (rows.next()) {
+        const auto reason = rows.column(1);
+        const auto state  = rows.column(2);
+        if ((reason != "session_not_stored" && reason != "outcome_unknown") ||
+            (state != "dispatched" && state != "succeeded" && state != "reconciliation_required"))
+            throw std::runtime_error("Corrupt Program provider journal restart");
+        restarts.push_back({reason == "session_not_stored" ? Restart::Reason::SessionNotStored
+                                                           : Restart::Reason::OutcomeUnknown,
+                            parse_amount(rows.column(0)), state_of(state), rows.column(3)});
+    }
+    return restarts;
 }
 
 std::vector<SQLiteProgramProviderCallJournal::PolicyChange>
@@ -1122,12 +1190,32 @@ void SQLiteProgramProviderCallJournal::reconcile_success(
             existing->evidence != evidence)
             throw std::runtime_error("Program provider reconciliation evidence conflict");
     } else {
+        // #541: a resume restarts or refuses an upload's opening by itself.
+        if (restart_count(impl_->db, owner, id) != 0)
+            throw std::runtime_error(
+                "Program provider reconciliation refused: a resume sent this call, which opens a chunked "
+                "upload's session, again in place of its record. A resume restarts the upload, or refuses it "
+                "with ProgramProviderUploadResendRequiredError, so the record needs no reconciliation");
+        std::string withheld;
+        if (existing->opens_upload) {
+            // A session continues by an upload id or by a URL, and a journal keeps no URL.
+            const auto  typed    = sp::files::typed_progress(*completion);
+            const auto* progress = std::get_if<sp::files::Progress>(&typed);
+            if (!progress || (progress->session.id.empty() && progress->session.url.empty()))
+                throw std::runtime_error(
+                    "Program provider reconciliation refused: this call opens a chunked upload's session, and the "
+                    "completion's session names neither an upload id nor a URL, so a resume could not continue it. "
+                    "A resume sends the call again, and needs no reconciliation");
+            const auto& secret = std::get<sp::Completion>(*completion).secret;
+            if (!secret.empty()) withheld = secret_identity(secret);
+        }
         auto reconciled = *existing;
         reconciled.committed = committed_amount(*completion, reconciled.claim);
         const auto canonical = neograph::detail::canonical_json_bytes(provider_codec::encode_outcome(
             *completion, impl_->archive, archive_binding(owner, id, reconciled)));
         const auto outcome = neograph::detail::sha256_identity(outcome_domain, "outcome", canonical);
-        save_outcome(impl_->db, owner, id, "succeeded", canonical, outcome, evidence, reconciled.committed);
+        save_outcome(impl_->db, owner, id, "succeeded", canonical, outcome, evidence, reconciled.committed,
+                     std::nullopt, withheld);
     }
     tx.commit();
 }
