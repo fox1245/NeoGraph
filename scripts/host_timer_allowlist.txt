@@ -1,8 +1,8 @@
 # Code that may use an Asio timer without src/core/host_timer.h, for scripts/check_host_timers.py (#567).
 # One per line: path-glob<TAB>reason. The glob matches the repository-relative path with fnmatch rules ("*" also
 # crosses "/"); the reason is required. Every entry here is code that never runs on a HostLoop, because the
-# component is not built for a WebAssembly host or its runtime does not start there. An entry that excuses no raw
-# timer use is an error: remove it when the code moves to HostTimer.
+# component is not built for a WebAssembly host or its runtime does not start there, or it is the HostLoop itself.
+# An entry that excuses no raw timer use is an error: remove it when the code moves to HostTimer.
 
 src/async/*	The ASYNC component (HTTP and WebSocket clients over sockets and TLS) is not built for a WebAssembly host.
 src/mcp/client.cpp	The MCP client (sockets, subprocess pipes) is not built for a WebAssembly host.
@@ -10,3 +10,4 @@ src/a2a/client.cpp	The A2A client (sockets and TLS) is not built for a WebAssemb
 src/grpc/*	The gRPC component is not built for a WebAssembly host.
 src/core/postgres_checkpoint.cpp	The PostgreSQL checkpoint store (libpq sockets) is not built for a WebAssembly host.
 src/program/*	ProgramRuntime runs on threads of its own and does not start in a single-thread build (#557). Move these timers to HostTimer when it takes a host executor, and remove this entry.
+src/core/host_loop.cpp	The HostLoop waits on a timer of its own to learn that Asio has dispatched the timers up to a deadline; telling itself of that deadline would only repeat it.

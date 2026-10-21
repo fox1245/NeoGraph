@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=b356aef7a1ba972201c4a1d99a2769c2bd587dd8e021fee6ec4084c036b068cf -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=af08dda8e4780898848c6ccf35b39f7c895ee49d16baa4bf157795491950c3cf -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -148,7 +148,10 @@ SchemaProvider も同じ問題を抱えており、ホストシームで解決�
   イベントループが続き、実行が終わると `ng_js_done` から JavaScript の `Promise` が解決されます。
 - **Asio のタイマー。** リトライのバックオフやリソース待ちのポーリングは Asio のタイマーで、ホストのループは Asio のタイマー
   キューを見られません。エンジンは `async::HostTimer`（`src/core/host_timer.h`）で待ちます。これは Asio のタイマーを設定する呼び出し 1 回で
-  ループに期限を知らせ（`async::note_deadline`）、ループは最も早い期限にホストのタイマーを 1 つ設定します。`src/` や
+  ループに期限を知らせ（`async::note_deadline`）、ループは最も早い期限にホストのタイマーを 1 つ設定します。このタイマーは、
+  同じ時刻に満了する Asio のタイマーを Asio がディスパッチする前に実行されることがあるため（Asio の Windows 用リアクターは
+  タイマーが満了したことを専用のスレッドから知らされ、ホストの時計は Asio の時計より進んでいることがあります）、ループは
+  Asio がその期限までのタイマーをディスパッチするまで期限を保持し、まだなら 1 ミリ秒後にもう一度確認します。`src/` や
   `include/` の素の Asio タイマーはホストでは決して発火しないため、`host_timer_guard` テストがこれを拒否し、ホストの
   ループで動かないコードは `scripts/host_timer_allowlist.txt` に列挙されます。`HostLoop` の下で Asio のタイマーを待つ
   独自のコードは、`async::note_deadline` を自分で呼びます。

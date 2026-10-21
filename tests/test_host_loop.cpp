@@ -37,7 +37,8 @@ using namespace std::chrono_literals;
 namespace {
 
 // A host's executor: work queues up, the host runs it from its own loop, and nothing runs inline. A timer runs when
-// the clock reaches it and the host next looks.
+// the clock reaches it and the host next looks. `clock_lead` makes the host's clock run ahead of the one Asio's
+// timers use, so that a host timer runs before the Asio timer that expires at the same instant has been dispatched.
 class ManualExecutor final : public sp::runtime::Executor {
 public:
     explicit ManualExecutor(bool pumped = true) : pumped_(pumped) {}
@@ -48,7 +49,7 @@ public:
         return id;
     }
     void cancel(Timer id) noexcept override { timers_.erase(id); }
-    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now() + clock_lead; }
     sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
     bool in_thread() const noexcept override { return running_ != 0; }
     bool host_pumped() const noexcept override { return pumped_; }
@@ -77,6 +78,7 @@ public:
     std::size_t timers() const { return timers_.size(); }
     int shutdowns = 0;
     std::size_t tasks_run = 0;
+    std::chrono::steady_clock::duration clock_lead{};
 
 private:
     struct Timed { sp::runtime::SteadyTime at; Task task; };
@@ -412,6 +414,58 @@ TEST(HostLoop, AHostTimerArmedAtAnInstantFiresOnTheHostsTimer) {
         [](async::HostTimer& timer) { timer.arm_at(std::chrono::steady_clock::now() + 30ms); });
 }
 
+// Asio decides when a timer is dispatched, and the host's timer for the same deadline can run first: Asio's Windows
+// reactor learns that a timer is due from a thread of its own, so a turn that polls the instant the deadline passes
+// can find nothing yet, and a host whose clock runs ahead of Asio's does the same on any platform. A deadline must
+// stay noted until Asio has dispatched the timer, or the loop idles and the wait never ends.
+template <class Arm>
+void expect_a_deadline_that_the_host_reaches_first_to_fire(std::chrono::milliseconds lead, Arm arm) {
+    auto executor = std::make_shared<ManualExecutor>();
+    executor->clock_lead = lead;
+    async::HostLoop loop(executor);
+    bool done = false;
+    loop.spawn(wait_on_a_host_timer(arm), [&](std::exception_ptr error) { done = !error; });
+    const auto limit = std::chrono::steady_clock::now() + 2s;
+    while (!done && std::chrono::steady_clock::now() < limit) {
+        if (!executor->step()) std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(done) << "the host's timer ran before Asio dispatched the wait, and nothing woke the loop again";
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_EQ(executor->pending(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, ADeadlineThatTheHostsClockReachesBeforeAsioDispatchesItIsNotLost) {
+    expect_a_deadline_that_the_host_reaches_first_to_fire(
+        20ms, [](async::HostTimer& timer) { timer.arm_after(30ms); });
+}
+
+TEST(HostLoop, ADeadlineThatIsAlreadyDueOnTheHostsClockWhenNotedIsNotLost) {
+    expect_a_deadline_that_the_host_reaches_first_to_fire(
+        50ms, [](async::HostTimer& timer) { timer.arm_after(10ms); });
+}
+
+TEST(HostLoop, ARawAsioTimerNotedBeforeTheHostReachesItIsNotLost) {
+    auto executor = std::make_shared<ManualExecutor>();
+    executor->clock_lead = 20ms;
+    async::HostLoop loop(executor);
+    bool done = false;
+    auto sleeping = []() -> asio::awaitable<void> {
+        auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer timer(ex);
+        timer.expires_after(30ms);
+        async::note_deadline(ex, timer.expiry());
+        co_await timer.async_wait(asio::use_awaitable);
+    };
+    loop.spawn(sleeping(), [&](std::exception_ptr error) { done = !error; });
+    const auto limit = std::chrono::steady_clock::now() + 2s;
+    while (!done && std::chrono::steady_clock::now() < limit) {
+        if (!executor->step()) std::this_thread::sleep_for(1ms);
+    }
+    ASSERT_TRUE(done) << "the host's timer ran before Asio dispatched the wait, and nothing woke the loop again";
+    EXPECT_TRUE(loop.idle());
+}
+
 namespace {
 class FlakyNode : public graph::GraphNode {
 public:
@@ -427,9 +481,8 @@ private:
     std::string name_;
     std::atomic<int> calls_{0};
 };
-}  // namespace
 
-TEST(HostLoop, ARetryBackoffWaitsOnTheHostsTimer) {
+void expect_a_retry_backoff_to_end(std::chrono::milliseconds lead) {
     graph::NodeFactory::instance().register_type(
         "host_loop_flaky",
         [](const std::string& name, const json&, const graph::NodeContext&) -> std::unique_ptr<graph::GraphNode> {
@@ -444,6 +497,7 @@ TEST(HostLoop, ARetryBackoffWaitsOnTheHostsTimer) {
     engine->set_retry_policy(graph::RetryPolicy{1, 40, 1.0f, 40, 0.0f});
 
     auto executor = std::make_shared<ManualExecutor>();
+    executor->clock_lead = lead;
     async::HostLoop loop(executor);
     Finished finished;
     graph::RunConfig config;
@@ -463,6 +517,12 @@ TEST(HostLoop, ARetryBackoffWaitsOnTheHostsTimer) {
     EXPECT_EQ(finished.result.channel<std::string>("result"), "ok");
     EXPECT_GE(std::chrono::steady_clock::now() - started, 40ms);
 }
+}  // namespace
+
+TEST(HostLoop, ARetryBackoffWaitsOnTheHostsTimer) { expect_a_retry_backoff_to_end(0ms); }
+
+// The host's timer for the backoff runs before Asio dispatches the Asio timer, as in the tests of deadlines above.
+TEST(HostLoop, ARetryBackoffEndsWhenTheHostsClockRunsAheadOfAsios) { expect_a_retry_backoff_to_end(30ms); }
 
 TEST(HostLoop, AGraphCallsTheModelThroughTheHostSeam) {
     Host host;
@@ -586,6 +646,21 @@ TEST(HostLoop, DestroyingTheLoopWithARunInFlightLeavesNothingRunning) {
     engine.reset();
     host.provider.reset();
     while (host.client_executor->step() || host.loop_executor->step()) {}
+    EXPECT_FALSE(completed);
+}
+
+TEST(HostLoop, DestroyingTheLoopWithATimerPendingLeavesNothingScheduled) {
+    auto executor = std::make_shared<ManualExecutor>();
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(wait_on_a_host_timer([](async::HostTimer& timer) { timer.arm_after(10s); }),
+                   [&](std::exception_ptr) { completed = true; });
+        while (executor->step()) {}
+        EXPECT_EQ(executor->timers(), 1u) << "one host timer for the deadline";
+    }
+    EXPECT_EQ(executor->timers(), 0u) << "the loop cancelled its host timer";
+    while (executor->step()) {}
     EXPECT_FALSE(completed);
 }
 

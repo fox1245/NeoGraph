@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=23f9435c4737b5e0ae23f2c50291e2cd4cb569e64d2b7cbbddc51a1e3f0b726d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=111632043ee21775a3a6b7fb870eac6c77f89281fe9499048640164cd4b2d49b -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -50,6 +50,9 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **`HostLoop`이 호스트가 Asio보다 먼저 도달한 타이머를 더 이상 잃지 않습니다 (#535).** 기록된 기한 뒤에 폴링했는데 준비된 핸들러가 없던 턴은, 그 시점까지 기한이 된 타이머를 Asio가 모두 디스패치했다고 가정하고 기한을 버렸습니다. 이를 정하는 것은 Asio이고 호스트의 타이머가 먼저 실행될 수 있습니다. Asio의 Windows 리액터는 타이머가 만료되었음을 자체 스레드로부터 전달받으므로 기한에 맞춰 한 폴링은 타이머가 아직 디스패치되지 않은 상태를 만날 수 있고, 호스트의 시계는 Asio의 시계보다 앞설 수 있습니다. 그 턴은 기한을 버리고 대기가 걸린 채로 루프를 유휴 상태로 두었으며, 그래서 재시도 백오프나 다른 `HostTimer`를 기다리는 실행이 끝나지 않았습니다. `HostLoop.ARetryBackoffWaitsOnTheHostsTimer`와 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer`가 CI의 Windows 잡에서 간헐적으로 실패했습니다.
+  - **기한은 Asio가 그 타이머를 디스패치할 때까지 기록된 채로 남습니다.** 루프는 가장 이른 기한에 자신의 타이머로 기다리다가, Asio가 그 타이머를 디스패치하면 거기까지의 기한을 버립니다. 그 전에 실행된 턴은 1 ms 뒤에 다시 확인합니다. 기록하는 시점에 이미 호스트의 시계로 기한이 지난 기한도 같은 방식으로 유지되며, 전에는 버려졌습니다.
+  - API는 바뀌지 않습니다. 타이머가 제때 발화하는 호스트에서는 루프가 전과 같이 동작합니다. 회귀 테스트는 수동 executor의 시계를 Asio의 시계보다 앞서게 하며, 이전 엔진에서는 Linux에서도 실패했고 지금은 통과합니다.
 - **Program 저장소가 서로 달랐던 부분을 맞추고, 각각 fail-closed로 처리합니다 (#556).** 공유 전이 검증기는 인메모리, SQLite, PostgreSQL 저장소 사이의 네 가지 차이를 그대로 두었습니다. 세 가지는 이제 계약을 따르고, 나머지 하나는 인메모리 저장소의 명시된 한계입니다.
   - **형식이 잘못된 기대 헤드는 모든 저장소가 저장된 상태를 읽기 전에 거부합니다.** SHA-256 아이덴티티가 아닌 헤드는 저장된 헤드와 일치할 수 없으므로 `compare_publish`는 읽지 않고 `Conflict`로 답합니다. 인메모리 저장소는 이미 그렇게 했습니다. SQL 저장소는 실행 기록을 읽은 뒤 헤드 비교 단계에서 같은 `Conflict`에 이르렀기 때문에, 읽을 수 없는 저장 기록이 있으면 `Conflict` 대신 예외를 던졌습니다.
   - **좌표 열이 바이트와 어긋나는 저장된 명령 행은 모든 저장소에서 손상으로 취급됩니다.** PostgreSQL 저장소는 이 경우 `std::invalid_argument`를 던졌습니다. SQLite 저장소는 같은 행을 읽을 때는 예외를 던지면서도, 게시 검사에서는 호출자가 오래된 헤드를 쓴 것처럼 `Conflict`로 답했습니다. 이제 두 저장소 모두 게시 검사에서도 `std::invalid_argument`를 던집니다.
