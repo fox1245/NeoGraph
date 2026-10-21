@@ -312,12 +312,18 @@ TEST(LiveEndpoints, OpenAIImageGeneration) {
     EXPECT_GT(result->images[0].data->size(), 1000u);
 }
 
+// The speech model of the live tests. The speech endpoint is under test here, not the model, so this is the
+// model that answers promptly: in October 2026 gpt-4o-mini-tts took up to a minute to answer speech requests
+// (mp3, pcm and wav alike, with or without NeoGraph), past the 30 s these tests allow, while tts-1 answered
+// every format in a few seconds.
+constexpr const char* kSpeechModel = "tts-1";
+
 // Speech made by one endpoint is transcribed by another, and the words survive the round trip.
 TEST(LiveEndpoints, OpenAISpeechThenTranscription) {
     LIVE_KEY(key, "OPENAI_API_KEY");
     auto provider = openai_provider(key);
     sp::speech::Request speech;
-    speech.model = "gpt-4o-mini-tts";
+    speech.model = kSpeechModel;
     speech.input = "The quick brown fox jumps over the lazy dog.";
     speech.voice = "alloy";
     speech.format = "mp3";
@@ -573,7 +579,7 @@ std::string pcm_16k(const std::string& pcm_24k) {
 std::string spoken_pcm(const std::string& key, const std::string& text) {
     auto provider = openai_provider(key);
     sp::speech::Request speech;
-    speech.model = "gpt-4o-mini-tts";
+    speech.model = kSpeechModel;
     speech.input = text;
     speech.voice = "alloy";
     speech.format = "pcm";
