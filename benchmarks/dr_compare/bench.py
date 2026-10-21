@@ -20,7 +20,7 @@ What we're isolating:
   * Same Postgres backend
 What necessarily differs:
   * NeoGraph: C++ engine, asio thread-pool fan-out, HTTP Chat by default
-  * LangGraph: Python engine, asyncio fan-out, HTTP Chat via httpx
+  * LangGraph: Python engine, sync invoke with a per-call thread pool for fan-out, HTTP Chat via httpx
 
 NG_TRANSPORT=http-responses compares a different wire API and must be labeled
 separately from the HTTP Chat comparison. LLM_MOCK_MS>=0 instead measures

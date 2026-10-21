@@ -1,0 +1,30 @@
+# Tip of the default branch of each compared framework, installed from git at an exact commit (resolved
+# 2026-10-21; Python 3.12). Commit dates (UTC) are in the comments. A monorepo package is installed from its
+# subdirectory. If an install or an import fails, the cohort falls back to the release for that framework and
+# the record says so.
+# One virtual environment per framework: compare/setup_venvs.sh creates `<name>` for every `# venv: <name>` section.
+#
+# venv: langgraph-head
+# langchain-ai/langchain 2026-10-20T15:51:22Z, langchain-ai/langgraph 2026-10-21T12:22:40Z
+langchain-core @ git+https://github.com/langchain-ai/langchain@e6d83ef6a6e2482cd55691023c51e45d7584a94f#subdirectory=libs/core
+langgraph @ git+https://github.com/langchain-ai/langgraph@3cd57c038ad827d05f80c6488adea9994156c58c#subdirectory=libs/langgraph
+langgraph-checkpoint @ git+https://github.com/langchain-ai/langgraph@3cd57c038ad827d05f80c6488adea9994156c58c#subdirectory=libs/checkpoint
+langgraph-prebuilt @ git+https://github.com/langchain-ai/langgraph@3cd57c038ad827d05f80c6488adea9994156c58c#subdirectory=libs/prebuilt
+
+# venv: haystack-head
+# deepset-ai/haystack 2026-10-21T11:18:45Z
+haystack-ai @ git+https://github.com/deepset-ai/haystack@276746c78b41858df94d7a08da7ecfbd708f4200
+
+# venv: pydantic_graph-head
+# pydantic/pydantic-ai 2026-10-21T12:17:53Z
+pydantic-graph @ git+https://github.com/pydantic/pydantic-ai@e0ccafa8ab9d205bc09bcd4db31a010301f2e116#subdirectory=pydantic_graph
+
+# venv: llamaindex-head
+# run-llama/llama_index 2026-10-14T15:29:28Z, run-llama/workflows-py 2026-10-21T02:40:08Z
+llama-index-core @ git+https://github.com/run-llama/llama_index@619d74664e8404612038bc15a1a40c686037277c#subdirectory=llama-index-core
+llama-index-workflows @ git+https://github.com/run-llama/workflows-py@f3528e83f35dab5ae2a32615f8394927b3f20622#subdirectory=packages/llama-index-workflows
+
+# venv: autogen-head
+# microsoft/autogen 2026-10-16T16:14:36Z
+autogen-core @ git+https://github.com/microsoft/autogen@004749e6b7102c8fd317b9b1499ce5807223c278#subdirectory=python/packages/autogen-core
+autogen-agentchat @ git+https://github.com/microsoft/autogen@004749e6b7102c8fd317b9b1499ce5807223c278#subdirectory=python/packages/autogen-agentchat

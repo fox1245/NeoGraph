@@ -797,6 +797,13 @@ add_test(NAME ci_ab_gates_selftest
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_ci_ab_gates.py)
 set_tests_properties(ci_ab_gates_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
 
+# The cross-framework benchmark tooling: the cell-validity rule of benchmarks/compare, the driver's handling of a
+# failed cell, and the generator (scripts/render_bench_report.py) that renders every table and chart of
+# benchmarks/README.md from a checked-in record.
+add_test(NAME bench_compare_selftest
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_bench_compare.py)
+set_tests_properties(bench_compare_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
+
 # Engine code waits on async::HostTimer (src/core/host_timer.h), never on a raw Asio timer: a HostLoop cannot see Asio's
 # timer queue, so a timer that it was not told about never fires on a WebAssembly host (#567). The scan covers src/ and
 # include/; scripts/host_timer_allowlist.txt lists the code that never runs on a host loop, each with its reason.
