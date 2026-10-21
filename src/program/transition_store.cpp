@@ -1235,7 +1235,7 @@ public:
         const auto* run = stored(run_id);
         return run && effect_history_contains(run->effects, run->history, effect_id);
     }
-    std::optional<Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>> command_log(
+    Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) override {
         return history_of(stored(run_id), &Stored::commands);
     }
@@ -1571,13 +1571,10 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
     auto prepared = detail::transition::prepare_transition(
-        owner, publication, safe_point_evidence, safe_point_capsule, expected_lease, next_lease);
+        owner, expected, publication, safe_point_evidence, safe_point_capsule, expected_lease,
+        next_lease);
     if (!prepared) return ProgramTransitionPublishResult::Conflict;
     std::string publication_bytes = std::move(*prepared);
-    // A head that cannot be a journal head is refused before any state is read.
-    if (!expected.empty() && !detail::is_sha256_identity(expected)) {
-        return ProgramTransitionPublishResult::Conflict;
-    }
 
     auto            storage_key = key(owner, publication.run_record.run_id());
     std::lock_guard lock(impl_->mutex);

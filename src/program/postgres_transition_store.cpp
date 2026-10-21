@@ -472,7 +472,7 @@ public:
             {std::string(owner_scope_), std::string(run_id), std::string(effect_id)});
         return PQntuples(result.get()) != 0;
     }
-    std::optional<Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>> command_log(
+    Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) override {
         return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(
             load_all_javascript_commands(connection_, owner_scope_, run_id));
@@ -1129,8 +1129,8 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
     const auto publication_bytes = detail::transition::prepare_transition(
-        owner_scope, publication, safe_point_evidence, safe_point_capsule, expected_lease,
-        next_lease);
+        owner_scope, expected_journal_head, publication, safe_point_evidence, safe_point_capsule,
+        expected_lease, next_lease);
     if (!publication_bytes) return ProgramTransitionPublishResult::Conflict;
 
     const std::string run_id = publication.run_record.run_id();

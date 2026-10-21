@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=377578a5a8f620ea920bec560acb17f5b6924c22318e3fa4c1443a449a0c9134 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=23f9435c4737b5e0ae23f2c50291e2cd4cb569e64d2b7cbbddc51a1e3f0b726d -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -50,6 +50,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Program 存储在过去不一致的地方现在对齐，并且每一处都以 fail-closed 处理 (#556)。** 共享的转换校验器保留了内存、SQLite 和 PostgreSQL 存储之间的四处差异。其中三处现在遵循契约，第四处是内存存储的已声明限制。
+  - **格式错误的期望头在所有存储中都会在读取已存状态之前被拒绝。** 不是 SHA-256 标识的头不可能与已存的头匹配，因此 `compare_publish` 不读取就返回 `Conflict`。内存存储原本就是这样。SQL 存储是在读取运行记录之后、比较头时才得到同样的 `Conflict`，所以只要有读不出的已存记录，它们就会抛出异常而不是返回 `Conflict`。
+  - **坐标列与字节内容不一致的已存命令行，在所有存储中都视为损坏。** PostgreSQL 存储对此会抛出 `std::invalid_argument`。SQLite 存储读取同一行时会抛出异常，但在发布检查中却像调用方持有过期的头一样返回 `Conflict`。现在两种存储在发布检查中也都抛出 `std::invalid_argument`。
+  - **SQLite 存储检查与 PostgreSQL 存储相同的标识列。** 已存的世代、谱系头及其历史、图迁移胶囊和执行租约，只有在所有者、键和标识列都与字节中的记录一致时才会返回，否则读取抛出 `std::invalid_argument`。世代 id 就是一致性套件此前在 SQLite 上跳过的情形。0.16.0 及更早版本写入的数据库其列是一致的，读取方式不变。
+  - **只有 SQL 存储会检查已存的上下文历史。** 这一点保持不变：内存存储保存的是它在存入时已经验证过的类型化值，没有可检查的已存字节。
 - **失败的 Python 工具不再把回溯发送给 Provider (#545)。** Python 工具抛出异常时，模型读到的工具结果里带着异常的完整回溯，即主机文件的绝对路径和代码的栈帧，这段文本会发送给 Provider。现在结果只包含异常的类型和消息，例如 `ValueError: bad input`。回溯会以 WARNING 级别写入 `neograph_engine.tools` 日志记录器，异常作为 `exc_info`，主机可以把它保留在自己的日志里；未配置日志时，Python 的 last-resort 处理器会把它打印到 stderr。
   - **行为变更：所有工具的失败调用，其错误文本都有长度上限。** `ToolExecutionPolicy::error_limit_bytes`（Python 中为 `ToolExecutionPolicy.error_limit_bytes`）是失败调用的 `error` 最多可带的字节数，默认 2048，范围 1 字节到 1 MiB。更长的文本会在码点边界截断，并以 `... [truncated]` 结尾。
   - C++ 工具路径也按同样的方式检查过。C++ 工具的错误只是其异常的 `what()`，没有可泄露的回溯，但也没有上限：带有响应正文的异常会原样发送给 Provider。现在它和 MCP、gRPC 工具的错误一样受该上限约束。

@@ -322,6 +322,53 @@ public:
                 " AND lineage_id = " + detail::quote_literal(lineage_id));
     }
 
+    // Gives a stored command row a coordinate column that the entry in its bytes does not carry.
+    void corrupt_command_coordinate(std::string_view owner_scope, std::string_view run_id) {
+        execute("UPDATE " + table("program_transition_javascript_command_log_v2") +
+                " SET coordinate_id = 'tampered' WHERE owner_scope = " +
+                detail::quote_literal(owner_scope) + " AND run_id = " + detail::quote_literal(run_id));
+    }
+
+    // Gives a stored execution lease an id column that the lease in its bytes does not carry.
+    void corrupt_lease_identity(std::string_view owner_scope, std::string_view run_id) {
+        execute("UPDATE " + table("program_execution_leases_v1") +
+                " SET lease_id = 'tampered' WHERE owner_scope = " +
+                detail::quote_literal(owner_scope) + " AND run_id = " + detail::quote_literal(run_id));
+    }
+
+    // Replaces the stored head and the stored history of one lineage with the records of
+    // another, so the records no longer carry the lineage they are stored under.
+    void replace_lineage_records(std::string_view owner_scope, std::string_view from_lineage,
+                                 std::string_view into_lineage) {
+        const auto owner = detail::quote_literal(owner_scope);
+        const auto from  = detail::quote_literal(from_lineage);
+        const auto into  = detail::quote_literal(into_lineage);
+        execute("UPDATE " + table("program_run_lineage_heads_v1") +
+                " SET head_bytes = (SELECT head_bytes FROM " +
+                table("program_run_lineage_heads_v1") + " WHERE owner_scope = " + owner +
+                " AND lineage_id = " + from + ") WHERE owner_scope = " + owner +
+                " AND lineage_id = " + into);
+        execute("UPDATE " + table("program_run_lineage_history_v1") +
+                " SET canonical_bytes = (SELECT canonical_bytes FROM " +
+                table("program_run_lineage_history_v1") + " WHERE owner_scope = " + owner +
+                " AND lineage_id = " + from + " LIMIT 1) WHERE owner_scope = " + owner +
+                " AND lineage_id = " + into);
+    }
+
+    // Stores a graph migration capsule under an id column that the capsule in its bytes does
+    // not carry.
+    void insert_capsule_with_foreign_identity(std::string_view owner_scope,
+                                              std::string_view source_run_id,
+                                              std::string_view source_lineage_head_id,
+                                              std::string_view capsule_bytes) {
+        execute("INSERT INTO " + table("program_graph_migration_capsules_v1") +
+                "(owner_scope, source_run_id, source_lineage_head_id, capsule_id, capsule_bytes) "
+                "VALUES(" + detail::quote_literal(owner_scope) + ", " +
+                detail::quote_literal(source_run_id) + ", " +
+                detail::quote_literal(source_lineage_head_id) + ", 'tampered', " +
+                detail::quote_literal(capsule_bytes) + ")");
+    }
+
     // Replaces a stored version with bytes that are not a canonical version.
     void corrupt_program_version(std::string_view version_id) {
         const auto table = detail::catalog_stage_table(backend_, CatalogWriteStage::Version).table;
@@ -330,6 +377,12 @@ public:
     }
 
 private:
+    // A table of the Program schema: the SQLite name, or the same name under the PostgreSQL prefix.
+    std::string table(std::string_view name) const {
+        return backend_ == StoreBackend::PostgreSql ? "neograph_" + std::string(name)
+                                                    : std::string(name);
+    }
+
     static ProgramTransitionFaultPoint memory_fault_point(WriteStage stage) {
         switch (stage) {
         case WriteStage::Run: return ProgramTransitionFaultPoint::AfterRunSnapshot;

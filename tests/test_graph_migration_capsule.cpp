@@ -1,6 +1,7 @@
 #include <neograph/program/program.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/state.h>
+#include "fixtures/program_store_backends.h"
 #include "fixtures/typed_provider.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
@@ -822,3 +823,41 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
     }
 }
 #endif
+
+// Key binding for the stored graph safe point: a row whose id column disagrees with the capsule
+// in its bytes is never returned. The capsule is stored only by the runtime's safe-point
+// publication, so the row is planted beside the published source run.
+class GraphMigrationCapsuleStoreConformance
+    : public ::testing::TestWithParam<neograph::program::test_support::StoreBackend> {};
+
+TEST_P(GraphMigrationCapsuleStoreConformance, StoredCapsuleRowMustAgreeWithItsRecord) {
+    using neograph::program::test_support::StoreDeployment;
+    if (const auto reason = neograph::program::test_support::backend_unavailable_reason(GetParam()))
+        GTEST_SKIP() << *reason;
+    if (GetParam() == neograph::program::test_support::StoreBackend::InMemory)
+        GTEST_SKIP() << "the in-memory store keeps typed values in the process: stored-byte tamper "
+                        "detection needs a durable backend (declared capability, #556)";
+    const auto source = migration_source_fixture();
+    const auto owner  = source.publication.run_record.owner_scope();
+    const auto run_id = source.publication.run_record.run_id();
+    StoreDeployment deployment(GetParam());
+    {
+        const auto store = deployment.transition_store();
+        ASSERT_EQ(store->compare_publish(owner, {}, source.publication),
+                  ProgramTransitionPublishResult::Published);
+    }
+    deployment.insert_capsule_with_foreign_identity(
+        owner, run_id, source.capsule.source_lineage_head_id(),
+        source.capsule.serialize_canonical());
+    const auto store = deployment.transition_store();
+    EXPECT_THROW((void)store->load_graph_migration_capsule(
+                     owner, run_id, source.capsule.source_lineage_head_id()),
+                 std::invalid_argument);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    Backends, GraphMigrationCapsuleStoreConformance,
+    ::testing::ValuesIn(neograph::program::test_support::store_backends()),
+    [](const ::testing::TestParamInfo<neograph::program::test_support::StoreBackend>& info) {
+        return std::string(neograph::program::test_support::backend_name(info.param));
+    });

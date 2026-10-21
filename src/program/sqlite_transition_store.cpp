@@ -184,7 +184,10 @@ std::optional<ProgramRunLineage> load_current_lineage_head(sqlite3* db,
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, lineage_id);
     if (!statement.step_row()) return std::nullopt;
-    return ProgramRunLineage::parse(column_blob(statement.get(), 0));
+    auto lineage = ProgramRunLineage::parse(column_blob(statement.get(), 0));
+    if (lineage.owner_scope() != owner_scope || lineage.lineage_id() != lineage_id)
+        throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+    return lineage;
 }
 
 std::optional<ProgramRunLineage> load_historical_lineage_head(sqlite3* db,
@@ -198,7 +201,11 @@ std::optional<ProgramRunLineage> load_historical_lineage_head(sqlite3* db,
     statement.bind_text(2, lineage_id);
     statement.bind_text(3, head_id);
     if (!statement.step_row()) return std::nullopt;
-    return ProgramRunLineage::parse(column_blob(statement.get(), 0));
+    auto lineage = ProgramRunLineage::parse(column_blob(statement.get(), 0));
+    if (lineage.owner_scope() != owner_scope || lineage.lineage_id() != lineage_id ||
+        lineage.id() != head_id)
+        throw std::invalid_argument("Stored Program lineage history is corrupt");
+    return lineage;
 }
 
 std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
@@ -206,13 +213,17 @@ std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
                                                             std::string_view lineage_id,
                                                             std::uint64_t generation) {
     Statement statement(
-        db, "SELECT canonical_bytes FROM program_run_generations_v1 "
+        db, "SELECT generation_id, canonical_bytes FROM program_run_generations_v1 "
             "WHERE owner_scope = ?1 AND lineage_id = ?2 AND generation = ?3");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, lineage_id);
     statement.bind_uint64(3, generation);
     if (!statement.step_row()) return std::nullopt;
-    return ProgramRunGeneration::parse(column_blob(statement.get(), 0));
+    auto value = ProgramRunGeneration::parse(column_blob(statement.get(), 1));
+    if (value.owner_scope() != owner_scope || value.lineage_id() != lineage_id ||
+        value.generation() != generation || value.id() != column_text(statement.get(), 0))
+        throw std::invalid_argument("Stored Program generation binding is corrupt");
+    return value;
 }
 
 std::optional<ProgramTransitionPublication> load_generation_initial_publication_record(
@@ -244,15 +255,16 @@ std::optional<GraphMigrationCapsule> load_graph_migration_capsule_record(
     sqlite3* db, std::string_view owner_scope, std::string_view source_run_id,
     std::string_view source_lineage_head_id) {
     Statement statement(
-        db, "SELECT capsule_bytes FROM program_graph_migration_capsules_v1 "
+        db, "SELECT capsule_id, capsule_bytes FROM program_graph_migration_capsules_v1 "
             "WHERE owner_scope = ?1 AND source_run_id = ?2 AND source_lineage_head_id = ?3");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, source_run_id);
     statement.bind_text(3, source_lineage_head_id);
     if (!statement.step_row()) return std::nullopt;
-    auto capsule = GraphMigrationCapsule::parse(column_blob(statement.get(), 0));
+    auto capsule = GraphMigrationCapsule::parse(column_blob(statement.get(), 1));
     if (capsule.owner_scope() != owner_scope || capsule.source_run_id() != source_run_id ||
-        capsule.source_lineage_head_id() != source_lineage_head_id) {
+        capsule.source_lineage_head_id() != source_lineage_head_id ||
+        capsule.id() != column_text(statement.get(), 0)) {
         throw std::invalid_argument("Stored graph migration capsule binding is corrupt");
     }
     return capsule;
@@ -261,13 +273,14 @@ std::optional<GraphMigrationCapsule> load_graph_migration_capsule_record(
 std::optional<ProgramExecutionLease> load_execution_lease_record(
     sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
     Statement statement(
-        db, "SELECT lease_bytes FROM program_execution_leases_v1 "
+        db, "SELECT lease_id, lease_bytes FROM program_execution_leases_v1 "
             "WHERE owner_scope = ?1 AND run_id = ?2");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, run_id);
     if (!statement.step_row()) return std::nullopt;
-    auto lease = ProgramExecutionLease::parse(column_blob(statement.get(), 0));
-    if (lease.owner_scope() != owner_scope || lease.run_id() != run_id) {
+    auto lease = ProgramExecutionLease::parse(column_blob(statement.get(), 1));
+    if (lease.owner_scope() != owner_scope || lease.run_id() != run_id ||
+        lease.id() != column_text(statement.get(), 0)) {
         throw std::invalid_argument("Stored Program execution lease binding is corrupt");
     }
     return lease;
@@ -446,7 +459,7 @@ public:
         statement.bind_text(3, effect_id);
         return statement.step_row();
     }
-    std::optional<Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>> command_log(
+    Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) override {
         std::vector<ProgramJavaScriptCommandJournalEntry> commands;
         Statement statement(
@@ -458,7 +471,10 @@ public:
         while (statement.step_row()) {
             auto entry = ProgramJavaScriptCommandJournalEntry::parse(
                 column_blob(statement.get(), 1));
-            if (column_text(statement.get(), 0) != entry.coordinate_id()) return std::nullopt;
+            if (column_text(statement.get(), 0) != entry.coordinate_id()) {
+                throw std::invalid_argument(
+                    "Stored JavaScript command journal coordinate column mismatch");
+            }
             commands.push_back(std::move(entry));
         }
         return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(std::move(commands));
@@ -1280,8 +1296,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
     const auto publication_bytes = detail::transition::prepare_transition(
-        owner_scope, publication, safe_point_evidence, safe_point_capsule, expected_lease,
-        next_lease);
+        owner_scope, expected_journal_head, publication, safe_point_evidence, safe_point_capsule,
+        expected_lease, next_lease);
     if (!publication_bytes) return ProgramTransitionPublishResult::Conflict;
 
     const std::string run_id = publication.run_record.run_id();

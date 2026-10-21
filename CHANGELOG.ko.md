@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=377578a5a8f620ea920bec560acb17f5b6924c22318e3fa4c1443a449a0c9134 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=23f9435c4737b5e0ae23f2c50291e2cd4cb569e64d2b7cbbddc51a1e3f0b726d -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -50,6 +50,11 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Program 저장소가 서로 달랐던 부분을 맞추고, 각각 fail-closed로 처리합니다 (#556).** 공유 전이 검증기는 인메모리, SQLite, PostgreSQL 저장소 사이의 네 가지 차이를 그대로 두었습니다. 세 가지는 이제 계약을 따르고, 나머지 하나는 인메모리 저장소의 명시된 한계입니다.
+  - **형식이 잘못된 기대 헤드는 모든 저장소가 저장된 상태를 읽기 전에 거부합니다.** SHA-256 아이덴티티가 아닌 헤드는 저장된 헤드와 일치할 수 없으므로 `compare_publish`는 읽지 않고 `Conflict`로 답합니다. 인메모리 저장소는 이미 그렇게 했습니다. SQL 저장소는 실행 기록을 읽은 뒤 헤드 비교 단계에서 같은 `Conflict`에 이르렀기 때문에, 읽을 수 없는 저장 기록이 있으면 `Conflict` 대신 예외를 던졌습니다.
+  - **좌표 열이 바이트와 어긋나는 저장된 명령 행은 모든 저장소에서 손상으로 취급됩니다.** PostgreSQL 저장소는 이 경우 `std::invalid_argument`를 던졌습니다. SQLite 저장소는 같은 행을 읽을 때는 예외를 던지면서도, 게시 검사에서는 호출자가 오래된 헤드를 쓴 것처럼 `Conflict`로 답했습니다. 이제 두 저장소 모두 게시 검사에서도 `std::invalid_argument`를 던집니다.
+  - **SQLite 저장소가 PostgreSQL 저장소와 같은 아이덴티티 열을 검사합니다.** 저장된 세대, 계보 헤드와 그 이력, 그래프 마이그레이션 캡슐, 실행 리스는 소유자, 키, 아이덴티티 열이 바이트 안의 기록과 모두 일치할 때만 반환되고, 그렇지 않으면 읽기가 `std::invalid_argument`를 던집니다. 세대 id는 적합성 스위트가 SQLite에서 건너뛰던 경우입니다. 0.16.0 이하가 쓴 데이터베이스는 열이 일치하므로 전과 똑같이 읽힙니다.
+  - **저장된 컨텍스트 이력은 SQL 저장소만 검사합니다.** 이 부분은 그대로입니다. 인메모리 저장소는 저장하면서 검증한 타입 값을 들고 있을 뿐, 검사할 저장된 바이트가 없습니다.
 - **실패한 Python 도구가 트레이스백을 제공자에게 보내지 않습니다 (#545).** Python 도구가 예외를 던지면 모델이 읽는 도구 결과에 예외의 트레이스백 전체가, 곧 호스트 파일의 절대 경로와 코드의 프레임이 들어 있었고, 그 텍스트가 제공자로 전송되었습니다. 이제 결과에는 `ValueError: bad input`처럼 예외의 타입과 메시지만 들어갑니다. 트레이스백은 `neograph_engine.tools` 로거에 WARNING 수준으로, 예외를 `exc_info`로 달아 기록되므로 호스트가 자기 로그에 보관합니다. 로깅을 설정하지 않았다면 Python의 last-resort 핸들러가 stderr에 출력합니다.
   - **동작 변경: 실패한 호출의 오류 텍스트에는 모든 도구에 길이 상한이 있습니다.** `ToolExecutionPolicy::error_limit_bytes`(Python에서는 `ToolExecutionPolicy.error_limit_bytes`)는 실패한 호출의 `error`가 담을 수 있는 최대 바이트 수이며, 기본값은 2048이고 범위는 1바이트부터 1 MiB입니다. 더 긴 텍스트는 코드 포인트 경계에서 잘리고 `... [truncated]`로 끝납니다.
   - C++ 도구 경로도 같은 방식으로 점검했습니다. C++ 도구의 오류는 예외의 `what()`일 뿐이라 새어 나갈 트레이스백은 없었지만, 상한도 없었습니다. 응답 본문을 담은 예외가 제공자로 통째로 전송되었습니다. 이제 MCP나 gRPC 도구의 오류와 마찬가지로 상한이 적용됩니다.
