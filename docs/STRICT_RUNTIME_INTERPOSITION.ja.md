@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=a6837ba97c87a975689aac8038004f408ccde630e28e01cd8cc5173ad84663ae -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -211,10 +211,10 @@ trusted supplemental input
 ```
 
 - **エポックのリストが順序です。** `order_context_artifacts` がアーティファクトからこのリストを作ります。安定性クラス、次に高い `priority`、次に `producer_id`、次にホストが与えるキーの順です。内容のハッシュは関与しないので、テキストが変わる兄弟のアーティファクトも位置を保ち、4 つがすべて同じ 2 つのアーティファクトはあいまいとして拒否されます。
-- **配置はクラスに従います。** `Stable` と `Slow` のアーティファクトは `BeforeHistory` に、`Volatile` のものは `AfterHistory` に置き、リストは `Stable`、`Slow`、`Volatile` の順に並べます。それ以外（たとえば既定の配置 `BeforeLatestUser` で作ったアーティファクト）は、移されることなく `ContextStabilityError` で拒否されます。
+- **配置はクラスに従います。** `Stable` と `Slow` のアーティファクトは `BeforeHistory` に、`Volatile` のものは `AfterHistory` に置き、リストは `Stable`、`Slow`、`Volatile` の順に並べます。それ以外（たとえば既定の配置 `BeforeLatestUser` で作ったアーティファクト）は、移されることなく `ContextStabilityError` で拒否されます。 アセンブラが検査するクラスは、アーティファクトが宣言したクラスで、宣言がなければ組み立てるビルドの `derive_stability_class` が返すクラスです。このレイアウトのエポックを保存するホストは、すべてのアーティファクトのクラスを宣言してください。そうしないと、導出規則が後で変わったときに、アセンブラが保存済みのエポックを拒否することがあります。
 - **System テキストは先頭に留まります。** System メッセージになれるのは、ホストの指示と、`Stable` または `Slow` のアーティファクトだけです。RAW や補助入力の System メッセージは、`anthropic.messages`、`google.generate`、`google.interactions` で system フィールドに移されてリクエストの先頭を動かすため、拒否されます。移されるテキストは `Stable`、`Slow` の順です。
 - **レイアウトの変更は断絶です。** 連続する 2 つのエポックでレイアウトが異なるには、後のエポックが理由 `LayoutChange` の `Breaks` を宣言しなければなりません。そうでなければ `verify_context_epoch_claim` が拒否し、レイアウトをまたぐ `Extends` の宣言も拒否します。
-- **本文から読み取る 2 つの境界。** レシートは、`Stable` の部分（ホストの指示と `Stable` のアーティファクト）が終わる位置、追記だけの部分（`Volatile` のアーティファクトより前のすべて）が終わる位置、そして後者までのリクエストのダイジェストを記録します。境界は、エンコードされた本文でプレフィックスに入らない最初のメッセージとパートなので、System テキストを移すファミリーでの `{0, 0}` は、ツールと system フィールドだけのプレフィックスです。位置は、System テキストを移し、ツール結果をまとめ直した後の本文のものです。アセンブラは、プレフィックスのメッセージとその後ろの目印のメッセージだけでリクエストを 2 回、3 回とエンコードして位置を見つけ、エンコードされた本文が食い違えば `ContextStabilityError` でエポックを拒否します。`Slow` の System テキストが `Stable` のテキストと system フィールドを共有するときは、フィールドが 1 つのブロックなので、`Stable` の境界は記録されません。ダイジェストは、ストリームのフラグと出力の上限を除く本文のすべてのメンバーを含み、メッセージは境界で切られます。レガシーのエポックには境界がありません。
+- **本文から読み取る 2 つの境界。** レシートは、`Stable` の部分（ホストの指示と `Stable` のアーティファクト）が終わる位置、追記だけの部分（`Volatile` のアーティファクトより前のすべて）が終わる位置、そして後者までのリクエストのダイジェストを記録します。境界は、エンコードされた本文でプレフィックスに入らない最初のメッセージとパートなので、System テキストを移すファミリーでの `{0, 0}` は、ツールと system フィールドだけのプレフィックスです。位置は、System テキストを移し、ツール結果をまとめ直した後の本文のものです。アセンブラは、プレフィックスのメッセージとその後ろの目印のメッセージだけでリクエストを 2 回、3 回とエンコードして位置を見つけ、エンコードされた本文が食い違えば `ContextStabilityError` でエポックを拒否します。`Slow` の System テキストが `Stable` のテキストと system フィールドを共有するときは、フィールドが 1 つのブロックなので、`Stable` の境界は記録されません。ダイジェストは、ストリームのフラグと出力の上限を除く本文のすべてのメンバーを含み、メッセージは境界で切られます。この 2 つは、ファミリーのディスクリプタが本文の最上位で名前を指定するメンバーで、`google.generate` は出力の上限を `generationConfig` の中に置くため、ダイジェストはそれを覆います。レガシーのエポックには境界がありません。
 
 ## 実行時のデベロッパー指示
 

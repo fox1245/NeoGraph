@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=a6837ba97c87a975689aac8038004f408ccde630e28e01cd8cc5173ad84663ae -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -291,10 +291,10 @@ trusted supplemental input
 ```
 
 - **epoch 的列表就是顺序。** `order_context_artifacts` 根据制品构造这个列表：先按稳定性类别，再按 `priority`（高者在前），再按 `producer_id`，最后按宿主给出的键。内容的哈希不参与，所以文本变化的同级制品保持原位；四项都相同的两个制品会因含混而被拒绝。
-- **放置位置服从类别。** `Stable` 和 `Slow` 制品放在 `BeforeHistory`，`Volatile` 制品放在 `AfterHistory`，列表先列 `Stable`，再列 `Slow`，最后列 `Volatile`。其他情况（例如用默认放置位置 `BeforeLatestUser` 创建的制品）不会被挪动，而是被 `ContextStabilityError` 拒绝。
+- **放置位置服从类别。** `Stable` 和 `Slow` 制品放在 `BeforeHistory`，`Volatile` 制品放在 `AfterHistory`，列表先列 `Stable`，再列 `Slow`，最后列 `Volatile`。其他情况（例如用默认放置位置 `BeforeLatestUser` 创建的制品）不会被挪动，而是被 `ContextStabilityError` 拒绝。 装配器检查的类别，是制品声明的类别；未声明时，则是执行装配的构建中 `derive_stability_class` 给出的类别。保存此布局 epoch 的宿主应声明每个制品的类别，否则派生规则日后改变时，装配器可能会拒绝已保存的 epoch。
 - **System 文本留在前面。** System 消息只能是宿主指令，或 `Stable`、`Slow` 制品。RAW 或补充输入中的 System 消息，在 `anthropic.messages`、`google.generate` 和 `google.interactions` 上会被提升到 system 字段而挪动请求的开头，所以会被拒绝。被提升的文本按 `Stable`、`Slow` 的顺序排列。
 - **布局变更是一次中断。** 相邻的两个 epoch 要使用不同的布局，后一个 epoch 必须声明原因为 `LayoutChange` 的 `Breaks`；否则 `verify_context_epoch_claim` 会拒绝，跨越布局变更的 `Extends` 声明同样被拒绝。
-- **从请求体读出的两个边界。** 回执记录 `Stable` 部分（宿主指令和 `Stable` 制品）在哪里结束、只追加的部分（`Volatile` 制品之前的全部内容）在哪里结束，以及到后者为止的请求摘要。边界是编码后的请求体中第一个不在前缀里的消息和部分，因此在会提升 System 文本的系列上，`{0, 0}` 表示只包含工具和 system 字段的前缀。位置是 System 文本被提升、工具结果被重新分组之后的请求体中的位置。装配器用只含前缀消息、后面再加一条标记消息的请求，把请求再编码第二次、第三次来找到它们；如果编码出的请求体彼此对不上，就以 `ContextStabilityError` 拒绝该 epoch。当 `Slow` 的 System 文本与 `Stable` 文本共用 system 字段时，该字段是一个整体，因此不记录 `Stable` 边界。摘要涵盖请求体中除流标志和输出上限之外的所有成员，消息在边界处截断。旧版 epoch 没有边界。
+- **从请求体读出的两个边界。** 回执记录 `Stable` 部分（宿主指令和 `Stable` 制品）在哪里结束、只追加的部分（`Volatile` 制品之前的全部内容）在哪里结束，以及到后者为止的请求摘要。边界是编码后的请求体中第一个不在前缀里的消息和部分，因此在会提升 System 文本的系列上，`{0, 0}` 表示只包含工具和 system 字段的前缀。位置是 System 文本被提升、工具结果被重新分组之后的请求体中的位置。装配器用只含前缀消息、后面再加一条标记消息的请求，把请求再编码第二次、第三次来找到它们；如果编码出的请求体彼此对不上，就以 `ContextStabilityError` 拒绝该 epoch。当 `Slow` 的 System 文本与 `Stable` 文本共用 system 字段时，该字段是一个整体，因此不记录 `Stable` 边界。摘要涵盖请求体中除流标志和输出上限之外的所有成员，消息在边界处截断。这两个成员是系列的描述符在请求体顶层命名的成员；`google.generate` 把输出上限放在 `generationConfig` 内，摘要会涵盖它。旧版 epoch 没有边界。
 
 ## 运行时的开发者指令
 
