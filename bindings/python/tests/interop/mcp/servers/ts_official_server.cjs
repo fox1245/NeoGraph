@@ -219,7 +219,9 @@ async function runHttp() {
       }
       await transport.handleRequest(req, res, parsed);
     } catch (e) {
-      if (!res.headersSent) { res.statusCode = 500; res.end(String(e)); }
+      // The error goes to stderr for the test log; the client gets no exception text or stack.
+      console.error(e);
+      if (!res.headersSent) { res.statusCode = 500; res.setHeader('Content-Type', 'text/plain'); res.end('internal server error'); }
     }
   });
   // --port 0: the OS picks; READY <port> says the server listens.
