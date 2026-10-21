@@ -20,7 +20,13 @@
 //                      parse, and coroutine scheduling.
 //
 // Output identical to bench_async_fanout (wall, ops/s, peak RSS) so
-// the two can be read side-by-side.
+// the two can be read side-by-side, followed by `ok=` and `failed=`: the calls that
+// returned 200 and the calls that did not (a failed call also ends its coroutine, so
+// the rounds it would have made are counted in neither). ops/s is ok / wall, never
+// the requested number of calls, and the process exits 3 with the first error on
+// stderr when any call failed or fewer than concur * rounds calls completed. The mock
+// server and the clients share one process, so a run needs about two file descriptors
+// per connection: raise the soft limit (`ulimit -n`) before a run with a large --concur.
 //
 // Not measuring (out of PoC scope):
 //   - TLS. Real Anthropic / OpenAI calls are HTTPS; asio::ssl works
@@ -48,6 +54,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -92,6 +99,22 @@ Config parse(int argc, char** argv) {
     if (c.client_threads == 0) c.client_threads = 4;
     return c;
 }
+
+// Calls that completed and calls that failed, with the first failure's text.
+struct Tally {
+    std::atomic<long> ok{0};
+    std::atomic<long> failed{0};
+    std::mutex mutex;
+    std::string first_error;
+
+    void fail(const std::string& what) {
+        failed.fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (first_error.empty()) first_error = what;
+    }
+};
+
+Tally g_tally;
 
 double peak_rss_mb() {
     std::ifstream f("/proc/self/status");
@@ -272,9 +295,11 @@ void run_sync(const Config& cfg) {
                 auto res = cli.Post("/v1/messages",
                     R"({"msg":"ping"})", "application/json");
                 if (!res || res->status != 200) {
-                    std::fprintf(stderr, "sync call failed\n");
+                    g_tally.fail(res ? "sync call status=" + std::to_string(res->status)
+                                     : "sync call failed: " + httplib::to_string(res.error()));
                     return;
                 }
+                g_tally.ok.fetch_add(1, std::memory_order_relaxed);
             }
         });
     }
@@ -292,11 +317,12 @@ asio::awaitable<void> async_agent(asio::any_io_executor ex,
                 ex, "127.0.0.1", std::to_string(port),
                 "/v1/messages", body, {});
             if (resp.status != 200) {
-                std::fprintf(stderr, "async call status=%d\n", resp.status);
+                g_tally.fail("async call status=" + std::to_string(resp.status));
                 co_return;
             }
+            g_tally.ok.fetch_add(1, std::memory_order_relaxed);
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "async call err: %s\n", e.what());
+            g_tally.fail(std::string("async call err: ") + e.what());
             co_return;
         }
     }
@@ -316,7 +342,7 @@ void run_async(const Config& cfg) {
             [&remaining](std::exception_ptr e) {
                 if (e) { try { std::rethrow_exception(e); }
                          catch (const std::exception& ex) {
-                             std::fprintf(stderr, "coro err: %s\n", ex.what()); } }
+                             g_tally.fail(std::string("coroutine error: ") + ex.what()); } }
                 --remaining;
             });
     }
@@ -349,11 +375,12 @@ asio::awaitable<void> pool_agent(neograph::async::ConnPool& pool,
                 "127.0.0.1", std::to_string(port),
                 "/v1/messages", body, {}, false);
             if (resp.status != 200) {
-                std::fprintf(stderr, "pool call status=%d\n", resp.status);
+                g_tally.fail("pool call status=" + std::to_string(resp.status));
                 co_return;
             }
+            g_tally.ok.fetch_add(1, std::memory_order_relaxed);
         } catch (const std::exception& e) {
-            std::fprintf(stderr, "pool call err: %s\n", e.what());
+            g_tally.fail(std::string("pool call err: ") + e.what());
             co_return;
         }
     }
@@ -374,7 +401,7 @@ void run_async_pool(const Config& cfg) {
             [&remaining](std::exception_ptr e) {
                 if (e) { try { std::rethrow_exception(e); }
                          catch (const std::exception& ex) {
-                             std::fprintf(stderr, "coro err: %s\n", ex.what()); } }
+                             g_tally.fail(std::string("coroutine error: ") + ex.what()); } }
                 --remaining;
             });
     }
@@ -468,13 +495,22 @@ int main(int argc, char** argv) {
 
     const bool driver_is_async =
         cfg.mode == "async" || cfg.mode == "async_pool";
-    double total_ops = static_cast<double>(cfg.concur) * cfg.rounds;
+    const long requested = static_cast<long>(cfg.concur) * cfg.rounds;
+    const long ok = g_tally.ok.load();
+    const long failed = g_tally.failed.load();
     std::printf("mode=%-10s concur=%6d rounds=%d lat_ms=%d  "
                 "wall=%6.3fs  ops/s=%9.1f  rss_mb=%7.1f  "
-                "client_threads=%d server_threads=%d\n",
+                "client_threads=%d server_threads=%d  ok=%ld failed=%ld\n",
                 cfg.mode.c_str(), cfg.concur, cfg.rounds, cfg.latency_ms,
-                wall, total_ops / wall, peak_rss_mb(),
+                wall, static_cast<double>(ok) / wall, peak_rss_mb(),
                 driver_is_async ? cfg.client_threads : cfg.concur,
-                cfg.server_threads);
+                cfg.server_threads, ok, failed);
+    if (failed != 0 || ok != requested) {
+        std::fprintf(stderr, "error: %ld of %ld calls completed, %ld failed; first error: %s\n",
+                     ok, requested, failed,
+                     g_tally.first_error.empty() ? "(none: a coroutine ended early)"
+                                                 : g_tally.first_error.c_str());
+        return 3;
+    }
     return 0;
 }

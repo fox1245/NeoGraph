@@ -5,8 +5,11 @@
 #   bash benchmarks/concurrent/run_matrix.sh [output_file]
 #
 # Produces results.jsonl with one JSON object per (profile, concurrency,
-# engine) cell. Container exits with OOM are captured with an explicit
-# error line so the chart can show where each engine dies.
+# engine) cell. A cell is "ok" only when the harness exited 0 and its own
+# record says status "ok" (every run returned the right answer, no failures).
+# Anything else is "error": a harness record with failures, a crash, a timeout,
+# or a container that Docker reports as OOM-killed (read from
+# `docker inspect`, not guessed from exit status 137).
 
 set -uo pipefail
 
@@ -56,32 +59,50 @@ run_cell() {
 
     log "  [$tag] profile=$profile concurrency=$concurrency"
 
+    # Named container, no --rm: the OOM flag is read before the container is removed.
+    local name="ngbench-$$-${tag}-${profile//:/_}-${concurrency}"
     local output
-    output=$(timeout "$timeout_s" docker run --rm \
+    output=$(timeout "$timeout_s" docker run --name "$name" \
         --cpus="$cpus" \
         --memory="$mem" \
         --memory-swap="$mem" \
         "$image" $args "$concurrency" 2>&1)
     local rc=$?
+    local oom
+    oom=$(docker inspect -f '{{.State.OOMKilled}}' "$name" 2>/dev/null || echo unknown)
+    docker rm -f "$name" >/dev/null 2>&1
 
     # Extract the last line that parses as JSON (bench image prints one).
     local json_line
     json_line=$(printf '%s\n' "$output" | tail -n 50 | grep -E '^\{' | tail -n 1)
 
-    if [[ -z "$json_line" ]]; then
-        # Detect OOM kill (exit 137), timeout (124), or other crash.
+    if [[ -z "$json_line" || "$oom" == "true" ]]; then
+        # No record, or the kernel killed the container: report why.
         local reason="crash"
-        case $rc in
-            124) reason="timeout" ;;
-            137) reason="oom_killed" ;;
-            143) reason="sigterm" ;;
-        esac
-        json_line=$(printf '{"engine":"%s","mode":"%s","profile":"%s","concurrency":%d,"status":"%s","exit":%d}' \
-            "${tag%%-*}" "${tag#*-}" "$profile" "$concurrency" "$reason" "$rc")
+        if [[ "$oom" == "true" ]]; then
+            reason="oom_killed"
+        else
+            case $rc in
+                124) reason="timeout" ;;
+                143) reason="sigterm" ;;
+            esac
+        fi
+        json_line=$(printf '{"schema":2,"engine":"%s","mode":"%s","profile":"%s","concurrency":%d,"status":"error","reason":"%s","exit":%d,"oom_killed":"%s"}' \
+            "${tag%%-*}" "${tag#*-}" "$profile" "$concurrency" "$reason" "$rc" "$oom")
     else
-        # Augment the bench's JSON with profile + status.
-        json_line=$(printf '%s' "$json_line" | sed \
-            -e "s/^{/{\"profile\":\"$profile\",\"status\":\"ok\",/")
+        # Add the profile and the exit status; the status is the harness's own
+        # unless the process exited non-zero, which makes the cell an error.
+        json_line=$(printf '%s' "$json_line" | python3 -c '
+import json, sys
+record = json.loads(sys.stdin.read())
+profile, rc = sys.argv[1], int(sys.argv[2])
+if rc != 0 or record.get("status") != "ok":
+    record["status"] = "error"
+record["profile"] = profile
+record["exit"] = rc
+print(json.dumps(record))' "$profile" "$rc") || json_line=$(printf \
+            '{"schema":2,"engine":"%s","mode":"%s","profile":"%s","concurrency":%d,"status":"error","reason":"unreadable_record","exit":%d}' \
+            "${tag%%-*}" "${tag#*-}" "$profile" "$concurrency" "$rc")
     fi
 
     printf '%s\n' "$json_line" | tee -a "$OUT" >&2

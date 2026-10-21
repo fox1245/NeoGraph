@@ -9,5 +9,6 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY benchmarks/concurrent/bench_concurrent_autogen.py /app/bench.py
+COPY benchmarks/concurrent/burst_common.py /app/burst_common.py
 
 ENTRYPOINT ["python", "-u", "/app/bench.py"]

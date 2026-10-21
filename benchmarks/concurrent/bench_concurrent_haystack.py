@@ -3,30 +3,31 @@
 
 Haystack's Pipeline.run() is sync-only. For the `async` mode we wrap it
 with asyncio.to_thread so the event loop can schedule it the way it
-would for a sync tool call wired into a LangGraph-style app — this is
-how users actually deploy Haystack behind an async server.
+would for a sync tool call wired into an async server — this is how
+users deploy Haystack behind an async server. Haystack also ships
+AsyncPipeline; this harness does not use it, so the row measures the
+sync Pipeline on the loop's default thread pool.
 
-Schema matches bench_concurrent_langgraph.py so the runner / renderer
-can concatenate results.
+Record schema 2, see burst_common.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import multiprocessing as mp
 import os
-import resource
-import sys
-import time
 
 from haystack import Pipeline, component
+
+import burst_common as bc
+
+RSS_AFTER_IMPORT_KB = bc.vm_kb("VmRSS")
 
 
 @component
 class Inc:
     @component.output_types(counter=int)
     def run(self, counter: int):
+        bc.inject_failure("haystack")
         return {"counter": counter + 1}
 
 
@@ -40,56 +41,33 @@ def build_seq() -> Pipeline:
     return p
 
 
-def peak_rss_kb() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-
-
-def pct(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    values = sorted(values)
-    idx = min(len(values) - 1, int(len(values) * p))
-    return values[idx]
+def check(result) -> None:
+    # run() returns the outputs of the leaf component only.
+    bc.check_equal("haystack counter", result["c"]["counter"])
 
 
 # ── async mode ─────────────────────────────────────────────────────────
 
-async def _run_async(graph: Pipeline, concurrency: int):
-    async def one_call() -> float:
-        t0 = time.perf_counter()
-        try:
-            await asyncio.to_thread(graph.run, {"a": {"counter": 0}})
-            return (time.perf_counter() - t0) * 1_000_000.0
-        except Exception:
-            return -1.0
-
-    tasks = [asyncio.create_task(one_call()) for _ in range(concurrency)]
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    ok = [v for v in results if v >= 0]
-    return ok, len(ok), concurrency - len(ok)
-
-
 def run_async(concurrency: int) -> dict:
     graph = build_seq()
-    for _ in range(10):
-        graph.run({"a": {"counter": 0}})
 
-    t_start = time.perf_counter()
-    ok_latencies, ok_count, err_count = asyncio.run(_run_async(graph, concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
+    def warm():
+        for _ in range(10):
+            check(graph.run({"a": {"counter": 0}}))
 
-    return {
-        "engine": "haystack",
-        "mode": "asyncio",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": ok_count,
-        "err": err_count,
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    failed = bc.guard_warmup("haystack", "asyncio", concurrency, warm, RSS_AFTER_IMPORT_KB)
+    if failed:
+        return failed
+    rss_before = bc.vm_kb("VmRSS")
+
+    async def call():
+        return await asyncio.to_thread(graph.run, {"a": {"counter": 0}})
+
+    collector, wall_ns = asyncio.run(bc.burst_async(concurrency, call, check))
+    return bc.build_record(
+        "haystack", "asyncio", concurrency, collector, wall_ns,
+        note="sync Pipeline.run through asyncio.to_thread on the default thread pool (AsyncPipeline not used)",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before)
 
 
 # ── multiprocessing mode ───────────────────────────────────────────────
@@ -100,56 +78,26 @@ _worker_graph = None
 def _mp_init():
     global _worker_graph
     _worker_graph = build_seq()
+    check(_worker_graph.run({"a": {"counter": 0}}))  # first-call cost off the clock
 
 
-def _mp_invoke(_: int) -> float:
-    assert _worker_graph is not None
-    t0 = time.perf_counter()
-    try:
-        _worker_graph.run({"a": {"counter": 0}})
-        return (time.perf_counter() - t0) * 1_000_000.0
-    except Exception:
-        return -1.0
+def _mp_invoke(_: int) -> tuple:
+    return bc.timed_call(lambda: _worker_graph.run({"a": {"counter": 0}}), check)
 
 
 def run_mp(concurrency: int) -> dict:
     pool_size = os.cpu_count() or 1
-
-    t_start = time.perf_counter()
-    with mp.Pool(pool_size, initializer=_mp_init) as pool:
-        latencies = pool.map(_mp_invoke, range(concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
-
-    ok_latencies = [v for v in latencies if v >= 0]
-    return {
-        "engine": "haystack",
-        "mode": f"mp-pool-{pool_size}",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": len(ok_latencies),
-        "err": concurrency - len(ok_latencies),
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    rss_before = bc.vm_kb("VmRSS")
+    collector, wall_ns, info = bc.burst_mp(concurrency, pool_size, _mp_invoke, _mp_init)
+    return bc.build_record(
+        "haystack", f"mp-pool-{pool_size}", concurrency, collector, wall_ns,
+        note="sync Pipeline.run in each pool worker; pool started and pipeline built before the clock",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before, mp_info=info)
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print("usage: bench_concurrent_haystack.py {async|mp} <concurrency>",
-              file=sys.stderr)
-        sys.exit(1)
-    mode, concurrency = sys.argv[1], int(sys.argv[2])
-    if mode == "async":
-        result = run_async(concurrency)
-    elif mode == "mp":
-        result = run_mp(concurrency)
-    else:
-        print(f"unknown mode: {mode}", file=sys.stderr)
-        sys.exit(1)
-    print(json.dumps(result))
-    sys.exit(2 if result["err"] > 0 else 0)
+    mode, concurrency = bc.parse_args("bench_concurrent_haystack.py")
+    bc.finish(run_async(concurrency) if mode == "async" else run_mp(concurrency))
 
 
 if __name__ == "__main__":

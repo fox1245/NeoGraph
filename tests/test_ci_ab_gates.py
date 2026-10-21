@@ -38,6 +38,8 @@ PROGRAM_OUTPUT = (
     "metric\toverhead_ratio\t129.0\n")
 FANOUT_OUTPUT = ("mode=async concur= 50000 rounds=5 lat_ms=50  wall= 0.299s  ops/s= 834754.2  "
                  "rss_mb=   67.5  io_threads=4\n")
+HTTP_OUTPUT = ("mode=async_pool concur=  1000 rounds=5 lat_ms=5  wall= 0.166s  ops/s=  30120.5  "
+               "rss_mb=   51.0  client_threads=4 server_threads=4  ok=5000 failed=0\n")
 CHECKPOINT_OUTPUT = (
     "# bench_checkpoint_store threads=4 iters=200 channels=6 payload=256B\n"
     "backend      wall(s)     ops/sec     p50(us)     p95(us)     p99(us)     blobs\n"
@@ -472,6 +474,16 @@ class CheckScript(unittest.TestCase):
         self.assertEqual(record["ops"], "834754.2")
         with self.assertRaises(check.BenchmarkError):
             check.parse_async(FANOUT_OUTPUT, arguments[:3] + ["1000"] + arguments[4:], http=False)
+
+    def test_an_http_record_must_count_every_requested_call_as_completed(self):
+        arguments = ["--mode", "async_pool", "--concur", "1000", "--rounds", "5", "--latency-ms", "5"]
+        record = check.parse_async(HTTP_OUTPUT, arguments, http=True)
+        self.assertEqual((record["ok"], record["failed"]), ("5000", "0"))
+        for broken in (HTTP_OUTPUT.replace("ok=5000 failed=0", "ok=2400 failed=520"),
+                       HTTP_OUTPUT.replace("ok=5000 failed=0", "ok=4999 failed=0"),
+                       HTTP_OUTPUT.replace("  ok=5000 failed=0", "")):
+            with self.assertRaises(check.BenchmarkError):
+                check.parse_async(broken, arguments, http=True)
 
     def test_the_workload_arguments_must_name_what_the_record_is_checked_against(self):
         with self.assertRaises(check.BenchmarkError):
