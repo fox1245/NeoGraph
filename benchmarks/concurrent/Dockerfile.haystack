@@ -2,9 +2,10 @@
 
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir haystack-ai==2.27.0
+RUN pip install --no-cache-dir haystack-ai==3.4.0
 
 WORKDIR /app
 COPY benchmarks/concurrent/bench_concurrent_haystack.py /app/bench.py
+COPY benchmarks/concurrent/burst_common.py /app/burst_common.py
 
 ENTRYPOINT ["python", "-u", "/app/bench.py"]

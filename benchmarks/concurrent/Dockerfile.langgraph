@@ -1,13 +1,14 @@
-# LangGraph concurrent bench image.
+# LangGraph concurrent bench image. The pins are the latest releases (benchmarks/requirements-compare.txt).
 #
 # Build from repo root (context just needs the bench script):
 #   docker build -t lg-concurrent -f benchmarks/concurrent/Dockerfile.langgraph .
 
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir langgraph==1.1.7
+RUN pip install --no-cache-dir langgraph==1.2.16 langchain-core==1.6.12
 
 WORKDIR /app
 COPY benchmarks/concurrent/bench_concurrent_langgraph.py /app/bench.py
+COPY benchmarks/concurrent/burst_common.py /app/burst_common.py
 
 ENTRYPOINT ["python", "-u", "/app/bench.py"]

@@ -63,6 +63,8 @@ def parse_async(output: str, arguments: list[str], *, http: bool) -> dict[str, s
         r"rounds=(?P<rounds>[0-9]+) +lat_ms=(?P<lat_ms>[0-9]+) +"
         rf"wall= *(?P<wall>{NUMBER})s +ops/s= *(?P<ops>{NUMBER}) +"
         rf"rss_mb= *(?P<rss>{NUMBER}) +" + threads
+        # bench_async_http counts its calls: ok= completed with status 200, failed= did not.
+        + (r" +ok=(?P<ok>[0-9]+) +failed=(?P<failed>[0-9]+)" if http else "")
     )
     match = re.fullmatch(pattern, output.strip())
     if match is None:
@@ -79,6 +81,12 @@ def parse_async(output: str, arguments: list[str], *, http: bool) -> dict[str, s
             raise BenchmarkError(f"async {key}: expected {value!r}, got {values[key]!r}")
     for key in ("wall", "ops", "rss"):
         number(values[key], f"async {key}")
+    if http:
+        # The throughput is only valid when every requested call completed.
+        requested = int(values["concur"]) * int(values["rounds"])
+        if int(values["failed"]) != 0 or int(values["ok"]) != requested:
+            raise BenchmarkError(
+                f"async http: {values['ok']} of {requested} calls completed, {values['failed']} failed")
     for key in (("client_threads", "server_threads") if http else ("io_threads",)):
         positive_integer(values[key], f"async {key}")
     return values

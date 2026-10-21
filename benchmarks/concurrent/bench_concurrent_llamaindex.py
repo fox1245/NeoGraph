@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """Concurrent-load bench for LlamaIndex Workflow.
 
-LlamaIndex Workflow is async-native. Workflow.run() returns a handler
-whose result we await. The idiomatic pattern is one Workflow instance
-per run (the event bus is per-run), so each concurrent call constructs
-a fresh SeqFlow.
+LlamaIndex Workflow is async-native. Workflow.run() is a plain method that
+returns a WorkflowHandler (an awaitable, not a coroutine) and schedules the
+run with asyncio.create_task, so it must be called inside a running event
+loop. Both modes therefore create and await the handler inside a coroutine.
 
-Schema matches bench_concurrent_langgraph.py.
+Each concurrent call constructs a fresh SeqFlow. Whether one instance can be
+reused across runs is measured separately by the engine-overhead comparison
+(benchmarks/compare), not here.
+
+Record schema 2, see burst_common.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import multiprocessing as mp
 import os
-import resource
-import sys
-import time
 
 from llama_index.core.workflow import (
     Event,
@@ -26,6 +25,10 @@ from llama_index.core.workflow import (
     Workflow,
     step,
 )
+
+import burst_common as bc
+
+RSS_AFTER_IMPORT_KB = bc.vm_kb("VmRSS")
 
 
 class AEv(Event):
@@ -39,6 +42,7 @@ class BEv(Event):
 class SeqFlow(Workflow):
     @step
     async def a(self, ev: StartEvent) -> AEv:
+        bc.inject_failure("llamaindex")
         return AEv(counter=ev.counter + 1)
 
     @step
@@ -50,108 +54,58 @@ class SeqFlow(Workflow):
         return StopEvent(result=ev.counter + 1)
 
 
-def peak_rss_kb() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+def check(result) -> None:
+    bc.check_equal("llamaindex result", result)
 
 
-def pct(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    values = sorted(values)
-    idx = min(len(values) - 1, int(len(values) * p))
-    return values[idx]
+async def run_chain():
+    # The handler is created inside the running loop and awaited there.
+    return await SeqFlow(timeout=60).run(counter=0)
 
 
 # ── async mode ─────────────────────────────────────────────────────────
 
-async def _run_async(concurrency: int):
-    async def one_call() -> float:
-        t0 = time.perf_counter()
-        try:
-            await SeqFlow(timeout=120).run(counter=0)
-            return (time.perf_counter() - t0) * 1_000_000.0
-        except Exception:
-            return -1.0
-
-    tasks = [asyncio.create_task(one_call()) for _ in range(concurrency)]
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    ok = [v for v in results if v >= 0]
-    return ok, len(ok), concurrency - len(ok)
-
-
 def run_async(concurrency: int) -> dict:
     async def _warm():
         for _ in range(10):
-            await SeqFlow(timeout=60).run(counter=0)
-    asyncio.run(_warm())
+            check(await run_chain())
+    failed = bc.guard_warmup("llamaindex", "asyncio", concurrency,
+                             lambda: asyncio.run(_warm()), RSS_AFTER_IMPORT_KB)
+    if failed:
+        return failed
+    rss_before = bc.vm_kb("VmRSS")
 
-    t_start = time.perf_counter()
-    ok_latencies, ok_count, err_count = asyncio.run(_run_async(concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
-
-    return {
-        "engine": "llamaindex",
-        "mode": "asyncio",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": ok_count,
-        "err": err_count,
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    collector, wall_ns = asyncio.run(bc.burst_async(concurrency, run_chain, check))
+    return bc.build_record(
+        "llamaindex", "asyncio", concurrency, collector, wall_ns,
+        note="a fresh Workflow instance per call",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before)
 
 
 # ── multiprocessing mode ───────────────────────────────────────────────
 
-def _mp_invoke(_: int) -> float:
-    t0 = time.perf_counter()
-    try:
-        asyncio.run(SeqFlow(timeout=60).run(counter=0))
-        return (time.perf_counter() - t0) * 1_000_000.0
-    except Exception:
-        return -1.0
+def _mp_init():
+    check(asyncio.run(run_chain()))  # first-call cost off the clock
+
+
+def _mp_invoke(_: int) -> tuple:
+    # A new event loop per call; the workflow is created and awaited inside it.
+    return bc.timed_call(lambda: asyncio.run(run_chain()), check)
 
 
 def run_mp(concurrency: int) -> dict:
     pool_size = os.cpu_count() or 1
-
-    t_start = time.perf_counter()
-    with mp.Pool(pool_size) as pool:
-        latencies = pool.map(_mp_invoke, range(concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
-
-    ok_latencies = [v for v in latencies if v >= 0]
-    return {
-        "engine": "llamaindex",
-        "mode": f"mp-pool-{pool_size}",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": len(ok_latencies),
-        "err": concurrency - len(ok_latencies),
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    rss_before = bc.vm_kb("VmRSS")
+    collector, wall_ns, info = bc.burst_mp(concurrency, pool_size, _mp_invoke, _mp_init)
+    return bc.build_record(
+        "llamaindex", f"mp-pool-{pool_size}", concurrency, collector, wall_ns,
+        note="a fresh Workflow instance and a new event loop per call in each pool worker; pool started before the clock",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before, mp_info=info)
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print("usage: bench_concurrent_llamaindex.py {async|mp} <concurrency>",
-              file=sys.stderr)
-        sys.exit(1)
-    mode, concurrency = sys.argv[1], int(sys.argv[2])
-    if mode == "async":
-        result = run_async(concurrency)
-    elif mode == "mp":
-        result = run_mp(concurrency)
-    else:
-        print(f"unknown mode: {mode}", file=sys.stderr)
-        sys.exit(1)
-    print(json.dumps(result))
-    sys.exit(2 if result["err"] > 0 else 0)
+    mode, concurrency = bc.parse_args("bench_concurrent_llamaindex.py")
+    bc.finish(run_async(concurrency) if mode == "async" else run_mp(concurrency))
 
 
 if __name__ == "__main__":

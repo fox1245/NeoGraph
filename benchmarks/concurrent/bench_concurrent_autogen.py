@@ -2,30 +2,30 @@
 """Concurrent-load bench for AutoGen GraphFlow.
 
 AutoGen GraphFlow keeps per-run message context on the participants;
-sharing one flow across concurrent coroutines would interleave state.
-Each concurrent call constructs a fresh flow — the idiomatic pattern
-for concurrent multi-agent runtimes.
+sharing one flow across concurrent coroutines would interleave state, and
+run_stream rejects concurrent use of one team. Each concurrent call therefore
+constructs a fresh flow (the construction is inside the timed call, because
+the framework requires one team per concurrent run).
 
 Counter is encoded in message content (AutoGen is message-passing, not
-state-channel), same as bench_autogen.py.
+state-channel), same as the engine-overhead comparison.
 
-Schema matches bench_concurrent_langgraph.py.
+Record schema 2, see burst_common.py.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
-import multiprocessing as mp
 import os
-import resource
-import sys
-import time
 
 from autogen_agentchat.agents import BaseChatAgent
 from autogen_agentchat.base import Response
 from autogen_agentchat.messages import TextMessage
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
+
+import burst_common as bc
+
+RSS_AFTER_IMPORT_KB = bc.vm_kb("VmRSS")
 
 
 class IncAgent(BaseChatAgent):
@@ -34,6 +34,7 @@ class IncAgent(BaseChatAgent):
         return (TextMessage,)
 
     async def on_messages(self, messages, cancellation_token):
+        bc.inject_failure("autogen")
         last = None
         for m in reversed(messages):
             if isinstance(m, TextMessage):
@@ -57,112 +58,60 @@ def build_seq() -> GraphFlow:
     return GraphFlow(participants=[a, b, c], graph=builder.build())
 
 
-def peak_rss_kb() -> int:
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+def check(result) -> None:
+    # The last message is the output of agent c: the counter as text.
+    bc.check_equal("autogen last message", result.messages[-1].content, str(bc.EXPECTED))
 
 
-def pct(values: list[float], p: float) -> float:
-    if not values:
-        return 0.0
-    values = sorted(values)
-    idx = min(len(values) - 1, int(len(values) * p))
-    return values[idx]
+async def run_chain():
+    return await build_seq().run(task="0")
 
 
 # ── async mode ─────────────────────────────────────────────────────────
-
-async def _run_async(concurrency: int):
-    async def one_call() -> float:
-        t0 = time.perf_counter()
-        try:
-            flow = build_seq()
-            await flow.run(task="0")
-            return (time.perf_counter() - t0) * 1_000_000.0
-        except Exception:
-            return -1.0
-
-    tasks = [asyncio.create_task(one_call()) for _ in range(concurrency)]
-    results = await asyncio.gather(*tasks, return_exceptions=False)
-    ok = [v for v in results if v >= 0]
-    return ok, len(ok), concurrency - len(ok)
-
 
 def run_async(concurrency: int) -> dict:
     async def _warm():
         warm = build_seq()
         for _ in range(10):
             await warm.reset()
-            await warm.run(task="0")
-    asyncio.run(_warm())
+            check(await warm.run(task="0"))
+    failed = bc.guard_warmup("autogen", "asyncio", concurrency,
+                             lambda: asyncio.run(_warm()), RSS_AFTER_IMPORT_KB)
+    if failed:
+        return failed
+    rss_before = bc.vm_kb("VmRSS")
 
-    t_start = time.perf_counter()
-    ok_latencies, ok_count, err_count = asyncio.run(_run_async(concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
-
-    return {
-        "engine": "autogen",
-        "mode": "asyncio",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": ok_count,
-        "err": err_count,
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    collector, wall_ns = asyncio.run(bc.burst_async(concurrency, run_chain, check))
+    return bc.build_record(
+        "autogen", "asyncio", concurrency, collector, wall_ns,
+        note="a fresh GraphFlow per call (required: one team cannot run concurrently); construction is in the timed call",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before)
 
 
 # ── multiprocessing mode ───────────────────────────────────────────────
 
-def _mp_invoke(_: int) -> float:
-    t0 = time.perf_counter()
-    try:
-        flow = build_seq()
-        asyncio.run(flow.run(task="0"))
-        return (time.perf_counter() - t0) * 1_000_000.0
-    except Exception:
-        return -1.0
+def _mp_init():
+    check(asyncio.run(run_chain()))  # first-call cost off the clock
+
+
+def _mp_invoke(_: int) -> tuple:
+    # A new event loop and a fresh flow per call.
+    return bc.timed_call(lambda: asyncio.run(run_chain()), check)
 
 
 def run_mp(concurrency: int) -> dict:
     pool_size = os.cpu_count() or 1
-
-    t_start = time.perf_counter()
-    with mp.Pool(pool_size) as pool:
-        latencies = pool.map(_mp_invoke, range(concurrency))
-    total_wall_ms = int((time.perf_counter() - t_start) * 1000)
-
-    ok_latencies = [v for v in latencies if v >= 0]
-    return {
-        "engine": "autogen",
-        "mode": f"mp-pool-{pool_size}",
-        "concurrency": concurrency,
-        "total_wall_ms": total_wall_ms,
-        "p50_us": int(pct(ok_latencies, 0.50)),
-        "p95_us": int(pct(ok_latencies, 0.95)),
-        "p99_us": int(pct(ok_latencies, 0.99)),
-        "ok": len(ok_latencies),
-        "err": concurrency - len(ok_latencies),
-        "peak_rss_kb": peak_rss_kb(),
-    }
+    rss_before = bc.vm_kb("VmRSS")
+    collector, wall_ns, info = bc.burst_mp(concurrency, pool_size, _mp_invoke, _mp_init)
+    return bc.build_record(
+        "autogen", f"mp-pool-{pool_size}", concurrency, collector, wall_ns,
+        note="a fresh GraphFlow and a new event loop per call in each pool worker; pool started before the clock",
+        rss_after_import_kb=RSS_AFTER_IMPORT_KB, rss_before_burst_kb=rss_before, mp_info=info)
 
 
 def main() -> None:
-    if len(sys.argv) < 3:
-        print("usage: bench_concurrent_autogen.py {async|mp} <concurrency>",
-              file=sys.stderr)
-        sys.exit(1)
-    mode, concurrency = sys.argv[1], int(sys.argv[2])
-    if mode == "async":
-        result = run_async(concurrency)
-    elif mode == "mp":
-        result = run_mp(concurrency)
-    else:
-        print(f"unknown mode: {mode}", file=sys.stderr)
-        sys.exit(1)
-    print(json.dumps(result))
-    sys.exit(2 if result["err"] > 0 else 0)
+    mode, concurrency = bc.parse_args("bench_concurrent_autogen.py")
+    bc.finish(run_async(concurrency) if mode == "async" else run_mp(concurrency))
 
 
 if __name__ == "__main__":
