@@ -118,8 +118,7 @@ class ResearchPlanNode(ng.GraphNode):
             f"주제: {topic}\n\n"
             "Sub-question을 한 줄에 하나씩, 번호나 글머리표 없이 출력하세요."
         )
-        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)],
-        temperature=0.0,)
+        completion = ask_text(PROVIDER, messages=[ng.ChatMessage(role="user", content=prompt)])
         questions = [
             line.strip().lstrip("-•0123456789. ")
             for line in completion.strip().splitlines()

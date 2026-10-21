@@ -56,7 +56,6 @@ class ClassifierNode(ng.GraphNode):
                 ng.ChatMessage(role="system", content=CLASSIFIER_PROMPT),
                 *msgs,
             ],
-            temperature=0.0,
         )
         label = completion.strip().lower()
         if label not in {"math", "translate", "general"}:

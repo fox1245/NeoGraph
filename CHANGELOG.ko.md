@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a281e8d5f01929030c643bff318e91f1a83657ceb8e464bd15699bd670de1483 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=3a702bea2723e9222813c77d50818d9cb0413943eb7785e5f641a19d00f184ba -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -68,6 +68,12 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **WebAssembly ([SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)).** SDK가 libcurl과 스레드 없이 Emscripten과 WASI용으로 빌드됩니다(`SP_BUILD_TRANSPORT`, `SP_THREADS`). 이 호스트에서 `sp::crypto::random_bytes`가 동작하고, 대상의 `std::size_t`보다 큰 admission 상한은 잘라 냅니다. NeoGraph 자체의 WebAssembly 빌드는 #535에서 이어집니다.
   - **호스트 seam ([SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)).** `runtime/host.h`가 공개되었습니다. `Executor`(`host_pumped()` 포함), `HostTransport`, 그리고 libcurl이나 스레드 없이 `sp_runtime`이 정의하는 `Client(descriptor, options, executor, transport)`입니다. 동작할 수 없는 블로킹 호출(`Client::complete`, `Operation::join`, realtime 세션의 `next_event`)은 이제 기다리지 않고 즉시 `Misuse` 실패(`runtime.blocking.host_pumped` 또는 `runtime.blocking.in_thread`)를 반환합니다. in-thread 거부에는 전에 사유가 없었습니다. `SP_BUILD_JS_HOST`는 Emscripten용으로 `fetch` 기반 참조 호스트를 빌드합니다. NeoGraph는 WebAssembly 모듈에서 이 seam을 씁니다(추가됨 참조).
 - **공개 문구 검사기가 문서도 검사합니다.** `scripts/check_public_text.py`와 ctest 항목 `public_text_guard`가 Markdown, `docs/`, README, CHANGELOG 파일을 검사하며(`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 옵션은 제거되었습니다), 새 규칙 두 개가 내부 결정과 그 과정을 서술하는 문구를 표시합니다.
+
+- **라이브 테스트, Python 예제, 문서가 OpenAI가 폐기 예정으로 올린 모델 이름을 더 이상 쓰지 않습니다.** 종료 날짜는 OpenAI의 [폐기 안내 페이지](https://developers.openai.com/api/docs/deprecations)에 있는 OpenAI의 날짜이며, 이 프로젝트는 날짜를 약속하지 않습니다. 대체 모델은 모두 쓰기 전에 실제 키로 한 번씩 호출해 확인했습니다. 라이브러리 코드에는 이 모델을 이름으로 쓴 곳이 없었습니다.
+  - **Chat.** Python 예제와 라이브 fan-out 테스트의 `OPENAI_MODEL` 기본값, 그리고 `controls.chat.models` 예시가 `gpt-4.1-mini`, `gpt-4o-mini`, `gpt-4.1`에서 `gpt-6-luna`와 `gpt-5.6-luna`로 바뀝니다. `gpt-5-nano`를 쓰던 라이브 테스트는 `gpt-6-luna`를 쓰고, 라이브 카탈로그 테스트는 내장 카탈로그에 없는 모델인 `gpt-5.6-luna`를 씁니다. OpenAI Chat 도구 호출 케이스는 `reasoning_effort`를 `none`으로 두는데, OpenAI가 이 모델들이 추론하는 동안 Chat Completions에서 함수 도구를 거부하기 때문입니다. OpenAI는 이 모델에서 기본 `temperature`만 받으므로, `temperature`를 지정하던 Python 예제는 더 이상 지정하지 않습니다.
+  - **전사와 이미지.** 라이브 음성 왕복 테스트는 `gpt-4o-mini-transcribe` 대신 `gpt-transcribe`로 전사하고, 라이브 이미지 테스트는 `gpt-image-1-mini` 대신 `gpt-image-2.5-sunburst`를 씁니다.
+  - **실시간 테스트의 음성 입력.** 라이브 실시간 전사 세션은 음성을 음성 엔드포인트가 아니라, 텍스트를 소리 내어 읽는 `gpt-realtime-2.1-mini` Realtime 세션에서 얻습니다.
+  - **음성 엔드포인트.** 라이브 테스트 하나는 아직 `/v1/audio/speech`를 `tts-1`로 호출합니다. OpenAI 페이지는 `tts-1`, `tts-1-hd`, 두 `gpt-4o-mini-tts` 스냅샷을 2027년 1월 6일에 제거하고 대체 모델로 Realtime API의 `gpt-realtime-2.1-mini`를 안내하며, 이 엔드포인트용 모델은 밝히지 않습니다. 이 테스트는 `tts-1`을 쓰므로 그 날짜까지 바꾸거나 없애야 합니다.
 
 ### 수정됨
 

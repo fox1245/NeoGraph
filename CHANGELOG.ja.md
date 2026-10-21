@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a281e8d5f01929030c643bff318e91f1a83657ceb8e464bd15699bd670de1483 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=3a702bea2723e9222813c77d50818d9cb0413943eb7785e5f641a19d00f184ba -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -68,6 +68,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK は libcurl とスレッドなしで Emscripten と WASI 向けにビルドできます（`SP_BUILD_TRANSPORT`、`SP_THREADS`）。これらのホストでも `sp::crypto::random_bytes` が動作し、ターゲットの `std::size_t` を超える admission の上限は切り詰められます。NeoGraph 自身の WebAssembly ビルドは #535 で続きます。
   - **ホスト seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` が公開されました。`Executor`（`host_pumped()` つき）、`HostTransport`、そして libcurl もスレッドも使わずに `sp_runtime` が定義する `Client(descriptor, options, executor, transport)` です。動作できないブロッキング呼び出し（`Client::complete`、`Operation::join`、realtime セッションの `next_event`）は、待たずにすぐ `Misuse` の失敗（`runtime.blocking.host_pumped` または `runtime.blocking.in_thread`）を返します。in-thread の拒否には、以前は理由がありませんでした。`SP_BUILD_JS_HOST` は Emscripten 向けに `fetch` ベースの参照ホストをビルドします。NeoGraph は WebAssembly モジュールでこの seam を使います（「追加」を参照）。
 - **公開テキストのガードがドキュメントも検査します。** `scripts/check_public_text.py` とその ctest エントリ `public_text_guard` が Markdown、`docs/`、README、CHANGELOG のファイルを検査し（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` オプションは削除されました）、新しい 2 つのルールが内部の決定とその過程を述べる文言を検出します。
+
+- **ライブテスト、Python のサンプル、ドキュメントは、OpenAI が廃止予定として挙げているモデル名を使わなくなりました。** 終了日は OpenAI の[廃止予定のページ](https://developers.openai.com/api/docs/deprecations)にある OpenAI の日付であり、このプロジェクトは日付を約束しません。代替モデルはいずれも、使う前に実際のキーで一度呼び出して確認しました。ライブラリのコードには、これらのモデルを名前で使っている箇所はありませんでした。
+  - **Chat。** Python のサンプルとライブの fan-out テストにおける `OPENAI_MODEL` の既定値、および `controls.chat.models` の例を、`gpt-4.1-mini`、`gpt-4o-mini`、`gpt-4.1` から `gpt-6-luna` と `gpt-5.6-luna` に変更しました。`gpt-5-nano` を使っていたライブテストは `gpt-6-luna` を使い、ライブのカタログテストは組み込みカタログに載っていないモデルである `gpt-5.6-luna` を使います。OpenAI Chat のツール呼び出しケースは `reasoning_effort` を `none` にします。OpenAI は、これらのモデルが推論している間、Chat Completions での関数ツールを拒否するためです。また OpenAI はこれらのモデルで既定の `temperature` しか受け付けないため、`temperature` を指定していた Python のサンプルは指定をやめました。
+  - **文字起こしと画像。** ライブの音声往復テストは `gpt-4o-mini-transcribe` ではなく `gpt-transcribe` で文字起こしし、ライブの画像テストは `gpt-image-1-mini` ではなく `gpt-image-2.5-sunburst` を使います。
+  - **リアルタイムテストの音声入力。** ライブのリアルタイム文字起こしセッションは、音声を音声エンドポイントからではなく、テキストを読み上げる `gpt-realtime-2.1-mini` の Realtime セッションから得ます。
+  - **音声エンドポイント。** ライブテストの 1 つは今も `/v1/audio/speech` を `tts-1` で呼び出します。OpenAI のページは `tts-1`、`tts-1-hd`、2 つの `gpt-4o-mini-tts` スナップショットを 2027 年 1 月 6 日に削除し、代替として Realtime API の `gpt-realtime-2.1-mini` を挙げていますが、このエンドポイント向けのモデルは挙げていません。このテストは `tts-1` を使うため、それまでに変更するか削除する必要があります。
 
 ### 修正
 

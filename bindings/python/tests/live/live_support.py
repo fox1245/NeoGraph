@@ -40,8 +40,8 @@ ROUTES = {
 # The cheapest model of each preset that answers text, and the controls it needs. A model that reasons gets a
 # larger cap so that its reasoning does not use up the answer.
 TEXT_MODELS = {
-    "openai.chat": ("gpt-5-nano", {"reasoning_effort": "low", "max_output_tokens": 600}),
-    "openai.responses": ("gpt-5-nano", {"reasoning_effort": "low", "max_output_tokens": 600}),
+    "openai.chat": ("gpt-6-luna", {"reasoning_effort": "low", "max_output_tokens": 600}),
+    "openai.responses": ("gpt-6-luna", {"reasoning_effort": "low", "max_output_tokens": 600}),
     "anthropic.messages": ("claude-haiku-4-5-20251001", {"max_output_tokens": 64}),
     "google.generate": ("gemini-3.1-flash-lite", {"max_output_tokens": 64}),
     "google.interactions": ("gemini-3.1-flash-lite", {"max_output_tokens": 64}),

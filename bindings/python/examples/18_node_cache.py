@@ -40,10 +40,10 @@ class ExpensiveNode(ng.GraphNode):
     def run(self, input):
         self.calls += 1
         topic = input.state.get("topic") or ""
+        # Repeated input hashes, not model determinism, drive the cache hits.
         c = ask_text(PROVIDER, messages=[ng.ChatMessage(
             role="user",
-            content=f"Give one short fun fact about {topic}.")],
-        temperature=0.0)  # repeated input hashes, not model determinism, drive hits
+            content=f"Give one short fun fact about {topic}.")])
         return [ng.ChannelWrite("answer", c.strip())]
 
 

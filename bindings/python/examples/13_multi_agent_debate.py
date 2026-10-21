@@ -94,8 +94,7 @@ class JudgeNode(ng.GraphNode):
             ng.ChatMessage(role="user", content=(
                 f"Topic: {topic}\n\nArguments:\n{cases}\n\n"
                 "Who makes the stronger case?")),
-        ],
-        temperature=0.0,)
+        ])
         return [ng.ChannelWrite("verdict", completion.strip())]
 
 

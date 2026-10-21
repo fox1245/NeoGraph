@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a281e8d5f01929030c643bff318e91f1a83657ceb8e464bd15699bd670de1483 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3a702bea2723e9222813c77d50818d9cb0413943eb7785e5f641a19d00f184ba -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -68,6 +68,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK 可以不依赖 libcurl 和线程，为 Emscripten 和 WASI 构建（`SP_BUILD_TRANSPORT`、`SP_THREADS`）；`sp::crypto::random_bytes` 在这些宿主上可用，超出目标 `std::size_t` 的 admission 上限会被截断。NeoGraph 自身的 WebAssembly 构建将在 #535 中继续。
   - **宿主 seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` 现已公开：`Executor`（带 `host_pumped()`）、`HostTransport`，以及由 `sp_runtime` 定义、不依赖 libcurl 和线程的 `Client(descriptor, options, executor, transport)`。无法工作的阻塞调用（`Client::complete`、`Operation::join`、realtime 会话的 `next_event`）现在不再等待，而是立即返回 `Misuse` 失败（`runtime.blocking.host_pumped` 或 `runtime.blocking.in_thread`）；此前线程内的拒绝没有原因。`SP_BUILD_JS_HOST` 为 Emscripten 构建基于 `fetch` 的参考宿主。NeoGraph 在其 WebAssembly 模块中使用这个 seam（见“已添加”）。
 - **公开文本检查器现在也检查文档。** `scripts/check_public_text.py` 及其 ctest 条目 `public_text_guard` 会扫描 Markdown、`docs/`、README 和 CHANGELOG 文件（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 选项已移除），并新增两条规则，标记叙述内部决定及其过程的措辞。
+
+- **实时测试、Python 示例和文档不再使用 OpenAI 列为即将停用的模型名称。** 停用日期是 OpenAI 在其[停用说明页面](https://developers.openai.com/api/docs/deprecations)上给出的日期，本项目不对日期作任何承诺。每个替代模型在使用前都用真实密钥调用过一次。库代码中没有按名称使用这些模型的地方。
+  - **Chat。** Python 示例和实时 fan-out 测试中 `OPENAI_MODEL` 的默认值，以及 `controls.chat.models` 示例，由 `gpt-4.1-mini`、`gpt-4o-mini` 和 `gpt-4.1` 改为 `gpt-6-luna` 和 `gpt-5.6-luna`。原来使用 `gpt-5-nano` 的实时测试改用 `gpt-6-luna`，实时目录测试改用内置目录中没有的模型 `gpt-5.6-luna`。OpenAI Chat 工具调用用例将 `reasoning_effort` 设为 `none`，因为这些模型在推理时，OpenAI 会拒绝 Chat Completions 上的函数工具。OpenAI 对这些模型只接受默认的 `temperature`，因此原先设置了 `temperature` 的 Python 示例不再设置。
+  - **转写和图像。** 实时语音往返测试改用 `gpt-transcribe` 而不是 `gpt-4o-mini-transcribe` 转写，实时图像测试改用 `gpt-image-2.5-sunburst` 而不是 `gpt-image-1-mini`。
+  - **实时测试的语音输入。** 实时转写会话的语音不再来自语音端点，而是来自一个朗读文本的 `gpt-realtime-2.1-mini` Realtime 会话。
+  - **语音端点。** 仍有一个实时测试用 `tts-1` 调用 `/v1/audio/speech`。OpenAI 页面列出 `tts-1`、`tts-1-hd` 和两个 `gpt-4o-mini-tts` 快照将于 2027 年 1 月 6 日移除，并以 Realtime API 的 `gpt-realtime-2.1-mini` 作为替代，但没有给出此端点的模型。这个测试使用 `tts-1`，因此需要在该日期前修改或删除。
 
 ### 修复
 

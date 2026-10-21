@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=8ef0a27fc5b648e7e294366dfc190837efd181346df40166952ecff3d34d3803 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=cdc4300edb845368b427f2b90eb0051e74fae14610f7039ae415a5bf6ed69281 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -177,7 +177,7 @@ with example_provider(script) as chosen:
 
 脚本也可以是读取 `turn.last_user_text`、`turn.system_text` 和 `turn.last_tool_result` 的函数 `(turn) -> Reply`。`chosen.scripted.call_count` 可用来断言发生了多少次模型调用。规则写在 `_scripted.py` 的 docstring 里。
 
-`--live`、`NG_EXAMPLE_LIVE=1`、`OPENAI_API_BASE` 或 `NG_PROVIDER_DESCRIPTOR` 会改为选择已配置的端点。托管端点需要 `OPENAI_API_KEY`，并可选 `OPENAI_MODEL`（默认 `gpt-4.1-mini`），两者都只从进程环境读取；`_common.py` 不加载 `.env` 文件，缺少 key 是错误，而不是一次成功的运行。`_common.py` 先准入封闭的 OpenAI Chat 或 Responses 描述符，再构造 `SchemaProvider`。类型化 SDK 使用 libcurl HTTP；已移除的 provider 类、completion 参数、WebSocket 路径和传输后端选择器不再可用。`OPENAI_API_BASE` 是 origin 或网关前缀，不是完整的 `/v1/chat/completions` 路由；若 HTTPS 对端的 CA 不在系统信任库中，还需要 `NG_EXAMPLE_CA_FILE`。也可以改用 `NG_PROVIDER_DESCRIPTOR` 指定一个完整的已准入描述符 JSON 文件。类型化请求与 outcome 契约见 [Python 绑定指南](../../../docs/python-binding.md)。
+`--live`、`NG_EXAMPLE_LIVE=1`、`OPENAI_API_BASE` 或 `NG_PROVIDER_DESCRIPTOR` 会改为选择已配置的端点。托管端点需要 `OPENAI_API_KEY`，并可选 `OPENAI_MODEL`（默认 `gpt-6-luna`），两者都只从进程环境读取；`_common.py` 不加载 `.env` 文件，缺少 key 是错误，而不是一次成功的运行。`_common.py` 先准入封闭的 OpenAI Chat 或 Responses 描述符，再构造 `SchemaProvider`。类型化 SDK 使用 libcurl HTTP；已移除的 provider 类、completion 参数、WebSocket 路径和传输后端选择器不再可用。`OPENAI_API_BASE` 是 origin 或网关前缀，不是完整的 `/v1/chat/completions` 路由；若 HTTPS 对端的 CA 不在系统信任库中，还需要 `NG_EXAMPLE_CA_FILE`。也可以改用 `NG_PROVIDER_DESCRIPTOR` 指定一个完整的已准入描述符 JSON 文件。类型化请求与 outcome 契约见 [Python 绑定指南](../../../docs/python-binding.md)。
 
 ## 状态与调度
 

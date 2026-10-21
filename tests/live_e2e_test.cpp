@@ -299,7 +299,7 @@ TEST(LiveEndpoints, OpenAIImageGeneration) {
     LIVE_KEY(key, "OPENAI_API_KEY");
     auto provider = openai_provider(key);
     sp::images::Request request;
-    request.model = "gpt-image-1-mini";
+    request.model = "gpt-image-2.5-sunburst";
     request.prompt = "A flat red circle on a white background.";
     request.size = "1024x1024";
     request.quality = "low";
@@ -316,6 +316,11 @@ TEST(LiveEndpoints, OpenAIImageGeneration) {
 // model that answers promptly: in October 2026 gpt-4o-mini-tts took up to a minute to answer speech requests
 // (mp3, pcm and wav alike, with or without NeoGraph), past the 30 s these tests allow, while tts-1 answered
 // every format in a few seconds.
+// OpenAI's deprecations page (https://developers.openai.com/api/docs/deprecations) lists tts-1, tts-1-hd and the
+// gpt-4o-mini-tts snapshots as removed on January 6, 2027, and recommends gpt-realtime-2.1-mini through the Realtime
+// API in their place; it names no model for /v1/audio/speech. From that date tts-1 is gone, and this test has to
+// name another model, move to another provider's speech endpoint, or go. The other live tests that need spoken
+// input make it with the Realtime API instead (spoken_pcm).
 constexpr const char* kSpeechModel = "tts-1";
 
 // Speech made by one endpoint is transcribed by another, and the words survive the round trip.
@@ -335,7 +340,7 @@ TEST(LiveEndpoints, OpenAISpeechThenTranscription) {
     EXPECT_GT(audio->audio.data->size(), 1000u);
 
     sp::transcription::Request transcription;
-    transcription.model = "gpt-4o-mini-transcribe";
+    transcription.model = "gpt-transcribe";
     transcription.audio = audio->audio;
     transcription.language = "en";
     const auto heard = provider.complete_endpoint(std::move(transcription));
@@ -431,7 +436,7 @@ TEST(LiveEndpoints, OpenAIBatchFromAnUploadedFile) {
     LIVE_KEY(key, "OPENAI_API_KEY");
     auto provider = openai_provider(key);
     sp::chat::Request item;
-    item.model = "gpt-5-nano";
+    item.model = "gpt-6-luna";
     item.reasoning_effort = "low";
     item.max_output_tokens = 200;
     item.messages.push_back(sp::chat::InputMessage{sp::Role::User, "Reply with one word."});
@@ -496,7 +501,8 @@ TEST(LiveCatalogue, RefreshFromEveryListing) {
     EXPECT_TRUE(again.removed.empty()) << again.removed.size() << " removed";
     EXPECT_LT(again.added.size() + again.changed.size(), 5u);
 
-    const std::string model = "gpt-5-nano";
+    // A current model that the built-in catalogue does not list and OpenAI's listing does.
+    const std::string model = "gpt-5.6-luna";
     const auto& builtin = sp::descriptor::builtin_catalogue()->entries();
     EXPECT_TRUE(std::none_of(builtin.begin(), builtin.end(), [&](const auto& entry) { return entry.id == model; }));
     const auto& listed = refreshed.catalogue->entries();
@@ -532,30 +538,6 @@ TEST(LiveCatalogue, UnlistedModelIsSent) {
     EXPECT_EQ(failure->error.http_status, 404);
 }
 
-// SchemaProvider realtime transcription sessions (#512): speech made by OpenAI's speech endpoint goes in, and a
-// final transcript and one committed user turn come out.
-std::string from_base64(const std::string& text) {
-    std::string out;
-    unsigned value = 0;
-    int bits = 0;
-    for (const unsigned char c : text) {
-        int digit = -1;
-        if (c >= 'A' && c <= 'Z') digit = c - 'A';
-        else if (c >= 'a' && c <= 'z') digit = c - 'a' + 26;
-        else if (c >= '0' && c <= '9') digit = c - '0' + 52;
-        else if (c == '+') digit = 62;
-        else if (c == '/') digit = 63;
-        if (digit < 0) continue;
-        value = (value << 6) | static_cast<unsigned>(digit);
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out.push_back(static_cast<char>((value >> bits) & 0xff));
-        }
-    }
-    return out;
-}
-
 // 16-bit little-endian mono PCM resampled from 24 kHz to 16 kHz by linear interpolation.
 std::string pcm_16k(const std::string& pcm_24k) {
     const auto sample = [&](std::size_t i) {
@@ -575,21 +557,71 @@ std::string pcm_16k(const std::string& pcm_24k) {
     return out;
 }
 
-// Speech from OpenAI's speech endpoint as raw 24 kHz PCM.
+// An error of a realtime session. The HTTP status and the vendor's code say what the SDK's message alone does not.
+std::string error_text(const sp::Error& error) {
+    return "kind " + std::to_string(static_cast<int>(error.kind)) + " http " + std::to_string(error.http_status) +
+           " code '" + error.vendor_code + "': " + error.safe_message;
+}
+
+// SchemaProvider realtime transcription sessions (#512): speech made by an OpenAI Realtime session goes in, and a
+// final transcript and one committed user turn come out.
+//
+// Speech made by an OpenAI Realtime session as raw 24 kHz PCM: the model is asked to read a text aloud, and its
+// audio is collected until the turn commits. This is how the live tests make spoken input without the speech
+// endpoint, whose models OpenAI lists as removed on January 6, 2027. A failure says what the provider said and, for
+// a session that never answered, how far it got.
 std::string spoken_pcm(const std::string& key, const std::string& text) {
-    auto provider = openai_provider(key);
-    sp::speech::Request speech;
-    speech.model = kSpeechModel;
-    speech.input = text;
-    speech.voice = "alloy";
-    speech.format = "pcm";
-    const auto spoken = provider.complete_endpoint(std::move(speech));
-    const auto* audio = std::get_if<sp::speech::Result>(&spoken);
-    if (!audio || !audio->audio.data) {
-        ADD_FAILURE() << failure_text(spoken);
+    sp::realtime::Setup setup;
+    setup.model = "gpt-realtime-2.1-mini";
+    setup.instructions = "Read the user's text aloud, word for word, in a plain voice. Add nothing and answer nothing.";
+    setup.voice = "alloy";
+    sp::realtime::Options options;
+    options.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    options.renew = [](const sp::Usage&) { return true; };
+    sp::transport::Transport transport;
+    auto opened = sp::realtime::open(transport, sp::descriptor::presets::openai_chat(), key, setup, options);
+    if (const auto* error = std::get_if<sp::Error>(&opened)) {
+        ADD_FAILURE() << "open refused: " << error_text(*error);
         return {};
     }
-    return from_base64(*audio->audio.data);
+    auto& session = std::get<sp::realtime::Session>(opened);
+    std::string pcm, said;
+    bool asked = false, committed = false, failed = false;
+    int events = 0;
+    for (int i = 0; i < 600 && !committed && !session.ended(); ++i) {
+        const auto event = session.next_event(std::chrono::milliseconds(100));
+        if (!event) continue;
+        ++events;
+        if (std::holds_alternative<sp::realtime::Ready>(*event) && !asked) {
+            asked = true;
+            if (!session.send(sp::realtime::Text{text}) || !session.send(sp::realtime::Respond{})) {
+                const auto refused = session.last_error();
+                ADD_FAILURE() << "the session refused the text: " << (refused ? error_text(*refused) : "it had ended");
+                failed = true;
+                break;
+            }
+        } else if (const auto* audio = std::get_if<sp::realtime::AudioDelta>(&*event)) {
+            pcm += audio->pcm;
+        } else if (const auto* spoken = std::get_if<sp::realtime::Transcript>(&*event); spoken && !spoken->input) {
+            said += spoken->text;
+        } else if (std::holds_alternative<sp::realtime::TurnCommitted>(*event)) {
+            committed = true;
+        } else if (const auto* error = std::get_if<sp::realtime::ProviderError>(&*event)) {
+            ADD_FAILURE() << "provider error: " << error_text(error->error);
+            failed = true;
+            break;
+        }
+    }
+    session.close();
+    const auto outcome = session.join();
+    if (!failed)
+        EXPECT_TRUE(committed) << (asked ? "the response never committed" : "the session never became ready") << " after "
+                               << events << " events and " << pcm.size() << " bytes of audio";
+    EXPECT_FALSE(outcome.error) << error_text(*outcome.error);
+    // What the model said goes with a failure, so that a model that changed the text is told apart from one that
+    // sent no audio.
+    if (pcm.size() <= 10000) ADD_FAILURE() << "only " << pcm.size() << " bytes of audio; the model said: " << said;
+    return pcm;
 }
 
 // A SchemaProvider transcription session (no output modality): the speech goes in, a final transcript and one

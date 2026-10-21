@@ -64,6 +64,10 @@ TOOLS = [case(preset, keys=[_key(preset)], id=preset) for preset in ROUTES]
 @pytest.mark.parametrize("preset", TOOLS)
 def test_tool_call(preset):
     model, values = TEXT_MODELS[preset]
+    if preset == "openai.chat":
+        # OpenAI refuses function tools on Chat Completions while the model reasons (HTTP 400, "set reasoning_effort
+        # to 'none'"), so this case turns the reasoning off.
+        values = {**values, "reasoning_effort": "none"}
     run = Run(provider(preset, model), model,
               [user("What is the weather in Seoul? Call get_weather with the city name.")],
               tools=[weather_tool()], **values)

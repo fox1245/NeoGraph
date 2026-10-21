@@ -162,8 +162,7 @@ class ResearchPlanNode(ng.GraphNode):
             "다음 주제를 심층 조사하기 위한 sub-question 정확히 3개로 분해. "
             "각각 독립적으로 답변 가능한 형태. 한 줄에 하나, 번호/글머리표 없이.\n\n"
             f"주제: {topic}"
-        ))],
-        temperature=0.0,)
+        ))])
         questions = [
             line.strip().lstrip("-•0123456789. ")
             for line in completion.strip().splitlines()
