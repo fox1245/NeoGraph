@@ -103,6 +103,10 @@ void init_runtime_context(py::module_& m) {
     py::enum_<AssemblyLayout>(m, "AssemblyLayout")
         .value("Legacy", AssemblyLayout::Legacy)
         .value("StableFirst", AssemblyLayout::StableFirst);
+    py::enum_<ClassSource>(m, "ClassSource")
+        .value("Declared", ClassSource::Declared)
+        .value("Derived", ClassSource::Derived);
+    m.attr("STABILITY_DERIVATION_RULE_VERSION") = STABILITY_DERIVATION_RULE_VERSION;
     py::enum_<ContextStabilityRefusal>(m, "ContextStabilityRefusal")
         .value("VolatileSystemArtifact", ContextStabilityRefusal::VolatileSystemArtifact)
         .value("PredecessorUnavailable", ContextStabilityRefusal::PredecessorUnavailable)
@@ -250,6 +254,8 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("mandatory_input_tokens", &ContextAssemblyReceiptData::mandatory_input_tokens)
         .def_readwrite("assembled_artifact_ids", &ContextAssemblyReceiptData::assembled_artifact_ids)
         .def_readwrite("artifact_classes", &ContextAssemblyReceiptData::artifact_classes)
+        .def_readwrite("class_sources", &ContextAssemblyReceiptData::class_sources)
+        .def_readwrite("class_rule_version", &ContextAssemblyReceiptData::class_rule_version)
         .def_readwrite("encoder_family", &ContextAssemblyReceiptData::encoder_family)
         .def_readwrite("stable_boundary", &ContextAssemblyReceiptData::stable_boundary)
         .def_readwrite("prefix_boundary", &ContextAssemblyReceiptData::prefix_boundary)
@@ -269,6 +275,8 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("mandatory_input_tokens", &ContextAssemblyReceipt::mandatory_input_tokens)
         .def_property_readonly("assembled_artifact_ids", &ContextAssemblyReceipt::assembled_artifact_ids)
         .def_property_readonly("artifact_classes", &ContextAssemblyReceipt::artifact_classes)
+        .def_property_readonly("class_sources", &ContextAssemblyReceipt::class_sources)
+        .def_property_readonly("class_rule_version", &ContextAssemblyReceipt::class_rule_version)
         .def_property_readonly("encoder_family", &ContextAssemblyReceipt::encoder_family)
         .def_property_readonly("stable_boundary", &ContextAssemblyReceipt::stable_boundary)
         .def_property_readonly("prefix_boundary", &ContextAssemblyReceipt::prefix_boundary)

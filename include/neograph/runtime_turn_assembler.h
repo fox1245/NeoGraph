@@ -7,8 +7,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace neograph {
@@ -69,6 +71,12 @@ public:
     static std::uint64_t estimate_input_tokens(const PreparedProviderRequest& request);
     /** Canonical digest of dispatch-relevant request data, excluding callback and cancellation identity. */
     static std::string normalized_request_digest(const PreparedProviderRequest& request);
+    /**
+     * Digest of the `tools` member of an encoded request body, which every family names `tools`. A body
+     * without that member has no tools and gives no digest. A body that is not a JSON object cannot be
+     * read, and that is an error and not the absence of tools: std::invalid_argument.
+     */
+    static std::optional<std::string> tools_digest(std::string_view encoded_body);
 
 private:
     struct Impl;

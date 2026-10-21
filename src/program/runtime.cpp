@@ -1789,6 +1789,8 @@ ProgramContextPublication transfer_context_to_run(
     receipt_data.mandatory_input_tokens = source.assembly_receipt.mandatory_input_tokens();
     receipt_data.assembled_artifact_ids = source.assembly_receipt.assembled_artifact_ids();
     receipt_data.artifact_classes = source.assembly_receipt.artifact_classes();
+    receipt_data.class_sources = source.assembly_receipt.class_sources();
+    receipt_data.class_rule_version = source.assembly_receipt.class_rule_version();
     receipt_data.encoder_family = source.assembly_receipt.encoder_family();
     receipt_data.stable_boundary = source.assembly_receipt.stable_boundary();
     receipt_data.prefix_boundary = source.assembly_receipt.prefix_boundary();

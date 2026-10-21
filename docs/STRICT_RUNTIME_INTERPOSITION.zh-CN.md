@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -274,8 +274,8 @@ System 消息怎么处理，取决于 provider 的系列：
 
 - 制品可以声明 `StabilityClass`：`Stable`（整个运行期间字节不变）、`Slow`（只在压缩或其他已声明的前缀中断时才变）或 `Volatile`（每次调用都可能变）。未声明的制品在读取时获得类别：`RequiredSkill` 和 `HardConstraint` 为 `Stable`，producer 为 `COMPACTION_PRODUCER_ID` 的 `DerivedContext` 为 `Slow`，其余一律为 `Volatile`。创建渲染为 System 消息的种类的 `Volatile` 制品，会被 `ContextStabilityError` 拒绝。
 - 制品可以声明 `AnchorMode`：`Replace`（默认）或 `KeepInPlace`。目前还没有任何代码使用它。
-- epoch 可以记录 `ordered_artifact_ids`（制品的固定顺序）和 `prefix_claim`：`Extends`（请求开头与前驱相同，只在末尾增长），或带有 `break_reason` 的 `Breaks`。激活声明 `Extends` 的 epoch 时，会针对当前生效的 epoch，或宿主传给 `activate` 的前驱检查该声明：`raw_from_sequence` 相同，`raw_through_sequence` 更大，`Stable` 和 `Slow` 制品相同且顺序相同，`KeepInPlace` 制品仍被选中且位于 RAW 窗口之内。没有记录顺序的 epoch（例如在该字段出现之前存储的）无法被延续。
-- 装配器写出的回执记录按提示词顺序排列的制品、它们的类别、编码器所属的 family、工具的摘要和 epoch 的中断原因。
+- epoch 可以记录 `ordered_artifact_ids`（制品的固定顺序）和 `prefix_claim`：`Extends`（请求开头与前驱相同，只在末尾增长），或带有 `break_reason` 的 `Breaks`。激活声明 `Extends` 的 epoch 时，会针对当前生效的 epoch，或宿主传给 `activate` 的前驱检查该声明：`raw_from_sequence` 相同，`raw_through_sequence` 更大，`Stable` 和 `Slow` 制品相同且顺序相同，`KeepInPlace` 制品仍被选中且位于 RAW 窗口之内。没有记录顺序的 epoch（例如在该字段出现之前存储的）无法被延续。`Extends` 所承诺的内容取决于布局。在 `Legacy` 下，它表示 `Stable` 和 `Slow` 制品及其记录的顺序没有变、窗口只是增长了；旧版装配器按放置位置、优先级和 producer 排序，不读取记录的顺序，所以并不承诺请求的开头。在 `StableFirst` 下，记录的顺序就是请求的顺序，epoch 的制品若不构成装配器接受的布局，该声明会被拒绝，直到 `Slow` 制品结束为止的请求开头与前驱相同（宿主指令和工具不归 epoch 所有，不在此列）。
+- 装配器写出的回执记录按提示词顺序排列的制品、它们的类别（各自标明是制品声明的还是推导的，并附推导规则的版本）、编码器所属的 family、工具的摘要和 epoch 的中断原因。不是 JSON 的请求体是错误，而不是没有工具的请求。已存储的回执，在类别由制品声明之处严格比对，只在规则版本为现行版本时才重新推导类别并比较，所以以后规则改变，已存储的回执仍然可读。
 
 ## 稳定优先的布局
 

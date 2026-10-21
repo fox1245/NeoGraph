@@ -116,6 +116,17 @@ ContextArtifact artifact_of(ContextArtifactKind kind, std::string producer,
 
 json parsed(const std::string& bytes) { return json::parse(bytes); }
 
+// The sources a receipt records for the classes of `artifacts`, and the rule version in force.
+void record_sources(ContextAssemblyReceiptData& data, const std::vector<ContextArtifact>& artifacts) {
+    std::map<std::string, ClassSource> sources;
+    for (const auto& artifact : artifacts) {
+        sources.emplace(artifact.id(), artifact.declared_stability_class() ? ClassSource::Declared
+                                                                           : ClassSource::Derived);
+    }
+    data.class_sources = std::move(sources);
+    data.class_rule_version = STABILITY_DERIVATION_RULE_VERSION;
+}
+
 json without(const json& value, const std::string& removed) {
     auto result = json::object();
     for (const auto& [key, field] : value.items()) {
@@ -552,6 +563,7 @@ TEST(ContextStability, AReceiptOfVersion2RoundTripsItsPrefixFields) {
     data.assembled_artifact_ids = std::vector<std::string>{summary.id(), skill.id()};
     data.artifact_classes = std::map<std::string, StabilityClass>{
         {skill.id(), StabilityClass::Stable}, {summary.id(), StabilityClass::Volatile}};
+    record_sources(data, artifacts);
     data.encoder_family = "openai.chat";
     data.tools_digest = sha('4');
     const auto receipt = ContextAssemblyReceipt::create(data, epoch, artifacts);
@@ -561,6 +573,8 @@ TEST(ContextStability, AReceiptOfVersion2RoundTripsItsPrefixFields) {
     EXPECT_EQ(stored.at("assembled_artifact_ids"), json::array({summary.id(), skill.id()}));
     EXPECT_EQ(stored.at("artifact_classes").at(skill.id()), "stable");
     EXPECT_EQ(stored.at("artifact_classes").at(summary.id()), "volatile");
+    EXPECT_EQ(stored.at("class_sources").at(skill.id()), "derived");
+    EXPECT_EQ(stored.at("class_rule_version"), STABILITY_DERIVATION_RULE_VERSION);
     EXPECT_EQ(stored.at("encoder_family"), "openai.chat");
     // The boundaries and the prefix digest are placeholders until the assembler marks them.
     EXPECT_FALSE(stored.contains("stable_boundary"));
@@ -607,6 +621,7 @@ TEST(ContextStability, AReceiptOfVersion2IsCheckedAgainstItsEpochAndArtifacts) {
     data.assembled_artifact_ids = std::vector<std::string>{skill.id(), summary.id()};
     data.artifact_classes = std::map<std::string, StabilityClass>{
         {skill.id(), StabilityClass::Stable}, {summary.id(), StabilityClass::Volatile}};
+    record_sources(data, artifacts);
     ASSERT_NO_THROW(ContextAssemblyReceipt::create(data, epoch, artifacts));
 
     // The class table is the classes of the artifacts, derived or declared.
@@ -620,6 +635,18 @@ TEST(ContextStability, AReceiptOfVersion2IsCheckedAgainstItsEpochAndArtifacts) {
     auto table_only = data;
     table_only.assembled_artifact_ids.reset();
     EXPECT_THROW(ContextAssemblyReceipt::create(table_only, epoch, artifacts), std::invalid_argument);
+    auto sources_missing = data;
+    sources_missing.class_sources.reset();
+    EXPECT_THROW(ContextAssemblyReceipt::create(sources_missing, epoch, artifacts), std::invalid_argument);
+    auto version_missing = data;
+    version_missing.class_rule_version.reset();
+    EXPECT_THROW(ContextAssemblyReceipt::create(version_missing, epoch, artifacts), std::invalid_argument);
+    auto short_sources = data;
+    short_sources.class_sources->erase(summary.id());
+    EXPECT_THROW(ContextAssemblyReceipt::create(short_sources, epoch, artifacts), std::invalid_argument);
+    auto bad_source = data;
+    (*bad_source.class_sources)[summary.id()] = static_cast<ClassSource>(255);
+    EXPECT_THROW(ContextAssemblyReceipt::create(bad_source, epoch, artifacts), std::invalid_argument);
     auto short_order = data;
     short_order.assembled_artifact_ids = std::vector<std::string>{skill.id()};
     EXPECT_THROW(ContextAssemblyReceipt::create(short_order, epoch, artifacts), std::invalid_argument);
@@ -857,6 +884,7 @@ TEST(ContextStability, TheValuesValidateAgainstTheirSchemas) {
     receipt_data.assembled_artifact_ids = std::vector<std::string>{skill.id(), summary.id()};
     receipt_data.artifact_classes = std::map<std::string, StabilityClass>{
         {skill.id(), StabilityClass::Stable}, {summary.id(), StabilityClass::Volatile}};
+    record_sources(receipt_data, artifacts);
     receipt_data.encoder_family = "anthropic.messages";
     receipt_data.tools_digest = sha('4');
     receipt_data.stable_boundary = ContextPrefixBoundary{1, 0};
@@ -1046,6 +1074,7 @@ TEST(ContextLayout, AReceiptRecordsRealBoundariesAndTheDigestOfThePrefix) {
     auto data = receipt_v1_data(epoch, artifacts);
     data.assembled_artifact_ids = std::vector<std::string>{skill.id()};
     data.artifact_classes = std::map<std::string, StabilityClass>{{skill.id(), StabilityClass::Stable}};
+    record_sources(data, artifacts);
     data.encoder_family = "anthropic.messages";
     data.stable_boundary = ContextPrefixBoundary{0, 0};
     data.prefix_boundary = ContextPrefixBoundary{4, 1};
@@ -1075,4 +1104,93 @@ TEST(ContextLayout, AReceiptRecordsRealBoundariesAndTheDigestOfThePrefix) {
     EXPECT_THROW(ContextAssemblyReceipt::create(reversed, epoch, artifacts), std::invalid_argument);
     reversed.stable_boundary = ContextPrefixBoundary{5, 0};
     EXPECT_THROW(ContextAssemblyReceipt::create(reversed, epoch, artifacts), std::invalid_argument);
+}
+
+TEST(ContextStability, AReceiptReadsTheClassesAsTheyWereWrittenUnderAnOlderDerivationRule) {
+    // A derived class and a declared one, and a rule that has since changed: the summary is Volatile by the
+    // rule in force and the receipt, written when that rule called it Slow, says Slow.
+    const auto skill = ContextArtifact::create(skill_data());
+    const auto summary = ContextArtifact::create(summary_data());
+    auto declared_data = summary_data();
+    declared_data.producer_id = "summarizer.v2";
+    declared_data.stability_class = StabilityClass::Slow;
+    const auto declared = ContextArtifact::create(declared_data);
+    ASSERT_EQ(summary.stability_class(), StabilityClass::Volatile);
+    const std::vector<ContextArtifact> artifacts{skill, summary, declared};
+    const auto epoch = ContextEpoch::create(epoch_v1_data({skill.id(), summary.id(), declared.id()}));
+    auto written = receipt_v1_data(epoch, artifacts);
+    written.assembled_artifact_ids = std::vector<std::string>{skill.id(), summary.id(), declared.id()};
+    written.artifact_classes = std::map<std::string, StabilityClass>{
+        {skill.id(), StabilityClass::Stable}, {summary.id(), StabilityClass::Slow},
+        {declared.id(), StabilityClass::Slow}};
+    record_sources(written, artifacts);
+    ASSERT_GT(STABILITY_DERIVATION_RULE_VERSION, 0u);
+
+    // Under the rule in force the derived class is derived again and has to agree.
+    EXPECT_THROW(ContextAssemblyReceipt::create(written, epoch, artifacts), std::invalid_argument);
+    // Under an older rule, or a newer one, the recorded class stands, and the receipt parses and reports it.
+    for (const auto version : {STABILITY_DERIVATION_RULE_VERSION - 1, STABILITY_DERIVATION_RULE_VERSION + 1}) {
+        auto historical = written;
+        historical.class_rule_version = version;
+        const auto receipt = ContextAssemblyReceipt::create(historical, epoch, artifacts);
+        const auto stored = ContextAssemblyReceipt::parse(receipt.serialize_canonical(), epoch, artifacts);
+        EXPECT_EQ(stored.id(), receipt.id());
+        EXPECT_EQ(stored.class_rule_version(), std::optional<std::uint32_t>(version));
+        EXPECT_EQ(stored.artifact_classes()->at(summary.id()), StabilityClass::Slow);
+        EXPECT_EQ(stored.class_sources()->at(summary.id()), ClassSource::Derived);
+        EXPECT_EQ(stored.class_sources()->at(declared.id()), ClassSource::Declared);
+
+        // A declared class is part of the artifact, and no rule version excuses a receipt that differs.
+        auto wrong = historical;
+        (*wrong.artifact_classes)[declared.id()] = StabilityClass::Stable;
+        EXPECT_THROW(ContextAssemblyReceipt::create(wrong, epoch, artifacts), std::invalid_argument);
+        // Nor does it excuse a source that disagrees with the artifact.
+        auto mislabelled = historical;
+        (*mislabelled.class_sources)[declared.id()] = ClassSource::Derived;
+        EXPECT_THROW(ContextAssemblyReceipt::create(mislabelled, epoch, artifacts), std::invalid_argument);
+        auto claimed = historical;
+        (*claimed.class_sources)[summary.id()] = ClassSource::Declared;
+        EXPECT_THROW(ContextAssemblyReceipt::create(claimed, epoch, artifacts), std::invalid_argument);
+    }
+    // Written under the rule in force and agreeing with it, the receipt is accepted.
+    auto agreeing = written;
+    (*agreeing.artifact_classes)[summary.id()] = StabilityClass::Volatile;
+    EXPECT_NO_THROW(ContextAssemblyReceipt::create(agreeing, epoch, artifacts));
+}
+
+TEST(ContextLayout, AnExtensionUnderTheStableFirstLayoutIsAlsoALayoutTheAssemblerAccepts) {
+    const auto skill = head_skill();
+    const auto first_note = tail_note("reading 1");
+    const auto second_note = tail_note("reading 2");
+    const auto check = [](const Turn& next, const Turn& before) {
+        verify_context_epoch_claim(next.epoch, next.artifacts, &before.epoch, before.artifacts);
+    };
+
+    // The Stable and Slow artifacts are the same and in the same order; only a Volatile one moved in front.
+    // The comparison alone cannot see that, and under the legacy layout, which does not read the recorded
+    // order, the claim is as good as it was.
+    const auto legacy_before = turn(1, std::nullopt, 1, 5, {skill, first_note}, std::nullopt);
+    const auto legacy_after = turn(2, legacy_before.epoch.id(), 1, 6, {second_note, skill}, ContextPrefixClaim::Extends);
+    EXPECT_NO_THROW(check(legacy_after, legacy_before));
+
+    // Under the stable-first layout the recorded order is the order of the request.
+    const auto before = layout_turn(1, std::nullopt, 5, {skill, first_note});
+    const auto after = layout_turn(2, before.epoch.id(), 6, {skill, second_note}, ContextPrefixClaim::Extends);
+    EXPECT_NO_THROW(check(after, before));
+    const auto volatile_first = layout_turn(2, before.epoch.id(), 6, {second_note, skill}, ContextPrefixClaim::Extends);
+    expect_refusal(ContextStabilityRefusal::TierOrderViolated, [&] { check(volatile_first, before); });
+    ContextArtifactData in_front;
+    in_front.kind = ContextArtifactKind::HookOutput;
+    in_front.producer_id = "hook-output.v1";
+    in_front.source_digest = sha('c');
+    in_front.media_type = "text/plain";
+    in_front.placement = ContextPlacement::BeforeHistory;
+    in_front.content = "reading 2";
+    const auto at_the_head = layout_turn(2, before.epoch.id(), 6, {skill, ContextArtifact::create(in_front)},
+                                         ContextPrefixClaim::Extends);
+    expect_refusal(ContextStabilityRefusal::VolatileOutsideTail, [&] { check(at_the_head, before); });
+    // The same order is no extension but may still be a break the epoch declares, as before.
+    const auto declared = layout_turn(2, before.epoch.id(), 6, {skill, second_note}, ContextPrefixClaim::Breaks,
+                                      ContextBreakReason::Explicit);
+    EXPECT_NO_THROW(check(declared, before));
 }

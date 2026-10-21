@@ -195,8 +195,13 @@ ProgramContextPublication ordered_context_publication(
     receipt_data.estimated_input_tokens = 1;
     receipt_data.assembled_artifact_ids = *epoch.ordered_artifact_ids();
     receipt_data.artifact_classes.emplace();
+    receipt_data.class_sources.emplace();
+    receipt_data.class_rule_version = neograph::STABILITY_DERIVATION_RULE_VERSION;
     for (const auto& artifact : artifacts) {
         receipt_data.artifact_classes->emplace(artifact.id(), artifact.stability_class());
+        receipt_data.class_sources->emplace(artifact.id(), artifact.declared_stability_class()
+                                                               ? neograph::ClassSource::Declared
+                                                               : neograph::ClassSource::Derived);
         if (artifact.kind() == ContextArtifactKind::RequiredSkill) {
             receipt_data.required_skill_artifact_ids.push_back(artifact.id());
         }
@@ -241,6 +246,8 @@ ProgramContextPublication transferred_context_publication(
         source.assembly_receipt.mandatory_input_tokens()};
     receipt_data.assembled_artifact_ids = source.assembly_receipt.assembled_artifact_ids();
     receipt_data.artifact_classes = source.assembly_receipt.artifact_classes();
+    receipt_data.class_sources = source.assembly_receipt.class_sources();
+    receipt_data.class_rule_version = source.assembly_receipt.class_rule_version();
     receipt_data.encoder_family = source.assembly_receipt.encoder_family();
     receipt_data.stable_boundary = source.assembly_receipt.stable_boundary();
     receipt_data.prefix_boundary = source.assembly_receipt.prefix_boundary();
@@ -1764,7 +1771,7 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
     base.migration_plan = MigrationPlan::create(MigrationPlanData{
         digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
     // A copy that lost the order, or the prefix fields of the receipt, is not the source's context.
-    const auto copy = [&](bool keep_order, bool keep_prefix_fields, bool keep_layout = true) {
+    const auto copy = [&](bool keep_order, bool keep_prefix_fields, bool keep_layout = true, bool keep_rule = true) {
         ContextEpochData data{"run-2", 1, std::nullopt, source_context.epoch.feed_id(),
                               source_context.epoch.raw_from_sequence(),
                               source_context.epoch.raw_through_sequence(),
@@ -1782,19 +1789,24 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
         if (keep_prefix_fields) {
             receipt_data.assembled_artifact_ids = source_receipt.assembled_artifact_ids();
             receipt_data.artifact_classes = source_receipt.artifact_classes();
+            receipt_data.class_sources = source_receipt.class_sources();
+            receipt_data.class_rule_version = source_receipt.class_rule_version();
+            // Another rule version is a valid receipt of its own, and it is not the source's.
+            if (!keep_rule) receipt_data.class_rule_version = *source_receipt.class_rule_version() + 1;
             receipt_data.encoder_family = source_receipt.encoder_family();
         }
         auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, source_context.artifacts);
         return ProgramContextPublication{std::move(epoch), source_context.artifacts, std::move(receipt)};
     };
-    for (const auto& [keep_order, keep_prefix_fields, keep_layout] :
-         std::vector<std::tuple<bool, bool, bool>>{
-             {false, true, true}, {true, false, true}, {false, false, true}, {true, true, false}}) {
+    for (const auto& [keep_order, keep_prefix_fields, keep_layout, keep_rule] :
+         std::vector<std::tuple<bool, bool, bool, bool>>{{false, true, true, true}, {true, false, true, true},
+                                                         {false, false, true, true}, {true, true, false, true},
+                                                         {true, true, true, false}}) {
         auto dropped = base;
-        dropped.context_publication = copy(keep_order, keep_prefix_fields, keep_layout);
+        dropped.context_publication = copy(keep_order, keep_prefix_fields, keep_layout, keep_rule);
         attach_fork_split(dropped, *source.run_lineage);
         EXPECT_EQ(store.compare_publish("owner-a", {}, dropped), ProgramTransitionPublishResult::Conflict)
-            << keep_order << keep_prefix_fields << keep_layout;
+            << keep_order << keep_prefix_fields << keep_layout << keep_rule;
     }
 
     // The first epoch of the target has no predecessor, so it claims nothing about a prefix.
@@ -1815,6 +1827,8 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
             copied.raw_through_sequence(), copied.estimated_input_tokens(), copied.mandatory_input_tokens()};
         receipt_data.assembled_artifact_ids = copied.assembled_artifact_ids();
         receipt_data.artifact_classes = copied.artifact_classes();
+        receipt_data.class_sources = copied.class_sources();
+        receipt_data.class_rule_version = copied.class_rule_version();
         receipt_data.encoder_family = copied.encoder_family();
         receipt_data.break_reason = neograph::ContextBreakReason::Explicit;
         auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, claiming.artifacts);

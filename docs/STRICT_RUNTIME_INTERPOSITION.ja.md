@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -194,8 +194,8 @@ trusted supplemental input
 
 - アーティファクトは `StabilityClass` を宣言できます。`Stable`（実行の間ずっと同じバイト列）、`Slow`（圧縮など、宣言されたプレフィックスの断絶のときだけ変わる）、`Volatile`（呼び出しごとに変わりうる）です。宣言しないアーティファクトは、読み込むときにクラスが決まります。`RequiredSkill` と `HardConstraint` は `Stable`、プロデューサーが `COMPACTION_PRODUCER_ID` の `DerivedContext` は `Slow`、それ以外はすべて `Volatile` です。System メッセージとして描画される種類の `Volatile` なアーティファクトを作ると、`ContextStabilityError` で拒否されます。
 - アーティファクトは `AnchorMode` を宣言できます。`Replace`（既定）または `KeepInPlace` です。これを使うものはまだありません。
-- エポックは、アーティファクトを固定された順序で並べた `ordered_artifact_ids` と `prefix_claim` を記録できます。`prefix_claim` は、`Extends`（リクエストの先頭は直前のエポックのものと同じで、末尾でだけ伸びる）か、`break_reason` を伴う `Breaks` です。`Extends` を宣言したエポックをアクティブにすると、アクティブなエポック、またはホストが `activate` に渡した直前のエポックに対して宣言が検査されます。条件は、同じ `raw_from_sequence`、より大きい `raw_through_sequence`、同じ順序の同じ `Stable` と `Slow` のアーティファクト、そしてまだ選択されていて RAW ウィンドウ内にある `KeepInPlace` のアーティファクトです。順序を記録していないエポック（このフィールドができる前に保存されたものなど）は、引き継げません。
-- アセンブラが書くレシートは、プロンプトの順序でのアーティファクト、そのクラス、エンコーダーのファミリー、ツールのダイジェスト、エポックの断絶の理由を記録します。
+- エポックは、アーティファクトを固定された順序で並べた `ordered_artifact_ids` と `prefix_claim` を記録できます。`prefix_claim` は、`Extends`（リクエストの先頭は直前のエポックのものと同じで、末尾でだけ伸びる）か、`break_reason` を伴う `Breaks` です。`Extends` を宣言したエポックをアクティブにすると、アクティブなエポック、またはホストが `activate` に渡した直前のエポックに対して宣言が検査されます。条件は、同じ `raw_from_sequence`、より大きい `raw_through_sequence`、同じ順序の同じ `Stable` と `Slow` のアーティファクト、そしてまだ選択されていて RAW ウィンドウ内にある `KeepInPlace` のアーティファクトです。順序を記録していないエポック（このフィールドができる前に保存されたものなど）は、引き継げません。`Extends` が約束するものはレイアウトによって異なります。`Legacy` では、`Stable` と `Slow` のアーティファクトと記録された順序が変わらず、ウィンドウが伸びただけだという意味で、レガシーのアセンブラは配置、優先度、プロデューサーの順に並べ、記録された順序を読まないので、リクエストの先頭までは約束しません。`StableFirst` では、記録された順序がそのままリクエストの順序で、エポックのアーティファクトがアセンブラの受け付けるレイアウトでなければ宣言は拒否され、`Slow` のアーティファクトが終わるまでのリクエストの先頭は直前のエポックのものと同じです（ホストの指示とツールは、エポックが所有しないので除きます）。
+- アセンブラが書くレシートは、プロンプトの順序でのアーティファクト、そのクラス（それぞれアーティファクトが宣言したものか導出したものか、および導出規則のバージョンとともに）、エンコーダーのファミリー、ツールのダイジェスト、エポックの断絶の理由を記録します。JSON でない本文は、ツールのないリクエストではなくエラーです。保存されたレシートは、クラスが宣言されているところでは厳密に照合し、現行の規則のバージョンのときだけクラスを導出し直して比べるので、後で規則が変わっても、保存済みのレシートは読めるままです。
 
 ## 安定性優先のレイアウト
 

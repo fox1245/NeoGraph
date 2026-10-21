@@ -95,6 +95,14 @@ enum class AssemblyLayout : std::uint8_t {
     StableFirst,
 };
 
+/** Where the class of an artifact in a receipt came from. */
+enum class ClassSource : std::uint8_t {
+    /** The artifact states its class, in its own stored bytes. */
+    Declared,
+    /** The class was derived from the kind and the producer by the rule of the receipt's rule version. */
+    Derived,
+};
+
 /** What an epoch declares about the request prefix of its predecessor. */
 enum class ContextPrefixClaim : std::uint8_t {
     /** Same start, only grown at the end; checked by verify_context_epoch_claim. */
@@ -112,6 +120,7 @@ NEOGRAPH_API std::string_view to_string(AnchorMode value) noexcept;
 NEOGRAPH_API std::string_view to_string(ContextBreakReason value) noexcept;
 NEOGRAPH_API std::string_view to_string(ContextPrefixClaim value) noexcept;
 NEOGRAPH_API std::string_view to_string(AssemblyLayout value) noexcept;
+NEOGRAPH_API std::string_view to_string(ClassSource value) noexcept;
 NEOGRAPH_API RuntimeTrustClass runtime_trust_class_from_string(std::string_view value);
 NEOGRAPH_API ContextArtifactKind context_artifact_kind_from_string(std::string_view value);
 NEOGRAPH_API ContextPlacement context_placement_from_string(std::string_view value);
@@ -122,12 +131,20 @@ NEOGRAPH_API AnchorMode anchor_mode_from_string(std::string_view value);
 NEOGRAPH_API ContextBreakReason context_break_reason_from_string(std::string_view value);
 NEOGRAPH_API ContextPrefixClaim context_prefix_claim_from_string(std::string_view value);
 NEOGRAPH_API AssemblyLayout assembly_layout_from_string(std::string_view value);
+NEOGRAPH_API ClassSource class_source_from_string(std::string_view value);
 
 /** Producer id of a DerivedContext artifact that a compaction transform writes. */
 inline constexpr std::string_view COMPACTION_PRODUCER_ID = "neograph-compaction.v1";
 
 /** True for the kinds that render as System messages: RequiredSkill and HardConstraint. */
 NEOGRAPH_API bool context_artifact_kind_renders_as_system(ContextArtifactKind kind) noexcept;
+
+/**
+ * The version of the rule derive_stability_class applies. A receipt records the version under which it
+ * derived the classes it names; whoever changes the rule raises this number, so that a receipt written under
+ * an older rule is still read as it was written.
+ */
+inline constexpr std::uint32_t STABILITY_DERIVATION_RULE_VERSION = 1;
 
 /**
  * The class of an artifact that does not declare one, from fields every stored
@@ -395,8 +412,19 @@ struct ContextAssemblyReceiptData {
     // them: its prefix is unknown, not empty.
     /** artifact_ids in the order the assembler placed them. Needs artifact_classes. */
     std::optional<std::vector<std::string>>        assembled_artifact_ids;
-    /** The class of every artifact in artifact_ids. Needs assembled_artifact_ids. */
+    /**
+     * The class of every artifact in artifact_ids. Recorded together with assembled_artifact_ids,
+     * class_sources and class_rule_version.
+     */
     std::optional<std::map<std::string, StabilityClass>> artifact_classes;
+    /** Whether the artifact declared that class or the receipt derived it. Covers the same artifacts. */
+    std::optional<std::map<std::string, ClassSource>> class_sources;
+    /**
+     * The STABILITY_DERIVATION_RULE_VERSION the derived classes were derived under. A receipt is checked
+     * against its artifacts strictly where a class was declared, and by deriving it again only when this is
+     * the version in force; under another version the recorded class is accepted as written.
+     */
+    std::optional<std::uint32_t> class_rule_version;
     /** The encoder the request body was written by, such as the provider family. */
     std::optional<std::string>                     encoder_family;
     /**
@@ -443,6 +471,8 @@ public:
     std::uint64_t mandatory_input_tokens() const noexcept;
     const std::optional<std::vector<std::string>>& assembled_artifact_ids() const noexcept;
     const std::optional<std::map<std::string, StabilityClass>>& artifact_classes() const noexcept;
+    const std::optional<std::map<std::string, ClassSource>>& class_sources() const noexcept;
+    const std::optional<std::uint32_t>& class_rule_version() const noexcept;
     const std::optional<std::string>& encoder_family() const noexcept;
     const std::optional<ContextPrefixBoundary>& stable_boundary() const noexcept;
     const std::optional<ContextPrefixBoundary>& prefix_boundary() const noexcept;
@@ -479,7 +509,17 @@ NEOGRAPH_API void validate_context_assembly_receipt(
  *   - raw_from_sequence is the same and raw_through_sequence is larger;
  *   - the Stable and Slow artifacts are the same, in the same order;
  *   - every KeepInPlace artifact of the predecessor is still selected, and each
- *     one the epoch selects covers a range inside its RAW window.
+ *     one the epoch selects covers a range inside its RAW window;
+ *   - under the stable-first layout, the artifacts of the epoch form a layout
+ *     the assembler accepts (validate_context_layout).
+ * What the claim promises depends on the layout. Under Legacy it says that the
+ * Stable and Slow artifacts and their recorded order are unchanged and that the
+ * RAW window only grew; the legacy assembler orders by placement, priority and
+ * producer and does not read the recorded order, so the claim does not promise
+ * the same start of the request. Under StableFirst the recorded order is the
+ * order of the request, and the start of the request up to the end of the Slow
+ * artifacts is the predecessor's (host instructions and tools aside, which the
+ * epoch does not own).
  * `artifacts` are the artifacts the epoch selects and `predecessor_artifacts` those of
  * the predecessor, each matching its epoch's artifact_ids. Pass a null predecessor
  * when none can be loaded: an Extends claim is then refused.

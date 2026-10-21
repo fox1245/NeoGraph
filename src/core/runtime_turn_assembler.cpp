@@ -103,19 +103,6 @@ sp::Message render_artifact(const ContextArtifact& artifact) {
     return message;
 }
 
-// Digest of the tool definitions an encoded request body carries, which every
-// family names `tools`; absent when the body has none. Tool definitions sit in
-// front of the messages, so a change to them changes the whole request.
-std::optional<std::string> tools_digest(std::string_view encoded_body) {
-    try {
-        const auto body = detail::parse_json_strict(encoded_body);
-        if (!body.is_object() || !body.contains("tools")) return std::nullopt;
-        return identity("provider-tools/v1", body.at("tools"));
-    } catch (const std::exception&) {
-        return std::nullopt;
-    }
-}
-
 // The text of the message that marks where a prefix ends when the request is encoded again.
 constexpr std::string_view PREFIX_MARKER = "neograph-prefix-boundary-marker-6f1d0c";
 
@@ -284,6 +271,22 @@ RuntimeTurnAssembler::RuntimeTurnAssembler(
 RuntimeTurnAssembler::~RuntimeTurnAssembler() = default;
 RuntimeTurnAssembler::RuntimeTurnAssembler(RuntimeTurnAssembler&&) noexcept = default;
 RuntimeTurnAssembler& RuntimeTurnAssembler::operator=(RuntimeTurnAssembler&&) noexcept = default;
+
+std::optional<std::string> RuntimeTurnAssembler::tools_digest(std::string_view encoded_body) {
+    json body;
+    try {
+        body = detail::parse_json_strict(encoded_body);
+    } catch (const std::exception& error) {
+        throw std::invalid_argument(std::string("The encoded request body is not JSON, so its tools cannot be digested: ") +
+                                    error.what());
+    }
+    if (!body.is_object()) {
+        throw std::invalid_argument("The encoded request body is not a JSON object, so its tools cannot be digested");
+    }
+    // Tool definitions sit in front of the messages, so a change to them changes the whole request.
+    if (!body.contains("tools")) return std::nullopt;
+    return identity("provider-tools/v1", body.at("tools"));
+}
 
 std::uint64_t RuntimeTurnAssembler::estimate_input_tokens(const PreparedProviderRequest& request) {
     return tokens_for_bytes(request.encoded_body().size());
@@ -515,11 +518,16 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
                                                     ids->begin(), ids->end());
     }
     receipt_data.artifact_classes.emplace();
+    receipt_data.class_sources.emplace();
+    receipt_data.class_rule_version = STABILITY_DERIVATION_RULE_VERSION;
     for (const auto& item : selected) {
         receipt_data.artifact_classes->emplace(item.artifact.id(), item.artifact.stability_class());
+        receipt_data.class_sources->emplace(item.artifact.id(), item.artifact.declared_stability_class()
+                                                                    ? ClassSource::Declared
+                                                                    : ClassSource::Derived);
     }
     receipt_data.encoder_family = std::string(prepared.family());
-    receipt_data.tools_digest = tools_digest(prepared.encoded_body());
+    receipt_data.tools_digest = RuntimeTurnAssembler::tools_digest(prepared.encoded_body());
     receipt_data.break_reason = epoch.break_reason();
     if (stable_first) {
         auto fields = read_prefix_fields(prepared, probes, shape);
