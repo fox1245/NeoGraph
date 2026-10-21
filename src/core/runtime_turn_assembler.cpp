@@ -159,7 +159,7 @@ struct PrefixFields {
     std::string prefix_digest;
 };
 
-// Read the two boundaries from the body of the full request and the bodies of the probes.
+// Where the parts end among the assembled messages.
 struct PrefixShape {
     std::size_t messages = 0;      // assembled messages
     std::size_t stable_end = 0;    // host instructions and Stable artifacts
@@ -167,6 +167,7 @@ struct PrefixShape {
     bool system_after_stable = false;  // a Slow artifact renders as a System message
 };
 
+// Read the two boundaries from the body of the full request and the bodies of the probes.
 PrefixFields read_prefix_fields(
     const PreparedProviderRequest& prepared, const PrefixEncodings& probes, const PrefixShape& shape) {
     const auto stable_end = shape.stable_end;
@@ -473,10 +474,11 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
         std::vector<std::string> placed = before_history_ids;
         placed.insert(placed.end(), after_history_ids.begin(), after_history_ids.end());
         if (placed != expected) throw std::logic_error("Stable-first assembly did not follow the recorded artifact order");
-        // Encoded before the request itself, so that the request a provider fixture sees last is the real one.
         for (std::size_t index = shape.stable_end; index < shape.prefix_end; ++index) {
             if (assembled[index].role == sp::Role::System) shape.system_after_stable = true;
         }
+        // The probes are encoded before the request itself, so that the request a provider sees last is the
+        // real one.
         if (shape.prefix_end < shape.messages) {
             probes.prefix = encode_prefix_probe(provider, request, assembled, shape.prefix_end);
         }

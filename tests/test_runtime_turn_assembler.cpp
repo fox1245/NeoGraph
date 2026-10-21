@@ -1027,6 +1027,21 @@ TEST(StableFirstAssembly, CountsHostInstructionsAndTheSupplementalInputInTheBoun
 TEST(StableFirstAssembly, ThePrefixDigestCoversEveryMemberButTheStreamFlagAndTheOutputCap) {
     auto provider = assembly_provider();
     LayoutFixture fixture({head_skill(), tail_note("reading")});
+    // The output cap is not part of what a provider's cache reads; a member that is, is.
+    const auto digest_with = [&](std::optional<std::uint64_t> cap, std::optional<double> temperature) {
+        auto request = assembly_template();
+        std::get<sp::chat::Request>(request.payload).max_output_tokens = cap;
+        std::get<sp::chat::Request>(request.payload).temperature = temperature;
+        const auto turn = RuntimeTurnAssembler(fixture.store, {fixture.artifacts.front().id()}).assemble(
+            provider, "owner", *fixture.epoch, std::move(request));
+        return std::make_pair(std::string(turn.request.encoded_body()), *turn.assembly_receipt.prefix_digest());
+    };
+    const auto base = digest_with(std::nullopt, std::nullopt);
+    const auto capped = digest_with(100, std::nullopt);
+    const auto warm = digest_with(std::nullopt, 0.5);
+    EXPECT_NE(base.first, capped.first);
+    EXPECT_EQ(base.second, capped.second);
+    EXPECT_NE(base.second, warm.second);
     const auto buffered = assemble_for(fixture, provider);
     const auto streamed = assemble_for(fixture, provider, {}, {}, ProviderMode::Stream);
     ASSERT_NE(buffered.request.encoded_body(), streamed.request.encoded_body());
