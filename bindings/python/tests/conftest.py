@@ -5,6 +5,7 @@ import shutil
 import ssl
 import socket
 import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -323,3 +324,15 @@ def registered_node_types_do_not_outlive_the_session():
     """
     yield
     _neograph._python_factories.clear()
+
+
+def pytest_terminal_summary(terminalreporter):
+    """Print the table of the wire-prefix traces when test_prompt_prefix_wire.py has run."""
+    trace = sys.modules.get("prefix_trace")
+    if trace is None or not trace.ROWS:
+        return
+    presets, layouts = list(trace.PRESETS), list(trace.LAYOUTS)
+    rows = sorted(trace.ROWS, key=lambda row: (presets.index(row[0]), layouts.index(row[1])))
+    terminalreporter.write_sep("-", "share of each request body that repeats the call before it")
+    for line in trace.render_table(rows):
+        terminalreporter.write_line(line)
