@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=111632043ee21775a3a6b7fb870eac6c77f89281fe9499048640164cd4b2d49b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a96b9b9ae6b57dc2955237adf29f74477fc61fed23a564375e2bb1535a6782e9 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -90,12 +90,12 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - Program のプロバイダーラッパーと `OpenInferenceProvider` は、内側のプロバイダーのエンドポイントを転送します（`Provider::endpoint_runtime_of`）。
 
 ### 変更
-- **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。2026-10-20 の円卓会議で決めた構造です。
+- **SchemaProvider interface 7 のすべてのリクエスト制御を、C++ と Python から family ごとのネストで使えます (#512, #513).** `ProviderControls` に `chat`、`responses`、`messages`、`generate`、`interactions`（`ChatControls` … `InteractionsControls`）が加わり、family 固有の制御を SDK の型のまま持ちます。フラットなメンバーはポータブルな制御として残ります。
   - **新しい制御。** Chat の出力 modality、音声出力、OpenRouter の画像出力と plugin。Responses のホスト型ツール（Web 検索、画像生成、ファイル検索、ツール検索、shell、code interpreter、MCP、computer use、OpenRouter のサーバーツール、ポリシーが承認したツール）、出力 modality、画像出力、plugin、include 名、MCP の承認。Messages のサーバー・型付きクライアントツール、container、skill、beta、MCP サーバー。Generate の応答 modality、音声、画像出力、音声の文字起こし、音声形式、組み込みツール、MCP サーバー、サーバーツールの呼び出し、retrieval。Interactions の応答形式、音声、文字起こし、組み込みツール、`previous_interaction_id`、`video_task`、`agent`、`background`（ポータブルな `store` も Interactions に適用されるようになりました）。各ネストには、SDK ポリシーが origin ごとに承認する最上位メンバー `extensions` があります。
   - **動作の変更: 各 family は自分のネストだけを適用します。** 異なる family を呼ぶノードからなるグラフでも `ProviderControls` を一つ共有でき、他の family の制御は無視されます。family が表現できないポータブルな制御は引き続き例外になります。
   - **非推奨: フラットな family メンバー**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。0.16.0 では対応するネストに移され、ほかの family は 0.15 と同じくこれを拒否し、別名とネストのメンバーを両方指定すると例外になり、0.17.0 で削除されます。
   - **Python。** ネストとその中のすべての SDK 型をバインドし、`MessagesOutputEffort` に `XHigh` が加わり、各制御クラスに厳格な `from_dict` があります。未知のキーは拒否し、enum はメンバー名で、ツールや形式の variant は `"type"` で受け取ります（`neograph_engine.provider_controls`）。
-- **Program の価格は、プロバイダーのポリシーが持つ SchemaProvider のモデルカタログからのみ得られます (#520).** 2026-10-20 の価格ラウンドテーブルが設計を決めました。route ceiling、tier の料率、ツール料金は NeoGraph の価格ファイルではなく、カタログの単位とレイヤーです。
+- **Program の価格は、プロバイダーのポリシーが持つ SchemaProvider のモデルカタログからのみ得られます (#520).** route ceiling、tier の料率、ツール料金は NeoGraph の価格ファイルではなく、カタログの単位とレイヤーです。
   - **動作の変更: ホストが価格を供給します。** 組み込みの SchemaProvider カタログには価格が一つもないので、予算付きの実行は、プロバイダーのポリシーがそのモデルに価格を付けるカタログレイヤーを持つまで、価格の付くすべての呼び出しを拒否します。`sp::descriptor::load_policy(..., catalogue)` または `with_catalogue` を使い、Python では `load_provider_policy(..., model_catalogue_json)` を使います。項目の `pricing` は、単位あたりの10進 USD（`input`、`output`、キャッシュ・推論・画像の単位）、OpenRouter の route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context の帯（`input+200000`）、サーバーツールの料金（`tool:<type>`）を与えます。
   - **何を拒否するかはカタログで決まります。** service tier には固有の単位が必要です。OpenRouter の fallback（`models`）はすべての候補に価格が必要で、hold は最も高い候補の値です。サーバーツールまたは hosted tool には料金（`"0"` は無料の宣言）と使用 cap（Messages の `max_uses`、Responses の `max_tool_calls`）が必要です。long-context の帯は、モデルの入力上限がそこに届くときに予約されます。使用 cap を持たない OpenRouter の plugin と Gemini の組み込みツールは、予算付きの実行では拒否されます。
   - **client ツールはトークンだけを請求します (#540)。** ポリシーが client ツールとして示す Messages のツール（`memory_*`、`bash_*`、`text_editor_*`、computer と browser の toolset）は呼び出し側が実行するため、それを含む価格付きリクエストには使用 cap も料金も必要ありません。`max_uses` を認めないサーバーツールの型（`mcp_toolset`、`tool_search_tool_*`、`code_execution_*`）は引き続き拒否され、拒否メッセージがその理由を示します。Responses の hosted tool と Gemini の組み込みツールの wire type は漏れなく対応づけられるため、SchemaProvider が後から追加するツールは `file_search` として価格が付けられず、ビルドが失敗します。
@@ -664,7 +664,7 @@ NeoGraph SDK4 の検証範囲は初回と修正後の限定実行を合わせた
 
 ### 削除
 
-- **非推奨のTransformerCPP統合例。** 削除されました`example_inproc_gemma`、`NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`、および`TRANSFORMERCPP_DIR`。これらは、利用できなくなった外部ホスト型リポジトリに依存していました。`example_local_transformer`は、標準のOpenAI互換ローカルサーバーを使用しており、保持されています。
+- **非推奨のインプロセス ローカル推論の例。** 削除されました`example_inproc_gemma`、`NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`、およびその外部チェックアウトを指していたCMake変数。これらは、利用できなくなった外部ホスト型リポジトリに依存していました。`example_local_transformer`は、標準のOpenAI互換ローカルサーバーを使用しており、保持されています。
 
 ### 修正済み
 
@@ -702,9 +702,9 @@ NeoGraph SDK4 の検証範囲は初回と修正後の限定実行を合わせた
 - **PBT / デルタ検証ハーネス**（#75 M3）。300シードの決定論的トポロジージェネレータ（スキーマエンベロープからの有効な厳格なドキュメント、自己計測された特徴カバレッジ—conditional_edges/barrier/interrupt の出現率が30%を下回るとテストが失敗する：テストされていない特徴は失敗になり、静かな穴にはならない）。
   - **変異検出**: 300シードのコーパスで、変換検証が5種類すべてのドロップ型(conditional_edges/edge/barrier/interrupt/channel)と3種類の誤配線型(ルート崩壊/エッジ再ターゲット/ノード改名=ドロップ+捏造の相殺)の全適用を捕捉することを確認した。適用率の下限(シードの10%)も検証した。
   - **参照インタプリタのデルタ**：コードが分離された実装から文書化されたスーパーステップセマンティクス（goto preemption、バリア蓄積、辞書式フォールバック、暗黙的__end__）を再実装する独立モデルで、12ステップ× 300グラフでスケジューラと比較される（DESILの教訓：単独の検証パイプラインでは誤った実行条件を把握できない）。
-  - **Engine ↔ Studio 共有コーパス**: `tests/fixtures/topology_corpus/` 15のバリアント（3つの有効 + E3–E11に違反する12）はNeoGraph-Studioとバイト単位で同一である `tests/corpus/`、両者は同じ判定（code:severity 多重集合）を主張する — 2つの実装は暗黙的に乖離することはできない。
+  - **Engine ↔ エディター共有コーパス**: `tests/fixtures/topology_corpus/` 15のバリアント（3つの有効 + E3–E11に違反する12）はコンパニオンのエディターリポジトリの `tests/corpus/` とバイト単位で同一で、両者は同じ判定（code:severity 多重集合）を主張する — 2つの実装は暗黙的に乖離することはできない。
 
-- **GraphValidator — トポロジー静的意味チェック (E3–E11 + 効果)** (#75 M2)。パース (M1) と実行の間のパスレイヤー。厳密なドキュメント (schema_version>=1) では、エラーはコンパイル失敗、警告は stderr の lint です。寛容なドキュメントでは、エラーレベルの診断のみが stderr 警告として表面化します (既存のグラフではノイズゼロ)。判定哲学 = チェッカーの健全性を優先: エンジンセマンティクスで決して正しくなり得ないものだけがエラーです (未解決参照 E3、シグナルパスのないバリア E8 — goto はバリア会計をバイパスするため回復不能、空ルート E10 — ディスパッチは rend() UB を逆参照する、未宣言チャネル書き込み E4 — ランタイムで送出が確認済み)。Command.goto/Send が正当化できるものは警告です (到達可能性 E7、脱出不能サイクル E11、バリアなしのプレーン fan-in E9、上書き競合 E5、デッドチャネル E6)。すべての診断には、マシン可読な証拠 (反例) JSON が付随します — Studio キャンバスのハイライト用 (M3)。
+- **GraphValidator — トポロジー静的意味チェック (E3–E11 + 効果)** (#75 M2)。パース (M1) と実行の間のパスレイヤー。厳密なドキュメント (schema_version>=1) では、エラーはコンパイル失敗、警告は stderr の lint です。寛容なドキュメントでは、エラーレベルの診断のみが stderr 警告として表面化します (既存のグラフではノイズゼロ)。判定哲学 = チェッカーの健全性を優先: エンジンセマンティクスで決して正しくなり得ないものだけがエラーです (未解決参照 E3、シグナルパスのないバリア E8 — goto はバリア会計をバイパスするため回復不能、空ルート E10 — ディスパッチは rend() UB を逆参照する、未宣言チャネル書き込み E4 — ランタイムで送出が確認済み)。Command.goto/Send が正当化できるものは警告です (到達可能性 E7、脱出不能サイクル E11、バリアなしのプレーン fan-in E9、上書き競合 E5、デッドチャネル E6)。すべての診断には、マシン可読な証拠 (反例) JSON が付随します — エディターのキャンバスのハイライト用 (M3)。
   - **ルート完全性（E10）**: `ConditionSpec` ラベルコントラクトを導入。`register_condition` の3引数オーバーロードを介して条件の出力ラベルセットを宣言する場合、クローズド条件ルートがラベルと正確に一致することが要求される — カバーされていないラベルはスケジューラの「辞書式順序最後のルート」フォールバック（順序依存の任意ターゲット）に落ち、これはエラーである。組み込みの `has_tool_calls` = クローズド {false,true}、`route_channel` = オープン + 既知の {default}。
   - **チャネル効果契約**: `register_type` の4引数オーバーロードは、ノードタイプごとの読み取り/書き込みチャネルを宣言する。E4/E5/E6分析は、グラフ内の**すべての**ノードタイプが宣言されている場合にのみ有効化される（単一の不明なタイプで分析全体がスキップされる — カバレッジに対する健全性）。組み込みの3タイプ（llm_call/tool_dispatch/intent_classifier）は完全に宣言されている。
   - `node_effects` · `condition_specs` を `export_schema()` に追加（既存の `conditions` 配列は後方互換用に維持）。新規テスト22件。
@@ -957,7 +957,7 @@ engine->set_worker_count_auto();  // ← this line added (hardware_concurrency)
 
 ## [0.8.0] — 2026-05-13 — DX ポリシー + ダウンストリーム主導のAPIギャップに対処しました。
 
-実際のダウンストリーム（ProjectDatePop）からのフィードバックと内部カバレッジ差分によって明らかになった8件の問題（#22、#25、#26、#27、#28、#34、#35 + #16のフォローアップ）を、単一のマイナーバンプにまとめます。2つの新しい公開ヘルパー（`RunResult::channel<T>`、`RunContext::store`）、11の新しいオフライン例、`docs/migration-v0.4-to-v1.0.md`移行ガイド、および新規ユーザーが最初の30分で遭遇する摩擦を軽減する5項目のDXバンドルが含まれます。
+実際のダウンストリームからのフィードバックと内部カバレッジ差分によって明らかになった8件の問題（#22、#25、#26、#27、#28、#34、#35 + #16のフォローアップ）を、単一のマイナーバンプにまとめます。2つの新しい公開ヘルパー（`RunResult::channel<T>`、`RunContext::store`）、11の新しいオフライン例、`docs/migration-v0.4-to-v1.0.md`移行ガイド、および新規ユーザーが最初の30分で遭遇する摩擦を軽減する5項目のDXバンドルが含まれます。
 
 ### 追加
 
@@ -1099,7 +1099,7 @@ v1.0シャープニングトラックの最初のリリース。8つの仮想`Gr
 
 ## [0.3.2] — 2026-05-05 — キャンセル伝搬の強化 (5ラウンド)
 
-v0.3.0 の単発キャンセルが明らかにしたギャップを埋める5 ラウンドのパッチシリーズ: Send fan-out 伝播、インプロセスポーリング、Python 用フック、C++ スコープ、例外型。また、FastAPI SSE チャットデモ評価からの TODO_v0.3.md フィードバックバッチも収録 — `resume_if_exists`、dict-or-list `update_state`、型付き状態読み取り用の StateView。
+v0.3.0 の単発キャンセルが明らかにしたギャップを埋める5 ラウンドのパッチシリーズ: Send fan-out 伝播、インプロセスポーリング、Python 用フック、C++ スコープ、例外型。また、FastAPI SSE チャットデモ評価からのフィードバックバッチも収録 — `resume_if_exists`、dict-or-list `update_state`、型付き状態読み取り用の StateView。
 
 ### 追加
 
@@ -1109,7 +1109,7 @@ v0.3.0 の単発キャンセルが明らかにしたギャップを埋める5 �
 - `StateView` (`bindings/python/neograph_engine/state_view.py`) — Pydantic 型付き状態読み取り。`engine.get_state_view(thread_id) ->
   StateView` はフラットなドットアクセス (`view.messages` / `view.foo`) に加え、dict エスケープハッチ用の `view.raw` を返す。型付きチャンネル定義用のサブクラス: `class ChatState(ng.StateView): messages: list[dict] = []`。
 - `bindings/python/tests/test_async_cancel_live_llm_fanout.py` — 実行中のキャンセルが、ソケット層で Send が生成したすべての兄弟を本当に中止することを検証 (v0.3.1 の根本原因パッチ)。
-- `examples/22_self_evolving_graph.py` — TODO_v0.3.md #9 クックブックの折り込みとともに v0.3.2 に移動。
+- `examples/22_self_evolving_graph.py` — クックブックの折り込みとともに v0.3.2 に移動。
 - Doxygen `/* */` ワイルドカード修正 — `acp/types.h` に `/**` ブロックが含まれており、パスワイルドカード（`fs/*`, `terminal/*`）がネストされたコメントを開き、後続のすべての診断を抑制していました。置き換え先： `&#42;` HTMLエンティティ。
 
 ### 修正済み
@@ -1122,7 +1122,7 @@ v0.3.0 の単発キャンセルが明らかにしたギャップを埋める5 �
   4. v0.3.2 Python用フック — `add_cancel_hook` が実行ごとのトークンにコールバックを登録し、`cancel()` で発火する。同期Python `execute()` がスレッドローカルスコープなしでアドホックなキャンセルハンドラをインストールできるようにする。
   5. v0.3.2 C++スコープ + リトライ + 例外型付け — メインスレッドでの新規スロー `NodeInterrupt`（libstdc++ `__exception_ptr::_M_release` の競合を回避）、リトライ予算はキャンセルを尊重、ランタイム対ロジックの例外分割。
 - `execute_stream` のみのPythonノードがデフォルトの `execute` パスに黙ってフォールスルーしていた（NotImplementedError）。現在は `run_stream` が、ユーザーがストリーミングバリアントのみをオーバーライドした場合に `execute_stream` を直接配線する。
-- `update_state` が list[ChannelWrite] を受け入れる — 黙示的なno-opを解消（TODO_v0.3.md #5）。
+- `update_state` が list[ChannelWrite] を受け入れる — 黙示的なno-opを解消。
 
 ### 注記
 
@@ -1153,7 +1153,7 @@ FastAPI SSEチャットデモ評価中に報告された本番コスト漏れの
 - `neograph::async::run_sync` はオプションの `graph::CancelToken*` パラメータを取得しました。非 null の場合、バインドされたスパウンはトークンのスロットをバインドします。
 - pybind `resolve_future_async` は、`future.set_result` を `call_soon_threadsafe` 経由で直接呼び出す代わりに、safe-resolve ヘルパーを経由してルーティングされる。
 
-### ロードマップ（v0.3.x に延期 — `TODO_v0.3.md` を参照）
+### ロードマップ（v0.3.x に延期）
 
 - 同じ `thread_id` での LangGraph スタイルの自動チェックポイント再開。
 - `run_async` エラーメッセージ内のストリーミング専用ノードのヒント。

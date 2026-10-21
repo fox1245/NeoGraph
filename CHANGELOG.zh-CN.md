@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=111632043ee21775a3a6b7fb870eac6c77f89281fe9499048640164cd4b2d49b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a96b9b9ae6b57dc2955237adf29f74477fc61fed23a564375e2bb1535a6782e9 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -90,12 +90,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - Program provider 包装器和 `OpenInferenceProvider` 会转发其内部 provider 的端点（`Provider::endpoint_runtime_of`）。
 
 ### 变更
-- **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。该结构由 2026-10-20 的圆桌会议决定。
+- **SchemaProvider interface 7 的所有请求控制都可以在 C++ 和 Python 中按 family 的嵌套结构使用 (#512, #513)。** `ProviderControls` 新增 `chat`、`responses`、`messages`、`generate` 和 `interactions`（`ChatControls` … `InteractionsControls`），以 SDK 自己的类型保存各 family 特有的控制；扁平成员保留为可移植控制。
   - **新控制。** Chat 的输出 modality、音频输出、OpenRouter 图像输出和 plugin；Responses 的托管工具（网页搜索、图像生成、文件搜索、工具搜索、shell、code interpreter、MCP、computer use、OpenRouter 服务端工具以及策略准入的工具）、输出 modality、图像输出、plugin、include 名称和 MCP 审批；Messages 的服务端与类型化客户端工具、container、skill、beta 和 MCP 服务器；Generate 的响应 modality、语音、图像输出、音频转写、音频格式、内置工具、MCP 服务器、服务端工具调用和 retrieval；Interactions 的响应格式、语音、转写、内置工具、`previous_interaction_id`、`video_task`、`agent` 和 `background`（可移植的 `store` 现在也适用于 Interactions）。每个嵌套都有 `extensions`，即 SDK 策略按 origin 准入的顶层成员。
   - **行为变更：每个 family 只应用自己的嵌套。** 节点调用不同 family 的图可以共用一个 `ProviderControls`；其他 family 的控制会被忽略。family 无法表达的可移植控制仍会抛出异常。
   - **已弃用：扁平的 family 成员**（`chat_reasoning`、`include_reasoning`、`usage_include`、`models`、`previous_response_id`、`previous_response_history`、`parallel_tool_calls`、`verbosity`、`truncation`、`responses_include`、`thinking_mode`、`output_effort`、`cache_control`、`messages_tool_choice`、`gemini_history_mode`、`gemini_thinking_level`、`safety_settings`、`gemini_tool_choice`）。它们在 0.16.0 中移入对应的嵌套，其他 family 与 0.15 一样拒绝它们，同时设置别名和嵌套成员会抛出异常，0.17.0 将移除它们。
   - **Python。** 绑定了嵌套结构及其中所有 SDK 类型，`MessagesOutputEffort` 新增 `XHigh`，每个控制类都有严格的 `from_dict`：拒绝未知的键，枚举按成员名接受，工具或格式 variant 按 `"type"` 接受（`neograph_engine.provider_controls`）。
-- **Program 的价格只来自 provider 策略中的 SchemaProvider 模型目录 (#520)。** 2026-10-20 的定价圆桌会议确定了设计：route ceiling、tier 费率和工具费用都是目录单位与目录层，而不是 NeoGraph 自带的价格文件。
+- **Program 的价格只来自 provider 策略中的 SchemaProvider 模型目录 (#520)。** route ceiling、tier 费率和工具费用都是目录单位与目录层，而不是 NeoGraph 自带的价格文件。
   - **行为变更：价格由宿主提供。** 内置的 SchemaProvider 目录不列出任何价格，因此在 provider 的策略带有为该模型计价的目录层之前，有预算的运行会拒绝每一个被计价的调用：使用 `sp::descriptor::load_policy(..., catalogue)` 或 `with_catalogue`，在 Python 中使用 `load_provider_policy(..., model_catalogue_json)`。条目的 `pricing` 给出每单位的十进制 USD（`input`、`output`，缓存、推理和图像单位）、OpenRouter 的 route ceiling（`ceiling_input`、`ceiling_output`）、service tier（`input/flex`）、long-context 档（`input+200000`）和服务器工具费用（`tool:<type>`）。
   - **拒绝与否由目录决定。** service tier 需要自己的单位。OpenRouter 回退（`models`）要求每个候选都有价格，hold 取最贵候选的值。服务器工具或 hosted tool 需要费用（`"0"` 声明免费）和使用上限（Messages 的 `max_uses`、Responses 的 `max_tool_calls`）。当模型的输入限制达到 long-context 档时，该档会被预留。没有使用上限的 OpenRouter plugin 和 Gemini 内置工具，在有预算的运行中会被拒绝。
   - **client 工具只按 token 计费 (#540)。** 策略标为 client 工具的 Messages 工具（`memory_*`、`bash_*`、`text_editor_*`、computer 和 browser toolset）由调用方执行，因此带有它们的计价请求既不需要使用上限，也不需要费用。不允许 `max_uses` 的服务器工具类型（`mcp_toolset`、`tool_search_tool_*`、`code_execution_*`）仍会被拒绝，拒绝信息会说明原因。Responses hosted tool 和 Gemini 内置工具的 wire type 是穷举匹配的，因此 SchemaProvider 以后新增的工具会使构建失败，而不会被当作 `file_search` 计价。
@@ -650,7 +650,7 @@ NeoGraph SDK4 验证范围为初次与修正后限定运行合计的 Core 1261 c
 
 ### 移除
 
-- **弃用的 TransformerCPP 集成示例。** 移除了 `example_inproc_gemma`、`NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE` 和 `TRANSFORMERCPP_DIR`，它们依赖于一个不再可用的外部托管仓库。使用标准 OpenAI 兼容本地服务器的 `example_local_transformer` 被保留。
+- **弃用的进程内本地推理示例。** 移除了 `example_inproc_gemma`、`NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE` 以及指向该外部检出目录的 CMake 变量，它们依赖于一个不再可用的外部托管仓库。使用标准 OpenAI 兼容本地服务器的 `example_local_transformer` 被保留。
 
 ### 已修复
 
@@ -688,9 +688,9 @@ NeoGraph SDK4 验证范围为初次与修正后限定运行合计的 Core 1261 c
 - **PBT / 增量验证框架**（#75 M3）。300 种子确定性拓扑生成器（来自 schema 包络的有效严格文档，自检测功能覆盖率——当 conditional_edges/barrier/interrupt 出现率低于 30% 时测试失败：未测试的功能成为失败，而非静默空洞）。
   - **突变检测**：在 300 种子语料库上确认，翻译验证捕获了所有 5 种丢弃类型（conditional_edges/edge/barrier/interrupt/channel）的所有应用 + 3 种错误接线类型（路由折叠 / 边重定向 / 节点重命名 = 丢弃+伪造平衡）。应用率下限（10% 的种子）也已断言。
   - **参考解释器增量**：一个独立模型，从代码不相交的实现重新实现文档化的超步语义（goto 抢占、屏障累积、字典序回退、隐式 __end__），与 Scheduler 在 12 步 × 300 图上进行比较（DESIL 教训：仅靠验证器无法捕获错误执行）。
-  - **Engine ↔ Studio 共享语料库**：`tests/fixtures/topology_corpus/` 15 个变体（3 个有效 + 12 个违反 E3–E11）与 NeoGraph-Studio `tests/corpus/` 字节相同，两者断言相同的判定（代码:严重性多重集）——两个实现不能静默分歧。
+  - **Engine ↔ 编辑器共享语料库**：`tests/fixtures/topology_corpus/` 15 个变体（3 个有效 + 12 个违反 E3–E11）与某个配套编辑器仓库的 `tests/corpus/` 字节相同，两者断言相同的判定（代码:严重性多重集）——两个实现不能静默分歧。
 
-- **GraphValidator — 拓扑静态语义检查（E3–E11 + 效果）**（#75 M2）。解析（M1）与执行之间的传递层。在严格文档（schema_version>=1）中，错误是编译失败，警告是 stderr lint；在宽松文档中，仅错误级诊断作为 stderr 警告浮现（对现有图零噪音）。判定哲学 = 检查器健全性优先：只有那些在引擎语义下永远不可能正确的事物才是错误（悬空引用 E3、无信号路径的屏障 E8——goto 绕过屏障记账因此不可恢复、空路由 E10——分发将解引用 rend() UB、未声明通道写入 E4——运行时确认抛出）；Command.goto/Send 可以证明合理的事物是警告（可达性 E7、无逃逸循环 E11、无屏障的普通 fan-in E9、覆盖竞争 E5、死通道 E6）。每个诊断都附带机器可读的见证（反例）JSON——用于 Studio 画布高亮（M3）。
+- **GraphValidator — 拓扑静态语义检查（E3–E11 + 效果）**（#75 M2）。解析（M1）与执行之间的传递层。在严格文档（schema_version>=1）中，错误是编译失败，警告是 stderr lint；在宽松文档中，仅错误级诊断作为 stderr 警告浮现（对现有图零噪音）。判定哲学 = 检查器健全性优先：只有那些在引擎语义下永远不可能正确的事物才是错误（悬空引用 E3、无信号路径的屏障 E8——goto 绕过屏障记账因此不可恢复、空路由 E10——分发将解引用 rend() UB、未声明通道写入 E4——运行时确认抛出）；Command.goto/Send 可以证明合理的事物是警告（可达性 E7、无逃逸循环 E11、无屏障的普通 fan-in E9、覆盖竞争 E5、死通道 E6）。每个诊断都附带机器可读的见证（反例）JSON——用于编辑器画布高亮（M3）。
   - **路由完备性（E10）**：`ConditionSpec` 标签契约引入。通过 `register_condition` 3 参数重载声明条件的输出标签集要求封闭条件路由与标签精确匹配——未覆盖的标签落入调度器的“字典序最后路由”回退（顺序相关的任意目标），这是错误。内置 `has_tool_calls` = 封闭 {false,true}，`route_channel` = 开放 + 已知 {default}。
   - **通道效果契约**：`register_type` 4 参数重载声明每节点类型的读/写通道。E4/E5/E6 分析仅在图中**每个**节点类型都被声明时激活（单个未知类型跳过整个分析——健全性优先于覆盖）。内置 3 种类型（llm_call/tool_dispatch/intent_classifier）完全声明。
   - `node_effects` · `condition_specs` 添加到 `export_schema()`（现有 `conditions` 数组保留用于向后兼容）。22 个新测试。
@@ -943,7 +943,7 @@ engine->set_worker_count_auto();  // ← this line added (hardware_concurrency)
 
 ## [0.8.0] — 2026年5月13日 — DX 策略 + 下游驱动的 API 缺口已解决
 
-将真实下游（ProjectDatePop）反馈和内部覆盖率差异所暴露的 8 个问题（#22、#25、#26、#27、#28、#34、#35 + #16 后续）打包为一次次要版本升级。新增两个公共辅助函数（`RunResult::channel<T>`、`RunContext::store`）、11 个新的离线示例、`docs/migration-v0.4-to-v1.0.md` 迁移指南，以及一个包含 5 项的 DX 包，以减少新用户在最初 30 分钟内遇到的摩擦。
+将真实下游反馈和内部覆盖率差异所暴露的 8 个问题（#22、#25、#26、#27、#28、#34、#35 + #16 后续）打包为一次次要版本升级。新增两个公共辅助函数（`RunResult::channel<T>`、`RunContext::store`）、11 个新的离线示例、`docs/migration-v0.4-to-v1.0.md` 迁移指南，以及一个包含 5 项的 DX 包，以减少新用户在最初 30 分钟内遇到的摩擦。
 
 ### 已添加
 
@@ -1085,7 +1085,7 @@ v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execu
 
 ## [0.3.2] — 2026-05-05 — 取消传播加固（5 轮）
 
-五轮补丁系列，填补了 v0.3.0 单次取消所暴露的缺口：Send fan-out 传播、进程内轮询、Python 钩子、C++ 作用域、异常类型。同时落地了来自 FastAPI SSE 聊天演示评估的 TODO_v0.3.md 反馈批次 — `resume_if_exists`、字典或列表 `update_state`、用于类型化状态读取的 StateView。
+五轮补丁系列，填补了 v0.3.0 单次取消所暴露的缺口：Send fan-out 传播、进程内轮询、Python 钩子、C++ 作用域、异常类型。同时落地了来自 FastAPI SSE 聊天演示评估的反馈批次 — `resume_if_exists`、字典或列表 `update_state`、用于类型化状态读取的 StateView。
 
 ### 已添加
 
@@ -1095,7 +1095,7 @@ v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execu
 - `StateView`（`bindings/python/neograph_engine/state_view.py`）— Pydantic 类型化状态读取。`engine.get_state_view(thread_id) ->
   StateView` 返回扁平点访问（`view.messages` / `view.foo`）以及用于字典逃生舱口的 `view.raw`。子类化以定义类型化通道：`class ChatState(ng.StateView): messages: list[dict] = []`。
 - `bindings/python/tests/test_async_cancel_live_llm_fanout.py` — 断言飞行中取消确实在套接字层中止了每个 Send 派生的兄弟节点（这是 v0.3.1 根因补丁）。
-- `examples/22_self_evolving_graph.py` — 移至 v0.3.2，并包含 TODO_v0.3.md #9 食谱折叠。
+- `examples/22_self_evolving_graph.py` — 移至 v0.3.2，并包含食谱折叠。
 - Doxygen `/* */` 通配符修复 — `acp/types.h` 包含带有路径通配符的 `/**` 块（`fs/*`、`terminal/*`），这些通配符打开了嵌套注释并抑制了所有后续诊断。已替换为 `&#42;` HTML 实体。
 
 ### 已修复
@@ -1108,7 +1108,7 @@ v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execu
   4. v0.3.2 Python 钩子 — `add_cancel_hook` 在每次运行的令牌上注册回调，在 `cancel()` 时触发。允许同步 Python `execute()` 安装临时取消处理器，而无需线程局部作用域。
   5. v0.3.2 C++ 作用域 + 重试 + 异常类型化 — 在主线程上重新抛出 `NodeInterrupt`（避免 libstdc++ `__exception_ptr::_M_release` 竞态），重试预算尊重取消，运行时与逻辑异常分离。
 - 仅 `execute_stream` 的 Python 节点静默落入默认 `execute` 路径（NotImplementedError）。现在当用户仅覆盖流式变体时，`run_stream` 直接连接 `execute_stream`。
-- `update_state` 接受 list[ChannelWrite] — 关闭静默无操作（TODO_v0.3.md #5）。
+- `update_state` 接受 list[ChannelWrite] — 关闭静默无操作。
 
 ### 备注
 
@@ -1139,7 +1139,7 @@ v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execu
 - `neograph::async::run_sync` 增加了可选的 `graph::CancelToken*` 参数；当非空时，绑定的 spawn 会绑定该令牌的槽。
 - pybind `resolve_future_async` 通过安全解析辅助函数路由，而不是调用 `future.set_result` 直接通过 `call_soon_threadsafe`.
 
-### 路线图（推迟至 v0.3.x — 参见 `TODO_v0.3.md`）
+### 路线图（推迟至 v0.3.x）
 
 - 在同一 `thread_id` 上实现 LangGraph 风格的自动检查点恢复。
 - `run_async` 错误消息中的仅流式节点提示。

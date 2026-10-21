@@ -2,7 +2,7 @@
 """Local topology retrieval for NeoGraph.
 
 This cookbook demonstrates the retrieval half of topology evolution without
-requiring NeoCode. It keeps an admitted-topology descriptor registry locally,
+requiring a companion repository. It keeps an admitted-topology descriptor registry locally,
 persists dense BGE-M3 vectors in Faiss, obtains lexical candidates with BM25,
 fuses both ranks with RRF, and optionally calls Voyage rerank-2.5 through the
 same OpenRouter credential.

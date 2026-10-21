@@ -1,7 +1,7 @@
-// Engine side of the engine<->Studio differential corpus (issue #75 M3).
+// Engine side of the engine<->editor differential corpus (issue #75 M3).
 //
-// tests/fixtures/topology_corpus/*.json is byte-shared with
-// NeoGraph-Studio's tests/corpus/ — the Studio lint (editor/lint.js)
+// tests/fixtures/topology_corpus/*.json is byte-shared with the
+// tests/corpus/ of a companion editor repository — its lint (editor/lint.js)
 // runs the same fixtures through its JavaScript reimplementation of
 // GraphValidator and asserts the same verdicts. A rule change on either
 // side that isn't mirrored breaks that side's test, so the two loaders

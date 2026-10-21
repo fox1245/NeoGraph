@@ -750,9 +750,8 @@ target_link_libraries(neograph_graph_safe_point_tests PRIVATE
 )
 neograph_discover_tests(neograph_graph_safe_point_tests)
 
-# The cross-repository compatibility metadata is not tracked in this repository.
-# Keep its fail-closed check available without making a clean checkout depend
-# on files that are not in it.
+# The fail-closed cross-repository compatibility check runs when its metadata files are
+# present; a clean checkout does not depend on them.
 set(NEOGRAPH_COMPATIBILITY_METADATA
     ${PROJECT_SOURCE_DIR}/spec/cross-repository-compatibility-v1.json)
 set(NEOGRAPH_COMPATIBILITY_SCHEMA

@@ -294,8 +294,6 @@ public:
      * copy is cheap and the parent reference inside the child stays
      * valid via shared ownership of the parent. (PR 2 trap shape
      * does NOT apply.)
-     *
-     * @see ROADMAP_v1.md "Execution plan" → PR 3
      */
     [[nodiscard]] std::shared_ptr<CancelToken> fork() {
         // Construct child outside any lock — its ctor takes no lock.

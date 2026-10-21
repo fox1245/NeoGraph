@@ -1131,8 +1131,8 @@ __all__.append("message_stream")
 
 # StateView — flat dot-access wrapper around engine.get_state(). Pydantic
 # v2 backed; the base class allows arbitrary channel names so it works
-# without a user-declared model. Subclass for typed access. (TODO_v0.3.md
-# item #6 / v0.3.2.)
+# without a user-declared model. Subclass for typed access. (Added in
+# v0.3.2.)
 from .state_view import StateView  # noqa: E402
 __all__.append("StateView")
 

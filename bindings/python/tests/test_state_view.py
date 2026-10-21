@@ -1,4 +1,4 @@
-"""v0.3.2: TODO_v0.3.md item #6 — flat StateView for engine.get_state.
+"""v0.3.2: flat StateView for engine.get_state.
 
 Pre-fix users had to write
 ``state["channels"]["messages"]["value"]`` for the most common
