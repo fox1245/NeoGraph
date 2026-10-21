@@ -311,12 +311,12 @@ RuntimeInstructionPlan RuntimeInstructionController::submit_and_plan(
         throw std::runtime_error("Runtime developer instruction history append conflicted");
     }
 
-    const auto lineage = config_.transitions->load_run_lineage(
+    const auto lineage = BlockingProgramTransitionStore(config_.transitions).load_run_lineage(
         request.owner_scope, request.source_run_id);
     if (!lineage || lineage->active_run_record_id().empty()) {
         throw std::runtime_error("Runtime developer instruction source lineage is unavailable");
     }
-    const auto generation = config_.transitions->load_generation(
+    const auto generation = BlockingProgramTransitionStore(config_.transitions).load_generation(
         request.owner_scope, lineage->lineage_id(), lineage->active_generation());
     if (!generation || generation->run_id() != request.source_run_id ||
         generation->id() != lineage->active_generation_id()) {
@@ -380,7 +380,7 @@ ProgramHandle RuntimeInstructionController::apply_replacement(
         throw std::invalid_argument(
             "Runtime instruction replacement request does not bind its decision");
     }
-    const auto lineage = config_.transitions->load_run_lineage(
+    const auto lineage = BlockingProgramTransitionStore(config_.transitions).load_run_lineage(
         invocation.owner_scope, decision.data().source_run_id);
     if (!lineage || lineage->id() != decision.data().expected_lineage_head_id) {
         throw std::runtime_error(
@@ -400,7 +400,7 @@ ProgramHandle RuntimeInstructionController::apply_graph_migration(
             "Runtime instruction graph migration does not bind its decision");
     }
     const auto snapshot = source.snapshot();
-    const auto lineage = config_.transitions->load_run_lineage(
+    const auto lineage = BlockingProgramTransitionStore(config_.transitions).load_run_lineage(
         snapshot.owner_scope(), decision.data().source_run_id);
     if (!lineage || lineage->id() != decision.data().expected_lineage_head_id) {
         throw std::runtime_error(

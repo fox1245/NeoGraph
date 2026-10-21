@@ -345,7 +345,7 @@ int run_example() {
                                                                           {"upper", upper_version}};
     std::vector<ProgramBundle> bundles;
     for (const auto& [name, version] : children) {
-        const auto bundle = store->get_bundle(version.bundle_id());
+        const auto bundle = store->get_bundle_sync(version.bundle_id());
         if (!bundle) throw std::runtime_error("child bundle was not admitted");
         bundles.push_back(*bundle);
         module_data.children.push_back(ChildProgramDescriptor{

@@ -1044,7 +1044,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
 #endif
 };
 
-class SqliteHarnessProgramTransitionStore final : public program::ProgramTransitionStore {
+class SqliteHarnessProgramTransitionStore final : public program::SyncProgramTransitionStore {
 public:
     SqliteHarnessProgramTransitionStore(std::shared_ptr<SqliteHarnessRecordStore::Impl> impl,
                                         HarnessProgramArtifactRecord                    artifact)
@@ -1056,14 +1056,14 @@ public:
                std::to_string(reinterpret_cast<std::uintptr_t>(impl_.get()));
     }
 
-    std::optional<program::ProgramRunRecord> load(std::string_view owner_scope,
+    std::optional<program::ProgramRunRecord> load_sync(std::string_view owner_scope,
                                                   std::string_view run_id) const override {
         const auto wrapper = load_wrapper(owner_scope, run_id);
         if (!wrapper) return std::nullopt;
         return wrapper->run_record();
     }
 
-    std::optional<program::ProgramJournalRecord> latest(std::string_view owner_scope,
+    std::optional<program::ProgramJournalRecord> latest_sync(std::string_view owner_scope,
                                                         std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
@@ -1095,7 +1095,7 @@ public:
         return record;
     }
 
-    std::vector<program::ProgramEvent> load_events(std::string_view owner_scope,
+    std::vector<program::ProgramEvent> load_events_sync(std::string_view owner_scope,
                                                    std::string_view run_id,
                                                    std::uint64_t    after_sequence) const override {
         if (owner_scope.empty() || run_id.empty()) return {};
@@ -1132,7 +1132,7 @@ public:
         return values;
     }
 
-    std::vector<program::ProgramEffectOutboxEntry> load_effects(
+    std::vector<program::ProgramEffectOutboxEntry> load_effects_sync(
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence) const override {
@@ -1166,7 +1166,7 @@ public:
         }
         return values;
     }
-    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence) const override {
@@ -1209,7 +1209,7 @@ public:
         return values;
     }
 
-    std::vector<program::ProgramContextPublication> load_context_publications(
+    std::vector<program::ProgramContextPublication> load_context_publications_sync(
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence) const override {
@@ -1221,7 +1221,7 @@ public:
         return load_context_publications_locked(owner_scope, run_id, after_sequence);
     }
 
-    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return {};
         std::lock_guard lock(impl_->mutex);
@@ -1234,7 +1234,7 @@ public:
         return entries;
     }
 
-    std::optional<program::MigrationPlan> load_migration_plan(
+    std::optional<program::MigrationPlan> load_migration_plan_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         const auto wrapper = load_wrapper(owner_scope, run_id);
         if (!wrapper) return std::nullopt;
@@ -1259,7 +1259,7 @@ public:
         return publication.migration_plan;
     }
 
-    std::optional<program::ProgramRunLineage> load_lineage(
+    std::optional<program::ProgramRunLineage> load_lineage_sync(
         std::string_view owner_scope, std::string_view lineage_id) const override {
         if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
@@ -1280,7 +1280,7 @@ public:
         return lineage;
     }
 
-    std::optional<program::ProgramRunLineage> load_run_lineage(
+    std::optional<program::ProgramRunLineage> load_run_lineage_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
@@ -1304,7 +1304,7 @@ public:
         return lineage;
     }
 
-    std::optional<program::ProgramRunLineage> load_lineage_head(
+    std::optional<program::ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::string_view head_id) const override {
@@ -1328,7 +1328,7 @@ public:
         return lineage;
     }
 
-    std::optional<program::ProgramRunGeneration> load_generation(
+    std::optional<program::ProgramRunGeneration> load_generation_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override {
@@ -1355,7 +1355,7 @@ public:
         return value;
     }
 
-    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication(
+    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override {
@@ -1391,7 +1391,7 @@ public:
         return publication;
     }
 
-    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner_scope, std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
         if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
@@ -1400,14 +1400,14 @@ public:
         return load_graph_migration_capsule_locked(
             owner_scope, source_run_id, source_lineage_head_id);
     }
-    std::optional<program::ProgramExecutionLease> load_execution_lease(
+    std::optional<program::ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
         return load_execution_lease_locked(owner_scope, run_id);
     }
 
-    program::ProgramTransitionPublishResult compare_publish(
+    program::ProgramTransitionPublishResult compare_publish_sync(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
         program::ProgramTransitionPublication publication) override {
@@ -1415,7 +1415,7 @@ public:
                                     std::move(publication), nullptr, nullptr, nullptr, nullptr);
     }
 
-    program::ProgramTransitionPublishResult compare_publish_execution(
+    program::ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         program::ProgramTransitionPublication publication,
@@ -1427,7 +1427,7 @@ public:
             next_lease ? &*next_lease : nullptr);
     }
 
-    program::ProgramTransitionPublishResult compare_publish_graph_safe_point(
+    program::ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         program::ProgramTransitionPublication publication,

@@ -165,11 +165,11 @@ public:
                std::shared_ptr<const RuntimeScheduler>    scheduler,
                std::shared_ptr<graph::CheckpointStore>    checkpoints,
                std::shared_ptr<graph::Store>              state_store,
-               std::shared_ptr<ProgramTransitionStore>    transitions,
+               std::shared_ptr<BlockingProgramTransitionStore> transitions,
                std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
                std::string                                logical_run_id  = {});
     RunControl(ProgramRunRecord record,
-               std::shared_ptr<ProgramTransitionStore> transitions,
+               std::shared_ptr<BlockingProgramTransitionStore> transitions,
                std::shared_ptr<sp::NativeArchive> archive,
                std::shared_ptr<const RuntimeScheduler> scheduler);
 
@@ -249,7 +249,9 @@ public:
     const std::string                                trace_id;
     const std::shared_ptr<graph::CheckpointStore>    checkpoints;
     const std::shared_ptr<graph::Store>              state_store;
-    const std::shared_ptr<ProgramTransitionStore>    transitions;
+    const std::shared_ptr<BlockingProgramTransitionStore> transitions;
+    /// The same store, for a coroutine of the run: it awaits the store's operations instead of waiting for them.
+    ProgramTransitionStore& async_transitions() const { return *transitions->store(); }
     const std::shared_ptr<graph::CancelToken>        cancel_token;
     const std::shared_ptr<std::atomic_bool>          budget_exhausted =
         std::make_shared<std::atomic_bool>(false);
@@ -319,9 +321,9 @@ public:
      */
     /** #395: reserves the resources of the command the attempt resumes, on a
      *  run whose first publication could hold no reservation (a fork). */
-    ProgramTransitionPublishResult publish_command_reservation(RunBudget remaining_budget,
-                                                               RunBudget inflight_reservation);
-    ProgramTransitionPublishResult publish_javascript_command(
+    asio::awaitable<ProgramTransitionPublishResult> publish_command_reservation(
+        RunBudget remaining_budget, RunBudget inflight_reservation);
+    asio::awaitable<ProgramTransitionPublishResult> publish_javascript_command(
         std::uint64_t              command_ordinal,
         JavaScriptCommand          command,
         std::optional<std::string> effect_identity,
@@ -331,7 +333,7 @@ public:
         std::optional<json>        settled_members      = std::nullopt,
         std::optional<json>        await_started_at     = std::nullopt);
     /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
-    bool consume_dynamic_compile();
+    asio::awaitable<bool> consume_dynamic_compile();
     std::atomic<std::uint64_t> dynamic_compile_ceiling{UINT64_MAX};
     void                       limit_dynamic_compiles(std::uint64_t remaining) noexcept {
         auto old = dynamic_compile_ceiling.load();

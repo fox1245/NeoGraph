@@ -11,6 +11,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 
@@ -246,9 +250,9 @@ struct RecordedRuntimeFixture {
     RegistrySnapshot                                registry;
     AdmissionProfile                                profile;
     PolicySnapshot                                  policy;
-    std::shared_ptr<InMemoryProgramStore>           store;
+    ProgramStoreHandle           store;
     std::shared_ptr<InMemoryCheckpointStore>        checkpoints;
-    std::shared_ptr<InMemoryProgramTransitionStore> transitions;
+    TransitionStoreHandle transitions;
     std::shared_ptr<EngineGenerationCache>          engines;
     std::shared_ptr<ProgramCatalog>                 catalog;
     std::unique_ptr<ProgramRuntime>                 runtime;

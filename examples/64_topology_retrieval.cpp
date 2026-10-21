@@ -251,8 +251,8 @@ int main(int argc, char** argv) {
         }
         const auto candidate = catalog->resolve_version("topology-retrieval", selected->topology_version_id);
         if (!candidate) throw std::runtime_error("Retrieved TopologyVersionId was not admitted");
-        const auto stored_source = store->get_bundle("topology-retrieval", source_version.bundle_id());
-        const auto stored_target = store->get_bundle("topology-retrieval", candidate->bundle_id());
+        const auto stored_source = store->get_bundle_sync("topology-retrieval", source_version.bundle_id());
+        const auto stored_target = store->get_bundle_sync("topology-retrieval", candidate->bundle_id());
         if (!stored_source || !stored_target) throw std::runtime_error("Retrieved bundle was not admitted");
 
         // A normal migration plan correctly rejects changed materialization.
@@ -274,7 +274,7 @@ int main(int argc, char** argv) {
             source, ProgramGraphMigrationTarget{candidate->id(), "topology-retrieval-target", {}, adapter});
         const auto result = target.wait();
         const auto source_result = source.wait();
-        const auto lineage = transitions->load_run_lineage("topology-retrieval", source.run_id());
+        const auto lineage = transitions->load_run_lineage_sync("topology-retrieval", source.run_id());
         const bool verified = !baseline.is_compatible() &&
                               result.status() == ProgramTerminalStatus::Completed &&
                               work_calls == 1 && followup_calls == 1 && lineage &&

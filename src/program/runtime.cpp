@@ -236,26 +236,24 @@ RunBudget debit_fork_share(RunBudget available, const RunBudget& share) noexcept
     return available;
 }
 
-ProgramTransitionPublication attach_run_lineage(ProgramTransitionStore&       transitions,
-                                                ProgramTransitionPublication publication) {
-    if (publication.run_lineage) return publication;
-
+// The lineage envelope of a publication, from what attach_run_lineage read: the lineage the run belongs to, if
+// any, and the generation it names when the publication is a retry of the run's last one.
+ProgramTransitionPublication attach_run_lineage_from(ProgramTransitionPublication      publication,
+                                                     std::string_view                  lineage_id,
+                                                     const std::optional<ProgramRunLineage>& current,
+                                                     const std::optional<ProgramRunGeneration>& generation) {
     const auto& run = publication.run_record;
-    auto current = transitions.load_run_lineage(run.owner_scope(), run.run_id());
-    const auto lineage_id = current ? current->lineage_id()
-                                    : program_run_lineage_id(run.owner_scope(), run.run_id());
-    if (!current) current = transitions.load_lineage(run.owner_scope(), lineage_id);
     if (!current) {
-        auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
-            run.owner_scope(), lineage_id, 1, run.run_id(), run.program_version_id(),
+        auto first = ProgramRunGeneration::create(ProgramRunGenerationData{
+            run.owner_scope(), std::string(lineage_id), 1, run.run_id(), run.program_version_id(),
             run.bundle_id(), run.id(), run.journal_head(), std::nullopt, run.created_at_ms(),
             run.child_depth()});
         publication.run_lineage = ProgramRunLineage::create(ProgramRunLineageData{
-            run.owner_scope(), lineage_id, run.run_id(), 1, generation.id(), run.id(),
+            run.owner_scope(), std::string(lineage_id), run.run_id(), 1, first.id(), run.id(),
             run.journal_head(), publication.journal_record.remaining_budget,
             publication.journal_record.inflight_reservation, std::nullopt, run.created_at_ms(),
             run.updated_at_ms(), lineage_descendant_budget(run)});
-        publication.run_generation = std::move(generation);
+        publication.run_generation = std::move(first);
         return publication;
     }
 
@@ -263,8 +261,6 @@ ProgramTransitionPublication attach_run_lineage(ProgramTransitionStore&       tr
     if (current->active_run_record_id() == run.id() &&
         current->active_journal_head() == run.journal_head()) {
         publication.run_lineage = *current;
-        const auto generation = transitions.load_generation(
-            run.owner_scope(), lineage_id, current->active_generation());
         if (generation && generation->initial_run_record_id() == run.id() &&
             generation->initial_journal_head() == run.journal_head()) {
             publication.run_generation = *generation;
@@ -281,8 +277,44 @@ ProgramTransitionPublication attach_run_lineage(ProgramTransitionStore&       tr
     return publication;
 }
 
+bool is_retry_of_lineage_head(const ProgramRunLineage& current, const ProgramRunRecord& run) {
+    return current.active_run_record_id() == run.id() && current.active_journal_head() == run.journal_head();
+}
+
+ProgramTransitionPublication attach_run_lineage(const BlockingProgramTransitionStore& transitions,
+                                                ProgramTransitionPublication publication) {
+    if (publication.run_lineage) return publication;
+
+    const auto& run = publication.run_record;
+    auto current = transitions.load_run_lineage(run.owner_scope(), run.run_id());
+    const auto lineage_id = current ? current->lineage_id()
+                                    : program_run_lineage_id(run.owner_scope(), run.run_id());
+    if (!current) current = transitions.load_lineage(run.owner_scope(), lineage_id);
+    std::optional<ProgramRunGeneration> generation;
+    if (current && is_retry_of_lineage_head(*current, run))
+        generation = transitions.load_generation(run.owner_scope(), lineage_id, current->active_generation());
+    return attach_run_lineage_from(std::move(publication), lineage_id, current, generation);
+}
+
+// The same reads, awaited: for the coroutines of a run attempt.
+asio::awaitable<ProgramTransitionPublication> attach_run_lineage_async(
+    const ProgramTransitionStore& transitions, ProgramTransitionPublication publication) {
+    if (publication.run_lineage) co_return publication;
+
+    const auto& run = publication.run_record;
+    auto current = co_await transitions.load_run_lineage(run.owner_scope(), run.run_id());
+    const auto lineage_id = current ? current->lineage_id()
+                                    : program_run_lineage_id(run.owner_scope(), run.run_id());
+    if (!current) current = co_await transitions.load_lineage(run.owner_scope(), lineage_id);
+    std::optional<ProgramRunGeneration> generation;
+    if (current && is_retry_of_lineage_head(*current, run))
+        generation = co_await transitions.load_generation(run.owner_scope(), lineage_id,
+                                                          current->active_generation());
+    co_return attach_run_lineage_from(std::move(publication), lineage_id, current, generation);
+}
+
 ProgramTransitionPublishResult compare_publish_with_lineage(
-    ProgramTransitionStore&       transitions,
+    const BlockingProgramTransitionStore&       transitions,
     std::string_view              owner_scope,
     std::string_view              expected_journal_head,
     ProgramTransitionPublication publication) {
@@ -291,17 +323,25 @@ ProgramTransitionPublishResult compare_publish_with_lineage(
         attach_run_lineage(transitions, std::move(publication)));
 }
 
+asio::awaitable<ProgramTransitionPublishResult> compare_publish_with_lineage_async(
+    ProgramTransitionStore&       transitions,
+    std::string_view              owner_scope,
+    std::string_view              expected_journal_head,
+    ProgramTransitionPublication publication) {
+    auto attached = co_await attach_run_lineage_async(transitions, std::move(publication));
+    co_return co_await transitions.compare_publish(owner_scope, expected_journal_head, std::move(attached));
+}
+
 struct ActiveRunLineage {
     ProgramRunLineage    lineage;
     ProgramRunGeneration generation;
 };
 
-std::optional<ActiveRunLineage> load_active_run_lineage(
-    ProgramTransitionStore& transitions, const ProgramRunRecord& run) {
-    auto lineage = transitions.load_run_lineage(run.owner_scope(), run.run_id());
-    if (!lineage) return std::nullopt;
-    auto generation = transitions.load_generation(run.owner_scope(), lineage->lineage_id(),
-                                                  lineage->active_generation());
+// What load_active_run_lineage makes of the lineage and generation it read: the pair, or a diagnostic when the run is
+// not the active generation of its lineage.
+ActiveRunLineage bind_active_run_lineage(const ProgramRunRecord&          run,
+                                         std::optional<ProgramRunLineage> lineage,
+                                         std::optional<ProgramRunGeneration> generation) {
     if (!generation) {
         throw_runtime_diagnostic("P_RUN_LINEAGE",
                                  "Program run lineage has no active generation",
@@ -320,6 +360,25 @@ std::optional<ActiveRunLineage> load_active_run_lineage(
                  {"active_run_id", generation->run_id()}});
     }
     return ActiveRunLineage{std::move(*lineage), std::move(*generation)};
+}
+
+std::optional<ActiveRunLineage> load_active_run_lineage(
+    const BlockingProgramTransitionStore& transitions, const ProgramRunRecord& run) {
+    auto lineage = transitions.load_run_lineage(run.owner_scope(), run.run_id());
+    if (!lineage) return std::nullopt;
+    auto generation = transitions.load_generation(run.owner_scope(), lineage->lineage_id(),
+                                                  lineage->active_generation());
+    return bind_active_run_lineage(run, std::move(lineage), std::move(generation));
+}
+
+// The same reads, awaited.
+asio::awaitable<std::optional<ActiveRunLineage>> load_active_run_lineage_async(
+    const ProgramTransitionStore& transitions, const ProgramRunRecord& run) {
+    auto lineage = co_await transitions.load_run_lineage(run.owner_scope(), run.run_id());
+    if (!lineage) co_return std::nullopt;
+    auto generation = co_await transitions.load_generation(run.owner_scope(), lineage->lineage_id(),
+                                                           lineage->active_generation());
+    co_return bind_active_run_lineage(run, std::move(lineage), std::move(generation));
 }
 
 bool fork_resume_matches(const ForkCompatibilityReceipt& receipt,
@@ -415,7 +474,7 @@ std::string core_thread_identity(std::string_view run_id,
 // repeats, as the fork's attempts replay them from the source's journal: the
 // source's attempt at the fork is the one before the fork's first.
 std::optional<detail::RunControl::ForkProviderReplay> fork_provider_replay_of(
-    const ProgramTransitionStore& transitions, graph::CheckpointStore& checkpoints,
+    const BlockingProgramTransitionStore& transitions, graph::CheckpointStore& checkpoints,
     std::string_view owner_scope, const ProgramRunRecord& record) {
     const auto source_run_id = record.fork_source_run_id();
     const auto source_checkpoint_id = record.fork_source_checkpoint_id();
@@ -1474,21 +1533,21 @@ std::vector<ProgramChildRecord> terminal_children(const std::vector<ProgramChild
 // dispatch, child completion, and parent terminal publication can run on
 // different scheduler threads; serialize local writers for the same chain.
 // Striping avoids a global bottleneck while harmlessly serializing collisions.
-detail::OperationLock& child_relation_publication_mutex(const ProgramTransitionStore& transitions,
-                                                        std::string_view              owner_scope,
-                                                        std::string_view              parent_run_id) {
+detail::OperationLock& child_relation_publication_mutex(const BlockingProgramTransitionStore& transitions,
+                                                        std::string_view owner_scope,
+                                                        std::string_view parent_run_id) {
     static std::array<detail::OperationLock, 257> locks;
     const auto                         mix = [](std::size_t seed, std::size_t value) noexcept {
         return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
     };
-    auto key = std::hash<const void*>{}(static_cast<const void*>(&transitions));
+    auto key = std::hash<const void*>{}(static_cast<const void*>(transitions.store().get()));
     key      = mix(key, std::hash<std::string_view>{}(owner_scope));
     key      = mix(key, std::hash<std::string_view>{}(parent_run_id));
     return locks[key % locks.size()];
 }
 
 std::optional<ProgramRunRecord> load_active_agent_run(
-    const std::shared_ptr<ProgramTransitionStore>& transitions,
+    const std::shared_ptr<BlockingProgramTransitionStore>& transitions,
     std::string_view                               owner,
     std::string_view                               run) {
     const auto lineage = transitions->load_run_lineage(owner, run);
@@ -1511,7 +1570,7 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
 ChildRecordPublication publish_child_record_unlocked(
     std::string_view                               owner_scope,
     std::string_view                               parent_run_id,
-    const std::shared_ptr<ProgramTransitionStore>& transitions,
+    const std::shared_ptr<BlockingProgramTransitionStore>& transitions,
     ProgramChildRecord                             child) {
     for (int attempt = 0; attempt < 5; ++attempt) {
         const auto previous = load_active_agent_run(transitions, owner_scope, parent_run_id);
@@ -1613,7 +1672,7 @@ ChildRecordPublication publish_child_record_unlocked(
 ChildRecordPublication publish_child_record(
     std::string_view                               owner_scope,
     std::string_view                               parent_run_id,
-    const std::shared_ptr<ProgramTransitionStore>& transitions,
+    const std::shared_ptr<BlockingProgramTransitionStore>& transitions,
     ProgramChildRecord                             child) {
     auto lock = child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_blocking();
     return publish_child_record_unlocked(owner_scope, parent_run_id, transitions, std::move(child));
@@ -1625,7 +1684,7 @@ ChildRecordPublication publish_child_record(const std::shared_ptr<detail::RunCon
                                 std::move(child));
 }
 
-bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& transitions,
+bool publish_child_completion(const std::shared_ptr<BlockingProgramTransitionStore>& transitions,
                               std::string_view                               owner_scope,
                               std::string_view                               parent_run_id,
                               std::string_view                               child_run_id,
@@ -1694,7 +1753,7 @@ void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
         });
 }
 
-bool is_unstarted_child_dispatch(const std::shared_ptr<ProgramTransitionStore>& transitions,
+bool is_unstarted_child_dispatch(const std::shared_ptr<BlockingProgramTransitionStore>& transitions,
                                  std::string_view                               owner_scope,
                                  std::string_view                               child_run_id) {
     const auto record = transitions->load(owner_scope, child_run_id);
@@ -2133,7 +2192,7 @@ RunControl::RunControl(std::string                                owner,
                        std::shared_ptr<const RuntimeScheduler>    scheduler_value,
                        std::shared_ptr<graph::CheckpointStore>    checkpoint_store,
                        std::shared_ptr<graph::Store>              store,
-                       std::shared_ptr<ProgramTransitionStore>    transition_store,
+                       std::shared_ptr<BlockingProgramTransitionStore> transition_store,
                        std::optional<ProgramExecutionLease>       execution_lease,
                        std::string                                logical_identity)
     : owner_scope(std::move(owner)),
@@ -2185,7 +2244,7 @@ RunControl::RunControl(std::string                                owner,
 }
 
 RunControl::RunControl(ProgramRunRecord                        record,
-                       std::shared_ptr<ProgramTransitionStore> transition_store,
+                       std::shared_ptr<BlockingProgramTransitionStore> transition_store,
                        std::shared_ptr<sp::NativeArchive> archive,
                        std::shared_ptr<const RuntimeScheduler> scheduler_value)
     : owner_scope(record.owner_scope()),
@@ -3756,10 +3815,10 @@ asio::awaitable<void> RunControl::hold_graph_migration(
             checkpoint.schema_version};
         const auto checkpoint_content_id =
             graph_migration_checkpoint_content_id(checkpoint);
-        const auto previous = transitions->load(owner_scope, run_id);
-        const auto previous_journal = transitions->latest(owner_scope, run_id);
-        const auto active = previous ? load_active_run_lineage(*transitions, *previous)
-                                     : std::nullopt;
+        const auto previous = co_await async_transitions().load(owner_scope, run_id);
+        const auto previous_journal = co_await async_transitions().latest(owner_scope, run_id);
+        std::optional<ActiveRunLineage> active;
+        if (previous) active = co_await load_active_run_lineage_async(async_transitions(), *previous);
         const auto expected_execution_lease = execution_lease();
         if (!previous || !previous_journal || !active ||
             !expected_execution_lease ||
@@ -3833,7 +3892,7 @@ asio::awaitable<void> RunControl::hold_graph_migration(
             std::move(events), {}};
         const auto safe_point_evidence = ProgramGraphSafePointEvidence(
             materialized->bundle, materialized->version, safe_point);
-        publication = attach_run_lineage(*transitions, std::move(publication));
+        publication = co_await attach_run_lineage_async(async_transitions(), std::move(publication));
         const auto candidate_run = publication.run_record;
         const auto candidate_journal = publication.journal_record;
         const auto candidate_lineage = publication.run_lineage;
@@ -3865,7 +3924,7 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         };
         ProgramTransitionPublishResult published;
         try {
-            published = transitions->compare_publish_graph_safe_point(
+            published = co_await async_transitions().compare_publish_graph_safe_point(
                 owner_scope, previous->journal_head(), std::move(publication),
                 safe_point_evidence, candidate_capsule, *expected_execution_lease);
         } catch (...) {
@@ -3900,10 +3959,9 @@ asio::awaitable<void> RunControl::hold_graph_migration(
             latest_checkpoint_ = checkpoint_identity;
         }
 
-        const auto durable = transitions->load(owner_scope, run_id);
-        const auto durable_active = durable
-            ? load_active_run_lineage(*transitions, *durable)
-            : std::nullopt;
+        const auto durable = co_await async_transitions().load(owner_scope, run_id);
+        std::optional<ActiveRunLineage> durable_active;
+        if (durable) durable_active = co_await load_active_run_lineage_async(async_transitions(), *durable);
         if (!durable || !durable_active ||
             durable->exact_checkpoint() != std::optional{checkpoint_identity} ||
             durable->exact_checkpoint_content_id() !=
@@ -3911,7 +3969,7 @@ asio::awaitable<void> RunControl::hold_graph_migration(
             throw std::runtime_error(
                 "Program graph migration source checkpoint was not durable");
         }
-        const auto durable_capsule = transitions->load_graph_migration_capsule(
+        const auto durable_capsule = co_await async_transitions().load_graph_migration_capsule(
             owner_scope, run_id, durable_active->lineage.id());
         if (!durable_capsule || durable_capsule->id() != candidate_capsule.id()) {
             throw std::runtime_error(
@@ -4192,21 +4250,21 @@ ProgramRunRecord RunControl::snapshot() const {
     return *record;
 }
 
-bool RunControl::consume_dynamic_compile() {
+asio::awaitable<bool> RunControl::consume_dynamic_compile() {
     for (int retry = 0; retry < 3; ++retry) {
-        const auto previous         = transitions->load(owner_scope, run_id);
-        const auto previous_journal = transitions->latest(owner_scope, run_id);
+        const auto previous         = co_await async_transitions().load(owner_scope, run_id);
+        const auto previous_journal = co_await async_transitions().latest(owner_scope, run_id);
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt ||
             previous->remaining_budget().max_dynamic_compiles == 0) {
-            return false;
+            co_return false;
         }
 
-        const auto lineage = transitions->load_run_lineage(owner_scope, run_id);
+        const auto lineage = co_await async_transitions().load_run_lineage(owner_scope, run_id);
         if (lineage && previous->remaining_budget().max_dynamic_compiles <=
                            lineage->committed_descendant_budget().max_dynamic_compiles)
-            return false;
+            co_return false;
         auto remaining = previous->remaining_budget();
         --remaining.max_dynamic_compiles;
         auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
@@ -4246,30 +4304,30 @@ bool RunControl::consume_dynamic_compile() {
         data.updated_at_ms                    = journal.timestamp_ms;
         auto publication = ProgramTransitionPublication{
             ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
-        const auto published = compare_publish_with_lineage(
-            *transitions, owner_scope, previous->journal_head(), std::move(publication));
+        const auto published = co_await compare_publish_with_lineage_async(
+            async_transitions(), owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
             limit_dynamic_compiles(remaining.max_dynamic_compiles);
-            return true;
+            co_return true;
         }
     }
-    return false;
+    co_return false;
 }
 
-ProgramTransitionPublishResult RunControl::publish_command_reservation(
+asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_command_reservation(
     RunBudget remaining_budget, RunBudget inflight_reservation) {
     remaining_budget.max_dynamic_compiles = std::min<std::uint64_t>(
         remaining_budget.max_dynamic_compiles, dynamic_compile_ceiling.load());
-    const auto head = transitions->load_run_publication_head(owner_scope, run_id);
-    if (!head) return ProgramTransitionPublishResult::Conflict;
+    const auto head = co_await async_transitions().load_run_publication_head(owner_scope, run_id);
+    if (!head) co_return ProgramTransitionPublishResult::Conflict;
     const auto& previous         = head->run_record;
     const auto& previous_journal = head->journal_record;
     if (previous.journal_head() != previous_journal.id ||
         previous.continuation().state != ContinuationState::Running ||
         previous.continuation().attempt != attempt ||
         previous_journal.inflight_reservation != RunBudget{})
-        return ProgramTransitionPublishResult::Conflict;
+        co_return ProgramTransitionPublishResult::Conflict;
     auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous.journal_head(), run_id, program_version_id, bundle_id,
         previous_journal.sequence + 1, previous.continuation(), std::move(remaining_budget),
@@ -4303,18 +4361,17 @@ ProgramTransitionPublishResult RunControl::publish_command_reservation(
     data.effect_sequence                  = previous.effect_sequence();
     data.created_at_ms                    = previous.created_at_ms();
     data.updated_at_ms                    = journal.timestamp_ms;
-    auto publication = attach_run_lineage(
-        *transitions, ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
+    auto publication = co_await attach_run_lineage_async(async_transitions(), ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                                    std::move(journal), {}, {}, std::nullopt, {}});
     const auto owned_lease = execution_lease();
-    return owned_lease ? transitions->compare_publish_execution(
-                             owner_scope, previous.journal_head(), std::move(publication),
-                             owned_lease, owned_lease)
-                       : transitions->compare_publish(owner_scope, previous.journal_head(),
-                                                      std::move(publication));
+    if (owned_lease)
+        co_return co_await async_transitions().compare_publish_execution(
+            owner_scope, previous.journal_head(), std::move(publication), owned_lease, owned_lease);
+    co_return co_await async_transitions().compare_publish(owner_scope, previous.journal_head(),
+                                                           std::move(publication));
 }
 
-ProgramTransitionPublishResult RunControl::publish_javascript_command(
+asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_command(
     std::uint64_t              command_ordinal,
     JavaScriptCommand          command,
     std::optional<std::string> effect_identity,
@@ -4326,10 +4383,10 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
     if (remaining_budget)
         remaining_budget->max_dynamic_compiles = std::min<std::uint64_t>(
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
-    if (!command_ordinal) return ProgramTransitionPublishResult::Conflict;
+    if (!command_ordinal) co_return ProgramTransitionPublishResult::Conflict;
 
     for (int retry = 0; retry < 3; ++retry) {
-        const auto head = transitions->load_command_publication_head(owner_scope, run_id);
+        const auto head = co_await async_transitions().load_command_publication_head(owner_scope, run_id);
         // The default store implementation reads optimistically. A child join
         // can advance its head between reads; retry that miss before treating
         // a command-result publication as an unresolved external outcome.
@@ -4339,14 +4396,14 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt) {
-            return ProgramTransitionPublishResult::Conflict;
+            co_return ProgramTransitionPublishResult::Conflict;
         }
 
         auto found = head->latest_command;
         if (found && found->command_ordinal() > command_ordinal) {
             // Older-coordinate retries still inspect the complete immutable history.
             // Normal append/settlement needs only the newest command, not every row.
-            const auto existing = transitions->load_javascript_commands(owner_scope, run_id);
+            const auto existing = co_await async_transitions().load_javascript_commands(owner_scope, run_id);
             const auto older = std::find_if(existing.rbegin(), existing.rend(), [&](const auto& entry) {
                 return entry.command_ordinal() == command_ordinal;
             });
@@ -4360,10 +4417,10 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                 detail::canonical_json_bytes(found->command().to_json()) !=
                     detail::canonical_json_bytes(command.to_json()) ||
                 found->effect_identity() != effect_identity) {
-                return ProgramTransitionPublishResult::Conflict;
+                co_return ProgramTransitionPublishResult::Conflict;
             }
             if (found->completed()) {
-                return found->terminal_result() == terminal_result
+                co_return found->terminal_result() == terminal_result
                            ? ProgramTransitionPublishResult::AlreadyPresent
                            : ProgramTransitionPublishResult::Conflict;
             }
@@ -4379,13 +4436,13 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                     for (const auto& [operation_id, started_at] : await_started_at->items()) {
                         // A recorded start never moves.
                         if (merged.contains(operation_id) && merged[operation_id] != started_at)
-                            return ProgramTransitionPublishResult::Conflict;
+                            co_return ProgramTransitionPublishResult::Conflict;
                         merged[operation_id] = started_at;
                     }
                     starts = std::move(merged);
                 }
                 if (members == found->settled_members() && starts == found->await_started_at())
-                    return ProgramTransitionPublishResult::AlreadyPresent;
+                    co_return ProgramTransitionPublishResult::AlreadyPresent;
                 settled_members  = std::move(members);
                 await_started_at = std::move(starts);
             }
@@ -4393,7 +4450,7 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
         // Settled members and await starts belong to an existing pending
         // coordinate.
         if ((settled_members || await_started_at) && (terminal_result || !found))
-            return ProgramTransitionPublishResult::Conflict;
+            co_return ProgramTransitionPublishResult::Conflict;
 
         const auto sequence = head->latest_command ? head->latest_command->sequence() + 1 : 1;
         ProgramJavaScriptCommandJournalEntryData entry_data{
@@ -4461,14 +4518,15 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
                                                         {},
                                                         std::nullopt,
                                                         {std::move(entry)}};
-        publication = attach_run_lineage(*transitions, std::move(publication));
+        publication = co_await attach_run_lineage_async(async_transitions(), std::move(publication));
         const auto owned_lease = execution_lease();
-        const auto published = owned_lease
-            ? transitions->compare_publish_execution(
-                  owner_scope, previous->journal_head(), std::move(publication),
-                  owned_lease, owned_lease)
-            : transitions->compare_publish(
-                  owner_scope, previous->journal_head(), std::move(publication));
+        ProgramTransitionPublishResult published;
+        if (owned_lease)
+            published = co_await async_transitions().compare_publish_execution(
+                owner_scope, previous->journal_head(), std::move(publication), owned_lease, owned_lease);
+        else
+            published = co_await async_transitions().compare_publish(
+                owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
             if (terminal_result && command.kind() == JavaScriptCommandKind::Checkpoint) {
@@ -4480,13 +4538,13 @@ ProgramTransitionPublishResult RunControl::publish_javascript_command(
             }
             for (const auto& event : deferred_checkpoint_events)
                 deliver_event(event);
-            return published;
+            co_return published;
         }
         // A concurrent terminal transition cannot be retried as a live
         // command.  Otherwise, reload the head and let the exact coordinate
         // check above classify an already-published append.
     }
-    return ProgramTransitionPublishResult::Conflict;
+    co_return ProgramTransitionPublishResult::Conflict;
 }
 
 }  // namespace detail
@@ -4510,7 +4568,7 @@ struct ProcessRuntimeState {
 };
 
 std::shared_ptr<ProcessRuntimeState> process_runtime_state(
-    const ProgramTransitionStore& transitions) {
+    const BlockingProgramTransitionStore& transitions) {
     static std::mutex registry_mutex;
     static std::unordered_map<const ProgramTransitionStore*, std::weak_ptr<ProcessRuntimeState>>
         address_registry;
@@ -4519,7 +4577,7 @@ std::shared_ptr<ProcessRuntimeState> process_runtime_state(
     std::erase_if(address_registry, [](const auto& entry) { return entry.second.expired(); });
     std::erase_if(key_registry, [](const auto& entry) { return entry.second.expired(); });
     const auto coordination_key = transitions.process_coordination_key();
-    auto& weak = coordination_key.empty() ? address_registry[&transitions]
+    auto& weak = coordination_key.empty() ? address_registry[transitions.store().get()]
                                           : key_registry[coordination_key];
     if (auto state = weak.lock()) return state;
     auto state = std::make_shared<ProcessRuntimeState>();
@@ -4527,12 +4585,12 @@ std::shared_ptr<ProcessRuntimeState> process_runtime_state(
     return state;
 }
 
-bool same_process_coordination_backend(const ProgramTransitionStore& lhs,
-                                       const ProgramTransitionStore& rhs) {
+bool same_process_coordination_backend(const BlockingProgramTransitionStore& lhs,
+                                       const BlockingProgramTransitionStore& rhs) {
     const auto lhs_key = lhs.process_coordination_key();
     const auto rhs_key = rhs.process_coordination_key();
     return !lhs_key.empty() || !rhs_key.empty() ? !lhs_key.empty() && lhs_key == rhs_key
-                                                : &lhs == &rhs;
+                                                : lhs.store().get() == rhs.store().get();
 }
 
 }  // namespace
@@ -4679,8 +4737,6 @@ ProgramHandle ProgramHandle::reconcile(ProgramRuntime&         runtime,
 
 struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl> {
     explicit Impl(RuntimeConfig runtime_config) : config(std::move(runtime_config)) {
-        // With the lock audit on, every call into the store checks that no memory-only mutex is held (lock_audit.h).
-        config.transitions = detail::audit_transition_store(std::move(config.transitions));
         auto executors = std::make_shared<detail::RuntimeScheduler>();
         if (config.executor) {
             // #557: the host's executor runs everything, and nothing runs inline. The runtime starts no thread.
@@ -4710,6 +4766,18 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             executors->waiters   = asio::system_executor{};
         }
         scheduler = std::move(executors);
+        // The runtime's synchronous code reaches the stores through one blocking view. A store that is not
+        // synchronous is awaited on a private io_context, which is refused where waiting would hang the thread
+        // that has to complete it: a host loop, or a thread that runs the injected executor.
+        BlockingStorePolicy policy;
+        policy.refuse = [sched = scheduler]() -> std::string {
+            if (sched->host_pumped)
+                return "the runtime's executor is run by a host's event loop, which a blocked thread cannot turn";
+            if (sched->on_executor_thread())
+                return "it is called on a thread that runs the runtime's executor";
+            return {};
+        };
+        transitions = std::make_shared<BlockingProgramTransitionStore>(config.transitions, std::move(policy));
         // #543: a fork may send a call its source journaled and the journal cannot adopt only when the host says so.
         if (config.fork_may_resend_provider_calls && config.core_provider_call_resolver) {
             config.core_provider_call_resolver =
@@ -4721,7 +4789,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 };
         }
         global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
-        process_state      = process_runtime_state(*config.transitions);
+        process_state      = process_runtime_state(*transitions);
     }
 
     // The awaitable forms of fork and replace take fork_operation with lock_async and then run the synchronous
@@ -4764,6 +4832,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         co_return std::move(*produced);
     }
 
+    // The blocking view of config.transitions that the synchronous code uses; the run path awaits config.transitions.
+    std::shared_ptr<BlockingProgramTransitionStore>        transitions;
+
     // The runtime's pools; empty when the host gave an executor.
     std::optional<asio::thread_pool>                       pool;
     std::optional<asio::thread_pool>                       deadline_pool;
@@ -4781,10 +4852,10 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             throw_runtime_diagnostic("P_CHILD_SYNTHESIS_AUTHORITY",
                                      "Stored child grant is not authorized by current host policy");
         if (require_reservation) {
-            const auto source = config.transitions->load_lineage_head(
+            const auto source = transitions->load_lineage_head(
                 d.proposal.data().owner_scope, d.proposal.data().lineage_id,
                 d.reservation.data().source_lineage_head_id);
-            const auto reserved = config.transitions->load_lineage_head(
+            const auto reserved = transitions->load_lineage_head(
                 d.proposal.data().owner_scope, d.proposal.data().lineage_id,
                 d.reservation.data().reserved_lineage_head_id);
             if (!source || source->id() != d.parent.lineage.id() || !reserved ||
@@ -4793,7 +4864,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 throw_runtime_diagnostic("P_CHILD_SYNTHESIS_RESERVATION",
                                          "Stored synthesis has no matching durable compile debit");
         }
-        auto lineage = config.transitions->load_run_lineage(d.proposal.data().owner_scope,
+        auto lineage = transitions->load_run_lineage(d.proposal.data().owner_scope,
                                                             d.parent.run.run_id());
         if (!lineage || lineage->active_generation_id() != d.parent.generation.id())
             throw_runtime_diagnostic("P_CHILD_SYNTHESIS_GENERATION",
@@ -4805,12 +4876,12 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         const auto& d = record.data();
         if (d.state != State::Dispatching && d.state != State::Spawned) return false;
         const auto child_id = d.artifacts.at("child_run_id").get<std::string>();
-        const auto child    = config.transitions->load(d.proposal.data().owner_scope, child_id);
+        const auto child    = transitions->load(d.proposal.data().owner_scope, child_id);
         if (!child || child->continuation().state != ContinuationState::Running ||
             child->exact_checkpoint())
             return false;
         const auto parent =
-            config.transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id());
+            transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id());
         const auto relation =
             parent ? find_child(*parent, child_id) : std::optional<ProgramChildRecord>{};
         if (!relation || relation->state != ProgramChildState::Dispatched) return false;
@@ -4826,9 +4897,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         const auto& d = next.data();
         for (int retry = 0; retry < 5; ++retry) {
             auto previous =
-                config.transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id());
+                transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id());
             auto journal =
-                config.transitions->latest(d.proposal.data().owner_scope, d.parent.run.run_id());
+                transitions->latest(d.proposal.data().owner_scope, d.parent.run.run_id());
             if (!previous || !journal || previous->journal_head() != journal->id) continue;
             if (control && control->cancellation_cause() != detail::CancellationCause::None)
                 throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CANCELLED",
@@ -4848,16 +4919,16 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 throw_runtime_diagnostic("P_CHILD_SYNTHESIS_BUDGET",
                                          "Parent synthesis deadline elapsed");
             auto publication = attach_run_lineage(
-                *config.transitions,
+                *transitions,
                 continuing_running_publication(*previous, *journal, remaining, timestamp,
                                                journal->inflight_reservation));
             publication.child_synthesis_records.push_back(next);
-            const auto lease = config.transitions->load_execution_lease(
+            const auto lease = transitions->load_execution_lease(
                 d.proposal.data().owner_scope, d.parent.run.run_id());
-            auto result = lease ? config.transitions->compare_publish_execution(
+            auto result = lease ? transitions->compare_publish_execution(
                                       d.proposal.data().owner_scope, previous->journal_head(),
                                       std::move(publication), lease, lease)
-                                : config.transitions->compare_publish(d.proposal.data().owner_scope,
+                                : transitions->compare_publish(d.proposal.data().owner_scope,
                                                                       previous->journal_head(),
                                                                       std::move(publication));
             if (result == ProgramTransitionPublishResult::Published) return;
@@ -4880,7 +4951,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             !parent->materialized->bundle.control_source())
             return std::nullopt;
         for (const auto& record :
-             config.transitions->load_child_syntheses(parent->owner_scope, parent->run_id)) {
+             transitions->load_child_syntheses(parent->owner_scope, parent->run_id)) {
             if (record.data().binding_name != name) continue;
             verify_synthesis_grant(record);
             using State = ProgramChildSynthesisState;
@@ -4902,9 +4973,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         // read above. What must hold is generation identity: the lineage still selects
         // the generation this control runs as.
         const auto lineage =
-            config.transitions->load_run_lineage(parent->owner_scope, parent->run_id);
+            transitions->load_run_lineage(parent->owner_scope, parent->run_id);
         const auto active =
-            lineage ? config.transitions->load_generation(parent->owner_scope,
+            lineage ? transitions->load_generation(parent->owner_scope,
                                                            lineage->lineage_id(),
                                                            lineage->active_generation())
                     : std::nullopt;
@@ -4993,7 +5064,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             detail::canonical_json_bytes(child->invocation.input) !=
                 detail::canonical_json_bytes(input))
             return std::nullopt;
-        const auto persisted = config.transitions->load(parent->owner_scope, child->child_run_id);
+        const auto persisted = transitions->load(parent->owner_scope, child->child_run_id);
         if (!persisted || persisted->owner_scope() != parent->owner_scope ||
             persisted->run_id() != child->child_run_id ||
             persisted->program_version_id() != resolved->version.id() ||
@@ -5054,7 +5125,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                                                      parent->logical_run_id, child->child_run_id);
                     parent->attach_child(reconnected.control_);
                     if (const auto result = reconnected.try_result())
-                        publish_child_completion(config.transitions, parent->owner_scope,
+                        publish_child_completion(transitions, parent->owner_scope,
                                                  parent->logical_run_id, child->child_run_id, *result);
                     return reconnected.control_;
                 });
@@ -5273,9 +5344,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             const auto run = control->snapshot();
             if (!run.children().empty()) {
                 const auto lineage =
-                    config.transitions->load_run_lineage(control->owner_scope, control->run_id);
+                    transitions->load_run_lineage(control->owner_scope, control->run_id);
                 const auto initial = lineage
-                                         ? config.transitions->load_generation_initial_publication(
+                                         ? transitions->load_generation_initial_publication(
                                                control->owner_scope, lineage->lineage_id(),
                                                lineage->active_generation())
                                          : std::nullopt;
@@ -5670,13 +5741,13 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 // envelope; fresh admission still uses `available`, and recovery retains each
                 // child's original deadline. Never perform history I/O under the runtime lock.
                 lock.unlock();
-                const auto lineage = config.transitions->load_run_lineage(
+                const auto lineage = transitions->load_run_lineage(
                     parent.owner_scope(), parent.run_id());
                 const auto original = lineage
-                    ? config.transitions->load_generation(parent.owner_scope(), lineage->lineage_id(), 1)
+                    ? transitions->load_generation(parent.owner_scope(), lineage->lineage_id(), 1)
                     : std::nullopt;
                 const auto initial = original
-                    ? config.transitions->load_generation_initial_publication(
+                    ? transitions->load_generation_initial_publication(
                           parent.owner_scope(), lineage->lineage_id(), 1)
                     : std::nullopt;
                 if (!initial || !initial->run_generation || !initial->run_lineage ||
@@ -5744,10 +5815,10 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     ParentChildBudget hydrate_parent_child_budget(std::string_view owner_scope,
                                                   std::string_view parent_run_id,
                                                   std::string_view child_run_id) {
-        const auto child_lineage = config.transitions->load_run_lineage(owner_scope, child_run_id);
+        const auto child_lineage = transitions->load_run_lineage(owner_scope, child_run_id);
         if (child_lineage) child_run_id = child_lineage->root_run_id();
-        const auto active = load_active_agent_run(config.transitions, owner_scope, parent_run_id);
-        const auto head = active ? config.transitions->load_run_publication_head(
+        const auto active = load_active_agent_run(transitions, owner_scope, parent_run_id);
+        const auto head = active ? transitions->load_run_publication_head(
                                        owner_scope, active->run_id())
                                  : std::nullopt;
         const auto* parent = head ? &head->run_record : nullptr;
@@ -5957,7 +6028,7 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
         std::string(owner_scope), run_id, 1, pinned, binding_fingerprint,
         std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
         impl_->scheduler, impl_->config.checkpoints, impl_->config.state_store,
-         impl_->config.transitions, execution_lease);
+         impl_->transitions, execution_lease);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
     control->set_core_provider_call_resolver(
@@ -6011,7 +6082,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     impl_->scheduler->require_synchronous_call("ProgramRuntime::start_child", "ProgramRuntime::start_child_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (!parent.control_) throw std::invalid_argument("Parent Program handle is empty");
-    if (parent.control_->transitions.get() != impl_->config.transitions.get())
+    if (parent.control_->transitions->store().get() != impl_->transitions->store().get())
         throw_runtime_diagnostic("P_CHILD_PARENT", "Parent handle belongs to another runtime");
     if (parent.control_->owner_scope != owner_scope || link.owner_scope() != owner_scope)
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child owner scope is not admitted");
@@ -6019,10 +6090,10 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     // Admission and reservation recovery must share one record/journal snapshot;
     // a concurrent child completion may advance both immediately after this read.
     auto parent_head = [&] {
-        auto lock = child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
+        auto lock = child_relation_publication_mutex(*impl_->transitions, owner_scope,
                                                      parent.control_->logical_run_id)
                         .lock_blocking();
-        return impl_->config.transitions->load_run_publication_head(owner_scope, parent.run_id());
+        return impl_->transitions->load_run_publication_head(owner_scope, parent.run_id());
     }();
     if (!parent_head)
         throw_runtime_diagnostic("P_CHILD_CONFLICT",
@@ -6049,7 +6120,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     const auto run_id           = child_run_id_for(parent_run_id, link, invocation);
     invocation.requested_run_id = run_id;
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
-    const auto occupied  = impl_->config.transitions->load(owner_scope, run_id);
+    const auto occupied  = impl_->transitions->load(owner_scope, run_id);
     if (occupied) {
         if (occupied->program_version_id() != version.id() ||
             occupied->bundle_id() != version.bundle_id() || occupied->invocation() != canonical ||
@@ -6063,8 +6134,8 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     auto existing = find_child(parent_record, run_id);
     if (occupied && !existing) {
         const auto active =
-            load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
-        auto head = active ? impl_->config.transitions->load_run_publication_head(
+            load_active_agent_run(impl_->transitions, owner_scope, parent_run_id);
+        auto head = active ? impl_->transitions->load_run_publication_head(
                                  owner_scope, active->run_id())
                            : std::nullopt;
         const auto* durable_parent = head ? &head->run_record : nullptr;
@@ -6158,15 +6229,15 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     }
 
     bool replay_initial_dispatch = false;
-    if (const auto child_record = impl_->config.transitions->load(owner_scope, run_id)) {
+    if (const auto child_record = impl_->transitions->load(owner_scope, run_id)) {
         const auto durable_parent =
-            load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
+            load_active_agent_run(impl_->transitions, owner_scope, parent_run_id);
         const auto durable_child  = durable_parent ? find_child(*durable_parent, run_id)
                                                    : std::optional<ProgramChildRecord>{};
         replay_initial_dispatch =
             ((existing && existing->state == ProgramChildState::Publishing) ||
              (durable_child && durable_child->state == ProgramChildState::Publishing)) &&
-            is_unstarted_child_dispatch(impl_->config.transitions, owner_scope, run_id);
+            is_unstarted_child_dispatch(impl_->transitions, owner_scope, run_id);
         if (auto live = impl_->find_control(owner_scope, run_id)) {
             if (global_quota) {
                 global_quota->release();
@@ -6187,7 +6258,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                                   run_id);
             parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
-                publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
+                publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                          run_id, *result);
             return reconnected;
         }
@@ -6201,7 +6272,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                                   run_id);
             parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
-                publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
+                publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                          run_id, *result);
             return reconnected;
         }
@@ -6220,7 +6291,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
             std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->scheduler, impl_->config.checkpoints,
-             impl_->config.state_store, impl_->config.transitions);
+             impl_->config.state_store, impl_->transitions);
         control->set_hook_runtime(impl_->config.hook_runtime);
         control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
         control->set_core_provider_call_resolver(
@@ -6230,7 +6301,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
         impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id);
         ProgramEvent started;
         if (replay_initial_dispatch) {
-            const auto events = impl_->config.transitions->load_events(owner_scope, run_id);
+            const auto events = impl_->transitions->load_events(owner_scope, run_id);
             if (events.size() != 1 || events.front().kind != ProgramEventKind::Started ||
                 events.front().sequence != 1) {
                 throw_runtime_diagnostic("P_CHILD_CONFLICT",
@@ -6246,7 +6317,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                 *control->transitions, owner_scope, "", initial_publication(*control, started));
             if (published != ProgramTransitionPublishResult::Published &&
                 published != ProgramTransitionPublishResult::AlreadyPresent) {
-                auto winner = impl_->config.transitions->load(owner_scope, run_id);
+                auto winner = impl_->transitions->load(owner_scope, run_id);
                 if (!winner) {
                     throw_runtime_diagnostic("P_RUN_CONFLICT",
                                              "Requested child Program run id is unavailable");
@@ -6256,7 +6327,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                                       parent_run_id, run_id);
                 parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
-                    publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
+                    publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                              run_id, *result);
                 return reconnected;
             }
@@ -6276,12 +6347,12 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                                       parent_run_id, run_id);
                 parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
-                    publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
+                    publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                              run_id, *result);
                 return reconnected;
             }
             const auto current_parent =
-                load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
+                load_active_agent_run(impl_->transitions, owner_scope, parent_run_id);
             if (current_parent &&
                 current_parent->continuation().state != ContinuationState::Running)
                 (void)control->cancel(detail::CancellationCause::ParentTerminal);
@@ -6324,7 +6395,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
     if (source_run_id.empty() || !invocation.parent_run_id.empty())
         throw_runtime_diagnostic("P_REPLAY_SOURCE", "Recorded replay requires a top-level source");
     const auto owner = invocation.owner_scope;
-    const auto source = impl_->config.transitions->load(owner, source_run_id);
+    const auto source = impl_->transitions->load(owner, source_run_id);
     if (!source || !source->terminal_result())
         throw_runtime_diagnostic("P_REPLAY_SOURCE", "Recorded replay source is not terminal");
     const auto terminal = *source->terminal_result();
@@ -6345,7 +6416,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Recorded source version was not found");
     recorded.validate_target(*version);
     const auto fingerprint = recorded.fingerprint();
-    const auto source_events = impl_->config.transitions->load_events(owner, source_run_id);
+    const auto source_events = impl_->transitions->load_events(owner, source_run_id);
     auto pinned = detail::CatalogRuntimeAccess::pin_recorded(
         *impl_->config.catalog, *version, recorded, source_events);
     if (version->execution_guarantee() == ExecutionGuarantee::Unmanaged &&
@@ -6360,10 +6431,10 @@ ProgramHandle ProgramRuntime::replay_recorded(
     if (binding != source->binding_fingerprint() || pinned->bundle.id() != source->bundle_id())
         throw_runtime_diagnostic("P_REPLAY_BINDING", "Source execution identity differs from its pinned version");
     const auto run_id = invocation.run_id;
-    if (const auto existing = impl_->config.transitions->load(owner, run_id)) {
-        const auto lineage = impl_->config.transitions->load_run_lineage(owner, run_id);
+    if (const auto existing = impl_->transitions->load(owner, run_id)) {
+        const auto lineage = impl_->transitions->load_run_lineage(owner, run_id);
         const auto initial = lineage
-            ? impl_->config.transitions->load_generation_initial_publication(
+            ? impl_->transitions->load_generation_initial_publication(
                 owner, lineage->lineage_id(), 1) : std::nullopt;
         if (existing->invocation() != invocation ||
             existing->recorded_binding_set_fingerprint() != std::optional<std::string>(fingerprint) ||
@@ -6376,9 +6447,9 @@ ProgramHandle ProgramRuntime::replay_recorded(
             return ProgramHandle(std::move(active));
         if (existing->terminal_result())
             return ProgramHandle(std::make_shared<detail::RunControl>(
-                *existing, impl_->config.transitions, impl_->config.native_history_archive,
+                *existing, impl_->transitions, impl_->config.native_history_archive,
                 impl_->scheduler));
-        const auto lease = impl_->config.transitions->load_execution_lease(owner, run_id);
+        const auto lease = impl_->transitions->load_execution_lease(owner, run_id);
         if (!lease || now_ms() < lease->expires_at_ms())
             throw_runtime_diagnostic("P_REPLAY_LEASE_HELD", "Recorded replay dispatch custody is still held");
         ProgramPersistedInvocation persisted{
@@ -6387,7 +6458,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
             owner, run_id, existing->continuation().attempt, std::move(pinned), binding,
             std::move(persisted), invocation, lease->core_thread_id(), existing->event_sequence(),
             events, impl_->scheduler, impl_->config.checkpoints,
-            impl_->config.state_store, impl_->config.transitions, lease);
+            impl_->config.state_store, impl_->transitions, lease);
         control->recorded_replay = std::make_shared<detail::RecordedRunReplay>();
         control->recorded_replay->source_run_id = std::string(source_run_id);
         detail::RunOutcome failed;
@@ -6406,7 +6477,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    const auto active_source = load_active_run_lineage(*impl_->config.transitions, *source);
+    const auto active_source = load_active_run_lineage(*impl_->transitions, *source);
     if (!active_source || active_source->lineage.committed_descendant_budget() != RunBudget{} ||
         active_source->lineage.inflight_reservation() != RunBudget{})
         throw_runtime_diagnostic("P_REPLAY_CUSTODY", "Source does not have transferable exact replay custody");
@@ -6423,7 +6494,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
     }
     if (!pinned->bundle.control_source() && replay->operations.empty())
         throw_runtime_diagnostic("P_REPLAY_COORDINATES", "Source lacks exact captured operation coordinates");
-    auto commands = impl_->config.transitions->load_javascript_commands(owner, source_run_id);
+    auto commands = impl_->transitions->load_javascript_commands(owner, source_run_id);
     for (const auto& command : commands) {
         if (!command.pending()) continue;
         const auto completion = std::find_if(commands.begin(), commands.end(), [&](const auto& candidate) {
@@ -6433,14 +6504,14 @@ ProgramHandle ProgramRuntime::replay_recorded(
             throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED", "Source command lacks a captured terminal outcome");
     }
     replay->commands = std::move(commands);
-    const auto contexts = impl_->config.transitions->load_context_publications(owner, source_run_id);
+    const auto contexts = impl_->transitions->load_context_publications(owner, source_run_id);
     const auto thread_id = core_thread_identity(run_id, pinned->root->compiled_plan_identity);
     ProgramPersistedInvocation persisted{
         invocation.input, available, invocation.correlation_id, "", 0};
     auto control = std::make_shared<detail::RunControl>(
         owner, run_id, 1, std::move(pinned), binding, std::move(persisted), invocation,
         thread_id, 0, events, impl_->scheduler, impl_->config.checkpoints,
-        impl_->config.state_store, impl_->config.transitions);
+        impl_->config.state_store, impl_->transitions);
     control->recorded_replay = std::move(replay);
     const auto started = control->stage_event(
         ProgramEventKind::Started, ProgramStartedEvent{available});
@@ -6448,7 +6519,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         *control, started, std::nullopt, std::nullopt, fingerprint);
     if (!contexts.empty())
         publication.context_publication = transfer_context_to_run(contexts.back(), run_id);
-    publication = attach_run_lineage(*impl_->config.transitions, std::move(publication));
+    publication = attach_run_lineage(*impl_->transitions, std::move(publication));
     publication.recorded_replay_source = ProgramRecordedReplaySource{
         source->run_id(), source->id(), source->journal_head(), active_source->lineage.id()};
     publication.recorded_replay_source_lineage = ProgramRunLineage::create(ProgramRunLineageData{
@@ -6469,7 +6540,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         control->materialized->root->core_name, control->materialized->root->compiled_plan_identity,
         control->core_thread_id, graph::Checkpoint::generate_id(), acquired,
         acquired + static_cast<std::int64_t>(available.wall_time_ms)});
-    const auto published = impl_->config.transitions->compare_publish_execution(
+    const auto published = impl_->transitions->compare_publish_execution(
         owner, "", std::move(publication), std::nullopt, lease);
     if (published != ProgramTransitionPublishResult::Published)
         throw_runtime_diagnostic("P_REPLAY_ALLOCATION_CONFLICT", "Source replay allocation lost its exact CAS");
@@ -6550,7 +6621,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     // commands the source's journal recorded.
     if (target_pinned->bundle.control_source()) {
         if (const auto source_run =
-                impl_->config.transitions->load(owner_scope, source.source_run_id)) {
+                impl_->transitions->load(owner_scope, source.source_run_id)) {
             invocation.input = source_run->invocation().input;
             if (invocation.canonical_request)
                 invocation.canonical_request->input = source_run->invocation().input;
@@ -6558,10 +6629,10 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     }
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
     const auto reconnect_existing = [&]() -> std::optional<ProgramHandle> {
-        const auto existing = impl_->config.transitions->load(owner_scope, run_id);
+        const auto existing = impl_->transitions->load(owner_scope, run_id);
         if (!existing) return std::nullopt;
         const auto fork = existing->fork_receipt();
-        const auto plan = impl_->config.transitions->load_migration_plan(owner_scope, run_id);
+        const auto plan = impl_->transitions->load_migration_plan(owner_scope, run_id);
         const auto source_version = fork ? impl_->config.catalog->resolve_version(
                                                owner_scope, fork->source_program_version_id())
                                          : std::nullopt;
@@ -6583,12 +6654,12 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     };
     if (auto existing = reconnect_existing()) return std::move(*existing);
 
-    const auto source_record = impl_->config.transitions->load(owner_scope, source.source_run_id);
+    const auto source_record = impl_->transitions->load(owner_scope, source.source_run_id);
     if (!source_record || !source_record->exact_checkpoint() ||
         source_record->exact_checkpoint()->checkpoint_id != source.source_checkpoint_id) {
         throw_runtime_diagnostic("P_CHECKPOINT_NOT_FOUND", "Program checkpoint was not found");
     }
-    const auto source_lineage = load_active_run_lineage(*impl_->config.transitions, *source_record);
+    const auto source_lineage = load_active_run_lineage(*impl_->transitions, *source_record);
     if (!source_lineage) {
         throw_runtime_diagnostic("P_FORK_LINEAGE",
                                  "Program fork source has no durable lineage head");
@@ -6604,7 +6675,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         throw_runtime_diagnostic("P_FORK_STATE",
                                  "Program fork source is not at an admitted durable boundary");
     }
-    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+    const auto source_runtime_state = impl_->transitions->load_effective_runtime_state(
         owner_scope, source_record->run_id());
     const auto& source_contexts = source_runtime_state.context_publications;
     if (!source_contexts.empty() && !impl_->config.runtime_recovery_handler) {
@@ -6763,7 +6834,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     std::optional<std::string>                        fork_core_operation;
     if (target_pinned->bundle.control_source()) {
         const auto source_commands =
-            impl_->config.transitions->load_javascript_commands(owner_scope, source.source_run_id);
+            impl_->transitions->load_javascript_commands(owner_scope, source.source_run_id);
         if (source_commands.empty() || !source_commands.back().pending())
             throw_runtime_diagnostic("P_FORK_STATE",
                                      "JavaScript Program fork source is not paused in a command");
@@ -6838,7 +6909,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
         std::string(owner_scope), run_id, source_record->continuation().attempt + 1,
         std::move(target_pinned), binding_fingerprint, std::move(persisted), canonical,
         target_thread_id, 0, std::move(invocation.events), impl_->scheduler,
-         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
+         impl_->config.checkpoints, impl_->config.state_store, impl_->transitions);
     // #405: the fork's first attempt repeats the provider calls the paused
     // invocation made; a journaling broker replays them from the source.
     control->fork_provider_replay = detail::RunControl::ForkProviderReplay{
@@ -6975,7 +7046,7 @@ ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
         throw std::invalid_argument("Program replacement requires an active handoff lease");
     }
     if (!same_process_coordination_backend(*source.impl_->control->transitions,
-                                           *impl_->config.transitions)) {
+                                           *impl_->transitions)) {
         throw std::invalid_argument(
             "Program handoff lease and replacement runtime use different transition stores");
     }
@@ -6993,7 +7064,7 @@ ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
     } catch (...) {
         bool definitely_uncommitted = false;
         try {
-            const auto lineage = impl_->config.transitions->load_run_lineage(
+            const auto lineage = impl_->transitions->load_run_lineage(
                 source.impl_->control->owner_scope, source.impl_->control->run_id);
             definitely_uncommitted =
                 lineage && lineage->active_run_record_id() == source_record_id;
@@ -7059,10 +7130,10 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
             impl_->cancel_process_controls(owner_scope, source.source_run_id);
     };
     const auto reconnect_existing = [&]() -> std::optional<ProgramHandle> {
-        const auto existing = impl_->config.transitions->load(owner_scope, run_id);
+        const auto existing = impl_->transitions->load(owner_scope, run_id);
         if (!existing) return std::nullopt;
-        const auto lineage = impl_->config.transitions->load_run_lineage(owner_scope, run_id);
-        const auto generation = lineage ? impl_->config.transitions->load_generation(
+        const auto lineage = impl_->transitions->load_run_lineage(owner_scope, run_id);
+        const auto generation = lineage ? impl_->transitions->load_generation(
                                               owner_scope, lineage->lineage_id(),
                                               lineage->active_generation())
                                         : std::nullopt;
@@ -7106,7 +7177,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     if (auto existing = reconnect_existing()) return std::move(*existing);
 
     const auto source_record =
-        impl_->config.transitions->load(owner_scope, source.source_run_id);
+        impl_->transitions->load(owner_scope, source.source_run_id);
     if (!source_record || source_record->journal_head() != source.source_journal_head) {
         throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
                                  "Program replacement handoff is not the active source head");
@@ -7117,7 +7188,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
             "Recorded replay evidence cannot authorize a live-bound replacement");
     }
     const auto source_lineage =
-        load_active_run_lineage(*impl_->config.transitions, *source_record);
+        load_active_run_lineage(*impl_->transitions, *source_record);
     if (!source_lineage || source_record->continuation().state != ContinuationState::Running ||
         source_record->pending_input() || source_record->pending_effect() ||
         source_record->terminal_result() ||
@@ -7173,15 +7244,15 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         throw_runtime_diagnostic("P_REPLACEMENT_CANCELLED",
                                  "Cancelled source cannot select another generation");
     const auto source_journal =
-        impl_->config.transitions->latest(owner_scope, source.source_run_id);
+        impl_->transitions->latest(owner_scope, source.source_run_id);
     if (!source_journal || source_journal->id != source.source_journal_head ||
         source_journal->inflight_reservation != RunBudget{}) {
         throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
                                  "Program replacement source journal is not quiescent");
     }
     const auto commands =
-        impl_->config.transitions->load_javascript_commands(owner_scope, source.source_run_id);
-    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+        impl_->transitions->load_javascript_commands(owner_scope, source.source_run_id);
+    const auto source_runtime_state = impl_->transitions->load_effective_runtime_state(
         owner_scope, source.source_run_id);
     const auto& source_contexts = source_runtime_state.context_publications;
     std::vector<HookOutboxEntry> unresolved_source_hooks =
@@ -7264,7 +7335,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         std::string(owner_scope), run_id, 1, std::move(target_pinned), binding_fingerprint,
         std::move(persisted), canonical, target_thread_id, 0, std::move(invocation.events),
         impl_->scheduler, impl_->config.checkpoints, impl_->config.state_store,
-        impl_->config.transitions, std::nullopt, source_record->logical_run_id());
+        impl_->transitions, std::nullopt, source_record->logical_run_id());
     replacement_control = control;
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -7449,7 +7520,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
         throw std::invalid_argument("Program replacement requires an active handoff lease");
     }
     if (!same_process_coordination_backend(*source.impl_->control->transitions,
-                                           *impl_->config.transitions)) {
+                                           *impl_->transitions)) {
         throw std::invalid_argument(
             "Program handoff lease and replacement runtime use different transition stores");
     }
@@ -7467,7 +7538,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
     } catch (...) {
         bool definitely_uncommitted = false;
         try {
-            const auto lineage = impl_->config.transitions->load_run_lineage(
+            const auto lineage = impl_->transitions->load_run_lineage(
                 source.impl_->control->owner_scope, source.impl_->control->run_id);
             definitely_uncommitted =
                 lineage && lineage->active_run_record_id() == source_record_id;
@@ -7505,14 +7576,14 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             "Program graph migration requires a target ProgramVersion id");
     }
     if (!same_process_coordination_backend(*source.control_->transitions,
-                                           *impl_->config.transitions)) {
+                                           *impl_->transitions)) {
         throw std::invalid_argument(
             "Program graph migration source and target use different transition stores");
     }
 
     auto fork_lock = co_await impl_->fork_operation.lock_async();
     const auto owner_scope = source.control_->owner_scope;
-    const auto source_record_before = impl_->config.transitions->load(
+    const auto source_record_before = impl_->transitions->load(
         owner_scope, source.control_->run_id);
     if (!source_record_before ||
         source_record_before->recorded_binding_set_fingerprint()) {
@@ -7556,10 +7627,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             "Program graph migration target run must differ from its source");
     }
 
-    if (const auto lineage = impl_->config.transitions->load_run_lineage(
+    if (const auto lineage = impl_->transitions->load_run_lineage(
             owner_scope, source.control_->run_id);
         lineage && lineage->active_run_record_id() != source_record_before->id()) {
-        const auto generation = impl_->config.transitions->load_generation(
+        const auto generation = impl_->transitions->load_generation(
             owner_scope, lineage->lineage_id(), lineage->active_generation());
         const auto receipt = generation
             ? generation->graph_migration_receipt()
@@ -7600,10 +7671,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             "P_GRAPH_MIGRATION_SOURCE",
             "Program graph migration source hold was cancelled before publication");
     }
-    const auto source_record = impl_->config.transitions->load(
+    const auto source_record = impl_->transitions->load(
         owner_scope, capsule.source_run_id());
     const auto active = source_record
-        ? load_active_run_lineage(*impl_->config.transitions, *source_record)
+        ? load_active_run_lineage(*impl_->transitions, *source_record)
         : std::nullopt;
     if (!source_record || !active ||
         source_record->id() != active->lineage.active_run_record_id() ||
@@ -7618,7 +7689,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             "P_GRAPH_MIGRATION_STALE",
             "Program graph migration capsule is no longer the active source head");
     }
-    const auto source_runtime_state = impl_->config.transitions->load_effective_runtime_state(
+    const auto source_runtime_state = impl_->transitions->load_effective_runtime_state(
         owner_scope, source_record->run_id());
     const auto& source_contexts = source_runtime_state.context_publications;
     std::vector<HookOutboxEntry> unresolved_source_hooks =
@@ -7644,7 +7715,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             "P_GRAPH_MIGRATION_SAME_RUN",
             "Program graph migration target run must differ from its source");
     }
-    if (impl_->config.transitions->load(owner_scope, target_run_id)) {
+    if (impl_->transitions->load(owner_scope, target_run_id)) {
         throw_runtime_diagnostic(
             "P_RUN_CONFLICT",
             "Requested Program graph migration target run id is unavailable");
@@ -7721,7 +7792,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
         owner_scope, target_run_id, source_record->continuation().attempt, std::move(target_pinned),
         binding_fingerprint, std::move(persisted), target_invocation, target_snapshot.thread_id, 0,
         std::move(target.events), impl_->scheduler, impl_->config.checkpoints,
-        impl_->config.state_store, impl_->config.transitions, std::nullopt,
+        impl_->config.state_store, impl_->transitions, std::nullopt,
         source_record->logical_run_id());
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -7808,17 +7879,17 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
     };
     ProgramTransitionPublishResult published;
     try {
-        published = impl_->config.transitions->compare_publish_execution(
+        published = impl_->transitions->compare_publish_execution(
             owner_scope, "", std::move(publication), std::nullopt,
             target_execution_lease);
     } catch (...) {
         bool committed = false;
         bool definitely_uncommitted = false;
         try {
-            const auto durable = impl_->config.transitions->load_generation(
+            const auto durable = impl_->transitions->load_generation(
                 owner_scope, successor.lineage_id(), successor.generation());
             committed = durable && durable->id() == successor.id();
-            const auto lineage = impl_->config.transitions->load_lineage(
+            const auto lineage = impl_->transitions->load_lineage(
                 owner_scope, successor.lineage_id());
             definitely_uncommitted = lineage &&
                 lineage->id() == capsule.source_lineage_head_id();
@@ -7831,7 +7902,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
         published != ProgramTransitionPublishResult::AlreadyPresent) {
         bool definitely_uncommitted = false;
         try {
-            const auto lineage = impl_->config.transitions->load_lineage(
+            const auto lineage = impl_->transitions->load_lineage(
                 owner_scope, successor.lineage_id());
             definitely_uncommitted = lineage &&
                 lineage->id() == capsule.source_lineage_head_id();
@@ -7888,7 +7959,7 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
         throw std::invalid_argument("Program child recovery parent_run_id must not be empty");
 
     const auto parent_record =
-        load_active_agent_run(impl_->config.transitions, owner_scope, parent_run_id);
+        load_active_agent_run(impl_->transitions, owner_scope, parent_run_id);
     if (!parent_record)
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program parent run was not found");
     auto parent = reconnect(owner_scope, parent_run_id);
@@ -7918,7 +7989,7 @@ std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view own
             auto child = reconnect(owner_scope, persisted.child_run_id);
             parent.control_->attach_child(child.control_);
             if (const auto result = child.try_result())
-                publish_child_completion(impl_->config.transitions, owner_scope, parent_run_id,
+                publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                          persisted.child_run_id, *result);
             recovered.push_back(std::move(child));
             continue;
@@ -7950,18 +8021,18 @@ ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
     if (!source.control_ || !handoff.impl_ || handoff.impl_->consumed.load() ||
         handoff.impl_->control != source.control_ || source.control_->owner_scope != owner_scope ||
         !same_process_coordination_backend(*source.control_->transitions,
-                                           *impl_->config.transitions))
+                                           *impl_->transitions))
         throw_runtime_diagnostic("P_SYNTHESIS_GENERATION",
                                  "Synthesis requires this runtime's held checkpoint");
     (void)handoff.value();
     if (impl_->find_control(owner_scope, source.run_id()) != source.control_)
         throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis requires the owning runtime");
-    auto lock = child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
+    auto lock = child_relation_publication_mutex(*impl_->transitions, owner_scope,
                                                  source.logical_run_id())
                     .lock_blocking();
     const auto      run     = source.snapshot();
-    const auto      journal = impl_->config.transitions->latest(owner_scope, source.run_id());
-    const auto      active  = load_active_run_lineage(*impl_->config.transitions, run);
+    const auto      journal = impl_->transitions->latest(owner_scope, source.run_id());
+    const auto      active  = load_active_run_lineage(*impl_->transitions, run);
     if (!journal || journal->id != run.journal_head() || !active ||
         active->lineage.id() != expected_lineage_head ||
         proposal.data().owner_scope != owner_scope ||
@@ -7980,7 +8051,7 @@ ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
     if (!remaining.wall_time_ms)
         throw_runtime_diagnostic("P_SYNTHESIS_BUDGET", "Synthesis deadline has expired");
     auto publication =
-        attach_run_lineage(*impl_->config.transitions,
+        attach_run_lineage(*impl_->transitions,
                            continuing_running_publication(run, *journal, remaining, timestamp,
                                                           journal->inflight_reservation));
     auto reservation = ProgramSynthesisReservation::create(
@@ -7988,13 +8059,13 @@ ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
          publication.run_lineage->id(), run.remaining_budget(), remaining});
     const auto reserved_journal_head = publication.run_record.journal_head();
     const auto lease =
-        impl_->config.transitions->load_execution_lease(owner_scope, source.run_id());
+        impl_->transitions->load_execution_lease(owner_scope, source.run_id());
     ProgramTransitionPublishResult published;
     try {
         published = lease
-                        ? impl_->config.transitions->compare_publish_execution(
+                        ? impl_->transitions->compare_publish_execution(
                               owner_scope, run.journal_head(), std::move(publication), lease, lease)
-                        : impl_->config.transitions->compare_publish(
+                        : impl_->transitions->compare_publish(
                               owner_scope, run.journal_head(), std::move(publication));
     } catch (...) {
         // A lost acknowledgement cannot restore compile authority in this live attempt.
@@ -8022,18 +8093,18 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
     if (!handoff.impl_ || handoff.impl_->consumed.load() ||
         handoff.impl_->control != parent.control_ || parent.control_->owner_scope != owner_scope ||
         !same_process_coordination_backend(*parent.control_->transitions,
-                                           *impl_->config.transitions))
+                                           *impl_->transitions))
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_GENERATION",
                                  "Child synthesis requires this runtime's held parent checkpoint");
     (void)handoff.value();
     auto synthesis_lock =
-        child_relation_publication_mutex(*impl_->config.transitions, owner_scope, parent.run_id())
+        child_relation_publication_mutex(*impl_->transitions, owner_scope, parent.run_id())
             .lock_blocking();
     if (!impl_->config.child_synthesis_gateway || !impl_->config.child_synthesis_grant_resolver)
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_AUTHORITY",
                                  "Child synthesis host policy is unavailable");
     for (const auto& existing :
-         impl_->config.transitions->load_child_syntheses(owner_scope, parent.run_id())) {
+         impl_->transitions->load_child_syntheses(owner_scope, parent.run_id())) {
         if (existing.data().proposal.id() != proposal.id()) continue;
         if (existing.data().grant.id() != grant.id() ||
             existing.data().binding_name != binding_name)
@@ -8056,8 +8127,8 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
                                  "Synthesis binding collides with a static child");
     auto run     = parent.snapshot();
-    auto journal = impl_->config.transitions->latest(owner_scope, parent.run_id());
-    auto active  = load_active_run_lineage(*impl_->config.transitions, run);
+    auto journal = impl_->transitions->latest(owner_scope, parent.run_id());
+    auto active  = load_active_run_lineage(*impl_->transitions, run);
     auto version = impl_->config.catalog->resolve_version(owner_scope, parent.program_version_id());
     if (!journal || journal->id != run.journal_head() || !active || !version ||
         parent.control_->cancellation_cause() != detail::CancellationCause::None)
@@ -8071,7 +8142,7 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
     const auto elapsed   = static_cast<std::uint64_t>(timestamp - run.updated_at_ms());
     remaining.wall_time_ms -= std::min(remaining.wall_time_ms, elapsed);
     auto publication =
-        attach_run_lineage(*impl_->config.transitions,
+        attach_run_lineage(*impl_->transitions,
                            continuing_running_publication(run, *journal, remaining, timestamp,
                                                           journal->inflight_reservation));
     auto reservation = ProgramSynthesisReservation::create(
@@ -8083,19 +8154,19 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
     impl_->verify_synthesis_grant(record, false);
     publication.child_synthesis_records.push_back(record);
     const auto lease =
-        impl_->config.transitions->load_execution_lease(owner_scope, parent.run_id());
+        impl_->transitions->load_execution_lease(owner_scope, parent.run_id());
     ProgramTransitionPublishResult result;
     try {
-        result = lease ? impl_->config.transitions->compare_publish_execution(
+        result = lease ? impl_->transitions->compare_publish_execution(
                              owner_scope, run.journal_head(), std::move(publication), lease, lease)
-                       : impl_->config.transitions->compare_publish(owner_scope, run.journal_head(),
+                       : impl_->transitions->compare_publish(owner_scope, run.journal_head(),
                                                                     std::move(publication));
     } catch (...) {
         const auto failure = std::current_exception();
         // A backend may lose the acknowledgement after committing. Read before returning control.
         try {
             for (const auto& stored :
-                 impl_->config.transitions->load_child_syntheses(owner_scope, parent.run_id()))
+                 impl_->transitions->load_child_syntheses(owner_scope, parent.run_id()))
                 if (stored.data().proposal.id() == proposal.id())
                     parent.control_->limit_dynamic_compiles(
                         stored.data()
@@ -8125,7 +8196,7 @@ ProgramChildSynthesisRecord ProgramRuntime::recover_child_synthesis(std::string_
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_GENERATION",
                                  "Live synthesis recovery requires the held parent checkpoint");
     for (const auto& record :
-         impl_->config.transitions->load_child_syntheses(owner_scope, parent_run_id)) {
+         impl_->transitions->load_child_syntheses(owner_scope, parent_run_id)) {
         if (record.data().proposal.id() != proposal_id) continue;
         impl_->verify_synthesis_grant(record);
         if (impl_->synthesis_child_is_uncertain(record)) {
@@ -8154,13 +8225,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     std::string resolved_run_id(run_id);
     bool        successor_generation = false;
     std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt;
-    const auto  requested_record = impl_->config.transitions->load(owner_scope, run_id);
+    const auto  requested_record = impl_->transitions->load(owner_scope, run_id);
     if (!requested_record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
     if (const auto lineage =
-            impl_->config.transitions->load_run_lineage(owner_scope, requested_record->run_id())) {
-        const auto active = impl_->config.transitions->load_generation(
+            impl_->transitions->load_run_lineage(owner_scope, requested_record->run_id())) {
+        const auto active = impl_->transitions->load_generation(
             owner_scope, lineage->lineage_id(), lineage->active_generation());
         if (!active || active->id() != lineage->active_generation_id()) {
             throw_runtime_diagnostic("P_RUN_LINEAGE",
@@ -8172,7 +8243,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         resolved_run_id = active->run_id();
     }
     run_id = resolved_run_id;
-    auto record = impl_->config.transitions->load(owner_scope, run_id);
+    auto record = impl_->transitions->load(owner_scope, run_id);
     if (!record) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
@@ -8180,7 +8251,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     std::optional<std::int64_t> synthesis_deadline;
     if (record->invocation().budget.max_dynamic_compiles && !record->terminal_result()) {
         for (const auto& synthesis :
-             impl_->config.transitions->load_child_syntheses(owner_scope, run_id)) {
+             impl_->transitions->load_child_syntheses(owner_scope, run_id)) {
             impl_->verify_synthesis_grant(synthesis);
             if (!impl_->find_control(owner_scope, run_id) &&
                 !impl_->find_process_control(owner_scope, run_id) &&
@@ -8211,7 +8282,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         // Recovery must inspect the complete causal histories, not merely the
         // reduced heads retained by a transition snapshot.
         auto runtime_state =
-            impl_->config.transitions->load_effective_runtime_state(owner_scope, run_id);
+            impl_->transitions->load_effective_runtime_state(owner_scope, run_id);
         auto& contexts = runtime_state.context_publications;
         auto& hooks = runtime_state.hook_outbox_entries;
 
@@ -8268,7 +8339,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     }
     if (record->has_children()) {
         recovery_head =
-            impl_->config.transitions->load_run_publication_head(owner_scope, run_id);
+            impl_->transitions->load_run_publication_head(owner_scope, run_id);
         if (!recovery_head)
             throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
                                      "Child recovery has no consistent parent transition head");
@@ -8282,9 +8353,9 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         std::optional<MigrationPlan> stored_plan;
         std::optional<ProgramTransitionPublication> initial_publication;
         try {
-            stored_plan = impl_->config.transitions->load_migration_plan(owner_scope, run_id);
+            stored_plan = impl_->transitions->load_migration_plan(owner_scope, run_id);
             initial_publication =
-                impl_->config.transitions->load_generation_initial_publication(
+                impl_->transitions->load_generation_initial_publication(
                     owner_scope, graph_migration_receipt->capsule().lineage_id(),
                     graph_migration_receipt->target_generation());
         } catch (const std::exception& error) {
@@ -8364,7 +8435,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         // with the same source/target version pair.
         std::optional<MigrationPlan> stored_plan;
         try {
-            stored_plan = impl_->config.transitions->load_migration_plan(owner_scope, run_id);
+            stored_plan = impl_->transitions->load_migration_plan(owner_scope, run_id);
         } catch (const std::exception& error) {
             throw_runtime_diagnostic(
                 "P_FORK_MIGRATION_PROOF", "Fork recovery migration proof is unreadable",
@@ -8406,13 +8477,13 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
     const auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
         const auto active_lineage =
-            load_active_run_lineage(*impl_->config.transitions, *record);
+            load_active_run_lineage(*impl_->transitions, *record);
         if (!active_lineage) {
             throw_runtime_diagnostic(
                 "P_RUN_LINEAGE", "Running Program recovery has no active generation");
         }
         const auto migration_capsule =
-            impl_->config.transitions->load_graph_migration_capsule(
+            impl_->transitions->load_graph_migration_capsule(
                 owner_scope, record->run_id(), active_lineage->lineage.id());
         if (migration_capsule) {
             const auto checkpoint = record->exact_checkpoint();
@@ -8451,7 +8522,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             const auto remaining = program_replacement_remaining_budget(
                 *record, active_lineage->lineage, timestamp);
             const auto previous_journal =
-                impl_->config.transitions->latest(owner_scope, record->run_id());
+                impl_->transitions->latest(owner_scope, record->run_id());
             if (!previous_journal || previous_journal->id != record->journal_head()) {
                 throw_runtime_diagnostic(
                     "P_GRAPH_MIGRATION_HOLD",
@@ -8518,10 +8589,10 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 ProgramRunRecord::create(std::move(data)), std::move(journal),
                 {terminal_event}, {}};
             const auto published = compare_publish_with_lineage(
-                *impl_->config.transitions, owner_scope, record->journal_head(),
+                *impl_->transitions, owner_scope, record->journal_head(),
                 std::move(publication));
             if (published == ProgramTransitionPublishResult::Conflict) {
-                const auto winner = impl_->config.transitions->load_run_lineage(
+                const auto winner = impl_->transitions->load_run_lineage(
                     owner_scope, record->run_id());
                 if (!winner || winner->id() == active_lineage->lineage.id()) {
                     throw_runtime_diagnostic(
@@ -8560,7 +8631,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             record->child_depth() == 0 &&
             record->invocation().parent_run_id.empty()) {
             const auto execution_lease =
-                impl_->config.transitions->load_execution_lease(owner_scope, run_id);
+                impl_->transitions->load_execution_lease(owner_scope, run_id);
             if (!execution_lease) {
                 throw_runtime_diagnostic(
                     "P_RUN_LEASE_MISSING",
@@ -8618,7 +8689,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 std::move(expired_invocation), record->invocation(), expected_thread_id,
                 record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
                 impl_->scheduler, impl_->config.checkpoints,
-                impl_->config.state_store, impl_->config.transitions, execution_lease);
+                impl_->config.state_store, impl_->transitions, execution_lease);
             expired_control->set_hook_runtime(impl_->config.hook_runtime);
             expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
             expired_control->set_core_provider_call_resolver(
@@ -8729,7 +8800,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         }
 
         const auto loaded_journal = recovery_head ? std::optional<ProgramJournalRecord>{}
-                                                  : impl_->config.transitions->latest(owner_scope,
+                                                  : impl_->transitions->latest(owner_scope,
                                                                                       run_id);
         const auto* recovery_journal = recovery_head
             ? &recovery_head->journal_record : (loaded_journal ? &*loaded_journal : nullptr);
@@ -8768,11 +8839,11 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
             record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
             std::shared_ptr<ProgramEventSink>{}, impl_->scheduler,
-            impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
+            impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
             std::nullopt, record->logical_run_id());
         control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
         control->fork_provider_replay =
-            fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *record);
+            fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *record);
         impl_->commit_active_child(control, global_quota);
         if (!record->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(
@@ -8805,7 +8876,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         throw_runtime_diagnostic("P_RUN_INVALID", "Stored terminal Program run is incomplete");
     }
     auto control = std::make_shared<detail::RunControl>(
-        *record, impl_->config.transitions, impl_->config.native_history_archive,
+        *record, impl_->transitions, impl_->config.native_history_archive,
                 impl_->scheduler);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -8825,12 +8896,12 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program resume run_id must not be empty");
 
-    const auto previous = impl_->config.transitions->load(owner_scope, run_id);
+    const auto previous = impl_->transitions->load(owner_scope, run_id);
     if (!previous) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
     const auto active_lineage =
-        load_active_run_lineage(*impl_->config.transitions, *previous);
+        load_active_run_lineage(*impl_->transitions, *previous);
     const auto available_budget = active_lineage ? active_lineage->lineage.remaining_budget()
                                                  : previous->remaining_budget();
     if (previous->child_depth() > MAX_SUPPORTED_CHILD_DEPTH ||
@@ -8887,7 +8958,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         return reconnect(owner_scope, run_id);
     }
     if (pending_disposition == ProgramPendingDisposition::Expired) {
-        const auto previous_journal = impl_->config.transitions->latest(owner_scope, run_id);
+        const auto previous_journal = impl_->transitions->latest(owner_scope, run_id);
         if (!previous_journal || previous_journal->id != previous->journal_head()) {
             throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
         }
@@ -8953,7 +9024,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         expired_data.created_at_ms   = previous->created_at_ms();
         expired_data.updated_at_ms   = journal.timestamp_ms;
         const auto published         = compare_publish_with_lineage(
-            *impl_->config.transitions, owner_scope, previous->journal_head(),
+            *impl_->transitions, owner_scope, previous->journal_head(),
             ProgramTransitionPublication{ProgramRunRecord::create(std::move(expired_data)),
                                          std::move(journal),
                                                  {terminal_event},
@@ -8963,7 +9034,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
             throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
         }
         if (!previous->invocation().parent_run_id.empty())
-            publish_child_completion(impl_->config.transitions, owner_scope,
+            publish_child_completion(impl_->transitions, owner_scope,
                                      previous->invocation().parent_run_id, run_id, terminal_result);
         throw_runtime_diagnostic(pending_code, pending_message);
     }
@@ -8977,7 +9048,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     // command is completed only after that resumed dispatch actually returns.
     const auto checkpoint = *previous->exact_checkpoint();
     const auto javascript_commands =
-        impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+        impl_->transitions->load_javascript_commands(owner_scope, run_id);
     std::optional<JavaScriptPendingCommand> javascript_pending;
     if (const auto previous_effect = previous->pending_effect()) {
         javascript_pending = javascript_pending_command(*previous_effect);
@@ -9043,7 +9114,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     const auto stored_resume_checkpoint =
         impl_->config.checkpoints->load_by_id(checkpoint.checkpoint_id);
 
-    const auto previous_journal = impl_->config.transitions->latest(owner_scope, run_id);
+    const auto previous_journal = impl_->transitions->latest(owner_scope, run_id);
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
@@ -9097,10 +9168,10 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         std::move(pinned), previous->binding_fingerprint(), std::move(attempt_invocation),
         previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
         std::move(resume_value.events), impl_->scheduler,
-        impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
+        impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
         std::nullopt, previous->logical_run_id());
     control->fork_provider_replay =
-        fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *previous);
+        fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *previous);
     impl_->commit_active_child(control, global_quota);
     if (!previous->invocation().parent_run_id.empty())
         impl_->bind_budgeted_child_completion(control, owner_scope,
@@ -9156,14 +9227,14 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
     if (reconcile_javascript_command) {
         const auto entries =
-            impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+            impl_->transitions->load_javascript_commands(owner_scope, run_id);
         command_entries.push_back(javascript_completion_entry(
             entries, *javascript_pending,
             javascript_resume_terminal_result(resume_value.value,
                                               previous_journal->inflight_reservation)));
     }
     auto publication = attach_run_lineage(
-        *impl_->config.transitions,
+        *impl_->transitions,
         ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                      std::move(journal),
                                      {started},
@@ -9173,13 +9244,13 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
     const auto execution_lease =
         make_execution_lease(*control->materialized, publication);
     const auto published = execution_lease
-        ? impl_->config.transitions->compare_publish_execution(
+        ? impl_->transitions->compare_publish_execution(
               owner_scope, previous->journal_head(), std::move(publication),
               std::nullopt, execution_lease)
-        : impl_->config.transitions->compare_publish(
+        : impl_->transitions->compare_publish(
               owner_scope, previous->journal_head(), std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
-        const auto                winner = impl_->config.transitions->load(owner_scope, run_id);
+        const auto                winner = impl_->transitions->load(owner_scope, run_id);
         ProgramPendingDisposition disposition = ProgramPendingDisposition::Conflict;
         if (winner && winner->pending_input()) {
             disposition = winner->pending_input()
@@ -9239,12 +9310,12 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     impl_->scheduler->require_synchronous_call("ProgramRuntime::reconcile", "ProgramRuntime::reconcile_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconcile run_id must not be empty");
-    const auto previous = impl_->config.transitions->load(owner_scope, run_id);
+    const auto previous = impl_->transitions->load(owner_scope, run_id);
     if (!previous) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
     const auto active_lineage =
-        load_active_run_lineage(*impl_->config.transitions, *previous);
+        load_active_run_lineage(*impl_->transitions, *previous);
     const auto available_budget = active_lineage ? active_lineage->lineage.remaining_budget()
                                                  : previous->remaining_budget();
     auto pending = previous->pending_effect();
@@ -9286,7 +9357,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
 
     const auto checkpoint = *previous->exact_checkpoint();
     const auto javascript_commands =
-        impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+        impl_->transitions->load_javascript_commands(owner_scope, run_id);
     if (!javascript_pending && !javascript_commands.empty() &&
         javascript_commands.back().pending()) {
         const auto& pending_command = javascript_commands.back();
@@ -9361,7 +9432,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         }
     }
 
-    const auto previous_journal = impl_->config.transitions->latest(owner_scope, run_id);
+    const auto previous_journal = impl_->transitions->latest(owner_scope, run_id);
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
         throw_runtime_diagnostic("P_RECONCILE_CONFLICT",
                                  "Program reconciliation lost the transition CAS");
@@ -9438,10 +9509,10 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             previous->binding_fingerprint(), std::move(invocation), previous->invocation(),
             checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
             impl_->scheduler, impl_->config.checkpoints,
-            impl_->config.state_store, impl_->config.transitions, std::nullopt,
+            impl_->config.state_store, impl_->transitions, std::nullopt,
             previous->logical_run_id());
         live_control->fork_provider_replay =
-            fork_provider_replay_of(*impl_->config.transitions, *impl_->config.checkpoints, owner_scope, *previous);
+            fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *previous);
         impl_->commit_active_child(live_control, global_quota);
         if (!previous->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(live_control, owner_scope,
@@ -9536,13 +9607,13 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
     std::vector<ProgramJavaScriptCommandJournalEntry> command_entries;
     if (reconcile_javascript_command) {
         const auto entries =
-            impl_->config.transitions->load_javascript_commands(owner_scope, run_id);
+            impl_->transitions->load_javascript_commands(owner_scope, run_id);
         command_entries.push_back(javascript_completion_entry(
             entries, *javascript_pending,
             javascript_resume_terminal_result(*resolution.result, spent_reservation)));
     }
     auto publication = attach_run_lineage(
-        *impl_->config.transitions,
+        *impl_->transitions,
         ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                      std::move(journal),
                                      outbox,
@@ -9553,13 +9624,13 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         ? make_execution_lease(*live_control->materialized, publication)
         : std::nullopt;
     const auto published = execution_lease
-        ? impl_->config.transitions->compare_publish_execution(
+        ? impl_->transitions->compare_publish_execution(
               owner_scope, previous->journal_head(), std::move(publication),
               std::nullopt, execution_lease)
-        : impl_->config.transitions->compare_publish(
+        : impl_->transitions->compare_publish(
               owner_scope, previous->journal_head(), std::move(publication));
     if (published != ProgramTransitionPublishResult::Published) {
-        const auto winner = impl_->config.transitions->load(owner_scope, run_id);
+        const auto winner = impl_->transitions->load(owner_scope, run_id);
         if (winner && winner->pending_effect()) {
             if (resolution.resolution == ProgramEffectReconciliation::Unknown &&
                 !resolution.result &&
@@ -9583,11 +9654,11 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         // Reconciliation replaces an already-terminal Interrupted control with
         // a newer durable terminal state.  Do not let reconnect reuse that
         // stale in-memory control while another thread still owns it.
-        const auto reconciled = impl_->config.transitions->load(owner_scope, run_id);
+        const auto reconciled = impl_->transitions->load(owner_scope, run_id);
         if (!reconciled)
             throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Reconciled Program run was not found");
         auto control = std::make_shared<detail::RunControl>(
-            *reconciled, impl_->config.transitions, impl_->config.native_history_archive,
+            *reconciled, impl_->transitions, impl_->config.native_history_archive,
                 impl_->scheduler);
         if (!reconciled->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(control, owner_scope,
@@ -9595,7 +9666,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         auto reconnected = ProgramHandle(std::move(control));
         if (const auto result = reconnected.try_result()) {
             if (!previous->invocation().parent_run_id.empty())
-                publish_child_completion(impl_->config.transitions, owner_scope,
+                publish_child_completion(impl_->transitions, owner_scope,
                                          previous->invocation().parent_run_id, run_id, *result);
         }
         return reconnected;

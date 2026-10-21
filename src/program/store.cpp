@@ -1,4 +1,5 @@
 #include <neograph/program/store.h>
+#include "lock_audit.h"
 
 #include <algorithm>
 #include <limits>
@@ -37,7 +38,7 @@ InMemoryProgramStore& InMemoryProgramStore::operator=(InMemoryProgramStore&&) no
 
 InMemoryProgramStore::~InMemoryProgramStore() = default;
 
-void InMemoryProgramStore::publish_admitted(const ProgramBundle&  bundle,
+void InMemoryProgramStore::publish_admitted_sync(const ProgramBundle&  bundle,
                                             const ProgramVersion& version) {
     if (version.bundle_id() != bundle.id()) {
         throw std::invalid_argument("Program version does not bind the published bundle");
@@ -88,7 +89,7 @@ void InMemoryProgramStore::publish_admitted(const ProgramBundle&  bundle,
     }
 }
 
-std::optional<ProgramBundle> InMemoryProgramStore::get_bundle(std::string_view id) const {
+std::optional<ProgramBundle> InMemoryProgramStore::get_bundle_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto      found = impl_->bundles.find(id);
     if (found == impl_->bundles.end()) {
@@ -97,7 +98,7 @@ std::optional<ProgramBundle> InMemoryProgramStore::get_bundle(std::string_view i
     return found->second.value;
 }
 
-std::optional<ProgramVersion> InMemoryProgramStore::get_version(std::string_view id) const {
+std::optional<ProgramVersion> InMemoryProgramStore::get_version_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto      found = impl_->versions.find(id);
     if (found == impl_->versions.end()) {
@@ -107,7 +108,7 @@ std::optional<ProgramVersion> InMemoryProgramStore::get_version(std::string_view
 }
 
 std::optional<ProgramVersion>
-InMemoryProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+InMemoryProgramStore::get_version_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     const auto      found = impl_->versions.find(id);
@@ -117,7 +118,7 @@ InMemoryProgramStore::get_version(std::string_view owner_scope, std::string_view
 }
 
 std::optional<ProgramBundle>
-InMemoryProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+InMemoryProgramStore::get_bundle_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     const auto bundle = impl_->bundles.find(id);
@@ -132,14 +133,14 @@ InMemoryProgramStore::get_bundle(std::string_view owner_scope, std::string_view 
 }
 
 std::optional<ProgramActivation>
-InMemoryProgramStore::get_activation(std::string_view owner_scope) const {
+InMemoryProgramStore::get_activation_sync(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->activations.find(owner_scope);
     if (found == impl_->activations.end()) return std::nullopt;
     return found->second.value;
 }
 std::optional<ProgramActivationBinding>
-InMemoryProgramStore::get_active_binding(std::string_view owner_scope) const {
+InMemoryProgramStore::get_active_binding_sync(std::string_view owner_scope) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     const auto active = impl_->activations.find(owner_scope);
@@ -154,7 +155,7 @@ InMemoryProgramStore::get_active_binding(std::string_view owner_scope) const {
     return ProgramActivationBinding{active->second.value, version->second.value};
 }
 
-ProgramActivationResult InMemoryProgramStore::compare_activate(
+ProgramActivationResult InMemoryProgramStore::compare_activate_sync(
     std::string_view owner_scope,
     std::uint64_t expected_generation,
     std::string_view version_id,
@@ -192,7 +193,7 @@ ProgramActivationResult InMemoryProgramStore::compare_activate(
 }
 
 std::vector<ProgramVersion>
-InMemoryProgramStore::list_versions(std::string_view owner_scope) const {
+InMemoryProgramStore::list_versions_sync(std::string_view owner_scope) const {
     if (owner_scope.empty())
         throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
@@ -202,7 +203,7 @@ InMemoryProgramStore::list_versions(std::string_view owner_scope) const {
     return result;
 }
 
-ProgramRetentionReport InMemoryProgramStore::collect_garbage(
+ProgramRetentionReport InMemoryProgramStore::collect_garbage_sync(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
     if (owner_scope.empty())
@@ -249,6 +250,201 @@ ProgramRetentionReport InMemoryProgramStore::collect_garbage(
                          std::tie(rhs.version_id, rhs.reason);
               });
     return report;
+}
+
+
+// ---- ProgramStore : the synchronous implementer base and the blocking facade (#556) ----
+
+asio::awaitable<void> SyncProgramStore::publish_admitted(
+    const ProgramBundle& bundle,
+    const ProgramVersion& version) {
+    detail::assert_no_pure_lock_held("ProgramStore::publish_admitted");
+    if (!offloads()) {
+        publish_admitted_sync(bundle, version);
+        co_return;
+    }
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<void>([this, bundle = bundle, version = version]() mutable -> void {
+        return publish_admitted_sync(bundle, version);
+    });
+}
+
+asio::awaitable<std::optional<ProgramBundle>> SyncProgramStore::get_bundle(std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
+    if (!offloads()) co_return get_bundle_sync(id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramBundle>>([this, id = std::string(id)]() mutable -> std::optional<ProgramBundle> {
+        return get_bundle_sync(id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramVersion>> SyncProgramStore::get_version(
+    std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_version");
+    if (!offloads()) co_return get_version_sync(id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramVersion>>([this, id = std::string(id)]() mutable -> std::optional<ProgramVersion> {
+        return get_version_sync(id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramBundle>> SyncProgramStore::get_bundle(
+    std::string_view owner_scope,
+    std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
+    if (!offloads()) co_return get_bundle_sync(owner_scope, id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramBundle>>([this, owner_scope = std::string(owner_scope), id = std::string(id)]() mutable -> std::optional<ProgramBundle> {
+        return get_bundle_sync(owner_scope, id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramVersion>> SyncProgramStore::get_version(
+    std::string_view owner_scope,
+    std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_version");
+    if (!offloads()) co_return get_version_sync(owner_scope, id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramVersion>>([this, owner_scope = std::string(owner_scope), id = std::string(id)]() mutable -> std::optional<ProgramVersion> {
+        return get_version_sync(owner_scope, id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramActivation>> SyncProgramStore::get_activation(
+    std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_activation");
+    if (!offloads()) co_return get_activation_sync(owner_scope);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramActivation>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::optional<ProgramActivation> {
+        return get_activation_sync(owner_scope);
+    });
+}
+
+asio::awaitable<std::optional<ProgramActivationBinding>> SyncProgramStore::get_active_binding(
+    std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_active_binding");
+    if (!offloads()) co_return get_active_binding_sync(owner_scope);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramActivationBinding>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::optional<ProgramActivationBinding> {
+        return get_active_binding_sync(owner_scope);
+    });
+}
+
+asio::awaitable<ProgramActivationResult> SyncProgramStore::compare_activate(
+    std::string_view owner_scope,
+    std::uint64_t expected_generation,
+    std::string_view version_id,
+    std::string_view policy_snapshot_hash) {
+    detail::assert_no_pure_lock_held("ProgramStore::compare_activate");
+    if (!offloads()) co_return compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramActivationResult>([this, owner_scope = std::string(owner_scope), expected_generation, version_id = std::string(version_id), policy_snapshot_hash = std::string(policy_snapshot_hash)]() mutable -> ProgramActivationResult {
+        return compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
+    });
+}
+
+asio::awaitable<std::vector<ProgramVersion>> SyncProgramStore::list_versions(
+    std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::list_versions");
+    if (!offloads()) co_return list_versions_sync(owner_scope);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramVersion>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::vector<ProgramVersion> {
+        return list_versions_sync(owner_scope);
+    });
+}
+
+asio::awaitable<ProgramRetentionReport> SyncProgramStore::collect_garbage(
+    std::string_view owner_scope,
+    const std::vector<std::string>& pinned_version_ids) {
+    detail::assert_no_pure_lock_held("ProgramStore::collect_garbage");
+    if (!offloads()) co_return collect_garbage_sync(owner_scope, pinned_version_ids);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramRetentionReport>([this, owner_scope = std::string(owner_scope), pinned_version_ids = pinned_version_ids]() mutable -> ProgramRetentionReport {
+        return collect_garbage_sync(owner_scope, pinned_version_ids);
+    });
+}
+
+BlockingProgramStore::BlockingProgramStore(std::shared_ptr<ProgramStore> store, BlockingStorePolicy policy)
+    : store_(std::move(store)), policy_(std::move(policy)) {
+    if (!store_) throw std::invalid_argument("BlockingProgramStore requires a store");
+    if (!policy_.await_synchronous_stores) sync_ = dynamic_cast<SyncProgramStore*>(store_.get());
+}
+
+BlockingProgramStore::BlockingProgramStore(ProgramStore& store, BlockingStorePolicy policy)
+    : BlockingProgramStore(std::shared_ptr<ProgramStore>(std::shared_ptr<ProgramStore>{}, &store), std::move(policy)) {}
+
+void BlockingProgramStore::publish_admitted(
+    const ProgramBundle& bundle,
+    const ProgramVersion& version) const {
+    detail::assert_no_pure_lock_held("ProgramStore::publish_admitted");
+    if (sync_) return sync_->publish_admitted_sync(bundle, version);
+    return detail::block_on_store(store_->publish_admitted(bundle, version), policy_, "ProgramStore::publish_admitted");
+}
+
+std::optional<ProgramBundle> BlockingProgramStore::get_bundle(std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
+    if (sync_) return sync_->get_bundle_sync(id);
+    return detail::block_on_store(store_->get_bundle(id), policy_, "ProgramStore::get_bundle");
+}
+
+std::optional<ProgramVersion> BlockingProgramStore::get_version(std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_version");
+    if (sync_) return sync_->get_version_sync(id);
+    return detail::block_on_store(store_->get_version(id), policy_, "ProgramStore::get_version");
+}
+
+std::optional<ProgramBundle> BlockingProgramStore::get_bundle(
+    std::string_view owner_scope,
+    std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
+    if (sync_) return sync_->get_bundle_sync(owner_scope, id);
+    return detail::block_on_store(store_->get_bundle(owner_scope, id), policy_, "ProgramStore::get_bundle");
+}
+
+std::optional<ProgramVersion> BlockingProgramStore::get_version(
+    std::string_view owner_scope,
+    std::string_view id) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_version");
+    if (sync_) return sync_->get_version_sync(owner_scope, id);
+    return detail::block_on_store(store_->get_version(owner_scope, id), policy_, "ProgramStore::get_version");
+}
+
+std::optional<ProgramActivation> BlockingProgramStore::get_activation(
+    std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_activation");
+    if (sync_) return sync_->get_activation_sync(owner_scope);
+    return detail::block_on_store(store_->get_activation(owner_scope), policy_, "ProgramStore::get_activation");
+}
+
+std::optional<ProgramActivationBinding> BlockingProgramStore::get_active_binding(
+    std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::get_active_binding");
+    if (sync_) return sync_->get_active_binding_sync(owner_scope);
+    return detail::block_on_store(store_->get_active_binding(owner_scope), policy_, "ProgramStore::get_active_binding");
+}
+
+ProgramActivationResult BlockingProgramStore::compare_activate(
+    std::string_view owner_scope,
+    std::uint64_t expected_generation,
+    std::string_view version_id,
+    std::string_view policy_snapshot_hash) const {
+    detail::assert_no_pure_lock_held("ProgramStore::compare_activate");
+    if (sync_) return sync_->compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
+    return detail::block_on_store(store_->compare_activate(owner_scope, expected_generation, version_id, policy_snapshot_hash), policy_, "ProgramStore::compare_activate");
+}
+
+std::vector<ProgramVersion> BlockingProgramStore::list_versions(std::string_view owner_scope) const {
+    detail::assert_no_pure_lock_held("ProgramStore::list_versions");
+    if (sync_) return sync_->list_versions_sync(owner_scope);
+    return detail::block_on_store(store_->list_versions(owner_scope), policy_, "ProgramStore::list_versions");
+}
+
+ProgramRetentionReport BlockingProgramStore::collect_garbage(
+    std::string_view owner_scope,
+    const std::vector<std::string>& pinned_version_ids) const {
+    detail::assert_no_pure_lock_held("ProgramStore::collect_garbage");
+    if (sync_) return sync_->collect_garbage_sync(owner_scope, pinned_version_ids);
+    return detail::block_on_store(store_->collect_garbage(owner_scope, pinned_version_ids), policy_, "ProgramStore::collect_garbage");
 }
 
 }  // namespace neograph::program

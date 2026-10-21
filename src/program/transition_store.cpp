@@ -1,6 +1,7 @@
 #include <neograph/program/transition_store.h>
 
 #include "command_publication_head.h"
+#include "lock_audit.h"
 
 #include "canonical_json.h"
 #include "node_retry_budget.h"
@@ -908,19 +909,19 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
     validate_pub(out, out.run_record.owner_scope());
     return out;
 }
-std::vector<ProgramJavaScriptCommandJournalEntry> ProgramTransitionStore::load_javascript_commands(
+std::vector<ProgramJavaScriptCommandJournalEntry> SyncProgramTransitionStore::load_javascript_commands_sync(
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable JavaScript command-history reads");
 }
 
-std::optional<ProgramRunPublicationHead> ProgramTransitionStore::load_run_publication_head(
+std::optional<ProgramRunPublicationHead> SyncProgramTransitionStore::load_run_publication_head_sync(
     std::string_view owner, std::string_view run_id) const {
     for (int retry = 0; retry < 3; ++retry) {
-        auto run = load(owner, run_id);
+        auto run = load_sync(owner, run_id);
         if (!run) return std::nullopt;
-        auto journal = latest(owner, run_id);
-        const auto after = load(owner, run_id);
+        auto journal = latest_sync(owner, run_id);
+        const auto after = load_sync(owner, run_id);
         if (!after) return std::nullopt;
         if (after->id() != run->id()) continue;
         if (!journal) return std::nullopt;
@@ -930,14 +931,14 @@ std::optional<ProgramRunPublicationHead> ProgramTransitionStore::load_run_public
     return std::nullopt;
 }
 
-std::optional<ProgramCommandPublicationHead> ProgramTransitionStore::load_command_publication_head(
+std::optional<ProgramCommandPublicationHead> SyncProgramTransitionStore::load_command_publication_head_sync(
     std::string_view owner, std::string_view run_id) const {
-    const auto run = load(owner, run_id);
+    const auto run = load_sync(owner, run_id);
     if (!run) return std::nullopt;
-    const auto journal = latest(owner, run_id);
+    const auto journal = latest_sync(owner, run_id);
     if (!journal || run->journal_head() != journal->id) return std::nullopt;
-    const auto commands = load_javascript_commands(owner, run_id);
-    const auto after = load(owner, run_id);
+    const auto commands = load_javascript_commands_sync(owner, run_id);
+    const auto after = load_sync(owner, run_id);
     if (!after || after->id() != run->id()) return std::nullopt;
     ProgramCommandPublicationHead head{
         *run, *journal, commands.empty() ? std::nullopt
@@ -946,19 +947,19 @@ std::optional<ProgramCommandPublicationHead> ProgramTransitionStore::load_comman
     return head;
 }
 
-std::vector<ProgramContextPublication> ProgramTransitionStore::load_context_publications(
+std::vector<ProgramContextPublication> SyncProgramTransitionStore::load_context_publications_sync(
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable context-publication reads");
 }
 
-std::vector<ProgramChildSynthesisRecord> ProgramTransitionStore::load_child_syntheses(
+std::vector<ProgramChildSynthesisRecord> SyncProgramTransitionStore::load_child_syntheses_sync(
     std::string_view, std::string_view) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable child synthesis reads");
 }
 
-std::vector<HookOutboxEntry> ProgramTransitionStore::load_hook_outbox_entries(
+std::vector<HookOutboxEntry> SyncProgramTransitionStore::load_hook_outbox_entries_sync(
     std::string_view, std::string_view) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support durable hook-outbox reads");
@@ -1148,17 +1149,17 @@ bool is_valid_program_runtime_state_transfer(
     }
 }
 
-ProgramEffectiveRuntimeState ProgramTransitionStore::load_effective_runtime_state(
+ProgramEffectiveRuntimeState SyncProgramTransitionStore::load_effective_runtime_state_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     ProgramEffectiveRuntimeState result;
-    result.context_publications = load_context_publications(owner_scope, run_id);
-    result.hook_outbox_entries = load_hook_outbox_entries(owner_scope, run_id);
-    const auto target_run = load(owner_scope, run_id);
-    const auto lineage = target_run ? load_run_lineage(owner_scope, run_id) : std::nullopt;
+    result.context_publications = load_context_publications_sync(owner_scope, run_id);
+    result.hook_outbox_entries = load_hook_outbox_entries_sync(owner_scope, run_id);
+    const auto target_run = load_sync(owner_scope, run_id);
+    const auto lineage = target_run ? load_run_lineage_sync(owner_scope, run_id) : std::nullopt;
     std::optional<ProgramRunGeneration> target_generation;
     if (lineage) {
         for (auto generation = lineage->active_generation(); generation > 0; --generation) {
-            auto candidate = load_generation(owner_scope, lineage->lineage_id(), generation);
+            auto candidate = load_generation_sync(owner_scope, lineage->lineage_id(), generation);
             if (candidate && candidate->run_id() == run_id) {
                 target_generation = std::move(candidate);
                 break;
@@ -1174,17 +1175,17 @@ ProgramEffectiveRuntimeState ProgramTransitionStore::load_effective_runtime_stat
     if (target_generation->generation() <= 1) {
         throw std::runtime_error("Runtime-state transfer target generation is invalid");
     }
-    const auto source_generation = load_generation(
+    const auto source_generation = load_generation_sync(
         owner_scope, lineage->lineage_id(), target_generation->generation() - 1);
-    const auto source_lineage = load_lineage_head(
+    const auto source_lineage = load_lineage_head_sync(
         owner_scope, lineage->lineage_id(), receipt.source_lineage_head_id());
-    const auto source_run = load(owner_scope, receipt.source_run_id());
-    const auto target_initial = load_generation_initial_publication(
+    const auto source_run = load_sync(owner_scope, receipt.source_run_id());
+    const auto target_initial = load_generation_initial_publication_sync(
         owner_scope, lineage->lineage_id(), target_generation->generation());
     if (!source_generation || !source_lineage || !source_run || !target_initial) {
         throw std::runtime_error("Runtime-state transfer source evidence is unavailable");
     }
-    auto source_state = load_effective_runtime_state(owner_scope, receipt.source_run_id());
+    auto source_state = load_effective_runtime_state_sync(owner_scope, receipt.source_run_id());
     const auto& source_contexts = source_state.context_publications;
     const auto& source_hooks = source_state.hook_outbox_entries;
     const auto target_context = target_initial->context_publication;
@@ -1212,7 +1213,7 @@ ProgramEffectiveRuntimeState ProgramTransitionStore::load_effective_runtime_stat
 }
 
 std::optional<ProgramTransitionPublication>
-ProgramTransitionStore::load_generation_initial_publication(
+SyncProgramTransitionStore::load_generation_initial_publication_sync(
     std::string_view, std::string_view, std::uint64_t) const {
     throw std::runtime_error(
         "ProgramTransitionStore does not support generation publication-history reads");
@@ -1346,7 +1347,7 @@ void InMemoryProgramTransitionStore::fail_next_publication_for_testing(
 }
 
 std::optional<ProgramRunPublicationHead>
-InMemoryProgramTransitionStore::load_run_publication_head(std::string_view owner,
+InMemoryProgramTransitionStore::load_run_publication_head_sync(std::string_view owner,
                                                          std::string_view run_id) const {
     if (owner.empty() || run_id.empty()) return std::nullopt;
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1361,7 +1362,7 @@ InMemoryProgramTransitionStore::load_run_publication_head(std::string_view owner
 }
 
 std::optional<ProgramCommandPublicationHead>
-InMemoryProgramTransitionStore::load_command_publication_head(std::string_view owner,
+InMemoryProgramTransitionStore::load_command_publication_head_sync(std::string_view owner,
                                                              std::string_view run_id) const {
     if (owner.empty() || run_id.empty()) return std::nullopt;
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1378,7 +1379,7 @@ InMemoryProgramTransitionStore::load_command_publication_head(std::string_view o
     detail::validate_command_publication_head(head, owner, run_id);
     return head;
 }
-std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load(std::string_view o,
+std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load_sync(std::string_view o,
                                                                      std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1390,7 +1391,7 @@ std::optional<ProgramRunRecord> InMemoryProgramTransitionStore::load(std::string
     }
     return snapshot->run;
 }
-std::optional<ProgramJournalRecord> InMemoryProgramTransitionStore::latest(
+std::optional<ProgramJournalRecord> InMemoryProgramTransitionStore::latest_sync(
     std::string_view o, std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1402,7 +1403,7 @@ std::optional<ProgramJournalRecord> InMemoryProgramTransitionStore::latest(
     }
     return snapshot->journal;
 }
-std::vector<ProgramEvent> InMemoryProgramTransitionStore::load_events(std::string_view o,
+std::vector<ProgramEvent> InMemoryProgramTransitionStore::load_events_sync(std::string_view o,
                                                                       std::string_view r,
                                                                       std::uint64_t    a) const {
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1416,7 +1417,7 @@ std::vector<ProgramEvent> InMemoryProgramTransitionStore::load_events(std::strin
     return entries_after(snapshot->events, a,
                          [](const ProgramEvent& event) { return event.sequence; });
 }
-std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effects(
+std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effects_sync(
     std::string_view o, std::string_view r, std::uint64_t a) const {
     std::shared_ptr<const Impl::Stored> snapshot;
     {
@@ -1432,7 +1433,7 @@ std::vector<ProgramEffectOutboxEntry> InMemoryProgramTransitionStore::load_effec
                          });
 }
 std::vector<ProgramJavaScriptCommandJournalEntry>
-InMemoryProgramTransitionStore::load_javascript_commands(std::string_view o,
+InMemoryProgramTransitionStore::load_javascript_commands_sync(std::string_view o,
                                                          std::string_view r,
                                                          std::uint64_t    a) const {
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1447,7 +1448,7 @@ InMemoryProgramTransitionStore::load_javascript_commands(std::string_view o,
                               return command.sequence();
                           });
 }
-std::vector<ProgramContextPublication> InMemoryProgramTransitionStore::load_context_publications(
+std::vector<ProgramContextPublication> InMemoryProgramTransitionStore::load_context_publications_sync(
     std::string_view o, std::string_view r, std::uint64_t after_sequence) const {
     std::shared_ptr<const Impl::Stored> snapshot;
     {
@@ -1462,7 +1463,7 @@ std::vector<ProgramContextPublication> InMemoryProgramTransitionStore::load_cont
     }
     return result;
 }
-std::vector<ProgramChildSynthesisRecord> InMemoryProgramTransitionStore::load_child_syntheses(
+std::vector<ProgramChildSynthesisRecord> InMemoryProgramTransitionStore::load_child_syntheses_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     auto            found = impl_->runs.find(key(owner_scope, run_id));
@@ -1470,14 +1471,14 @@ std::vector<ProgramChildSynthesisRecord> InMemoryProgramTransitionStore::load_ch
     return found->second->child_syntheses;
 }
 
-std::vector<HookOutboxEntry> InMemoryProgramTransitionStore::load_hook_outbox_entries(
+std::vector<HookOutboxEntry> InMemoryProgramTransitionStore::load_hook_outbox_entries_sync(
     std::string_view o, std::string_view r) const {
     std::shared_ptr<const Impl::Stored> snapshot;
     { std::lock_guard lock(impl_->mutex); const auto found = impl_->runs.find(key(o, r));
       if (found == impl_->runs.end()) return {}; snapshot = found->second; }
     return snapshot->hook_outbox_entries;
 }
-std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan(
+std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan_sync(
     std::string_view o, std::string_view r) const {
     if (o.empty() || r.empty()) return std::nullopt;
     std::shared_ptr<const Impl::Stored> snapshot;
@@ -1489,11 +1490,11 @@ std::optional<MigrationPlan> InMemoryProgramTransitionStore::load_migration_plan
     }
     return snapshot->migration_plan;
 }
-std::optional<ProgramRunLineage> ProgramTransitionStore::load_run_lineage(
+std::optional<ProgramRunLineage> SyncProgramTransitionStore::load_run_lineage_sync(
     std::string_view, std::string_view) const {
     return std::nullopt;
 }
-std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage(
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage_sync(
     std::string_view owner, std::string_view lineage_id) const {
     if (owner.empty() || lineage_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1501,7 +1502,7 @@ std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage(
     if (found == impl_->lineages.end()) return std::nullopt;
     return found->second->head;
 }
-std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_run_lineage(
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_run_lineage_sync(
     std::string_view owner, std::string_view run_id) const {
     if (owner.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1512,7 +1513,7 @@ std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_run_lineag
         throw std::invalid_argument("Stored Program run lineage association is corrupt");
     return lineage->second->head;
 }
-std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage_head(
+std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage_head_sync(
     std::string_view owner, std::string_view lineage_id, std::string_view head_id) const {
     if (owner.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1522,7 +1523,7 @@ std::optional<ProgramRunLineage> InMemoryProgramTransitionStore::load_lineage_he
     if (found == lineage->second->heads.end()) return std::nullopt;
     return found->second;
 }
-std::optional<ProgramRunGeneration> InMemoryProgramTransitionStore::load_generation(
+std::optional<ProgramRunGeneration> InMemoryProgramTransitionStore::load_generation_sync(
     std::string_view owner, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1533,7 +1534,7 @@ std::optional<ProgramRunGeneration> InMemoryProgramTransitionStore::load_generat
     return found->second;
 }
 std::optional<ProgramTransitionPublication>
-InMemoryProgramTransitionStore::load_generation_initial_publication(
+InMemoryProgramTransitionStore::load_generation_initial_publication_sync(
     std::string_view owner, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::string bytes;
@@ -1548,7 +1549,7 @@ InMemoryProgramTransitionStore::load_generation_initial_publication(
     return ProgramTransitionPublication::parse(bytes);
 }
 std::optional<GraphMigrationCapsule>
-InMemoryProgramTransitionStore::load_graph_migration_capsule(
+InMemoryProgramTransitionStore::load_graph_migration_capsule_sync(
     std::string_view owner, std::string_view run_id,
     std::string_view source_lineage_head_id) const {
     if (owner.empty() || run_id.empty() || source_lineage_head_id.empty()) return std::nullopt;
@@ -1559,7 +1560,7 @@ InMemoryProgramTransitionStore::load_graph_migration_capsule(
         ? std::nullopt : std::optional<GraphMigrationCapsule>{found->second};
 }
 std::optional<ProgramExecutionLease>
-InMemoryProgramTransitionStore::load_execution_lease(
+InMemoryProgramTransitionStore::load_execution_lease_sync(
     std::string_view owner, std::string_view run_id) const {
     if (owner.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1567,13 +1568,13 @@ InMemoryProgramTransitionStore::load_execution_lease(
     return found == impl_->execution_leases.end()
         ? std::nullopt : std::optional<ProgramExecutionLease>{found->second};
 }
-ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish(
+ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_sync(
     std::string_view owner, std::string_view expected, ProgramTransitionPublication publication) {
     return compare_publish_impl(owner, expected, std::move(publication), nullptr, nullptr,
                                 nullptr, nullptr);
 }
 ProgramTransitionPublishResult
-InMemoryProgramTransitionStore::compare_publish_execution(
+InMemoryProgramTransitionStore::compare_publish_execution_sync(
     std::string_view owner, std::string_view expected,
     ProgramTransitionPublication publication,
     std::optional<ProgramExecutionLease> expected_lease,
@@ -1583,7 +1584,7 @@ InMemoryProgramTransitionStore::compare_publish_execution(
                                 next_lease ? &*next_lease : nullptr);
 }
 ProgramTransitionPublishResult
-InMemoryProgramTransitionStore::compare_publish_graph_safe_point(
+InMemoryProgramTransitionStore::compare_publish_graph_safe_point_sync(
     std::string_view owner,
     std::string_view expected,
     ProgramTransitionPublication publication,
@@ -1853,4 +1854,602 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     }
     return ProgramTransitionPublishResult::Published;
 }
+
+// ---- ProgramTransitionStore : defaults of the awaitable interface (#556) ----
+
+asio::awaitable<std::optional<ProgramRunPublicationHead>> ProgramTransitionStore::load_run_publication_head(
+    std::string_view owner, std::string_view run_id) const {
+    for (int retry = 0; retry < 3; ++retry) {
+        auto run = co_await load(owner, run_id);
+        if (!run) co_return std::nullopt;
+        auto journal = co_await latest(owner, run_id);
+        const auto after = co_await load(owner, run_id);
+        if (!after) co_return std::nullopt;
+        if (after->id() != run->id()) continue;
+        if (!journal) co_return std::nullopt;
+        detail::validate_run_publication_head(*run, *journal, owner, run_id);
+        co_return ProgramRunPublicationHead{std::move(*run), std::move(*journal)};
+    }
+    co_return std::nullopt;
+}
+
+asio::awaitable<std::optional<ProgramCommandPublicationHead>> ProgramTransitionStore::load_command_publication_head(
+    std::string_view owner, std::string_view run_id) const {
+    const auto run = co_await load(owner, run_id);
+    if (!run) co_return std::nullopt;
+    const auto journal = co_await latest(owner, run_id);
+    if (!journal || run->journal_head() != journal->id) co_return std::nullopt;
+    const auto commands = co_await load_javascript_commands(owner, run_id);
+    const auto after = co_await load(owner, run_id);
+    if (!after || after->id() != run->id()) co_return std::nullopt;
+    ProgramCommandPublicationHead head{
+        *run, *journal, commands.empty() ? std::nullopt
+                                        : std::optional<ProgramJavaScriptCommandJournalEntry>(commands.back())};
+    detail::validate_command_publication_head(head, owner, run_id);
+    co_return head;
+}
+
+asio::awaitable<ProgramEffectiveRuntimeState> ProgramTransitionStore::load_effective_runtime_state(
+    std::string_view owner_scope, std::string_view run_id) const {
+    ProgramEffectiveRuntimeState result;
+    result.context_publications = co_await load_context_publications(owner_scope, run_id);
+    result.hook_outbox_entries = co_await load_hook_outbox_entries(owner_scope, run_id);
+    const auto target_run = co_await load(owner_scope, run_id);
+    const auto lineage = target_run ? co_await load_run_lineage(owner_scope, run_id) : std::nullopt;
+    std::optional<ProgramRunGeneration> target_generation;
+    if (lineage) {
+        for (auto generation = lineage->active_generation(); generation > 0; --generation) {
+            auto candidate = co_await load_generation(owner_scope, lineage->lineage_id(), generation);
+            if (candidate && candidate->run_id() == run_id) {
+                target_generation = std::move(candidate);
+                break;
+            }
+        }
+    }
+    if (!target_run || !lineage || !target_generation) {
+        co_return result;
+    }
+    result.transfer_receipt = target_generation->runtime_state_transfer_receipt();
+    if (!result.transfer_receipt) co_return result;
+    const auto& receipt = *result.transfer_receipt;
+    if (target_generation->generation() <= 1) {
+        throw std::runtime_error("Runtime-state transfer target generation is invalid");
+    }
+    const auto source_generation = co_await load_generation(
+        owner_scope, lineage->lineage_id(), target_generation->generation() - 1);
+    const auto source_lineage = co_await load_lineage_head(
+        owner_scope, lineage->lineage_id(), receipt.source_lineage_head_id());
+    const auto source_run = co_await load(owner_scope, receipt.source_run_id());
+    const auto target_initial = co_await load_generation_initial_publication(
+        owner_scope, lineage->lineage_id(), target_generation->generation());
+    if (!source_generation || !source_lineage || !source_run || !target_initial) {
+        throw std::runtime_error("Runtime-state transfer source evidence is unavailable");
+    }
+    auto source_state = co_await load_effective_runtime_state(owner_scope, receipt.source_run_id());
+    const auto& source_contexts = source_state.context_publications;
+    const auto& source_hooks = source_state.hook_outbox_entries;
+    const auto target_context = target_initial->context_publication;
+    if (!is_valid_program_runtime_state_transfer(
+            result.transfer_receipt, *source_generation, *source_lineage, *source_run,
+            source_contexts, source_hooks, *target_generation, target_initial->run_record,
+            target_context)) {
+        throw std::runtime_error("Runtime-state transfer evidence is invalid");
+    }
+    std::vector<HookOutboxEntry> source_hook_heads = source_state.inherited_hook_outbox_entries;
+    source_hook_heads.insert(source_hook_heads.end(), source_hooks.begin(), source_hooks.end());
+    for (const auto& reference : receipt.hook_references()) {
+        const auto found = std::find_if(
+            source_hook_heads.begin(), source_hook_heads.end(), [&](const auto& hook) {
+                return hook.data().invocation.id() == reference.invocation_id &&
+                       hook.id() == reference.head_id &&
+                       hook.data().event.id() == reference.event_id;
+            });
+        if (found == source_hook_heads.end()) {
+            throw std::runtime_error("Transferred hook head is unavailable");
+        }
+        result.inherited_hook_outbox_entries.push_back(*found);
+    }
+    co_return result;
+}
+
+asio::awaitable<std::vector<ProgramJavaScriptCommandJournalEntry>>
+ProgramTransitionStore::load_javascript_commands(std::string_view, std::string_view, std::uint64_t) const {
+    return detail::failed_store_call<std::vector<ProgramJavaScriptCommandJournalEntry>>(std::make_exception_ptr(
+        std::runtime_error("ProgramTransitionStore does not support durable JavaScript command-history reads")));
+}
+
+asio::awaitable<std::vector<ProgramContextPublication>> ProgramTransitionStore::load_context_publications(
+    std::string_view, std::string_view, std::uint64_t) const {
+    return detail::failed_store_call<std::vector<ProgramContextPublication>>(std::make_exception_ptr(
+        std::runtime_error("ProgramTransitionStore does not support durable context-publication reads")));
+}
+
+asio::awaitable<std::vector<ProgramChildSynthesisRecord>> ProgramTransitionStore::load_child_syntheses(
+    std::string_view, std::string_view) const {
+    return detail::failed_store_call<std::vector<ProgramChildSynthesisRecord>>(std::make_exception_ptr(
+        std::runtime_error("ProgramTransitionStore does not support durable child synthesis reads")));
+}
+
+asio::awaitable<std::vector<HookOutboxEntry>> ProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view, std::string_view) const {
+    return detail::failed_store_call<std::vector<HookOutboxEntry>>(std::make_exception_ptr(
+        std::runtime_error("ProgramTransitionStore does not support durable hook-outbox reads")));
+}
+
+asio::awaitable<std::optional<ProgramRunLineage>> ProgramTransitionStore::load_run_lineage(
+    std::string_view, std::string_view) const {
+    co_return std::nullopt;
+}
+
+asio::awaitable<std::optional<ProgramTransitionPublication>>
+ProgramTransitionStore::load_generation_initial_publication(std::string_view, std::string_view, std::uint64_t) const {
+    return detail::failed_store_call<std::optional<ProgramTransitionPublication>>(std::make_exception_ptr(
+        std::runtime_error("ProgramTransitionStore does not support generation publication-history reads")));
+}
+
+// ---- ProgramTransitionStore : the synchronous implementer base and the blocking facade (#556) ----
+
+asio::awaitable<std::optional<ProgramRunRecord>> SyncProgramTransitionStore::load(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load");
+    if (!offloads()) co_return load_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunRecord> {
+        return load_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramJournalRecord>> SyncProgramTransitionStore::latest(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::latest");
+    if (!offloads()) co_return latest_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramJournalRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramJournalRecord> {
+        return latest_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramRunPublicationHead>> SyncProgramTransitionStore::load_run_publication_head(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_publication_head");
+    if (!offloads()) co_return load_run_publication_head_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunPublicationHead>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunPublicationHead> {
+        return load_run_publication_head_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::vector<ProgramEvent>> SyncProgramTransitionStore::load_events(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_events");
+    if (!offloads()) co_return load_events_sync(owner_scope, run_id, after_sequence);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramEvent>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramEvent> {
+        return load_events_sync(owner_scope, run_id, after_sequence);
+    });
+}
+
+asio::awaitable<std::vector<ProgramEffectOutboxEntry>> SyncProgramTransitionStore::load_effects(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effects");
+    if (!offloads()) co_return load_effects_sync(owner_scope, run_id, after_sequence);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramEffectOutboxEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramEffectOutboxEntry> {
+        return load_effects_sync(owner_scope, run_id, after_sequence);
+    });
+}
+
+asio::awaitable<std::vector<ProgramJavaScriptCommandJournalEntry>> SyncProgramTransitionStore::load_javascript_commands(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_javascript_commands");
+    if (!offloads()) co_return load_javascript_commands_sync(owner_scope, run_id, after_sequence);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramJavaScriptCommandJournalEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramJavaScriptCommandJournalEntry> {
+        return load_javascript_commands_sync(owner_scope, run_id, after_sequence);
+    });
+}
+
+asio::awaitable<std::optional<ProgramCommandPublicationHead>> SyncProgramTransitionStore::load_command_publication_head(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_command_publication_head");
+    if (!offloads()) co_return load_command_publication_head_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramCommandPublicationHead>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramCommandPublicationHead> {
+        return load_command_publication_head_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::vector<ProgramContextPublication>> SyncProgramTransitionStore::load_context_publications(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_context_publications");
+    if (!offloads()) co_return load_context_publications_sync(owner_scope, run_id, after_sequence);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramContextPublication>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramContextPublication> {
+        return load_context_publications_sync(owner_scope, run_id, after_sequence);
+    });
+}
+
+asio::awaitable<std::vector<HookOutboxEntry>> SyncProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_hook_outbox_entries");
+    if (!offloads()) co_return load_hook_outbox_entries_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<HookOutboxEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::vector<HookOutboxEntry> {
+        return load_hook_outbox_entries_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<ProgramEffectiveRuntimeState> SyncProgramTransitionStore::load_effective_runtime_state(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effective_runtime_state");
+    if (!offloads()) co_return load_effective_runtime_state_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramEffectiveRuntimeState>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> ProgramEffectiveRuntimeState {
+        return load_effective_runtime_state_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::vector<ProgramChildSynthesisRecord>> SyncProgramTransitionStore::load_child_syntheses(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_syntheses");
+    if (!offloads()) co_return load_child_syntheses_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramChildSynthesisRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::vector<ProgramChildSynthesisRecord> {
+        return load_child_syntheses_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::optional<MigrationPlan>> SyncProgramTransitionStore::load_migration_plan(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_migration_plan");
+    if (!offloads()) co_return load_migration_plan_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<MigrationPlan>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<MigrationPlan> {
+        return load_migration_plan_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::load_lineage(
+    std::string_view owner_scope,
+    std::string_view lineage_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage");
+    if (!offloads()) co_return load_lineage_sync(owner_scope, lineage_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id)]() mutable -> std::optional<ProgramRunLineage> {
+        return load_lineage_sync(owner_scope, lineage_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::load_run_lineage(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_lineage");
+    if (!offloads()) co_return load_run_lineage_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunLineage> {
+        return load_run_lineage_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::load_lineage_head(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::string_view head_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage_head");
+    if (!offloads()) co_return load_lineage_head_sync(owner_scope, lineage_id, head_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), head_id = std::string(head_id)]() mutable -> std::optional<ProgramRunLineage> {
+        return load_lineage_head_sync(owner_scope, lineage_id, head_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramRunGeneration>> SyncProgramTransitionStore::load_generation(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::uint64_t generation) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation");
+    if (!offloads()) co_return load_generation_sync(owner_scope, lineage_id, generation);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramRunGeneration>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), generation]() mutable -> std::optional<ProgramRunGeneration> {
+        return load_generation_sync(owner_scope, lineage_id, generation);
+    });
+}
+
+asio::awaitable<std::optional<ProgramTransitionPublication>> SyncProgramTransitionStore::load_generation_initial_publication(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::uint64_t generation) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation_initial_publication");
+    if (!offloads()) co_return load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramTransitionPublication>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), generation]() mutable -> std::optional<ProgramTransitionPublication> {
+        return load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
+    });
+}
+
+asio::awaitable<std::optional<GraphMigrationCapsule>> SyncProgramTransitionStore::load_graph_migration_capsule(
+    std::string_view owner_scope,
+    std::string_view source_run_id,
+    std::string_view source_lineage_head_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_graph_migration_capsule");
+    if (!offloads()) co_return load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<GraphMigrationCapsule>>([this, owner_scope = std::string(owner_scope), source_run_id = std::string(source_run_id), source_lineage_head_id = std::string(source_lineage_head_id)]() mutable -> std::optional<GraphMigrationCapsule> {
+        return load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramExecutionLease>> SyncProgramTransitionStore::load_execution_lease(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_execution_lease");
+    if (!offloads()) co_return load_execution_lease_sync(owner_scope, run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramExecutionLease>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramExecutionLease> {
+        return load_execution_lease_sync(owner_scope, run_id);
+    });
+}
+
+asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::compare_publish(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish");
+    if (!offloads()) co_return compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication)]() mutable -> ProgramTransitionPublishResult {
+        return compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
+    });
+}
+
+asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::compare_publish_execution(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    std::optional<ProgramExecutionLease> expected_lease,
+    std::optional<ProgramExecutionLease> next_lease) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_execution");
+    if (!offloads()) co_return compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication), expected_lease = std::move(expected_lease), next_lease = std::move(next_lease)]() mutable -> ProgramTransitionPublishResult {
+        return compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    });
+}
+
+asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::compare_publish_graph_safe_point(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_graph_safe_point");
+    if (!offloads()) co_return compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication), evidence = evidence, capsule = capsule, execution_lease = execution_lease]() mutable -> ProgramTransitionPublishResult {
+        return compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+    });
+}
+
+BlockingProgramTransitionStore::BlockingProgramTransitionStore(std::shared_ptr<ProgramTransitionStore> store, BlockingStorePolicy policy)
+    : store_(std::move(store)), policy_(std::move(policy)) {
+    if (!store_) throw std::invalid_argument("BlockingProgramTransitionStore requires a store");
+    if (!policy_.await_synchronous_stores) sync_ = dynamic_cast<SyncProgramTransitionStore*>(store_.get());
+}
+
+BlockingProgramTransitionStore::BlockingProgramTransitionStore(ProgramTransitionStore& store, BlockingStorePolicy policy)
+    : BlockingProgramTransitionStore(std::shared_ptr<ProgramTransitionStore>(std::shared_ptr<ProgramTransitionStore>{}, &store), std::move(policy)) {}
+
+std::string BlockingProgramTransitionStore::process_coordination_key() const {
+    return store_->process_coordination_key();
+}
+
+std::optional<ProgramRunRecord> BlockingProgramTransitionStore::load(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load");
+    if (sync_) return sync_->load_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load(owner_scope, run_id), policy_, "ProgramTransitionStore::load");
+}
+
+std::optional<ProgramJournalRecord> BlockingProgramTransitionStore::latest(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::latest");
+    if (sync_) return sync_->latest_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->latest(owner_scope, run_id), policy_, "ProgramTransitionStore::latest");
+}
+
+std::optional<ProgramRunPublicationHead> BlockingProgramTransitionStore::load_run_publication_head(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_publication_head");
+    if (sync_) return sync_->load_run_publication_head_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_run_publication_head(owner_scope, run_id), policy_, "ProgramTransitionStore::load_run_publication_head");
+}
+
+std::vector<ProgramEvent> BlockingProgramTransitionStore::load_events(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_events");
+    if (sync_) return sync_->load_events_sync(owner_scope, run_id, after_sequence);
+    return detail::block_on_store(store_->load_events(owner_scope, run_id, after_sequence), policy_, "ProgramTransitionStore::load_events");
+}
+
+std::vector<ProgramEffectOutboxEntry> BlockingProgramTransitionStore::load_effects(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effects");
+    if (sync_) return sync_->load_effects_sync(owner_scope, run_id, after_sequence);
+    return detail::block_on_store(store_->load_effects(owner_scope, run_id, after_sequence), policy_, "ProgramTransitionStore::load_effects");
+}
+
+std::vector<ProgramJavaScriptCommandJournalEntry> BlockingProgramTransitionStore::load_javascript_commands(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_javascript_commands");
+    if (sync_) return sync_->load_javascript_commands_sync(owner_scope, run_id, after_sequence);
+    return detail::block_on_store(store_->load_javascript_commands(owner_scope, run_id, after_sequence), policy_, "ProgramTransitionStore::load_javascript_commands");
+}
+
+std::optional<ProgramCommandPublicationHead> BlockingProgramTransitionStore::load_command_publication_head(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_command_publication_head");
+    if (sync_) return sync_->load_command_publication_head_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_command_publication_head(owner_scope, run_id), policy_, "ProgramTransitionStore::load_command_publication_head");
+}
+
+std::vector<ProgramContextPublication> BlockingProgramTransitionStore::load_context_publications(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::uint64_t after_sequence) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_context_publications");
+    if (sync_) return sync_->load_context_publications_sync(owner_scope, run_id, after_sequence);
+    return detail::block_on_store(store_->load_context_publications(owner_scope, run_id, after_sequence), policy_, "ProgramTransitionStore::load_context_publications");
+}
+
+std::vector<HookOutboxEntry> BlockingProgramTransitionStore::load_hook_outbox_entries(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_hook_outbox_entries");
+    if (sync_) return sync_->load_hook_outbox_entries_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_hook_outbox_entries(owner_scope, run_id), policy_, "ProgramTransitionStore::load_hook_outbox_entries");
+}
+
+ProgramEffectiveRuntimeState BlockingProgramTransitionStore::load_effective_runtime_state(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effective_runtime_state");
+    if (sync_) return sync_->load_effective_runtime_state_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_effective_runtime_state(owner_scope, run_id), policy_, "ProgramTransitionStore::load_effective_runtime_state");
+}
+
+std::vector<ProgramChildSynthesisRecord> BlockingProgramTransitionStore::load_child_syntheses(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_syntheses");
+    if (sync_) return sync_->load_child_syntheses_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_child_syntheses(owner_scope, run_id), policy_, "ProgramTransitionStore::load_child_syntheses");
+}
+
+std::optional<MigrationPlan> BlockingProgramTransitionStore::load_migration_plan(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_migration_plan");
+    if (sync_) return sync_->load_migration_plan_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_migration_plan(owner_scope, run_id), policy_, "ProgramTransitionStore::load_migration_plan");
+}
+
+std::optional<ProgramRunLineage> BlockingProgramTransitionStore::load_lineage(
+    std::string_view owner_scope,
+    std::string_view lineage_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage");
+    if (sync_) return sync_->load_lineage_sync(owner_scope, lineage_id);
+    return detail::block_on_store(store_->load_lineage(owner_scope, lineage_id), policy_, "ProgramTransitionStore::load_lineage");
+}
+
+std::optional<ProgramRunLineage> BlockingProgramTransitionStore::load_run_lineage(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_lineage");
+    if (sync_) return sync_->load_run_lineage_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_run_lineage(owner_scope, run_id), policy_, "ProgramTransitionStore::load_run_lineage");
+}
+
+std::optional<ProgramRunLineage> BlockingProgramTransitionStore::load_lineage_head(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::string_view head_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage_head");
+    if (sync_) return sync_->load_lineage_head_sync(owner_scope, lineage_id, head_id);
+    return detail::block_on_store(store_->load_lineage_head(owner_scope, lineage_id, head_id), policy_, "ProgramTransitionStore::load_lineage_head");
+}
+
+std::optional<ProgramRunGeneration> BlockingProgramTransitionStore::load_generation(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::uint64_t generation) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation");
+    if (sync_) return sync_->load_generation_sync(owner_scope, lineage_id, generation);
+    return detail::block_on_store(store_->load_generation(owner_scope, lineage_id, generation), policy_, "ProgramTransitionStore::load_generation");
+}
+
+std::optional<ProgramTransitionPublication> BlockingProgramTransitionStore::load_generation_initial_publication(
+    std::string_view owner_scope,
+    std::string_view lineage_id,
+    std::uint64_t generation) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation_initial_publication");
+    if (sync_) return sync_->load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
+    return detail::block_on_store(store_->load_generation_initial_publication(owner_scope, lineage_id, generation), policy_, "ProgramTransitionStore::load_generation_initial_publication");
+}
+
+std::optional<GraphMigrationCapsule> BlockingProgramTransitionStore::load_graph_migration_capsule(
+    std::string_view owner_scope,
+    std::string_view source_run_id,
+    std::string_view source_lineage_head_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_graph_migration_capsule");
+    if (sync_) return sync_->load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
+    return detail::block_on_store(store_->load_graph_migration_capsule(owner_scope, source_run_id, source_lineage_head_id), policy_, "ProgramTransitionStore::load_graph_migration_capsule");
+}
+
+std::optional<ProgramExecutionLease> BlockingProgramTransitionStore::load_execution_lease(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_execution_lease");
+    if (sync_) return sync_->load_execution_lease_sync(owner_scope, run_id);
+    return detail::block_on_store(store_->load_execution_lease(owner_scope, run_id), policy_, "ProgramTransitionStore::load_execution_lease");
+}
+
+ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish");
+    if (sync_) return sync_->compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
+    return detail::block_on_store(store_->compare_publish(owner_scope, expected_journal_head, std::move(publication)), policy_, "ProgramTransitionStore::compare_publish");
+}
+
+ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish_execution(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    std::optional<ProgramExecutionLease> expected_lease,
+    std::optional<ProgramExecutionLease> next_lease) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_execution");
+    if (sync_) return sync_->compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    return detail::block_on_store(store_->compare_publish_execution(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease)), policy_, "ProgramTransitionStore::compare_publish_execution");
+}
+
+ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish_graph_safe_point(
+    std::string_view owner_scope,
+    std::string_view expected_journal_head,
+    ProgramTransitionPublication publication,
+    const ProgramGraphSafePointEvidence& evidence,
+    const GraphMigrationCapsule& capsule,
+    const ProgramExecutionLease& execution_lease) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_graph_safe_point");
+    if (sync_) return sync_->compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+    return detail::block_on_store(store_->compare_publish_graph_safe_point(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease), policy_, "ProgramTransitionStore::compare_publish_graph_safe_point");
+}
+
 }  // namespace neograph::program

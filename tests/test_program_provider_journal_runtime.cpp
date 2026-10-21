@@ -35,6 +35,9 @@
 #include <thread>
 #include <string_view>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
 
 namespace {
 using namespace neograph;
@@ -940,7 +943,7 @@ TEST(ProgramProviderJournalRuntime, CrashBetweenMarkerAndOutcomeIsNeverRedispatc
     EXPECT_EQ(crashed[0].state, "dispatched");
     EXPECT_EQ(crashed[0].original_attempt, "2");
     {
-        SQLiteProgramTransitionStore transitions(image.program_db());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(image.program_db());
         const auto record = transitions.load(owner, "crash-run");
         ASSERT_TRUE(record);
         ASSERT_TRUE(record->exact_checkpoint());
@@ -997,7 +1000,7 @@ TEST(ProgramProviderJournalRuntime, RecoveredResumedAttemptRebuildsItsRequestFro
     ASSERT_EQ(crashed.size(), 1U);
     EXPECT_EQ(crashed[0].state, "succeeded");
     {
-        SQLiteProgramTransitionStore transitions(image.program_db());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(image.program_db());
         const auto record = transitions.load(owner, run);
         ASSERT_TRUE(record);
         EXPECT_EQ(record->continuation().state, ContinuationState::Running);
@@ -1074,7 +1077,7 @@ TEST(ProgramProviderJournalRuntime, ExpiredLeaseChargesTheJournaledCallsTokensOn
     ASSERT_EQ(crashed[0].state, "succeeded");
     std::int64_t expires_at_ms = 0;
     {
-        SQLiteProgramTransitionStore transitions(image.program_db());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(image.program_db());
         const auto record = transitions.load(owner, run);
         ASSERT_TRUE(record);
         ASSERT_EQ(record->continuation().state, ContinuationState::Running);

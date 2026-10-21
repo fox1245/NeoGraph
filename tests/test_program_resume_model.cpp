@@ -48,6 +48,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
 
 namespace {
 
@@ -750,7 +753,7 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             }
             host.reset();
             if (std::getenv("NEOGRAPH_PROGRAM_RESUME_MODEL_DEBUG")) {
-                SQLiteProgramTransitionStore inspect((image.path / "durable.sqlite").string());
+                OwnedTransitionStore<SQLiteProgramTransitionStore> inspect((image.path / "durable.sqlite").string());
                 if (const auto record = inspect.load(kOwner, current)) {
                     std::cout << "    [image] state " << to_string(record->continuation().state) << " attempt "
                               << record->continuation().attempt << " pending input "

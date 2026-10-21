@@ -208,7 +208,7 @@ SQLiteProgramStore::SQLiteProgramStore(SQLiteProgramStore&&) noexcept = default;
 SQLiteProgramStore& SQLiteProgramStore::operator=(SQLiteProgramStore&&) noexcept = default;
 SQLiteProgramStore::~SQLiteProgramStore() = default;
 
-void SQLiteProgramStore::publish_admitted(const ProgramBundle& bundle, const ProgramVersion& version) {
+void SQLiteProgramStore::publish_admitted_sync(const ProgramBundle& bundle, const ProgramVersion& version) {
     if (version.bundle_id() != bundle.id())
         throw std::invalid_argument("Program version does not bind the published bundle");
     const auto bundle_bytes  = bundle.serialize_canonical();
@@ -240,14 +240,14 @@ void SQLiteProgramStore::publish_admitted(const ProgramBundle& bundle, const Pro
     transaction.commit();
 }
 
-std::optional<ProgramBundle> SQLiteProgramStore::get_bundle(std::string_view id) const {
+std::optional<ProgramBundle> SQLiteProgramStore::get_bundle_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto bytes = stored_bytes(impl_->db, "program_bundles", id);
     if (!bytes) return std::nullopt;
     return ProgramBundle::parse(*bytes);
 }
 
-std::optional<ProgramVersion> SQLiteProgramStore::get_version(std::string_view id) const {
+std::optional<ProgramVersion> SQLiteProgramStore::get_version_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto bytes = stored_bytes(impl_->db, "program_versions", id);
     if (!bytes) return std::nullopt;
@@ -255,7 +255,7 @@ std::optional<ProgramVersion> SQLiteProgramStore::get_version(std::string_view i
 }
 
 std::optional<ProgramVersion>
-SQLiteProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+SQLiteProgramStore::get_version_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     Statement statement(impl_->db,
@@ -274,7 +274,7 @@ SQLiteProgramStore::get_version(std::string_view owner_scope, std::string_view i
 }
 
 std::optional<ProgramBundle>
-SQLiteProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+SQLiteProgramStore::get_bundle_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     Statement owner(impl_->db,
@@ -292,14 +292,14 @@ SQLiteProgramStore::get_bundle(std::string_view owner_scope, std::string_view id
 }
 
 std::optional<ProgramActivation>
-SQLiteProgramStore::get_activation(std::string_view owner_scope) const {
+SQLiteProgramStore::get_activation_sync(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
     const auto activation = load_activation(impl_->db, owner_scope);
     if (activation) verify_activation_target(impl_->db, *activation);
     return activation;
 }
 std::optional<ProgramActivationBinding>
-SQLiteProgramStore::get_active_binding(std::string_view owner_scope) const {
+SQLiteProgramStore::get_active_binding_sync(std::string_view owner_scope) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
@@ -321,7 +321,7 @@ SQLiteProgramStore::get_active_binding(std::string_view owner_scope) const {
     return ProgramActivationBinding{*active, version};
 }
 
-ProgramActivationResult SQLiteProgramStore::compare_activate(
+ProgramActivationResult SQLiteProgramStore::compare_activate_sync(
     std::string_view owner_scope,
     std::uint64_t expected_generation,
     std::string_view version_id,
@@ -377,7 +377,7 @@ ProgramActivationResult SQLiteProgramStore::compare_activate(
 }
 
 std::vector<ProgramVersion>
-SQLiteProgramStore::list_versions(std::string_view owner_scope) const {
+SQLiteProgramStore::list_versions_sync(std::string_view owner_scope) const {
     if (owner_scope.empty())
         throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
@@ -400,7 +400,7 @@ SQLiteProgramStore::list_versions(std::string_view owner_scope) const {
     return result;
 }
 
-ProgramRetentionReport SQLiteProgramStore::collect_garbage(
+ProgramRetentionReport SQLiteProgramStore::collect_garbage_sync(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
     if (owner_scope.empty())

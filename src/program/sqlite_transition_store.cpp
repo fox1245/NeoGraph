@@ -1033,7 +1033,7 @@ std::string SQLiteProgramTransitionStore::process_coordination_key() const {
 }
 
 std::optional<ProgramRunPublicationHead>
-SQLiteProgramTransitionStore::load_run_publication_head(std::string_view owner,
+SQLiteProgramTransitionStore::load_run_publication_head_sync(std::string_view owner,
                                                        std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     Statement statement(impl_->db,
@@ -1050,7 +1050,7 @@ SQLiteProgramTransitionStore::load_run_publication_head(std::string_view owner,
 }
 
 std::optional<ProgramCommandPublicationHead>
-SQLiteProgramTransitionStore::load_command_publication_head(std::string_view owner,
+SQLiteProgramTransitionStore::load_command_publication_head_sync(std::string_view owner,
                                                            std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     // One statement pins a read snapshot even when another connection publishes.
@@ -1081,7 +1081,7 @@ SQLiteProgramTransitionStore::load_command_publication_head(std::string_view own
     return head;
 }
 
-std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load(
+std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->db, owner_scope, run_id);
@@ -1089,7 +1089,7 @@ std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load(
     return head->run_record;
 }
 
-std::optional<ProgramJournalRecord> SQLiteProgramTransitionStore::latest(
+std::optional<ProgramJournalRecord> SQLiteProgramTransitionStore::latest_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->db, owner_scope, run_id);
@@ -1097,7 +1097,7 @@ std::optional<ProgramJournalRecord> SQLiteProgramTransitionStore::latest(
     return head->journal_record;
 }
 
-std::vector<ProgramEvent> SQLiteProgramTransitionStore::load_events(
+std::vector<ProgramEvent> SQLiteProgramTransitionStore::load_events_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     Statement statement(
@@ -1113,7 +1113,7 @@ std::vector<ProgramEvent> SQLiteProgramTransitionStore::load_events(
     return result;
 }
 
-std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects(
+std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     Statement statement(
@@ -1131,7 +1131,7 @@ std::vector<ProgramEffectOutboxEntry> SQLiteProgramTransitionStore::load_effects
 }
 
 std::vector<ProgramJavaScriptCommandJournalEntry>
-SQLiteProgramTransitionStore::load_javascript_commands(std::string_view owner_scope,
+SQLiteProgramTransitionStore::load_javascript_commands_sync(std::string_view owner_scope,
                                                        std::string_view run_id,
                                                        std::uint64_t    after_sequence) const {
     std::lock_guard lock(impl_->mutex);
@@ -1155,7 +1155,7 @@ SQLiteProgramTransitionStore::load_javascript_commands(std::string_view owner_sc
     return result;
 }
 
-std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_context_publications(
+std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_context_publications_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
@@ -1169,14 +1169,14 @@ std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_contex
     }
     return result;
 }
-std::vector<ProgramChildSynthesisRecord> SQLiteProgramTransitionStore::load_child_syntheses(
+std::vector<ProgramChildSynthesisRecord> SQLiteProgramTransitionStore::load_child_syntheses_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     if (!load_head(impl_->db, owner_scope, run_id)) return {};
     return load_synthesis_heads(impl_->db, owner_scope, run_id);
 }
 
-std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entries(
+std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entries_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
@@ -1188,7 +1188,7 @@ std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entr
     return entries;
 }
 
-std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
+std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->db, owner_scope, run_id);
@@ -1196,14 +1196,14 @@ std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan(
     return head->migration_plan;
 }
 
-std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage(
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_sync(
     std::string_view owner_scope, std::string_view lineage_id) const {
     if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_current_lineage_head(impl_->db, owner_scope, lineage_id);
 }
 
-std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_run_lineage(
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_run_lineage_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1215,7 +1215,7 @@ std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_run_lineage(
     return lineage;
 }
 
-std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generation(
+std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generation_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1223,7 +1223,7 @@ std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generatio
 }
 
 std::optional<ProgramTransitionPublication>
-SQLiteProgramTransitionStore::load_generation_initial_publication(
+SQLiteProgramTransitionStore::load_generation_initial_publication_sync(
     std::string_view owner_scope, std::string_view lineage_id,
     std::uint64_t generation) const {
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
@@ -1233,7 +1233,7 @@ SQLiteProgramTransitionStore::load_generation_initial_publication(
 }
 
 std::optional<GraphMigrationCapsule>
-SQLiteProgramTransitionStore::load_graph_migration_capsule(
+SQLiteProgramTransitionStore::load_graph_migration_capsule_sync(
     std::string_view owner_scope, std::string_view source_run_id,
     std::string_view source_lineage_head_id) const {
     if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
@@ -1243,21 +1243,21 @@ SQLiteProgramTransitionStore::load_graph_migration_capsule(
         impl_->db, owner_scope, source_run_id, source_lineage_head_id);
 }
 std::optional<ProgramExecutionLease>
-SQLiteProgramTransitionStore::load_execution_lease(
+SQLiteProgramTransitionStore::load_execution_lease_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_execution_lease_record(impl_->db, owner_scope, run_id);
 }
 
-std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head(
+std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const {
     if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_historical_lineage_head(impl_->db, owner_scope, lineage_id, head_id);
 }
 
-ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
+ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication) {
     return compare_publish_impl(owner_scope, expected_journal_head,
@@ -1265,7 +1265,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish(
 }
 
 ProgramTransitionPublishResult
-SQLiteProgramTransitionStore::compare_publish_execution(
+SQLiteProgramTransitionStore::compare_publish_execution_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication,
     std::optional<ProgramExecutionLease> expected_lease,
@@ -1277,7 +1277,7 @@ SQLiteProgramTransitionStore::compare_publish_execution(
 }
 
 ProgramTransitionPublishResult
-SQLiteProgramTransitionStore::compare_publish_graph_safe_point(
+SQLiteProgramTransitionStore::compare_publish_graph_safe_point_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication,
     const ProgramGraphSafePointEvidence& evidence,

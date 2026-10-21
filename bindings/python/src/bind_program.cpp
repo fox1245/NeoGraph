@@ -622,7 +622,7 @@ public:
         if (checkpoint_id) {
             source_checkpoint = std::move(*checkpoint_id);
         } else {
-            const auto record = stores_.transitions->load(owner_scope_, run_id);
+            const auto record = BlockingProgramTransitionStore(stores_.transitions).load(owner_scope_, run_id);
             if (!record || !record->exact_checkpoint())
                 throw py::value_error("fork() needs checkpoint_id: run '" + run_id +
                                       "' has no exact checkpoint in this host");
@@ -645,7 +645,7 @@ private:
     // the run's single awaiting call; any other run state keeps the empty id so
     // the runtime reports its own diagnostic.
     std::string awaiting_pending_id(const std::string& run_id) const {
-        const auto record = stores_.transitions->load(owner_scope_, run_id);
+        const auto record = BlockingProgramTransitionStore(stores_.transitions).load(owner_scope_, run_id);
         if (!record || record->continuation().state != ContinuationState::Interrupted) return {};
         const auto input  = record->pending_input();
         const auto effect = record->pending_effect();

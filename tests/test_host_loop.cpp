@@ -527,6 +527,17 @@ TEST(HostLoop, ACancelledHostTimerLeavesNoHostTimerArmed) {
     EXPECT_EQ(executor->timers(), 0u);
 }
 
+TEST(HostLoop, InHostTurnIsTrueOnlyWhileATurnRunsOnTheCallingThread) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    EXPECT_FALSE(async::in_host_turn());
+    bool inside = false;
+    asio::post(loop.executor(), [&inside] { inside = async::in_host_turn(); });
+    while (executor->step()) {}
+    EXPECT_TRUE(inside);
+    EXPECT_FALSE(async::in_host_turn()) << "the flag does not outlive the turn";
+}
+
 TEST(HostLoop, ALoopsExecutorIsHostPumpedAndAnotherIsNot) {
     auto executor = std::make_shared<ManualExecutor>();
     async::HostLoop loop(executor);

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=e3bfa0465dab0936930f60c26c76fc9116482656efd7b1c1066544a3477941f3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=0b98e23b8164da773ac5ea7771f57b925ef650234ba8c2a5569679616ce68dce -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -388,6 +388,30 @@ C++ 호스트는 `RuntimeConfig`로 `ProgramRuntime`을 만듭니다. 호스트�
   때까지 executor를 계속 돌리십시오.
 
 실행할 수 있는 점검이 있는 WebAssembly 쪽은 [`wasm/README.md`](../wasm/README.md)에 있습니다.
+
+## Program의 상태가 보관되는 곳 (C++ 호스트)
+
+`ProgramRuntime`은 run 기록을 `ProgramTransitionStore`에, 버전을 `ProgramStore`에 보관하고, 호스트가 쓰는 경우 작업 그래프
+조각, 연결된 모듈, Core 도구 grant를 각각 `TaskGraphFragmentStore`, `ModuleStore`, `ProgramCoreToolGrantStore`에 보관합니다.
+이 인터페이스들은 `asio::awaitable`을 반환하므로, 호스트는 호출이 나중에 완료되는 데이터베이스 위에 저장소를 둘 수 있고,
+run의 attempt는 스레드를 붙잡는 대신 이를 await합니다.
+
+- **동기 백엔드는 해당하는 `Sync...Store` 클래스에서 상속합니다**(`SyncProgramTransitionStore` 등 다섯 개). 그리고 `..._sync`
+  연산(`load_sync`, `compare_publish_sync` 등)을 구현합니다. 기반 클래스는 이로부터 각 awaitable 연산을 완료시킵니다.
+  호출한 스레드에서 즉시 완료하거나, 저장소가 `offloads()`를 true로 재정의하면 제한된 풀의 스레드에서 완료합니다.
+  인메모리와 SQLite 저장소는 즉시 완료하고, PostgreSQL은 풀로 넘기며, 기다리던 코루틴은 자기 executor에서 재개됩니다.
+  await하는 호출의 인자는 string view를 포함해 호출이 완료될 때까지 살아 있어야 합니다.
+- **중단할 수 없는 호출자는 블로킹 뷰를 씁니다.** `BlockingProgramTransitionStore`와 나머지 넷은 인터페이스가 전에 갖던
+  시그니처를 가집니다. 동기 저장소 위의 뷰는 그 저장소의 `..._sync` 연산을 호출합니다. 다른 저장소 위에서는 호출한
+  스레드의 전용 `io_context`에서 awaitable을 돌려 기다립니다. 다만 `BlockingStorePolicy::refuse`가 기다리면 호출을 완료해야 할
+  스레드가 멈춘다고 하면 거부합니다. 런타임의 정책은 호스트가 구동하는 executor와 자기 executor를 돌리는 스레드에서
+  거부하며, 이때 호출은 저장소에 닿기 전에 `ProgramBlockingCallRefused`를 던집니다.
+- **무엇이 await하고 무엇이 기다리는가.** run의 attempt는 전이(transition) 저장소와 조각 저장소를 await합니다. 런타임의 동기
+  진입점, 종료 게시, 자식 시작, grant 리졸버, 카탈로그는 블로킹 뷰를 통해 기다립니다. 즉시 완료되는 저장소는 어디서나
+  동작하고, 호스트의 이벤트 루프를 돌려야만 완료되는 저장소는 호스트가 구동하는 루프가 Program을 실행하는 곳에서 거부됩니다.
+- **awaitable을 버리는 호출은 아무 일도 하지 않습니다.** 연산은 `[[nodiscard]]`입니다. `co_await`하거나 블로킹 뷰를 쓰십시오.
+- **계약**(원자적 게시, 헤드 compare-and-swap, fail-closed)은 모든 저장소가 지켜야 하며, `tests/test_program_transition_store.cpp`와
+  `tests/test_program_catalog.cpp`의 적합성(conformance) 스위트가 인메모리, SQLite, PostgreSQL 저장소에 대해 각 형태로 한 번씩 실행합니다.
 
 ## 동작을 검증하는 테스트
 

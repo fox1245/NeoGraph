@@ -140,7 +140,7 @@ SQLiteProgramCoreToolGrantStore::SQLiteProgramCoreToolGrantStore(std::string dat
     : impl_(std::make_unique<Impl>(database_path)) {}
 SQLiteProgramCoreToolGrantStore::~SQLiteProgramCoreToolGrantStore() = default;
 
-ProgramCoreToolGrantAdmission SQLiteProgramCoreToolGrantStore::admit(
+ProgramCoreToolGrantAdmission SQLiteProgramCoreToolGrantStore::admit_sync(
     const ProgramCoreToolGrantRecord& record) {
     validate(record);
     std::lock_guard lock(impl_->mutex);
@@ -192,7 +192,7 @@ ProgramCoreToolGrantAdmission SQLiteProgramCoreToolGrantStore::admit(
                      : ProgramCoreToolGrantAdmission::Conflict;
 }
 
-std::optional<ProgramCoreToolGrantRecord> SQLiteProgramCoreToolGrantStore::load(
+std::optional<ProgramCoreToolGrantRecord> SQLiteProgramCoreToolGrantStore::load_sync(
     const ProgramCoreToolGrantContext& context) const {
     std::lock_guard lock(impl_->mutex);
     Statement statement(impl_->db, "SELECT grant_id FROM program_core_tool_grants "
@@ -208,7 +208,7 @@ std::optional<ProgramCoreToolGrantRecord> SQLiteProgramCoreToolGrantStore::load(
         context.attempt, std::string(context.binding_fingerprint), std::move(grant_id)};
 }
 
-bool SQLiteProgramCoreToolGrantStore::revoke(
+bool SQLiteProgramCoreToolGrantStore::revoke_sync(
     const ProgramCoreToolGrantContext& context) {
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);

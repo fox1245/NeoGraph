@@ -484,7 +484,7 @@ struct Tenant {
     }
     void save() { store->save(owner, data); }
     void remember(const ProgramVersion& version, const std::string& plan) {
-        const auto bundle = store->programs->get_bundle(owner, version.bundle_id());
+        const auto bundle = store->programs_view->get_bundle(owner, version.bundle_id());
         if (!bundle) throw std::runtime_error("Published bundle unavailable");
         std::lock_guard lock(data_mutex);
         data["versions"][version.id()] = {
@@ -529,7 +529,7 @@ struct Tenant {
         if (p.lease.value().at("source") != source_text(plan))
             throw std::runtime_error("Child source does not match the independent host template");
         for (const auto& existing :
-             store->transitions->load_child_syntheses(owner, p.handle.run_id())) {
+             store->transitions_view->load_child_syntheses(owner, p.handle.run_id())) {
             if (existing.data().binding_name != binding) continue;
             auto continued = runtime->prepare_child_synthesis(
                 owner, p.handle, p.lease, existing.data().proposal, existing.data().grant, binding);
@@ -539,7 +539,7 @@ struct Tenant {
             return;
         }
         const auto run     = p.handle.snapshot();
-        const auto lineage = store->transitions->load_run_lineage(owner, run.run_id());
+        const auto lineage = store->transitions_view->load_run_lineage(owner, run.run_id());
         const auto version = catalog->resolve_version(owner, run.program_version_id());
         ProgramSynthesisProposalData request;
         request.owner_scope            = owner;
@@ -585,7 +585,7 @@ struct Tenant {
             return;
         }
         const std::string root_id = owner + ":main";
-        if (store->transitions->load(owner, root_id)) {
+        if (store->transitions_view->load(owner, root_id)) {
             root = runtime->reconnect(owner, root_id);
         } else {
             auto v = admit("orchestrator", root_budget);
@@ -936,7 +936,7 @@ struct Tenant {
         if (evolution.at("status") == "preparing") {
             try {
                 const auto lineage =
-                    store->transitions->load_run_lineage(owner, ready->handle.run_id());
+                    store->transitions_view->load_run_lineage(owner, ready->handle.run_id());
                 const auto                   plan = evolution.at("to").get<std::string>();
                 ProgramSynthesisProposalData request;
                 request.owner_scope            = owner;
@@ -1091,11 +1091,11 @@ struct Tenant {
             result = json::parse(result.dump());
         }
         std::function<void(const std::string&)> visit = [&](const std::string& id) {
-            auto lineage = store->transitions->load_run_lineage(owner, id);
+            auto lineage = store->transitions_view->load_run_lineage(owner, id);
             if (!lineage) return;
-            const auto generation = store->transitions->load_generation(
+            const auto generation = store->transitions_view->load_generation(
                 owner, lineage->lineage_id(), lineage->active_generation());
-            const auto run = store->transitions->load(owner, generation->run_id());
+            const auto run = store->transitions_view->load(owner, generation->run_id());
             if (!run) return;
             result["agents"].push_back(
                 {{"logical_id", run->logical_run_id()},
@@ -1117,7 +1117,7 @@ struct Tenant {
     void cancel() {
         // Read the durable root identity; reconnect follows the registered live family.
         const std::string id = owner + ":main";
-        if (store->transitions->load(owner, id)) runtime->reconnect(owner, id).cancel();
+        if (store->transitions_view->load(owner, id)) runtime->reconnect(owner, id).cancel();
         std::lock_guard lock(data_mutex);
         data["status"] = "cancelled";
         save();

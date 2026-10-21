@@ -6,7 +6,10 @@
 
 #include <neograph/program/admission.h>
 #include <neograph/program/coordinate.h>
+#include <neograph/program/store_call.h>
 #include <neograph/program/version.h>
+
+#include <asio/awaitable.hpp>
 
 #include <cstdint>
 #include <functional>
@@ -236,24 +239,93 @@ NEOGRAPH_PROGRAM_API ModuleLinkReceipt link_module_child(
     const ProgramBundle&    child_bundle,
     const ProgramVersion&   child);
 
+/**
+ * The store of sealed Program modules, as the catalog uses it (#556). Every operation is awaitable; a store whose backend is synchronous completes it at once
+ * (SyncModuleStore). The arguments of a call, string views included, must stay alive until the awaitable completes: await it in
+ * the full expression that makes the call.
+ */
 class NEOGRAPH_PROGRAM_API ModuleStore {
 public:
     virtual ~ModuleStore() = default;
-    virtual void publish(const ProgramModule& module) = 0;
-    virtual std::optional<ProgramModule> get(std::string_view content_identity) const = 0;
+    [[nodiscard]] virtual asio::awaitable<void> publish(const ProgramModule& module) = 0;
+    [[nodiscard]] virtual asio::awaitable<std::optional<ProgramModule>> get(
+        std::string_view content_identity) const = 0;
     /** Wrong-owner module lookups are indistinguishable from absence. */
-    virtual std::optional<ProgramModule> get(std::string_view owner_scope,
-                                             std::string_view content_identity) const {
+    [[nodiscard]] virtual asio::awaitable<std::optional<ProgramModule>> get(
+        std::string_view owner_scope,
+        std::string_view content_identity) const {
+        if (owner_scope.empty()) co_return std::nullopt;
+        const auto module = co_await get(content_identity);
+        if (!module || module->owner_scope() != owner_scope) co_return std::nullopt;
+        co_return module;
+    }
+    [[nodiscard]] virtual asio::awaitable<void> set_lifecycle(
+        std::string_view content_identity,
+        ModuleLifecycle lifecycle) = 0;
+};
+
+/**
+ * Base of a ModuleStore whose backend is synchronous. A derived class implements the `..._sync` operations and gets
+ * the awaitable interface from them, as SyncProgramTransitionStore does.
+ */
+class NEOGRAPH_PROGRAM_API SyncModuleStore : public ModuleStore {
+public:
+    // The synchronous operations. Each has the contract of the awaitable operation of the same name.
+    virtual void publish_sync(const ProgramModule& module) = 0;
+    virtual std::optional<ProgramModule> get_sync(std::string_view content_identity) const = 0;
+    virtual std::optional<ProgramModule> get_sync(
+        std::string_view owner_scope,
+        std::string_view content_identity) const {
         if (owner_scope.empty()) return std::nullopt;
-        const auto module = get(content_identity);
+        const auto module = get_sync(content_identity);
         if (!module || module->owner_scope() != owner_scope) return std::nullopt;
         return module;
     }
-    virtual void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) = 0;
+    virtual void set_lifecycle_sync(std::string_view content_identity, ModuleLifecycle lifecycle) = 0;
+
+    // The awaitable interface, completed by the operations above: at once on the calling thread,
+    // or on a thread of a bounded pool when offloads() is true.
+    [[nodiscard]] asio::awaitable<void> publish(const ProgramModule& module) final;
+    [[nodiscard]] asio::awaitable<std::optional<ProgramModule>> get(std::string_view content_identity) const final;
+    [[nodiscard]] asio::awaitable<std::optional<ProgramModule>> get(
+        std::string_view owner_scope,
+        std::string_view content_identity) const final;
+    [[nodiscard]] asio::awaitable<void> set_lifecycle(
+        std::string_view content_identity,
+        ModuleLifecycle lifecycle) final;
+
+protected:
+    /** True for a backend that blocks for long: each operation then runs on a pool thread. */
+    virtual bool offloads() const noexcept { return false; }
+};
+
+/**
+ * A ModuleStore for a caller that cannot suspend. It waits for a store that is not synchronous as
+ * BlockingProgramTransitionStore does.
+ */
+class NEOGRAPH_PROGRAM_API BlockingModuleStore {
+public:
+    BlockingModuleStore(std::shared_ptr<ModuleStore> store, BlockingStorePolicy policy = {});
+    /** A view of a store that outlives it. */
+    BlockingModuleStore(ModuleStore& store, BlockingStorePolicy policy = {});
+
+    const std::shared_ptr<ModuleStore>& store() const noexcept { return store_; }
+
+    void publish(const ProgramModule& module) const;
+    std::optional<ProgramModule> get(std::string_view content_identity) const;
+    std::optional<ProgramModule> get(
+        std::string_view owner_scope,
+        std::string_view content_identity) const;
+    void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) const;
+
+private:
+    std::shared_ptr<ModuleStore> store_;
+    SyncModuleStore* sync_ = nullptr;
+    BlockingStorePolicy policy_;
 };
 
 /** Small durable-boundary-compatible store used by the in-process resolver. */
-class NEOGRAPH_PROGRAM_API InMemoryModuleStore final : public ModuleStore {
+class NEOGRAPH_PROGRAM_API InMemoryModuleStore final : public SyncModuleStore {
 public:
     InMemoryModuleStore();
     InMemoryModuleStore(InMemoryModuleStore&&) noexcept;
@@ -262,11 +334,11 @@ public:
     InMemoryModuleStore& operator=(const InMemoryModuleStore&) = delete;
     ~InMemoryModuleStore() override;
 
-    void publish(const ProgramModule& module) override;
-    std::optional<ProgramModule> get(std::string_view content_identity) const override;
-    std::optional<ProgramModule> get(std::string_view owner_scope,
+    void publish_sync(const ProgramModule& module) override;
+    std::optional<ProgramModule> get_sync(std::string_view content_identity) const override;
+    std::optional<ProgramModule> get_sync(std::string_view owner_scope,
                                      std::string_view content_identity) const override;
-    void set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) override;
+    void set_lifecycle_sync(std::string_view content_identity, ModuleLifecycle lifecycle) override;
 
 private:
     struct Impl;
@@ -285,7 +357,8 @@ public:
                              const PolicySnapshot& policy) const;
 
 private:
-    std::shared_ptr<const ModuleStore> store_;
+    // Only the reads of the store are called, so the view of a const store is safe.
+    std::shared_ptr<BlockingModuleStore> store_;
 };
 
 }  // namespace neograph::program

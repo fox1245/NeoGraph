@@ -10,6 +10,7 @@
 #include <neograph/graph/store.h>
 #include <neograph/host_admission.h>
 #include <neograph/hook_runtime.h>
+#include <neograph/program/blocking.h>
 #include <neograph/program/catalog.h>
 #include <neograph/program/core_tool_grant.h>
 #include <neograph/program/core_provider_call.h>
@@ -141,37 +142,6 @@ struct ProgramExecutorIdentity {
      * io_context or a thread_pool; set it for any other executor that has threads.
      */
     std::function<bool()> running_in_this_thread;
-};
-
-/**
- * Thrown by the ProgramRuntime constructor in a build without threads (NEOGRAPH_THREADS=OFF) when
- * RuntimeConfig::executor is not set: the runtime's own pools need threads that this build does not have. It is also
- * a graph::ConfigurationFailure: running it again reproduces it.
- */
-class NEOGRAPH_PROGRAM_API ProgramExecutorRequired final : public std::runtime_error,
-                                                           public graph::ConfigurationFailure {
-public:
-    ProgramExecutorRequired();
-};
-
-/**
- * Thrown by a synchronous call that would wait for a Program on a thread that cannot wait for it: the executor of
- * RuntimeConfig::executor is pumped by a host's event loop, the build has no threads, or the call is made from a
- * thread that runs that executor. Nothing is started or changed. alternative() names the awaitable form to use. It is
- * also a graph::ConfigurationFailure: running it again reproduces it.
- */
-class NEOGRAPH_PROGRAM_API ProgramBlockingCallRefused final : public std::runtime_error,
-                                                              public graph::ConfigurationFailure {
-public:
-    ProgramBlockingCallRefused(std::string operation, std::string alternative, std::string reason);
-    /// The refused call, for example "ProgramRuntime::start".
-    const std::string& operation() const noexcept { return operation_; }
-    /// The awaitable form that does the same without blocking, for example "ProgramRuntime::start_async".
-    const std::string& alternative() const noexcept { return alternative_; }
-
-private:
-    std::string operation_;
-    std::string alternative_;
 };
 
  struct RuntimeConfig {

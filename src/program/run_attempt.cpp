@@ -1944,7 +1944,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         const auto control_source = control->materialized->bundle.control_source();
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
-            if (const auto durable = control->transitions->load(
+            if (const auto durable = co_await control->async_transitions().load(
                     control->owner_scope, control->run_id);
                 durable && durable->exact_checkpoint() &&
                 durable->exact_checkpoint()->checkpoint_id == *checkpoint_id) {
@@ -1997,14 +1997,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         std::set<std::string>      replayed_records;
         if (!checkpoint_id && !control_source && !control->recorded_replay) {
             // #404: a plan operation reconciled as completed replays its result.
-            const auto durable = control->transitions->load(control->owner_scope, control->run_id);
+            const auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
             if (durable && durable->pending_effect() &&
                 durable->pending_effect()->core_node() == "plan") {
                 if (const auto settled = durable->settled_branches()) replay_records = *settled;
             }
         }
         if (checkpoint_id && !control_source && !control->recorded_replay) {
-            const auto durable = control->transitions->load(control->owner_scope, control->run_id);
+            const auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
             if (durable && durable->exact_checkpoint() &&
                 durable->exact_checkpoint()->checkpoint_id == *checkpoint_id) {
                 if (const auto pending = durable->pending_input())
@@ -2021,7 +2021,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // exactly it. Taken once (plan_mutex).
         std::optional<std::pair<std::string, std::string>> resume_core_interrupt;
         if (checkpoint_id && !control->recorded_replay) {
-            const auto durable = control->transitions->load(control->owner_scope, control->run_id);
+            const auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
             if (durable && durable->exact_checkpoint() &&
                 durable->exact_checkpoint()->checkpoint_id == *checkpoint_id) {
                 std::string id;
@@ -2427,7 +2427,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             std::shared_ptr<ExpansionRecordState> durable;
             if (store) {
                 try {
-                    const auto recovered = store->find_published_lineage(
+                    const auto recovered = co_await store->find_published_lineage(
                         control->owner_scope, control->run_id, operation.id());
                     if (recovered) {
                         const auto& fragment = recovered->fragment;
@@ -2524,7 +2524,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                 }();
                 const auto recovered =
-                    store->find_published(control->owner_scope, control->run_id, operation.id(),
+                    co_await store->find_published(control->owner_scope, control->run_id, operation.id(),
                                           parsed_proposal.proposal_hash());
                 if (recovered) {
                     if (!recovered->published) {
@@ -2547,7 +2547,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             std::lock_guard lock(plan_mutex);
                             within_limit = dynamic_compile_count < compile_limit;
                         }
-                        if (!within_limit || !control->consume_dynamic_compile()) {
+                        const bool consumed = within_limit && co_await control->consume_dynamic_compile();
+                        if (!consumed) {
                             co_return plan_failure(
                                 ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
                                 "expand_task_graph dynamic compilation budget exhausted",
@@ -2610,7 +2611,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             std::nullopt, std::nullopt});
                     }
                     try {
-                        const auto publication = store->publish(durable->record);
+                        const auto publication = co_await store->publish(durable->record);
                         if (publication == TaskGraphPublishResult::Conflict ||
                             publication == TaskGraphPublishResult::Missing) {
                             co_return plan_failure(
@@ -2618,7 +2619,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 "expand_task_graph fragment publication conflicted",
                                 operation.id());
                         }
-                        const auto loaded = store->load(compiled_fragment->fragment_id());
+                        const auto loaded = co_await store->load(compiled_fragment->fragment_id());
                         if (!loaded || !loaded->published) {
                             co_return plan_failure(
                                 ProgramTerminalStatus::Failed, "P_EXPAND_PUBLICATION",
@@ -2696,7 +2697,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 found->failure      = std::move(failure);
                 candidate.revision  = durable->record.revision + 1;
                 candidate.published = true;
-                const auto result   = durable->store->compare_update(
+                const auto result   = co_await durable->store->compare_update(
                     durable->record.fragment.fragment_id(), durable->record.revision, candidate);
                 if (result != TaskGraphPublishResult::Published &&
                     result != TaskGraphPublishResult::AlreadyPresent)
@@ -2706,7 +2707,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                              {"expected_revision", durable->record.revision}});
                 if (result == TaskGraphPublishResult::AlreadyPresent) {
                     const auto winner =
-                        durable->store->load(durable->record.fragment.fragment_id());
+                        co_await durable->store->load(durable->record.fragment.fragment_id());
                     if (!winner)
                         throw_runtime_diagnostic("P_EXPAND_CAS",
                                                  "Published task update winner disappeared",
@@ -3222,7 +3223,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 candidate.terminal     = true;
                 candidate.published       = true;
                 candidate.revision        = durable->record.revision + 1;
-                const auto result         = durable->store->compare_update(
+                const auto result         = co_await durable->store->compare_update(
                     durable->record.fragment.fragment_id(), durable->record.revision, candidate);
                 if (result != TaskGraphPublishResult::Published &&
                     result != TaskGraphPublishResult::AlreadyPresent)
@@ -3230,7 +3231,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         "P_EXPAND_CAS", "Dynamic fragment terminal update lost its revision race");
                 if (result == TaskGraphPublishResult::AlreadyPresent) {
                     const auto winner =
-                        durable->store->load(durable->record.fragment.fragment_id());
+                        co_await durable->store->load(durable->record.fragment.fragment_id());
                     if (!winner)
                         throw_runtime_diagnostic("P_EXPAND_CAS",
                                                  "Published terminal fragment disappeared");
@@ -5016,10 +5017,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         }
                         if (!recorded && !control->recorded_replay && active_javascript_command) {
                             const auto& active    = *active_javascript_command;
-                            const auto  published = control->publish_javascript_command(
+                            auto publish_call_1 = control->publish_javascript_command(
                                 active.ordinal, active.command, active.effect_identity,
                                 std::nullopt, std::nullopt, std::nullopt, std::nullopt,
                                 json{{operation_id, started_at}});
+                            const auto  published = co_await std::move(publish_call_1);
                             if (published != ProgramTransitionPublishResult::Published &&
                                 published != ProgramTransitionPublishResult::AlreadyPresent)
                                 co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
@@ -5776,9 +5778,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             "P_JS_COMMAND_JOURNAL_MISMATCH",
                             "Exact Core resume checkpoint did not match its pending command");
                     }
-                    const auto durable_commands = control->recorded_replay
-                        ? std::vector<ProgramJavaScriptCommandJournalEntry>{}
-                        : control->transitions->load_javascript_commands(control->owner_scope, control->run_id);
+                    std::vector<ProgramJavaScriptCommandJournalEntry> durable_commands;
+                    if (!control->recorded_replay)
+                        durable_commands = co_await control->async_transitions().load_javascript_commands(
+                            control->owner_scope, control->run_id);
                     const auto& recorded_commands = control->recorded_replay
                         ? control->recorded_replay->commands : durable_commands;
                     for (std::size_t index = 0; index < recorded_commands.size(); ++index) {
@@ -5824,9 +5827,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto operation_id  = javascript_command_operation_id(ordinal);
                 auto effect_id =
                     javascript_command_effect_identity(*control, ordinal, command_value);
-                const auto durable_prior_commands = control->recorded_replay
-                    ? std::vector<ProgramJavaScriptCommandJournalEntry>{}
-                    : control->transitions->load_javascript_commands(control->owner_scope, control->run_id);
+                std::vector<ProgramJavaScriptCommandJournalEntry> durable_prior_commands;
+                if (!control->recorded_replay)
+                    durable_prior_commands = co_await control->async_transitions().load_javascript_commands(
+                        control->owner_scope, control->run_id);
                 const auto& prior_commands = control->recorded_replay
                     ? control->recorded_replay->commands : durable_prior_commands;
                 bool       child_resume_authorized      = false;
@@ -5884,7 +5888,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             decode_javascript_command_result(*prior->terminal_result(), *control);
                         if (control->recorded_replay) {
                             const auto durable_before_dispatch =
-                                control->transitions->load(control->owner_scope, control->run_id);
+                                co_await control->async_transitions().load(control->owner_scope, control->run_id);
                             if (!durable_before_dispatch)
                                 throw_runtime_diagnostic("P_REPLAY_COMMAND",
                                     "Captured command lost its running snapshot before replay");
@@ -5899,9 +5903,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 reservation.remaining.max_core_steps;
                             reservation.remaining.wall_time_ms = 0;
                             reservation.remaining.max_core_steps = 0;
-                            const auto pending = control->publish_javascript_command(
+                            auto publish_call_2 = control->publish_javascript_command(
                                 ordinal, command_value, effect_id, std::nullopt,
                                 reservation.remaining, reservation.reservation);
+                            const auto pending = co_await std::move(publish_call_2);
                             if (pending != ProgramTransitionPublishResult::Published &&
                                 pending != ProgramTransitionPublishResult::AlreadyPresent)
                                 throw_runtime_diagnostic("P_REPLAY_COMMAND",
@@ -5943,10 +5948,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 replay_work.wall_time_ms, settled_javascript_wall_time_ms);
                             command_work.core_steps = subtract_saturated(
                                 replay_work.core_steps, core_before);
-                            const auto completed = control->publish_javascript_command(
+                            auto publish_call_3 = control->publish_javascript_command(
                                 ordinal, command_value, effect_id,
                                 javascript_command_terminal_result(replayed, to_string(replayed.status), command_work),
                                 remaining, RunBudget{});
+                            const auto completed = co_await std::move(publish_call_3);
                             if (completed != ProgramTransitionPublishResult::Published &&
                                 completed != ProgramTransitionPublishResult::AlreadyPresent)
                                 throw_runtime_diagnostic("P_REPLAY_COMMAND",
@@ -5971,7 +5977,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             co_return replayed;
                         }
                         if (const auto durable_replay =
-                                control->transitions->load(control->owner_scope, control->run_id)) {
+                                co_await control->async_transitions().load(control->owner_scope, control->run_id)) {
                             unreconciled_javascript_remaining = durable_replay->remaining_budget();
                         }
                         if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
@@ -6066,7 +6072,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         // Already-published non-Core work is never dispatch
                         // authority. It must be explicitly reconciled.
                         const auto durable_pending =
-                            control->transitions->load(control->owner_scope, control->run_id);
+                            co_await control->async_transitions().load(control->owner_scope, control->run_id);
                         if (durable_pending)
                             unreconciled_javascript_remaining = durable_pending->remaining_budget();
                         result.status = ProgramTerminalStatus::Interrupted;
@@ -6080,7 +6086,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (exact_resume_authorized || child_resume_authorized ||
                     checkpoint_resume_authorized || recovery_resume_authorized) {
                     auto durable_resumed =
-                        control->transitions->latest(control->owner_scope, control->run_id);
+                        co_await control->async_transitions().latest(control->owner_scope, control->run_id);
                     // #395: the first attempt of a fork resumes the command its
                     // source paused in, and reserves that command's resources
                     // itself: a fork's first publication holds none. A
@@ -6089,15 +6095,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         !has_resource_reservation(durable_resumed->inflight_reservation) &&
                         durable_resumed->sequence == 1) {
                         const auto record =
-                            control->transitions->load(control->owner_scope, control->run_id);
+                            co_await control->async_transitions().load(control->owner_scope, control->run_id);
                         if (record && record->fork_receipt()) {
                             auto reservation =
                                 reserve_command_resources(durable_resumed->remaining_budget);
-                            (void)control->publish_command_reservation(
+                            (void)co_await control->publish_command_reservation(
                                 std::move(reservation.remaining),
                                 std::move(reservation.reservation));
                             durable_resumed =
-                                control->transitions->latest(control->owner_scope, control->run_id);
+                                co_await control->async_transitions().latest(control->owner_scope, control->run_id);
                         }
                     }
                     if (!durable_resumed ||
@@ -6133,7 +6139,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return std::move(*failure);
 
                     const auto durable_before_dispatch =
-                        control->transitions->load(control->owner_scope, control->run_id);
+                        co_await control->async_transitions().load(control->owner_scope, control->run_id);
                     if (!durable_before_dispatch) {
                         throw_runtime_diagnostic(
                             "P_JS_COMMAND_JOURNAL",
@@ -6146,9 +6152,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     auto reservation             = reserve_command_resources(after_operations);
                     resource_reservation         = reservation.reservation;
                     const auto pending_remaining = reservation.remaining;
-                    const auto pending_published = control->publish_javascript_command(
+                    auto publish_call_4 = control->publish_javascript_command(
                         ordinal, command_value, effect_id, std::nullopt, pending_remaining,
                         resource_reservation);
+                    const auto pending_published = co_await std::move(publish_call_4);
                     if (pending_published == ProgramTransitionPublishResult::AlreadyPresent) {
                         unreconciled_javascript_remaining = pending_remaining;
                         result.status                     = ProgramTerminalStatus::Interrupted;
@@ -6174,6 +6181,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto    steps_before       = core_progress->steps();
                 const auto    command_started_at = std::chrono::steady_clock::now();
                 PlanExecution command_result;
+                // A handler cannot await: the read of the durable remainder waits for the end of the chain.
+                bool reload_remaining_after_child_recovery = false;
                 try {
                     command_result = co_await execute_command(
                         command_value, operation_id, control->cancel_token, root_scope, 0, false,
@@ -6188,9 +6197,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 } catch (const ProgramDiagnosticError& error) {
                     if (child_recovery_mode == ChildRecoveryMode::Existing &&
                         error.diagnostic().code == "P_CHILD_RECOVERY") {
-                        if (const auto pending = control->transitions->load(
-                                control->owner_scope, control->run_id))
-                            unreconciled_javascript_remaining = pending->remaining_budget();
+                        reload_remaining_after_child_recovery = true;
                         active_javascript_command.reset();
                         command_result.status = ProgramTerminalStatus::Interrupted;
                         command_result.interrupt = ProgramInterrupt{
@@ -6212,6 +6219,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         plan_failure(ProgramTerminalStatus::Failed, "P_RUNTIME_CORE_FAILURE",
                                      "Unknown JavaScript command failure", operation_id);
                 }
+                if (reload_remaining_after_child_recovery) {
+                    if (const auto pending = co_await control->async_transitions().load(
+                            control->owner_scope, control->run_id))
+                        unreconciled_javascript_remaining = pending->remaining_budget();
+                }
                 resumed_join_members = json::object();
                 {
                     std::lock_guard lock(await_starts_mutex);
@@ -6232,7 +6244,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         // again stays in their checkpoints; the command is
                         // reconciled as a whole.
                         if (const auto durable_pending =
-                                control->transitions->load(control->owner_scope, control->run_id))
+                                co_await control->async_transitions().load(control->owner_scope, control->run_id))
                             unreconciled_javascript_remaining = durable_pending->remaining_budget();
                         active_javascript_command.reset();
                         javascript_trace.insert(javascript_trace.end(),
@@ -6274,9 +6286,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     // attempt that resumes it replays them instead of running
                     // and charging them again (#380).
                     if (!command_result.settled_members.empty() && !control->recorded_replay) {
-                        const auto recorded = control->publish_javascript_command(
+                        auto publish_call_5 = control->publish_javascript_command(
                             ordinal, command_value, effect_id, std::nullopt, std::nullopt,
                             std::nullopt, command_result.settled_members);
+                        const auto recorded = co_await std::move(publish_call_5);
                         if (recorded != ProgramTransitionPublishResult::Published &&
                             recorded != ProgramTransitionPublishResult::AlreadyPresent) {
                             throw_runtime_diagnostic(
@@ -6309,7 +6322,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 const auto terminal_result = javascript_command_terminal_result(
                     command_result, to_string(command_result.status), command_usage);
-                auto durable = control->transitions->load(control->owner_scope, control->run_id);
+                auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
                 if (!durable) {
                     throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL",
                                              "JavaScript command result lost its running snapshot");
@@ -6323,8 +6336,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         : settle_budget(durable->remaining_budget(), settlement_usage);
                 ProgramTransitionPublishResult published;
                 try {
-                    published = control->publish_javascript_command(
+                    auto publish_call_6 = control->publish_javascript_command(
                         ordinal, command_value, effect_id, terminal_result, remaining, RunBudget{});
+                    published = co_await std::move(publish_call_6);
                 } catch (const EventSinkError&) {
                     unreconciled_javascript_remaining = remaining;
                     active_javascript_command.reset();

@@ -765,6 +765,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
     src/program/runtime_instruction.cpp
         src/program/core_progress.cpp
         src/program/lock_audit.cpp
+        src/program/store_call.cpp
         src/program/run_attempt.cpp
         src/program/invocation.cpp
         src/program/monetary.cpp

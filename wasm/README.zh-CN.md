@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=c14878b149d129d3bd6122457d44379277e4a7e64c5aa40c9376eba1f15b7b38 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=a536a05a6ce1901d70a120936b2705ad36eba9b86c5e421ab45d4ab7c73e8dc9 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -179,7 +179,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 ## 宿主循环上的 Program
 
 `program::ProgramRuntime` 接收循环的 executor，并把所有工作都放在上面执行：Program 的 attempt、截止时间定时器，以及
-`ProgramHandle::wait_async` 的等待者。它不会启动任何线程。目前这些宿主上的 Program 支持就是这些，存储是内存存储。
+`ProgramHandle::wait_async` 的等待者。它不会启动任何线程。它读写的存储是 awaitable 的，这个构建提供的是内存存储。
 
 ```cpp
 async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
@@ -205,6 +205,9 @@ loop.spawn(runtime.run_async(owner, version, invocation),
 - **节点主体。** 有 executor 时，需要自己的工作线程的节点 attempt 在该 executor 的 strand 上运行，而不是使用 32 线程的
   进程级线程池，所以节点主体不能阻塞自己的线程。
 - **锁。** 会访问存储的临界区持有 `OperationLock`，协程可以不阻塞地等待它；`std::mutex` 只保护内存。
+- **awaitable 存储。** 五个 Program 存储接口都返回 `asio::awaitable`，运行的 attempt 会 await 它们。像内存存储那样操作立即完成的
+  存储不占用回合。运行时的同步入口、终态发布和子运行启动通过阻塞视图等待存储；该视图会以
+  `program::ProgramBlockingCallRefused` 拒绝，而不是去等待只有等待线程才能转动的循环。
 - **销毁运行时**会取消其运行，但不会等待它们结束。attempt 会持有运行时的状态直到结束，所以要让循环一直运行，
   直到各句柄进入终态。
 
@@ -228,8 +231,11 @@ CI 构建该模块，并在 Node 22 和 24 下运行以下测试，不需要网�
 - `checks.cpp`（见下文）对宿主驱动的提供方运行一次同步运行，检查它被拒绝且没有发送任何东西。
 - `checks.cpp` 还在 `HostLoop` 上构建 `ProgramRuntime`：没有执行器的运行时和同步的 `start` 都会被拒绝，使用内存存储的
   单节点 Program 在宿主的回合中运行到结果。
+  随后它在宿主回合中通过 awaitable 存储读回运行和版本，并展示阻塞视图拒绝在循环上等待。
 - `tests/test_program_runtime_executor.cpp` 在单线程 `io_context` 和手动执行器之上的 `HostLoop` 上原生运行 Program，
   所以原生构建也覆盖同样的路径。
+- `tests/test_program_store_awaitable.cpp` 在原生环境中运行存储契约：内联存储不挂起即完成，交给线程池的存储在自己的 executor 上
+  恢复等待的协程，阻塞视图会等待稍后完成的存储，或者拒绝。
 - `tests/test_host_loop.cpp` 针对手动 executor 在原生环境中运行循环和宿主接缝提供方，所以原生构建也覆盖相同的路径。
 
 ## 实测大小
@@ -255,8 +261,9 @@ CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 �
 - **不经宿主的模型调用。** ASYNC、MCP 客户端和 A2A 需要套接字和 TLS。模型调用通过上述模块走宿主的 `fetch`；面向其他
   WebAssembly 宿主的构建则把自己的 executor 和传输层交给 `SchemaProvider`。
 - **宿主驱动的提供方上的阻塞入口。** `run()`、`Provider::dispatch` 等会予以拒绝（见上文）。
-- **宿主数据库上的 Program 存储。** Program 运行时在宿主循环上运行（见上），但它的存储是内存存储：SQLite 和 PostgreSQL
-  存储需要系统库，而访问宿主数据库的存储要等存储接口变成 awaitable
+- **宿主数据库上的 Program 存储。** 存储接口是 awaitable 的。SQLite 和 PostgreSQL 存储需要系统库，
+  所以宿主数据库需要自己的存储。操作立即完成的存储（宿主的同步存储）可以在宿主循环上为运行时服务。只能通过宿主事件循环
+  完成的存储会在那里被 `ProgramBlockingCallRefused` 拒绝，因为运行时的入口、终态发布和子运行启动仍然要等待存储
   （[#556](https://github.com/fox1245/NeoGraph/issues/556)）。同步的 Program 调用在宿主循环上会被拒绝，请使用 `_async` 形式。
 - **原生 Program 控件。** C v1 插件 ABI 是 64 位布局，因此在 wasm32 上 `NativeControlBinding::create` 会以
   `NativeControlUnavailable` 拒绝。
@@ -281,5 +288,5 @@ Node.js 上的运行不能作为浏览器上的证据。该模块为 `web`、`wo
 - **M2（本页）。** 通过宿主 `fetch` 进行模型调用：宿主循环、宿主接缝提供方、JavaScript 模块，以及 Node 和 Workers 示例。
 - **M3。** 宿主存储上的 Program（[#557](https://github.com/fox1245/NeoGraph/issues/557)、
   [#556](https://github.com/fox1245/NeoGraph/issues/556)）。运行时这一半已完成：`ProgramRuntime` 在
-  `HostLoop::executor()` 上运行（见上文“宿主循环上的 Program”）。存储这一半随后：awaitable 存储接口。
+  `HostLoop::executor()` 上运行（见上文“宿主循环上的 Program”）。存储接口也已成为 awaitable。
 - **M4。** 实时会话、WASI、原生归档的保管后端，以及远程 Harness。

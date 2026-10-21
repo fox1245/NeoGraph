@@ -15,6 +15,10 @@
 #include <gtest/gtest.h>
 #include <tuple>
 
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <array>
 #include <atomic>
 #include <barrier>
@@ -28,6 +32,9 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
 namespace {
 using namespace neograph::program;
 using neograph::ContextArtifact;
@@ -596,7 +603,7 @@ struct ReplacementBoundary {
     ProgramJavaScriptCommandJournalEntry completed_checkpoint;
 };
 
-ReplacementBoundary publish_replacement_boundary(ProgramTransitionStore& store,
+ReplacementBoundary publish_replacement_boundary(BlockingProgramTransitionStore& store,
                                                    bool recorded_source = false,
                                                    std::optional<ProgramContextPublication> context = {},
                                                    std::vector<neograph::HookOutboxEntry> hooks = {}) {
@@ -631,7 +638,7 @@ ReplacementBoundary publish_replacement_boundary(ProgramTransitionStore& store,
     return {std::move(completed), std::move(completed_entry)};
 }
 
-void exercise_javascript_command_history(ProgramTransitionStore& store) {
+void exercise_javascript_command_history(BlockingProgramTransitionStore& store) {
     EXPECT_FALSE(store.load_command_publication_head("owner-a", "run-1"));
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
@@ -689,8 +696,8 @@ void exercise_javascript_command_history(ProgramTransitionStore& store) {
     EXPECT_FALSE(empty_head->latest_command);
 }
 
-void exercise_command_head_concurrency(ProgramTransitionStore& writer,
-                                       ProgramTransitionStore& reader) {
+void exercise_command_head_concurrency(BlockingProgramTransitionStore& writer,
+                                       BlockingProgramTransitionStore& reader) {
     auto publication = start_publication();
     ASSERT_EQ(writer.compare_publish("owner-a", {}, publication), ProgramTransitionPublishResult::Published);
     std::atomic<bool> done{false};
@@ -732,34 +739,34 @@ void exercise_command_head_concurrency(ProgramTransitionStore& writer,
 }
 
 // An existing user wrapper need not implement the new virtual read.
-class LegacyCommandHeadStore final : public ProgramTransitionStore {
+class LegacyCommandHeadStore final : public SyncProgramTransitionStore {
 public:
     InMemoryProgramTransitionStore backend;
     mutable std::function<void()> after_command_read;
-    std::optional<ProgramRunRecord> load(std::string_view owner, std::string_view run) const override {
-        return backend.load(owner, run);
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
+        return backend.load_sync(owner, run);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner, std::string_view run) const override {
-        return backend.latest(owner, run);
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run) const override {
+        return backend.latest_sync(owner, run);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner, std::string_view run, std::uint64_t after) const override {
-        return backend.load_events(owner, run, after);
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        return backend.load_events_sync(owner, run, after);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner, std::string_view run, std::uint64_t after) const override {
-        return backend.load_effects(owner, run, after);
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        return backend.load_effects_sync(owner, run, after);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run, std::uint64_t after) const override {
-        auto values = backend.load_javascript_commands(owner, run, after);
+        auto values = backend.load_javascript_commands_sync(owner, run, after);
         if (auto callback = std::exchange(after_command_read, {})) callback();
         return values;
     }
-    ProgramTransitionPublishResult compare_publish(std::string_view owner, std::string_view previous,
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view previous,
                                                   ProgramTransitionPublication publication) override {
-        return backend.compare_publish(owner, previous, std::move(publication));
+        return backend.compare_publish_sync(owner, previous, std::move(publication));
     }
 };
-void exercise_javascript_command_reservation_settlement(ProgramTransitionStore& store) {
+void exercise_javascript_command_reservation_settlement(BlockingProgramTransitionStore& store) {
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
               ProgramTransitionPublishResult::Published);
@@ -1091,25 +1098,25 @@ json publication_reference_body(const ProgramTransitionPublication& publication)
                  ? detail::parse_json_strict(publication.migration_plan->serialize_canonical())
                  : json(nullptr)}};
 }
-class CommandReadUnsupportedStore final : public ProgramTransitionStore {
+class CommandReadUnsupportedStore final : public SyncProgramTransitionStore {
 public:
-    std::optional<ProgramRunRecord> load(std::string_view, std::string_view) const override {
+    std::optional<ProgramRunRecord> load_sync(std::string_view, std::string_view) const override {
         return std::nullopt;
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view, std::string_view) const override {
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view, std::string_view) const override {
         return std::nullopt;
     }
-    std::vector<ProgramEvent> load_events(std::string_view,
+    std::vector<ProgramEvent> load_events_sync(std::string_view,
                                           std::string_view,
                                           std::uint64_t) const override {
         return {};
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view,
                                                        std::string_view,
                                                        std::uint64_t) const override {
         return {};
     }
-    ProgramTransitionPublishResult compare_publish(std::string_view,
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view,
                                                    std::string_view,
                                                    ProgramTransitionPublication) override {
         return ProgramTransitionPublishResult::Conflict;
@@ -1200,7 +1207,7 @@ private:
 };
 #endif
 
-void exercise_initial_reservation_is_rejected(ProgramTransitionStore& store) {
+void exercise_initial_reservation_is_rejected(BlockingProgramTransitionStore& store) {
     auto reservation                     = RunBudget{};
     reservation.wall_time_ms             = 1;
     auto                         journal = ProgramJournalRecord::create({{},
@@ -1222,7 +1229,7 @@ void exercise_initial_reservation_is_rejected(ProgramTransitionStore& store) {
               ProgramTransitionPublishResult::Conflict);
 }
 void exercise_commandless_running_checkpoint_requires_host_evidence(
-    ProgramTransitionStore& store) {
+    BlockingProgramTransitionStore& store) {
     auto initial = start_publication();
     attach_initial_lineage(initial);
     ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
@@ -1251,7 +1258,7 @@ void exercise_commandless_running_checkpoint_requires_host_evidence(
                                     std::move(update)),
               ProgramTransitionPublishResult::Conflict);
 }
-void exercise_cross_thread_call_core_settlement(ProgramTransitionStore& store,
+void exercise_cross_thread_call_core_settlement(BlockingProgramTransitionStore& store,
                                                 bool                    exact_command_coordinate) {
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
@@ -1350,7 +1357,7 @@ void exercise_cross_thread_call_core_settlement(ProgramTransitionStore& store,
 }
 
 void exercise_execution_lease_fences_ordinary_publication(
-    ProgramTransitionStore& store) {
+    BlockingProgramTransitionStore& store) {
     auto start = start_publication();
     attach_initial_lineage(start);
     const auto lease = execution_lease(start);
@@ -1441,16 +1448,18 @@ DROP TABLE IF EXISTS neograph_program_transition_run_heads_v2;
 // NEOGRAPH_TEST_POSTGRES_URL.
 namespace {
 using neograph::program::test_support::StoreBackend;
+using neograph::program::test_support::StoreCase;
 using neograph::program::test_support::StoreDeployment;
 using neograph::program::test_support::WriteStage;
 
-class ProgramTransitionStoreConformance : public ::testing::TestWithParam<StoreBackend> {
+class ProgramTransitionStoreConformance : public ::testing::TestWithParam<StoreCase> {
 protected:
     void SetUp() override {
-        if (const auto reason = neograph::program::test_support::backend_unavailable_reason(GetParam()))
+        if (const auto reason =
+                neograph::program::test_support::backend_unavailable_reason(GetParam().backend))
             GTEST_SKIP() << *reason;
-        deployment_.emplace(GetParam());
-        store_ = deployment_->transition_store();
+        deployment_.emplace(GetParam().backend, GetParam().form);
+        store_ = deployment_->blocking_transition_store();
     }
     void TearDown() override {
         store_.reset();
@@ -1460,17 +1469,20 @@ protected:
     StoreDeployment& deployment() { return *deployment_; }
     // The store the case writes through. A second `deployment().transition_store()` is a
     // second writer on a database backend, and the same store in memory.
-    ProgramTransitionStore& primary_store() { return *store_; }
-    std::shared_ptr<ProgramTransitionStore> second_store() { return deployment_->transition_store(); }
+    // Called in the form of the case: through a synchronous store's own operations, or through its awaitable ones.
+    BlockingProgramTransitionStore& primary_store() { return *store_; }
+    std::shared_ptr<BlockingProgramTransitionStore> second_store() {
+        return deployment_->blocking_transition_store();
+    }
     // Closes the primary store and opens another over the same data, as after a process restart.
     void restart_store() {
         store_.reset();
-        store_ = deployment_->transition_store();
+        store_ = deployment_->blocking_transition_store();
     }
 
 private:
-    std::optional<StoreDeployment>          deployment_;
-    std::shared_ptr<ProgramTransitionStore> store_;
+    std::optional<StoreDeployment>                  deployment_;
+    std::shared_ptr<BlockingProgramTransitionStore> store_;
 };
 
 constexpr const char* NOT_DURABLE =
@@ -1479,15 +1491,27 @@ constexpr const char* NOT_DURABLE =
 
 INSTANTIATE_TEST_SUITE_P(
     Backends, ProgramTransitionStoreConformance,
-    ::testing::ValuesIn(neograph::program::test_support::store_backends()),
-    [](const ::testing::TestParamInfo<StoreBackend>& info) {
-        return std::string(neograph::program::test_support::backend_name(info.param));
+    ::testing::ValuesIn(neograph::program::test_support::store_cases()),
+    [](const ::testing::TestParamInfo<StoreCase>& info) {
+        return neograph::program::test_support::case_name(info.param);
     });
 }  // namespace
 
 TEST(ProgramTransitionStoreTest, MissingJavaScriptCommandReadSupportFailsClosed) {
-    CommandReadUnsupportedStore store;
+    CommandReadUnsupportedStore    unsupported;
+    BlockingProgramTransitionStore store(unsupported);
     EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::runtime_error);
+    // The awaitable form refuses too, when it is awaited.
+    EXPECT_THROW(
+        {
+            BlockingProgramTransitionStore awaiting(unsupported, [] {
+                BlockingStorePolicy policy;
+                policy.await_synchronous_stores = true;
+                return policy;
+            }());
+            (void)awaiting.load_javascript_commands("owner-a", "run-1");
+        },
+        std::runtime_error);
 }
 
 TEST(ProgramTransitionStoreTest, CanonicalValuesRejectTamper) {
@@ -1851,10 +1875,10 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
 }
 
 TEST(ProgramTransitionStoreTest, ContextPublicationFaultLeavesNoPartialSnapshotAndRetries) {
-    InMemoryProgramTransitionStore store;
+    OwnedTransitionStore<InMemoryProgramTransitionStore> store;
     auto publication = start_publication();
     publication.context_publication = context_publication(1);
-    store.fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterContextSnapshot);
+    store.store().fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterContextSnapshot);
     EXPECT_THROW((void)store.compare_publish("owner-a", {}, publication), std::runtime_error);
     EXPECT_FALSE(store.load("owner-a", "run-1"));
     EXPECT_TRUE(store.load_context_publications("owner-a", "run-1").empty());
@@ -1882,7 +1906,7 @@ std::uint64_t stored_schema(const ProgramJavaScriptCommandJournalEntry& entry) {
         .get<std::uint64_t>();
 }
 
-void exercise_await_start_history(ProgramTransitionStore& store) {
+void exercise_await_start_history(BlockingProgramTransitionStore& store) {
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start),
               ProgramTransitionPublishResult::Published);
@@ -1961,15 +1985,17 @@ TEST_P(ProgramTransitionStoreConformance, JavaScriptCommandHistoryIsAppendOnly) 
     exercise_javascript_command_history(primary_store());
 }
 TEST(ProgramTransitionStoreTest, CommandPublicationHeadSupportsLegacyWrappers) {
-    LegacyCommandHeadStore store;
+    LegacyCommandHeadStore             legacy;
+    BlockingProgramTransitionStore     store(legacy);
     exercise_javascript_command_history(store);
 }
 TEST(ProgramTransitionStoreTest, CommandPublicationHeadRejectsTornLegacyReads) {
-    LegacyCommandHeadStore store;
+    LegacyCommandHeadStore         legacy;
+    BlockingProgramTransitionStore store(legacy);
     const auto start = start_publication();
     ASSERT_EQ(store.compare_publish("owner-a", {}, start), ProgramTransitionPublishResult::Published);
     const auto pending = javascript_command_publication(start, javascript_command_entry(1, false), 20);
-    store.after_command_read = [&] {
+    legacy.after_command_read = [&] {
         ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
                   ProgramTransitionPublishResult::Published);
     };
@@ -2014,6 +2040,58 @@ TEST_P(ProgramTransitionStoreConformance, FirstPublishRetryAndOwnerIsolation) {
     EXPECT_FALSE(store.load("owner-b", "run-1"));
     EXPECT_FALSE(store.latest("owner-b", "run-1"));
     EXPECT_TRUE(store.load_events("owner-b", "run-1").empty());
+}
+// The awaitable operations, called from a coroutine on the host's executor, give the answers the blocking form gives.
+// (The Awaited form of every case in this suite already calls them; this one calls them from a coroutine.)
+TEST_P(ProgramTransitionStoreConformance, AnAwaitingCoroutineSeesTheAnswersOfTheBlockingForm) {
+    if (GetParam().form == neograph::program::test_support::StoreForm::Awaited)
+        GTEST_SKIP() << "every call of the Awaited form is an awaitable call";
+    const auto raw   = primary_store().store();
+    const auto start = start_publication();
+    const auto terminal =
+        terminal_publication(start, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+
+    struct Observed {
+        ProgramTransitionPublishResult first   = ProgramTransitionPublishResult::Conflict;
+        ProgramTransitionPublishResult retry   = ProgramTransitionPublishResult::Conflict;
+        ProgramTransitionPublishResult stale   = ProgramTransitionPublishResult::Published;
+        ProgramTransitionPublishResult last    = ProgramTransitionPublishResult::Conflict;
+        std::optional<ProgramRunRecord>     loaded;
+        std::optional<ProgramRunRecord>     foreign;
+        std::optional<ProgramJournalRecord> journal;
+        std::size_t                         events = 0;
+    } seen;
+    std::exception_ptr failure;
+    asio::io_context   io;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            seen.first   = co_await raw->compare_publish("owner-a", {}, start);
+            seen.retry   = co_await raw->compare_publish("owner-a", {}, start);
+            seen.stale   = co_await raw->compare_publish("owner-a", "not-the-head", terminal);
+            seen.last    = co_await raw->compare_publish("owner-a", start.journal_record.id, terminal);
+            seen.loaded  = co_await raw->load("owner-a", "run-1");
+            seen.foreign = co_await raw->load("owner-b", "run-1");
+            seen.journal = co_await raw->latest("owner-a", "run-1");
+            seen.events  = (co_await raw->load_events("owner-a", "run-1")).size();
+        },
+        [&](std::exception_ptr error) { failure = error; });
+    io.run();
+    if (failure) std::rethrow_exception(failure);
+
+    EXPECT_EQ(seen.first, ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(seen.retry, ProgramTransitionPublishResult::AlreadyPresent);
+    EXPECT_EQ(seen.stale, ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(seen.last, ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(seen.foreign);
+    ASSERT_TRUE(seen.loaded);
+    ASSERT_TRUE(seen.journal);
+    // What the coroutine read is what a blocking read gives afterwards.
+    const auto blocking = primary_store().load("owner-a", "run-1");
+    ASSERT_TRUE(blocking);
+    EXPECT_EQ(seen.loaded->id(), blocking->id());
+    EXPECT_EQ(seen.journal->id, primary_store().latest("owner-a", "run-1")->id);
+    EXPECT_EQ(seen.events, primary_store().load_events("owner-a", "run-1").size());
 }
 
 TEST_P(ProgramTransitionStoreConformance, MigrationPublicationIsDurableAndInheritedAcrossReplay) {
@@ -2417,13 +2495,13 @@ TEST(ProgramTransitionStoreTest, FaultAtEachPublishBoundaryPreservesCommittedSta
     };
 
     for (const auto fault : faults) {
-        InMemoryProgramTransitionStore store;
+        OwnedTransitionStore<InMemoryProgramTransitionStore> store;
         auto                           start = start_publication();
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
                                              ContinuationState::Completed);
-        store.fail_next_publication_for_testing(fault);
+        store.store().fail_next_publication_for_testing(fault);
         EXPECT_THROW(store.compare_publish("owner-a", start.journal_record.id, std::move(terminal)),
                      std::runtime_error);
 
@@ -2452,12 +2530,12 @@ TEST(ProgramTransitionStoreTest, EffectPublicationFaultsPreserveSourceAndOutbox)
         ProgramTransitionFaultPoint::BeforeCommit,
     };
     for (const auto fault : faults) {
-        InMemoryProgramTransitionStore store;
+        OwnedTransitionStore<InMemoryProgramTransitionStore> store;
         const auto                     start = start_publication();
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         const auto interrupted = interrupted_effect_publication(start);
-        store.fail_next_publication_for_testing(fault);
+        store.store().fail_next_publication_for_testing(fault);
         EXPECT_THROW(store.compare_publish("owner-a", start.journal_record.id, interrupted),
                      std::runtime_error);
 
@@ -2486,7 +2564,7 @@ TEST_P(ProgramTransitionStoreConformance, ConcurrentCasHasOneWinner) {
     auto failed =
         terminal_publication(start, ProgramTerminalStatus::Failed, ContinuationState::Failed, 21);
     std::barrier ready(3);
-    auto         publish = [&](ProgramTransitionStore& writer, ProgramTransitionPublication value) {
+    auto         publish = [&](BlockingProgramTransitionStore& writer, ProgramTransitionPublication value) {
         ready.arrive_and_wait();
         return writer.compare_publish("owner-a", start.journal_record.id, std::move(value));
     };
@@ -2614,7 +2692,7 @@ TEST_P(ProgramTransitionStoreConformance, ExactCheckpointReplacementPublishesOne
                                  boundary.completed_checkpoint);
 
     std::barrier ready(3);
-    auto publish = [&](ProgramTransitionStore& writer, ProgramTransitionPublication value) {
+    auto publish = [&](BlockingProgramTransitionStore& writer, ProgramTransitionPublication value) {
         ready.arrive_and_wait();
         return writer.compare_publish("owner-a", {}, std::move(value));
     };
@@ -2818,7 +2896,7 @@ TEST(ProgramTransitionStoreTest, RuntimeStateTransferFaultLeavesSourceAsOnlyOwne
     for (const auto fault : {ProgramTransitionFaultPoint::AfterContextSnapshot,
                              ProgramTransitionFaultPoint::AfterLineageSnapshot,
                              ProgramTransitionFaultPoint::BeforeCommit}) {
-        InMemoryProgramTransitionStore store;
+        OwnedTransitionStore<InMemoryProgramTransitionStore> store;
         const auto source_context = context_publication(1);
         const auto source_hook = pending_hook_outbox_entry();
         const auto boundary = publish_replacement_boundary(
@@ -2839,7 +2917,7 @@ TEST(ProgramTransitionStoreTest, RuntimeStateTransferFaultLeavesSourceAsOnlyOwne
             successor, *lineage, *predecessor, boundary.publication.run_record,
             boundary.completed_checkpoint, {source_context}, {source_hook});
 
-        store.fail_next_publication_for_testing(fault);
+        store.store().fail_next_publication_for_testing(fault);
         EXPECT_THROW((void)store.compare_publish("owner-a", {}, successor), std::runtime_error);
         EXPECT_FALSE(store.load("owner-a", "run-2"));
         EXPECT_EQ(store.load_lineage("owner-a", lineage->lineage_id())->id(), lineage->id());
@@ -3167,15 +3245,15 @@ TEST(ProgramTransitionStoreTest, SQLiteRejectsReceiptlessSuccessorAcrossReopen) 
     attach_successor_lineage(target, *source.run_lineage);
     const auto lineage_id = source.run_lineage->lineage_id();
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, source),
                   ProgramTransitionPublishResult::Published);
         EXPECT_EQ(store.compare_publish("owner-a", {}, target),
                   ProgramTransitionPublishResult::Conflict);
     }
     {
-        SQLiteProgramTransitionStore store(path);
-        SQLiteProgramTransitionStore same_backend(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> same_backend(path);
         EXPECT_FALSE(store.process_coordination_key().empty());
         EXPECT_EQ(store.process_coordination_key(), same_backend.process_coordination_key());
         const auto lineage = store.load_lineage("owner-a", lineage_id);
@@ -3210,7 +3288,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReplacementReceiptSurvivesReopen) {
     std::string receipt_id;
     RunBudget   successor_budget;
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto boundary = publish_replacement_boundary(store);
         const auto lineage = store.load_run_lineage("owner-a", "run-1");
         ASSERT_TRUE(lineage);
@@ -3237,7 +3315,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReplacementReceiptSurvivesReopen) {
             "DELETE FROM program_run_generation_publications_v1 WHERE generation = 2");
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto lineage = store.load_lineage("owner-a", lineage_id);
         ASSERT_TRUE(lineage);
         EXPECT_EQ(lineage->active_generation(), 2U);
@@ -3267,8 +3345,8 @@ TEST(ProgramTransitionStoreTest, SQLiteConnectionsPublishExactlyOneReplacementSu
     std::filesystem::remove(path);
 
     {
-        SQLiteProgramTransitionStore first_store(path);
-        SQLiteProgramTransitionStore second_store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> first_store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> second_store(path);
         const auto boundary = publish_replacement_boundary(first_store);
         const auto lineage = first_store.load_run_lineage("owner-a", "run-1");
         ASSERT_TRUE(lineage);
@@ -3327,8 +3405,8 @@ TEST(ProgramTransitionStoreTest, SQLiteConnectionsRejectReceiptlessSuccessors) {
     std::filesystem::remove(path);
 
     {
-        SQLiteProgramTransitionStore first_store(path);
-        SQLiteProgramTransitionStore second_store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> first_store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> second_store(path);
         auto source = start_publication();
         attach_initial_lineage(source);
         ASSERT_EQ(first_store.compare_publish("owner-a", {}, source),
@@ -3363,7 +3441,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation
     std::filesystem::remove(path);
 
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   start = start_publication();
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
@@ -3379,7 +3457,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensAtomicPublicationAndOwnerIsolation
     }
 
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
         ASSERT_TRUE(run->terminal_result().has_value());
@@ -3399,11 +3477,11 @@ TEST(ProgramTransitionStoreTest, SQLiteJavaScriptCommandHistorySurvivesReopen) {
             .string();
     std::filesystem::remove(path);
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         exercise_javascript_command_history(store);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
         ASSERT_EQ(commands.size(), 4U);
         EXPECT_TRUE(commands[0].pending());
@@ -3419,7 +3497,7 @@ TEST(ProgramTransitionStoreTest, SQLiteCommandPublicationHeadReadsOnlyTailAndRej
     const auto path = (std::filesystem::temp_directory_path() / "neograph-command-head-corruption.db").string();
     std::filesystem::remove(path);
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         exercise_javascript_command_history(store);
         TestSqliteDatabase db(path);
         db.execute("UPDATE program_transition_javascript_command_log_v2 SET canonical_bytes = 'broken' WHERE sequence = 1");
@@ -3445,7 +3523,7 @@ TEST(ProgramTransitionStoreTest, SQLiteContextPublicationIsAtomicAcrossReopenAnd
     auto next = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
     next.context_publication = context_publication(2, initial.context_publication->epoch.id());
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
                   ProgramTransitionPublishResult::Published);
         EXPECT_EQ(store.compare_publish("owner-a", {}, initial),
@@ -3470,7 +3548,7 @@ TEST(ProgramTransitionStoreTest, SQLiteContextPublicationIsAtomicAcrossReopenAnd
                          "WHERE owner_scope = 'owner-a' AND run_id = 'run-1' AND sequence = 2");
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         EXPECT_THROW((void)store.load_context_publications("owner-a", "run-1"),
                      std::invalid_argument);
         auto retry = javascript_command_publication(next, javascript_command_entry(2, true), 30);
@@ -3517,7 +3595,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
     attach_fork_split(downgraded, *source.run_lineage);
     const auto expected_id     = publication.migration_plan->id();
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, source_start),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
@@ -3532,7 +3610,7 @@ TEST(ProgramTransitionStoreTest, SQLiteReopensDurableMigrationProof) {
         EXPECT_EQ(store.load_migration_plan("owner-a", "run-2")->id(), expected_id);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-2");
         ASSERT_TRUE(run.has_value());
         ASSERT_TRUE(run->fork_receipt().has_value());
@@ -3567,7 +3645,7 @@ TEST(ProgramTransitionStoreTest, SQLiteEffectOutboxSurvivesResumePublication) {
                                                  std::move(aggregate_effects), std::nullopt};
     EXPECT_NO_THROW((void)aggregate.serialize_canonical());
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
@@ -3577,7 +3655,7 @@ TEST(ProgramTransitionStoreTest, SQLiteEffectOutboxSurvivesResumePublication) {
         EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
         ASSERT_TRUE(store.load("owner-a", "run-1").has_value());
         EXPECT_EQ(store.load("owner-a", "run-1")->continuation().state, ContinuationState::Running);
@@ -3596,7 +3674,7 @@ TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
     const auto start = start_publication();
     const auto child = child_metadata_publication(start);
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
@@ -3605,7 +3683,7 @@ TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
                   ProgramTransitionPublishResult::AlreadyPresent);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
         ASSERT_EQ(run->children().size(), 1U);
@@ -3626,7 +3704,7 @@ TEST(ProgramTransitionStoreTest, SQLiteStoresTransitionDeltasAndReopens) {
     const auto start = start_publication();
     const auto child = child_metadata_publication(start);
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, child),
@@ -3642,7 +3720,7 @@ TEST(ProgramTransitionStoreTest, SQLiteStoresTransitionDeltasAndReopens) {
                   0);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
         EXPECT_FALSE(run->terminal_result().has_value());
@@ -3687,7 +3765,7 @@ TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
                                legacy_retry_bytes);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
         EXPECT_EQ(run->continuation().state, ContinuationState::Interrupted);
@@ -3706,7 +3784,7 @@ TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
         EXPECT_EQ(database.scalar("SELECT COUNT(*) FROM program_transition_effect_log_v2"), 1);
     }
     {
-        SQLiteProgramTransitionStore store(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
         EXPECT_EQ(run->continuation().state, ContinuationState::Running);
@@ -3725,8 +3803,8 @@ TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinne
             .string();
     std::filesystem::remove(path);
     {
-        SQLiteProgramTransitionStore first(path);
-        SQLiteProgramTransitionStore second(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> first(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> second(path);
         const auto                   start = start_publication();
         ASSERT_EQ(first.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
@@ -3735,7 +3813,7 @@ TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinne
         const auto   failed    = terminal_publication(start, ProgramTerminalStatus::Failed,
                                                       ContinuationState::Failed, 21);
         std::barrier ready(3);
-        auto         publish = [&](SQLiteProgramTransitionStore& store,
+        auto         publish = [&](BlockingProgramTransitionStore& store,
                            ProgramTransitionPublication  publication) {
             ready.arrive_and_wait();
             return store.compare_publish("owner-a", start.journal_record.id,
@@ -3777,15 +3855,15 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReopensAtomicLineageAndOwnerIsolation
     const auto generation_id = publication.run_generation->id();
 
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
                   ProgramTransitionPublishResult::Published);
         EXPECT_EQ(store.compare_publish("owner-a", {}, publication),
                   ProgramTransitionPublishResult::AlreadyPresent);
     }
     {
-        PostgreSQLProgramTransitionStore store(url);
-        PostgreSQLProgramTransitionStore same_backend(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> same_backend(url);
         EXPECT_FALSE(store.process_coordination_key().empty());
         EXPECT_EQ(store.process_coordination_key(), same_backend.process_coordination_key());
         const auto run = store.load("owner-a", run_id);
@@ -3810,7 +3888,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLCommandPublicationHeadReadsOnlyTailAn
     const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
     if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
     reset_postgres_transition_schema(url);
-    PostgreSQLProgramTransitionStore store(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
     exercise_javascript_command_history(store);
     std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
     ASSERT_EQ(PQstatus(connection.get()), CONNECTION_OK);
@@ -3839,10 +3917,10 @@ TEST(ProgramTransitionStoreTest, PostgreSQLConcurrentInitialCasHasOneWinner) {
     auto second = start_publication_for(run_id, digest('2'), digest('3'), budget(), 201);
     attach_initial_lineage(first);
     attach_initial_lineage(second);
-    PostgreSQLProgramTransitionStore first_store(url);
-    PostgreSQLProgramTransitionStore second_store(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> first_store(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> second_store(url);
     std::barrier ready(3);
-    auto publish = [&](PostgreSQLProgramTransitionStore& store,
+    auto publish = [&](BlockingProgramTransitionStore& store,
                        ProgramTransitionPublication value) {
         ready.arrive_and_wait();
         return store.compare_publish("owner-a", {}, std::move(value));
@@ -3872,7 +3950,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
     std::string lineage_id;
     std::string successor_generation_id;
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         const auto boundary = publish_replacement_boundary(store);
         const auto lineage = store.load_run_lineage("owner-a", "run-1");
         ASSERT_TRUE(lineage);
@@ -3893,7 +3971,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         successor_generation_id = target.run_generation->id();
     }
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         const auto lineage = store.load_lineage("owner-a", lineage_id);
         ASSERT_TRUE(lineage);
         EXPECT_EQ(lineage->active_generation(), 2U);
@@ -3911,7 +3989,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         const auto start = start_publication();
         const auto interrupted = interrupted_effect_publication(start);
         const auto resumed = resumed_effect_publication(interrupted);
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, interrupted),
@@ -3921,7 +3999,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
     }
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
         ASSERT_TRUE(store.load("owner-a", "run-1"));
         EXPECT_EQ(store.load("owner-a", "run-1")->continuation().state,
@@ -3939,7 +4017,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         next.context_publication =
             context_publication(2, initial.context_publication->epoch.id());
         attach_same_generation_lineage(next, *initial.run_lineage);
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, next),
@@ -3949,7 +4027,7 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         ASSERT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").size(), 1U);
     }
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.load_context_publications("owner-a", "run-1").size(), 2U);
         ASSERT_EQ(store.load_context_publications("owner-a", "run-1", 1).size(), 1U);
         ASSERT_EQ(store.load_hook_outbox_entries("owner-a", "run-1").size(), 1U);
@@ -3959,14 +4037,14 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
     {
         const auto initial = start_publication();
         const auto child = child_metadata_publication(initial);
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.compare_publish("owner-a", {}, initial),
                   ProgramTransitionPublishResult::Published);
         ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, child),
                   ProgramTransitionPublishResult::Published);
     }
     {
-        PostgreSQLProgramTransitionStore store(url);
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         const auto run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run);
         ASSERT_EQ(run->children().size(), 1U);
@@ -3976,10 +4054,10 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
 #endif
 
 TEST(ProgramTransitionStoreTest, HookOutboxHeadsAreAtomicAndReconnectable) {
-    InMemoryProgramTransitionStore store;
+    OwnedTransitionStore<InMemoryProgramTransitionStore> store;
     auto publication = start_publication();
     publication.hook_outbox_entries.push_back(pending_hook_outbox_entry());
-    store.fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterHookSnapshot);
+    store.store().fail_next_publication_for_testing(ProgramTransitionFaultPoint::AfterHookSnapshot);
     EXPECT_THROW(store.compare_publish("owner-a", {}, publication), std::runtime_error);
     EXPECT_TRUE(store.load_hook_outbox_entries("owner-a", "run-1").empty());
     ASSERT_EQ(store.compare_publish("owner-a", {}, publication),
@@ -4103,7 +4181,7 @@ namespace {
 // publishes the same publication once the fault is gone.
 template <typename Unchanged>
 void expect_fault_leaves_state_then_retries(StoreDeployment&                    deployment,
-                                            ProgramTransitionStore&             store,
+                                            BlockingProgramTransitionStore&             store,
                                             WriteStage                          stage,
                                             std::string_view                    expected_head,
                                             const ProgramTransitionPublication& publication,
@@ -4123,8 +4201,8 @@ void expect_fault_leaves_state_then_retries(StoreDeployment&                    
 // committed state stays exactly as it was, and the same publication then publishes.
 TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication) {
     for (const auto stage : {WriteStage::Run, WriteStage::Events}) {
-        StoreDeployment dep(GetParam());
-        const auto      store = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store = dep.blocking_transition_store();
         const auto      start = start_publication();
         ASSERT_EQ(store->compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
@@ -4139,8 +4217,8 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
         EXPECT_EQ(store->load_events("owner-a", "run-1").size(), 2U);
     }
     {
-        StoreDeployment dep(GetParam());
-        const auto      store = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store = dep.blocking_transition_store();
         const auto      start = start_publication();
         ASSERT_EQ(store->compare_publish("owner-a", {}, start),
                   ProgramTransitionPublishResult::Published);
@@ -4154,8 +4232,8 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
         EXPECT_EQ(store->load_effects("owner-a", "run-1").size(), 1U);
     }
     {
-        StoreDeployment dep(GetParam());
-        const auto      store   = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store   = dep.blocking_transition_store();
         auto            initial = start_publication();
         initial.context_publication = context_publication(1);
         expect_fault_leaves_state_then_retries(
@@ -4167,8 +4245,8 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
         EXPECT_EQ(store->load_context_publications("owner-a", "run-1").size(), 1U);
     }
     {
-        StoreDeployment dep(GetParam());
-        const auto      store   = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store   = dep.blocking_transition_store();
         auto            initial = start_publication();
         initial.hook_outbox_entries = {pending_hook_outbox_entry()};
         expect_fault_leaves_state_then_retries(
@@ -4180,8 +4258,8 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
         EXPECT_EQ(store->load_hook_outbox_entries("owner-a", "run-1").size(), 1U);
     }
     {
-        StoreDeployment dep(GetParam());
-        const auto      store   = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store   = dep.blocking_transition_store();
         auto            initial = start_publication();
         attach_initial_lineage(initial);
         expect_fault_leaves_state_then_retries(
@@ -4201,8 +4279,8 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
 TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesTheSourceAsTheOnlyOwnerAcrossAReplacement) {
     for (const auto stage : {WriteStage::Run, WriteStage::Context, WriteStage::Lineage}) {
         SCOPED_TRACE(neograph::program::test_support::write_stage_name(stage));
-        StoreDeployment dep(GetParam());
-        const auto      store_owner = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store_owner = dep.blocking_transition_store();
         auto&           store       = *store_owner;
         const auto source_context = context_publication(1);
         const auto source_hook    = pending_hook_outbox_entry();
@@ -4504,7 +4582,8 @@ TEST_P(ProgramTransitionStoreConformance, MalformedExpectedHeadIsRefusedBeforeSt
 // A transition store that implements no JavaScript command journal read refuses to answer
 // instead of reporting an empty journal.
 TEST(ProgramTransitionStoreTest, UnimplementedDurableReadsFailClosed) {
-    CommandReadUnsupportedStore store;
+    CommandReadUnsupportedStore    unsupported;
+    BlockingProgramTransitionStore store(unsupported);
     EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::runtime_error);
     EXPECT_THROW((void)store.load_context_publications("owner-a", "run-1"), std::runtime_error);
     EXPECT_THROW((void)store.load_child_syntheses("owner-a", "run-1"), std::runtime_error);
@@ -4555,7 +4634,7 @@ ProgramTransitionPublication child_result_publication(const ProgramTransitionPub
 
 // A run that finished with its provider-budget custody, the exact record a recorded replay
 // starts from. It has a lineage, which the replay debits.
-ProgramTransitionPublication published_finished_source(ProgramTransitionStore& store) {
+ProgramTransitionPublication published_finished_source(BlockingProgramTransitionStore& store) {
     auto start = start_publication();
     attach_initial_lineage(start);
     if (store.compare_publish("owner-a", {}, start) != ProgramTransitionPublishResult::Published)
@@ -4626,10 +4705,10 @@ Verdict verdict_of_call(Call&& call) {
 struct GoldenRow {
     const char* name;
     Verdict     expected;
-    std::function<Verdict(ProgramTransitionStore&)> run;
+    std::function<Verdict(BlockingProgramTransitionStore&)> run;
 };
 
-ProgramTransitionPublication published(ProgramTransitionStore&       store,
+ProgramTransitionPublication published(BlockingProgramTransitionStore&       store,
                                        ProgramTransitionPublication publication,
                                        std::string_view             expected_head = {}) {
     if (store.compare_publish("owner-a", expected_head, publication) !=
@@ -4638,13 +4717,13 @@ ProgramTransitionPublication published(ProgramTransitionStore&       store,
     return publication;
 }
 
-ProgramTransitionPublication published_start(ProgramTransitionStore& store, bool lineage = false) {
+ProgramTransitionPublication published_start(BlockingProgramTransitionStore& store, bool lineage = false) {
     auto start = start_publication();
     if (lineage) attach_initial_lineage(start);
     return published(store, std::move(start));
 }
 
-ProgramTransitionPublication published_interrupted_source(ProgramTransitionStore& store) {
+ProgramTransitionPublication published_interrupted_source(BlockingProgramTransitionStore& store) {
     auto source_start = published_start(store, true);
     auto source       = interrupted_effect_publication(source_start);
     attach_same_generation_lineage(source, *source_start.run_lineage);
@@ -5153,8 +5232,8 @@ const std::vector<GoldenRow>& golden_rows() {
 TEST_P(ProgramTransitionStoreConformance, GoldenVerdictsAreTheSameOnEveryBackend) {
     for (const auto& row : golden_rows()) {
         SCOPED_TRACE(row.name);
-        StoreDeployment dep(GetParam());
-        const auto      store = dep.transition_store();
+        StoreDeployment dep(GetParam().backend, GetParam().form);
+        const auto      store = dep.blocking_transition_store();
         EXPECT_EQ(row.run(*store), row.expected) << row.name;
     }
 }
@@ -5162,8 +5241,8 @@ TEST_P(ProgramTransitionStoreConformance, GoldenVerdictsAreTheSameOnEveryBackend
 // Error kinds. A refusal is a Conflict, never an exception; a failed write is a
 // runtime_error; and nothing that is thrown leaves a partial publication behind.
 TEST_P(ProgramTransitionStoreConformance, ErrorsAreConflictsOrRuntimeErrors) {
-    StoreDeployment dep(GetParam());
-    const auto      store = dep.transition_store();
+    StoreDeployment dep(GetParam().backend, GetParam().form);
+    const auto      store = dep.blocking_transition_store();
     const auto      start = start_publication();
     dep.arm_fault(WriteStage::Run);
     EXPECT_EQ(verdict_of_call([&] { return store->compare_publish("owner-a", {}, start); }),

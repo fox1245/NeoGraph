@@ -114,7 +114,7 @@ struct RecordedCapabilityMaterialization {
 class ProgramHistoricalReplacementChain;
 
 NEOGRAPH_PROGRAM_API ProgramHistoricalReplacementChain
-inspect_program_replacement_chain(const ProgramTransitionStore& store,
+inspect_program_replacement_chain(const BlockingProgramTransitionStore& store,
                                   std::string_view owner_scope,
                                   std::string_view any_run_id);
 
@@ -135,7 +135,7 @@ private:
     std::shared_ptr<const Impl> impl_;
 
     friend ProgramHistoricalReplacementChain inspect_program_replacement_chain(
-        const ProgramTransitionStore&, std::string_view, std::string_view);
+        const BlockingProgramTransitionStore&, std::string_view, std::string_view);
 };
 
 /** Read-only, fail-closed evidence for one immutable A -> ... -> N lineage. */
@@ -151,7 +151,7 @@ private:
     std::shared_ptr<const Impl> impl_;
 
     friend ProgramHistoricalReplacementChain inspect_program_replacement_chain(
-        const ProgramTransitionStore&, std::string_view, std::string_view);
+        const BlockingProgramTransitionStore&, std::string_view, std::string_view);
 };
 
 }  // namespace neograph::program

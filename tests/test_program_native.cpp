@@ -19,6 +19,10 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 
@@ -666,69 +670,69 @@ private:
     std::string name_;
 };
 
-class BlockAfterNativeResultStore final : public ProgramTransitionStore {
+class BlockAfterNativeResultStore final : public SyncProgramTransitionStore {
 public:
-    std::optional<ProgramRunRecord> load(std::string_view owner,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
-        return inner_.load(owner, run_id);
+        return inner_.load_sync(owner, run_id);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
                                                std::string_view run_id) const override {
-        return inner_.latest(owner, run_id);
+        return inner_.latest_sync(owner, run_id);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
-        return inner_.load_events(owner, run_id, sequence);
+        return inner_.load_events_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
-        return inner_.load_effects(owner, run_id, sequence);
+        return inner_.load_effects_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands(owner, run_id, sequence);
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
-        return inner_.load_context_publications(owner, run_id, sequence);
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries(owner, run_id);
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
-        return inner_.load_lineage(owner, lineage_id);
+        return inner_.load_lineage_sync(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
-        return inner_.load_run_lineage(owner, run_id);
+        return inner_.load_run_lineage_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
-        return inner_.load_lineage_head(owner, lineage_id, head_id);
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
-        return inner_.load_generation(owner, lineage_id, generation);
+        return inner_.load_generation_sync(owner, lineage_id, generation);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_execution_lease(owner, run_id);
+        return inner_.load_execution_lease_sync(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
         const bool native_result =
             !publication.commands.empty() && publication.commands.back().completed() &&
             publication.commands.back().command().kind() == JavaScriptCommandKind::HostCapability;
-        const auto published = inner_.compare_publish(owner, expected, std::move(publication));
+        const auto published = inner_.compare_publish_sync(owner, expected, std::move(publication));
         if (!native_result || published != ProgramTransitionPublishResult::Published)
             return published;
         std::unique_lock lock(mutex_);
@@ -737,12 +741,12 @@ public:
         condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
         return published;
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
-        return inner_.compare_publish_execution(
+        return inner_.compare_publish_execution_sync(
             owner, expected, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
     }
@@ -863,7 +867,7 @@ struct NativeAdmittedRuntime {
     std::shared_ptr<EngineGenerationCache>  engines;
     std::shared_ptr<ProgramCatalog>         catalog;
     std::shared_ptr<CheckpointStore>        checkpoints;
-    std::shared_ptr<ProgramTransitionStore> transitions;
+    TransitionStoreHandle transitions;
     std::unique_ptr<ProgramRuntime>         runtime;
 
     explicit NativeAdmittedRuntime(std::shared_ptr<ProgramTransitionStore> journal = {},

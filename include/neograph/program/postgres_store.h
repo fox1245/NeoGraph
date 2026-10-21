@@ -19,7 +19,7 @@ namespace neograph::program {
  * operation uses an explicit transaction, so a process crash cannot expose a
  * partially published bundle/version or activation pointer.
  */
-class NEOGRAPH_PROGRAM_API PostgreSQLProgramStore final : public ProgramStore {
+class NEOGRAPH_PROGRAM_API PostgreSQLProgramStore final : public SyncProgramStore {
 public:
     explicit PostgreSQLProgramStore(std::string connection_string);
     PostgreSQLProgramStore(PostgreSQLProgramStore&&) noexcept;
@@ -28,25 +28,29 @@ public:
     PostgreSQLProgramStore& operator=(const PostgreSQLProgramStore&) = delete;
     ~PostgreSQLProgramStore() override;
 
-    void publish_admitted(const ProgramBundle& bundle, const ProgramVersion& version) override;
-    std::optional<ProgramBundle> get_bundle(std::string_view id) const override;
-    std::optional<ProgramVersion> get_version(std::string_view id) const override;
-    std::optional<ProgramBundle> get_bundle(std::string_view owner_scope,
+    void publish_admitted_sync(const ProgramBundle& bundle, const ProgramVersion& version) override;
+    std::optional<ProgramBundle> get_bundle_sync(std::string_view id) const override;
+    std::optional<ProgramVersion> get_version_sync(std::string_view id) const override;
+    std::optional<ProgramBundle> get_bundle_sync(std::string_view owner_scope,
                                             std::string_view id) const override;
-    std::optional<ProgramVersion> get_version(std::string_view owner_scope,
+    std::optional<ProgramVersion> get_version_sync(std::string_view owner_scope,
                                               std::string_view id) const override;
     std::optional<ProgramActivation>
-    get_activation(std::string_view owner_scope) const override;
+    get_activation_sync(std::string_view owner_scope) const override;
     std::optional<ProgramActivationBinding>
-    get_active_binding(std::string_view owner_scope) const override;
-    ProgramActivationResult compare_activate(std::string_view owner_scope,
+    get_active_binding_sync(std::string_view owner_scope) const override;
+    ProgramActivationResult compare_activate_sync(std::string_view owner_scope,
                                              std::uint64_t    expected_generation,
                                              std::string_view version_id,
                                              std::string_view policy_snapshot_hash) override;
-    std::vector<ProgramVersion> list_versions(std::string_view owner_scope) const override;
-    ProgramRetentionReport collect_garbage(
+    std::vector<ProgramVersion> list_versions_sync(std::string_view owner_scope) const override;
+    ProgramRetentionReport collect_garbage_sync(
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids) override;
+
+protected:
+    /** libpq blocks for long: an awaited operation runs on a thread of the bounded pool (#556). */
+    bool offloads() const noexcept override { return true; }
 
 private:
     struct Impl;

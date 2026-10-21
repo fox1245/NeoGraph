@@ -239,7 +239,7 @@ PostgreSQLProgramStore::PostgreSQLProgramStore(PostgreSQLProgramStore&&) noexcep
 PostgreSQLProgramStore& PostgreSQLProgramStore::operator=(PostgreSQLProgramStore&&) noexcept = default;
 PostgreSQLProgramStore::~PostgreSQLProgramStore() = default;
 
-void PostgreSQLProgramStore::publish_admitted(const ProgramBundle& bundle,
+void PostgreSQLProgramStore::publish_admitted_sync(const ProgramBundle& bundle,
                                               const ProgramVersion& version) {
     if (version.bundle_id() != bundle.id())
         throw std::invalid_argument("Program version does not bind the published bundle");
@@ -269,7 +269,7 @@ void PostgreSQLProgramStore::publish_admitted(const ProgramBundle& bundle,
     transaction.commit();
 }
 
-std::optional<ProgramBundle> PostgreSQLProgramStore::get_bundle(std::string_view id) const {
+std::optional<ProgramBundle> PostgreSQLProgramStore::get_bundle_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto bytes = select_bytes(impl_->connection,
                                     "SELECT canonical_bytes FROM neograph_program_bundles "
@@ -279,7 +279,7 @@ std::optional<ProgramBundle> PostgreSQLProgramStore::get_bundle(std::string_view
     return ProgramBundle::parse(*bytes);
 }
 
-std::optional<ProgramVersion> PostgreSQLProgramStore::get_version(std::string_view id) const {
+std::optional<ProgramVersion> PostgreSQLProgramStore::get_version_sync(std::string_view id) const {
     std::lock_guard lock(impl_->mutex);
     const auto bytes = select_bytes(impl_->connection,
                                     "SELECT canonical_bytes FROM neograph_program_versions "
@@ -290,7 +290,7 @@ std::optional<ProgramVersion> PostgreSQLProgramStore::get_version(std::string_vi
 }
 
 std::optional<ProgramVersion>
-PostgreSQLProgramStore::get_version(std::string_view owner_scope, std::string_view id) const {
+PostgreSQLProgramStore::get_version_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     auto result = exec_params(
@@ -317,7 +317,7 @@ PostgreSQLProgramStore::get_version(std::string_view owner_scope, std::string_vi
 }
 
 std::optional<ProgramBundle>
-PostgreSQLProgramStore::get_bundle(std::string_view owner_scope, std::string_view id) const {
+PostgreSQLProgramStore::get_bundle_sync(std::string_view owner_scope, std::string_view id) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     const auto visible = select_bytes(
@@ -338,14 +338,14 @@ PostgreSQLProgramStore::get_bundle(std::string_view owner_scope, std::string_vie
 }
 
 std::optional<ProgramActivation>
-PostgreSQLProgramStore::get_activation(std::string_view owner_scope) const {
+PostgreSQLProgramStore::get_activation_sync(std::string_view owner_scope) const {
     std::lock_guard lock(impl_->mutex);
     const auto activation = load_activation(impl_->connection, owner_scope);
     if (activation) verify_activation_target(impl_->connection, *activation);
     return activation;
 }
 std::optional<ProgramActivationBinding>
-PostgreSQLProgramStore::get_active_binding(std::string_view owner_scope) const {
+PostgreSQLProgramStore::get_active_binding_sync(std::string_view owner_scope) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->connection);
@@ -370,7 +370,7 @@ PostgreSQLProgramStore::get_active_binding(std::string_view owner_scope) const {
     return ProgramActivationBinding{*active, version};
 }
 
-ProgramActivationResult PostgreSQLProgramStore::compare_activate(
+ProgramActivationResult PostgreSQLProgramStore::compare_activate_sync(
     std::string_view owner_scope,
     std::uint64_t    expected_generation,
     std::string_view version_id,
@@ -438,7 +438,7 @@ ProgramActivationResult PostgreSQLProgramStore::compare_activate(
 }
 
 std::vector<ProgramVersion>
-PostgreSQLProgramStore::list_versions(std::string_view owner_scope) const {
+PostgreSQLProgramStore::list_versions_sync(std::string_view owner_scope) const {
     if (owner_scope.empty())
         throw std::invalid_argument("Program version owner scope must not be empty");
     std::lock_guard lock(impl_->mutex);
@@ -469,7 +469,7 @@ PostgreSQLProgramStore::list_versions(std::string_view owner_scope) const {
     return versions;
 }
 
-ProgramRetentionReport PostgreSQLProgramStore::collect_garbage(
+ProgramRetentionReport PostgreSQLProgramStore::collect_garbage_sync(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
     if (owner_scope.empty())

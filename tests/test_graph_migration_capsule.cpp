@@ -20,6 +20,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
 
 using namespace neograph;
 using namespace neograph::graph;
@@ -728,7 +731,7 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
         digest('5'), false, BudgetLimits{5, 1000, 1000, 1, 1, 20, 1, 1, 1});
     auto over_budget = migration_target_publication(
         source, "capsule-budget-target", 21, std::nullopt, &constrained);
-    InMemoryProgramTransitionStore transitions;
+    OwnedTransitionStore<InMemoryProgramTransitionStore> transitions;
     ASSERT_EQ(transitions.compare_publish(
                   source.publication.run_record.owner_scope(), {}, source.publication),
               ProgramTransitionPublishResult::Published);
@@ -782,7 +785,7 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
     const auto forged_source = migration_source_fixture(false);
     const auto forged_target = migration_target_publication(
         forged_source, "capsule-forged-source-target", 20);
-    InMemoryProgramTransitionStore forged_transitions;
+    OwnedTransitionStore<InMemoryProgramTransitionStore> forged_transitions;
     ASSERT_EQ(forged_transitions.compare_publish(
                   forged_source.publication.run_record.owner_scope(), {},
                   forged_source.publication),
@@ -799,7 +802,7 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
     const auto target = migration_target_publication(source, "capsule-sqlite-target", 20);
     const auto lineage_id = source.publication.run_lineage->lineage_id();
     {
-        SQLiteProgramTransitionStore transitions(database.path.string());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(database.path.string());
         ASSERT_EQ(transitions.compare_publish(
                       source.publication.run_record.owner_scope(), {}, source.publication),
                   ProgramTransitionPublishResult::Published);
@@ -808,7 +811,7 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
                   ProgramTransitionPublishResult::Conflict);
     }
     {
-        SQLiteProgramTransitionStore transitions(database.path.string());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(database.path.string());
         const auto head = transitions.load_lineage("capsule-owner", lineage_id);
         ASSERT_TRUE(head);
         EXPECT_EQ(head->active_generation(), 1U);
@@ -828,28 +831,29 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
 // in its bytes is never returned. The capsule is stored only by the runtime's safe-point
 // publication, so the row is planted beside the published source run.
 class GraphMigrationCapsuleStoreConformance
-    : public ::testing::TestWithParam<neograph::program::test_support::StoreBackend> {};
+    : public ::testing::TestWithParam<neograph::program::test_support::StoreCase> {};
 
 TEST_P(GraphMigrationCapsuleStoreConformance, StoredCapsuleRowMustAgreeWithItsRecord) {
     using neograph::program::test_support::StoreDeployment;
-    if (const auto reason = neograph::program::test_support::backend_unavailable_reason(GetParam()))
+    if (const auto reason =
+            neograph::program::test_support::backend_unavailable_reason(GetParam().backend))
         GTEST_SKIP() << *reason;
-    if (GetParam() == neograph::program::test_support::StoreBackend::InMemory)
+    if (GetParam().backend == neograph::program::test_support::StoreBackend::InMemory)
         GTEST_SKIP() << "the in-memory store keeps typed values in the process: stored-byte tamper "
                         "detection needs a durable backend (declared capability, #556)";
     const auto source = migration_source_fixture();
     const auto owner  = source.publication.run_record.owner_scope();
     const auto run_id = source.publication.run_record.run_id();
-    StoreDeployment deployment(GetParam());
+    StoreDeployment deployment(GetParam().backend, GetParam().form);
     {
-        const auto store = deployment.transition_store();
+        const auto store = deployment.blocking_transition_store();
         ASSERT_EQ(store->compare_publish(owner, {}, source.publication),
                   ProgramTransitionPublishResult::Published);
     }
     deployment.insert_capsule_with_foreign_identity(
         owner, run_id, source.capsule.source_lineage_head_id(),
         source.capsule.serialize_canonical());
-    const auto store = deployment.transition_store();
+    const auto store = deployment.blocking_transition_store();
     EXPECT_THROW((void)store->load_graph_migration_capsule(
                      owner, run_id, source.capsule.source_lineage_head_id()),
                  std::invalid_argument);
@@ -857,7 +861,7 @@ TEST_P(GraphMigrationCapsuleStoreConformance, StoredCapsuleRowMustAgreeWithItsRe
 
 INSTANTIATE_TEST_SUITE_P(
     Backends, GraphMigrationCapsuleStoreConformance,
-    ::testing::ValuesIn(neograph::program::test_support::store_backends()),
-    [](const ::testing::TestParamInfo<neograph::program::test_support::StoreBackend>& info) {
-        return std::string(neograph::program::test_support::backend_name(info.param));
+    ::testing::ValuesIn(neograph::program::test_support::store_cases()),
+    [](const ::testing::TestParamInfo<neograph::program::test_support::StoreCase>& info) {
+        return neograph::program::test_support::case_name(info.param);
     });

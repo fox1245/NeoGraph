@@ -13,6 +13,10 @@
 #include <neograph/program/postgres_store.h>
 #endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <asio/co_spawn.hpp>
+#include <asio/io_context.hpp>
+#include <asio/use_awaitable.hpp>
+
 #include <filesystem>
 #endif
 #include <cstdlib>
@@ -33,6 +37,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedProgramStore;
+using neograph::program::test_support::ProgramStoreHandle;
 
 namespace {
 
@@ -344,7 +352,7 @@ struct CatalogFixture {
     RegistrySnapshot                       snapshot;
     AdmissionProfile                       admission;
     PolicySnapshot                         authorization;
-    std::shared_ptr<InMemoryProgramStore>  store   = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle  store   = std::make_shared<InMemoryProgramStore>();
     std::shared_ptr<EngineGenerationCache> engines = std::make_shared<EngineGenerationCache>();
     ProgramCatalog                         catalog;
 
@@ -549,7 +557,7 @@ TEST(ProgramCatalogTest, ProfileAndPolicyDenialsOccurBeforeFactory) {
                                BudgetLimits ceiling) {
         factory_calls.store(0);
         auto       snapshot = registry();
-        auto       store    = std::make_shared<InMemoryProgramStore>();
+        ProgramStoreHandle       store    = std::make_shared<InMemoryProgramStore>();
         const auto bundle   = compile(snapshot);
         bool       rejected = false;
         try {
@@ -578,7 +586,7 @@ TEST(ProgramCatalogTest, BrokeredClosureAdmitsWhenPolicyAllows) {
     auto snapshot        = registry(false, {"catalog-capability"}, {"catalog-effect"});
     auto allowed_profile = profile(snapshot);
     auto allowed_policy  = policy(allowed_profile, {1000, 100, 100, 1, 1, 20, 1, 1, 1}, true, true);
-    auto store           = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle store           = std::make_shared<InMemoryProgramStore>();
     ProgramCatalog catalog(CatalogConfig{store, snapshot, std::make_shared<EngineGenerationCache>(),
                                          "catalog-test/v1"});
     const auto     bundle = compile(snapshot);
@@ -610,7 +618,7 @@ TEST(ProgramCatalogTest, DerivesAndEnforcesExecutableExecutionGuarantees) {
                 ExecutionGuarantee::Recorded);
     const auto recorded_policy  = policy(recorded_profile, {1000, 100, 100, 1, 1, 20, 1, 1, 1},
                                          false, false, ExecutionGuarantee::Recorded);
-    auto       store            = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle       store            = std::make_shared<InMemoryProgramStore>();
     ProgramCatalog catalog(CatalogConfig{store, snapshot, std::make_shared<EngineGenerationCache>(),
                                          "catalog-test/v1"});
 
@@ -672,7 +680,7 @@ TEST(ProgramCatalogTest, JavaScriptControlLowersGuaranteeBelowStrictCoreClosure)
         .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
     const auto authorization = std::move(policy_builder).build();
 
-    auto           store = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle           store = std::make_shared<InMemoryProgramStore>();
     ProgramCatalog catalog(CatalogConfig{store, snapshot, std::make_shared<EngineGenerationCache>(),
                                          "catalog-test/javascript-control/v1"});
     const auto     version = catalog.admit(
@@ -964,7 +972,7 @@ TEST(ProgramCatalogTest, ExtraDuplicateAndNonShaReceiptsRejectBeforeFactory) {
 TEST(ProgramCatalogTest, BindingReceiptRouteChangesVersionAndEngineGeneration) {
     factory_calls.store(0);
     auto           snapshot      = bound_registry();
-    auto           store         = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle           store         = std::make_shared<InMemoryProgramStore>();
     auto           engines       = std::make_shared<EngineGenerationCache>();
     auto           admission     = profile(snapshot);
     auto           authorization = policy(admission);
@@ -999,7 +1007,7 @@ TEST(ProgramCatalogTest, BindingReceiptRouteChangesVersionAndEngineGeneration) {
 TEST(ProgramCatalogTest, WorkerCountSeparatesOtherwiseIdenticalEngineGenerations) {
     factory_calls.store(0);
     auto       snapshot      = bound_registry();
-    auto       store         = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle       store         = std::make_shared<InMemoryProgramStore>();
     auto       engines       = std::make_shared<EngineGenerationCache>();
     auto       admission     = profile(snapshot);
     auto       authorization = policy(admission, BudgetLimits{1000, 100, 100, 4, 1, 20, 1, 1, 1});
@@ -1026,7 +1034,7 @@ TEST(ProgramCatalogTest, WorkerCountSeparatesOtherwiseIdenticalEngineGenerations
 
 TEST(ProgramCatalogTest, ResolveVersionIsOwnerScopedAndRebindsExactStoredReceipt) {
     auto           snapshot         = bound_registry();
-    auto           store            = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle           store            = std::make_shared<InMemoryProgramStore>();
     auto           original_engines = std::make_shared<EngineGenerationCache>();
     auto           admission        = profile(snapshot);
     auto           authorization    = policy(admission);
@@ -1186,7 +1194,7 @@ void cold_mixed_recovery(const MixedStoreOpener& open_store) {
     };
     const auto stored = [&] {
         const auto snapshot = mixed_registry(seen);
-        auto store = open_store();
+        ProgramStoreHandle store = open_store();
         auto engines = std::make_shared<EngineGenerationCache>();
         const auto bundle = compile_mixed(snapshot);
         ProgramVersion version = [&] {
@@ -1227,7 +1235,7 @@ void cold_mixed_recovery(const MixedStoreOpener& open_store) {
     ASSERT_EQ(providers.size(), 2U);
     for (const auto& provider : providers) EXPECT_TRUE(provider.expired());
     const auto snapshot = mixed_registry(seen);
-    auto store = open_store();
+    ProgramStoreHandle store = open_store();
     ProgramCatalog recovered(CatalogConfig{store, snapshot,
         std::make_shared<EngineGenerationCache>(), "catalog-test/v1", binder});
     EXPECT_FALSE(recovered.resolve_version("tenant:other", stored.id()).has_value());
@@ -1268,7 +1276,7 @@ void rejected_mixed_recovery(const MixedStoreOpener& open_store, bool wrong_prov
     EXPECT_EQ(requests.front(), mixed_requirements());
 
     const auto snapshot = mixed_registry(seen);
-    auto store = open_store();
+    ProgramStoreHandle store = open_store();
     auto engines = std::make_shared<EngineGenerationCache>();
     ProgramCatalog recovered(CatalogConfig{store, snapshot, engines, "catalog-test/v1",
         [&](const std::vector<ExecutableIdentity>& requested) {
@@ -1330,17 +1338,17 @@ private:
 }  // namespace
 
 TEST(ProgramCatalogTest, ColdRecoveryKeepsPerNodeCapabilityAttenuation) {
-    auto store = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle store = std::make_shared<InMemoryProgramStore>();
     cold_mixed_recovery([&] { return store; });
 }
 
 TEST(ProgramCatalogTest, RecoveredBindingWithWrongProviderFailsClosed) {
-    auto store = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle store = std::make_shared<InMemoryProgramStore>();
     rejected_mixed_recovery([&] { return store; }, true);
 }
 
 TEST(ProgramCatalogTest, RecoveredBindingWithWrongReceiptFailsClosed) {
-    auto store = std::make_shared<InMemoryProgramStore>();
+    ProgramStoreHandle store = std::make_shared<InMemoryProgramStore>();
     rejected_mixed_recovery([&] { return store; }, false);
 }
 
@@ -1809,14 +1817,14 @@ TEST(ProgramCatalogTest, SQLiteProgramStoreReopensActivationAndRetention) {
     const auto     version = fixture.catalog.admit(bundle, fixture.request());
 
     {
-        SQLiteProgramStore store(path);
+        OwnedProgramStore<SQLiteProgramStore> store(path);
         store.publish_admitted(bundle, version);
         EXPECT_EQ(store.compare_activate("tenant:catalog", 0, version.id(),
                                          version.policy_snapshot().fingerprint()),
                   ProgramActivationResult::Activated);
     }
     {
-        SQLiteProgramStore store(path);
+        OwnedProgramStore<SQLiteProgramStore> store(path);
         ASSERT_TRUE(store.get_bundle(bundle.id()).has_value());
         ASSERT_TRUE(store.get_version(version.id()).has_value());
         ASSERT_TRUE(store.get_version("tenant:catalog", version.id()).has_value());
@@ -1855,7 +1863,7 @@ TEST(ProgramCatalogTest, PostgreSQLProgramStoreReopensActivationAndOwnerVisibili
 
     std::uint64_t persisted_generation = 0;
     {
-        PostgreSQLProgramStore store(url);
+        OwnedProgramStore<PostgreSQLProgramStore> store(url);
         store.publish_admitted(bundle, version);
         const auto current = store.get_activation("tenant:catalog");
         const auto expected_generation = current ? current->generation() : std::uint64_t{0};
@@ -1869,7 +1877,7 @@ TEST(ProgramCatalogTest, PostgreSQLProgramStoreReopensActivationAndOwnerVisibili
                                                              : expected_generation;
     }
     {
-        PostgreSQLProgramStore store(url);
+        OwnedProgramStore<PostgreSQLProgramStore> store(url);
         ASSERT_TRUE(store.get_bundle(bundle.id()).has_value());
         ASSERT_TRUE(store.get_version(version.id()).has_value());
         ASSERT_TRUE(store.get_version("tenant:catalog", version.id()).has_value());
@@ -1896,6 +1904,7 @@ TEST(ProgramCatalogTest, PostgreSQLProgramStoreReopensActivationAndOwnerVisibili
 namespace {
 using neograph::program::test_support::CatalogWriteStage;
 using neograph::program::test_support::StoreBackend;
+using neograph::program::test_support::StoreCase;
 using neograph::program::test_support::StoreDeployment;
 
 constexpr const char* CATALOG_OWNER = "tenant:catalog";
@@ -1923,13 +1932,14 @@ struct ConformanceVersions {
     }
 };
 
-class ProgramStoreConformance : public ::testing::TestWithParam<StoreBackend> {
+class ProgramStoreConformance : public ::testing::TestWithParam<StoreCase> {
 protected:
     void SetUp() override {
-        if (const auto reason = neograph::program::test_support::backend_unavailable_reason(GetParam()))
+        if (const auto reason =
+                neograph::program::test_support::backend_unavailable_reason(GetParam().backend))
             GTEST_SKIP() << *reason;
-        deployment_.emplace(GetParam());
-        store_ = deployment_->program_store();
+        deployment_.emplace(GetParam().backend, GetParam().form);
+        store_ = deployment_->blocking_program_store();
     }
     void TearDown() override {
         store_.reset();
@@ -1937,17 +1947,18 @@ protected:
     }
 
     StoreDeployment& deployment() { return *deployment_; }
-    ProgramStore&    primary_store() { return *store_; }
-    std::shared_ptr<ProgramStore> second_store() { return deployment_->program_store(); }
+    // Called in the form of the case: through a synchronous store's own operations, or through its awaitable ones.
+    BlockingProgramStore&                 primary_store() { return *store_; }
+    std::shared_ptr<BlockingProgramStore> second_store() { return deployment_->blocking_program_store(); }
     // Closes the primary store and opens another over the same data, as after a process restart.
     void restart_store() {
         store_.reset();
-        store_ = deployment_->program_store();
+        store_ = deployment_->blocking_program_store();
     }
 
 private:
-    std::optional<StoreDeployment> deployment_;
-    std::shared_ptr<ProgramStore>  store_;
+    std::optional<StoreDeployment>        deployment_;
+    std::shared_ptr<BlockingProgramStore> store_;
 };
 
 constexpr const char* CATALOG_NOT_DURABLE =
@@ -1959,9 +1970,9 @@ constexpr const char* CATALOG_NO_FAULT_POINT =
 
 INSTANTIATE_TEST_SUITE_P(
     Backends, ProgramStoreConformance,
-    ::testing::ValuesIn(neograph::program::test_support::store_backends()),
-    [](const ::testing::TestParamInfo<StoreBackend>& info) {
-        return std::string(neograph::program::test_support::backend_name(info.param));
+    ::testing::ValuesIn(neograph::program::test_support::store_cases()),
+    [](const ::testing::TestParamInfo<StoreCase>& info) {
+        return neograph::program::test_support::case_name(info.param);
     });
 }  // namespace
 
@@ -1988,6 +1999,44 @@ TEST_P(ProgramStoreConformance, PublishedTupleIsReadableByItsOwnerOnly) {
     EXPECT_EQ(versions.front().id(), v.first.id());
     EXPECT_TRUE(store.list_versions("tenant:other").empty());
     EXPECT_THROW((void)store.list_versions(""), std::invalid_argument);
+}
+
+// The awaitable operations, called from a coroutine on the host's executor, give the answers the blocking form gives.
+TEST_P(ProgramStoreConformance, AnAwaitingCoroutineSeesTheAnswersOfTheBlockingForm) {
+    if (GetParam().form == neograph::program::test_support::StoreForm::Awaited)
+        GTEST_SKIP() << "every call of the Awaited form is an awaitable call";
+    const auto                raw = primary_store().store();
+    const ConformanceVersions v;
+
+    std::optional<ProgramVersion> version;
+    std::optional<ProgramBundle>  bundle;
+    std::optional<ProgramVersion> foreign;
+    std::size_t                   listed = 0;
+    std::exception_ptr            failure;
+    asio::io_context              io;
+    asio::co_spawn(
+        io,
+        [&]() -> asio::awaitable<void> {
+            co_await raw->publish_admitted(v.bundle, v.first);
+            version = co_await raw->get_version(v.first.id());
+            bundle  = co_await raw->get_bundle(v.bundle.id());
+            foreign = co_await raw->get_version("tenant:other", v.first.id());
+            listed  = (co_await raw->list_versions(CATALOG_OWNER)).size();
+        },
+        [&](std::exception_ptr error) { failure = error; });
+    io.run();
+    if (failure) std::rethrow_exception(failure);
+
+    ASSERT_TRUE(version);
+    ASSERT_TRUE(bundle);
+    EXPECT_FALSE(foreign);
+    EXPECT_EQ(listed, 1U);
+    EXPECT_EQ(version->serialize_canonical(), v.first.serialize_canonical());
+    EXPECT_EQ(bundle->serialize_canonical(), v.bundle.serialize_canonical());
+    // What the coroutine published is what a blocking read gives afterwards.
+    const auto blocking = primary_store().get_version(v.first.id());
+    ASSERT_TRUE(blocking);
+    EXPECT_EQ(blocking->serialize_canonical(), v.first.serialize_canonical());
 }
 
 TEST_P(ProgramStoreConformance, RepublishingTheSameTupleIsIdempotent) {
@@ -2053,7 +2102,7 @@ TEST_P(ProgramStoreConformance, ConcurrentActivationHasOneWinner) {
     store.publish_admitted(v.bundle, v.second);
 
     std::barrier ready(3);
-    auto         activate = [&](ProgramStore& writer, const ProgramVersion& version) {
+    auto         activate = [&](BlockingProgramStore& writer, const ProgramVersion& version) {
         ready.arrive_and_wait();
         return writer.compare_activate(CATALOG_OWNER, 0, version.id(),
                                        ConformanceVersions::policy_hash(version));

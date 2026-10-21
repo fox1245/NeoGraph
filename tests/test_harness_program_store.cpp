@@ -17,9 +17,12 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include "fixtures/store_handle.h"
 #if defined(__linux__)
 #include <sys/wait.h>
 #endif
+
+using neograph::program::test_support::TransitionStoreHandle;
 
 
 namespace {
@@ -579,7 +582,7 @@ std::shared_ptr<program::ProgramTransitionStore> persist_and_bind(
     HarnessBoundedProgramStore bounded(
         store, fixture.artifact.artifact_id(), fixture.artifact.owner_scope(),
         fixture.artifact.invocation_template(), fixture.artifact.projection());
-    bounded.publish_admitted(fixture.bundle_value, fixture.version_value);
+    bounded.publish_admitted_sync(fixture.bundle_value, fixture.version_value);
     return require_harness_program_adapter_store(store)->bind_program_transitions(fixture.artifact);
 }
 
@@ -651,7 +654,7 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
     auto    initial = initial_publication(fixture);
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
         EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
@@ -685,7 +688,7 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
             fixture.artifact.invocation_template(), fixture.artifact.projection());
         const auto artifact = bounded.load_artifact();
         ASSERT_TRUE(artifact);
-        auto transitions = capability->bind_program_transitions(*artifact);
+        TransitionStoreHandle transitions = capability->bind_program_transitions(*artifact);
         ASSERT_TRUE(transitions->load(fixture.artifact.owner_scope(), "run-one"));
         ASSERT_TRUE(transitions->latest(fixture.artifact.owner_scope(), "run-one"));
         EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-one").size(), 1U);
@@ -704,8 +707,8 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
         HarnessBoundedProgramStore target_bounded(
             store, target_artifact.artifact_id(), target_artifact.owner_scope(),
             target_artifact.invocation_template(), target_artifact.projection());
-        target_bounded.publish_admitted(fixture.bundle_value, fixture.version_value);
-        const auto target_transitions = capability->bind_program_transitions(target_artifact);
+        target_bounded.publish_admitted_sync(fixture.bundle_value, fixture.version_value);
+        TransitionStoreHandle target_transitions = capability->bind_program_transitions(target_artifact);
         EXPECT_TRUE(target_transitions->load(fixture.artifact.owner_scope(), "run-one"));
 
         ASSERT_TRUE(store->load_run("legacy-run"));
@@ -721,7 +724,7 @@ TEST(HarnessProgramStoreTest, SqliteContextPublicationRollsBackReopensAndRejects
 
     {
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         store->fail_next_program_transition_for_testing(
             SqliteHarnessProgramFaultPoint::AfterContextWrite);
         EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, publication),
@@ -733,7 +736,7 @@ TEST(HarnessProgramStoreTest, SqliteContextPublicationRollsBackReopensAndRejects
 
     {
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = require_harness_program_adapter_store(store)
+        TransitionStoreHandle transitions = require_harness_program_adapter_store(store)
                                ->bind_program_transitions(fixture.artifact);
         const auto contexts = transitions->load_context_publications(
             fixture.artifact.owner_scope(), publication.run_record.run_id());
@@ -746,7 +749,7 @@ TEST(HarnessProgramStoreTest, SqliteContextPublicationRollsBackReopensAndRejects
     sqlite_exec(db.path,
                 "UPDATE neograph_harness_program_context_publications SET sequence=2;");
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = require_harness_program_adapter_store(store)
+    TransitionStoreHandle transitions = require_harness_program_adapter_store(store)
                            ->bind_program_transitions(fixture.artifact);
     EXPECT_THROW((void)transitions->load_context_publications(
                      fixture.artifact.owner_scope(), publication.run_record.run_id()),
@@ -762,7 +765,7 @@ TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) 
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source),
                   ProgramTransitionPublishResult::Published);
         ASSERT_TRUE(transitions->load_lineage(fixture.artifact.owner_scope(), lineage_id));
@@ -771,7 +774,7 @@ TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) 
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = require_harness_program_adapter_store(store)
+        TransitionStoreHandle transitions = require_harness_program_adapter_store(store)
                                ->bind_program_transitions(fixture.artifact);
         const auto previous = transitions->load_lineage(fixture.artifact.owner_scope(), lineage_id);
         ASSERT_TRUE(previous);
@@ -786,7 +789,7 @@ TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) 
     }
 
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = require_harness_program_adapter_store(reopened)
+    TransitionStoreHandle transitions = require_harness_program_adapter_store(reopened)
                            ->bind_program_transitions(fixture.artifact);
     const auto head = transitions->load_lineage(fixture.artifact.owner_scope(), lineage_id);
     ASSERT_TRUE(head);
@@ -843,11 +846,11 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto source_transitions = persist_and_bind(store, source_fixture);
+        TransitionStoreHandle source_transitions = persist_and_bind(store, source_fixture);
         ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {},
                                                       source),
                   ProgramTransitionPublishResult::Published);
-        auto target_transitions = persist_and_bind(store, target_fixture);
+        TransitionStoreHandle target_transitions = persist_and_bind(store, target_fixture);
         EXPECT_FALSE(source_transitions->process_coordination_key().empty());
         EXPECT_EQ(source_transitions->process_coordination_key(),
                   target_transitions->process_coordination_key());
@@ -860,7 +863,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = require_harness_program_adapter_store(store)
+        TransitionStoreHandle transitions = require_harness_program_adapter_store(store)
                                ->bind_program_transitions(target_fixture.artifact);
         EXPECT_FALSE(
             transitions->load(target_fixture.artifact.owner_scope(), "lineage-successor"));
@@ -881,7 +884,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
                 "UPDATE neograph_harness_schema SET version=6 WHERE singleton=1;");
 
     auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = require_harness_program_adapter_store(store)
+    TransitionStoreHandle transitions = require_harness_program_adapter_store(store)
                            ->bind_program_transitions(target_fixture.artifact);
     const auto head =
         transitions->load_lineage(target_fixture.artifact.owner_scope(), lineage_id);
@@ -946,10 +949,10 @@ TEST(HarnessProgramStoreTest, SqliteReplacementRejectsMissingPredecessorArtifact
                                  source.run_record, source.commands.back());
 
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto source_transitions = persist_and_bind(store, source_fixture);
+    TransitionStoreHandle source_transitions = persist_and_bind(store, source_fixture);
     ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {}, source),
               ProgramTransitionPublishResult::Published);
-    auto target_transitions = persist_and_bind(store, target_fixture);
+    TransitionStoreHandle target_transitions = persist_and_bind(store, target_fixture);
     sqlite_exec(db.path,
                 "PRAGMA foreign_keys=OFF; DELETE FROM neograph_harness_artifacts "
                 "WHERE artifact_id='artifact-one';");
@@ -978,7 +981,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source_start),
                   ProgramTransitionPublishResult::Published);
         auto source = publication_with_effect(fixture, source_start);
@@ -1053,7 +1056,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     }
 
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = require_harness_program_adapter_store(reopened)
+    TransitionStoreHandle transitions = require_harness_program_adapter_store(reopened)
                            ->bind_program_transitions(fixture.artifact);
     const auto source =
         transitions->load_run_lineage(fixture.artifact.owner_scope(), "fork-source");
@@ -1086,7 +1089,7 @@ TEST(HarnessProgramStoreTest, SqliteReopenSurvivesNewProcessExec) {
             capability->resolve_program_run(fixture.artifact.owner_scope(), "run-exec");
         ASSERT_TRUE(resolved);
         EXPECT_EQ(resolved->run_record().run_id(), "run-exec");
-        auto transitions = capability->bind_program_transitions(fixture.artifact);
+        TransitionStoreHandle transitions = capability->bind_program_transitions(fixture.artifact);
         ASSERT_TRUE(transitions->load(fixture.artifact.owner_scope(), "run-exec"));
         EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-exec").size(), 1U);
         return;
@@ -1097,7 +1100,7 @@ TEST(HarnessProgramStoreTest, SqliteReopenSurvivesNewProcessExec) {
     auto    initial = initial_publication(fixture, "run-exec");
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
     }
@@ -1129,7 +1132,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
     if (const auto* child_db = std::getenv("NEOGRAPH_SQLITE_CRASH_DB")) {
         Fixture fixture;
         auto    store = std::make_shared<SqliteHarnessRecordStore>(child_db);
-        auto    transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle    transitions = persist_and_bind(store, fixture);
         const auto initial = initial_publication(fixture, "run-crash");
         auto terminal = terminal_publication(
             fixture, initial, ProgramTerminalStatus::Completed, ContinuationState::Completed, 20);
@@ -1149,7 +1152,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
     const auto initial = initial_publication(fixture, "run-crash");
     {
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
     }
@@ -1175,7 +1178,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
     EXPECT_EQ(WEXITSTATUS(status), 128 + SIGKILL);
 
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = persist_and_bind(reopened, fixture);
+    TransitionStoreHandle transitions = persist_and_bind(reopened, fixture);
     const auto latest = transitions->latest(fixture.artifact.owner_scope(), "run-crash");
     ASSERT_TRUE(latest);
     EXPECT_EQ(latest->id, initial.journal_record.id);
@@ -1196,7 +1199,7 @@ TEST(HarnessProgramStoreTest, SqliteProgramTransitionsEnforceOwnerScope) {
     TempDb  db;
     Fixture fixture;
     auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto    transitions = persist_and_bind(store, fixture);
+    TransitionStoreHandle    transitions = persist_and_bind(store, fixture);
     auto    initial     = initial_publication(fixture);
 
     ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
@@ -1217,7 +1220,7 @@ TEST(HarnessProgramStoreTest, SqliteCommandlessRunningCheckpointRequiresHostEvid
     TempDb  db;
     Fixture fixture;
     auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto    transitions = persist_and_bind(store, fixture);
+    TransitionStoreHandle    transitions = persist_and_bind(store, fixture);
     auto    initial     = initial_lineage_publication(fixture);
     ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
               ProgramTransitionPublishResult::Published);
@@ -1239,7 +1242,7 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
     TempDb db;
     Fixture fixture;
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = persist_and_bind(store, fixture);
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
     auto initial = initial_lineage_publication(fixture);
     const auto lease = execution_lease(initial);
     ASSERT_EQ(transitions->compare_publish_execution(
@@ -1276,7 +1279,7 @@ TEST(HarnessProgramStoreTest, SqlitePublishesAnInitiallyAmbiguousEffect) {
     TempDb db;
     Fixture fixture;
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions = persist_and_bind(store, fixture);
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
     const auto initial = initial_publication(fixture);
     ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
               ProgramTransitionPublishResult::Published);
@@ -1298,7 +1301,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublic
     TempDb db;
     Fixture fixture;
     auto writer_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto writer = persist_and_bind(writer_store, fixture);
+    TransitionStoreHandle writer = persist_and_bind(writer_store, fixture);
     const auto initial = initial_publication(fixture);
     ASSERT_EQ(writer->compare_publish(fixture.artifact.owner_scope(), {}, initial),
               ProgramTransitionPublishResult::Published);
@@ -1306,7 +1309,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublic
                                                 ContinuationState::Completed, 20);
 
     auto reader_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto reader = reader_store->bind_program_transitions(fixture.artifact);
+    TransitionStoreHandle reader = reader_store->bind_program_transitions(fixture.artifact);
     {
         // Commit through another WAL connection while latest() holds a run row.
         // The reader must finish on that snapshot, then see the new head on its
@@ -1335,7 +1338,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestRejectsMissingOrMisboundJournal) {
         TempDb db;
         Fixture fixture;
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         const auto initial = initial_publication(fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
@@ -1351,7 +1354,7 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
     TempDb  db;
     Fixture fixture;
     auto    first_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto    first       = persist_and_bind(first_store, fixture);
+    TransitionStoreHandle    first       = persist_and_bind(first_store, fixture);
     auto    initial     = initial_publication(fixture);
     ASSERT_EQ(first->compare_publish(fixture.artifact.owner_scope(), {}, initial),
               ProgramTransitionPublishResult::Published);
@@ -1367,15 +1370,15 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
               initial.journal_record.id);
 
     auto second_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto second       = require_harness_program_adapter_store(second_store)
+    TransitionStoreHandle second       = require_harness_program_adapter_store(second_store)
                       ->bind_program_transitions(fixture.artifact);
     auto completed = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
                                           ContinuationState::Completed, 20);
     auto failed    = terminal_publication(fixture, initial, ProgramTerminalStatus::Failed,
                                           ContinuationState::Failed, 21);
     std::barrier ready(3);
-    auto         publish = [&](const std::shared_ptr<ProgramTransitionStore>& store,
-                       ProgramTransitionPublication                   value) {
+    auto         publish = [&](const TransitionStoreHandle& store,
+                       ProgramTransitionPublication  value) {
         ready.arrive_and_wait();
         return store->compare_publish(fixture.artifact.owner_scope(), initial.journal_record.id,
                                               std::move(value));
@@ -1395,7 +1398,7 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
     first_store.reset();
     second_store.reset();
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions =
+    TransitionStoreHandle transitions =
         require_harness_program_adapter_store(reopened)->bind_program_transitions(fixture.artifact);
     const auto run = transitions->load(fixture.artifact.owner_scope(), "run-one");
     ASSERT_TRUE(run);
@@ -1418,7 +1421,7 @@ TEST(HarnessProgramStoreTest, SqlitePublicationFaultsRollbackAllRowsAcrossReconn
     for (const auto point : points) {
         TempDb db;
         auto   store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         auto initial     = initial_publication(fixture, "run-effect");
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
@@ -1433,7 +1436,7 @@ TEST(HarnessProgramStoreTest, SqlitePublicationFaultsRollbackAllRowsAcrossReconn
         transitions.reset();
         store.reset();
         auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto recovered =
+        TransitionStoreHandle recovered =
             require_harness_program_adapter_store(reopened)->bind_program_transitions(
                 fixture.artifact);
         EXPECT_TRUE(recovered->load(fixture.artifact.owner_scope(), "run-effect"));
@@ -1463,7 +1466,7 @@ TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {
         TempDb db;
         {
             auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-            auto transitions = persist_and_bind(store, fixture);
+            TransitionStoreHandle transitions = persist_and_bind(store, fixture);
             auto initial     = initial_publication(fixture);
             ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                       ProgramTransitionPublishResult::Published);
@@ -1479,14 +1482,14 @@ TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {
         TempDb db;
         {
             auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-            auto transitions = persist_and_bind(store, fixture);
+            TransitionStoreHandle transitions = persist_and_bind(store, fixture);
             auto initial     = initial_publication(fixture);
             ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                       ProgramTransitionPublishResult::Published);
         }
         sqlite_exec(db.path, "DELETE FROM neograph_harness_program_events");
         auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions =
+        TransitionStoreHandle transitions =
             require_harness_program_adapter_store(reopened)->bind_program_transitions(
                 fixture.artifact);
         EXPECT_THROW((void)transitions->load(fixture.artifact.owner_scope(), "run-one"),
@@ -1508,13 +1511,13 @@ TEST(HarnessProgramStoreTest, SqliteDurablyLoadsJavaScriptCommandJournalByOwnerA
 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-        auto transitions = persist_and_bind(store, fixture);
+        TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
                   ProgramTransitionPublishResult::Published);
     }
 
     auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
-    auto transitions =
+    TransitionStoreHandle transitions =
         require_harness_program_adapter_store(reopened)->bind_program_transitions(fixture.artifact);
     const auto commands =
         transitions->load_javascript_commands(fixture.artifact.owner_scope(), "run-command");

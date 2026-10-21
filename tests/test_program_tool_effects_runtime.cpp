@@ -48,6 +48,11 @@
 #include <thread>
 #include <tuple>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::GrantStoreHandle;
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 
@@ -420,10 +425,10 @@ private:
     std::unique_ptr<LedgerTool> tool_;
     std::unique_ptr<LedgerTool> foreign_tool_;
     std::shared_ptr<SQLiteToolEffectBroker> broker_;
-    std::shared_ptr<SQLiteProgramStore> program_store_;
-    std::shared_ptr<SQLiteProgramTransitionStore> transitions_;
+    ProgramStoreHandle program_store_;
+    TransitionStoreHandle transitions_;
     std::shared_ptr<graph::SqliteCheckpointStore> checkpoints_;
-    std::shared_ptr<SQLiteProgramCoreToolGrantStore> grant_store_;
+    GrantStoreHandle grant_store_;
     std::shared_ptr<EngineGenerationCache> engines_;
     std::shared_ptr<ProgramCatalog> catalog_;
     std::optional<ProgramVersion> version_;

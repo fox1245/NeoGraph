@@ -398,43 +398,43 @@ private:
     std::map<std::string, json>                      a_, r_;
     std::shared_ptr<program::ProgramTransitionStore> transitions_;
 };
-class ForkProgramStore final : public program::ProgramStore {
+class ForkProgramStore final : public program::SyncProgramStore {
 public:
     ForkProgramStore(std::shared_ptr<program::ProgramStore> target,
                      program::ProgramBundle                 source_bundle,
                      program::ProgramVersion                source_version)
-        : target_(std::move(target)),
+        : target_(std::make_shared<program::BlockingProgramStore>(std::move(target))),
           source_bundle_(std::move(source_bundle)),
           source_version_(std::move(source_version)) {}
-    void publish_admitted(const program::ProgramBundle&  bundle,
+    void publish_admitted_sync(const program::ProgramBundle&  bundle,
                           const program::ProgramVersion& version) override {
         target_->publish_admitted(bundle, version);
     }
-    std::optional<program::ProgramBundle> get_bundle(std::string_view id) const override {
+    std::optional<program::ProgramBundle> get_bundle_sync(std::string_view id) const override {
         if (id == source_bundle_.id()) return source_bundle_;
         return target_->get_bundle(id);
     }
-    std::optional<program::ProgramVersion> get_version(std::string_view id) const override {
+    std::optional<program::ProgramVersion> get_version_sync(std::string_view id) const override {
         if (id == source_version_.id()) return source_version_;
         return target_->get_version(id);
     }
 
 private:
-    std::shared_ptr<program::ProgramStore> target_;
+    std::shared_ptr<program::BlockingProgramStore> target_;
     program::ProgramBundle                 source_bundle_;
     program::ProgramVersion                source_version_;
 };
-class ForkProgramTransitionStore final : public program::ProgramTransitionStore {
+class ForkProgramTransitionStore final : public program::SyncProgramTransitionStore {
 public:
     ForkProgramTransitionStore(std::string                                      source_run_id,
                                std::shared_ptr<program::ProgramTransitionStore> source,
                                std::shared_ptr<program::ProgramTransitionStore> target)
-        : source_run_id_(std::move(source_run_id)),
-          source_(std::move(source)),
-          target_(std::move(target)) {
-        if (source_run_id_.empty() || !source_ || !target_) {
+        : source_run_id_(std::move(source_run_id)) {
+        if (source_run_id_.empty() || !source || !target) {
             throw std::invalid_argument("incomplete Program fork transition stores");
         }
+        source_ = std::make_shared<program::BlockingProgramTransitionStore>(std::move(source));
+        target_ = std::make_shared<program::BlockingProgramTransitionStore>(std::move(target));
     }
 
     std::string process_coordination_key() const override {
@@ -443,55 +443,55 @@ public:
         return !source_key.empty() && source_key == target_key ? source_key : std::string{};
     }
 
-    std::optional<program::ProgramRunRecord> load(std::string_view owner_scope,
+    std::optional<program::ProgramRunRecord> load_sync(std::string_view owner_scope,
                                                   std::string_view run_id) const override {
         return select(run_id).load(owner_scope, run_id);
     }
-    std::optional<program::ProgramJournalRecord> latest(std::string_view owner_scope,
+    std::optional<program::ProgramJournalRecord> latest_sync(std::string_view owner_scope,
                                                         std::string_view run_id) const override {
         return select(run_id).latest(owner_scope, run_id);
     }
-    std::vector<program::ProgramEvent> load_events(std::string_view owner_scope,
+    std::vector<program::ProgramEvent> load_events_sync(std::string_view owner_scope,
                                                    std::string_view run_id,
                                                    std::uint64_t    after_sequence) const override {
         return select(run_id).load_events(owner_scope, run_id, after_sequence);
     }
-    std::vector<program::ProgramEffectOutboxEntry> load_effects(
+    std::vector<program::ProgramEffectOutboxEntry> load_effects_sync(
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence) const override {
         return select(run_id).load_effects(owner_scope, run_id, after_sequence);
     }
-    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<program::ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner_scope,
         std::string_view run_id,
         std::uint64_t    after_sequence) const override {
         return select(run_id).load_javascript_commands(owner_scope, run_id, after_sequence);
     }
-    std::vector<program::ProgramContextPublication> load_context_publications(
+    std::vector<program::ProgramContextPublication> load_context_publications_sync(
         std::string_view owner_scope, std::string_view run_id,
         std::uint64_t after_sequence) const override {
         return select(run_id).load_context_publications(owner_scope, run_id, after_sequence);
     }
-    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_hook_outbox_entries(owner_scope, run_id);
     }
-    std::optional<program::MigrationPlan> load_migration_plan(
+    std::optional<program::MigrationPlan> load_migration_plan_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_migration_plan(owner_scope, run_id);
     }
-    std::optional<program::ProgramRunLineage> load_lineage(
+    std::optional<program::ProgramRunLineage> load_lineage_sync(
         std::string_view owner_scope, std::string_view lineage_id) const override {
         if (const auto target = target_->load_lineage(owner_scope, lineage_id)) return target;
         return source_->load_lineage(owner_scope, lineage_id);
     }
-    std::optional<program::ProgramRunLineage> load_run_lineage(
+    std::optional<program::ProgramRunLineage> load_run_lineage_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (const auto target = target_->load_run_lineage(owner_scope, run_id)) return target;
         return source_->load_run_lineage(owner_scope, run_id);
     }
-    std::optional<program::ProgramRunLineage> load_lineage_head(
+    std::optional<program::ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::string_view head_id) const override {
@@ -499,7 +499,7 @@ public:
             return target;
         return source_->load_lineage_head(owner_scope, lineage_id, head_id);
     }
-    std::optional<program::ProgramRunGeneration> load_generation(
+    std::optional<program::ProgramRunGeneration> load_generation_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override {
@@ -507,7 +507,7 @@ public:
             return target;
         return source_->load_generation(owner_scope, lineage_id, generation);
     }
-    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication(
+    std::optional<program::ProgramTransitionPublication> load_generation_initial_publication_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override {
@@ -517,25 +517,25 @@ public:
         }
         return source_->load_generation_initial_publication(owner_scope, lineage_id, generation);
     }
-    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<program::GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner_scope,
         std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
         return select(source_run_id).load_graph_migration_capsule(
             owner_scope, source_run_id, source_lineage_head_id);
     }
-    std::optional<program::ProgramExecutionLease> load_execution_lease(
+    std::optional<program::ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope,
         std::string_view run_id) const override {
         return select(run_id).load_execution_lease(owner_scope, run_id);
     }
-    program::ProgramTransitionPublishResult compare_publish(
+    program::ProgramTransitionPublishResult compare_publish_sync(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
         program::ProgramTransitionPublication publication) override {
         return target_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
     }
-    program::ProgramTransitionPublishResult compare_publish_execution(
+    program::ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         program::ProgramTransitionPublication publication,
@@ -545,7 +545,7 @@ public:
             owner_scope, expected_journal_head, std::move(publication),
             std::move(expected_lease), std::move(next_lease));
     }
-    program::ProgramTransitionPublishResult compare_publish_graph_safe_point(
+    program::ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         program::ProgramTransitionPublication publication,
@@ -558,13 +558,13 @@ public:
     }
 
 private:
-    program::ProgramTransitionStore& select(std::string_view run_id) const {
+    const program::BlockingProgramTransitionStore& select(std::string_view run_id) const {
         return run_id == source_run_id_ ? *source_ : *target_;
     }
 
-    std::string                                      source_run_id_;
-    std::shared_ptr<program::ProgramTransitionStore> source_;
-    std::shared_ptr<program::ProgramTransitionStore> target_;
+    std::string                                               source_run_id_;
+    std::shared_ptr<program::BlockingProgramTransitionStore> source_;
+    std::shared_ptr<program::BlockingProgramTransitionStore> target_;
 };
 
 json diagnostics(const std::vector<program::Diagnostic>& values) {
@@ -1033,10 +1033,12 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
         }
         auto invocation_template = x->record.invocation_template();
         if (fork_source) {
+            // The Harness is a synchronous host: it reads the stores through their blocking view.
+            const program::BlockingProgramTransitionStore source_view(*fork_source_transitions);
             const auto source_record =
-                fork_source_transitions->load(resources.owner_scope, fork_source->source_run_id);
+                source_view.load(resources.owner_scope, fork_source->source_run_id);
             if (!source_record) return {{"started", false}, {"status", "not_found"}};
-            const auto source_lineage = fork_source_transitions->load_run_lineage(
+            const auto source_lineage = source_view.load_run_lineage(
                 resources.owner_scope, fork_source->source_run_id);
             if (!source_lineage)
                 return {{"started", false}, {"status", "lineage_unavailable"}};
@@ -1057,8 +1059,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             const auto source_handle = retained_handle(replay_source);
             if (mode == "recorded_replay" && !source_handle.try_result())
                 return {{"started", false}, {"status", "source_not_terminal"}};
-            const auto source_transitions = transitions(x->record);
-            const auto source_lineage = source_transitions->load_run_lineage(
+            const auto                                   source_store = transitions(x->record);
+            const program::BlockingProgramTransitionStore source_transitions(*source_store);
+            const auto source_lineage = source_transitions.load_run_lineage(
                 resources.owner_scope, source_handle.run_id());
             if (!source_lineage)
                 return {{"started", false}, {"status", "lineage_unavailable"}};
@@ -1066,7 +1069,7 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
             // separately and atomically transfers only the retained remainder.
             if (mode == "recorded_replay") {
                 const auto source_record =
-                    source_transitions->load(resources.owner_scope, source_handle.run_id());
+                    source_transitions.load(resources.owner_scope, source_handle.run_id());
                 if (!source_record) return {{"started", false}, {"status", "not_found"}};
                 invocation_template.input = source_record->invocation().input;
                 invocation_template.budget = source_record->invocation().budget;
@@ -1322,8 +1325,9 @@ struct HarnessService::Impl : std::enable_shared_from_this<HarnessService::Impl>
                                                 {"operation_id", record.continuation().operation_id},
                                                 {"attempt", record.continuation().attempt},
                                                 {"remaining_budget", budget_json(record.remaining_budget())}};
-        if (const auto lineage = transitions(artifact(x->artifact_id)->record)->load_run_lineage(
-                resources.owner_scope, record.run_id()))
+        const auto lineage_store = transitions(artifact(x->artifact_id)->record);
+        if (const auto lineage = program::BlockingProgramTransitionStore(*lineage_store)
+                                     .load_run_lineage(resources.owner_scope, record.run_id()))
             r["remaining_budget"] = budget_json(lineage->remaining_budget());
         r["artifact_id"]      = x->artifact_id;
         r["revision_digest"]  = record.program_version_id();

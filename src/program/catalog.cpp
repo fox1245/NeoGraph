@@ -912,7 +912,7 @@ struct ProgramCatalog::Impl {
          std::string                            host,
          std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
              recorded_binder)
-        : program_store(std::move(store)),
+        : program_store(std::make_shared<BlockingProgramStore>(std::move(store))),
           registry(std::move(registry_snapshot)),
           engines(std::move(engine_cache)),
           compiler_build_id(std::move(build_id)),
@@ -921,9 +921,14 @@ struct ProgramCatalog::Impl {
           materialization_context_identity(std::move(context_identity)),
           module_store(std::move(modules)),
           host_identity(std::move(host)),
-          recorded_capability_binder(std::move(recorded_binder)) {}
+          recorded_capability_binder(std::move(recorded_binder)) {
+        // Only reads of the store are called, so a view of a const store is safe.
+        if (module_store)
+            module_reads = std::make_shared<BlockingModuleStore>(
+                std::const_pointer_cast<ModuleStore>(module_store));
+    }
 
-    std::shared_ptr<ProgramStore>          program_store;
+    std::shared_ptr<BlockingProgramStore>  program_store;
     RegistrySnapshot                       registry;
     std::shared_ptr<EngineGenerationCache> engines;
     std::string                            compiler_build_id;
@@ -931,6 +936,7 @@ struct ProgramCatalog::Impl {
     std::size_t                            worker_count = 1;
     std::string                            materialization_context_identity;
     std::shared_ptr<const ModuleStore>     module_store;
+    std::shared_ptr<BlockingModuleStore>   module_reads;
     std::string                            host_identity;
     std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
         recorded_capability_binder;
@@ -1173,7 +1179,7 @@ ProgramVersion ProgramCatalog::materialize(
                 if (!coordinate_keys.insert(key).second) continue;
                 expected_receipts.emplace(coordinate.qualified_name(), coordinate.content_identity);
                 const auto module =
-                    impl_->module_store->get(admission.owner_scope, coordinate.content_identity);
+                    impl_->module_reads->get(admission.owner_scope, coordinate.content_identity);
                 if (!module) {
                     diagnostics.add("P_ADMIT_DEPENDENCY", "/module_coordinates",
                                     "Pinned module is unavailable in the admitting owner scope",
