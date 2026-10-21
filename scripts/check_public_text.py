@@ -23,8 +23,11 @@ Rules (name: what it finds)
   private-repo-link         a link to a private repository, or to any repository
                             under the project's GitHub handle that is not one of
                             the public repositories listed in PUBLIC_REPOS
-  internal-process-wording  wording that refers to an internal decision-making
-                            process or internal tooling
+  internal-process-wording  wording that refers to internal tooling
+  owner-intent              text that narrates what the owner or maintainer
+                            decided, approved, asked or planned
+  review-process            text that narrates how a decision was reached by a
+                            review panel, a roundtable or a vote of seats
   home-path                 a personal home directory such as /home/<name>/
   external-ip               a globally routable IPv4 or IPv6 literal
   secret-shaped             a string shaped like an API key, token or private key
@@ -38,14 +41,16 @@ Out of scope: deps/, THIRD_PARTY_LICENSES*, node_modules/, lock files, the
 *.schema.json and *.proto copies under bindings/python/tests/interop/*/spec/,
 and binary files.
 
+Documents (Markdown, docs/, README*, CHANGELOG*, and their translations) are
+scanned like code: the default scope is "all", and so is the ctest entry
+public_text_guard. A legitimate use of a flagged wording is a justified
+exception; --scope code scans everything else and is for quick local runs.
+
 Justified exceptions live in scripts/public_text_allowlist.txt, one per line:
 "path-glob<TAB>rule<TAB>reason". The reason is required. A fixture that needs a
-fake key or a sample address is allowlisted for that path; the rule itself is
-never loosened to let it through.
-
---scope code limits a scan to files that are not documents (Markdown, docs/,
-README*, CHANGELOG*). tests/CMakeLists.txt uses it until the documents are
-clean; see NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS there.
+fake key or a sample address, a shipped feature whose name is a flagged word, or
+a literature citation is allowlisted for that path; the rule itself is never
+loosened to let it through.
 """
 
 from __future__ import annotations
@@ -267,6 +272,51 @@ _SECRET = re.compile(
     r"|-----BEGIN (?:[A-Z]+ )*PRIVATE KEY(?: BLOCK)?-----"
 )
 
+_OWNER = r"(?:owner|maintainer)"
+
+# Text that narrates what the owner or maintainer decided, approved, asked or planned. The code
+# senses of "owner" (a Program owner scope, a lease owner, a copyright owner) are not matched:
+# every shape needs a determiner, a possessive, a decision noun or a decision verb next to it.
+_OWNER_INTENT = re.compile(
+    r"\b(?:the|our|its|their|project|repository|repo|release)[ -]" + _OWNER + r"s?(?:['’]s)?\s+"
+    r"(?:(?:has|have|had|then|also|later|finally|again)\s+)?"
+    r"(?:decided|decides|approved|approves|asked|asks|requested|requests|chose|chooses|reversed|"
+    r"reverses|plans|planned|wants|wanted|said|instructed|accepted|accepts|settled|clarified|"
+    r"confirmed|confirms|authori[sz]ed|prefers|preferred|insisted|rejected|rejects|agreed)\b"
+    r"|(?<![A-Za-z0-9_])the " + _OWNER + r"['’]s\b"
+    r"|\b" + _OWNER + r"['’]s\s+(?:own\s+)?(?:decision|decisions|instruction|instructions|call|"
+    r"approval|request|choice|intent|intention|plan|plans|priority|priorities|direction|wish|"
+    r"rule|principle|input|opinion|sign-?off|veto|mandate|consent|ruling|preference)\b"
+    r"|\b" + _OWNER + r"-(?:approved|requested|decided|authori[sz]ed|chosen|defined|local|mandated|"
+    r"directed|specified|selected|priority|input)\b"
+    r"|\b" + _OWNER + r"[ ](?:decision|decisions|approval|instruction|instructions|input|"
+    r"confirmation|priority|priorities|direction)\b"
+    r"|\b(?:following|per) the " + _OWNER + r"\b"
+    r"|\bas (?:the )?" + _OWNER + r" (?:requested|asked|decided|instructed)\b",
+    re.IGNORECASE,
+)
+
+_NUMBER_WORD = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|twelve)"
+
+# Text that narrates how a decision was reached by a panel of reviewers: a roundtable, a review
+# panel, seats and votes. The localized words are for the translations of the documents.
+_REVIEW_PROCESS = re.compile(
+    r"round[- ]?tables?\b"
+    r"|\breview[- ]panels?\b|\bpanell?ists?\b|\bexpert panel\b"
+    r"|\b" + _NUMBER_WORD + r"\s+of\s+" + _NUMBER_WORD + r"\s+(?:seats?|votes?|reviewers)\b"
+    r"|\b" + _NUMBER_WORD + r"[- ]seats?\b|\bseats? (?:count|tally)\b"
+    r"|\b(?:the|a|our) panel (?:voted|recommends?|recommended|decided|settled|agreed)\b"
+    r"|\bmodel[- ]famil(?:y|ies)\b"
+    r"|\b(?:design|code|security) reviews? (?:from|by|with|over) (?:\w+ ){0,3}(?:angles|seats|rounds|"
+    r"perspectives|panel)\b"
+    r"|\b" + _NUMBER_WORD + r"[- ]round (?:design |code )?(?:review|panel)\b"
+    r"|\bdecision brief\b|\bpersonas? whose argument\b"
+    r"|\b(?:codex|astra|haiku)[ -](?:review|reviewer|reviewers|audit)s?\b"
+    r"|\b(?:reviewed|audited) by (?:codex|astra|haiku)\b"
+    r"|원탁회의|라운드테이블|円卓会議|ラウンドテーブル|圆桌会议|圆桌",
+    re.IGNORECASE,
+)
+
 RULES: Tuple[Rule, ...] = (
     Rule(
         "predecessor-name",
@@ -289,16 +339,26 @@ RULES: Tuple[Rule, ...] = (
     ),
     Rule(
         "internal-process-wording",
-        "wording that refers to an internal decision process or internal tooling",
+        "wording that refers to internal tooling",
         ALL_KINDS,
         regex_finder(
             re.compile(
-                r"(?i:owner-local|(?<![A-Za-z0-9_])the owner['’]s|owner['’]s decision"
-                r"|following the owner|(?<![A-Za-z0-9_])owner decision)"
-                r"|(?<![A-Za-z0-9])AgentX(?![A-Za-z0-9])|(?<![A-Za-z0-9])WorkOrder"
+                r"(?<![A-Za-z0-9])AgentX(?![A-Za-z0-9])|(?<![A-Za-z0-9])WorkOrder"
                 r"|Analysis Graph provenance"
             )
         ),
+    ),
+    Rule(
+        "owner-intent",
+        "text that narrates what the owner or maintainer decided, approved, asked or planned",
+        ALL_KINDS,
+        regex_finder(_OWNER_INTENT),
+    ),
+    Rule(
+        "review-process",
+        "text that narrates a review panel, a roundtable or a vote of seats",
+        ALL_KINDS,
+        regex_finder(_REVIEW_PROCESS),
     ),
     Rule(
         "home-path",
@@ -640,7 +700,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--scope", choices=("all", "code"), default="all",
-        help="'code' skips documents (Markdown, docs/, README*, CHANGELOG*)",
+        help="'all' (default) includes documents; 'code' skips Markdown, docs/, README* and CHANGELOG*",
     )
     parser.add_argument("--root", type=Path, default=ROOT, help="repository root")
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)

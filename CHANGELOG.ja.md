@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=a96b9b9ae6b57dc2955237adf29f74477fc61fed23a564375e2bb1535a6782e9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -46,6 +46,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **モデルカタログ（[SchemaProvider #155](https://github.com/fox1245/SchemaProvider/pull/155)、[#156](https://github.com/fox1245/SchemaProvider/pull/156)、[#157](https://github.com/fox1245/SchemaProvider/pull/157)）。** カタログの正規テキストと digest は、C ロケールとリストの順序に左右されなくなりました。リストはローダーが並べ替えます。origin のないレイヤーはマージすると全 origin に適用されるため、refresh 結果の上に重ねた組み込みエントリは、ゲートウェイの origin でも引き続き適用されます。refresh は、モデルを 1 つも挙げないリスト、以前よりはるかに少ないリスト、不正な Gemini のページトークン、多すぎるエントリを返したソースを失敗として扱い、そのソースのエントリを保持します。`sp_catalogue_refresh` は失敗のあと終了コード 3 で終了し、何も書きません。
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK は libcurl とスレッドなしで Emscripten と WASI 向けにビルドできます（`SP_BUILD_TRANSPORT`、`SP_THREADS`）。これらのホストでも `sp::crypto::random_bytes` が動作し、ターゲットの `std::size_t` を超える admission の上限は切り詰められます。NeoGraph 自身の WebAssembly ビルドは #535 で続きます。
   - **ホスト seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` が公開されました。`Executor`（`host_pumped()` つき）、`HostTransport`、そして libcurl もスレッドも使わずに `sp_runtime` が定義する `Client(descriptor, options, executor, transport)` です。動作できないブロッキング呼び出し（`Client::complete`、`Operation::join`、realtime セッションの `next_event`）は、待たずにすぐ `Misuse` の失敗（`runtime.blocking.host_pumped` または `runtime.blocking.in_thread`）を返します。in-thread の拒否には、以前は理由がありませんでした。`SP_BUILD_JS_HOST` は Emscripten 向けに `fetch` ベースの参照ホストをビルドします。NeoGraph は WebAssembly モジュールでこの seam を使います（「追加」を参照）。
+- **公開テキストのガードがドキュメントも検査します。** `scripts/check_public_text.py` とその ctest エントリ `public_text_guard` が Markdown、`docs/`、README、CHANGELOG のファイルを検査し（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` オプションは削除されました）、新しい 2 つのルールが内部の決定とその過程を述べる文言を検出します。
 
 
 ### 修正

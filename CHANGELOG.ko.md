@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=a96b9b9ae6b57dc2955237adf29f74477fc61fed23a564375e2bb1535a6782e9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -46,6 +46,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **모델 카탈로그 ([SchemaProvider #155](https://github.com/fox1245/SchemaProvider/pull/155), [#156](https://github.com/fox1245/SchemaProvider/pull/156), [#157](https://github.com/fox1245/SchemaProvider/pull/157)).** 카탈로그의 정규 텍스트와 digest가 C 로캘과 목록 순서에 더 이상 좌우되지 않습니다. 목록은 로더가 정렬합니다. origin이 없는 레이어는 병합하면 모든 origin에 적용되므로, refresh 결과 위에 겹친 내장 엔트리가 게이트웨이 origin에서도 계속 적용됩니다. refresh는 모델이 없는 목록, 이전보다 훨씬 적은 목록, 잘못된 Gemini 페이지 토큰, 너무 많은 엔트리를 내놓은 소스를 실패로 처리하고 그 소스의 엔트리를 유지합니다. `sp_catalogue_refresh`는 실패 뒤 종료 코드 3으로 끝나며 아무것도 쓰지 않습니다.
   - **WebAssembly ([SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)).** SDK가 libcurl과 스레드 없이 Emscripten과 WASI용으로 빌드됩니다(`SP_BUILD_TRANSPORT`, `SP_THREADS`). 이 호스트에서 `sp::crypto::random_bytes`가 동작하고, 대상의 `std::size_t`보다 큰 admission 상한은 잘라 냅니다. NeoGraph 자체의 WebAssembly 빌드는 #535에서 이어집니다.
   - **호스트 seam ([SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)).** `runtime/host.h`가 공개되었습니다. `Executor`(`host_pumped()` 포함), `HostTransport`, 그리고 libcurl이나 스레드 없이 `sp_runtime`이 정의하는 `Client(descriptor, options, executor, transport)`입니다. 동작할 수 없는 블로킹 호출(`Client::complete`, `Operation::join`, realtime 세션의 `next_event`)은 이제 기다리지 않고 즉시 `Misuse` 실패(`runtime.blocking.host_pumped` 또는 `runtime.blocking.in_thread`)를 반환합니다. in-thread 거부에는 전에 사유가 없었습니다. `SP_BUILD_JS_HOST`는 Emscripten용으로 `fetch` 기반 참조 호스트를 빌드합니다. NeoGraph는 WebAssembly 모듈에서 이 seam을 씁니다(추가됨 참조).
+- **공개 문구 검사기가 문서도 검사합니다.** `scripts/check_public_text.py`와 ctest 항목 `public_text_guard`가 Markdown, `docs/`, README, CHANGELOG 파일을 검사하며(`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 옵션은 제거되었습니다), 새 규칙 두 개가 내부 결정과 그 과정을 서술하는 문구를 표시합니다.
 
 
 ### 수정됨

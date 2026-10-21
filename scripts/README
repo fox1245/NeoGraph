@@ -4,7 +4,8 @@ Public-text guard (scripts/check_public_text.py)
 NeoGraph is a public repository, so every tracked file is read by people who
 never saw its history. The guard keeps wording and details out of that text that
 only make sense inside the project: names of earlier projects, links to private
-repositories, wording about internal decision processes, home directories,
+repositories, text that narrates what the owner or maintainer decided, text that
+narrates a review panel, a roundtable or a vote of seats, home directories,
 public IP addresses, key-shaped strings and private project names.
 
     python3 scripts/check_public_text.py --tree             # every tracked file
@@ -24,13 +25,13 @@ public_text_guard_selftest, which tests the script itself:
 
     ctest --test-dir build -L hygiene --output-on-failure
 
-By default that entry scans code, configuration and examples only (--scope code).
-The CMake option NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS (tests/CMakeLists.txt)
-adds Markdown, docs/, README* and CHANGELOG*; turn it on, or change its default,
-once the documents are clean.
+The scan covers the documents (Markdown, docs/, README*, CHANGELOG* and their
+translations) as well as code, configuration and examples. --scope code skips the
+documents and is for quick local runs only; neither CI nor the ctest entry uses it.
 
 When a finding is a justified exception (a test fixture with a deliberately fake
-key, a rule's own sample text), add a line to scripts/public_text_allowlist.txt:
+key, a rule's own sample text, a shipped feature whose name is a flagged word, a
+citation of published work), add a line to scripts/public_text_allowlist.txt:
 
     path-glob<TAB>rule<TAB>reason
 

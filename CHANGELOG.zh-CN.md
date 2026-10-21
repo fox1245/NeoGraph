@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a96b9b9ae6b57dc2955237adf29f74477fc61fed23a564375e2bb1535a6782e9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=348b936bc3f33fd1737cd3f258fdfd19039cf0c4d6b74336eaf1ed761a84c904 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -46,6 +46,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **模型目录（[SchemaProvider #155](https://github.com/fox1245/SchemaProvider/pull/155)、[#156](https://github.com/fox1245/SchemaProvider/pull/156)、[#157](https://github.com/fox1245/SchemaProvider/pull/157)）。** 目录的规范文本和 digest 不再受 C 区域设置和列表顺序影响，列表由加载器排序。没有 origin 的层在合并时适用于所有 origin，因此叠在 refresh 结果之上的内置条目，在网关 origin 上仍然适用。refresh 会把列出零个模型、远少于以往、Gemini 分页令牌格式错误或条目过多的来源判为失败，并保留该来源的条目；`sp_catalogue_refresh` 在失败后以退出码 3 结束，且不写任何文件。
   - **WebAssembly（[SchemaProvider #159](https://github.com/fox1245/SchemaProvider/pull/159)）。** SDK 可以不依赖 libcurl 和线程，为 Emscripten 和 WASI 构建（`SP_BUILD_TRANSPORT`、`SP_THREADS`）；`sp::crypto::random_bytes` 在这些宿主上可用，超出目标 `std::size_t` 的 admission 上限会被截断。NeoGraph 自身的 WebAssembly 构建将在 #535 中继续。
   - **宿主 seam（[SchemaProvider #161](https://github.com/fox1245/SchemaProvider/pull/161)）。** `runtime/host.h` 现已公开：`Executor`（带 `host_pumped()`）、`HostTransport`，以及由 `sp_runtime` 定义、不依赖 libcurl 和线程的 `Client(descriptor, options, executor, transport)`。无法工作的阻塞调用（`Client::complete`、`Operation::join`、realtime 会话的 `next_event`）现在不再等待，而是立即返回 `Misuse` 失败（`runtime.blocking.host_pumped` 或 `runtime.blocking.in_thread`）；此前线程内的拒绝没有原因。`SP_BUILD_JS_HOST` 为 Emscripten 构建基于 `fetch` 的参考宿主。NeoGraph 在其 WebAssembly 模块中使用这个 seam（见“已添加”）。
+- **公开文本检查器现在也检查文档。** `scripts/check_public_text.py` 及其 ctest 条目 `public_text_guard` 会扫描 Markdown、`docs/`、README 和 CHANGELOG 文件（`NEOGRAPH_PUBLIC_TEXT_GUARD_INCLUDE_DOCS` 选项已移除），并新增两条规则，标记叙述内部决定及其过程的措辞。
 
 
 ### 修复

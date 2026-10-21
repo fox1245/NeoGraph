@@ -75,15 +75,57 @@ class RuleTest(unittest.TestCase):
 
     def test_internal_process_wording(self):
         self.assertFires("internal-process-wording", [
-            "// owner-local metadata", "// Owner-Local metadata", "the owner's examples",
-            "The Owner's examples", "// the owner\u2019s call", "owner's decision for hardened sessions",
-            "Following the owner, we", "an owner decision (D5)", "the AgentX peer", "a WorkOrder was run",
-            "Analysis Graph provenance",
+            "the AgentX peer", "a WorkOrder was run", "Analysis Graph provenance",
         ])
         self.assertQuiet("internal-process-wording", [
             "owner_scope", "owner_id", "OwnerScope owner_scope_", "owner-qualified id",
             "agentx", "work order", "workorder", "the owners of a program", "program owner",
             "std::string owner", "AgentXY",
+        ])
+
+    def test_owner_intent(self):
+        self.assertFires("owner-intent", [
+            "// owner-local metadata", "// Owner-Local metadata", "the owner's examples",
+            "The Owner's examples", "// the owner\u2019s call", "owner's decision for hardened sessions",
+            "Following the owner, we", "an owner decision (D5)",
+            "The owner decided on 2026-10-18 that the plan changes.", "the owner approved it",
+            "The owner has asked for a rename.", "the maintainer chose the second option",
+            "the project owner reversed that", "owner-requested change", "Owner-approved wording",
+            "per the owner, the field stays", "as the maintainer requested, we dropped it",
+            "By maintainer decision the revision stays 6", "the maintainer\u2019s accepted scope",
+            "the repository owner plans a rewrite",
+        ])
+        self.assertQuiet("owner-intent", [
+            "owner_scope", "owner_id", "OwnerScope owner_scope_", "owner-qualified id",
+            "the owners of a program", "program owner", "std::string owner", "the lease owner",
+            "Only the owner scope may read the record.", "the owner boundary", "owner-scoped store",
+            "the owner Runtime", "the copyright owner", "a server-side owner selection",
+            "ownership transfers to the successor", "the maintainers of a dependency",
+            "contact the maintainer", "the owner of a listener cannot be read",
+            "The owner of the thread id", "maintainer mode",
+        ])
+
+    def test_review_process(self):
+        self.assertFires("review-process", [
+            "The decision is the roundtable of 2026-10-20.", "the pricing Roundtable settled it",
+            "a round-table of reviewers", "round table", "a review panel of eight",
+            "the panelists agreed", "an expert panel", "settled by 6 of 8 seats",
+            "(7 of 8 seats)", "an eight-seat review", "three seats", "the seat count was 5",
+            "the panel voted for option B", "The panel recommends keeping the field",
+            "models from three model families", "a design review from five angles",
+            "a design review by four seats", "a two-round design review", "the decision brief says",
+            "the persona whose argument drove it", "Codex review found it", "reviewed by Codex",
+            "an Astra audit", "2026-10-20 \uc6d0\ud0c1\ud68c\uc758", "\uac00\uaca9 \ub77c\uc6b4\ub4dc\ud14c\uc774\ube14",
+            "\u4fa1\u683c\u30e9\u30a6\u30f3\u30c9\u30c6\u30fc\u30d6\u30eb", "\u5b9a\u4ef7\u5706\u684c\u4f1a\u8bae",
+            "\u5186\u5353\u4f1a\u8b70",
+        ])
+        self.assertQuiet("review-process", [
+            "a panel of experts graph", "mcp panels", "the panel shows the log", "a control panel",
+            "majority vote", "a vote: support/oppose/abstain", "the seat belt", "window seat",
+            "the seats of a venue", "the roundup of tables", "a round of table tests",
+            "round-robin", "a table", "Haiku", "a Haiku model route", "Codex CLI",
+            "the user reviewed the plan", "persona-specific prompt", "reviewer role labels",
+            "code review by the caller", "three families of providers", "model ids",
         ])
 
     def test_home_path(self):
@@ -167,8 +209,8 @@ class RuleTest(unittest.TestCase):
     def test_rule_table_is_stable(self):
         self.assertEqual(
             guard.RULE_NAMES,
-            ("predecessor-name", "private-repo-link", "internal-process-wording", "home-path",
-             "external-ip", "secret-shaped", "private-project-name"),
+            ("predecessor-name", "private-repo-link", "internal-process-wording", "owner-intent",
+             "review-process", "home-path", "external-ip", "secret-shaped", "private-project-name"),
         )
         for rule in guard.RULES:
             self.assertTrue(rule.summary)
@@ -241,6 +283,18 @@ class AllowlistTest(unittest.TestCase):
         self.assertEqual({f.rule for f in guard.scan_text("src/a.cpp", text, entries)}, {"predecessor-name"})
         self.assertEqual(
             {f.rule for f in guard.scan_text("src/b.cpp", text, entries)}, {"predecessor-name", "home-path"}
+        )
+
+    def test_allowlist_can_excuse_the_process_rules_for_one_path(self):
+        text = "the pricing roundtable settled it; the owner decided\n"
+        entries = guard.parse_allowlist(
+            "docs/cite.md\treview-process\tcitation of the published term\n"
+        )
+        self.assertEqual(
+            {f.rule for f in guard.scan_text("docs/cite.md", text, entries)}, {"owner-intent"}
+        )
+        self.assertEqual(
+            {f.rule for f in guard.scan_text("docs/other.md", text, entries)}, {"owner-intent", "review-process"}
         )
 
     def test_the_committed_allowlist_is_well_formed(self):
@@ -369,6 +423,29 @@ class RepositoryModeTest(unittest.TestCase):
             sorted(line.split(":")[0] for line in out_code.splitlines()), ["CMakeLists.txt", "src/a.cpp"]
         )
 
+    def test_documents_are_scanned_by_default_and_the_new_rules_reach_them(self):
+        self.write("CHANGELOG.md", "- The pricing roundtable settled the design.\n")
+        self.write("docs/guide.md", "The owner decided to rename it.\n")
+        self.write("CHANGELOG.ko.md", "- 2026-10-20 \uc6d0\ud0c1\ud68c\uc758\ub85c \uc815\ud588\ub2e4.\n")
+        self.write("README.ja.md", "\u4fa1\u683c\u30e9\u30a6\u30f3\u30c9\u30c6\u30fc\u30d6\u30eb\n")
+        self.write("src/ok.cpp", "int ok;\n")
+        self.commit()
+        code, out, err = self.run_guard("--tree")
+        self.assertEqual(code, 1, err)
+        self.assertEqual(
+            sorted(line.split(": ")[0] + " " + line.split(": ")[1] for line in out.splitlines()),
+            ["CHANGELOG.ko.md:1 review-process", "CHANGELOG.md:1 review-process",
+             "README.ja.md:1 review-process", "docs/guide.md:1 owner-intent"],
+        )
+        self.assertIn("documents included", err)
+
+    def test_the_ctest_entry_scans_documents(self):
+        cmake = (ROOT / "tests" / "CMakeLists.txt").read_text(encoding="utf-8")
+        entry = cmake[cmake.index("add_test(NAME public_text_guard"):]
+        entry = entry[: entry.index("add_test(NAME public_text_guard_selftest")]
+        self.assertNotIn("--scope code", entry)
+        self.assertNotIn("INCLUDE_DOCS", cmake)
+
     def test_allowlist_is_applied_by_path_and_rule(self):
         key = "sk-" + "Z8y7X6w5" * 5
         self.write("tests/fixtures/keys.json", '{"k": "' + key + '"}\n// NexaGraph\n')
@@ -446,7 +523,7 @@ class RepositoryModeTest(unittest.TestCase):
         self.assertEqual(
             sorted(out.splitlines()),
             [
-                "src/doc.cpp:2: internal-process-wording: // owner-local note",
+                "src/doc.cpp:2: owner-intent: // owner-local note",
                 "src/new.cpp:1: predecessor-name: // ported from NexaGraph",
                 "src/staged.cpp:1: private-project-name: // Capstone work",
             ],
