@@ -136,6 +136,8 @@ public:
     void wake() noexcept;
     /// Schedules a turn no earlier than `at` for an Asio timer that expires then.
     void wake_at(sp::runtime::SteadyTime at) noexcept;
+    /// Takes back one `wake_at` for `at` whose timer was cancelled. Does nothing if none is noted.
+    void forget_at(sp::runtime::SteadyTime at) noexcept;
 
     /// True when no turn is scheduled and no handler is ready.
     bool idle() const noexcept;
@@ -151,5 +153,14 @@ private:
 /// timer is due from a thread of its own; the loop then looks again shortly, until Asio has dispatched it.
 NEOGRAPH_API void note_deadline(const asio::any_io_executor& executor,
                                 std::chrono::steady_clock::time_point at) noexcept;
+
+/// Takes back one `note_deadline` for `at`, once the Asio timer it was for is cancelled, so that the loop does not
+/// keep a host timer armed for a deadline nothing waits for. Does nothing for an executor that no HostLoop runs.
+NEOGRAPH_API void forget_deadline(const asio::any_io_executor& executor,
+                                  std::chrono::steady_clock::time_point at) noexcept;
+
+/// True when `executor` is run by a HostLoop, including an executor derived from it (a strand of it, or one with
+/// other properties). Nothing that waits for work on such an executor can finish: only the host's own turn runs it.
+NEOGRAPH_API bool is_host_pumped(const asio::any_io_executor& executor) noexcept;
 
 }  // namespace neograph::async

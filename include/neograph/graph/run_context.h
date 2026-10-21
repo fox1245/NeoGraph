@@ -11,6 +11,8 @@
 #include <neograph/tool_dispatch.h>
 #include <neograph/types.h>
 
+#include <asio/any_io_executor.hpp>
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -94,6 +96,10 @@ struct RunContext {
     /// RunMetadata::shared_scheduler: blocking node bodies should not hold the
     /// calling executor, which other runs and host timers share.
     bool shared_scheduler = false;
+
+    /// RunMetadata::dispatch_executor: where a node attempt that needs its own worker runs. Empty: the process-wide
+    /// attempt pool.
+    asio::any_io_executor dispatch_executor;
 
     /// Per-run trace correlator supplied through RunMetadata.
     std::string trace_id;

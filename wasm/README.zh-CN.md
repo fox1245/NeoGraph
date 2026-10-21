@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=af08dda8e4780898848c6ccf35b39f7c895ee49d16baa4bf157795491950c3cf -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=c14878b149d129d3bd6122457d44379277e4a7e64c5aa40c9376eba1f15b7b38 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -21,7 +21,7 @@
 | 构建模式 | 单线程（WebAssembly 上的默认值）和 pthread，二者都在 CI 中构建并运行。JavaScript 模块是单线程的。 |
 | 运行时 | CI 中的 Node.js 22 和 24。Workers 示例在 Node 中以 `Request` 调用来运行，尚未在 workerd 上运行。浏览器、Deno 和 WASI 尚未验证。 |
 | SDK | SchemaProvider 0.4.0，接口修订版 7，使用 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交。可在没有 libcurl、没有线程的情况下构建，其 JavaScript 宿主（`sp_js_host`）就是模块的 executor 和 `fetch` 传输层。 |
-| 组件 | Core、LLM（通过宿主的模型调用），以及可选的 Program。 |
+| 组件 | Core、LLM（通过宿主的模型调用），以及可选的 Program（宿主循环上的运行时，内存存储）。 |
 
 ## 构建
 
@@ -176,6 +176,38 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 `Module.ngOnDone` 返回，它们在宿主事件循环之后的回合中被调用。密钥是交给 `compile` 的提供方描述的一部分，由该图的 SDK
 客户端持有；它不在二进制文件中，不在任何结果中，也不在错误消息中。
 
+## 宿主循环上的 Program
+
+`program::ProgramRuntime` 接收循环的 executor，并把所有工作都放在上面执行：Program 的 attempt、截止时间定时器，以及
+`ProgramHandle::wait_async` 的等待者。它不会启动任何线程。目前这些宿主上的 Program 支持就是这些，存储是内存存储。
+
+```cpp
+async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
+program::RuntimeConfig config{catalog, checkpoints, /*state_store=*/{}, transitions, /*scheduler_threads=*/1};
+config.executor = loop.executor();                    // required here: a build without threads has no pool to fall back to
+program::ProgramRuntime runtime(std::move(config));
+
+loop.spawn(runtime.run_async(owner, version, invocation),
+           [](std::exception_ptr error, program::ProgramResult result) { /* from a later turn */ });
+```
+
+- **必须设置。** 没有 `RuntimeConfig::executor` 时，没有线程的构建的构造函数会抛出 `ProgramExecutorRequired`（一个
+  `graph::ConfigurationFailure`）。原生构建在未设置时仍使用运行时自己的线程池，和以前一样。
+- **awaitable 形式。** 每个操作都有：`start_async`、`reconnect_async`、`resume_handle_async`、`fork_async`、
+  `replace_async`、`migrate_graph_async` 等。它们在循环上运行，并在等待它们的协程的 executor 上完成。`run_async` 和
+  `resume_async` 会等待结果。
+- **同步调用会被拒绝。** `start`、`resume`、`fork`、`run` 等同步调用，以及结果尚未就绪时的 `ProgramHandle::wait`，
+  会阻塞本该运行 Program 的线程。它们在做任何事之前就抛出 `program::ProgramBlockingCallRefused`
+  （一个 `graph::ConfigurationFailure`）。`operation()` 给出被拒绝的调用，`alternative()` 给出 awaitable 形式。
+  `hook_runtime` 出于同样的原因被构造函数拒绝。
+- **定时器。** 运行时只通过 `async::HostTimer` 等待。这种定时器会把截止时间告知循环，并在被取消、被重新设置或被销毁时
+  撤回，所以已结束的运行不会留下宿主定时器。
+- **节点主体。** 有 executor 时，需要自己的工作线程的节点 attempt 在该 executor 的 strand 上运行，而不是使用 32 线程的
+  进程级线程池，所以节点主体不能阻塞自己的线程。
+- **锁。** 会访问存储的临界区持有 `OperationLock`，协程可以不阻塞地等待它；`std::mutex` 只保护内存。
+- **销毁运行时**会取消其运行，但不会等待它们结束。attempt 会持有运行时的状态直到结束，所以要让循环一直运行，
+  直到各句柄进入终态。
+
 ## 示例
 
 - `examples/node/chat.mjs`：从 Node 发起一次调用，
@@ -194,6 +226,10 @@ CI 构建该模块，并在 Node 22 和 24 下运行以下测试，不需要网�
 - `test/workers_test.mjs`：以 `Request` 调用 Workers 示例导出的 `fetch` 处理程序，对着同一个服务器，分别缓冲和流式。它展示的是
   处理程序的逻辑及其对平台 API 的使用，并不是在 workerd 上运行。
 - `checks.cpp`（见下文）对宿主驱动的提供方运行一次同步运行，检查它被拒绝且没有发送任何东西。
+- `checks.cpp` 还在 `HostLoop` 上构建 `ProgramRuntime`：没有执行器的运行时和同步的 `start` 都会被拒绝，使用内存存储的
+  单节点 Program 在宿主的回合中运行到结果。
+- `tests/test_program_runtime_executor.cpp` 在单线程 `io_context` 和手动执行器之上的 `HostLoop` 上原生运行 Program，
+  所以原生构建也覆盖同样的路径。
 - `tests/test_host_loop.cpp` 针对手动 executor 在原生环境中运行循环和宿主接缝提供方，所以原生构建也覆盖相同的路径。
 
 ## 实测大小
@@ -219,8 +255,9 @@ CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 �
 - **不经宿主的模型调用。** ASYNC、MCP 客户端和 A2A 需要套接字和 TLS。模型调用通过上述模块走宿主的 `fetch`；面向其他
   WebAssembly 宿主的构建则把自己的 executor 和传输层交给 `SchemaProvider`。
 - **宿主驱动的提供方上的阻塞入口。** `run()`、`Provider::dispatch` 等会予以拒绝（见上文）。
-- **Program。** Program 组件可以编译，但 `ProgramRuntime` 会启动线程，所以在单线程构建中，它的构造、节点 attempt 超时
-  以及 `n > 1` 的 `set_worker_count(n)` 都会以 `thread: Not supported` 失败（#557）。宿主上的 Program 存储在 #556 中跟踪。
+- **宿主数据库上的 Program 存储。** Program 运行时在宿主循环上运行（见上），但它的存储是内存存储：SQLite 和 PostgreSQL
+  存储需要系统库，而访问宿主数据库的存储要等存储接口变成 awaitable
+  （[#556](https://github.com/fox1245/NeoGraph/issues/556)）。同步的 Program 调用在宿主循环上会被拒绝，请使用 `_async` 形式。
 - **原生 Program 控件。** C v1 插件 ABI 是 64 位布局，因此在 wasm32 上 `NativeControlBinding::create` 会以
   `NativeControlUnavailable` 拒绝。
 - **同步检查点存储。** 非异步的存储会在工作线程池中执行每个操作。单线程构建没有线程池，因此操作会以
@@ -243,6 +280,6 @@ Node.js 上的运行不能作为浏览器上的证据。该模块为 `web`、`wo
 - **M0 和 M1。** wasm32 修复、单线程构建，以及 CI 中的 Node smoke 和大小门禁。
 - **M2（本页）。** 通过宿主 `fetch` 进行模型调用：宿主循环、宿主接缝提供方、JavaScript 模块，以及 Node 和 Workers 示例。
 - **M3。** 宿主存储上的 Program（[#557](https://github.com/fox1245/NeoGraph/issues/557)、
-  [#556](https://github.com/fox1245/NeoGraph/issues/556)）。`HostLoop::executor()` 就是 Program 运行时将要接收的
-  `any_io_executor`。
+  [#556](https://github.com/fox1245/NeoGraph/issues/556)）。运行时这一半已完成：`ProgramRuntime` 在
+  `HostLoop::executor()` 上运行（见上文“宿主循环上的 Program”）。存储这一半随后：awaitable 存储接口。
 - **M4。** 实时会话、WASI、原生归档的保管后端，以及远程 Harness。

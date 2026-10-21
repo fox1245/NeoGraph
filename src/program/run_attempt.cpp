@@ -1,3 +1,4 @@
+#include <neograph/async/host_loop.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/diagnostic.h>
@@ -22,7 +23,6 @@
 #include <asio/experimental/channel.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -636,7 +636,7 @@ asio::awaitable<PlanExecution> replay_settled_member(PlanExecution settled) {
  * losing member cannot leave a detached child behind.
  */
 struct JavaScriptScopeState final {
-    std::mutex                             mutex;
+    PureMutex                             mutex;
     std::vector<std::weak_ptr<RunControl>> children;
     bool                                   cancelled          = false;
     CancellationCause                      cancellation_cause = CancellationCause::ParentTerminal;
@@ -1534,15 +1534,16 @@ CancellationCause terminal_cause_at_deadline(const std::shared_ptr<RunControl>& 
     return control->seal_terminal_cause();
 }
 
-void cancel_deadline_timer(const asio::any_io_executor&        executor,
-                           std::shared_ptr<asio::steady_timer> timer) {
+void cancel_deadline_timer(const asio::any_io_executor&      executor,
+                           std::shared_ptr<async::HostTimer> timer) {
+    // HostTimer::cancel also takes the deadline back from a host loop, so no host timer stays armed (#557).
     asio::post(executor, [timer = std::move(timer)] {
         try {
             timer->cancel();
         } catch (...) {}
     });
 }
-asio::awaitable<void> cancel_after_timer(std::shared_ptr<asio::steady_timer> timer,
+asio::awaitable<void> cancel_after_timer(std::shared_ptr<async::HostTimer> timer,
                                          std::shared_ptr<graph::CancelToken> token,
                                          std::shared_ptr<std::atomic<bool>> expired) {
     asio::error_code wait_error;
@@ -1922,8 +1923,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     };
     if (std::chrono::steady_clock::now() >= deadline) control->cancel(CancellationCause::Timeout);
 
-    auto timer = std::make_shared<asio::steady_timer>(control->deadline_executor);
-    timer->expires_at(deadline);
+    auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
+    timer->arm_at(deadline);
     asio::co_spawn(
         control->deadline_executor,
         [control, timer]() -> asio::awaitable<void> {
@@ -1981,7 +1982,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             throw_runtime_diagnostic("P_RUNTIME_PLAN",
                                      "Admitted Program root operation is missing");
 
-        std::mutex                            plan_mutex;
+        PureMutex                            plan_mutex;
+        OperationLock                        dynamic_compile_turn;
         std::optional<std::string>            resume_id = checkpoint_id;
         std::optional<CoreCheckpointIdentity> last_root_checkpoint;
         // #384, #386: a resumed plan continues the Core call its pending
@@ -2268,6 +2270,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 metadata.trace_id    = control->trace_id;
                 // Join members and await timers share this scheduler.
                 metadata.shared_scheduler = true;
+                // #557: with a host's executor there is no process-wide attempt pool to dispatch node attempts to.
+                if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts;
                 metadata.node_retry_ceiling = node_retry_ceiling;
                 if (next_resume) {
                     std::lock_guard lock(plan_mutex);
@@ -2392,7 +2396,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         struct ExpansionBatchState {
             explicit ExpansionBatchState(const asio::any_io_executor& completion_executor)
                 : join(completion_executor) {}
-            std::mutex                                   mutex;
+            PureMutex                                   mutex;
             std::vector<std::optional<ExpansionTaskRun>> results;
             std::vector<std::shared_ptr<RunControl>>     children;
             std::size_t                                  remaining = 0;
@@ -2404,7 +2408,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         struct ExpansionRecordState {
             explicit ExpansionRecordState(const CompiledTaskGraphFragment& value)
                 : record{value, {}, 0, false, false} {}
-            std::mutex                              mutex;
+            // Held across the fragment store's calls and across the suspension of an awaiting store, so it is
+            // an OperationLock and not a mutex (operation_lock.h).
+            OperationLock                           lock;
             TaskGraphFragmentRecord                 record;
             std::shared_ptr<TaskGraphFragmentStore> store;
         };
@@ -2533,14 +2539,21 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto compile_limit = std::min<std::uint64_t>(
                         spec->max_dynamic_compiles, control->granted_budget.max_dynamic_compiles);
                     {
-                        std::lock_guard lock(plan_mutex);
-                        if (dynamic_compile_count >= compile_limit ||
-                            !control->consume_dynamic_compile()) {
+                        // consume_dynamic_compile publishes a transition, so expansions take turns
+                        // on an OperationLock; plan_mutex guards the counter and nothing else.
+                        const auto turn = co_await dynamic_compile_turn.lock_async();
+                        bool       within_limit = false;
+                        {
+                            std::lock_guard lock(plan_mutex);
+                            within_limit = dynamic_compile_count < compile_limit;
+                        }
+                        if (!within_limit || !control->consume_dynamic_compile()) {
                             co_return plan_failure(
                                 ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
                                 "expand_task_graph dynamic compilation budget exhausted",
                                 operation.id());
                         }
+                        std::lock_guard lock(plan_mutex);
                         ++dynamic_compile_count;
                     }
 
@@ -2642,25 +2655,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 throw_runtime_diagnostic("P_EXPAND_RECORD", "Published fragment task is missing",
                                          json{{"task_id", std::string(task_id)}});
             };
-            auto update_task = [&](std::string_view task_id, TaskGraphTaskState task_state,
+            auto update_task = [&](std::string task_id, TaskGraphTaskState task_state,
                                    std::uint32_t attempt, std::optional<json> output,
                                    std::optional<json>        failure,
                                    std::optional<std::string> attempt_identity,
-                                   std::optional<std::string> child_run_id) {
+                                   std::optional<std::string> child_run_id) -> asio::awaitable<void> {
                 // Cancellation prevents launch, not settlement of already-dispatched evidence.
                 if (task_state != TaskGraphTaskState::Cancelled &&
                     ((task_state == TaskGraphTaskState::Active &&
                       (operation_token->is_cancelled() ||
                        control->cancellation_cause() != CancellationCause::None)) ||
                      control->try_result().has_value()))
-                    return;
-                std::lock_guard lock(durable->mutex);
+                    co_return;
+                const auto record_lock = co_await durable->lock.lock_async();
                 if (task_state != TaskGraphTaskState::Cancelled &&
                     ((task_state == TaskGraphTaskState::Active &&
                       (operation_token->is_cancelled() ||
                        control->cancellation_cause() != CancellationCause::None)) ||
                      control->try_result().has_value()))
-                    return;
+                    co_return;
                 auto candidate = durable->record;
                 auto found =
                     std::find_if(candidate.tasks.begin(), candidate.tasks.end(),
@@ -2910,7 +2923,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         const auto failure   = json{{"code", "P_TASK_CANCELLED"},
                                                     {"message", "Parent expansion was cancelled"},
                                                     {"operation_id", task.operation_id}};
-                        update_task(task.task_id, TaskGraphTaskState::Cancelled,
+                        co_await update_task(task.task_id, TaskGraphTaskState::Cancelled,
                                     attempts[task.task_id], std::nullopt, failure,
                                     attempt_identities[task.task_id],
                                     child_run_ids.contains(task.task_id)
@@ -2935,7 +2948,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             json{{"code", "P_TASK_DEPENDENCY"},
                                  {"message", "Task dependency did not complete successfully"},
                                  {"operation_id", task.operation_id}};
-                        update_task(task.task_id, TaskGraphTaskState::Failed,
+                        co_await update_task(task.task_id, TaskGraphTaskState::Failed,
                                     attempts[task.task_id], std::nullopt, failure,
                                     attempt_identities[task.task_id],
                                     child_run_ids.contains(task.task_id)
@@ -3008,7 +3021,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                    0,
                                                    json{{"operation_id", task->operation_id}}};
                                 failures[task->task_id] = failure_json(failure);
-                                update_task(
+                                co_await update_task(
                                     task->task_id, TaskGraphTaskState::Failed, task_attempt,
                                     std::nullopt, failures[task->task_id],
                                     attempt_identities[task->task_id],
@@ -3042,7 +3055,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             states[task->task_id] = TaskGraphTaskState::Active;
                             // A retried attempt's record keeps the failure of the attempt before
                             // it, until its own outcome replaces it.
-                            update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
+                            co_await update_task(task->task_id, TaskGraphTaskState::Active, task_attempt,
                                         std::nullopt,
                                         retrying ? std::optional<json>{retry_failures[task->task_id]}
                                                  : std::nullopt,
@@ -3126,7 +3139,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             states[task_result.task_id]  = TaskGraphTaskState::Completed;
                             outputs[task_result.task_id] = task_result.output;
                             failures.erase(task_result.task_id);  // a retried task's last failure
-                            update_task(task_result.task_id, TaskGraphTaskState::Completed,
+                            co_await update_task(task_result.task_id, TaskGraphTaskState::Completed,
                                         task_result.attempt, task_result.output, std::nullopt,
                                         task_result.attempt_identity, child_id);
                         } else if (task_result.status == ProgramTerminalStatus::Failed &&
@@ -3149,7 +3162,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                                     : TaskGraphTaskState::Failed;
                             const auto failure          = failure_json(task_result.failure);
                             failures[task_result.task_id] = failure;
-                            update_task(task_result.task_id, states[task_result.task_id],
+                            co_await update_task(task_result.task_id, states[task_result.task_id],
                                         task_result.attempt, std::nullopt, failure,
                                         task_result.attempt_identity, child_id);
                         }
@@ -3170,7 +3183,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                           "Task graph fail-fast policy cancelled pending work"},
                                          {"operation_id", task.operation_id}};
                                 failures[task.task_id] = failure;
-                                update_task(
+                                co_await update_task(
                                     task.task_id, TaskGraphTaskState::Cancelled,
                                     attempts[task.task_id], std::nullopt, failure,
                                     attempt_identities[task.task_id],
@@ -3204,9 +3217,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
             }
             {
-                std::lock_guard lock(durable->mutex);
-                auto            candidate = durable->record;
-                candidate.terminal        = true;
+                const auto record_lock = co_await durable->lock.lock_async();
+                auto       candidate   = durable->record;
+                candidate.terminal     = true;
                 candidate.published       = true;
                 candidate.revision        = durable->record.revision + 1;
                 const auto result         = durable->store->compare_update(
@@ -3584,7 +3597,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // question asks it again, and the branch that holds the
                 // answered call continues.
                 struct ParallelState {
-                    std::mutex                                       mutex;
+                    PureMutex                                       mutex;
                     std::vector<std::optional<PlanExecution>>        results;
                     std::vector<std::shared_ptr<graph::CancelToken>> branch_tokens;
                     std::exception_ptr                               error;
@@ -3798,7 +3811,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // Wait for the losing coroutine to observe cancellation before this
                 // operation returns, so no detached branch outlives the run handle.
                 struct RaceState {
-                    std::mutex                                       mutex;
+                    PureMutex                                       mutex;
                     std::array<std::optional<PlanExecution>, 2>      results;
                     std::array<std::exception_ptr, 2>                errors;
                     std::array<bool, 2>                              finished{};
@@ -4098,7 +4111,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 struct ParallelMapState {
                     explicit ParallelMapState(const asio::any_io_executor& completion_executor)
                         : join(completion_executor) {}
-                    std::mutex                                mutex;
+                    PureMutex                                mutex;
                     std::vector<std::optional<PlanExecution>> results;
                     std::vector<std::shared_ptr<RunControl>>  children;
                     std::exception_ptr                        error;
@@ -4480,8 +4493,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
 
                     const auto executor = co_await asio::this_coro::executor;
-                    auto timeout        = std::make_shared<asio::steady_timer>(executor);
-                    timeout->expires_after(std::chrono::milliseconds(*operation.timeout_ms()));
+                    auto timeout        = std::make_shared<async::HostTimer>(executor);
+                    timeout->arm_after(std::chrono::milliseconds(*operation.timeout_ms()));
                     auto timeout_operation = [timeout]() -> asio::awaitable<void> {
                         asio::error_code error;
                         co_await         timeout->async_wait(
@@ -4525,8 +4538,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                            "Program await operation timed out", operation_id);
                 const auto executor = co_await asio::this_coro::executor;
-                auto timeout        = std::make_shared<asio::steady_timer>(executor);
-                timeout->expires_after(std::chrono::milliseconds(remaining));
+                auto timeout        = std::make_shared<async::HostTimer>(executor);
+                timeout->arm_after(std::chrono::milliseconds(remaining));
                 auto child_token       = operation_token->fork();
                 auto timeout_expired   = std::make_shared<std::atomic<bool>>(false);
                 auto timeout_operation = cancel_after_timer(timeout, child_token, timeout_expired);
@@ -4650,8 +4663,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             // #391: when each await of the current command started, in Unix
             // milliseconds by operation id: recorded in its command journal by
             // an earlier attempt, or by this one when the await starts.
-            std::mutex await_starts_mutex;
-            json       await_starts = json::object();
+            PureMutex     await_starts_mutex;
+            OperationLock await_start_publication;
+            json          await_starts = json::object();
             bool supplied_core_resume_required = false;
             bool supplied_core_resume_consumed = false;
             // #402: the command a reconnect recovers continues each of its calls
@@ -4765,7 +4779,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return fail(ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
                                        "Native host capability exceeded its granted run deadline");
                     }
-                    asio::steady_timer completion_wait(executor);
+                    async::HostTimer completion_wait(executor);
 
                     while (!invocation.finished()) {
                         if (operation_token->is_cancelled() ||
@@ -4781,7 +4795,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
                                 "Native host capability exceeded its granted run deadline");
                         }
-                        completion_wait.expires_after(std::min(
+                        completion_wait.arm_after(std::min(
                             std::chrono::milliseconds(1),
                             std::chrono::duration_cast<std::chrono::milliseconds>(native_deadline -
                                                                                   now)));
@@ -4988,10 +5002,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto now_unix = unix_time_ms();
                     std::uint64_t started_at = now_unix;
                     {
-                        std::lock_guard lock(await_starts_mutex);
-                        if (await_starts.contains(operation_id)) {
-                            started_at = recorded_start_ms(await_starts[operation_id]);
-                        } else if (!control->recorded_replay && active_javascript_command) {
+                        // The publication reads the command's head and appends to it, so two awaits
+                        // that start together record their starts one after the other. The mutex
+                        // guards the map only; the store is never reached while it is held.
+                        const auto publication = co_await await_start_publication.lock_async();
+                        bool       recorded    = false;
+                        {
+                            std::lock_guard lock(await_starts_mutex);
+                            if (await_starts.contains(operation_id)) {
+                                started_at = recorded_start_ms(await_starts[operation_id]);
+                                recorded   = true;
+                            }
+                        }
+                        if (!recorded && !control->recorded_replay && active_javascript_command) {
                             const auto& active    = *active_javascript_command;
                             const auto  published = control->publish_javascript_command(
                                 active.ordinal, active.command, active.effect_identity,
@@ -5002,6 +5025,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
                                                "Could not durably record the start of a "
                                                "JavaScript await");
+                            std::lock_guard lock(await_starts_mutex);
                             await_starts[operation_id] = started_at;
                         }
                     }
@@ -5011,23 +5035,23 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        "JavaScript await operation timed out");
 
                     struct AwaitState {
-                        std::mutex                          mutex;
+                        PureMutex                          mutex;
                         std::optional<PlanExecution>        result;
                         std::exception_ptr                  error;
                         bool                                finished  = false;
                         bool                                timed_out = false;
                         std::chrono::steady_clock::time_point deadline;
-                        std::shared_ptr<asio::steady_timer> timer;
+                        std::shared_ptr<async::HostTimer> timer;
                         std::shared_ptr<asio::experimental::channel<void(asio::error_code, int)>>
                             completion;
                     };
                     auto       await_state         = std::make_shared<AwaitState>();
                     const auto completion_executor = asio::make_strand(executor);
                     await_state->timer =
-                        std::make_shared<asio::steady_timer>(completion_executor);
+                        std::make_shared<async::HostTimer>(completion_executor);
                     await_state->deadline =
                         std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining);
-                    await_state->timer->expires_at(await_state->deadline);
+                    await_state->timer->arm_at(await_state->deadline);
                     await_state->completion =
                         std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                             completion_executor, 1);
@@ -5214,7 +5238,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
 
                 struct JoinState {
-                    std::mutex                                         mutex;
+                    PureMutex                                         mutex;
                     std::vector<std::optional<PlanExecution>>          results;
                     std::vector<std::exception_ptr>                    errors;
                     std::vector<bool>                                  started;

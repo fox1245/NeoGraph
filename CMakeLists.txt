@@ -764,6 +764,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
     src/program/runtime.cpp
     src/program/runtime_instruction.cpp
         src/program/core_progress.cpp
+        src/program/lock_audit.cpp
         src/program/run_attempt.cpp
         src/program/invocation.cpp
         src/program/monetary.cpp
@@ -776,6 +777,13 @@ if(NEOGRAPH_BUILD_PROGRAM)
     )
     target_compile_features(neograph_program PUBLIC cxx_std_20)
     target_compile_definitions(neograph_program PRIVATE NEOGRAPH_BUILDING_PROGRAM)
+    # The lock audit (src/program/lock_audit.h) changes the layout of the runtime's internal types, so a consumer that
+    # includes them (the tests) must agree: the definition is public.
+    option(NEOGRAPH_PROGRAM_LOCK_AUDIT
+           "Check that no mutex of the Program runtime that guards memory is held across a store call" OFF)
+    if(NEOGRAPH_PROGRAM_LOCK_AUDIT OR CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_definitions(neograph_program PUBLIC NEOGRAPH_PROGRAM_LOCK_AUDIT=1)
+    endif()
     if(NOT BUILD_SHARED_LIBS)
         target_compile_definitions(neograph_program INTERFACE NEOGRAPH_STATIC_BUILD)
     endif()

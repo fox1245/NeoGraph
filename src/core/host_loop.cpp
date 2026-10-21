@@ -84,6 +84,25 @@ public:
         }
     }
 
+    // Takes back one noted deadline for `at`: the earliest note for that time. The loop then waits on, and arms the host
+    // timer for, the next one, or for none.
+    void forget_at(sp::runtime::SteadyTime at) noexcept {
+        if (closed_) return;
+        try {
+            const auto noted = deadlines_.lower_bound({at, 0});
+            if (noted == deadlines_.end() || noted->first != at) return;
+            deadlines_.erase(noted);
+            if (deadlines_.empty() && sentinel_) {
+                sentinel_->cancel();
+                watching_ = false;
+            } else {
+                watch();
+            }
+            if (!running_) arm();
+        } catch (...) {
+        }
+    }
+
     bool idle() const noexcept { return closed_ || (!scheduled_ && !running_ && timer_ == 0); }
 
 private:
@@ -216,7 +235,28 @@ void HostLoop::wake() noexcept { core_->wake(); }
 
 void HostLoop::wake_at(sp::runtime::SteadyTime at) noexcept { core_->wake_at(at); }
 
+void HostLoop::forget_at(sp::runtime::SteadyTime at) noexcept { core_->forget_at(at); }
+
 bool HostLoop::idle() const noexcept { return core_->idle(); }
+
+void forget_deadline(const asio::any_io_executor& executor, std::chrono::steady_clock::time_point at) noexcept {
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        if (!asio::has_service<detail::HostLoopService>(context)) return;
+        if (auto* core = asio::use_service<detail::HostLoopService>(context).core) core->forget_at(at);
+    } catch (...) {
+    }
+}
+
+bool is_host_pumped(const asio::any_io_executor& executor) noexcept {
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        return asio::has_service<detail::HostLoopService>(context) &&
+               asio::use_service<detail::HostLoopService>(context).core != nullptr;
+    } catch (...) {
+        return false;
+    }
+}
 
 void note_deadline(const asio::any_io_executor& executor, std::chrono::steady_clock::time_point at) noexcept {
     try {

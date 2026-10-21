@@ -654,8 +654,10 @@ void start_dispatched_body(const std::shared_ptr<DispatchedAttempt>& unit) {
     // to the serial executor the body runs on, so a node may bind its slot()
     // to what it awaits; the body's own co_spawn uses a separate child token,
     // so cancelling the attempt aborts what the body awaits either way.
-    const auto token_executor =
-        unit->token->bind_executor(asio::make_strand(attempt_pool().get_executor()));
+    // #557: a host that gave the Program runtime an executor has no process-wide pool of threads to dispatch to.
+    const auto token_executor = unit->token->bind_executor(
+        unit->context.dispatch_executor ? asio::any_io_executor(asio::make_strand(unit->context.dispatch_executor))
+                                        : asio::any_io_executor(asio::make_strand(attempt_pool().get_executor())));
     const auto body_executor = unit->execution->bind_executor(token_executor);
     asio::post(body_executor, [unit, body_executor] {
         try {

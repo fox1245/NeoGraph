@@ -348,6 +348,12 @@ struct RunMetadata {
     /// thread should run elsewhere; the Python binding does. Copied into
     /// RunContext::shared_scheduler.
     bool shared_scheduler = false;
+    /// #557: the executor a node attempt that needs its own worker runs on, on a strand of it (shared_scheduler, or
+    /// an attempt timeout). The Program runtime sets it when the host gave it an executor, so that no node attempt
+    /// needs the process-wide attempt pool, which is made of threads. A node body then runs on a thread of that
+    /// executor and must not block it. Empty: the pool, as before. Copied into RunContext::dispatch_executor and
+    /// inherited by subgraphs.
+    asio::any_io_executor dispatch_executor;
     /// #364: the run-level retry ceiling; null means none. Subgraphs share
     /// their parent's.
     std::shared_ptr<NodeRetryCeiling> node_retry_ceiling;

@@ -1,22 +1,28 @@
 #include <neograph/program/runtime.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/schema.h>
+#include <neograph/async/host_loop.h>
 #include <neograph/async/run_sync.h>
+#include <neograph/build_config.h>
 #include <neograph/provider.h>
 
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "catalog_access.h"
 #include "monetary.h"
+#include "lock_audit.h"
+#include "operation_lock.h"
 #include "provider_failure.h"
 #include "run_control.h"
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/error.hpp>
+#include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/prefer.hpp>
+#include <asio/strand.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/thread_pool.hpp>
 #include <asio/use_awaitable.hpp>
@@ -653,7 +659,7 @@ struct GlobalChildQuotaState {
     explicit GlobalChildQuotaState(ProgramChildQuotaConfig limits_value) : limits(limits_value) {}
 
     ProgramChildQuotaConfig                        limits;
-    std::mutex                                     mutex;
+    detail::PureMutex                              mutex;
     std::uint64_t                                  active_children = 0;
     std::uint64_t                                  pending_spawns  = 0;
     std::unordered_map<std::string, std::uint64_t> active_by_owner;
@@ -849,10 +855,10 @@ HostAdmissionRequest make_host_admission_request(const std::shared_ptr<detail::R
     return request;
 }
 
-std::shared_ptr<asio::steady_timer> arm_host_admission_deadline(
+std::shared_ptr<async::HostTimer> arm_host_admission_deadline(
     const std::shared_ptr<detail::RunControl>& control) {
-    auto timer = std::make_shared<asio::steady_timer>(control->deadline_executor);
-    timer->expires_at(control->deadline);
+    auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
+    timer->arm_at(control->deadline);
     asio::co_spawn(
         control->deadline_executor,
         [control, timer]() -> asio::awaitable<void> {
@@ -866,7 +872,7 @@ std::shared_ptr<asio::steady_timer> arm_host_admission_deadline(
 }
 
 void cancel_host_admission_deadline(const std::shared_ptr<detail::RunControl>& control,
-                                    std::shared_ptr<asio::steady_timer>        timer) noexcept {
+                                    std::shared_ptr<async::HostTimer>          timer) noexcept {
     try {
         asio::post(control->deadline_executor, [timer = std::move(timer)] { timer->cancel(); });
     } catch (...) {}
@@ -878,11 +884,11 @@ asio::awaitable<void> execute_host_admitted_attempt(
     std::optional<std::string>               checkpoint_id,
     std::shared_ptr<HostAdmissionController> host_admission,
     ProgramHostAdmissionResolver             resolver,
-    std::shared_ptr<asio::steady_timer>      deadline_timer,
+    std::shared_ptr<async::HostTimer>        deadline_wait,
     std::optional<json>                      javascript_core_resume_value) {
     try {
         if (control->cancel_token->is_cancelled()) {
-            cancel_host_admission_deadline(control, std::move(deadline_timer));
+            cancel_host_admission_deadline(control, std::move(deadline_wait));
             complete_attempt_admission_cancelled(control, checkpoint_id);
             co_return;
         }
@@ -895,7 +901,7 @@ asio::awaitable<void> execute_host_admitted_attempt(
         }
         auto held_lease = std::make_shared<HostResourceLease>(std::move(lease));
         control->add_terminal_cleanup([held_lease] { held_lease->release(); });
-        cancel_host_admission_deadline(control, std::move(deadline_timer));
+        cancel_host_admission_deadline(control, std::move(deadline_wait));
 
         if (control->cancel_token->is_cancelled()) {
             complete_attempt_admission_cancelled(control, checkpoint_id);
@@ -904,10 +910,10 @@ asio::awaitable<void> execute_host_admitted_attempt(
         co_await detail::execute_run_attempt(control, std::move(input), checkpoint_id,
                                              std::move(javascript_core_resume_value));
     } catch (const graph::CancelledException&) {
-        cancel_host_admission_deadline(control, std::move(deadline_timer));
+        cancel_host_admission_deadline(control, std::move(deadline_wait));
         complete_attempt_admission_cancelled(control, checkpoint_id);
     } catch (const HostAdmissionError& error) {
-        cancel_host_admission_deadline(control, std::move(deadline_timer));
+        cancel_host_admission_deadline(control, std::move(deadline_wait));
         if (error.failure() == HostAdmissionFailure::QueueTimeout) {
             (void)control->cancel(detail::CancellationCause::Timeout);
             complete_attempt_admission_cancelled(control, checkpoint_id);
@@ -918,7 +924,10 @@ asio::awaitable<void> execute_host_admitted_attempt(
     co_return;
 }
 
-void spawn_run_attempt(asio::thread_pool&                         pool,
+// `keepalive` is the runtime's state: the attempt may outlive the ProgramRuntime object on an injected executor, and
+// the runtime's callbacks that it calls need that state.
+void spawn_run_attempt(const std::shared_ptr<const detail::RuntimeScheduler>& scheduler,
+                       std::shared_ptr<void>                      keepalive,
                        const std::shared_ptr<detail::RunControl>& control,
                        json                                       input,
                        std::optional<std::string>                 checkpoint_id,
@@ -927,22 +936,22 @@ void spawn_run_attempt(asio::thread_pool&                         pool,
                        std::optional<json> javascript_core_resume_value = std::nullopt) noexcept {
     try {
         if (host_admission) {
-            auto deadline_timer = arm_host_admission_deadline(control);
-            asio::co_spawn(pool,
+            auto deadline_wait = arm_host_admission_deadline(control);
+            asio::co_spawn(scheduler->attempts,
                            execute_host_admitted_attempt(
                                control, std::move(input), checkpoint_id, std::move(host_admission),
-                               std::move(host_admission_resolver), std::move(deadline_timer),
+                               std::move(host_admission_resolver), std::move(deadline_wait),
                                std::move(javascript_core_resume_value)),
-                           [control, checkpoint_id](std::exception_ptr error) {
+                           [control, checkpoint_id, keepalive](std::exception_ptr error) {
                                if (error)
                                    complete_attempt_launch_failure(control, checkpoint_id, error);
                            });
             return;
         }
-        asio::co_spawn(pool,
+        asio::co_spawn(scheduler->attempts,
                        detail::execute_run_attempt(control, std::move(input), checkpoint_id,
                                                    std::move(javascript_core_resume_value)),
-                       [control, checkpoint_id](std::exception_ptr error) {
+                       [control, checkpoint_id, keepalive](std::exception_ptr error) {
                            if (error)
                                complete_attempt_launch_failure(control, checkpoint_id, error);
                        });
@@ -1465,10 +1474,10 @@ std::vector<ProgramChildRecord> terminal_children(const std::vector<ProgramChild
 // dispatch, child completion, and parent terminal publication can run on
 // different scheduler threads; serialize local writers for the same chain.
 // Striping avoids a global bottleneck while harmlessly serializing collisions.
-std::mutex& child_relation_publication_mutex(const ProgramTransitionStore& transitions,
-                                             std::string_view              owner_scope,
-                                             std::string_view              parent_run_id) {
-    static std::array<std::mutex, 257> locks;
+detail::OperationLock& child_relation_publication_mutex(const ProgramTransitionStore& transitions,
+                                                        std::string_view              owner_scope,
+                                                        std::string_view              parent_run_id) {
+    static std::array<detail::OperationLock, 257> locks;
     const auto                         mix = [](std::size_t seed, std::size_t value) noexcept {
         return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
     };
@@ -1606,8 +1615,7 @@ ChildRecordPublication publish_child_record(
     std::string_view                               parent_run_id,
     const std::shared_ptr<ProgramTransitionStore>& transitions,
     ProgramChildRecord                             child) {
-    std::lock_guard lock(
-        child_relation_publication_mutex(*transitions, owner_scope, parent_run_id));
+    auto lock = child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_blocking();
     return publish_child_record_unlocked(owner_scope, parent_run_id, transitions, std::move(child));
 }
 
@@ -1623,8 +1631,8 @@ bool publish_child_completion(const std::shared_ptr<ProgramTransitionStore>& tra
                               std::string_view                               child_run_id,
                               const ProgramResult&                           result) noexcept {
     try {
-        std::lock_guard lock(
-            child_relation_publication_mutex(*transitions, owner_scope, parent_run_id));
+        auto lock =
+            child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_blocking();
         std::uint64_t terminal_generation = 0;
         const auto    child_lineage = transitions->load_run_lineage(owner_scope, child_run_id);
         if (child_lineage) {
@@ -1844,8 +1852,9 @@ enum class TerminalPublicationResult : std::uint8_t {
 TerminalPublicationResult publish_terminal_record(const detail::RunControl& control,
                                                   const ProgramResult&      result,
                                                   std::exception_ptr&       cause) {
-    std::lock_guard lock(child_relation_publication_mutex(*control.transitions, control.owner_scope,
-                                                          control.logical_run_id));
+    auto lock = child_relation_publication_mutex(*control.transitions, control.owner_scope,
+                                                 control.logical_run_id)
+                    .lock_blocking();
     for (int retry = 0; retry < 3; ++retry) {
         std::optional<ProgramRunPublicationHead> head;
         std::optional<ProgramRunRecord> loaded_previous;
@@ -2044,7 +2053,72 @@ bool admit_started(const std::shared_ptr<detail::RunControl>& control,
 
 }  // namespace
 
+ProgramExecutorRequired::ProgramExecutorRequired()
+    : std::runtime_error("This build has no threads, so ProgramRuntime has none to run Programs on: set "
+                         "RuntimeConfig::executor (for a WebAssembly host, async::HostLoop::executor())") {}
+
+ProgramBlockingCallRefused::ProgramBlockingCallRefused(std::string operation, std::string alternative,
+                                                       std::string reason)
+    : std::runtime_error(operation + " is refused: " + reason +
+                         (alternative.empty() ? std::string{} : "; use " + alternative + " instead")),
+      operation_(std::move(operation)),
+      alternative_(std::move(alternative)) {}
+
 namespace detail {
+
+namespace {
+thread_local unsigned internal_call_depth = 0;
+
+// Whether the calling thread runs `executor`, for the executors the runtime can see into: the executor of an
+// io_context or a thread_pool, and a strand of either. Anything else is the host's to say
+// (ProgramExecutorIdentity::running_in_this_thread).
+bool runs_in_this_thread(const asio::any_io_executor& executor) noexcept {
+    try {
+        if (const auto* io = executor.target<asio::io_context::executor_type>()) return io->running_in_this_thread();
+        if (const auto* pool = executor.target<asio::thread_pool::executor_type>())
+            return pool->running_in_this_thread();
+        if (const auto* strand = executor.target<asio::strand<asio::io_context::executor_type>>())
+            return strand->get_inner_executor().running_in_this_thread();
+        if (const auto* strand = executor.target<asio::strand<asio::thread_pool::executor_type>>())
+            return strand->get_inner_executor().running_in_this_thread();
+    } catch (...) {
+    }
+    return false;
+}
+}  // namespace
+
+InternalCall::InternalCall() noexcept { ++internal_call_depth; }
+InternalCall::~InternalCall() { --internal_call_depth; }
+bool InternalCall::active() noexcept { return internal_call_depth != 0; }
+
+bool RuntimeScheduler::on_executor_thread() const {
+    if (!injected) return false;
+    if (running_in_this_thread) return running_in_this_thread();
+    return runs_in_this_thread(host_executor);
+}
+
+void RuntimeScheduler::require_synchronous_call(std::string_view operation,
+                                                std::string_view alternative) const {
+    if (!host_pumped || InternalCall::active()) return;
+    throw ProgramBlockingCallRefused(
+        std::string(operation), std::string(alternative),
+        NEOGRAPH_BUILD_THREADS
+            ? "the runtime's executor is run by a host's event loop, and a synchronous call would block it"
+            : "this build has no threads, so a synchronous call has nothing to wait on");
+}
+
+void RuntimeScheduler::require_wait(std::string_view operation, std::string_view alternative) const {
+    if (host_pumped)
+        throw ProgramBlockingCallRefused(
+            std::string(operation), std::string(alternative),
+            NEOGRAPH_BUILD_THREADS
+                ? "the runtime's executor is run by a host's event loop, and waiting would block it"
+                : "this build has no threads, so nothing could finish while it waits");
+    if (on_executor_thread())
+        throw ProgramBlockingCallRefused(
+            std::string(operation), std::string(alternative),
+            "it is made on a thread that runs the runtime's executor, which would wait for work only that thread can do");
+}
 
 RunControl::RunControl(std::string                                owner,
                        std::string                                run,
@@ -2056,7 +2130,7 @@ RunControl::RunControl(std::string                                owner,
                        std::string                                thread,
                        std::uint64_t                              event_sequence,
                        std::shared_ptr<ProgramEventSink>          sink,
-                       asio::any_io_executor                      deadline_executor_value,
+                       std::shared_ptr<const RuntimeScheduler>    scheduler_value,
                        std::shared_ptr<graph::CheckpointStore>    checkpoint_store,
                        std::shared_ptr<graph::Store>              store,
                        std::shared_ptr<ProgramTransitionStore>    transition_store,
@@ -2075,8 +2149,9 @@ RunControl::RunControl(std::string                                owner,
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
       deadline(started_at + std::chrono::milliseconds(granted_budget.wall_time_ms)),
-      deadline_executor(std::move(deadline_executor_value)),
-      waiter_strand(asio::make_strand(asio::system_executor{})),
+      scheduler(std::move(scheduler_value)),
+      deadline_executor(scheduler->deadlines),
+      waiter_strand(asio::make_strand(scheduler->waiters)),
       core_thread_id(std::move(thread)),
       trace_id(invocation.correlation_id),
       checkpoints(std::move(checkpoint_store)),
@@ -2111,7 +2186,8 @@ RunControl::RunControl(std::string                                owner,
 
 RunControl::RunControl(ProgramRunRecord                        record,
                        std::shared_ptr<ProgramTransitionStore> transition_store,
-                       std::shared_ptr<sp::NativeArchive> archive)
+                       std::shared_ptr<sp::NativeArchive> archive,
+                       std::shared_ptr<const RuntimeScheduler> scheduler_value)
     : owner_scope(record.owner_scope()),
       run_id(record.run_id()),
       logical_run_id(record.logical_run_id()),
@@ -2127,8 +2203,9 @@ RunControl::RunControl(ProgramRunRecord                        record,
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
       deadline(started_at + std::chrono::milliseconds(record.remaining_budget().wall_time_ms)),
-      deadline_executor(asio::system_executor{}),
-      waiter_strand(asio::make_strand(asio::system_executor{})),
+      scheduler(std::move(scheduler_value)),
+      deadline_executor(scheduler->deadlines),
+      waiter_strand(asio::make_strand(scheduler->waiters)),
       core_thread_id(record.exact_checkpoint() ? record.exact_checkpoint()->core_thread_id
                                                : std::string{}),
       trace_id(invocation.correlation_id),
@@ -2521,16 +2598,13 @@ void RunControl::attach_child(const std::shared_ptr<RunControl>& child) noexcept
 bool RunControl::cancel(CancellationCause cause) noexcept {
     try {
         if (const auto next = following_successor()) return next->cancel(cause);
-        std::shared_ptr<std::recursive_mutex> coordination_mutex;
+        std::shared_ptr<ReentrantOperationLock> coordination_mutex;
         {
             std::lock_guard lock(mutex_);
             coordination_mutex = handoff_coordination_mutex_;
         }
-        std::unique_lock<std::recursive_mutex> coordination_lock;
-        if (coordination_mutex) {
-            coordination_lock = std::unique_lock<std::recursive_mutex>(
-                *coordination_mutex);
-        }
+        ReentrantOperationLock::Guard coordination_lock;
+        if (coordination_mutex) coordination_lock = coordination_mutex->lock_blocking();
         const auto previous = transitions->load(owner_scope, run_id);
         if (previous && previous->continuation().state == ContinuationState::Interrupted) {
             auto                      pending_input  = previous->pending_input();
@@ -3156,6 +3230,8 @@ void RunControl::fail_closed(std::exception_ptr error) noexcept {
 
 ProgramResult RunControl::wait() const {
     std::unique_lock lock(mutex_);
+    if (!result_.has_value() && !(follow_successor_ && successor_))
+        scheduler->require_wait("ProgramHandle::wait", "ProgramHandle::wait_async");
     cv_.wait(lock, [this] { return result_.has_value() || (follow_successor_ && successor_); });
     if (follow_successor_ && successor_) {
         auto next = successor_;
@@ -3169,8 +3245,8 @@ asio::awaitable<ProgramResult> RunControl::wait_async() const {
 }
 asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
     std::shared_ptr<const RunControl> control) {
-    auto timer = std::make_shared<asio::steady_timer>(control->waiter_strand);
-    timer->expires_at((std::chrono::steady_clock::time_point::max)());
+    auto timer = std::make_shared<async::HostTimer>(control->waiter_strand);
+    timer->arm_never();
     co_await asio::co_spawn(
         control->waiter_strand,
         [control, timer]() -> asio::awaitable<void> {
@@ -3269,7 +3345,7 @@ std::optional<ExactProgramHandoff> RunControl::latest_handoff() const {
 }
 
 void RunControl::set_handoff_coordination_mutex(
-    std::shared_ptr<std::recursive_mutex> coordination_mutex,
+    std::shared_ptr<ReentrantOperationLock> coordination_mutex,
     std::function<bool(const RunControl*)> admission) {
     if (!coordination_mutex || !admission) {
         throw std::invalid_argument("Program handoff coordination must be complete");
@@ -3283,7 +3359,7 @@ void RunControl::set_handoff_coordination_mutex(
 }
 
 std::uint64_t RunControl::request_handoff() {
-    std::shared_ptr<std::recursive_mutex> coordination_mutex;
+    std::shared_ptr<ReentrantOperationLock> coordination_mutex;
     std::function<bool(const RunControl*)> admission;
     {
         std::lock_guard lock(mutex_);
@@ -3293,7 +3369,7 @@ std::uint64_t RunControl::request_handoff() {
     if (!coordination_mutex || !admission) {
         throw std::logic_error("Program handoff coordination is not configured");
     }
-    std::unique_lock coordination_lock(*coordination_mutex);
+    auto coordination_lock = coordination_mutex->lock_blocking();
     if (!admission(this)) {
         throw std::runtime_error(
             "Program handoff requires one process-local execution control");
@@ -3315,6 +3391,9 @@ std::uint64_t RunControl::request_handoff() {
 
 HeldProgramHandoff RunControl::wait_handoff(std::uint64_t request_id) {
     std::unique_lock lock(mutex_);
+    if (!(handoff_request_id_ != request_id || held_handoff_ || result_ ||
+          cancellation_cause_ != CancellationCause::None))
+        scheduler->require_wait("ProgramHandoff::reference", "ProgramHandoff::wait_async");
     handoff_cv_.wait(lock, [&] {
         return handoff_request_id_ != request_id || held_handoff_ || result_ ||
                cancellation_cause_ != CancellationCause::None;
@@ -3328,8 +3407,8 @@ HeldProgramHandoff RunControl::wait_handoff(std::uint64_t request_id) {
 asio::awaitable<HeldProgramHandoff> RunControl::wait_handoff_async(
     std::uint64_t request_id) {
     auto       control    = shared_from_this();
-    auto       timer      = std::make_shared<asio::steady_timer>(waiter_strand);
-    timer->expires_at((asio::steady_timer::time_point::max)());
+    auto       timer      = std::make_shared<async::HostTimer>(waiter_strand);
+    timer->arm_never();
     co_await asio::co_spawn(
         waiter_strand,
         [control, request_id, timer]() -> asio::awaitable<void> {
@@ -3398,8 +3477,8 @@ asio::awaitable<void> RunControl::hold_latest_handoff_if_requested(std::uint64_t
     reach_latest_handoff_if_requested();
 
     auto control = shared_from_this();
-    auto timer = std::make_shared<asio::steady_timer>(waiter_strand);
-    timer->expires_at((asio::steady_timer::time_point::max)());
+    auto timer = std::make_shared<async::HostTimer>(waiter_strand);
+    timer->arm_never();
     // Register and initiate the wait on the same strand used by release.
     // A pool executor alone permits expiry mutation to race async_wait.
     co_await asio::co_spawn(
@@ -3423,7 +3502,7 @@ asio::awaitable<void> RunControl::hold_latest_handoff_if_requested(std::uint64_t
 
 void RunControl::release_handoff(std::uint64_t request_id) noexcept {
     try {
-        std::shared_ptr<asio::steady_timer> release_waiter;
+        std::shared_ptr<async::HostTimer> release_waiter;
         std::vector<AsyncWaiter>            waiters;
         {
             std::lock_guard lock(mutex_);
@@ -3439,8 +3518,8 @@ void RunControl::release_handoff(std::uint64_t request_id) noexcept {
             asio::dispatch(release_waiter->get_executor(),
                            [release_waiter] {
                                try {
-                                   release_waiter->expires_at(
-                                       (asio::steady_timer::time_point::min)());
+                                   release_waiter->arm_at(
+                                       (std::chrono::steady_clock::time_point::min)());
                                } catch (...) {}
                            });
         }
@@ -3480,7 +3559,7 @@ RunControl::graph_safe_point_request() const {
 }
 
 std::uint64_t RunControl::request_graph_migration() {
-    std::shared_ptr<std::recursive_mutex> coordination_mutex;
+    std::shared_ptr<ReentrantOperationLock> coordination_mutex;
     std::function<bool(const RunControl*)> admission;
     {
         std::lock_guard lock(mutex_);
@@ -3490,7 +3569,7 @@ std::uint64_t RunControl::request_graph_migration() {
     if (!coordination_mutex || !admission) {
         throw std::logic_error("Program graph migration coordination is not configured");
     }
-    std::unique_lock coordination_lock(*coordination_mutex);
+    auto coordination_lock = coordination_mutex->lock_blocking();
     if (!admission(this)) {
         throw std::runtime_error(
             "Program graph migration requires one process-local execution control");
@@ -3524,6 +3603,10 @@ std::uint64_t RunControl::request_graph_migration() {
 
 GraphMigrationCapsule RunControl::wait_graph_migration(std::uint64_t request_id) {
     std::unique_lock lock(mutex_);
+    if (!(graph_migration_request_id_ != request_id || held_graph_migration_ ||
+          finished_graph_migration_request_id_ == request_id || result_ ||
+          cancellation_cause_ != CancellationCause::None))
+        scheduler->require_wait("ProgramRuntime::migrate_graph", "ProgramRuntime::migrate_graph_async");
     graph_migration_cv_.wait(lock, [&] {
         return graph_migration_request_id_ != request_id || held_graph_migration_ ||
                finished_graph_migration_request_id_ == request_id || result_ ||
@@ -3540,6 +3623,52 @@ GraphMigrationCapsule RunControl::wait_graph_migration(std::uint64_t request_id)
         "Program graph migration ended before reaching a durable safe point");
 }
 
+void RunControl::notify_graph_migration_locked(std::vector<AsyncWaiter>& async_waiters) {
+    graph_migration_cv_.notify_all();
+    for (auto& waiter : graph_migration_waiters_) async_waiters.push_back(std::move(waiter));
+    graph_migration_waiters_.clear();
+}
+
+void RunControl::wake_async_waiters(std::vector<AsyncWaiter> waiters) const {
+    if (waiters.empty()) return;
+    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+        for (const auto& waiter : waiters)
+            if (auto timer = waiter.timer.lock()) timer->cancel();
+    });
+}
+
+asio::awaitable<GraphMigrationCapsule> RunControl::wait_graph_migration_async(std::uint64_t request_id) {
+    auto control = shared_from_this();
+    auto timer   = std::make_shared<async::HostTimer>(waiter_strand);
+    timer->arm_never();
+    co_await asio::co_spawn(
+        waiter_strand,
+        [control, request_id, timer]() -> asio::awaitable<void> {
+            {
+                std::lock_guard lock(control->mutex_);
+                if (control->graph_migration_request_id_ != request_id ||
+                    control->held_graph_migration_ ||
+                    control->finished_graph_migration_request_id_ == request_id || control->result_ ||
+                    control->cancellation_cause_ != CancellationCause::None) {
+                    co_return;
+                }
+                control->graph_migration_waiters_.push_back(AsyncWaiter{timer});
+            }
+            asio::error_code error;
+            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+        },
+        asio::use_awaitable);
+
+    std::lock_guard lock(mutex_);
+    if (graph_migration_request_id_ == request_id && held_graph_migration_) {
+        co_return *held_graph_migration_;
+    }
+    if (finished_graph_migration_request_id_ == request_id && !graph_migration_error_.empty()) {
+        throw std::runtime_error(graph_migration_error_);
+    }
+    throw std::runtime_error("Program graph migration ended before reaching a durable safe point");
+}
+
 asio::awaitable<void> RunControl::hold_graph_migration(
     const graph::GraphSafePoint& safe_point,
     RunBudget remaining_budget) {
@@ -3554,14 +3683,18 @@ asio::awaitable<void> RunControl::hold_graph_migration(
     }
 
     const auto fail_request = [&](std::string message) {
-        std::lock_guard lock(mutex_);
-        if (graph_migration_request_id_ != request_id) return;
-        graph_migration_request_id_ = 0;
-        finished_graph_migration_request_id_ = request_id;
-        held_graph_migration_.reset();
-        graph_migration_error_ = std::move(message);
-        renew_graph_safe_point_request_locked();
-        graph_migration_cv_.notify_all();
+        std::vector<AsyncWaiter> waiters;
+        {
+            std::lock_guard lock(mutex_);
+            if (graph_migration_request_id_ != request_id) return;
+            graph_migration_request_id_ = 0;
+            finished_graph_migration_request_id_ = request_id;
+            held_graph_migration_.reset();
+            graph_migration_error_ = std::move(message);
+            renew_graph_safe_point_request_locked();
+            notify_graph_migration_locked(waiters);
+        }
+        wake_async_waiters(std::move(waiters));
     };
     const auto fence_request = [&](std::string message) {
         if (const auto local_lease = execution_lease()) {
@@ -3572,14 +3705,18 @@ asio::awaitable<void> RunControl::hold_graph_migration(
             } catch (...) {}
         }
         {
-            std::lock_guard lock(mutex_);
-            if (graph_migration_request_id_ == request_id) {
-                graph_migration_request_id_ = 0;
-                finished_graph_migration_request_id_ = request_id;
-                held_graph_migration_.reset();
-                graph_migration_error_ = std::move(message);
-                graph_migration_cv_.notify_all();
+            std::vector<AsyncWaiter> waiters;
+            {
+                std::lock_guard lock(mutex_);
+                if (graph_migration_request_id_ == request_id) {
+                    graph_migration_request_id_ = 0;
+                    finished_graph_migration_request_id_ = request_id;
+                    held_graph_migration_.reset();
+                    graph_migration_error_ = std::move(message);
+                    notify_graph_migration_locked(waiters);
+                }
             }
+            wake_async_waiters(std::move(waiters));
         }
         (void)cancel(CancellationCause::ParentTerminal);
         RunOutcome cancelled;
@@ -3784,15 +3921,19 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         deliver_event(checkpoint_event);
 
         {
-            std::lock_guard lock(mutex_);
-            if (graph_migration_request_id_ != request_id || result_ || terminal_decided_ ||
-                cancellation_cause_ != CancellationCause::None) {
-                throw std::runtime_error(
-                    "Program graph migration source stopped before it could be held");
+            std::vector<AsyncWaiter> waiters;
+            {
+                std::lock_guard lock(mutex_);
+                if (graph_migration_request_id_ != request_id || result_ || terminal_decided_ ||
+                    cancellation_cause_ != CancellationCause::None) {
+                    throw std::runtime_error(
+                        "Program graph migration source stopped before it could be held");
+                }
+                held_graph_migration_ = *durable_capsule;
+                latest_checkpoint_ = checkpoint_identity;
+                notify_graph_migration_locked(waiters);
             }
-            held_graph_migration_ = *durable_capsule;
-            latest_checkpoint_ = checkpoint_identity;
-            graph_migration_cv_.notify_all();
+            wake_async_waiters(std::move(waiters));
         }
     } catch (const std::exception& error) {
         if (source_checkpoint_committed || uncertain_publication) {
@@ -3829,8 +3970,8 @@ asio::awaitable<void> RunControl::hold_graph_migration(
     }
 
     auto control = shared_from_this();
-    auto timer = std::make_shared<asio::steady_timer>(waiter_strand);
-    timer->expires_at((asio::steady_timer::time_point::max)());
+    auto timer = std::make_shared<async::HostTimer>(waiter_strand);
+    timer->arm_never();
     // Registration and wait initiation must serialize with the release expiry,
     // including when the migration caller rejects before this coroutine suspends.
     co_await asio::co_spawn(
@@ -3992,7 +4133,8 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
             }
         }
 
-        std::shared_ptr<asio::steady_timer> release_waiter;
+        std::shared_ptr<async::HostTimer> release_waiter;
+        std::vector<AsyncWaiter>            waiters;
         {
             std::lock_guard lock(mutex_);
             const bool cancelled = cancellation_cause_ != CancellationCause::None ||
@@ -4011,13 +4153,14 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
             } else {
                 return;
             }
-            graph_migration_cv_.notify_all();
+            notify_graph_migration_locked(waiters);
         }
+        wake_async_waiters(std::move(waiters));
         if (release_waiter) {
             asio::dispatch(release_waiter->get_executor(), [release_waiter] {
                 try {
-                    release_waiter->expires_at(
-                        (asio::steady_timer::time_point::min)());
+                    release_waiter->arm_at(
+                        (std::chrono::steady_clock::time_point::min)());
                 } catch (...) {}
             });
         }
@@ -4360,9 +4503,9 @@ struct ProcessRuntimeState {
         std::weak_ptr<detail::RunControl> control;
     };
 
-    std::shared_ptr<std::recursive_mutex> transition_mutex =
-        std::make_shared<std::recursive_mutex>();
-    std::mutex                controls_mutex;
+    std::shared_ptr<detail::ReentrantOperationLock> transition_mutex =
+        std::make_shared<detail::ReentrantOperationLock>();
+    detail::PureMutex         controls_mutex;
     std::vector<ControlEntry> controls;
 };
 
@@ -4413,7 +4556,7 @@ struct ProgramHandoff::Impl {
 
     std::shared_ptr<detail::RunControl> control;
     std::uint64_t                       request_id = 0;
-    mutable std::mutex                  resolve_mutex;
+    mutable detail::PureMutex           resolve_mutex;
     mutable std::optional<ExactProgramHandoff> handoff;
     std::atomic_bool                    consumed{false};
 };
@@ -4534,9 +4677,39 @@ ProgramHandle ProgramHandle::reconcile(ProgramRuntime&         runtime,
     return runtime.reconcile(control_->owner_scope, control_->run_id, std::move(resolution));
 }
 
-struct ProgramRuntime::Impl {
-    explicit Impl(RuntimeConfig runtime_config)
-        : config(std::move(runtime_config)), pool(config.scheduler_threads) {
+struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl> {
+    explicit Impl(RuntimeConfig runtime_config) : config(std::move(runtime_config)) {
+        // With the lock audit on, every call into the store checks that no memory-only mutex is held (lock_audit.h).
+        config.transitions = detail::audit_transition_store(std::move(config.transitions));
+        auto executors = std::make_shared<detail::RuntimeScheduler>();
+        if (config.executor) {
+            // #557: the host's executor runs everything, and nothing runs inline. The runtime starts no thread.
+            executors->injected = true;
+            executors->host_pumped = config.executor_identity.host_pumped ||
+                                     async::is_host_pumped(config.executor) || !NEOGRAPH_BUILD_THREADS;
+            executors->host_executor          = config.executor;
+            executors->running_in_this_thread = config.executor_identity.running_in_this_thread;
+            if (executors->host_pumped && config.hook_runtime)
+                throw ProgramBlockingCallRefused(
+                    "RuntimeConfig::hook_runtime", {},
+                    "a lifecycle hook blocks its caller until the hook answers, and the runtime's executor is run by a "
+                    "host's event loop");
+            const asio::any_io_executor never_inline =
+                asio::prefer(config.executor, asio::execution::blocking.never);
+            executors->attempts  = never_inline;
+            executors->deadlines = never_inline;
+            executors->waiters   = never_inline;
+        } else {
+            if (!NEOGRAPH_BUILD_THREADS) throw ProgramExecutorRequired();
+            // Today's pools are one implementation of an executor: attempts on `scheduler_threads` threads,
+            // deadline timers on one, waiters on the system executor.
+            pool.emplace(config.scheduler_threads);
+            deadline_pool.emplace(1);
+            executors->attempts  = pool->get_executor();
+            executors->deadlines = deadline_pool->get_executor();
+            executors->waiters   = asio::system_executor{};
+        }
+        scheduler = std::move(executors);
         // #543: a fork may send a call its source journaled and the journal cannot adopt only when the host says so.
         if (config.fork_may_resend_provider_calls && config.core_provider_call_resolver) {
             config.core_provider_call_resolver =
@@ -4550,7 +4723,51 @@ struct ProgramRuntime::Impl {
         global_child_quota = std::make_shared<GlobalChildQuotaState>(config.child_quota);
         process_state      = process_runtime_state(*config.transitions);
     }
-    ProgramRuntime* owner = nullptr;
+
+    // The awaitable forms of fork and replace take fork_operation with lock_async and then run the synchronous
+    // body on the same thread; the body must not take it again.
+    detail::OperationLock::Guard acquire_fork_operation() {
+        if (fork_operation_held_by_call == &fork_operation) return {};
+        return fork_operation.lock_blocking();
+    }
+    struct ForkOperationHeld {
+        explicit ForkOperationHeld(const detail::OperationLock* lock) noexcept { fork_operation_held_by_call = lock; }
+        ~ForkOperationHeld() { fork_operation_held_by_call = nullptr; }
+        ForkOperationHeld(const ForkOperationHeld&)            = delete;
+        ForkOperationHeld& operator=(const ForkOperationHeld&) = delete;
+    };
+    static inline thread_local const detail::OperationLock* fork_operation_held_by_call = nullptr;
+
+    // Runs a synchronous body on the runtime's executor and completes on the executor of the awaiting coroutine.
+    // The state outlives the body, whatever happens to the ProgramRuntime object in the meantime.
+    // (co_spawn builds a default Result when the body throws, and most results have no default: the body hands back
+    // an optional.)
+    template <typename Result, typename Body>
+    asio::awaitable<Result> run_on_executor(Body body) {
+        auto produced = co_await asio::co_spawn(
+            scheduler->attempts,
+            [keep = shared_from_this(), body = std::move(body)]() mutable -> asio::awaitable<std::optional<Result>> {
+                co_return std::optional<Result>(body());
+            },
+            asio::use_awaitable);
+        co_return std::move(*produced);
+    }
+    // The same for a body that is a coroutine.
+    template <typename Result, typename Body>
+    asio::awaitable<Result> run_coroutine_on_executor(Body body) {
+        auto produced = co_await asio::co_spawn(
+            scheduler->attempts,
+            [keep = shared_from_this(), body = std::move(body)]() mutable -> asio::awaitable<std::optional<Result>> {
+                co_return std::optional<Result>(co_await body());
+            },
+            asio::use_awaitable);
+        co_return std::move(*produced);
+    }
+
+    // The runtime's pools; empty when the host gave an executor.
+    std::optional<asio::thread_pool>                       pool;
+    std::optional<asio::thread_pool>                       deadline_pool;
+    std::shared_ptr<const detail::RuntimeScheduler>        scheduler;
 
     void verify_synthesis_grant(const ProgramChildSynthesisRecord& record,
                                 bool require_reservation = true) const {
@@ -4794,7 +5011,9 @@ struct ProgramRuntime::Impl {
     }
 
     void configure_child_launcher(const std::shared_ptr<detail::RunControl>& control) {
-        if (!owner) return;
+        // The callbacks below run on an attempt, which can outlive the ProgramRuntime object on an injected
+        // executor: each one keeps this state alive while it runs, and finds it gone only after shutdown.
+        const std::weak_ptr<Impl> weak_impl = weak_from_this();
         if (!config.child_binding_resolver && !config.child_synthesis_gateway &&
             !config.recover_existing_child_commands) {
             if (config.task_graph_fragments && config.task_graph_policy_resolver)
@@ -4805,8 +5024,10 @@ struct ProgramRuntime::Impl {
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
         if (config.recover_existing_child_commands) {
             control->set_existing_child_reconnect_callback(
-                [this, weak_control](std::string_view binding, const json& input,
-                                     std::string_view operation) {
+                [this, weak_impl, weak_control](std::string_view binding, const json& input,
+                                                std::string_view operation) {
+                    const auto keep = weak_impl.lock();
+                    if (!keep) throw std::runtime_error("ProgramRuntime has been destroyed");
                     const auto parent = weak_control.lock();
                     const auto child = parent
                                            ? recoverable_existing_child(parent, binding, input,
@@ -4819,7 +5040,9 @@ struct ProgramRuntime::Impl {
                     // to start_child if publication disappears after validation.
                     auto reconnected = [&] {
                         try {
-                            return owner->reconnect(parent->owner_scope, child->child_run_id);
+                            detail::InternalCall internal;
+                            return ProgramRuntime(keep, ProgramRuntime::Borrowed{})
+                                .reconnect(parent->owner_scope, child->child_run_id);
                         } catch (const ProgramDiagnosticError& error) {
                             if (error.diagnostic().code == "P_RUN_NOT_FOUND")
                                 throw_runtime_diagnostic("P_CHILD_RECOVERY",
@@ -4837,12 +5060,13 @@ struct ProgramRuntime::Impl {
                 });
         }
         if (config.child_synthesis_gateway || config.recover_existing_child_commands) {
-            control->set_child_recovery_callback([this, weak_control](std::string_view binding,
-                                                                      const json&      input,
-                                                                      std::string_view operation) {
+            control->set_child_recovery_callback([this, weak_impl, weak_control](std::string_view binding,
+                                                                                 const json&      input,
+                                                                                 std::string_view operation) {
+                const auto keep   = weak_impl.lock();
                 const auto parent = weak_control.lock();
                 using Mode = detail::ChildRecoveryMode;
-                if (!parent) return Mode::None;
+                if (!keep || !parent) return Mode::None;
                 if (config.recover_existing_child_commands &&
                     recoverable_existing_child(parent, binding, input, operation))
                     return Mode::Existing;
@@ -4876,7 +5100,9 @@ struct ProgramRuntime::Impl {
         }
 
         control->set_child_binding_validation_callback(
-            [this, weak_control](std::string_view binding_name, std::string_view operation_id) {
+            [this, weak_impl, weak_control](std::string_view binding_name, std::string_view operation_id) {
+                const auto keep = weak_impl.lock();
+                if (!keep) throw std::runtime_error("ProgramRuntime has been destroyed");
                 const auto parent = weak_control.lock();
                 if (!parent) throw std::runtime_error("Parent Program control expired");
                 const auto resolved = resolve_child_binding(parent, binding_name);
@@ -4893,12 +5119,14 @@ struct ProgramRuntime::Impl {
                              {"receipt_child_name", resolved->receipt.child_name()},
                              {"operation_id", std::string(operation_id)}});
             });
-        control->set_child_launch_callback([this, weak_control](
+        control->set_child_launch_callback([this, weak_impl, weak_control](
                                                std::string_view binding_name, json input,
                                                std::string_view               operation_id,
                                                std::string_view               execution_key,
                                                std::optional<TaskGraphBudget> budget_override,
                                                bool                           exact_budget) {
+            const auto keep = weak_impl.lock();
+            if (!keep) throw std::runtime_error("ProgramRuntime has been destroyed");
             const auto parent = weak_control.lock();
             if (!parent) throw std::runtime_error("Parent Program control expired");
             if (parent->cancellation_cause() != detail::CancellationCause::None)
@@ -4930,9 +5158,10 @@ struct ProgramRuntime::Impl {
                     child->invocation.trace_id,   {},
                     child->child_run_id,          child->invocation.parent_run_id,
                     child->invocation.child_depth};
-                return owner
-                    ->start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
-                                  resolved->version, std::move(invocation))
+                detail::InternalCall internal;
+                return ProgramRuntime(keep, ProgramRuntime::Borrowed{})
+                    .start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
+                                 resolved->version, std::move(invocation))
                     .control_;
             }
             const auto& limits = resolved->receipt.budget();
@@ -5007,9 +5236,11 @@ struct ProgramRuntime::Impl {
                                          child_run_id,
                                          parent->logical_run_id,
                                          parent->persisted_invocation.child_depth + 1};
+            detail::InternalCall internal;
             ProgramHandle     child =
-                owner->start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
-                                   resolved->version, std::move(invocation));
+                ProgramRuntime(keep, ProgramRuntime::Borrowed{})
+                    .start_child(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
+                                 resolved->version, std::move(invocation));
             if (synthesis && synthesis->data().state == ProgramChildSynthesisState::Dispatching) {
                 auto data        = synthesis->data();
                 data.previous_id = synthesis->id();
@@ -5310,8 +5541,9 @@ struct ProgramRuntime::Impl {
         // Resource release is independent of the parent join CAS.  A transient
         // publication failure must not strand the parent's active-concurrency
         // lease while the durable child record remains recoverable.
-        child->add_logical_cleanup([this, parent, child_id, concurrency] {
-            release_child_concurrency(parent, child_id, concurrency);
+        child->add_logical_cleanup([weak_impl = weak_from_this(), parent, child_id, concurrency] {
+            if (const auto live = weak_impl.lock())
+                live->release_child_concurrency(parent, child_id, concurrency);
         });
         ::neograph::program::bind_child_completion(child, owner_scope, parent, child_id);
     }
@@ -5554,20 +5786,20 @@ struct ProgramRuntime::Impl {
             }
             for (auto& control : live)
                 control->cancel(detail::CancellationCause::RuntimeShutdown);
-            pool.join();
-            deadline_pool.join();
+            // An injected executor is not the runtime's to join: its attempts finish there, holding this state.
+            if (pool) pool->join();
+            if (deadline_pool) deadline_pool->join();
         } catch (...) {
             std::terminate();
         }
     }
 
     RuntimeConfig                                          config;
-    asio::thread_pool                                      pool;
     std::shared_ptr<GlobalChildQuotaState>                 global_child_quota;
     std::shared_ptr<ProcessRuntimeState>                   process_state;
-    asio::thread_pool                                      deadline_pool{1};
-    std::mutex                                             mutex;
-    std::mutex                                             fork_mutex;
+    detail::PureMutex                                      mutex;
+    // Held by fork, replace and migrate_graph from their first read to their publication, across store I/O.
+    detail::OperationLock                                  fork_operation;
     bool                                                   stopping = false;
     std::unordered_map<std::string, ChildReservationState> child_reservations;
     std::vector<std::weak_ptr<detail::RunControl>>         controls;
@@ -5585,28 +5817,32 @@ ProgramRuntime::ProgramRuntime(RuntimeConfig config) {
         throw std::invalid_argument(
             "ProgramRuntime host admission requires both a controller and a request resolver");
     }
-    impl_        = std::make_unique<Impl>(std::move(config));
-    impl_->owner = this;
+    impl_ = std::make_shared<Impl>(std::move(config));
 }
 
-ProgramRuntime::ProgramRuntime(ProgramRuntime&& other) noexcept : impl_(std::move(other.impl_)) {
-    if (impl_) impl_->owner = this;
-}
+ProgramRuntime::ProgramRuntime(std::shared_ptr<Impl> impl, Borrowed) noexcept
+    : impl_(std::move(impl)), borrowed_(true) {}
+
+ProgramRuntime ProgramRuntime::borrowed() const noexcept { return ProgramRuntime(impl_, Borrowed{}); }
+
+ProgramRuntime::ProgramRuntime(ProgramRuntime&& other) noexcept
+    : impl_(std::move(other.impl_)), borrowed_(other.borrowed_) {}
 
 ProgramRuntime& ProgramRuntime::operator=(ProgramRuntime&& other) noexcept {
     if (this == &other) return *this;
-    if (impl_) impl_->shutdown();
-    impl_ = std::move(other.impl_);
-    if (impl_) impl_->owner = this;
+    if (impl_ && !borrowed_) impl_->shutdown();
+    impl_     = std::move(other.impl_);
+    borrowed_ = other.borrowed_;
     return *this;
 }
 
 ProgramRuntime::~ProgramRuntime() {
-    if (impl_) impl_->shutdown();
+    if (impl_ && !borrowed_) impl_->shutdown();
 }
 
 ProgramActiveRun ProgramRuntime::start_active(
     RunInvocation invocation, std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::start_active", "ProgramRuntime::start_active_async");
     if (!invocation.program_version_id.empty() || !invocation.parent_run_id.empty()) {
         throw std::invalid_argument(
             "Active-version start accepts only a top-level request without a version id");
@@ -5635,11 +5871,13 @@ ProgramActiveRun ProgramRuntime::start_active(
 }
 
 ProgramHandle ProgramRuntime::start(RunInvocation invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::start", "ProgramRuntime::start_async");
     return start(std::move(invocation), {});
 }
 
 ProgramHandle ProgramRuntime::start(RunInvocation                     invocation,
                                     std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::start", "ProgramRuntime::start_async");
     invocation.validate();
     if (!invocation.parent_run_id.empty()) {
         throw std::invalid_argument(
@@ -5660,6 +5898,7 @@ ProgramHandle ProgramRuntime::start(RunInvocation                     invocation
 ProgramHandle ProgramRuntime::start(std::string_view      owner_scope,
                                     const ProgramVersion& version,
                                     ProgramInvocation     invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::start", "ProgramRuntime::start_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (version.ownership_scope() != owner_scope) {
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
@@ -5717,7 +5956,7 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
     auto                       control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, 1, pinned, binding_fingerprint,
         std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
+        impl_->scheduler, impl_->config.checkpoints, impl_->config.state_store,
          impl_->config.transitions, execution_lease);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -5759,7 +5998,7 @@ ProgramHandle ProgramRuntime::start_resolved(std::string_view      owner_scope,
         return ProgramHandle(std::move(control));
     }
 
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+    spawn_run_attempt(impl_->scheduler, impl_, control, std::move(invocation.input), std::nullopt,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
@@ -5769,6 +6008,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
                                           const ModuleLinkReceipt& link,
                                           const ProgramVersion&    version,
                                           ProgramInvocation        invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::start_child", "ProgramRuntime::start_child_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (!parent.control_) throw std::invalid_argument("Parent Program handle is empty");
     if (parent.control_->transitions.get() != impl_->config.transitions.get())
@@ -5779,8 +6019,9 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     // Admission and reservation recovery must share one record/journal snapshot;
     // a concurrent child completion may advance both immediately after this read.
     auto parent_head = [&] {
-        std::lock_guard lock(child_relation_publication_mutex(
-            *impl_->config.transitions, owner_scope, parent.control_->logical_run_id));
+        auto lock = child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
+                                                     parent.control_->logical_run_id)
+                        .lock_blocking();
         return impl_->config.transitions->load_run_publication_head(owner_scope, parent.run_id());
     }();
     if (!parent_head)
@@ -5978,7 +6219,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
         control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
-            impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+            impl_->scheduler, impl_->config.checkpoints,
              impl_->config.state_store, impl_->config.transitions);
         control->set_hook_runtime(impl_->config.hook_runtime);
         control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -6070,7 +6311,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
     } catch (...) {
         throw;
     }
-    spawn_run_attempt(impl_->pool, control, std::move(invocation.input), std::nullopt,
+    spawn_run_attempt(impl_->scheduler, impl_, control, std::move(invocation.input), std::nullopt,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
@@ -6078,6 +6319,7 @@ ProgramHandle ProgramRuntime::start_child(std::string_view         owner_scope,
 ProgramHandle ProgramRuntime::replay_recorded(
     std::string_view source_run_id, RunInvocation invocation,
     RecordedBindingSet recorded, std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::replay_recorded", "ProgramRuntime::replay_recorded_async");
     invocation.validate();
     if (source_run_id.empty() || !invocation.parent_run_id.empty())
         throw_runtime_diagnostic("P_REPLAY_SOURCE", "Recorded replay requires a top-level source");
@@ -6134,7 +6376,8 @@ ProgramHandle ProgramRuntime::replay_recorded(
             return ProgramHandle(std::move(active));
         if (existing->terminal_result())
             return ProgramHandle(std::make_shared<detail::RunControl>(
-                *existing, impl_->config.transitions, impl_->config.native_history_archive));
+                *existing, impl_->config.transitions, impl_->config.native_history_archive,
+                impl_->scheduler));
         const auto lease = impl_->config.transitions->load_execution_lease(owner, run_id);
         if (!lease || now_ms() < lease->expires_at_ms())
             throw_runtime_diagnostic("P_REPLAY_LEASE_HELD", "Recorded replay dispatch custody is still held");
@@ -6143,7 +6386,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         auto control = std::make_shared<detail::RunControl>(
             owner, run_id, existing->continuation().attempt, std::move(pinned), binding,
             std::move(persisted), invocation, lease->core_thread_id(), existing->event_sequence(),
-            events, impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+            events, impl_->scheduler, impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions, lease);
         control->recorded_replay = std::make_shared<detail::RecordedRunReplay>();
         control->recorded_replay->source_run_id = std::string(source_run_id);
@@ -6196,7 +6439,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         invocation.input, available, invocation.correlation_id, "", 0};
     auto control = std::make_shared<detail::RunControl>(
         owner, run_id, 1, std::move(pinned), binding, std::move(persisted), invocation,
-        thread_id, 0, events, impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        thread_id, 0, events, impl_->scheduler, impl_->config.checkpoints,
         impl_->config.state_store, impl_->config.transitions);
     control->recorded_replay = std::move(replay);
     const auto started = control->stage_event(
@@ -6244,7 +6487,7 @@ ProgramHandle ProgramRuntime::replay_recorded(
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, invocation.input, std::nullopt,
+    spawn_run_attempt(impl_->scheduler, impl_, control, invocation.input, std::nullopt,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
@@ -6254,6 +6497,7 @@ ProgramHandle ProgramRuntime::fork(ExactProgramCheckpointReference   source,
                                    RunInvocation                     invocation,
                                    ProgramResume                     resume_value,
                                    std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::fork", "ProgramRuntime::fork_async");
     invocation.validate();
     if (!invocation.parent_run_id.empty()) {
         throw std::invalid_argument(
@@ -6276,8 +6520,9 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
                                    const ProgramVersion&           target,
                                    ProgramInvocation               invocation,
                                    ProgramResume                   resume_value) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::fork", "ProgramRuntime::fork_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
-    std::unique_lock fork_lock(impl_->fork_mutex);
+    auto fork_lock = impl_->acquire_fork_operation();
     if (!invocation.parent_run_id.empty() || invocation.child_depth != 0) {
         throw std::invalid_argument(
             "Program fork invocation must be top-level; child forks require parent admission");
@@ -6592,7 +6837,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     auto                       control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, source_record->continuation().attempt + 1,
         std::move(target_pinned), binding_fingerprint, std::move(persisted), canonical,
-        target_thread_id, 0, std::move(invocation.events), impl_->deadline_pool.get_executor(),
+        target_thread_id, 0, std::move(invocation.events), impl_->scheduler,
          impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions);
     // #405: the fork's first attempt repeats the provider calls the paused
     // invocation made; a journaling broker replays them from the source.
@@ -6696,11 +6941,11 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
     // #395: a JavaScript main() runs again with the source's input and
     // resumes its paused callCore with the resume value, as resume does.
     if (fork_core_operation) {
-        spawn_run_attempt(impl_->pool, control, control->persisted_invocation.input,
+        spawn_run_attempt(impl_->scheduler, impl_, control, control->persisted_invocation.input,
                           target_checkpoint.checkpoint_id, impl_->config.host_admission,
                           impl_->config.host_admission_resolver, std::move(resume_value.value));
     } else {
-        spawn_run_attempt(impl_->pool, control, std::move(resume_value.value),
+        spawn_run_attempt(impl_->scheduler, impl_, control, std::move(resume_value.value),
                           target_checkpoint.checkpoint_id, impl_->config.host_admission,
                           impl_->config.host_admission_resolver);
     }
@@ -6710,6 +6955,7 @@ ProgramHandle ProgramRuntime::fork(std::string_view                owner_scope,
 ProgramHandle ProgramRuntime::replace(ExactProgramHandoffReference source,
                                       RunInvocation                invocation,
                                       std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::replace", "ProgramRuntime::replace_async");
     invocation.validate();
     const auto owner_scope = invocation.owner_scope;
     const auto resolved =
@@ -6724,6 +6970,7 @@ ProgramHandle ProgramRuntime::replace(ExactProgramHandoffReference source,
 ProgramHandle ProgramRuntime::replace(ProgramHandoff&&             source,
                                       RunInvocation                 invocation,
                                       std::shared_ptr<ProgramEventSink> events) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::replace", "ProgramRuntime::replace_async");
     if (!source || !source.impl_ || !source.impl_->control) {
         throw std::invalid_argument("Program replacement requires an active handoff lease");
     }
@@ -6764,9 +7011,10 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
                                       ExactProgramHandoffReference   source,
                                       const ProgramVersion&          target,
                                       ProgramInvocation              invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::replace", "ProgramRuntime::replace_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
-    std::unique_lock transition_lock(impl_->fork_mutex);
-    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
+    auto transition_lock = impl_->acquire_fork_operation();
+    auto reconnect_lock = impl_->process_state->transition_mutex->lock_blocking();
     if (source.source_run_id.empty() || source.source_journal_head.empty() ||
         source.command_coordinate_id.empty() || source.command_entry_id.empty()) {
         throw_runtime_diagnostic("P_REPLACEMENT_HANDOFF",
@@ -7015,7 +7263,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
     auto                       control = std::make_shared<detail::RunControl>(
         std::string(owner_scope), run_id, 1, std::move(target_pinned), binding_fingerprint,
         std::move(persisted), canonical, target_thread_id, 0, std::move(invocation.events),
-        impl_->deadline_pool.get_executor(), impl_->config.checkpoints, impl_->config.state_store,
+        impl_->scheduler, impl_->config.checkpoints, impl_->config.state_store,
         impl_->config.transitions, std::nullopt, source_record->logical_run_id());
     replacement_control = control;
     control->set_hook_runtime(impl_->config.hook_runtime);
@@ -7187,7 +7435,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view              owner_scope,
         control->complete(std::move(failed));
         return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, invocation.input, std::nullopt,
+    spawn_run_attempt(impl_->scheduler, impl_, control, invocation.input, std::nullopt,
                       impl_->config.host_admission, impl_->config.host_admission_resolver);
     return ProgramHandle(std::move(control));
 }
@@ -7196,6 +7444,7 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
                                       ProgramHandoff&&       source,
                                       const ProgramVersion&  target,
                                       ProgramInvocation      invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::replace", "ProgramRuntime::replace_async");
     if (!source || !source.impl_ || !source.impl_->control) {
         throw std::invalid_argument("Program replacement requires an active handoff lease");
     }
@@ -7235,6 +7484,18 @@ ProgramHandle ProgramRuntime::replace(std::string_view      owner_scope,
 ProgramHandle ProgramRuntime::migrate_graph(
     const ProgramHandle& source,
     ProgramGraphMigrationTarget target) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::migrate_graph", "ProgramRuntime::migrate_graph_async");
+    // The call waits for the source to reach a safe point, which only the executor can bring about: made on a thread
+    // that runs it, it would wait for ever.
+    impl_->scheduler->require_wait("ProgramRuntime::migrate_graph", "ProgramRuntime::migrate_graph_async");
+    return async::run_sync(migrate_graph_core(source, std::move(target)));
+}
+
+// The body of migrate_graph. It waits for the source to reach a safe point without blocking a thread, so the
+// synchronous form drives it on a private io_context and the awaitable form on the runtime's executor.
+asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
+    ProgramHandle source,
+    ProgramGraphMigrationTarget target) {
     if (!source.control_ || !source.control_->materialized) {
         throw std::invalid_argument(
             "Program graph migration requires a live source handle");
@@ -7249,7 +7510,7 @@ ProgramHandle ProgramRuntime::migrate_graph(
             "Program graph migration source and target use different transition stores");
     }
 
-    std::unique_lock fork_lock(impl_->fork_mutex);
+    auto fork_lock = co_await impl_->fork_operation.lock_async();
     const auto owner_scope = source.control_->owner_scope;
     const auto source_record_before = impl_->config.transitions->load(
         owner_scope, source.control_->run_id);
@@ -7314,7 +7575,8 @@ ProgramHandle ProgramRuntime::migrate_graph(
             receipt->target_version().id() == target_version->id() &&
             generation->run_id() == receipt->target_run_id() &&
             receipt->target_run_id() == expected_target_run_id) {
-            return reconnect(owner_scope, source.control_->run_id);
+            detail::InternalCall internal;
+            co_return reconnect(owner_scope, source.control_->run_id);
         }
         throw_runtime_diagnostic(
             "P_GRAPH_MIGRATION_STALE",
@@ -7330,9 +7592,9 @@ ProgramHandle ProgramRuntime::migrate_graph(
             if (!consumed && control) control->release_graph_migration(request_id);
         }
     } source_guard{source.control_, request_id};
-    const auto capsule = source.control_->wait_graph_migration(request_id);
+    const auto capsule = co_await source.control_->wait_graph_migration_async(request_id);
 
-    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
+    auto reconnect_lock = impl_->process_state->transition_mutex->lock_blocking();
     if (!source.control_->graph_migration_matches(request_id, capsule.id())) {
         throw_runtime_diagnostic(
             "P_GRAPH_MIGRATION_SOURCE",
@@ -7458,7 +7720,7 @@ ProgramHandle ProgramRuntime::migrate_graph(
     auto control = std::make_shared<detail::RunControl>(
         owner_scope, target_run_id, source_record->continuation().attempt, std::move(target_pinned),
         binding_fingerprint, std::move(persisted), target_invocation, target_snapshot.thread_id, 0,
-        std::move(target.events), impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+        std::move(target.events), impl_->scheduler, impl_->config.checkpoints,
         impl_->config.state_store, impl_->config.transitions, std::nullopt,
         source_record->logical_run_id());
     control->set_hook_runtime(impl_->config.hook_runtime);
@@ -7595,10 +7857,10 @@ ProgramHandle ProgramRuntime::migrate_graph(
     control->set_execution_lease(*target_execution_lease);
     auto registration = impl_->register_control(control, true);
     if (!registration.inserted) {
-        return ProgramHandle(std::move(registration.control));
+        co_return ProgramHandle(std::move(registration.control));
     }
     const auto admitted = admit_started(control, started, remaining, target_checkpoint);
-    if (!admitted) return ProgramHandle(std::move(control));
+    if (!admitted) co_return ProgramHandle(std::move(control));
     try {
         control->deliver_event(started);
     } catch (const std::exception& error) {
@@ -7609,17 +7871,18 @@ ProgramHandle ProgramRuntime::migrate_graph(
         failed.failure = ProgramFailure{
             "P_EVENT_SINK", error.what(), "root", "", 0, json::object()};
         control->complete(std::move(failed));
-        return ProgramHandle(std::move(control));
+        co_return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->pool, control, target_invocation.input,
+    spawn_run_attempt(impl_->scheduler, impl_, control, target_invocation.input,
                       target_checkpoint.checkpoint_id,
                       impl_->config.host_admission,
                       impl_->config.host_admission_resolver);
-    return ProgramHandle(std::move(control));
+    co_return ProgramHandle(std::move(control));
 }
 
 std::vector<ProgramHandle> ProgramRuntime::recover_children(std::string_view owner_scope,
                                                             std::string_view parent_run_id) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::recover_children", "ProgramRuntime::recover_children_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (parent_run_id.empty())
         throw std::invalid_argument("Program child recovery parent_run_id must not be empty");
@@ -7683,6 +7946,7 @@ ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
     ProgramHandoff&                 handoff,
     const ProgramSynthesisProposal& proposal,
     std::string_view                expected_lineage_head) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::reserve_synthesis", "ProgramRuntime::reserve_synthesis_async");
     if (!source.control_ || !handoff.impl_ || handoff.impl_->consumed.load() ||
         handoff.impl_->control != source.control_ || source.control_->owner_scope != owner_scope ||
         !same_process_coordination_backend(*source.control_->transitions,
@@ -7692,8 +7956,9 @@ ProgramSynthesisReservation ProgramRuntime::reserve_synthesis(
     (void)handoff.value();
     if (impl_->find_control(owner_scope, source.run_id()) != source.control_)
         throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis requires the owning runtime");
-    std::lock_guard lock(child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
-                                                          source.logical_run_id()));
+    auto lock = child_relation_publication_mutex(*impl_->config.transitions, owner_scope,
+                                                 source.logical_run_id())
+                    .lock_blocking();
     const auto      run     = source.snapshot();
     const auto      journal = impl_->config.transitions->latest(owner_scope, source.run_id());
     const auto      active  = load_active_run_lineage(*impl_->config.transitions, run);
@@ -7753,6 +8018,7 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
     const ProgramSynthesisProposal&   proposal,
     const ProgramChildSynthesisGrant& grant,
     std::string                       binding_name) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::prepare_child_synthesis", "ProgramRuntime::prepare_child_synthesis_async");
     if (!handoff.impl_ || handoff.impl_->consumed.load() ||
         handoff.impl_->control != parent.control_ || parent.control_->owner_scope != owner_scope ||
         !same_process_coordination_backend(*parent.control_->transitions,
@@ -7760,8 +8026,9 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_GENERATION",
                                  "Child synthesis requires this runtime's held parent checkpoint");
     (void)handoff.value();
-    std::lock_guard synthesis_lock(
-        child_relation_publication_mutex(*impl_->config.transitions, owner_scope, parent.run_id()));
+    auto synthesis_lock =
+        child_relation_publication_mutex(*impl_->config.transitions, owner_scope, parent.run_id())
+            .lock_blocking();
     if (!impl_->config.child_synthesis_gateway || !impl_->config.child_synthesis_grant_resolver)
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_AUTHORITY",
                                  "Child synthesis host policy is unavailable");
@@ -7851,6 +8118,7 @@ ProgramChildSynthesisRecord ProgramRuntime::prepare_child_synthesis(
 ProgramChildSynthesisRecord ProgramRuntime::recover_child_synthesis(std::string_view owner_scope,
                                                                     std::string_view parent_run_id,
                                                                     std::string_view proposal_id) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::recover_child_synthesis", "ProgramRuntime::recover_child_synthesis_async");
     // Live recovery requires the explicit held-checkpoint API above.
     if (impl_->find_process_control(owner_scope, parent_run_id) ||
         impl_->find_control(owner_scope, parent_run_id))
@@ -7879,9 +8147,10 @@ ProgramChildSynthesisRecord ProgramRuntime::recover_child_synthesis(std::string_
 }
 
 ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::string_view run_id) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::reconnect", "ProgramRuntime::reconnect_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
-    std::unique_lock reconnect_lock(*impl_->process_state->transition_mutex);
+    auto reconnect_lock = impl_->process_state->transition_mutex->lock_blocking();
     std::string resolved_run_id(run_id);
     bool        successor_generation = false;
     std::optional<ProgramGraphMigrationReceipt> graph_migration_receipt;
@@ -8348,7 +8617,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
                 record->continuation().attempt, pinned, record->binding_fingerprint(),
                 std::move(expired_invocation), record->invocation(), expected_thread_id,
                 record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
-                impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+                impl_->scheduler, impl_->config.checkpoints,
                 impl_->config.state_store, impl_->config.transitions, execution_lease);
             expired_control->set_hook_runtime(impl_->config.hook_runtime);
             expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
@@ -8498,7 +8767,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
             record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
-            std::shared_ptr<ProgramEventSink>{}, impl_->deadline_pool.get_executor(),
+            std::shared_ptr<ProgramEventSink>{}, impl_->scheduler,
             impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
             std::nullopt, record->logical_run_id());
         control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
@@ -8520,7 +8789,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         const bool  resumed_attempt = attempt_resume && resume_checkpoint_id &&
                                      attempt_resume->checkpoint_id == *resume_checkpoint_id;
         const bool  control_source = control->materialized->bundle.control_source().has_value();
-        spawn_run_attempt(impl_->pool, control,
+        spawn_run_attempt(impl_->scheduler, impl_, control,
                           resumed_attempt && !control_source ? attempt_resume->value
                                                              : record->invocation().input,
                           std::move(resume_checkpoint_id), impl_->config.host_admission,
@@ -8536,7 +8805,8 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
         throw_runtime_diagnostic("P_RUN_INVALID", "Stored terminal Program run is incomplete");
     }
     auto control = std::make_shared<detail::RunControl>(
-        *record, impl_->config.transitions, impl_->config.native_history_archive);
+        *record, impl_->config.transitions, impl_->config.native_history_archive,
+                impl_->scheduler);
     control->set_hook_runtime(impl_->config.hook_runtime);
     control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
     control->set_core_provider_call_resolver(
@@ -8551,6 +8821,7 @@ ProgramHandle ProgramRuntime::reconnect(std::string_view owner_scope, std::strin
 ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
                                      std::string_view run_id,
                                      ProgramResume    resume_value) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::resume", "ProgramRuntime::resume_handle_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program resume run_id must not be empty");
 
@@ -8825,7 +9096,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
         std::string(owner_scope), std::string(run_id), previous->continuation().attempt + 1,
         std::move(pinned), previous->binding_fingerprint(), std::move(attempt_invocation),
         previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
-        std::move(resume_value.events), impl_->deadline_pool.get_executor(),
+        std::move(resume_value.events), impl_->scheduler,
         impl_->config.checkpoints, impl_->config.state_store, impl_->config.transitions,
         std::nullopt, previous->logical_run_id());
     control->fork_provider_replay =
@@ -8956,7 +9227,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
                                      !reconcile_javascript_command
                                  ? std::optional<json>{std::move(resume_value.value)}
                                  : std::nullopt;
-    spawn_run_attempt(impl_->pool, control, std::move(attempt_input), checkpoint.checkpoint_id,
+    spawn_run_attempt(impl_->scheduler, impl_, control, std::move(attempt_input), checkpoint.checkpoint_id,
                       impl_->config.host_admission, impl_->config.host_admission_resolver,
                       std::move(core_resume_value));
     return ProgramHandle(std::move(control));
@@ -8965,6 +9236,7 @@ ProgramHandle ProgramRuntime::resume(std::string_view owner_scope,
 ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
                                         std::string_view        run_id,
                                         ProgramEffectResolution resolution) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::reconcile", "ProgramRuntime::reconcile_async");
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconcile run_id must not be empty");
     const auto previous = impl_->config.transitions->load(owner_scope, run_id);
@@ -9165,7 +9437,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
             std::string(owner_scope), std::string(run_id), next_attempt, std::move(pinned),
             previous->binding_fingerprint(), std::move(invocation), previous->invocation(),
             checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
-            impl_->deadline_pool.get_executor(), impl_->config.checkpoints,
+            impl_->scheduler, impl_->config.checkpoints,
             impl_->config.state_store, impl_->config.transitions, std::nullopt,
             previous->logical_run_id());
         live_control->fork_provider_replay =
@@ -9315,7 +9587,8 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
         if (!reconciled)
             throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Reconciled Program run was not found");
         auto control = std::make_shared<detail::RunControl>(
-            *reconciled, impl_->config.transitions, impl_->config.native_history_archive);
+            *reconciled, impl_->config.transitions, impl_->config.native_history_archive,
+                impl_->scheduler);
         if (!reconciled->invocation().parent_run_id.empty())
             impl_->bind_budgeted_child_completion(control, owner_scope,
                                                   reconciled->invocation().parent_run_id, run_id);
@@ -9355,7 +9628,7 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
                                  ? std::optional<json>{*resolution.result}
                                  : std::nullopt;
     // #404: the plan runs again from its root, without a Core resume.
-    spawn_run_attempt(impl_->pool, live_control, std::move(attempt_input),
+    spawn_run_attempt(impl_->scheduler, impl_, live_control, std::move(attempt_input),
                       reconcile_plan_operation ? std::optional<std::string>{}
                                                : std::optional<std::string>{checkpoint.checkpoint_id},
                       impl_->config.host_admission, impl_->config.host_admission_resolver,
@@ -9366,20 +9639,258 @@ ProgramHandle ProgramRuntime::reconcile(std::string_view        owner_scope,
 asio::awaitable<ProgramResult> ProgramRuntime::run_async(std::string       owner_scope,
                                                          ProgramVersion    version,
                                                          ProgramInvocation invocation) {
-    auto               handle = start(owner_scope, version, std::move(invocation));
+    auto handle = co_await start_async(std::move(owner_scope), std::move(version), std::move(invocation));
     co_return co_await handle.wait_async();
 }
 
 asio::awaitable<ProgramResult> ProgramRuntime::resume_async(std::string   owner_scope,
                                                             std::string   run_id,
                                                             ProgramResume resume_value) {
-    auto               handle = resume(owner_scope, run_id, std::move(resume_value));
+    auto handle = co_await resume_handle_async(std::move(owner_scope), std::move(run_id), std::move(resume_value));
     co_return co_await handle.wait_async();
+}
+
+// The awaitable forms (#557). Each runs the body of its synchronous namesake on the runtime's executor, where
+// the synchronous form's refusal on a host-pumped executor does not apply (InternalCall). The stores are
+// synchronous in this release, so a body does its store work inline; it never waits for another thread, and it
+// takes the operation lock without blocking.
+
+asio::awaitable<ProgramHandle> ProgramRuntime::start_async(RunInvocation invocation,
+                                                           std::shared_ptr<ProgramEventSink> events) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), invocation = std::move(invocation), events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            return self.start(std::move(invocation), std::move(events));
+        });
+}
+
+asio::awaitable<ProgramActiveRun> ProgramRuntime::start_active_async(RunInvocation invocation,
+                                                                     std::shared_ptr<ProgramEventSink> events) {
+    co_return co_await impl_->run_on_executor<ProgramActiveRun>(
+        [self = borrowed(), invocation = std::move(invocation), events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            return self.start_active(std::move(invocation), std::move(events));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::start_async(std::string       owner_scope,
+                                                           ProgramVersion    version,
+                                                           ProgramInvocation invocation) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), version = std::move(version),
+         invocation = std::move(invocation)]() mutable {
+            detail::InternalCall internal;
+            return self.start(owner_scope, version, std::move(invocation));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::replay_recorded_async(std::string source_run_id,
+                                                                     RunInvocation invocation,
+                                                                     RecordedBindingSet recorded,
+                                                                     std::shared_ptr<ProgramEventSink> events) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), source_run_id = std::move(source_run_id), invocation = std::move(invocation),
+         recorded = std::move(recorded), events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            return self.replay_recorded(source_run_id, std::move(invocation), std::move(recorded),
+                                        std::move(events));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::start_child_async(std::string       owner_scope,
+                                                                 ProgramHandle     parent,
+                                                                 ModuleLinkReceipt link,
+                                                                 ProgramVersion    version,
+                                                                 ProgramInvocation invocation) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), parent = std::move(parent),
+         link = std::move(link), version = std::move(version), invocation = std::move(invocation)]() mutable {
+            detail::InternalCall internal;
+            return self.start_child(owner_scope, parent, link, version, std::move(invocation));
+        });
+}
+
+asio::awaitable<ProgramSynthesisReservation> ProgramRuntime::reserve_synthesis_async(
+    std::string owner_scope, ProgramHandle source, ProgramHandoff& handoff,
+    ProgramSynthesisProposal proposal, std::string expected_lineage_head) {
+    // Reaching the checkpoint is awaited here: the body below must not wait for it on the executor's thread.
+    if (handoff) (void)co_await handoff.wait_async();
+    co_return co_await impl_->run_on_executor<ProgramSynthesisReservation>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), source = std::move(source),
+         handoff = &handoff, proposal = std::move(proposal),
+         expected_lineage_head = std::move(expected_lineage_head)]() mutable {
+            detail::InternalCall internal;
+            return self.reserve_synthesis(owner_scope, source, *handoff, proposal, expected_lineage_head);
+        });
+}
+
+asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synthesis_async(
+    std::string owner_scope, ProgramHandle parent, const ProgramHandoff& handoff,
+    ProgramSynthesisProposal proposal, ProgramChildSynthesisGrant grant, std::string binding_name) {
+    if (handoff) (void)co_await handoff.wait_async();
+    co_return co_await impl_->run_on_executor<ProgramChildSynthesisRecord>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), parent = std::move(parent),
+         handoff = &handoff, proposal = std::move(proposal), grant = std::move(grant),
+         binding_name = std::move(binding_name)]() mutable {
+            detail::InternalCall internal;
+            return self.prepare_child_synthesis(owner_scope, parent, *handoff, proposal, grant,
+                                                std::move(binding_name));
+        });
+}
+
+asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::recover_child_synthesis_async(
+    std::string owner_scope, std::string parent_run_id, std::string proposal_id) {
+    co_return co_await impl_->run_on_executor<ProgramChildSynthesisRecord>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), parent_run_id = std::move(parent_run_id),
+         proposal_id = std::move(proposal_id)]() mutable {
+            detail::InternalCall internal;
+            return self.recover_child_synthesis(owner_scope, parent_run_id, proposal_id);
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_async(std::string owner_scope, std::string run_id) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), run_id = std::move(run_id)]() mutable {
+            detail::InternalCall internal;
+            return self.reconnect(owner_scope, run_id);
+        });
+}
+
+asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_async(std::string owner_scope,
+                                                                                    std::string parent_run_id) {
+    co_return co_await impl_->run_on_executor<std::vector<ProgramHandle>>(
+        [self = borrowed(), owner_scope = std::move(owner_scope),
+         parent_run_id = std::move(parent_run_id)]() mutable {
+            detail::InternalCall internal;
+            return self.recover_children(owner_scope, parent_run_id);
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::resume_handle_async(std::string   owner_scope,
+                                                                   std::string   run_id,
+                                                                   ProgramResume resume_value) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), run_id = std::move(run_id),
+         resume_value = std::move(resume_value)]() mutable {
+            detail::InternalCall internal;
+            return self.resume(owner_scope, run_id, std::move(resume_value));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_async(std::string             owner_scope,
+                                                               std::string             run_id,
+                                                               ProgramEffectResolution resolution) {
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), run_id = std::move(run_id),
+         resolution = std::move(resolution)]() mutable {
+            detail::InternalCall internal;
+            return self.reconcile(owner_scope, run_id, std::move(resolution));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::fork_async(ExactProgramCheckpointReference source,
+                                                          RunInvocation                   invocation,
+                                                          ProgramResume                   resume_value,
+                                                          std::shared_ptr<ProgramEventSink> events) {
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), source = std::move(source), invocation = std::move(invocation),
+         resume_value = std::move(resume_value), events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.fork(std::move(source), std::move(invocation), std::move(resume_value), std::move(events));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::fork_async(std::string                     owner_scope,
+                                                          ExactProgramCheckpointReference source,
+                                                          ProgramVersion                  target,
+                                                          ProgramInvocation               invocation,
+                                                          ProgramResume                   resume_value) {
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), source = std::move(source),
+         target = std::move(target), invocation = std::move(invocation),
+         resume_value = std::move(resume_value)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.fork(owner_scope, std::move(source), target, std::move(invocation),
+                             std::move(resume_value));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::replace_async(ExactProgramHandoffReference source,
+                                                             RunInvocation                invocation,
+                                                             std::shared_ptr<ProgramEventSink> events) {
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), source = std::move(source), invocation = std::move(invocation),
+         events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.replace(std::move(source), std::move(invocation), std::move(events));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::replace_async(ProgramHandoff source,
+                                                             RunInvocation  invocation,
+                                                             std::shared_ptr<ProgramEventSink> events) {
+    // The handoff is resolved here, so that the body below never waits for the source to reach its checkpoint.
+    if (source) (void)co_await source.wait_async();
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), source = std::move(source), invocation = std::move(invocation),
+         events = std::move(events)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.replace(std::move(source), std::move(invocation), std::move(events));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::replace_async(std::string                  owner_scope,
+                                                             ExactProgramHandoffReference source,
+                                                             ProgramVersion               target,
+                                                             ProgramInvocation            invocation) {
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), source = std::move(source),
+         target = std::move(target), invocation = std::move(invocation)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.replace(owner_scope, std::move(source), target, std::move(invocation));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::replace_async(std::string      owner_scope,
+                                                             ProgramHandoff   source,
+                                                             ProgramVersion   target,
+                                                             ProgramInvocation invocation) {
+    if (source) (void)co_await source.wait_async();
+    auto guard = co_await impl_->fork_operation.lock_async();
+    co_return co_await impl_->run_on_executor<ProgramHandle>(
+        [self = borrowed(), owner_scope = std::move(owner_scope), source = std::move(source),
+         target = std::move(target), invocation = std::move(invocation)]() mutable {
+            detail::InternalCall internal;
+            Impl::ForkOperationHeld held(&self.impl_->fork_operation);
+            return self.replace(owner_scope, std::move(source), target, std::move(invocation));
+        });
+}
+
+asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_async(ProgramHandle              source,
+                                                                   ProgramGraphMigrationTarget target) {
+    co_return co_await impl_->run_coroutine_on_executor<ProgramHandle>(
+        [self = borrowed(), source = std::move(source), target = std::move(target)]() mutable {
+            return self.migrate_graph_core(std::move(source), std::move(target));
+        });
 }
 
 ProgramResult ProgramRuntime::run(std::string_view      owner_scope,
                                   const ProgramVersion& version,
                                   ProgramInvocation     invocation) {
+    impl_->scheduler->require_synchronous_call("ProgramRuntime::run", "ProgramRuntime::run_async");
+    // Refused before the Program is started, not after: the wait that follows would be refused on a thread that runs
+    // the executor, and the Program would be left running.
+    impl_->scheduler->require_wait("ProgramRuntime::run", "ProgramRuntime::run_async");
     return start(owner_scope, version, std::move(invocation)).wait();
 }
 

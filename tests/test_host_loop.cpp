@@ -17,7 +17,10 @@
 #include <descriptor/descriptor.h>
 #include <runtime/host.h>
 
+#include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/redirect_error.hpp>
+#include <asio/strand.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -464,6 +467,75 @@ TEST(HostLoop, ARawAsioTimerNotedBeforeTheHostReachesItIsNotLost) {
     }
     ASSERT_TRUE(done) << "the host's timer ran before Asio dispatched the wait, and nothing woke the loop again";
     EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, ATakenBackDeadlineLeavesNoHostTimerArmed) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    const auto at = std::chrono::steady_clock::now() + 1h;
+    async::note_deadline(loop.executor(), at);
+    EXPECT_EQ(executor->timers(), 1u);
+    EXPECT_FALSE(loop.idle());
+    // One note is taken back for one note made; a second takes back nothing.
+    async::forget_deadline(loop.executor(), at);
+    EXPECT_EQ(executor->timers(), 0u);
+    async::forget_deadline(loop.executor(), at);
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+    // Two timers for one instant need two takes back.
+    async::note_deadline(loop.executor(), at);
+    async::note_deadline(loop.executor(), at);
+    async::forget_deadline(loop.executor(), at);
+    EXPECT_EQ(executor->timers(), 1u);
+    async::forget_deadline(loop.executor(), at);
+    EXPECT_EQ(executor->timers(), 0u);
+}
+
+asio::awaitable<void> wait_on_a_signal(async::HostTimer& signal) {
+    asio::error_code ended;
+    co_await signal.async_wait(asio::redirect_error(asio::use_awaitable, ended));
+}
+
+TEST(HostLoop, ACancelledHostTimerLeavesNoHostTimerArmed) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    {
+        async::HostTimer timer(loop.executor());
+        timer.arm_after(1h);
+        EXPECT_EQ(executor->timers(), 1u);
+        timer.cancel();
+        EXPECT_EQ(executor->timers(), 0u);
+        // Re-arming takes the earlier deadline back before it notes the new one.
+        timer.arm_after(1h);
+        timer.arm_after(2h);
+        EXPECT_EQ(executor->timers(), 1u);
+    }
+    EXPECT_EQ(executor->timers(), 0u) << "a destroyed timer takes its deadline back";
+    // A timer that never expires is a signal: the loop is told nothing and keeps no host timer for it.
+    async::HostTimer signal(loop.executor());
+    signal.arm_never();
+    EXPECT_EQ(executor->timers(), 0u);
+    bool woken = false;
+    loop.spawn(wait_on_a_signal(signal), [&](std::exception_ptr) { woken = true; });
+    while (executor->step()) {}
+    EXPECT_FALSE(woken);
+    // As in the engine, the wait is cancelled from a handler on the loop's executor: a timer cancelled from outside a
+    // turn completes its wait into the io_context's queue without telling the loop.
+    asio::post(loop.executor(), [&signal] { signal.cancel(); });
+    while (executor->step()) {}
+    EXPECT_TRUE(woken);
+    EXPECT_EQ(executor->timers(), 0u);
+}
+
+TEST(HostLoop, ALoopsExecutorIsHostPumpedAndAnotherIsNot) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    EXPECT_TRUE(async::is_host_pumped(loop.executor()));
+    // An executor derived from the loop's, a strand of it, is run by the loop too.
+    EXPECT_TRUE(async::is_host_pumped(asio::any_io_executor(asio::make_strand(loop.executor()))));
+    asio::io_context io;
+    EXPECT_FALSE(async::is_host_pumped(io.get_executor()));
+    EXPECT_FALSE(async::is_host_pumped(asio::any_io_executor{}));
 }
 
 namespace {

@@ -21,7 +21,7 @@ The plan is in [#535](https://github.com/fox1245/NeoGraph/issues/535), and this 
 | Build modes | Single-thread (the default on WebAssembly) and pthread, both built and run in CI. The JavaScript module is single-thread. |
 | Runtime | Node.js 22 and 24, in CI. The Workers example runs in Node, called with a `Request`; it has not run on workerd. Browsers, Deno and WASI are not verified. |
 | SDK | SchemaProvider 0.4.0, interface revision 7, at the commit that `cmake/NeoGraphSchemaProvider.cmake` pins. It builds without libcurl and without threads, and its JavaScript host (`sp_js_host`) is the executor and the `fetch` transport of the module. |
-| Components | Core, LLM (model calls through the host), and optionally Program. |
+| Components | Core, LLM (model calls through the host), and optionally Program (the runtime on the host's loop, with in-memory stores). |
 
 ## Build
 
@@ -193,6 +193,41 @@ would add one and a registration of every type, for a surface of five functions:
 from a later turn of the host's event loop. The key is part of the provider description that `compile` is given and is
 held by the SDK client of that graph; it is not in the binary, not in any result, and not in an error message.
 
+## Programs on the host loop
+
+`program::ProgramRuntime` takes the loop's executor, and runs everything on it: a Program's attempts, its deadline timers
+and the waiters of `ProgramHandle::wait_async`. It starts no thread. This is the whole of the Program support on these
+hosts at this point: the stores are the in-memory ones.
+
+```cpp
+async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
+program::RuntimeConfig config{catalog, checkpoints, /*state_store=*/{}, transitions, /*scheduler_threads=*/1};
+config.executor = loop.executor();                    // required here: a build without threads has no pool to fall back to
+program::ProgramRuntime runtime(std::move(config));
+
+loop.spawn(runtime.run_async(owner, version, invocation),
+           [](std::exception_ptr error, program::ProgramResult result) { /* from a later turn */ });
+```
+
+- **Required.** Without `RuntimeConfig::executor`, a build without threads throws `ProgramExecutorRequired`, a
+  `graph::ConfigurationFailure`, from the constructor. On a native build the runtime's own pools are used when it is
+  unset, as they always were.
+- **Awaitable forms.** Every operation has one: `start_async`, `reconnect_async`, `resume_handle_async`, `fork_async`,
+  `replace_async`, `migrate_graph_async` and the rest. They run on the loop and complete on the awaiting coroutine's
+  executor. `run_async` and `resume_async` wait for the result.
+- **The synchronous calls refuse.** `start`, `resume`, `fork`, `run` and the other synchronous calls, and
+  `ProgramHandle::wait` while the result is not in, would block the thread that has to run the Program. They throw
+  `program::ProgramBlockingCallRefused` (a `graph::ConfigurationFailure`) before they do anything. `operation()` names the
+  call and `alternative()` the awaitable form. A `hook_runtime` is refused by the constructor for the same reason.
+- **Timers.** The runtime waits on `async::HostTimer` only, which tells the loop each deadline and takes it back when the
+  timer is cancelled, re-armed or destroyed, so a finished run leaves no host timer armed.
+- **Node bodies.** With an executor, a node attempt that needs its own worker runs on a strand of it instead of the
+  32-thread process-wide pool, so a node body must not block its thread.
+- **Locks.** A critical section that reaches a store holds an `OperationLock`, which a coroutine waits for without
+  blocking; `std::mutex` guards memory only.
+- **Destroying the runtime** cancels its runs and does not wait for them. The attempts keep the runtime's state alive until
+  they finish, so keep running the loop until the handles are terminal.
+
 ## Examples
 
 - `examples/node/chat.mjs`: one call from Node,
@@ -215,6 +250,10 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   workerd.
 - `checks.cpp` (below) runs a synchronous run against a host-pumped provider and checks that it is refused and that
   nothing was sent.
+- `checks.cpp` also builds a `ProgramRuntime` on a `HostLoop`: a runtime without an executor and a synchronous `start` are
+  refused, and a one-node Program with in-memory stores runs to its result in the host's turns.
+- `tests/test_program_runtime_executor.cpp` runs Programs natively on a single-thread `io_context` and on a `HostLoop` over a
+  manual executor, so a native build covers the same paths.
 - `tests/test_host_loop.cpp` runs the loop and the host-seam provider natively against a manual executor, so a native
   build covers the same paths.
 
@@ -243,9 +282,10 @@ Calls into these fail with a typed error where NeoGraph owns the call, and are n
   the host's `fetch` with the module above; a build for another WebAssembly host supplies its own executor and
   transport to `SchemaProvider`.
 - **Blocking entry points on a host-pumped provider.** `run()`, `Provider::dispatch` and the like refuse (above).
-- **Programs.** The Program component compiles, but `ProgramRuntime` starts threads, and in a single-thread build
-  its construction, a node attempt timeout and `set_worker_count(n)` with `n > 1` fail with `thread: Not supported`
-  (#557). Program stores on a host are tracked in #556.
+- **Program stores on a host database.** The Program runtime runs on the host loop (above), but its stores are the
+  in-memory ones: the SQLite and PostgreSQL stores need system libraries, and a store that reaches a host database
+  waits for the store interfaces to become awaitable ([#556](https://github.com/fox1245/NeoGraph/issues/556)). The
+  synchronous Program calls refuse on a host loop; use the `_async` forms.
 - **Native Program controls.** The C v1 plugin ABI is a 64-bit layout, so `NativeControlBinding::create` refuses on
   wasm32 with `NativeControlUnavailable`.
 - **Synchronous checkpoint stores.** A store that is not asynchronous runs each operation on a pool of worker threads.
@@ -273,6 +313,6 @@ The plan after the toolchain review is in [#535](https://github.com/fox1245/NeoG
 - **M2 (this page).** Model calls through the host's `fetch`: the host loop, the host-seam provider, the JavaScript
   module, and the Node and Workers examples.
 - **M3.** Programs on a host store ([#557](https://github.com/fox1245/NeoGraph/issues/557),
-  [#556](https://github.com/fox1245/NeoGraph/issues/556)). `HostLoop::executor()` is the `any_io_executor` the Program
-  runtime is to take.
+  [#556](https://github.com/fox1245/NeoGraph/issues/556)). The runtime half is in: `ProgramRuntime` runs on
+  `HostLoop::executor()` ("Programs on the host loop" above). The store half follows: awaitable store interfaces.
 - **M4.** Realtime sessions, WASI, a custody backend for native archives, and remote Harness.

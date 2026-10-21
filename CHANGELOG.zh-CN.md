@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3a702bea2723e9222813c77d50818d9cb0413943eb7785e5f641a19d00f184ba -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5fefd3ffaa4b2f511cbe633f320e59b7ec50352b6be4b36c5625f29a73a67dc2 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -43,6 +43,15 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **其他都不变。** 调用按报告收费，运行的 status、预算和 `P_MONEY_BUDGET` 与以前一样。notice 不随运行保存，所以保存下来的是 `result.monetary_records`（`microunits` 高于 `reserved_microunits`）。
   - **不拒绝 route，也还没有 upstream。** NeoGraph 没有在出现超出后拒绝某条 route 的设置，避开哪些 route 是宿主的策略。处理调用的 upstream 目前还不会记录在 notice 或记录里。
   - **文档。** 参考文档（[计价证据与模型目录](docs/reference-en.md#pricing-evidence-and-the-model-catalogue)）、Program 指南、Python 指南和故障排查表说明 hold 只对在 cap 处停下的 upstream 才是上界，并列出宿主可以做的事：用 `only`、`order` 和 `ignore` 限定 route，对 notice 和记录作出反应，并且授予的额度低于自己能承受的损失。
+- **ProgramRuntime 在宿主提供的执行器（executor）上运行，不再拥有自己的线程 (#557)。**
+  - 新增 **`RuntimeConfig::executor`**（`asio::any_io_executor`）和 **`executor_identity`**。尝试（attempt）、截止时间定时器和等待者都在这个执行器上运行，没有任何东西在调用方线程上内联执行。未设置时，原生构建沿用原有线程池（尝试用 `scheduler_threads` 个线程，截止时间用 1 个），这些线程池现在是执行器的一种实现。没有线程的构建（`NEOGRAPH_THREADS=OFF`）必须提供执行器，否则构造函数抛出 `ProgramExecutorRequired`（一个 `ConfigurationFailure`）。销毁运行时会取消其运行；在注入的执行器上它不会等待这些运行结束，尝试会持有运行时的状态直到结束，所以要让执行器一直运行，直到各句柄进入终态。
+  - **`ProgramExecutorIdentity`** 告诉运行时它从执行器里看不出的两件事：`host_pumped`（由宿主的事件循环驱动）和 `running_in_this_thread`。对基于 `io_context` 或 `thread_pool` 的执行器、它们的 strand，以及 `async::HostLoop` 的执行器，两者都会自动检测（新增 `async::is_host_pumped`）。
+  - **定时器。** 运行时等待的每个定时器都是 `async::HostTimer`（#567），宿主循环因此会在到期时安排一轮，`scripts/host_timer_allowlist.txt` 也不再豁免 `src/program/`。`HostTimer` 现在会在被取消、被重新设置或被销毁时向循环撤回自己的截止时间（`async::forget_deadline`），已结束的运行不会让宿主定时器一直保持到它的 wall-time 截止时间。`HostTimer::arm_never()` 用于只发信号的定时器，也就是由 `cancel()` 唤醒的等待者。
+  - **节点尝试。** 需要自己的工作线程的节点尝试（Program 运行的每一次尝试，以及任何带超时的尝试）改在注入执行器的 strand 上运行，不再使用 32 线程的进程级尝试线程池。`RunMetadata::dispatch_executor` 和 `RunContext::dispatch_executor` 负责传递，子图会继承。此时节点主体不能阻塞自己的线程：它会拖住所有共用该执行器的运行。
+  - **每个操作都有 awaitable 形式。** 新增 `start_async`、`start_active_async`、`replay_recorded_async`、`start_child_async`、`reserve_synthesis_async`、`prepare_child_synthesis_async`、`recover_child_synthesis_async`、`reconnect_async`、`recover_children_async`、`resume_handle_async`、`reconcile_async`、`fork_async`、`replace_async`（四种形式）和 `migrate_graph_async`。每一个都在运行时的执行器上执行其同步同名函数的主体，并在等待它的协程的执行器上完成。`resume_async` 仍然表示“恢复并等待结果”，返回句柄的是 `resume_handle_async`。`run_async` 和 `resume_async` 建立在这些形式之上。`migrate_graph` 和 `replace` 等待源的安全点或交接时不再阻塞线程（`RunControl::wait_graph_migration_async`、`ProgramHandoff::wait_async`）。
+  - **行为变更：在由宿主驱动的执行器上，或没有线程的构建中，同步调用会被拒绝。** `start`、`start_active`、`start_child`、`replay_recorded`、`fork`、`replace`、`migrate_graph`、`reconnect`、`recover_children`、`reserve_synthesis`、`prepare_child_synthesis`、`recover_child_synthesis`、`resume`、`reconcile` 和 `run` 在做任何事之前就抛出 `ProgramBlockingCallRefused`（一个 `ConfigurationFailure`）。`operation()` 给出被拒绝的调用，`alternative()` 给出对应的 awaitable 形式，消息里也同时写明。`ProgramHandle::wait`、`ProgramHandoff::reference` 以及 `migrate_graph` 内部的等待，在结果尚未就绪时同样会被拒绝；如果它们是在运行注入执行器的线程上调用的，也会被拒绝，因为那样会等待只有该线程才能完成的工作。`hook_runtime` 会阻塞调用方，所以在由宿主驱动的执行器上，构造函数会以同样的错误拒绝它。没有执行器的原生运行时不变。
+  - **锁。** 会访问存储、或者要等待 Program 的临界区不再持有 `std::mutex`，而是持有 `OperationLock`（`src/program/operation_lock.h`）：不可重入，按请求顺序授予，用 `co_await lock.lock_async()` 获取时不阻塞线程，同步 API 使用 `lock_blocking()`。这包括 `fork`、`replace`、`migrate_graph` 的锁、串行化父运行子关系的条带锁，以及进程级的转换（transition）锁（`ReentrantOperationLock`，同一线程可以再次获取，就像被它取代的 `std::recursive_mutex`）。运行的 attempt 在存储调用期间还会持有三个锁：更新任务图片段的记录、在命令日志中记录 await 的开始，以及扣减 dynamic-compile 预算。其余的 `std::mutex` 只保护内存。Debug 构建，或 `-DNEOGRAPH_PROGRAM_LOCK_AUDIT=ON`，会对它们计数，一旦持有其中任何一个时调用转换存储，就会带着调用名 abort。
+  - **测试。** `tests/test_program_runtime_executor.cpp` 在单线程 `io_context` 上（节点在该线程上运行；wall-time 截止时间在其上触发；在该线程上发起的等待被拒绝）以及手动执行器之上的 `HostLoop` 上（同步调用被拒绝并指明 awaitable 形式；Program 在测试线程的宿主轮次中完成且进程不增加线程；结果就绪前的阻塞等待被拒绝；截止时间通过宿主定时器触发）运行 Program，并测试这把锁。wasm32 检查（`wasm/checks.cpp`）在 Node 22 和 24 上验证：没有执行器的运行时被拒绝、宿主循环上的同步 start 被拒绝，以及用内存存储在宿主轮次中把单节点 Program 运行到结果。什么在哪里运行见 [`wasm/README.md`](wasm/README.md)。
 
 ### 变更
 - **提供方调用的 identity 标识的是请求所问的内容，而不是批准该请求的 SchemaProvider 策略 (#543)。** Program 提供方调用 journal 以 `Provider::request_digest` 标识调用，而这个摘要包含 SchemaProvider descriptor 策略的 identity。因此，内容相同的请求只要策略 identity 不同，就成了另一次调用：恢复或崩溃恢复会遇到逻辑调用绑定冲突，fork 则不会沿用来源运行的调用而是重新发送，已付费的调用于是被付费两次。interface 7 改变了所有策略 identity，0.16.0 就是这样遇到这个问题的。现在 journal 把请求内容和策略 identity 分开保存。
@@ -74,6 +83,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **转写和图像。** 实时语音往返测试改用 `gpt-transcribe` 而不是 `gpt-4o-mini-transcribe` 转写，实时图像测试改用 `gpt-image-2.5-sunburst` 而不是 `gpt-image-1-mini`。
   - **实时测试的语音输入。** 实时转写会话的语音不再来自语音端点，而是来自一个朗读文本的 `gpt-realtime-2.1-mini` Realtime 会话。
   - **语音端点。** 仍有一个实时测试用 `tts-1` 调用 `/v1/audio/speech`。OpenAI 页面列出 `tts-1`、`tts-1-hd` 和两个 `gpt-4o-mini-tts` 快照将于 2027 年 1 月 6 日移除，并以 Realtime API 的 `gpt-realtime-2.1-mini` 作为替代，但没有给出此端点的模型。这个测试使用 `tts-1`，因此需要在该日期前修改或删除。
+- **C++ 使用方需要重新构建：新增了成员和函数 (#557)。** `RuntimeConfig` 新增 `executor` 和 `executor_identity`，`RunMetadata` 和 `RunContext` 新增 `dispatch_executor`，`ProgramRuntime` 新增了 awaitable 函数，并把状态保存在共享对象中。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
 
