@@ -488,10 +488,11 @@ public:
     /** Whether the run ever published an effect with this id. */
     virtual bool effect_id_published(std::string_view run_id, std::string_view effect_id) = 0;
     /**
-     * The run's command log in sequence order. Nothing when the stored log fails its
-     * integrity check; the publication is then refused.
+     * The run's command log in sequence order. A stored log that fails its integrity
+     * check is corrupt: the reader throws std::invalid_argument, as it does for every
+     * other stored record that contradicts itself.
      */
-    virtual std::optional<Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>> command_log(
+    virtual Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) = 0;
     virtual std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(
         std::string_view run_id) = 0;
@@ -561,16 +562,21 @@ struct TransitionPlan {
 
 /**
  * The checks that need no stored state. Returns the publication's canonical bytes, or
- * nothing when the request is refused before any state is read.
+ * nothing when the request is refused before any state is read. An expected head that
+ * cannot be a journal head is one of those: it can match no stored head, so it is
+ * refused without reading the possibly unreadable state it would be compared with.
  */
 inline std::optional<std::string> prepare_transition(
     std::string_view                     owner_scope,
+    std::string_view                     expected_journal_head,
     const ProgramTransitionPublication&  publication,
     const ProgramGraphSafePointEvidence* safe_point_evidence,
     const GraphMigrationCapsule*         safe_point_capsule,
     const ProgramExecutionLease*         expected_lease,
     const ProgramExecutionLease*         next_lease) {
     try {
+        if (!expected_journal_head.empty() && !is_sha256_identity(expected_journal_head))
+            return std::nullopt;
         if (publication.run_record.owner_scope() != owner_scope ||
             static_cast<bool>(safe_point_evidence) != static_cast<bool>(safe_point_capsule) ||
             (safe_point_evidence && (!expected_lease || next_lease)))
@@ -640,10 +646,9 @@ inline bool valid_increment(TransitionReads&                     reads,
         return false;
     if (!effect_ids_are_new(reads, old_run.run_id(), next_publication.effects)) return false;
     const auto old_commands = reads.command_log(old_run.run_id());
-    if (!old_commands) return false;
-    if (!valid_command_history_append(old_run, old_commands->get(), next_publication.commands) ||
+    if (!valid_command_history_append(old_run, old_commands.get(), next_publication.commands) ||
         !valid_command_reservation_transition(old_run, old_journal, next_journal,
-                                              old_commands->get(), next_publication,
+                                              old_commands.get(), next_publication,
                                               safe_point_evidence, safe_point_capsule,
                                               execution_lease))
         return false;

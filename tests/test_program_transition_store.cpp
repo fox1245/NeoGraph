@@ -4151,10 +4151,6 @@ TEST_P(ProgramTransitionStoreConformance, TamperedStoredRunRecordFailsClosed) {
 // with the record in its bytes is never returned as that record.
 TEST_P(ProgramTransitionStoreConformance, StoredGenerationRowMustAgreeWithItsRecord) {
     if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
-    if (GetParam() == StoreBackend::Sqlite)
-        GTEST_SKIP() << "the SQLite store finds a generation by its key columns and does not compare "
-                        "the row's generation_id with the identity of the record it holds; the "
-                        "PostgreSQL store does (#556)";
     auto start = start_publication();
     attach_initial_lineage(start);
     ASSERT_EQ(primary_store().compare_publish("owner-a", {}, start),
@@ -4165,6 +4161,95 @@ TEST_P(ProgramTransitionStoreConformance, StoredGenerationRowMustAgreeWithItsRec
     restart_store();
     EXPECT_THROW((void)primary_store().load_generation("owner-a", lineage_id, 1),
                  std::invalid_argument);
+}
+
+// Key binding for the execution lease: a stored lease whose id column disagrees with the lease
+// in its bytes is never returned.
+TEST_P(ProgramTransitionStoreConformance, StoredLeaseRowMustAgreeWithItsRecord) {
+    if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
+    auto start = start_publication();
+    attach_initial_lineage(start);
+    const auto lease = execution_lease(start);
+    ASSERT_EQ(primary_store().compare_publish_execution("owner-a", "", start, std::nullopt, lease),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(primary_store().load_execution_lease("owner-a", "run-1"));
+    deployment().corrupt_lease_identity("owner-a", "run-1");
+    restart_store();
+    EXPECT_THROW((void)primary_store().load_execution_lease("owner-a", "run-1"),
+                 std::invalid_argument);
+}
+
+// Key binding for the lineage: a stored head or history record that is not the lineage it is
+// stored under is never returned.
+TEST_P(ProgramTransitionStoreConformance, StoredLineageRecordsMustAgreeWithTheirKey) {
+    if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
+    auto first = start_publication();
+    attach_initial_lineage(first);
+    auto second = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_initial_lineage(second);
+    ASSERT_EQ(primary_store().compare_publish("owner-a", {}, first),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(primary_store().compare_publish("owner-a", {}, second),
+              ProgramTransitionPublishResult::Published);
+    const auto first_lineage  = first.run_lineage->lineage_id();
+    const auto second_lineage = second.run_lineage->lineage_id();
+    ASSERT_TRUE(primary_store().load_lineage("owner-a", first_lineage));
+    ASSERT_TRUE(primary_store().load_lineage_head("owner-a", first_lineage, first.run_lineage->id()));
+    deployment().replace_lineage_records("owner-a", second_lineage, first_lineage);
+    restart_store();
+    EXPECT_THROW((void)primary_store().load_lineage("owner-a", first_lineage),
+                 std::invalid_argument);
+    EXPECT_THROW((void)primary_store().load_lineage_head("owner-a", first_lineage,
+                                                         first.run_lineage->id()),
+                 std::invalid_argument);
+    EXPECT_TRUE(primary_store().load_lineage("owner-a", second_lineage));
+}
+
+// Fail closed: a stored command row whose coordinate column disagrees with the entry in its
+// bytes is corruption, in a read and in the check that decides a publication. Every store
+// raises the same typed error; none reads it as a refusal.
+TEST_P(ProgramTransitionStoreConformance, StoredCommandRowMustAgreeWithItsCoordinate) {
+    if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
+    const auto start = start_publication();
+    ASSERT_EQ(primary_store().compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+    const auto pending =
+        javascript_command_publication(start, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(primary_store().compare_publish("owner-a", start.journal_record.id, pending),
+              ProgramTransitionPublishResult::Published);
+    deployment().corrupt_command_coordinate("owner-a", "run-1");
+    restart_store();
+    auto& store = primary_store();
+    EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::invalid_argument);
+    const auto completed =
+        javascript_command_publication(pending, javascript_command_entry(2, true), 30);
+    EXPECT_THROW((void)store.compare_publish("owner-a", pending.journal_record.id, completed),
+                 std::invalid_argument);
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, pending.journal_record.id);
+}
+
+// An expected head that cannot be a journal head matches no stored head, so the publication is
+// refused without reading the state it would be compared with. A stored record that cannot be
+// read does not turn that refusal into an error.
+TEST_P(ProgramTransitionStoreConformance, MalformedExpectedHeadIsRefusedBeforeStateIsRead) {
+    const auto start = start_publication();
+    EXPECT_EQ(primary_store().compare_publish("owner-a", "not-a-journal-head", start),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(primary_store().load("owner-a", "run-1"));
+    ASSERT_EQ(primary_store().compare_publish("owner-a", {}, start),
+              ProgramTransitionPublishResult::Published);
+    const auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
+                                               ContinuationState::Completed);
+    EXPECT_EQ(primary_store().compare_publish("owner-a", "not-a-journal-head", terminal),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(primary_store().latest("owner-a", "run-1")->id, start.journal_record.id);
+    if (!deployment().durable()) return;
+    deployment().corrupt_run_record("owner-a", "run-1");
+    restart_store();
+    EXPECT_EQ(primary_store().compare_publish("owner-a", "not-a-journal-head", terminal),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_THROW((void)primary_store().compare_publish("owner-a", start.journal_record.id, terminal),
+                 std::exception);
 }
 
 // A transition store that implements no JavaScript command journal read refuses to answer
