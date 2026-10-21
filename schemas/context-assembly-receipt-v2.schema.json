@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-assembly-receipt-v2.schema.json",
+  "title": "NeoGraph ContextAssemblyReceipt stored value v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "context_epoch_id", "normalized_request_digest", "message_window_digest", "artifact_ids", "required_skill_artifact_ids", "raw_from_sequence", "raw_through_sequence", "estimated_input_tokens", "mandatory_input_tokens"],
+  "properties": {
+    "format": { "const": "neograph-context-assembly-receipt" },
+    "storage_schema_version": { "const": 2 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "context_epoch_id": { "$ref": "#/$defs/sha256" },
+    "normalized_request_digest": { "$ref": "#/$defs/sha256" },
+    "message_window_digest": { "$ref": "#/$defs/sha256" },
+    "artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "required_skill_artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "raw_from_sequence": { "type": "integer", "minimum": 0 },
+    "raw_through_sequence": { "type": "integer", "minimum": 0 },
+    "estimated_input_tokens": { "type": "integer", "minimum": 0 },
+    "mandatory_input_tokens": { "type": "integer", "minimum": 0 },
+    "assembled_artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
+    "artifact_classes": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/sha256" },
+      "additionalProperties": { "enum": ["stable", "slow", "volatile"] }
+    },
+    "encoder_family": { "type": "string", "minLength": 1 },
+    "stable_boundary": { "$ref": "#/$defs/boundary" },
+    "prefix_boundary": { "$ref": "#/$defs/boundary" },
+    "prefix_digest": { "$ref": "#/$defs/sha256" },
+    "tools_digest": { "$ref": "#/$defs/sha256" },
+    "break_reason": { "enum": ["compaction", "stable_change", "layout_change", "anchor_drop", "order_change", "explicit"] }
+  },
+  "anyOf": [
+    { "required": ["assembled_artifact_ids"] },
+    { "required": ["encoder_family"] },
+    { "required": ["stable_boundary"] },
+    { "required": ["prefix_boundary"] },
+    { "required": ["prefix_digest"] },
+    { "required": ["tools_digest"] },
+    { "required": ["break_reason"] }
+  ],
+  "allOf": [
+    {
+      "if": { "required": ["assembled_artifact_ids"] },
+      "then": { "required": ["artifact_classes"] },
+      "else": { "not": { "required": ["artifact_classes"] } }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message_index", "part_index"],
+      "properties": {
+        "message_index": { "type": "integer", "minimum": 0 },
+        "part_index": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

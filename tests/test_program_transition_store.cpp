@@ -37,6 +37,7 @@ using neograph::ContextAssemblyReceiptData;
 using neograph::ContextEpoch;
 using neograph::ContextEpochData;
 using neograph::ContextPlacement;
+using neograph::ContextPrefixClaim;
 using neograph::RuntimeGuaranteeProfile;
 std::string digest(char c) {
     return "sha256:" + std::string(64, c);
@@ -162,6 +163,58 @@ ProgramContextPublication context_publication(
     return {std::move(epoch), std::move(artifacts), std::move(receipt)};
 }
 
+// An epoch over a feed that records the order of its artifacts, with the receipt of its assembly.
+ProgramContextPublication ordered_context_publication(
+    std::uint64_t sequence, std::optional<std::string> predecessor, std::uint64_t through,
+    std::vector<ContextArtifact> artifacts, std::optional<ContextPrefixClaim> claim,
+    std::string run_id = "run-1") {
+    ContextEpochData epoch_data;
+    epoch_data.run_id = std::move(run_id);
+    epoch_data.sequence = sequence;
+    epoch_data.predecessor_id = std::move(predecessor);
+    epoch_data.feed_id = "feed";
+    epoch_data.raw_from_sequence = 1;
+    epoch_data.raw_through_sequence = through;
+    epoch_data.raw_window_digest = digest('9');
+    for (const auto& artifact : artifacts) epoch_data.artifact_ids.push_back(artifact.id());
+    epoch_data.ordered_artifact_ids = epoch_data.artifact_ids;
+    epoch_data.prefix_claim = claim;
+    auto epoch = ContextEpoch::create(std::move(epoch_data));
+    ContextAssemblyReceiptData receipt_data;
+    receipt_data.context_epoch_id = epoch.id();
+    receipt_data.normalized_request_digest = digest('a');
+    receipt_data.message_window_digest = digest('b');
+    receipt_data.artifact_ids = epoch.artifact_ids();
+    receipt_data.raw_from_sequence = 1;
+    receipt_data.raw_through_sequence = through;
+    receipt_data.estimated_input_tokens = 1;
+    receipt_data.assembled_artifact_ids = *epoch.ordered_artifact_ids();
+    receipt_data.artifact_classes.emplace();
+    for (const auto& artifact : artifacts) {
+        receipt_data.artifact_classes->emplace(artifact.id(), artifact.stability_class());
+        if (artifact.kind() == ContextArtifactKind::RequiredSkill) {
+            receipt_data.required_skill_artifact_ids.push_back(artifact.id());
+        }
+    }
+    receipt_data.encoder_family = "openai.chat";
+    auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, artifacts);
+    return {std::move(epoch), std::move(artifacts), std::move(receipt)};
+}
+
+ContextArtifact context_skill(std::string text) {
+    return ContextArtifact::create(ContextArtifactData{ContextArtifactKind::RequiredSkill,
+                                                        "skill", digest('c'), {}, 0, 0, "text/plain",
+                                                        ContextPlacement::BeforeHistory, 0, true,
+                                                        json(std::move(text))});
+}
+
+ContextArtifact context_note(std::string text) {
+    return ContextArtifact::create(ContextArtifactData{ContextArtifactKind::DerivedContext,
+                                                        "note", digest('d'), {}, 0, 0, "text/plain",
+                                                        ContextPlacement::AfterHistory, 0, false,
+                                                        json(std::move(text))});
+}
+
 ProgramContextPublication transferred_context_publication(
     const ProgramContextPublication& source, std::string run_id) {
     ContextEpochData epoch_data{std::move(run_id), 1, std::nullopt, source.epoch.feed_id(),
@@ -169,6 +222,7 @@ ProgramContextPublication transferred_context_publication(
                                 source.epoch.raw_through_sequence(),
                                 source.epoch.raw_window_digest(), source.epoch.artifact_ids(),
                                 source.epoch.guarantee_profile()};
+    epoch_data.ordered_artifact_ids = source.epoch.ordered_artifact_ids();
     auto epoch = ContextEpoch::create(std::move(epoch_data));
     ContextAssemblyReceiptData receipt_data{
         epoch.id(), source.assembly_receipt.normalized_request_digest(),
@@ -179,6 +233,13 @@ ProgramContextPublication transferred_context_publication(
         source.assembly_receipt.raw_through_sequence(),
         source.assembly_receipt.estimated_input_tokens(),
         source.assembly_receipt.mandatory_input_tokens()};
+    receipt_data.assembled_artifact_ids = source.assembly_receipt.assembled_artifact_ids();
+    receipt_data.artifact_classes = source.assembly_receipt.artifact_classes();
+    receipt_data.encoder_family = source.assembly_receipt.encoder_family();
+    receipt_data.stable_boundary = source.assembly_receipt.stable_boundary();
+    receipt_data.prefix_boundary = source.assembly_receipt.prefix_boundary();
+    receipt_data.prefix_digest = source.assembly_receipt.prefix_digest();
+    receipt_data.tools_digest = source.assembly_receipt.tools_digest();
     auto artifacts = source.artifacts;
     auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, artifacts);
     return {std::move(epoch), std::move(artifacts), std::move(receipt)};
@@ -1599,6 +1660,138 @@ TEST_P(ProgramTransitionStoreConformance, ContextPublicationIsAtomicAppendOnlyAn
     hook.context_publication =
         context_publication(1, std::nullopt, {hook_output_artifact()}, "run-2");
     EXPECT_EQ(store.compare_publish("owner-a", {}, hook), ProgramTransitionPublishResult::Conflict);
+}
+
+TEST_P(ProgramTransitionStoreConformance, ContextPublicationVerifiesAClaimToExtendItsPredecessor) {
+    auto& store = primary_store();
+    const auto skill = context_skill("Verify before editing.");
+    auto initial = start_publication();
+    initial.context_publication = ordered_context_publication(
+        1, std::nullopt, 3, {skill, context_note("reading 1")}, std::nullopt);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial), ProgramTransitionPublishResult::Published);
+
+    auto next = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    next.context_publication = ordered_context_publication(
+        2, initial.context_publication->epoch.id(), 5, {skill, context_note("reading 2")},
+        ContextPrefixClaim::Extends);
+    ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, next),
+              ProgramTransitionPublishResult::Published);
+
+    // A Stable artifact changed, or the window did not grow: the claim does not hold, so nothing is written.
+    const auto head = next.context_publication->epoch.id();
+    auto changed = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+    changed.context_publication = ordered_context_publication(
+        3, head, 7, {context_skill("Verify twice."), context_note("reading 3")}, ContextPrefixClaim::Extends);
+    EXPECT_EQ(store.compare_publish("owner-a", next.journal_record.id, changed),
+              ProgramTransitionPublishResult::Conflict);
+    auto stalled = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+    stalled.context_publication = ordered_context_publication(
+        3, head, 5, {skill, context_note("reading 3")}, ContextPrefixClaim::Extends);
+    EXPECT_EQ(store.compare_publish("owner-a", next.journal_record.id, stalled),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.load_context_publications("owner-a", "run-1").size(), 2U);
+
+    // The same change is a publishable break when the epoch says so, or claims nothing.
+    auto unclaimed = javascript_command_publication(next, javascript_command_entry(2, true), 30);
+    unclaimed.context_publication = ordered_context_publication(
+        3, head, 7, {context_skill("Verify twice."), context_note("reading 3")}, std::nullopt);
+    ASSERT_EQ(store.compare_publish("owner-a", next.journal_record.id, unclaimed),
+              ProgramTransitionPublishResult::Published);
+    const auto history = store.load_context_publications("owner-a", "run-1");
+    ASSERT_EQ(history.size(), 3U);
+    ASSERT_TRUE(history[1].epoch.prefix_claim());
+    EXPECT_EQ(*history[1].epoch.prefix_claim(), ContextPrefixClaim::Extends);
+    EXPECT_EQ(history[1].epoch.ordered_artifact_ids(), next.context_publication->epoch.ordered_artifact_ids());
+    ASSERT_TRUE(history[1].assembly_receipt.assembled_artifact_ids());
+    EXPECT_EQ(history[1].assembly_receipt.encoder_family(), std::optional<std::string>("openai.chat"));
+}
+
+TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceiptPrefixFields) {
+    auto& store = primary_store();
+    const auto source_context = ordered_context_publication(
+        1, std::nullopt, 3, {context_skill("Verify before editing."), context_note("reading 1")},
+        std::nullopt);
+    auto source_start = start_publication();
+    source_start.context_publication = source_context;
+    attach_initial_lineage(source_start);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, source_start), ProgramTransitionPublishResult::Published);
+    auto source = interrupted_effect_publication(source_start);
+    attach_same_generation_lineage(source, *source_start.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", source_start.journal_record.id, source),
+              ProgramTransitionPublishResult::Published);
+
+    auto base = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(base);
+    base.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    // A copy that lost the order, or the prefix fields of the receipt, is not the source's context.
+    const auto copy = [&](bool keep_order, bool keep_prefix_fields) {
+        ContextEpochData data{"run-2", 1, std::nullopt, source_context.epoch.feed_id(),
+                              source_context.epoch.raw_from_sequence(),
+                              source_context.epoch.raw_through_sequence(),
+                              source_context.epoch.raw_window_digest(), source_context.epoch.artifact_ids(),
+                              source_context.epoch.guarantee_profile()};
+        if (keep_order) data.ordered_artifact_ids = source_context.epoch.ordered_artifact_ids();
+        auto epoch = ContextEpoch::create(std::move(data));
+        const auto& source_receipt = source_context.assembly_receipt;
+        ContextAssemblyReceiptData receipt_data{
+            epoch.id(), source_receipt.normalized_request_digest(), source_receipt.message_window_digest(),
+            source_receipt.artifact_ids(), source_receipt.required_skill_artifact_ids(),
+            source_receipt.raw_from_sequence(), source_receipt.raw_through_sequence(),
+            source_receipt.estimated_input_tokens(), source_receipt.mandatory_input_tokens()};
+        if (keep_prefix_fields) {
+            receipt_data.assembled_artifact_ids = source_receipt.assembled_artifact_ids();
+            receipt_data.artifact_classes = source_receipt.artifact_classes();
+            receipt_data.encoder_family = source_receipt.encoder_family();
+        }
+        auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, source_context.artifacts);
+        return ProgramContextPublication{std::move(epoch), source_context.artifacts, std::move(receipt)};
+    };
+    for (const auto& [keep_order, keep_prefix_fields] :
+         std::vector<std::pair<bool, bool>>{{false, true}, {true, false}, {false, false}}) {
+        auto dropped = base;
+        dropped.context_publication = copy(keep_order, keep_prefix_fields);
+        attach_fork_split(dropped, *source.run_lineage);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, dropped), ProgramTransitionPublishResult::Conflict)
+            << keep_order << keep_prefix_fields;
+    }
+
+    // The first epoch of the target has no predecessor, so it claims nothing about a prefix.
+    {
+        auto claiming = copy(true, true);
+        ContextEpochData data{"run-2", 1, std::nullopt, claiming.epoch.feed_id(),
+                              claiming.epoch.raw_from_sequence(), claiming.epoch.raw_through_sequence(),
+                              claiming.epoch.raw_window_digest(), claiming.epoch.artifact_ids(),
+                              claiming.epoch.guarantee_profile()};
+        data.ordered_artifact_ids = claiming.epoch.ordered_artifact_ids();
+        data.prefix_claim = ContextPrefixClaim::Breaks;
+        data.break_reason = neograph::ContextBreakReason::Explicit;
+        auto epoch = ContextEpoch::create(std::move(data));
+        const auto& copied = claiming.assembly_receipt;
+        ContextAssemblyReceiptData receipt_data{
+            epoch.id(), copied.normalized_request_digest(), copied.message_window_digest(),
+            copied.artifact_ids(), copied.required_skill_artifact_ids(), copied.raw_from_sequence(),
+            copied.raw_through_sequence(), copied.estimated_input_tokens(), copied.mandatory_input_tokens()};
+        receipt_data.assembled_artifact_ids = copied.assembled_artifact_ids();
+        receipt_data.artifact_classes = copied.artifact_classes();
+        receipt_data.encoder_family = copied.encoder_family();
+        receipt_data.break_reason = neograph::ContextBreakReason::Explicit;
+        auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, claiming.artifacts);
+        auto target = base;
+        target.context_publication =
+            ProgramContextPublication{std::move(epoch), claiming.artifacts, std::move(receipt)};
+        attach_fork_split(target, *source.run_lineage);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, target), ProgramTransitionPublishResult::Conflict);
+    }
+
+    auto kept = base;
+    kept.context_publication = transferred_context_publication(source_context, "run-2");
+    attach_fork_split(kept, *source.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, kept), ProgramTransitionPublishResult::Published);
+    const auto contexts = store.load_context_publications("owner-a", "run-2");
+    ASSERT_EQ(contexts.size(), 1U);
+    EXPECT_EQ(contexts.front().epoch.ordered_artifact_ids(), source_context.epoch.ordered_artifact_ids());
+    EXPECT_EQ(contexts.front().assembly_receipt.artifact_classes(), source_context.assembly_receipt.artifact_classes());
 }
 
 TEST(ProgramTransitionStoreTest, ContextPublicationFaultLeavesNoPartialSnapshotAndRetries) {

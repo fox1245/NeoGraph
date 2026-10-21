@@ -81,8 +81,7 @@ sp::Message render_artifact(const ContextArtifact& artifact) {
     if (artifact.media_type() != "text/plain" && artifact.media_type() != "text/markdown") {
         throw std::invalid_argument("Context assembly only renders text/plain or text/markdown artifacts");
     }
-    const auto role = artifact.kind() == ContextArtifactKind::RequiredSkill ||
-                      artifact.kind() == ContextArtifactKind::HardConstraint
+    const auto role = context_artifact_kind_renders_as_system(artifact.kind())
         ? sp::Role::System
         : sp::Role::User;
     const auto content = artifact.content();
@@ -100,6 +99,19 @@ sp::Message render_artifact(const ContextArtifact& artifact) {
     message.role = role;
     message.parts.emplace_back(sp::Text{std::move(text)});
     return message;
+}
+
+// Digest of the tool definitions an encoded request body carries, which every
+// family names `tools`; absent when the body has none. Tool definitions sit in
+// front of the messages, so a change to them changes the whole request.
+std::optional<std::string> tools_digest(std::string_view encoded_body) {
+    try {
+        const auto body = detail::parse_json_strict(encoded_body);
+        if (!body.is_object() || !body.contains("tools")) return std::nullopt;
+        return identity("provider-tools/v1", body.at("tools"));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 void normalize_required_ids(std::vector<std::string>& ids,
@@ -257,18 +269,24 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     std::vector<sp::Message> before;
     std::vector<sp::Message> after_user;
     std::vector<sp::Message> after_history;
+    // The ids of those messages in the order the prompt shows them.
+    std::vector<std::string> before_history_ids, before_ids, after_user_ids, after_history_ids;
     std::uint64_t mandatory_bytes = 0;
     for (const auto& item : selected) {
         const auto rendered = render_artifact(item.artifact);
         if (item.artifact.required()) mandatory_bytes += text_bytes(rendered);
         if (item.artifact.placement() == ContextPlacement::BeforeHistory) {
             before_history.push_back(rendered);
+            before_history_ids.push_back(item.artifact.id());
         } else if (item.artifact.placement() == ContextPlacement::BeforeLatestUser) {
             before.push_back(rendered);
+            before_ids.push_back(item.artifact.id());
         } else if (item.artifact.placement() == ContextPlacement::AfterLatestUser) {
             after_user.push_back(rendered);
+            after_user_ids.push_back(item.artifact.id());
         } else {
             after_history.push_back(rendered);
+            after_history_ids.push_back(item.artifact.id());
         }
     }
 
@@ -328,6 +346,18 @@ RuntimeTurn RuntimeTurnAssembler::assemble(
     receipt_data.raw_through_sequence = epoch.raw_through_sequence();
     receipt_data.estimated_input_tokens = estimate_input_tokens(prepared);
     receipt_data.mandatory_input_tokens = tokens_for_bytes(mandatory_bytes);
+    receipt_data.assembled_artifact_ids.emplace();
+    for (const auto* ids : {&before_history_ids, &before_ids, &after_user_ids, &after_history_ids}) {
+        receipt_data.assembled_artifact_ids->insert(receipt_data.assembled_artifact_ids->end(),
+                                                    ids->begin(), ids->end());
+    }
+    receipt_data.artifact_classes.emplace();
+    for (const auto& item : selected) {
+        receipt_data.artifact_classes->emplace(item.artifact.id(), item.artifact.stability_class());
+    }
+    receipt_data.encoder_family = std::string(prepared.family());
+    receipt_data.tools_digest = tools_digest(prepared.encoded_body());
+    receipt_data.break_reason = epoch.break_reason();
     if (impl_->max_input_tokens != 0 &&
         receipt_data.estimated_input_tokens > impl_->max_input_tokens) {
         throw ContextBudgetBlocked();

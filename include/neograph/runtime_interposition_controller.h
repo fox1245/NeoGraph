@@ -39,7 +39,16 @@ public:
     RuntimeInterpositionController& operator=(const RuntimeInterpositionController&) = delete;
 
     /// Select the immutable context generation used by subsequent dispatches.
+    ///
+    /// An epoch that claims to extend its predecessor is verified first
+    /// (verify_context_epoch_claim). The predecessor is the one given, or else
+    /// the epoch active for this owner when its id is the epoch's predecessor_id.
+    /// A claim without a predecessor of either kind, or one that does not hold, is
+    /// refused with ContextStabilityError and the active epoch stays as it was.
+    /// An epoch that claims nothing, or that breaks, is activated as before.
     void activate(std::string owner_id, ContextEpoch epoch);
+    void activate(std::string owner_id, ContextEpoch epoch,
+                  std::optional<ContextEpoch> predecessor);
     void clear() noexcept;
     bool active() const noexcept;
     /// Additive host resource; absent preserves legacy dispatch behavior.

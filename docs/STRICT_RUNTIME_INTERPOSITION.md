@@ -340,6 +340,16 @@ Keep the text of System-role artifacts unchanged between turns when you want a
 stable request start. This describes the assembly today. The defaults and the
 per-family rules are under review, and a change would alter the assembled bytes.
 
+## Stability class, order and prefix claim
+
+Whether a provider's prompt cache keeps the start of a request depends on which artifacts stay the same between calls. The data model records that. The assembler does not use it yet, so the assembled request is the one described under "Artifact placement".
+
+- An artifact can declare a `StabilityClass`: `Stable` (the same bytes for the life of the run), `Slow` (changes only at a compaction or another declared prefix break) or `Volatile` (may change on every call). An artifact that declares none gets a class when it is read: `RequiredSkill` and `HardConstraint` are `Stable`, a `DerivedContext` whose producer is `COMPACTION_PRODUCER_ID` is `Slow`, and everything else is `Volatile`. Creating a `Volatile` artifact of a kind that renders as a System message is refused with `ContextStabilityError`.
+- An artifact can declare an `AnchorMode`: `Replace` (the default) or `KeepInPlace`. Nothing acts on it yet.
+- An epoch can record `ordered_artifact_ids`, the artifacts in a fixed order, and a `prefix_claim`: `Extends` (the request start is the predecessor's and only grows at the end) or `Breaks` with a `break_reason`. Activating an epoch that `Extends` checks the claim against the active epoch, or against the predecessor the host passes to `activate`: the same `raw_from_sequence`, a larger `raw_through_sequence`, the same `Stable` and `Slow` artifacts in the same order, and `KeepInPlace` artifacts that are still selected and inside the RAW window. An epoch that records no order, such as one stored before the field existed, cannot be extended.
+- A receipt written by the assembler records the artifacts in the order of the prompt, their classes, the encoder family, a digest of the tools and the epoch's break reason.
+
+
 ## Runtime developer instructions
 
 `RuntimeDeveloperInstruction` is immutable developer input, not authority.

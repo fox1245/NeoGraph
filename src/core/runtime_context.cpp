@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <map>
 #include <set>
 #include <stdexcept>
 #include <utility>
@@ -78,6 +79,22 @@ void require_format(const json& value,
     }
 }
 
+// The schema version of a stored value that exists in more than one version.
+std::uint32_t require_format_version(const json& value,
+                                     std::string_view expected_format,
+                                     std::uint32_t legacy,
+                                     std::uint32_t current,
+                                     std::string_view name) {
+    if (required_string(value, "format") != expected_format) {
+        throw std::invalid_argument(std::string(name) + " has an unknown format");
+    }
+    const auto version = required_u64(value, "storage_schema_version");
+    if (version != legacy && version != current) {
+        throw std::invalid_argument(std::string(name) + " schema version is unsupported");
+    }
+    return static_cast<std::uint32_t>(version);
+}
+
 std::optional<std::string> optional_string(const json& value, std::string_view field) {
     const std::string key(field);
     if (!value.contains(key)) return std::nullopt;
@@ -110,6 +127,12 @@ void normalize_id_set(std::vector<std::string>& values, std::string_view field) 
     if (std::adjacent_find(values.begin(), values.end()) != values.end()) {
         throw std::invalid_argument(std::string(field) + " contains a duplicate identity");
     }
+}
+
+// A set of identities that keeps the order it was given.
+void require_id_sequence(const std::vector<std::string>& values, std::string_view field) {
+    auto sorted = values;
+    normalize_id_set(sorted, field);
 }
 
 void validate_range(std::string_view feed_id,
@@ -165,6 +188,28 @@ void require_known_enum(Enum value, std::string_view name) {
 }
 
 
+bool prefix_aware(const ContextAssemblyReceiptData& data) noexcept {
+    return data.assembled_artifact_ids || data.encoder_family || data.stable_boundary ||
+           data.prefix_boundary || data.prefix_digest || data.tools_digest || data.break_reason;
+}
+
+json boundary_body(const ContextPrefixBoundary& boundary) {
+    return json{{"message_index", boundary.message_index}, {"part_index", boundary.part_index}};
+}
+
+ContextPrefixBoundary parse_boundary(const json& value, std::string_view field) {
+    const std::string name = "Stored runtime value field '" + std::string(field) + "'";
+    if (!value.is_object()) throw std::invalid_argument(name + " must be an object");
+    detail::reject_unknown_fields(value, name, {"message_index", "part_index"});
+    return {required_u64(value, "message_index"), required_u64(value, "part_index")};
+}
+
+std::optional<ContextPrefixBoundary> optional_boundary(const json& value, std::string_view field) {
+    const std::string key(field);
+    if (!value.contains(key)) return std::nullopt;
+    return parse_boundary(value.at(key), field);
+}
+
 json seal(json body, std::string_view domain, std::string& id) {
     id = runtime_identity(domain, body);
     body["id"] = id;
@@ -215,6 +260,75 @@ std::string_view to_string(RuntimeGuaranteeProfile value) noexcept {
     return "unknown";
 }
 
+std::string_view to_string(StabilityClass value) noexcept {
+    switch (value) {
+        case StabilityClass::Stable: return "stable";
+        case StabilityClass::Slow: return "slow";
+        case StabilityClass::Volatile: return "volatile";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(AnchorMode value) noexcept {
+    switch (value) {
+        case AnchorMode::Replace: return "replace";
+        case AnchorMode::KeepInPlace: return "keep_in_place";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(ContextBreakReason value) noexcept {
+    switch (value) {
+        case ContextBreakReason::Compaction: return "compaction";
+        case ContextBreakReason::StableChange: return "stable_change";
+        case ContextBreakReason::LayoutChange: return "layout_change";
+        case ContextBreakReason::AnchorDrop: return "anchor_drop";
+        case ContextBreakReason::OrderChange: return "order_change";
+        case ContextBreakReason::Explicit: return "explicit";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(ContextPrefixClaim value) noexcept {
+    switch (value) {
+        case ContextPrefixClaim::Extends: return "extends";
+        case ContextPrefixClaim::Breaks: return "breaks";
+    }
+    return "unknown";
+}
+
+std::string_view to_string(ContextStabilityRefusal value) noexcept {
+    switch (value) {
+        case ContextStabilityRefusal::VolatileSystemArtifact: return "volatile_system_artifact";
+        case ContextStabilityRefusal::PredecessorUnavailable: return "predecessor_unavailable";
+        case ContextStabilityRefusal::PredecessorOrderUnknown: return "predecessor_order_unknown";
+        case ContextStabilityRefusal::ArtifactsMismatch: return "artifacts_mismatch";
+        case ContextStabilityRefusal::RawWindowMoved: return "raw_window_moved";
+        case ContextStabilityRefusal::RawWindowNotGrown: return "raw_window_not_grown";
+        case ContextStabilityRefusal::StablePrefixChanged: return "stable_prefix_changed";
+        case ContextStabilityRefusal::AnchorDropped: return "anchor_dropped";
+        case ContextStabilityRefusal::AnchorOutOfRange: return "anchor_out_of_range";
+    }
+    return "unknown";
+}
+
+ContextStabilityError::ContextStabilityError(ContextStabilityRefusal code, const std::string& message)
+    : std::invalid_argument(message), code_(code) {}
+
+ContextStabilityRefusal ContextStabilityError::code() const noexcept { return code_; }
+
+bool context_artifact_kind_renders_as_system(ContextArtifactKind kind) noexcept {
+    return kind == ContextArtifactKind::RequiredSkill || kind == ContextArtifactKind::HardConstraint;
+}
+
+StabilityClass derive_stability_class(ContextArtifactKind kind, std::string_view producer_id) noexcept {
+    if (context_artifact_kind_renders_as_system(kind)) return StabilityClass::Stable;
+    if (kind == ContextArtifactKind::DerivedContext && producer_id == COMPACTION_PRODUCER_ID) {
+        return StabilityClass::Slow;
+    }
+    return StabilityClass::Volatile;
+}
+
 RuntimeTrustClass runtime_trust_class_from_string(std::string_view value) {
     if (value == "untrusted_input") return RuntimeTrustClass::UntrustedInput;
     if (value == "model_output") return RuntimeTrustClass::ModelOutput;
@@ -247,6 +361,35 @@ RuntimeGuaranteeProfile runtime_guarantee_profile_from_string(std::string_view v
     if (value == "recorded") return RuntimeGuaranteeProfile::Recorded;
     if (value == "strict") return RuntimeGuaranteeProfile::Strict;
     throw std::invalid_argument("Unknown runtime guarantee profile");
+}
+
+StabilityClass stability_class_from_string(std::string_view value) {
+    if (value == "stable") return StabilityClass::Stable;
+    if (value == "slow") return StabilityClass::Slow;
+    if (value == "volatile") return StabilityClass::Volatile;
+    throw std::invalid_argument("Unknown stability class");
+}
+
+AnchorMode anchor_mode_from_string(std::string_view value) {
+    if (value == "replace") return AnchorMode::Replace;
+    if (value == "keep_in_place") return AnchorMode::KeepInPlace;
+    throw std::invalid_argument("Unknown anchor mode");
+}
+
+ContextBreakReason context_break_reason_from_string(std::string_view value) {
+    if (value == "compaction") return ContextBreakReason::Compaction;
+    if (value == "stable_change") return ContextBreakReason::StableChange;
+    if (value == "layout_change") return ContextBreakReason::LayoutChange;
+    if (value == "anchor_drop") return ContextBreakReason::AnchorDrop;
+    if (value == "order_change") return ContextBreakReason::OrderChange;
+    if (value == "explicit") return ContextBreakReason::Explicit;
+    throw std::invalid_argument("Unknown context break reason");
+}
+
+ContextPrefixClaim context_prefix_claim_from_string(std::string_view value) {
+    if (value == "extends") return ContextPrefixClaim::Extends;
+    if (value == "breaks") return ContextPrefixClaim::Breaks;
+    throw std::invalid_argument("Unknown context prefix claim");
 }
 
 struct RuntimeHistoryRecord::Impl {
@@ -408,11 +551,21 @@ ContextArtifact ContextArtifact::create(ContextArtifactData data) {
     if (data.kind == ContextArtifactKind::HardConstraint && !data.required) {
         throw std::invalid_argument("Hard constraint artifacts must be required");
     }
+    if (data.stability_class) require_known_enum(*data.stability_class, "Context artifact stability class");
+    if (data.anchor_mode) require_known_enum(*data.anchor_mode, "Context artifact anchor mode");
+    if (data.stability_class == StabilityClass::Volatile &&
+        context_artifact_kind_renders_as_system(data.kind)) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::VolatileSystemArtifact,
+            "A Volatile context artifact cannot be of a kind that renders as a System message");
+    }
     data.content = detail::owned_json_copy(data.content);
     auto impl = std::make_shared<Impl>();
     impl->content_digest = runtime_identity("context-artifact-content/v1", data.content);
+    // An artifact that declares neither field is a version 1 artifact, byte for byte.
+    const bool declared = data.stability_class || data.anchor_mode;
     json body{{"format", "neograph-context-artifact"},
-              {"storage_schema_version", STORAGE_SCHEMA_VERSION},
+              {"storage_schema_version", declared ? STORAGE_SCHEMA_VERSION : LEGACY_STORAGE_SCHEMA_VERSION},
               {"kind", std::string(to_string(data.kind))},
               {"producer_id", data.producer_id},
               {"source_digest", data.source_digest},
@@ -425,8 +578,11 @@ ContextArtifact ContextArtifact::create(ContextArtifactData data) {
               {"required", data.required},
               {"content", data.content},
               {"content_digest", impl->content_digest}};
+    if (data.stability_class) body["stability_class"] = std::string(to_string(*data.stability_class));
+    if (data.anchor_mode) body["anchor_mode"] = std::string(to_string(*data.anchor_mode));
     impl->data = std::move(data);
-    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "context-artifact/v1", impl->id));
+    impl->canonical = detail::canonical_json_bytes(
+        seal(std::move(body), declared ? "context-artifact/v2" : "context-artifact/v1", impl->id));
     return ContextArtifact(std::move(impl));
 }
 
@@ -437,9 +593,11 @@ ContextArtifact ContextArtifact::parse(std::string_view stored_bytes) {
         value, "Stored ContextArtifact",
         {"format", "storage_schema_version", "id", "kind", "producer_id", "source_digest",
          "source_feed_id", "covers_from_sequence", "covers_through_sequence", "media_type",
-         "placement", "priority", "required", "content", "content_digest"});
-    require_format(value, "neograph-context-artifact", STORAGE_SCHEMA_VERSION,
-                   "Stored ContextArtifact");
+         "placement", "priority", "required", "content", "content_digest", "stability_class",
+         "anchor_mode"});
+    const auto version = require_format_version(
+        value, "neograph-context-artifact", LEGACY_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION,
+        "Stored ContextArtifact");
     const auto stored_id = required_string(value, "id");
     const auto stored_content_digest = required_string(value, "content_digest");
     ContextArtifactData data;
@@ -455,9 +613,19 @@ ContextArtifact ContextArtifact::parse(std::string_view stored_bytes) {
     data.required = required_bool(value, "required");
     if (!value.contains("content")) throw std::invalid_argument("Stored ContextArtifact has no content");
     data.content = detail::owned_json_copy(value.at("content"));
+    if (const auto stability = optional_string(value, "stability_class")) {
+        data.stability_class = stability_class_from_string(*stability);
+    }
+    if (const auto anchor = optional_string(value, "anchor_mode")) {
+        data.anchor_mode = anchor_mode_from_string(*anchor);
+    }
+    const bool declared = data.stability_class || data.anchor_mode;
     auto result = create(std::move(data));
     if (result.id() != stored_id || result.content_digest() != stored_content_digest)
         throw std::invalid_argument("Stored ContextArtifact digest mismatch");
+    if (declared != (version == STORAGE_SCHEMA_VERSION)) {
+        throw std::invalid_argument("Stored ContextArtifact version does not match its fields");
+    }
     return result;
 }
 
@@ -473,6 +641,19 @@ std::int32_t ContextArtifact::priority() const noexcept { return impl_->data.pri
 bool ContextArtifact::required() const noexcept { return impl_->data.required; }
 json ContextArtifact::content() const { return impl_->data.content; }
 const std::string& ContextArtifact::content_digest() const noexcept { return impl_->content_digest; }
+StabilityClass ContextArtifact::stability_class() const noexcept {
+    return impl_->data.stability_class.value_or(
+        derive_stability_class(impl_->data.kind, impl_->data.producer_id));
+}
+const std::optional<StabilityClass>& ContextArtifact::declared_stability_class() const noexcept {
+    return impl_->data.stability_class;
+}
+AnchorMode ContextArtifact::anchor_mode() const noexcept {
+    return impl_->data.anchor_mode.value_or(AnchorMode::Replace);
+}
+const std::optional<AnchorMode>& ContextArtifact::declared_anchor_mode() const noexcept {
+    return impl_->data.anchor_mode;
+}
 const std::string& ContextArtifact::id() const noexcept { return impl_->id; }
 std::string ContextArtifact::serialize_canonical() const { return impl_->canonical; }
 
@@ -494,8 +675,33 @@ ContextEpoch ContextEpoch::create(ContextEpochData data) {
     validate_range(data.feed_id, data.raw_from_sequence, data.raw_through_sequence, "Context epoch");
     require_sha256(data.raw_window_digest, "Context epoch raw_window_digest");
     normalize_id_set(data.artifact_ids, "Context epoch artifact_ids");
+    if (data.ordered_artifact_ids) {
+        require_id_sequence(*data.ordered_artifact_ids, "Context epoch ordered_artifact_ids");
+        auto sorted = *data.ordered_artifact_ids;
+        std::sort(sorted.begin(), sorted.end());
+        if (sorted != data.artifact_ids) {
+            throw std::invalid_argument(
+                "Context epoch ordered_artifact_ids must order exactly its artifact_ids");
+        }
+    }
+    if (data.prefix_claim) require_known_enum(*data.prefix_claim, "Context epoch prefix claim");
+    if (data.break_reason) require_known_enum(*data.break_reason, "Context epoch break reason");
+    if (data.prefix_claim == ContextPrefixClaim::Extends) {
+        if (!data.predecessor_id) {
+            throw ContextStabilityError(ContextStabilityRefusal::PredecessorUnavailable,
+                                        "Context epoch cannot extend a predecessor it does not have");
+        }
+        if (!data.ordered_artifact_ids) {
+            throw std::invalid_argument("Context epoch that extends its predecessor must record ordered_artifact_ids");
+        }
+    }
+    if ((data.prefix_claim == ContextPrefixClaim::Breaks) != data.break_reason.has_value()) {
+        throw std::invalid_argument("Context epoch break_reason belongs to a claim that breaks, and only to it");
+    }
+    // An epoch that sets none of the version 2 fields is a version 1 epoch, byte for byte.
+    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason;
     json body{{"format", "neograph-context-epoch"},
-              {"storage_schema_version", STORAGE_SCHEMA_VERSION},
+              {"storage_schema_version", ordered ? STORAGE_SCHEMA_VERSION : LEGACY_STORAGE_SCHEMA_VERSION},
               {"run_id", data.run_id},
               {"sequence", data.sequence},
               {"feed_id", data.feed_id},
@@ -505,9 +711,13 @@ ContextEpoch ContextEpoch::create(ContextEpochData data) {
               {"artifact_ids", data.artifact_ids},
               {"guarantee_profile", std::string(to_string(data.guarantee_profile))}};
     if (data.predecessor_id) body["predecessor_id"] = *data.predecessor_id;
+    if (data.ordered_artifact_ids) body["ordered_artifact_ids"] = *data.ordered_artifact_ids;
+    if (data.prefix_claim) body["prefix_claim"] = std::string(to_string(*data.prefix_claim));
+    if (data.break_reason) body["break_reason"] = std::string(to_string(*data.break_reason));
     auto impl = std::make_shared<Impl>();
     impl->data = std::move(data);
-    impl->canonical = detail::canonical_json_bytes(seal(std::move(body), "context-epoch/v1", impl->id));
+    impl->canonical = detail::canonical_json_bytes(
+        seal(std::move(body), ordered ? "context-epoch/v2" : "context-epoch/v1", impl->id));
     return ContextEpoch(std::move(impl));
 }
 
@@ -518,8 +728,11 @@ ContextEpoch ContextEpoch::parse(std::string_view stored_bytes) {
         value, "Stored ContextEpoch",
         {"format", "storage_schema_version", "id", "run_id", "sequence", "predecessor_id",
          "feed_id", "raw_from_sequence", "raw_through_sequence", "raw_window_digest",
-         "artifact_ids", "guarantee_profile"});
-    require_format(value, "neograph-context-epoch", STORAGE_SCHEMA_VERSION, "Stored ContextEpoch");
+         "artifact_ids", "guarantee_profile", "ordered_artifact_ids", "prefix_claim",
+         "break_reason"});
+    const auto version = require_format_version(
+        value, "neograph-context-epoch", LEGACY_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION,
+        "Stored ContextEpoch");
     const auto stored_id = required_string(value, "id");
     ContextEpochData data;
     data.run_id = required_string(value, "run_id");
@@ -532,8 +745,21 @@ ContextEpoch ContextEpoch::parse(std::string_view stored_bytes) {
     data.artifact_ids = required_string_array(value, "artifact_ids");
     data.guarantee_profile = runtime_guarantee_profile_from_string(
         required_string(value, "guarantee_profile"));
+    if (value.contains("ordered_artifact_ids")) {
+        data.ordered_artifact_ids = required_string_array(value, "ordered_artifact_ids");
+    }
+    if (const auto claim = optional_string(value, "prefix_claim")) {
+        data.prefix_claim = context_prefix_claim_from_string(*claim);
+    }
+    if (const auto reason = optional_string(value, "break_reason")) {
+        data.break_reason = context_break_reason_from_string(*reason);
+    }
+    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason;
     auto result = create(std::move(data));
     if (result.id() != stored_id) throw std::invalid_argument("Stored ContextEpoch id mismatch");
+    if (ordered != (version == STORAGE_SCHEMA_VERSION)) {
+        throw std::invalid_argument("Stored ContextEpoch version does not match its fields");
+    }
     return result;
 }
 
@@ -546,6 +772,9 @@ std::uint64_t ContextEpoch::raw_through_sequence() const noexcept { return impl_
 const std::string& ContextEpoch::raw_window_digest() const noexcept { return impl_->data.raw_window_digest; }
 const std::vector<std::string>& ContextEpoch::artifact_ids() const noexcept { return impl_->data.artifact_ids; }
 RuntimeGuaranteeProfile ContextEpoch::guarantee_profile() const noexcept { return impl_->data.guarantee_profile; }
+const std::optional<std::vector<std::string>>& ContextEpoch::ordered_artifact_ids() const noexcept { return impl_->data.ordered_artifact_ids; }
+const std::optional<ContextPrefixClaim>& ContextEpoch::prefix_claim() const noexcept { return impl_->data.prefix_claim; }
+const std::optional<ContextBreakReason>& ContextEpoch::break_reason() const noexcept { return impl_->data.break_reason; }
 const std::string& ContextEpoch::id() const noexcept { return impl_->id; }
 std::string ContextEpoch::serialize_canonical() const { return impl_->canonical; }
 
@@ -577,8 +806,34 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
             "Mandatory input tokens (" + std::to_string(data.mandatory_input_tokens) +
             ") exceed the estimated input tokens (" +
             std::to_string(data.estimated_input_tokens) + ") they are part of");
+    if (data.assembled_artifact_ids.has_value() != data.artifact_classes.has_value()) {
+        throw std::invalid_argument(
+            "Context assembly assembled_artifact_ids and artifact_classes are recorded together");
+    }
+    if (data.assembled_artifact_ids) {
+        require_id_sequence(*data.assembled_artifact_ids, "Context assembly assembled_artifact_ids");
+        auto sorted = *data.assembled_artifact_ids;
+        std::sort(sorted.begin(), sorted.end());
+        std::vector<std::string> classified;
+        classified.reserve(data.artifact_classes->size());
+        for (const auto& [id, stability] : *data.artifact_classes) {
+            require_known_enum(stability, "Context assembly artifact class");
+            classified.push_back(id);
+        }
+        require_id_sequence(classified, "Context assembly artifact_classes");
+        if (sorted != data.artifact_ids || classified != data.artifact_ids) {
+            throw std::invalid_argument(
+                "Context assembly order and classes must cover exactly its artifact_ids");
+        }
+    }
+    if (data.encoder_family) detail::validate_token(*data.encoder_family, "Context assembly encoder_family");
+    if (data.prefix_digest) require_sha256(*data.prefix_digest, "Context assembly prefix_digest");
+    if (data.tools_digest) require_sha256(*data.tools_digest, "Context assembly tools_digest");
+    if (data.break_reason) require_known_enum(*data.break_reason, "Context assembly break reason");
+    // A receipt that sets none of the version 2 fields is a version 1 receipt, byte for byte.
+    const bool versioned = prefix_aware(data);
     json body{{"format", "neograph-context-assembly-receipt"},
-              {"storage_schema_version", STORAGE_SCHEMA_VERSION},
+              {"storage_schema_version", versioned ? STORAGE_SCHEMA_VERSION : LEGACY_STORAGE_SCHEMA_VERSION},
               {"context_epoch_id", data.context_epoch_id},
               {"normalized_request_digest", data.normalized_request_digest},
               {"message_window_digest", data.message_window_digest},
@@ -588,10 +843,23 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
               {"raw_through_sequence", data.raw_through_sequence},
               {"estimated_input_tokens", data.estimated_input_tokens},
               {"mandatory_input_tokens", data.mandatory_input_tokens}};
+    if (data.assembled_artifact_ids) {
+        body["assembled_artifact_ids"] = *data.assembled_artifact_ids;
+        json classes = json::object();
+        for (const auto& [id, stability] : *data.artifact_classes) classes[id] = std::string(to_string(stability));
+        body["artifact_classes"] = std::move(classes);
+    }
+    if (data.encoder_family) body["encoder_family"] = *data.encoder_family;
+    if (data.stable_boundary) body["stable_boundary"] = boundary_body(*data.stable_boundary);
+    if (data.prefix_boundary) body["prefix_boundary"] = boundary_body(*data.prefix_boundary);
+    if (data.prefix_digest) body["prefix_digest"] = *data.prefix_digest;
+    if (data.tools_digest) body["tools_digest"] = *data.tools_digest;
+    if (data.break_reason) body["break_reason"] = std::string(to_string(*data.break_reason));
     auto impl = std::make_shared<Impl>();
     impl->data = std::move(data);
-    impl->canonical = detail::canonical_json_bytes(
-        seal(std::move(body), "context-assembly-receipt/v1", impl->id));
+    impl->canonical = detail::canonical_json_bytes(seal(
+        std::move(body), versioned ? "context-assembly-receipt/v2" : "context-assembly-receipt/v1",
+        impl->id));
     return ContextAssemblyReceipt(std::move(impl));
 }
 
@@ -615,9 +883,12 @@ ContextAssemblyReceipt ContextAssemblyReceipt::parse(
         {"format", "storage_schema_version", "id", "context_epoch_id",
          "normalized_request_digest", "message_window_digest", "artifact_ids",
          "required_skill_artifact_ids", "raw_from_sequence", "raw_through_sequence",
-         "estimated_input_tokens", "mandatory_input_tokens"});
-    require_format(value, "neograph-context-assembly-receipt", STORAGE_SCHEMA_VERSION,
-                   "Stored ContextAssemblyReceipt");
+         "estimated_input_tokens", "mandatory_input_tokens", "assembled_artifact_ids",
+         "artifact_classes", "encoder_family", "stable_boundary", "prefix_boundary",
+         "prefix_digest", "tools_digest", "break_reason"});
+    const auto version = require_format_version(
+        value, "neograph-context-assembly-receipt", LEGACY_STORAGE_SCHEMA_VERSION,
+        STORAGE_SCHEMA_VERSION, "Stored ContextAssemblyReceipt");
     const auto stored_id = required_string(value, "id");
     ContextAssemblyReceiptData data;
     data.context_epoch_id = required_string(value, "context_epoch_id");
@@ -629,9 +900,38 @@ ContextAssemblyReceipt ContextAssemblyReceipt::parse(
     data.raw_through_sequence = required_u64(value, "raw_through_sequence");
     data.estimated_input_tokens = required_u64(value, "estimated_input_tokens");
     data.mandatory_input_tokens = required_u64(value, "mandatory_input_tokens");
+    if (value.contains("assembled_artifact_ids")) {
+        data.assembled_artifact_ids = required_string_array(value, "assembled_artifact_ids");
+    }
+    if (value.contains("artifact_classes")) {
+        const auto& classes = value.at("artifact_classes");
+        if (!classes.is_object()) {
+            throw std::invalid_argument("Stored runtime value field 'artifact_classes' must be an object");
+        }
+        std::map<std::string, StabilityClass> parsed;
+        for (const auto& [id, name] : classes.items()) {
+            if (!name.is_string()) {
+                throw std::invalid_argument("Stored runtime value field 'artifact_classes' must name classes");
+            }
+            parsed.emplace(id, stability_class_from_string(name.get<std::string>()));
+        }
+        data.artifact_classes = std::move(parsed);
+    }
+    data.encoder_family = optional_string(value, "encoder_family");
+    data.stable_boundary = optional_boundary(value, "stable_boundary");
+    data.prefix_boundary = optional_boundary(value, "prefix_boundary");
+    data.prefix_digest = optional_string(value, "prefix_digest");
+    data.tools_digest = optional_string(value, "tools_digest");
+    if (const auto reason = optional_string(value, "break_reason")) {
+        data.break_reason = context_break_reason_from_string(*reason);
+    }
+    const bool versioned = prefix_aware(data);
     auto result = create_structural(std::move(data));
     if (result.id() != stored_id)
         throw std::invalid_argument("Stored ContextAssemblyReceipt id mismatch");
+    if (versioned != (version == STORAGE_SCHEMA_VERSION)) {
+        throw std::invalid_argument("Stored ContextAssemblyReceipt version does not match its fields");
+    }
     validate_context_assembly_receipt(result, epoch, artifacts);
     return result;
 }
@@ -645,6 +945,14 @@ std::uint64_t ContextAssemblyReceipt::raw_from_sequence() const noexcept { retur
 std::uint64_t ContextAssemblyReceipt::raw_through_sequence() const noexcept { return impl_->data.raw_through_sequence; }
 std::uint64_t ContextAssemblyReceipt::estimated_input_tokens() const noexcept { return impl_->data.estimated_input_tokens; }
 std::uint64_t ContextAssemblyReceipt::mandatory_input_tokens() const noexcept { return impl_->data.mandatory_input_tokens; }
+const std::optional<std::vector<std::string>>& ContextAssemblyReceipt::assembled_artifact_ids() const noexcept { return impl_->data.assembled_artifact_ids; }
+const std::optional<std::map<std::string, StabilityClass>>& ContextAssemblyReceipt::artifact_classes() const noexcept { return impl_->data.artifact_classes; }
+const std::optional<std::string>& ContextAssemblyReceipt::encoder_family() const noexcept { return impl_->data.encoder_family; }
+const std::optional<ContextPrefixBoundary>& ContextAssemblyReceipt::stable_boundary() const noexcept { return impl_->data.stable_boundary; }
+const std::optional<ContextPrefixBoundary>& ContextAssemblyReceipt::prefix_boundary() const noexcept { return impl_->data.prefix_boundary; }
+const std::optional<std::string>& ContextAssemblyReceipt::prefix_digest() const noexcept { return impl_->data.prefix_digest; }
+const std::optional<std::string>& ContextAssemblyReceipt::tools_digest() const noexcept { return impl_->data.tools_digest; }
+const std::optional<ContextBreakReason>& ContextAssemblyReceipt::break_reason() const noexcept { return impl_->data.break_reason; }
 const std::string& ContextAssemblyReceipt::id() const noexcept { return impl_->id; }
 std::string ContextAssemblyReceipt::serialize_canonical() const { return impl_->canonical; }
 
@@ -675,6 +983,103 @@ void validate_context_assembly_receipt(
     if (artifact_ids != receipt.artifact_ids() ||
         required_skill_ids != receipt.required_skill_artifact_ids()) {
         throw std::invalid_argument("Context assembly receipt artifact evidence does not match");
+    }
+    if (receipt.artifact_classes()) {
+        for (const auto& artifact : artifacts) {
+            const auto recorded = receipt.artifact_classes()->find(artifact.id());
+            if (recorded == receipt.artifact_classes()->end() ||
+                recorded->second != artifact.stability_class()) {
+                throw std::invalid_argument(
+                    "Context assembly receipt artifact classes do not match the artifacts");
+            }
+        }
+    }
+    const bool versioned = receipt.assembled_artifact_ids() || receipt.encoder_family() ||
+        receipt.stable_boundary() || receipt.prefix_boundary() || receipt.prefix_digest() ||
+        receipt.tools_digest() || receipt.break_reason();
+    if (versioned && receipt.break_reason() != epoch.break_reason()) {
+        throw std::invalid_argument("Context assembly receipt break reason does not match its epoch");
+    }
+}
+
+namespace {
+
+// The artifacts an epoch selects, checked against the ids it records.
+std::map<std::string, const ContextArtifact*> selected_artifacts(
+    const ContextEpoch& epoch, const std::vector<ContextArtifact>& artifacts) {
+    std::map<std::string, const ContextArtifact*> by_id;
+    for (const auto& artifact : artifacts) by_id.emplace(artifact.id(), &artifact);
+    if (by_id.size() != artifacts.size() || by_id.size() != epoch.artifact_ids().size() ||
+        !std::all_of(epoch.artifact_ids().begin(), epoch.artifact_ids().end(),
+                     [&](const std::string& id) { return by_id.contains(id); })) {
+        throw ContextStabilityError(ContextStabilityRefusal::ArtifactsMismatch,
+                                    "Context epoch claim needs exactly the artifacts the epoch selects");
+    }
+    return by_id;
+}
+
+// Stable and Slow artifacts in the order the epoch fixes.
+std::vector<std::string> stable_prefix(
+    const ContextEpoch& epoch, const std::map<std::string, const ContextArtifact*>& by_id) {
+    std::vector<std::string> result;
+    for (const auto& id : *epoch.ordered_artifact_ids()) {
+        if (by_id.at(id)->stability_class() != StabilityClass::Volatile) result.push_back(id);
+    }
+    return result;
+}
+
+}  // namespace
+
+void verify_context_epoch_claim(
+    const ContextEpoch& epoch,
+    const std::vector<ContextArtifact>& artifacts,
+    const ContextEpoch* predecessor,
+    const std::vector<ContextArtifact>& predecessor_artifacts) {
+    if (epoch.prefix_claim() != ContextPrefixClaim::Extends) return;
+    if (!predecessor || !epoch.predecessor_id() || predecessor->id() != *epoch.predecessor_id()) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::PredecessorUnavailable,
+            "Context epoch extends a predecessor that is not available");
+    }
+    if (!predecessor->ordered_artifact_ids() || !epoch.ordered_artifact_ids()) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::PredecessorOrderUnknown,
+            "Context epoch extends a predecessor that records no artifact order");
+    }
+    const auto current = selected_artifacts(epoch, artifacts);
+    const auto previous = selected_artifacts(*predecessor, predecessor_artifacts);
+    if (predecessor->run_id() != epoch.run_id() || predecessor->feed_id() != epoch.feed_id() ||
+        predecessor->raw_from_sequence() != epoch.raw_from_sequence()) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::RawWindowMoved,
+            "Context epoch extends a predecessor whose RAW window starts elsewhere");
+    }
+    if (epoch.raw_through_sequence() <= predecessor->raw_through_sequence()) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::RawWindowNotGrown,
+            "Context epoch extends a predecessor without growing its RAW window");
+    }
+    if (stable_prefix(epoch, current) != stable_prefix(*predecessor, previous)) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::StablePrefixChanged,
+            "Context epoch extends a predecessor but changes its Stable or Slow artifacts");
+    }
+    for (const auto& [id, artifact] : previous) {
+        if (artifact->anchor_mode() == AnchorMode::KeepInPlace && !current.contains(id)) {
+            throw ContextStabilityError(
+                ContextStabilityRefusal::AnchorDropped,
+                "Context epoch extends a predecessor but drops one of its anchored artifacts");
+        }
+    }
+    for (const auto& [id, artifact] : current) {
+        if (artifact->anchor_mode() != AnchorMode::KeepInPlace) continue;
+        if (artifact->source_feed_id() != epoch.feed_id() ||
+            artifact->covers_through_sequence() < epoch.raw_from_sequence() ||
+            artifact->covers_through_sequence() > epoch.raw_through_sequence()) {
+            throw ContextStabilityError(
+                ContextStabilityRefusal::AnchorOutOfRange,
+                "Context epoch selects an anchored artifact that covers records outside its RAW window");
+        }
     }
 }
 

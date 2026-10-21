@@ -615,3 +615,136 @@ TEST(RuntimeTurnAssembler, RejectsTemplateMessagesAndUnsupportedArtifactRenderin
     EXPECT_THROW(RuntimeTurnAssembler(store).assemble(provider, "owner", epoch, request),
                  std::invalid_argument);
 }
+
+namespace {
+
+// A feed of two user records and the epoch that selects them with the given artifacts.
+struct ReceiptFixture {
+    InMemoryContextStore store;
+    std::vector<ContextArtifact> artifacts;
+    std::optional<ContextEpoch> epoch;
+
+    ReceiptFixture(std::vector<ContextArtifact> chosen,
+                   std::optional<std::vector<std::string>> order = std::nullopt,
+                   std::optional<ContextPrefixClaim> claim = std::nullopt,
+                   std::optional<ContextBreakReason> reason = std::nullopt)
+        : artifacts(std::move(chosen)) {
+        const ContextStoreFeed feed{"owner", "feed"};
+        const auto first = history(1, std::nullopt);
+        const auto second = history(2, first.id());
+        EXPECT_EQ(store.append_history(feed, first, std::nullopt), ContextStoreAppendResult::Appended);
+        EXPECT_EQ(store.append_history(feed, second, first.id()), ContextStoreAppendResult::Appended);
+        ContextEpochData data;
+        data.run_id = "run";
+        data.sequence = claim ? 2 : 1;
+        if (claim) data.predecessor_id = sha('9');
+        data.feed_id = "feed";
+        data.raw_from_sequence = 1;
+        data.raw_through_sequence = 2;
+        data.raw_window_digest = store.snapshot_history(feed, 1, 2).digest;
+        for (const auto& artifact : artifacts) {
+            EXPECT_EQ(store.put_artifact("owner", artifact), ContextArtifactPutResult::Stored);
+            data.artifact_ids.push_back(artifact.id());
+        }
+        data.ordered_artifact_ids = std::move(order);
+        data.prefix_claim = claim;
+        data.break_reason = reason;
+        epoch = ContextEpoch::create(std::move(data));
+    }
+};
+
+ContextArtifact compaction_summary() {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::DerivedContext;
+    data.producer_id = std::string(COMPACTION_PRODUCER_ID);
+    data.source_digest = sha('c');
+    data.source_feed_id = "feed";
+    data.covers_from_sequence = 1;
+    data.covers_through_sequence = 1;
+    data.media_type = "text/plain";
+    data.placement = ContextPlacement::BeforeHistory;
+    data.content = "summary";
+    return ContextArtifact::create(std::move(data));
+}
+
+}  // namespace
+
+TEST(RuntimeTurnAssembler, ReceiptRecordsTheAssembledOrderTheClassesAndTheEncoder) {
+    const auto summary = compaction_summary();
+    const auto skill = artifact("a", "skill", ContextPlacement::BeforeLatestUser, 10, true);
+    const auto note = artifact("b", "note", ContextPlacement::BeforeLatestUser, 0);
+    const auto late = artifact("z", "late", ContextPlacement::AfterLatestUser, 0);
+    ReceiptFixture fixture({late, note, skill, summary});
+    auto provider = assembly_provider();
+    const auto turn = RuntimeTurnAssembler(fixture.store, {skill.id()}).assemble(
+        provider, "owner", *fixture.epoch, assembly_template());
+
+    // The order is the one the prompt follows, not the epoch's sorted set.
+    const std::vector<std::string> assembled{summary.id(), skill.id(), note.id(), late.id()};
+    ASSERT_NE(fixture.epoch->artifact_ids(), assembled);
+    const auto& receipt = turn.assembly_receipt;
+    EXPECT_EQ(receipt.assembled_artifact_ids(), assembled);
+    EXPECT_EQ(receipt.artifact_ids(), fixture.epoch->artifact_ids());
+    ASSERT_TRUE(receipt.artifact_classes());
+    EXPECT_EQ(receipt.artifact_classes()->at(summary.id()), StabilityClass::Slow);
+    EXPECT_EQ(receipt.artifact_classes()->at(skill.id()), StabilityClass::Stable);
+    EXPECT_EQ(receipt.artifact_classes()->at(note.id()), StabilityClass::Volatile);
+    EXPECT_EQ(receipt.artifact_classes()->at(late.id()), StabilityClass::Volatile);
+    EXPECT_EQ(receipt.encoder_family(), std::optional<std::string>(turn.request.family()));
+    EXPECT_EQ(receipt.encoder_family(), std::optional<std::string>("openai.chat"));
+    // The prompt and the boundaries are not changed or marked by this version.
+    EXPECT_FALSE(receipt.tools_digest());
+    EXPECT_FALSE(receipt.stable_boundary());
+    EXPECT_FALSE(receipt.prefix_boundary());
+    EXPECT_FALSE(receipt.prefix_digest());
+    EXPECT_FALSE(receipt.break_reason());
+    const auto& messages = admitted_messages(provider, turn.request);
+    ASSERT_EQ(messages.size(), 6u);
+    expect_text(messages[0], sp::Role::User, "summary");
+    expect_text(messages[1], sp::Role::User, "user_1");
+    expect_text(messages[2], sp::Role::System, "skill");
+    expect_text(messages[3], sp::Role::User, "note");
+    expect_text(messages[4], sp::Role::User, "user_2");
+    expect_text(messages[5], sp::Role::User, "late");
+    // The receipt is evidence that survives storage.
+    EXPECT_EQ(ContextAssemblyReceipt::parse(receipt.serialize_canonical(), *fixture.epoch, fixture.artifacts).id(),
+              receipt.id());
+}
+
+TEST(RuntimeTurnAssembler, AnOrderRecordedByTheEpochDoesNotChangeTheAssembly) {
+    const auto skill = artifact("a", "skill", ContextPlacement::BeforeLatestUser, 10, true);
+    const auto note = artifact("b", "note", ContextPlacement::BeforeLatestUser, 0);
+    const auto late = artifact("z", "late", ContextPlacement::AfterLatestUser, 0);
+    ReceiptFixture legacy({skill, note, late});
+    ReceiptFixture ordered({skill, note, late}, std::vector<std::string>{late.id(), note.id(), skill.id()});
+    auto legacy_provider = assembly_provider();
+    auto ordered_provider = assembly_provider();
+    const auto from_legacy = RuntimeTurnAssembler(legacy.store, {skill.id()}).assemble(
+        legacy_provider, "owner", *legacy.epoch, assembly_template());
+    const auto from_order = RuntimeTurnAssembler(ordered.store, {skill.id()}).assemble(
+        ordered_provider, "owner", *ordered.epoch, assembly_template());
+    ASSERT_NE(legacy.epoch->id(), ordered.epoch->id());
+    EXPECT_EQ(from_order.request.encoded_body(), from_legacy.request.encoded_body());
+    EXPECT_EQ(from_order.assembly_receipt.message_window_digest(),
+              from_legacy.assembly_receipt.message_window_digest());
+    EXPECT_EQ(from_order.assembly_receipt.normalized_request_digest(),
+              from_legacy.assembly_receipt.normalized_request_digest());
+    EXPECT_EQ(from_order.assembly_receipt.assembled_artifact_ids(),
+              from_legacy.assembly_receipt.assembled_artifact_ids());
+}
+
+TEST(RuntimeTurnAssembler, ReceiptNamesTheBreakItsEpochClaims) {
+    const auto skill = artifact("a", "skill", ContextPlacement::BeforeLatestUser, 10, true);
+    const std::vector<std::string> order{skill.id()};
+    ReceiptFixture breaking({skill}, order, ContextPrefixClaim::Breaks, ContextBreakReason::Compaction);
+    ReceiptFixture extending({skill}, order, ContextPrefixClaim::Extends);
+    auto provider = assembly_provider();
+    const auto broken = RuntimeTurnAssembler(breaking.store, {skill.id()}).assemble(
+        provider, "owner", *breaking.epoch, assembly_template());
+    EXPECT_EQ(broken.assembly_receipt.break_reason(), ContextBreakReason::Compaction);
+    // The claim to extend is checked when the epoch is activated; assembly only carries the reason.
+    const auto extended = RuntimeTurnAssembler(extending.store, {skill.id()}).assemble(
+        provider, "owner", *extending.epoch, assembly_template());
+    EXPECT_FALSE(extended.assembly_receipt.break_reason());
+    EXPECT_TRUE(extended.assembly_receipt.assembled_artifact_ids());
+}

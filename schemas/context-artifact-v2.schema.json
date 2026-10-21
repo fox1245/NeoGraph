@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://neograph.dev/schemas/context-artifact-v2.schema.json",
+  "title": "NeoGraph ContextArtifact stored value v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "storage_schema_version", "id", "kind", "producer_id", "source_digest", "source_feed_id", "covers_from_sequence", "covers_through_sequence", "media_type", "placement", "priority", "required", "content", "content_digest"],
+  "properties": {
+    "format": { "const": "neograph-context-artifact" },
+    "storage_schema_version": { "const": 2 },
+    "id": { "$ref": "#/$defs/sha256" },
+    "kind": { "enum": ["raw_history", "derived_context", "required_skill", "hook_output", "hard_constraint", "untrusted_supplemental"] },
+    "producer_id": { "$ref": "#/$defs/token" },
+    "source_digest": { "$ref": "#/$defs/sha256" },
+    "source_feed_id": { "type": "string" },
+    "covers_from_sequence": { "type": "integer", "minimum": 0 },
+    "covers_through_sequence": { "type": "integer", "minimum": 0 },
+    "media_type": { "$ref": "#/$defs/token" },
+    "placement": { "enum": ["before_latest_user", "after_latest_user", "after_history", "before_history"] },
+    "priority": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+    "required": { "type": "boolean" },
+    "content": {},
+    "content_digest": { "$ref": "#/$defs/sha256" },
+    "stability_class": { "enum": ["stable", "slow", "volatile"] },
+    "anchor_mode": { "enum": ["replace", "keep_in_place"] }
+  },
+  "anyOf": [
+    { "required": ["stability_class"] },
+    { "required": ["anchor_mode"] }
+  ],
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "required_skill" } }, "required": ["kind"] },
+      "then": {
+        "properties": {
+          "required": { "const": true },
+          "source_feed_id": { "const": "" },
+          "covers_from_sequence": { "const": 0 },
+          "covers_through_sequence": { "const": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "hard_constraint" } }, "required": ["kind"] },
+      "then": { "properties": { "required": { "const": true } } }
+    },
+    {
+      "if": { "properties": { "kind": { "enum": ["required_skill", "hard_constraint"] } }, "required": ["kind"] },
+      "then": { "properties": { "stability_class": { "enum": ["stable", "slow"] } } }
+    }
+  ],
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "token": { "type": "string", "pattern": "^[^\\u0000-\\u0020\\u007F](?:[^\\u0000-\\u001F\\u007F]*[^\\u0000-\\u0020\\u007F])?$" }
+  }
+}

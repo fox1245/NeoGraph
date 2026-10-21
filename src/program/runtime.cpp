@@ -1769,6 +1769,9 @@ ProgramContextPublication transfer_context_to_run(
     epoch_data.raw_window_digest = source.epoch.raw_window_digest();
     epoch_data.artifact_ids = source.epoch.artifact_ids();
     epoch_data.guarantee_profile = source.epoch.guarantee_profile();
+    // The run's first epoch has no predecessor, so it keeps the source's order
+    // and nothing it claimed about a prefix.
+    epoch_data.ordered_artifact_ids = source.epoch.ordered_artifact_ids();
     auto epoch = ContextEpoch::create(std::move(epoch_data));
 
     ContextAssemblyReceiptData receipt_data;
@@ -1783,6 +1786,13 @@ ProgramContextPublication transfer_context_to_run(
     receipt_data.raw_through_sequence = source.assembly_receipt.raw_through_sequence();
     receipt_data.estimated_input_tokens = source.assembly_receipt.estimated_input_tokens();
     receipt_data.mandatory_input_tokens = source.assembly_receipt.mandatory_input_tokens();
+    receipt_data.assembled_artifact_ids = source.assembly_receipt.assembled_artifact_ids();
+    receipt_data.artifact_classes = source.assembly_receipt.artifact_classes();
+    receipt_data.encoder_family = source.assembly_receipt.encoder_family();
+    receipt_data.stable_boundary = source.assembly_receipt.stable_boundary();
+    receipt_data.prefix_boundary = source.assembly_receipt.prefix_boundary();
+    receipt_data.prefix_digest = source.assembly_receipt.prefix_digest();
+    receipt_data.tools_digest = source.assembly_receipt.tools_digest();
     auto artifacts = source.artifacts;
     auto assembly = ContextAssemblyReceipt::create(receipt_data, epoch, artifacts);
     return {std::move(epoch), std::move(artifacts), std::move(assembly)};

@@ -1,6 +1,8 @@
 // The family nests of ProviderControls reach the wire through make_provider_request, each family takes only its
 // own nest, and the deprecated flat members move into their nests.
 #include <gtest/gtest.h>
+#include <neograph/context_store.h>
+#include <neograph/runtime_turn_assembler.h>
 #include "fixtures/typed_wire_peer.h"
 
 using namespace neograph;
@@ -136,4 +138,72 @@ TEST(ProviderFamilyControls, UnadmittedExtensionsAreRefusedAtPrepare) {
     ProviderControls not_object;
     not_object.chat.extensions = json::array({1});
     EXPECT_THROW(encode("openai.chat", "https://api.openai.com", not_object), std::invalid_argument);
+}
+
+// The assembly receipt records a digest of the tools in the encoded body (#329). Every family writes them
+// as the top-level `tools` member, so one reading serves all of them, and it moves with the tools alone.
+TEST(ProviderFamilyControls, TheAssemblyReceiptDigestsTheEncodedToolsOfEveryFamily) {
+    const std::vector<std::pair<std::string, std::string>> families{
+        {"openai.chat", "https://api.openai.com"},
+        {"openai.responses", "https://api.openai.com"},
+        {"anthropic.messages", "https://api.anthropic.com"},
+        {"google.generate", "https://generativelanguage.googleapis.com"},
+        {"google.interactions", "https://generativelanguage.googleapis.com"}};
+    const std::string sha_a = "sha256:" + std::string(64, 'a');
+    InMemoryContextStore store;
+    const ContextStoreFeed feed{"owner", "feed"};
+    RuntimeHistoryRecordData record_data;
+    record_data.feed_id = "feed";
+    record_data.sequence = 1;
+    record_data.message_id = "message_1";
+    record_data.trust = RuntimeTrustClass::UntrustedInput;
+    record_data.message = test::message("question", sp::Role::User);
+    const auto record = RuntimeHistoryRecord::create(std::move(record_data));
+    ASSERT_EQ(store.append_history(feed, record, std::nullopt), ContextStoreAppendResult::Appended);
+    ContextArtifactData skill_data;
+    skill_data.kind = ContextArtifactKind::RequiredSkill;
+    skill_data.producer_id = "skill-resolver.v1";
+    skill_data.source_digest = sha_a;
+    skill_data.media_type = "text/plain";
+    skill_data.placement = ContextPlacement::BeforeHistory;
+    skill_data.required = true;
+    skill_data.content = "Verify before editing.";
+    const auto skill = ContextArtifact::create(std::move(skill_data));
+    ASSERT_EQ(store.put_artifact("owner", skill), ContextArtifactPutResult::Stored);
+    ContextEpochData epoch_data;
+    epoch_data.run_id = "run";
+    epoch_data.sequence = 1;
+    epoch_data.feed_id = "feed";
+    epoch_data.raw_from_sequence = 1;
+    epoch_data.raw_through_sequence = 1;
+    epoch_data.raw_window_digest = store.snapshot_history(feed, 1, 1).digest;
+    epoch_data.artifact_ids = {skill.id()};
+    const auto epoch = ContextEpoch::create(std::move(epoch_data));
+
+    const ChatTool read{"read", "Read a file.", json{{"type", "object"}}, std::nullopt};
+    const ChatTool write{"write", "Write a file.", json{{"type", "object"}}, std::nullopt};
+    for (const auto& [family, origin] : families) {
+        SCOPED_TRACE(family);
+        const auto provider = wire::provider(family, origin);
+        const auto assemble = [&](std::vector<ChatTool> tools) {
+            ProviderControls controls;
+            controls.max_output_tokens = 64;
+            if (family != "openai.chat") controls.account_scope = "fixture-account";
+            auto request = make_provider_request(*provider, "fixture-model",
+                                                 {test::message("template", sp::Role::User)},
+                                                 std::move(tools), std::move(controls));
+            clear_provider_request_messages(request);
+            return RuntimeTurnAssembler(store, {skill.id()}).assemble(
+                *provider, "owner", epoch, std::move(request)).assembly_receipt;
+        };
+        const auto none = assemble({});
+        const auto one = assemble({read});
+        const auto two = assemble({read, write});
+        EXPECT_EQ(none.encoder_family(), std::optional<std::string>(family));
+        EXPECT_FALSE(none.tools_digest());
+        ASSERT_TRUE(one.tools_digest());
+        ASSERT_TRUE(two.tools_digest());
+        EXPECT_NE(*one.tools_digest(), *two.tools_digest());
+        EXPECT_EQ(assemble({read}).tools_digest(), one.tools_digest());
+    }
 }

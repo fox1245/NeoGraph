@@ -737,6 +737,174 @@ TEST(StrictRuntimeProfile, RequiresDurableDependenciesAndStrictEpoch) {
                  std::invalid_argument);
 }
 
+// A claim to extend the predecessor's request prefix is checked when an epoch is activated (#329).
+namespace {
+
+ContextArtifact claim_artifact(ContextArtifactKind kind, std::string text) {
+    ContextArtifactData data;
+    data.kind = kind;
+    data.producer_id = kind == ContextArtifactKind::RequiredSkill ? "skill-resolver.v1" : "hook-output.v1";
+    data.source_digest = sha(kind == ContextArtifactKind::RequiredSkill ? 'a' : 'b');
+    data.media_type = "text/plain";
+    data.required = kind == ContextArtifactKind::RequiredSkill;
+    data.content = std::move(text);
+    return ContextArtifact::create(std::move(data));
+}
+
+ContextEpoch claim_epoch(std::uint64_t sequence, std::optional<std::string> predecessor,
+                         std::uint64_t through, const std::vector<ContextArtifact>& artifacts,
+                         std::optional<ContextPrefixClaim> claim,
+                         RuntimeGuaranteeProfile profile = RuntimeGuaranteeProfile::Recorded) {
+    ContextEpochData data;
+    data.run_id = "claim-run";
+    data.sequence = sequence;
+    data.predecessor_id = std::move(predecessor);
+    data.feed_id = "feed";
+    data.raw_from_sequence = 1;
+    data.raw_through_sequence = through;
+    data.raw_window_digest = sha('a');
+    for (const auto& artifact : artifacts) data.artifact_ids.push_back(artifact.id());
+    data.ordered_artifact_ids = data.artifact_ids;
+    data.prefix_claim = claim;
+    data.guarantee_profile = profile;
+    return ContextEpoch::create(std::move(data));
+}
+
+void expect_claim_refused(ContextStabilityRefusal code, const std::function<void()>& call) {
+    try {
+        call();
+    } catch (const ContextStabilityError& error) {
+        EXPECT_EQ(error.code(), code) << error.what();
+        return;
+    }
+    ADD_FAILURE() << "the claim was not refused";
+}
+
+}  // namespace
+
+TEST(RuntimeInterpositionController, ActivatesAnEpochThatExtendsTheActiveOne) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<InMemoryProviderDispatchReceiptStore>();
+    const auto skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify before editing.");
+    const std::vector<ContextArtifact> first_set{skill, claim_artifact(ContextArtifactKind::HookOutput, "reading 1")};
+    const std::vector<ContextArtifact> next_set{skill, claim_artifact(ContextArtifactKind::HookOutput, "reading 2")};
+    for (const auto& artifact : first_set) contexts->put_artifact("owner", artifact);
+    for (const auto& artifact : next_set) contexts->put_artifact("owner", artifact);
+    const auto first = claim_epoch(1, std::nullopt, 3, first_set, std::nullopt);
+    const auto next = claim_epoch(2, first.id(), 5, next_set, ContextPrefixClaim::Extends);
+
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    // Nothing is active yet, so there is no predecessor to extend.
+    expect_claim_refused(ContextStabilityRefusal::PredecessorUnavailable,
+                         [&] { controller.activate("owner", next); });
+    EXPECT_FALSE(controller.active());
+    controller.activate("owner", first);
+    EXPECT_NO_THROW(controller.activate("owner", next));
+    EXPECT_TRUE(controller.active());
+    // A third epoch extends the second, which is the one that is active now.
+    const auto third_set = std::vector<ContextArtifact>{skill, claim_artifact(ContextArtifactKind::HookOutput, "reading 3")};
+    contexts->put_artifact("owner", third_set[1]);
+    const auto third = claim_epoch(3, next.id(), 7, third_set, ContextPrefixClaim::Extends);
+    EXPECT_NO_THROW(controller.activate("owner", third));
+    // The first epoch is not the predecessor of the fourth.
+    const auto skipped = claim_epoch(4, first.id(), 9, third_set, ContextPrefixClaim::Extends);
+    expect_claim_refused(ContextStabilityRefusal::PredecessorUnavailable,
+                         [&] { controller.activate("owner", skipped); });
+    EXPECT_TRUE(controller.active());
+}
+
+TEST(RuntimeInterpositionController, TakesThePredecessorTheHostGivesAfterTheActiveEpochIsGone) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<InMemoryProviderDispatchReceiptStore>();
+    const auto skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify before editing.");
+    const std::vector<ContextArtifact> set{skill};
+    contexts->put_artifact("owner", skill);
+    const auto first = claim_epoch(1, std::nullopt, 3, set, std::nullopt);
+    const auto next = claim_epoch(2, first.id(), 5, set, ContextPrefixClaim::Extends);
+
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    controller.activate("owner", first);
+    controller.clear();
+    expect_claim_refused(ContextStabilityRefusal::PredecessorUnavailable,
+                         [&] { controller.activate("owner", next); });
+    EXPECT_NO_THROW(controller.activate("owner", next, first));
+    EXPECT_TRUE(controller.active());
+    // The predecessor the host gives is the one the claim names.
+    const auto other = claim_epoch(1, std::nullopt, 4, set, std::nullopt);
+    controller.clear();
+    expect_claim_refused(ContextStabilityRefusal::PredecessorUnavailable,
+                         [&] { controller.activate("owner", next, other); });
+    EXPECT_FALSE(controller.active());
+}
+
+TEST(RuntimeInterpositionController, RefusesAClaimThatDoesNotHoldAndKeepsTheActiveEpoch) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<InMemoryProviderDispatchReceiptStore>();
+    const auto skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify before editing.");
+    const auto other_skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify twice.");
+    contexts->put_artifact("owner", skill);
+    contexts->put_artifact("owner", other_skill);
+    const auto first = claim_epoch(1, std::nullopt, 3, {skill}, std::nullopt);
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    controller.activate("owner", first);
+
+    // The Stable artifact changed, so the request start is not kept.
+    const auto changed = claim_epoch(2, first.id(), 5, {other_skill}, ContextPrefixClaim::Extends);
+    expect_claim_refused(ContextStabilityRefusal::StablePrefixChanged,
+                         [&] { controller.activate("owner", changed); });
+    // The same artifacts and a window that did not grow.
+    const auto stalled = claim_epoch(2, first.id(), 3, {skill}, ContextPrefixClaim::Extends);
+    expect_claim_refused(ContextStabilityRefusal::RawWindowNotGrown,
+                         [&] { controller.activate("owner", stalled); });
+    // An artifact that this owner cannot load.
+    const auto missing = claim_artifact(ContextArtifactKind::HookOutput, "never stored");
+    const auto unavailable = claim_epoch(2, first.id(), 5, {skill, missing}, ContextPrefixClaim::Extends);
+    expect_claim_refused(ContextStabilityRefusal::ArtifactsMismatch,
+                         [&] { controller.activate("owner", unavailable); });
+    // The epoch that was active is still the one that is; a valid successor still extends it.
+    EXPECT_TRUE(controller.active());
+    EXPECT_NO_THROW(controller.activate("owner", claim_epoch(2, first.id(), 5, {skill}, ContextPrefixClaim::Extends)));
+    // A break is not checked: it only costs a cache entry.
+    const auto breaking = [&] {
+        ContextEpochData data;
+        data.run_id = "claim-run";
+        data.sequence = 3;
+        data.predecessor_id = sha('8');
+        data.feed_id = "feed";
+        data.raw_from_sequence = 4;
+        data.raw_through_sequence = 9;
+        data.raw_window_digest = sha('a');
+        data.artifact_ids = {other_skill.id()};
+        data.prefix_claim = ContextPrefixClaim::Breaks;
+        data.break_reason = ContextBreakReason::Compaction;
+        return ContextEpoch::create(std::move(data));
+    }();
+    EXPECT_NO_THROW(controller.activate("owner", breaking));
+}
+
+TEST(StrictRuntimeProfile, ChecksAClaimToExtendAgainstTheActiveOrTheGivenPredecessor) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<DurableMemoryContextStore>();
+    auto receipts = std::make_shared<RecordingStore>();
+    StrictRuntimeProfile profile({provider, contexts, receipts, empty_hook_runtime(), sha('f'), 1000, {}});
+    const auto skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify before editing.");
+    contexts->put_artifact("owner", skill);
+    const auto strict = RuntimeGuaranteeProfile::Strict;
+    const auto first = claim_epoch(1, std::nullopt, 3, {skill}, std::nullopt, strict);
+    const auto next = claim_epoch(2, first.id(), 5, {skill}, ContextPrefixClaim::Extends, strict);
+    expect_claim_refused(ContextStabilityRefusal::PredecessorUnavailable,
+                         [&] { profile.activate("owner", next); });
+    EXPECT_FALSE(profile.active());
+    profile.activate("owner", first);
+    EXPECT_NO_THROW(profile.activate("owner", next));
+    profile.clear();
+    EXPECT_NO_THROW(profile.activate("owner", next, first));
+    EXPECT_TRUE(profile.active());
+}
+
 // ---------------------------------------------------------------------------
 // The host-stepped contract (#444): the host appends RAW records and activates
 // a new epoch for every provider call. A call that presents assistant or tool

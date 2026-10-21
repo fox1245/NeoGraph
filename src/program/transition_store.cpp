@@ -45,8 +45,18 @@ bool valid_context_history_append(
     const auto& epoch = next_context->epoch;
     if (old_context.empty()) return epoch.sequence() == 1 && !epoch.predecessor_id();
     const auto& previous = old_context.back().epoch;
-    return epoch.sequence() == previous.sequence() + 1 && epoch.predecessor_id() &&
-           *epoch.predecessor_id() == previous.id();
+    if (epoch.sequence() != previous.sequence() + 1 || !epoch.predecessor_id() ||
+        *epoch.predecessor_id() != previous.id()) {
+        return false;
+    }
+    // A claim to extend the predecessor's request prefix has to hold.
+    try {
+        verify_context_epoch_claim(epoch, next_context->artifacts, &previous,
+                                   old_context.back().artifacts);
+    } catch (const ContextStabilityError&) {
+        return false;
+    }
+    return true;
 }
 
 bool hook_is_terminal(HookExecutionState state) noexcept {
@@ -998,6 +1008,8 @@ bool is_valid_program_runtime_context_clone(
             target.epoch.raw_through_sequence() != source.epoch.raw_through_sequence() ||
             target.epoch.raw_window_digest() != source.epoch.raw_window_digest() ||
             target.epoch.artifact_ids() != source.epoch.artifact_ids() ||
+            target.epoch.ordered_artifact_ids() != source.epoch.ordered_artifact_ids() ||
+            target.epoch.prefix_claim() || target.assembly_receipt.break_reason() ||
             target.epoch.guarantee_profile() != source.epoch.guarantee_profile() ||
             target.assembly_receipt.normalized_request_digest() !=
                 source.assembly_receipt.normalized_request_digest() ||
@@ -1015,6 +1027,20 @@ bool is_valid_program_runtime_context_clone(
                 source.assembly_receipt.estimated_input_tokens() ||
             target.assembly_receipt.mandatory_input_tokens() !=
                 source.assembly_receipt.mandatory_input_tokens() ||
+            target.assembly_receipt.assembled_artifact_ids() !=
+                source.assembly_receipt.assembled_artifact_ids() ||
+            target.assembly_receipt.artifact_classes() !=
+                source.assembly_receipt.artifact_classes() ||
+            target.assembly_receipt.encoder_family() !=
+                source.assembly_receipt.encoder_family() ||
+            target.assembly_receipt.stable_boundary() !=
+                source.assembly_receipt.stable_boundary() ||
+            target.assembly_receipt.prefix_boundary() !=
+                source.assembly_receipt.prefix_boundary() ||
+            target.assembly_receipt.prefix_digest() !=
+                source.assembly_receipt.prefix_digest() ||
+            target.assembly_receipt.tools_digest() !=
+                source.assembly_receipt.tools_digest() ||
             target.artifacts.size() != source.artifacts.size()) {
             return false;
         }
