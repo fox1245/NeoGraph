@@ -775,6 +775,15 @@ add_test(NAME ci_ab_gates_selftest
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_ci_ab_gates.py)
 set_tests_properties(ci_ab_gates_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
 
+# Engine code waits on async::HostTimer (src/core/host_timer.h), never on a raw Asio timer: a HostLoop cannot see Asio's
+# timer queue, so a timer that it was not told about never fires on a WebAssembly host (#567). The scan covers src/ and
+# include/; scripts/host_timer_allowlist.txt lists the code that never runs on a host loop, each with its reason.
+add_test(NAME host_timer_guard
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/scripts/check_host_timers.py --root ${PROJECT_SOURCE_DIR})
+add_test(NAME host_timer_guard_selftest
+    COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_host_timer_guard.py)
+set_tests_properties(host_timer_guard host_timer_guard_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
+
 if(TARGET neograph_program_tests)
     if(NEOGRAPH_BUILD_POSTGRES)
         # Keep the Program PostgreSQL store integration cases off the shared

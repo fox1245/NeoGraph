@@ -145,8 +145,11 @@ loop in four steps.
   returns at once, and `done(exception, result)` is called from a later turn. The module's `ng_run` returns, the host
   event loop goes on, and the JavaScript `Promise` is resolved from `ng_js_done` when the run ends.
 - **Asio timers.** A retry backoff or a resource-wait poll is an Asio timer, and the host's loop cannot see Asio's timer
-  queue. The engine's waits tell the loop their deadline (`async::note_deadline`), and the loop sets one host timer for
-  the earliest. Code that waits on an Asio timer under a `HostLoop` does the same.
+  queue. The engine waits on `async::HostTimer` (`src/core/host_timer.h`), which arms the Asio timer and tells the loop
+  its deadline (`async::note_deadline`) in one call, and the loop sets one host timer for the earliest. A raw Asio timer
+  in `src/` or `include/` would never fire on a host, so the `host_timer_guard` test refuses it;
+  `scripts/host_timer_allowlist.txt` lists the code that never runs on a host loop. Code of your own that waits on an
+  Asio timer under a `HostLoop` calls `async::note_deadline` itself.
 
 The synchronous entry points keep their symbols and refuse. `GraphEngine::run`, `resume`, `Provider::dispatch` and
 `invoke`, and the synchronous endpoint calls drive a private `io_context` until the call is done, which would wait for

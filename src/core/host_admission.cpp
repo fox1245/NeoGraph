@@ -1,9 +1,9 @@
 #include <neograph/host_admission.h>
-#include <neograph/async/host_loop.h>
+
+#include "host_timer.h"
 
 #include <asio/error.hpp>
 #include <asio/redirect_error.hpp>
-#include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
@@ -874,7 +874,7 @@ asio::awaitable<HostResourceLease> HostAdmissionController::reserve_async(
 
     PendingGuard pending{impl_, std::move(registration.waiter)};
     const auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer poll(executor);
+    async::HostTimer poll(executor);
     const auto deadline = std::chrono::steady_clock::now() + pending.waiter->request.queue_timeout;
 
     for (;;) {
@@ -902,9 +902,8 @@ asio::awaitable<HostResourceLease> HostAdmissionController::reserve_async(
             throw HostAdmissionError(HostAdmissionFailure::QueueTimeout,
                                      "queued host reservation reached its deadline");
         }
-        poll.expires_after(std::min(std::chrono::milliseconds{2},
-                                    std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
-        async::note_deadline(executor, poll.expiry());
+        poll.arm_after(std::min(std::chrono::milliseconds{2},
+                                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
         asio::error_code error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, error));
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);

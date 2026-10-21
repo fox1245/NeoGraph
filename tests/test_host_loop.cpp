@@ -12,6 +12,8 @@
 #include <neograph/graph/node.h>
 #include <neograph/llm/schema_provider.h>
 
+#include "../src/core/host_timer.h"
+
 #include <descriptor/descriptor.h>
 #include <runtime/host.h>
 
@@ -370,6 +372,44 @@ TEST(HostLoop, AnAsioTimerNotedWithTheLoopFiresOnTheHostsTimer) {
     EXPECT_TRUE(done);
     EXPECT_EQ(executor->timers(), 0u);
     EXPECT_TRUE(loop.idle());
+}
+
+// The timer that the engine waits on tells the loop in the call that arms it (#567): the loop holds one host timer
+// for the deadline, and the wait ends when it fires.
+template <class Arm>
+asio::awaitable<void> wait_on_a_host_timer(Arm arm) {
+    auto ex = co_await asio::this_coro::executor;
+    async::HostTimer timer(ex);
+    arm(timer);
+    co_await timer.async_wait(asio::use_awaitable);
+}
+
+template <class Arm>
+void expect_a_host_timer_to_fire(Arm arm) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    bool done = false;
+    loop.spawn(wait_on_a_host_timer(arm), [&](std::exception_ptr error) { done = !error; });
+    while (executor->step()) {}
+    EXPECT_FALSE(done);
+    EXPECT_EQ(executor->timers(), 1u) << "one host timer for the deadline, nothing else scheduled";
+    EXPECT_EQ(executor->pending(), 0u);
+    const auto limit = std::chrono::steady_clock::now() + 2s;
+    while (!done && std::chrono::steady_clock::now() < limit) {
+        if (!executor->step()) std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_TRUE(done);
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, AHostTimerArmedAfterADelayFiresOnTheHostsTimer) {
+    expect_a_host_timer_to_fire([](async::HostTimer& timer) { timer.arm_after(30ms); });
+}
+
+TEST(HostLoop, AHostTimerArmedAtAnInstantFiresOnTheHostsTimer) {
+    expect_a_host_timer_to_fire(
+        [](async::HostTimer& timer) { timer.arm_at(std::chrono::steady_clock::now() + 30ms); });
 }
 
 namespace {
