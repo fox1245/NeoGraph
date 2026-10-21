@@ -192,14 +192,17 @@ void RuntimeInterpositionController::activate(
         dynamic_cast<DurableProviderDispatchReceiptStore*>(impl_->receipts.get()) == nullptr) {
         throw std::invalid_argument("Strict provider dispatch requires a durable dispatch receipt store");
     }
-    if (epoch.prefix_claim() == ContextPrefixClaim::Extends) {
-        if (!predecessor) {
-            std::lock_guard lock(impl_->mutex);
-            if (impl_->epoch && impl_->owner_id == owner_id && epoch.predecessor_id() &&
-                impl_->epoch->id() == *epoch.predecessor_id()) {
-                predecessor = impl_->epoch;
-            }
+    if (!predecessor) {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->epoch && impl_->owner_id == owner_id && epoch.predecessor_id() &&
+            impl_->epoch->id() == *epoch.predecessor_id()) {
+            predecessor = impl_->epoch;
         }
+    }
+    if (epoch.prefix_claim() != ContextPrefixClaim::Extends) {
+        // Without a claim to extend only a change of layout has to be declared; that needs no artifacts.
+        if (predecessor) verify_context_epoch_claim(epoch, {}, &*predecessor, {});
+    } else {
         const auto load = [&](const ContextEpoch& source) {
             std::vector<ContextArtifact> artifacts;
             artifacts.reserve(source.artifact_ids().size());

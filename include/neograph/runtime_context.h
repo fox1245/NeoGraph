@@ -80,6 +80,21 @@ enum class ContextBreakReason : std::uint8_t {
     Explicit,
 };
 
+/**
+ * How the assembler lays an epoch's artifacts out in the request.
+ *
+ * Legacy orders them by placement, priority, producer and identity, and the
+ * request is what it has always been. StableFirst puts the host instructions,
+ * the Stable artifacts and the Slow artifacts in front of the RAW history, in the
+ * order the epoch records, and the Volatile artifacts behind it, so a provider's
+ * prompt cache can keep the start of the request. An epoch that records no order
+ * is Legacy.
+ */
+enum class AssemblyLayout : std::uint8_t {
+    Legacy,
+    StableFirst,
+};
+
 /** What an epoch declares about the request prefix of its predecessor. */
 enum class ContextPrefixClaim : std::uint8_t {
     /** Same start, only grown at the end; checked by verify_context_epoch_claim. */
@@ -96,6 +111,7 @@ NEOGRAPH_API std::string_view to_string(StabilityClass value) noexcept;
 NEOGRAPH_API std::string_view to_string(AnchorMode value) noexcept;
 NEOGRAPH_API std::string_view to_string(ContextBreakReason value) noexcept;
 NEOGRAPH_API std::string_view to_string(ContextPrefixClaim value) noexcept;
+NEOGRAPH_API std::string_view to_string(AssemblyLayout value) noexcept;
 NEOGRAPH_API RuntimeTrustClass runtime_trust_class_from_string(std::string_view value);
 NEOGRAPH_API ContextArtifactKind context_artifact_kind_from_string(std::string_view value);
 NEOGRAPH_API ContextPlacement context_placement_from_string(std::string_view value);
@@ -105,6 +121,7 @@ NEOGRAPH_API StabilityClass stability_class_from_string(std::string_view value);
 NEOGRAPH_API AnchorMode anchor_mode_from_string(std::string_view value);
 NEOGRAPH_API ContextBreakReason context_break_reason_from_string(std::string_view value);
 NEOGRAPH_API ContextPrefixClaim context_prefix_claim_from_string(std::string_view value);
+NEOGRAPH_API AssemblyLayout assembly_layout_from_string(std::string_view value);
 
 /** Producer id of a DerivedContext artifact that a compaction transform writes. */
 inline constexpr std::string_view COMPACTION_PRODUCER_ID = "neograph-compaction.v1";
@@ -142,6 +159,20 @@ enum class ContextStabilityRefusal : std::uint8_t {
     AnchorDropped,
     /** A KeepInPlace artifact covers a range outside the epoch's RAW window. */
     AnchorOutOfRange,
+    /** An epoch changes the assembly layout of its predecessor without declaring Breaks(LayoutChange). */
+    LayoutChangeUndeclared,
+    /** StableFirst: a Stable or Slow artifact is not placed at BeforeHistory. */
+    StableOutsideHistoryHead,
+    /** StableFirst: a Volatile artifact is not placed at AfterHistory. */
+    VolatileOutsideTail,
+    /** StableFirst: the recorded order puts a Volatile artifact in front of a Slow or Stable one, or a Slow in front of a Stable one. */
+    TierOrderViolated,
+    /** StableFirst: a System message that is neither a host instruction nor a Stable or Slow artifact. */
+    VolatileSystemText,
+    /** StableFirst: the encoded request does not show the prefix boundaries the assembly expects. */
+    PrefixBoundaryUnavailable,
+    /** Two artifacts have the same stability class, priority, producer and order key. */
+    AmbiguousOrder,
 };
 
 NEOGRAPH_API std::string_view to_string(ContextStabilityRefusal value) noexcept;
@@ -287,13 +318,19 @@ struct ContextEpochData {
      */
     std::optional<ContextPrefixClaim> prefix_claim;
     std::optional<ContextBreakReason> break_reason;
+    /**
+     * How the assembler lays the artifacts out. Part of the identity only when it is StableFirst, which
+     * needs ordered_artifact_ids. Two consecutive epochs may differ in layout only if the later one
+     * declares Breaks with the reason LayoutChange.
+     */
+    AssemblyLayout assembly_layout = AssemblyLayout::Legacy;
 };
 
 /** Immutable selection of exact RAW and derived material for provider turns. */
 class NEOGRAPH_API ContextEpoch final {
 public:
-    // 2 only for an epoch that sets ordered_artifact_ids, prefix_claim or
-    // break_reason; every other epoch keeps version 1 and the identity it had.
+    // 2 only for an epoch that sets ordered_artifact_ids, prefix_claim, break_reason
+    // or the StableFirst layout; every other epoch keeps version 1 and the identity it had.
     static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
     static constexpr std::uint32_t LEGACY_STORAGE_SCHEMA_VERSION = 1;
 
@@ -312,6 +349,7 @@ public:
     const std::optional<std::vector<std::string>>& ordered_artifact_ids() const noexcept;
     const std::optional<ContextPrefixClaim>& prefix_claim() const noexcept;
     const std::optional<ContextBreakReason>& break_reason() const noexcept;
+    AssemblyLayout assembly_layout() const noexcept;
     const std::string& id() const noexcept;
     std::string serialize_canonical() const;
 
@@ -321,11 +359,19 @@ private:
     std::shared_ptr<const Impl> impl_;
 };
 
-/** Where in an encoded request body a prefix ends: the message, and the part of it. */
+/**
+ * Where a prefix of an encoded request body ends, as the first message and part that is not in it.
+ *
+ * A provider reads a request as its tools, its system text, then its messages, so a prefix always holds
+ * the tools and the system field, the messages before message_index, and the parts before part_index of
+ * message_index. On a family that hoists System messages into the system field, {0, 0} is a prefix of
+ * nothing but the tools and the system field; a prefix of a whole body ends at {number of messages, 0}.
+ * The positions are those of the encoded body, after hoisting and after tool results are regrouped.
+ */
 struct ContextPrefixBoundary {
     std::uint64_t message_index = 0;
     std::uint64_t part_index = 0;
-    bool operator==(const ContextPrefixBoundary&) const = default;
+    auto operator<=>(const ContextPrefixBoundary&) const = default;
 };
 
 struct ContextAssemblyReceiptData {
@@ -353,11 +399,17 @@ struct ContextAssemblyReceiptData {
     std::optional<std::map<std::string, StabilityClass>> artifact_classes;
     /** The encoder the request body was written by, such as the provider family. */
     std::optional<std::string>                     encoder_family;
-    /** End of the Stable part of the encoded request. Null until the assembler marks it. */
+    /**
+     * End of the Stable part of the encoded request. Set by the stable-first assembly when the family
+     * can mark it; not after the prefix_boundary.
+     */
     std::optional<ContextPrefixBoundary>           stable_boundary;
-    /** End of the append-only part of the encoded request. Null until the assembler marks it. */
+    /** End of the append-only part of the encoded request: everything in front of the Volatile artifacts. */
     std::optional<ContextPrefixBoundary>           prefix_boundary;
-    /** Digest of the encoded request up to prefix_boundary. Null until the assembler computes it. */
+    /**
+     * Digest of the encoded request up to prefix_boundary: every member of the body except the stream
+     * flag and the output cap, with the messages cut at the boundary. Needs prefix_boundary.
+     */
     std::optional<std::string>                     prefix_digest;
     /** Digest of the tool definitions in the encoded request body. */
     std::optional<std::string>                     tools_digest;
@@ -418,7 +470,10 @@ NEOGRAPH_API void validate_context_assembly_receipt(
  *
  * An epoch without a claim, or one that Breaks, is accepted as it stands: a break
  * only has to name its reason, and an epoch that breaks without needing to costs
- * a cache entry, not correctness. An Extends claim is structural and must hold:
+ * a cache entry, not correctness. The one exception: when the predecessor is
+ * loadable and has another assembly layout, the epoch has to say
+ * Breaks(LayoutChange), since the request then differs from its first byte.
+ * An Extends claim is structural and must hold:
  *   - the predecessor is the epoch's predecessor (same id, run and feed) and
  *     records its artifact order, which an epoch of version 1 does not;
  *   - raw_from_sequence is the same and raw_through_sequence is larger;
@@ -430,6 +485,31 @@ NEOGRAPH_API void validate_context_assembly_receipt(
  * when none can be loaded: an Extends claim is then refused.
  * Throws ContextStabilityError.
  */
+/** An artifact and the key a host orders it by. */
+struct ContextArtifactOrderEntry {
+    ContextArtifact artifact;
+    std::string     order_key;
+};
+
+/**
+ * The identities of `entries` in the total order of the stable-first layout: stability class (Stable,
+ * Slow, Volatile), then priority (higher first), then producer, then order_key. Nothing in it depends on
+ * the content of an artifact, so a sibling whose text changes keeps its place. Two entries that agree on
+ * all four keys are ambiguous and are refused with ContextStabilityError (AmbiguousOrder); so is a
+ * repeated artifact. A host puts the result in ContextEpochData::ordered_artifact_ids.
+ */
+NEOGRAPH_API std::vector<std::string> order_context_artifacts(
+    const std::vector<ContextArtifactOrderEntry>& entries);
+
+/**
+ * Check that the artifacts of a StableFirst epoch can be laid out: Stable and Slow artifacts are placed
+ * at BeforeHistory, Volatile artifacts at AfterHistory, and the recorded order lists the Stable ones,
+ * then the Slow ones, then the Volatile ones. `artifacts` are the artifacts the epoch selects. A Legacy
+ * epoch is accepted as it stands. Throws ContextStabilityError.
+ */
+NEOGRAPH_API void validate_context_layout(
+    const ContextEpoch& epoch, const std::vector<ContextArtifact>& artifacts);
+
 NEOGRAPH_API void verify_context_epoch_claim(
     const ContextEpoch& epoch,
     const std::vector<ContextArtifact>& artifacts,

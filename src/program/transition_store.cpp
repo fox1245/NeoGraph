@@ -1009,6 +1009,7 @@ bool is_valid_program_runtime_context_clone(
             target.epoch.raw_window_digest() != source.epoch.raw_window_digest() ||
             target.epoch.artifact_ids() != source.epoch.artifact_ids() ||
             target.epoch.ordered_artifact_ids() != source.epoch.ordered_artifact_ids() ||
+            target.epoch.assembly_layout() != source.epoch.assembly_layout() ||
             target.epoch.prefix_claim() || target.assembly_receipt.break_reason() ||
             target.epoch.guarantee_profile() != source.epoch.guarantee_profile() ||
             target.assembly_receipt.normalized_request_digest() !=

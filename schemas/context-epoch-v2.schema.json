@@ -20,18 +20,24 @@
     "guarantee_profile": { "enum": ["legacy", "recorded", "strict"] },
     "ordered_artifact_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/sha256" } },
     "prefix_claim": { "enum": ["extends", "breaks"] },
-    "break_reason": { "enum": ["compaction", "stable_change", "layout_change", "anchor_drop", "order_change", "explicit"] }
+    "break_reason": { "enum": ["compaction", "stable_change", "layout_change", "anchor_drop", "order_change", "explicit"] },
+    "assembly_layout": { "const": "stable_first" }
   },
   "anyOf": [
     { "required": ["ordered_artifact_ids"] },
     { "required": ["prefix_claim"] },
-    { "required": ["break_reason"] }
+    { "required": ["break_reason"] },
+    { "required": ["assembly_layout"] }
   ],
   "allOf": [
     {
       "if": { "properties": { "sequence": { "const": 1 } }, "required": ["sequence"] },
       "then": { "not": { "required": ["predecessor_id"] } },
       "else": { "required": ["predecessor_id"] }
+    },
+    {
+      "if": { "required": ["assembly_layout"] },
+      "then": { "required": ["ordered_artifact_ids"] }
     },
     {
       "if": { "properties": { "prefix_claim": { "const": "extends" } }, "required": ["prefix_claim"] },

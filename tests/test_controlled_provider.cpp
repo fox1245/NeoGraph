@@ -754,7 +754,9 @@ ContextArtifact claim_artifact(ContextArtifactKind kind, std::string text) {
 ContextEpoch claim_epoch(std::uint64_t sequence, std::optional<std::string> predecessor,
                          std::uint64_t through, const std::vector<ContextArtifact>& artifacts,
                          std::optional<ContextPrefixClaim> claim,
-                         RuntimeGuaranteeProfile profile = RuntimeGuaranteeProfile::Recorded) {
+                         RuntimeGuaranteeProfile profile = RuntimeGuaranteeProfile::Recorded,
+                         AssemblyLayout layout = AssemblyLayout::Legacy,
+                         std::optional<ContextBreakReason> reason = std::nullopt) {
     ContextEpochData data;
     data.run_id = "claim-run";
     data.sequence = sequence;
@@ -766,7 +768,9 @@ ContextEpoch claim_epoch(std::uint64_t sequence, std::optional<std::string> pred
     for (const auto& artifact : artifacts) data.artifact_ids.push_back(artifact.id());
     data.ordered_artifact_ids = data.artifact_ids;
     data.prefix_claim = claim;
+    data.break_reason = reason;
     data.guarantee_profile = profile;
+    data.assembly_layout = layout;
     return ContextEpoch::create(std::move(data));
 }
 
@@ -883,6 +887,44 @@ TEST(RuntimeInterpositionController, RefusesAClaimThatDoesNotHoldAndKeepsTheActi
         return ContextEpoch::create(std::move(data));
     }();
     EXPECT_NO_THROW(controller.activate("owner", breaking));
+}
+
+TEST(RuntimeInterpositionController, ALayoutChangeHasToBeDeclaredWhenTheEpochIsActivated) {
+    auto provider = std::make_shared<RecordingProvider>();
+    auto contexts = std::make_shared<InMemoryContextStore>();
+    auto receipts = std::make_shared<InMemoryProviderDispatchReceiptStore>();
+    const auto skill = claim_artifact(ContextArtifactKind::RequiredSkill, "Verify before editing.");
+    contexts->put_artifact("owner", skill);
+    const auto legacy = claim_epoch(1, std::nullopt, 3, {skill}, std::nullopt);
+    const auto recorded = AssemblyLayout::StableFirst;
+    const auto stable_first = [&](std::optional<ContextPrefixClaim> claim, std::optional<ContextBreakReason> reason) {
+        return claim_epoch(2, legacy.id(), 5, {skill}, claim, RuntimeGuaranteeProfile::Recorded, recorded, reason);
+    };
+
+    RuntimeInterpositionController controller(provider, contexts, receipts, sha('f'), 1000);
+    // The first epoch of a run has nothing to differ from.
+    const auto first = claim_epoch(1, std::nullopt, 3, {skill}, std::nullopt, RuntimeGuaranteeProfile::Recorded, recorded);
+    EXPECT_NO_THROW(controller.activate("owner", first));
+    controller.clear();
+
+    controller.activate("owner", legacy);
+    expect_claim_refused(ContextStabilityRefusal::LayoutChangeUndeclared,
+                         [&] { controller.activate("owner", stable_first(std::nullopt, std::nullopt)); });
+    expect_claim_refused(ContextStabilityRefusal::LayoutChangeUndeclared, [&] {
+        controller.activate("owner", stable_first(ContextPrefixClaim::Breaks, ContextBreakReason::Compaction));
+    });
+    expect_claim_refused(ContextStabilityRefusal::LayoutChangeUndeclared,
+                         [&] { controller.activate("owner", stable_first(ContextPrefixClaim::Extends, std::nullopt)); });
+    EXPECT_TRUE(controller.active());
+    EXPECT_NO_THROW(controller.activate(
+        "owner", stable_first(ContextPrefixClaim::Breaks, ContextBreakReason::LayoutChange)));
+    // An epoch of the same layout needs nothing declared, and the way back is a break again.
+    const auto next = claim_epoch(3, stable_first(ContextPrefixClaim::Breaks, ContextBreakReason::LayoutChange).id(), 7,
+                                  {skill}, std::nullopt, RuntimeGuaranteeProfile::Recorded, recorded);
+    EXPECT_NO_THROW(controller.activate("owner", next));
+    expect_claim_refused(ContextStabilityRefusal::LayoutChangeUndeclared, [&] {
+        controller.activate("owner", claim_epoch(4, next.id(), 9, {skill}, std::nullopt));
+    });
 }
 
 TEST(StrictRuntimeProfile, ChecksAClaimToExtendAgainstTheActiveOrTheGivenPredecessor) {

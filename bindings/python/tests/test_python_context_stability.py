@@ -374,3 +374,96 @@ def test_the_controller_activates_an_epoch_that_extends_the_active_one(provider_
     controller.clear()
     controller.activate("owner", successor, first)  # the predecessor the host loaded
     assert controller.active
+
+
+def _head(text, placement=ng.ContextPlacement.BeforeHistory, **fields):
+    return _artifact(KIND.RequiredSkill, "skill-resolver.v1", text, placement=placement, **fields)
+
+
+def _tail(text, producer="hook-output.v1", priority=0):
+    return _artifact(KIND.HookOutput, producer, text, placement=ng.ContextPlacement.AfterHistory, priority=priority)
+
+
+def test_the_order_of_artifacts_is_a_function_of_class_priority_producer_and_key_alone():
+    skill = _head("Verify before editing.")
+    high = _tail("high", priority=10)
+    beta, gamma = _tail("beta", "alpha.v1"), _tail("gamma", "alpha.v1")
+    ordered = ng.order_context_artifacts([(gamma, "2"), (high, ""), (beta, "1"), (skill, "")])
+    assert ordered == [skill.id, high.id, beta.id, gamma.id]
+    for round_ in range(100):
+        first, second, live = (_tail(f"{name} {round_ * 7919}", "sibling.v1") for name in ("first", "second", "live"))
+        assert ng.order_context_artifacts([(live, "c"), (first, "a"), (second, "b")]) == [first.id, second.id, live.id]
+    with pytest.raises(ng.ContextStabilityError) as refused:
+        ng.order_context_artifacts([(beta, "1"), (gamma, "1")])
+    assert refused.value.code == ng.ContextStabilityRefusal.AmbiguousOrder
+
+
+def test_the_stable_first_layout_is_declared_on_the_epoch_and_checked_against_its_artifacts():
+    skill, note = _head("Verify before editing."), _tail("reading")
+    first = _epoch([skill, note], claim=None)
+    data = ng.ContextEpochData()
+    data.run_id, data.sequence, data.feed_id = "run_claim", 1, "hist_claim"
+    data.raw_from_sequence, data.raw_through_sequence, data.raw_window_digest = 1, 5, _sha("e")
+    data.artifact_ids = [skill.id, note.id]
+    assert first.assembly_layout == ng.AssemblyLayout.Legacy
+    data.assembly_layout = ng.AssemblyLayout.StableFirst
+    with pytest.raises(ValueError):
+        ng.ContextEpoch.create(data)  # the layout reads the order the epoch records
+    data.ordered_artifact_ids = [skill.id, note.id]
+    stable_first = ng.ContextEpoch.create(data)
+    assert stable_first.assembly_layout == ng.AssemblyLayout.StableFirst
+    assert ng.ContextEpoch.parse(stable_first.serialize_canonical()).assembly_layout == ng.AssemblyLayout.StableFirst
+    ng.validate_context_layout(stable_first, [skill, note])
+
+    for artifacts, code in [
+            ([_head("rule", ng.ContextPlacement.BeforeLatestUser), note], ng.ContextStabilityRefusal.StableOutsideHistoryHead),
+            ([skill, _artifact(KIND.HookOutput, "hook-output.v1", "moved", placement=ng.ContextPlacement.BeforeHistory)],
+             ng.ContextStabilityRefusal.VolatileOutsideTail),
+            ([note, skill], ng.ContextStabilityRefusal.TierOrderViolated)]:
+        data.artifact_ids = [artifact.id for artifact in artifacts]
+        data.ordered_artifact_ids = data.artifact_ids
+        epoch = ng.ContextEpoch.create(data)
+        with pytest.raises(ng.ContextStabilityError) as refused:
+            ng.validate_context_layout(epoch, artifacts)
+        assert refused.value.code == code
+
+
+def test_a_change_of_layout_has_to_be_declared_and_a_receipt_records_real_boundaries():
+    skill, note = _head("Verify before editing."), _tail("reading")
+    legacy = _epoch([skill, note])
+    data = ng.ContextEpochData()
+    data.run_id, data.sequence, data.predecessor_id = "run_claim", 2, legacy.id
+    data.feed_id, data.raw_from_sequence, data.raw_through_sequence = "hist_claim", 1, 6
+    data.raw_window_digest = _sha("e")
+    data.artifact_ids = data.ordered_artifact_ids = [skill.id, note.id]
+    data.assembly_layout = ng.AssemblyLayout.StableFirst
+    with pytest.raises(ng.ContextStabilityError) as refused:
+        ng.verify_context_epoch_claim(ng.ContextEpoch.create(data), [skill, note], legacy, [skill, note])
+    assert refused.value.code == ng.ContextStabilityRefusal.LayoutChangeUndeclared
+    data.prefix_claim, data.break_reason = ng.ContextPrefixClaim.Breaks, ng.ContextBreakReason.LayoutChange
+    declared = ng.ContextEpoch.create(data)
+    ng.verify_context_epoch_claim(declared, [skill, note], legacy, [skill, note])
+
+    receipt_data = ng.ContextAssemblyReceiptData()
+    receipt_data.context_epoch_id = declared.id
+    receipt_data.normalized_request_digest, receipt_data.message_window_digest = _sha("2"), _sha("3")
+    receipt_data.artifact_ids = declared.artifact_ids
+    receipt_data.required_skill_artifact_ids = [skill.id]
+    receipt_data.raw_from_sequence, receipt_data.raw_through_sequence = 1, 6
+    receipt_data.estimated_input_tokens, receipt_data.mandatory_input_tokens = 100, 10
+    receipt_data.assembled_artifact_ids = [skill.id, note.id]
+    receipt_data.artifact_classes = {skill.id: ng.StabilityClass.Stable, note.id: ng.StabilityClass.Volatile}
+    receipt_data.break_reason = ng.ContextBreakReason.LayoutChange
+    receipt_data.stable_boundary = ng.ContextPrefixBoundary(1, 0)
+    receipt_data.prefix_boundary = ng.ContextPrefixBoundary(4, 0)
+    receipt_data.prefix_digest = _sha("5")
+    receipt = ng.ContextAssemblyReceipt.create(receipt_data, declared, [skill, note])
+    again = ng.ContextAssemblyReceipt.parse(receipt.serialize_canonical(), declared, [skill, note])
+    assert again.id == receipt.id and again.prefix_boundary == ng.ContextPrefixBoundary(4, 0)
+    receipt_data.stable_boundary = ng.ContextPrefixBoundary(5, 0)
+    with pytest.raises(ValueError):
+        ng.ContextAssemblyReceipt.create(receipt_data, declared, [skill, note])  # the stable end lies behind the prefix
+    receipt_data.stable_boundary = ng.ContextPrefixBoundary(1, 0)
+    receipt_data.prefix_boundary = None
+    with pytest.raises(ValueError):
+        ng.ContextAssemblyReceipt.create(receipt_data, declared, [skill, note])  # a digest names the prefix it covers

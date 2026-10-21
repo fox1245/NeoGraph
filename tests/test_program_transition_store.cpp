@@ -13,6 +13,7 @@
 #endif
 #include "fixtures/program_store_backends.h"
 #include <gtest/gtest.h>
+#include <tuple>
 
 #include <array>
 #include <atomic>
@@ -167,7 +168,8 @@ ProgramContextPublication context_publication(
 ProgramContextPublication ordered_context_publication(
     std::uint64_t sequence, std::optional<std::string> predecessor, std::uint64_t through,
     std::vector<ContextArtifact> artifacts, std::optional<ContextPrefixClaim> claim,
-    std::string run_id = "run-1") {
+    std::string run_id = "run-1", neograph::AssemblyLayout layout = neograph::AssemblyLayout::Legacy,
+    std::optional<neograph::ContextBreakReason> reason = std::nullopt) {
     ContextEpochData epoch_data;
     epoch_data.run_id = std::move(run_id);
     epoch_data.sequence = sequence;
@@ -179,9 +181,12 @@ ProgramContextPublication ordered_context_publication(
     for (const auto& artifact : artifacts) epoch_data.artifact_ids.push_back(artifact.id());
     epoch_data.ordered_artifact_ids = epoch_data.artifact_ids;
     epoch_data.prefix_claim = claim;
+    epoch_data.break_reason = reason;
+    epoch_data.assembly_layout = layout;
     auto epoch = ContextEpoch::create(std::move(epoch_data));
     ContextAssemblyReceiptData receipt_data;
     receipt_data.context_epoch_id = epoch.id();
+    if (reason) receipt_data.break_reason = reason;
     receipt_data.normalized_request_digest = digest('a');
     receipt_data.message_window_digest = digest('b');
     receipt_data.artifact_ids = epoch.artifact_ids();
@@ -223,6 +228,7 @@ ProgramContextPublication transferred_context_publication(
                                 source.epoch.raw_window_digest(), source.epoch.artifact_ids(),
                                 source.epoch.guarantee_profile()};
     epoch_data.ordered_artifact_ids = source.epoch.ordered_artifact_ids();
+    epoch_data.assembly_layout = source.epoch.assembly_layout();
     auto epoch = ContextEpoch::create(std::move(epoch_data));
     ContextAssemblyReceiptData receipt_data{
         epoch.id(), source.assembly_receipt.normalized_request_digest(),
@@ -1706,11 +1712,44 @@ TEST_P(ProgramTransitionStoreConformance, ContextPublicationVerifiesAClaimToExte
     EXPECT_EQ(history[1].assembly_receipt.encoder_family(), std::optional<std::string>("openai.chat"));
 }
 
+TEST_P(ProgramTransitionStoreConformance, ContextPublicationRequiresALayoutChangeToBeDeclared) {
+    auto& store = primary_store();
+    const auto skill = context_skill("Verify before editing.");
+    auto initial = start_publication();
+    initial.context_publication = ordered_context_publication(1, std::nullopt, 3, {skill}, std::nullopt);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, initial), ProgramTransitionPublishResult::Published);
+    const auto head = initial.context_publication->epoch.id();
+    const auto stable_first = neograph::AssemblyLayout::StableFirst;
+
+    auto undeclared = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    undeclared.context_publication = ordered_context_publication(2, head, 5, {skill}, std::nullopt, "run-1", stable_first);
+    EXPECT_EQ(store.compare_publish("owner-a", initial.journal_record.id, undeclared),
+              ProgramTransitionPublishResult::Conflict);
+    auto extending = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    extending.context_publication = ordered_context_publication(
+        2, head, 5, {skill}, ContextPrefixClaim::Extends, "run-1", stable_first);
+    EXPECT_EQ(store.compare_publish("owner-a", initial.journal_record.id, extending),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.load_context_publications("owner-a", "run-1").size(), 1U);
+
+    auto declared = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    declared.context_publication = ordered_context_publication(
+        2, head, 5, {skill}, ContextPrefixClaim::Breaks, "run-1", stable_first,
+        neograph::ContextBreakReason::LayoutChange);
+    ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, declared),
+              ProgramTransitionPublishResult::Published);
+    const auto history = store.load_context_publications("owner-a", "run-1");
+    ASSERT_EQ(history.size(), 2U);
+    EXPECT_EQ(history[1].epoch.assembly_layout(), stable_first);
+    EXPECT_EQ(history[1].assembly_receipt.break_reason(), std::optional<neograph::ContextBreakReason>(
+                                                              neograph::ContextBreakReason::LayoutChange));
+}
+
 TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceiptPrefixFields) {
     auto& store = primary_store();
     const auto source_context = ordered_context_publication(
         1, std::nullopt, 3, {context_skill("Verify before editing."), context_note("reading 1")},
-        std::nullopt);
+        std::nullopt, "run-1", neograph::AssemblyLayout::StableFirst);
     auto source_start = start_publication();
     source_start.context_publication = source_context;
     attach_initial_lineage(source_start);
@@ -1725,13 +1764,14 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
     base.migration_plan = MigrationPlan::create(MigrationPlanData{
         digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
     // A copy that lost the order, or the prefix fields of the receipt, is not the source's context.
-    const auto copy = [&](bool keep_order, bool keep_prefix_fields) {
+    const auto copy = [&](bool keep_order, bool keep_prefix_fields, bool keep_layout = true) {
         ContextEpochData data{"run-2", 1, std::nullopt, source_context.epoch.feed_id(),
                               source_context.epoch.raw_from_sequence(),
                               source_context.epoch.raw_through_sequence(),
                               source_context.epoch.raw_window_digest(), source_context.epoch.artifact_ids(),
                               source_context.epoch.guarantee_profile()};
         if (keep_order) data.ordered_artifact_ids = source_context.epoch.ordered_artifact_ids();
+        if (keep_order && keep_layout) data.assembly_layout = source_context.epoch.assembly_layout();
         auto epoch = ContextEpoch::create(std::move(data));
         const auto& source_receipt = source_context.assembly_receipt;
         ContextAssemblyReceiptData receipt_data{
@@ -1747,13 +1787,14 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
         auto receipt = ContextAssemblyReceipt::create(std::move(receipt_data), epoch, source_context.artifacts);
         return ProgramContextPublication{std::move(epoch), source_context.artifacts, std::move(receipt)};
     };
-    for (const auto& [keep_order, keep_prefix_fields] :
-         std::vector<std::pair<bool, bool>>{{false, true}, {true, false}, {false, false}}) {
+    for (const auto& [keep_order, keep_prefix_fields, keep_layout] :
+         std::vector<std::tuple<bool, bool, bool>>{
+             {false, true, true}, {true, false, true}, {false, false, true}, {true, true, false}}) {
         auto dropped = base;
-        dropped.context_publication = copy(keep_order, keep_prefix_fields);
+        dropped.context_publication = copy(keep_order, keep_prefix_fields, keep_layout);
         attach_fork_split(dropped, *source.run_lineage);
         EXPECT_EQ(store.compare_publish("owner-a", {}, dropped), ProgramTransitionPublishResult::Conflict)
-            << keep_order << keep_prefix_fields;
+            << keep_order << keep_prefix_fields << keep_layout;
     }
 
     // The first epoch of the target has no predecessor, so it claims nothing about a prefix.
@@ -1791,6 +1832,7 @@ TEST_P(ProgramTransitionStoreConformance, ForkedContextKeepsTheOrderAndTheReceip
     const auto contexts = store.load_context_publications("owner-a", "run-2");
     ASSERT_EQ(contexts.size(), 1U);
     EXPECT_EQ(contexts.front().epoch.ordered_artifact_ids(), source_context.epoch.ordered_artifact_ids());
+    EXPECT_EQ(contexts.front().epoch.assembly_layout(), neograph::AssemblyLayout::StableFirst);
     EXPECT_EQ(contexts.front().assembly_receipt.artifact_classes(), source_context.assembly_receipt.artifact_classes());
 }
 

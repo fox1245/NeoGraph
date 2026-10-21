@@ -178,9 +178,49 @@ Turn turn(std::uint64_t sequence, std::optional<std::string> predecessor, std::u
     return {ContextEpoch::create(std::move(data)), std::move(ordered)};
 }
 
+// An epoch of the stable-first layout over the same feed.
+Turn layout_turn(std::uint64_t sequence, std::optional<std::string> predecessor, std::uint64_t through,
+                 std::vector<ContextArtifact> ordered, std::optional<ContextPrefixClaim> claim = std::nullopt,
+                 std::optional<ContextBreakReason> reason = std::nullopt,
+                 AssemblyLayout layout = AssemblyLayout::StableFirst) {
+    ContextEpochData data;
+    data.run_id = "run_claim";
+    data.sequence = sequence;
+    data.predecessor_id = std::move(predecessor);
+    data.feed_id = "hist_claim";
+    data.raw_from_sequence = 1;
+    data.raw_through_sequence = through;
+    data.raw_window_digest = sha('e');
+    for (const auto& artifact : ordered) data.artifact_ids.push_back(artifact.id());
+    data.ordered_artifact_ids = data.artifact_ids;
+    data.prefix_claim = claim;
+    data.break_reason = reason;
+    data.assembly_layout = layout;
+    return {ContextEpoch::create(std::move(data)), std::move(ordered)};
+}
+
 ContextArtifact claim_skill(std::string text = "Verify before editing.") {
     auto data = skill_data();
     data.content = json{{"text", std::move(text)}};
+    return ContextArtifact::create(std::move(data));
+}
+
+ContextArtifact head_skill(std::string text = "Verify before editing.") {
+    auto data = skill_data();
+    data.placement = ContextPlacement::BeforeHistory;
+    data.content = json{{"text", std::move(text)}};
+    return ContextArtifact::create(std::move(data));
+}
+
+ContextArtifact tail_note(std::string text, std::string producer = "hook-output.v1", std::int32_t priority = 0) {
+    ContextArtifactData data;
+    data.kind = ContextArtifactKind::HookOutput;
+    data.producer_id = std::move(producer);
+    data.source_digest = sha('c');
+    data.media_type = "text/plain";
+    data.placement = ContextPlacement::AfterHistory;
+    data.priority = priority;
+    data.content = std::move(text);
     return ContextArtifact::create(std::move(data));
 }
 
@@ -801,6 +841,14 @@ TEST(ContextStability, TheValuesValidateAgainstTheirSchemas) {
     accepts(epoch_v2, ContextEpoch::create(breaking_data).serialize_canonical());
     rejects(epoch_v2, without(parsed(ContextEpoch::create(extending_data).serialize_canonical()),
                               "ordered_artifact_ids"));
+    auto stable_first_data = ordered_data;
+    stable_first_data.assembly_layout = AssemblyLayout::StableFirst;
+    const auto stable_first = ContextEpoch::create(stable_first_data);
+    accepts(epoch_v2, stable_first.serialize_canonical());
+    rejects(epoch_v2, without(parsed(stable_first.serialize_canonical()), "ordered_artifact_ids"));
+    auto spelled_legacy = parsed(stable_first.serialize_canonical());
+    spelled_legacy["assembly_layout"] = "legacy";
+    rejects(epoch_v2, spelled_legacy);
     auto reason_without_break = parsed(ContextEpoch::create(extending_data).serialize_canonical());
     reason_without_break["break_reason"] = "explicit";
     rejects(epoch_v2, reason_without_break);
@@ -821,4 +869,210 @@ TEST(ContextStability, TheValuesValidateAgainstTheirSchemas) {
     auto unknown_class = parsed(receipt.serialize_canonical());
     unknown_class["artifact_classes"][skill.id()] = "eternal";
     rejects(receipt_v2, unknown_class);
+}
+
+TEST(ContextLayout, TheStableFirstLayoutIsPartOfTheEpochIdentityOnlyWhenSet) {
+    const auto a = sha('1');
+    const auto b = sha('2');
+    auto data = epoch_v1_data({a, b});
+    const auto legacy = ContextEpoch::create(data);
+    EXPECT_EQ(legacy.assembly_layout(), AssemblyLayout::Legacy);
+    EXPECT_EQ(parsed(legacy.serialize_canonical()).at("storage_schema_version"), 1);
+
+    // The stable-first layout is read from the order the epoch records.
+    data.assembly_layout = AssemblyLayout::StableFirst;
+    EXPECT_THROW(ContextEpoch::create(data), std::invalid_argument);
+    data.ordered_artifact_ids = std::vector<std::string>{b, a};
+    const auto stable_first = ContextEpoch::create(data);
+    EXPECT_EQ(stable_first.assembly_layout(), AssemblyLayout::StableFirst);
+    EXPECT_EQ(parsed(stable_first.serialize_canonical()).at("assembly_layout"), "stable_first");
+    EXPECT_EQ(ContextEpoch::parse(stable_first.serialize_canonical()).assembly_layout(), AssemblyLayout::StableFirst);
+    EXPECT_EQ(ContextEpoch::parse(stable_first.serialize_canonical()).id(), stable_first.id());
+
+    // The same order under the legacy layout is another epoch: the layout decides the bytes.
+    data.assembly_layout = AssemblyLayout::Legacy;
+    const auto ordered_legacy = ContextEpoch::create(data);
+    EXPECT_NE(ordered_legacy.id(), stable_first.id());
+    EXPECT_FALSE(parsed(ordered_legacy.serialize_canonical()).contains("assembly_layout"));
+
+    data.assembly_layout = static_cast<AssemblyLayout>(255);
+    EXPECT_THROW(ContextEpoch::create(data), std::invalid_argument);
+    auto forged = parsed(ordered_legacy.serialize_canonical());
+    forged["assembly_layout"] = "legacy";
+    EXPECT_THROW(ContextEpoch::parse(forged.dump()), std::invalid_argument);
+    forged["assembly_layout"] = "stable_first";
+    EXPECT_THROW(ContextEpoch::parse(forged.dump()), std::invalid_argument);
+}
+
+TEST(ContextLayout, TheOrderOfArtifactsIsAFunctionOfClassPriorityProducerAndKeyAlone) {
+    const auto skill = head_skill();
+    const auto summary = [] {
+        ContextArtifactData data;
+        data.kind = ContextArtifactKind::DerivedContext;
+        data.producer_id = std::string(COMPACTION_PRODUCER_ID);
+        data.source_digest = sha('b');
+        data.media_type = "text/plain";
+        data.placement = ContextPlacement::BeforeHistory;
+        data.content = "Summary.";
+        return ContextArtifact::create(std::move(data));
+    }();
+    const auto high = tail_note("high", "hook-output.v1", 10);
+    const auto alpha = tail_note("alpha", "zeta.v1");
+    const auto beta = tail_note("beta", "alpha.v1");
+    const auto gamma = tail_note("gamma", "alpha.v1");
+    // Stable, then Slow, then Volatile; inside Volatile higher priority first, then producer, then key.
+    const auto ordered = order_context_artifacts({{gamma, "2"}, {alpha, ""}, {summary, ""}, {high, ""},
+                                                   {beta, "1"}, {skill, ""}});
+    EXPECT_EQ(ordered, (std::vector<std::string>{skill.id(), summary.id(), high.id(), beta.id(), gamma.id(),
+                                                 alpha.id()}));
+    EXPECT_EQ(order_context_artifacts({{skill, ""}, {beta, "1"}, {gamma, "2"}}),
+              order_context_artifacts({{gamma, "2"}, {skill, ""}, {beta, "1"}}));
+
+    // Three siblings that agree on class, priority and producer keep the order of their keys, whatever
+    // their text is. A hash of the content would reorder them as the text changes.
+    for (int round = 0; round < 100; ++round) {
+        const auto first = tail_note("first " + std::to_string(round * 7919), "sibling.v1");
+        const auto second = tail_note("second " + std::to_string(round * 104729), "sibling.v1");
+        const auto live = tail_note("live " + std::to_string(round * 1299709), "sibling.v1");
+        EXPECT_EQ(order_context_artifacts({{live, "c"}, {first, "a"}, {second, "b"}}),
+                  (std::vector<std::string>{first.id(), second.id(), live.id()}));
+    }
+
+    // A full tie has no answer that does not depend on the content, and a repeated artifact has none.
+    expect_refusal(ContextStabilityRefusal::AmbiguousOrder,
+                   [&] { (void)order_context_artifacts({{beta, "1"}, {gamma, "1"}}); });
+    expect_refusal(ContextStabilityRefusal::AmbiguousOrder,
+                   [&] { (void)order_context_artifacts({{beta, "1"}, {beta, "2"}}); });
+    EXPECT_TRUE(order_context_artifacts({}).empty());
+}
+
+TEST(ContextLayout, TheStableFirstLayoutRefusesWhatItCannotPlaceOrOrder) {
+    const auto skill = head_skill();
+    ContextArtifactData slow_data;
+    slow_data.kind = ContextArtifactKind::DerivedContext;
+    slow_data.producer_id = std::string(COMPACTION_PRODUCER_ID);
+    slow_data.source_digest = sha('b');
+    slow_data.media_type = "text/plain";
+    slow_data.placement = ContextPlacement::BeforeHistory;
+    slow_data.content = "Summary.";
+    const auto slow = ContextArtifact::create(slow_data);
+    const auto note = tail_note("reading");
+
+    const auto accepted = layout_turn(1, std::nullopt, 5, {skill, slow, note});
+    EXPECT_NO_THROW(validate_context_layout(accepted.epoch, accepted.artifacts));
+    // A legacy epoch is not checked: its artifacts may sit anywhere.
+    const auto legacy = turn(1, std::nullopt, 1, 5, {note, skill}, std::nullopt);
+    EXPECT_NO_THROW(validate_context_layout(legacy.epoch, legacy.artifacts));
+
+    const auto refuses = [&](ContextStabilityRefusal code, std::vector<ContextArtifact> ordered) {
+        const auto layout = layout_turn(1, std::nullopt, 5, std::move(ordered));
+        expect_refusal(code, [&] { validate_context_layout(layout.epoch, layout.artifacts); });
+    };
+    // Stable and Slow artifacts belong in front of the history, wherever they sit by default.
+    for (const auto placement : {ContextPlacement::BeforeLatestUser, ContextPlacement::AfterLatestUser,
+                                 ContextPlacement::AfterHistory}) {
+        auto moved = skill_data();
+        moved.placement = placement;
+        refuses(ContextStabilityRefusal::StableOutsideHistoryHead, {ContextArtifact::create(moved), note});
+        auto moved_slow = slow_data;
+        moved_slow.placement = placement;
+        refuses(ContextStabilityRefusal::StableOutsideHistoryHead, {skill, ContextArtifact::create(moved_slow)});
+    }
+    // Volatile artifacts belong behind it.
+    for (const auto placement : {ContextPlacement::BeforeHistory, ContextPlacement::BeforeLatestUser,
+                                 ContextPlacement::AfterLatestUser}) {
+        ContextArtifactData moved;
+        moved.kind = ContextArtifactKind::HookOutput;
+        moved.producer_id = "hook-output.v1";
+        moved.source_digest = sha('c');
+        moved.media_type = "text/plain";
+        moved.placement = placement;
+        moved.content = "moved";
+        refuses(ContextStabilityRefusal::VolatileOutsideTail, {skill, ContextArtifact::create(moved)});
+    }
+    // The recorded order lists Stable, then Slow, then Volatile.
+    refuses(ContextStabilityRefusal::TierOrderViolated, {note, skill});
+    refuses(ContextStabilityRefusal::TierOrderViolated, {slow, skill, note});
+    refuses(ContextStabilityRefusal::TierOrderViolated, {skill, note, slow});
+    // The artifacts handed over are the artifacts the epoch selects.
+    expect_refusal(ContextStabilityRefusal::ArtifactsMismatch,
+                   [&] { validate_context_layout(accepted.epoch, {skill, slow}); });
+}
+
+TEST(ContextLayout, ALayoutChangeIsABreakTheEpochHasToName) {
+    const auto skill = head_skill();
+    const auto note = tail_note("reading");
+    const auto legacy = turn(1, std::nullopt, 1, 5, {skill, note}, std::nullopt);
+    const auto check = [](const Turn& next, const Turn& before) {
+        verify_context_epoch_claim(next.epoch, next.artifacts, &before.epoch, before.artifacts);
+    };
+
+    // The first stable-first epoch after a legacy one declares the break, and nothing else will do.
+    const auto declared = layout_turn(2, legacy.epoch.id(), 6, {skill, note}, ContextPrefixClaim::Breaks,
+                                      ContextBreakReason::LayoutChange);
+    EXPECT_NO_THROW(check(declared, legacy));
+    for (const auto& [claim, reason] : std::vector<std::pair<std::optional<ContextPrefixClaim>,
+                                                             std::optional<ContextBreakReason>>>{
+             {std::nullopt, std::nullopt},
+             {ContextPrefixClaim::Breaks, ContextBreakReason::Compaction},
+             {ContextPrefixClaim::Extends, std::nullopt}}) {
+        const auto undeclared = layout_turn(2, legacy.epoch.id(), 6, {skill, note}, claim, reason);
+        expect_refusal(ContextStabilityRefusal::LayoutChangeUndeclared, [&] { check(undeclared, legacy); });
+    }
+    // The way back is a break as well.
+    const auto stable_first = layout_turn(1, std::nullopt, 5, {skill, note});
+    const auto back = turn(2, stable_first.epoch.id(), 1, 6, {skill, note}, std::nullopt);
+    expect_refusal(ContextStabilityRefusal::LayoutChangeUndeclared, [&] { check(back, stable_first); });
+    const auto back_declared = turn(2, stable_first.epoch.id(), 1, 6, {skill, note}, ContextPrefixClaim::Breaks,
+                                    ContextBreakReason::LayoutChange);
+    EXPECT_NO_THROW(check(back_declared, stable_first));
+
+    // Epochs of one layout need nothing declared, and an extension of a stable-first epoch is checked as before.
+    const auto next = layout_turn(2, stable_first.epoch.id(), 6, {skill, tail_note("reading 2")},
+                                  ContextPrefixClaim::Extends);
+    EXPECT_NO_THROW(check(next, stable_first));
+    EXPECT_NO_THROW(check(layout_turn(2, stable_first.epoch.id(), 6, {skill, note}), stable_first));
+    // Without a loadable predecessor there is nothing to compare, as before.
+    const auto alone = layout_turn(2, legacy.epoch.id(), 6, {skill, note});
+    EXPECT_NO_THROW(verify_context_epoch_claim(alone.epoch, alone.artifacts, nullptr, {}));
+    const auto stranger = turn(1, std::nullopt, 1, 5, {skill}, std::nullopt, std::nullopt, true, "other_run");
+    EXPECT_NO_THROW(check(alone, stranger));
+}
+
+TEST(ContextLayout, AReceiptRecordsRealBoundariesAndTheDigestOfThePrefix) {
+    const auto skill = ContextArtifact::create(skill_data());
+    const std::vector<ContextArtifact> artifacts{skill};
+    const auto epoch = ContextEpoch::create(epoch_v1_data({skill.id()}));
+    auto data = receipt_v1_data(epoch, artifacts);
+    data.assembled_artifact_ids = std::vector<std::string>{skill.id()};
+    data.artifact_classes = std::map<std::string, StabilityClass>{{skill.id(), StabilityClass::Stable}};
+    data.encoder_family = "anthropic.messages";
+    data.stable_boundary = ContextPrefixBoundary{0, 0};
+    data.prefix_boundary = ContextPrefixBoundary{4, 1};
+    data.prefix_digest = sha('5');
+    const auto receipt = ContextAssemblyReceipt::create(data, epoch, artifacts);
+    const auto again = ContextAssemblyReceipt::parse(receipt.serialize_canonical(), epoch, artifacts);
+    EXPECT_EQ(again.id(), receipt.id());
+    EXPECT_EQ(again.stable_boundary(), std::optional<ContextPrefixBoundary>({0, 0}));
+    EXPECT_EQ(again.prefix_boundary(), std::optional<ContextPrefixBoundary>({4, 1}));
+    EXPECT_EQ(parsed(receipt.serialize_canonical()).at("stable_boundary").at("message_index"), 0);
+    EXPECT_EQ(parsed(receipt.serialize_canonical()).at("prefix_boundary").at("part_index"), 1);
+
+    // A boundary alone, equal boundaries, and the stable one before the prefix one are accepted.
+    auto only_stable = data;
+    only_stable.prefix_boundary.reset();
+    only_stable.prefix_digest.reset();
+    EXPECT_NO_THROW(ContextAssemblyReceipt::create(only_stable, epoch, artifacts));
+    auto equal = data;
+    equal.stable_boundary = equal.prefix_boundary;
+    EXPECT_NO_THROW(ContextAssemblyReceipt::create(equal, epoch, artifacts));
+    // A digest names the prefix it covers, and the stable end is not behind the end of the prefix.
+    auto digest_alone = data;
+    digest_alone.prefix_boundary.reset();
+    EXPECT_THROW(ContextAssemblyReceipt::create(digest_alone, epoch, artifacts), std::invalid_argument);
+    auto reversed = data;
+    reversed.stable_boundary = ContextPrefixBoundary{4, 2};
+    EXPECT_THROW(ContextAssemblyReceipt::create(reversed, epoch, artifacts), std::invalid_argument);
+    reversed.stable_boundary = ContextPrefixBoundary{5, 0};
+    EXPECT_THROW(ContextAssemblyReceipt::create(reversed, epoch, artifacts), std::invalid_argument);
 }
