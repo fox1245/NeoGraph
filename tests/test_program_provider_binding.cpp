@@ -2535,10 +2535,10 @@ struct Position {
         context.diagnostic    = [told = told](ProgramCoreProviderCallDiagnostic value) { told->push_back(std::move(value)); };
         return context;
     }
-    graph::ProviderCallIdentity identity() const {
-        return graph::ProviderCallIdentity{kOwner, run, thread, "s1:work", "work", 0};
+    graph::ProviderCallIdentity identity(std::uint64_t ordinal = 0) const {
+        return graph::ProviderCallIdentity{kOwner, run, thread, "s1:work", "work", ordinal};
     }
-    std::string id() const { return Journal::logical_call_id(context(), identity()); }
+    std::string id(std::uint64_t ordinal = 0) const { return Journal::logical_call_id(context(), identity(ordinal)); }
     std::vector<std::string> codes() const {
         std::vector<std::string> codes;
         for (const auto& value : *told) codes.push_back(value.code);
@@ -2564,9 +2564,11 @@ Position fork_position(bool may_resend = false) {
 }
 
 sp::runtime::Result make_call(Journal& journal, const Position& at, std::shared_ptr<Provider> provider,
-                              ProviderRequest request, std::string deployment = digest('a')) {
+                              ProviderRequest request, std::string deployment = digest('a'),
+                              std::uint64_t ordinal = 0) {
     auto binding = journal.bind(at.context(), std::move(deployment));
-    return neograph::async::run_sync(binding.broker->invoke(at.identity(), std::move(provider), std::move(request)));
+    return neograph::async::run_sync(
+        binding.broker->invoke(at.identity(ordinal), std::move(provider), std::move(request)));
 }
 
 std::string text_of(const sp::runtime::Result& result) { return neograph::test::text(result); }
@@ -3257,6 +3259,11 @@ HostOptions chunked_options(const ChunkedUploadPeer& peer, bool google = true) {
     return endpoint_options(peer.origin(), {google ? kGoogleOrigin : "https://api.openai.com"});
 }
 
+std::shared_ptr<Provider> chunked_provider(const ChunkedUploadPeer& peer, bool google = true) {
+    return std::shared_ptr<Provider>(neograph::test::endpoints::provider_at(
+        peer.origin(), true, {google ? kGoogleOrigin : "https://api.openai.com"}));
+}
+
 // Bytes that tell their offset.
 std::string pattern(std::size_t size) {
     std::string bytes(size, '\0');
@@ -3365,4 +3372,371 @@ TEST(ProgramProviderBindingJournal, AnUploadInOneRequestPersistsNeitherItsPathNo
     ASSERT_EQ(peer.received().size(), 2U);
     h.close();
     EXPECT_GE(files_holding_none_of(files.path, {source.string(), "fixture-key", "Bearer"}), 3U);
+}
+
+TEST(ProgramProviderBindingJournal, AChunkedUploadResumedBeforeItsFirstPartStartsAgain) {
+    // #541: the journal holds the call that opened the session without the session's URL. Nothing was sent into
+    // the session, so the resumed Program opens another and sends the file whole.
+    TempDir           files("upload-restart");
+    ChunkedUploadPeer peer;
+    Host              h(std::make_shared<Peer>(), chunked_options(peer), &files);
+    h.script().upload_bytes          = pattern(100);
+    h.script().chunk_size            = 40;
+    h.script().interrupt_after_calls = 1;
+    const auto paused                = h.run(Shape::ChunkedUpload, "upload-restart");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    EXPECT_EQ(peer.starts(), 1);
+    EXPECT_EQ(peer.chunks(), 0);
+
+    auto       handle = h.runtime().resume(kOwner, "upload-restart", resume_after(paused, "trace-upload-restart"));
+    const auto done   = handle.wait();
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    EXPECT_EQ(peer.starts(), 2) << "the first session cannot be written to: its URL was never stored";
+    const auto held = peer.sessions();
+    ASSERT_EQ(held.size(), 2U);
+    EXPECT_TRUE(held[0].bytes.empty());
+    EXPECT_EQ(held[1].bytes, pattern(100));
+    EXPECT_NE(done.output().dump().find(held[1].file), std::string::npos) << done.output().dump();
+    const auto notices = handle.notices();
+    const auto* notice = notice_with(notices, "P_PROVIDER_UPLOAD_RESTARTED");
+    ASSERT_NE(notice, nullptr);
+    EXPECT_EQ(notice->witness["reason"].get<std::string>(), "session_not_stored");
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(4, "succeeded"));
+    h.close();
+    EXPECT_GE(files_holding_none_of(files.path, secrets_of(peer)), 3U);
+}
+
+TEST(ProgramProviderBindingJournal, AChunkedUploadResumedAfterAPartIsRefusedBeforeAnythingIsSent) {
+    // #541: a part is in the first session, whose URL is gone, and the call positions of the upload are bound to it.
+    // The upload is not continued, not replayed as if it had finished, and not started again under those
+    // positions: the resumed Program fails with an error that says it has to be sent again.
+    TempDir           files("upload-refused");
+    ChunkedUploadPeer peer;
+    Host              h(std::make_shared<Peer>(), chunked_options(peer), &files);
+    h.script().upload_bytes          = pattern(100);
+    h.script().chunk_size            = 40;
+    h.script().interrupt_after_calls = 2;
+    const auto paused                = h.run(Shape::ChunkedUpload, "upload-refused");
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_text(paused);
+    EXPECT_EQ(peer.starts(), 1);
+    EXPECT_EQ(peer.chunks(), 1);
+
+    const auto resumed =
+        h.runtime().resume(kOwner, "upload-refused", resume_after(paused, "trace-upload-refused")).wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Failed) << failure_text(resumed);
+    EXPECT_EQ(resumed.failure()->code, "NG.ConfigError") << "the journal refuses it again: never retried";
+    EXPECT_NE(failure_text(resumed).find("chunked upload"), std::string::npos) << failure_text(resumed);
+    EXPECT_EQ(peer.starts(), 1) << "no second session";
+    EXPECT_EQ(peer.chunks(), 1) << "and no byte sent";
+    EXPECT_EQ(journal_states(files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}));
+}
+
+namespace {
+// One host's chunked upload through the journal: a call that opens the session and a call for each part, at call
+// ordinals 0, 1, ... The session, with its URL, lives only in this object, as in a host node's frame.
+class UploadRun {
+public:
+    // `purpose` is OpenAI's, which asks for one; Google takes none.
+    UploadRun(Journal& journal, Position at, std::shared_ptr<Provider> provider, std::string bytes,
+              std::uint64_t chunk, std::string purpose = {})
+        : journal_(journal), at_(std::move(at)), provider_(std::move(provider)), bytes_(std::move(bytes)),
+          chunk_(chunk), purpose_(std::move(purpose)) {}
+    const Position& at() const { return at_; }
+    // The call that opens the session.
+    sp::files::Progress open() {
+        return advance(make_endpoint_request(
+            sp::files::Start{"data.bin", "application/octet-stream", bytes_.size(), purpose_}));
+    }
+    // The next part, from where the session stands.
+    sp::files::Progress part() {
+        sp::files::Part part;
+        part.session      = progress_.session;
+        const auto size   = std::min<std::uint64_t>(chunk_, bytes_.size() - part.session.sent);
+        part.source.bytes = std::make_shared<const std::string>(bytes_.substr(part.session.sent, size));
+        return advance(make_endpoint_request(std::move(part)));
+    }
+    // OpenAI: assembles the parts into the file.
+    sp::files::Progress complete() { return advance(make_endpoint_request(sp::files::Complete{progress_.session})); }
+    // Opens the session, sends every part and, where the provider asks for it, completes the file.
+    sp::files::Progress finish() {
+        open();
+        while (progress_.session.sent < bytes_.size()) part();
+        if (!progress_.file) complete();
+        return progress_;
+    }
+private:
+    sp::files::Progress advance(ProviderRequest request) {
+        auto result  = make_call(journal_, at_, provider_, std::move(request), digest('a'), ordinal_++);
+        auto outcome = sp::files::typed_progress(*result);
+        if (const auto* failure = std::get_if<sp::Failure>(&outcome))
+            throw std::runtime_error(failure->error.safe_message);
+        progress_ = std::get<sp::files::Progress>(std::move(outcome));
+        return progress_;
+    }
+    Journal&                  journal_;
+    Position                  at_;
+    std::shared_ptr<Provider> provider_;
+    std::string               bytes_;
+    std::uint64_t             chunk_;
+    std::string               purpose_;
+    std::uint64_t             ordinal_ = 0;
+    sp::files::Progress       progress_;
+};
+
+const std::vector<std::string> kRestarted{"P_PROVIDER_UPLOAD_RESTARTED"};
+}  // namespace
+
+TEST(ProgramProviderUploadResume, ACrashAfterTheSessionOpensStartsTheUploadAgain) {
+    TempDir           files("resume-open");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();  // the process dies here
+    }
+    ASSERT_EQ(journal_states(files.provider_db()), std::vector<std::string>{"succeeded"});
+    const auto before = Journal(files.provider_db()).inspect(kOwner, at.id());
+    ASSERT_TRUE(before);
+
+    auto    later = at_attempt(at, 2);
+    Journal journal(files.provider_db());
+    UploadRun second(journal, later, provider, bytes, 40);
+    const auto done = second.finish();
+    ASSERT_TRUE(done.file);
+    EXPECT_EQ(done.file->id, "files/chunked-1");
+    EXPECT_EQ(peer.starts(), 2);
+    const auto held = peer.sessions();
+    ASSERT_EQ(held.size(), 2U);
+    EXPECT_TRUE(held[0].bytes.empty()) << "nothing went into the first session";
+    EXPECT_EQ(held[1].bytes, bytes);
+    ASSERT_EQ(later.codes(), kRestarted);
+    EXPECT_EQ(later.told->front().witness["call_id"].get<std::string>(), at.id());
+    EXPECT_EQ(later.told->front().witness["reason"].get<std::string>(), "session_not_stored");
+    // The journaled row is evidence of what was sent, and is not rewritten; the parts are journaled after it.
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(4, "succeeded"));
+    const auto after = journal.inspect(kOwner, at.id());
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->outcome_digest, before->outcome_digest);
+    EXPECT_EQ(after->original_attempt, before->original_attempt);
+}
+
+TEST(ProgramProviderUploadResume, ACrashWhileTheSessionOpensStartsTheUploadAgain) {
+    // The marker is durable and the answer is not: the process dies with the request on the wire.
+    TempDir           files("resume-opening");
+    TempDir           image("resume-opening-image");
+    ChunkedUploadPeer peer;
+    std::atomic<bool> taken{false};
+    peer.on_request([&](const std::string& what) {
+        if (what == "start" && !taken.exchange(true)) crash_image(files.path, image.path);
+    });
+    const auto provider = chunked_provider(peer);
+    const auto bytes    = pattern(100);
+    const auto at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+    }
+    peer.on_request({});
+    ASSERT_TRUE(taken.load());
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"dispatched"});
+
+    auto    later = at_attempt(at, 2);
+    Journal journal(image.provider_db());
+    UploadRun second(journal, later, provider, bytes, 40);
+    const auto done = second.finish();
+    ASSERT_TRUE(done.file);
+    EXPECT_EQ(peer.starts(), 2);
+    EXPECT_EQ(peer.sessions().back().bytes, bytes);
+    ASSERT_EQ(later.codes(), kRestarted);
+    EXPECT_EQ(later.told->front().witness["reason"].get<std::string>(), "outcome_unknown");
+    EXPECT_EQ(journal_states(image.provider_db()),
+              (std::vector<std::string>{"dispatched", "succeeded", "succeeded", "succeeded"}))
+        << "the marker stays as it was";
+}
+
+namespace {
+// The error a resumed upload is refused with, and the peer's counts before it, which must not change.
+void expect_refused(Journal& journal, const Position& later, const std::shared_ptr<Provider>& provider,
+                    const std::string& bytes, const ChunkedUploadPeer& peer, std::uint64_t first_later_ordinal) {
+    const int starts = peer.starts(), chunks = peer.chunks();
+    UploadRun resumed(journal, later, provider, bytes, 40);
+    try {
+        (void)resumed.open();
+        ADD_FAILURE() << "the resumed upload was not refused";
+    } catch (const ProgramProviderUploadResendRequiredError& error) {
+        EXPECT_EQ(error.call_id(), later.id(0));
+        EXPECT_EQ(error.later_call_id(), later.id(first_later_ordinal));
+        EXPECT_NE(dynamic_cast<const graph::ConfigurationFailure*>(&error), nullptr);
+        EXPECT_EQ(std::string(error.what()).find("SECRET"), std::string::npos);
+    }
+    EXPECT_EQ(peer.starts(), starts) << "no second session";
+    EXPECT_EQ(peer.chunks(), chunks) << "and no byte sent";
+    EXPECT_TRUE(later.told->empty());
+}
+}  // namespace
+
+TEST(ProgramProviderUploadResume, ACrashAfterAPartRefusesTheResume) {
+    TempDir           files("resume-part");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+        first.part();  // 40 of the 100 bytes are in the session
+    }
+    Journal journal(files.provider_db());
+    auto    later = at_attempt(at, 2);
+    expect_refused(journal, later, provider, bytes, peer, 1);
+    EXPECT_EQ(journal_states(files.provider_db()), (std::vector<std::string>{"succeeded", "succeeded"}))
+        << "nothing is journaled";
+    EXPECT_EQ(peer.sessions().at(0).bytes, bytes.substr(0, 40));
+}
+
+TEST(ProgramProviderUploadResume, ACrashWhileAPartIsSentRefusesTheResume) {
+    TempDir           files("resume-sending");
+    TempDir           image("resume-sending-image");
+    ChunkedUploadPeer peer;
+    std::atomic<bool> taken{false};
+    peer.on_request([&](const std::string& what) {
+        if (what == "upload" && !taken.exchange(true)) crash_image(files.path, image.path);
+    });
+    const auto provider = chunked_provider(peer);
+    const auto bytes    = pattern(100);
+    const auto at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+        first.part();
+    }
+    peer.on_request({});
+    ASSERT_EQ(journal_states(image.provider_db()), (std::vector<std::string>{"succeeded", "dispatched"}));
+    Journal journal(image.provider_db());
+    auto    later = at_attempt(at, 2);
+    expect_refused(journal, later, provider, bytes, peer, 1);
+}
+
+TEST(ProgramProviderUploadResume, ACrashAfterTheLastPartRefusesTheResumeOfAFinishedUpload) {
+    // The file is whole at the provider, but a resumed node cannot replay a part without its session's URL, and
+    // the journal cannot hand back a finished upload in place of the call that opened it.
+    TempDir           files("resume-finished");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        ASSERT_TRUE(first.finish().file);
+    }
+    ASSERT_EQ(journal_states(files.provider_db()), std::vector<std::string>(4, "succeeded"));
+    Journal journal(files.provider_db());
+    auto    later = at_attempt(at, 2);
+    expect_refused(journal, later, provider, bytes, peer, 1);
+    EXPECT_EQ(peer.sessions().at(0).bytes, bytes) << "the upload that finished is not touched";
+}
+
+TEST(ProgramProviderUploadResume, APartThatFailedStillRefusesTheResume) {
+    // A failed part is a journaled call of the upload too: starting again would find its position bound to the
+    // first session.
+    TempDir           files("resume-failed-part");
+    ChunkedUploadPeer peer;
+    peer.fail_chunks = 1;
+    const auto provider = chunked_provider(peer);
+    const auto bytes    = pattern(100);
+    const auto at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40);
+        first.open();
+        EXPECT_THROW(first.part(), std::runtime_error);
+    }
+    EXPECT_EQ(peer.chunks(), 0);
+    Journal journal(files.provider_db());
+    auto    later = at_attempt(at, 2);
+    expect_refused(journal, later, provider, bytes, peer, 1);
+}
+
+TEST(ProgramProviderUploadResume, AnOpenAiUploadResumesWhereItStopped) {
+    // OpenAI names its upload by an id the journal does hold, so nothing is lost: the resumed Program replays the
+    // calls it made and goes on, and no session is opened again.
+    TempDir           files("resume-openai");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer, false);
+    const auto        bytes    = pattern(100);
+    const auto        at       = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, at, provider, bytes, 40, "user_data");
+        first.open();
+        first.part();
+    }
+    auto    later = at_attempt(at, 2);
+    Journal journal(files.provider_db());
+    UploadRun second(journal, later, provider, bytes, 40, "user_data");
+    const auto done = second.finish();
+    ASSERT_TRUE(done.file);
+    EXPECT_EQ(done.file->id, "file-chunked-1");
+    EXPECT_EQ(peer.starts(), 1) << "the journaled call that opened the upload is replayed";
+    EXPECT_EQ(peer.chunks(), 3) << "the first part is replayed, not sent again";
+    EXPECT_EQ(peer.sessions().at(0).bytes, bytes);
+    EXPECT_TRUE(later.codes().empty());
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(5, "succeeded"));
+}
+
+TEST(ProgramProviderUploadResume, AForkUploadsToASessionOfItsOwn) {
+    // A fork cannot continue its source's session, and its source's journaled parts are not the fork's: the fork
+    // opens a session and sends its parts, and is told nothing about the source's.
+    TempDir           files("resume-fork");
+    ChunkedUploadPeer peer;
+    const auto        provider = chunked_provider(peer);
+    const auto        bytes    = pattern(100);
+    const auto        source   = source_position();
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, source, provider, bytes, 40);
+        first.open();
+        first.part();
+    }
+    Journal journal(files.provider_db());
+    auto    fork = fork_position();
+    UploadRun forked(journal, fork, provider, bytes, 40);
+    const auto done = forked.finish();
+    ASSERT_TRUE(done.file);
+    EXPECT_EQ(peer.starts(), 2);
+    EXPECT_EQ(peer.chunks(), 4) << "the source's part and the fork's three";
+    EXPECT_EQ(peer.sessions().at(0).bytes, bytes.substr(0, 40)) << "the source's session is left as it was";
+    EXPECT_EQ(peer.sessions().at(1).bytes, bytes);
+    EXPECT_TRUE(fork.codes().empty());
+}
+
+TEST(ProgramProviderUploadResume, AForkUploadsAgainWhenItsSourceNeverSawTheSessionOpen) {
+    TempDir           files("resume-fork-opening");
+    TempDir           image("resume-fork-opening-image");
+    ChunkedUploadPeer peer;
+    std::atomic<bool> taken{false};
+    peer.on_request([&](const std::string& what) {
+        if (what == "start" && !taken.exchange(true)) crash_image(files.path, image.path);
+    });
+    const auto provider = chunked_provider(peer);
+    const auto bytes    = pattern(100);
+    {
+        Journal   journal(files.provider_db());
+        UploadRun first(journal, source_position(), provider, bytes, 40);
+        first.open();
+    }
+    peer.on_request({});
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"dispatched"});
+    Journal journal(image.provider_db());
+    auto    fork = fork_position();
+    UploadRun forked(journal, fork, provider, bytes, 40);
+    ASSERT_TRUE(forked.finish().file) << "a session opening is sent again, never held as unknown";
+    EXPECT_EQ(peer.starts(), 2);
 }

@@ -91,6 +91,32 @@ private:
     std::string call_id_, source_run_id_, source_call_id_;
 };
 
+/** A resumed Program reached a chunked upload that cannot continue (#541). The call
+ * that opened the upload's session is journaled, but its answer holds a value no
+ * journal stores (a Google resumable upload's session URL, which lets anyone write
+ * the file without the API key), so the journal cannot give the session back. The
+ * journal also holds a later call of the same node, a part sent into the session or
+ * one that may have been, so the upload cannot be sent from its start under the
+ * same call positions either: those positions are bound to the first session. It is
+ * raised before anything is sent, and nothing is journaled. The upload has to be
+ * sent again: from a new run, or by a node that catches this error and uploads at
+ * call ordinals the journal has not used. Inside a Core node it is NG.ConfigError:
+ * the journal would refuse the same call again, so it is never retried and never
+ * routed.
+ */
+class NEOGRAPH_PROGRAM_API ProgramProviderUploadResendRequiredError final
+    : public std::runtime_error,
+      public graph::ConfigurationFailure {
+public:
+    ProgramProviderUploadResendRequiredError(std::string call_id, std::string later_call_id);
+    /// The logical call id (SQLiteProgramProviderCallJournal::logical_call_id) of the call that opened the upload.
+    const std::string& call_id() const noexcept { return call_id_; }
+    /// The logical call id of the first later call of the same node that the journal holds.
+    const std::string& later_call_id() const noexcept { return later_call_id_; }
+private:
+    std::string call_id_, later_call_id_;
+};
+
 /** Host-owned SQLite dispatch journal. Share the journal across resolver calls/runs.
  * A marker means transport MAY have occurred; it does not prove provider receipt
  * or exactly-once execution. Pending/uncertain calls require external reconciliation.
@@ -111,6 +137,22 @@ private:
  * version 1) hold only a dispatch digest that includes the policy, so they match
  * only while the policy is unchanged; a fork that cannot tell such a call from a
  * new one is refused (ProgramProviderForkResendRefusedError).
+ *
+ * Chunked uploads (#541). The answer to the call that opens an upload's session
+ * (PreparedProviderRequest::opens_upload_session()) may carry a value that only the
+ * live call may hold: a Google resumable upload's URL, which lets anyone write the
+ * file without the API key (Completion::secret). The journal never stores it, and
+ * the row says that its answer is short of it (withheld_secret). A resume that
+ * finds such a row, or an opening whose answer is not known, cannot give the
+ * session back. Where the journal holds no later call of the node's task, nothing
+ * was written into the session and opening one charges nothing, so the call is
+ * sent again; the row is not rewritten, and the handle carries
+ * P_PROVIDER_UPLOAD_RESTARTED. Where it holds one, in any state, the later calls
+ * name the first session by the digest of its URL, and the resume fails with
+ * ProgramProviderUploadResendRequiredError before anything is sent. A fork sends
+ * the opening again, since the source's session is the source's alone. An opening
+ * that reconcile_success() settled has no secret to withhold and replays without
+ * the session's URL: the upload cannot be continued, and is sent again.
  */
 class NEOGRAPH_PROGRAM_API SQLiteProgramProviderCallJournal final {
 public:
