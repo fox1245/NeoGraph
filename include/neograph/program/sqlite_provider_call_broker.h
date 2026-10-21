@@ -150,9 +150,12 @@ private:
  * P_PROVIDER_UPLOAD_RESTARTED. Where it holds one, in any state, the later calls
  * name the first session by the digest of its URL, and the resume fails with
  * ProgramProviderUploadResendRequiredError before anything is sent. A fork sends
- * the opening again, since the source's session is the source's alone. An opening
- * that reconcile_success() settled has no secret to withhold and replays without
- * the session's URL: the upload cannot be continued, and is sent again.
+ * the opening again, since the source's session is the source's alone. A restart
+ * is recorded, in the transaction before the call is sent, in a table of its own
+ * (restarts(); Record::restarts and Record::superseded), so the record it replaces
+ * stays as it was and a Dispatched record that was restarted does not read as
+ * uncertain. The row of such a call carries a marker (Record::opens_upload_session)
+ * that lets reconcile_success() refuse an answer a resume could not continue.
  */
 class NEOGRAPH_PROGRAM_API SQLiteProgramProviderCallJournal final {
 public:
@@ -211,6 +214,16 @@ public:
         std::string policy_identity;
         /// The NeoGraph build that encoded the request.
         std::string producer;
+        /// #541. The call opens a chunked upload's session (a files::Start). A row written before the marker
+        /// says false.
+        bool opens_upload_session = false;
+        /// #541. The times a resume sent the call again in place of this record (restarts()). The record itself
+        /// is as it was.
+        std::uint32_t restarts = 0;
+        /// #541. A resume sent the call again and this record holds no answer for it: its Dispatched or
+        /// ReconciliationRequired state does not mean that the outcome is unknown, and reconcile_success()
+        /// refuses it.
+        bool superseded = false;
     };
     std::optional<Record> inspect(std::string_view owner_scope,
                                   std::string_view dispatch_id) const;
@@ -234,9 +247,41 @@ public:
     std::vector<PolicyChange> policy_changes(std::string_view owner_scope,
                                              std::string_view dispatch_id) const;
 
+    /// A time a resume sent a call that opens a chunked upload's session again, in
+    /// place of its record (#541). The record is not rewritten.
+    struct Restart {
+        enum class Reason : std::uint8_t {
+            /// The record's answer carries no session URL, which a journal never stores.
+            SessionNotStored,
+            /// The record has no answer: the process died with the call on the wire, or the
+            /// transport raised.
+            OutcomeUnknown,
+        };
+        Reason        reason = Reason::OutcomeUnknown;
+        std::uint64_t attempt = 0;
+        /// The record as the restart found it.
+        State         replaced_state = State::Dispatched;
+        std::string   replaced_outcome_digest;
+    };
+    /// The restarts noted for one call, oldest first. They are written in the
+    /// transaction that precedes the call, so a restart that was recorded was at
+    /// least about to be sent.
+    std::vector<Restart> restarts(std::string_view owner_scope,
+                                  std::string_view dispatch_id) const;
+
     /** Only after independent provider-side evidence establishes this exact result.
      * The evidence identity is retained, immutable and must not be empty. This
      * method never retries transport; a later invoke replays the verified result.
+     *
+     * It refuses (std::runtime_error, nothing written) the record of a call that
+     * opens a chunked upload's session (#541) in two cases. A resume sent the call
+     * again (Record::superseded, restarts()): a resume restarts or refuses an
+     * upload by itself, and the record needs no reconciliation. Or the completion's
+     * session names neither an upload id nor a URL: a journal keeps no URL, so a
+     * resume would replay a session it cannot continue. A completion that does
+     * carry a URL (Completion::secret) is accepted and the URL is not stored; the
+     * row then says that its answer is short of it, and a resume restarts the
+     * upload.
      */
     void reconcile_success(std::string_view owner_scope, std::string_view dispatch_id,
                            std::string evidence_identity, sp::runtime::Result completion);
