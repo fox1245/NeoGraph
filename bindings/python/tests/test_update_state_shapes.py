@@ -1,4 +1,4 @@
-"""v0.3.2: TODO_v0.3.md item #5 — update_state accepts both
+"""v0.3.2: update_state accepts both
 dict and list[ChannelWrite] forms.
 
 Pre-fix the binding silently no-op'd when channel_writes was a

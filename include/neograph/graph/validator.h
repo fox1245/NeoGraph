@@ -15,7 +15,7 @@
  * an undeclared channel = guaranteed runtime throw). Anything a
  * dynamic mechanism could legitimize — Command.goto / Send can reach
  * statically-unreachable nodes — is a WARNING, so a correct graph is
- * never rejected (no false errors), while Studio/tooling can still
+ * never rejected (no false errors), while editors and other tooling can still
  * render every warning as lint.
  */
 #pragma once

@@ -89,12 +89,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - The Program provider wrapper and `OpenInferenceProvider` forward their inner provider's endpoints (`Provider::endpoint_runtime_of`).
 
 ### Changed
-- **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable. The decision is the roundtable of 2026-10-20.
+- **Every SchemaProvider interface 7 request control is reachable from C++ and Python, in a nest per family (#512, #513).** `ProviderControls` gains `chat`, `responses`, `messages`, `generate` and `interactions` (`ChatControls` ... `InteractionsControls`), which hold the family's own controls in the SDK's types; the flat members stay portable.
   - **New controls.** Chat modalities, audio output, OpenRouter image output and plugins; Responses hosted tools (web search, image generation, file search, tool search, shell, code interpreter, MCP, computer use, OpenRouter server tools and policy-admitted tools), output modalities, image output, plugins, include names and MCP approvals; Messages server and typed client tools, container, skills, betas and MCP servers; Generate response modalities, speech, image output, audio transcription, audio format, built-in tools, MCP servers, server tool invocations and retrieval; Interactions response formats, speech, transcription, built-in tools, `previous_interaction_id`, `video_task`, `agent` and `background` (the portable `store` now applies to Interactions too). Each nest has `extensions`, top-level members the SDK policy admits for the origin.
   - **Behavior change: a family takes only its own nest.** A graph whose nodes call different families can share one `ProviderControls`; the other families' controls are ignored. A portable control the family cannot express still throws.
   - **Deprecated: the flat family members** (`chat_reasoning`, `include_reasoning`, `usage_include`, `models`, `previous_response_id`, `previous_response_history`, `parallel_tool_calls`, `verbosity`, `truncation`, `responses_include`, `thinking_mode`, `output_effort`, `cache_control`, `messages_tool_choice`, `gemini_history_mode`, `gemini_thinking_level`, `safety_settings`, `gemini_tool_choice`). They move into their nests in 0.16.0, another family refuses them as in 0.15, setting one and its nest member throws, and 0.17.0 removes them.
   - **Python.** The nests and every SDK type they hold are bound, `MessagesOutputEffort` gains `XHigh`, and each controls class has a strict `from_dict`: unknown keys are refused, enums take their member names and tool or format variants take a `"type"` (`neograph_engine.provider_controls`).
-- **Program prices come only from the SchemaProvider model catalogue of the provider's policy (#520).** The pricing roundtable of 2026-10-20 settled the design: route ceilings, tier rates and tool fees are catalogue units and layers, not a NeoGraph price file.
+- **Program prices come only from the SchemaProvider model catalogue of the provider's policy (#520).** Route ceilings, tier rates and tool fees are catalogue units and layers, not a NeoGraph price file.
   - **Behavior change: the host supplies prices.** The embedded SchemaProvider catalogue lists none, so a budgeted run refuses every priced call until the provider's policy carries a catalogue layer that prices the model: `sp::descriptor::load_policy(..., catalogue)` or `with_catalogue`, and in Python `load_provider_policy(..., model_catalogue_json)`. An entry's `pricing` gives decimal USD per unit (`input`, `output`, cache, reasoning and image units), OpenRouter's route ceiling (`ceiling_input`, `ceiling_output`), service tiers (`input/flex`), long-context bands (`input+200000`) and server-tool fees (`tool:<type>`).
   - **The catalogue decides what is refused.** A service tier needs its own units. OpenRouter fallbacks (`models`) need every candidate priced, and the hold is the dearest candidate's. A server or hosted tool needs a fee (`"0"` declares a free one) and a use cap (Messages `max_uses`, Responses `max_tool_calls`). A long-context band is reserved when the model's input limit reaches it. OpenRouter plugins and Gemini's built-in tools, which take no use cap, are refused on a budgeted run.
   - **Client tools bill only tokens (#540).** A Messages tool the policy marks as a client tool (`memory_*`, `bash_*`, `text_editor_*`, the computer and browser toolsets) is run by the caller, so a priced request that carries one needs neither a use cap nor a fee. A server tool whose type admits no `max_uses` (`mcp_toolset`, `tool_search_tool_*`, `code_execution_*`) is still refused, and the refusal says so. The wire types of Responses hosted tools and Gemini built-in tools are matched exhaustively, so a tool that SchemaProvider adds later fails the build instead of being priced as `file_search`.
@@ -902,9 +902,9 @@ mode, plan replay, changed C++ helpers and 11 Python applications were exercised
 
 ### Removed
 
-- **Deprecated TransformerCPP integration examples.** Removed `example_inproc_gemma`,
-  `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`, and `TRANSFORMERCPP_DIR`, which depended on
-  an externally hosted repository that is no longer available. `example_local_transformer`,
+- **Deprecated in-process local-inference examples.** Removed `example_inproc_gemma`,
+  `NEOGRAPH_BUILD_LOCAL_INFERENCE_EXAMPLE`, and the CMake variable that pointed to the
+  external checkout, which depended on an externally hosted repository that is no longer available. `example_local_transformer`,
   which uses a standard OpenAI-compatible local server, is retained.
 
 ### Fixed
@@ -1061,9 +1061,9 @@ mode, plan replay, changed C++ helpers and 11 Python applications were exercised
     lexicographic fallback, implicit __end__) from a code-disjoint
     implementation, compared against the Scheduler on 12-step × 300-graph
     (DESIL lesson: a verifier alone cannot catch wrong-execution).
-  - **Engine ↔ Studio shared corpus**: `tests/fixtures/topology_corpus/` 15
+  - **Engine ↔ editor shared corpus**: `tests/fixtures/topology_corpus/` 15
     variants (3 valid + 12 violating E3–E11) are byte-identical with
-    NeoGraph-Studio `tests/corpus/`, both asserting the same
+    `tests/corpus/` of a companion editor repository, both asserting the same
     verdict (code:severity multiset) — the two implementations cannot silently
     diverge.
 
@@ -1079,7 +1079,7 @@ mode, plan replay, changed C++ helpers and 11 Python applications were exercised
   at runtime); things that Command.goto/Send can justify are warnings
   (reachability E7, escapeless cycle E11, plain fan-in without barrier E9,
   overwrite race E5, dead channel E6). Every diagnostic is accompanied by a
-  machine-readable witness (counterexample) JSON — for Studio canvas
+  machine-readable witness (counterexample) JSON — for editor canvas
   highlighting (M3).
   - **Route completeness (E10)**: `ConditionSpec` label contract introduced.
     Declaring the output label set of a condition via the `register_condition`
@@ -1554,7 +1554,7 @@ next docs sweep) provide case-by-case before/after guidance.
 ## [0.8.0] — 2026-05-13 — DX policy + downstream-driven API gaps addressed
 
 Bundles 8 issues (#22, #25, #26, #27, #28, #34, #35 + #16 follow-up)
-surfaced by real-world downstream (ProjectDatePop) feedback and internal
+surfaced by real-world downstream feedback and internal
 coverage diff into a single minor bump. Two new public helpers
 (`RunResult::channel<T>`, `RunContext::store`), 11 new offline examples,
 `docs/migration-v0.4-to-v1.0.md` migration guide, and a 5-item DX bundle
@@ -1959,7 +1959,7 @@ private signal that the parent's `cancel()` cascades to.
 Five-round patch series closing the gaps the v0.3.0 single-shot
 cancel uncovered: Send fan-out propagation, in-process polling,
 hooks for Python, C++ scope, exception typing. Also lands the
-TODO_v0.3.md feedback batch from the FastAPI SSE chat-demo
+feedback batch from the FastAPI SSE chat-demo
 evaluation — `resume_if_exists`, dict-or-list `update_state`,
 StateView for typed state reads.
 
@@ -1983,7 +1983,7 @@ StateView for typed state reads.
   asserts mid-flight cancel really aborts every Send-spawned
   sibling at the socket layer (was the v0.3.1 root-cause patch).
 - `examples/22_self_evolving_graph.py` — moved to v0.3.2 with the
-  TODO_v0.3.md #9 cookbook fold.
+  cookbook fold.
 - Doxygen `/* */` wildcard fix — `acp/types.h` had `/**` blocks
   containing path wildcards (`fs/*`, `terminal/*`) that opened a
   nested comment + suppressed all subsequent diagnostics. Replaced
@@ -2011,7 +2011,7 @@ StateView for typed state reads.
   wires `execute_stream` directly when the user only overrode the
   streaming variant.
 - `update_state` accepting list[ChannelWrite] — closes the silent
-  no-op (TODO_v0.3.md #5).
+  no-op.
 
 ### Notes
 
@@ -2086,7 +2086,7 @@ completion. Cancel propagates through every layer of the run.
   helpers instead of calling `future.set_result` directly via
   `call_soon_threadsafe`.
 
-### Roadmap (deferred to v0.3.x — see `TODO_v0.3.md`)
+### Roadmap (deferred to v0.3.x)
 
 - LangGraph-style auto checkpoint resume on same `thread_id`.
 - Streaming-only-node hint in `run_async` error message.

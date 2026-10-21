@@ -1,6 +1,6 @@
 """v0.3.1: RunConfig.resume_if_exists — multi-turn-chat semantics.
 
-Closes the LangGraph parity gap noted in TODO_v0.3.md item #1: same
+Closes a LangGraph parity gap: same
 ``thread_id`` no longer requires the caller to thread prior state
 through the input dict themselves. Opt-in flag keeps existing callers
 unaffected.

@@ -1039,8 +1039,7 @@ void init_graph(py::module_& m) {
             "Latest serialized state for thread_id, or None if no "
             "checkpoint has been written.\n\n"
             "**v0.4 soft-deprecated**: prefer "
-            "``engine.get_state_view(thread_id)`` (PR 5 of "
-            "ROADMAP_v1.md). The view exposes channels as flat "
+            "``engine.get_state_view(thread_id)``. The view exposes channels as flat "
             "attributes (``view.messages``) and supports typed "
             "Pydantic subclasses; this raw-dict accessor stays as the "
             "escape hatch for callers that need the nested "
@@ -1066,7 +1065,7 @@ void init_graph(py::module_& m) {
                const std::string& thread_id,
                py::object channel_writes,
                const std::string& as_node) {
-                // v0.3.2 (TODO_v0.3.md item #5): accept BOTH a
+                // v0.3.2: accept BOTH a
                 // ``dict`` (channel_name → value) and a
                 // ``list[ChannelWrite]`` form. Pre-fix only dict
                 // worked — passing a list silently no-op'd because

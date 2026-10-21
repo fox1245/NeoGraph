@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=de4c839856811127ad10511d744ae40d8ea1e5419da7c21f9c3b3d03ab48aead -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=9487e79cd37e1295f1d55bacc01c881d30f5547d6b5cfec3a44689f57276f991 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2389,7 +2389,7 @@ public:
 NeoGraph は *JSON で記述された* グラフを実行します。JSON を差し替えれば、同じエンジンが別のハーネスになります。
 同じエンジンが別のハーネスになります。`NodeFactory::export_schema()` は
 このエンジンのバージョンが受け付けるトポロジー JSON の正確な機械可読説明を出力します。
-そのため外部ツール、特にコードを書かないビジュアルブロックエディター (プライベートな関連リポジトリ NeoGraph Studio、
+そのため外部ツール、特にコードを書かないビジュアルブロックエディター (関連リポジトリ、
 issue #56) はエンジンからパレットを生成でき、同期ずれを起こしません。
 同期しなくなるのを避けるためです。
 **3 つのアクセス経路、1 つのドキュメント:**

@@ -1,4 +1,4 @@
-// v0.3.1: TODO_v0.3.md item #7 — verify CancelToken propagates into
+// v0.3.1: verify CancelToken propagates into
 // every fan-out worker (run_parallel_async + run_sends_async).
 //
 // Historical v0.3.0 path wired the token through GraphState →

@@ -1,4 +1,4 @@
-"""v0.3.1: TODO_v0.3.md item #3 — emit_token helper.
+"""v0.3.1: emit_token helper.
 
 Streaming-aware Python nodes used to need a 4-line GraphEvent
 construction ritual to push tokens. The new

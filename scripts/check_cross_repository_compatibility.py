@@ -4,8 +4,8 @@
 This is intentionally a metadata/source-contract check.  It reads the two
 explicitly named JSON files and verifies their references plus current markers
 in the exposed NeoGraph headers; it does not clone, execute, or inspect
-NeoCode/NeoProtocol, and it never grants compatibility based on a repository
-name alone.
+the two historical consumer repositories, and it never grants compatibility
+based on a repository name alone.
 """
 
 from __future__ import annotations
@@ -215,7 +215,7 @@ def _validate(metadata: dict[str, Any], root: Path) -> None:
     _unique(reference_ids, "historical_references")
     _require(
         {"neocode_harness_sidecar", "neoprotocol_federated_acp"}.issubset(reference_ids),
-        "NeoCode and NeoProtocol historical references are required",
+        "the historical references of both consumer repositories are required",
     )
     for index, reference in enumerate(references):
         prefix = f"historical_references[{index}]"

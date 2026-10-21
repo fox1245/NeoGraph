@@ -1928,7 +1928,7 @@ GraphEngine::execute_graph_async(
     // land in subsequent PRs. ``ctx.step`` is updated at the top of
     // each super-step iteration below so per-step consumers see a
     // consistent value without the engine threading ``int step``
-    // separately. See ROADMAP_v1.md "Execution plan" → PR 1.
+    // separately.
     RunContext ctx;
     ctx.cancel_token = config.cancel_token;
     ctx.provider_outcomes = config.provider_outcomes ? config.provider_outcomes : std::make_shared<ProviderOutcomes>();

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=de4c839856811127ad10511d744ae40d8ea1e5419da7c21f9c3b3d03ab48aead -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=9487e79cd37e1295f1d55bacc01c881d30f5547d6b5cfec3a44689f57276f991 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2698,7 +2698,7 @@ NeoGraph runs a graph that is *described in JSON*; swap the JSON and the
 same engine becomes a different harness. `NodeFactory::export_schema()`
 emits a machine-readable description of exactly what topology JSON this
 engine version accepts, so external tooling — notably a code-free
-visual block editor (NeoGraph Studio, a private companion repo,
+visual block editor (a companion repository,
 issue #56) — can generate its palette from the engine and never drift
 out of sync.
 

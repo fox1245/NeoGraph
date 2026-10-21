@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared engine<->Studio differential corpus. Keep tests/fixtures/topology_corpus (NeoGraph) and tests/corpus (NeoGraph-Studio) byte-identical. Expected = sorted code:severity multiset from GraphValidator / lint.js.",
+  "_comment": "Shared engine<->editor differential corpus. Keep tests/fixtures/topology_corpus (NeoGraph) and tests/corpus (a companion editor repository) byte-identical. Expected = sorted code:severity multiset from GraphValidator / lint.js.",
   "expected": {
     "valid_minimal.json": [],
     "valid_full.json": [],
