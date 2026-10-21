@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=4f67e53baad10b4739eb2f462ac5cce18e493494d091ff6e1eb5690f2fc395db -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=5f8e6ab72d08c418bed91bd429a171ccecb655a519d3818748d0fab7a20ea18e -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -268,6 +268,16 @@ System 消息怎么处理，取决于 provider 的系列：
 
 想让请求的开头保持稳定，请不要在各轮之间改动 System 角色制品的文本。以上描述的是目前的组装方式。
 默认值和各系列的规则正在评审，一旦改动，就会改变组装出的字节。
+
+## 稳定性类别、顺序与前缀声明
+
+提供方的提示词缓存能否保住请求的开头，取决于各次调用之间哪些制品保持不变。数据模型记录这一点。装配器目前还不使用它，所以装配出的请求仍是“制品的放置位置”一节所描述的那样。
+
+- 制品可以声明 `StabilityClass`：`Stable`（整个运行期间字节不变）、`Slow`（只在压缩或其他已声明的前缀中断时才变）或 `Volatile`（每次调用都可能变）。未声明的制品在读取时获得类别：`RequiredSkill` 和 `HardConstraint` 为 `Stable`，producer 为 `COMPACTION_PRODUCER_ID` 的 `DerivedContext` 为 `Slow`，其余一律为 `Volatile`。创建渲染为 System 消息的种类的 `Volatile` 制品，会被 `ContextStabilityError` 拒绝。
+- 制品可以声明 `AnchorMode`：`Replace`（默认）或 `KeepInPlace`。目前还没有任何代码使用它。
+- epoch 可以记录 `ordered_artifact_ids`（制品的固定顺序）和 `prefix_claim`：`Extends`（请求开头与前驱相同，只在末尾增长），或带有 `break_reason` 的 `Breaks`。激活声明 `Extends` 的 epoch 时，会针对当前生效的 epoch，或宿主传给 `activate` 的前驱检查该声明：`raw_from_sequence` 相同，`raw_through_sequence` 更大，`Stable` 和 `Slow` 制品相同且顺序相同，`KeepInPlace` 制品仍被选中且位于 RAW 窗口之内。没有记录顺序的 epoch（例如在该字段出现之前存储的）无法被延续。
+- 装配器写出的回执记录按提示词顺序排列的制品、它们的类别、编码器所属的 family、工具的摘要和 epoch 的中断原因。
+
 
 ## 运行时的开发者指令
 

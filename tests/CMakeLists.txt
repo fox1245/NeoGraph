@@ -658,7 +658,11 @@ endif()
 add_executable(neograph_runtime_context_tests
     test_runtime_context.cpp
     test_context_transform.cpp
+    test_context_stability.cpp
 )
+# The stability tests check the stored values against the schemas under schemas/.
+set_source_files_properties(test_context_stability.cpp PROPERTIES
+    COMPILE_DEFINITIONS NEOGRAPH_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(neograph_runtime_context_tests PRIVATE
     neograph::core
     GTest::gtest_main

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=51b508679964df1fb2ef42232399a26a5a4d63fbb6eef4c7d0ab0ac7fd3343a6 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=a5ae3a2e8a27690487384684cf5b841b3b11c4ee0371f29db32294e81d30f206 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,12 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 已添加
+- **面向缓存稳定的上下文布局的数据模型：制品的稳定性类别与锚定模式、epoch 的顺序与前缀声明、装配回执的前缀字段 (#329)。** 装配器写出的内容不变：编码后的请求体和消息顺序与之前逐字节相同。这些是布局工作所依赖的字段，目前还没有代码使用顺序、锚定模式或边界。
+  - **制品。** `ContextArtifactData::stability_class`（`StabilityClass`：`Stable`、`Slow`、`Volatile`）和 `anchor_mode`（`AnchorMode`：`Replace`、`KeepInPlace`）是可选的。每个字段只有在设置时才计入制品的标识（存储 schema 版本 2），因此两者都不设置的制品保持原有的字节和 id。未声明类别的制品在读取时推导出类别，不会改写任何内容：`RequiredSkill` 和 `HardConstraint` 为 Stable，producer 为 `COMPACTION_PRODUCER_ID` 的 `DerivedContext`（压缩转换写出的摘要）为 Slow，其余一律为 Volatile。`ContextArtifact::stability_class()` 返回声明的或推导出的类别，`declared_stability_class()` 只返回声明的类别。`ContextArtifact::create` 会以 `ContextStabilityError`（代码 `VolatileSystemArtifact`）拒绝渲染为 System 消息的种类的 Volatile 制品；它同时也是 `std::invalid_argument`，在 Python 中是 `ValueError`。
+  - **Epoch。** `ContextEpochData::ordered_artifact_ids` 按 epoch 固定的顺序记录制品（`artifact_ids` 仍是按 id 排序的集合）。`prefix_claim` 表明 epoch 是延续（`Extends`）还是打破（`Breaks`）前一个 epoch 的请求前缀；打破时要给出 `break_reason`（`Compaction`、`StableChange`、`LayoutChange`、`AnchorDrop`、`OrderChange`、`Explicit`）。三者都不设置的 epoch 是版本 1 的 epoch，字节和 id 与以往相同。装配器目前还不读取这个顺序：没有顺序的 epoch 沿用装配器从制品推导出的顺序。
+  - **声明验证。** `verify_context_epoch_claim` 从结构上检查 `Extends` 声明：前驱就是该 epoch 的前驱，并且记录了顺序（版本 1 的 epoch 没有顺序，所以没有任何 epoch 能延续它）；`raw_from_sequence` 相同且 `raw_through_sequence` 更大；Stable 和 Slow 制品相同，顺序也相同；前驱的每个 `KeepInPlace` 制品仍被选中，该 epoch 选中的每个 `KeepInPlace` 制品覆盖的记录都在其 RAW 窗口之内。`RuntimeInterpositionController::activate` 和 `StrictRuntimeProfile::activate` 在切换 epoch 之前执行该检查，对象是当前生效的 epoch，或宿主传给新重载的前驱。不成立的声明，或没有可加载前驱的声明，会抛出 `ContextStabilityError`，并保持原有生效的 epoch 不变。Program 转换存储会针对上一次上下文发布执行该检查，因此声明不成立的发布会作为冲突被拒绝。打破声明不做验证。
+  - **回执。** `ContextAssemblyReceipt` 版本 2 增加了 `assembled_artifact_ids`（按提示词顺序排列的制品）、`artifact_classes`、`encoder_family`、`tools_digest`（编码后请求体中 `tools` 成员的摘要，没有则不设置）和 `break_reason`（取自 epoch）。此外还有 `stable_boundary`、`prefix_boundary` 和 `prefix_digest`，在装配器标出它们之前保持未设置。装配器每个回合都写版本 2 的回执，所以一个回合的回执 id 与以往不同，而只能读取版本 1 回执的 0.16.0 无法加载上下文由此版本存储的 Program 运行。版本 1 的回执仍可解析，不含这些字段。被 fork 或被替换的 Program 运行，会把顺序和这些字段复制到目标的第一个 epoch 中。
+  - **Python。** 新增 `StabilityClass`、`AnchorMode`、`ContextBreakReason`、`ContextPrefixClaim`、`ContextPrefixBoundary`、`ContextStabilityError`（带有类型为 `ContextStabilityRefusal` 的 `code`）、`derive_stability_class`、`verify_context_epoch_claim` 和 `COMPACTION_PRODUCER_ID`，数据类与值类上的新字段，以及两个 `activate` 方法上可选的 `predecessor`。`schemas/` 新增 `context-artifact-v2`、`context-epoch-v2` 和 `context-assembly-receipt-v2`。
 - **图引擎的单线程 WebAssembly 构建，在 CI 中构建并运行 (#535)。**
   - **`NEOGRAPH_THREADS`** 在 Emscripten 和 WASI 上为 `OFF`，其他平台为 `ON`。关闭时，NeoGraph 不使用操作系统线程构建：没有 `-pthread`，没有 `Threads::Threads`，`asio` 目标导出 `ASIO_DISABLE_THREADS`，SchemaProvider 以 `SP_THREADS=OFF` 且不带 libcurl 传输层构建。`NEOGRAPH_THREADS=ON` 则在 WebAssembly 上保留 pthread 构建。原生构建不变。
   - **一个程序只有一种设置。** 生成的 `neograph/build_config.h` 记录该设置，并随头文件一起安装。与之不一致的翻译单元无法编译（与 SDK 的 `sp/build_config.h` 相同），NeoGraph 与 SDK 的设置不同时配置会失败。在 Emscripten 上每个目标都带 `-fexceptions`，异常被禁用时配置失败。需要套接字、TLS、系统库或线程的组件（ASYNC、MCP 客户端、A2A、gRPC、SQLite、PostgreSQL、Python）会被 CMake 拒绝。
@@ -34,6 +40,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **0.16.0 的 journal 仍可恢复。** 其中的行只有包含策略的分发摘要，读取方式和以前一样：摘要与调用的摘要相等的行可以匹配，所以 0.16.0 的 journal 在写入时的策略之下可以恢复，fork 也会接管其中的调用。如果此后策略变了，摘要就不再匹配，恢复会遇到绑定冲突。
   - **0.15 的 journal 仍然无法恢复。** 0.15 的摘要包含 SchemaProvider 0.3 的策略 identity 和 observer 上限，0.4 无法重新计算，所以任何 0.16.x 都无法判断这样一行的请求是否就是这次调用的请求。0.16.0 中“0.15 记入 journal 的运行无法由 0.16 恢复”的说明依然成立。变化的是对这类运行的 fork：它不再悄悄地重新发送其中的调用（见下一条）。
 - **行为变更：fork 会拒绝无法与来源运行匹配的提供方调用 (#543)。** fork 会在来源运行的同一位置查找记录，并接管内容相同的记录。来源在该位置没有记录、来源的记录是已证明提供方未接受任何内容的失败，或者内容不同且由同一个 NeoGraph 构建编码时，fork 才发送调用。既不能接管记录，又无法证明调用不同时，发送就会让同一次调用再次付费，所以它会在发送或记录任何内容之前，以 `ProgramProviderForkResendRefusedError` 拒绝。`reason()` 在行早于请求内容 identity 且摘要不同时为 `Unverifiable`，在内容不同且该行由另一个 NeoGraph 构建编码时为 `EncoderDiffers`，在内容相同但来源是在另一个提供方部署之下记录时为 `DeploymentDiffers`。在 Core 节点中它是 `NG.ConfigError`，既不重试也不路由，fork 会失败。`RuntimeConfig::fork_may_resend_provider_calls`（默认 `false`；Python 为 `LocalProgramHost(fork_may_resend_provider_calls=True)`）允许重新发送：fork 会发送该调用，提供方可能再次计费，它的句柄上带有 `P_FORK_PROVIDER_CALL_RESENT`。结果未知的来源调用，无论标志如何，都保持不确定。因此对 0.15 journal 的 fork 默认会失败，而以前它会为这些调用再次付费。
+- **需要重新构建 C++ 使用方：新增了成员 (#329)。** `ContextArtifactData`、`ContextEpochData` 和 `ContextAssemblyReceiptData` 新增了成员，`ContextArtifact`、`ContextEpoch` 和 `ContextAssemblyReceipt` 新增了访问器，`RuntimeInterpositionController` 和 `StrictRuntimeProfile` 新增了 `activate` 重载。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。设置了新字段的值，以及装配器写出的每一份回执，其版本是 0.16.0 读不了的，所以 0.16.0 无法加载上下文由此版本存储的 Program 运行。
 - **需要重新构建 C++ 使用方：新增了成员 (#543)。** `RuntimeConfig` 新增 `fork_may_resend_provider_calls`，`ProgramCoreProviderCallReplaySource` 新增 `may_resend`，`ProgramCoreProviderCallContext` 新增 `diagnostic`，`SQLiteProgramProviderCallJournal::Record` 新增四个成员，`Provider` 新增两个静态函数。请一起重新构建 NeoGraph、C++ 使用方与 Python 扩展（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：`Provider` 新增了虚函数 (#535)。** `Provider::host_pumped()` 是新增的虚函数，`OpenInferenceProvider` 重写了它，受保护的 `Provider::prepare_runtime` 新增了带默认值的参数。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：`ToolExecutionPolicy` 新增了成员 (#545)。** `ToolExecutionPolicy` 新增了 `error_limit_bytes`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
@@ -51,6 +58,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Python 绑定公开 `ContextArtifactKind.UntrustedSupplemental`，制品 schema 列出所有种类和放置位置 (#329)。** 该种类在 C++ 中存在但未被绑定，所以 Python 宿主无法创建或比较这个种类。`schemas/context-artifact-v1.schema.json` 只列出两种放置位置和五种种类，会拒绝代码写出的已存储制品。
 - **Python 绑定公开 `ContextPlacement.AfterHistory` 和 `ContextPlacement.BeforeHistory` (#329)。** 该枚举只绑定了 `BeforeLatestUser` 和 `AfterLatestUser`，因此尽管 C++ 组装器会排列全部四种位置，Python 宿主仍无法创建放在历史之前或之后的上下文制品。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` 为每种位置通过控制器组装一个制品，并检查提供方收到的顺序。
 - **`HostLoop` 不再丢失宿主先于 Asio 到达的定时器 (#535)。** 在已记录的截止时间之后轮询、却没有就绪处理程序的回合，会假定 Asio 已分发了到那时为止所有到期的定时器，并丢弃该截止时间。但这由 Asio 决定，宿主的定时器可能先运行：Asio 的 Windows reactor 由自己的线程得知定时器已到期，所以在截止时间上做的轮询可能发现定时器尚未分发，宿主的时钟也可能比 Asio 的时钟快。该回合丢弃了截止时间，使循环在等待仍未结束时进入空闲，于是等待重试退避或其他 `HostTimer` 的运行永远不会结束。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` 和 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` 曾在 CI 的 Windows 作业中间歇性失败。
   - **截止时间在 Asio 分发其定时器之前一直保持已记录。** 循环用自己的定时器在最早的截止时间上等待，Asio 分发它时，丢弃到该时间为止的截止时间。在此之前运行的回合会在 1 毫秒后再次查看。记录时在宿主时钟上已经到期的截止时间也同样保留，而以前会被丢弃。

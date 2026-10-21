@@ -72,7 +72,8 @@ void init_runtime_context(py::module_& m) {
         .value("DerivedContext", ContextArtifactKind::DerivedContext)
         .value("RequiredSkill", ContextArtifactKind::RequiredSkill)
         .value("HookOutput", ContextArtifactKind::HookOutput)
-        .value("HardConstraint", ContextArtifactKind::HardConstraint);
+        .value("HardConstraint", ContextArtifactKind::HardConstraint)
+        .value("UntrustedSupplemental", ContextArtifactKind::UntrustedSupplemental);
     py::enum_<ContextPlacement>(m, "ContextPlacement")
         .value("BeforeLatestUser", ContextPlacement::BeforeLatestUser)
         .value("AfterLatestUser", ContextPlacement::AfterLatestUser)
@@ -82,6 +83,33 @@ void init_runtime_context(py::module_& m) {
         .value("Legacy", RuntimeGuaranteeProfile::Legacy)
         .value("Recorded", RuntimeGuaranteeProfile::Recorded)
         .value("Strict", RuntimeGuaranteeProfile::Strict);
+    py::enum_<StabilityClass>(m, "StabilityClass")
+        .value("Stable", StabilityClass::Stable)
+        .value("Slow", StabilityClass::Slow)
+        .value("Volatile", StabilityClass::Volatile);
+    py::enum_<AnchorMode>(m, "AnchorMode")
+        .value("Replace", AnchorMode::Replace)
+        .value("KeepInPlace", AnchorMode::KeepInPlace);
+    py::enum_<ContextBreakReason>(m, "ContextBreakReason")
+        .value("Compaction", ContextBreakReason::Compaction)
+        .value("StableChange", ContextBreakReason::StableChange)
+        .value("LayoutChange", ContextBreakReason::LayoutChange)
+        .value("AnchorDrop", ContextBreakReason::AnchorDrop)
+        .value("OrderChange", ContextBreakReason::OrderChange)
+        .value("Explicit", ContextBreakReason::Explicit);
+    py::enum_<ContextPrefixClaim>(m, "ContextPrefixClaim")
+        .value("Extends", ContextPrefixClaim::Extends)
+        .value("Breaks", ContextPrefixClaim::Breaks);
+    py::enum_<ContextStabilityRefusal>(m, "ContextStabilityRefusal")
+        .value("VolatileSystemArtifact", ContextStabilityRefusal::VolatileSystemArtifact)
+        .value("PredecessorUnavailable", ContextStabilityRefusal::PredecessorUnavailable)
+        .value("PredecessorOrderUnknown", ContextStabilityRefusal::PredecessorOrderUnknown)
+        .value("ArtifactsMismatch", ContextStabilityRefusal::ArtifactsMismatch)
+        .value("RawWindowMoved", ContextStabilityRefusal::RawWindowMoved)
+        .value("RawWindowNotGrown", ContextStabilityRefusal::RawWindowNotGrown)
+        .value("StablePrefixChanged", ContextStabilityRefusal::StablePrefixChanged)
+        .value("AnchorDropped", ContextStabilityRefusal::AnchorDropped)
+        .value("AnchorOutOfRange", ContextStabilityRefusal::AnchorOutOfRange);
     py::enum_<ContextStoreAppendResult>(m, "ContextStoreAppendResult")
         .value("Appended", ContextStoreAppendResult::Appended)
         .value("AlreadyPresent", ContextStoreAppendResult::AlreadyPresent)
@@ -143,6 +171,8 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("covers_from_sequence", &ContextArtifactData::covers_from_sequence).def_readwrite("covers_through_sequence", &ContextArtifactData::covers_through_sequence)
         .def_readwrite("media_type", &ContextArtifactData::media_type).def_readwrite("placement", &ContextArtifactData::placement)
         .def_readwrite("priority", &ContextArtifactData::priority).def_readwrite("required", &ContextArtifactData::required)
+        .def_readwrite("stability_class", &ContextArtifactData::stability_class)
+        .def_readwrite("anchor_mode", &ContextArtifactData::anchor_mode)
         .def_property("content", [](const ContextArtifactData& v) { return json_to_py(v.content); }, [](ContextArtifactData& v, py::object x) { v.content = py_to_json(x); });
     py::class_<ContextArtifact> artifact(m, "ContextArtifact");
     artifact.def_static("create", &ContextArtifact::create).def_static("parse", &ContextArtifact::parse)
@@ -156,6 +186,10 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("priority", &ContextArtifact::priority)
         .def_property_readonly("required", &ContextArtifact::required)
         .def_property_readonly("content_digest", &ContextArtifact::content_digest)
+        .def_property_readonly("stability_class", &ContextArtifact::stability_class)
+        .def_property_readonly("declared_stability_class", &ContextArtifact::declared_stability_class)
+        .def_property_readonly("anchor_mode", &ContextArtifact::anchor_mode)
+        .def_property_readonly("declared_anchor_mode", &ContextArtifact::declared_anchor_mode)
         .def_property_readonly("content", [](const ContextArtifact& v) { return json_to_py(v.content()); });
     bind_identity_methods(artifact);
 
@@ -164,7 +198,10 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("predecessor_id", &ContextEpochData::predecessor_id).def_readwrite("feed_id", &ContextEpochData::feed_id)
         .def_readwrite("raw_from_sequence", &ContextEpochData::raw_from_sequence).def_readwrite("raw_through_sequence", &ContextEpochData::raw_through_sequence)
         .def_readwrite("raw_window_digest", &ContextEpochData::raw_window_digest).def_readwrite("artifact_ids", &ContextEpochData::artifact_ids)
-        .def_readwrite("guarantee_profile", &ContextEpochData::guarantee_profile);
+        .def_readwrite("guarantee_profile", &ContextEpochData::guarantee_profile)
+        .def_readwrite("ordered_artifact_ids", &ContextEpochData::ordered_artifact_ids)
+        .def_readwrite("prefix_claim", &ContextEpochData::prefix_claim)
+        .def_readwrite("break_reason", &ContextEpochData::break_reason);
     py::class_<ContextEpoch> epoch(m, "ContextEpoch");
     epoch.def_static("create", &ContextEpoch::create).def_static("parse", &ContextEpoch::parse)
         .def_property_readonly("run_id", &ContextEpoch::run_id).def_property_readonly("sequence", &ContextEpoch::sequence)
@@ -174,8 +211,20 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("raw_through_sequence", &ContextEpoch::raw_through_sequence)
         .def_property_readonly("raw_window_digest", &ContextEpoch::raw_window_digest)
         .def_property_readonly("artifact_ids", &ContextEpoch::artifact_ids)
-        .def_property_readonly("guarantee_profile", &ContextEpoch::guarantee_profile);
+        .def_property_readonly("guarantee_profile", &ContextEpoch::guarantee_profile)
+        .def_property_readonly("ordered_artifact_ids", &ContextEpoch::ordered_artifact_ids)
+        .def_property_readonly("prefix_claim", &ContextEpoch::prefix_claim)
+        .def_property_readonly("break_reason", &ContextEpoch::break_reason);
     bind_identity_methods(epoch);
+
+    py::class_<ContextPrefixBoundary>(m, "ContextPrefixBoundary")
+        .def(py::init<>())
+        .def(py::init([](std::uint64_t message_index, std::uint64_t part_index) {
+            return ContextPrefixBoundary{message_index, part_index};
+        }), py::arg("message_index"), py::arg("part_index"))
+        .def_readwrite("message_index", &ContextPrefixBoundary::message_index)
+        .def_readwrite("part_index", &ContextPrefixBoundary::part_index)
+        .def("__eq__", [](const ContextPrefixBoundary& a, const ContextPrefixBoundary& b) { return a == b; });
 
     py::class_<ContextAssemblyReceiptData>(m, "ContextAssemblyReceiptData")
         .def(py::init<>()).def_readwrite("context_epoch_id", &ContextAssemblyReceiptData::context_epoch_id)
@@ -186,7 +235,15 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("raw_from_sequence", &ContextAssemblyReceiptData::raw_from_sequence)
         .def_readwrite("raw_through_sequence", &ContextAssemblyReceiptData::raw_through_sequence)
         .def_readwrite("estimated_input_tokens", &ContextAssemblyReceiptData::estimated_input_tokens)
-        .def_readwrite("mandatory_input_tokens", &ContextAssemblyReceiptData::mandatory_input_tokens);
+        .def_readwrite("mandatory_input_tokens", &ContextAssemblyReceiptData::mandatory_input_tokens)
+        .def_readwrite("assembled_artifact_ids", &ContextAssemblyReceiptData::assembled_artifact_ids)
+        .def_readwrite("artifact_classes", &ContextAssemblyReceiptData::artifact_classes)
+        .def_readwrite("encoder_family", &ContextAssemblyReceiptData::encoder_family)
+        .def_readwrite("stable_boundary", &ContextAssemblyReceiptData::stable_boundary)
+        .def_readwrite("prefix_boundary", &ContextAssemblyReceiptData::prefix_boundary)
+        .def_readwrite("prefix_digest", &ContextAssemblyReceiptData::prefix_digest)
+        .def_readwrite("tools_digest", &ContextAssemblyReceiptData::tools_digest)
+        .def_readwrite("break_reason", &ContextAssemblyReceiptData::break_reason);
     py::class_<ContextAssemblyReceipt> receipt(m, "ContextAssemblyReceipt");
     receipt.def_static("create", &ContextAssemblyReceipt::create).def_static("parse", &ContextAssemblyReceipt::parse)
         .def_property_readonly("context_epoch_id", &ContextAssemblyReceipt::context_epoch_id)
@@ -197,8 +254,52 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("raw_from_sequence", &ContextAssemblyReceipt::raw_from_sequence)
         .def_property_readonly("raw_through_sequence", &ContextAssemblyReceipt::raw_through_sequence)
         .def_property_readonly("estimated_input_tokens", &ContextAssemblyReceipt::estimated_input_tokens)
-        .def_property_readonly("mandatory_input_tokens", &ContextAssemblyReceipt::mandatory_input_tokens);
+        .def_property_readonly("mandatory_input_tokens", &ContextAssemblyReceipt::mandatory_input_tokens)
+        .def_property_readonly("assembled_artifact_ids", &ContextAssemblyReceipt::assembled_artifact_ids)
+        .def_property_readonly("artifact_classes", &ContextAssemblyReceipt::artifact_classes)
+        .def_property_readonly("encoder_family", &ContextAssemblyReceipt::encoder_family)
+        .def_property_readonly("stable_boundary", &ContextAssemblyReceipt::stable_boundary)
+        .def_property_readonly("prefix_boundary", &ContextAssemblyReceipt::prefix_boundary)
+        .def_property_readonly("prefix_digest", &ContextAssemblyReceipt::prefix_digest)
+        .def_property_readonly("tools_digest", &ContextAssemblyReceipt::tools_digest)
+        .def_property_readonly("break_reason", &ContextAssemblyReceipt::break_reason);
     bind_identity_methods(receipt);
+
+    m.attr("COMPACTION_PRODUCER_ID") = std::string(COMPACTION_PRODUCER_ID);
+    m.def("derive_stability_class", &derive_stability_class,
+          py::arg("kind"), py::arg("producer_id"),
+          "The class of an artifact that declares none: Stable for a required skill or hard "
+          "constraint, Slow for a compaction summary, Volatile for everything else.");
+    // Registered after pybind11's plain translators, so it is tried first and the Python
+    // exception keeps the typed refusal as `code`.
+    py::register_exception<ContextStabilityError>(m, "ContextStabilityError", PyExc_ValueError);
+    py::register_exception_translator([](std::exception_ptr pointer) {
+        if (!pointer) return;
+        try {
+            std::rethrow_exception(pointer);
+        } catch (const ContextStabilityError& error) {
+            try {
+                py::object type = py::module_::import("neograph_engine._neograph")
+                                      .attr("ContextStabilityError");
+                py::object instance = type(py::str(error.what()));
+                instance.attr("code") = py::cast(error.code());
+                PyErr_SetObject(type.ptr(), instance.ptr());
+            } catch (py::error_already_set& failure) {
+                failure.restore();
+            }
+        }
+    });
+    m.def("verify_context_epoch_claim",
+          [](const ContextEpoch& epoch, const std::vector<ContextArtifact>& artifacts,
+             const std::optional<ContextEpoch>& predecessor,
+             const std::vector<ContextArtifact>& predecessor_artifacts) {
+              verify_context_epoch_claim(epoch, artifacts, predecessor ? &*predecessor : nullptr,
+                                         predecessor_artifacts);
+          },
+          py::arg("epoch"), py::arg("artifacts"), py::arg("predecessor") = py::none(),
+          py::arg("predecessor_artifacts") = std::vector<ContextArtifact>{},
+          "Check an epoch's claim to extend its predecessor's request prefix; raises "
+          "ContextStabilityError when it does not hold.");
 
     py::class_<ContextStoreFeed>(m, "ContextStoreFeed").def(py::init<>())
         .def(py::init<std::string, std::string>(), py::arg("owner_id"), py::arg("feed_id"))
@@ -362,7 +463,11 @@ void init_runtime_context(py::module_& m) {
         .def(py::init<std::shared_ptr<Provider>, std::shared_ptr<ContextStore>, std::shared_ptr<ProviderDispatchReceiptStore>, std::string, std::uint64_t, std::vector<std::string>>(),
               py::arg("provider"), py::arg("context_store"), py::arg("dispatch_store"), py::arg("provider_binding_identity"), py::arg("max_input_tokens") = 0, py::arg("static_required_skill_artifact_ids") = std::vector<std::string>{},
              py::keep_alive<1, 2>(), py::keep_alive<1, 3>(), py::keep_alive<1, 4>())
-        .def("activate", &RuntimeInterpositionController::activate).def("clear", &RuntimeInterpositionController::clear)
+        .def("activate", [](RuntimeInterpositionController& self, std::string owner_id, ContextEpoch epoch,
+                            std::optional<ContextEpoch> predecessor) {
+            self.activate(std::move(owner_id), std::move(epoch), std::move(predecessor));
+        }, py::arg("owner_id"), py::arg("epoch"), py::arg("predecessor") = py::none())
+        .def("clear", &RuntimeInterpositionController::clear)
         .def_property_readonly("active", &RuntimeInterpositionController::active)
         .def("set_hook_runtime", &RuntimeInterpositionController::set_hook_runtime,
              py::arg("runtime"), py::keep_alive<1, 2>())
@@ -394,7 +499,10 @@ void init_runtime_context(py::module_& m) {
         py::arg("required_skill_artifact_ids") = std::vector<std::string>{},
         py::keep_alive<1, 2>(), py::keep_alive<1, 3>(),
         py::keep_alive<1, 4>(), py::keep_alive<1, 5>())
-        .def("activate", &StrictRuntimeProfile::activate)
+        .def("activate", [](StrictRuntimeProfile& self, std::string owner_id, ContextEpoch epoch,
+                            std::optional<ContextEpoch> predecessor) {
+            self.activate(std::move(owner_id), std::move(epoch), std::move(predecessor));
+        }, py::arg("owner_id"), py::arg("epoch"), py::arg("predecessor") = py::none())
         .def("clear", &StrictRuntimeProfile::clear)
         .def_property_readonly("active", &StrictRuntimeProfile::active)
         .def("attach", &StrictRuntimeProfile::attach, py::arg("engine"),

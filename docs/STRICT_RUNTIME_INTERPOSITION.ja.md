@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=4f67e53baad10b4739eb2f462ac5cce18e493494d091ff6e1eb5690f2fc395db -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=5f8e6ab72d08c418bed91bd429a171ccecb655a519d3818748d0fab7a20ea18e -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -187,6 +187,16 @@ trusted supplemental input
 - `openai.chat` と `openai.responses` では、Systemメッセージは、配置が決めた場所にそのまま残ります。
 
 リクエストの先頭を安定させたいときは、System役割のアーティファクトのテキストを、ターンの間で変えないでください。ここまでは現在のアセンブリの説明です。デフォルトとファミリーごとの規則は見直し中で、変わるとアセンブルされるバイト列が変わります。
+
+## 安定性クラス、順序、プレフィックス宣言
+
+プロバイダーのプロンプトキャッシュがリクエストの先頭を保てるかどうかは、呼び出しの間にどのアーティファクトが変わらないかに左右されます。データモデルはそれを記録します。アセンブラはまだこれを使わないので、組み立てられるリクエストは「アーティファクトの配置」で説明したとおりです。
+
+- アーティファクトは `StabilityClass` を宣言できます。`Stable`（実行の間ずっと同じバイト列）、`Slow`（圧縮など、宣言されたプレフィックスの断絶のときだけ変わる）、`Volatile`（呼び出しごとに変わりうる）です。宣言しないアーティファクトは、読み込むときにクラスが決まります。`RequiredSkill` と `HardConstraint` は `Stable`、プロデューサーが `COMPACTION_PRODUCER_ID` の `DerivedContext` は `Slow`、それ以外はすべて `Volatile` です。System メッセージとして描画される種類の `Volatile` なアーティファクトを作ると、`ContextStabilityError` で拒否されます。
+- アーティファクトは `AnchorMode` を宣言できます。`Replace`（既定）または `KeepInPlace` です。これを使うものはまだありません。
+- エポックは、アーティファクトを固定された順序で並べた `ordered_artifact_ids` と `prefix_claim` を記録できます。`prefix_claim` は、`Extends`（リクエストの先頭は直前のエポックのものと同じで、末尾でだけ伸びる）か、`break_reason` を伴う `Breaks` です。`Extends` を宣言したエポックをアクティブにすると、アクティブなエポック、またはホストが `activate` に渡した直前のエポックに対して宣言が検査されます。条件は、同じ `raw_from_sequence`、より大きい `raw_through_sequence`、同じ順序の同じ `Stable` と `Slow` のアーティファクト、そしてまだ選択されていて RAW ウィンドウ内にある `KeepInPlace` のアーティファクトです。順序を記録していないエポック（このフィールドができる前に保存されたものなど）は、引き継げません。
+- アセンブラが書くレシートは、プロンプトの順序でのアーティファクト、そのクラス、エンコーダーのファミリー、ツールのダイジェスト、エポックの断絶の理由を記録します。
+
 
 ## 実行時のデベロッパー指示
 

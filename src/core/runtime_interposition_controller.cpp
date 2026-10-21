@@ -182,10 +182,43 @@ RuntimeInterpositionController::RuntimeInterpositionController(RuntimeInterposit
 RuntimeInterpositionController& RuntimeInterpositionController::operator=(RuntimeInterpositionController&&) noexcept = default;
 
 void RuntimeInterpositionController::activate(std::string owner_id, ContextEpoch epoch) {
+    activate(std::move(owner_id), std::move(epoch), std::nullopt);
+}
+
+void RuntimeInterpositionController::activate(
+    std::string owner_id, ContextEpoch epoch, std::optional<ContextEpoch> predecessor) {
     if (owner_id.empty()) throw std::invalid_argument("Runtime interposition owner_id must not be empty");
     if (epoch.guarantee_profile() == RuntimeGuaranteeProfile::Strict &&
         dynamic_cast<DurableProviderDispatchReceiptStore*>(impl_->receipts.get()) == nullptr) {
         throw std::invalid_argument("Strict provider dispatch requires a durable dispatch receipt store");
+    }
+    if (epoch.prefix_claim() == ContextPrefixClaim::Extends) {
+        if (!predecessor) {
+            std::lock_guard lock(impl_->mutex);
+            if (impl_->epoch && impl_->owner_id == owner_id && epoch.predecessor_id() &&
+                impl_->epoch->id() == *epoch.predecessor_id()) {
+                predecessor = impl_->epoch;
+            }
+        }
+        const auto load = [&](const ContextEpoch& source) {
+            std::vector<ContextArtifact> artifacts;
+            artifacts.reserve(source.artifact_ids().size());
+            for (const auto& id : source.artifact_ids()) {
+                auto artifact = impl_->store->get_artifact(owner_id, id);
+                if (!artifact) {
+                    throw ContextStabilityError(
+                        ContextStabilityRefusal::ArtifactsMismatch,
+                        "Context epoch artifact is not available to this owner");
+                }
+                artifacts.push_back(std::move(*artifact));
+            }
+            return artifacts;
+        };
+        if (predecessor) {
+            verify_context_epoch_claim(epoch, load(epoch), &*predecessor, load(*predecessor));
+        } else {
+            verify_context_epoch_claim(epoch, {}, nullptr, {});
+        }
     }
     std::lock_guard lock(impl_->mutex);
     impl_->owner_id = std::move(owner_id);

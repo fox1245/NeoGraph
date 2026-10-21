@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,7 +64,11 @@ class NEOGRAPH_API StrictRuntimeProfile final {
 public:
     explicit StrictRuntimeProfile(StrictRuntimeProfileConfig config);
 
+    /** See RuntimeInterpositionController::activate: an epoch that claims to extend its
+     *  predecessor is verified against the given predecessor or the active epoch. */
     void activate(std::string owner_id, ContextEpoch epoch);
+    void activate(std::string owner_id, ContextEpoch epoch,
+                  std::optional<ContextEpoch> predecessor);
     void clear() noexcept;
     bool active() const noexcept;
 

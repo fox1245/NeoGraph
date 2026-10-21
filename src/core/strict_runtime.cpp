@@ -30,11 +30,16 @@ StrictRuntimeProfile::StrictRuntimeProfile(StrictRuntimeProfileConfig config)
 }
 
 void StrictRuntimeProfile::activate(std::string owner_id, ContextEpoch epoch) {
+    activate(std::move(owner_id), std::move(epoch), std::nullopt);
+}
+
+void StrictRuntimeProfile::activate(std::string owner_id, ContextEpoch epoch,
+                                    std::optional<ContextEpoch> predecessor) {
     if (epoch.guarantee_profile() != RuntimeGuaranteeProfile::Strict) {
         throw std::invalid_argument(
             "Strict runtime accepts only a Strict ContextEpoch");
     }
-    interposition_->activate(std::move(owner_id), std::move(epoch));
+    interposition_->activate(std::move(owner_id), std::move(epoch), std::move(predecessor));
 }
 
 void StrictRuntimeProfile::clear() noexcept { interposition_->clear(); }
