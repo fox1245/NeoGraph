@@ -799,10 +799,14 @@ set_tests_properties(ci_ab_gates_selftest PROPERTIES LABELS "hygiene" TIMEOUT 12
 
 # The cross-framework benchmark tooling: the cell-validity rule of benchmarks/compare, the driver's handling of a
 # failed cell, and the generator (scripts/render_bench_report.py) that renders every table and chart of
-# benchmarks/README.md from a checked-in record.
+# benchmarks/README.md from a checked-in record. bench_report_current fails when a rendered document or chart no
+# longer matches the record that benchmarks/records/CURRENT (and CURRENT_DR_COMPARE) names.
 add_test(NAME bench_compare_selftest
     COMMAND Python3::Interpreter ${CMAKE_CURRENT_SOURCE_DIR}/test_bench_compare.py)
-set_tests_properties(bench_compare_selftest PROPERTIES LABELS "hygiene" TIMEOUT 120)
+add_test(NAME bench_report_current
+    COMMAND Python3::Interpreter ${PROJECT_SOURCE_DIR}/scripts/render_bench_report.py --check
+        --docs benchmarks/README benchmarks/concurrent/CONCURRENT benchmarks/dr_compare/README)
+set_tests_properties(bench_compare_selftest bench_report_current PROPERTIES LABELS "hygiene" TIMEOUT 120)
 
 # Engine code waits on async::HostTimer (src/core/host_timer.h), never on a raw Asio timer: a HostLoop cannot see Asio's
 # timer queue, so a timer that it was not told about never fires on a WebAssembly host (#567). The scan covers src/ and

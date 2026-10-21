@@ -5,8 +5,10 @@ text content of the messages, and the summarizer counts the worker messages it r
 node count run (`seq`: three agents; `par`: a dispatcher, five workers and a summarizer). AutoGen's runtime is
 `SingleThreadedAgentRuntime` on one event loop; it has no thread-pool regime.
 
-A `GraphFlow` is built once, outside the timed region, and reused: `await flow.reset()` before every run is
-required to clear the manager's message thread, so the reset belongs to the timed call.
+A `GraphFlow` is built once, outside the timed region, and reused. `await flow.reset()` runs before every run, as
+AutoGen's team documentation does before a new task; it clears the manager's message thread, and it belongs to the
+timed call. A repeated run without it also returns the right answer (autogen-agentchat 0.7.5: the graph resets its
+own execution state when it completes), and is not timed here.
 
 Variants:
 

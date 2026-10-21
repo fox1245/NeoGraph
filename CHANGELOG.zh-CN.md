@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=948c20da5544a9fc544c652e81c54682b7569914a7e1193754793da317f94abe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9b7f8d6b006e19ca2a68d6d2bbc6b15a88ab43c634812248c986d233eb92fa76 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -66,6 +66,13 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **测试。** 三个一致性测试套件（`ProgramTransitionStoreConformance`、`ProgramStoreConformance` 和图迁移胶囊一行）在两种形式下运行每个后端：`Direct` 调用同步存储自己的操作，`Awaited` 调用 awaitable 操作。前两个套件各有一个用例在协程中 await 这些操作。`tests/test_program_store_awaitable.cpp` 覆盖存储契约：内联存储不挂起即完成，交给线程池的存储在等待协程自己的 executor 上恢复它，阻塞视图会等待在定时器上或在另一个线程上完成的存储，而拒绝的策略绝不触及存储。`tests/test_program_runtime_executor.cpp` 在交给线程池的转换存储之上运行 Program，并展示等待存储调用的运行会让出自己的 executor 供另一个运行使用；稍后才完成的存储在由宿主循环运行 Program 的地方会被拒绝，而在使用自带线程池的运行时中可以使用。wasm32 检查在宿主回合中通过 awaitable 存储读回一次运行。PostgreSQL 用例在所有环境中都会构建，并在设置了 `NEOGRAPH_TEST_POSTGRES_URL` 的环境中运行。
 
 ### 变更
+- **跨框架基准表现在是同一批测量（cohort），由脚本根据已入库的记录渲染。** `benchmarks/README.md` 不再包含手工输入的表格或写死数值的图表。
+  - **一个会话、一台机器、交错轮次。** NeoGraph（`origin/master` 提交，分别采用默认加固 Release 构建和作为引擎上限的未加固构建）与五个 Python 框架（各默认分支的最新提交，按确切提交从 git 安装；匹配单元另加最新发布版）在一台安静的 Arm 机器上，以打乱的轮次、每个单元一个全新进程运行。`benchmarks/records/` 中的记录包含原始样本和来源信息：提交、编译器与标志、CPU、内核、软件包版本、平均负载以及脚本的 sha256。`scripts/render_bench_report.py` 据此以四种语言生成表格和图表，文档与记录不一致时 `bench_report_current` 会失败。
+  - **只在匹配的运行方式之间给出比值。** `worker_count=1` 的 NeoGraph 与各框架使用 `async def` 节点的协程路径比较，`set_worker_count_auto()` 与各线程池路径（LangGraph 的 `invoke`、使用同步组件的 Haystack `run_async`）比较。pydantic-graph 和 AutoGen 没有线程池路径，LlamaIndex 的路径（在事件循环默认执行器上运行的普通 `def` 步骤）未计时，三者都标为“不适用”。各框架文档最先展示的 API 单独报告，只给绝对时间、不形成比值。NeoGraph 的两种 worker 模式并列展示，因此不发布单一的“快 N 倍”数字。
+  - **新增表格。** 含空运行时基线、相对空闲的增量和每个在途运行的边际内存的整进程内存；冷启动；NeoGraph 二进制文件、库和 WebAssembly 模块的体积以及各框架的安装体积（标注为不同的部署单位）；以及探针（LlamaIndex 实例复用、LangGraph 扇出所用的线程、pydantic-graph 的扇出是否真实、加固的开销，以及此前两个 pydantic-graph 数值为何不一致）。
+  - **2026-04 的表格归入历史。** 它们连同对现已确认无效之处（混用会话、与内联派发相比的线程池、旧版 pydantic-graph API、每次迭代都重建的 LlamaIndex 实例、不同类进程的整进程内存）的说明，移到了 `benchmarks/history/`。
+- **撤回：突发测试指南中的 P50、P99 两列和延迟图表、LlamaIndex 多进程各行、多进程内存数值。** 百分位数混用了服务时间与系统内停留时间，LlamaIndex 测试工具在事件循环之外创建 handler 因而每次调用都失败，内存只统计了父进程。墙钟时间一列保留，并标注为封闭的单次突发；用修正后的工具重新测量尚未进行。`dr_compare` 的 FANOUT=50 对比因线程池不匹配而撤回其作为引擎对比的结论，并在对齐宽度后重新测量。
+- **`dr_compare` 对齐两个运行器的线程池宽度。** `LG_MAX_CONCURRENCY`（默认值为 NeoGraph 的 worker 数）决定 LangGraph 的线程池宽度，运行器拒绝宽度不一致的运行，`session.py` 运行模拟模型矩阵并写出记录。LangGraph 的运行器是同步的 `invoke`，此前被称为 asyncio。
 - **提供方调用的 identity 标识的是请求所问的内容，而不是批准该请求的 SchemaProvider 策略 (#543)。** Program 提供方调用 journal 以 `Provider::request_digest` 标识调用，而这个摘要包含 SchemaProvider descriptor 策略的 identity。因此，内容相同的请求只要策略 identity 不同，就成了另一次调用：恢复或崩溃恢复会遇到逻辑调用绑定冲突，fork 则不会沿用来源运行的调用而是重新发送，已付费的调用于是被付费两次。interface 7 改变了所有策略 identity，0.16.0 就是这样遇到这个问题的。现在 journal 把请求内容和策略 identity 分开保存。
   - **请求内容。** `Provider::request_content_digest(prepared)` 涵盖 family、模型、模式和 origin；端点调用还有它的端点、方法和 URL，上传还有它的元数据和所发送字节的摘要 (#541)；以及编码后的请求体。请求体中有消息（包括 NeoGraph 提供的 prompt 文本）、工具和选项。请求体会被规范化，descriptor 为模型、消息、流式标志和输出上限所指定的成员名按角色单独放置，所以策略即使改了其中一个名字，内容也不会变。策略的 identity、descriptor 的路由和请求头、重试策略以及 observer 上限都不属于请求内容。`Provider::request_policy_identity(prepared)` 返回策略 identity，`Provider::request_digest` 保持不变。SchemaProvider 没有带类型请求的规范形式；在 NeoGraph 里自己写一个，就得跟进每种请求类型的每个字段，漏掉一个字段，两个请求就会共用同一次调用。所以编码后的请求体就是内容，SDK 如果把同一个请求编码得不一样，就算作不同的内容，结果是安全失败（fail closed）。
   - **journal 的行。** 行会在内容旁边记录策略 identity。它有新列 `identity_version`、`content_digest`、`policy_identity` 和 `producer`（编码该请求的 NeoGraph 构建），行的 `request_digest` 同时标识内容和策略。`SQLiteProgramProviderCallJournal::Record` 也新增了这四个成员，`policy_changes()` 列出为某次调用记下的变化（表 `ng_program_provider_call_policy_changes`）。本版本写入的行，0.16.0 无法匹配，所以降级会遇到绑定冲突。
@@ -889,7 +896,7 @@ CI 未将这些目标作为 add_executables 处理，或（Docker 构建依赖�
     | autogen         | mp-pool-8     | 22428   | 82361       | 49.1    | 10000/0 |
     | llamaindex      | asyncio       | 26303   | 25912204    | 582.7   | 10000/0 |
 
-NG 与 LangGraph（营销对比轴）：wall **快 237 倍**，p99 **快 4134 倍**，峰值 RSS **仅为 1/12**。
+NG 与 LangGraph（营销对比轴）：wall **快 237 倍**，p99 **快 4134 倍**，峰值 RSS **仅为 1/12**。 已撤回：p99 比较的是 NeoGraph 工作线程内的服务时间与 Python 各行的系统内停留时间，而 LangGraph 多进程的内存只统计了父进程；见 [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)。
 
 **严苛场景**（并发数=10000，1 核 CPU / 512 MiB）：
     - NG: 8 ms / 5.2 MB / 0 err / **ok**
@@ -1295,8 +1302,9 @@ v1.0 打磨轨道的开篇版本。8 个虚拟 `GraphNode` 交叉乘积（`execu
 - `par` 引擎开销（5 工作线程 fan-out + 汇总器）：**每次调用约 11.8 µs**。
 - 整个基准测试过程（预热 + 顺序 + 并行迭代）的峰值 RSS：**4.8 MB**。
 - 与 LangGraph 1.1.9 在相同工作负载下的对比：**顺序执行快 131 倍，并行执行快 199 倍**（每次迭代）；RSS 约轻 12 倍。
+- 更正：`par` 数值比较的是 LangGraph 的同步 `invoke`（在每次调用新建的线程池上执行扇出）与 NeoGraph 的内联派发（`worker_count=1`）；2026-04-29 的重新测量（LangGraph 1.1.10 对 `set_worker_count_auto()`）中池对池的比值是 8.1 倍。内存数值比较的是原生进程与包含解释器的 Python 进程。这两个数字都不是当前的结果；匹配比值和内存基线见 [`benchmarks/README.md`](benchmarks/README.md)。
 
-本 CHANGELOG 的先前草稿将“约 46 µs 顺序 / 约 114 µs 并行”列为 3.0 回归。这些数字来自 `CMAKE_BUILD_TYPE` 未设置的构建树，因此基准二进制文件在未启用 `-O3 -DNDEBUG` 的情况下编译。在正确的 Release 构建中，异步对等节点折叠相比 2.0 的 Taskflow 同步路径是**改进**（2.0 README 在同一主机上宣称 20.65 µs 顺序 / 150.7 µs 并行）。修正后的图表见 [`docs/images/bench-engine-overhead.png`](docs/images/bench-engine-overhead.png)。
+本 CHANGELOG 的先前草稿将“约 46 µs 顺序 / 约 114 µs 并行”列为 3.0 回归。这些数字来自 `CMAKE_BUILD_TYPE` 未设置的构建树，因此基准二进制文件在未启用 `-O3 -DNDEBUG` 的情况下编译。在正确的 Release 构建中，异步对等节点折叠相比 2.0 的 Taskflow 同步路径是**改进**（2.0 README 在同一主机上宣称 20.65 µs 顺序 / 150.7 µs 并行）。此条目的图表已替换为由当前基准记录生成的图表，见 [`benchmarks/README.md`](benchmarks/README.md)。
 
 ### 迁移
 

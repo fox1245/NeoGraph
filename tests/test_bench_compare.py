@@ -144,7 +144,8 @@ class DriverCells(unittest.TestCase):
         self.assertEqual(result["first_error"], "boom")
 
     def test_host_paths_are_removed_from_stored_text(self):
-        self.assertEqual(driver.sanitize("see /home/someone/x and /w/y", Path("/w")), "see <home>/x and <work>/y")
+        work = Path("/w")  # str(work) is "\\w" on Windows, so the text is built from it
+        self.assertEqual(driver.sanitize(f"see /home/someone/x and {work}/y", work), "see <home>/x and <work>/y")
 
 
 def synthetic_record():
@@ -255,6 +256,12 @@ class Report(unittest.TestCase):
         agg = report.Agg(record)
         self.assertEqual(agg.stat("fw/head/fast/seq").n, 3)
         self.assertIn("boom", report.block_probes(agg, "en"))
+
+    def test_the_printed_script_hash_does_not_depend_on_line_endings(self):
+        # A checkout with core.autocrlf has CRLF line endings; the hash printed in the documents must not change.
+        self.assertEqual(report.normalized_sha(b"a = 1\r\nb = 2\r\n"), report.normalized_sha(b"a = 1\nb = 2\n"))
+        self.assertNotEqual(report.normalized_sha(b"a = 1\n"), report.normalized_sha(b"a = 2\n"))
+        self.assertEqual(len(report.script_sha()), 16)
 
     def test_a_record_without_provenance_is_refused(self):
         record = synthetic_record()

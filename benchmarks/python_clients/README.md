@@ -33,6 +33,12 @@ This directory compares NeoGraph Python bindings and Python SDK clients against 
 
 The throughput drop at K=16/64 includes interaction with `ThreadingHTTPServer` and the clients. It does not isolate a stdlib ceiling or prove a general asyncio limitation. Nor does the K=4 result establish near-linear scaling: it reports one sampled configuration.
 
+## What the numbers include
+
+* **The mock peer is part of every number.** Both clients talk to a Python `ThreadingHTTPServer` in the same process. It speaks HTTP/1.0 (the `http.server` default), so every request is a new TCP connection and a new server thread, and the server shares the interpreter and the GIL with the clients. That cost is paid by both clients, is not measured separately, and dilutes every ratio: a ratio of the clients' own work would be larger than the ratios above. The rows at K=16 and K=64 describe the mock together with the clients, not client scaling; no scaling law follows from this table.
+* **The a2a-sdk rows use its compatibility transport.** The mock's agent card declares protocol version 0.3.0, so `a2a-sdk` selects its backward-compatibility JSON-RPC transport, which converts each request and reply between its 1.0 types and the 0.3 types. Its native 1.0 transport is not exercised, and the NeoGraph client also speaks the 0.3 dialect for that card. A peer that served a 1.0 card would not trigger the conversion.
+* **Closed loop, one connection per request.** Each client sends its next request when the previous one has returned, over a new connection, so the figures are service times at a fixed concurrency, not the behaviour of keep-alive HTTPS connections.
+
 ## Current API and dependencies
 
 The current OpenAI comparison constructs `SchemaProvider` from an admitted HTTP Chat descriptor and runtime options, then uses `make_provider_request` and `invoke`. It consumes authentic typed owned outcomes and checks failure/completion and visible text. `OpenAIProvider`, `CompletionParams`, and `complete()` are removed APIs. The request model is explicit; controls use typed factory defaults unless supplied. They are not legacy provider constructor defaults.

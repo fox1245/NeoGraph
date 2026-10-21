@@ -1,152 +1,324 @@
-<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=ad94d181c2cac62338e50b62f279053c11de72ffdeba6dec2249f4e3ee7fef7d -->
+<!-- neograph-i18n: source=benchmarks/README.md locale=ja source_sha256=bbfba1a87c6a9a4f4f7c7a732df64ce07c6ddacc41c9b8ac7024042f05a40fba -->
 # NeoGraphとPythonのグラフ／パイプラインフレームワークの比較 — エンジンのオーバーヘッドベンチマーク
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-I/O、スリープ、モデル呼び出しのない小さな同等のワークロードで、NeoGraphとPythonのオーケストレーションフレームワークについて、1回の呼び出しあたりのエンジンのオーバーヘッドを測定します。測定の対象は、ノードのディスパッチ、ステートチャネルへの書き込み、リデューサーの呼び出しです。
-日付付きの表に載っているエンジンのラベルと依存バージョンは、当時のものです。現在のパッケージのバージョンを示すものではありません。
+I/O、スリープ、モデル呼び出し、永続的なチェックポイントのない 2 つの小さなワークロードで、NeoGraphと
+Pythonのオーケストレーションフレームワーク 5 つについて、1 回の実行あたりのエンジンのオーバーヘッドを測定し、
+それぞれのメモリ、起動時間、サイズも併せて測定します。測定の対象は、ノードのディスパッチ、ステートチャネルへの書き込み、
+リデューサーの呼び出しです。
+
+このページのすべての表とチャートは、チェックイン済みの 1 つの記録（[`records/CURRENT`](records/CURRENT) が指すファイル）から
+`scripts/render_bench_report.py` が生成します。記録には、各セルの生のサンプルと、セッションの来歴（コミット、コンパイラとフラグ、
+CPU、カーネル、パッケージのバージョン、ロードアベレージ、スクリプトの sha256）が含まれます。表が記録と食い違うとテストが失敗します。
+別々のセッションでバージョンを混ぜて測定した以前の表は、現在では無効と分かっている項目の注記とともに
+[2026-04 の履歴](history/engine-overhead-2026-04.md)に残してあり、このページの表とは比較できません。
 現在のNeoGraph `0.16.0` のレシピには、alpha SDK `0.4.0`（インターフェースのリビジョンと共有世代は7）と、それに合ったヘッダーおよびライブラリーが必要です。
 
 Programのadmission、JavaScriptによる制御、SQLite／PostgreSQLのランタイムのコストについては、[Programのコストの測定](../docs/PROGRAM_COST_MEASUREMENT.md)を参照してください。
 そちらのマトリクスにはジャーナルとチェックポイントの処理が含まれているので、下のチェックポイントなしのCoreの比較と並べて示してはいけません。
 
-比較したフレームワークは、次のとおりです。
+## コホート
 
-| フレームワーク | バージョン | 抽象化 |
-|-----------|---------|-------------|
-| NeoGraph | 3.0 | ステートチャネル型のグラフ、C++20コルーチン＋asio |
-| LangGraph | 1.1.9 | ステートチャネル型のグラフ（Python） |
-| Haystack | 2.27 | 型付きソケットを持つコンポーネントのパイプライン |
-| pydantic-graph | 1.84 | 次のノードが1つに決まるステートマシン |
-| LlamaIndex Workflow | 0.14 | イベント駆動の非同期ワークフロー |
-| AutoGen GraphFlow | 0.7.5 | メッセージパッシング型のマルチエージェントグラフ |
+NeoGraphと 5 つのフレームワークは、1 台のマシンで 1 回のセッションの中でインストール、ビルド、測定しました。**HEAD** は
+フレームワークの既定ブランチの先頭を、表に示すコミットで git からインストールしたもの、**release** は当時の最新の PyPI リリースです。
+release のビルドは対応セルだけを実行するので、HEAD とリリースに差があるかどうかを読み取れます。HEAD のビルドが
+インストールまたはインポートに失敗した場合は、リリースで代用し、表にその旨を記します。NeoGraphは、表に示す `origin/master` の
+コミットを、ハードニングのフラグを含む既定の Release 構成でビルドしたものです（[エンジン上限](#engine-ceiling-and-the-hardening-delta)を参照）。
+
+<!-- bench-record:begin cohort -->
+| フレームワーク | 最新リリース | HEAD（コミット、日付、バージョン） |
+| :--- | :--- | :--- |
+| LangGraph | langgraph 1.2.16, langchain-core 1.6.12 | langgraph 1.2.16, langchain-core 1.6.12; `langchain@e6d83ef` (2026-10-20), `langgraph@3cd57c0` (2026-10-21) |
+| Haystack | haystack-ai 3.4.0 | haystack-ai 3.5.0-rc0; `haystack@276746c` (2026-10-21) |
+| pydantic-graph | pydantic-graph 2.59.0 | pydantic-graph 2.59.1.dev4+e0ccafa8a; `pydantic-ai@e0ccafa` (2026-10-21) |
+| LlamaIndex Workflow | llama-index-core 0.14.25, llama-index-workflows 2.26.0 | llama-index-core 0.14.25, llama-index-workflows 2.26.0; `llama_index@619d746` (2026-10-14), `workflows-py@f3528e8` (2026-10-21) |
+| AutoGen GraphFlow | autogen-agentchat 0.7.5, autogen-core 0.7.5 | autogen-agentchat 0.7.5, autogen-core 0.7.5; `autogen@004749e` (2026-10-16) |
+
+ホスト: ARM Neoverse-N1、4 コア、カーネル 6.17.0-1018-oracle、Python 3.12.3、NeoGraph のビルドに使ったコンパイラ g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; CPU ガバナー: ホストが公開していない。
+
+セッション: 2026-10-21T13:24:06Z ～ 2026-10-21T13:59:49Z UTC; 1 分間のロードアベレージは、最初のフェーズの開始時（アイドルになるのを待った後）が 0.26、終了時が 0.97（セッション自身のプロセスを含む）; インターリーブラウンド 12 回; 記録 `2026-10-21-compare-arm-neoverse-n1.json`。
+
+NeoGraph エンジン: コミット `db0fc651e2c9`; ハーネスツリー: コミット `10d6c77a7d42`。ハーネスのコミットはセッションの実行元のローカルコミットで、このリポジトリの履歴に存在しない場合があります。記録は編集せず、記録にはハーネスの各スクリプトの sha256 が入っていて、ファイルを特定できます。このツリーのファイルは、ハッシュされたファイルとバイト単位で一致します。例外は `scripts/render_bench_report.py`（これらの表を生成したバージョンのハッシュは下に示します）と、`benchmarks/compare/` の `port_llamaindex.py`・`port_autogen.py`（それぞれセッション後にコメントを 1 か所修正）です。
+
+表は `scripts/render_bench_report.py`（sha256 `db933a39bedf3733`…）が生成しました。
+<!-- bench-record:end cohort -->
 
 ## ワークロード
 
-6つの実装は、同じ2つのワークロードを移植したものです。可能な場合は1回だけコンパイルし、ホットループで繰り返し呼び出します。ステートとトポロジーを調整した箇所は、下に挙げています。
+すべてのフレームワークが同じ 2 つのワークロードを移植しています。グラフ、パイプライン、ワークフローは計測区間の外で 1 回だけ構築し
+（フレームワークが許す限りインスタンスを再利用します）、計測ループで呼び出します。ステートとトポロジーの調整は以下のとおりです。
 
-| ID | 形状 | ステート |
+| Id | 形 | ステート |
 |----|-------|-------|
-| `seq` | 3ノードのチェーン `a → b → c` | `counter` チャネルが1つ。各ノードが `counter+1` を書き込みます（上書きのリデューサー） |
-| `par` | ワーカー5つにfan-outし、`summarizer` でjoinする | `results: list`（追加のリデューサー）と `count: int`。各ワーカーは自分のインデックスを追加し、summarizerは `len(results)` を書き込みます |
+| `seq` | 3 ノードのチェーン `a → b → c` | 単一の `counter` チャネル、各ノードが `counter+1` を書き込む（overwrite リデューサー） |
+| `par` | 5 ワーカーへのファンアウトのあと `summarizer` で結合 | `results: list`（append リデューサー）と `count: int`；各ワーカーが自分のインデックスを追加し、summarizer が `len(results)` を書き込む |
 
-チェックポイントは、すべてのフレームワークで無効にしています。
+すべての実行を検証します。最終ステートが期待どおり（counter が 3、インデックス 5 つと count が 5）でなければなりません。検証は、
+各サンプルの最後の実行と、時計を止めたあとの追加の 1 回の実行に対して行います。答えが誤っている、実行が失敗した、完了した実行がない、
+のいずれかのセルはエラーセルで、そのタイミングは公開せず、記録にエラーとして残します。
 
-3つの移植では、フレームワークの仕様に合わせてワークロードを調整する必要がありました。
+どのフレームワークにも永続的なチェックポインターは設定していません。AutoGen は実行ごとにメッセージスレッドを蓄積します。
+これはフレームワークの実行ごとのコストです。
 
-* **Haystack** には、追加のリデューサーがありません。そのため、各ワーカーが自分専用の型付きソケットに出力し、summarizerがリストの長さを合計します。1回の実行でディスパッチされるコンポーネントの数は、同じです。
-* **pydantic-graph** は、次のノードが1つに決まるステートマシンで、fan-outできません。そのため、`par` は6ノードの直列チェーン（`w1 → w2 → w3 → w4 → w5 → summ`）で代用しました。結果の表には、この点を注記しています。ネイティブの並列fan-outと同じ条件での比較ではありません。
-* **AutoGen** は、ステートチャネルではなくメッセージパッシングです。カウンターはテキストメッセージの内容として符号化し、summarizerは届いたワーカーのメッセージを数えます。グラフの形状は同じですが、ステートのモデルが違います。
+移植の注記：
 
-## 結果
+* **Haystack** には append リデューサーがないため、各ワーカーが自分の型付きソケットに出力し、summarizer がリストの長さを合計します。
+  1 回の実行でディスパッチされるコンポーネントの数は同じです。ベンチマークのプロセスではテレメトリーを無効にしています。
+* **pydantic-graph** の API は現在 `GraphBuilder` の 1 つだけです。ステップは `async def` で、複数のステップへのエッジはブロードキャストし、
+  結合がそれらを待ちます。`par` は本物のファンアウトで、開始ノードから 5 つのステップに送り、`reduce_list_append` で結合して
+  summarizer ステップに渡します。ドキュメントで最初に示される `BaseNode` クラスは次のノードをちょうど 1 つだけ返すため、
+  その版の `par` は 6 ノードの直列チェーンであり、慣用の既定値のブロックにだけ載せます。
+* **LlamaIndex** は `ctx.collect_events` で結合するため、summarizer のステップ関数は結果イベントごとに 1 回（5 回、待機中の 4 回は `None` を返す）
+  実行されます。`Workflow` インスタンスは複数の実行にわたって、また同時にも再利用できるので（プローブを参照）、対応する行は
+  インスタンスを 1 つ再利用し、慣用の既定値の行は実行ごとに新しいインスタンスを作ります。
+* **AutoGen** はステートチャネルではなくメッセージパッシングです。カウンターはメッセージのテキストにエンコードし、summarizer は受け取った
+  ワーカーのメッセージを報告し、新しいタスクの前にチームをリセットする AutoGen のドキュメントに倣って `reset()` を毎回の実行前に呼びます。
+  これはマネージャーのメッセージスレッドを消します。`reset()` なしで繰り返し実行しても正しい答えが返り（0.7.5：グラフは完了すると
+  自分で実行状態をリセットする）、その場合はここでは計測していません。
+* **LangGraph** のノードは `ainvoke` では `async def`、`invoke` では通常の `def` で、グラフはそれ以外は同一です。
 
-下の**参照実行**は、2026-04-22に、x86_64 Linux、g++ 13 Release（`-O3 -DNDEBUG`）、CPython 3.12.3で、NeoGraph v3.0.0について測定したものです。NeoGraphは `bench_neograph` の10回の中央値、Pythonのフレームワークは3回の中央値です。バージョンは、neograph v3.0.0、langgraph 1.1.9、haystack-ai 2.28.0、pydantic-graph 1.85.1、llama-index-core 0.14.21、autogen-agentchat 0.7.5です。
+## 対応するレジーム：比率を載せる唯一のブロック
 
-参照実行の下に、当時のmaster（2026-04-29）で測り直した結果も載せています。`par` の行には、サポートしている2つの実行方式を分けて示しました。現在のデフォルトである `worker_count=1` と、`set_worker_count_auto()` で有効にするエンジン所有のプールです。I/Oのないマイクロベンチマークでこの2つの数値を別々に扱うべき理由は、表のあとの「注記」を参照してください。
+2 つの実行レジームを比較し、それぞれに専用の NeoGraph の行があります。
 
-![Engine-overhead benchmark: per-iteration latency and peak RSS](../docs/images/bench-engine-overhead.png)
+* **シングルスレッド。** `worker_count=1` の NeoGraph と、各フレームワークの `async def` ノードによるコルーチン経路：LangGraph の `ainvoke`、
+  コルーチンのコンポーネントを使う Haystack の `run_async`、pydantic-graph（唯一の経路）、`async def` ステップの LlamaIndex、
+  AutoGen（唯一の経路）。ノードは呼び出し側のスレッドで動きます。
+* **スレッドプール。** `set_worker_count_auto()` の NeoGraph と、スレッドプール経路があり計測したフレームワークのその経路：LangGraph の `invoke`
+  （ファンアウトのステップを langchain-core が呼び出しごとに作るスレッドプールで実行）と、同期専用コンポーネントを使う Haystack の `run_async`
+  （各コンポーネントを `asyncio.to_thread` で実行）。そうした経路がない、または計測していないフレームワークは、理由を添えた `該当なし` の行にし、
+  エミュレートはしません。LlamaIndex Workflow は後者です。通常の `def` ステップを受け付けてイベントループの既定のエグゼキューターで実行しますが、
+  その経路はこのコホートに含まれません。プールは既定の幅のままです（NeoGraph：ハードウェアスレッドごとに 1 本、ここでは 4 本。Python のエグゼキューター：
+  `min(32, コア数 + 4)`）。[`dr_compare` のガイド](dr_compare/README.md)ではこれらを揃えています。`seq` では、どのステップも準備のできたノードが
+  1 つだけで、NeoGraph も LangGraph の `invoke` もインラインで実行するため、どちらのプールも使われません。それでも LangGraph の行は、そのフレームワークの
+  既定の同期経路です。
 
-### 1反復あたりのオーバーヘッド（µs、小さいほど良い）
+比率は、フレームワークの中央値を、同じレジームとワークロードの NeoGraph の行の中央値で割った値です。NeoGraphの `par` はワーカーモードで変わり、
+その範囲は 2 つ目の表の下に示します。1 つの比率にまとめることはしません。
 
-| フレームワーク | `seq`（3ノードのチェーン） | `par`（fan-out 5＋join） | `seq`のNeoGraphとの比 | `par`のNeoGraphとの比 |
-|-----------|---------------------:|-------------------------:|-------------------:|-------------------:|
-| **NeoGraph v3.0.0** *（参照、2026-04-22）* | **5.0** | **11.8** | 1× | 1× |
-| **NeoGraph master** *（2026-04-29、デフォルトの `worker_count=1`）* | **5.25** | **14.4** | 1× | 1× |
-| **NeoGraph master** *（2026-04-29、`set_worker_count_auto()`）* | **5.25** | **278** | 1× | 1× |
-| Haystack 2.28.0 | 139.85 | 278.48 | 28.0× / 26.6× / 26.6× | 23.6× / 19.3× / 1.0× |
-| pydantic-graph 1.87.0 | 227.14 | 280.26¹ | 45.4× / 43.3× / 43.3× | 23.7×¹ / 19.5×¹ / 1.0×¹ |
-| LangGraph 1.1.10 | 642.62 | 2,261.55 | 128.5× / 122.4× / 122.4× | 191.7× / 157.1× / 8.1× |
-| LlamaIndex Workflow 0.14.21 | 1,564.54 | 4,373.76 | 312.9× / 298.0× / 298.0× | 370.7× / 303.7× / 15.7× |
-| AutoGen GraphFlow 0.7.5 | 3,126.86 | 7,281.08 | 625.4× / 595.6× / 595.6× | 617.0× / 505.6× / 26.2× |
+表の見出しの下の行は、同じフレームワークの HEAD ビルドと最新リリースです。
 
-右の2列には、比を3つずつ示しています。v3.0.0の参照値との比、masterのデフォルト（worker=1）との比、masterのauto-workerモードとの比の順です。
+### シングルスレッド
 
-日付付きの `seq` の測定値は、近い値になりました。NeoGraphは5.0 µsから5.25 µsに変わっています。`par` の測定値は実行モードによって異なります（11.8、14.4、278 µs）。参照の全行を±10%以内で再現できたわけではなく、現在のHEADを測定したものでもありません。
+<!-- bench-record:begin matched_single -->
+| フレームワーク | ソース | `seq` 1 実行あたり µs | `par` 1 実行あたり µs | `seq` 対 NeoGraph | `par` 対 NeoGraph |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| **NeoGraph `worker_count=1`** |  | **9.72 [9.68, 10.1]** | **21.5 [21.4, 23.6]** | 1× | 1× |
+| Haystack — Pipeline.run_async、コルーチンコンポーネント | HEAD `276746c` (3.5.0-rc0) | 272 [266, 275] | 499 [497, 507] | 27.9× | 23.2× |
+| Haystack — Pipeline.run_async、コルーチンコンポーネント | リリース 3.4.0 | 273 [266, 276] | 501 [499, 505] | 28.1× | 23.3× |
+| pydantic-graph — GraphBuilder のステップ、本物のファンアウト | HEAD `e0ccafa` (2.59.1.dev4+e0ccafa8a) | 483 [476, 494] | 1,277 [1,252, 1,308] | 49.7× | 59.3× |
+| pydantic-graph — GraphBuilder のステップ、本物のファンアウト | リリース 2.59.0 | 487 [480, 501] | 1,271 [1,256, 1,294] | 50.0× | 59.1× |
+| LangGraph — ainvoke、async def ノード | HEAD `3cd57c0` (1.2.16) | 1,248 [1,232, 1,273] | 1,777 [1,754, 1,808] | 128× | 82.6× |
+| LangGraph — ainvoke、async def ノード | リリース 1.2.16 | 1,258 [1,242, 1,280] | 1,773 [1,750, 1,792] | 129× | 82.4× |
+| LlamaIndex Workflow — ワークフローインスタンスを 1 つ再利用 | HEAD `619d746` (0.14.25) | 2,272 [2,219, 2,297] | 7,069 [6,937, 7,136] | 234× | 329× |
+| LlamaIndex Workflow — ワークフローインスタンスを 1 つ再利用 | リリース 0.14.25 | 2,364 [2,339, 2,396] | 7,393 [7,235, 7,458] | 243× | 344× |
+| AutoGen GraphFlow — GraphFlow を reset して run | HEAD `004749e` (0.7.5) | 4,192 [4,135, 4,286] | 9,543 [9,346, 9,734] | 431× | 444× |
+| AutoGen GraphFlow — GraphFlow を reset して run | リリース 0.7.5 | 4,224 [4,115, 4,274] | 9,521 [9,405, 9,645] | 434× | 443× |
 
-¹ pydantic-graphの `par` は、6ノードを直列に並べた代用であり、fan-outはサポートしていません。並列のワークロードではありませんが、一覧を揃えるために載せています。
+数値は 12 回のインターリーブラウンドの中央値で、括弧はラウンド間の [最小, 最大] です。各ラウンドは全セルをシャッフルした順で 1 回ずつ、セルごとに新しいプロセスで実行します。比率は中央値同士の割り算です。
+<!-- bench-record:end matched_single -->
 
-### `par` の行についての注記（`seq` は変わりません）
+![エンジンオーバーヘッドのベンチマーク、対応するシングルスレッドのレジーム：1 実行あたりのマイクロ秒](../docs/images/bench-engine-overhead.svg)
 
-`par` が14.4 µsから278 µsに増えた分は、実際の処理をしない5つのノードのために、エンジン所有のスレッドプールを使うことにしたコストを測ったものです。
+### スレッドプール
 
-* **現在の `build()` / `compile()` のデフォルトは `worker_count=1` です。** エンジン所有のプールは作られず、fan-outは呼び出し元のexecutor上でディスパッチされます。これが14.4 µsの行です。CPUをほとんど使わないノードや、スレッドセーフでない状態をノードが持つグラフでは、この行が回帰を見つける正しい指標になります。
-* **並列のfan-outは、明示的に指定したときだけ使います。** `set_worker_count_auto()` は、プールのサイズを `hardware_concurrency` に合わせます。`set_worker_count(N)` は、上限を固定値で指定します。これが278 µsの行です。ここでは各ワーカーが整数を1つ追加するだけなので、調整のコストがそのまま見えます。100 msのLLM呼び出しと比べれば無視できる大きさで、独立したノードを重ねて実行できる利点があります。
+<!-- bench-record:begin matched_pool -->
+| フレームワーク | ソース | `seq` 1 実行あたり µs | `par` 1 実行あたり µs | `seq` 対 NeoGraph | `par` 対 NeoGraph |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| **NeoGraph `set_worker_count_auto()`** |  | **10.2 [10.1, 10.5]** | **86.0 [82.8, 86.9]** | 1× | 1× |
+| Haystack — Pipeline.run_async、スレッドで動く同期コンポーネント | HEAD `276746c` (3.5.0-rc0) | 759 [745, 779] | 1,424 [1,389, 1,460] | 74.8× | 16.6× |
+| Haystack — Pipeline.run_async、スレッドで動く同期コンポーネント | リリース 3.4.0 | 757 [738, 780] | 1,426 [1,388, 1,459] | 74.5× | 16.6× |
+| pydantic-graph |  | 該当なし — スレッドプール経路なし: ステップはコルーチンで、通常の関数は拒否される |  |  |  |
+| LangGraph — invoke、通常の def ノード | HEAD `3cd57c0` (1.2.16) | 1,063 [1,049, 1,079] | 3,184 [3,146, 3,224] | 105× | 37.0× |
+| LangGraph — invoke、通常の def ノード | リリース 1.2.16 | 1,066 [1,053, 1,088] | 3,194 [3,163, 3,301] | 105× | 37.1× |
+| LlamaIndex Workflow |  | 該当なし — 未計測: 通常の `def` ステップを受け付けてイベントループの既定のエグゼキューターで実行するスレッドプール経路があるが、このコホートでは計測していない |  |  |  |
+| AutoGen GraphFlow |  | 該当なし — スレッドプール経路なし: 単一スレッドのエージェントランタイム 1 つ |  |  |  |
 
-ベンチマークのソースを変えずに、2つの方式を実行できます。
+NeoGraph の `par` は `worker_count=1` で 21.5 µs、`set_worker_count_auto()` で 86.0 µs です（ワーカースレッド 4 本）。
+<!-- bench-record:end matched_pool -->
 
-```bash
-./build/bench_neograph 10000 5000 1
-./build/bench_neograph 10000 5000 auto
+## 慣用の既定値：絶対時間のみ、比率なし
+
+各フレームワークの公式ドキュメントが最初に示す API です。これらの行は互いに違う処理をするため（実行ごとの構築、スレッドの切り替え、直列チェーン）、
+絶対時間だけを示し、比率は作りません。
+
+<!-- bench-record:begin idiomatic -->
+| フレームワーク | 測定した API | `seq` 1 実行あたり µs | `par` 1 実行あたり µs |
+| :--- | :--- | ---: | ---: |
+| **NeoGraph** | **NeoGraph `run()` (既定 `worker_count=1`)** | **9.72 [9.68, 10.1]** | **21.5 [21.4, 23.6]** |
+| Haystack | Pipeline.run、同期コンポーネント | 143 [143, 144] | 321 [318, 325] |
+| pydantic-graph | GraphBuilder のステップ、本物のファンアウト | 483 [476, 494] | 1,277 [1,252, 1,308] |
+| pydantic-graph | BaseNode クラス（par は直列チェーン） | 535 [525, 547] | 818 [802, 823] |
+| LangGraph | invoke、通常の def ノード | 1,063 [1,049, 1,079] | 3,184 [3,146, 3,224] |
+| LlamaIndex Workflow | 実行ごとに新しいワークフローインスタンス | 2,615 [2,577, 2,656] | 7,536 [7,408, 7,729] |
+| AutoGen GraphFlow | GraphFlow を reset して run | 4,192 [4,135, 4,286] | 9,543 [9,346, 9,734] |
+| AutoGen GraphFlow | 実行ごとに新しい GraphFlow | 5,274 [5,239, 5,372] | 11,280 [11,082, 11,549] |
+<!-- bench-record:end idiomatic -->
+
+<a id="engine-ceiling-and-the-hardening-delta"></a>
+## エンジンの上限とハードニングの差
+
+上のNeoGraphの行は既定の Release ビルドで、`-O3 -DNDEBUG` に `-D_GLIBCXX_ASSERTIONS`、`-fstack-protector-strong`、
+`-D_FORTIFY_SOURCE=2`、位置独立コード、RELRO が加わります。これらを外した 2 つ目のビルド（`-DNEOGRAPH_ENABLE_HARDENING=OFF` に加え、
+ディストリビューションのコンパイラが既定で有効にする項目を外す `-U_FORTIFY_SOURCE -fno-stack-protector -fno-stack-clash-protection`）がエンジンの上限です。
+両方のビルドのフラグと、各バイナリがコンパイルされたときのマクロは、表の下に出力しています。
+
+<!-- bench-record:begin ceiling -->
+| ビルド | `seq`, `worker_count=1` | `par`, `worker_count=1` | `par`, `set_worker_count_auto()` |
+| :--- | ---: | ---: | ---: |
+| 既定の Release ビルド（ハードニング）— 見出しの値 | 9.72 [9.68, 10.1] | 21.5 [21.4, 23.6] | 86.0 [82.8, 86.9] |
+| ハードニングなしのエンジン上限 | 9.88 [9.86, 10.6] | 20.7 [20.5, 22.2] | 84.6 [81.9, 86.5] |
+| ハードニング ÷ 非ハードニング | 0.98× | 1.04× | 1.02× |
+
+| ビルド | µs |
+| :--- | ---: |
+| `seq`、すべてのライフサイクルイベントを生成してコールバックに配信 | 10.7 [10.7, 11.6] |
+
+既定ビルドのフラグとコンパイラマクロ（バイナリとビルドツリーの出力）:
+
+```text
+[hardened] build type: Release; g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+[hardened] NEOGRAPH_ENABLE_HARDENING: ON
+[hardened] compile: /usr/bin/c++ -DASIO_NO_DEPRECATED -DASIO_STANDALONE -DNEOGRAPH_BENCH_BUILD_TYPE=\"Release\" -DNEOGRAPH_STATIC_BUILD -I<work>/ng/include -I<work>/ng/deps/yyjson -I<work>/ng/deps/asio/include -I<work>/build-hardened/generated -I<work>/build-hardened/_deps/neograph_schemaprovider-src/src -I<work>/build-hardened/_deps/neograph_schemaprovider-build/generated -O3 -DNDEBUG -std=gnu++20 -fPIE -D_GLIBCXX_ASSERTIONS -fstack-protector-strong -D_FORTIFY_SOURCE=2 -o CMakeFiles/bench_neograph.dir/benchmarks/bench_neograph.cpp.o -c <work>/ng/benchmarks/bench_neograph.cpp
+[hardened] macros seen by the binary: _GLIBCXX_ASSERTIONS=True, _FORTIFY_SOURCE=2, stack protector=strong, PIE=True
+[unhardened] build type: Release; g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+[unhardened] CMAKE_CXX_FLAGS: -U_FORTIFY_SOURCE -fno-stack-protector -fno-stack-clash-protection
+[unhardened] NEOGRAPH_ENABLE_HARDENING: OFF
+[unhardened] compile: /usr/bin/c++ -DASIO_NO_DEPRECATED -DASIO_STANDALONE -DNEOGRAPH_BENCH_BUILD_TYPE=\"Release\" -DNEOGRAPH_STATIC_BUILD -I<work>/ng/include -I<work>/ng/deps/yyjson -I<work>/ng/deps/asio/include -I<work>/build-unhardened/generated -I<work>/build-unhardened/_deps/neograph_schemaprovider-src/src -I<work>/build-unhardened/_deps/neograph_schemaprovider-build/generated -U_FORTIFY_SOURCE -fno-stack-protector -fno-stack-clash-protection -O3 -DNDEBUG -std=gnu++20 -fPIE -o CMakeFiles/bench_neograph.dir/benchmarks/bench_neograph.cpp.o -c <work>/ng/benchmarks/bench_neograph.cpp
+[unhardened] macros seen by the binary: _GLIBCXX_ASSERTIONS=False, _FORTIFY_SOURCE=0, stack protector=none, PIE=True
 ```
+<!-- bench-record:end ceiling -->
 
-3番目の引数は `par` のエンジンに適用され、`1`（デフォルト）、`auto`、または正のワーカー数を指定できます。出力には `config\tpar_workers\t...` の行が含まれるので、保存した結果から実行モードが分かります。
+## メモリ
 
-記録したworker=1の `par` では、LangGraphの2,261.55 µsはNeoGraphの14.4 µsの157.1倍です。エンジン所有のプールを使うと、8.1倍になります。Haystackとpydantic-graphは、NeoGraphのauto-workerの行（278 µs）とほぼ同じです。これらの比が表すのは、このワークロードとこの設定での値だけです。
+数値はすべてプロセス全体のもので、Python では**インタプリタとインポート済みフレームワークを含みます**（NeoGraph では C++ ランタイムと
+SchemaProvider ランタイムを含む）。デプロイ済みアプリケーションのメモリではありません。
 
-### プロセス全体のエンドツーエンドの指標
+* **アイドル**は、フレームワークをインポートした後（NeoGraph ではエンジンを構築した後）で、実行を始める前のプロセスです。最初の 2 行は空のベースラインで、
+  何もインポートしていない Python インタプリタと、NeoGraph のバイナリです。
+* **ピーク**は、対応するセルの計測ループの終了時点の `VmHWM` で、増加量はピークからアイドルを引いた値です。
+* **実行中の run あたりの限界メモリ**は、N 個の run を 1 つのノードの中で止めた状態（`seq` は中央のノード、`par` は 5 つのワーカーが結果を書いた後の summarizer）で、
+  単一のイベントループ（NeoGraph では `io_context` スレッド 1 本）上に保ち、その時点のプロセスの `VmRSS` と `Pss` を読みます。数値は、run を 1 回完了させ、
+  アロケーターに空きメモリの返却を求めたあとの、N=64 と N=1 の差を 63 で割った値です。AutoGen は実行中の run ごとにチームが 1 つ必要で、計測区間の中で作ります。
+  他のフレームワークは、コンパイル済みのグラフまたはワークフローのインスタンスを 1 つ共有します。
 
-ウォームアップと2つのワークロードを含めた、バイナリまたはスクリプト全体の実行時間です。`seq` は10,000反復、`par` は5,000反復で、`/usr/bin/time -f "%e s, %M KB"` で測定しました。
+<!-- bench-record:begin memory -->
+| フレームワーク (HEAD) | アイドル: インポートのみ、実行なし (MiB) | `seq` ループ中のピーク (MiB) | `par` ループ中のピーク (MiB) | アイドルからの増加、`seq` / `par` (MiB) |
+| :--- | ---: | ---: | ---: | ---: |
+| Python インタプリタのみ、インポートなし | 10.9 | — | — | — |
+| **NeoGraph**: エンジンを構築したバイナリ、実行なし | 5.3 | 6.1 | 6.2 | 0.8 / 0.9 |
+| Haystack | 63.5 | 70.2 | 70.2 | 6.7 / 6.7 |
+| pydantic-graph | 25.1 | 26.2 | 26.2 | 1.1 / 1.2 |
+| LangGraph | 62.8 | 63.0 | 63.1 | 0.2 / 0.3 |
+| LlamaIndex Workflow | 35.5 | 36.7 | 36.7 | 1.1 / 1.2 |
+| AutoGen GraphFlow | 42.2 | 42.7 | 42.8 | 0.5 / 0.5 |
 
-| フレームワーク | 経過時間の合計 | ピークRSS | Executor |
-|-----------|--------------:|---------:|---------:|
-| **NeoGraph 3.0** | **0.11 s** | **4.5 MB** | デフォルトはシングルスレッドのio_context |
-| pydantic-graph | 3.98 s | 35.1 MB | シングルスレッドのasyncio（GIL） |
-| Haystack | 3.85 s | 80.3 MB | シングルスレッドのasyncio（GIL） |
-| LangGraph | 18.95 s | 60.1 MB | シングルスレッドのasyncio（GIL） |
-| LlamaIndex Workflow | 39.49 s | 101.4 MB | シングルスレッドのasyncio（GIL） |
-| AutoGen GraphFlow | 63.29 s | 52.3 MB | シングルスレッドのasyncio（GIL） |
+**実行中の run あたりの限界メモリ**
 
-NeoGraph 3.0のデフォルトのスーパーステップループは、`run_sync` を通じて、シングルスレッドのio_context上でコルーチンを実行します。CPUを使った並列のfan-outは、`engine->set_worker_count(N)` で有効にします。I/O待ちが中心のノードのワークロードでは、スレッドが1つでも、co_awaitで中断している間に他の処理が進みます。
+| フレームワーク (HEAD) | `seq` run あたり KiB (RSS / PSS) | `par` run あたり KiB (RSS / PSS) |
+| :--- | ---: | ---: |
+| **NeoGraph** | 33.9 / 33.8 | 49.9 / 50.0 |
+| Haystack | 14.2 / 14.2 | 27.3 / 27.4 |
+| pydantic-graph | 24.3 / 24.4 | 57.8 / 57.7 |
+| LangGraph | 37.1 / 37.3 | 93.8 / 93.8 |
+| LlamaIndex Workflow | 58.5 / 58.3 | 119.5 / 119.5 |
+| AutoGen GraphFlow | 96.4 / 96.3 | 174.1 / 174.1 |
+<!-- bench-record:end memory -->
 
-## Linux ARM64のベースライン：Neoverse-N1
+## 起動時間とサイズ
 
-これは、[#165](https://github.com/fox1245/NeoGraph/issues/165)に基づく、ネイティブARM64プラットフォーム単独のベースラインです。上のx86_64の表との回帰比較ではありません。リビジョン `d7a6477` と専用の依存セットに固定しているので、後の測定値と照らし合わせられます。
+**コールドスタート**は、親がプロセスを生成した時点から、最初の `seq` の実行が完了して検証された時点までの時間です。親はプロセスを生成する直前に
+`CLOCK_MONOTONIC` を読み、プロセスは実行が終わったときに `CLOCK_MONOTONIC` を出力します。ローダーまたはインタプリタの起動、インポート（Python）または
+静的初期化（NeoGraph）、グラフの構築、1 回の実行を含み、ページキャッシュは温まっていて、バイトコードキャッシュがある状態です。フレームワークごとに新しいプロセスを
+20 回、フレームワーク間でインターリーブして実行し、数値は中央値と [最小, 最大] です。
 
-| 項目 | 値 |
-|---|---|
-| 日付 | 2026-07-22 |
-| OS | Ubuntu 24.04、Linux `6.17.0-1018-oracle` |
-| アーキテクチャ | `aarch64` |
-| CPU | 4 vCPU、ARM Neoverse-N1 |
-| メモリ | 23 GiB、スワップなし |
-| コンパイラー / CMake | GCC 13.3.0 / CMake 3.28.3 |
-| Python | CPython 3.12.3 |
-| NeoGraphのリビジョン | `d7a6477` |
+**サイズ。**ネイティブのバイナリは `strip` 後に測定し、`libneograph_core.a` はビルドしたままのオブジェクトのアーカイブで、WebAssembly のモジュールは
+WebAssembly ワークフローのサイズゲートから取っています。Python 環境は、フレームワークとその依存関係の全体を入れた新しい仮想環境の `site-packages` の
+ディスク上のサイズから、空の仮想環境を引いた値で、パッケージ数を添えます。ネイティブの実行ファイル、WebAssembly のモジュール、Python 環境は
+**デプロイ単位が異なる**ので、表では並べて示しますが、それらの間で比率は作りません。
 
-ワークロードと反復回数は、主要なベンチマークと同じです。各グラフを1回だけコンパイルしたあと、`seq` を10,000反復、`par` を5,000反復しました。NeoGraphは10回、Pythonの各実装は3回測定し、表には中央値を載せています。チェックポイント、ネットワークI/O、モデル呼び出し、スリープは無効です。プロセス全体のピークRSSは、`/usr/bin/time -f "%e s, %M KB"` で取得しました。
+<!-- bench-record:begin footprint -->
+| フレームワーク (HEAD) | プロセス開始から最初の `seq` 結果まで、ms | インポート / ビルド / 初回実行（中央値 ms） |
+| :--- | ---: | ---: |
+| **NeoGraph** | **2.49 [2.40, 10.7]** | — / 0.55 / 0.09 |
+| Haystack | 561 [550, 583] | 395 / 0.84 / 99.6 |
+| pydantic-graph | 153 [149, 157] | 72.0 / 0.56 / 12.8 |
+| LangGraph | 756 [735, 775] | 683 / 0.72 / 4.13 |
+| LlamaIndex Workflow | 314 [309, 330] | 219 / 22.8 / 4.63 |
+| AutoGen GraphFlow | 331 [326, 345] | 257 / 0.73 / 8.05 |
 
-| フレームワーク | `seq`（µs/反復） | `par`（µs/反復） | `seq`のNeoGraphとの比 | `par`のNeoGraphとの比 | ピークRSS |
-|---|---:|---:|---:|---:|---:|
-| **NeoGraph** | **9.50** | **21.80** | 1× | 1× | **4.35 MB** |
-| Haystack 3.0.0 | 153.44 | 329.67 | 16.2× | 15.1× | 73.6 MB |
-| pydantic-graph 1.87.0 | 342.60 | 405.87¹ | 36.1× | 18.6×¹ | 32.1 MB |
-| LangGraph 1.2.9 | 1,037.55 | 3,289.22 | 109.2× | 150.9× | 63.7 MB |
-| LlamaIndex 0.14.23 | 2,765.04 | 7,824.85 | 291.1× | 358.9× | 96.9 MB |
-| AutoGen 0.7.5 | 4,166.39 | 9,571.11 | 438.6× | 439.0× | 47.8 MB |
+| 項目 | デプロイ単位 | サイズ | 計測対象 |
+| :--- | :--- | ---: | :--- |
+| NeoGraph `bench_footprint`（既定のハードニング Release） | ネイティブ実行ファイル 1 つ | 7.15 MB | 最小のアプリ: ノードを登録し、`seq` をコンパイルして 1 回実行; strip 後 |
+| NeoGraph `bench_neograph`（既定のハードニング Release） | ネイティブ実行ファイル 1 つ | 7.15 MB | ベンチマークのバイナリ; strip 後 |
+| NeoGraph `libneograph_core.a`（既定のハードニング Release） | ライブラリファイル 1 つ | 25.84 MB | ビルドしたままの静的アーカイブ |
+| NeoGraph `bench_footprint`（MinSizeRel と LTO（`-Os`）） | ネイティブ実行ファイル 1 つ | 2.82 MB | 最小のアプリ: ノードを登録し、`seq` をコンパイルして 1 回実行; strip 後 |
+| NeoGraph `bench_footprint`（ハードニングなしの Release） | ネイティブ実行ファイル 1 つ | 6.49 MB | 最小のアプリ: ノードを登録し、`seq` をコンパイルして 1 回実行; strip 後 |
+| NeoGraph `bench_neograph`（ハードニングなしの Release） | ネイティブ実行ファイル 1 つ | 6.49 MB | ベンチマークのバイナリ; strip 後 |
+| NeoGraph `libneograph_core.a`（ハードニングなしの Release） | ライブラリファイル 1 つ | 23.86 MB | ビルドしたままの静的アーカイブ |
+| NeoGraph `bench_footprint`（共有 `libneograph_core.so`） | ネイティブ実行ファイル 1 つ | 0.26 MB | 実行ファイルのみ; strip 後 |
+| NeoGraph の最小アプリの共有ライブラリ配布 | 実行ファイルとその共有ライブラリ | 10.44 MB | 実行ファイルと NeoGraph・SDK の共有ライブラリ 7 個; strip 後 |
+| NeoGraph グラフスモーク `smoke.wasm` (Emscripten 6.0.13, -O3 -flto, Release) | WebAssembly モジュール 1 つ | 5.53 MB / 1.61 MB gzip | CI の WebAssembly ワークフローのサイズゲート、シングルスレッドのジョブ、コミット db0fc651 |
+| NeoGraph JavaScript モジュール `neograph_module.wasm` (Emscripten 6.0.13, -O3 -flto, Release) | WebAssembly モジュール 1 つ | 6.29 MB / 1.84 MB gzip | CI の WebAssembly ワークフローのサイズゲート、シングルスレッドのジョブ、コミット db0fc651 |
+| Haystack（HEAD のインストール） | Python 環境: フレームワークと依存関係の全体 | 140.75 MB | パッケージ 42 個; site-packages から空の venv を引いた値 |
+| pydantic-graph（HEAD のインストール） | Python 環境: フレームワークと依存関係の全体 | 12.03 MB | パッケージ 9 個; site-packages から空の venv を引いた値 |
+| LangGraph（HEAD のインストール） | Python 環境: フレームワークと依存関係の全体 | 65.46 MB | パッケージ 38 個; site-packages から空の venv を引いた値 |
+| LlamaIndex Workflow（HEAD のインストール） | Python 環境: フレームワークと依存関係の全体 | 216.19 MB | パッケージ 62 個; site-packages から空の venv を引いた値 |
+| AutoGen GraphFlow（HEAD のインストール） | Python 環境: フレームワークと依存関係の全体 | 36.93 MB | パッケージ 11 個; site-packages から空の venv を引いた値 |
+<!-- bench-record:end footprint -->
 
-NeoGraphはデフォルトのworker=1で測定しました。そのため、`par` の行が測っているのは、トポロジー、リデューサー、直列のディスパッチのオーバーヘッドであり、エンジン所有のスレッドプールによる実行ではありません。並列のfan-outを測りたい場合は、明示的な `auto` のベンチマークモードで別に測定してください。2つのモードの値を、1つの見出しの数字にまとめてはいけません。
+## プローブ
 
-¹ pydantic-graphでは、このfan-outのトポロジーを表現できません。この `par` の行は、上で説明したものと同じ、6ノードを直列に並べた代用です。バージョンを1.87.0に固定したのは、当時の最新版2.15.0では、ベンチマークで使っている `Graph(...)` コンストラクターのAPIがサポートされなくなったためです。プロセスは、CPUへの固定もcgroupによる制限もしていません。
+行の読み方を左右する問いに、同じセッションの中で答えます。(1) LlamaIndex のワークフローインスタンスは複数の実行にわたって再利用できるか、
+(2) LangGraph のファンアウトのコストのうち、呼び出しごとのスレッドプールが占める分はどれだけか、Haystack のワーカーはどのスレッドで動くか、
+(3) pydantic-graph は async 専用か、ファンアウトは本物か、(4) ハードニングはエンジンにどれだけのコストを課すか、
+(5) 従来の 2 つのハーネスが、同じ pydantic-graph の呼び出しを 227 µs と 70〜100 µs と、なぜ違って測ったのか。
+
+<!-- bench-record:begin probes -->
+| # | 結果 |
+| :--- | :--- |
+| 1 | LlamaIndex: 1 つの `Workflow` インスタンスを繰り返し、また同時に実行できる — 逐次の実行 [3, 13]、同時の実行 [3, 103]、llama-index-workflows 2.26.0。 |
+| 1 | LlamaIndex 計測: `seq` は再利用インスタンス 2,272 µs、実行ごとに新規 2,615 µs; `par` は 7,069 µs と 7,536 µs。 |
+| 2 | LangGraph: `invoke` は 5 つのワーカーをプールスレッド 1 本で実行し、呼び出しスレッドは使わない; `async def` ノードの `ainvoke` は呼び出しスレッドで実行。計測: `par` は `invoke` 3,184 µs 対 `ainvoke` 1,777 µs（1.79 倍）、`seq` は 1,063 µs 対 1,248 µs（0.85 倍）。 |
+| 2 | Haystack: 同期コンポーネントでは `run_async` がワーカーを呼び出しスレッド以外の 3 本に任せる; `run_async` コンポーネントでは `run` と同様に呼び出しスレッドで実行。 |
+| 3 | pydantic-graph 2.59.1.dev4+e0ccafa8a: `Graph.run` はコルーチンで、`run_sync` はイベントループ上で駆動するだけ; 通常のステップ関数は拒否される（TypeError: object int can't be used in 'await' expression）; 各 50 ms 待つステップ 5 つがスレッド 1 本で 52 ms で終わるため、ファンアウトは本物で単一スレッド。 |
+| 4 | `bench_neograph` のハードニング差: 既定のハードニングビルド対非ハードニングビルド、`seq` 0.98 倍、`worker_count=1` の `par` 1.04 倍、ワーカープールの `par` 1.02 倍。 |
+| 5 | pydantic-graph 1.x、レガシー `Graph(nodes=[...])` API、このホストで連続計測: await ループ 79.3 µs/run、同じ run を gather したタスク 87.2 µs、1 つのタスク内のループ 79.2 µs、循環 GC オフ 79.2 µs。ハーネスの形では従来の 227 µs 対 70〜100 µs を説明できず、2 つの数値は別々のセッションと環境のものである。 |
+| 5 | 同じレガシー pydantic-graph のループで、オプションの `logfire` パッケージを環境にインストールすると 1 run あたり 498 µs で、クリーンな環境（79.3 µs）の 6.3 倍。計測スパンはパッケージがなければ何もせず、あれば実際のスパンになるため、これを含む共有環境では数値が変わる。 |
+<!-- bench-record:end probes -->
 
 ## 数値の読み方
 
-1. x86_64の参照実行で、`seq` のオーバーヘッドがNeoGraphの何倍かを見ると、Haystackが28.0倍、AutoGenが625.4倍です。これはフレームワークとワークロードの組み合わせで測った値で、それぞれのコストの原因を切り分けたものではありません。
-2. 参照実行のプロセス全体のピークRSSは、NeoGraphが4.5 MB、Pythonの実装が35.1〜101.4 MBです。各プロセスのランタイムとインポートが含まれた値で、デプロイしたアプリケーションのメモリ使用量ではありません。
-3. worker=1でのディスパッチと、エンジン所有のスレッドプールは、別の実行方式です。想定するワークロードで両方を測ってください。何も処理しないfan-outのベンチマークからは、調整のコストが分かりますが、モデルやI/Oのレイテンシーは予測できません。
+1. 比率は、そのレジームの組、ワークロード、ホスト、コホートの表にあるバージョンに固有です。NeoGraphの `par` は 2 つのワーカーモードの間で、
+   スレッドプールの表の下に示す倍率だけ異なるので、1 つの「N 倍速い」という数値でエンジンを表すことはできません。
+2. 各行はフレームワークとワークロードの測定値であり、コストの原因を切り分けて説明するものではありません。各フレームワークが既定で実行ごとに行う処理
+   （コールバック、スパン、ステートのスナップショット、メッセージスレッド）を含みます。
+3. ワーカー 1 でのディスパッチと、エンジンが所有するスレッドプールは、異なる実行レジームです。意図するワークロードで両方を測定してください。
+   仕事のないファンアウトのベンチマークは調整のコストを見せますが、モデルや I/O のレイテンシーを予測するものではありません。
+4. メモリの数値にはインタプリタとインポート済みフレームワークが含まれます。デプロイした Python サービスでエンジンが占める分は、プロセス全体のピークではなく、
+   アイドルからの増加量と実行ごとの限界値です。
 
 ## 注意事項 — このベンチマークで測っていないもの
 
-* **実際のエージェントのワークロード。** フレームワークの比較には、モデルの推論、ネットワークリクエスト、ツールのI/Oが含まれていません。アプリケーション全体では、それらが大半を占めることもあります。この表から、エンドツーエンドのエージェントが速くなるとは言えません。
-* **各フレームワークに向いたワークロード。** AutoGen、LlamaIndex、pydantic-graphは、それぞれ別の用途（マルチエージェントのチャット、イベント駆動の長時間のワークフロー、ステートマシンによる制御フロー）に向けて最適化されています。このベンチマークは、それらを使いません。つまり、NeoGraphが得意な条件で測っています。
-* **チェックポイントのスループット。** 各フレームワークで永続化を有効にすると、シリアライズのコストが支配的になります。それは別のベンチマークです。
-* **コールドスタート。** どの実装も、測定の前に10反復のウォームアップを行っています。プロセス全体の数値には、Pythonインタープリターの起動（約200 ms）と、フレームワークのインポート時間が含まれます。後者は大きくばらつきます（LlamaIndexとAutoGenは、多数のモジュールを読み込みます）。
-* **公平性。** NeoGraphは、CMakeの `-DCMAKE_BUILD_TYPE=Release` でビルドしました。GCCでは `-O3 -DNDEBUG` になります。Pythonのフレームワークはいずれも標準のCPython 3.12で、依存バージョンはコホートごとに記録しており、独自のチューニングはしていません。スタンドアロンのベンチマークコマンドは `-O2` を使っていました。CMakeのビルドでは、`Release` は `-O3` になります。
+* **実際のエージェントのワークロード。**フレームワークの比較には、モデルの推論、ネットワークリクエスト、ツールの I/O が含まれません。
+  それらのコストがアプリケーションを支配しうるため、これらの表はエンドツーエンドのエージェントの高速化を示すものではありません。
+* **フレームワークに適したワークロード。**AutoGen、LlamaIndex、pydantic-graph はそれぞれ、このベンチマークが扱わないパラダイム（マルチエージェントのチャット、
+  イベント駆動の長時間ワークフロー、ステートマシンの制御フロー）に最適化されています。
+* **チェックポイントのスループット。**各フレームワークで永続化を有効にすると、シリアライズのコストが支配的になります。それは別のベンチマークです。
+* **1 台のホスト、1 回のセッション。**コホートは 4 コアの Arm マシン 1 台で実行しました。比率はプラットフォームとフレームワークのバージョンで動き、
+  HEAD とリリースの行は、バージョンだけでどれだけ動くかを示します。
+* **公平性。**NeoGraphはハードニングのフラグを含む既定の Release ビルドで（上に出力）、ハードニングなしの行が上限です。Python のフレームワークはすべて、
+  それぞれの仮想環境で、記録に残した依存バージョンの素の CPython 3.12 を使い、独自のチューニングはありません。あるフレームワークのためにインストールした
+  パッケージが、別のフレームワークのコストを変えないようにするためです。
 
 ## 再現手順
 
-現在のソースビルドには、Core単体のベンチマークも含めて、外部の `SchemaProvider::runtime` パッケージが必要です。CMake 3.20以降は、明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、リビジョンを固定した公開GitHubのソースアーカイブの順に選びます。`NEOGRAPH_FETCH_SCHEMAPROVIDER` のデフォルトはONです。インストール済みのパッケージか明示したソースを使ってオフラインでビルドするときは、OFFにしてください。
-再現用のコマンドがビルドするのは、現在メンテナンスしているターゲットです。過去のバイナリを再生成することも、表に載せたPythonのバージョンを自動で固定することもありません。
-明示的に指定するチェックアウトやインストール済みのパッケージは、インターフェースと共有世代が7のものでなければなりません。新しい出力は別に保存してください。過去の表とJSONファイルは、SDK 0.4.0で測定した結果ではありません。
+現在のソースビルドには、Coreだけのベンチマークを含めて、外部の `SchemaProvider::runtime` パッケージが必要です。CMake 3.20以降は、
+明示した `NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR`、インストール済みのランタイム、固定した公開GitHubのソースアーカイブの順で選びます。
+`NEOGRAPH_FETCH_SCHEMAPROVIDER` の既定値はONで、インストール済みのパッケージまたは明示したソースを使ってオフラインでビルドするときはOFFにします。
+明示したチェックアウトまたはインストール済みのパッケージは、インターフェース／共有世代7を提供している必要があります。
+新しい出力は別に保存してください。`records/` 配下の記録は、書き込んだ後に編集しません。
 
 ```bash
 # Build native Core + v1 Program benchmarks (Release is required for
@@ -182,37 +354,54 @@ taskset -c 0 ./build-program-codec-poc/bench_program_codec_poc 25 100
 ```
 
 ネイティブのベンチマークはいずれも、`config`、`runtime`、`header`、`result` のレコードを出力します。明示的なウォームアップのあとに測定したサンプルの中央値を報告してください。短い実行を1回だけ比べるのは避けてください。`bench_program` はインメモリのストアを使い、プロバイダーやネットワークの呼び出しはありません。`bench_program_dispatch` が測るのは、不変の `ProgramPlan` の検索とディスクリプターの走査だけで、Coreの実行は含みません。
-
 シリアライズのPOC（概念実証）は、オフラインでインメモリの測定です。完了したProgramの実行から、不変のpublicationを取り込んで使います。シリアライズのPOCは、正規化したバイト列の再利用を測ります。バイナリのPOCは、現在の正規JSONのエンベロープと、入れ子になった各レコードの正規バイト列を保持する、長さプレフィックス付きのエンベロープを比べます。バイナリの結果は下限を見る実験であり、永続化の契約を置き換えるものではありません。
-
 `bench_program_codec_poc` は別にオプトインで実行するもので、同じ入れ子の正規バイト列を包むprotobufとCap'n Protoの**トランスポートエンベロープ**を比べます。`*_envelope_only_*` が測るのは、バイト列が用意できたあとのエンベロープの構築だけです。`*_transport_total_lower_bound_*` は入れ子の正規バイト列の構築も含みますが、`ProgramTransitionPublication` のレコード間にまたがる外側の検証は、意図的に省いています。永続化やIDフォーマットのベンチマークではありません。復元（recovery）の指標は、所有権を持つProgramレコードにパースし直します。受信側のコンシューマー全体を模したコーデックの数値は、これだけです。どのPOCも、SQLiteやPostgresのトランザクションのレイテンシーや、`ProgramRuntime` のエンドツーエンドのレイテンシーは測定していません。
 
-Pythonフレームワークの比較は引き続きオプションで、サードパーティのパッケージが必要です。
+フレームワークの比較には、フレームワークとソースごとに仮想環境が 1 つずつ必要です。あるフレームワークのためにインストールしたものが、
+別のフレームワークのコストを変えないようにするためです。バージョンは [`requirements-compare.txt`](requirements-compare.txt)（最新リリース）と
+[`requirements-compare-head.txt`](requirements-compare-head.txt)（git のコミット）に固定してあります。`compare/driver.py` はセッション全体を
+インターリーブしたラウンドで、セルごとに新しいプロセスで実行して記録を書き出し、エラーセルが 1 つでもあれば終了ステータスが 0 以外になります。
 
 ```bash
-# Shared Python venv for every Python framework:
-python3 -m venv /tmp/bench_venv
-/tmp/bench_venv/bin/pip install \
-    langgraph \
-    haystack-ai \
-    pydantic-graph \
-    llama-index-core \
-    "autogen-agentchat" "autogen-core" "autogen-ext"
+# One virtual environment per framework and per source, from the pinned requirement files
+# (creates $WORK/venvs/<framework>-release and $WORK/venvs/<framework>-head):
+benchmarks/compare/setup_venvs.sh "$WORK"
 
-# Run each bench (10k seq + 5k par matches the C++ side):
-/tmp/bench_venv/bin/python benchmarks/bench_langgraph.py      10000 5000
-/tmp/bench_venv/bin/python benchmarks/bench_haystack.py       10000 5000
-/tmp/bench_venv/bin/python benchmarks/bench_pydantic_graph.py 10000 5000
-/tmp/bench_venv/bin/python benchmarks/bench_llamaindex.py     10000 5000
-/tmp/bench_venv/bin/python benchmarks/bench_autogen.py        10000 5000
+# NeoGraph: the default hardened Release build and the unhardened engine ceiling.
+cmake -S . -B "$WORK/build-hardened" -G Ninja -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_BUILD_BENCHMARKS=ON \
+    -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build "$WORK/build-hardened" --target bench_neograph bench_footprint
+cmake -S . -B "$WORK/build-unhardened" -G Ninja -DCMAKE_BUILD_TYPE=Release -DNEOGRAPH_ENABLE_HARDENING=OFF \
+    -DNEOGRAPH_BUILD_BENCHMARKS=ON -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_EXAMPLES=OFF \
+    -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    "-DCMAKE_CXX_FLAGS=-U_FORTIFY_SOURCE -fno-stack-protector -fno-stack-clash-protection" \
+    "-DCMAKE_C_FLAGS=-U_FORTIFY_SOURCE -fno-stack-protector -fno-stack-clash-protection"
+cmake --build "$WORK/build-unhardened" --target bench_neograph bench_footprint
 
-# Peak RSS + wall time:
-/usr/bin/time -f "%e s, %M KB" ./build-program-bench/bench_neograph
+# One cell by hand; the last line of standard output is the record:
+"$WORK/venvs/langgraph-head/bin/python" benchmarks/compare/cell.py --framework langgraph \
+    --variant ainvoke_async --workload seq --iters 600 --samples 3
+"$WORK/build-hardened/bench_neograph" 80000 36000 1 10 5 --rows=seq --record
+
+# The whole session on a quiet machine (it waits for a load average under 0.3), then the tables and the chart:
+python3 benchmarks/compare/driver.py run --work "$WORK" --out record.json \
+    --harness-commit "$(git rev-parse HEAD)" --engine-commit "$(git rev-parse HEAD)" \
+    --harness-dirty "$([ -n "$(git status --porcelain)" ] && echo true || echo false)"
+python3 scripts/render_bench_report.py --record record.json
 ```
 
 サービスを使うチェックポイント、HTTP、並行実行のDockerベンチマークは、別の実験です。上で説明した、決定的なネイティブのCore／Programの実行には、これらは不要です。
 
-出力形式は、タブ区切りの `config`、`runtime`、`header`、`result`、`metric` のレコードです。ネイティブの結果の行には、合計時間の中央値と1反復あたりの時間が入ります。Pythonのスクリプトは、従来どおり `workload<TAB>iters<TAB>total_ms<TAB>per_iter_us` の行を出力します。
+出力形式は、タブ区切りの `config`、`runtime`、`header`、`result`、`metric` のレコードです。ネイティブの結果の行には、中央値の合計時間と
+1 反復あたりの時間が入っています。`--record` を付けると、`bench_neograph` と `bench_footprint` は `record<TAB>{json}` の行も 1 行出力し、
+`benchmarks/compare/cell.py` のすべてのセルは、そうした行を最後の行として出力します。生のサンプル、完了数と失敗数、結果の検証、プロセスのメモリが入っています。
+答えが誤っている、実行が失敗した、何も完了しなかった、のいずれかのセルは、`status` が `error` で、タイミングがなく、終了ステータスが 0 以外になります。
+
+## 以前の結果
+
+2026-04（x86_64）の表と、2026-07 の Arm64 のベースラインは、バージョンと日付、および現在では無効と分かっている項目の注記とともに
+[履歴](history/engine-overhead-2026-04.md)に移しました。2026-04-19 の測定環境のブロックもそちらにあります。以下の型付きプロバイダーの節は
+NeoGraphだけを測定したもので、変更していません。
 
 ## CIの性能ゲート
 
@@ -261,19 +450,6 @@ python3 scripts/run_ci_ab_gates.py --head-dir build --base-dir build-base --outp
 
 `verify_ci.py bench-ab` がビルドするのは、ファイルに書かれたベンチマークのターゲットだけです。マシンがコンパイルも行っている間は測定値がぶれるので、絶対的な時間ではなく比を読むか、静かなマシンを使ってください。
 
-## 2026-04-19の数値を測定した環境
-
-```
-OS:        Linux 6.6.87.2-microsoft-standard-WSL2 (Ubuntu 24.04 userland)
-CPU:       host CPU (8 logical cores exposed to WSL)
-Compiler:  g++ 13.x, -std=c++20 -O2 -DNDEBUG
-Python:    3.12.3 (system)
-Versions:  langgraph 1.1.7, haystack-ai 2.27.0, pydantic-graph 1.84.1,
-           llama-index-core 0.14.20, autogen-agentchat 0.7.5
-```
-
-ハードウェア、ランタイムのバージョン、ワークロードの形状、ワーカーのモードによって、レイテンシーも比率も変わります。この文書は、プラットフォーム間の許容誤差を定めていません。
-
 ## 型付きプロバイダーへの切り替え：実際のGraphEngineでの前後比較
 
 以下の切り替え、最終検証、handoffの測定は、SDKのインターフェース／共有世代3で記録したものです。これらの記録にある「current」と「final」は、当時のコホートを指しており、現在のリリースではありません。
@@ -308,7 +484,6 @@ done
 ```
 
 NeoGraphのルートから、Node.js／OpenSSLのCLIとSDKの通常の依存を用意して実行します。peerは一時的なプライベートCAを使います。システムの信頼ストアも、依存ライブラリも置き換えません。
-
 
 ## 最終検証コホート：新規の型付きプロバイダーでのGraphEngineの測定
 

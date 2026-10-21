@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=948c20da5544a9fc544c652e81c54682b7569914a7e1193754793da317f94abe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9b7f8d6b006e19ca2a68d6d2bbc6b15a88ab43c634812248c986d233eb92fa76 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -66,6 +66,13 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **테스트.** 세 적합성 스위트(`ProgramTransitionStoreConformance`, `ProgramStoreConformance`, 그래프 마이그레이션 캡슐 행)는 모든 백엔드를 두 형태로 실행합니다. `Direct`는 동기 저장소 자신의 연산을, `Awaited`는 awaitable 연산을 호출합니다. 앞의 두 스위트에는 코루틴에서 연산을 await하는 케이스가 하나씩 있습니다. `tests/test_program_store_awaitable.cpp`는 저장소 계약을 다룹니다. 인라인 저장소는 중단 없이 완료되고, 풀로 넘기는 저장소는 기다리던 코루틴을 자기 executor에서 재개하며, 블로킹 뷰는 타이머나 다른 스레드에서 완료되는 저장소를 기다리고, 거부하는 정책은 저장소에 닿지 않습니다. `tests/test_program_runtime_executor.cpp`는 풀로 넘기는 전이 저장소 위에서 Program을 실행하고, 저장소 호출을 기다리는 run이 자기 executor를 다른 run에 내주는 것, 나중에 완료되는 저장소가 호스트 루프가 Program을 실행하는 곳에서는 거부되고 자체 풀을 쓰는 런타임에서는 쓰일 수 있음을 보입니다. wasm32 점검은 호스트 턴에서 awaitable 저장소로 run을 다시 읽습니다. PostgreSQL 케이스는 어디서나 빌드되고 `NEOGRAPH_TEST_POSTGRES_URL`이 설정된 곳에서 실행됩니다.
 
 ### 변경됨
+- **프레임워크 간 벤치마크 표는 체크인된 기록에서 스크립트가 렌더링하는 하나의 코호트입니다.** `benchmarks/README.md`에는 더 이상 손으로 입력한 표나 값이 고정된 차트가 없습니다.
+  - **한 세션, 한 머신, 교차 라운드.** NeoGraph(`origin/master` 커밋을 기본 하드닝 Release 빌드와, 엔진 상한인 하드닝 없는 빌드로)와 Python 프레임워크 다섯 개(각 기본 브랜치의 최신 커밋을 git에서 정확한 커밋으로 설치한 것, 그리고 매칭 셀에는 최신 릴리스)를 한 대의 조용한 Arm 머신에서 무작위 순서의 라운드로, 셀마다 새 프로세스 하나로 실행했습니다. `benchmarks/records/`에 원본 샘플과 출처 정보(커밋, 컴파일러와 플래그, CPU, 커널, 패키지 버전, 부하 평균, 스크립트의 sha256)가 담긴 기록이 있습니다. `scripts/render_bench_report.py`가 이 기록에서 표와 차트를 네 언어로 생성하며, 문서가 기록과 다르면 `bench_report_current`가 실패합니다.
+  - **비율은 매칭되는 레짐 사이에서만.** `worker_count=1`의 NeoGraph는 각 프레임워크의 `async def` 노드 코루틴 경로와, `set_worker_count_auto()`는 각 스레드 풀 경로(LangGraph `invoke`, 동기 컴포넌트를 쓴 Haystack `run_async`)와 비교합니다. pydantic-graph와 AutoGen에는 스레드 풀 경로가 없고, LlamaIndex의 경로(이벤트 루프의 기본 실행기에서 실행되는 일반 `def` 스텝)는 측정하지 않았으므로, 셋 다 `해당 없음`으로 표시합니다. 각 프레임워크의 문서가 가장 먼저 보여 주는 API는 절대 시간만 담아 따로 보고하며 비율은 만들지 않습니다. NeoGraph의 두 워커 모드를 나란히 보여 주므로 하나의 "N배 빠름" 수치는 공개하지 않습니다.
+  - **새 표.** 빈 런타임 기준선, 유휴 대비 증가, 실행 중인 run당 한계 메모리를 포함한 프로세스 전체 메모리, 콜드 스타트, NeoGraph 바이너리·라이브러리·WebAssembly 모듈의 크기와 각 프레임워크의 설치 크기(서로 다른 배포 단위로 표기), 프로브(LlamaIndex 인스턴스 재사용, LangGraph 팬아웃의 스레드, pydantic-graph 팬아웃이 실제인지, 하드닝의 비용, 기존의 두 pydantic-graph 수치가 서로 달랐던 이유).
+  - **2026-04 표는 이력입니다.** 현재 무효로 알려진 항목(세션 혼합, 인라인 디스패치와 비교한 스레드 풀, 레거시 pydantic-graph API, 반복마다 다시 만든 LlamaIndex 인스턴스, 서로 다른 프로세스의 프로세스 전체 메모리)에 대한 설명과 함께 `benchmarks/history/`로 옮겼습니다.
+- **철회: 버스트 가이드의 P50, P99 열과 지연 차트, LlamaIndex multiprocessing 행, multiprocessing 메모리 수치.** 백분위수는 서비스 시간과 시스템 체류 시간을 섞었고, LlamaIndex 하니스는 핸들러를 이벤트 루프 밖에서 만들어 모든 호출이 실패했으며, 메모리는 부모 프로세스만 센 값이었습니다. wall 시간 열은 닫힌 단일 버스트로 표기해 남기며, 수정된 하니스로 다시 측정하는 일은 아직 남아 있습니다. `dr_compare`의 FANOUT=50 비교는 풀이 맞지 않았으므로 엔진 비교로서는 철회하고 너비를 맞춰 다시 측정했습니다.
+- **`dr_compare`는 두 러너의 풀 너비를 맞춥니다.** `LG_MAX_CONCURRENCY`(기본값: NeoGraph 워커 수)가 LangGraph의 풀 너비를 정하고, 러너는 너비가 다른 실행을 거부하며, `session.py`는 모의 모델 매트릭스를 실행해 기록을 씁니다. LangGraph 러너는 동기 `invoke`이며, 이전에는 asyncio라고 불렸습니다.
 - **공급자 호출의 identity는 요청이 묻는 내용을 가리키며, 그 요청을 승인한 SchemaProvider 정책을 가리키지 않습니다 (#543).** Program 공급자 호출 저널은 호출을 `Provider::request_digest`로 식별했는데, 이 다이제스트에는 SchemaProvider descriptor 정책의 identity가 들어갑니다. 그래서 내용이 같은 요청도 정책 identity가 다르면 다른 호출이 되었습니다. 재개나 크래시 복구는 논리 호출 바인딩 충돌을 만났고, fork는 원본의 호출을 이어받지 않고 다시 보내서 이미 비용을 낸 호출에 다시 비용이 들었습니다. interface 7이 모든 정책 identity를 바꾸기 때문에 0.16.0에서 이 문제가 드러났습니다. 이제 저널은 요청 내용과 정책 identity를 따로 보관합니다.
   - **요청 내용.** `Provider::request_content_digest(prepared)`는 family, 모델, 모드, origin을 다룹니다. 엔드포인트 호출이면 엔드포인트, 메서드, URL을, 업로드면 메타데이터와 보내는 바이트의 다이제스트를(#541) 더하고, 인코딩된 본문도 다룹니다. 본문에는 메시지(NeoGraph가 넣는 prompt 텍스트 포함), 도구, 옵션이 들어 있습니다. 본문은 정규화(canonicalize)하고, descriptor가 모델, 메시지, 스트림 플래그, 출력 상한에 붙인 멤버 이름은 역할별로 따로 두므로, 정책이 그 이름을 바꿔도 요청 내용은 바뀌지 않습니다. 정책의 identity, descriptor의 경로와 헤더, 재시도 정책, observer 한도는 요청 내용에 들어가지 않습니다. `Provider::request_policy_identity(prepared)`는 정책 identity를 돌려주고, `Provider::request_digest`는 그대로입니다. SchemaProvider에는 타입이 있는 요청의 정규형이 없고, NeoGraph에서 만들면 모든 요청 타입의 모든 필드를 따라가야 하며 빠뜨린 필드가 있으면 서로 다른 두 요청이 한 호출을 공유하게 됩니다. 그래서 인코딩된 본문이 곧 내용이며, SDK가 같은 요청을 다르게 인코딩하면 다른 내용으로 취급하고 안전한 쪽으로 실패합니다(fail closed).
   - **저널 행.** 행은 요청 내용 옆에 정책 identity를 기록합니다. 새 열 `identity_version`, `content_digest`, `policy_identity`, `producer`(요청을 인코딩한 NeoGraph 빌드)가 있고, 행의 `request_digest`는 내용과 정책을 함께 가리킵니다. `SQLiteProgramProviderCallJournal::Record`에도 같은 네 멤버가 생겼고, `policy_changes()`는 호출에 기록된 변경을 나열합니다(테이블 `ng_program_provider_call_policy_changes`). 이 버전이 쓴 행은 0.16.0이 매칭하지 못하므로, 다운그레이드하면 바인딩 충돌을 만납니다.
@@ -895,7 +902,7 @@ CI는 이러한 대상들을 add_executables로 감지하지 못했거나 (Docke
     | autogen         | mp-pool-8     | 22428   | 82361       | 49.1    | 10000/0 |
     | llamaindex      | asyncio       | 26303   | 25912204    | 582.7   | 10000/0 |
 
-NG vs LangGraph(마케팅 비교 축): 벽 **237× 더 빠름**, p99 **4134× 더 빠름**, 최대 RSS **12× 더 낮음**.
+NG vs LangGraph(마케팅 비교 축): 벽 **237× 더 빠름**, p99 **4134× 더 빠름**, 최대 RSS **12× 더 낮음**. 철회: p99는 NeoGraph의 워커 안 서비스 시간을 Python 행의 시스템 체류 시간과 비교한 값이고, LangGraph multiprocessing 메모리는 부모 프로세스만 센 값입니다. [`benchmarks/concurrent/CONCURRENT.md`](benchmarks/concurrent/CONCURRENT.md)를 참고하세요.
 
 **극한 시나리오**(동시성=10000, 1 cpu / 512 MiB):
     - NG: 8 ms / 5.2 MB / 0 err / **ok**
@@ -1301,8 +1308,9 @@ Stage 4는 비동기 경로의 마지막 `run_sync` 홉을 닫습니다. `run_as
 - `par` 엔진 오버헤드(5-워커 fan-out + 요약기): **~11.8 µs** 호출당.
 - 전체 벤치 프로세스의 최대 RSS(워밍업 + 순차 + 병렬 반복): **4.8 MB**.
 - 동일 워크로드에서 LangGraph 1.1.9 대비: 반복당 **순차 131배, 병렬 199배** 더 빠름; RSS 약 12배 더 가벼움.
+- 정정: `par` 수치는 LangGraph의 동기 `invoke`(팬아웃을 호출마다 새로 만드는 스레드 풀에서 실행)와 NeoGraph의 인라인 디스패치(`worker_count=1`)를 비교한 값이며, 2026-04-29의 재측정(LangGraph 1.1.10 대 `set_worker_count_auto()`)에서 풀 대 풀 비율은 8.1배였습니다. 메모리 수치는 네이티브 프로세스를 인터프리터를 포함한 Python 프로세스와 비교한 값입니다. 두 수치 모두 현재의 결과가 아니며, 매칭 비율과 메모리 기준선은 [`benchmarks/README.md`](benchmarks/README.md)에 있습니다.
 
-이전 CHANGELOG 초안은 "~46 µs seq / ~114 µs par"을 3.0 회귀로 나열했습니다. 그 숫자들은 `CMAKE_BUILD_TYPE`가 설정되지 않은 빌드 트리에서 나온 것이므로, 벤치 바이너리는 `-O3 -DNDEBUG` 없이 컴파일되었습니다. 올바른 Release 빌드에서 비동기 피어 축소는 2.0의 Taskflow 동기 경로(같은 호스트에서 2.0 README가 20.65 µs seq / 150.7 µs par로 광고)에 비해 **승리**입니다. 수정된 차트는 [`docs/images/bench-engine-overhead.png`](docs/images/bench-engine-overhead.png)에 있습니다.
+이전 CHANGELOG 초안은 "~46 µs seq / ~114 µs par"을 3.0 회귀로 나열했습니다. 그 숫자들은 `CMAKE_BUILD_TYPE`가 설정되지 않은 빌드 트리에서 나온 것이므로, 벤치 바이너리는 `-O3 -DNDEBUG` 없이 컴파일되었습니다. 올바른 Release 빌드에서 비동기 피어 축소는 2.0의 Taskflow 동기 경로(같은 호스트에서 2.0 README가 20.65 µs seq / 150.7 µs par로 광고)에 비해 **승리**입니다. 이 항목의 차트는 현재 벤치마크 기록에서 생성한 차트로 대체했습니다. [`benchmarks/README.md`](benchmarks/README.md)를 참고하세요.
 
 ### 마이그레이션
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=f3bc3b6b068ce7b66d2092b2d2092a1a0d3b6cbea9af2b415feffef8537f4d15 -->
+<!-- neograph-i18n: source=benchmarks/python_clients/README.md locale=ko source_sha256=9eb323da15539ee4bca6ce0c716a1012e6f981bec388df65b8b346e3014d145f -->
 # Python 클라이언트 오버헤드: 현재 러너와 과거 결과
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -33,6 +33,12 @@
 | 64 | 343 | 275 | 1.25× |
 
 K=16/64에서 처리량이 떨어진 데에는 `ThreadingHTTPServer`와 클라이언트 사이의 상호작용이 섞여 있습니다. 표준 라이브러리의 한계를 따로 가려낸 것도, asyncio에 일반적인 제약이 있음을 증명한 것도 아닙니다. K=4의 결과 역시 거의 선형에 가까운 확장을 입증하지 않습니다. 표본 하나로 측정한 설정의 결과일 뿐입니다.
+
+## 수치에 포함된 것
+
+* **모의 상대(mock peer)가 모든 수치에 포함되어 있습니다.** 두 클라이언트는 같은 프로세스 안의 Python `ThreadingHTTPServer`와 통신합니다. 이 서버는 HTTP/1.0(`http.server`의 기본값)을 사용하므로 요청마다 새 TCP 연결과 새 서버 스레드가 생기고, 서버는 클라이언트와 인터프리터와 GIL을 공유합니다. 이 비용은 두 클라이언트가 똑같이 치르지만 따로 측정하지 않았고 모든 비율을 희석합니다. 클라이언트 자체 작업만의 비율은 위의 비율보다 클 것입니다. K=16과 K=64 행은 클라이언트의 확장성이 아니라 모의 서버와 클라이언트를 함께 설명하며, 이 표에서 어떤 확장 법칙도 도출되지 않습니다.
+* **a2a-sdk 행은 호환 전송 계층을 사용합니다.** 모의 서버의 agent card가 프로토콜 버전 0.3.0을 선언하므로 `a2a-sdk`는 하위 호환 JSON-RPC 전송을 선택하고, 이 전송은 요청과 응답을 1.0 타입과 0.3 타입 사이에서 변환합니다. 네이티브 1.0 전송은 측정하지 않았고, NeoGraph 클라이언트도 그 card에 대해 0.3 방언으로 통신합니다. 1.0 card를 제공하는 상대라면 이 변환이 일어나지 않습니다.
+* **닫힌 루프, 요청마다 연결 하나.** 각 클라이언트는 이전 요청이 돌아온 뒤에 새 연결로 다음 요청을 보내므로, 수치는 고정된 동시성에서의 서비스 시간이며 keep-alive HTTPS 연결의 동작이 아닙니다.
 
 ## 현재 API와 의존성
 

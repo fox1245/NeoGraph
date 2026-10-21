@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=2d15a0b62d2881a1880f92dc7b5d24e9e499ffc57b27fd02b0bb365c20ce9225 -->
+<!-- neograph-i18n: source=docs/performance-deep-dive.md locale=zh-CN source_sha256=1441793955b212960f5bb907b65dda7705de92ccfbfa4877fb40810066ac2ea7 -->
 # 性能深度剖析
 
 **Languages:** [English](performance-deep-dive.md) | [한국어](performance-deep-dive.ko.md) | [日本語](performance-deep-dive.ja.md) | [简体中文](performance-deep-dive.zh-CN.md)
@@ -9,41 +9,19 @@
 
 这些测量值不能用来保证云成本、worker 数量或容量。除了包的版本，还要固定 wheel 的哈希和原生依赖；仅凭一个版本号，不能让部署可复现。
 
-## 仅引擎的工作负载，2026 年 4 月
+## 仅引擎的工作负载
 
-拓扑一致，只编译一次，没有模型、网络或 sleep：seq 是三个节点的链；par 是五路 fan-out 加 join。这些数据是 2026-04-22 在 x86_64 Linux 上测得的。NeoGraph 使用 GCC 13 的 Release `-O3 -DNDEBUG`，取十次运行的中位数；Python 使用 CPython 3.12.3，取三次运行的中位数。pydantic-graph 的 par 一行是对六个节点的串行模拟，不是原生的 fan-out。
+当前的跨框架表格（匹配与惯用默认值、内存、启动时间和体积）由一份已入库的记录生成，见[基准测试指南](../benchmarks/README.md)。本页过去重复的 2026 年 4 月表格是在多个会话中、混用版本测得的；它们连同对现已确认无效之处的说明，保留在[历史记录](../benchmarks/history/engine-overhead-2026-04.md)中。不含 I/O 的引擎对比无法预测模型服务的延迟。
 
-| 框架（2026-04-22） | seq µs | par µs |
-|---|---:|---:|
-| NeoGraph，当时的 master | 5.0 | 11.8 |
-| Haystack 2.28.0 | 144.1 | 290.0 |
-| pydantic-graph 1.85.1 | 235.9 | 286.1 |
-| LangGraph 1.1.9 | 656.7 | 2348.7 |
-| LlamaIndex Workflow 0.14.21 | 1780.3 | 4683.5 |
-| AutoGen GraphFlow 0.7.5 | 3209.2 | 7292.7 |
+## 突发并发
 
-历史上“预热加 10000 次 seq / 5000 次 par”的那次运行，记录的是：NeoGraph 约 0.16 秒、4.8 MB；Haystack 2.91 秒、80.3 MB；AutoGen 68.29 秒、52.4 MB。零 I/O 的引擎对比，不能用来预测模型服务的延迟。
-
-## 历史上的突发并发测量
-
-一次性同时提交 10000 个请求，运行在限制为 1 个 CPU 和 512 MB 内存的 Docker cgroup 里。Python 的各行使用 asyncio。这些结果只属于该工作负载和环境，并不能确立适用于一切场景的 Python/GIL 扩展规律。
-
-| 框架 | 总耗时 | P99 | 峰值 RSS | 结果 |
-|---|---:|---:|---:|---|
-| NeoGraph，当时的 master | 52 ms | 7 µs | 5.5 MB | 10000 个全部完成 |
-| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000 个全部完成 |
-| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000 个全部完成 |
-| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000 个全部完成 |
-| LlamaIndex | — | — | — | 因 OOM 被杀 |
-| AutoGen | — | — | — | 因 OOM 被杀 |
-
-测量方法以及与进程池的对比，见[并发基准测试](../benchmarks/concurrent/CONCURRENT.md)。
+一万个请求同时提交（封闭的单次突发），运行在限制为 1 个 CPU 和 512 MB 内存的 Docker cgroup 中。记录数据所支持的墙钟时间一列，以及被撤回的列和行及其原因，见[并发基准测试](../benchmarks/concurrent/CONCURRENT.md)。这些结果只属于该工作负载和环境，并不能确立 Python/GIL 的普适扩展规律。
 
 ## 历史上的缓存模拟
 
 Cachegrind 模拟了 Ryzen 7 5800X 的缓存层级：32 KB 的 L1 指令/数据缓存，8 路组相联；32 MB 的末级缓存，16 路组相联；缓存行 64 字节。历史上的并发基准测试报告了：
 
-| N | 指令引用数 | 末级缓存指令未命中数 | 原生 p50 |
+| N | 指令引用数 | 末级缓存指令未命中数 | 原生 p50（工作线程内的服务时间） |
 |---|---:|---:|---:|
 | 1 | 5.3 M | 4313 | 17 µs |
 | 10 | 5.9 M | 4304 | 16 µs |

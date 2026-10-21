@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=69f7c20709c2c0405d4aa839668b7aeb6c74d582143b3548b9e378066d2c318c -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=zh-CN source_sha256=2b082a63b44c2beb85ce4d89781581abaac211bd192807db4439301f62e36f74 -->
 # dr_compare：深度研究编排对比
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -24,6 +24,7 @@
 | `USE_INMEMORY_CP` | `0` | 为 1 时选用内存检查点；mock 模式下也会选用。 |
 | `NG_TRANSPORT` | `http-chat` | NG：http-chat 或 http-responses。没有 WebSocket；Responses 会改变所用的 wire API。 |
 | `NG_WORKER_COUNT` | `4` | NG 用于 fan-out 的 worker 数量。 |
+| `LG_MAX_CONCURRENCY` | `NG_WORKER_COUNT`，否则为 `4` | LangGraph 线程池宽度（`invoke` 的 `max_concurrency`）。默认值与 NeoGraph 一致，除非给出 `--allow-unmatched-widths`，否则 `bench_mock.py` 会拒绝宽度不一致的运行。 |
 | `DR_MODEL` | `gpt-5.4-mini` | 两侧真实调用所用的显式模型。 |
 | `DR_PLAN_TEMPERATURE` | 未设置 | 两侧 planner 的 temperature；未设置时不发送，因为 `gpt-5.4-mini` 这类 reasoning 模型会拒绝它。 |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG 和 LG 两侧每次调用的输出上限；从不自动调高。 |
@@ -39,9 +40,37 @@
 2. 第一轮托管模型的测试：NG p50 23.90 s（标准差 5.90 s），LG 21.95 s（标准差 1.23 s）。
 3. 历史上的连接诊断，在一次包含七次模型调用的 NG 运行中记录到 21 次 `connect()` 系统调用。仅凭这个数字，并不能证明有 21 个 TLS 会话，也不能证明 HTTP 版本或载荷是等价的。
 4. 历史上的连接池改动，即提交 `6da4810` / `bc2ab4f`，与 NG 的 p90 从 35.34 s 降到 25.28 s、标准差从 5.90 s 降到 1.28 s 相关联。这些改动针对的是已经移除的 provider 实现；当前带类型的 SchemaProvider 使用外部的 SDK/libcurl 运行时。
-5. 一次 worker 数量的实验，在 FANOUT=50、LLM_MOCK_MS=100、NG_WORKER_COUNT=50 的条件下，报告 NG 为 307 ms，LG asyncio 为 711 ms。这是另一种工作负载，不是通用的服务器容量结论。
+5. 一次 worker 数量的实验，在 FANOUT=50、LLM_MOCK_MS=100、NG_WORKER_COUNT=50 的条件下，报告 NG 为 307 ms，LangGraph 为 711 ms。LangGraph 的运行器并非 asyncio，而是在 langchain-core 每次调用新建的线程池上运行的同步 `invoke`（旧标签有误），其线程池保持默认宽度 `min(32, CPU 数 + 4)`，而只有 NeoGraph 的线程池被加宽到 50。两个线程池并不匹配，因此撤回其作为引擎对比的结论；下面的重新测量把宽度对齐。
 
 以前说 NeoGraph 仍然需要 HTTP/2 支持，这个说法已经过时。这些记录下来的耗时是在新的 SDK 和当前的 Python wheel 之前测得的，不适用于其他平台，也不能用来预测远程推理的加速。mock 模式只测量编排和配置的 sleep；它不产生任何 provider 证据。真实模式会从带类型、持有所有权的 outcome 中提取可见文本，但不对 native 重放、可移植历史的导出，或 provider 上报与预算计费的结算做基准测试。
+
+## 对齐线程池宽度的重新测量
+
+两个运行器都通过线程池扇出：NeoGraph 使用 worker 线程池（`NG_WORKER_COUNT`），LangGraph 的同步 `invoke` 使用 langchain-core 每次调用新建的线程池（以 `max_concurrency` 传入的 `LG_MAX_CONCURRENCY`）。重新测量在每种配置中给两侧相同的宽度，使用模拟模型（每次调用休眠）、固定的检索证据和内存检查点，无密钥、无网络。运行失败或宽度不一致的运行会使其单元成为错误单元，并从表中排除。
+
+<!-- bench-record:begin dr_compare -->
+| 配置 | 扇出 | 每次模型调用的延迟 (ms) | 线程池宽度，两侧相同 | NeoGraph，每次运行 ms | LangGraph，每次运行 ms | LangGraph ÷ NeoGraph |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A：无模型延迟（引擎下限） | 5 | 0 | 4 | 1.39 [1.37, 1.40] | 6.23 [6.11, 6.34] | 4.47× |
+| B：五个研究节点 | 5 | 100 | 4 | 402 [402, 402] | 407 [407, 407] | 1.01× |
+| C：五十个研究节点，线程池与扇出等宽 | 50 | 100 | 50 | 307 [307, 308] | 329 [328, 329] | 1.07× |
+| D：五十个研究节点，窄线程池 | 50 | 100 | 4 | 1,508 [1,508, 1,508] | 1,516 [1,516, 1,516] | 1.01× |
+
+模拟模型（每次调用休眠）、固定的检索证据、内存检查点，无密钥、无网络；5 轮交错运行的中位数及各轮之间的 [最小, 最大]；每轮对每个配置使用一个全新进程，每侧预热 3 次、测量 50 (A); 20 (B, C, D) 次；neograph_engine 0.16.0，编译器 g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0。两侧使用相同的线程池宽度：`NG_WORKER_COUNT` 与 `LG_MAX_CONCURRENCY`。
+
+主机：ARM Neoverse-N1，4 核，内核 6.17.0-1018-oracle，Python 3.12.3，构建 NeoGraph 的编译器 g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0；CPU 调频策略：主机未提供。
+<!-- bench-record:end dr_compare -->
+
+`session.py` 以交错轮次运行表中的四种配置，每个配置使用一个全新的 `bench_mock.py` 进程，并写出包含原始样本和来源信息的记录；上面的表格由 `scripts/render_bench_report.py` 根据该记录生成。
+
+```sh
+# Environment: the dr_compare section of benchmarks/requirements-compare.txt (benchmarks/compare/setup_venvs.sh creates it).
+# The NeoGraph Python module is built from the source tree (-DNEOGRAPH_BUILD_PYBIND=ON, shared libraries) in $WORK/build-pybind.
+python3 benchmarks/dr_compare/session.py --python "$WORK/venvs/dr_compare/bin/python" \
+    --pythonpath "$WORK/build-pybind" --build-dir "$WORK/build-pybind" --out dr-record.json --rounds 5 \
+    --harness-commit "$(git rev-parse HEAD)" --engine-commit "$(git rev-parse HEAD)"
+python3 scripts/render_bench_report.py --dr-record dr-record.json --docs benchmarks/dr_compare/README
+```
 
 ## 运行新的 cohort
 

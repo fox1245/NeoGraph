@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=69f7c20709c2c0405d4aa839668b7aeb6c74d582143b3548b9e378066d2c318c -->
+<!-- neograph-i18n: source=benchmarks/dr_compare/README.md locale=ko source_sha256=2b082a63b44c2beb85ce4d89781581abaac211bd192807db4439301f62e36f74 -->
 # dr_compare: 심층 조사 오케스트레이션 비교
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -22,6 +22,7 @@
 | `USE_INMEMORY_CP` | `0` | 1이면 메모리 체크포인트를 쓴다. mock 모드에서도 메모리 체크포인트를 쓴다. |
 | `NG_TRANSPORT` | `http-chat` | NG의 전송 방식으로 http-chat 또는 http-responses를 고른다. WebSocket은 없다. Responses를 고르면 wire API가 달라진다. |
 | `NG_WORKER_COUNT` | `4` | fan-out에 쓰는 NG 워커 수이다. |
+| `LG_MAX_CONCURRENCY` | `NG_WORKER_COUNT`, 없으면 `4` | LangGraph 풀 너비(`invoke`의 `max_concurrency`)이다. 기본값은 NeoGraph와 같으며, `--allow-unmatched-widths`를 주지 않으면 `bench_mock.py`는 너비가 다른 실행을 거부한다. |
 | `DR_MODEL` | `gpt-5.4-mini` | 양쪽의 실제 호출에 쓰는 모델이며, 명시적으로 지정한다. |
 | `DR_PLAN_TEMPERATURE` | 미설정 | 양쪽 플래너의 temperature이다. 미설정이면 보내지 않는다. `gpt-5.4-mini` 같은 추론 모델은 temperature를 거부하기 때문이다. |
 | `NG_EXAMPLE_MAX_TOKENS` | `1600` | NG와 LG 양쪽의 호출당 출력 상한이다. 자동으로 올리지 않는다. |
@@ -37,9 +38,37 @@
 2. 호스팅 모델을 쓴 첫 라운드: NG p50 23.90 s (sd 5.90 s), LG 21.95 s (sd 1.23 s).
 3. 당시 연결 진단에서는 모델 호출이 7번인 NG 실행에서 `connect()` 시스콜 21회가 기록되었습니다. 이 횟수만으로 TLS 세션이 21개였다거나 HTTP 버전, payload가 같았다는 것이 증명되지는 않습니다.
 4. 커밋 `6da4810` / `bc2ab4f`로 확인된 과거의 풀링 변경은 NG p90 35.34 s → 25.28 s, sd 5.90 s → 1.28 s와 연관되었습니다. 이 변경은 이미 제거된 provider 구현에 관한 것이며, 현재의 typed SchemaProvider는 외부 SDK/libcurl 런타임을 씁니다.
-5. 워커 수 실험에서는 FANOUT=50, LLM_MOCK_MS=100, NG_WORKER_COUNT=50일 때 NG 307 ms, LG asyncio 711 ms로 보고되었습니다. 이는 별도의 워크로드이며 서버 용량으로 일반화할 수 있는 결과가 아닙니다.
+5. 워커 수 실험에서는 FANOUT=50, LLM_MOCK_MS=100, NG_WORKER_COUNT=50일 때 NG 307 ms 대 LangGraph 711 ms로 보고되었습니다. LangGraph 러너는 asyncio가 아니라 langchain-core가 호출마다 새로 만드는 스레드 풀 위에서 도는 동기 `invoke`이며(기존 라벨이 틀렸습니다), 그 풀은 기본 너비 `min(32, CPU 수 + 4)`를 유지한 반면 NeoGraph의 풀만 50으로 넓혔습니다. 풀이 맞지 않았으므로 엔진 비교로서는 철회하며, 아래의 재측정이 풀 너비를 맞춥니다.
 
 NeoGraph에 아직 HTTP/2 지원이 필요하다는 예전 주장은 더 이상 유효하지 않습니다. 기록된 시간은 새 SDK와 현재의 Python wheel 이전에 측정한 값이므로, 다른 플랫폼에는 적용되지 않으며 원격 추론의 속도 향상을 예측하지도 않습니다. mock 모드가 측정하는 것은 오케스트레이션과 설정한 sleep뿐이며 provider 증거는 만들지 않습니다. 실제 모드는 typed 소유 outcome에서 화면에 보이는 텍스트를 추출하지만, 네이티브 재생(replay), 이식 가능한 기록(history) 내보내기, provider 보고/예산 청구 정산(settlement)은 벤치마크하지 않습니다.
+
+## 풀 너비를 맞춘 재측정
+
+두 러너 모두 스레드 풀로 팬아웃합니다. NeoGraph는 워커 풀(`NG_WORKER_COUNT`)을, LangGraph의 동기 `invoke`는 langchain-core가 호출마다 새로 만드는 풀(`max_concurrency`로 전달하는 `LG_MAX_CONCURRENCY`)을 씁니다. 재측정은 모든 구성에서 양쪽에 같은 너비를 주고, 모의 모델(호출마다 sleep), 고정된 검색 근거, 메모리 체크포인트를 쓰며 키와 네트워크는 없습니다. 실패한 실행이나 너비가 다른 실행은 그 셀을 오류로 만들고 표에서 제외합니다.
+
+<!-- bench-record:begin dr_compare -->
+| 구성 | 팬아웃 | 모델 호출당 지연 (ms) | 풀 너비, 양쪽 모두 | NeoGraph, 실행당 ms | LangGraph, 실행당 ms | LangGraph ÷ NeoGraph |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| A: 모델 지연 없음(엔진 하한) | 5 | 0 | 4 | 1.39 [1.37, 1.40] | 6.23 [6.11, 6.34] | 4.47× |
+| B: 연구자 다섯 명 | 5 | 100 | 4 | 402 [402, 402] | 407 [407, 407] | 1.01× |
+| C: 연구자 50명, 풀 너비가 팬아웃과 같음 | 50 | 100 | 50 | 307 [307, 308] | 329 [328, 329] | 1.07× |
+| D: 연구자 50명, 좁은 풀 | 50 | 100 | 4 | 1,508 [1,508, 1,508] | 1,516 [1,516, 1,516] | 1.01× |
+
+모의 모델(호출마다 sleep), 고정된 검색 근거, 메모리 체크포인트, 키와 네트워크 없음; 교차 라운드 5회의 중앙값과 라운드 간 [최소, 최대]; 각 라운드는 구성마다 새 프로세스 하나로, 쪽마다 워밍업 3회와 측정 50 (A); 20 (B, C, D)회; neograph_engine 0.16.0, 컴파일러 g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0. 양쪽은 같은 풀 너비를 씁니다: `NG_WORKER_COUNT`와 `LG_MAX_CONCURRENCY`.
+
+호스트: ARM Neoverse-N1, 코어 4개, 커널 6.17.0-1018-oracle, Python 3.12.3, NeoGraph 빌드 컴파일러 g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; CPU 거버너: 호스트가 노출하지 않음.
+<!-- bench-record:end dr_compare -->
+
+`session.py`는 표의 네 구성을 교차 라운드로, 구성마다 새 `bench_mock.py` 프로세스 하나로 실행하고 원본 샘플과 출처 정보가 담긴 기록을 씁니다. 위의 표는 그 기록에서 `scripts/render_bench_report.py`가 생성합니다.
+
+```sh
+# Environment: the dr_compare section of benchmarks/requirements-compare.txt (benchmarks/compare/setup_venvs.sh creates it).
+# The NeoGraph Python module is built from the source tree (-DNEOGRAPH_BUILD_PYBIND=ON, shared libraries) in $WORK/build-pybind.
+python3 benchmarks/dr_compare/session.py --python "$WORK/venvs/dr_compare/bin/python" \
+    --pythonpath "$WORK/build-pybind" --build-dir "$WORK/build-pybind" --out dr-record.json --rounds 5 \
+    --harness-commit "$(git rev-parse HEAD)" --engine-commit "$(git rev-parse HEAD)"
+python3 scripts/render_bench_report.py --dr-record dr-record.json --docs benchmarks/dr_compare/README
+```
 
 ## 새 측정 실행하기
 

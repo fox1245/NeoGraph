@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420" role="img" aria-label="Peak resident memory of one process (MiB)" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+<rect width="760" height="420" fill="#ffffff"/>
+<text x="380.0" y="26" text-anchor="middle" font-size="15" font-weight="700" fill="#24292e">Peak resident memory of one process (MiB)</text>
+<text x="380.0" y="44" text-anchor="middle" font-size="11" fill="#586069">closed single burst, 1 CPU / 512 MiB; points whose wall time is below the clock resolution are left out</text>
+<line x1="78" x2="610" y1="366.0" y2="366.0" stroke="#eaecef"/>
+<text x="72" y="370.0" text-anchor="end" font-size="10.5" fill="#586069">1</text>
+<line x1="78" x2="610" y1="264.0" y2="264.0" stroke="#eaecef"/>
+<text x="72" y="268.0" text-anchor="end" font-size="10.5" fill="#586069">10</text>
+<line x1="78" x2="610" y1="162.0" y2="162.0" stroke="#eaecef"/>
+<text x="72" y="166.0" text-anchor="end" font-size="10.5" fill="#586069">100</text>
+<line x1="78" x2="610" y1="60.0" y2="60.0" stroke="#eaecef"/>
+<text x="72" y="64.0" text-anchor="end" font-size="10.5" fill="#586069">1,000</text>
+<text x="78.0" y="382" text-anchor="middle" font-size="10.5" fill="#586069">10</text>
+<text x="255.3" y="382" text-anchor="middle" font-size="10.5" fill="#586069">100</text>
+<text x="432.7" y="382" text-anchor="middle" font-size="10.5" fill="#586069">1,000</text>
+<text x="610.0" y="382" text-anchor="middle" font-size="10.5" fill="#586069">10,000</text>
+<text x="344.0" y="408" text-anchor="middle" font-size="11" fill="#586069">N, simultaneous runs submitted</text>
+<text x="16" y="213.0" text-anchor="middle" font-size="11" fill="#586069" transform="rotate(-90 16 213.0)">MiB</text>
+<polyline points="78.0,195.6 255.3,188.6 432.7,148.8" fill="none" stroke="#c0392b" stroke-width="2"/>
+<circle cx="78.0" cy="195.6" r="3" fill="#c0392b"/>
+<circle cx="255.3" cy="188.6" r="3" fill="#c0392b"/>
+<circle cx="432.7" cy="148.8" r="3" fill="#c0392b"/>
+<rect x="622" y="68" width="10" height="10" fill="#c0392b"/><text x="638" y="77" font-size="11" fill="#24292e">AutoGen asyncio</text>
+<polyline points="78.0,175.7 255.3,175.6 432.7,172.9 610.0,150.1" fill="none" stroke="#1f77b4" stroke-width="2"/>
+<circle cx="78.0" cy="175.7" r="3" fill="#1f77b4"/>
+<circle cx="255.3" cy="175.6" r="3" fill="#1f77b4"/>
+<circle cx="432.7" cy="172.9" r="3" fill="#1f77b4"/>
+<circle cx="610.0" cy="150.1" r="3" fill="#1f77b4"/>
+<rect x="622" y="86" width="10" height="10" fill="#1f77b4"/><text x="638" y="95" font-size="11" fill="#24292e">Haystack asyncio</text>
+<polyline points="78.0,186.4 255.3,183.9 432.7,165.1 610.0,98.8" fill="none" stroke="#8250df" stroke-width="2"/>
+<circle cx="78.0" cy="186.4" r="3" fill="#8250df"/>
+<circle cx="255.3" cy="183.9" r="3" fill="#8250df"/>
+<circle cx="432.7" cy="165.1" r="3" fill="#8250df"/>
+<circle cx="610.0" cy="98.8" r="3" fill="#8250df"/>
+<rect x="622" y="104" width="10" height="10" fill="#8250df"/><text x="638" y="113" font-size="11" fill="#24292e">LangGraph asyncio</text>
+<polyline points="78.0,161.4 255.3,159.6 432.7,144.1" fill="none" stroke="#d3822a" stroke-width="2"/>
+<circle cx="78.0" cy="161.4" r="3" fill="#d3822a"/>
+<circle cx="255.3" cy="159.6" r="3" fill="#d3822a"/>
+<circle cx="432.7" cy="144.1" r="3" fill="#d3822a"/>
+<rect x="622" y="122" width="10" height="10" fill="#d3822a"/><text x="638" y="131" font-size="11" fill="#24292e">LlamaIndex asyncio</text>
+<polyline points="78.0,301.9 255.3,301.9 432.7,300.6 610.0,290.5" fill="none" stroke="#2ea44f" stroke-width="2"/>
+<circle cx="78.0" cy="301.9" r="3" fill="#2ea44f"/>
+<circle cx="255.3" cy="301.9" r="3" fill="#2ea44f"/>
+<circle cx="432.7" cy="300.6" r="3" fill="#2ea44f"/>
+<circle cx="610.0" cy="290.5" r="3" fill="#2ea44f"/>
+<rect x="622" y="140" width="10" height="10" fill="#2ea44f"/><text x="638" y="149" font-size="11" fill="#24292e">NeoGraph threadpool</text>
+<polyline points="78.0,208.2 255.3,208.8 432.7,207.5 610.0,199.8" fill="none" stroke="#17a2b8" stroke-width="2"/>
+<circle cx="78.0" cy="208.2" r="3" fill="#17a2b8"/>
+<circle cx="255.3" cy="208.8" r="3" fill="#17a2b8"/>
+<circle cx="432.7" cy="207.5" r="3" fill="#17a2b8"/>
+<circle cx="610.0" cy="199.8" r="3" fill="#17a2b8"/>
+<rect x="622" y="158" width="10" height="10" fill="#17a2b8"/><text x="638" y="167" font-size="11" fill="#24292e">pydantic-graph asyncio</text>
+</svg>

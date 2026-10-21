@@ -8,41 +8,19 @@ The tables below preserve pre-cutover measurements. They do not qualify the curr
 
 These measurements give no cloud costs, worker counts or capacity guarantees. Pin wheel hashes and native dependencies as well as package versions; a version string alone does not make a deployment reproducible.
 
-## Engine-only workloads, April 2026
+## Engine-only workloads
 
-Matched topology, compiled once, with no model, network or sleep: seq is a three-node chain; par is five-way fan-out plus join. These rows were measured on x86_64 Linux on 2026-04-22. NeoGraph used GCC 13 Release `-O3 -DNDEBUG` and a ten-run median; Python used CPython 3.12.3 and a three-run median. pydantic-graph's par row is a serial six-node emulation, not native fan-out.
+The current cross-framework tables (the matched and idiomatic regimes, memory, start-up and size) are generated from a checked-in record in [the benchmark guide](../benchmarks/README.md). The April 2026 tables that this page used to repeat were measured in several sessions with mixed versions; they are kept, with a note on what is known to be invalid, in [the history](../benchmarks/history/engine-overhead-2026-04.md). A zero-I/O engine comparison does not predict model-service latency.
 
-| Framework (2026-04-22) | seq µs | par µs |
-|---|---:|---:|
-| NeoGraph, then-current master | 5.0 | 11.8 |
-| Haystack 2.28.0 | 144.1 | 290.0 |
-| pydantic-graph 1.85.1 | 235.9 | 286.1 |
-| LangGraph 1.1.9 | 656.7 | 2348.7 |
-| LlamaIndex Workflow 0.14.21 | 1780.3 | 4683.5 |
-| AutoGen GraphFlow 0.7.5 | 3209.2 | 7292.7 |
+## Burst concurrency
 
-The historical warm-up plus 10000 seq/5000 par run recorded ~0.16 s and 4.8 MB for NeoGraph, 2.91 s and 80.3 MB for Haystack, and 68.29 s and 52.4 MB for AutoGen. A zero-I/O engine comparison does not predict model-service latency.
-
-## Historical burst concurrency
-
-10000 requests submitted together, inside a Docker cgroup with one CPU and 512 MB RAM. Python rows used asyncio. These results belong to that workload and environment; they do not establish a universal Python/GIL scaling law.
-
-| Framework | Wall | P99 | Peak RSS | Result |
-|---|---:|---:|---:|---|
-| NeoGraph, then-current master | 52 ms | 7 µs | 5.5 MB | 10000 completed |
-| pydantic-graph | 886 ms | 158 µs | 42.6 MB | 10000 completed |
-| Haystack | 3.1 s | 2.9 s | 130.7 MB | 10000 completed |
-| LangGraph | 23.4 s | 23.0 s | 416.2 MB | 10000 completed |
-| LlamaIndex | — | — | — | OOM killed |
-| AutoGen | — | — | — | OOM killed |
-
-See [the concurrent benchmark](../benchmarks/concurrent/CONCURRENT.md) for methodology and process-pool comparisons.
+Ten thousand requests submitted together (a closed, single burst) inside a Docker cgroup with one CPU and 512 MB RAM. The wall-time column that the recorded data supports, and the columns and rows that were withdrawn with the reason for each, are in [the concurrent benchmark](../benchmarks/concurrent/CONCURRENT.md). These results belong to that workload and environment; they do not establish a universal Python/GIL scaling law.
 
 ## Historical cache simulation
 
 Cachegrind simulated a Ryzen 7 5800X cache hierarchy: 32 KB L1 instruction/data caches, eight-way; 32 MB last-level cache, sixteen-way; 64-byte lines. The historical concurrent benchmark reported:
 
-| N | Instruction references | Last-level instruction misses | Native p50 |
+| N | Instruction references | Last-level instruction misses | Native p50 (service time in the worker) |
 |---|---:|---:|---:|
 | 1 | 5.3 M | 4313 | 17 µs |
 | 10 | 5.9 M | 4304 | 16 µs |
