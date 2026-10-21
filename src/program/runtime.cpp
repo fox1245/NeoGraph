@@ -1772,6 +1772,7 @@ ProgramContextPublication transfer_context_to_run(
     // The run's first epoch has no predecessor, so it keeps the source's order
     // and nothing it claimed about a prefix.
     epoch_data.ordered_artifact_ids = source.epoch.ordered_artifact_ids();
+    epoch_data.assembly_layout = source.epoch.assembly_layout();
     auto epoch = ContextEpoch::create(std::move(epoch_data));
 
     ContextAssemblyReceiptData receipt_data;

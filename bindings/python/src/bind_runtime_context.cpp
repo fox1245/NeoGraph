@@ -100,6 +100,9 @@ void init_runtime_context(py::module_& m) {
     py::enum_<ContextPrefixClaim>(m, "ContextPrefixClaim")
         .value("Extends", ContextPrefixClaim::Extends)
         .value("Breaks", ContextPrefixClaim::Breaks);
+    py::enum_<AssemblyLayout>(m, "AssemblyLayout")
+        .value("Legacy", AssemblyLayout::Legacy)
+        .value("StableFirst", AssemblyLayout::StableFirst);
     py::enum_<ContextStabilityRefusal>(m, "ContextStabilityRefusal")
         .value("VolatileSystemArtifact", ContextStabilityRefusal::VolatileSystemArtifact)
         .value("PredecessorUnavailable", ContextStabilityRefusal::PredecessorUnavailable)
@@ -109,7 +112,14 @@ void init_runtime_context(py::module_& m) {
         .value("RawWindowNotGrown", ContextStabilityRefusal::RawWindowNotGrown)
         .value("StablePrefixChanged", ContextStabilityRefusal::StablePrefixChanged)
         .value("AnchorDropped", ContextStabilityRefusal::AnchorDropped)
-        .value("AnchorOutOfRange", ContextStabilityRefusal::AnchorOutOfRange);
+        .value("AnchorOutOfRange", ContextStabilityRefusal::AnchorOutOfRange)
+        .value("LayoutChangeUndeclared", ContextStabilityRefusal::LayoutChangeUndeclared)
+        .value("StableOutsideHistoryHead", ContextStabilityRefusal::StableOutsideHistoryHead)
+        .value("VolatileOutsideTail", ContextStabilityRefusal::VolatileOutsideTail)
+        .value("TierOrderViolated", ContextStabilityRefusal::TierOrderViolated)
+        .value("VolatileSystemText", ContextStabilityRefusal::VolatileSystemText)
+        .value("PrefixBoundaryUnavailable", ContextStabilityRefusal::PrefixBoundaryUnavailable)
+        .value("AmbiguousOrder", ContextStabilityRefusal::AmbiguousOrder);
     py::enum_<ContextStoreAppendResult>(m, "ContextStoreAppendResult")
         .value("Appended", ContextStoreAppendResult::Appended)
         .value("AlreadyPresent", ContextStoreAppendResult::AlreadyPresent)
@@ -201,7 +211,8 @@ void init_runtime_context(py::module_& m) {
         .def_readwrite("guarantee_profile", &ContextEpochData::guarantee_profile)
         .def_readwrite("ordered_artifact_ids", &ContextEpochData::ordered_artifact_ids)
         .def_readwrite("prefix_claim", &ContextEpochData::prefix_claim)
-        .def_readwrite("break_reason", &ContextEpochData::break_reason);
+        .def_readwrite("break_reason", &ContextEpochData::break_reason)
+        .def_readwrite("assembly_layout", &ContextEpochData::assembly_layout);
     py::class_<ContextEpoch> epoch(m, "ContextEpoch");
     epoch.def_static("create", &ContextEpoch::create).def_static("parse", &ContextEpoch::parse)
         .def_property_readonly("run_id", &ContextEpoch::run_id).def_property_readonly("sequence", &ContextEpoch::sequence)
@@ -214,7 +225,8 @@ void init_runtime_context(py::module_& m) {
         .def_property_readonly("guarantee_profile", &ContextEpoch::guarantee_profile)
         .def_property_readonly("ordered_artifact_ids", &ContextEpoch::ordered_artifact_ids)
         .def_property_readonly("prefix_claim", &ContextEpoch::prefix_claim)
-        .def_property_readonly("break_reason", &ContextEpoch::break_reason);
+        .def_property_readonly("break_reason", &ContextEpoch::break_reason)
+        .def_property_readonly("assembly_layout", &ContextEpoch::assembly_layout);
     bind_identity_methods(epoch);
 
     py::class_<ContextPrefixBoundary>(m, "ContextPrefixBoundary")
@@ -289,6 +301,19 @@ void init_runtime_context(py::module_& m) {
             }
         }
     });
+    m.def("order_context_artifacts",
+          [](const std::vector<std::pair<ContextArtifact, std::string>>& entries) {
+              std::vector<ContextArtifactOrderEntry> converted;
+              converted.reserve(entries.size());
+              for (const auto& [artifact, key] : entries) converted.push_back({artifact, key});
+              return order_context_artifacts(converted);
+          },
+          py::arg("entries"),
+          "The identities of (artifact, order_key) pairs in the total order of the stable-first layout: "
+          "stability class, priority (higher first), producer, order_key. A full tie raises "
+          "ContextStabilityError.");
+    m.def("validate_context_layout", &validate_context_layout, py::arg("epoch"), py::arg("artifacts"),
+          "Check that the artifacts of a StableFirst epoch are placed and ordered for that layout.");
     m.def("verify_context_epoch_claim",
           [](const ContextEpoch& epoch, const std::vector<ContextArtifact>& artifacts,
              const std::optional<ContextEpoch>& predecessor,

@@ -297,6 +297,14 @@ std::string_view to_string(ContextPrefixClaim value) noexcept {
     return "unknown";
 }
 
+std::string_view to_string(AssemblyLayout value) noexcept {
+    switch (value) {
+        case AssemblyLayout::Legacy: return "legacy";
+        case AssemblyLayout::StableFirst: return "stable_first";
+    }
+    return "unknown";
+}
+
 std::string_view to_string(ContextStabilityRefusal value) noexcept {
     switch (value) {
         case ContextStabilityRefusal::VolatileSystemArtifact: return "volatile_system_artifact";
@@ -308,6 +316,13 @@ std::string_view to_string(ContextStabilityRefusal value) noexcept {
         case ContextStabilityRefusal::StablePrefixChanged: return "stable_prefix_changed";
         case ContextStabilityRefusal::AnchorDropped: return "anchor_dropped";
         case ContextStabilityRefusal::AnchorOutOfRange: return "anchor_out_of_range";
+        case ContextStabilityRefusal::LayoutChangeUndeclared: return "layout_change_undeclared";
+        case ContextStabilityRefusal::StableOutsideHistoryHead: return "stable_outside_history_head";
+        case ContextStabilityRefusal::VolatileOutsideTail: return "volatile_outside_tail";
+        case ContextStabilityRefusal::TierOrderViolated: return "tier_order_violated";
+        case ContextStabilityRefusal::VolatileSystemText: return "volatile_system_text";
+        case ContextStabilityRefusal::PrefixBoundaryUnavailable: return "prefix_boundary_unavailable";
+        case ContextStabilityRefusal::AmbiguousOrder: return "ambiguous_order";
     }
     return "unknown";
 }
@@ -390,6 +405,12 @@ ContextPrefixClaim context_prefix_claim_from_string(std::string_view value) {
     if (value == "extends") return ContextPrefixClaim::Extends;
     if (value == "breaks") return ContextPrefixClaim::Breaks;
     throw std::invalid_argument("Unknown context prefix claim");
+}
+
+AssemblyLayout assembly_layout_from_string(std::string_view value) {
+    if (value == "legacy") return AssemblyLayout::Legacy;
+    if (value == "stable_first") return AssemblyLayout::StableFirst;
+    throw std::invalid_argument("Unknown assembly layout");
 }
 
 struct RuntimeHistoryRecord::Impl {
@@ -684,6 +705,10 @@ ContextEpoch ContextEpoch::create(ContextEpochData data) {
                 "Context epoch ordered_artifact_ids must order exactly its artifact_ids");
         }
     }
+    require_known_enum(data.assembly_layout, "Context epoch assembly layout");
+    if (data.assembly_layout == AssemblyLayout::StableFirst && !data.ordered_artifact_ids) {
+        throw std::invalid_argument("Context epoch with the stable-first layout must record ordered_artifact_ids");
+    }
     if (data.prefix_claim) require_known_enum(*data.prefix_claim, "Context epoch prefix claim");
     if (data.break_reason) require_known_enum(*data.break_reason, "Context epoch break reason");
     if (data.prefix_claim == ContextPrefixClaim::Extends) {
@@ -699,7 +724,8 @@ ContextEpoch ContextEpoch::create(ContextEpochData data) {
         throw std::invalid_argument("Context epoch break_reason belongs to a claim that breaks, and only to it");
     }
     // An epoch that sets none of the version 2 fields is a version 1 epoch, byte for byte.
-    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason;
+    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason ||
+                         data.assembly_layout != AssemblyLayout::Legacy;
     json body{{"format", "neograph-context-epoch"},
               {"storage_schema_version", ordered ? STORAGE_SCHEMA_VERSION : LEGACY_STORAGE_SCHEMA_VERSION},
               {"run_id", data.run_id},
@@ -714,6 +740,9 @@ ContextEpoch ContextEpoch::create(ContextEpochData data) {
     if (data.ordered_artifact_ids) body["ordered_artifact_ids"] = *data.ordered_artifact_ids;
     if (data.prefix_claim) body["prefix_claim"] = std::string(to_string(*data.prefix_claim));
     if (data.break_reason) body["break_reason"] = std::string(to_string(*data.break_reason));
+    if (data.assembly_layout != AssemblyLayout::Legacy) {
+        body["assembly_layout"] = std::string(to_string(data.assembly_layout));
+    }
     auto impl = std::make_shared<Impl>();
     impl->data = std::move(data);
     impl->canonical = detail::canonical_json_bytes(
@@ -729,7 +758,7 @@ ContextEpoch ContextEpoch::parse(std::string_view stored_bytes) {
         {"format", "storage_schema_version", "id", "run_id", "sequence", "predecessor_id",
          "feed_id", "raw_from_sequence", "raw_through_sequence", "raw_window_digest",
          "artifact_ids", "guarantee_profile", "ordered_artifact_ids", "prefix_claim",
-         "break_reason"});
+         "break_reason", "assembly_layout"});
     const auto version = require_format_version(
         value, "neograph-context-epoch", LEGACY_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION,
         "Stored ContextEpoch");
@@ -754,7 +783,14 @@ ContextEpoch ContextEpoch::parse(std::string_view stored_bytes) {
     if (const auto reason = optional_string(value, "break_reason")) {
         data.break_reason = context_break_reason_from_string(*reason);
     }
-    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason;
+    if (const auto layout = optional_string(value, "assembly_layout")) {
+        data.assembly_layout = assembly_layout_from_string(*layout);
+        if (data.assembly_layout == AssemblyLayout::Legacy) {
+            throw std::invalid_argument("Stored ContextEpoch records its assembly layout only when it is not legacy");
+        }
+    }
+    const bool ordered = data.ordered_artifact_ids || data.prefix_claim || data.break_reason ||
+                         data.assembly_layout != AssemblyLayout::Legacy;
     auto result = create(std::move(data));
     if (result.id() != stored_id) throw std::invalid_argument("Stored ContextEpoch id mismatch");
     if (ordered != (version == STORAGE_SCHEMA_VERSION)) {
@@ -775,6 +811,7 @@ RuntimeGuaranteeProfile ContextEpoch::guarantee_profile() const noexcept { retur
 const std::optional<std::vector<std::string>>& ContextEpoch::ordered_artifact_ids() const noexcept { return impl_->data.ordered_artifact_ids; }
 const std::optional<ContextPrefixClaim>& ContextEpoch::prefix_claim() const noexcept { return impl_->data.prefix_claim; }
 const std::optional<ContextBreakReason>& ContextEpoch::break_reason() const noexcept { return impl_->data.break_reason; }
+AssemblyLayout ContextEpoch::assembly_layout() const noexcept { return impl_->data.assembly_layout; }
 const std::string& ContextEpoch::id() const noexcept { return impl_->id; }
 std::string ContextEpoch::serialize_canonical() const { return impl_->canonical; }
 
@@ -828,6 +865,12 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
     }
     if (data.encoder_family) detail::validate_token(*data.encoder_family, "Context assembly encoder_family");
     if (data.prefix_digest) require_sha256(*data.prefix_digest, "Context assembly prefix_digest");
+    if (data.prefix_digest && !data.prefix_boundary) {
+        throw std::invalid_argument("Context assembly prefix_digest needs its prefix_boundary");
+    }
+    if (data.stable_boundary && data.prefix_boundary && *data.prefix_boundary < *data.stable_boundary) {
+        throw std::invalid_argument("Context assembly stable_boundary lies behind its prefix_boundary");
+    }
     if (data.tools_digest) require_sha256(*data.tools_digest, "Context assembly tools_digest");
     if (data.break_reason) require_known_enum(*data.break_reason, "Context assembly break reason");
     // A receipt that sets none of the version 2 fields is a version 1 receipt, byte for byte.
@@ -1030,11 +1073,91 @@ std::vector<std::string> stable_prefix(
 
 }  // namespace
 
+std::vector<std::string> order_context_artifacts(const std::vector<ContextArtifactOrderEntry>& entries) {
+    struct Keyed {
+        StabilityClass tier;
+        std::int32_t   priority;
+        const std::string* producer;
+        const std::string* order_key;
+        const std::string* id;
+    };
+    std::vector<Keyed> keyed;
+    keyed.reserve(entries.size());
+    std::set<std::string> seen;
+    for (const auto& entry : entries) {
+        if (!seen.insert(entry.artifact.id()).second) {
+            throw ContextStabilityError(ContextStabilityRefusal::AmbiguousOrder,
+                                        "Context artifact order lists an artifact twice");
+        }
+        keyed.push_back({entry.artifact.stability_class(), entry.artifact.priority(),
+                         &entry.artifact.producer_id(), &entry.order_key, &entry.artifact.id()});
+    }
+    // Higher priority first. The identity is never a key: it is a hash of the content.
+    const auto before = [](const Keyed& a, const Keyed& b) {
+        if (a.tier != b.tier) return a.tier < b.tier;
+        if (a.priority != b.priority) return a.priority > b.priority;
+        if (*a.producer != *b.producer) return *a.producer < *b.producer;
+        return *a.order_key < *b.order_key;
+    };
+    std::stable_sort(keyed.begin(), keyed.end(), before);
+    for (std::size_t index = 1; index < keyed.size(); ++index) {
+        if (!before(keyed[index - 1], keyed[index])) {
+            throw ContextStabilityError(
+                ContextStabilityRefusal::AmbiguousOrder,
+                "Two context artifacts have the same stability class, priority, producer and order key");
+        }
+    }
+    std::vector<std::string> result;
+    result.reserve(keyed.size());
+    for (const auto& item : keyed) result.push_back(*item.id);
+    return result;
+}
+
+void validate_context_layout(const ContextEpoch& epoch, const std::vector<ContextArtifact>& artifacts) {
+    if (epoch.assembly_layout() != AssemblyLayout::StableFirst) return;
+    const auto by_id = selected_artifacts(epoch, artifacts);
+    StabilityClass tier = StabilityClass::Stable;
+    for (const auto& id : *epoch.ordered_artifact_ids()) {
+        const auto& artifact = *by_id.at(id);
+        const auto cls = artifact.stability_class();
+        if (cls == StabilityClass::Volatile) {
+            if (artifact.placement() != ContextPlacement::AfterHistory) {
+                throw ContextStabilityError(
+                    ContextStabilityRefusal::VolatileOutsideTail,
+                    "A Volatile context artifact must be placed at AfterHistory in the stable-first layout, not at " +
+                        std::string(to_string(artifact.placement())));
+            }
+        } else if (artifact.placement() != ContextPlacement::BeforeHistory) {
+            throw ContextStabilityError(
+                ContextStabilityRefusal::StableOutsideHistoryHead,
+                "A " + std::string(to_string(cls)) +
+                    " context artifact must be placed at BeforeHistory in the stable-first layout, not at " +
+                    std::string(to_string(artifact.placement())));
+        }
+        if (cls < tier) {
+            throw ContextStabilityError(
+                ContextStabilityRefusal::TierOrderViolated,
+                "The recorded artifact order puts a " + std::string(to_string(cls)) +
+                    " artifact behind a " + std::string(to_string(tier)) + " one");
+        }
+        tier = cls;
+    }
+}
+
 void verify_context_epoch_claim(
     const ContextEpoch& epoch,
     const std::vector<ContextArtifact>& artifacts,
     const ContextEpoch* predecessor,
     const std::vector<ContextArtifact>& predecessor_artifacts) {
+    // The layout decides every byte of the request, so a change of it is a break the epoch has to name.
+    if (predecessor && epoch.predecessor_id() && predecessor->id() == *epoch.predecessor_id() &&
+        predecessor->assembly_layout() != epoch.assembly_layout() &&
+        !(epoch.prefix_claim() == ContextPrefixClaim::Breaks &&
+          epoch.break_reason() == ContextBreakReason::LayoutChange)) {
+        throw ContextStabilityError(
+            ContextStabilityRefusal::LayoutChangeUndeclared,
+            "Context epoch changes the assembly layout of its predecessor without declaring Breaks(LayoutChange)");
+    }
     if (epoch.prefix_claim() != ContextPrefixClaim::Extends) return;
     if (!predecessor || !epoch.predecessor_id() || predecessor->id() != *epoch.predecessor_id()) {
         throw ContextStabilityError(
