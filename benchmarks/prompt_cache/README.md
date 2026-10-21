@@ -30,9 +30,16 @@ PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py --of
 OPENAI_API_KEY=... PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py \
     --preset openai.chat --model <model> --rates input=...,cache_read=...,output=... \
     --budget-usd 0.05 --turns 16 --scenarios before-history,after-history,compaction
+
+# Where does a provider's cache stop? Live only: four requests per level share the fixed block and that
+# many turns of history, and differ after it.
+OPENAI_API_KEY=... PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py \
+    --preset openai.chat --model <model> --rates input=...,cache_read=...,output=... \
+    --budget-usd 0.02 --prefix-ladder 1,2,4 --control reasoning_effort=low
 ```
 
 - **Presets.** `openai.chat`, `anthropic.messages`, `google.generate` and `openrouter.chat`. Use `--control NAME=VALUE` for a `ProviderControls` field, dotted for a family nest, and `--cache-control 5m` to send the Messages request-level cache control. Gemini needs `--control generate.history_mode=GeminiHistoryMode.PortableForeign`, because the probe records replies as portable text.
 - **Cost.** A live run needs `--rates` (USD per million tokens) to bound and report its spend. It refuses to start when its worst case, with no cache hit, is above `--budget-usd`, and stops when the spend passes it. A provider that caches in the background, such as DeepSeek, needs `--pause-ms` of a few seconds between turns.
 - **Key.** The probe reads the key from the environment and never prints or stores it.
+- **Prefix ladder.** `--prefix-ladder 1,2,4` replaces the scenarios. For each level (a number of shared turns) four requests share the fixed block and that much history and differ in the block after it: X, Y, Z, and X again as a control. A calibration request with another fixed block gives the token count of the fixed block and one question. A request that reads up to the end of the shared history shows a cache that follows the longest shared prefix; one that reads only the fixed block shows a cache that keeps nothing between the fixed block and the end of an earlier request. It costs a few thousandths of a dollar.
 - **Output.** A table per scenario, a summary, and with `--out` the per-call records as JSON. `--show-order N` prints the message order of call N.

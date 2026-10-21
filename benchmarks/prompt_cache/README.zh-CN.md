@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=benchmarks/prompt_cache/README.md locale=zh-CN source_sha256=6a92a60b5c6c8db6ee25c9ea02812b828fbd6188a35b871288a902c7b7d1366e -->
+<!-- neograph-i18n: source=benchmarks/prompt_cache/README.md locale=zh-CN source_sha256=606a79f539c2aa4251858cf8bd9238efa4b6b14a5b4024faf240476f774b4114 -->
 # 提示词缓存前缀探针
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -31,9 +31,16 @@ PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py --of
 OPENAI_API_KEY=... PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py \
     --preset openai.chat --model <model> --rates input=...,cache_read=...,output=... \
     --budget-usd 0.05 --turns 16 --scenarios before-history,after-history,compaction
+
+# Where does a provider's cache stop? Live only: four requests per level share the fixed block and that
+# many turns of history, and differ after it.
+OPENAI_API_KEY=... PYTHONPATH=<build dir> python benchmarks/prompt_cache/prompt_cache_probe.py \
+    --preset openai.chat --model <model> --rates input=...,cache_read=...,output=... \
+    --budget-usd 0.02 --prefix-ladder 1,2,4 --control reasoning_effort=low
 ```
 
 - **预设。** `openai.chat`、`anthropic.messages`、`google.generate` 和 `openrouter.chat`。`ProviderControls` 字段用 `--control NAME=VALUE` 指定，family 嵌套用点号分隔；Messages 的请求级缓存控制用 `--cache-control 5m` 发送。探针把回复记录为可移植文本，所以 Gemini 需要 `--control generate.history_mode=GeminiHistoryMode.PortableForeign`。
 - **成本。** 实时运行需要 `--rates`（每百万 token 的美元价格），用来限制并报告花费。如果没有任何缓存命中的最坏情况超过 `--budget-usd`，它会拒绝启动；花费超过该值时会停止。像 DeepSeek 这样在后台建立缓存的提供方，轮与轮之间需要几秒的 `--pause-ms`。
 - **密钥。** 探针从环境变量读取密钥，从不打印或保存。
+- **前缀阶梯。** `--prefix-ladder 1,2,4` 取代场景。在每一级（共享的轮数）上，四个请求共享固定块和相应长度的历史，只有其后的块不同：X、Y、Z，以及作为对照的再次发送的 X。固定块不同的校准请求会给出固定块和一个问题的 token 数。读到共享历史末尾的请求表明缓存沿最长共同前缀命中；只读到固定块的请求表明缓存在固定块与之前某个请求的末尾之间不保留任何内容。花费只有几千分之一美元。
 - **输出。** 每个场景一张表和一份汇总；加上 `--out` 会把每次调用的记录保存为 JSON。`--show-order N` 打印第 N 次调用的消息顺序。
