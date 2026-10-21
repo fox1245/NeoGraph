@@ -1,0 +1,47 @@
+# Latest PyPI releases of the compared frameworks, pinned exactly (resolved 2026-10-21; Python 3.12).
+# One virtual environment per framework: compare/setup_venvs.sh creates `<name>` for every `# venv: <name>` section.
+# Only the direct dependencies are pinned here; every record under benchmarks/records/ holds the `pip freeze` of
+# each environment, which lists the transitive versions that were installed.
+#
+# venv: langgraph-release
+langgraph==1.2.16
+langchain-core==1.6.12
+
+# venv: haystack-release
+haystack-ai==3.4.0
+
+# venv: pydantic_graph-release
+pydantic-graph==2.59.0
+
+# venv: llamaindex-release
+llama-index-core==0.14.25
+llama-index-workflows==2.26.0
+
+# venv: autogen-release
+autogen-agentchat==0.7.5
+autogen-core==0.7.5
+
+# venv: pydantic_graph-legacy
+# Only benchmarks/compare/probe_pydantic_legacy.py uses this one: pydantic-graph 1.x is the last series with the
+# `Graph(nodes=[...])` constructor that the earlier harnesses were written against.
+pydantic-graph==1.87.0
+
+# venv: pydantic_graph-legacy-logfire
+# The same legacy pydantic-graph with the optional `logfire` package installed beside it, which turns the
+# no-op instrumentation spans of pydantic-graph into real ones (benchmarks/compare/probe_pydantic_legacy.py).
+pydantic-graph==1.87.0
+logfire==5.2.0
+
+# venv: dr_compare
+# The deep-research comparison (benchmarks/dr_compare): LangGraph and the imports of its runner. The NeoGraph Python
+# module is not installed here; it is built from the source tree in its own build directory, and pybind11 is the
+# build-time dependency of that build.
+langgraph==1.2.16
+langchain-core==1.6.12
+langchain-openai==1.7.2
+openai==3.35.1
+requests==2.34.2
+psutil==7.2.2
+pydantic==2.14.1
+certifi==2026.10.19
+pybind11==2.13.6

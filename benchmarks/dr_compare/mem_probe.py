@@ -109,7 +109,8 @@ print(json.dumps({{"width": WIDTH, "pre_mb": round(pre,1), "post_mb": round(post
 
 
 def lg_concurrent_fanout(width: int):
-    """LG: same workload via Send fan-out; asyncio handles concurrency."""
+    """LG: same workload via Send fan-out; sync `invoke` runs the branches on a per-call thread pool
+    (default width min(32, cpu_count + 4)), not on an event loop."""
     snippet = rf"""
 import json, time, psutil, asyncio, operator
 from typing import Annotated, TypedDict

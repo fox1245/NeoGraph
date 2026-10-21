@@ -4,8 +4,11 @@ import __future__
 import ast
 import contextlib
 import io
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -13,6 +16,7 @@ from pathlib import Path
 
 import bench
 import bench_mock
+import session
 
 
 class BenchmarkAccountingTests(unittest.TestCase):
@@ -106,6 +110,197 @@ class BenchmarkAccountingTests(unittest.TestCase):
                 bench_mock.main()
             self.assertEqual(error.exception.code, 2)
             dispatch.assert_not_called()
+
+
+class MatchedWidthAndJsonTests(unittest.TestCase):
+    """Pool widths of the two sides, and the raw-sample report. Runners are stubs; no engine is imported."""
+
+    def run_both(self, environment, extra_args=(), replies=None, warmup=0, iters=2):
+        calls = {"neograph": iter(replies or ["report"] * (warmup + iters)),
+                 "langgraph": iter(replies or ["report"] * (warmup + iters))}
+        dispatched = []
+
+        def runner(side):
+            def run_query(query, thread_id):
+                dispatched.append(side)
+                reply = next(calls[side])
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+            return types.SimpleNamespace(run_query=run_query, LLM_MOCK_MS=0, MOCK_SEARCH=True)
+
+        output = io.StringIO()
+        modules = {"dr_neograph": runner("neograph"), "dr_langgraph": runner("langgraph")}
+        with patch.dict(os.environ, environment, clear=True), patch.dict(sys.modules, modules), patch.object(
+                sys, "argv", ["bench_mock", "--warmup", str(warmup), "--iters", str(iters), *extra_args]), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            code = bench_mock.main()
+        return code, output.getvalue(), dispatched
+
+    def test_default_widths_are_matched_and_printed(self):
+        code, output, _ = self.run_both({})
+        self.assertEqual(code, 0)
+        self.assertIn("NeoGraph worker_count=4, LangGraph max_concurrency=4", output)
+        self.assertNotIn("UNMATCHED", output)
+
+    def test_langgraph_follows_the_neograph_worker_count_unless_told_otherwise(self):
+        self.assertEqual(bench_mock._widths({"NG_WORKER_COUNT": "7"}), (7, 7))
+        self.assertEqual(bench_mock._widths({"NG_WORKER_COUNT": "7", "LG_MAX_CONCURRENCY": "3"}), (7, 3))
+        self.assertEqual(bench_mock._widths({}), (4, 4))
+
+    def test_unmatched_widths_are_refused_before_any_dispatch(self):
+        dispatched = []
+        with self.assertRaises(SystemExit) as error:
+            _, _, dispatched = self.run_both({"NG_WORKER_COUNT": "4", "LG_MAX_CONCURRENCY": "8"})
+        self.assertEqual(error.exception.code, 2)
+        self.assertEqual(dispatched, [])
+
+    def test_unmatched_widths_run_only_when_allowed_and_are_labelled(self):
+        code, output, dispatched = self.run_both({"NG_WORKER_COUNT": "4", "LG_MAX_CONCURRENCY": "8"},
+                                                 ["--allow-unmatched-widths"])
+        self.assertEqual(code, 0)
+        self.assertIn("(UNMATCHED)", output)
+        self.assertEqual(sorted(set(dispatched)), ["langgraph", "neograph"])
+
+    def test_one_side_alone_needs_no_matching(self):
+        code, _, dispatched = self.run_both({"NG_WORKER_COUNT": "4", "LG_MAX_CONCURRENCY": "8"},
+                                            ["--only", "neograph"])
+        self.assertEqual(code, 0)
+        self.assertEqual(set(dispatched), {"neograph"})
+
+    def test_non_positive_widths_are_rejected(self):
+        for environment in ({"NG_WORKER_COUNT": "0"}, {"LG_MAX_CONCURRENCY": "abc"}):
+            with self.subTest(environment=environment), self.assertRaises(SystemExit) as error:
+                self.run_both(environment)
+            self.assertEqual(error.exception.code, 2)
+
+    def test_json_holds_raw_samples_widths_and_env_knobs(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = os.path.join(scratch, "report.json")
+            code, _, _ = self.run_both({"FANOUT": "5", "NG_WORKER_COUNT": "4"}, ["--json", path], iters=3)
+            self.assertEqual(code, 0)
+            with open(path, encoding="utf-8") as handle:
+                report = json.load(handle)
+        self.assertEqual(report["schema"], 1)
+        self.assertEqual(report["kind"], "dr_compare_mock")
+        self.assertEqual({side: len(values) for side, values in report["samples_s"].items()},
+                         {"neograph": 3, "langgraph": 3})
+        self.assertTrue(all(isinstance(v, float) and v >= 0 for v in report["samples_s"]["neograph"]))
+        self.assertEqual(report["widths"], {"neograph": 4, "langgraph": 4})
+        self.assertTrue(report["widths_matched"])
+        self.assertEqual(report["failures"], 0)
+        self.assertEqual(report["exit"], 0)
+        self.assertEqual(report["env"]["FANOUT"], "5")
+        self.assertEqual(report["env"]["MOCK_SEARCH"], "1")
+        self.assertEqual(report["env"]["LG_MAX_CONCURRENCY"], None)
+        self.assertEqual(report["env"]["NG_WORKER_COUNT"], "4")
+
+    def test_json_keeps_the_first_error_of_a_failed_run(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = os.path.join(scratch, "report.json")
+            code, _, _ = self.run_both({}, ["--json", path, "--only", "neograph"],
+                                       replies=[RuntimeError("dispatch failed"), "report"], iters=2)
+            with open(path, encoding="utf-8") as handle:
+                report = json.load(handle)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["failures"], 1)
+        self.assertEqual(report["errors"][0]["side"], "neograph")
+        self.assertIn("dispatch failed", report["errors"][0]["message"])
+        self.assertEqual(report["exit"], 1)
+        self.assertEqual(len(report["samples_s"]["neograph"]), 1)
+
+
+class SessionTests(unittest.TestCase):
+    """session.py with a stub in place of bench_mock.py."""
+
+    STUB = r'''
+import json, os, sys
+args = sys.argv[1:]
+path = args[args.index("--json") + 1]
+mode = os.environ.get("STUB_MODE", "ok")
+iters = int(args[args.index("--iters") + 1])
+if mode == "crash":
+    sys.stderr.write("Traceback\nValueError: FANOUT must be positive\n")
+    sys.exit(1)
+width = int(os.environ["NG_WORKER_COUNT"]), int(os.environ["LG_MAX_CONCURRENCY"])
+report = {"schema": 1, "widths": {"neograph": width[0], "langgraph": width[1]}, "widths_matched": width[0] == width[1],
+          "env": {k: os.environ.get(k) for k in ("LLM_MOCK_MS", "FANOUT", "NG_WORKER_COUNT", "LG_MAX_CONCURRENCY")},
+          "samples_s": {"neograph": [0.01] * iters, "langgraph": [0.03] * iters}, "failures": 0, "errors": []}
+if mode == "failed-run":
+    report["failures"] = 1
+    report["errors"] = [{"side": "langgraph", "message": "RuntimeError: boom"}]
+    report["samples_s"]["langgraph"] = report["samples_s"]["langgraph"][1:]
+json.dump(report, open(path, "w"))
+sys.exit(1 if report["failures"] else 0)
+'''
+
+    def run_session(self, *extra, rounds="2", configs="A,C", environment=None):
+        scratch = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(scratch, ignore_errors=True))
+        stub = Path(scratch) / "stub.py"
+        stub.write_text(self.STUB, encoding="utf-8")
+        out = Path(scratch) / "record.json"
+        command = [sys.executable, str(Path(session.__file__)), "--python", sys.executable, "--pythonpath", scratch,
+                   "--out", str(out), "--rounds", rounds, "--configs", configs, "--no-load-check", "--scale", "0.1",
+                   "--bench", str(stub), *extra]
+        env = dict(os.environ, **(environment or {}))
+        done = subprocess.run(command, capture_output=True, text=True, env=env)
+        record = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+        return done, record
+
+    def test_a_clean_session_records_every_cell_with_provenance(self):
+        done, record = self.run_session()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((record["schema"], record["kind"]), (1, "dr_compare_session"))
+        self.assertEqual(len(record["cells"]), 4)
+        self.assertEqual({c["id"] for c in record["cells"]}, {"A", "C"})
+        self.assertTrue(all(c["status"] == "ok" and c["widths_matched"] for c in record["cells"]))
+        prov = record["provenance"]
+        for key in ("script_sha256", "session", "host", "python", "neograph_module", "env_knobs_per_config"):
+            self.assertIn(key, prov)
+        self.assertIn("benchmarks/dr_compare/session.py", prov["script_sha256"])
+        self.assertEqual(prov["env_knobs_per_config"]["C"]["NG_WORKER_COUNT"], 50)
+        self.assertEqual(prov["env_knobs_per_config"]["C"]["LG_MAX_CONCURRENCY"], 50)
+        self.assertEqual(record["summary"]["A"]["rounds_ok"], 2)
+        self.assertAlmostEqual(record["summary"]["A"]["ratio_langgraph_over_neograph"], 3.0)
+        text = json.dumps(record)
+        self.assertNotIn("/home/", text)
+
+    def test_the_order_is_shuffled_per_round_and_reproducible(self):
+        _, first = self.run_session(rounds="3", configs="A,B,C,D")
+        _, second = self.run_session(rounds="3", configs="A,B,C,D")
+        order = lambda rec: [(c["round"], c["id"]) for c in rec["cells"]]  # noqa: E731
+        self.assertEqual(order(first), order(second))
+        per_round = {}
+        for c in first["cells"]:
+            per_round.setdefault(c["round"], []).append(c["id"])
+        self.assertTrue(all(sorted(ids) == ["A", "B", "C", "D"] for ids in per_round.values()))
+
+    def test_a_failed_run_makes_an_error_cell_without_timings_and_a_nonzero_exit(self):
+        done, record = self.run_session(environment={"STUB_MODE": "failed-run"})
+        self.assertNotEqual(done.returncode, 0)
+        cell = record["cells"][0]
+        self.assertEqual(cell["status"], "error")
+        self.assertNotIn("samples_s", cell)
+        self.assertIn("RuntimeError: boom", cell["first_error"])
+        self.assertEqual(record["summary"], {})
+
+    def test_a_process_that_writes_no_report_is_an_error_cell_with_its_last_stderr_line(self):
+        done, record = self.run_session(environment={"STUB_MODE": "crash"})
+        self.assertNotEqual(done.returncode, 0)
+        self.assertTrue(all(c["status"] == "error" for c in record["cells"]))
+        self.assertEqual(record["cells"][0]["first_error"], "ValueError: FANOUT must be positive")
+
+    def test_unmatched_widths_in_a_cell_are_an_error(self):
+        done, record = self.run_session("--cell-env", "LG_MAX_CONCURRENCY=9", configs="B", rounds="1")
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual(record["cells"][0]["status"], "error")
+        self.assertIn("not matched", record["cells"][0]["first_error"])
+
+    def test_unknown_configuration_is_a_usage_error(self):
+        done, record = self.run_session(configs="Z")
+        self.assertEqual(done.returncode, 2)
+        self.assertIsNone(record)
 
 
 class ProviderProjectionPolicyTests(unittest.TestCase):

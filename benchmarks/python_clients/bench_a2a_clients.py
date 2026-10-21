@@ -1,12 +1,17 @@
 """A2A client overhead — NeoGraph (`neograph_engine.a2a`) vs `a2a-sdk` Python.
 
 Both clients hit the same in-process Python mock A2A server that
-returns a canned Task on every message/send. The server cost is a
-flat constant; the difference we measure is purely client-side
-overhead — JSON-RPC envelope build, HTTP write, parse.
+returns a canned Task on every message/send. The mock speaks HTTP/1.0 (the
+`http.server` default), so every request is a new TCP connection and a new
+server thread in the same interpreter as the client; that cost is shared by both
+clients but is not measured separately, and it is part of every number. The mock's
+agent card declares protocol version 0.3.0, so `a2a-sdk` takes its backward-
+compatibility transport (types are converted in each direction); its native
+1.0 path is not exercised here.
 
-Run:
-    pip install neograph-engine==0.2.2 a2a-sdk httpx
+Run (install a neograph-engine wheel that matches the source first, see
+docs/python-binding.md):
+    pip install a2a-sdk httpx
     python bench_a2a_clients.py [N=500]
 """
 

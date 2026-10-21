@@ -1,0 +1,250 @@
+{
+  "schema": 1,
+  "id": "single-cohort-compare",
+  "rounds": 12,
+  "seed": 20261022,
+  "loop": {
+    "samples": 3,
+    "warmup": 30
+  },
+  "footprint": {
+    "cold_start_runs": 20,
+    "inflight_ns": [
+      1,
+      64,
+      256
+    ],
+    "inflight_rounds": 5,
+    "idle_rounds": 5
+  },
+  "neograph": {
+    "builds": {
+      "hardened": {
+        "label": "NeoGraph, default Release build (hardened)",
+        "headline": true
+      },
+      "unhardened": {
+        "label": "NeoGraph, unhardened engine ceiling",
+        "headline": false
+      }
+    },
+    "loop_cells": [
+      {
+        "variant": "workers_1",
+        "workload": "seq",
+        "roles": [
+          "matched_single",
+          "idiomatic"
+        ],
+        "iters": 80000,
+        "samples": 5,
+        "builds": [
+          "hardened",
+          "unhardened"
+        ]
+      },
+      {
+        "variant": "workers_1",
+        "workload": "par",
+        "roles": [
+          "matched_single",
+          "idiomatic"
+        ],
+        "iters": 36000,
+        "samples": 5,
+        "builds": [
+          "hardened",
+          "unhardened"
+        ]
+      },
+      {
+        "variant": "workers_auto",
+        "workload": "seq",
+        "roles": [
+          "matched_pool"
+        ],
+        "iters": 75000,
+        "samples": 5,
+        "builds": [
+          "hardened"
+        ]
+      },
+      {
+        "variant": "workers_auto",
+        "workload": "par",
+        "roles": [
+          "matched_pool"
+        ],
+        "iters": 9500,
+        "samples": 5,
+        "builds": [
+          "hardened",
+          "unhardened"
+        ]
+      },
+      {
+        "variant": "workers_1_events",
+        "workload": "seq",
+        "roles": [
+          "extra"
+        ],
+        "iters": 70000,
+        "samples": 5,
+        "builds": [
+          "hardened"
+        ]
+      }
+    ]
+  },
+  "frameworks": {
+    "langgraph": {
+      "label": "LangGraph",
+      "variants": {
+        "ainvoke_async": {
+          "roles": [
+            "matched_single"
+          ],
+          "label": "ainvoke, async def nodes",
+          "iters": {
+            "seq": 600,
+            "par": 400
+          },
+          "release": true
+        },
+        "invoke_sync": {
+          "roles": [
+            "idiomatic",
+            "matched_pool"
+          ],
+          "label": "invoke, def nodes",
+          "iters": {
+            "seq": 700,
+            "par": 250
+          },
+          "release": true
+        }
+      }
+    },
+    "haystack": {
+      "label": "Haystack",
+      "variants": {
+        "run_sync": {
+          "roles": [
+            "idiomatic"
+          ],
+          "label": "Pipeline.run, sync components",
+          "iters": {
+            "seq": 5000,
+            "par": 2000
+          },
+          "release": false
+        },
+        "run_async_coro": {
+          "roles": [
+            "matched_single"
+          ],
+          "label": "Pipeline.run_async, async components",
+          "iters": {
+            "seq": 2500,
+            "par": 1500
+          },
+          "release": true
+        },
+        "run_async_pool": {
+          "roles": [
+            "matched_pool"
+          ],
+          "label": "Pipeline.run_async, sync components in threads",
+          "iters": {
+            "seq": 1000,
+            "par": 500
+          },
+          "release": true
+        }
+      }
+    },
+    "pydantic_graph": {
+      "label": "pydantic-graph",
+      "variants": {
+        "builder_steps": {
+          "roles": [
+            "matched_single",
+            "idiomatic"
+          ],
+          "label": "GraphBuilder steps, real fan-out",
+          "iters": {
+            "seq": 1500,
+            "par": 600
+          },
+          "release": true
+        },
+        "basenode_chain": {
+          "roles": [
+            "idiomatic"
+          ],
+          "label": "BaseNode classes (par is a serial chain)",
+          "iters": {
+            "seq": 1500,
+            "par": 900
+          },
+          "release": false
+        }
+      }
+    },
+    "llamaindex": {
+      "label": "LlamaIndex Workflow",
+      "variants": {
+        "reused_instance": {
+          "roles": [
+            "matched_single"
+          ],
+          "label": "one workflow instance reused",
+          "iters": {
+            "seq": 350,
+            "par": 110
+          },
+          "release": true
+        },
+        "fresh_instance": {
+          "roles": [
+            "idiomatic"
+          ],
+          "label": "new workflow instance per run",
+          "iters": {
+            "seq": 300,
+            "par": 100
+          },
+          "release": false
+        }
+      }
+    },
+    "autogen": {
+      "label": "AutoGen GraphFlow",
+      "variants": {
+        "reset_run": {
+          "roles": [
+            "matched_single",
+            "idiomatic"
+          ],
+          "label": "GraphFlow reset and run",
+          "iters": {
+            "seq": 180,
+            "par": 80
+          },
+          "release": true
+        },
+        "fresh_flow": {
+          "roles": [
+            "idiomatic"
+          ],
+          "label": "new GraphFlow per run",
+          "iters": {
+            "seq": 150,
+            "par": 75
+          },
+          "release": false
+        }
+      }
+    }
+  }
+}

@@ -1,11 +1,13 @@
 """Concurrent A2A throughput — GIL behavior under load.
 
 NeoGraph's `A2AClient.send_message` releases the GIL during the HTTP
-exchange (every wrapped C++ call uses `gil_scoped_release`), so
-`ThreadPoolExecutor` scales linearly until the network or the server
-saturates. The `a2a-sdk` Python client is asyncio-native, also non-
-blocking in its event loop. We compare both at K=1, 4, 16, 64
-concurrent in-flight requests against the same mock server.
+exchange (every wrapped C++ call uses `gil_scoped_release`). The `a2a-sdk`
+Python client is asyncio-native, also non-blocking in its event loop. We
+compare both at K=1, 4, 16, 64 concurrent in-flight requests against the same
+in-process mock server. That server is Python, speaks HTTP/1.0 (a new
+connection and a new thread per request) and shares the interpreter and the GIL
+with the clients, so at larger K the rows describe the mock together with the
+clients; no scaling law follows from them.
 
 Run:
     python bench_concurrent.py [N=500]

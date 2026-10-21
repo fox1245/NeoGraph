@@ -4,7 +4,9 @@ Same topology, same prompts, same model, same Crawl4AI search,
 same Postgres checkpoint backend (langgraph_checkpoint_postgres).
 Only the engine + transport differ:
   * NeoGraph: C++ engine, asio thread-pool fan-out, HTTP Chat by default.
-  * LangGraph: Python engine, asyncio fan-out, HTTP via httpx.
+  * LangGraph: Python engine, synchronous `invoke` whose fan-out steps run on
+    a thread pool that langchain-core creates for every call (sized by
+    LG_MAX_CONCURRENCY here), HTTP via httpx.
 
 Returns the final assistant markdown report. Used by bench.py."""
 
@@ -35,6 +37,13 @@ FANOUT       = int(os.environ.get("FANOUT", "5"))
 USE_INMEMORY = os.environ.get("USE_INMEMORY_CP", "0") == "1"
 if FANOUT < 1:
     raise ValueError("FANOUT must be positive")
+# Width of the thread pool that runs a fan-out step. langchain-core creates one pool per `invoke` with
+# max_workers=config["max_concurrency"]; unset, Python's default is min(32, cpu_count + 4), which is not the
+# width NeoGraph gets. The default here is the NeoGraph worker count (NG_WORKER_COUNT, default 4), so the two
+# sides run with the same width unless a run asks otherwise.
+LG_MAX_CONCURRENCY = int(os.environ.get("LG_MAX_CONCURRENCY", os.environ.get("NG_WORKER_COUNT", "4")))
+if LG_MAX_CONCURRENCY < 1:
+    raise ValueError("LG_MAX_CONCURRENCY must be positive")
 MAX_OUTPUT_TOKENS = int(os.environ.get("NG_EXAMPLE_MAX_TOKENS", "1600"))
 if MAX_OUTPUT_TOKENS < 1:
     raise ValueError("NG_EXAMPLE_MAX_TOKENS must be positive")
@@ -267,7 +276,8 @@ def run_query(query: str, thread_id: str) -> str:
     app = _get_compiled()
     result = app.invoke(
         {"messages": [{"role": "user", "content": query}]},
-        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25},
+        config={"configurable": {"thread_id": thread_id}, "recursion_limit": 25,
+                "max_concurrency": LG_MAX_CONCURRENCY},
     )
     msgs = result.get("messages") or []
     last = next(
