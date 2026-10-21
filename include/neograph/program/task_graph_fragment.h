@@ -11,10 +11,13 @@
 #pragma once
 
 #include <neograph/api.h>
+#include <neograph/program/store_call.h>
 #include <neograph/program/admission.h>
 #include <neograph/program/task_graph_proposal.h>
 
 #include <functional>
+#include <asio/awaitable.hpp>
+
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -167,13 +170,17 @@ enum class TaskGraphPublishResult : std::uint8_t {
 
 NEOGRAPH_PROGRAM_API std::string_view to_string(TaskGraphPublishResult result) noexcept;
 
-/** Host-owned durable store boundary for compiled fragments and task state. */
+/**
+ * Host-owned durable store boundary for compiled fragments and task state. Every operation is awaitable (#556); a store
+ * whose backend is synchronous completes it at once (SyncTaskGraphFragmentStore). The arguments of a call, string views
+ * included, must stay alive until the awaitable completes: await it in the full expression that makes the call.
+ */
 class NEOGRAPH_PROGRAM_API TaskGraphFragmentStore {
 public:
     virtual ~TaskGraphFragmentStore() = default;
 
-    virtual TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) = 0;
-    virtual std::optional<TaskGraphFragmentRecord> load(
+    [[nodiscard]] virtual asio::awaitable<TaskGraphPublishResult> publish(const TaskGraphFragmentRecord& record) = 0;
+    [[nodiscard]] virtual asio::awaitable<std::optional<TaskGraphFragmentRecord>> load(
         std::string_view fragment_id) const = 0;
     /**
      * Locate the published expansion for one immutable parent operation.
@@ -183,14 +190,14 @@ public:
      * proposal is only needed on the first execution or when no fragment has
      * crossed the publication boundary.
      */
-    virtual std::optional<TaskGraphFragmentRecord> find_published_lineage(
+    [[nodiscard]] virtual asio::awaitable<std::optional<TaskGraphFragmentRecord>> find_published_lineage(
         std::string_view owner_scope,
         std::string_view parent_run_id,
         std::string_view expansion_operation_id) const {
         (void)owner_scope;
         (void)parent_run_id;
         (void)expansion_operation_id;
-        return std::nullopt;
+        co_return std::nullopt;
     }
     /**
      * Locate an already published expansion by immutable parent lineage and
@@ -199,7 +206,42 @@ public:
      * The default is deliberately empty for legacy stores; such stores remain
      * safe but cannot recover an expansion without replanning.
      */
-    virtual std::optional<TaskGraphFragmentRecord> find_published(
+    [[nodiscard]] virtual asio::awaitable<std::optional<TaskGraphFragmentRecord>> find_published(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id,
+        std::string_view proposal_hash) const {
+        (void)owner_scope;
+        (void)parent_run_id;
+        (void)expansion_operation_id;
+        (void)proposal_hash;
+        co_return std::nullopt;
+    }
+    [[nodiscard]] virtual asio::awaitable<TaskGraphPublishResult> compare_update(
+        std::string_view fragment_id,
+        std::uint64_t expected_revision,
+        const TaskGraphFragmentRecord& record) = 0;
+};
+
+/**
+ * Base of a TaskGraphFragmentStore whose backend is synchronous. A derived class implements the `..._sync` operations
+ * and gets the awaitable interface from them, as SyncProgramTransitionStore does.
+ */
+class NEOGRAPH_PROGRAM_API SyncTaskGraphFragmentStore : public TaskGraphFragmentStore {
+public:
+    // The synchronous operations. Each has the contract of the awaitable operation of the same name.
+    virtual TaskGraphPublishResult publish_sync(const TaskGraphFragmentRecord& record) = 0;
+    virtual std::optional<TaskGraphFragmentRecord> load_sync(std::string_view fragment_id) const = 0;
+    virtual std::optional<TaskGraphFragmentRecord> find_published_lineage_sync(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id) const {
+        (void)owner_scope;
+        (void)parent_run_id;
+        (void)expansion_operation_id;
+        return std::nullopt;
+    }
+    virtual std::optional<TaskGraphFragmentRecord> find_published_sync(
         std::string_view owner_scope,
         std::string_view parent_run_id,
         std::string_view expansion_operation_id,
@@ -210,10 +252,67 @@ public:
         (void)proposal_hash;
         return std::nullopt;
     }
-    virtual TaskGraphPublishResult compare_update(
+    virtual TaskGraphPublishResult compare_update_sync(
         std::string_view fragment_id,
         std::uint64_t expected_revision,
         const TaskGraphFragmentRecord& record) = 0;
+
+    // The awaitable interface, completed by the operations above: at once on the calling thread,
+    // or on a thread of a bounded pool when offloads() is true.
+    [[nodiscard]] asio::awaitable<TaskGraphPublishResult> publish(const TaskGraphFragmentRecord& record) final;
+    [[nodiscard]] asio::awaitable<std::optional<TaskGraphFragmentRecord>> load(
+        std::string_view fragment_id) const final;
+    [[nodiscard]] asio::awaitable<std::optional<TaskGraphFragmentRecord>> find_published_lineage(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id) const final;
+    [[nodiscard]] asio::awaitable<std::optional<TaskGraphFragmentRecord>> find_published(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id,
+        std::string_view proposal_hash) const final;
+    [[nodiscard]] asio::awaitable<TaskGraphPublishResult> compare_update(
+        std::string_view fragment_id,
+        std::uint64_t expected_revision,
+        const TaskGraphFragmentRecord& record) final;
+
+protected:
+    /** True for a backend that blocks for long: each operation then runs on a pool thread. */
+    virtual bool offloads() const noexcept { return false; }
+};
+
+/**
+ * A TaskGraphFragmentStore for a caller that cannot suspend. It waits for a store that is not synchronous as
+ * BlockingProgramTransitionStore does.
+ */
+class NEOGRAPH_PROGRAM_API BlockingTaskGraphFragmentStore {
+public:
+    BlockingTaskGraphFragmentStore(std::shared_ptr<TaskGraphFragmentStore> store, BlockingStorePolicy policy = {});
+    /** A view of a store that outlives it. */
+    BlockingTaskGraphFragmentStore(TaskGraphFragmentStore& store, BlockingStorePolicy policy = {});
+
+    const std::shared_ptr<TaskGraphFragmentStore>& store() const noexcept { return store_; }
+
+    TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) const;
+    std::optional<TaskGraphFragmentRecord> load(std::string_view fragment_id) const;
+    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id) const;
+    std::optional<TaskGraphFragmentRecord> find_published(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view expansion_operation_id,
+        std::string_view proposal_hash) const;
+    TaskGraphPublishResult compare_update(
+        std::string_view fragment_id,
+        std::uint64_t expected_revision,
+        const TaskGraphFragmentRecord& record) const;
+
+private:
+    std::shared_ptr<TaskGraphFragmentStore> store_;
+    SyncTaskGraphFragmentStore* sync_ = nullptr;
+    BlockingStorePolicy policy_;
 };
 
 /** Trusted, host-owned inputs to deterministic proposal lowering. */
@@ -262,7 +361,7 @@ public:
 };
 
 /** Small deterministic store used by tests and embedded hosts. */
-class NEOGRAPH_PROGRAM_API InMemoryTaskGraphFragmentStore final : public TaskGraphFragmentStore {
+class NEOGRAPH_PROGRAM_API InMemoryTaskGraphFragmentStore final : public SyncTaskGraphFragmentStore {
 public:
     InMemoryTaskGraphFragmentStore();
     InMemoryTaskGraphFragmentStore(InMemoryTaskGraphFragmentStore&&) noexcept;
@@ -271,18 +370,18 @@ public:
     InMemoryTaskGraphFragmentStore& operator=(const InMemoryTaskGraphFragmentStore&) = delete;
     ~InMemoryTaskGraphFragmentStore() override;
 
-    TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) override;
-    std::optional<TaskGraphFragmentRecord> load(std::string_view fragment_id) const override;
-    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+    TaskGraphPublishResult publish_sync(const TaskGraphFragmentRecord& record) override;
+    std::optional<TaskGraphFragmentRecord> load_sync(std::string_view fragment_id) const override;
+    std::optional<TaskGraphFragmentRecord> find_published_lineage_sync(
         std::string_view owner_scope,
         std::string_view parent_run_id,
         std::string_view expansion_operation_id) const override;
-    std::optional<TaskGraphFragmentRecord> find_published(
+    std::optional<TaskGraphFragmentRecord> find_published_sync(
         std::string_view owner_scope,
         std::string_view parent_run_id,
         std::string_view expansion_operation_id,
         std::string_view proposal_hash) const override;
-    TaskGraphPublishResult compare_update(
+    TaskGraphPublishResult compare_update_sync(
         std::string_view fragment_id, std::uint64_t expected_revision,
         const TaskGraphFragmentRecord& record) override;
 

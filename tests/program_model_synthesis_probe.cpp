@@ -20,6 +20,10 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 
@@ -219,7 +223,7 @@ int main(int argc, char** argv) {
         const auto registry = registry_snapshot();
         const auto profile = admission_profile(registry);
         const auto policy = policy_snapshot(profile);
-        auto store = std::make_shared<InMemoryProgramStore>();
+        ProgramStoreHandle store = std::make_shared<InMemoryProgramStore>();
         auto catalog = std::make_shared<ProgramCatalog>(CatalogConfig{
             store,
             registry,
@@ -281,7 +285,7 @@ int main(int argc, char** argv) {
 
         std::promise<ProgramHandoff> source_handoff;
         auto handoff_ready = source_handoff.get_future();
-        auto transitions = std::make_shared<InMemoryProgramTransitionStore>();
+        TransitionStoreHandle transitions = std::make_shared<InMemoryProgramTransitionStore>();
         RuntimeConfig runtime_config{
             catalog,
             std::make_shared<InMemoryCheckpointStore>(),

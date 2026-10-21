@@ -556,7 +556,7 @@ ProgramHistoricalReplacementChain::replacements() const noexcept {
 }
 
 ProgramHistoricalReplacementChain inspect_program_replacement_chain(
-    const ProgramTransitionStore& store,
+    const BlockingProgramTransitionStore& store,
     std::string_view owner_scope,
     std::string_view any_run_id) {
     if (owner_scope.empty() || any_run_id.empty()) {

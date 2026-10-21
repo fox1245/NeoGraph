@@ -22,7 +22,7 @@ namespace neograph::program {
  * partially written run/journal/event/effect set.
  */
 class NEOGRAPH_PROGRAM_API SQLiteProgramTransitionStore final
-    : public ProgramTransitionStore {
+    : public SyncProgramTransitionStore {
 public:
     explicit SQLiteProgramTransitionStore(std::string database_path);
     SQLiteProgramTransitionStore(SQLiteProgramTransitionStore&&) noexcept;
@@ -33,69 +33,69 @@ public:
 
     std::string process_coordination_key() const override;
 
-    std::optional<ProgramRunPublicationHead> load_run_publication_head(
+    std::optional<ProgramRunPublicationHead> load_run_publication_head_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
 
-    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
 
-    std::optional<ProgramRunRecord> load(std::string_view owner_scope,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner_scope,
                                          std::string_view run_id) const override;
-    std::optional<ProgramJournalRecord> latest(std::string_view owner_scope,
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner_scope,
                                                std::string_view run_id) const override;
-    std::vector<ProgramEvent> load_events(std::string_view owner_scope,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner_scope,
                                            std::string_view run_id,
                                            std::uint64_t after_sequence = 0) const override;
     std::vector<ProgramEffectOutboxEntry>
-    load_effects(std::string_view owner_scope,
+    load_effects_sync(std::string_view owner_scope,
                  std::string_view run_id,
                  std::uint64_t after_sequence = 0) const override;
     std::vector<ProgramJavaScriptCommandJournalEntry>
-    load_javascript_commands(std::string_view owner_scope,
+    load_javascript_commands_sync(std::string_view owner_scope,
                              std::string_view run_id,
                              std::uint64_t after_sequence = 0) const override;
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner_scope,
         std::string_view run_id,
          std::uint64_t    after_sequence = 0) const override;
-    std::vector<HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
-    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
-    std::optional<MigrationPlan> load_migration_plan(std::string_view owner_scope,
+    std::optional<MigrationPlan> load_migration_plan_sync(std::string_view owner_scope,
                                                      std::string_view run_id) const override;
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner_scope,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner_scope,
                                                     std::string_view lineage_id) const override;
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner_scope,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner_scope,
                                                        std::string_view run_id) const override;
-    std::optional<ProgramRunLineage> load_lineage_head(std::string_view owner_scope,
+    std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner_scope,
                                                         std::string_view lineage_id,
                                                         std::string_view head_id) const override;
-    std::optional<ProgramRunGeneration> load_generation(std::string_view owner_scope,
+    std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner_scope,
                                                           std::string_view lineage_id,
                                                           std::uint64_t generation) const override;
-    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication_sync(
         std::string_view owner_scope,
         std::string_view lineage_id,
         std::uint64_t generation) const override;
-    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner_scope,
         std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override;
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope,
         std::string_view run_id) const override;
     ProgramTransitionPublishResult
-    compare_publish(std::string_view owner_scope,
+    compare_publish_sync(std::string_view owner_scope,
                     std::string_view expected_journal_head,
                     ProgramTransitionPublication publication) override;
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override;
-    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+    ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
         ProgramTransitionPublication publication,

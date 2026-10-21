@@ -153,6 +153,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_record_identity.cpp
         test_program_runtime.cpp
         test_program_runtime_executor.cpp
+        test_program_store_awaitable.cpp
         test_program_runtime_instruction.cpp
         test_program_invocation.cpp
         test_program_task_graph_proposal.cpp
@@ -810,7 +811,7 @@ if(TARGET neograph_program_tests)
         # Keep the Program PostgreSQL store integration cases off the shared
         # checkpoint fixture while other test cases remain parallelizable.
         set(NEOGRAPH_PROGRAM_PG_LOCKED_TESTS
-            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*:*ProgramChildSynthesisPersistence.*/*PostgreSQL*:*ProgramChildSynthesisCrash.*/*PostgreSQL*:ProgramChildSynthesisPostgreSQL.*:*StoreConformance.*/PostgreSQL")
+            "ProgramCatalogTest.PostgreSQLProgramStoreReopensActivationAndOwnerVisibility:ProgramTransitionStoreTest.PostgreSQL*:*ProgramChildSynthesisPersistence.*/*PostgreSQL*:*ProgramChildSynthesisCrash.*/*PostgreSQL*:ProgramChildSynthesisPostgreSQL.*:*StoreConformance.*/PostgreSQL*")
         neograph_discover_tests(neograph_program_tests
             TEST_FILTER "${NEOGRAPH_PROGRAM_PG_LOCKED_TESTS}"
             PROPERTIES RESOURCE_LOCK postgres_test_db)

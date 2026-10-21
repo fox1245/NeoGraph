@@ -8,6 +8,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::ModuleStoreHandle;
 
 namespace {
 
@@ -403,7 +406,7 @@ TEST(ProgramModuleTest, RejectsChildOwnerOutsideParentScope) {
 
 TEST(ProgramModuleTest, ResolverRejectsCrossScopeAndUnapprovedCapabilities) {
     auto fixture = make_fixture();
-    auto store   = std::make_shared<InMemoryModuleStore>();
+    ModuleStoreHandle store   = std::make_shared<InMemoryModuleStore>();
     store->publish(fixture.parent);
 
     PolicySnapshotBuilder owner_policy_builder;
@@ -464,7 +467,7 @@ TEST(ProgramModuleTest, ResolverReturnsCompletePinnedDependencyClosure) {
     root_data.declared_effects     = {"tool"};
     const auto root = ProgramModule::create(std::move(root_data));
 
-    auto store = std::make_shared<InMemoryModuleStore>();
+    ModuleStoreHandle store = std::make_shared<InMemoryModuleStore>();
     store->publish(dependency);
     store->publish(root);
 
@@ -529,7 +532,7 @@ TEST(ProgramModuleTest, ResolutionRejectsUnpinnedDependency) {
 
 TEST(ProgramModuleTest, OwnerQualifiedLookupHidesForeignModuleIdentity) {
     auto fixture = make_fixture();
-    auto store   = std::make_shared<InMemoryModuleStore>();
+    ModuleStoreHandle store   = std::make_shared<InMemoryModuleStore>();
     store->publish(fixture.parent);
 
     EXPECT_TRUE(store->get("tenant:module", fixture.parent.id()).has_value());
@@ -538,7 +541,7 @@ TEST(ProgramModuleTest, OwnerQualifiedLookupHidesForeignModuleIdentity) {
 
 TEST(ProgramModuleTest, ResolverRejectsQuarantinedModuleEvenWithPinnedIdentity) {
     auto fixture = make_fixture();
-    auto store   = std::make_shared<InMemoryModuleStore>();
+    ModuleStoreHandle store   = std::make_shared<InMemoryModuleStore>();
     store->publish(fixture.parent);
     store->set_lifecycle(fixture.parent.id(), ModuleLifecycle::Quarantined);
 
@@ -714,7 +717,7 @@ TEST(ProgramModuleTest, WholeCompositionDeniesChildIdentityCollision) {
 
 TEST(ProgramModuleTest, ResolverRejectsDeprecatedPinnedModule) {
     auto fixture = make_fixture();
-    auto store   = std::make_shared<InMemoryModuleStore>();
+    ModuleStoreHandle store   = std::make_shared<InMemoryModuleStore>();
     store->publish(fixture.parent);
     store->set_lifecycle(fixture.parent.id(), ModuleLifecycle::Deprecated);
 

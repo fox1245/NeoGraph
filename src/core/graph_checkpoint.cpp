@@ -405,6 +405,12 @@ private:
 
 } // namespace
 
+namespace detail {
+asio::awaitable<void> run_on_blocking_pool(std::function<void()> work) {
+    co_await run_blocking_checkpoint(std::move(work));
+}
+}  // namespace detail
+
 std::shared_ptr<CheckpointStore>
 adapt_checkpoint_store(std::shared_ptr<CheckpointStoreCore> core) {
     if (!core) {

@@ -78,6 +78,8 @@ ChatStore::ChatStore(const Options& o) : impl_(std::make_unique<Impl>()) {
         throw std::runtime_error("Build with NEOGRAPH_BUILD_SQLITE=ON");
 #endif
     }
+    programs_view    = std::make_shared<neograph::program::BlockingProgramStore>(programs);
+    transitions_view = std::make_shared<neograph::program::BlockingProgramTransitionStore>(transitions);
 }
 ChatStore::~ChatStore() = default;
 json ChatStore::load(const std::string& owner) {

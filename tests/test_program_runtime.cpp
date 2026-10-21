@@ -70,6 +70,14 @@ extern char** environ;
 #include <thread>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::FragmentStoreHandle;
+using neograph::program::test_support::GrantStoreHandle;
+using neograph::program::test_support::OwnedProgramStore;
+using neograph::program::test_support::OwnedTransitionStore;
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 neograph::json orchestration_document(neograph::json root, std::string node_type);
 namespace {
 
@@ -1626,72 +1634,72 @@ public:
     std::atomic<bool> terminal_observed_committed{false};
 
 private:
-    std::shared_ptr<ProgramTransitionStore> journal_;
+    TransitionStoreHandle journal_;
 };
 
-class ConflictOnceJournal final : public ProgramTransitionStore {
+class ConflictOnceJournal final : public SyncProgramTransitionStore {
 public:
-    std::optional<ProgramRunRecord> load(std::string_view owner,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
-        return inner_.load(owner, run_id);
+        return inner_.load_sync(owner, run_id);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
                                                std::string_view run_id) const override {
-        return inner_.latest(owner, run_id);
+        return inner_.latest_sync(owner, run_id);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
-        return inner_.load_events(owner, run_id, sequence);
+        return inner_.load_events_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
-        return inner_.load_effects(owner, run_id, sequence);
+        return inner_.load_effects_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands(owner, run_id, sequence);
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
-        return inner_.load_context_publications(owner, run_id, sequence);
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries(owner, run_id);
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
-        return inner_.load_lineage(owner, lineage_id);
+        return inner_.load_lineage_sync(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
-        return inner_.load_run_lineage(owner, run_id);
+        return inner_.load_run_lineage_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
-        return inner_.load_lineage_head(owner, lineage_id, head_id);
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
-        return inner_.load_generation(owner, lineage_id, generation);
+        return inner_.load_generation_sync(owner, lineage_id, generation);
     }
-    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner,
         std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
-        return inner_.load_graph_migration_capsule(
+        return inner_.load_graph_migration_capsule_sync(
             owner, source_run_id, source_lineage_head_id);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_execution_lease(owner, run_id);
+        return inner_.load_execution_lease_sync(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
@@ -1699,9 +1707,9 @@ public:
             !injected_.exchange(true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
-        return inner_.compare_publish(owner, expected, std::move(publication));
+        return inner_.compare_publish_sync(owner, expected, std::move(publication));
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
@@ -1710,7 +1718,7 @@ public:
             !injected_.exchange(true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
-        return inner_.compare_publish_execution(
+        return inner_.compare_publish_execution_sync(
             owner, expected, std::move(publication), expected_lease, next_lease);
     }
     bool injected() const noexcept { return injected_.load(); }
@@ -1720,36 +1728,36 @@ private:
     std::atomic<bool>              injected_{false};
 };
 
-class IsolatedProcessTransitionStore final : public ProgramTransitionStore {
+class IsolatedProcessTransitionStore final : public SyncProgramTransitionStore {
 public:
     explicit IsolatedProcessTransitionStore(
         std::shared_ptr<ProgramTransitionStore> target)
-        : target_(std::move(target)) {}
+        : target_(std::make_shared<BlockingProgramTransitionStore>(std::move(target))) {}
 
-    std::optional<ProgramRunRecord> load(
+    std::optional<ProgramRunRecord> load_sync(
         std::string_view owner, std::string_view run_id) const override {
         return target_->load(owner, run_id);
     }
-    std::optional<ProgramJournalRecord> latest(
+    std::optional<ProgramJournalRecord> latest_sync(
         std::string_view owner, std::string_view run_id) const override {
         return target_->latest(owner, run_id);
     }
-    std::vector<ProgramEvent> load_events(
+    std::vector<ProgramEvent> load_events_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         return target_->load_events(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         return target_->load_effects(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         return target_->load_javascript_commands(owner, run_id, sequence);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         if (recovery_run_id_ == run_id) {
@@ -1761,55 +1769,55 @@ public:
         }
         return target_->load_context_publications(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
         if (recovery_run_id_ == run_id) return recovery_hooks_;
         return target_->load_hook_outbox_entries(owner, run_id);
     }
-    std::optional<MigrationPlan> load_migration_plan(
+    std::optional<MigrationPlan> load_migration_plan_sync(
         std::string_view owner, std::string_view run_id) const override {
         return target_->load_migration_plan(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(
+    std::optional<ProgramRunLineage> load_lineage_sync(
         std::string_view owner, std::string_view lineage_id) const override {
         return target_->load_lineage(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(
+    std::optional<ProgramRunLineage> load_run_lineage_sync(
         std::string_view owner, std::string_view run_id) const override {
         return target_->load_run_lineage(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
         return target_->load_lineage_head(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
         return target_->load_generation(owner, lineage_id, generation);
     }
-    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
         return target_->load_generation_initial_publication(
             owner, lineage_id, generation);
     }
-    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner, std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
         return target_->load_graph_migration_capsule(
             owner, source_run_id, source_lineage_head_id);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
         return target_->load_execution_lease(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication) override {
         return target_->compare_publish(owner, expected, std::move(publication));
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
@@ -1829,7 +1837,7 @@ public:
         return target_->compare_publish_execution(
             owner, expected, std::move(publication), expected_lease, next_lease);
     }
-    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+    ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
@@ -1864,7 +1872,7 @@ public:
     }
 
 private:
-    std::shared_ptr<ProgramTransitionStore> target_;
+    std::shared_ptr<BlockingProgramTransitionStore> target_;
     std::mutex execution_release_mutex_;
     std::condition_variable execution_release_condition_;
     bool block_execution_release_ = false;
@@ -1905,14 +1913,15 @@ neograph::HookOutboxEntry recovery_hook(std::string run_id) {
          std::chrono::system_clock::now() + std::chrono::minutes(1)});
 }
 
-class BlockAfterJavaScriptResultJournal final : public ProgramTransitionStore {
+class BlockAfterJavaScriptResultJournal final : public SyncProgramTransitionStore {
 public:
     explicit BlockAfterJavaScriptResultJournal(std::shared_ptr<ProgramTransitionStore> inner = {})
-        : inner_(inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>()) {}
+        : inner_(std::make_shared<BlockingProgramTransitionStore>(
+              inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>())) {}
     void reopen_backend_for_testing(std::shared_ptr<ProgramTransitionStore> backend) {
-        inner_ = std::move(backend);
+        inner_ = std::make_shared<BlockingProgramTransitionStore>(std::move(backend));
     }
-    std::vector<ProgramChildSynthesisRecord> load_child_syntheses(
+    std::vector<ProgramChildSynthesisRecord> load_child_syntheses_sync(
         std::string_view owner, std::string_view run) const override {
         auto remaining = synthesis_read_failures.load();
         while (remaining &&
@@ -1936,13 +1945,13 @@ public:
     mutable std::atomic<unsigned>                            command_head_misses{0};
     bool javascript_reads_unavailable = false;
     mutable std::atomic<unsigned> javascript_read_attempts{0};
-    std::optional<ProgramRunPublicationHead> load_run_publication_head(
+    std::optional<ProgramRunPublicationHead> load_run_publication_head_sync(
         std::string_view owner, std::string_view run) const override {
         return filter_run_read
-            ? ProgramTransitionStore::load_run_publication_head(owner, run)
+            ? SyncProgramTransitionStore::load_run_publication_head_sync(owner, run)
             : inner_->load_run_publication_head(owner, run);
     }
-    std::optional<ProgramCommandPublicationHead> load_command_publication_head(
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head_sync(
         std::string_view owner, std::string_view run) const override {
         auto remaining = command_head_misses.load();
         while (remaining &&
@@ -1951,10 +1960,10 @@ public:
         // Forward native snapshots except when an adversarial read filter needs
         // to observe the individual reads of the compatibility implementation.
         return filter_run_read || filter_command_read || javascript_reads_unavailable
-            ? ProgramTransitionStore::load_command_publication_head(owner, run)
+            ? SyncProgramTransitionStore::load_command_publication_head_sync(owner, run)
             : inner_->load_command_publication_head(owner, run);
     }
-    std::optional<ProgramRunRecord> load(std::string_view owner,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         if (throw_next_load_.exchange(false)) {
             throw std::runtime_error("simulated Program run read failure");
@@ -1962,44 +1971,44 @@ public:
         auto record = inner_->load(owner, run_id);
         return filter_run_read ? filter_run_read(run_id, std::move(record)) : std::move(record);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
                                                std::string_view run_id) const override {
         return inner_->latest(owner, run_id);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
         return inner_->load_events(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
         return inner_->load_effects(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
         if (javascript_reads_unavailable) {
             javascript_read_attempts.fetch_add(1);
-            return ProgramTransitionStore::load_javascript_commands(owner, run_id, sequence);
+            return SyncProgramTransitionStore::load_javascript_commands_sync(owner, run_id, sequence);
         }
         auto commands = inner_->load_javascript_commands(owner, run_id, sequence);
         return filter_command_read ? filter_command_read(run_id, std::move(commands))
                                    : std::move(commands);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
         return inner_->load_context_publications(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
         return inner_->load_hook_outbox_entries(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_->load_lineage(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
         if (consume_replacement_readback_failure()) {
             throw std::runtime_error("simulated replacement lineage readback failure");
@@ -2007,12 +2016,12 @@ public:
         const auto read = [&] { return inner_->load_run_lineage(owner, run_id); };
         return filter_run_lineage_read ? filter_run_lineage_read(run_id, read) : read();
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
         return inner_->load_lineage_head(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
         if (consume_replacement_readback_failure()) {
@@ -2020,21 +2029,21 @@ public:
         }
         return inner_->load_generation(owner, lineage_id, generation);
     }
-    std::optional<ProgramTransitionPublication> load_generation_initial_publication(
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication_sync(
         std::string_view owner, std::string_view lineage, std::uint64_t generation) const override {
         return inner_->load_generation_initial_publication(owner, lineage, generation);
     }
-    std::optional<GraphMigrationCapsule> load_graph_migration_capsule(
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
         std::string_view owner,
         std::string_view source_run_id,
         std::string_view source_lineage_head_id) const override {
         return inner_->load_graph_migration_capsule(owner, source_run_id, source_lineage_head_id);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
         return inner_->load_execution_lease(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
@@ -2084,7 +2093,7 @@ public:
         condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
         return published;
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
@@ -2111,7 +2120,7 @@ public:
         }
         return published;
     }
-    ProgramTransitionPublishResult compare_publish_graph_safe_point(
+    ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner,
         std::string_view expected,
         ProgramTransitionPublication publication,
@@ -2168,7 +2177,7 @@ private:
         return false;
     }
 
-    std::shared_ptr<ProgramTransitionStore> inner_;
+    std::shared_ptr<BlockingProgramTransitionStore> inner_;
     mutable std::mutex             mutex_;
     std::condition_variable        condition_;
     bool                           observed_ = false;
@@ -2183,81 +2192,81 @@ private:
     std::function<void()>          publish_collision_;
 };
 
-class FailChildDispatchOnceJournal final : public ProgramTransitionStore {
+class FailChildDispatchOnceJournal final : public SyncProgramTransitionStore {
 public:
-    std::optional<ProgramRunRecord> load(std::string_view owner,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
-        return inner_.load(owner, run_id);
+        return inner_.load_sync(owner, run_id);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner,
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
                                                std::string_view run_id) const override {
-        return inner_.latest(owner, run_id);
+        return inner_.latest_sync(owner, run_id);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
-        return inner_.load_events(owner, run_id, sequence);
+        return inner_.load_events_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
-        return inner_.load_effects(owner, run_id, sequence);
+        return inner_.load_effects_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands(owner, run_id, sequence);
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
-        return inner_.load_context_publications(owner, run_id, sequence);
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries(owner, run_id);
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
-        return inner_.load_lineage(owner, lineage_id);
+        return inner_.load_lineage_sync(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
-        return inner_.load_run_lineage(owner, run_id);
+        return inner_.load_run_lineage_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
-        return inner_.load_lineage_head(owner, lineage_id, head_id);
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
-        return inner_.load_generation(owner, lineage_id, generation);
+        return inner_.load_generation_sync(owner, lineage_id, generation);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_execution_lease(owner, run_id);
+        return inner_.load_execution_lease_sync(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
         const auto children = publication.run_record.children();
         if (children.empty() || children.back().state != ProgramChildState::Dispatched ||
             !block_dispatch_.load()) {
-            return inner_.compare_publish(owner, expected, std::move(publication));
+            return inner_.compare_publish_sync(owner, expected, std::move(publication));
         }
         if (!injected_.exchange(true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
         return ProgramTransitionPublishResult::Conflict;
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
-        return inner_.compare_publish_execution(
+        return inner_.compare_publish_execution_sync(
             owner, expected, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
     }
@@ -2268,77 +2277,77 @@ private:
     std::atomic<bool>              injected_{false};
     std::atomic<bool>              block_dispatch_{true};
 };
-class ThrowOnLatestJournal final : public ProgramTransitionStore {
+class ThrowOnLatestJournal final : public SyncProgramTransitionStore {
 public:
-    std::optional<ProgramRunRecord> load(std::string_view owner,
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
-        return inner_.load(owner, run_id);
+        return inner_.load_sync(owner, run_id);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view, std::string_view) const override {
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view, std::string_view) const override {
         throw std::runtime_error("journal latest failed");
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner,
                                           std::string_view run_id,
                                           std::uint64_t    sequence) const override {
-        return inner_.load_events(owner, run_id, sequence);
+        return inner_.load_events_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
                                                        std::string_view run_id,
                                                        std::uint64_t    sequence) const override {
-        return inner_.load_effects(owner, run_id, sequence);
+        return inner_.load_effects_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands(owner, run_id, sequence);
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
     }
-    std::vector<ProgramContextPublication> load_context_publications(
+    std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id,
         std::uint64_t sequence) const override {
-        return inner_.load_context_publications(owner, run_id, sequence);
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
     }
-    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries(
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries(owner, run_id);
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
-        return inner_.load_lineage(owner, lineage_id);
+        return inner_.load_lineage_sync(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
-        return inner_.load_run_lineage(owner, run_id);
+        return inner_.load_run_lineage_sync(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
-        return inner_.load_lineage_head(owner, lineage_id, head_id);
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
-        return inner_.load_generation(owner, lineage_id, generation);
+        return inner_.load_generation_sync(owner, lineage_id, generation);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_execution_lease(owner, run_id);
+        return inner_.load_execution_lease_sync(owner, run_id);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
         ProgramTransitionPublication publication) override {
-        return inner_.compare_publish(owner, expected, std::move(publication));
+        return inner_.compare_publish_sync(owner, expected, std::move(publication));
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
-        return inner_.compare_publish_execution(
+        return inner_.compare_publish_execution_sync(
             owner, expected, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
     }
     std::optional<ProgramJournalRecord> stored_latest(std::string_view run_id) const {
-        return inner_.latest("tenant:runtime", run_id);
+        return inner_.latest_sync("tenant:runtime", run_id);
     }
 
 private:
@@ -2844,7 +2853,7 @@ TEST(ProgramRuntimeTest, DurableCoreToolGrantRebindsExactAuthorityAcrossRestart)
             std::filesystem::remove(path, ignored);
         }
     } cleanup{path};
-    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    GrantStoreHandle store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
     const auto effect_broker = std::make_shared<ProgramToolEffectProbe>();
     const auto make_policy = [effect_broker](const ProgramCoreToolGrantRecord& record)
         -> std::optional<ProgramCoreToolGrant> {
@@ -2932,7 +2941,7 @@ TEST(ProgramRuntimeTest, DurableCoreToolGrantRejectsChangedBindingAndHostPolicy)
             std::filesystem::remove(path, ignored);
         }
     } cleanup{path};
-    auto store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
+    GrantStoreHandle store = std::make_shared<SQLiteProgramCoreToolGrantStore>(path.string());
     const ProgramCoreToolGrantRecord record{
         "tenant:runtime", version.id(), "different-binding", "root", 1,
         "different-executable-binding", "host-grant-negative"};
@@ -3850,7 +3859,7 @@ TEST(ProgramRuntimeTest, RetriesOneSpuriousTerminalJournalConflict) {
 
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
     EXPECT_TRUE(journal->injected());
-    const auto latest = journal->latest("tenant:runtime", result.run_id());
+    const auto latest = journal->latest_sync("tenant:runtime", result.run_id());
     ASSERT_TRUE(latest.has_value());
     EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
 }
@@ -3969,7 +3978,7 @@ struct JoinTestStores {
     JoinTestStores& operator=(const JoinTestStores&) = delete;
 
     std::filesystem::path                   directory;
-    std::shared_ptr<ProgramTransitionStore> transitions;
+    TransitionStoreHandle transitions;
     std::shared_ptr<CheckpointStore>        checkpoints;
 };
 
@@ -4416,15 +4425,15 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
     }
     EXPECT_EQ(completed_calls.load(), 1U);
     const auto durable_commands =
-        journal->load_javascript_commands("tenant:runtime", original.run_id(), 0);
+        journal->load_javascript_commands_sync("tenant:runtime", original.run_id(), 0);
     ASSERT_EQ(durable_commands.size(), 2U);
     EXPECT_TRUE(durable_commands.back().completed());
-    EXPECT_FALSE(journal->load_execution_lease(
+    EXPECT_FALSE(journal->load_execution_lease_sync(
         "tenant:runtime", original.run_id()));
-    const auto durable_snapshot = journal->load("tenant:runtime", original.run_id());
+    const auto durable_snapshot = journal->load_sync("tenant:runtime", original.run_id());
     ASSERT_TRUE(durable_snapshot.has_value());
     ASSERT_TRUE(durable_snapshot->exact_checkpoint().has_value());
-    const auto durable_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    const auto durable_events = journal->load_events_sync("tenant:runtime", original.run_id(), 0);
     ASSERT_FALSE(durable_events.empty());
     EXPECT_EQ(durable_snapshot->event_sequence(), durable_events.back().sequence);
     EXPECT_TRUE(std::any_of(durable_events.begin(), durable_events.end(), [&](const auto& event) {
@@ -4438,7 +4447,7 @@ TEST(ProgramRuntimeTest, JavaScriptCompletedHeadFreshRuntimeReplaysRecordedResul
     ASSERT_EQ(replayed.status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(replayed.output(), (json{{"value", "completed"}}));
     EXPECT_EQ(completed_calls.load(), 1U);
-    const auto replayed_events = journal->load_events("tenant:runtime", original.run_id(), 0);
+    const auto replayed_events = journal->load_events_sync("tenant:runtime", original.run_id(), 0);
     for (const auto& durable_event : durable_events) {
         EXPECT_EQ(std::count_if(replayed_events.begin(), replayed_events.end(),
                                 [&](const auto& replayed_event) {
@@ -4762,7 +4771,7 @@ TEST(ProgramRuntimeTest, GraphMigrationTargetSaveFailureResumesHeldSource) {
               release->run_record.remaining_budget().max_core_steps);
     EXPECT_EQ(result.usage().wall_time_ms + result.remaining_budget().wall_time_ms,
               grant().wall_time_ms);
-    EXPECT_FALSE(journal->load_execution_lease("tenant:runtime", source.run_id()));
+    EXPECT_FALSE(journal->load_execution_lease_sync("tenant:runtime", source.run_id()));
     EXPECT_FALSE(fixture.journal->load_graph_migration_capsule(
         "tenant:runtime", source.run_id(), lineage->id()));
     EXPECT_FALSE(fixture.journal->load(
@@ -4823,12 +4832,12 @@ TEST(ProgramRuntimeTest, UnreadableSafePointCommitFencesSourceDurably) {
     EXPECT_EQ(source_result.status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(blocking_calls.load(), 1U);
     EXPECT_EQ(followup_calls.load(), 0U);
-    const auto durable = journal->load("tenant:runtime", source.run_id());
+    const auto durable = journal->load_sync("tenant:runtime", source.run_id());
     ASSERT_TRUE(durable);
     EXPECT_EQ(durable->continuation().state, ContinuationState::Cancelled);
     ASSERT_TRUE(durable->exact_checkpoint());
     ASSERT_TRUE(durable->exact_checkpoint_content_id());
-    EXPECT_FALSE(journal->load(
+    EXPECT_FALSE(journal->load_sync(
         "tenant:runtime", "graph-migration-uncertain-target"));
 
     auto fresh_runtime = fixture.make_runtime();
@@ -4928,7 +4937,7 @@ TEST(ProgramRuntimeTest, CancellationAfterHeldSourceLinearizesBehindMigrationCom
 TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
     blocking_calls.store(0);
     blocking_active.store(0);
-    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    TransitionStoreHandle backend = std::make_shared<InMemoryProgramTransitionStore>();
     auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
     AdmittedRuntime fixture(2, {}, local_view);
     const auto version = fixture.admit("runtime-blocking");
@@ -4977,7 +4986,7 @@ TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
 TEST(ProgramRuntimeTest, ExpiredRootExecutionLeaseFencesWithoutRedispatch) {
     blocking_calls.store(0);
     blocking_active.store(0);
-    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    TransitionStoreHandle backend = std::make_shared<InMemoryProgramTransitionStore>();
     auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
     local_view->block_execution_release();
     AdmittedRuntime fixture(2, {}, local_view);
@@ -5035,7 +5044,7 @@ TEST(ProgramRuntimeTest, RemoteReconnectCannotDispatchDurablyHeldGraphMigrationS
     followup_calls.store(0);
     auto checkpoints = std::make_shared<AdversarialCheckpointStore>();
     checkpoints->arm(AdversarialCheckpointStore::Mode::DelayMigrationTargetSave);
-    auto backend = std::make_shared<InMemoryProgramTransitionStore>();
+    TransitionStoreHandle backend = std::make_shared<InMemoryProgramTransitionStore>();
     auto local_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
     AdmittedRuntime fixture(1, checkpoints, local_view);
     const auto version = fixture.admit("runtime-short-blocking");
@@ -5139,7 +5148,7 @@ TEST(ProgramRuntimeTest, GraphMigrationSurvivesSqliteRuntimeReopen) {
     followup_calls.store(0);
 
     {
-        auto transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
+        TransitionStoreHandle transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
         auto checkpoints = std::make_shared<SqliteCheckpointStore>(checkpoint_path);
         AdmittedRuntime fixture(1, checkpoints, transitions);
         const auto version = fixture.admit("runtime-short-blocking");
@@ -5231,7 +5240,7 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
     const auto handoff_reference = handoff.reference();
     const auto source_boundary = source.snapshot();
     const auto source_lineage =
-        journal->load_run_lineage("tenant:runtime", source.run_id());
+        journal->load_run_lineage_sync("tenant:runtime", source.run_id());
     ASSERT_TRUE(source_lineage);
     EXPECT_EQ(source_lineage->active_generation(), 1U);
 
@@ -5256,11 +5265,11 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
                     {"previous_run_id", source.run_id()}}));
     EXPECT_EQ(completed_calls.load(), 0U);
 
-    const auto lineage = journal->load_run_lineage("tenant:runtime", target.run_id());
+    const auto lineage = journal->load_run_lineage_sync("tenant:runtime", target.run_id());
     ASSERT_TRUE(lineage);
     EXPECT_EQ(lineage->lineage_id(), source_lineage->lineage_id());
     EXPECT_EQ(lineage->active_generation(), 2U);
-    const auto target_record = journal->load("tenant:runtime", target.run_id());
+    const auto target_record = journal->load_sync("tenant:runtime", target.run_id());
     ASSERT_TRUE(target_record);
     EXPECT_EQ(target_record->invocation().budget,
               program_replacement_remaining_budget(source_boundary, *source_lineage,
@@ -5269,7 +5278,7 @@ TEST(ProgramRuntimeTest, JavaScriptCheckpointReplacementPublishesAndReconnectsGe
               source_boundary.remaining_budget().wall_time_ms);
     EXPECT_EQ(lineage->remaining_budget(), result.remaining_budget());
     const auto generation =
-        journal->load_generation("tenant:runtime", lineage->lineage_id(), 2);
+        journal->load_generation_sync("tenant:runtime", lineage->lineage_id(), 2);
     ASSERT_TRUE(generation);
     ASSERT_TRUE(generation->replacement_receipt());
     EXPECT_EQ(generation->replacement_receipt()->source_run_id(), source.run_id());
@@ -5320,7 +5329,7 @@ TEST(ProgramRuntimeTest, ReplacementCommitBeforeDispatchRecoversExactSuccessor) 
                               "trace-replacement-crash-target", {}}),
         std::runtime_error);
     const auto committed_lineage =
-        journal->load_run_lineage("tenant:runtime", source.run_id());
+        journal->load_run_lineage_sync("tenant:runtime", source.run_id());
     ASSERT_TRUE(committed_lineage);
     EXPECT_EQ(committed_lineage->active_generation(), 2U);
     EXPECT_EQ(completed_calls.load(), 0U);
@@ -5432,7 +5441,7 @@ TEST(ProgramRuntimeTest, UnreadableCommittedReplacementNeverReleasesHeldSource) 
                 source_boundary.remaining_budget(), "trace-handoff-ambiguous-target", {}}),
         std::runtime_error);
     EXPECT_FALSE(handoff);
-    const auto committed = journal->load_run_lineage("tenant:runtime", source.run_id());
+    const auto committed = journal->load_run_lineage_sync("tenant:runtime", source.run_id());
     ASSERT_TRUE(committed);
     EXPECT_EQ(committed->active_generation(), 2U);
 
@@ -5493,7 +5502,7 @@ TEST(ProgramRuntimeTest, ReplacementFailureBeforeCommitLeavesSourceExecutable) {
             std::runtime_error);
         ASSERT_TRUE(collider);
         EXPECT_EQ(collider->wait().status(), ProgramTerminalStatus::Completed);
-        const auto lineage = journal->load_run_lineage("tenant:runtime", source.run_id());
+        const auto lineage = journal->load_run_lineage_sync("tenant:runtime", source.run_id());
         ASSERT_TRUE(lineage);
         EXPECT_EQ(lineage->active_generation(), 1U);
     }
@@ -5852,7 +5861,7 @@ TEST(ProgramRuntimeTest, RecordedControlChargesRealCoreWorkBeforeItsHeldCheckpoi
         ProgramInvocation{json::object(), javascript_budget(1, 4), "real-core-source", {}});
     const auto terminal = original.wait();
     ASSERT_EQ(terminal.status(), ProgramTerminalStatus::Completed);
-    const auto source_budget = journal->load_run_lineage(
+    const auto source_budget = journal->load_run_lineage_sync(
         "tenant:runtime", original.run_id())->remaining_budget();
     auto invocation = original.snapshot().invocation();
     invocation.run_id = "real-core-recorded-target";
@@ -5896,7 +5905,7 @@ TEST(ProgramRuntimeTest, RecordedControlCannotHideUnmanagedCoreBehindSandboxedJa
         "tenant:runtime", version,
         ProgramInvocation{json::object(), javascript_budget(1, 4), "unmanaged-source", {}});
     ASSERT_EQ(original.wait().status(), ProgramTerminalStatus::Completed);
-    const auto head = journal->load_run_lineage("tenant:runtime", original.run_id());
+    const auto head = journal->load_run_lineage_sync("tenant:runtime", original.run_id());
     ASSERT_TRUE(head);
     auto invocation = original.snapshot().invocation();
     invocation.run_id = "unmanaged-hidden-target";
@@ -5908,8 +5917,8 @@ TEST(ProgramRuntimeTest, RecordedControlCannotHideUnmanagedCoreBehindSandboxedJa
         EXPECT_EQ(error.diagnostic().code, "P_REPLAY_GUARANTEE");
     }
     EXPECT_EQ(completed_calls.load(), 1U);
-    EXPECT_FALSE(journal->load("tenant:runtime", invocation.run_id));
-    EXPECT_EQ(journal->load_run_lineage("tenant:runtime", original.run_id())->id(), head->id());
+    EXPECT_FALSE(journal->load_sync("tenant:runtime", invocation.run_id));
+    EXPECT_EQ(journal->load_run_lineage_sync("tenant:runtime", original.run_id())->id(), head->id());
 }
 
 TEST(ProgramRuntimeTest, RecordedControlCannotDispatchAnUncapturedCoreCommand) {
@@ -5942,7 +5951,7 @@ TEST(ProgramRuntimeTest, RecordedControlCannotDispatchAnUncapturedCoreCommand) {
     ASSERT_TRUE(replay.failure());
     EXPECT_EQ(replay.failure()->code, "P_REPLAY_EVIDENCE_REQUIRED");
     EXPECT_EQ(completed_calls.load(), 1U);
-    EXPECT_EQ(journal->load_run_lineage("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
+    EXPECT_EQ(journal->load_run_lineage_sync("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
 }
 
 TEST(ProgramRuntimeTest, RecordedControlRejectsChangedCapturedCommandBeforeCoreWork) {
@@ -5987,7 +5996,7 @@ TEST(ProgramRuntimeTest, RecordedControlRejectsChangedCapturedCommandBeforeCoreW
         EXPECT_EQ(replay.usage().core_steps, 0U);
         EXPECT_EQ(replay.usage().program_operations, 0U);
         EXPECT_EQ(completed_calls.load(), 1U);
-        EXPECT_EQ(journal->load_run_lineage("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
+        EXPECT_EQ(journal->load_run_lineage_sync("tenant:runtime", source_id)->remaining_budget(), RunBudget{});
     }
 }
 
@@ -7993,7 +8002,7 @@ TEST(ProgramRuntimeTest, FailedExactResumeIgnoresNewerOrphanForUsage) {
 // scheduler and terminated the process.
 TEST(ProgramRuntimeTest, FailedInterruptPublicationFailsTheRunCleanly) {
     AdmittedRuntime fixture;
-    auto store = std::dynamic_pointer_cast<InMemoryProgramTransitionStore>(fixture.journal);
+    auto store = fixture.journal.as<InMemoryProgramTransitionStore>();
     ASSERT_TRUE(store);
     before_fault_interrupt = [store] {
         store->fail_next_publication_for_testing(ProgramTransitionFaultPoint::BeforeCommit);
@@ -8040,7 +8049,7 @@ TEST(ProgramRuntimeTest, ExceptionEscapingTerminalizationFailsTheRunCleanly) {
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 // Issue #371: each interrupted callCore of one JavaScript main() is a
 // resumable Interrupted result, on every transition store.
-void expect_two_interrupted_core_calls_resume(std::shared_ptr<ProgramTransitionStore> store) {
+void expect_two_interrupted_core_calls_resume(TransitionStoreHandle store) {
     AdmittedRuntime fixture(1, {}, std::move(store), {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version = fixture.admit_javascript(
         R"JS(
@@ -8107,7 +8116,7 @@ TEST(ProgramRuntimeTest, TwoInterruptedCoreCallsEachResumeOnSqlite) {
 // execution_trace was one attempt late: ["draft"], ["draft"],
 // ["deploy", "deploy"]. Each result lists exactly the Core nodes that ran
 // since the previous result, in order.
-void expect_each_result_lists_the_nodes_it_ran(std::shared_ptr<ProgramTransitionStore> store) {
+void expect_each_result_lists_the_nodes_it_ran(TransitionStoreHandle store) {
     using Trace = std::vector<std::string>;
     AdmittedRuntime fixture(1, {}, std::move(store), {}, ExecutionGuarantee::Unmanaged, true);
     const auto      version = fixture.admit_javascript(
@@ -9244,7 +9253,7 @@ TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
 
     interrupt_calls.store(0);
     {
-        auto transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
+        TransitionStoreHandle transitions = std::make_shared<SQLiteProgramTransitionStore>(path);
         AdmittedRuntime fixture(1, {}, transitions);
         const auto      version = fixture.admit("runtime-interrupt");
         const auto      source =
@@ -12274,7 +12283,7 @@ TEST(ProgramRuntimeTest, TypedChildStoreDoesNotRequireJavaScriptHistory) {
                           "typed-child-without-js", {}});
     const auto result = child.wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
-    const auto head = journal->load_run_publication_head("tenant:runtime", parent.run_id());
+    const auto head = journal->load_run_publication_head_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(head);
     const auto children = head->run_record.children();
     ASSERT_EQ(children.size(), 1U);
@@ -12327,8 +12336,8 @@ TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedis
             if (id != parent_id || !record || !armed->load() || advances->exchange(1) != 0)
                 return record;
             const auto store = weak_journal.lock();
-            const auto previous_journal = store->latest("tenant:runtime", parent_id);
-            const auto lineage = store->load_run_lineage("tenant:runtime", parent_id);
+            const auto previous_journal = store->latest_sync("tenant:runtime", parent_id);
+            const auto lineage = store->load_run_lineage_sync("tenant:runtime", parent_id);
             if (!previous_journal || !lineage)
                 throw std::runtime_error("Sibling publication has no durable parent head");
             auto next_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
@@ -12375,8 +12384,8 @@ TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedis
             ProgramTransitionPublication publication{next_run, std::move(next_journal), {}, {}};
             publication.run_lineage = std::move(next_lineage);
             allow_completion->store(true);
-            if (store->compare_publish("tenant:runtime", record->journal_head(),
-                                       std::move(publication)) !=
+            if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
+                                            std::move(publication)) !=
                 ProgramTransitionPublishResult::Published)
                 throw std::runtime_error("Sibling completion publication was rejected");
             return record;
@@ -12778,7 +12787,7 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
                                                     linked.child_version, child_invocation),
                  ProgramDiagnosticError);
 
-    const auto publishing = journal->load("tenant:runtime", parent.run_id());
+    const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
     ASSERT_EQ(publishing->children().size(), 1U);
     EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
@@ -12787,7 +12796,7 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
     auto recovered = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
                                                   linked.child_version, child_invocation);
     EXPECT_EQ(recovered.wait().status(), ProgramTerminalStatus::Completed);
-    const auto completed = journal->load("tenant:runtime", parent.run_id());
+    const auto completed = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(completed.has_value());
     ASSERT_EQ(completed->children().size(), 1U);
     EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
@@ -12816,7 +12825,7 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
     EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
                                                     linked.child_version, child_invocation),
                  ProgramDiagnosticError);
-    const auto publishing = journal->load("tenant:runtime", parent.run_id());
+    const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
     ASSERT_EQ(publishing->children().size(), 1U);
     EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
@@ -12827,7 +12836,7 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
     EXPECT_EQ(recovered.front().wait().status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(completed_calls.load(), 1U);
 
-    const auto completed = journal->load("tenant:runtime", parent.run_id());
+    const auto completed = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(completed.has_value());
     ASSERT_EQ(completed->children().size(), 1U);
     EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
@@ -13572,9 +13581,9 @@ struct ChildSynthesisFixture {
         journal->release_result();
         (void)hold->value();
         auto run     = handle->snapshot();
-        auto lineage = journal->load_run_lineage("tenant:runtime", handle->run_id());
+        auto lineage = journal->load_run_lineage_sync("tenant:runtime", handle->run_id());
         if (!lineage) throw std::runtime_error("Missing parent lineage");
-        auto generation = journal->load_generation("tenant:runtime", lineage->lineage_id(),
+        auto generation = journal->load_generation_sync("tenant:runtime", lineage->lineage_id(),
                                                    lineage->active_generation());
         if (!generation) throw std::runtime_error("Missing parent generation");
         parent.emplace(
@@ -13683,7 +13692,7 @@ TEST(ProgramChildSynthesis, AuthorizesExactHostGrantWithoutChangingParent) {
     EXPECT_EQ(authorize_program_child_synthesis(proposal, grant, *test.parent).id(),
               authorization.id());
     EXPECT_EQ(test.handle->snapshot().id(), test.parent->run.id());
-    EXPECT_EQ(test.journal->load_run_lineage("tenant:runtime", test.handle->run_id())->id(),
+    EXPECT_EQ(test.journal->load_run_lineage_sync("tenant:runtime", test.handle->run_id())->id(),
               test.parent->lineage.id());
     EXPECT_EQ(test.reservations, 0U);
 }
@@ -14038,7 +14047,7 @@ TEST(ProgramChildSynthesis, ANewGrantCannotAuthorizeATerminalParent) {
     test.hold.reset();
     ASSERT_EQ(test.handle->wait().status(), ProgramTerminalStatus::Completed);
     test.parent->run     = test.handle->snapshot();
-    test.parent->lineage = *test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    test.parent->lineage = *test.journal->load_run_lineage_sync("tenant:runtime", test.handle->run_id());
     const auto proposal  = ProgramSynthesisProposal::create(test.proposal_data());
     const auto grant     = ProgramChildSynthesisGrant::create(test.grant_data());
     expect_child_synthesis_error(
@@ -14299,7 +14308,7 @@ protected:
 #endif
         return std::make_shared<InMemoryCheckpointStore>();
     }
-    std::shared_ptr<ProgramStore> program_backend() {
+    ProgramStoreHandle program_backend() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
 #endif
@@ -14310,7 +14319,7 @@ protected:
 #endif
         return std::make_shared<InMemoryProgramStore>();
     }
-    std::shared_ptr<ProgramTransitionStore> backend() {
+    TransitionStoreHandle backend() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramTransitionStore>(database);
 #endif
@@ -14387,7 +14396,7 @@ TEST_P(ProgramChildSynthesisPersistence, ReusesCommittedCompileValidationAndFroz
                          "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
                          "generated-child"),
                      std::runtime_error);
-        ASSERT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id())
+        ASSERT_EQ(test.journal->load_child_syntheses_sync("tenant:runtime", test.handle->run_id())
                       .front()
                       .data()
                       .state,
@@ -14458,7 +14467,7 @@ TEST_P(ProgramChildSynthesisPersistence,
     if (const auto* inherited = std::getenv("NEOGRAPH_SYNTHESIS_CRASH_DB")) database = inherited;
     setenv("NEOGRAPH_SYNTHESIS_CRASH_DB", database.c_str(), 1);
     ::testing::FLAGS_gtest_death_test_style = "threadsafe";
-    const auto programs                     = [&]() -> std::shared_ptr<ProgramStore> {
+    const auto programs                     = [&]() -> ProgramStoreHandle {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (GetParam() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
 #endif
@@ -14493,7 +14502,7 @@ TEST_P(ProgramChildSynthesisPersistence,
                 std::_Exit(78);
             } catch (const std::runtime_error&) {
                 const auto stored =
-                    child.journal->load_child_syntheses("tenant:runtime", child.handle->run_id());
+                    child.journal->load_child_syntheses_sync("tenant:runtime", child.handle->run_id());
                 if (stored.size() != 1 ||
                     stored.front().data().state != ProgramChildSynthesisState::Admitting)
                     std::_Exit(79);
@@ -14597,7 +14606,7 @@ TEST_P(ProgramChildSynthesisPersistence, ConcurrentRetriesHaveOneReservationAndO
     EXPECT_EQ(test.semantic_calls, 1U);
     EXPECT_EQ(test.admissions, 1U);
     EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);
-    ASSERT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id()).size(),
+    ASSERT_EQ(test.journal->load_child_syntheses_sync("tenant:runtime", test.handle->run_id()).size(),
               1U);
 }
 TEST_P(ProgramChildSynthesisPersistence, RejectsMutatedStageArtifactsAndRecordIdentity) {
@@ -14659,7 +14668,7 @@ TEST_P(ProgramChildSynthesisPersistence,
 #endif
     };
     if (GetParam() == "Memory")
-        std::dynamic_pointer_cast<InMemoryProgramTransitionStore>(storage)
+        storage.as<InMemoryProgramTransitionStore>()
             ->fail_next_publication_for_testing(ProgramTransitionFaultPoint::BeforeCommit);
     else if (GetParam() == "SQLite")
         execute(
@@ -14718,7 +14727,7 @@ protected:
         for (const auto* suffix : {"", "-wal", "-shm", ".recovery", ".executions"})
             std::filesystem::remove(database + suffix);
     }
-    std::shared_ptr<ProgramTransitionStore> backend() {
+    TransitionStoreHandle backend() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (backend_name() == "SQLite")
             return std::make_shared<SQLiteProgramTransitionStore>(database);
@@ -14730,7 +14739,7 @@ protected:
 #endif
         throw std::runtime_error("Durable transition backend unavailable");
     }
-    std::shared_ptr<ProgramStore> programs() {
+    ProgramStoreHandle programs() {
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (backend_name() == "SQLite") return std::make_shared<SQLiteProgramStore>(database);
 #endif
@@ -15099,7 +15108,7 @@ TEST(ProgramChildSynthesisPostgreSQL, ConnectionLossInsideReservationRollsBackBe
         "DROP TRIGGER synthesis_n3_disconnect ON neograph_program_transition_synthesis_log_v1; "
         "DROP FUNCTION synthesis_n3_disconnect_fn();");
     PQfinish(admin);
-    auto reopened = std::make_shared<PostgreSQLProgramTransitionStore>(url);
+    TransitionStoreHandle reopened = std::make_shared<PostgreSQLProgramTransitionStore>(url);
     EXPECT_EQ(reopened->load("tenant:runtime", test.handle->run_id())->id(), before.id());
     EXPECT_TRUE(reopened->load_child_syntheses("tenant:runtime", test.handle->run_id()).empty());
     test.journal->reopen_backend_for_testing(reopened);
@@ -15184,10 +15193,10 @@ TEST_P(ProgramChildSynthesisPersistence,
     const auto result = replacement.wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
     EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
-    EXPECT_EQ(test.journal->load_run_lineage("tenant:runtime", test.handle->run_id())
+    EXPECT_EQ(test.journal->load_run_lineage_sync("tenant:runtime", test.handle->run_id())
                   ->active_generation(),
               2U);
-    EXPECT_TRUE(test.journal->load_child_syntheses("tenant:runtime", replacement.run_id()).empty());
+    EXPECT_TRUE(test.journal->load_child_syntheses_sync("tenant:runtime", replacement.run_id()).empty());
     EXPECT_THROW(test.fixture.runtime->recover_child_synthesis(
                      "tenant:runtime", test.handle->run_id(), proposal.id()),
                  std::runtime_error);
@@ -15225,7 +15234,7 @@ TEST_P(ProgramChildSynthesisPersistence, LiveReconnectDoesNotMisclassifyAnActive
     release.set_value();
     const auto result = test.handle->wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
-    EXPECT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.handle->run_id())
+    EXPECT_EQ(test.journal->load_child_syntheses_sync("tenant:runtime", test.handle->run_id())
                   .front()
                   .data()
                   .state,
@@ -15289,7 +15298,7 @@ struct RecursiveHarnessFixture {
     std::shared_ptr<RecursiveCheckpointGate> gate = std::make_shared<RecursiveCheckpointGate>();
     std::shared_ptr<BlockAfterJavaScriptResultJournal> journal;
     AdmittedRuntime                                    host;
-    std::shared_ptr<ProgramStore>                      program_store;
+    ProgramStoreHandle                      program_store;
     std::shared_ptr<ProgramCompiler>                   compiler;
     std::mutex                                         grants_mutex;
     std::map<std::string, ProgramChildSynthesisGrant>  grants;
@@ -15413,7 +15422,7 @@ struct RecursiveHarnessFixture {
                 ProgramSource::from_javascript(source_name, approved->second).source_hash())
             throw std::runtime_error("Source is not an independently reviewed template instance");
         const auto run     = parent.snapshot();
-        const auto lineage = journal->load_run_lineage("tenant:runtime", parent.run_id());
+        const auto lineage = journal->load_run_lineage_sync("tenant:runtime", parent.run_id());
         const auto version =
             host.catalog->resolve_version("tenant:runtime", parent.program_version_id());
         ProgramSynthesisProposalData request;
@@ -15484,7 +15493,7 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(test.grandchild->snapshot().child_depth(), 2U);
     EXPECT_EQ(test.child->snapshot().remaining_budget().max_dynamic_compiles, 1U);
     test.replace_child();
-    const auto initial = test.journal->load("tenant:runtime", test.replacement->run_id());
+    const auto initial = test.journal->load_sync("tenant:runtime", test.replacement->run_id());
     ASSERT_TRUE(initial);
     EXPECT_EQ(initial->logical_run_id(), child_root);
     ASSERT_EQ(initial->children().size(), 1U);
@@ -15500,9 +15509,9 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(main.children().front().child_run_id, child_root);
     EXPECT_EQ(main.children().front().terminal_generation, 2U);
     EXPECT_EQ(main.children().front().terminal_result->run_id(), test.replacement->run_id());
-    const auto lineage = test.journal->load_run_lineage("tenant:runtime", child_root);
+    const auto lineage = test.journal->load_run_lineage_sync("tenant:runtime", child_root);
     const auto generation =
-        test.journal->load_generation("tenant:runtime", lineage->lineage_id(), 2);
+        test.journal->load_generation_sync("tenant:runtime", lineage->lineage_id(), 2);
     EXPECT_TRUE(does_program_child_generation_result_bind(
         main, main.children().front(), *generation, *lineage, test.replacement->snapshot()));
     auto forged                = main.children().front();
@@ -15640,7 +15649,7 @@ TEST_P(ProgramChildSynthesisPersistence, InheritedChildRejectsSupersededParentGe
                                              test.grandchild->run_id()};
     // The generation-1 head of the child lineage is what a lagging reader returns after
     // generation 2 became active; the replacement must not act on it.
-    const auto superseded = test.journal->load_run_lineage("tenant:runtime", test.child->run_id());
+    const auto superseded = test.journal->load_run_lineage_sync("tenant:runtime", test.child->run_id());
     ASSERT_TRUE(superseded);
     ASSERT_EQ(superseded->active_generation(), 1U);
     const auto hits = intercept_lineage_read_after_run_read(
@@ -15698,7 +15707,7 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacem
         recovered.grants.emplace(grant.id(), grant);
     }
     const auto child_before_recovery =
-        recovered.journal->load_run_lineage("tenant:runtime", child);
+        recovered.journal->load_run_lineage_sync("tenant:runtime", child);
     ASSERT_TRUE(child_before_recovery);
     recovered.root    = recovered.host.runtime->reconnect("tenant:runtime", root);
     const auto result = recovered.root->wait();
@@ -15876,7 +15885,7 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
             test.start(replace);
             const auto save = [&](const ProgramRunRecord& active) {
                 const auto    child      = active.children().front();
-                const auto    descendant = test.journal->load("tenant:runtime", child.child_run_id);
+                const auto    descendant = test.journal->load_sync("tenant:runtime", child.child_run_id);
                 std::ofstream saved(database + ".static-family");
                 saved << json{{"root", test.root->run_id()},
                               {"active", active.run_id()},
@@ -15888,7 +15897,7 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                               {"dynamic_compiles", active.remaining_budget().max_dynamic_compiles},
                               {"root_budget",
                                active.remaining_budget().model_tokens +
-                                   test.journal->latest("tenant:runtime", active.run_id())
+                                   test.journal->latest_sync("tenant:runtime", active.run_id())
                                        ->inflight_reservation.model_tokens}}
                              .dump();
                 saved.close();
@@ -15901,7 +15910,7 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                     if (publication.run_record.program_version_id() == test.grand_version->id() &&
                         !publication.commands.empty() && !publication.commands.back().completed() &&
                         publication.commands.back().command_ordinal() == 12)
-                        save(*test.journal->load("tenant:runtime", successor->run_id()));
+                        save(*test.journal->load_sync("tenant:runtime", successor->run_id()));
                     return;
                 }
                 if (publication.run_record.program_version_id() == test.successor_version->id() &&
@@ -15986,8 +15995,8 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
     const auto result = recovered.root->wait();
     if (effect_crash) {
         EXPECT_EQ(result.status(), ProgramTerminalStatus::Interrupted) << result.serialize_canonical();
-        const auto child = recovered.journal->load("tenant:runtime", child_id);
-        const auto grand = recovered.journal->load("tenant:runtime",
+        const auto child = recovered.journal->load_sync("tenant:runtime", child_id);
+        const auto grand = recovered.journal->load_sync("tenant:runtime",
                                                    saved.at("grandchild").get<std::string>());
         ASSERT_TRUE(child);
         ASSERT_TRUE(grand);
@@ -15997,9 +16006,9 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
         EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
         ASSERT_EQ(recovered.root->snapshot().children().size(), 1U);
         EXPECT_EQ(recovered.root->snapshot().children().front().state, ProgramChildState::Dispatched);
-        EXPECT_EQ(recovered.journal->load_javascript_commands("tenant:runtime", grand->run_id(), 0)
+        EXPECT_EQ(recovered.journal->load_javascript_commands_sync("tenant:runtime", grand->run_id(), 0)
                       .size(), 23U);
-        const auto events = recovered.journal->load_events("tenant:runtime", grand->run_id(), 0);
+        const auto events = recovered.journal->load_events_sync("tenant:runtime", grand->run_id(), 0);
         EXPECT_TRUE(std::none_of(events.begin(), events.end(), [](const auto& event) {
             return event.kind == ProgramEventKind::Emit;
         }));
@@ -16035,12 +16044,12 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
     EXPECT_EQ(json::parse(active.children().front().link_receipt), saved.at("child_record"));
     EXPECT_EQ(active.remaining_budget().model_tokens, saved.at("root_budget").get<std::uint64_t>());
     const auto child =
-        recovered.journal->load("tenant:runtime", saved.at("child").get<std::string>());
+        recovered.journal->load_sync("tenant:runtime", saved.at("child").get<std::string>());
     ASSERT_TRUE(child);
     ASSERT_EQ(child->children().size(), 1U);
     EXPECT_EQ(child->children().front().child_run_id, saved.at("grandchild").get<std::string>());
     EXPECT_EQ(recovered.journal
-                  ->load_javascript_commands("tenant:runtime",
+                  ->load_javascript_commands_sync("tenant:runtime",
                                              saved.at("grandchild").get<std::string>(), 0)
                   .size(),
               64U);
@@ -16100,7 +16109,7 @@ TEST_P(ProgramChildSynthesisPersistence, CommandResultRetriesAnOptimisticSnapsho
     journal->after_publication = {};
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
     EXPECT_EQ(result.output(), (json{{"done", true}}));
-    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 2U);
+    EXPECT_EQ(journal->load_javascript_commands_sync("tenant:runtime", result.run_id(), 0).size(), 2U);
 }
 
 TEST_P(ProgramChildSynthesisPersistence, FailedResultPublicationPersistsAmbiguousEffect) {
@@ -16123,11 +16132,11 @@ TEST_P(ProgramChildSynthesisPersistence, FailedResultPublicationPersistsAmbiguou
     ASSERT_TRUE(result.interrupt());
     ASSERT_TRUE(result.interrupt()->pending_effect);
     EXPECT_EQ(result.interrupt()->pending_effect->state(), ProgramPendingState::Ambiguous);
-    const auto stored = journal->load("tenant:runtime", result.run_id());
+    const auto stored = journal->load_sync("tenant:runtime", result.run_id());
     ASSERT_TRUE(stored);
     EXPECT_EQ(stored->continuation().state, ContinuationState::AmbiguousEffect);
-    EXPECT_EQ(journal->load_effects("tenant:runtime", result.run_id(), 0).size(), 1U);
-    EXPECT_EQ(journal->load_javascript_commands("tenant:runtime", result.run_id(), 0).size(), 1U);
+    EXPECT_EQ(journal->load_effects_sync("tenant:runtime", result.run_id(), 0).size(), 1U);
+    EXPECT_EQ(journal->load_javascript_commands_sync("tenant:runtime", result.run_id(), 0).size(), 1U);
     auto recovered = host.runtime->reconnect("tenant:runtime", result.run_id());
     EXPECT_FALSE(recovered.cancel());
     EXPECT_EQ(recovered.wait().id(), result.id());
@@ -16152,12 +16161,12 @@ TEST_P(ProgramChildSynthesisPersistence, AmbiguousDescendantDoesNotStrandFamilyC
     const auto root = test.root->snapshot();
     ASSERT_EQ(root.children().size(), 1U);
     EXPECT_EQ(root.children().front().state, ProgramChildState::Dispatched);
-    const auto child = test.journal->load("tenant:runtime", root.children().front().child_run_id);
+    const auto child = test.journal->load_sync("tenant:runtime", root.children().front().child_run_id);
     ASSERT_TRUE(child);
     ASSERT_EQ(child->children().size(), 1U);
     EXPECT_EQ(child->continuation().state, ContinuationState::AmbiguousEffect);
     EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
-    const auto grand = test.journal->load("tenant:runtime", child->children().front().child_run_id);
+    const auto grand = test.journal->load_sync("tenant:runtime", child->children().front().child_run_id);
     ASSERT_TRUE(grand);
     EXPECT_EQ(grand->continuation().state, ContinuationState::AmbiguousEffect);
     EXPECT_FALSE(test.root->cancel());
@@ -16209,7 +16218,7 @@ TEST(ProgramCatalogTest, SQLiteCatalogWaitsForShortSharedDatabaseWriter) {
                        ("neograph-catalog-busy-" + Checkpoint::generate_id() + ".db"))
                           .string();
     {
-        SQLiteProgramStore store(path);
+        OwnedProgramStore<SQLiteProgramStore> store(path);
         store.publish_admitted(*bundle, version);
         sqlite3* writer = nullptr;
         ASSERT_EQ(sqlite3_open(path.c_str(), &writer), SQLITE_OK);
@@ -16231,7 +16240,7 @@ TEST_P(ProgramChildSynthesisPersistence, HostSuccessorReservationBindsOwnerAndEx
     ChildSynthesisFixture test(backend(), true, program_backend(), checkpoint_backend());
     auto                  proposal = ProgramSynthesisProposal::create(test.proposal_data());
     const auto            before   = test.handle->snapshot();
-    const auto head = test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    const auto head = test.journal->load_run_lineage_sync("tenant:runtime", test.handle->run_id());
     EXPECT_THROW(test.fixture.runtime->reserve_synthesis("tenant:other", *test.handle, *test.hold,
                                                          proposal, head->id()),
                  ProgramDiagnosticError);
@@ -16259,7 +16268,7 @@ TEST_P(ProgramChildSynthesisPersistence, HostSuccessorReservationBindsOwnerAndEx
 TEST_P(ProgramChildSynthesisPersistence, SuccessorReservationLostAcknowledgementDoesNotRefund) {
     ChildSynthesisFixture test(backend(), true, program_backend(), checkpoint_backend());
     auto                  proposal = ProgramSynthesisProposal::create(test.proposal_data());
-    const auto head = test.journal->load_run_lineage("tenant:runtime", test.handle->run_id());
+    const auto head = test.journal->load_run_lineage_sync("tenant:runtime", test.handle->run_id());
     bool       lost = false;
     test.journal->after_publication = [&](const auto& publication) {
         if (!lost && publication.run_record.run_id() == test.handle->run_id() &&
@@ -16350,7 +16359,7 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedComp
     test.root_hold.reset();
     test.root_hold.emplace(test.hold(*test.root, "main:budget"));
     const auto before  = test.root->snapshot();
-    const auto lineage = test.journal->load_run_lineage("tenant:runtime", test.root->run_id());
+    const auto lineage = test.journal->load_run_lineage_sync("tenant:runtime", test.root->run_id());
     EXPECT_EQ(before.remaining_budget().max_dynamic_compiles, 3U);
     EXPECT_EQ(lineage->committed_descendant_budget().max_dynamic_compiles, 2U);
     const RunBudget attempted{1000, 10, 10, 1, 4, 4, 1, 1, 1};
@@ -16358,7 +16367,7 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedComp
         test.synthesize(*test.root, *test.root_hold, "reused-budget.js", attempted, "second-child"),
         ProgramChildSynthesisError);
     EXPECT_EQ(test.root->snapshot().id(), before.id());
-    EXPECT_EQ(test.journal->load_child_syntheses("tenant:runtime", test.root->run_id()).size(), 1U);
+    EXPECT_EQ(test.journal->load_child_syntheses_sync("tenant:runtime", test.root->run_id()).size(), 1U);
     ProgramSynthesisProposalData request;
     request.owner_scope      = "tenant:runtime";
     request.parent_run_id    = test.root->run_id();
@@ -16369,7 +16378,7 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedComp
     const auto reserved      = test.host.runtime->reserve_synthesis(
         "tenant:runtime", *test.root, *test.root_hold, proposal, lineage->id());
     EXPECT_EQ(reserved.data().remaining_after_reservation.max_dynamic_compiles, 2U);
-    const auto next_head = test.journal->load_run_lineage("tenant:runtime", test.root->run_id());
+    const auto next_head = test.journal->load_run_lineage_sync("tenant:runtime", test.root->run_id());
     EXPECT_THROW(test.host.runtime->reserve_synthesis("tenant:runtime", *test.root, *test.root_hold,
                                                       proposal, next_head->id()),
                  ProgramDiagnosticError);
@@ -16464,7 +16473,7 @@ std::unique_ptr<ProgramRuntime> join_scope_test_runtime(
                                             std::string_view binding) {
             return bindings->resolve(owner, version, binding);
         }};
-    config.task_graph_fragments = fragments ? std::move(fragments) : fixture.task_graph_fragments;
+    config.task_graph_fragments = fragments ? std::move(fragments) : fixture.task_graph_fragments.shared();
     config.task_graph_policy_resolver =
         [](std::string_view owner, std::string_view,
            std::string_view) -> std::optional<TaskGraphExpansionPolicy> {
@@ -16503,28 +16512,28 @@ json join_scope_test_proposal(bool dependent_last) {
 // This wraps the real in-memory durable store and fails a real dispatch publication
 // only after the first two child nodes have entered. It exposes a partial-launch
 // exception while their expansion task coroutines still borrow the launcher's locals.
-class JoinPartialLaunchStore final : public TaskGraphFragmentStore {
+class JoinPartialLaunchStore final : public SyncTaskGraphFragmentStore {
 public:
     JoinPartialLaunchStore(std::shared_ptr<InMemoryTaskGraphFragmentStore> inner,
                           std::shared_future<void> children_entered)
         : inner_(std::move(inner)), children_entered_(std::move(children_entered)) {}
 
-    TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) override {
-        return inner_->publish(record);
+    TaskGraphPublishResult publish_sync(const TaskGraphFragmentRecord& record) override {
+        return inner_->publish_sync(record);
     }
-    std::optional<TaskGraphFragmentRecord> load(std::string_view id) const override {
-        return inner_->load(id);
+    std::optional<TaskGraphFragmentRecord> load_sync(std::string_view id) const override {
+        return inner_->load_sync(id);
     }
-    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+    std::optional<TaskGraphFragmentRecord> find_published_lineage_sync(
         std::string_view owner, std::string_view parent, std::string_view operation) const override {
-        return inner_->find_published_lineage(owner, parent, operation);
+        return inner_->find_published_lineage_sync(owner, parent, operation);
     }
-    std::optional<TaskGraphFragmentRecord> find_published(
+    std::optional<TaskGraphFragmentRecord> find_published_sync(
         std::string_view owner, std::string_view parent, std::string_view operation,
         std::string_view proposal) const override {
-        return inner_->find_published(owner, parent, operation, proposal);
+        return inner_->find_published_sync(owner, parent, operation, proposal);
     }
-    TaskGraphPublishResult compare_update(std::string_view id, std::uint64_t revision,
+    TaskGraphPublishResult compare_update_sync(std::string_view id, std::uint64_t revision,
                                          const TaskGraphFragmentRecord& record) override {
         const auto active = std::count_if(record.tasks.begin(), record.tasks.end(),
                                          [](const auto& task) {
@@ -16535,7 +16544,7 @@ public:
                 throw std::runtime_error("join partial launch children did not enter");
             throw std::runtime_error("join partial launch sentinel");
         }
-        return inner_->compare_update(id, revision, record);
+        return inner_->compare_update_sync(id, revision, record);
     }
 
     std::atomic<bool> failed{false};
@@ -16695,7 +16704,7 @@ TEST(ProgramRuntimeTest, ExpansionPartialLaunchFailureDrainsAlreadyBorrowingTask
     overlap_ready = std::make_shared<std::promise<void>>();
     auto entered = overlap_ready->get_future().share();
     AdmittedRuntime fixture(4);
-    auto fragments = std::make_shared<JoinPartialLaunchStore>(fixture.task_graph_fragments, entered);
+    auto fragments = std::make_shared<JoinPartialLaunchStore>(fixture.task_graph_fragments.as<InMemoryTaskGraphFragmentStore>(), entered);
     fixture.runtime = join_scope_test_runtime(fixture, fragments);
     auto document = expand_task_graph_document(join_scope_test_proposal(false), 3, 4, 2, 3);
     document["declared_budget_requirements"][4]["maximum"] = 8;

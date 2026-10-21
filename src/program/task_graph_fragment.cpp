@@ -1,6 +1,7 @@
 #include <neograph/program/task_graph_fragment.h>
 
 #include "canonical_json.h"
+#include "lock_audit.h"
 
 #include <algorithm>
 #include <limits>
@@ -1011,7 +1012,7 @@ InMemoryTaskGraphFragmentStore& InMemoryTaskGraphFragmentStore::operator=(
     InMemoryTaskGraphFragmentStore&&) noexcept = default;
 InMemoryTaskGraphFragmentStore::~InMemoryTaskGraphFragmentStore() = default;
 
-TaskGraphPublishResult InMemoryTaskGraphFragmentStore::publish(
+TaskGraphPublishResult InMemoryTaskGraphFragmentStore::publish_sync(
     const TaskGraphFragmentRecord& record) {
     auto copy = TaskGraphFragmentRecord::parse(record.serialize_canonical());
     const auto id = copy.fragment.fragment_id();
@@ -1029,14 +1030,14 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::publish(
     return TaskGraphPublishResult::Published;
 }
 
-std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::load(
+std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::load_sync(
     std::string_view fragment_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->records.find(std::string(fragment_id));
     if (found == impl_->records.end()) return std::nullopt;
     return found->second;
 }
-std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published_lineage(
+std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published_lineage_sync(
     std::string_view owner_scope,
     std::string_view parent_run_id,
     std::string_view expansion_operation_id) const {
@@ -1058,7 +1059,7 @@ std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_publ
     return result;
 }
 
-std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published(
+std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_published_sync(
     std::string_view owner_scope,
     std::string_view parent_run_id,
     std::string_view expansion_operation_id,
@@ -1076,7 +1077,7 @@ std::optional<TaskGraphFragmentRecord> InMemoryTaskGraphFragmentStore::find_publ
     }
     return std::nullopt;
 }
-TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update(
+TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update_sync(
     std::string_view fragment_id, std::uint64_t expected_revision,
     const TaskGraphFragmentRecord& record) {
     auto copy = TaskGraphFragmentRecord::parse(record.serialize_canonical());
@@ -1092,6 +1093,117 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update(
     copy.published = true;
     found->second = std::move(copy);
     return TaskGraphPublishResult::Published;
+}
+
+
+// ---- TaskGraphFragmentStore : the synchronous implementer base and the blocking facade (#556) ----
+
+asio::awaitable<TaskGraphPublishResult> SyncTaskGraphFragmentStore::publish(
+    const TaskGraphFragmentRecord& record) {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::publish");
+    if (!offloads()) co_return publish_sync(record);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<TaskGraphPublishResult>([this, record = record]() mutable -> TaskGraphPublishResult {
+        return publish_sync(record);
+    });
+}
+
+asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentStore::load(
+    std::string_view fragment_id) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::load");
+    if (!offloads()) co_return load_sync(fragment_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, fragment_id = std::string(fragment_id)]() mutable -> std::optional<TaskGraphFragmentRecord> {
+        return load_sync(fragment_id);
+    });
+}
+
+asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentStore::find_published_lineage(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published_lineage");
+    if (!offloads()) co_return find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expansion_operation_id = std::string(expansion_operation_id)]() mutable -> std::optional<TaskGraphFragmentRecord> {
+        return find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
+    });
+}
+
+asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentStore::find_published(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id,
+    std::string_view proposal_hash) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published");
+    if (!offloads()) co_return find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expansion_operation_id = std::string(expansion_operation_id), proposal_hash = std::string(proposal_hash)]() mutable -> std::optional<TaskGraphFragmentRecord> {
+        return find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
+    });
+}
+
+asio::awaitable<TaskGraphPublishResult> SyncTaskGraphFragmentStore::compare_update(
+    std::string_view fragment_id,
+    std::uint64_t expected_revision,
+    const TaskGraphFragmentRecord& record) {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::compare_update");
+    if (!offloads()) co_return compare_update_sync(fragment_id, expected_revision, record);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<TaskGraphPublishResult>([this, fragment_id = std::string(fragment_id), expected_revision, record = record]() mutable -> TaskGraphPublishResult {
+        return compare_update_sync(fragment_id, expected_revision, record);
+    });
+}
+
+BlockingTaskGraphFragmentStore::BlockingTaskGraphFragmentStore(std::shared_ptr<TaskGraphFragmentStore> store, BlockingStorePolicy policy)
+    : store_(std::move(store)), policy_(std::move(policy)) {
+    if (!store_) throw std::invalid_argument("BlockingTaskGraphFragmentStore requires a store");
+    if (!policy_.await_synchronous_stores) sync_ = dynamic_cast<SyncTaskGraphFragmentStore*>(store_.get());
+}
+
+BlockingTaskGraphFragmentStore::BlockingTaskGraphFragmentStore(TaskGraphFragmentStore& store, BlockingStorePolicy policy)
+    : BlockingTaskGraphFragmentStore(std::shared_ptr<TaskGraphFragmentStore>(std::shared_ptr<TaskGraphFragmentStore>{}, &store), std::move(policy)) {}
+
+TaskGraphPublishResult BlockingTaskGraphFragmentStore::publish(
+    const TaskGraphFragmentRecord& record) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::publish");
+    if (sync_) return sync_->publish_sync(record);
+    return detail::block_on_store(store_->publish(record), policy_, "TaskGraphFragmentStore::publish");
+}
+
+std::optional<TaskGraphFragmentRecord> BlockingTaskGraphFragmentStore::load(
+    std::string_view fragment_id) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::load");
+    if (sync_) return sync_->load_sync(fragment_id);
+    return detail::block_on_store(store_->load(fragment_id), policy_, "TaskGraphFragmentStore::load");
+}
+
+std::optional<TaskGraphFragmentRecord> BlockingTaskGraphFragmentStore::find_published_lineage(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published_lineage");
+    if (sync_) return sync_->find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
+    return detail::block_on_store(store_->find_published_lineage(owner_scope, parent_run_id, expansion_operation_id), policy_, "TaskGraphFragmentStore::find_published_lineage");
+}
+
+std::optional<TaskGraphFragmentRecord> BlockingTaskGraphFragmentStore::find_published(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view expansion_operation_id,
+    std::string_view proposal_hash) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published");
+    if (sync_) return sync_->find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
+    return detail::block_on_store(store_->find_published(owner_scope, parent_run_id, expansion_operation_id, proposal_hash), policy_, "TaskGraphFragmentStore::find_published");
+}
+
+TaskGraphPublishResult BlockingTaskGraphFragmentStore::compare_update(
+    std::string_view fragment_id,
+    std::uint64_t expected_revision,
+    const TaskGraphFragmentRecord& record) const {
+    detail::assert_no_pure_lock_held("TaskGraphFragmentStore::compare_update");
+    if (sync_) return sync_->compare_update_sync(fragment_id, expected_revision, record);
+    return detail::block_on_store(store_->compare_update(fragment_id, expected_revision, record), policy_, "TaskGraphFragmentStore::compare_update");
 }
 
 } // namespace neograph::program

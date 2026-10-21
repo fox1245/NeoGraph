@@ -20,55 +20,55 @@ using namespace neograph::program;
 using Clock = std::chrono::steady_clock;
 volatile std::size_t blackhole = 0;
 
-class CaptureTransitionStore final : public ProgramTransitionStore {
+class CaptureTransitionStore final : public SyncProgramTransitionStore {
 public:
     explicit CaptureTransitionStore(std::shared_ptr<ProgramTransitionStore> inner)
-        : inner_(std::move(inner)) {}
-    std::optional<ProgramRunRecord> load(std::string_view owner, std::string_view run) const override {
+        : inner_(std::make_shared<BlockingProgramTransitionStore>(std::move(inner))) {}
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
         return inner_->load(owner, run);
     }
-    std::optional<ProgramJournalRecord> latest(std::string_view owner, std::string_view run) const override {
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run) const override {
         return inner_->latest(owner, run);
     }
-    std::vector<ProgramEvent> load_events(std::string_view owner, std::string_view run,
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run,
                                           std::uint64_t after) const override {
         return inner_->load_events(owner, run, after);
     }
-    std::vector<ProgramEffectOutboxEntry> load_effects(std::string_view owner, std::string_view run,
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run,
                                                        std::uint64_t after) const override {
         return inner_->load_effects(owner, run, after);
     }
-    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands(
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run, std::uint64_t after) const override {
         return inner_->load_javascript_commands(owner, run, after);
     }
-    std::optional<MigrationPlan> load_migration_plan(std::string_view owner,
+    std::optional<MigrationPlan> load_migration_plan_sync(std::string_view owner,
                                                      std::string_view run) const override {
         return inner_->load_migration_plan(owner, run);
     }
-    std::optional<ProgramRunLineage> load_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_->load_lineage(owner, lineage_id);
     }
-    std::optional<ProgramRunLineage> load_run_lineage(std::string_view owner,
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                        std::string_view run_id) const override {
         return inner_->load_run_lineage(owner, run_id);
     }
-    std::optional<ProgramRunLineage> load_lineage_head(
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
         std::string_view owner, std::string_view lineage_id,
         std::string_view head_id) const override {
         return inner_->load_lineage_head(owner, lineage_id, head_id);
     }
-    std::optional<ProgramRunGeneration> load_generation(
+    std::optional<ProgramRunGeneration> load_generation_sync(
         std::string_view owner, std::string_view lineage_id,
         std::uint64_t generation) const override {
         return inner_->load_generation(owner, lineage_id, generation);
     }
-    std::optional<ProgramExecutionLease> load_execution_lease(
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner, std::string_view run) const override {
         return inner_->load_execution_lease(owner, run);
     }
-    ProgramTransitionPublishResult compare_publish(
+    ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication) override {
         {
@@ -77,7 +77,7 @@ public:
         }
         return inner_->compare_publish(owner, expected, std::move(publication));
     }
-    ProgramTransitionPublishResult compare_publish_execution(
+    ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
@@ -99,7 +99,7 @@ public:
         publications_.clear();
     }
 private:
-    std::shared_ptr<ProgramTransitionStore> inner_;
+    std::shared_ptr<BlockingProgramTransitionStore> inner_;
     mutable std::mutex mutex_;
     std::vector<ProgramTransitionPublication> publications_;
 };

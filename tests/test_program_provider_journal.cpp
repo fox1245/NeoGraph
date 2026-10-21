@@ -25,6 +25,10 @@
 #include <filesystem>
 #include <future>
 #include <stdexcept>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 using namespace neograph;
@@ -986,8 +990,8 @@ void prove_native_program_failure_custody(bool ordinary_failure) {
         .owner_scope(owner).admission_profile(profile)
         .budget_ceiling(BudgetLimits{10000, 1000000, 1, 1, 4, 20, 1, 0, 0});
     const auto program_policy = std::move(program_policy_builder).build();
-    auto store = std::make_shared<SQLiteProgramStore>(program_db.path);
-    auto transitions = std::make_shared<SQLiteProgramTransitionStore>(program_db.path);
+    ProgramStoreHandle store = std::make_shared<SQLiteProgramStore>(program_db.path);
+    TransitionStoreHandle transitions = std::make_shared<SQLiteProgramTransitionStore>(program_db.path);
     const auto make_catalog = [&] {
         CatalogConfig config{store, registry, std::make_shared<EngineGenerationCache>(),
                              "native-program-fixture/v1"};

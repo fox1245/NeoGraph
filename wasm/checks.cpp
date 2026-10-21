@@ -27,6 +27,8 @@
 #include <neograph/program/native.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#include <neograph/program/store_call.h>
+#include <neograph/program/transition_store.h>
 #endif
 #if defined(NEOGRAPH_WASM_CHECKS_PROGRAM) && defined(NEOGRAPH_WASM_CHECKS_LLM)
 #define NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME 1
@@ -462,6 +464,17 @@ struct ProgramFixture {
     }
 };
 
+// Reads what the run left in the stores through their awaitable operations, as a host's coroutine does. co_spawn builds a
+// default result for a failure, and these records have none: they are kept on the side.
+asio::awaitable<int> read_back_awaited(std::shared_ptr<program::ProgramTransitionStore> transitions,
+                                       std::shared_ptr<program::ProgramStore> store, std::string run_id,
+                                       std::string version_id, std::optional<program::ProgramRunRecord>& run,
+                                       std::optional<program::ProgramVersion>& version) {
+    run     = co_await transitions->load("wasm:tenant", run_id);
+    version = co_await store->get_version(version_id);
+    co_return 0;
+}
+
 void check_program_runtime() {
     try {
         ProgramFixture fixture;
@@ -504,6 +517,40 @@ void check_program_runtime() {
               "program: a one-node Program completes on the host loop with in-memory stores");
         check(result && result->output()["channels"]["value"]["value"] == "hosted",
               "program: the node's output is the Program's result");
+
+        // The stores are awaitable: a coroutine of the host reads the run back in a host turn, and each operation of
+        // the in-memory stores completes without suspending.
+        if (result) {
+            bool                                  read = false;
+            std::exception_ptr                    read_failure;
+            std::optional<program::ProgramRunRecord> run;
+            std::optional<program::ProgramVersion>   version;
+            loop.spawn(read_back_awaited(fixture.transitions, fixture.store, result->run_id(), fixture.version.id(),
+                                         run, version),
+                       [&](std::exception_ptr error, int) {
+                           read_failure = error;
+                           read         = true;
+                       });
+            for (int turns = 0; !read && turns < 100000; ++turns) host->step();
+            if (read_failure) std::rethrow_exception(read_failure);
+            check(read && run && run->continuation().state == program::ContinuationState::Completed,
+                  "program: the awaitable transition store returns the run the Program completed");
+            check(version && version->id() == fixture.version.id(),
+                  "program: the awaitable Program store returns the version that was admitted");
+        }
+
+        // A caller that cannot suspend uses the blocking view, and the view refuses to wait for a store on a host loop.
+        program::BlockingStorePolicy policy;
+        policy.await_synchronous_stores = true;
+        policy.refuse                   = [] { return std::string("the executor is run by a host's event loop"); };
+        program::BlockingProgramTransitionStore view(fixture.transitions, policy);
+        try {
+            (void)view.load("wasm:tenant", "run-1");
+            check(false, "program: a blocking store view refuses to wait on a host loop", "the call was accepted");
+        } catch (const program::ProgramBlockingCallRefused& error) {
+            check(dynamic_cast<const ConfigurationFailure*>(&error) != nullptr,
+                  "program: a blocking store view refuses to wait on a host loop, with a typed error");
+        }
     } catch (const std::exception& error) {
         check(false, "program: a Program runs on a host loop", error.what());
     }

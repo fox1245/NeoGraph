@@ -1,5 +1,6 @@
 #include "fixtures/unique_temp_dir.h"
 
+#include "fixtures/store_handle.h"
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/store.h>
 #include <neograph/harness/contract.h>
@@ -40,6 +41,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+
+using neograph::program::test_support::TransitionStoreHandle;
 
 using namespace std::chrono_literals;
 
@@ -260,7 +263,7 @@ private:
     mutable std::mutex          mutex_;
     std::map<std::string, json> artifacts_;
     std::map<std::string, json> runs_;
-    std::shared_ptr<neograph::program::ProgramTransitionStore> transitions_;
+    TransitionStoreHandle transitions_;
 };
 
 json request() {
@@ -1212,7 +1215,7 @@ TEST(HarnessProgramCutover, RecordedReplayTransfersExactCustodyOnceWithoutRenewi
     fixture.config.translation_defaults.max_provider_tool_rounds = 1;
     std::shared_ptr<neograph::program::ProgramRuntime> runtime;
     std::shared_ptr<neograph::program::ProgramCatalog> catalog;
-    std::shared_ptr<neograph::program::ProgramTransitionStore> transitions;
+    neograph::program::test_support::TransitionStoreHandle transitions;
     const auto runtime_factory = fixture.resources.make_program_runtime;
     fixture.resources.make_program_runtime =
         [&, runtime_factory](auto admitted_catalog, auto store) {
@@ -1313,7 +1316,7 @@ TEST(HarnessProgramCutover, RecordedReplayRetainsLargeHistoricalChargeAndFullCei
                 return neograph::mcp::HarnessWorkerResponse::success(
                     {{"status", "ok"}, {"findings", json::array({"captured"})}});
             });
-        std::shared_ptr<neograph::program::ProgramTransitionStore> transitions;
+        neograph::program::test_support::TransitionStoreHandle transitions;
         const auto make_runtime = fixture.resources.make_program_runtime;
         fixture.resources.make_program_runtime = [&, make_runtime](auto catalog, auto store) {
             transitions = store;
@@ -1365,7 +1368,7 @@ TEST(HarnessProgramCutover, LiveReplayThenRecordedReplayUsesSelectedSourceImmuta
     });
     auto records = std::make_shared<MutableHarnessRecordStore>();
     fixture.config.record_store = records;
-    std::shared_ptr<neograph::program::ProgramTransitionStore> transitions;
+    neograph::program::test_support::TransitionStoreHandle transitions;
     const auto make_runtime = fixture.resources.make_program_runtime;
     fixture.resources.make_program_runtime = [&, make_runtime](auto catalog, auto store) {
         transitions = store;

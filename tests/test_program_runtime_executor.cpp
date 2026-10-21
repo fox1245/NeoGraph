@@ -6,6 +6,7 @@
 
 #include "program_expansion_fixture.h"
 #include "operation_lock.h"
+#include <neograph/program/core_tool_grant_store.h>
 
 #include <neograph/async/host_loop.h>
 #include <neograph/program/runtime.h>
@@ -24,6 +25,7 @@
 #include <asio/use_future.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <chrono>
 #include <deque>
 #include <filesystem>
@@ -31,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 
@@ -198,6 +201,260 @@ private:
     unsigned running_ = 0;
 };
 
+// A transition store over the in-memory one whose backend "blocks for long": every operation an awaiting coroutine makes
+// runs on a pool thread, as a PostgreSQL store's does. It records the threads its operations ran on, and can hold the
+// first operation that ran on a pool thread.
+class OffloadingJournal final : public SyncProgramTransitionStore {
+public:
+    OffloadingJournal() : inner_(std::make_shared<InMemoryProgramTransitionStore>()) {}
+
+    std::set<std::thread::id> threads() const {
+        std::lock_guard lock(mutex_);
+        return threads_;
+    }
+    // Holds the first operation that runs on a thread other than `a` and `b`, until release_gate().
+    void hold_first_pool_operation(std::thread::id a, std::thread::id b) {
+        std::lock_guard lock(mutex_);
+        gate_armed_ = true;
+        main_       = a;
+        io_         = b;
+    }
+    bool wait_for_gate(std::chrono::milliseconds limit) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, limit, [this] { return gate_entered_; });
+    }
+    void release_gate() {
+        std::lock_guard lock(mutex_);
+        gate_released_ = true;
+        changed_.notify_all();
+    }
+
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
+        enter();
+        return inner_->load_sync(owner, run);
+    }
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run) const override {
+        enter();
+        return inner_->latest_sync(owner, run);
+    }
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run,
+                                               std::uint64_t after) const override {
+        enter();
+        return inner_->load_events_sync(owner, run, after);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run,
+                                                            std::uint64_t after) const override {
+        enter();
+        return inner_->load_effects_sync(owner, run, after);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+        std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        enter();
+        return inner_->load_javascript_commands_sync(owner, run, after);
+    }
+    std::vector<ProgramContextPublication> load_context_publications_sync(
+        std::string_view owner, std::string_view run, std::uint64_t after) const override {
+        enter();
+        return inner_->load_context_publications_sync(owner, run, after);
+    }
+    std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
+                                                               std::string_view run) const override {
+        enter();
+        return inner_->load_hook_outbox_entries_sync(owner, run);
+    }
+    std::optional<MigrationPlan> load_migration_plan_sync(std::string_view owner,
+                                                          std::string_view run) const override {
+        enter();
+        return inner_->load_migration_plan_sync(owner, run);
+    }
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                       std::string_view lineage) const override {
+        enter();
+        return inner_->load_lineage_sync(owner, lineage);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                           std::string_view run) const override {
+        enter();
+        return inner_->load_run_lineage_sync(owner, run);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage,
+                                                            std::string_view head) const override {
+        enter();
+        return inner_->load_lineage_head_sync(owner, lineage, head);
+    }
+    std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage,
+                                                             std::uint64_t generation) const override {
+        enter();
+        return inner_->load_generation_sync(owner, lineage, generation);
+    }
+    std::optional<ProgramTransitionPublication> load_generation_initial_publication_sync(
+        std::string_view owner, std::string_view lineage, std::uint64_t generation) const override {
+        enter();
+        return inner_->load_generation_initial_publication_sync(owner, lineage, generation);
+    }
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
+        std::string_view owner, std::string_view run, std::string_view head) const override {
+        enter();
+        return inner_->load_graph_migration_capsule_sync(owner, run, head);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
+                                                                   std::string_view run) const override {
+        enter();
+        return inner_->load_execution_lease_sync(owner, run);
+    }
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        ProgramTransitionPublication publication) override {
+        enter();
+        return inner_->compare_publish_sync(owner, expected, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_execution_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        enter();
+        return inner_->compare_publish_execution_sync(owner, expected, std::move(publication),
+                                                      std::move(expected_lease), std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& lease) override {
+        enter();
+        return inner_->compare_publish_graph_safe_point_sync(owner, expected, std::move(publication), evidence,
+                                                             capsule, lease);
+    }
+
+protected:
+    bool offloads() const noexcept override { return true; }
+
+private:
+    void enter() const {
+        std::unique_lock lock(mutex_);
+        const auto       self = std::this_thread::get_id();
+        threads_.insert(self);
+        if (gate_armed_ && self != main_ && self != io_ && !gate_entered_) {
+            gate_entered_ = true;
+            changed_.notify_all();
+            changed_.wait_for(lock, 10s, [this] { return gate_released_; });
+        }
+    }
+
+    std::shared_ptr<InMemoryProgramTransitionStore> inner_;
+    mutable std::mutex                              mutex_;
+    mutable std::condition_variable                 changed_;
+    mutable std::set<std::thread::id>               threads_;
+    mutable bool                                    gate_entered_ = false;
+    bool                                            gate_armed_   = false;
+    bool                                            gate_released_ = false;
+    std::thread::id                                 main_;
+    std::thread::id                                 io_;
+};
+
+// A transition store that is not synchronous: every operation completes after a short wait on the awaiting coroutine's
+// executor, as a store whose backend answers through an event loop does.
+class DelayedJournal final : public ProgramTransitionStore {
+public:
+    DelayedJournal() : inner_(std::make_shared<InMemoryProgramTransitionStore>()) {}
+
+    asio::awaitable<std::optional<ProgramRunRecord>> load(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramJournalRecord>> latest(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->latest(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunPublicationHead>> load_run_publication_head(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_run_publication_head(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramEvent>> load_events(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_await pause();
+        co_return co_await inner_->load_events(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<ProgramEffectOutboxEntry>> load_effects(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_await pause();
+        co_return co_await inner_->load_effects(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<ProgramJavaScriptCommandJournalEntry>> load_javascript_commands(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_await pause();
+        co_return co_await inner_->load_javascript_commands(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::optional<ProgramCommandPublicationHead>> load_command_publication_head(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_command_publication_head(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramContextPublication>> load_context_publications(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_await pause();
+        co_return co_await inner_->load_context_publications(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<HookOutboxEntry>> load_hook_outbox_entries(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_hook_outbox_entries(owner_scope, run_id);
+    }
+    asio::awaitable<ProgramEffectiveRuntimeState> load_effective_runtime_state(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_effective_runtime_state(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramChildSynthesisRecord>> load_child_syntheses(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_child_syntheses(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<MigrationPlan>> load_migration_plan(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_migration_plan(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_lineage(std::string_view owner_scope, std::string_view lineage_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_lineage(owner_scope, lineage_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_run_lineage(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_run_lineage(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_lineage_head(std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_lineage_head(owner_scope, lineage_id, head_id);
+    }
+    asio::awaitable<std::optional<ProgramRunGeneration>> load_generation(std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const override {
+        co_await pause();
+        co_return co_await inner_->load_generation(owner_scope, lineage_id, generation);
+    }
+    asio::awaitable<std::optional<ProgramTransitionPublication>> load_generation_initial_publication(std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const override {
+        co_await pause();
+        co_return co_await inner_->load_generation_initial_publication(owner_scope, lineage_id, generation);
+    }
+    asio::awaitable<std::optional<GraphMigrationCapsule>> load_graph_migration_capsule(std::string_view owner_scope, std::string_view source_run_id, std::string_view source_lineage_head_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_graph_migration_capsule(owner_scope, source_run_id, source_lineage_head_id);
+    }
+    asio::awaitable<std::optional<ProgramExecutionLease>> load_execution_lease(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await pause();
+        co_return co_await inner_->load_execution_lease(owner_scope, run_id);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication) override {
+        co_await pause();
+        co_return co_await inner_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication, std::optional<ProgramExecutionLease> expected_lease, std::optional<ProgramExecutionLease> next_lease) override {
+        co_await pause();
+        co_return co_await inner_->compare_publish_execution(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication, const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule, const ProgramExecutionLease& execution_lease) override {
+        co_await pause();
+        co_return co_await inner_->compare_publish_graph_safe_point(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+    }
+
+private:
+    asio::awaitable<void> pause() const {
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_after(1ms);
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+
+    std::shared_ptr<InMemoryProgramTransitionStore> inner_;
+};
+
 struct HostedRuntime {
     std::shared_ptr<ManualExecutor> host = std::make_shared<ManualExecutor>();
     async::HostLoop                 loop{host};
@@ -207,6 +464,43 @@ struct HostedRuntime {
 asio::awaitable<int> start_and_keep(ProgramRuntime& runtime, ProgramVersion version, ProgramInvocation invocation,
                                     std::optional<ProgramHandle>& out) {
     out.emplace(co_await runtime.start_async("tenant:runtime", std::move(version), std::move(invocation)));
+    co_return 0;
+}
+
+// A grant store that is not synchronous: every operation finishes after a short wait on the awaiting coroutine's executor.
+class LaterGrantStore final : public ProgramCoreToolGrantStore {
+public:
+    asio::awaitable<ProgramCoreToolGrantAdmission> admit(const ProgramCoreToolGrantRecord&) override {
+        co_await pause();
+        co_return ProgramCoreToolGrantAdmission::Admitted;
+    }
+    asio::awaitable<std::optional<ProgramCoreToolGrantRecord>> load(const ProgramCoreToolGrantContext&) const override {
+        co_await pause();
+        co_return std::nullopt;
+    }
+    asio::awaitable<bool> revoke(const ProgramCoreToolGrantContext&) override {
+        co_await pause();
+        co_return false;
+    }
+
+private:
+    static asio::awaitable<void> pause() {
+        asio::steady_timer timer(co_await asio::this_coro::executor);
+        timer.expires_after(1ms);
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+};
+
+// Reads through a view that has no policy, from a handler of the loop: the way ProgramCatalog and the grant resolver
+// read a store.
+asio::awaitable<int> read_grant_in_a_turn(const BlockingProgramCoreToolGrantStore& view,
+                                          ProgramCoreToolGrantContext context, std::optional<std::string>& verdict) {
+    try {
+        (void)view.load(context);
+        verdict = "waited";
+    } catch (const ProgramBlockingCallRefused& error) {
+        verdict = error.operation();
+    }
     co_return 0;
 }
 
@@ -509,6 +803,132 @@ TEST(ProgramRuntimeExecutorTest, EveryCallHasAnAwaitableFormThatRunsOnTheExecuto
     EXPECT_EQ(first->status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(reconnected->status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(reconnected->run_id(), run_id);
+}
+
+// ---- Store calls the run awaits (#556) ----
+
+TEST(ProgramRuntimeExecutorTest, AStoreThatOffloadsIsAwaitedByTheRunOnItsPoolThreads) {
+    forget_node_threads();
+    auto            journal = std::make_shared<OffloadingJournal>();
+    ExecutorFixture fixture(1, {}, journal);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    const auto       io_id = io_thread.get_id();
+
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    {
+        ProgramRuntime runtime(std::move(config));
+        auto           handle = runtime.start("tenant:runtime", version, invocation("trace-offload"));
+        const auto     result = handle.wait();
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    }
+    work.reset();
+    io_thread.join();
+
+    // A read the attempt awaits ran on a pool thread: a thread of neither the caller nor the executor.
+    std::size_t pool_threads = 0;
+    for (const auto id : journal->threads())
+        if (id != std::this_thread::get_id() && id != io_id) ++pool_threads;
+    EXPECT_GE(pool_threads, 1U);
+}
+
+TEST(ProgramRuntimeExecutorTest, ARunWaitingForAStoreLeavesTheExecutorFreeForAnotherRun) {
+    forget_node_threads();
+    auto            journal = std::make_shared<OffloadingJournal>();
+    ExecutorFixture fixture(1, {}, journal);
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    journal->hold_first_pool_operation(std::this_thread::get_id(), io_thread.get_id());
+
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    {
+        ProgramRuntime runtime(std::move(config));
+        auto           first = runtime.start("tenant:runtime", version, invocation("trace-held"));
+        // The first run's attempt is waiting for its store call on a pool thread.
+        EXPECT_TRUE(journal->wait_for_gate(5s));
+
+        // The executor has one thread. If the attempt were waiting on it, a second run could not run.
+        auto second  = runtime.start("tenant:runtime", version, invocation("trace-free"));
+        auto outcome = std::async(std::launch::async, [&] { return second.wait(); });
+        const bool second_finished = outcome.wait_for(5s) == std::future_status::ready;
+        journal->release_gate();
+        EXPECT_TRUE(second_finished) << "the second run could not run while the first waited for its store";
+        if (second_finished) EXPECT_EQ(outcome.get().status(), ProgramTerminalStatus::Completed);
+        else outcome.wait();
+        EXPECT_EQ(first.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    work.reset();
+    io_thread.join();
+}
+
+TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterIsRefusedWhereTheHostLoopRunsTheProgram) {
+    ExecutorFixture fixture(1, {}, std::make_shared<DelayedJournal>());
+    fixture.runtime.reset();
+    const auto version = fixture.admit("executor-record");
+
+    HostedRuntime hosted;
+    auto          config = runtime_config(fixture);
+    config.executor      = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+
+    // The runtime's entry points wait for a store through a blocking view. On a host loop nothing can complete a store that
+    // is not synchronous while a thread waits for it, so the view refuses instead of hanging.
+    bool                         done = false;
+    std::exception_ptr           failure;
+    std::optional<ProgramHandle> handle;
+    hosted.loop.spawn(start_and_keep(runtime, version, invocation("trace-late"), handle),
+                      [&](std::exception_ptr error, int) {
+                          failure = error;
+                          done    = true;
+                      });
+    ASSERT_TRUE(hosted.host->run_until([&] { return done; }));
+    ASSERT_TRUE(failure);
+    EXPECT_FALSE(handle);
+    try {
+        std::rethrow_exception(failure);
+    } catch (const ProgramBlockingCallRefused& error) {
+        EXPECT_NE(error.operation().find("ProgramTransitionStore::"), std::string::npos) << error.operation();
+        EXPECT_NE(std::string(error.what()).find("event loop"), std::string::npos) << error.what();
+    } catch (...) {
+        ADD_FAILURE() << "the call failed with another error";
+    }
+}
+
+TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterServesARuntimeWithItsOwnPools) {
+    // Without an executor of the host's, a thread that waits for a store blocks nothing but itself, so the same store
+    // that a host loop refuses completes the run: the entry points wait for it, and the attempt awaits it.
+    ExecutorFixture fixture(1, {}, std::make_shared<DelayedJournal>());
+    const auto      version = fixture.admit("executor-record");
+    const auto      result  = fixture.runtime->run("tenant:runtime", version, invocation("trace-pools"));
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    const auto record = fixture.journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->continuation().state, ContinuationState::Completed);
+}
+
+TEST(ProgramRuntimeExecutorTest, AViewWithoutAPolicyRefusesToWaitForAStoreInsideAHostTurn) {
+    HostedRuntime hosted;
+    const ProgramCoreToolGrantContext context{"tenant:runtime", "version-1", "run-1", "root", 1, "binding-1"};
+    const BlockingProgramCoreToolGrantStore view(std::make_shared<LaterGrantStore>());
+
+    // Called from the host's own thread, outside a turn, the view waits for the store, as a view always has.
+    EXPECT_FALSE(view.load(context));
+
+    // Called by a handler of the loop, it would block the thread that has to turn the loop: it refuses, with no policy.
+    std::optional<std::string> verdict;
+    hosted.loop.spawn(read_grant_in_a_turn(view, context, verdict), [](std::exception_ptr, int) {});
+    ASSERT_TRUE(hosted.host->run_until([&] { return verdict.has_value(); }));
+    EXPECT_EQ(*verdict, "ProgramCoreToolGrantStore::load");
 }
 
 // ---- The operation lock ----

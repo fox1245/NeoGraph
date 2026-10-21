@@ -19,7 +19,7 @@ namespace neograph::program {
  * activation compare-and-swap each use a database transaction, so a process
  * crash cannot expose a half-written bundle/version or activation pointer.
  */
-class NEOGRAPH_PROGRAM_API SQLiteProgramStore final : public ProgramStore {
+class NEOGRAPH_PROGRAM_API SQLiteProgramStore final : public SyncProgramStore {
 public:
     explicit SQLiteProgramStore(std::string database_path);
     SQLiteProgramStore(SQLiteProgramStore&&) noexcept;
@@ -28,23 +28,23 @@ public:
     SQLiteProgramStore& operator=(const SQLiteProgramStore&) = delete;
     ~SQLiteProgramStore() override;
 
-    void publish_admitted(const ProgramBundle& bundle, const ProgramVersion& version) override;
-    std::optional<ProgramBundle> get_bundle(std::string_view id) const override;
-    std::optional<ProgramVersion> get_version(std::string_view id) const override;
-    std::optional<ProgramBundle> get_bundle(std::string_view owner_scope,
+    void publish_admitted_sync(const ProgramBundle& bundle, const ProgramVersion& version) override;
+    std::optional<ProgramBundle> get_bundle_sync(std::string_view id) const override;
+    std::optional<ProgramVersion> get_version_sync(std::string_view id) const override;
+    std::optional<ProgramBundle> get_bundle_sync(std::string_view owner_scope,
                                             std::string_view id) const override;
-    std::optional<ProgramVersion> get_version(std::string_view owner_scope,
+    std::optional<ProgramVersion> get_version_sync(std::string_view owner_scope,
                                               std::string_view id) const override;
     std::optional<ProgramActivation>
-    get_activation(std::string_view owner_scope) const override;
+    get_activation_sync(std::string_view owner_scope) const override;
     std::optional<ProgramActivationBinding>
-    get_active_binding(std::string_view owner_scope) const override;
-    ProgramActivationResult compare_activate(std::string_view owner_scope,
+    get_active_binding_sync(std::string_view owner_scope) const override;
+    ProgramActivationResult compare_activate_sync(std::string_view owner_scope,
                                              std::uint64_t    expected_generation,
                                              std::string_view version_id,
                                              std::string_view policy_snapshot_hash) override;
-    std::vector<ProgramVersion> list_versions(std::string_view owner_scope) const override;
-    ProgramRetentionReport collect_garbage(
+    std::vector<ProgramVersion> list_versions_sync(std::string_view owner_scope) const override;
+    ProgramRetentionReport collect_garbage_sync(
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids) override;
 

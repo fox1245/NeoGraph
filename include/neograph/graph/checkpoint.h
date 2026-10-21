@@ -26,6 +26,7 @@
 #include <unordered_map>
 #include <string_view>
 #include <chrono>
+#include <functional>
 
 namespace neograph::graph {
 class NativeGraphCheckpoint;
@@ -36,6 +37,9 @@ class ManagedBudgetJournalAccess;
 /// How many operations of a synchronous checkpoint store have been handed to the pool of worker threads so far.
 /// A diagnostic for tests: an operation that runs on the calling thread does not count.
 NEOGRAPH_API std::uint64_t blocking_checkpoint_hops() noexcept;
+/// Runs `work` on a thread of the bounded pool that serves the synchronous checkpoint stores, and resumes the awaiting
+/// coroutine on its own executor (#556). Throws SynchronousCheckpointStoreUnavailable in a build without threads.
+NEOGRAPH_API asio::awaitable<void> run_on_blocking_pool(std::function<void()> work);
 }  // namespace detail
 
 /// A managed model-token budget with a deadline binds the deadline to the clock it counts on, so that a restart can

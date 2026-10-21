@@ -17,6 +17,9 @@ namespace detail {
 
 class HostLoopCore;
 
+// The number of HostLoop turns the calling thread is running (they nest only when a handler runs another loop).
+thread_local unsigned host_turn_depth = 0;
+
 // Found through the io_context, so that note_deadline can reach the loop from any executor derived from it.
 class HostLoopService final : public asio::execution_context::service {
 public:
@@ -113,6 +116,10 @@ private:
         const auto started = host_->now();
         bool more = false;
         std::exception_ptr failure;
+        struct TurnScope {
+            TurnScope() noexcept { ++host_turn_depth; }
+            ~TurnScope() { --host_turn_depth; }
+        } in_turn;
         try {
             io_->restart();
             std::size_t handled = 0;
@@ -247,6 +254,8 @@ void forget_deadline(const asio::any_io_executor& executor, std::chrono::steady_
     } catch (...) {
     }
 }
+
+bool in_host_turn() noexcept { return detail::host_turn_depth != 0; }
 
 bool is_host_pumped(const asio::any_io_executor& executor) noexcept {
     try {

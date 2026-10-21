@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=e3bfa0465dab0936930f60c26c76fc9116482656efd7b1c1066544a3477941f3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=0b98e23b8164da773ac5ea7771f57b925ef650234ba8c2a5569679616ce68dce -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -389,6 +389,32 @@ WebAssembly ホストなら `async::HostLoop::executor()` です。するとラ�
   終了状態になるまで executor を回し続けてください。
 
 実行できるチェックのある WebAssembly 側は [`wasm/README.md`](../wasm/README.md) にあります。
+
+## Program の状態が保存される場所（C++ ホスト）
+
+`ProgramRuntime` は run の記録を `ProgramTransitionStore` に、バージョンを `ProgramStore` に保存し、ホストが使う場合は、
+タスクグラフ断片、リンクされたモジュール、Core ツールの grant を、それぞれ `TaskGraphFragmentStore`、`ModuleStore`、
+`ProgramCoreToolGrantStore` に保存します。これらのインターフェースは `asio::awaitable` を返すので、ホストは呼び出しが
+あとで完了するデータベースの上にストアを置くことができ、run の attempt はスレッドを握る代わりにそれを await します。
+
+- **同期バックエンドは、対応する `Sync...Store` クラスから派生します**（`SyncProgramTransitionStore` ほか 4 つ）。そして
+  `..._sync` 操作（`load_sync`、`compare_publish_sync` など）を実装します。基底クラスはそれらから各 awaitable 操作を完了
+  させます。呼び出したスレッドですぐに完了するか、ストアが `offloads()` を true にオーバーライドしたときは有限のプールの
+  スレッドで完了します。インメモリと SQLite のストアはすぐに完了し、PostgreSQL はプールに回し、待っているコルーチンは
+  自分の executor で再開します。await する呼び出しの引数は、string view を含め、呼び出しが完了するまで生きている必要があります。
+- **中断できない呼び出し元はブロッキングビューを使います。** `BlockingProgramTransitionStore` と残りの 4 つは、インターフェースが
+  かつて持っていたシグネチャを持ちます。同期ストアに対するビューは、その `..._sync` 操作を呼びます。それ以外のストアでは、
+  呼び出したスレッドの専用 `io_context` で awaitable を回して待ちます。ただし `BlockingStorePolicy::refuse` が、待つと呼び出しを
+  完了させるべきスレッドが止まると言うときは拒否します。ランタイムのポリシーは、ホストが駆動する executor と、自分の
+  executor を回しているスレッドで拒否し、呼び出しはストアに触れる前に `ProgramBlockingCallRefused` を投げます。
+- **何が await し、何が待つのか。** run の attempt は遷移（transition）ストアと断片ストアを await します。ランタイムの同期
+  エントリーポイント、終端の公開、子の起動、grant リゾルバー、カタログは、ブロッキングビューを通して待ちます。すぐに完了する
+  ストアはどこでも動き、ホストのイベントループを回さなければ完了しないストアは、ホストが駆動するループが Program を
+  実行する場所で拒否されます。
+- **awaitable を捨てる呼び出しは何もしません。** 操作は `[[nodiscard]]` です。`co_await` するか、ブロッキングビューを使ってください。
+- **契約**（アトミックな公開、ヘッドの compare-and-swap、fail-closed）はすべてのストアが満たすもので、
+  `tests/test_program_transition_store.cpp` と `tests/test_program_catalog.cpp` の適合性（conformance）スイートが、インメモリ、
+  SQLite、PostgreSQL のストアに対して、それぞれの形式で 1 回ずつ実行します。
 
 ## 動作を確認しているテスト
 

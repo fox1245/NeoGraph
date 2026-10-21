@@ -882,7 +882,7 @@ std::string PostgreSQLProgramTransitionStore::process_coordination_key() const {
 }
 
 std::optional<ProgramRunPublicationHead>
-PostgreSQLProgramTransitionStore::load_run_publication_head(std::string_view owner,
+PostgreSQLProgramTransitionStore::load_run_publication_head_sync(std::string_view owner,
                                                            std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     // One statement observes the run record and journal head under one MVCC snapshot. Unlike
@@ -901,7 +901,7 @@ PostgreSQLProgramTransitionStore::load_run_publication_head(std::string_view own
 }
 
 std::optional<ProgramCommandPublicationHead>
-PostgreSQLProgramTransitionStore::load_command_publication_head(std::string_view owner,
+PostgreSQLProgramTransitionStore::load_command_publication_head_sync(std::string_view owner,
                                                                std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     // One statement observes the head and tail under the same MVCC snapshot.
@@ -930,21 +930,21 @@ PostgreSQLProgramTransitionStore::load_command_publication_head(std::string_view
     return head;
 }
 
-std::optional<ProgramRunRecord> PostgreSQLProgramTransitionStore::load(
+std::optional<ProgramRunRecord> PostgreSQLProgramTransitionStore::load_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->connection, owner_scope, run_id);
     return head ? std::optional<ProgramRunRecord>(head->run_record) : std::nullopt;
 }
 
-std::optional<ProgramJournalRecord> PostgreSQLProgramTransitionStore::latest(
+std::optional<ProgramJournalRecord> PostgreSQLProgramTransitionStore::latest_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->connection, owner_scope, run_id);
     return head ? std::optional<ProgramJournalRecord>(head->journal_record) : std::nullopt;
 }
 
-std::vector<ProgramEvent> PostgreSQLProgramTransitionStore::load_events(
+std::vector<ProgramEvent> PostgreSQLProgramTransitionStore::load_events_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     auto rows = exec_params(
@@ -958,7 +958,7 @@ std::vector<ProgramEvent> PostgreSQLProgramTransitionStore::load_events(
     return result;
 }
 
-std::vector<ProgramEffectOutboxEntry> PostgreSQLProgramTransitionStore::load_effects(
+std::vector<ProgramEffectOutboxEntry> PostgreSQLProgramTransitionStore::load_effects_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     auto rows = exec_params(
@@ -973,7 +973,7 @@ std::vector<ProgramEffectOutboxEntry> PostgreSQLProgramTransitionStore::load_eff
 }
 
 std::vector<ProgramJavaScriptCommandJournalEntry>
-PostgreSQLProgramTransitionStore::load_javascript_commands(
+PostgreSQLProgramTransitionStore::load_javascript_commands_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
     auto rows = exec_params(
@@ -993,7 +993,7 @@ PostgreSQLProgramTransitionStore::load_javascript_commands(
 }
 
 std::vector<ProgramContextPublication>
-PostgreSQLProgramTransitionStore::load_context_publications(
+PostgreSQLProgramTransitionStore::load_context_publications_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
@@ -1007,14 +1007,14 @@ PostgreSQLProgramTransitionStore::load_context_publications(
     return result;
 }
 
-std::vector<ProgramChildSynthesisRecord> PostgreSQLProgramTransitionStore::load_child_syntheses(
+std::vector<ProgramChildSynthesisRecord> PostgreSQLProgramTransitionStore::load_child_syntheses_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     if (!load_head(impl_->connection, owner_scope, run_id)) return {};
     return load_synthesis_heads(impl_->connection, owner_scope, run_id);
 }
 
-std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_entries(
+std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_entries_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
@@ -1026,21 +1026,21 @@ std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_
     return result;
 }
 
-std::optional<MigrationPlan> PostgreSQLProgramTransitionStore::load_migration_plan(
+std::optional<MigrationPlan> PostgreSQLProgramTransitionStore::load_migration_plan_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
     const auto head = load_head(impl_->connection, owner_scope, run_id);
     return head ? head->migration_plan : std::nullopt;
 }
 
-std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_lineage(
+std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_lineage_sync(
     std::string_view owner_scope, std::string_view lineage_id) const {
     if (owner_scope.empty() || lineage_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_current_lineage_head(impl_->connection, owner_scope, lineage_id);
 }
 
-std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_run_lineage(
+std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_run_lineage_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1051,14 +1051,14 @@ std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_run_line
     return lineage;
 }
 
-std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_lineage_head(
+std::optional<ProgramRunLineage> PostgreSQLProgramTransitionStore::load_lineage_head_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const {
     if (owner_scope.empty() || lineage_id.empty() || head_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_historical_lineage_head(impl_->connection, owner_scope, lineage_id, head_id);
 }
 
-std::optional<ProgramRunGeneration> PostgreSQLProgramTransitionStore::load_generation(
+std::optional<ProgramRunGeneration> PostgreSQLProgramTransitionStore::load_generation_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1066,7 +1066,7 @@ std::optional<ProgramRunGeneration> PostgreSQLProgramTransitionStore::load_gener
 }
 
 std::optional<ProgramTransitionPublication>
-PostgreSQLProgramTransitionStore::load_generation_initial_publication(
+PostgreSQLProgramTransitionStore::load_generation_initial_publication_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1075,7 +1075,7 @@ PostgreSQLProgramTransitionStore::load_generation_initial_publication(
 }
 
 std::optional<GraphMigrationCapsule>
-PostgreSQLProgramTransitionStore::load_graph_migration_capsule(
+PostgreSQLProgramTransitionStore::load_graph_migration_capsule_sync(
     std::string_view owner_scope, std::string_view source_run_id,
     std::string_view source_lineage_head_id) const {
     if (owner_scope.empty() || source_run_id.empty() || source_lineage_head_id.empty())
@@ -1085,21 +1085,21 @@ PostgreSQLProgramTransitionStore::load_graph_migration_capsule(
         impl_->connection, owner_scope, source_run_id, source_lineage_head_id);
 }
 
-std::optional<ProgramExecutionLease> PostgreSQLProgramTransitionStore::load_execution_lease(
+std::optional<ProgramExecutionLease> PostgreSQLProgramTransitionStore::load_execution_lease_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
     return load_execution_lease_record(impl_->connection, owner_scope, run_id);
 }
 
-ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish(
+ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication) {
     return compare_publish_impl(owner_scope, expected_journal_head, std::move(publication),
                                 nullptr, nullptr, nullptr, nullptr);
 }
 
-ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish_execution(
+ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish_execution_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication,
     std::optional<ProgramExecutionLease> expected_lease,
@@ -1111,7 +1111,7 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
 }
 
 ProgramTransitionPublishResult
-PostgreSQLProgramTransitionStore::compare_publish_graph_safe_point(
+PostgreSQLProgramTransitionStore::compare_publish_graph_safe_point_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     ProgramTransitionPublication publication,
     const ProgramGraphSafePointEvidence& evidence,

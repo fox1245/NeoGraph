@@ -1,6 +1,7 @@
 #pragma once
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
+#include <neograph/program/transition_store.h>
 #include <core/native_archive.h>
 
 #include "program_chat.h"
@@ -20,6 +21,9 @@ public:
         bool allow_provision);
     std::shared_ptr<neograph::program::ProgramStore> programs;
     std::shared_ptr<neograph::program::ProgramTransitionStore> transitions;
+    // The same two stores for code that cannot suspend. The Program store interfaces are awaitable (#556).
+    std::shared_ptr<neograph::program::BlockingProgramStore>           programs_view;
+    std::shared_ptr<neograph::program::BlockingProgramTransitionStore> transitions_view;
     std::shared_ptr<neograph::graph::CheckpointStore>          checkpoints;
 
 private:

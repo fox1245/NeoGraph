@@ -12,10 +12,16 @@
 // record, so a case written once can check the same contract clause on every
 // backend. A backend that cannot take part in a case says why and the case is
 // skipped with that reason.
+//
+// A store is called in two forms (StoreForm). Direct calls a synchronous store's own
+// operations, as synchronous code does. Awaited calls the awaitable operations that the
+// Program runtime and a host's coroutine call, and waits for each on a private io_context.
+// The conformance suites run on every backend in both forms (store_cases()).
 
 #include "unique_temp_dir.h"
 
 #include <neograph/program/store.h>
+#include <neograph/program/store_call.h>
 #include <neograph/program/transition_store.h>
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_store.h>
@@ -62,6 +68,36 @@ inline std::vector<StoreBackend> store_backends() {
     out.push_back(StoreBackend::PostgreSql);
 #endif
     return out;
+}
+
+enum class StoreForm { Direct, Awaited };
+
+inline const char* form_name(StoreForm form) { return form == StoreForm::Direct ? "Direct" : "Awaited"; }
+
+// One conformance case: a backend, and the form its store is called in.
+struct StoreCase {
+    StoreBackend backend = StoreBackend::InMemory;
+    StoreForm    form    = StoreForm::Direct;
+};
+
+// The Direct form keeps the backend's name, so a case keeps the name it had before the forms.
+inline std::string case_name(const StoreCase& value) {
+    return std::string(backend_name(value.backend)) + (value.form == StoreForm::Awaited ? "Awaited" : "");
+}
+
+inline void PrintTo(const StoreCase& value, std::ostream* out) { *out << case_name(value); }
+
+inline std::vector<StoreCase> store_cases() {
+    std::vector<StoreCase> out;
+    for (const auto backend : store_backends())
+        for (const auto form : {StoreForm::Direct, StoreForm::Awaited}) out.push_back({backend, form});
+    return out;
+}
+
+inline BlockingStorePolicy form_policy(StoreForm form) {
+    BlockingStorePolicy policy;
+    policy.await_synchronous_stores = form == StoreForm::Awaited;
+    return policy;
 }
 
 inline const char* postgres_test_url() {
@@ -202,7 +238,8 @@ DROP TABLE IF EXISTS neograph_program_bundles;
 
 class StoreDeployment {
 public:
-    explicit StoreDeployment(StoreBackend backend) : backend_(backend) {
+    explicit StoreDeployment(StoreBackend backend, StoreForm form = StoreForm::Direct)
+        : backend_(backend), form_(form) {
         if (backend == StoreBackend::InMemory) {
             memory_transitions_ = std::make_shared<InMemoryProgramTransitionStore>();
             memory_catalog_     = std::make_shared<InMemoryProgramStore>();
@@ -236,6 +273,7 @@ public:
     StoreDeployment& operator=(const StoreDeployment&) = delete;
 
     StoreBackend backend() const noexcept { return backend_; }
+    StoreForm    form() const noexcept { return form_; }
 
     // False only for the in-memory stores: they have no stored form to restart from or corrupt.
     bool durable() const noexcept { return backend_ != StoreBackend::InMemory; }
@@ -254,6 +292,15 @@ public:
             return std::make_shared<PostgreSQLProgramTransitionStore>(url_);
 #endif
         throw std::logic_error("backend is not built");
+    }
+
+    // The same store for a case that cannot suspend, called in this deployment's form.
+    std::shared_ptr<BlockingProgramTransitionStore> blocking_transition_store() const {
+        return std::make_shared<BlockingProgramTransitionStore>(transition_store(), form_policy(form_));
+    }
+
+    std::shared_ptr<BlockingProgramStore> blocking_program_store() const {
+        return std::make_shared<BlockingProgramStore>(program_store(), form_policy(form_));
     }
 
     std::shared_ptr<ProgramStore> program_store() const {
@@ -443,6 +490,7 @@ private:
     }
 
     StoreBackend backend_;
+    StoreForm    form_ = StoreForm::Direct;
     std::shared_ptr<InMemoryProgramTransitionStore> memory_transitions_;
     std::shared_ptr<InMemoryProgramStore>           memory_catalog_;
     std::optional<neograph::graph::test_support::UniqueTempDir> directory_;

@@ -7,13 +7,11 @@
  * (operation_lock.h), which a coroutine can wait for without blocking its thread.
  *
  * With NEOGRAPH_PROGRAM_LOCK_AUDIT defined (Debug builds, and any build configured with
- * -DNEOGRAPH_PROGRAM_LOCK_AUDIT=ON) PureMutex counts the locks the calling thread holds, and the transition store
- * the runtime was given is wrapped (audit_transition_store) so that every call into it aborts with a message when
- * the count is not zero. Otherwise PureMutex is std::mutex and nothing is checked or wrapped.
+ * -DNEOGRAPH_PROGRAM_LOCK_AUDIT=ON) PureMutex counts the locks the calling thread holds, and every call into a store
+ * through SyncProgramTransitionStore (and the other Sync...Store bases) or through a Blocking...Store aborts with the
+ * name of the call when the count is not zero. Otherwise PureMutex is std::mutex and nothing is checked.
  */
 #pragma once
-
-#include <neograph/program/transition_store.h>
 
 #include <condition_variable>
 #include <memory>
@@ -56,18 +54,11 @@ private:
 };
 using PureConditionVariable = std::condition_variable_any;
 
-/// A store whose every call first asserts that no PureMutex is held, then forwards to `inner`.
-std::shared_ptr<ProgramTransitionStore> audit_transition_store(std::shared_ptr<ProgramTransitionStore> inner);
-
 #else
 
 using PureMutex             = std::mutex;
 using PureConditionVariable = std::condition_variable;
 inline void assert_no_pure_lock_held(const char*) noexcept {}
-inline std::shared_ptr<ProgramTransitionStore> audit_transition_store(
-    std::shared_ptr<ProgramTransitionStore> inner) {
-    return inner;
-}
 
 #endif
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=c14878b149d129d3bd6122457d44379277e4a7e64c5aa40c9376eba1f15b7b38 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=a536a05a6ce1901d70a120936b2705ad36eba9b86c5e421ab45d4ab7c73e8dc9 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -198,8 +198,8 @@ Embind는 라이브러리와 모든 타입의 등록을 더하게 되는데, 표
 ## 호스트 루프 위의 Program
 
 `program::ProgramRuntime`은 루프의 executor를 받아 모든 것을 그 위에서 실행합니다. Program의 attempt, 데드라인 타이머,
-`ProgramHandle::wait_async`의 대기자가 그렇습니다. 스레드를 시작하지 않습니다. 현재 이 호스트들에서 Program 지원은
-이것이 전부이며, 저장소는 인메모리 저장소입니다.
+`ProgramHandle::wait_async`의 대기자가 그렇습니다. 스레드를 시작하지 않습니다. 읽고 쓰는 저장소는 awaitable이며,
+이 빌드가 제공하는 것은 인메모리 저장소입니다.
 
 ```cpp
 async::HostLoop loop(host_executor);                  // the sp::runtime::Executor the host runs
@@ -226,6 +226,10 @@ loop.spawn(runtime.run_async(owner, version, invocation),
   strand에서 실행되므로, 노드 본문은 자기 스레드를 막으면 안 됩니다.
 - **락.** 저장소에 닿는 임계 구역은 코루틴이 막히지 않고 기다릴 수 있는 `OperationLock`을 쥡니다. `std::mutex`는
   메모리만 보호합니다.
+- **awaitable 저장소.** Program 저장소 인터페이스 다섯 개는 `asio::awaitable`을 반환하며, run의 attempt는 이를 await합니다.
+  인메모리 저장소처럼 연산이 즉시 완료되는 저장소는 턴을 쓰지 않습니다. 런타임의 동기 진입점, 종료 게시, 자식 시작은
+  블로킹 뷰를 통해 저장소를 기다리며, 이 뷰는 기다리는 스레드만 돌릴 수 있는 루프를 기다리는 대신
+  `program::ProgramBlockingCallRefused`로 거부합니다.
 - **런타임을 소멸시키면** 실행 중인 run은 취소되지만 끝나기를 기다리지 않습니다. attempt가 끝날 때까지 런타임의
   상태를 붙들고 있으므로, 핸들이 종료 상태가 될 때까지 루프를 계속 돌리십시오.
 
@@ -250,8 +254,11 @@ CI는 모듈을 빌드해 Node 22와 24에서, 네트워크도 키도 없이 다
 - `checks.cpp`(아래)는 호스트 펌프 공급자에 대한 동기 실행을 돌려 거부되는지, 아무것도 보내지 않았는지 확인합니다.
 - `checks.cpp`는 `HostLoop` 위에 `ProgramRuntime`도 만듭니다. 실행기 없는 런타임과 동기 `start`는 거부되고, 인메모리
   저장소를 쓰는 노드 하나짜리 Program이 호스트의 턴에서 결과까지 실행됩니다.
+  이어서 호스트 턴에서 awaitable 저장소로 run과 버전을 다시 읽고, 블로킹 뷰가 루프에서 기다리기를 거부함을 보입니다.
 - `tests/test_program_runtime_executor.cpp`는 단일 스레드 `io_context`와 수동 실행기 위의 `HostLoop`에서 Program을
   네이티브로 실행하므로, 네이티브 빌드도 같은 경로를 다룹니다.
+- `tests/test_program_store_awaitable.cpp`는 저장소 계약을 네이티브로 실행합니다. 인라인 저장소는 중단 없이 완료되고, 풀로
+  넘기는 저장소는 기다리던 코루틴을 자기 executor에서 재개하며, 블로킹 뷰는 나중에 완료되는 저장소를 기다리거나 거부합니다.
 - `tests/test_host_loop.cpp`는 수동 executor를 상대로 루프와 호스트 seam 공급자를 네이티브로 실행하므로, 네이티브 빌드도
   같은 경로를 다룹니다.
 
@@ -279,9 +286,11 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
 - **호스트를 거치지 않는 모델 호출.** ASYNC, MCP 클라이언트, A2A는 소켓과 TLS가 필요합니다. 모델 호출은 위의 모듈로 호스트의
   `fetch`를 거칩니다. 다른 WebAssembly 호스트용 빌드는 자신의 executor와 트랜스포트를 `SchemaProvider`에 넘깁니다.
 - **호스트 펌프 공급자에 대한 블로킹 진입점.** `run()`, `Provider::dispatch` 등은 거부합니다(위).
-- **호스트 데이터베이스의 Program 저장소.** Program 런타임은 호스트 루프 위에서 실행되지만(위), 저장소는 인메모리
-  저장소입니다. SQLite와 PostgreSQL 저장소는 시스템 라이브러리가 필요하고, 호스트 데이터베이스에 닿는 저장소는 저장소
-  인터페이스가 awaitable이 되기를 기다립니다([#556](https://github.com/fox1245/NeoGraph/issues/556)). 동기 Program
+- **호스트 데이터베이스의 Program 저장소.** 저장소 인터페이스는 awaitable입니다.
+  SQLite와 PostgreSQL 저장소는 시스템 라이브러리가 필요하므로 호스트 데이터베이스에는 직접 만든 저장소가 필요합니다.
+  연산이 즉시 완료되는 저장소(호스트의 동기 스토리지)는 호스트 루프의 런타임에 쓸 수 있습니다. 호스트의 이벤트 루프를
+  통해서만 완료되는 저장소는 런타임의 진입점, 종료 게시, 자식 시작이 아직 저장소를 기다리므로 거기서
+  `ProgramBlockingCallRefused`로 거부됩니다([#556](https://github.com/fox1245/NeoGraph/issues/556)). 동기 Program
   호출은 호스트 루프에서 거부되므로 `_async` 형태를 쓰십시오.
 - **네이티브 Program 컨트롤.** C v1 플러그인 ABI는 64비트 레이아웃이므로 wasm32에서
   `NativeControlBinding::create`는 `NativeControlUnavailable`로 거부합니다.
@@ -308,5 +317,5 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
 - **M2(이 문서).** 호스트의 `fetch`를 통한 모델 호출. 호스트 루프, 호스트 seam 공급자, JavaScript 모듈, Node와 Workers 예제.
 - **M3.** 호스트 저장소 위의 Program([#557](https://github.com/fox1245/NeoGraph/issues/557),
   [#556](https://github.com/fox1245/NeoGraph/issues/556)). 런타임 쪽은 끝났습니다. `ProgramRuntime`이
-  `HostLoop::executor()` 위에서 실행됩니다(위의 "호스트 루프 위의 Program"). 저장소 쪽이 이어집니다. awaitable 저장소 인터페이스입니다.
+  `HostLoop::executor()` 위에서 실행됩니다(위의 "호스트 루프 위의 Program"). 저장소 인터페이스도 awaitable이 되었습니다.
 - **M4.** 실시간 세션, WASI, 네이티브 아카이브용 보관 백엔드, 원격 Harness.

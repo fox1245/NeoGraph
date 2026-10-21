@@ -163,4 +163,8 @@ NEOGRAPH_API void forget_deadline(const asio::any_io_executor& executor,
 /// other properties). Nothing that waits for work on such an executor can finish: only the host's own turn runs it.
 NEOGRAPH_API bool is_host_pumped(const asio::any_io_executor& executor) noexcept;
 
+/// True while the calling thread is running a turn of a HostLoop (#556). Code there that blocks its thread waits for
+/// work that only a later turn can do, and that turn cannot start until this one returns.
+NEOGRAPH_API bool in_host_turn() noexcept;
+
 }  // namespace neograph::async

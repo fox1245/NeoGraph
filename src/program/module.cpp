@@ -1,6 +1,7 @@
 #include <neograph/program/module.h>
 
 #include "canonical_json.h"
+#include "lock_audit.h"
 
 #include <algorithm>
 #include <limits>
@@ -1210,7 +1211,7 @@ InMemoryModuleStore::InMemoryModuleStore(InMemoryModuleStore&&) noexcept = defau
 InMemoryModuleStore& InMemoryModuleStore::operator=(InMemoryModuleStore&&) noexcept = default;
 InMemoryModuleStore::~InMemoryModuleStore() = default;
 
-void InMemoryModuleStore::publish(const ProgramModule& module) {
+void InMemoryModuleStore::publish_sync(const ProgramModule& module) {
     std::lock_guard lock(impl_->mutex);
     const auto [it, inserted] = impl_->modules.emplace(
         module.id(), Impl::Entry{module, module.lifecycle()});
@@ -1218,14 +1219,14 @@ void InMemoryModuleStore::publish(const ProgramModule& module) {
         throw std::invalid_argument("Module content identity collision");
 }
 
-std::optional<ProgramModule> InMemoryModuleStore::get(std::string_view content_identity) const {
+std::optional<ProgramModule> InMemoryModuleStore::get_sync(std::string_view content_identity) const {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->modules.find(content_identity);
     if (found == impl_->modules.end()) return std::nullopt;
     return ProgramModule::with_lifecycle(found->second.module, found->second.lifecycle);
 }
 
-std::optional<ProgramModule> InMemoryModuleStore::get(std::string_view owner_scope,
+std::optional<ProgramModule> InMemoryModuleStore::get_sync(std::string_view owner_scope,
                                                        std::string_view content_identity) const {
     if (owner_scope.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
@@ -1235,7 +1236,7 @@ std::optional<ProgramModule> InMemoryModuleStore::get(std::string_view owner_sco
     return ProgramModule::with_lifecycle(found->second.module, found->second.lifecycle);
 }
 
-void InMemoryModuleStore::set_lifecycle(std::string_view content_identity, ModuleLifecycle lifecycle) {
+void InMemoryModuleStore::set_lifecycle_sync(std::string_view content_identity, ModuleLifecycle lifecycle) {
     std::lock_guard lock(impl_->mutex);
     const auto found = impl_->modules.find(content_identity);
     if (found == impl_->modules.end()) throw std::invalid_argument("Unknown module identity");
@@ -1244,8 +1245,9 @@ void InMemoryModuleStore::set_lifecycle(std::string_view content_identity, Modul
     found->second.lifecycle = lifecycle;
 }
 
-ModuleResolver::ModuleResolver(std::shared_ptr<const ModuleStore> store) : store_(std::move(store)) {
-    if (!store_) throw std::invalid_argument("ModuleResolver requires a ModuleStore");
+ModuleResolver::ModuleResolver(std::shared_ptr<const ModuleStore> store) {
+    if (!store) throw std::invalid_argument("ModuleResolver requires a ModuleStore");
+    store_ = std::make_shared<BlockingModuleStore>(std::const_pointer_cast<ModuleStore>(std::move(store)));
 }
 
 ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
@@ -1293,6 +1295,93 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
     }
     validate_module_resolution(result);
     return result;
+}
+
+
+// ---- ModuleStore : the synchronous implementer base and the blocking facade (#556) ----
+
+asio::awaitable<void> SyncModuleStore::publish(const ProgramModule& module) {
+    detail::assert_no_pure_lock_held("ModuleStore::publish");
+    if (!offloads()) {
+        publish_sync(module);
+        co_return;
+    }
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<void>([this, module = module]() mutable -> void {
+        return publish_sync(module);
+    });
+}
+
+asio::awaitable<std::optional<ProgramModule>> SyncModuleStore::get(
+    std::string_view content_identity) const {
+    detail::assert_no_pure_lock_held("ModuleStore::get");
+    if (!offloads()) co_return get_sync(content_identity);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramModule>>([this, content_identity = std::string(content_identity)]() mutable -> std::optional<ProgramModule> {
+        return get_sync(content_identity);
+    });
+}
+
+asio::awaitable<std::optional<ProgramModule>> SyncModuleStore::get(
+    std::string_view owner_scope,
+    std::string_view content_identity) const {
+    detail::assert_no_pure_lock_held("ModuleStore::get");
+    if (!offloads()) co_return get_sync(owner_scope, content_identity);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramModule>>([this, owner_scope = std::string(owner_scope), content_identity = std::string(content_identity)]() mutable -> std::optional<ProgramModule> {
+        return get_sync(owner_scope, content_identity);
+    });
+}
+
+asio::awaitable<void> SyncModuleStore::set_lifecycle(
+    std::string_view content_identity,
+    ModuleLifecycle lifecycle) {
+    detail::assert_no_pure_lock_held("ModuleStore::set_lifecycle");
+    if (!offloads()) {
+        set_lifecycle_sync(content_identity, std::move(lifecycle));
+        co_return;
+    }
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<void>([this, content_identity = std::string(content_identity), lifecycle = std::move(lifecycle)]() mutable -> void {
+        return set_lifecycle_sync(content_identity, std::move(lifecycle));
+    });
+}
+
+BlockingModuleStore::BlockingModuleStore(std::shared_ptr<ModuleStore> store, BlockingStorePolicy policy)
+    : store_(std::move(store)), policy_(std::move(policy)) {
+    if (!store_) throw std::invalid_argument("BlockingModuleStore requires a store");
+    if (!policy_.await_synchronous_stores) sync_ = dynamic_cast<SyncModuleStore*>(store_.get());
+}
+
+BlockingModuleStore::BlockingModuleStore(ModuleStore& store, BlockingStorePolicy policy)
+    : BlockingModuleStore(std::shared_ptr<ModuleStore>(std::shared_ptr<ModuleStore>{}, &store), std::move(policy)) {}
+
+void BlockingModuleStore::publish(const ProgramModule& module) const {
+    detail::assert_no_pure_lock_held("ModuleStore::publish");
+    if (sync_) return sync_->publish_sync(module);
+    return detail::block_on_store(store_->publish(module), policy_, "ModuleStore::publish");
+}
+
+std::optional<ProgramModule> BlockingModuleStore::get(std::string_view content_identity) const {
+    detail::assert_no_pure_lock_held("ModuleStore::get");
+    if (sync_) return sync_->get_sync(content_identity);
+    return detail::block_on_store(store_->get(content_identity), policy_, "ModuleStore::get");
+}
+
+std::optional<ProgramModule> BlockingModuleStore::get(
+    std::string_view owner_scope,
+    std::string_view content_identity) const {
+    detail::assert_no_pure_lock_held("ModuleStore::get");
+    if (sync_) return sync_->get_sync(owner_scope, content_identity);
+    return detail::block_on_store(store_->get(owner_scope, content_identity), policy_, "ModuleStore::get");
+}
+
+void BlockingModuleStore::set_lifecycle(
+    std::string_view content_identity,
+    ModuleLifecycle lifecycle) const {
+    detail::assert_no_pure_lock_held("ModuleStore::set_lifecycle");
+    if (sync_) return sync_->set_lifecycle_sync(content_identity, std::move(lifecycle));
+    return detail::block_on_store(store_->set_lifecycle(content_identity, std::move(lifecycle)), policy_, "ModuleStore::set_lifecycle");
 }
 
 }  // namespace neograph::program

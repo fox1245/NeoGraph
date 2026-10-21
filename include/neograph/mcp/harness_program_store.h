@@ -128,7 +128,7 @@ require_harness_program_adapter_store(const std::shared_ptr<HarnessRecordStore>&
  * It cannot enumerate, activate, garbage-collect, or act as the PR12 generic SQLite
  * ProgramStore.
  */
-class NEOGRAPH_HARNESS_API HarnessBoundedProgramStore final : public program::ProgramStore {
+class NEOGRAPH_HARNESS_API HarnessBoundedProgramStore final : public program::SyncProgramStore {
 public:
     HarnessBoundedProgramStore(std::shared_ptr<HarnessRecordStore> records,
                                std::string                         artifact_id,
@@ -142,14 +142,14 @@ public:
     HarnessBoundedProgramStore(HarnessBoundedProgramStore&&) noexcept;
     HarnessBoundedProgramStore& operator=(HarnessBoundedProgramStore&&) noexcept;
 
-    void publish_admitted(const program::ProgramBundle&  bundle,
+    void publish_admitted_sync(const program::ProgramBundle&  bundle,
                           const program::ProgramVersion& version) override;
-    std::optional<program::ProgramBundle>  get_bundle(std::string_view id) const override;
-    std::optional<program::ProgramVersion> get_version(std::string_view id) const override;
+    std::optional<program::ProgramBundle>  get_bundle_sync(std::string_view id) const override;
+    std::optional<program::ProgramVersion> get_version_sync(std::string_view id) const override;
     std::optional<program::ProgramBundle>
-    get_bundle(std::string_view owner_scope, std::string_view id) const override;
+    get_bundle_sync(std::string_view owner_scope, std::string_view id) const override;
     std::optional<program::ProgramVersion>
-    get_version(std::string_view owner_scope, std::string_view id) const override;
+    get_version_sync(std::string_view owner_scope, std::string_view id) const override;
 
     /** Owner-scoped strict load. Wrong owners are indistinguishable from absent IDs. */
     std::optional<HarnessProgramArtifactRecord> load_artifact() const;

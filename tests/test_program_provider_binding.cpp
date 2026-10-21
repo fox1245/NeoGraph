@@ -42,6 +42,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedTransitionStore;
+using neograph::program::test_support::ProgramStoreHandle;
+using neograph::program::test_support::TransitionStoreHandle;
 
 namespace {
 using namespace neograph;
@@ -613,7 +618,7 @@ public:
         for (const auto& identity : registry_->identities()) profile.allow_executable(identity);
         profile_.emplace(std::move(profile).build());
 
-        std::shared_ptr<ProgramStore>           store;
+        ProgramStoreHandle           store;
         std::shared_ptr<graph::CheckpointStore> checkpoints;
         if (files_) {
             store        = std::make_shared<SQLiteProgramStore>(files_->program_db());
@@ -879,7 +884,7 @@ private:
     const TempDir*                                    files_;
     std::optional<RegistrySnapshot>                   registry_;
     std::optional<AdmissionProfile>                   profile_;
-    std::shared_ptr<ProgramTransitionStore>           transitions_;
+    TransitionStoreHandle           transitions_;
     std::shared_ptr<SQLiteProgramProviderCallJournal> journal_;
     std::shared_ptr<ProgramCatalog>                   catalog_;
     std::unique_ptr<ProgramRuntime>                   runtime_;
@@ -2286,7 +2291,7 @@ TEST(ProgramProviderBindingJournal, AProcessThatDiesAfterTheCallIsJournaledIsCha
     }
     ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
     {
-        SQLiteProgramTransitionStore transitions(image.program_db());
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(image.program_db());
         const auto record = transitions.load(kOwner, "crash-run");
         ASSERT_TRUE(record);
         EXPECT_EQ(record->continuation().state, ContinuationState::Running);

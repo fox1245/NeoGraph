@@ -363,27 +363,27 @@ using ExpansionRuntime = BasicAdmittedRuntime<expansion_registry>;
 
 // ---- A fragment store that logs every task transition it is asked to make durable. ----
 
-class RecordingFragmentStore final : public TaskGraphFragmentStore {
+class RecordingFragmentStore final : public SyncTaskGraphFragmentStore {
 public:
     explicit RecordingFragmentStore(std::shared_ptr<TaskGraphFragmentStore> inner)
-        : inner_(std::move(inner)) {}
+        : inner_(std::make_shared<BlockingTaskGraphFragmentStore>(std::move(inner))) {}
 
-    TaskGraphPublishResult publish(const TaskGraphFragmentRecord& record) override {
+    TaskGraphPublishResult publish_sync(const TaskGraphFragmentRecord& record) override {
         return inner_->publish(record);
     }
-    std::optional<TaskGraphFragmentRecord> load(std::string_view id) const override {
+    std::optional<TaskGraphFragmentRecord> load_sync(std::string_view id) const override {
         return inner_->load(id);
     }
-    std::optional<TaskGraphFragmentRecord> find_published_lineage(
+    std::optional<TaskGraphFragmentRecord> find_published_lineage_sync(
         std::string_view owner, std::string_view parent, std::string_view operation) const override {
         return inner_->find_published_lineage(owner, parent, operation);
     }
-    std::optional<TaskGraphFragmentRecord> find_published(
+    std::optional<TaskGraphFragmentRecord> find_published_sync(
         std::string_view owner, std::string_view parent, std::string_view operation,
         std::string_view proposal) const override {
         return inner_->find_published(owner, parent, operation, proposal);
     }
-    TaskGraphPublishResult compare_update(std::string_view id, std::uint64_t revision,
+    TaskGraphPublishResult compare_update_sync(std::string_view id, std::uint64_t revision,
                                          const TaskGraphFragmentRecord& record) override {
         std::lock_guard lock(mutex_);
         auto previous = last_.find(std::string(id));
@@ -421,7 +421,7 @@ public:
     }
 
 private:
-    std::shared_ptr<TaskGraphFragmentStore>        inner_;
+    std::shared_ptr<BlockingTaskGraphFragmentStore> inner_;
     mutable std::mutex                             mutex_;
     std::map<std::string, TaskGraphFragmentRecord> last_;
     std::vector<std::string>                       events_;

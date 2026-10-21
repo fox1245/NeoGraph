@@ -483,7 +483,7 @@ HarnessBoundedProgramStore::HarnessBoundedProgramStore(HarnessBoundedProgramStor
 HarnessBoundedProgramStore& HarnessBoundedProgramStore::operator=(
     HarnessBoundedProgramStore&&) noexcept = default;
 
-void HarnessBoundedProgramStore::publish_admitted(const program::ProgramBundle&  bundle,
+void HarnessBoundedProgramStore::publish_admitted_sync(const program::ProgramBundle&  bundle,
                                                   const program::ProgramVersion& version) {
     const auto record = HarnessProgramArtifactRecord::create(
         impl_->artifact_id, impl_->owner_scope, bundle, version, impl_->invocation_template,
@@ -504,36 +504,36 @@ std::optional<HarnessProgramArtifactRecord> HarnessBoundedProgramStore::load_art
     return record;
 }
 
-std::optional<program::ProgramBundle> HarnessBoundedProgramStore::get_bundle(
+std::optional<program::ProgramBundle> HarnessBoundedProgramStore::get_bundle_sync(
     std::string_view id) const {
     const auto record = load_artifact();
     if (!record || record->bundle().id() != id) return std::nullopt;
     return record->bundle();
 }
 
-std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version(
+std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version_sync(
     std::string_view id) const {
     const auto record = load_artifact();
     if (!record || record->version().id() != id) return std::nullopt;
     return record->version();
 }
 
-std::optional<program::ProgramBundle> HarnessBoundedProgramStore::get_bundle(
+std::optional<program::ProgramBundle> HarnessBoundedProgramStore::get_bundle_sync(
     std::string_view owner_scope, std::string_view id) const {
     if (owner_scope != impl_->owner_scope) return std::nullopt;
-    return get_bundle(id);
+    return get_bundle_sync(id);
 }
 
-std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version(
+std::optional<program::ProgramVersion> HarnessBoundedProgramStore::get_version_sync(
     std::string_view owner_scope, std::string_view id) const {
     if (owner_scope != impl_->owner_scope) return std::nullopt;
-    return get_version(id);
+    return get_version_sync(id);
 }
 
 struct HarnessBoundedProgramJournal::Impl {
     Impl(std::shared_ptr<program::ProgramTransitionStore> store, std::string owner)
         : transitions(std::move(store)), owner_scope(std::move(owner)) {}
-    std::shared_ptr<program::ProgramTransitionStore> transitions;
+    program::BlockingProgramTransitionStore transitions;
     std::string                                      owner_scope;
 };
 
@@ -550,7 +550,7 @@ HarnessBoundedProgramJournal::~HarnessBoundedProgramJournal() = default;
 
 std::optional<program::ProgramJournalRecord> HarnessBoundedProgramJournal::latest(
     std::string_view run_id) const {
-    return impl_->transitions->latest(impl_->owner_scope, run_id);
+    return impl_->transitions.latest(impl_->owner_scope, run_id);
 }
 
 program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
@@ -564,14 +564,14 @@ program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
     } catch (const std::invalid_argument&) {
         return program::JournalAppendResult::Conflict;
     }
-    const auto existing = impl_->transitions->latest(impl_->owner_scope, record.run_id);
+    const auto existing = impl_->transitions.latest(impl_->owner_scope, record.run_id);
     if (existing && existing->id == record.id) {
         return expected_previous_id == record.previous_id &&
                        existing->serialize_canonical() == canonical_bytes
                    ? program::JournalAppendResult::AlreadyPresent
                    : program::JournalAppendResult::Conflict;
     }
-    const auto current = impl_->transitions->load(impl_->owner_scope, record.run_id);
+    const auto current = impl_->transitions.load(impl_->owner_scope, record.run_id);
     if (!current) return program::JournalAppendResult::Conflict;
 
     program::ProgramRunRecordData next_data;
@@ -608,7 +608,7 @@ program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
         {},
         {},
     };
-    switch (impl_->transitions->compare_publish(impl_->owner_scope, expected_previous_id,
+    switch (impl_->transitions.compare_publish(impl_->owner_scope, expected_previous_id,
                                                 std::move(publication))) {
         case program::ProgramTransitionPublishResult::Published:
             return program::JournalAppendResult::Appended;

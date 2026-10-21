@@ -7,6 +7,7 @@
 
 #include <neograph/graph/engine.h>
 #include <neograph/hook_runtime.h>
+#include "fixtures/store_handle.h"
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
@@ -21,6 +22,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+using neograph::program::test_support::FragmentStoreHandle;
 
 neograph::json orchestration_document(neograph::json root, std::string node_type);
 
@@ -203,16 +206,16 @@ struct BasicAdmittedRuntime {
     RegistrySnapshot                                registry;
     AdmissionProfile                                profile;
     PolicySnapshot                                  policy;
-    std::shared_ptr<InMemoryProgramStore>           store;
+    test_support::ProgramStoreHandle                store;
     std::shared_ptr<EngineGenerationCache>          engines;
     std::shared_ptr<ProgramCatalog>                 catalog;
     std::shared_ptr<CheckpointStore>                checkpoints;
-    std::shared_ptr<ProgramTransitionStore>         journal;
+    test_support::TransitionStoreHandle             journal;
     std::shared_ptr<ChildBindingRegistry>           child_bindings;
-    std::shared_ptr<InMemoryTaskGraphFragmentStore> task_graph_fragments;
+    test_support::FragmentStoreHandle               task_graph_fragments;
     /// When set, the runtime uses this store (typically a wrapper around task_graph_fragments).
     /// Call make_runtime() again after setting it.
-    std::shared_ptr<TaskGraphFragmentStore>         fragment_store_override;
+    FragmentStoreHandle         fragment_store_override;
     /// What the policy resolver returns for owner "tenant:runtime"; tests may edit it.
     std::shared_ptr<TaskGraphExpansionPolicy>       expansion = std::make_shared<TaskGraphExpansionPolicy>(expansion_policy());
     ProgramChildQuotaConfig                         child_quota;

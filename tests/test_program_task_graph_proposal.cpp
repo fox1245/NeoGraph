@@ -12,6 +12,9 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "fixtures/store_handle.h"
+
+using neograph::program::test_support::OwnedFragmentStore;
 
 namespace {
 
@@ -707,7 +710,7 @@ TEST(TaskGraphFragmentTest, RejectsTamperedOperationIdentity) {
 TEST(TaskGraphFragmentTest, PublishesAndUpdatesOnlyThroughDurableCompareAndSwap) {
     const auto fragment = compiled_fragment();
     const auto record = fragment_record(fragment);
-    InMemoryTaskGraphFragmentStore store;
+    OwnedFragmentStore<InMemoryTaskGraphFragmentStore> store;
 
     EXPECT_EQ(store.publish(record), TaskGraphPublishResult::Published);
     const auto first = store.load(fragment.fragment_id());
@@ -743,7 +746,7 @@ TEST(TaskGraphFragmentTest, PublishesAndUpdatesOnlyThroughDurableCompareAndSwap)
 }
 TEST(TaskGraphFragmentTest, RecoversPublishedFragmentByParentLineage) {
     const auto fragment = compiled_fragment();
-    InMemoryTaskGraphFragmentStore store;
+    OwnedFragmentStore<InMemoryTaskGraphFragmentStore> store;
     ASSERT_EQ(store.publish(fragment_record(fragment)), TaskGraphPublishResult::Published);
 
     const auto recovered = store.find_published(

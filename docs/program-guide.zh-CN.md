@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=e3bfa0465dab0936930f60c26c76fc9116482656efd7b1c1066544a3477941f3 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=0b98e23b8164da773ac5ea7771f57b925ef650234ba8c2a5569679616ce68dce -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -385,6 +385,27 @@ attempt，在另外一个线程上运行截止时间定时器，`LocalProgramHos
 - **销毁运行时**会取消其运行，在注入的 executor 上不会等待它们结束。要让 executor 一直运行，直到各句柄进入终态。
 
 带有可运行检查的 WebAssembly 部分见 [`wasm/README.md`](../wasm/README.md)。
+
+## Program 的状态保存在哪里（C++ 宿主）
+
+`ProgramRuntime` 把运行记录保存在 `ProgramTransitionStore` 中，把版本保存在 `ProgramStore` 中；宿主使用时，还把任务图片段、
+链接的模块和 Core 工具 grant 分别保存在 `TaskGraphFragmentStore`、`ModuleStore` 和 `ProgramCoreToolGrantStore` 中。这些接口返回
+`asio::awaitable`，所以宿主可以把存储放在调用稍后才完成的数据库上，运行的 attempt 也会 await 它们，而不是占住一个线程。
+
+- **同步后端从对应的 `Sync...Store` 类派生**（`SyncProgramTransitionStore` 及另外四个），并实现 `..._sync` 操作（`load_sync`、
+  `compare_publish_sync` 等）。基类据此完成每个 awaitable 操作：在调用线程上立即完成；存储把 `offloads()` 重写为返回 true 时，
+  则在有界线程池的某个线程上完成。内存存储和 SQLite 存储立即完成，PostgreSQL 交给线程池，等待的协程在自己的 executor 上恢复。
+  被 await 的调用的参数（包括 string view）必须在调用完成之前一直有效。
+- **无法挂起的调用方使用阻塞视图**：`BlockingProgramTransitionStore` 及其余四个沿用接口原先的签名。针对同步存储的视图调用它的
+  `..._sync` 操作；针对其他存储，它在调用线程自己的 `io_context` 上驱动 awaitable 并等待，除非 `BlockingStorePolicy::refuse` 表示
+  等待会让本该完成这次调用的线程挂住。运行时的策略在由宿主驱动的 executor 上，以及在运行其 executor 的线程上拒绝，调用会在
+  触及存储之前抛出 `ProgramBlockingCallRefused`。
+- **谁 await，谁等待。** 运行的 attempt 会 await 转换（transition）存储和片段存储。运行时的同步入口、终态发布、子运行启动、
+  grant 解析器和目录通过阻塞视图等待。立即完成的存储在任何地方都能用；只有转动宿主事件循环才能完成的存储，会在由宿主驱动的
+  循环运行 Program 的地方被拒绝。
+- **丢弃 awaitable 的调用什么也不会做。** 这些操作带有 `[[nodiscard]]`：请 `co_await` 它们，或者使用阻塞视图。
+- **契约**（原子发布、头部 compare-and-swap、失败即关闭）是每个存储都要满足的，`tests/test_program_transition_store.cpp` 和
+  `tests/test_program_catalog.cpp` 中的一致性测试套件会针对内存、SQLite 和 PostgreSQL 存储，通过每种形式各运行一次。
 
 ## 行为在哪里测试
 
