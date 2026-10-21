@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -261,6 +262,10 @@ struct Script {
     std::string   upload_path;
     std::uint64_t upload_size = 0;
     std::string   upload_bytes;
+    // #541: the "chunked_upload" node sends the same file in parts of `chunk_size` bytes, and asks for approval
+    // after this many of its calls (the one that opens the session counts) until it is resumed.
+    std::uint64_t chunk_size = 0;
+    std::atomic<int> interrupt_after_calls{0};
     // #543: what the "brokered_call" node asks, and the system text it puts before it (none when empty).
     std::string   prompt = "probe";
     std::string   system;
@@ -333,6 +338,61 @@ public:
     }
 
 private:
+    std::string               name_;
+    std::shared_ptr<Provider> provider_;
+    std::shared_ptr<Script>   script_;
+};
+
+// #541: uploads a file in parts through the Program provider broker. One call opens the session and one sends each
+// part, at call ordinals 0, 1, ... The session, which holds the upload's secret URL, lives only in this frame.
+class ChunkedUploadCall final : public graph::GraphNode {
+public:
+    ChunkedUploadCall(std::string name, std::shared_ptr<Provider> provider, std::shared_ptr<Script> script)
+        : name_(std::move(name)), provider_(std::move(provider)), script_(std::move(script)) {}
+    std::string get_name() const override { return name_; }
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        ++script_->node_runs;
+        const bool          in_memory = !script_->upload_bytes.empty();
+        const std::uint64_t total     = in_memory ? script_->upload_bytes.size() : script_->upload_size;
+        int                 calls     = 0;
+        const auto          pause     = [&] {
+            if (++calls == script_->interrupt_after_calls.load() && !in.ctx.resume_value)
+                throw graph::NodeInterrupt("approve the upload", json{{"request", "approve"}});
+        };
+        auto progress = co_await step(in, 0, make_endpoint_request(sp::files::Start{
+            "data.bin", "application/octet-stream", total}));
+        pause();
+        for (std::uint64_t ordinal = 1; progress.session.sent < progress.session.size; ++ordinal) {
+            sp::files::Part part;
+            part.session      = progress.session;
+            const auto size   = std::min<std::uint64_t>(script_->chunk_size, total - part.session.sent);
+            if (in_memory)
+                part.source.bytes = std::make_shared<const std::string>(
+                    script_->upload_bytes.substr(part.session.sent, size));
+            else
+                part.source.file = {script_->upload_path, part.session.sent, size};
+            progress = co_await step(in, ordinal, make_endpoint_request(std::move(part)));
+            pause();
+        }
+        graph::NodeOutput output;
+        output.writes.push_back(graph::ChannelWrite{"value", progress.file ? progress.file->id : std::string()});
+        co_return output;
+    }
+
+private:
+    asio::awaitable<sp::files::Progress> step(graph::NodeInput& in, std::uint64_t ordinal, ProviderRequest request) {
+        const auto broker = graph::provider_call_broker(in.ctx);
+        if (!broker) throw std::logic_error("the Program provider broker is absent");
+        auto result = co_await graph::observe_provider_result(
+            in.ctx, broker->invoke(graph::make_provider_call_identity(in.ctx, name_, ordinal), provider_,
+                                   std::move(request)));
+        if (!result) throw std::runtime_error("the upload returned no outcome");
+        auto outcome = sp::files::typed_progress(*result);
+        if (const auto* failure = std::get_if<sp::Failure>(&outcome))
+            throw std::runtime_error(failure->error.safe_message);
+        co_return std::get<sp::files::Progress>(std::move(outcome));
+    }
+
     std::string               name_;
     std::shared_ptr<Provider> provider_;
     std::shared_ptr<Script>   script_;
@@ -428,7 +488,9 @@ enum class Shape {
     // #531: a video job submitted, then collected.
     VideoJob,
     // #541: a file uploaded by a host node.
-    FileUpload
+    FileUpload,
+    // #541: a file uploaded in parts by a host node.
+    ChunkedUpload
 };
 
 struct HostOptions {
@@ -496,6 +558,12 @@ public:
             manifest({ExecutableKind::Node, "file_upload", "1.0.0", digest('d')}, {kProviderIdentity}),
             [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
                 return std::make_unique<UploadCall>(name, context.provider, script);
+            },
+            json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
+        builder.add_host_brokered_node(
+            manifest({ExecutableKind::Node, "chunked_upload", "1.0.0", digest('e')}, {kProviderIdentity}),
+            [script = script_](const std::string& name, const json&, const graph::NodeContext& context) {
+                return std::make_unique<ChunkedUploadCall>(name, context.provider, script);
             },
             json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
         builder.add_host_brokered_node(
@@ -690,6 +758,10 @@ public:
             }
             case Shape::FileUpload:
                 definition["nodes"] = {{"upload", {{"type", "file_upload"}}}};
+                definition["edges"] = json::array({edge("__start__", "upload"), edge("upload", "__end__")});
+                break;
+            case Shape::ChunkedUpload:
+                definition["nodes"] = {{"upload", {{"type", "chunked_upload"}}}};
                 definition["edges"] = json::array({edge("__start__", "upload"), edge("upload", "__end__")});
                 break;
             case Shape::VideoJob:
@@ -3170,4 +3242,127 @@ TEST(ProgramProviderBindingJournal, AResumeOfAJournalItCannotMatchIsAConflict) {
     EXPECT_NE(failure_text(failed).find("binding conflict"), std::string::npos) << failure_text(failed);
     EXPECT_NE(failure_text(failed).find("predates content identity"), std::string::npos) << failure_text(failed);
     EXPECT_EQ(other->transport.load(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// #541: a chunked upload whose session URL only the live call holds
+// ---------------------------------------------------------------------------
+
+namespace {
+using neograph::test::endpoints::ChunkedUploadPeer;
+constexpr const char* kGoogleOrigin = "https://generativelanguage.googleapis.com";
+
+// A host over a loopback peer, admitted for Google's resumable upload or, with `google` false, OpenAI's Uploads.
+HostOptions chunked_options(const ChunkedUploadPeer& peer, bool google = true) {
+    return endpoint_options(peer.origin(), {google ? kGoogleOrigin : "https://api.openai.com"});
+}
+
+// Bytes that tell their offset.
+std::string pattern(std::size_t size) {
+    std::string bytes(size, '\0');
+    for (std::size_t i = 0; i != size; ++i) bytes[i] = static_cast<char>('a' + (i * 7 + i / 5) % 26);
+    return bytes;
+}
+
+// Every file under `directory` holds none of `needles`. Returns how many files it read.
+std::size_t files_holding_none_of(const std::filesystem::path& directory, const std::vector<std::string>& needles) {
+    std::size_t scanned = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(directory)) {
+        if (!entry.is_regular_file()) continue;
+        std::ifstream     in(entry.path(), std::ios::binary);
+        const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        for (const auto& needle : needles)
+            EXPECT_EQ(bytes.find(needle), std::string::npos) << needle << " in " << entry.path();
+        ++scanned;
+    }
+    return scanned;
+}
+
+// What no persisted byte may hold after a chunked upload: the upload URLs the peer handed out and the parts they
+// are made of, the API key, and the path of a file the upload read.
+std::vector<std::string> secrets_of(const ChunkedUploadPeer& peer, std::string path = {}) {
+    std::vector<std::string> needles = peer.urls();
+    for (const char* part : {"SECRET-session", "upload_id", "upload_protocol", "fixture-key", "Bearer"})
+        needles.emplace_back(part);
+    if (!path.empty()) needles.push_back(std::move(path));
+    return needles;
+}
+}  // namespace
+
+TEST(ProgramProviderBindingJournal, NoUploadSessionUrlIsPersistedAnywhere) {
+    // #541: a chunked upload's session URL lets anyone write the file without the API key. Only the live call
+    // holds it: not the provider journal, the Program's records or the checkpoints.
+    TempDir           files("upload-session-url");
+    ChunkedUploadPeer peer;
+    Host              h(std::make_shared<Peer>(), chunked_options(peer), &files);
+    const auto        source = files.path / "source.bin";
+    const auto        bytes  = pattern(100);
+    write_file(source, bytes);
+    h.script().chunk_size = 40;
+
+    // From a file, in three parts, then from memory.
+    h.script().upload_path = source.string();
+    h.script().upload_size = bytes.size();
+    const auto from_file   = h.run(Shape::ChunkedUpload, "upload-file");
+    ASSERT_EQ(from_file.status(), ProgramTerminalStatus::Completed) << failure_text(from_file);
+    h.script().upload_path.clear();
+    h.script().upload_bytes = bytes;
+    const auto from_memory  = h.run(Shape::ChunkedUpload, "upload-memory");
+    ASSERT_EQ(from_memory.status(), ProgramTerminalStatus::Completed) << failure_text(from_memory);
+
+    const auto held = peer.sessions();
+    ASSERT_EQ(held.size(), 2U);
+    EXPECT_EQ(held[0].bytes, bytes);
+    EXPECT_EQ(held[1].bytes, bytes);
+    EXPECT_NE(from_file.output().dump().find(held[0].file), std::string::npos) << from_file.output().dump();
+    EXPECT_EQ(journal_states(files.provider_db()), std::vector<std::string>(8, "succeeded")) << "two uploads of four calls";
+
+    const auto needles = secrets_of(peer, source.string());
+    EXPECT_GE(files_holding_none_of(files.path, needles), 3U) << "the program, checkpoint and provider databases";
+    for (const auto* result : {&from_file, &from_memory}) {
+        const auto text = result->output().dump();
+        for (const auto& needle : needles) EXPECT_EQ(text.find(needle), std::string::npos) << needle;
+    }
+    h.close();
+    EXPECT_GE(files_holding_none_of(files.path, needles), 3U) << "and after the write-ahead logs are folded in";
+}
+
+TEST(ProgramProviderBindingJournal, NoUploadSessionUrlIsPersistedWhenAPartFails) {
+    // #541: a failed part is journaled with its error and the evidence the SDK kept. Neither names the session.
+    TempDir           files("upload-session-failed");
+    ChunkedUploadPeer peer;
+    peer.fail_chunks = 1;
+    Host h(std::make_shared<Peer>(), chunked_options(peer), &files);
+    h.script().upload_bytes = pattern(100);
+    h.script().chunk_size   = 40;
+    const auto failed       = h.run(Shape::ChunkedUpload, "upload-failed");
+    ASSERT_EQ(failed.status(), ProgramTerminalStatus::Failed);
+    EXPECT_EQ(peer.chunks(), 0);
+    EXPECT_EQ(journal_states(files.provider_db()).size(), 2U) << "the session's opening and the part that failed";
+
+    const auto needles = secrets_of(peer);
+    const auto text    = failure_text(failed);
+    for (const auto& needle : needles) EXPECT_EQ(text.find(needle), std::string::npos) << needle << " in " << text;
+    EXPECT_GE(files_holding_none_of(files.path, needles), 3U);
+    h.close();
+    EXPECT_GE(files_holding_none_of(files.path, needles), 3U);
+}
+
+TEST(ProgramProviderBindingJournal, AnUploadInOneRequestPersistsNeitherItsPathNorACredential) {
+    // #541: an upload from a file or from memory, sent in one request, leaves no path and no key in a record.
+    TempDir                              files("upload-persisted");
+    neograph::test::endpoints::UploadPeer peer;
+    Host h(std::make_shared<Peer>(), endpoint_options(peer.origin()), &files);
+    const auto source = files.path / "source.bin";
+    write_file(source, "the file's contents");
+    h.script().upload_path = source.string();
+    h.script().upload_size = 19;
+    const auto from_file   = h.run(Shape::FileUpload, "upload-one-file");
+    ASSERT_EQ(from_file.status(), ProgramTerminalStatus::Completed) << failure_text(from_file);
+    h.script().upload_bytes = "bytes in memory";
+    const auto from_memory  = h.run(Shape::FileUpload, "upload-one-memory");
+    ASSERT_EQ(from_memory.status(), ProgramTerminalStatus::Completed) << failure_text(from_memory);
+    ASSERT_EQ(peer.received().size(), 2U);
+    h.close();
+    EXPECT_GE(files_holding_none_of(files.path, {source.string(), "fixture-key", "Bearer"}), 3U);
 }
