@@ -78,6 +78,10 @@ def test_the_receipt_follows_the_order_and_the_classes_of_the_epoch(preset, layo
         assert receipt.assembled_artifact_ids == epoch.ordered_artifact_ids
         assert sorted(receipt.assembled_artifact_ids) == epoch.artifact_ids
         assert epoch.assembly_layout == ng.AssemblyLayout.StableFirst
+        assert receipt.class_rule_version == ng.STABILITY_DERIVATION_RULE_VERSION
+        declared = {artifact.id for artifact in artifacts if artifact.declared_stability_class is not None}
+        assert {artifact_id for artifact_id, source in receipt.class_sources.items()
+                if source == ng.ClassSource.Declared} == declared
         classes = [receipt.artifact_classes[artifact_id] for artifact_id in receipt.assembled_artifact_ids]
         assert classes == sorted(classes, key=list(ng.StabilityClass.__members__.values()).index)
         assert receipt.encoder_family == pt.PRESETS[preset][0]

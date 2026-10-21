@@ -305,6 +305,14 @@ std::string_view to_string(AssemblyLayout value) noexcept {
     return "unknown";
 }
 
+std::string_view to_string(ClassSource value) noexcept {
+    switch (value) {
+        case ClassSource::Declared: return "declared";
+        case ClassSource::Derived: return "derived";
+    }
+    return "unknown";
+}
+
 std::string_view to_string(ContextStabilityRefusal value) noexcept {
     switch (value) {
         case ContextStabilityRefusal::VolatileSystemArtifact: return "volatile_system_artifact";
@@ -411,6 +419,12 @@ AssemblyLayout assembly_layout_from_string(std::string_view value) {
     if (value == "legacy") return AssemblyLayout::Legacy;
     if (value == "stable_first") return AssemblyLayout::StableFirst;
     throw std::invalid_argument("Unknown assembly layout");
+}
+
+ClassSource class_source_from_string(std::string_view value) {
+    if (value == "declared") return ClassSource::Declared;
+    if (value == "derived") return ClassSource::Derived;
+    throw std::invalid_argument("Unknown class source");
 }
 
 struct RuntimeHistoryRecord::Impl {
@@ -843,9 +857,12 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
             "Mandatory input tokens (" + std::to_string(data.mandatory_input_tokens) +
             ") exceed the estimated input tokens (" +
             std::to_string(data.estimated_input_tokens) + ") they are part of");
-    if (data.assembled_artifact_ids.has_value() != data.artifact_classes.has_value()) {
+    if (data.assembled_artifact_ids.has_value() != data.artifact_classes.has_value() ||
+        data.assembled_artifact_ids.has_value() != data.class_sources.has_value() ||
+        data.assembled_artifact_ids.has_value() != data.class_rule_version.has_value()) {
         throw std::invalid_argument(
-            "Context assembly assembled_artifact_ids and artifact_classes are recorded together");
+            "Context assembly assembled_artifact_ids, artifact_classes, class_sources and class_rule_version "
+            "are recorded together");
     }
     if (data.assembled_artifact_ids) {
         require_id_sequence(*data.assembled_artifact_ids, "Context assembly assembled_artifact_ids");
@@ -858,9 +875,16 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
             classified.push_back(id);
         }
         require_id_sequence(classified, "Context assembly artifact_classes");
-        if (sorted != data.artifact_ids || classified != data.artifact_ids) {
+        std::vector<std::string> sourced;
+        sourced.reserve(data.class_sources->size());
+        for (const auto& [id, source] : *data.class_sources) {
+            require_known_enum(source, "Context assembly class source");
+            sourced.push_back(id);
+        }
+        require_id_sequence(sourced, "Context assembly class_sources");
+        if (sorted != data.artifact_ids || classified != data.artifact_ids || sourced != data.artifact_ids) {
             throw std::invalid_argument(
-                "Context assembly order and classes must cover exactly its artifact_ids");
+                "Context assembly order, classes and class sources must cover exactly its artifact_ids");
         }
     }
     if (data.encoder_family) detail::validate_token(*data.encoder_family, "Context assembly encoder_family");
@@ -891,6 +915,10 @@ ContextAssemblyReceipt ContextAssemblyReceipt::create_structural(ContextAssembly
         json classes = json::object();
         for (const auto& [id, stability] : *data.artifact_classes) classes[id] = std::string(to_string(stability));
         body["artifact_classes"] = std::move(classes);
+        json sources = json::object();
+        for (const auto& [id, source] : *data.class_sources) sources[id] = std::string(to_string(source));
+        body["class_sources"] = std::move(sources);
+        body["class_rule_version"] = *data.class_rule_version;
     }
     if (data.encoder_family) body["encoder_family"] = *data.encoder_family;
     if (data.stable_boundary) body["stable_boundary"] = boundary_body(*data.stable_boundary);
@@ -927,7 +955,8 @@ ContextAssemblyReceipt ContextAssemblyReceipt::parse(
          "normalized_request_digest", "message_window_digest", "artifact_ids",
          "required_skill_artifact_ids", "raw_from_sequence", "raw_through_sequence",
          "estimated_input_tokens", "mandatory_input_tokens", "assembled_artifact_ids",
-         "artifact_classes", "encoder_family", "stable_boundary", "prefix_boundary",
+         "artifact_classes", "class_sources", "class_rule_version", "encoder_family",
+         "stable_boundary", "prefix_boundary",
          "prefix_digest", "tools_digest", "break_reason"});
     const auto version = require_format_version(
         value, "neograph-context-assembly-receipt", LEGACY_STORAGE_SCHEMA_VERSION,
@@ -960,6 +989,27 @@ ContextAssemblyReceipt ContextAssemblyReceipt::parse(
         }
         data.artifact_classes = std::move(parsed);
     }
+    if (value.contains("class_sources")) {
+        const auto& sources = value.at("class_sources");
+        if (!sources.is_object()) {
+            throw std::invalid_argument("Stored runtime value field 'class_sources' must be an object");
+        }
+        std::map<std::string, ClassSource> parsed;
+        for (const auto& [id, name] : sources.items()) {
+            if (!name.is_string()) {
+                throw std::invalid_argument("Stored runtime value field 'class_sources' must name sources");
+            }
+            parsed.emplace(id, class_source_from_string(name.get<std::string>()));
+        }
+        data.class_sources = std::move(parsed);
+    }
+    if (value.contains("class_rule_version")) {
+        const auto version = required_u64(value, "class_rule_version");
+        if (version > std::numeric_limits<std::uint32_t>::max()) {
+            throw std::invalid_argument("Stored runtime value field 'class_rule_version' is out of range");
+        }
+        data.class_rule_version = static_cast<std::uint32_t>(version);
+    }
     data.encoder_family = optional_string(value, "encoder_family");
     data.stable_boundary = optional_boundary(value, "stable_boundary");
     data.prefix_boundary = optional_boundary(value, "prefix_boundary");
@@ -990,6 +1040,8 @@ std::uint64_t ContextAssemblyReceipt::estimated_input_tokens() const noexcept { 
 std::uint64_t ContextAssemblyReceipt::mandatory_input_tokens() const noexcept { return impl_->data.mandatory_input_tokens; }
 const std::optional<std::vector<std::string>>& ContextAssemblyReceipt::assembled_artifact_ids() const noexcept { return impl_->data.assembled_artifact_ids; }
 const std::optional<std::map<std::string, StabilityClass>>& ContextAssemblyReceipt::artifact_classes() const noexcept { return impl_->data.artifact_classes; }
+const std::optional<std::map<std::string, ClassSource>>& ContextAssemblyReceipt::class_sources() const noexcept { return impl_->data.class_sources; }
+const std::optional<std::uint32_t>& ContextAssemblyReceipt::class_rule_version() const noexcept { return impl_->data.class_rule_version; }
 const std::optional<std::string>& ContextAssemblyReceipt::encoder_family() const noexcept { return impl_->data.encoder_family; }
 const std::optional<ContextPrefixBoundary>& ContextAssemblyReceipt::stable_boundary() const noexcept { return impl_->data.stable_boundary; }
 const std::optional<ContextPrefixBoundary>& ContextAssemblyReceipt::prefix_boundary() const noexcept { return impl_->data.prefix_boundary; }
@@ -1028,10 +1080,24 @@ void validate_context_assembly_receipt(
         throw std::invalid_argument("Context assembly receipt artifact evidence does not match");
     }
     if (receipt.artifact_classes()) {
+        // A class an artifact declares is part of the artifact and has to match strictly. A class the receipt
+        // derived is checked by deriving it again only under the rule version in force: the rule can change
+        // after the receipt was stored, and a receipt written under an older one is read as it was written.
+        const bool current_rule = receipt.class_rule_version() == STABILITY_DERIVATION_RULE_VERSION;
         for (const auto& artifact : artifacts) {
             const auto recorded = receipt.artifact_classes()->find(artifact.id());
-            if (recorded == receipt.artifact_classes()->end() ||
-                recorded->second != artifact.stability_class()) {
+            const auto source = receipt.class_sources()->find(artifact.id());
+            if (recorded == receipt.artifact_classes()->end() || source == receipt.class_sources()->end()) {
+                throw std::invalid_argument(
+                    "Context assembly receipt artifact classes do not match the artifacts");
+            }
+            const auto& declared = artifact.declared_stability_class();
+            if ((source->second == ClassSource::Declared) != declared.has_value()) {
+                throw std::invalid_argument(
+                    "Context assembly receipt class source does not match what the artifact declares");
+            }
+            if (declared ? recorded->second != *declared
+                         : current_rule && recorded->second != artifact.stability_class()) {
                 throw std::invalid_argument(
                     "Context assembly receipt artifact classes do not match the artifacts");
             }
@@ -1171,6 +1237,10 @@ void verify_context_epoch_claim(
     }
     const auto current = selected_artifacts(epoch, artifacts);
     const auto previous = selected_artifacts(*predecessor, predecessor_artifacts);
+    // Under the stable-first layout the recorded order is the order of the request, so a claim to extend is
+    // only as good as a layout the assembler accepts: a Volatile artifact in front of a Stable one, for
+    // instance, passes the comparison below and is still no extension.
+    if (epoch.assembly_layout() == AssemblyLayout::StableFirst) validate_context_layout(epoch, artifacts);
     if (predecessor->run_id() != epoch.run_id() || predecessor->feed_id() != epoch.feed_id() ||
         predecessor->raw_from_sequence() != epoch.raw_from_sequence()) {
         throw ContextStabilityError(

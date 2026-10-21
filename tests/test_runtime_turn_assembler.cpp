@@ -693,6 +693,9 @@ TEST(RuntimeTurnAssembler, ReceiptRecordsTheAssembledOrderTheClassesAndTheEncode
     EXPECT_EQ(receipt.artifact_classes()->at(skill.id()), StabilityClass::Stable);
     EXPECT_EQ(receipt.artifact_classes()->at(note.id()), StabilityClass::Volatile);
     EXPECT_EQ(receipt.artifact_classes()->at(late.id()), StabilityClass::Volatile);
+    // Every class here is derived, under the rule in force.
+    for (const auto& [id, source] : *receipt.class_sources()) EXPECT_EQ(source, ClassSource::Derived) << id;
+    EXPECT_EQ(receipt.class_rule_version(), std::optional<std::uint32_t>(STABILITY_DERIVATION_RULE_VERSION));
     EXPECT_EQ(receipt.encoder_family(), std::optional<std::string>(turn.request.family()));
     EXPECT_EQ(receipt.encoder_family(), std::optional<std::string>("openai.chat"));
     // The prompt and the boundaries are not changed or marked by this version.
@@ -891,6 +894,9 @@ TEST(StableFirstAssembly, FollowsTheOrderTheEpochRecordsAndNotTheOrderOfAHash) {
     expect_text(messages[5], sp::Role::User, "note one");
     EXPECT_EQ(turn.assembly_receipt.assembled_artifact_ids(), fixture.order);
     EXPECT_EQ(turn.assembly_receipt.artifact_classes()->at(summary.id()), StabilityClass::Slow);
+    // The summary declares its class and the skill does not.
+    EXPECT_EQ(turn.assembly_receipt.class_sources()->at(summary.id()), ClassSource::Declared);
+    EXPECT_EQ(turn.assembly_receipt.class_sources()->at(skill.id()), ClassSource::Derived);
 
     // The notes in the other order give the other prompt: nothing but the epoch decides.
     LayoutFixture swapped({skill, summary, first, second});
@@ -1104,4 +1110,19 @@ TEST(StableFirstAssembly, RefusesAConversationThatContainsTheTextOfTheMarker) {
     expect_layout_refusal(ContextStabilityRefusal::PrefixBoundaryUnavailable, [&] {
         (void)assemble_for(fixture, provider, {}, {user});
     });
+}
+
+TEST(RuntimeTurnAssembler, ToolsDigestDistinguishesNoToolsFromABodyItCannotRead) {
+    // A body without a `tools` member has no tools and no digest.
+    EXPECT_FALSE(RuntimeTurnAssembler::tools_digest(R"({"model":"m","messages":[]})"));
+    const auto one = RuntimeTurnAssembler::tools_digest(R"({"messages":[],"tools":[{"name":"read"}]})");
+    const auto two = RuntimeTurnAssembler::tools_digest(R"({"tools":[{"name":"read"},{"name":"write"}],"messages":[]})");
+    ASSERT_TRUE(one && two);
+    EXPECT_NE(*one, *two);
+    // The digest is that of the tools alone, whatever else the body holds and however it is written.
+    EXPECT_EQ(RuntimeTurnAssembler::tools_digest(R"({ "tools": [ {"name": "read"} ], "model": "other" })"), one);
+    // A body that cannot be read says nothing about its tools, and is not reported as having none.
+    for (const std::string body : {"", "not json", R"({"tools":[)", "[1,2]", R"("tools")", "null"}) {
+        EXPECT_THROW((void)RuntimeTurnAssembler::tools_digest(body), std::invalid_argument) << body;
+    }
 }

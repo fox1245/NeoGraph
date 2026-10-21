@@ -29,6 +29,12 @@ def _sha(char):
     return "sha256:" + char * 64
 
 
+def _sources(artifacts):
+    """What a receipt records for the classes of artifacts: declared or derived, under the rule in force."""
+    return {artifact.id: ng.ClassSource.Declared if artifact.declared_stability_class is not None
+            else ng.ClassSource.Derived for artifact in artifacts}
+
+
 def _skill_data():
     data = ng.ContextArtifactData()
     data.kind = KIND.RequiredSkill
@@ -105,7 +111,8 @@ def test_values_stored_before_the_class_existed_keep_their_bytes_and_identity():
 
     receipt = ng.ContextAssemblyReceipt.parse(RECEIPT_V1, epoch, [skill, summary])
     assert receipt.id == RECEIPT_V1_ID and receipt.serialize_canonical() == RECEIPT_V1
-    for name in ("assembled_artifact_ids", "artifact_classes", "encoder_family", "stable_boundary",
+    for name in ("assembled_artifact_ids", "artifact_classes", "class_sources", "class_rule_version",
+                 "encoder_family", "stable_boundary",
                  "prefix_boundary", "prefix_digest", "tools_digest", "break_reason"):
         assert getattr(receipt, name) is None, name
 
@@ -235,6 +242,8 @@ def test_the_receipt_of_version_2_carries_the_prefix_fields():
 
     base.assembled_artifact_ids = [summary.id, skill.id]
     base.artifact_classes = {skill.id: ng.StabilityClass.Stable, summary.id: ng.StabilityClass.Volatile}
+    base.class_sources = _sources([skill, summary])
+    base.class_rule_version = ng.STABILITY_DERIVATION_RULE_VERSION
     base.encoder_family = "openai.chat"
     base.tools_digest = _sha("4")
     receipt = ng.ContextAssemblyReceipt.create(base, epoch, [skill, summary])
@@ -242,6 +251,8 @@ def test_the_receipt_of_version_2_carries_the_prefix_fields():
     assert json.loads(receipt.serialize_canonical())["storage_schema_version"] == 2
     assert receipt.assembled_artifact_ids == [summary.id, skill.id]
     assert receipt.artifact_classes == {skill.id: ng.StabilityClass.Stable, summary.id: ng.StabilityClass.Volatile}
+    assert receipt.class_sources == {skill.id: ng.ClassSource.Derived, summary.id: ng.ClassSource.Derived}
+    assert receipt.class_rule_version == ng.STABILITY_DERIVATION_RULE_VERSION
     assert receipt.encoder_family == "openai.chat" and receipt.tools_digest == _sha("4")
     assert receipt.stable_boundary is None and receipt.prefix_boundary is None and receipt.prefix_digest is None
     again = ng.ContextAssemblyReceipt.parse(receipt.serialize_canonical(), epoch, [skill, summary])
@@ -453,6 +464,8 @@ def test_a_change_of_layout_has_to_be_declared_and_a_receipt_records_real_bounda
     receipt_data.estimated_input_tokens, receipt_data.mandatory_input_tokens = 100, 10
     receipt_data.assembled_artifact_ids = [skill.id, note.id]
     receipt_data.artifact_classes = {skill.id: ng.StabilityClass.Stable, note.id: ng.StabilityClass.Volatile}
+    receipt_data.class_sources = _sources([skill, note])
+    receipt_data.class_rule_version = ng.STABILITY_DERIVATION_RULE_VERSION
     receipt_data.break_reason = ng.ContextBreakReason.LayoutChange
     receipt_data.stable_boundary = ng.ContextPrefixBoundary(1, 0)
     receipt_data.prefix_boundary = ng.ContextPrefixBoundary(4, 0)
@@ -467,3 +480,74 @@ def test_a_change_of_layout_has_to_be_declared_and_a_receipt_records_real_bounda
     receipt_data.prefix_boundary = None
     with pytest.raises(ValueError):
         ng.ContextAssemblyReceipt.create(receipt_data, declared, [skill, note])  # a digest names the prefix it covers
+
+
+def test_a_receipt_reads_the_classes_as_they_were_written_under_an_older_derivation_rule():
+    skill = ng.ContextArtifact.create(_skill_data())
+    summary = ng.ContextArtifact.create(_summary_data())
+    declared_data = _summary_data()
+    declared_data.producer_id = "summarizer.v2"
+    declared_data.stability_class = ng.StabilityClass.Slow
+    declared = ng.ContextArtifact.create(declared_data)
+    assert summary.stability_class == ng.StabilityClass.Volatile  # by the rule in force
+    artifacts = [skill, summary, declared]
+    epoch = _epoch(artifacts, order=False)
+
+    data = ng.ContextAssemblyReceiptData()
+    data.context_epoch_id = epoch.id
+    data.normalized_request_digest, data.message_window_digest = _sha("2"), _sha("3")
+    data.artifact_ids = epoch.artifact_ids
+    data.required_skill_artifact_ids = [skill.id]
+    data.raw_from_sequence, data.raw_through_sequence = 1, 5
+    data.estimated_input_tokens, data.mandatory_input_tokens = 100, 10
+    data.assembled_artifact_ids = [skill.id, summary.id, declared.id]
+    # The receipt says Slow for the summary, as an older rule would have derived it.
+    data.artifact_classes = {skill.id: ng.StabilityClass.Stable, summary.id: ng.StabilityClass.Slow,
+                             declared.id: ng.StabilityClass.Slow}
+    data.class_sources = _sources(artifacts)
+    data.class_rule_version = ng.STABILITY_DERIVATION_RULE_VERSION
+    with pytest.raises(ValueError):
+        ng.ContextAssemblyReceipt.create(data, epoch, artifacts)  # the rule in force derives it again
+
+    data.class_rule_version = ng.STABILITY_DERIVATION_RULE_VERSION - 1
+    written = ng.ContextAssemblyReceipt.create(data, epoch, artifacts)
+    stored = ng.ContextAssemblyReceipt.parse(written.serialize_canonical(), epoch, artifacts)
+    assert stored.id == written.id
+    assert stored.artifact_classes[summary.id] == ng.StabilityClass.Slow
+    assert stored.class_sources[summary.id] == ng.ClassSource.Derived
+    assert stored.class_sources[declared.id] == ng.ClassSource.Declared
+    assert stored.class_rule_version == ng.STABILITY_DERIVATION_RULE_VERSION - 1
+
+    # A declared class is strict whatever the rule version, and so is the source that says it was declared.
+    data.artifact_classes = {**data.artifact_classes, declared.id: ng.StabilityClass.Stable}
+    with pytest.raises(ValueError):
+        ng.ContextAssemblyReceipt.create(data, epoch, artifacts)
+    data.artifact_classes = {**data.artifact_classes, declared.id: ng.StabilityClass.Slow}
+    data.class_sources = {**data.class_sources, declared.id: ng.ClassSource.Derived}
+    with pytest.raises(ValueError):
+        ng.ContextAssemblyReceipt.create(data, epoch, artifacts)
+
+
+def test_an_extension_under_the_stable_first_layout_is_also_a_layout_the_assembler_accepts():
+    skill, first_note, second_note = _head("Verify before editing."), _tail("reading 1"), _tail("reading 2")
+
+    def epoch(artifacts, sequence, predecessor, layout, through):
+        data = ng.ContextEpochData()
+        data.run_id, data.sequence, data.predecessor_id = "run_claim", sequence, predecessor
+        data.feed_id, data.raw_from_sequence, data.raw_through_sequence = "hist_claim", 1, through
+        data.raw_window_digest = _sha("e")
+        data.artifact_ids = data.ordered_artifact_ids = [artifact.id for artifact in artifacts]
+        data.assembly_layout = layout
+        if predecessor is not None:
+            data.prefix_claim = ng.ContextPrefixClaim.Extends
+        return ng.ContextEpoch.create(data)
+
+    for layout, accepted in ((ng.AssemblyLayout.Legacy, True), (ng.AssemblyLayout.StableFirst, False)):
+        before = epoch([skill, first_note], 1, None, layout, 5)
+        after = epoch([second_note, skill], 2, before.id, layout, 6)
+        if accepted:
+            ng.verify_context_epoch_claim(after, [second_note, skill], before, [skill, first_note])
+        else:
+            with pytest.raises(ng.ContextStabilityError) as refused:
+                ng.verify_context_epoch_claim(after, [second_note, skill], before, [skill, first_note])
+            assert refused.value.code == ng.ContextStabilityRefusal.TierOrderViolated

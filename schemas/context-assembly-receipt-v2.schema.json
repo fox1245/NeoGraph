@@ -24,6 +24,12 @@
       "propertyNames": { "$ref": "#/$defs/sha256" },
       "additionalProperties": { "enum": ["stable", "slow", "volatile"] }
     },
+    "class_sources": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/sha256" },
+      "additionalProperties": { "enum": ["declared", "derived"] }
+    },
+    "class_rule_version": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
     "encoder_family": { "type": "string", "minLength": 1 },
     "stable_boundary": { "$ref": "#/$defs/boundary" },
     "prefix_boundary": { "$ref": "#/$defs/boundary" },
@@ -43,8 +49,14 @@
   "allOf": [
     {
       "if": { "required": ["assembled_artifact_ids"] },
-      "then": { "required": ["artifact_classes"] },
-      "else": { "not": { "required": ["artifact_classes"] } }
+      "then": { "required": ["artifact_classes", "class_sources", "class_rule_version"] },
+      "else": {
+        "allOf": [
+          { "not": { "required": ["artifact_classes"] } },
+          { "not": { "required": ["class_sources"] } },
+          { "not": { "required": ["class_rule_version"] } }
+        ]
+      }
     }
   ],
   "$defs": {

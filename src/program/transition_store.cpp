@@ -1032,6 +1032,10 @@ bool is_valid_program_runtime_context_clone(
                 source.assembly_receipt.assembled_artifact_ids() ||
             target.assembly_receipt.artifact_classes() !=
                 source.assembly_receipt.artifact_classes() ||
+            target.assembly_receipt.class_sources() !=
+                source.assembly_receipt.class_sources() ||
+            target.assembly_receipt.class_rule_version() !=
+                source.assembly_receipt.class_rule_version() ||
             target.assembly_receipt.encoder_family() !=
                 source.assembly_receipt.encoder_family() ||
             target.assembly_receipt.stable_boundary() !=

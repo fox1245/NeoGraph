@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=acab2f08683f42b29a9e0b385b13fe6d1107a87938bfb97a6b14ee86286d5ca6 -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -194,8 +194,8 @@ trusted supplemental input
 
 - 아티팩트는 `StabilityClass`를 선언할 수 있습니다. `Stable`(실행 내내 같은 바이트), `Slow`(압축이나 그 밖에 선언된 프리픽스 단절 때에만 바뀜), `Volatile`(호출마다 바뀔 수 있음)입니다. 선언하지 않은 아티팩트는 읽을 때 클래스를 얻습니다. `RequiredSkill`과 `HardConstraint`는 `Stable`, 프로듀서가 `COMPACTION_PRODUCER_ID`인 `DerivedContext`는 `Slow`, 나머지는 모두 `Volatile`입니다. System 메시지로 렌더링되는 종류의 `Volatile` 아티팩트를 만들면 `ContextStabilityError`로 거부됩니다.
 - 아티팩트는 `AnchorMode`를 선언할 수 있습니다. `Replace`(기본값) 또는 `KeepInPlace`입니다. 아직 이를 사용하는 것은 없습니다.
-- 에포크는 아티팩트를 고정된 순서로 담은 `ordered_artifact_ids`와 `prefix_claim`을 기록할 수 있습니다. `prefix_claim`은 `Extends`(요청의 앞부분이 직전 에포크와 같고 끝에서만 늘어남) 또는 `break_reason`을 동반한 `Breaks`입니다. `Extends`를 선언한 에포크를 활성화하면 활성 에포크, 또는 호스트가 `activate`에 넘긴 직전 에포크에 대해 선언을 검사합니다. 같은 `raw_from_sequence`, 더 큰 `raw_through_sequence`, 같은 순서의 같은 `Stable`·`Slow` 아티팩트, 그리고 여전히 선택되어 있고 RAW 윈도 안에 있는 `KeepInPlace` 아티팩트가 조건입니다. 순서를 기록하지 않은 에포크(이 필드가 생기기 전에 저장된 것 등)는 이어 갈 수 없습니다.
-- 어셈블러가 쓰는 영수증은 프롬프트 순서대로의 아티팩트, 그 클래스, 인코더 계열, 도구의 다이제스트, 에포크의 단절 사유를 기록합니다.
+- 에포크는 아티팩트를 고정된 순서로 담은 `ordered_artifact_ids`와 `prefix_claim`을 기록할 수 있습니다. `prefix_claim`은 `Extends`(요청의 앞부분이 직전 에포크와 같고 끝에서만 늘어남) 또는 `break_reason`을 동반한 `Breaks`입니다. `Extends`를 선언한 에포크를 활성화하면 활성 에포크, 또는 호스트가 `activate`에 넘긴 직전 에포크에 대해 선언을 검사합니다. 같은 `raw_from_sequence`, 더 큰 `raw_through_sequence`, 같은 순서의 같은 `Stable`·`Slow` 아티팩트, 그리고 여전히 선택되어 있고 RAW 윈도 안에 있는 `KeepInPlace` 아티팩트가 조건입니다. 순서를 기록하지 않은 에포크(이 필드가 생기기 전에 저장된 것 등)는 이어 갈 수 없습니다. `Extends`가 약속하는 바는 레이아웃에 따라 다릅니다. `Legacy`에서는 `Stable`·`Slow` 아티팩트와 기록된 순서가 그대로이고 윈도가 늘기만 했다는 뜻이며, 레거시 어셈블러는 배치, 우선순위, 프로듀서 순으로 배열하고 기록된 순서를 읽지 않으므로 요청의 시작 부분까지 약속하지는 않습니다. `StableFirst`에서는 기록된 순서가 곧 요청의 순서이고, 에포크의 아티팩트가 어셈블러가 받아들이는 레이아웃이 아니면 선언이 거부되며, `Slow` 아티팩트가 끝날 때까지의 요청 시작 부분은 직전 에포크와 같습니다(호스트 지침과 도구는 에포크가 소유하지 않으므로 제외).
+- 어셈블러가 쓰는 영수증은 프롬프트 순서대로의 아티팩트, 그 클래스(각각 아티팩트가 선언한 것인지 유도한 것인지, 그리고 유도 규칙의 버전과 함께), 인코더 계열, 도구의 다이제스트, 에포크의 단절 사유를 기록합니다. JSON이 아닌 본문은 도구 없는 요청이 아니라 오류입니다. 저장된 영수증은 클래스가 선언된 곳에서는 엄격하게 대조하고, 현재 규칙의 버전일 때만 클래스를 다시 유도해 비교하므로, 나중에 규칙이 바뀌어도 저장된 영수증을 계속 읽을 수 있습니다.
 
 ## 안정 우선 레이아웃
 
