@@ -337,18 +337,36 @@ provider family:
   placement puts it.
 
 Keep the text of System-role artifacts unchanged between turns when you want a
-stable request start. This describes the assembly today. The defaults and the
-per-family rules are under review, and a change would alter the assembled bytes.
+stable request start. This is the legacy layout, which an epoch uses unless it
+asks for another one (see "The stable-first layout").
 
 ## Stability class, order and prefix claim
 
-Whether a provider's prompt cache keeps the start of a request depends on which artifacts stay the same between calls. The data model records that. The assembler does not use it yet, so the assembled request is the one described under "Artifact placement".
+Whether a provider's prompt cache keeps the start of a request depends on which artifacts stay the same between calls. The data model records that, and the stable-first layout (next section) uses it.
 
 - An artifact can declare a `StabilityClass`: `Stable` (the same bytes for the life of the run), `Slow` (changes only at a compaction or another declared prefix break) or `Volatile` (may change on every call). An artifact that declares none gets a class when it is read: `RequiredSkill` and `HardConstraint` are `Stable`, a `DerivedContext` whose producer is `COMPACTION_PRODUCER_ID` is `Slow`, and everything else is `Volatile`. Creating a `Volatile` artifact of a kind that renders as a System message is refused with `ContextStabilityError`.
 - An artifact can declare an `AnchorMode`: `Replace` (the default) or `KeepInPlace`. Nothing acts on it yet.
 - An epoch can record `ordered_artifact_ids`, the artifacts in a fixed order, and a `prefix_claim`: `Extends` (the request start is the predecessor's and only grows at the end) or `Breaks` with a `break_reason`. Activating an epoch that `Extends` checks the claim against the active epoch, or against the predecessor the host passes to `activate`: the same `raw_from_sequence`, a larger `raw_through_sequence`, the same `Stable` and `Slow` artifacts in the same order, and `KeepInPlace` artifacts that are still selected and inside the RAW window. An epoch that records no order, such as one stored before the field existed, cannot be extended.
 - A receipt written by the assembler records the artifacts in the order of the prompt, their classes, the encoder family, a digest of the tools and the epoch's break reason.
 
+## The stable-first layout
+
+An epoch chooses how its artifacts are laid out with `assembly_layout`. `Legacy`, the default and the only layout an epoch stored before the field existed can have, is the assembly under "Artifact placement". `StableFirst` is opt-in, needs `ordered_artifact_ids`, and builds the prompt in this order:
+
+```text
+host instructions
+Stable artifacts, in the recorded order
+Slow artifacts, in the recorded order
+RAW messages
+Volatile artifacts, in the recorded order
+trusted supplemental input
+```
+
+- **The epoch's list is the order.** `order_context_artifacts` builds it from the artifacts: stability class, then higher `priority`, then `producer_id`, then a key the host gives. No hash of the content takes part, so a sibling whose text changes keeps its place, and two artifacts that agree on all four are refused as ambiguous.
+- **Placement follows the class.** `Stable` and `Slow` artifacts are placed at `BeforeHistory`, `Volatile` ones at `AfterHistory`, and the list names the `Stable` ones, then the `Slow` ones, then the `Volatile` ones. Anything else, such as an artifact created with the default `BeforeLatestUser` placement, is refused with a `ContextStabilityError` and not moved.
+- **System text stays in front.** A System message may be a host instruction or a `Stable` or `Slow` artifact, and nothing else: a RAW or supplemental System message would be lifted into the system field by `anthropic.messages`, `google.generate` and `google.interactions` and would move the start of the request. The lifted text is ordered `Stable`, then `Slow`.
+- **A layout change is a break.** Two consecutive epochs may differ in layout only if the later one declares `Breaks` with the reason `LayoutChange`; `verify_context_epoch_claim` refuses it otherwise, and an `Extends` claim across a layout change as well.
+- **Two boundaries, read from the body.** The receipt records where the `Stable` part (host instructions and `Stable` artifacts) ends and where the append-only part (everything in front of the `Volatile` artifacts) ends, and a digest of the request up to the second. A boundary is the first message and part of the encoded body that is not in the prefix, so `{0, 0}` on a family that lifts System text is a prefix of the tools and the system field alone. The positions are those of the body after System text is lifted and tool results are regrouped. The assembler finds them by encoding the request a second and a third time with only the messages of the prefix and a marker message after them, and it refuses the epoch with `ContextStabilityError` if the encoded bodies do not agree. When a `Slow` System text shares the system field with the `Stable` text, the field is one block and no `Stable` boundary is recorded. The digest covers every member of the body except the stream flag and the output cap, with the messages cut at the boundary. A legacy epoch has no boundaries.
 
 ## Runtime developer instructions
 

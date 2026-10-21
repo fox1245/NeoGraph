@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=5f8e6ab72d08c418bed91bd429a171ccecb655a519d3818748d0fab7a20ea18e -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ja source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
 # Strictランタイムインターポジション
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -186,17 +186,35 @@ trusted supplemental input
 - `anthropic.messages`、`google.generate`、`google.interactions` では、リクエストビルダーが、すべてのSystemメッセージを、配置にかかわらず最上位のsystemフィールドに移します（空行で区切り、組み立てた順）。そのため、Skillや制約の配置が決めるのは、会話の中での位置ではなく、systemテキスト同士の順序だけです。
 - `openai.chat` と `openai.responses` では、Systemメッセージは、配置が決めた場所にそのまま残ります。
 
-リクエストの先頭を安定させたいときは、System役割のアーティファクトのテキストを、ターンの間で変えないでください。ここまでは現在のアセンブリの説明です。デフォルトとファミリーごとの規則は見直し中で、変わるとアセンブルされるバイト列が変わります。
+リクエストの先頭を安定させたいときは、System役割のアーティファクトのテキストを、ターンの間で変えないでください。ここまではレガシーのレイアウトの説明で、エポックが別のレイアウトを求めない限りこれが使われます（「安定性優先のレイアウト」を参照）。
 
 ## 安定性クラス、順序、プレフィックス宣言
 
-プロバイダーのプロンプトキャッシュがリクエストの先頭を保てるかどうかは、呼び出しの間にどのアーティファクトが変わらないかに左右されます。データモデルはそれを記録します。アセンブラはまだこれを使わないので、組み立てられるリクエストは「アーティファクトの配置」で説明したとおりです。
+プロバイダーのプロンプトキャッシュがリクエストの先頭を保てるかどうかは、呼び出しの間にどのアーティファクトが変わらないかに左右されます。データモデルはそれを記録し、安定性優先のレイアウト（次の節）がそれを使います。
 
 - アーティファクトは `StabilityClass` を宣言できます。`Stable`（実行の間ずっと同じバイト列）、`Slow`（圧縮など、宣言されたプレフィックスの断絶のときだけ変わる）、`Volatile`（呼び出しごとに変わりうる）です。宣言しないアーティファクトは、読み込むときにクラスが決まります。`RequiredSkill` と `HardConstraint` は `Stable`、プロデューサーが `COMPACTION_PRODUCER_ID` の `DerivedContext` は `Slow`、それ以外はすべて `Volatile` です。System メッセージとして描画される種類の `Volatile` なアーティファクトを作ると、`ContextStabilityError` で拒否されます。
 - アーティファクトは `AnchorMode` を宣言できます。`Replace`（既定）または `KeepInPlace` です。これを使うものはまだありません。
 - エポックは、アーティファクトを固定された順序で並べた `ordered_artifact_ids` と `prefix_claim` を記録できます。`prefix_claim` は、`Extends`（リクエストの先頭は直前のエポックのものと同じで、末尾でだけ伸びる）か、`break_reason` を伴う `Breaks` です。`Extends` を宣言したエポックをアクティブにすると、アクティブなエポック、またはホストが `activate` に渡した直前のエポックに対して宣言が検査されます。条件は、同じ `raw_from_sequence`、より大きい `raw_through_sequence`、同じ順序の同じ `Stable` と `Slow` のアーティファクト、そしてまだ選択されていて RAW ウィンドウ内にある `KeepInPlace` のアーティファクトです。順序を記録していないエポック（このフィールドができる前に保存されたものなど）は、引き継げません。
 - アセンブラが書くレシートは、プロンプトの順序でのアーティファクト、そのクラス、エンコーダーのファミリー、ツールのダイジェスト、エポックの断絶の理由を記録します。
 
+## 安定性優先のレイアウト
+
+エポックは `assembly_layout` で、アーティファクトをどう並べるかを選びます。`Legacy` は既定で、このフィールドができる前に保存されたエポックが持てる唯一のレイアウトであり、「アーティファクトの配置」で説明したアセンブリです。`StableFirst` は明示的に選ぶもので、`ordered_artifact_ids` が必要で、プロンプトを次の順に組み立てます。
+
+```text
+host instructions
+Stable artifacts, in the recorded order
+Slow artifacts, in the recorded order
+RAW messages
+Volatile artifacts, in the recorded order
+trusted supplemental input
+```
+
+- **エポックのリストが順序です。** `order_context_artifacts` がアーティファクトからこのリストを作ります。安定性クラス、次に高い `priority`、次に `producer_id`、次にホストが与えるキーの順です。内容のハッシュは関与しないので、テキストが変わる兄弟のアーティファクトも位置を保ち、4 つがすべて同じ 2 つのアーティファクトはあいまいとして拒否されます。
+- **配置はクラスに従います。** `Stable` と `Slow` のアーティファクトは `BeforeHistory` に、`Volatile` のものは `AfterHistory` に置き、リストは `Stable`、`Slow`、`Volatile` の順に並べます。それ以外（たとえば既定の配置 `BeforeLatestUser` で作ったアーティファクト）は、移されることなく `ContextStabilityError` で拒否されます。
+- **System テキストは先頭に留まります。** System メッセージになれるのは、ホストの指示と、`Stable` または `Slow` のアーティファクトだけです。RAW や補助入力の System メッセージは、`anthropic.messages`、`google.generate`、`google.interactions` で system フィールドに移されてリクエストの先頭を動かすため、拒否されます。移されるテキストは `Stable`、`Slow` の順です。
+- **レイアウトの変更は断絶です。** 連続する 2 つのエポックでレイアウトが異なるには、後のエポックが理由 `LayoutChange` の `Breaks` を宣言しなければなりません。そうでなければ `verify_context_epoch_claim` が拒否し、レイアウトをまたぐ `Extends` の宣言も拒否します。
+- **本文から読み取る 2 つの境界。** レシートは、`Stable` の部分（ホストの指示と `Stable` のアーティファクト）が終わる位置、追記だけの部分（`Volatile` のアーティファクトより前のすべて）が終わる位置、そして後者までのリクエストのダイジェストを記録します。境界は、エンコードされた本文でプレフィックスに入らない最初のメッセージとパートなので、System テキストを移すファミリーでの `{0, 0}` は、ツールと system フィールドだけのプレフィックスです。位置は、System テキストを移し、ツール結果をまとめ直した後の本文のものです。アセンブラは、プレフィックスのメッセージとその後ろの目印のメッセージだけでリクエストを 2 回、3 回とエンコードして位置を見つけ、エンコードされた本文が食い違えば `ContextStabilityError` でエポックを拒否します。`Slow` の System テキストが `Stable` のテキストと system フィールドを共有するときは、フィールドが 1 つのブロックなので、`Stable` の境界は記録されません。ダイジェストは、ストリームのフラグと出力の上限を除く本文のすべてのメンバーを含み、メッセージは境界で切られます。レガシーのエポックには境界がありません。
 
 ## 実行時のデベロッパー指示
 

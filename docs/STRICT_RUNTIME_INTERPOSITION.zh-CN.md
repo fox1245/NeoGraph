@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=5f8e6ab72d08c418bed91bd429a171ccecb655a519d3818748d0fab7a20ea18e -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=zh-CN source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
 # 严格的运行时拦截
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -266,18 +266,35 @@ System 消息怎么处理，取决于 provider 的系列：
   决定的只是它在各段 system 文本中的次序，而不是它在对话里的位置。
 - 在 `openai.chat` 和 `openai.responses` 上，System 消息留在其放置位置所决定的位置。
 
-想让请求的开头保持稳定，请不要在各轮之间改动 System 角色制品的文本。以上描述的是目前的组装方式。
-默认值和各系列的规则正在评审，一旦改动，就会改变组装出的字节。
+想让请求的开头保持稳定，请不要在各轮之间改动 System 角色制品的文本。以上描述的是旧版（Legacy）布局，除非 epoch 要求别的布局，否则使用它（见“稳定优先的布局”）。
 
 ## 稳定性类别、顺序与前缀声明
 
-提供方的提示词缓存能否保住请求的开头，取决于各次调用之间哪些制品保持不变。数据模型记录这一点。装配器目前还不使用它，所以装配出的请求仍是“制品的放置位置”一节所描述的那样。
+提供方的提示词缓存能否保住请求的开头，取决于各次调用之间哪些制品保持不变。数据模型记录这一点，稳定优先的布局（下一节）使用它。
 
 - 制品可以声明 `StabilityClass`：`Stable`（整个运行期间字节不变）、`Slow`（只在压缩或其他已声明的前缀中断时才变）或 `Volatile`（每次调用都可能变）。未声明的制品在读取时获得类别：`RequiredSkill` 和 `HardConstraint` 为 `Stable`，producer 为 `COMPACTION_PRODUCER_ID` 的 `DerivedContext` 为 `Slow`，其余一律为 `Volatile`。创建渲染为 System 消息的种类的 `Volatile` 制品，会被 `ContextStabilityError` 拒绝。
 - 制品可以声明 `AnchorMode`：`Replace`（默认）或 `KeepInPlace`。目前还没有任何代码使用它。
 - epoch 可以记录 `ordered_artifact_ids`（制品的固定顺序）和 `prefix_claim`：`Extends`（请求开头与前驱相同，只在末尾增长），或带有 `break_reason` 的 `Breaks`。激活声明 `Extends` 的 epoch 时，会针对当前生效的 epoch，或宿主传给 `activate` 的前驱检查该声明：`raw_from_sequence` 相同，`raw_through_sequence` 更大，`Stable` 和 `Slow` 制品相同且顺序相同，`KeepInPlace` 制品仍被选中且位于 RAW 窗口之内。没有记录顺序的 epoch（例如在该字段出现之前存储的）无法被延续。
 - 装配器写出的回执记录按提示词顺序排列的制品、它们的类别、编码器所属的 family、工具的摘要和 epoch 的中断原因。
 
+## 稳定优先的布局
+
+epoch 用 `assembly_layout` 选择如何布置制品。`Legacy` 是默认值，也是在该字段出现之前存储的 epoch 唯一可能有的布局，即“制品的放置位置”一节描述的组装方式。`StableFirst` 需要主动选择，需要 `ordered_artifact_ids`，并按下面的顺序构造提示词：
+
+```text
+host instructions
+Stable artifacts, in the recorded order
+Slow artifacts, in the recorded order
+RAW messages
+Volatile artifacts, in the recorded order
+trusted supplemental input
+```
+
+- **epoch 的列表就是顺序。** `order_context_artifacts` 根据制品构造这个列表：先按稳定性类别，再按 `priority`（高者在前），再按 `producer_id`，最后按宿主给出的键。内容的哈希不参与，所以文本变化的同级制品保持原位；四项都相同的两个制品会因含混而被拒绝。
+- **放置位置服从类别。** `Stable` 和 `Slow` 制品放在 `BeforeHistory`，`Volatile` 制品放在 `AfterHistory`，列表先列 `Stable`，再列 `Slow`，最后列 `Volatile`。其他情况（例如用默认放置位置 `BeforeLatestUser` 创建的制品）不会被挪动，而是被 `ContextStabilityError` 拒绝。
+- **System 文本留在前面。** System 消息只能是宿主指令，或 `Stable`、`Slow` 制品。RAW 或补充输入中的 System 消息，在 `anthropic.messages`、`google.generate` 和 `google.interactions` 上会被提升到 system 字段而挪动请求的开头，所以会被拒绝。被提升的文本按 `Stable`、`Slow` 的顺序排列。
+- **布局变更是一次中断。** 相邻的两个 epoch 要使用不同的布局，后一个 epoch 必须声明原因为 `LayoutChange` 的 `Breaks`；否则 `verify_context_epoch_claim` 会拒绝，跨越布局变更的 `Extends` 声明同样被拒绝。
+- **从请求体读出的两个边界。** 回执记录 `Stable` 部分（宿主指令和 `Stable` 制品）在哪里结束、只追加的部分（`Volatile` 制品之前的全部内容）在哪里结束，以及到后者为止的请求摘要。边界是编码后的请求体中第一个不在前缀里的消息和部分，因此在会提升 System 文本的系列上，`{0, 0}` 表示只包含工具和 system 字段的前缀。位置是 System 文本被提升、工具结果被重新分组之后的请求体中的位置。装配器用只含前缀消息、后面再加一条标记消息的请求，把请求再编码第二次、第三次来找到它们；如果编码出的请求体彼此对不上，就以 `ContextStabilityError` 拒绝该 epoch。当 `Slow` 的 System 文本与 `Stable` 文本共用 system 字段时，该字段是一个整体，因此不记录 `Stable` 边界。摘要涵盖请求体中除流标志和输出上限之外的所有成员，消息在边界处截断。旧版 epoch 没有边界。
 
 ## 运行时的开发者指令
 
