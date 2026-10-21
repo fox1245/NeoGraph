@@ -6,9 +6,15 @@
 
 scripts/check_public_text.py	internal-process-wording	The rule definitions contain the phrases they search for.
 scripts/check_public_text.py	private-project-name	The rule definition contains the name it searches for.
+scripts/check_public_text.py	owner-intent	The rule definition and its documentation contain the phrases they search for.
+scripts/check_public_text.py	review-process	The rule definition and its documentation contain the words they search for.
+scripts/README	review-process	The description of the rule names the words it searches for.
+src/mcp/harness.cpp	review-process	The description of a shipped Harness preset: the words name a product feature, not a narrated review.
 tests/test_public_text_guard.py	predecessor-name	Samples that the rule must flag, and the content of throwaway repositories in the guard self-test.
 tests/test_public_text_guard.py	private-repo-link	Samples of private and unlisted repository links that the rule must flag.
 tests/test_public_text_guard.py	internal-process-wording	Samples of the phrases that the rule must flag.
+tests/test_public_text_guard.py	owner-intent	Samples of the phrases that the rule must flag.
+tests/test_public_text_guard.py	review-process	Samples of the words that the rule must flag.
 tests/test_public_text_guard.py	home-path	Samples of personal home directories (invented names) that the rule must flag.
 tests/test_public_text_guard.py	external-ip	Samples of public addresses that the rule must flag.
 tests/test_public_text_guard.py	private-project-name	Samples of the project name that the rule must flag.
