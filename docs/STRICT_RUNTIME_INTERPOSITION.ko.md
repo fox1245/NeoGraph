@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=5f8e6ab72d08c418bed91bd429a171ccecb655a519d3818748d0fab7a20ea18e -->
+<!-- neograph-i18n: source=docs/STRICT_RUNTIME_INTERPOSITION.md locale=ko source_sha256=b039e7b57feafc338a8b6fea0cdbc8c0a492c3dbec6a269f986de85d1c629d09 -->
 # 엄격한 런타임 인터포지션
 
 **Languages:** [English](STRICT_RUNTIME_INTERPOSITION.md) | [한국어](STRICT_RUNTIME_INTERPOSITION.ko.md) | [日本語](STRICT_RUNTIME_INTERPOSITION.ja.md) | [简体中文](STRICT_RUNTIME_INTERPOSITION.zh-CN.md)
@@ -186,17 +186,35 @@ trusted supplemental input
 - `anthropic.messages`, `google.generate`, `google.interactions`에서는 요청 빌더가 모든 System 메시지를 배치와 상관없이 최상위 system 필드로 옮깁니다(빈 줄로 구분하며 조립된 순서대로). 그러면 Skill이나 제약의 배치는 대화 안의 위치가 아니라 system 텍스트들 사이의 순서만 정합니다.
 - `openai.chat`과 `openai.responses`에서는 System 메시지가 배치가 정한 자리에 그대로 남습니다.
 
-요청의 시작 부분을 안정적으로 유지하려면 System 역할 아티팩트의 텍스트를 턴마다 바꾸지 마세요. 여기까지는 현재의 조립 방식에 대한 설명입니다. 기본값과 계열별 규칙은 검토 중이며, 바뀌면 조립되는 바이트가 달라집니다.
+요청의 시작 부분을 안정적으로 유지하려면 System 역할 아티팩트의 텍스트를 턴마다 바꾸지 마세요. 여기까지는 레거시 레이아웃에 대한 설명이며, 에포크가 다른 레이아웃을 요청하지 않는 한 이것이 쓰입니다("안정 우선 레이아웃" 참조).
 
 ## 안정성 클래스, 순서, 프리픽스 선언
 
-공급자의 프롬프트 캐시가 요청의 앞부분을 유지하는지는 호출 사이에 어떤 아티팩트가 그대로인지에 달려 있습니다. 데이터 모델은 이를 기록합니다. 어셈블러는 아직 이를 사용하지 않으므로, 조립되는 요청은 "아티팩트 배치"에서 설명한 그대로입니다.
+공급자의 프롬프트 캐시가 요청의 앞부분을 유지하는지는 호출 사이에 어떤 아티팩트가 그대로인지에 달려 있습니다. 데이터 모델은 이를 기록하고, 안정 우선 레이아웃(다음 절)이 이를 사용합니다.
 
 - 아티팩트는 `StabilityClass`를 선언할 수 있습니다. `Stable`(실행 내내 같은 바이트), `Slow`(압축이나 그 밖에 선언된 프리픽스 단절 때에만 바뀜), `Volatile`(호출마다 바뀔 수 있음)입니다. 선언하지 않은 아티팩트는 읽을 때 클래스를 얻습니다. `RequiredSkill`과 `HardConstraint`는 `Stable`, 프로듀서가 `COMPACTION_PRODUCER_ID`인 `DerivedContext`는 `Slow`, 나머지는 모두 `Volatile`입니다. System 메시지로 렌더링되는 종류의 `Volatile` 아티팩트를 만들면 `ContextStabilityError`로 거부됩니다.
 - 아티팩트는 `AnchorMode`를 선언할 수 있습니다. `Replace`(기본값) 또는 `KeepInPlace`입니다. 아직 이를 사용하는 것은 없습니다.
 - 에포크는 아티팩트를 고정된 순서로 담은 `ordered_artifact_ids`와 `prefix_claim`을 기록할 수 있습니다. `prefix_claim`은 `Extends`(요청의 앞부분이 직전 에포크와 같고 끝에서만 늘어남) 또는 `break_reason`을 동반한 `Breaks`입니다. `Extends`를 선언한 에포크를 활성화하면 활성 에포크, 또는 호스트가 `activate`에 넘긴 직전 에포크에 대해 선언을 검사합니다. 같은 `raw_from_sequence`, 더 큰 `raw_through_sequence`, 같은 순서의 같은 `Stable`·`Slow` 아티팩트, 그리고 여전히 선택되어 있고 RAW 윈도 안에 있는 `KeepInPlace` 아티팩트가 조건입니다. 순서를 기록하지 않은 에포크(이 필드가 생기기 전에 저장된 것 등)는 이어 갈 수 없습니다.
 - 어셈블러가 쓰는 영수증은 프롬프트 순서대로의 아티팩트, 그 클래스, 인코더 계열, 도구의 다이제스트, 에포크의 단절 사유를 기록합니다.
 
+## 안정 우선 레이아웃
+
+에포크는 `assembly_layout`으로 아티팩트를 어떻게 배치할지 정합니다. `Legacy`는 기본값이며, 이 필드가 생기기 전에 저장된 에포크가 가질 수 있는 유일한 레이아웃으로, "아티팩트 배치"에서 설명한 조립 방식입니다. `StableFirst`는 직접 선택해야 하고 `ordered_artifact_ids`가 필요하며, 프롬프트를 다음 순서로 만듭니다.
+
+```text
+host instructions
+Stable artifacts, in the recorded order
+Slow artifacts, in the recorded order
+RAW messages
+Volatile artifacts, in the recorded order
+trusted supplemental input
+```
+
+- **에포크의 목록이 곧 순서입니다.** `order_context_artifacts`가 아티팩트로부터 이 목록을 만듭니다. 안정성 클래스, 그다음 높은 `priority`, 그다음 `producer_id`, 그다음 호스트가 주는 키 순입니다. 내용의 해시는 관여하지 않으므로 텍스트가 바뀌는 형제 아티팩트도 자리를 지키며, 네 가지가 모두 같은 두 아티팩트는 모호하다며 거부됩니다.
+- **배치는 클래스를 따릅니다.** `Stable`과 `Slow` 아티팩트는 `BeforeHistory`에, `Volatile` 아티팩트는 `AfterHistory`에 두고, 목록은 `Stable`, `Slow`, `Volatile` 순으로 나열해야 합니다. 그 밖의 경우(예: 기본 배치 `BeforeLatestUser`로 만든 아티팩트)는 옮겨 주지 않고 `ContextStabilityError`로 거부됩니다.
+- **System 텍스트는 앞에 머뭅니다.** System 메시지는 호스트 지침이거나 `Stable` 또는 `Slow` 아티팩트일 수만 있습니다. RAW나 보조 입력의 System 메시지는 `anthropic.messages`, `google.generate`, `google.interactions`에서 system 필드로 옮겨져 요청의 시작을 바꾸므로 거부됩니다. 옮겨진 텍스트는 `Stable`, `Slow` 순입니다.
+- **레이아웃 변경은 단절입니다.** 연속한 두 에포크의 레이아웃이 다르려면 뒤의 에포크가 이유 `LayoutChange`와 함께 `Breaks`를 선언해야 합니다. 그렇지 않으면 `verify_context_epoch_claim`이 거부하며, 레이아웃이 바뀌는 지점을 가로지르는 `Extends` 선언도 거부합니다.
+- **본문에서 읽은 두 경계.** 영수증은 `Stable` 부분(호스트 지침과 `Stable` 아티팩트)이 끝나는 곳, 추가만 되는 부분(`Volatile` 아티팩트 앞의 모든 것)이 끝나는 곳, 그리고 두 번째 경계까지의 요청 다이제스트를 기록합니다. 경계는 인코딩된 본문에서 프리픽스에 속하지 않는 첫 메시지와 파트이므로, System 텍스트를 옮기는 계열에서 `{0, 0}`은 도구와 system 필드만의 프리픽스입니다. 위치는 System 텍스트를 옮기고 도구 결과를 다시 묶은 뒤의 본문 기준입니다. 어셈블러는 프리픽스의 메시지와 그 뒤의 표식 메시지만으로 요청을 두 번째, 세 번째 인코딩해 위치를 찾으며, 인코딩된 본문들이 서로 맞지 않으면 `ContextStabilityError`로 에포크를 거부합니다. `Slow` System 텍스트가 `Stable` 텍스트와 system 필드를 함께 쓰면 필드가 한 블록이므로 `Stable` 경계는 기록되지 않습니다. 다이제스트는 스트림 플래그와 출력 상한을 뺀 본문의 모든 멤버를 담고, 메시지는 경계에서 잘립니다. 레거시 에포크에는 경계가 없습니다.
 
 ## 런타임 개발자 지침
 
