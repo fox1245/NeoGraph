@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=820b9997966b41772a0c0404dbb9fdb8cc47266bea540342f13bc3658c4ae695 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=f54e1a1db994c330527456105294e83cafd203fe4ef6f37465cbd8476b292264 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -222,7 +222,7 @@ programs.release();
 모든 것은 호스트의 이벤트 루프 위에서 실행됩니다. 런타임은 저장소, 타이머, 모델 호출을 거기서 await하며 그중 무엇도 루프를 막지 않습니다.
 제어 소스는 예외입니다. `define()`과 `main()`의 각 단계는 같은 스레드의 QuickJS에서 실행되므로, 끝나지 않는 소스는 시간 제한이
 멈출 때까지 루프를 붙잡습니다. 시간 제한은 Program을 승인할 때 실행되는 `define()`에는 5초이고, `main()`의 단계에는 실행의 벽시계 시간 예산(기본 60초, `budget.wallTimeMs`)입니다.
-QuickJS의 스택 제한은 이 빌드에서 동작하지 않으므로, 끝없이 재귀하는 소스는 엔진 자신의 스택을 넘치게 하며 모듈은 이를 잡을 수 없습니다. 호출은 결정되지 않습니다. 호스트가 신뢰하거나 검증한 제어 소스만 실행하세요. 일시 정지한 그래프의 체크포인트는 모듈의 메모리에 있으므로, 실행은 그것을 시작한 `Programs` 객체가 살아 있는 동안에만 재개하거나 fork할 수 있습니다.
+QuickJS의 스택 제한은 이 빌드에서 동작하지 않으므로, 끝없이 재귀하는 소스는 엔진 자신의 스택을 넘치게 하며 모듈은 이를 잡을 수 없습니다. 호출은 결정되지 않고, 그 모듈 인스턴스는 쓸 수 없게 되며, Node에서는 호스트가 처리하지 않으면 잡히지 않은 `RangeError`로 프로세스가 종료됩니다. 호스트가 신뢰하거나 검증한 제어 소스만 실행하세요. 일시 정지한 그래프의 체크포인트는 모듈의 메모리에 있으므로, 실행은 그것을 시작한 `Programs` 객체가 살아 있는 동안에만 재개하거나 fork할 수 있습니다.
 
 ## 동작 방식
 

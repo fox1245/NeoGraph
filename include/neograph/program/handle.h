@@ -60,8 +60,9 @@ public:
     /**
      * Cancels the run. Cancelling an interrupted run publishes its Cancelled state through the transition store, and
      * the call waits for that. It does not wait on a thread that runs the runtime's executor (a node body) or on a
-     * host-pumped executor: there the run stops in memory at once and the rest is a task of the executor. Use
-     * cancel_async to wait for the Cancelled state there.
+     * host-pumped executor: there a run that is executing stops in memory at once, and the Cancelled state of an
+     * interrupted run is not guaranteed (the call may return false and leave it Interrupted). Use cancel_async, which
+     * waits for the Cancelled state and publishes it.
      */
     bool                                  cancel() noexcept;
     ProgramResult                         wait() const;
