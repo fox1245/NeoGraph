@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=b2017d5b55e55b13e5099782146c99d416fcef29a17f13a0994ae7a6548f37aa -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=820b9997966b41772a0c0404dbb9fdb8cc47266bea540342f13bc3658c4ae695 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -565,7 +565,7 @@ Program と QuickJS 付きのモジュールを `-DCMAKE_CXX_FLAGS_RELEASE="-Oz 
 速度は測っていません。
 
 CI はシングルスレッドの smoke を `.wasm` 6,000,000 バイト、gzip 後 1,750,000 バイト（測定したサイズに約 9% を足した値）で、
-モジュールを `.wasm` 6,850,000 バイト、gzip 後 2,010,000 バイト で制限し、サイズをジョブのサマリーに報告します。Worker のスクリプトにはプランに応じたサイズ制限が
+モジュール（CI は Program と QuickJS 付きでビルドします）を `.wasm` 14,400,000 バイト、gzip 後 4,300,000 バイト で制限し、サイズをジョブのサマリーに報告します。Worker のスクリプトにはプランに応じたサイズ制限が
 あるので、モジュールの圧縮後のサイズをご利用のプランの制限と比べてください。このページの以前の版にあった 712 KB は、型付き SDK より
 前に測った値で、今は当てはまりません。
 

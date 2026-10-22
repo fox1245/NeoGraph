@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=b2017d5b55e55b13e5099782146c99d416fcef29a17f13a0994ae7a6548f37aa -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=820b9997966b41772a0c0404dbb9fdb8cc47266bea540342f13bc3658c4ae695 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -514,7 +514,7 @@ JavaScript 宿主和 C API。其余的大部分是 Program 组件：带 Program 
 
 带 Program 和 QuickJS 的模块用 `-DCMAKE_CXX_FLAGS_RELEASE="-Oz -DNDEBUG"`（C 同样）构建时为 10,378,540 B，gzip 后 3,122,630 B；没有测速度。
 
-CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 字节（实测大小加约 9%）以内，把模块限制在 `.wasm` 6,850,000 字节、gzip 后 2,010,000 字节 以内，
+CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 字节（实测大小加约 9%）以内，把模块（CI 带 Program 和 QuickJS 构建它）限制在 `.wasm` 14,400,000 字节、gzip 后 4,300,000 字节 以内，
 并在作业摘要中报告大小。Worker 脚本有随套餐而定的大小限制；请把模块压缩后的大小与你所用套餐的限制比较。
 本页旧版本中的 712 KB 是在带类型的 SDK 之前测得的，现已不适用。
 
