@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=a536a05a6ce1901d70a120936b2705ad36eba9b86c5e421ab45d4ab7c73e8dc9 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=c26dd9eeb2d12e8a1d44a024e5393babd5138731c710fb7539bd4251cd62cb8b -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -19,7 +19,7 @@
 |---|---|
 | 工具链 | Emscripten 6.0.13。CI 中固定到 emsdk 的发布提交。 |
 | 构建模式 | 单线程（WebAssembly 上的默认值）和 pthread，二者都在 CI 中构建并运行。JavaScript 模块是单线程的。 |
-| 运行时 | CI 中的 Node.js 22 和 24。Workers 示例在 Node 中以 `Request` 调用来运行，尚未在 workerd 上运行。浏览器、Deno 和 WASI 尚未验证。 |
+| 运行时 | CI 中的 Node.js 22 和 24。Workers 示例在 Node 中以 `Request` 调用来运行，尚未在 workerd 上运行。图 smoke 也通过 `smoke.html` 和 `serve_smoke.py` 在 Chromium 中运行（见下文）；浏览器中的 JavaScript 模块、Deno 和 WASI 尚未验证。 |
 | SDK | SchemaProvider 0.4.0，接口修订版 7，使用 `cmake/NeoGraphSchemaProvider.cmake` 固定的提交。可在没有 libcurl、没有线程的情况下构建，其 JavaScript 宿主（`sp_js_host`）就是模块的 executor 和 `fetch` 传输层。 |
 | 组件 | Core、LLM（通过宿主的模型调用），以及可选的 Program（宿主循环上的运行时，内存存储）。 |
 
@@ -277,8 +277,17 @@ CI 把单线程 smoke 限制在 `.wasm` 6,000,000 字节、gzip 后 1,750,000 �
 
 ## 浏览器
 
-浏览器测试工具不在仓库中：`serve_smoke.py` 期望一个并不存在的 `smoke.html`，也没有浏览器运行记录（#435）。
-Node.js 上的运行不能作为浏览器上的证据。该模块为 `web`、`worker` 和 `node` 环境构建，但只运行过 Node。
+由 `serve_smoke.py` 提供服务时，`smoke.html` 会在 `http://127.0.0.1:8765/smoke.html` 运行生成的 `smoke.js`：
+
+```bash
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+```
+
+`serve_smoke.py` 发送 `Cross-Origin-Opener-Policy: same-origin` 和 `Cross-Origin-Embedder-Policy: require-corp`。
+`smoke.html` 会检查跨源隔离和 `SharedArrayBuffer`，加载 `/smoke.js`，并在程序输出 `doubled = 42` 和 `trace = d`、
+退出码为 `0` 且无标准错误输出时，把 `document.body.dataset.result` 设为 `"pass"`、`document.body.dataset.exitCode` 设为 `"0"`。
+已用默认单线程构建在无头 Chromium 140.0.7339.186 中验证（`doubled = 42`、`trace = d`、退出码 `0`）；pthread 构建仅在 Node
+中运行（不带 `-sPROXY_TO_PTHREAD` 时 `main` 会阻塞主线程），CI 仅运行 Node，JavaScript 模块（`neograph.mjs`）尚未在浏览器中运行。
 
 ## 里程碑
 

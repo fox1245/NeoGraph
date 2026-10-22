@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>NeoGraph WebAssembly smoke</title>
+</head>
+<body data-result="running" data-exit-code="">
+  <pre id="status">running</pre>
+  <pre id="output"></pre>
+  <script>
+    (() => {
+      const statusEl = document.getElementById("status");
+      const outputEl = document.getElementById("output");
+      const lines = [];
+      const errLines = [];
+
+      function fail(code, reason) {
+        document.body.dataset.exitCode = String(code);
+        document.body.dataset.result = "fail";
+        statusEl.textContent = `fail (${reason})`;
+      }
+
+      if (!window.crossOriginIsolated || typeof SharedArrayBuffer !== "function") {
+        fail(-1, "cross-origin isolation and SharedArrayBuffer are required; serve via wasm/serve_smoke.py");
+        return;
+      }
+
+      window.Module = {
+        print(text) {
+          const line = String(text);
+          lines.push(line);
+          outputEl.textContent = lines.join("\n");
+          console.log(line);
+        },
+        printErr(text) {
+          const line = String(text);
+          errLines.push(line);
+          outputEl.textContent = [...lines, ...errLines].join("\n");
+          console.error(line);
+        },
+        onAbort(reason) {
+          fail("abort", String(reason));
+        },
+        onExit(code) {
+          const trimmed = lines.map((line) => line.trim());
+          const ok =
+            code === 0 &&
+            errLines.length === 0 &&
+            trimmed.includes("doubled = 42") &&
+            trimmed.includes("trace = d");
+          document.body.dataset.exitCode = String(code);
+          document.body.dataset.result = ok ? "pass" : "fail";
+          statusEl.textContent = ok ? "pass (exit 0)" : `fail (exit ${code})`;
+        },
+      };
+
+      const script = document.createElement("script");
+      script.src = "/smoke.js";
+      script.onerror = () => fail("load-error", "failed to load /smoke.js");
+      document.body.appendChild(script);
+    })();
+  </script>
+</body>
+</html>

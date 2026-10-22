@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=a536a05a6ce1901d70a120936b2705ad36eba9b86c5e421ab45d4ab7c73e8dc9 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=c26dd9eeb2d12e8a1d44a024e5393babd5138731c710fb7539bd4251cd62cb8b -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@
 |---|---|
 | 툴체인 | Emscripten 6.0.13. CI에서 emsdk 릴리스 커밋으로 고정합니다. |
 | 빌드 모드 | 싱글 스레드(WebAssembly의 기본값)와 pthread. 둘 다 CI에서 빌드하고 실행합니다. JavaScript 모듈은 싱글 스레드입니다. |
-| 런타임 | CI의 Node.js 22와 24. Workers 예제는 `Request`를 넘겨 Node에서 실행하며, workerd에서는 실행하지 않았습니다. 브라우저, Deno, WASI는 검증하지 않았습니다. |
+| 런타임 | CI의 Node.js 22와 24. Workers 예제는 `Request`를 넘겨 Node에서 실행하며, workerd에서는 실행하지 않았습니다. 그래프 smoke는 `smoke.html`과 `serve_smoke.py`를 통해 Chromium에서도 실행됩니다(아래). 브라우저에서의 JavaScript 모듈, Deno, WASI는 검증하지 않았습니다. |
 | SDK | SchemaProvider 0.4.0, 인터페이스 리비전 7. `cmake/NeoGraphSchemaProvider.cmake`가 고정한 커밋을 씁니다. libcurl 없이, 스레드 없이 빌드되며, SDK의 JavaScript 호스트(`sp_js_host`)가 모듈의 executor와 `fetch` 트랜스포트입니다. |
 | 구성 요소 | Core, LLM(호스트를 통한 모델 호출), 그리고 선택적으로 Program(호스트 루프 위의 런타임, 인메모리 저장소). |
 
@@ -305,9 +305,18 @@ NeoGraph가 호출을 소유하는 경우 타입이 있는 오류로 실패하�
 
 ## 브라우저
 
-브라우저 하니스는 저장소에 없습니다. `serve_smoke.py`는 존재하지 않는 `smoke.html`을 기대하며, 브라우저 실행 기록도
-없습니다(#435). Node.js 실행은 브라우저에서 동작한다는 증거가 아닙니다. 모듈은 `web`, `worker`, `node` 환경용으로
-빌드되지만 실행해 본 것은 Node뿐입니다.
+`smoke.html`은 `serve_smoke.py`로 서빙할 때 `http://127.0.0.1:8765/smoke.html`에서 생성된 `smoke.js`를 실행합니다.
+
+```bash
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+```
+
+`serve_smoke.py`는 `Cross-Origin-Opener-Policy: same-origin`과 `Cross-Origin-Embedder-Policy: require-corp`를 보냅니다.
+`smoke.html`은 교차 출처 격리와 `SharedArrayBuffer`를 확인한 뒤 `/smoke.js`를 로드하며, 프로그램이 `doubled = 42`와
+`trace = d`를 출력하고 표준 오류 출력 없이 종료 코드 `0`으로 끝나면 `document.body.dataset.result = "pass"`와
+`document.body.dataset.exitCode = "0"`을 설정합니다. 기본 싱글 스레드 빌드로 헤드리스 Chromium 140.0.7339.186에서
+검증했습니다(`doubled = 42`, `trace = d`, 종료 코드 `0`). pthread 빌드는 Node에서만 실행하며(`-sPROXY_TO_PTHREAD` 없이는
+`main`이 메인 스레드를 막습니다), CI는 Node만 실행하고, JavaScript 모듈(`neograph.mjs`)은 브라우저에서 실행하지 않았습니다.
 
 ## 마일스톤
 

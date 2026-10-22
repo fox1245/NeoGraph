@@ -35,10 +35,11 @@ bindings/python/examples/my_graph.json
 
 benchmarks/dr_compare/SESSION_REPORT.md
 
-# WASM build artifacts — wasm/smoke.cpp + README.md track; binaries don't.
+# WASM build artifacts — wasm/smoke.cpp + smoke.html + README.md track; binaries don't.
 wasm/*.wasm
 wasm/*.js
 wasm/*.html
+!wasm/smoke.html
 wasm/*.data
 .omc/
 
