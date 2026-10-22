@@ -1,7 +1,7 @@
 // The JavaScript module against a local OpenAI-compatible server, offline and without a key: a graph with one llm_call
 // node, run through the host's fetch, buffered and streamed.
 //
-//   node wasm/test/llm_host_test.mjs <directory with neograph.mjs, neograph_module.mjs and neograph_module.wasm>
+//   node wasm/test/llm_host_test.mjs <directory with neograph.mjs, stores.mjs, neograph_module.mjs and neograph_module.wasm>
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';

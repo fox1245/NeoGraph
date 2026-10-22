@@ -4,8 +4,9 @@
 
 This directory holds the WebAssembly programs that CI builds and runs.
 
-- `module.cpp` and `neograph.mjs` are the JavaScript module: compile a graph from JSON and run it, with the model calls
-  sent through the host's `fetch`. `examples/` has a Node program and a Cloudflare Workers-style handler that use it,
+- `module.cpp`, `programs.cpp` and `neograph.mjs` are the JavaScript module: compile a graph from JSON and run it, or
+  compile, admit and run a Program (with pauses, forks and a record of every run), with the model calls sent through the
+  host's `fetch`. `neograph.d.ts` has its types. `examples/` has Node programs and a Cloudflare Workers-style handler that use it,
   and `test/` has the offline tests that CI runs (a local HTTP server stands in for the model).
 - `smoke.cpp` compiles a graph with one `DoubleNode`, writes `doubled = seed * 2`, and runs it with
   `InMemoryCheckpointStore`; with `seed = 21` it prints `doubled = 42` and `trace = d`.
@@ -21,7 +22,7 @@ The plan is in [#535](https://github.com/fox1245/NeoGraph/issues/535), and this 
 | Build modes | Single-thread (the default on WebAssembly) and pthread, both built and run in CI. The JavaScript module is single-thread. |
 | Runtime | Node.js 22 and 24, in CI. The Workers example runs in Node, called with a `Request`; it has not run on workerd. The graph smoke also runs in Chromium through `smoke.html` and `serve_smoke.py` (below); the JavaScript module in a browser, Deno and WASI are not verified. |
 | SDK | SchemaProvider 0.4.0, interface revision 7, at the commit that `cmake/NeoGraphSchemaProvider.cmake` pins. It builds without libcurl and without threads, and its JavaScript host (`sp_js_host`) is the executor and the `fetch` transport of the module. |
-| Components | Core, LLM (model calls through the host), and optionally Program (the runtime on the host's loop, with in-memory stores). |
+| Components | Core, LLM (model calls through the host), and Program (the runtime on the host's loop; the stores are in memory or the host's own). |
 
 ## Build
 
@@ -38,7 +39,7 @@ source /path/to/emsdk/emsdk_env.sh
 emcmake cmake -S . -B build-wasm -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DNEOGRAPH_BUILD_WASM=ON -DNEOGRAPH_BUILD_WASM_JS=ON \
-  -DNEOGRAPH_BUILD_PROGRAM=ON \
+  -DNEOGRAPH_BUILD_PROGRAM=ON -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
   -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_MCP=OFF \
   -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
   -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
@@ -50,12 +51,27 @@ node build-wasm/wasm/smoke.js
 node build-wasm/wasm/checks.js
 node wasm/test/llm_host_test.mjs build-wasm/wasm
 node wasm/test/workers_test.mjs build-wasm/wasm
+node wasm/test/program_test.mjs build-wasm/wasm
+```
+
+To also build the Program store tests (the conformance suites against the JavaScript stores and the store checks, see
+*Program stores in JavaScript* and *Tests*), add `-DNEOGRAPH_BUILD_WASM_STORE_TESTS=ON` to the configure line; it fetches
+googletest. Then:
+
+```bash
+cmake --build build-wasm --target neograph_wasm_store_conformance neograph_wasm_store_checks
+node wasm/test/store_conformance_test.mjs build-wasm/wasm
+node wasm/test/js_stores_test.mjs build-wasm/wasm
 ```
 
 `NEOGRAPH_BUILD_WASM_JS=ON` builds the JavaScript module into `build-wasm/wasm/`: `neograph_module.wasm`,
-`neograph_module.mjs` (the Emscripten loader) and `neograph.mjs` (the API, copied from this directory). Copy those three
-files into a project to use it. `NEOGRAPH_BUILD_PROGRAM=ON` is only needed for the native-plugin check; leave it off to
-build the graph smoke and the module alone. Pthread: add `-DNEOGRAPH_THREADS=ON` to the configure line, leave
+`neograph_module.mjs` (the Emscripten loader), `neograph.mjs` (the API, copied from this directory), `stores.mjs` (the
+bridge to the host's stores, which `neograph.mjs` imports) and `neograph.d.ts` (its types). Copy the first four into a
+project to use it. With `NEOGRAPH_BUILD_PROGRAM=ON` the module has the Program
+API ([below](#programs-in-the-module)); `NEOGRAPH_BUILD_QUICKJS_CONTROL=ON` adds the QuickJS control runtime that a
+Program written in JavaScript needs, and without it only a Program given as a document is accepted.
+`NEOGRAPH_WASM_JS_PROGRAMS=OFF` builds a module that runs graphs only, which is about half the size (see
+[Measured sizes](#measured-sizes)). Pthread: add `-DNEOGRAPH_THREADS=ON` to the configure line, leave
 `NEOGRAPH_BUILD_WASM_JS` and `NEOGRAPH_BUILD_LLM` off, and use another build directory.
 
 `NEOGRAPH_THREADS` is the one switch between the two modes. It is `OFF` on Emscripten and WASI and `ON` elsewhere.
@@ -118,7 +134,109 @@ console.log(result.text);
   throws from `compile`.
 
 Graphs use the built-in node types that need no tool: `llm_call`, `intent_classifier` and `subgraph`. Tools and nodes
-written in JavaScript, checkpoint stores and Programs are not part of this milestone.
+written in JavaScript are not part of this milestone; a Program has its own surface, below.
+
+## Programs in the module
+
+A Program is a small JavaScript module that the host compiles and admits, and that runs a graph under a budget: a run
+can pause at an interrupt and wait for an answer, be resumed or forked, and leaves a record of every step in the
+stores ([the Program guide](../docs/program-guide.md)). The module compiles, admits and runs one from JavaScript, on
+the one thread of the host's event loop:
+
+```js
+import { load } from './neograph.mjs';
+
+const SOURCE = `
+export function define() {
+  return ng.graph("two-turns")
+    .channel("messages", {reducer: "append", initial: []})
+    .node("first", {type: "llm_call"})
+    .node("second", {type: "llm_call"})
+    .entry("first").edge("first", "second").exit("second")
+    .interruptBefore("second");                      // the run stops here and waits for an answer
+}
+export function* main(input) {
+  const reply = yield ng.callCore("two-turns", input, "run");
+  return {messages: reply.messages};
+}
+`;
+
+const neograph = await load();
+const programs = neograph.programs({
+  provider: {
+    baseUrl: 'https://api.example.com', path: '/v1/chat/completions', apiKey: env.API_KEY, model: 'a-model',
+    catalogue: { version: 1, models: [{ id: 'a-model', input_limit: 4000, output_limit: 1000 }] },
+  },
+});
+const version = await programs.admit(SOURCE);                  // compile and admit
+const run = programs.start(version, {
+  input: { messages: [{ role: 'user', content: 'Hello' }] },
+  onEvent: (event) => console.log(event.kind),                 // optional: the run's events, in order
+});
+const paused = await run.result;                               // status 'interrupted'; paused.interrupt says where
+const done = await run.resume('Go on').result;                 // the answer is the next message; 'completed'
+console.log(done.output.messages.at(-1).content);
+programs.release();
+```
+
+- **`neograph.programs({ provider, owner, limits, budget, stores })`** makes a `Programs` object over one provider and
+  one set of stores, and throws a `NeoGraphError` when the provider is invalid or the module was built without Program
+  support. `provider` is as for `compile`, with one addition: `catalogue`, the SDK's model catalogue (`{ version: 1,
+  models: [...] }`), which is laid over the embedded one. `owner` scopes the Programs and runs of the object.
+  `stores` are the host's own stores ([Program stores in JavaScript](#program-stores-in-javascript)); a store that is left
+  out is in memory. `limits` is the most any admitted Program may be given and `budget` the budget of a run that gives
+  none, both written as below.
+- **`programs.admit(source)`** compiles a Program and admits it, and resolves with `{ id, bundleId, name }`. `source` is
+  the text of a JavaScript control source, `{ javascript, name }`, or `{ document, name }` for a Program already in the
+  document form. A source the compiler or the admission policy refuses rejects with a `NeoGraphError` of type `compile`
+  or `admission`, whose `diagnostics` list `{ code, message, pointer, witness }`. Admitting the same source again gives
+  the same version.
+- **`programs.start(version, { input, budget, runId, onEvent, signal })`** returns a `ProgramRun` at once.
+  **`programs.run(version, options)`** is `start(...).result`.
+- **`ProgramRun`** has `id`, `versionId`, `result`, `resume(value, options)`, `fork(value, options)` and `cancel()`.
+  `result` resolves when the run ends or waits for an answer; a run that fails or is cancelled resolves with that
+  status, and it rejects only when the call itself could not be made (an unknown version, a budget outside what the
+  version admits, a run id that was used before). `resume` answers the interrupt the run waits at and returns a `ProgramRun` with
+  the same id. `fork` continues the same pause as a new run (`options.runId` names it) with its own answer, takes half
+  of what the paused run has left of its budget (or what `options.budget` asks for, which must leave the paused run some wall time and Core steps), and leaves
+  the paused run resumable; the finished node is not run again. Make the forks of one pause one after another. `cancel()` resolves with whether this call cancelled
+  the run. A resume or a fork that has not been sent yet, because it waits for the run it continues, is withdrawn by
+  `cancel()` or an aborted `signal` instead, and its `result` rejects with a `cancelled` error; a `signal` that is
+  aborted already means the call is not made.
+- **`programs.result(runId)`** reads what the stores hold of a run: its latest result (the pause of a run that waits is
+  one), `{ runId, status: 'running' }` while it has none, or `null` when they know no such run. **`programs.release()`** cancels the runs that are executing and frees the object, and calls already made finish
+  first. A run that waits at an interrupt stays as it is in the stores.
+- **A result** is `{ runId, versionId, status, output, trace, usage, remainingBudget, checkpointId?, interrupt?,
+  failure? }`. `status` is `completed`, `interrupted`, `cancelled`, `budget_exhausted`, `timed_out`, `failed`,
+  `ambiguous_effect` or `checkpoint_incompatible`. `output` is what `main()` returned (the graph's state, under
+  `output.channels`, while a run waits). `trace` lists the nodes that ran since the run started or resumed. An
+  `interrupt` is `{ node, value, kind, pendingId }`, and a `failure` is `{ code, message, node, attempts, witness }`.
+- **Events** are the run's journal entries, `{ sequence, kind, run_id, operation_id, payload, ... }`, in the order the
+  runtime wrote them. A model reply arrives as events with `payload.type === 'llm_token'`. An error thrown by `onEvent`
+  cancels that run and rejects its `result` with the error; `signal` cancels the call when it aborts while the call is
+  pending, and has no effect once the call has settled (use `cancel()` for a run that paused). One case is not
+  supported by the runtime: a resumed run that is cancelled before its first node starts ends `failed` with
+  `P_TRANSITION_CONFLICT` and its record stays `running`, because the runtime cannot publish a cancellation while the
+  reservation of the interrupted command is held. Cancel a resumed run once a node has started, or let it end.
+- **Budgets.** A budget is `{ wallTimeMs, modelTokens, monetaryMicrounits, maxConcurrency, maxProgramOperations,
+  maxCoreSteps, ... }`; a member that is left out keeps the default: 60 s of wall time, 10,000 model tokens, 4 concurrent
+  branches, 32 Program operations and 100 Core steps, which are also the largest values a JavaScript source can declare.
+  An amount is a whole number from 0 to 2^53 and a name must be a member of the budget, otherwise the call is refused.
+  A call to the model is sent only when its worst case fits what is left: the model's input limit plus its output limit,
+  read from the catalogue (or `maxOutputTokens` for the output). A model that no catalogue gives limits for is not called,
+  and the run ends `failed` with `NG.ConfigError`. `catalogue` states them. Give `modelTokens` a positive amount: a run
+  given 0 is not bounded before its calls, because the runtime charges them afterwards.
+- **Errors.** Besides `compile` and `admission`, a refusal of the runtime is a `NeoGraphError` of type `program` with a
+  `code` (`P_START_BUDGET` for a budget outside what the version admits, for example) and its `witness`.
+
+Everything runs on the host's event loop: the runtime awaits its stores, the timers and the model calls there, and none of
+those blocks it. A control source is the exception: `define()` and each step of `main()` run in QuickJS on the same
+thread, and a source that never ends holds the loop until its time limit stops it: 5 seconds for `define()`, which runs
+when the Program is admitted, and the run's wall-time budget (60 seconds by default, `budget.wallTimeMs`) for the steps of
+`main()`. The stack limit of QuickJS does not work in this build, so a source that recurses without end overflows the
+engine's own stack, which the module cannot catch: the call never settles. Run only control sources that the host trusts
+or has vetted. The checkpoints of a paused graph are kept in the module's memory, so a run can be resumed or forked only while
+the `Programs` object that started it is alive.
 
 ## How it works
 
@@ -188,9 +306,11 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 ### The JavaScript surface
 
 The module exports a C API and `neograph.mjs` wraps it. A C API with JSON strings needs no binding library; Embind
-would add one and a registration of every type, for a surface of five functions: `ng_compile`, `ng_run`, `ng_cancel`,
-`ng_release` and `ng_error`. Results come back through two callbacks, `Module.ngOnEvent` and `Module.ngOnDone`, called
-from a later turn of the host's event loop. The key is part of the provider description that `compile` is given and is
+would add one and a registration of every type, for a surface of a few functions: `ng_compile`, `ng_run`, `ng_cancel`,
+`ng_release` and `ng_error` for graphs, and `ng_programs_create`, `ng_programs_admit`, `ng_programs_start`,
+`ng_programs_resume`, `ng_programs_fork`, `ng_programs_cancel`, `ng_programs_result` and `ng_programs_release` for
+Programs. Results come back through callbacks, `Module.ngOnEvent` and `Module.ngOnDone` for a graph and
+`Module.ngProgramEvent` and `Module.ngProgramDone` for a Program, called from a later turn of the host's event loop. The key is part of the provider description that `compile` is given and is
 held by the SDK client of that graph; it is not in the binary, not in any result, and not in an error message.
 
 ## Programs on the host loop
@@ -235,10 +355,197 @@ loop.spawn(runtime.run_async(owner, version, invocation),
 - **Destroying the runtime** cancels its runs and does not wait for them. The attempts keep the runtime's state alive until
   they finish, so keep running the loop until the handles are terminal.
 
+## Program stores in JavaScript
+
+A host that runs NeoGraph in WebAssembly supplies the stores of the Program runtime as a JavaScript object. The C++ side
+adapts that object to the five awaitable store interfaces, so the runtime and the catalog use it like any other store.
+The contract moves values and decisions; what a store does with them stays in C++, so a host writes no state machine.
+
+```js
+const neograph = await load();
+const programs = neograph.programs({
+  provider,
+  stores: { transitions, programs: programStore, fragments, modules },    // each member is optional
+});
+```
+
+A member that is left out is the module's own in-memory store, and a name that is not a member (a misspelt one) is
+refused. A `transitions` store must have `loadJavascriptCommands`, `loadMigrationPlan`, `loadRunLineage` and `loadGeneration` as well
+as the methods marked required below: a run reads its command history, a fork its migration proof, and a resume and a fork the
+lineage of a run. The `Programs` object keeps the object registered until the
+runtime has dropped every store it made from it, which is after the runs that were cancelled by `programs.release()` have
+published their end, so releasing the object does not make those publications fail. The runtime of the module uses the
+`transitions`, `programs`, `fragments` and `modules` stores. A Program of the module has no tools to grant, so `grants` is
+for C++ code that links the adapters:
+
+```js
+import { installStoreBridge, registerStores, releaseStores, memoryStores } from './stores.mjs';
+
+installStoreBridge(module);                       // once per module instance; load() does it for neograph.mjs
+const handle = registerStores(module, {           // each member is optional
+  transitions, programs, grants, fragments, modules,
+});
+// C++: neograph::wasm::JsStoreSet stores = neograph::wasm::adapt_js_stores(handle);
+releaseStores(module, handle);
+```
+
+`wasm/js_stores.h` declares `adapt_js_stores(handle, lease)`, which returns a `JsStoreSet` of five `shared_ptr`s (a member is null
+when the object has no store of that kind). Each call makes new adapters over the same object, so two sets are two writers
+on the same data. `lease`, when given, is held by every adapter and released with the last of them; the Programs object of the
+module ends the registration from its deleter. `stores.mjs` is the JavaScript half and is copied next to `neograph.mjs`. A
+module that links `neograph_wasm_js_stores` exports the functions the bridge calls (`ng_store_resolve`, `ng_store_reject`,
+`ng_store_alloc`, `ng_store_free`) and the ones of the reference store (`ng_memory_*`).
+
+**Calls.** A store member is an object whose methods are named after the C++ operations, in camelCase, and take the
+arguments of the C++ operation in its order. A method returns its value or a Promise of it.
+
+- A value that is not a thenable completes the call at once, without suspending the awaiting coroutine and without a turn
+  of the host's loop. A synchronous caller (`Blocking...Store`) can then wait for it.
+- A Promise suspends the coroutine. When it settles, the bridge posts a task, and the coroutine goes on in a turn of the
+  loop, on its own executor. `set_js_store_executor(executor)` names another executor for the completions; by default
+  they go to the executor the awaiting coroutine runs on.
+- The arguments are copied into the call before the coroutine can suspend.
+- If the awaiting coroutine is destroyed while a Promise is pending (its loop is closed, its run is cancelled), its wait
+  goes with it. The outcome that arrives afterwards finds no one and is dropped.
+- Calls are not serialized: another call may be made while one is pending.
+
+**Failures.** A thrown exception or a rejected Promise becomes a C++ exception thrown from the awaiting call, which the
+runtime treats as a failed store (it fails closed). It is a `std::runtime_error` that carries the message of the JavaScript
+error, or of the rejection value converted to a string. An error with a `kind` property names the C++ class instead:
+`invalid_argument`, `out_of_range`, `domain_error`, `length_error`, `logic_error` or `runtime_error`; any other `kind` is
+ignored. A store that refuses a call for a reason of its own, as the in-memory stores refuse an empty owner scope with
+`std::invalid_argument`, says so this way. A value that does not parse, or has the wrong shape, is the same failure with a
+message that names the method (`JavaScript store method 'transitions.load' returned a malformed value: ...`). The adapter
+never returns a default value for a failed call.
+
+**Values.**
+
+| C++ | JavaScript |
+|---|---|
+| `std::string`, `std::string_view` | string |
+| `std::uint64_t` (a sequence, a generation, a count) | number: a non-negative integer below 2^53 |
+| `bool` | boolean |
+| `std::optional<T>` | the value of `T`, or `null` (`undefined` reads as `null`) |
+| `std::vector<T>` | array |
+| `ProgramTransitionPublishResult` | `"published"`, `"already_present"`, `"conflict"` |
+| `ProgramActivationResult` | `"activated"`, `"already_present"`, `"conflict"` |
+| `ProgramCoreToolGrantAdmission` | `"admitted"`, `"already_present"`, `"conflict"` |
+| `TaskGraphPublishResult` | `"published"`, `"already_present"`, `"conflict"`, `"missing"` |
+| `ModuleLifecycle` | `"active"`, `"deprecated"`, `"quarantined"`, `"revoked"` |
+| `ProgramRunRecord`, `ProgramJournalRecord`, `ProgramEvent`, `ProgramEffectOutboxEntry`, `ProgramJavaScriptCommandJournalEntry`, `HookOutboxEntry`, `ProgramChildSynthesisRecord`, `MigrationPlan`, `ProgramRunLineage`, `ProgramRunGeneration`, `ProgramTransitionPublication`, `GraphMigrationCapsule`, `ProgramExecutionLease`, `ProgramRuntimeStateTransferReceipt`, `ContextEpoch`, `ContextArtifact`, `ProgramBundle`, `ProgramVersion`, `ProgramActivation`, `TaskGraphFragmentRecord`, `ProgramModule` | string: the canonical text, `serialize_canonical()`, which the type's `parse(bytes)` reads back. A host stores and returns it as it is. |
+| `ProgramRunPublicationHead` | `{ run_record, journal_record }` |
+| `ProgramCommandPublicationHead` | `{ run_record, journal_record, latest_command }`; `latest_command` is a command journal entry or `null` |
+| `ProgramContextPublication` | `{ epoch, artifacts: [...], assembly_receipt }`, each a canonical text |
+| `ProgramEffectiveRuntimeState` | `{ context_publications: [ProgramContextPublication...], hook_outbox_entries: [...], inherited_hook_outbox_entries: [...], transfer_receipt }`; `transfer_receipt` is a canonical text or `null` |
+| `ProgramActivationBinding` | `{ activation, version }`, each a canonical text |
+| `ProgramRetentionReport` | `{ versions_removed, bundles_removed, references: [{ version_id, reason }...] }` |
+| `ProgramCoreToolGrantRecord` | `{ owner_scope, program_version_id, run_id, operation_id, attempt, binding_fingerprint, grant_id }` |
+| `ProgramCoreToolGrantContext` | the same without `grant_id` |
+
+An object has exactly the members listed; a missing or extra member is a malformed value.
+
+**Methods.** `ownerScope`, `runId` and the other names are strings. A method marked required must be present: `adapt_js_stores`
+throws `std::invalid_argument`, naming it, when it is not. An optional method that is absent keeps the default of the C++
+interface, given in the last column.
+
+| Member | Method | Result | If absent |
+|---|---|---|---|
+| `transitions` | `load(ownerScope, runId)` | run record or `null` | required |
+| | `latest(ownerScope, runId)` | journal record or `null` | required |
+| | `loadRunPublicationHead(ownerScope, runId)` | publication head or `null` | read from `load` and `latest`, which are read again to see that the head did not move |
+| | `loadEvents(ownerScope, runId, afterSequence)` | list of events | required |
+| | `loadEffects(ownerScope, runId, afterSequence)` | list of effect outbox entries | required |
+| | `loadJavascriptCommands(ownerScope, runId, afterSequence)` | list of command journal entries | fails |
+| | `loadCommandPublicationHead(ownerScope, runId)` | command publication head or `null` | read from `load`, `latest` and `loadJavascriptCommands` (so it fails with them) |
+| | `loadContextPublications(ownerScope, runId, afterSequence)` | list of context publications | fails |
+| | `loadHookOutboxEntries(ownerScope, runId)` | list of hook outbox entries | fails |
+| | `loadEffectiveRuntimeState(ownerScope, runId)` | effective runtime state | read from the context, hook, run, lineage and generation reads |
+| | `loadChildSyntheses(ownerScope, runId)` | list of child synthesis records | fails |
+| | `loadMigrationPlan(ownerScope, runId)` | migration plan or `null` | `null` |
+| | `loadLineage(ownerScope, lineageId)` | lineage head or `null` | `null` |
+| | `loadRunLineage(ownerScope, runId)` | lineage head or `null` | `null` |
+| | `loadLineageHead(ownerScope, lineageId, headId)` | lineage head or `null` | `null` |
+| | `loadGeneration(ownerScope, lineageId, generation)` | generation or `null` | `null` |
+| | `loadGenerationInitialPublication(ownerScope, lineageId, generation)` | publication or `null` | fails |
+| | `loadGraphMigrationCapsule(ownerScope, runId, lineageHeadId)` | capsule or `null` | `null` |
+| | `loadExecutionLease(ownerScope, runId)` | lease or `null` | `null` |
+| | `comparePublish(ownerScope, expectedJournalHead, publication)` | publish result | required |
+| | `comparePublishExecution(ownerScope, expectedJournalHead, publication, expectedLease, nextLease)` | publish result; the leases are canonical texts or `null` | `"conflict"` |
+| `programs` | `publishAdmitted(bundle, version)` | nothing | required |
+| | `getBundle(id)`, `getBundle(ownerScope, id)` | bundle or `null` | required |
+| | `getVersion(id)`, `getVersion(ownerScope, id)` | version or `null` | required |
+| | `getActivation(ownerScope)` | activation or `null` | fails |
+| | `getActiveBinding(ownerScope)` | activation binding or `null` | read from `getActivation` and `getVersion` |
+| | `compareActivate(ownerScope, expectedGeneration, versionId, policySnapshotHash)` | activation result | fails |
+| | `listVersions(ownerScope)` | list of versions | fails |
+| | `collectGarbage(ownerScope, pinnedVersionIds)` | retention report | fails |
+| `grants` | `admit(record)` | admission | required |
+| | `load(context)` | grant record or `null` | required |
+| | `revoke(context)` | boolean: whether a grant was revoked | required |
+| `fragments` | `publish(record)` | publish result | required |
+| | `load(fragmentId)` | fragment record or `null` | required |
+| | `findPublishedLineage(ownerScope, parentRunId, expansionOperationId)` | fragment record or `null` | `null` |
+| | `findPublished(ownerScope, parentRunId, expansionOperationId, proposalHash)` | fragment record or `null` | `null` |
+| | `compareUpdate(fragmentId, expectedRevision, record)` | publish result | required |
+| `modules` | `publish(module)` | nothing | required |
+| | `get(contentIdentity)`, `get(ownerScope, contentIdentity)` | module or `null` | required |
+| | `setLifecycle(contentIdentity, lifecycle)` | nothing | required |
+
+- **Two forms of one method.** `getBundle`, `getVersion` and `get` each have an unqualified form and an owner-qualified one in
+  C++, and the catalog uses both. One JavaScript method serves both, and the number of arguments tells them apart: one is
+  the identity, two are the owner scope and then the identity. A method written for one argument is wrong for the other.
+- **A publication is checked before it crosses.** `comparePublish` and `comparePublishExecution` begin as every backend of
+  the transition store begins: the checks that need no stored state (the owner of the publication, the shape of the
+  expected head, the effect outbox, the canonical text of the publication). A publication that fails them is `"conflict"`
+  and never reaches the object. What the stored state says about it is the store's decision.
+- **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
+  does not take part in live graph migration: it answers `"conflict"`, as the base class does.
+
+**The reference store.** `neograph.memoryStores()` (`memoryStores(module)` of `stores.mjs`) returns `{ transitions, programs, grants, fragments, modules }` that
+implement this contract by calling the in-memory C++ stores of the module (`wasm/memory_stores.cpp`): the arguments are
+decoded with the same table the adapters encode with, the store's own operation runs, and the result is encoded with the
+table the adapters decode with. Its methods return values, not Promises, and a refusal of the in-memory store reaches the
+adapter as the same C++ exception class, through `kind`. The grant store has no in-memory form in the library, so the
+reference keeps a small one with the decisions of the SQLite grant store. `stores.release()` drops the set; do that when
+the runs on it have ended (their `result` has settled), because a call on a dropped set fails.
+
+A host that wants a durable store wraps the reference store instead of writing the rules again. Every method delegates to
+it; the arguments of the calls that change something are written to the host's own storage; and on start the wrapper
+replays them in order into a fresh reference store. The reference store decides each call from its arguments and the state
+before it, so the replay reaches the state the log describes. The wrapper below appends to the log after the reference
+store has decided and before it returns the result; a host that cannot lose a call to a crash in between writes the log
+entry first and applies the call after it. `test/program_stores_test.mjs` does this for a whole Program run.
+
+```js
+const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
+  'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
+  'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
+
+function durable(reference, log) {                          // log.append(entry) is the host's storage
+  const wrapped = {};
+  for (const [member, target] of Object.entries(reference)) {
+    wrapped[member] = {};
+    for (const [method, call] of Object.entries(target)) {
+      wrapped[member][method] = async (...args) => {
+        const result = call(...args);                       // the reference store decides
+        if (CHANGES.has(`${member}.${method}`)) await log.append({ member, method, args });
+        return result;
+      };
+    }
+  }
+  return wrapped;
+}
+// On start: for (const { member, method, args } of log.entries()) fresh[member][method](...args);
+```
+
 ## Examples
 
 - `examples/node/chat.mjs`: one call from Node,
   `API_KEY=... node wasm/examples/node/chat.mjs <base url> <path> <model> "<prompt>" [--stream]`.
+- `examples/node/program.mjs`: a Program with two model calls and a pause between them, from Node,
+  `API_KEY=... node wasm/examples/node/program.mjs <base url> <path> <model> "<prompt>" [--answer <text>]`. It prints the
+  first reply token by token, waits for an answer (the flag, or a line on stdin; an empty answer cancels the run) and
+  continues the conversation with it.
 - `examples/workers/worker.mjs` and `wrangler.toml`: a request handler that answers `POST {"message": "..."}` with the
   model's reply, as JSON or as server-sent events. The template holds no secret: the key is a Worker secret
   (`wrangler secret put API_KEY`), and `neograph_module.wasm` is imported as a `WebAssembly.Module`.
@@ -252,6 +559,21 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   final state, the order of the streamed events, the request that went out (the key and model given at run time), a
   provider refusal, cancellation by `AbortSignal`, a timeout, concurrent runs, and that the host's timers keep running
   while a call is in flight.
+- `test/program_test.mjs`: the Program API against the same server. A Program is compiled and admitted (and a refused
+  source says why), a run streams its events, pauses at the interrupt and is resumed, a fork answers the same pause another
+  way without asking the first call again, a paused run is cancelled and read back from the stores, runs in flight
+  together keep their own answers, an `AbortSignal` closes the connection of a model call, and an error thrown by
+  `onEvent` cancels its run. A fork that is cancelled before it is sent is withdrawn, an aborted signal starts nothing, and a
+  control source that never ends is stopped by its time limit. The failures that must stay failures are checked too: a model with no limits in the catalogue
+  is not called, a budget that cannot cover a call exhausts the run before it is sent, a budget outside what the version
+  admits is refused, and the key is in no result or event. The Node example is run as a child process.
+- `test/program_stores_test.mjs`: the module's `stores` option. The reference store serves a whole lifecycle as it is and
+  wrapped to answer in later tasks (the host's timers keep running between the calls); a rejected call, a thrown error and a
+  value that is not one fail closed with the store's message and the name of the method, and the model is not called; an
+  object without a required method is refused; a wrapper that writes what changes to a log lets a second object, over a
+  store replayed from the log, read back a finished run, see that a paused one is still paused and start the first object's
+  Program; a fork cancelled while the stores are still answering ends cancelled; a misspelt member and a missing lineage
+  reader are refused; releasing an object cancels a run that is executing and leaves one that waits as it is.
 - `test/workers_test.mjs`: the Workers example's exported `fetch` handler is called with a `Request` against the same
   server, buffered and streamed. It shows the handler's logic and its use of the platform APIs; it is not a run on
   workerd.
@@ -273,18 +595,37 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   later or refuses.
 - `tests/test_host_loop.cpp` runs the loop and the host-seam provider natively against a manual executor, so a native
   build covers the same paths.
+- `test/store_conformance_test.mjs` runs the store conformance suites of `tests/` (`ProgramTransitionStoreConformance`,
+  `ProgramStoreConformance` and the graph migration capsule row) against the JavaScript stores, under Node. The module is
+  built with `-DNEOGRAPH_BUILD_WASM_STORE_TESTS=ON` (it fetches googletest) from the target
+  `neograph_wasm_store_conformance`: the suites with a JavaScript backend that hands every case stores through the adapters
+  over the reference store, in both forms (`JavaScript` calls the operations that a synchronous caller uses, `JavaScriptAwaited`
+  the awaitable ones). A case that races two writers on threads makes them take turns on the one thread. The script prints
+  the counts per backend and the reason for every skipped case, and exits non-zero on a failure.
+- `test/js_stores_test.mjs` drives the target `neograph_wasm_store_checks` with stores whose methods return Promises that
+  settle in later tasks: a Promise resumes the awaiting coroutine in a turn of the loop and nothing waits while it is
+  pending; a value that is not a Promise costs no turn; a rejection, a throw and a value that does not parse become C++
+  exceptions that name the method; an object that mixes the two works; an outcome that arrives after the coroutine was
+  destroyed or cancelled is dropped; a missing required method fails `adapt_js_stores`; a whole Program runs over Promise
+  stores, and fails closed over stores that reject.
 
 ## Measured sizes
 
-Release, `-O3 -flto`, Emscripten 6.0.13. The graph smoke contains the Core engine and the SDK runtime; the module adds
-the LLM component, the SDK's JavaScript host and the C API.
+Release, `-O3 -flto`, Emscripten 6.0.13. The graph smoke contains the Core engine and the SDK runtime; the graphs-only
+module adds the LLM component, the SDK's JavaScript host and the C API. The Program component is most of the rest: the
+module with Programs is twice the size of the graphs-only one, and QuickJS is about 1 MB of that.
 
 | Build | `.wasm` | `.wasm` gzip -9 | `.js` |
 |---|---:|---:|---:|
-| Graph smoke, single-thread | 5,509,570 B (5.3 MiB) | 1,608,986 B (1.5 MiB) | 83,223 B |
+| Graph smoke, single-thread | 5,615,386 B (5.4 MiB) | 1,642,238 B (1.6 MiB) | 83,223 B |
 | Graph smoke, pthread | 5,448,684 B (5.2 MiB) | 1,660,246 B (1.6 MiB) | 103,691 B |
-| Checks with Program and LLM, single-thread | 6,039,737 B (5.8 MiB) | 1,842,525 B (1.8 MiB) | 84,263 B |
-| JavaScript module, single-thread | 6,270,525 B (6.0 MiB) | 1,835,562 B (1.8 MiB) | 87,762 B |
+| Checks with Program, LLM and QuickJS, single-thread | 12,495,665 B (11.9 MiB) | 3,741,204 B (3.6 MiB) | 91,040 B |
+| JavaScript module, graphs only (`NEOGRAPH_WASM_JS_PROGRAMS=OFF`), single-thread | 6,466,458 B (6.2 MiB) | 1,893,168 B (1.8 MiB) | 87,762 B |
+| JavaScript module with Programs, without QuickJS, single-thread | 12,148,715 B (11.6 MiB) | 3,551,238 B (3.4 MiB) | 95,154 B |
+| JavaScript module with Programs and QuickJS, single-thread | 13,209,571 B (12.6 MiB) | 3,931,479 B (3.7 MiB) | 96,889 B |
+
+The module with Programs and QuickJS built with `-DCMAKE_CXX_FLAGS_RELEASE="-Oz -DNDEBUG"` (and the same for C) is
+10,378,540 B and 3,122,630 B gzipped; its speed was not measured.
 
 CI fails the single-thread smoke above 6,000,000 bytes of `.wasm` or 1,750,000 bytes gzipped (the measured size plus
 about 9%), and the module above 6,850,000 bytes of `.wasm` or 2,010,000 bytes gzipped, and reports the sizes in the job summary. A Worker's script has a size
@@ -303,7 +644,7 @@ Calls into these fail with a typed error where NeoGraph owns the call, and are n
   libraries, so a host database needs a store of its own. A store whose operations complete at once (a host's synchronous
   storage) and a store that completes only through the host's event loop both serve the runtime on the host loop, through
   the `_async` forms ([#557](https://github.com/fox1245/NeoGraph/issues/557)). The synchronous Program calls refuse on a
-  host loop; use the `_async` forms.
+  host loop; use the `_async` forms. The JavaScript module takes such stores as JavaScript objects (`stores`, above).
 - **Native Program controls.** The C v1 plugin ABI is a 64-bit layout, so `NativeControlBinding::create` refuses on
   wasm32 with `NativeControlUnavailable`.
 - **Synchronous checkpoint stores.** A store that is not asynchronous runs each operation on a pool of worker threads.
@@ -342,5 +683,6 @@ The plan after the toolchain review is in [#535](https://github.com/fox1245/NeoG
   module, and the Node and Workers examples.
 - **M3.** Programs on a host store ([#557](https://github.com/fox1245/NeoGraph/issues/557),
   [#556](https://github.com/fox1245/NeoGraph/issues/556)). The runtime half is in: `ProgramRuntime` runs on
-  `HostLoop::executor()` ("Programs on the host loop" above). So is the store interface: it is awaitable.
+  `HostLoop::executor()` ("Programs on the host loop" above). So is the store interface: it is awaitable. So is the
+  JavaScript surface ("Programs in the module" above).
 - **M4.** Realtime sessions, WASI, a custody backend for native archives, and remote Harness.

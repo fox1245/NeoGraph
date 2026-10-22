@@ -2,7 +2,9 @@ name: WebAssembly
 # The graph engine for a WebAssembly host (#535): the single-thread Emscripten build of the graph smoke and of the
 # JavaScript module (model calls through the host's fetch), with a curl-free SchemaProvider and no OpenSSL, run under
 # Node 22 and 24: the smoke program, the wasm32 checks, the module against a local OpenAI-compatible server (no
-# network, no key), and the Workers example's fetch handler called in Node. Size gates for the smoke program and the
+# network, no key) for graphs and for Programs, and the Workers example's fetch handler called in Node. The Program
+# stores of a JavaScript host: the store conformance suites run against the JavaScript adapters over the reference
+# store, and the adapters are checked against stores whose methods return Promises. Size gates for the smoke program and the
 # module. The pthread build is a second job. Both pin the Emscripten toolchain: 6.0.13, from the emsdk commit that
 # is that release.
 
@@ -45,7 +47,8 @@ jobs:
   single-thread:
     name: single-thread (Node 22 and 24)
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # The job also builds the Program component, QuickJS and the two store test modules.
+    timeout-minutes: 45
     env:
       # The size gates. Budgets are the measured size (-O3 -flto, Release) plus about 9%: the graph smoke is 5.51 MB
       # and 1.61 MB gzipped. The JavaScript module adds the LLM component, the SDK's JavaScript host and the C API
@@ -76,12 +79,13 @@ jobs:
           source emsdk/emsdk_env.sh
           emcmake cmake -S . -B build-wasm -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DNEOGRAPH_BUILD_WASM=ON -DNEOGRAPH_BUILD_WASM_JS=ON -DNEOGRAPH_BUILD_PROGRAM=ON \
+            -DNEOGRAPH_BUILD_QUICKJS_CONTROL=ON \
             -DNEOGRAPH_BUILD_ASYNC=OFF -DNEOGRAPH_BUILD_LLM=ON -DNEOGRAPH_BUILD_MCP=OFF \
             -DNEOGRAPH_BUILD_MCP_CLIENT=OFF -DNEOGRAPH_BUILD_MCP_SERVER=OFF -DNEOGRAPH_BUILD_MCP_HTTP_SERVER=OFF \
             -DNEOGRAPH_BUILD_A2A=OFF -DNEOGRAPH_BUILD_ACP=OFF -DNEOGRAPH_BUILD_GRPC=OFF \
             -DNEOGRAPH_BUILD_POSTGRES=OFF -DNEOGRAPH_BUILD_SQLITE=OFF -DNEOGRAPH_BUILD_UTIL=OFF \
             -DNEOGRAPH_BUILD_EXAMPLES=OFF -DNEOGRAPH_BUILD_TESTS=OFF -DNEOGRAPH_BUILD_BENCHMARKS=OFF \
-            -DNEOGRAPH_USE_LIBCURL=OFF
+            -DNEOGRAPH_USE_LIBCURL=OFF -DNEOGRAPH_BUILD_WASM_STORE_TESTS=ON
       - name: Check that the configuration is single-thread, curl-free, OpenSSL-free and uses exceptions
         run: |
           fail() { echo "configuration check failed: $1"; exit 1; }
@@ -96,15 +100,16 @@ jobs:
           if grep -q -i -E 'openssl|libssl|libcrypto' build-wasm/build.ninja; then fail "OpenSSL is on a command line"; fi
           ninja -C build-wasm -t targets all | grep -q 'neograph_llm' || fail "neograph_llm is not configured"
           ninja -C build-wasm -t targets all | grep -q 'sp_js_host' || fail "sp_js_host is not configured"
-      - name: Build the smoke program, the wasm32 checks and the JavaScript module
+      - name: Build the smoke program, the wasm32 checks, the JavaScript module and the Program store tests
         run: |
           source emsdk/emsdk_env.sh
-          time cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks neograph_js --parallel
+          time cmake --build build-wasm --target neograph_wasm_smoke neograph_wasm_checks neograph_js \
+            neograph_wasm_store_conformance neograph_wasm_store_checks --parallel
           ls -l build-wasm/wasm
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Run the smoke program, the checks and the module tests on Node 22
+      - name: Run the smoke program, the checks, the module tests and the Program store tests on Node 22
         run: |
           node --version
           node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
@@ -116,10 +121,18 @@ jobs:
           tail -n 1 module.out | grep -q '^all checks passed$'
           node wasm/test/workers_test.mjs build-wasm/wasm | tee workers.out
           tail -n 1 workers.out | grep -q '^all checks passed$'
+          node wasm/test/program_test.mjs build-wasm/wasm | tee program.out
+          tail -n 1 program.out | grep -q '^all checks passed$'
+          node wasm/test/program_stores_test.mjs build-wasm/wasm | tee program-stores.out
+          tail -n 1 program-stores.out | grep -q '^all checks passed$'
+          node wasm/test/store_conformance_test.mjs build-wasm/wasm | tee conformance.out
+          tail -n 1 conformance.out | grep -q '^all checks passed$'
+          node wasm/test/js_stores_test.mjs build-wasm/wasm | tee stores.out
+          tail -n 1 stores.out | grep -q '^all checks passed$'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Run the smoke program, the checks and the module tests on Node 24
+      - name: Run the smoke program, the checks, the module tests and the Program store tests on Node 24
         run: |
           node --version
           node build-wasm/wasm/smoke.js > smoke.out && cat smoke.out
@@ -131,6 +144,14 @@ jobs:
           tail -n 1 module.out | grep -q '^all checks passed$'
           node wasm/test/workers_test.mjs build-wasm/wasm | tee workers.out
           tail -n 1 workers.out | grep -q '^all checks passed$'
+          node wasm/test/program_test.mjs build-wasm/wasm | tee program.out
+          tail -n 1 program.out | grep -q '^all checks passed$'
+          node wasm/test/program_stores_test.mjs build-wasm/wasm | tee program-stores.out
+          tail -n 1 program-stores.out | grep -q '^all checks passed$'
+          node wasm/test/store_conformance_test.mjs build-wasm/wasm | tee conformance.out
+          tail -n 1 conformance.out | grep -q '^all checks passed$'
+          node wasm/test/js_stores_test.mjs build-wasm/wasm | tee stores.out
+          tail -n 1 stores.out | grep -q '^all checks passed$'
       - name: Size gate
         run: |
           python3 wasm/size_gate.py --label "Graph smoke, single-thread, Emscripten $EMSCRIPTEN_VERSION" \

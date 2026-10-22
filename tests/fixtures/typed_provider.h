@@ -7,6 +7,11 @@
 #include <descriptor/policy.h>
 #include <sp/config_defaults.h>
 #include <json/json.h>
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+#include <runtime/host.h>
+#include <chrono>
+#include <memory>
+#endif
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -59,13 +64,47 @@ inline sp::descriptor::ValidatedDescriptor descriptor(
     return std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted));
 }
 
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+// The WebAssembly build has no libcurl transport, so its clients are built over a host seam that sends nothing. The
+// fixtures that hold a client answer through their provider's handler and never send through it.
+namespace idle_host {
+class Executor final : public sp::runtime::Executor {
+public:
+    void post(Task) override {}
+    Timer schedule(sp::runtime::SteadyTime, Task) override { return 0; }
+    void cancel(Timer) noexcept override {}
+    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
+    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+    bool in_thread() const noexcept override { return false; }
+    bool host_pumped() const noexcept override { return true; }
+    void shutdown() noexcept override {}
+};
+class Transport final : public sp::runtime::HostTransport {
+public:
+    std::unique_ptr<sp::runtime::HostAttempt> start(sp::transport::HttpRequest, sp::transport::Callbacks) override {
+        throw std::logic_error("a fixture client must not send");
+    }
+    void shutdown() noexcept override {}
+};
+}  // namespace idle_host
+inline std::shared_ptr<sp::runtime::Client> make_client(sp::descriptor::ValidatedDescriptor admitted) {
+    return std::make_shared<sp::runtime::Client>(std::move(admitted), sp::runtime::Options{},
+                                                 std::make_shared<idle_host::Executor>(),
+                                                 std::make_shared<idle_host::Transport>());
+}
+#else
+inline std::shared_ptr<sp::runtime::Client> make_client(sp::descriptor::ValidatedDescriptor admitted) {
+    return std::make_shared<sp::runtime::Client>(std::move(admitted));
+}
+#endif
+
 inline std::shared_ptr<sp::runtime::Client> client() {
-    return std::make_shared<sp::runtime::Client>(descriptor());
+    return make_client(descriptor());
 }
 
 inline std::shared_ptr<sp::runtime::Client> bounded_client(
     std::string model = "test-model", std::uint64_t input_limit = 1) {
-    return std::make_shared<sp::runtime::Client>(descriptor(
+    return make_client(descriptor(
         "openai.chat", "https://fixture.invalid",
         policy_with_models(neograph::json::parse(sp::config_defaults::descriptor_policy_json),
                            {{"openai.chat", std::move(model), input_limit}})));

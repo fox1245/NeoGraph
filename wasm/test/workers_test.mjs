@@ -3,7 +3,7 @@
 // no key. This shows the handler's logic and the module's use of Request/Response/fetch/TransformStream; it does not run
 // on workerd.
 //
-//   node wasm/test/workers_test.mjs <directory with neograph.mjs, neograph_module.mjs and neograph_module.wasm>
+//   node wasm/test/workers_test.mjs <directory with neograph.mjs, stores.mjs, neograph_module.mjs and neograph_module.wasm>
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,7 +19,7 @@ const examples = path.resolve(here, '../examples/workers');
 // The Worker's directory as a project has it: the example next to the module it imports.
 const project = fs.mkdtempSync(path.join(os.tmpdir(), 'neograph-worker-'));
 fs.copyFileSync(path.join(examples, 'worker.mjs'), path.join(project, 'worker.mjs'));
-for (const name of ['neograph.mjs', 'neograph_module.mjs', 'neograph_module.wasm']) {
+for (const name of ['neograph.mjs', 'stores.mjs', 'neograph_module.mjs', 'neograph_module.wasm']) {
   fs.copyFileSync(path.join(modules, name), path.join(project, name));
 }
 register(pathToFileURL(path.join(here, 'wasm_import_loader.mjs')));

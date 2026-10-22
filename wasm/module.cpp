@@ -17,15 +17,21 @@
 #include <neograph/json.h>
 #include <neograph/llm/schema_provider.h>
 
+#include <descriptor/catalogue.h>
 #include <descriptor/descriptor.h>
+#include <descriptor/policy.h>
 #include <runtime/js_host.h>
+
+#include "module_host.h"
 
 #include <emscripten.h>
 
+#include <array>
 #include <chrono>
 #include <exception>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -39,13 +45,6 @@ EM_JS(void, ng_js_event, (int run, const char* text), { Module.ngOnEvent(run, UT
 EM_JS(void, ng_js_done, (int run, const char* text), { Module.ngOnDone(run, UTF8ToString(text)); });
 EM_JS_DEPS(ng_js_deps, "$UTF8ToString");
 
-// The loop that pumps every run of this module instance, on an executor of its own: a Client shuts down the executor
-// it runs on when it is destroyed, so the loop cannot share one.
-neograph::async::HostLoop& loop() {
-    static neograph::async::HostLoop instance{sp::runtime::js::make_executor()};
-    return instance;
-}
-
 struct Compiled {
     std::unique_ptr<graph::GraphEngine> engine;
     std::shared_ptr<neograph::Provider> provider;
@@ -58,6 +57,8 @@ std::map<int, std::shared_ptr<Compiled>> compiled;
 std::map<int, Run> runs;
 int last_handle = 0;
 std::string last_error;
+
+using neograph::wasm::loop;
 
 const char* const error_kinds[] = {
     "invalid_config", "invalid_request", "unsupported", "transport", "protocol_corrupt", "truncated",
@@ -93,8 +94,26 @@ const char* event_name(graph::GraphEvent::Type type) {
     return "unknown";
 }
 
-sp::descriptor::ValidatedDescriptor load_descriptor(const json& description) {
-    auto loaded = sp::descriptor::load(description.dump());
+// The embedded policy with `catalogue` (the SDK's model catalogue format, from the host) layered over the embedded
+// catalogue: what the host states about its models (their limits, prices) replaces what the embedded one says.
+sp::descriptor::PolicySnapshot policy_with_catalogue(const json& catalogue) {
+    auto parsed = sp::descriptor::load_catalogue(catalogue.dump());
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&parsed))
+        throw std::invalid_argument("provider.catalogue rejected at " + error->pointer + ": " + error->message);
+    const std::array<sp::descriptor::CatalogueSnapshot, 2> layers{
+        sp::descriptor::builtin_catalogue(), std::get<sp::descriptor::CatalogueSnapshot>(parsed)};
+    auto merged = sp::descriptor::merge_catalogues(layers);
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&merged))
+        throw std::invalid_argument("provider.catalogue rejected at " + error->pointer + ": " + error->message);
+    auto policy = sp::descriptor::builtin_policy()->with_catalogue(std::get<sp::descriptor::CatalogueSnapshot>(merged));
+    if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&policy))
+        throw std::invalid_argument("provider.catalogue rejected at " + error->pointer + ": " + error->message);
+    return std::get<sp::descriptor::PolicySnapshot>(std::move(policy));
+}
+
+sp::descriptor::ValidatedDescriptor load_descriptor(const json& description, const json* catalogue = nullptr) {
+    auto loaded = catalogue ? sp::descriptor::load(description.dump(), policy_with_catalogue(*catalogue))
+                            : sp::descriptor::load(description.dump());
     if (const auto* error = std::get_if<sp::descriptor::ConfigError>(&loaded))
         throw std::invalid_argument("provider.descriptor rejected at " + error->pointer + ": " + error->message);
     return std::get<sp::descriptor::ValidatedDescriptor>(std::move(loaded));
@@ -185,6 +204,37 @@ asio::awaitable<graph::RunResult> drive(std::shared_ptr<Compiled> graph_handle, 
 
 }  // namespace
 
+namespace neograph::wasm {
+
+async::HostLoop& loop() {
+    static async::HostLoop instance{sp::runtime::js::make_executor()};
+    return instance;
+}
+
+void set_error(std::string message) { last_error = std::move(message); }
+
+graph::NodeContext node_context_from(const json& provider) {
+    sp::runtime::Options options = sp::runtime::Options::with_api_key(provider.value("api_key", ""));
+    // The SDK's host seam for this provider: its executor, and the transport that sends over fetch on it.
+    auto executor = sp::runtime::js::make_executor();
+    auto transport = sp::runtime::js::make_fetch_transport(executor);
+    std::optional<json> catalogue;
+    if (provider.contains("catalogue")) catalogue = provider.at("catalogue");
+    graph::NodeContext context;
+    context.provider = neograph::llm::SchemaProvider::create(
+        load_descriptor(provider.at("descriptor"), catalogue ? &*catalogue : nullptr),
+        std::move(options), std::move(executor), std::move(transport));
+    context.model = provider.value("model", "");
+    context.instructions = provider.value("instructions", "");
+    if (provider.contains("max_output_tokens"))
+        context.provider_controls.max_output_tokens = provider["max_output_tokens"].get<unsigned long long>();
+    if (provider.contains("temperature"))
+        context.provider_controls.temperature = provider["temperature"].get<double>();
+    return context;
+}
+
+}  // namespace neograph::wasm
+
 // The last error message of ng_compile or ng_run. Valid until the next call.
 extern "C" EMSCRIPTEN_KEEPALIVE const char* ng_error() { return last_error.c_str(); }
 
@@ -203,20 +253,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int ng_compile(const char* graph_json, const cha
         const auto definition = json::parse(graph_json);
         const auto provider = json::parse(provider_json);
         auto handle = std::make_shared<Compiled>();
-        sp::runtime::Options options = sp::runtime::Options::with_api_key(provider.value("api_key", ""));
-        // The SDK's host seam for this provider: its executor, and the transport that sends over fetch on it.
-        auto executor = sp::runtime::js::make_executor();
-        auto transport = sp::runtime::js::make_fetch_transport(executor);
-        handle->provider = neograph::llm::SchemaProvider::create(
-            load_descriptor(provider["descriptor"]), std::move(options), std::move(executor), std::move(transport));
-        graph::NodeContext context;
-        context.provider = handle->provider;
-        context.model = provider.value("model", "");
-        context.instructions = provider.value("instructions", "");
-        if (provider.contains("max_output_tokens"))
-            context.provider_controls.max_output_tokens = provider["max_output_tokens"].get<unsigned long long>();
-        if (provider.contains("temperature"))
-            context.provider_controls.temperature = provider["temperature"].get<double>();
+        auto context = neograph::wasm::node_context_from(provider);
+        handle->provider = context.provider;
         handle->engine = graph::GraphEngine::compile(definition, context);
         compiled.emplace(++last_handle, std::move(handle));
         return last_handle;

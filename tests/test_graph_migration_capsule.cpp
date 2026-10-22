@@ -461,6 +461,9 @@ TEST(GraphMigrationCapsule, CanonicalRoundTripBindsSourceAndCheckpoint) {
 // Trusted-archive custody requires an owner-only protected DACL on the parent; this fixture
 // only sets POSIX permission bits, as in the other archive tests that are skipped on Windows.
 TEST(GraphMigrationCapsule, ArchiveConfigurationDoesNotGrantPlainGraphCustody) {
+#ifdef __EMSCRIPTEN__
+    GTEST_SKIP() << "a WebAssembly host has no file custody: a native archive cannot be provisioned";
+#endif
     TempMigrationArchive files;
     const auto descriptor = neograph::test::descriptor();
     auto provisioned = sp::NativeArchive::provision(
@@ -838,7 +841,7 @@ TEST_P(GraphMigrationCapsuleStoreConformance, StoredCapsuleRowMustAgreeWithItsRe
     if (const auto reason =
             neograph::program::test_support::backend_unavailable_reason(GetParam().backend))
         GTEST_SKIP() << *reason;
-    if (GetParam().backend == neograph::program::test_support::StoreBackend::InMemory)
+    if (!neograph::program::test_support::backend_is_durable(GetParam().backend))
         GTEST_SKIP() << "the in-memory store keeps typed values in the process: stored-byte tamper "
                         "detection needs a durable backend (declared capability, #556)";
     const auto source = migration_source_fixture();

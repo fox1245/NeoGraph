@@ -4,7 +4,7 @@
 //   API_KEY=<key> node wasm/examples/node/chat.mjs https://api.example.com /v1/chat/completions <model> "Say hello" --stream
 //
 // The base url is the origin of an OpenAI-compatible Chat Completions endpoint, and the path is its route. The module
-// is the build's wasm/ directory (neograph.mjs, neograph_module.mjs, neograph_module.wasm); NEOGRAPH_WASM_DIR names
+// is the build's wasm/ directory (neograph.mjs, stores.mjs, neograph_module.mjs, neograph_module.wasm); NEOGRAPH_WASM_DIR names
 // another one. The key comes from the environment of this process and goes nowhere else.
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';

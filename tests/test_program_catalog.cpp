@@ -28,9 +28,13 @@
 
 #include <algorithm>
 #include <atomic>
+#if NEOGRAPH_BUILD_THREADS
 #include <barrier>
+#endif
 #include <cstdint>
+#if NEOGRAPH_BUILD_THREADS
 #include <future>
+#endif
 #include <optional>
 #include <functional>
 #include <memory>
@@ -804,6 +808,9 @@ TEST(ProgramCatalogTest, NodeFactoriesReceiveOnlyTheirExactCapabilities) {
 }
 
 TEST(ProgramCatalogTest, FixedBrokeredCoreNodesDispatchOnlyThroughRunGate) {
+#if !NEOGRAPH_BUILD_THREADS
+    GTEST_SKIP() << "a synchronous Tool runs on the bounded blocking pool, which a build without OS threads does not have";
+#endif
     provider_calls.store(0);
     tool_calls.store(0);
     const auto provider = manifest(ExecutableKind::Provider, "catalog-provider", '3');
@@ -1005,6 +1012,9 @@ TEST(ProgramCatalogTest, BindingReceiptRouteChangesVersionAndEngineGeneration) {
 }
 
 TEST(ProgramCatalogTest, WorkerCountSeparatesOtherwiseIdenticalEngineGenerations) {
+#if !NEOGRAPH_BUILD_THREADS
+    GTEST_SKIP() << "a worker count above one needs OS threads, and this build has one thread";
+#endif
     factory_calls.store(0);
     auto       snapshot      = bound_registry();
     ProgramStoreHandle       store         = std::make_shared<InMemoryProgramStore>();
@@ -1370,6 +1380,9 @@ TEST(ProgramCatalogTest, SQLiteRecoveredBindingWithWrongReceiptFailsClosed) {
 #endif
 
 TEST(ProgramCatalogTest, PositiveFiniteConcurrencyAboveOneIsAdmitted) {
+#if !NEOGRAPH_BUILD_THREADS
+    GTEST_SKIP() << "a worker count above one needs OS threads, and this build has one thread";
+#endif
     factory_calls.store(0);
     auto           snapshot = bound_registry();
     CatalogFixture fixture(
@@ -2101,6 +2114,7 @@ TEST_P(ProgramStoreConformance, ConcurrentActivationHasOneWinner) {
     store.publish_admitted(v.bundle, v.first);
     store.publish_admitted(v.bundle, v.second);
 
+#if NEOGRAPH_BUILD_THREADS
     std::barrier ready(3);
     auto         activate = [&](BlockingProgramStore& writer, const ProgramVersion& version) {
         ready.arrive_and_wait();
@@ -2112,6 +2126,13 @@ TEST_P(ProgramStoreConformance, ConcurrentActivationHasOneWinner) {
     ready.arrive_and_wait();
     const auto ar = a.get();
     const auto br = b.get();
+#else
+    // A build without threads has one thread: the two writers take turns, and the second one finds the generation moved.
+    const auto ar = store.compare_activate(CATALOG_OWNER, 0, v.first.id(),
+                                           ConformanceVersions::policy_hash(v.first));
+    const auto br = other->compare_activate(CATALOG_OWNER, 0, v.second.id(),
+                                            ConformanceVersions::policy_hash(v.second));
+#endif
     EXPECT_TRUE((ar == ProgramActivationResult::Activated && br == ProgramActivationResult::Conflict) ||
                 (br == ProgramActivationResult::Activated && ar == ProgramActivationResult::Conflict));
     const auto activation = store.get_activation(CATALOG_OWNER);
