@@ -314,6 +314,13 @@ public:
     ProgramChildSynthesisRecord continue_child(
         ProgramChildSynthesisRecord                                    record,
         const std::function<void(const ProgramChildSynthesisRecord&)>& publish) const;
+    /**
+     * The same stages for a caller that cannot block (#557): `publish` is awaited, and so is the catalog's admission, so a
+     * store that completes only in a later turn of a host's event loop works. `publish` is taken by value.
+     */
+    asio::awaitable<ProgramChildSynthesisRecord> continue_child_async(
+        ProgramChildSynthesisRecord                                                   record,
+        std::function<asio::awaitable<void>(const ProgramChildSynthesisRecord&)>     publish) const;
     ProgramSynthesisResult synthesize(const ProgramSynthesisProposal& proposal) const;
     /** Checked child path; never treats a proposal or returned receipt as authority. */
     ProgramChildSynthesisResult synthesize_child(const ProgramSynthesisProposal&    proposal,

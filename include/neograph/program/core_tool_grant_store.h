@@ -72,6 +72,9 @@ public:
         const ProgramCoreToolGrantContext& context) const final;
     [[nodiscard]] asio::awaitable<bool> revoke(const ProgramCoreToolGrantContext& context) final;
 
+    /** True when every awaitable operation completes at once on the calling thread, not on a pool thread. */
+    bool completes_at_once() const noexcept { return !offloads(); }
+
 protected:
     /** True for a backend that blocks for long: each operation then runs on a pool thread. */
     virtual bool offloads() const noexcept { return false; }
@@ -109,6 +112,14 @@ using ProgramCoreToolGrantPolicyFactory = std::function<
  * revoked or mismatched records never authorize mediated Tool dispatch.
  */
 NEOGRAPH_PROGRAM_API ProgramCoreToolGrantResolver make_durable_core_tool_grant_resolver(
+    std::shared_ptr<ProgramCoreToolGrantStore> store,
+    ProgramCoreToolGrantPolicyFactory policy_factory);
+
+/**
+ * The same resolver for a host that cannot block: it awaits the store, so a store that completes only when the host's
+ * event loop is pumped works. Set it as RuntimeConfig::core_tool_grant_awaitable_resolver.
+ */
+NEOGRAPH_PROGRAM_API ProgramCoreToolGrantAwaitableResolver make_durable_core_tool_grant_awaitable_resolver(
     std::shared_ptr<ProgramCoreToolGrantStore> store,
     ProgramCoreToolGrantPolicyFactory policy_factory);
 

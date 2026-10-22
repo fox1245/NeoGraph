@@ -13,6 +13,8 @@
 #include <neograph/program/store.h>
 #include <neograph/tool_set.h>
 
+#include <asio/awaitable.hpp>
+
 #include <functional>
 #include <cstddef>
 #include <memory>
@@ -182,15 +184,53 @@ public:
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids);
 
+    /**
+     * Awaitable forms of the operations above. Each one is the body its synchronous namesake runs: it awaits the
+     * catalog's stores on the executor of the coroutine that awaits it, so a store that completes only when a
+     * host's event loop is pumped works, and nothing blocks a thread. They take their arguments by value. The
+     * synchronous forms keep their meaning for a threaded host; inside a turn of an async::HostLoop they are
+     * refused (ProgramBlockingCallRefused) when a store is not synchronous.
+     */
+    asio::awaitable<ProgramVersion> admit_async(ProgramBundle bundle, ProgramAdmission admission);
+    asio::awaitable<ProgramVersion> admit_composed_async(ProgramBundle bundle,
+                                                         ProgramAdmission admission,
+                                                         ProgramComposition composition);
+    asio::awaitable<std::optional<ProgramVersion>> find_version_async(std::string id) const;
+    asio::awaitable<std::optional<ProgramVersion>> find_version_async(std::string owner_scope,
+                                                                      std::string id) const;
+    asio::awaitable<std::optional<ProgramVersion>> resolve_version_async(std::string owner_scope,
+                                                                         std::string id);
+    asio::awaitable<std::optional<ProgramVersion>> resolve_version_with_binding_async(
+        std::string owner_scope, std::string id, CatalogCapabilityBinding binding);
+    asio::awaitable<MigrationPlan> plan_migration_async(std::string owner_scope,
+                                                        std::string source_version_id,
+                                                        std::string target_version_id) const;
+    asio::awaitable<ProgramActivationResult> activate_async(std::string owner_scope,
+                                                            std::string version_id,
+                                                            std::uint64_t expected_generation);
+    asio::awaitable<ProgramActivationResult> rollback_async(std::string owner_scope,
+                                                            std::string version_id,
+                                                            std::uint64_t expected_generation);
+    asio::awaitable<std::optional<ProgramActivation>> activation_async(std::string owner_scope) const;
+    asio::awaitable<std::optional<ProgramActivationBinding>> active_binding_async(
+        std::string owner_scope) const;
+    /// True when every store this catalog reads completes its awaitable operations at once (Sync...Store), so that a
+    /// synchronous call can never wait for another thread or for a host's event loop.
+    bool completes_inline() const noexcept;
+    asio::awaitable<ProgramRetentionReport> collect_retention_async(
+        std::string owner_scope, std::vector<std::string> pinned_version_ids);
+
 private:
-    ProgramVersion materialize(
-        const ProgramBundle& bundle, ProgramAdmission admission,
+    // The bodies behind the public operations; each is awaited by the awaitable form and run to completion by the
+    // synchronous one. Arguments are by value so that nothing dangles across a suspension.
+    asio::awaitable<ProgramVersion> materialize_async(
+        ProgramBundle bundle, ProgramAdmission admission,
         std::optional<CatalogCapabilityBinding> supplied_binding,
-        const ProgramVersion* expected_version, bool publish,
+        std::optional<ProgramVersion> expected_version, bool publish,
         ExecutionGuarantee effective_execution_guarantee,
         std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization = nullptr);
-    std::optional<ProgramVersion> resolve_version_impl(
-        std::string_view owner_scope, std::string_view id,
+    asio::awaitable<std::optional<ProgramVersion>> resolve_version_impl_async(
+        std::string owner_scope, std::string id,
         std::optional<CatalogCapabilityBinding> supplied_binding,
         std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization = nullptr);
 

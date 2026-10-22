@@ -1245,47 +1245,74 @@ void InMemoryModuleStore::set_lifecycle_sync(std::string_view content_identity, 
     found->second.lifecycle = lifecycle;
 }
 
-ModuleResolver::ModuleResolver(std::shared_ptr<const ModuleStore> store) {
-    if (!store) throw std::invalid_argument("ModuleResolver requires a ModuleStore");
-    store_ = std::make_shared<BlockingModuleStore>(std::const_pointer_cast<ModuleStore>(std::move(store)));
+namespace {
+
+// What one resolution accumulates while it walks the dependency closure.
+struct ModuleWalk {
+    const ModuleStore*                                   store = nullptr;
+    const PolicySnapshot*                                policy = nullptr;
+    std::map<std::string, ProgramModule, std::less<>>*   resolved = nullptr;
+    std::set<std::string, std::less<>>*                  visiting = nullptr;
+};
+
+// One recursive coroutine. The coordinate is taken by value, and the walk's own state lives in the frame of
+// ModuleResolver::resolve_async, which awaits the whole walk.
+asio::awaitable<void> visit_module(const ModuleWalk& walk, ModuleCoordinate coordinate) {
+    const auto& policy = *walk.policy;
+    if (!walk.visiting->insert(coordinate.content_identity).second)
+        throw std::invalid_argument("Module dependency cycle detected at " + coordinate.qualified_name());
+    const std::string owner_scope      = policy.owner_scope();
+    const std::string content_identity = coordinate.content_identity;
+    const auto module = co_await walk.store->get(owner_scope, content_identity);
+    if (!module) throw std::invalid_argument("Pinned module dependency is unavailable");
+    if (module->coordinate() != coordinate)
+        throw std::invalid_argument("Pinned module coordinate does not match its content identity");
+    if (module->owner_scope() != policy.owner_scope())
+        throw std::invalid_argument("Module owner scope differs from the admitting policy");
+    {
+        const auto allowed = policy.allowed_module_digests();
+        if (std::find(allowed.begin(), allowed.end(), module->id()) == allowed.end())
+            throw std::invalid_argument("Module digest is not allowed by the policy snapshot");
+    }
+    if (module->lifecycle() == ModuleLifecycle::Revoked ||
+        module->lifecycle() == ModuleLifecycle::Quarantined ||
+        module->lifecycle() == ModuleLifecycle::Deprecated)
+        throw std::invalid_argument("Module lifecycle is not admissible");
+    for (const auto& capability : module->allowed_capabilities())
+        if (!contains(policy.allowed_capabilities(), capability))
+            throw std::invalid_argument("Module capability exceeds the policy authority");
+    for (const auto& effect : module->declared_effects())
+        if (!contains(policy.allowed_effects(), effect))
+            throw std::invalid_argument("Module effect exceeds the policy authority");
+    for (const auto& dependency : module->dependencies()) co_await visit_module(walk, dependency);
+    walk.visiting->erase(coordinate.content_identity);
+    walk.resolved->emplace(module->id(), *module);
+}
+
+}  // namespace
+
+ModuleResolver::ModuleResolver(std::shared_ptr<const ModuleStore> store) : store_(std::move(store)) {
+    if (!store_) throw std::invalid_argument("ModuleResolver requires a ModuleStore");
+    synchronous_ = dynamic_cast<const SyncModuleStore*>(store_.get()) != nullptr;
 }
 
 ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
                                           const PolicySnapshot& policy) const {
+    // A synchronous store completes at once on this thread. Any other store is waited for here, which a turn of a
+    // host's event loop cannot do: it would complete only in a later turn.
+    if (!synchronous_)
+        detail::check_blocking_store_call(BlockingStorePolicy{}, "ModuleResolver::resolve");
+    return detail::run_to_completion(resolve_async(root, policy), "ModuleResolver::resolve");
+}
+
+asio::awaitable<ModuleResolution> ModuleResolver::resolve_async(ModuleCoordinate root,
+                                                                PolicySnapshot   policy) const {
     require_digest(root.content_identity, "Module root content_identity");
     if (policy.owner_scope().empty()) throw std::invalid_argument("Module resolution requires an owner");
     std::map<std::string, ProgramModule, std::less<>> resolved;
     std::set<std::string, std::less<>> visiting;
-    const auto allowed_digest = [&](std::string_view digest) {
-        const auto allowed = policy.allowed_module_digests();
-        return std::find(allowed.begin(), allowed.end(), digest) != allowed.end();
-    };
-    std::function<void(const ModuleCoordinate&)> visit = [&](const ModuleCoordinate& coordinate) {
-        if (!visiting.insert(coordinate.content_identity).second)
-            throw std::invalid_argument("Module dependency cycle detected at " + coordinate.qualified_name());
-        const auto module = store_->get(policy.owner_scope(), coordinate.content_identity);
-        if (!module) throw std::invalid_argument("Pinned module dependency is unavailable");
-        if (module->coordinate() != coordinate)
-            throw std::invalid_argument("Pinned module coordinate does not match its content identity");
-        if (module->owner_scope() != policy.owner_scope())
-            throw std::invalid_argument("Module owner scope differs from the admitting policy");
-        if (!allowed_digest(module->id()))
-            throw std::invalid_argument("Module digest is not allowed by the policy snapshot");
-        if (module->lifecycle() == ModuleLifecycle::Revoked ||
-            module->lifecycle() == ModuleLifecycle::Quarantined ||
-            module->lifecycle() == ModuleLifecycle::Deprecated)
-            throw std::invalid_argument("Module lifecycle is not admissible");
-        for (const auto& capability : module->allowed_capabilities())
-            if (!contains(policy.allowed_capabilities(), capability))
-                throw std::invalid_argument("Module capability exceeds the policy authority");
-        for (const auto& effect : module->declared_effects())
-            if (!contains(policy.allowed_effects(), effect))
-                throw std::invalid_argument("Module effect exceeds the policy authority");
-        for (const auto& dependency : module->dependencies()) visit(dependency);
-        visiting.erase(coordinate.content_identity);
-        resolved.emplace(module->id(), *module);
-    };
-    visit(root);
+    const ModuleWalk walk{store_.get(), &policy, &resolved, &visiting};
+    co_await visit_module(walk, root);
     ModuleResolution result;
     result.root = root;
     for (const auto& [id, module] : resolved) {
@@ -1294,7 +1321,7 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
         result.receipts.push_back({module.coordinate().qualified_name(), module.id()});
     }
     validate_module_resolution(result);
-    return result;
+    co_return result;
 }
 
 
@@ -1302,7 +1329,7 @@ ModuleResolution ModuleResolver::resolve(const ModuleCoordinate& root,
 
 asio::awaitable<void> SyncModuleStore::publish(const ProgramModule& module) {
     detail::assert_no_pure_lock_held("ModuleStore::publish");
-    if (!offloads()) {
+    if (!detail::offload_store_call(offloads())) {
         publish_sync(module);
         co_return;
     }
@@ -1315,7 +1342,7 @@ asio::awaitable<void> SyncModuleStore::publish(const ProgramModule& module) {
 asio::awaitable<std::optional<ProgramModule>> SyncModuleStore::get(
     std::string_view content_identity) const {
     detail::assert_no_pure_lock_held("ModuleStore::get");
-    if (!offloads()) co_return get_sync(content_identity);
+    if (!detail::offload_store_call(offloads())) co_return get_sync(content_identity);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramModule>>([this, content_identity = std::string(content_identity)]() mutable -> std::optional<ProgramModule> {
         return get_sync(content_identity);
@@ -1326,7 +1353,7 @@ asio::awaitable<std::optional<ProgramModule>> SyncModuleStore::get(
     std::string_view owner_scope,
     std::string_view content_identity) const {
     detail::assert_no_pure_lock_held("ModuleStore::get");
-    if (!offloads()) co_return get_sync(owner_scope, content_identity);
+    if (!detail::offload_store_call(offloads())) co_return get_sync(owner_scope, content_identity);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramModule>>([this, owner_scope = std::string(owner_scope), content_identity = std::string(content_identity)]() mutable -> std::optional<ProgramModule> {
         return get_sync(owner_scope, content_identity);
@@ -1337,7 +1364,7 @@ asio::awaitable<void> SyncModuleStore::set_lifecycle(
     std::string_view content_identity,
     ModuleLifecycle lifecycle) {
     detail::assert_no_pure_lock_held("ModuleStore::set_lifecycle");
-    if (!offloads()) {
+    if (!detail::offload_store_call(offloads())) {
         set_lifecycle_sync(content_identity, std::move(lifecycle));
         co_return;
     }

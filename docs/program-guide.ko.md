@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=139912a5df70aababcb5da41715f1e4b1b21f77fc5853718745b48b9f1461e64 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=faed88529c59a389348b12b563d87661b14d1256ca7667e0f728c3529e6f7124 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -394,7 +394,7 @@ C++ 호스트는 `RuntimeConfig`로 `ProgramRuntime`을 만듭니다. 호스트�
 `ProgramRuntime`은 run 기록을 `ProgramTransitionStore`에, 버전을 `ProgramStore`에 보관하고, 호스트가 쓰는 경우 작업 그래프
 조각, 연결된 모듈, Core 도구 grant를 각각 `TaskGraphFragmentStore`, `ModuleStore`, `ProgramCoreToolGrantStore`에 보관합니다.
 이 인터페이스들은 `asio::awaitable`을 반환하므로, 호스트는 호출이 나중에 완료되는 데이터베이스 위에 저장소를 둘 수 있고,
-run의 attempt는 스레드를 붙잡는 대신 이를 await합니다.
+런타임은 스레드를 붙잡는 대신 이를 await합니다.
 
 - **동기 백엔드는 해당하는 `Sync...Store` 클래스에서 상속합니다**(`SyncProgramTransitionStore` 등 다섯 개). 그리고 `..._sync`
   연산(`load_sync`, `compare_publish_sync` 등)을 구현합니다. 기반 클래스는 이로부터 각 awaitable 연산을 완료시킵니다.
@@ -406,9 +406,16 @@ run의 attempt는 스레드를 붙잡는 대신 이를 await합니다.
   스레드의 전용 `io_context`에서 awaitable을 돌려 기다립니다. 다만 `BlockingStorePolicy::refuse`가 기다리면 호출을 완료해야 할
   스레드가 멈춘다고 하면 거부합니다. 런타임의 정책은 호스트가 구동하는 executor와 자기 executor를 돌리는 스레드에서
   거부하며, 이때 호출은 저장소에 닿기 전에 `ProgramBlockingCallRefused`를 던집니다.
-- **무엇이 await하고 무엇이 기다리는가.** run의 attempt는 전이(transition) 저장소와 조각 저장소를 await합니다. 런타임의 동기
-  진입점, 종료 게시, 자식 시작, grant 리졸버, 카탈로그는 블로킹 뷰를 통해 기다립니다. 즉시 완료되는 저장소는 어디서나
-  동작하고, 호스트의 이벤트 루프를 돌려야만 완료되는 저장소는 호스트가 구동하는 루프가 Program을 실행하는 곳에서 거부됩니다.
+- **무엇이 await하고 무엇이 기다리는가.** 런타임의 모든 연산은 자기 저장소를 await하는 코루틴 하나입니다. 진입점(`start`, `reconnect`,
+  `resume`, `fork`, `replace` 등), run의 종료 게시, 자식 시작과 그 복구, awaitable 쪽일 때의 Core 도구 grant 리졸버
+  (`RuntimeConfig::core_tool_grant_awaitable_resolver`, 저장소로부터 `make_durable_core_tool_grant_awaitable_resolver`가 만듭니다),
+  `ProgramCatalog`(`resolve_version_async`, `admit_async` 등 `_async` 형태), `ModuleResolver::resolve_async`가 그렇습니다.
+  `_async` 형태는 그 본문을 런타임의 executor에서 실행합니다. 동기 형태는 같은 본문을 호출한 스레드에서 끝까지 실행하며,
+  그 스레드가 멈출 곳에서는 거부됩니다. 따라서 호스트 이벤트 루프의 이후 턴에서만 완료되는 저장소가 호스트가 구동하는
+  executor에서 `_async` 형태로 동작하고(`ProgramHandle::cancel_async`, `snapshot_async`, `latest_handoff_async`,
+  `next_handoff_async` 포함), 그 루프의 턴 안에서는 동기 형태가 거부됩니다. 아직 호출자를 막는 것은 `ProgramHandoff::reference()`,
+  `RuntimeInstructionController`, `inspect_program_replacement_chain`, `hook_runtime`이며, 런타임은 `graph::CheckpointStore`를
+  그 저장소의 동기 호출로 읽습니다.
 - **awaitable을 버리는 호출은 아무 일도 하지 않습니다.** 연산은 `[[nodiscard]]`입니다. `co_await`하거나 블로킹 뷰를 쓰십시오.
 - **계약**(원자적 게시, 헤드 compare-and-swap, fail-closed)은 모든 저장소가 지켜야 하며, `tests/test_program_transition_store.cpp`와
   `tests/test_program_catalog.cpp`의 적합성(conformance) 스위트가 인메모리, SQLite, PostgreSQL 저장소에 대해 각 형태로 한 번씩 실행합니다.

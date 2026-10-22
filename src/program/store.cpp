@@ -259,7 +259,7 @@ asio::awaitable<void> SyncProgramStore::publish_admitted(
     const ProgramBundle& bundle,
     const ProgramVersion& version) {
     detail::assert_no_pure_lock_held("ProgramStore::publish_admitted");
-    if (!offloads()) {
+    if (!detail::offload_store_call(offloads())) {
         publish_admitted_sync(bundle, version);
         co_return;
     }
@@ -271,7 +271,7 @@ asio::awaitable<void> SyncProgramStore::publish_admitted(
 
 asio::awaitable<std::optional<ProgramBundle>> SyncProgramStore::get_bundle(std::string_view id) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
-    if (!offloads()) co_return get_bundle_sync(id);
+    if (!detail::offload_store_call(offloads())) co_return get_bundle_sync(id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramBundle>>([this, id = std::string(id)]() mutable -> std::optional<ProgramBundle> {
         return get_bundle_sync(id);
@@ -281,7 +281,7 @@ asio::awaitable<std::optional<ProgramBundle>> SyncProgramStore::get_bundle(std::
 asio::awaitable<std::optional<ProgramVersion>> SyncProgramStore::get_version(
     std::string_view id) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_version");
-    if (!offloads()) co_return get_version_sync(id);
+    if (!detail::offload_store_call(offloads())) co_return get_version_sync(id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramVersion>>([this, id = std::string(id)]() mutable -> std::optional<ProgramVersion> {
         return get_version_sync(id);
@@ -292,7 +292,7 @@ asio::awaitable<std::optional<ProgramBundle>> SyncProgramStore::get_bundle(
     std::string_view owner_scope,
     std::string_view id) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_bundle");
-    if (!offloads()) co_return get_bundle_sync(owner_scope, id);
+    if (!detail::offload_store_call(offloads())) co_return get_bundle_sync(owner_scope, id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramBundle>>([this, owner_scope = std::string(owner_scope), id = std::string(id)]() mutable -> std::optional<ProgramBundle> {
         return get_bundle_sync(owner_scope, id);
@@ -303,7 +303,7 @@ asio::awaitable<std::optional<ProgramVersion>> SyncProgramStore::get_version(
     std::string_view owner_scope,
     std::string_view id) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_version");
-    if (!offloads()) co_return get_version_sync(owner_scope, id);
+    if (!detail::offload_store_call(offloads())) co_return get_version_sync(owner_scope, id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramVersion>>([this, owner_scope = std::string(owner_scope), id = std::string(id)]() mutable -> std::optional<ProgramVersion> {
         return get_version_sync(owner_scope, id);
@@ -313,7 +313,7 @@ asio::awaitable<std::optional<ProgramVersion>> SyncProgramStore::get_version(
 asio::awaitable<std::optional<ProgramActivation>> SyncProgramStore::get_activation(
     std::string_view owner_scope) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_activation");
-    if (!offloads()) co_return get_activation_sync(owner_scope);
+    if (!detail::offload_store_call(offloads())) co_return get_activation_sync(owner_scope);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramActivation>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::optional<ProgramActivation> {
         return get_activation_sync(owner_scope);
@@ -323,7 +323,7 @@ asio::awaitable<std::optional<ProgramActivation>> SyncProgramStore::get_activati
 asio::awaitable<std::optional<ProgramActivationBinding>> SyncProgramStore::get_active_binding(
     std::string_view owner_scope) const {
     detail::assert_no_pure_lock_held("ProgramStore::get_active_binding");
-    if (!offloads()) co_return get_active_binding_sync(owner_scope);
+    if (!detail::offload_store_call(offloads())) co_return get_active_binding_sync(owner_scope);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramActivationBinding>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::optional<ProgramActivationBinding> {
         return get_active_binding_sync(owner_scope);
@@ -336,7 +336,7 @@ asio::awaitable<ProgramActivationResult> SyncProgramStore::compare_activate(
     std::string_view version_id,
     std::string_view policy_snapshot_hash) {
     detail::assert_no_pure_lock_held("ProgramStore::compare_activate");
-    if (!offloads()) co_return compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
+    if (!detail::offload_store_call(offloads())) co_return compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramActivationResult>([this, owner_scope = std::string(owner_scope), expected_generation, version_id = std::string(version_id), policy_snapshot_hash = std::string(policy_snapshot_hash)]() mutable -> ProgramActivationResult {
         return compare_activate_sync(owner_scope, expected_generation, version_id, policy_snapshot_hash);
@@ -346,7 +346,7 @@ asio::awaitable<ProgramActivationResult> SyncProgramStore::compare_activate(
 asio::awaitable<std::vector<ProgramVersion>> SyncProgramStore::list_versions(
     std::string_view owner_scope) const {
     detail::assert_no_pure_lock_held("ProgramStore::list_versions");
-    if (!offloads()) co_return list_versions_sync(owner_scope);
+    if (!detail::offload_store_call(offloads())) co_return list_versions_sync(owner_scope);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramVersion>>([this, owner_scope = std::string(owner_scope)]() mutable -> std::vector<ProgramVersion> {
         return list_versions_sync(owner_scope);
@@ -357,7 +357,7 @@ asio::awaitable<ProgramRetentionReport> SyncProgramStore::collect_garbage(
     std::string_view owner_scope,
     const std::vector<std::string>& pinned_version_ids) {
     detail::assert_no_pure_lock_held("ProgramStore::collect_garbage");
-    if (!offloads()) co_return collect_garbage_sync(owner_scope, pinned_version_ids);
+    if (!detail::offload_store_call(offloads())) co_return collect_garbage_sync(owner_scope, pinned_version_ids);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramRetentionReport>([this, owner_scope = std::string(owner_scope), pinned_version_ids = pinned_version_ids]() mutable -> ProgramRetentionReport {
         return collect_garbage_sync(owner_scope, pinned_version_ids);

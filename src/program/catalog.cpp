@@ -2,11 +2,13 @@
 #include <neograph/program/catalog.h>
 #include <neograph/program/compiler.h>
 #include <neograph/program/store.h>
+#include <neograph/program/store_call.h>
 #include <neograph/program/replay.h>
 
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "catalog_access.h"
+#include "operation_lock.h"
 #include "registry_access.h"
 
 #include <algorithm>
@@ -890,8 +892,12 @@ struct EngineGenerationCache::Impl {
         }
     };
 
-    std::mutex                                                         mutex;
-    std::optional<std::pair<std::string, std::string>>                 scope;
+    // `scope` is pure memory, read and written by the constructor of a Catalog only.
+    std::mutex                                         mutex;
+    std::optional<std::pair<std::string, std::string>> scope;
+    // `generations` stays locked while a materialization publishes its tuple to a store (and may have to take its
+    // entry back out), so the lock is an OperationLock, not a mutex.
+    detail::OperationLock                                              generations_lock;
     std::map<Key, std::shared_ptr<const detail::PinnedCoreGeneration>> generations;
 };
 
@@ -912,7 +918,7 @@ struct ProgramCatalog::Impl {
          std::string                            host,
          std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
              recorded_binder)
-        : program_store(std::make_shared<BlockingProgramStore>(std::move(store))),
+        : program_store(std::move(store)),
           registry(std::move(registry_snapshot)),
           engines(std::move(engine_cache)),
           compiler_build_id(std::move(build_id)),
@@ -922,13 +928,43 @@ struct ProgramCatalog::Impl {
           module_store(std::move(modules)),
           host_identity(std::move(host)),
           recorded_capability_binder(std::move(recorded_binder)) {
-        // Only reads of the store are called, so a view of a const store is safe.
-        if (module_store)
-            module_reads = std::make_shared<BlockingModuleStore>(
-                std::const_pointer_cast<ModuleStore>(module_store));
+        // A synchronous store that does not offload completes every call at once on the calling thread; any other
+        // store is awaited, and its call can suspend for a turn of the executor that runs the awaiting coroutine.
+        const auto* sync_programs = dynamic_cast<const SyncProgramStore*>(program_store.get());
+        const auto* sync_modules  = dynamic_cast<const SyncModuleStore*>(module_store.get());
+        program_store_synchronous = sync_programs != nullptr;
+        module_store_synchronous  = !module_store || sync_modules != nullptr;
+        program_store_at_once     = sync_programs != nullptr && sync_programs->completes_at_once();
+        module_store_at_once      = !module_store || (sync_modules != nullptr && sync_modules->completes_at_once());
     }
 
-    std::shared_ptr<BlockingProgramStore>  program_store;
+    /**
+     * The synchronous API of the catalog runs the awaitable bodies to completion on the calling thread. That is
+     * refused where it could never end, before any store is touched:
+     *   - inside a turn of a host's event loop, a store that is not synchronous completes only in a later turn;
+     *   - where this thread is the one that would have to resume an operation that holds a lock of the catalog across
+     *     a suspension (a store that offloads, or one that is awaited), as in every build without threads and in a
+     *     host turn: waiting for that lock here would never end.
+     * A synchronous store that completes at once never refuses outside those two cases.
+     */
+    void require_blocking_allowed(std::string_view operation, bool with_module_store) const {
+        if (!NEOGRAPH_BUILD_THREADS || async::in_host_turn()) {
+            const bool busy = !lock.try_lock() ||
+                              (engines && !engines->impl_->generations_lock.try_lock());
+            if (busy)
+                throw ProgramBlockingCallRefused(
+                    std::string(operation), {},
+                    "a synchronous call needs a lock that an operation suspended on this thread's executor holds");
+        }
+        if (program_store_synchronous && (!with_module_store || module_store_synchronous)) return;
+        detail::check_blocking_store_call(BlockingStorePolicy{}, operation);
+    }
+
+    std::shared_ptr<ProgramStore>          program_store;
+    bool                                   program_store_synchronous = false;
+    bool                                   module_store_synchronous  = true;
+    bool                                   program_store_at_once     = false;
+    bool                                   module_store_at_once      = true;
     RegistrySnapshot                       registry;
     std::shared_ptr<EngineGenerationCache> engines;
     std::string                            compiler_build_id;
@@ -936,16 +972,20 @@ struct ProgramCatalog::Impl {
     std::size_t                            worker_count = 1;
     std::string                            materialization_context_identity;
     std::shared_ptr<const ModuleStore>     module_store;
-    std::shared_ptr<BlockingModuleStore>   module_reads;
     std::string                            host_identity;
     std::function<RecordedCapabilityMaterialization(const ProgramVersion&, const std::vector<ProgramEvent>&)>
         recorded_capability_binder;
     graph::FailureTextRedactor failure_text_redactor;
 
-    mutable std::mutex mutex;
+    // Held across store calls and suspensions by every operation that reads or fills `materialized`.
+    mutable detail::OperationLock lock;
     std::unordered_map<std::string, std::shared_ptr<const detail::MaterializedProgram>>
         materialized;
 };
+
+bool ProgramCatalog::completes_inline() const noexcept {
+    return impl_->program_store_at_once && impl_->module_store_at_once;
+}
 
 ProgramCatalog::ProgramCatalog(CatalogConfig config) {
     if (!config.program_store) {
@@ -991,13 +1031,29 @@ ProgramCatalog::~ProgramCatalog()                                    = default;
 
 ProgramVersion ProgramCatalog::admit(const ProgramBundle& input_bundle,
                                      ProgramAdmission     admission) {
-    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
-                       input_bundle.execution_guarantee());
+    impl_->require_blocking_allowed("ProgramCatalog::admit", true);
+    return detail::run_to_completion(admit_async(input_bundle, std::move(admission)),
+                                     "ProgramCatalog::admit");
+}
+
+asio::awaitable<ProgramVersion> ProgramCatalog::admit_async(ProgramBundle    input_bundle,
+                                                            ProgramAdmission admission) {
+    const auto guarantee = input_bundle.execution_guarantee();
+    co_return co_await materialize_async(std::move(input_bundle), std::move(admission), std::nullopt,
+                                         std::nullopt, true, guarantee);
 }
 
 ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bundle,
                                               ProgramAdmission          admission,
                                               const ProgramComposition& composition) {
+    impl_->require_blocking_allowed("ProgramCatalog::admit_composed", true);
+    return detail::run_to_completion(
+        admit_composed_async(input_bundle, std::move(admission), composition),
+        "ProgramCatalog::admit_composed");
+}
+
+asio::awaitable<ProgramVersion> ProgramCatalog::admit_composed_async(
+    ProgramBundle input_bundle, ProgramAdmission admission, ProgramComposition composition) {
     if (!impl_->module_store)
         throw std::invalid_argument("Composed admission requires a configured ModuleStore");
     if (composition.parent.owner_scope() != admission.owner_scope)
@@ -1007,11 +1063,13 @@ ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bu
     // present in the owner-qualified durable catalog; a caller cannot pass a
     // merely well-formed fabricated ProgramVersion into composition.
     for (const auto& child : composition.children) {
-        const auto stored_version =
-            impl_->program_store->get_version(admission.owner_scope, child.version.id());
+        const std::string child_version_id = child.version.id();
+        const std::string child_bundle_id  = child.bundle.id();
+        const auto        stored_version =
+            co_await impl_->program_store->get_version(admission.owner_scope, child_version_id);
         auto stored_bundle =
-            impl_->program_store->get_bundle(admission.owner_scope, child.bundle.id());
-        if (!stored_bundle) stored_bundle = impl_->program_store->get_bundle(child.bundle.id());
+            co_await impl_->program_store->get_bundle(admission.owner_scope, child_bundle_id);
+        if (!stored_bundle) stored_bundle = co_await impl_->program_store->get_bundle(child_bundle_id);
         if (!stored_version || !stored_bundle ||
             stored_version->serialize_canonical() != child.version.serialize_canonical() ||
             stored_bundle->serialize_canonical() != child.bundle.serialize_canonical())
@@ -1024,15 +1082,16 @@ ProgramVersion ProgramCatalog::admit_composed(const ProgramBundle&      input_bu
         throw std::invalid_argument(
             "Composed admission dependency receipts differ from the resolved module closure");
     }
-    return materialize(input_bundle, std::move(admission), std::nullopt, nullptr, true,
-                       composed_execution_guarantee(input_bundle, composition));
+    const auto guarantee = composed_execution_guarantee(input_bundle, composition);
+    co_return co_await materialize_async(std::move(input_bundle), std::move(admission), std::nullopt,
+                                         std::nullopt, true, guarantee);
 }
 
-ProgramVersion ProgramCatalog::materialize(
-    const ProgramBundle&                                input_bundle,
+asio::awaitable<ProgramVersion> ProgramCatalog::materialize_async(
+    ProgramBundle                                       input_bundle,
     ProgramAdmission                                    admission,
     std::optional<CatalogCapabilityBinding>             supplied_binding,
-    const ProgramVersion*                               expected_version,
+    std::optional<ProgramVersion>                       expected_version,
     bool                                                publish,
     ExecutionGuarantee                                  effective_execution_guarantee,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
@@ -1178,8 +1237,11 @@ ProgramVersion ProgramCatalog::materialize(
                     std::pair{coordinate.qualified_name(), coordinate.content_identity};
                 if (!coordinate_keys.insert(key).second) continue;
                 expected_receipts.emplace(coordinate.qualified_name(), coordinate.content_identity);
-                const auto module =
-                    impl_->module_reads->get(admission.owner_scope, coordinate.content_identity);
+                // The store call's arguments stay alive in named locals until it completes.
+                const std::string module_owner    = admission.owner_scope;
+                const std::string module_identity = coordinate.content_identity;
+                const auto        module =
+                    co_await impl_->module_store->get(module_owner, module_identity);
                 if (!module) {
                     diagnostics.add("P_ADMIT_DEPENDENCY", "/module_coordinates",
                                     "Pinned module is unavailable in the admitting owner scope",
@@ -1217,7 +1279,8 @@ ProgramVersion ProgramCatalog::materialize(
             try {
                 const ModuleResolver resolver(impl_->module_store);
                 for (const auto& coordinate : module_coordinates) {
-                    const auto resolution = resolver.resolve(coordinate, admission.policy);
+                    const auto resolution =
+                        co_await resolver.resolve_async(coordinate, admission.policy);
                     for (const auto& module : resolution.modules) {
                         const auto key =
                             std::pair{module.coordinate().qualified_name(), module.id()};
@@ -1498,8 +1561,9 @@ ProgramVersion ProgramCatalog::materialize(
         mismatch.throw_error();
     }
 
-    std::lock_guard catalog_lock(impl_->mutex);
-    const auto      existing = impl_->materialized.find(version.id());
+    // Held across the store calls below and to the end of the materialization.
+    const auto catalog_lock = co_await impl_->lock.lock_async();
+    const auto existing     = impl_->materialized.find(version.id());
     if (!isolate_binding && existing != impl_->materialized.end()) {
         if (existing->second->version.serialize_canonical() != version.serialize_canonical() ||
             existing->second->bundle.serialize_canonical() != bundle.serialize_canonical()) {
@@ -1514,16 +1578,18 @@ ProgramVersion ProgramCatalog::materialize(
         // equivalent admission must restore the durable authority record
         // before returning the cached generation; otherwise the caller sees a
         // successful admission that cannot be recovered after restart.
-        const auto stored_version =
-            impl_->program_store->get_version(version.ownership_scope(), version.id());
-        auto stored_bundle =
-            impl_->program_store->get_bundle(version.ownership_scope(), bundle.id());
-        if (!stored_bundle) stored_bundle = impl_->program_store->get_bundle(bundle.id());
+        const std::string version_scope = version.ownership_scope();
+        const std::string version_id    = version.id();
+        const std::string bundle_id     = bundle.id();
+        const auto        stored_version =
+            co_await impl_->program_store->get_version(version_scope, version_id);
+        auto stored_bundle = co_await impl_->program_store->get_bundle(version_scope, bundle_id);
+        if (!stored_bundle) stored_bundle = co_await impl_->program_store->get_bundle(bundle_id);
         if (!stored_version || !stored_bundle ||
             stored_version->serialize_canonical() != version.serialize_canonical() ||
             stored_bundle->serialize_canonical() != bundle.serialize_canonical()) {
             try {
-                impl_->program_store->publish_admitted(bundle, version);
+                co_await impl_->program_store->publish_admitted(bundle, version);
             } catch (const std::exception& error) {
                 AdmissionDiagnostics publication(bundle.id());
                 publication.add("P_ADMIT_BINDING", "/id",
@@ -1537,7 +1603,7 @@ ProgramVersion ProgramCatalog::materialize(
                 publication.throw_error();
             }
         }
-        return existing->second->version;
+        co_return existing->second->version;
     }
 
     const auto binding_root =
@@ -1546,8 +1612,10 @@ ProgramVersion ProgramCatalog::materialize(
         bundle.id(),          recomputed_plan->name,    recomputed_plan->compiled_plan_identity,
         registry_fingerprint, impl_->compiler_build_id, binding_root,
         impl_->materialization_context_identity, impl_->worker_count};
-    auto&                                               cache = *impl_->engines->impl_;
-    std::lock_guard                                     cache_lock(cache.mutex);
+    auto& cache = *impl_->engines->impl_;
+    // Held to the end of the materialization, publication included: the entry it adds is taken back out if the
+    // publication fails, and no other Catalog may see it meanwhile.
+    const auto                                          cache_lock = co_await cache.generations_lock.lock_async();
     auto                                                cached = cache.generations.find(key);
     std::shared_ptr<const detail::PinnedCoreGeneration> generation;
     bool                                                inserted_generation = false;
@@ -1647,7 +1715,7 @@ ProgramVersion ProgramCatalog::materialize(
     }
     if (publish) {
         try {
-            impl_->program_store->publish_admitted(bundle, version);
+            co_await impl_->program_store->publish_admitted(bundle, version);
         } catch (const std::exception& error) {
             impl_->materialized.erase(version.id());
             if (inserted_generation) cache.generations.erase(key);
@@ -1665,84 +1733,158 @@ ProgramVersion ProgramCatalog::materialize(
             publication.throw_error();
         }
     }
-    return version;
+    co_return version;
 }
+
+// ---- The operations that read or move the durable records. Each pair is one coroutine body: `x_async` is the body,
+// and the synchronous `x` runs it to completion on the calling thread (a synchronous store completes at once). ----
+
 MigrationPlan ProgramCatalog::plan_migration(std::string_view owner_scope,
                                              std::string_view source_version_id,
                                              std::string_view target_version_id) const {
+    impl_->require_blocking_allowed("ProgramCatalog::plan_migration", false);
+    return detail::run_to_completion(
+        plan_migration_async(std::string(owner_scope), std::string(source_version_id),
+                             std::string(target_version_id)),
+        "ProgramCatalog::plan_migration");
+}
+
+asio::awaitable<MigrationPlan> ProgramCatalog::plan_migration_async(
+    std::string owner_scope, std::string source_version_id, std::string target_version_id) const {
     detail::validate_token(owner_scope, "Program migration owner_scope");
-    const auto source = impl_->program_store->get_version(owner_scope, source_version_id);
-    const auto target = impl_->program_store->get_version(owner_scope, target_version_id);
+    const auto source = co_await impl_->program_store->get_version(owner_scope, source_version_id);
+    const auto target = co_await impl_->program_store->get_version(owner_scope, target_version_id);
     if (!source || !target)
         throw std::invalid_argument("Program migration references an unpublished version");
     if (source->ownership_scope() != owner_scope || target->ownership_scope() != owner_scope)
         throw std::invalid_argument("Program migration crosses an owner scope boundary");
-    const auto source_bundle = impl_->program_store->get_bundle(owner_scope, source->bundle_id());
-    const auto target_bundle = impl_->program_store->get_bundle(owner_scope, target->bundle_id());
+    const std::string source_bundle_id = source->bundle_id();
+    const std::string target_bundle_id = target->bundle_id();
+    const auto source_bundle = co_await impl_->program_store->get_bundle(owner_scope, source_bundle_id);
+    const auto target_bundle = co_await impl_->program_store->get_bundle(owner_scope, target_bundle_id);
     if (!source_bundle || !target_bundle)
         throw std::invalid_argument("Program migration references an unpublished admitted bundle");
-    return MigrationPlan::between(*source, *source_bundle, *target, *target_bundle);
+    co_return MigrationPlan::between(*source, *source_bundle, *target, *target_bundle);
 }
+
 ProgramActivationResult ProgramCatalog::activate(std::string_view owner_scope,
                                                  std::string_view version_id,
                                                  std::uint64_t    expected_generation) {
-    const auto version = resolve_version(owner_scope, version_id);
+    impl_->require_blocking_allowed("ProgramCatalog::activate", true);
+    return detail::run_to_completion(
+        activate_async(std::string(owner_scope), std::string(version_id), expected_generation),
+        "ProgramCatalog::activate");
+}
+
+asio::awaitable<ProgramActivationResult> ProgramCatalog::activate_async(
+    std::string owner_scope, std::string version_id, std::uint64_t expected_generation) {
+    const auto version = co_await resolve_version_async(owner_scope, version_id);
     if (!version)
         throw std::invalid_argument(
             "Program activation references an unknown owner-scoped version");
-    return impl_->program_store->compare_activate(owner_scope, expected_generation, version->id(),
-                                                  version->policy_snapshot().fingerprint());
+    const std::string activated_id = version->id();
+    const std::string policy_hash  = version->policy_snapshot().fingerprint();
+    co_return co_await impl_->program_store->compare_activate(owner_scope, expected_generation,
+                                                              activated_id, policy_hash);
 }
 
 ProgramActivationResult ProgramCatalog::rollback(std::string_view owner_scope,
                                                  std::string_view version_id,
                                                  std::uint64_t    expected_generation) {
+    impl_->require_blocking_allowed("ProgramCatalog::rollback", true);
+    return detail::run_to_completion(
+        rollback_async(std::string(owner_scope), std::string(version_id), expected_generation),
+        "ProgramCatalog::rollback");
+}
+
+asio::awaitable<ProgramActivationResult> ProgramCatalog::rollback_async(
+    std::string owner_scope, std::string version_id, std::uint64_t expected_generation) {
     // Rollback is deliberately the same owner-scoped activation CAS: an older
     // immutable version is published for future resolutions while existing
     // runs retain their already pinned materialization.
-    return activate(owner_scope, version_id, expected_generation);
+    co_return co_await activate_async(std::move(owner_scope), std::move(version_id),
+                                      expected_generation);
 }
 
 std::optional<ProgramActivation> ProgramCatalog::activation(std::string_view owner_scope) const {
-    detail::validate_token(owner_scope, "Program activation owner_scope");
-    return impl_->program_store->get_activation(owner_scope);
+    impl_->require_blocking_allowed("ProgramCatalog::activation", false);
+    return detail::run_to_completion(activation_async(std::string(owner_scope)),
+                                     "ProgramCatalog::activation");
 }
+
+asio::awaitable<std::optional<ProgramActivation>> ProgramCatalog::activation_async(
+    std::string owner_scope) const {
+    detail::validate_token(owner_scope, "Program activation owner_scope");
+    co_return co_await impl_->program_store->get_activation(owner_scope);
+}
+
 std::optional<ProgramActivationBinding>
 ProgramCatalog::active_binding(std::string_view owner_scope) const {
+    impl_->require_blocking_allowed("ProgramCatalog::active_binding", false);
+    return detail::run_to_completion(active_binding_async(std::string(owner_scope)),
+                                     "ProgramCatalog::active_binding");
+}
+
+asio::awaitable<std::optional<ProgramActivationBinding>> ProgramCatalog::active_binding_async(
+    std::string owner_scope) const {
     detail::validate_token(owner_scope, "Program activation owner_scope");
-    return impl_->program_store->get_active_binding(owner_scope);
+    co_return co_await impl_->program_store->get_active_binding(owner_scope);
 }
 
 ProgramRetentionReport ProgramCatalog::collect_retention(
     std::string_view owner_scope, const std::vector<std::string>& pinned_version_ids) {
+    impl_->require_blocking_allowed("ProgramCatalog::collect_retention", false);
+    return detail::run_to_completion(
+        collect_retention_async(std::string(owner_scope), pinned_version_ids),
+        "ProgramCatalog::collect_retention");
+}
+
+asio::awaitable<ProgramRetentionReport> ProgramCatalog::collect_retention_async(
+    std::string owner_scope, std::vector<std::string> pinned_version_ids) {
     detail::validate_token(owner_scope, "Program retention owner_scope");
     for (const auto& id : pinned_version_ids) {
-        const auto version = impl_->program_store->get_version(owner_scope, id);
+        const auto version = co_await impl_->program_store->get_version(owner_scope, id);
         if (!version || version->ownership_scope() != owner_scope)
             throw std::invalid_argument("Program retention pin crosses an owner scope boundary");
     }
-    return impl_->program_store->collect_garbage(owner_scope, pinned_version_ids);
+    co_return co_await impl_->program_store->collect_garbage(owner_scope, pinned_version_ids);
 }
 
 std::optional<ProgramVersion> ProgramCatalog::resolve_version(std::string_view owner_scope,
                                                               std::string_view id) {
-    return resolve_version_impl(owner_scope, id, std::nullopt);
+    impl_->require_blocking_allowed("ProgramCatalog::resolve_version", true);
+    return detail::run_to_completion(resolve_version_async(std::string(owner_scope), std::string(id)),
+                                     "ProgramCatalog::resolve_version");
+}
+
+asio::awaitable<std::optional<ProgramVersion>> ProgramCatalog::resolve_version_async(
+    std::string owner_scope, std::string id) {
+    co_return co_await resolve_version_impl_async(std::move(owner_scope), std::move(id), std::nullopt);
 }
 
 std::optional<ProgramVersion> ProgramCatalog::resolve_version_with_binding(
     std::string_view owner_scope, std::string_view id, CatalogCapabilityBinding binding) {
-    return resolve_version_impl(owner_scope, id, std::move(binding));
+    impl_->require_blocking_allowed("ProgramCatalog::resolve_version_with_binding", true);
+    return detail::run_to_completion(
+        resolve_version_with_binding_async(std::string(owner_scope), std::string(id), std::move(binding)),
+        "ProgramCatalog::resolve_version_with_binding");
 }
 
-std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
-    std::string_view                                    owner_scope,
-    std::string_view                                    id,
+asio::awaitable<std::optional<ProgramVersion>> ProgramCatalog::resolve_version_with_binding_async(
+    std::string owner_scope, std::string id, CatalogCapabilityBinding binding) {
+    co_return co_await resolve_version_impl_async(std::move(owner_scope), std::move(id),
+                                                  std::move(binding));
+}
+
+asio::awaitable<std::optional<ProgramVersion>> ProgramCatalog::resolve_version_impl_async(
+    std::string                                         owner_scope,
+    std::string                                         id,
     std::optional<CatalogCapabilityBinding>             supplied_binding,
     std::shared_ptr<const detail::MaterializedProgram>* isolated_materialization) {
     detail::validate_token(owner_scope, "Program resolve owner_scope");
-    const auto stored_value = impl_->program_store->get_version(owner_scope, id);
-    if (!stored_value) return std::nullopt;
-    if (stored_value->ownership_scope() != owner_scope) return std::nullopt;
+    const auto stored_value = co_await impl_->program_store->get_version(owner_scope, id);
+    if (!stored_value) co_return std::nullopt;
+    if (stored_value->ownership_scope() != owner_scope) co_return std::nullopt;
 
     const auto stored_id    = stored_value->id();
     const auto stored_bytes = stored_value->serialize_canonical();
@@ -1751,8 +1893,9 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     // may expose only its one immutable bundle; after the exact owner-
     // qualified version has been established, that hash-addressed bundle is
     // safe to load through the legacy view as a compatibility fallback.
-    auto bundle_value = impl_->program_store->get_bundle(owner_scope, stored_value->bundle_id());
-    if (!bundle_value) bundle_value = impl_->program_store->get_bundle(stored_value->bundle_id());
+    const std::string stored_bundle_id = stored_value->bundle_id();
+    auto bundle_value = co_await impl_->program_store->get_bundle(owner_scope, stored_bundle_id);
+    if (!bundle_value) bundle_value = co_await impl_->program_store->get_bundle(stored_bundle_id);
     if (!bundle_value) {
         AdmissionDiagnostics diagnostics(stored_id);
         diagnostics.add("P_RESOLVE_STORE", "/bundle_id",
@@ -1763,12 +1906,12 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
     const auto bundle_bytes = bundle_value->serialize_canonical();
 
     if (!supplied_binding) {
-        std::lock_guard lock(impl_->mutex);
-        const auto      known = impl_->materialized.find(stored_id);
+        const auto lock  = co_await impl_->lock.lock_async();
+        const auto known = impl_->materialized.find(stored_id);
         if (known != impl_->materialized.end() &&
             known->second->version.serialize_canonical() == stored_bytes &&
             known->second->bundle.serialize_canonical() == bundle_bytes) {
-            return known->second->version;
+            co_return known->second->version;
         }
     }
 
@@ -1783,7 +1926,7 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
             diagnostics.throw_error();
         }
     }();
-    if (stored.ownership_scope() != owner_scope) return std::nullopt;
+    if (stored.ownership_scope() != owner_scope) co_return std::nullopt;
 
     ProgramBundle bundle = [&]() {
         try {
@@ -1799,82 +1942,153 @@ std::optional<ProgramVersion> ProgramCatalog::resolve_version_impl(
 
     ProgramAdmission admission{stored.ownership_scope(), stored.admission_profile(),
                                stored.policy_snapshot(), stored.dependency_receipts()};
-    return materialize(bundle, std::move(admission), std::move(supplied_binding), &stored, false,
-                       stored.execution_guarantee(), isolated_materialization);
+    const auto       guarantee = stored.execution_guarantee();
+    co_return co_await materialize_async(std::move(bundle), std::move(admission),
+                                         std::move(supplied_binding), std::move(stored), false,
+                                         guarantee, isolated_materialization);
 }
 
 std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view id) const {
-    std::lock_guard lock(impl_->mutex);
-    const auto      known = impl_->materialized.find(std::string(id));
-    if (known == impl_->materialized.end()) return std::nullopt;
-    const auto stored =
-        impl_->program_store->get_version(known->second->version.ownership_scope(), id);
+    impl_->require_blocking_allowed("ProgramCatalog::find_version", false);
+    return detail::run_to_completion(find_version_async(std::string(id)),
+                                     "ProgramCatalog::find_version");
+}
+
+asio::awaitable<std::optional<ProgramVersion>> ProgramCatalog::find_version_async(
+    std::string id) const {
+    const auto lock  = co_await impl_->lock.lock_async();
+    const auto known = impl_->materialized.find(id);
+    if (known == impl_->materialized.end()) co_return std::nullopt;
+    const std::string known_scope = known->second->version.ownership_scope();
+    const auto        stored      = co_await impl_->program_store->get_version(known_scope, id);
     if (!stored || stored->serialize_canonical() != known->second->version.serialize_canonical()) {
-        return std::nullopt;
+        co_return std::nullopt;
     }
-    return known->second->version;
+    co_return known->second->version;
 }
 
 std::optional<ProgramVersion> ProgramCatalog::find_version(std::string_view owner_scope,
                                                            std::string_view id) const {
+    impl_->require_blocking_allowed("ProgramCatalog::find_version", false);
+    return detail::run_to_completion(find_version_async(std::string(owner_scope), std::string(id)),
+                                     "ProgramCatalog::find_version");
+}
+
+asio::awaitable<std::optional<ProgramVersion>> ProgramCatalog::find_version_async(
+    std::string owner_scope, std::string id) const {
     detail::validate_token(owner_scope, "Program find owner_scope");
-    std::lock_guard lock(impl_->mutex);
-    const auto      known = impl_->materialized.find(std::string(id));
+    const auto lock  = co_await impl_->lock.lock_async();
+    const auto known = impl_->materialized.find(id);
     if (known == impl_->materialized.end() ||
         known->second->version.ownership_scope() != owner_scope)
-        return std::nullopt;
-    const auto stored = impl_->program_store->get_version(owner_scope, id);
+        co_return std::nullopt;
+    const auto stored = co_await impl_->program_store->get_version(owner_scope, id);
     if (!stored || stored->serialize_canonical() != known->second->version.serialize_canonical())
-        return std::nullopt;
-    return known->second->version;
+        co_return std::nullopt;
+    co_return known->second->version;
+}
+
+// ---- What the runtime uses to pin an admitted version ----
+
+void detail::CatalogRuntimeAccess::require_blocking_allowed(const ProgramCatalog& catalog,
+                                                            std::string_view      operation) {
+    catalog.impl_->require_blocking_allowed(operation, true);
 }
 
 std::optional<ProgramVersion> detail::CatalogRuntimeAccess::load_admitted_version(
     const ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id) {
+    catalog.impl_->require_blocking_allowed("ProgramCatalog::load_admitted_version", false);
+    return detail::run_to_completion(
+        load_admitted_version_async(catalog, std::string(owner_scope), std::string(version_id)),
+        "ProgramCatalog::load_admitted_version");
+}
+
+asio::awaitable<std::optional<ProgramVersion>> detail::CatalogRuntimeAccess::load_admitted_version_async(
+    const ProgramCatalog& catalog, std::string owner_scope, std::string version_id) {
     detail::validate_token(owner_scope, "Program version owner_scope");
     detail::validate_token(version_id, "Program version id");
-    std::lock_guard lock(catalog.impl_->mutex);
-    return catalog.impl_->program_store->get_version(owner_scope, version_id);
+    const auto lock = co_await catalog.impl_->lock.lock_async();
+    co_return co_await catalog.impl_->program_store->get_version(owner_scope, version_id);
 }
 
 std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin(
     const ProgramCatalog& catalog, const ProgramVersion& version) {
-    std::lock_guard lock(catalog.impl_->mutex);
-    const auto      found = catalog.impl_->materialized.find(version.id());
+    catalog.impl_->require_blocking_allowed("ProgramCatalog::pin", false);
+    return detail::run_to_completion(pin_async(catalog, version), "ProgramCatalog::pin");
+}
+
+asio::awaitable<std::shared_ptr<const detail::MaterializedProgram>>
+detail::CatalogRuntimeAccess::pin_async(const ProgramCatalog& catalog, ProgramVersion version) {
+    const auto lock  = co_await catalog.impl_->lock.lock_async();
+    const auto found = catalog.impl_->materialized.find(version.id());
     if (found == catalog.impl_->materialized.end() ||
         found->second->version.serialize_canonical() != version.serialize_canonical()) {
         throw ProgramDiagnosticError(start_not_admitted(version.id()));
     }
-    const auto stored_version =
-        catalog.impl_->program_store->get_version(version.ownership_scope(), version.id());
-    auto stored_bundle = catalog.impl_->program_store->get_bundle(version.ownership_scope(),
-                                                                  found->second->bundle.id());
-    if (!stored_bundle)
-        stored_bundle = catalog.impl_->program_store->get_bundle(found->second->bundle.id());
+    const std::string version_scope = version.ownership_scope();
+    const std::string version_id    = version.id();
+    const std::string bundle_id     = found->second->bundle.id();
+    const auto        stored_version =
+        co_await catalog.impl_->program_store->get_version(version_scope, version_id);
+    auto stored_bundle = co_await catalog.impl_->program_store->get_bundle(version_scope, bundle_id);
+    if (!stored_bundle) stored_bundle = co_await catalog.impl_->program_store->get_bundle(bundle_id);
     if (!stored_version || !stored_bundle ||
         stored_version->serialize_canonical() != found->second->version.serialize_canonical() ||
         stored_bundle->serialize_canonical() != found->second->bundle.serialize_canonical()) {
         throw ProgramDiagnosticError(start_not_admitted(version.id()));
     }
-    return found->second;
+    co_return found->second;
 }
+
 std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin_with_binding(
     ProgramCatalog&          catalog,
     std::string_view         owner_scope,
     std::string_view         version_id,
     CatalogCapabilityBinding binding) {
+    catalog.impl_->require_blocking_allowed("ProgramCatalog::pin_with_binding", true);
+    return detail::run_to_completion(
+        pin_with_binding_async(catalog, std::string(owner_scope), std::string(version_id),
+                               std::move(binding)),
+        "ProgramCatalog::pin_with_binding");
+}
+
+asio::awaitable<std::shared_ptr<const detail::MaterializedProgram>>
+detail::CatalogRuntimeAccess::pin_with_binding_async(ProgramCatalog&          catalog,
+                                                     std::string              owner_scope,
+                                                     std::string              version_id,
+                                                     CatalogCapabilityBinding binding) {
     std::shared_ptr<const detail::MaterializedProgram> isolated;
-    const auto                                         resolved =
-        catalog.resolve_version_impl(owner_scope, version_id, std::move(binding), &isolated);
+    const auto                                         resolved = co_await catalog.resolve_version_impl_async(
+        owner_scope, version_id, std::move(binding), &isolated);
     if (!resolved || !isolated || isolated->version.id() != version_id) {
         throw ProgramDiagnosticError(start_not_admitted(version_id));
     }
-    return isolated;
+    co_return isolated;
 }
 
 std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess::pin_recorded(
     ProgramCatalog& catalog, const ProgramVersion& version,
     const RecordedBindingSet& requested, const std::vector<ProgramEvent>& source_events) {
+    catalog.impl_->require_blocking_allowed("ProgramCatalog::pin_recorded", true);
+    return detail::run_to_completion(
+        pin_recorded_core(catalog, version, requested.fingerprint(), source_events),
+        "ProgramCatalog::pin_recorded");
+}
+
+asio::awaitable<std::shared_ptr<const detail::MaterializedProgram>>
+detail::CatalogRuntimeAccess::pin_recorded_async(ProgramCatalog&           catalog,
+                                                 ProgramVersion            version,
+                                                 RecordedBindingSet        requested,
+                                                 std::vector<ProgramEvent> source_events) {
+    co_return co_await pin_recorded_core(catalog, std::move(version), requested.fingerprint(),
+                                         std::move(source_events));
+}
+
+asio::awaitable<std::shared_ptr<const detail::MaterializedProgram>>
+detail::CatalogRuntimeAccess::pin_recorded_core(ProgramCatalog&           catalog,
+                                                ProgramVersion            version,
+                                                std::string               requested_fingerprint,
+                                                std::vector<ProgramEvent> source_events) {
     if (!catalog.impl_->recorded_capability_binder) {
         Diagnostic diagnostic;
         diagnostic.phase = CompilePhase::Resolve;
@@ -1885,11 +2099,11 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
     }
     auto captured = catalog.impl_->recorded_capability_binder(version, source_events);
     captured.evidence.validate_target(version);
-    if (captured.evidence.fingerprint() != requested.fingerprint())
+    if (captured.evidence.fingerprint() != requested_fingerprint)
         throw std::invalid_argument(
             "P_REPLAY_EVIDENCE: Public evidence differs from durable source observations");
-    auto pinned = pin_with_binding(catalog, version.ownership_scope(), version.id(),
-                                   std::move(captured.binding));
+    auto pinned = co_await pin_with_binding_async(catalog, version.ownership_scope(), version.id(),
+                                                  std::move(captured.binding));
     for (const auto& identity : pinned->bundle.executable_registry_identities()) {
         const auto& manifest = detail::RegistrySnapshotAccess::require_manifest(
             catalog.impl_->registry, identity.kind, identity.name);
@@ -1903,7 +2117,7 @@ std::shared_ptr<const detail::MaterializedProgram> detail::CatalogRuntimeAccess:
             throw ProgramDiagnosticError(std::move(diagnostic));
         }
     }
-    return pinned;
+    co_return pinned;
 }
 
 }  // namespace neograph::program

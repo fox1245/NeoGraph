@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=139912a5df70aababcb5da41715f1e4b1b21f77fc5853718745b48b9f1461e64 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=faed88529c59a389348b12b563d87661b14d1256ca7667e0f728c3529e6f7124 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -395,7 +395,7 @@ WebAssembly ホストなら `async::HostLoop::executor()` です。するとラ�
 `ProgramRuntime` は run の記録を `ProgramTransitionStore` に、バージョンを `ProgramStore` に保存し、ホストが使う場合は、
 タスクグラフ断片、リンクされたモジュール、Core ツールの grant を、それぞれ `TaskGraphFragmentStore`、`ModuleStore`、
 `ProgramCoreToolGrantStore` に保存します。これらのインターフェースは `asio::awaitable` を返すので、ホストは呼び出しが
-あとで完了するデータベースの上にストアを置くことができ、run の attempt はスレッドを握る代わりにそれを await します。
+あとで完了するデータベースの上にストアを置くことができ、ランタイムはスレッドを握る代わりにそれを await します。
 
 - **同期バックエンドは、対応する `Sync...Store` クラスから派生します**（`SyncProgramTransitionStore` ほか 4 つ）。そして
   `..._sync` 操作（`load_sync`、`compare_publish_sync` など）を実装します。基底クラスはそれらから各 awaitable 操作を完了
@@ -407,10 +407,16 @@ WebAssembly ホストなら `async::HostLoop::executor()` です。するとラ�
   呼び出したスレッドの専用 `io_context` で awaitable を回して待ちます。ただし `BlockingStorePolicy::refuse` が、待つと呼び出しを
   完了させるべきスレッドが止まると言うときは拒否します。ランタイムのポリシーは、ホストが駆動する executor と、自分の
   executor を回しているスレッドで拒否し、呼び出しはストアに触れる前に `ProgramBlockingCallRefused` を投げます。
-- **何が await し、何が待つのか。** run の attempt は遷移（transition）ストアと断片ストアを await します。ランタイムの同期
-  エントリーポイント、終端の公開、子の起動、grant リゾルバー、カタログは、ブロッキングビューを通して待ちます。すぐに完了する
-  ストアはどこでも動き、ホストのイベントループを回さなければ完了しないストアは、ホストが駆動するループが Program を
-  実行する場所で拒否されます。
+- **何が await し、何が待つのか。** ランタイムのすべての操作は、自分のストアを await する 1 つのコルーチンです。エントリーポイント
+  （`start`、`reconnect`、`resume`、`fork`、`replace` など）、run の終端の公開、子の起動とその復旧、awaitable のときの Core ツール grant
+  リゾルバー（`RuntimeConfig::core_tool_grant_awaitable_resolver`。ストアから `make_durable_core_tool_grant_awaitable_resolver`
+  で作ります）、`ProgramCatalog`（`resolve_version_async`、`admit_async` などの `_async` 形式）、`ModuleResolver::resolve_async` が
+  そうです。`_async` 形式はその本体をランタイムの executor で実行します。同期形式は同じ本体を呼び出したスレッドで最後まで実行し、
+  そのスレッドが止まってしまう場所では拒否されます。したがって、ホストのイベントループの後のターンでしか完了しないストアが、
+  ホストが駆動する executor で `_async` 形式を通して動き（`ProgramHandle::cancel_async`、`snapshot_async`、`latest_handoff_async`、
+  `next_handoff_async` を含みます）、そのループのターンの中では同期形式が拒否されます。まだ呼び出し側をブロックするのは
+  `ProgramHandoff::reference()`、`RuntimeInstructionController`、`inspect_program_replacement_chain`、`hook_runtime` で、
+  ランタイムは `graph::CheckpointStore` をそのストアの同期呼び出しで読みます。
 - **awaitable を捨てる呼び出しは何もしません。** 操作は `[[nodiscard]]` です。`co_await` するか、ブロッキングビューを使ってください。
 - **契約**（アトミックな公開、ヘッドの compare-and-swap、fail-closed）はすべてのストアが満たすもので、
   `tests/test_program_transition_store.cpp` と `tests/test_program_catalog.cpp` の適合性（conformance）スイートが、インメモリ、

@@ -2,6 +2,8 @@
 
 #include <neograph/tool_dispatch.h>
 
+#include <asio/awaitable.hpp>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -48,5 +50,12 @@ struct ProgramCoreToolGrant {
 
 using ProgramCoreToolGrantResolver =
     std::function<std::optional<ProgramCoreToolGrant>(const ProgramCoreToolGrantContext&)>;
+
+/**
+ * The resolver of a host that cannot block (#557): it may await a store. The runtime keeps the context, string views
+ * included, alive until the returned awaitable completes. When both resolvers are configured the awaitable one is used.
+ */
+using ProgramCoreToolGrantAwaitableResolver = std::function<
+    asio::awaitable<std::optional<ProgramCoreToolGrant>>(const ProgramCoreToolGrantContext&)>;
 
 }  // namespace neograph::program

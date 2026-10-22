@@ -225,10 +225,13 @@ loop.spawn(runtime.run_async(owner, version, invocation),
   32-thread process-wide pool, so a node body must not block its thread.
 - **Locks.** A critical section that reaches a store holds an `OperationLock`, which a coroutine waits for without
   blocking; `std::mutex` guards memory only.
-- **Awaitable stores.** The five Program store interfaces return `asio::awaitable`, and a run attempt awaits them. A store
-  whose operations complete at once, as the in-memory ones do, costs no turn. The runtime's synchronous entry points, its
-  terminal publication and its child launch wait for a store through a blocking view, which refuses with
-  `program::ProgramBlockingCallRefused` instead of waiting for a loop that only the waiting thread could turn.
+- **Awaitable stores.** The five Program store interfaces return `asio::awaitable`, and every operation of the runtime
+  awaits them on the loop: the entry points, the terminal publication, the child launch, the Core tool grant resolver
+  (`RuntimeConfig::core_tool_grant_awaitable_resolver`), `ProgramCatalog`'s `_async` forms and
+  `ModuleResolver::resolve_async`. A store whose operations complete at once, as the in-memory ones do, costs no turn,
+  and one that completes in a later turn of the host's loop works. The synchronous forms run the same coroutines to
+  completion on the calling thread and refuse, as above, instead of waiting for a loop that only the waiting thread could
+  turn.
 - **Destroying the runtime** cancels its runs and does not wait for them. The attempts keep the runtime's state alive until
   they finish, so keep running the loop until the handles are terminal.
 
@@ -258,8 +261,13 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   refused, and a one-node Program with in-memory stores runs to its result in the host's turns.
   It then reads the run and the version back through the awaitable stores in a host turn, and shows that a blocking view
   refuses to wait on the loop.
+  It also runs the Program over a Program store and a transition store that complete a call only in a later turn of the
+  loop, and reads the catalog through such a store.
 - `tests/test_program_runtime_executor.cpp` runs Programs natively on a single-thread `io_context` and on a `HostLoop` over a
   manual executor, so a native build covers the same paths.
+- `tests/test_program_host_pumped_stores.cpp` runs a whole Program lifecycle natively on a `HostLoop` over stores that
+  complete a call only in a later turn of the loop: a start, a model node, an interrupt and its resume, a fork, a child, a
+  Core tool grant, a completion and a cancellation, with nothing blocked or refused.
 - `tests/test_program_store_awaitable.cpp` runs the store contract natively: an inline store completes without suspending,
   an offloading one resumes the awaiting coroutine on its own executor, and a blocking view waits for a store that completes
   later or refuses.
@@ -292,11 +300,10 @@ Calls into these fail with a typed error where NeoGraph owns the call, and are n
   transport to `SchemaProvider`.
 - **Blocking entry points on a host-pumped provider.** `run()`, `Provider::dispatch` and the like refuse (above).
 - **Program stores on a host database.** The store interfaces are awaitable. The SQLite and PostgreSQL stores need system
-  libraries, so a host database needs a store of its own. A store whose operations complete
-  at once (a host's synchronous storage) can serve the runtime on the host loop. A store that completes only through the
-  host's event loop is refused there with `ProgramBlockingCallRefused`, because the runtime's entry points, its terminal
-  publication and its child launch still wait for a store ([#556](https://github.com/fox1245/NeoGraph/issues/556)). The
-  synchronous Program calls refuse on a host loop; use the `_async` forms.
+  libraries, so a host database needs a store of its own. A store whose operations complete at once (a host's synchronous
+  storage) and a store that completes only through the host's event loop both serve the runtime on the host loop, through
+  the `_async` forms ([#557](https://github.com/fox1245/NeoGraph/issues/557)). The synchronous Program calls refuse on a
+  host loop; use the `_async` forms.
 - **Native Program controls.** The C v1 plugin ABI is a 64-bit layout, so `NativeControlBinding::create` refuses on
   wasm32 with `NativeControlUnavailable`.
 - **Synchronous checkpoint stores.** A store that is not asynchronous runs each operation on a pool of worker threads.

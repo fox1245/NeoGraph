@@ -12769,6 +12769,34 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     EXPECT_TRUE(parent.cancel());
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
+// The parent's cancellation holds the process-wide transition lock while it cancels its children, and the cancellation of an
+// interrupted child takes that lock to publish its Cancelled state: the lock must be handed down, not taken twice.
+TEST(ProgramRuntimeTest, CancellingARunningParentCancelsItsInterruptedChildDurably) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(2);
+    const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-cancels-interrupted-child",
+                                                 {}});
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                          "trace-child-cancelled-with-parent",
+                          {}});
+    ASSERT_EQ(child.wait().status(), ProgramTerminalStatus::Interrupted);
+
+    EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto stored_child = fixture.journal->load("tenant:runtime", child.run_id());
+    ASSERT_TRUE(stored_child.has_value());
+    EXPECT_EQ(stored_child->continuation().state, ContinuationState::Cancelled);
+    EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
     auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);

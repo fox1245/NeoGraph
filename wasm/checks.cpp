@@ -14,6 +14,8 @@
 //   program    A ProgramRuntime without an executor is refused with a typed error (it has no thread to run on). On the
 //              executor of a host loop, the synchronous calls are refused naming the awaitable form, and a one-node
 //              Program with in-memory stores runs to its result through the awaitable calls, in the host's turns.
+//              The same Program runs over stores that complete a call only in a later turn of the loop (the Program
+//              store, the transition store), and the catalog is read through such a store: nothing blocks or is refused.
 
 #include <neograph/graph/checkpoint.h>
 #include <neograph/graph/configuration_failure.h>
@@ -35,6 +37,8 @@
 #endif
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME
 #include <neograph/async/host_loop.h>
+
+#include "../tests/fixtures/host_pumped_stores.h"
 #endif
 #ifdef NEOGRAPH_WASM_CHECKS_LLM
 #include <neograph/llm/schema_provider.h>
@@ -475,6 +479,54 @@ asio::awaitable<int> read_back_awaited(std::shared_ptr<program::ProgramTransitio
     co_return 0;
 }
 
+// A Program over stores that complete a call only in a later turn of the loop. The catalog and the runtime read the
+// Program store and the transition store through wrappers that take a turn of the host per call.
+void check_program_on_host_pumped_stores() {
+    try {
+        ProgramFixture fixture;
+        auto           turns      = std::make_shared<program::test_support::HostTurns>(true);
+        auto           programs   = std::make_shared<program::test_support::HostPumpedProgramStore>(fixture.store, turns);
+        auto           transitions =
+            std::make_shared<program::test_support::HostPumpedTransitionStore>(fixture.transitions, turns);
+        auto catalog = std::make_shared<program::ProgramCatalog>(
+            program::CatalogConfig{programs, fixture.registry, std::make_shared<program::EngineGenerationCache>(),
+                                   "wasm-checks/v1"});
+
+        auto host = std::make_shared<StepHost>();
+        async::HostLoop loop(host);
+        program::RuntimeConfig config{catalog, fixture.checkpoints, {}, transitions, 1};
+        config.executor = loop.executor();
+        program::ProgramRuntime runtime(std::move(config));
+        const program::ProgramInvocation invocation{
+            json::object(), program::RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, "wasm-trace-pumped", {}};
+
+        bool                                  done = false;
+        std::exception_ptr                    failure;
+        std::optional<program::ProgramResult> result;
+        std::optional<program::ProgramVersion> read;
+        auto flow = [&]() -> asio::awaitable<int> {
+            read = co_await catalog->resolve_version_async("wasm:tenant", fixture.version.id());
+            auto started = co_await runtime.start_async("wasm:tenant", fixture.version, invocation);
+            result       = co_await started.wait_async();
+            co_return 0;
+        };
+        loop.spawn(flow(), [&](std::exception_ptr error, int) {
+            failure = error;
+            done    = true;
+        });
+        for (int step = 0; !done && step < 100000; ++step) host->step();
+        if (failure) std::rethrow_exception(failure);
+        check(read && read->id() == fixture.version.id(),
+              "program: the catalog reads a version through a store that completes in a later turn");
+        check(done && result && result->status() == program::ProgramTerminalStatus::Completed,
+              "program: a Program completes over stores that complete in a later turn of the host loop");
+        check(turns->suspended() > 0 && turns->off_thread() == 0,
+              "program: every store call waited for a turn of the host and none was refused");
+    } catch (const std::exception& error) {
+        check(false, "program: a Program runs over stores that complete in a later turn", error.what());
+    }
+}
+
 void check_program_runtime() {
     try {
         ProgramFixture fixture;
@@ -573,6 +625,7 @@ int main() {
 #endif
 #ifdef NEOGRAPH_WASM_CHECKS_PROGRAM_RUNTIME
     check_program_runtime();
+    check_program_on_host_pumped_stores();
 #endif
     std::printf("%s\n", failures == 0 ? "all checks passed" : "checks failed");
     return failures == 0 ? 0 : 1;

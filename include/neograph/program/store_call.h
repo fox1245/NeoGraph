@@ -57,6 +57,44 @@ struct BlockingStorePolicy {
 namespace detail {
 
 /**
+ * While one is alive on a thread, a `Sync...Store` completes its awaitable operations on that thread even when it
+ * offloads. The synchronous API of the runtime and of the catalog runs the same coroutine bodies as their awaitable
+ * forms (run_to_completion below): the caller has accepted blocking its thread, and a hop to the bounded pool and back
+ * would only add a wait that a caller on a pool thread could never finish. It nests.
+ */
+class NEOGRAPH_PROGRAM_API InlineStoreCalls {
+public:
+    InlineStoreCalls() noexcept;
+    ~InlineStoreCalls();
+    InlineStoreCalls(const InlineStoreCalls&)            = delete;
+    InlineStoreCalls& operator=(const InlineStoreCalls&) = delete;
+    static bool active() noexcept;
+};
+
+/** Whether a `Sync...Store` whose offloads() is @p offloads moves its next operation to the pool. */
+NEOGRAPH_PROGRAM_API bool offload_store_call(bool offloads) noexcept;
+
+/**
+ * The private io_context of one blocking wait. A thread keeps the contexts it has finished with and hands them out
+ * again, so a synchronous call does not create an epoll descriptor and its timer each time. Nested waits on one thread
+ * get different contexts. A context that did not end cleanly is dropped, not reused.
+ */
+class NEOGRAPH_PROGRAM_API BlockingIoContext {
+public:
+    BlockingIoContext();
+    ~BlockingIoContext();
+    BlockingIoContext(const BlockingIoContext&)            = delete;
+    BlockingIoContext& operator=(const BlockingIoContext&) = delete;
+    asio::io_context&  get() noexcept { return *io_; }
+    /// Call when the wait ended without its coroutine finishing, or with an exception from the loop.
+    void discard() noexcept { reusable_ = false; }
+
+private:
+    std::unique_ptr<asio::io_context> io_;
+    bool                              reusable_ = true;
+};
+
+/**
  * Runs `work` on a thread of a bounded pool and resumes the awaiting coroutine on its own executor. The pool is the one
  * that the checkpoint stores use for a synchronous backend. Throws SynchronousCheckpointStoreUnavailable in a build
  * without threads.
@@ -106,6 +144,16 @@ inline void check_blocking_store_call(const BlockingStorePolicy& policy, std::st
                                    "it is called inside a turn of a host's event loop, which a blocked thread cannot turn");
 }
 
+/** Runs the context until its coroutine is done; a context whose loop threw is not reused. */
+inline void run_blocking_wait(BlockingIoContext& wait) {
+    try {
+        wait.get().run();
+    } catch (...) {
+        wait.discard();
+        throw;
+    }
+}
+
 /**
  * Waits for `call` on a private io_context of the calling thread. The wait ends when the call does: Asio keeps the
  * context running for as long as the coroutine exists, so a store that completes only through another event loop would
@@ -114,39 +162,88 @@ inline void check_blocking_store_call(const BlockingStorePolicy& policy, std::st
 template <typename R>
 R block_on_store(asio::awaitable<R> call, const BlockingStorePolicy& policy, std::string_view operation) {
     check_blocking_store_call(policy, operation);
-    asio::io_context   io(1);
+    BlockingIoContext  wait;
     std::optional<R>   value;
     std::exception_ptr failure;
     bool               finished = false;
-    asio::co_spawn(io, box_store_call<R>(std::move(call)),
+    asio::co_spawn(wait.get(), box_store_call<R>(std::move(call)),
                    [&](std::exception_ptr error, std::optional<R> result) {
                        failure  = std::move(error);
                        value    = std::move(result);
                        finished = true;
                    });
-    io.run();
+    run_blocking_wait(wait);
     // run() returns only when the call is done (the context stays busy for as long as the coroutine exists), so this is
     // a defence: an unfinished call is never reported as a result.
-    if (!finished)
+    if (!finished) {
+        wait.discard();
         refuse_blocking_store_call(operation, "the store call did not finish on this thread");
+    }
     if (failure) std::rethrow_exception(failure);
     return std::move(*value);
 }
 
 inline void block_on_store(asio::awaitable<void> call, const BlockingStorePolicy& policy, std::string_view operation) {
     check_blocking_store_call(policy, operation);
-    asio::io_context   io(1);
+    BlockingIoContext  wait;
     std::exception_ptr failure;
     bool               finished = false;
-    asio::co_spawn(io, std::move(call), [&](std::exception_ptr error) {
+    asio::co_spawn(wait.get(), std::move(call), [&](std::exception_ptr error) {
         failure  = std::move(error);
         finished = true;
     });
-    io.run();
+    run_blocking_wait(wait);
     // run() returns only when the call is done (the context stays busy for as long as the coroutine exists), so this is
     // a defence: an unfinished call is never reported as a result.
-    if (!finished)
+    if (!finished) {
+        wait.discard();
         refuse_blocking_store_call(operation, "the store call did not finish on this thread");
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
+/**
+ * Runs `call` to completion on a private io_context of the calling thread, with InlineStoreCalls in force: the way the
+ * synchronous API runs the coroutine body it shares with its awaitable form. Over stores that complete at once the
+ * coroutine never suspends. The caller decides beforehand whether waiting is allowed here (check_blocking_store_call):
+ * a store that completes only in a later turn of a host's event loop would never finish this wait.
+ */
+template <typename R>
+R run_to_completion(asio::awaitable<R> call, std::string_view operation) {
+    InlineStoreCalls   inline_calls;
+    BlockingIoContext  wait;
+    std::optional<R>   value;
+    std::exception_ptr failure;
+    bool               finished = false;
+    asio::co_spawn(wait.get(), box_store_call<R>(std::move(call)),
+                   [&](std::exception_ptr error, std::optional<R> result) {
+                       failure  = std::move(error);
+                       value    = std::move(result);
+                       finished = true;
+                   });
+    run_blocking_wait(wait);
+    if (!finished) {
+        wait.discard();
+        refuse_blocking_store_call(operation, "the call did not finish on this thread");
+    }
+    if (failure) std::rethrow_exception(failure);
+    return std::move(*value);
+}
+
+inline void run_to_completion(asio::awaitable<void> call, std::string_view operation) {
+    InlineStoreCalls   inline_calls;
+    BlockingIoContext  wait;
+    std::exception_ptr failure;
+    bool               finished = false;
+    asio::co_spawn(wait.get(), std::move(call), [&](std::exception_ptr error) {
+        failure  = std::move(error);
+        finished = true;
+    });
+    run_blocking_wait(wait);
+    if (!finished) {
+        wait.discard();
+        refuse_blocking_store_call(operation, "the call did not finish on this thread");
+    }
     if (failure) std::rethrow_exception(failure);
 }
 
