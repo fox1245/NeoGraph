@@ -1891,22 +1891,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         unreserved.node_retries = node_retries_used();
         return settle_budget(remaining, unreserved);
     };
-    const auto apply_durable_javascript_disposition = [&](RunOutcome& terminal) noexcept {
+    const auto apply_durable_javascript_disposition = [&](RunOutcome& terminal) -> asio::awaitable<void> {
         if (unreconciled_javascript_remaining) {
             terminal.remaining_budget =
                 settle_unreserved_javascript_wall(*unreconciled_javascript_remaining);
         }
-        if (!active_javascript_command) return;
+        if (!active_javascript_command) co_return;
         try {
-            const auto latest = control->transitions->latest(control->owner_scope, control->run_id);
-            if (!latest || !has_resource_reservation(latest->inflight_reservation)) return;
+            const auto latest = (co_await control->transitions->latest(control->owner_scope, control->run_id));
+            if (!latest || !has_resource_reservation(latest->inflight_reservation)) co_return;
             if (terminal.failure && terminal.failure->provider_outcome) {
                 // Publication failed after a known provider outcome. Retain
                 // its evidence and all still-held command authority.
                 terminal.remaining_budget = latest->remaining_budget;
                 terminal.status = ProgramTerminalStatus::Failed;
                 terminal.interrupt.reset();
-                return;
+                co_return;
             }
             terminal.status = ProgramTerminalStatus::AmbiguousEffect;
             terminal.failure.reset();
@@ -1921,7 +1921,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             // transition store itself cannot be read during terminalization.
         }
     };
-    if (std::chrono::steady_clock::now() >= deadline) control->cancel(CancellationCause::Timeout);
+    if (std::chrono::steady_clock::now() >= deadline) (void)co_await control->cancel_async(CancellationCause::Timeout);
 
     auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
     timer->arm_at(deadline);
@@ -1930,7 +1930,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         [control, timer]() -> asio::awaitable<void> {
             asio::error_code error;
             co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
-            if (!error) control->cancel(CancellationCause::Timeout);
+            if (!error) (void)co_await control->cancel_async(CancellationCause::Timeout);
             co_return;
         },
         asio::detached);
@@ -1938,6 +1938,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::optional<CoreCheckpointIdentity> resume_checkpoint;
     std::optional<std::string>            resume_checkpoint_content_id;
     RunOutcome                            outcome;
+    // The handlers below cannot suspend: they note that the durable command disposition is owed, and it is read after them.
+    bool                                  needs_durable_disposition = false;
     // #443: the plan completed over a budget, and `outcome` has the record of it.
     bool                                  completed_over_budget = false;
     try {
@@ -1968,7 +1970,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     outcome, control, *checkpoint_id, resume_checkpoint,
                     "Journal-published Core checkpoint changed after resume admission");
                 cancel_deadline_timer(control->deadline_executor, std::move(timer));
-                control->complete(std::move(outcome));
+                (co_await control->complete_async(std::move(outcome)));
                 co_return;
             }
         }
@@ -2077,19 +2079,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             return std::nullopt;
         };
 
-        std::function<std::optional<PlanExecution>(const JavaScriptCommand&, std::string,
-                                                   std::size_t)>
+        std::function<asio::awaitable<std::optional<PlanExecution>>(const JavaScriptCommand&, std::string,
+                                                                    std::size_t)>
             validate_javascript_command;
         validate_javascript_command = [&](const JavaScriptCommand& command,
                                           std::string              operation_id,
-                                          std::size_t scope_depth) -> std::optional<PlanExecution> {
+                                          std::size_t scope_depth) -> asio::awaitable<std::optional<PlanExecution>> {
             const auto fail = [&](ProgramTerminalStatus status, std::string code,
                                   std::string message) {
                 return std::optional<PlanExecution>(
                     plan_failure(status, std::move(code), std::move(message), operation_id));
             };
             if (scope_depth > kMaxJavaScriptStructuredScopeDepth)
-                return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE_LIMIT",
+                co_return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE_LIMIT",
                             "JavaScript structured-concurrency nesting exceeds its bound");
 
             const auto expected_slot = [](JavaScriptCommandKind kind) -> std::uint32_t {
@@ -2116,13 +2118,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             if (command.protocol_version() != JavaScriptCommand::PROTOCOL_VERSION ||
                 (command.kind() != JavaScriptCommandKind::HostCapability &&
                  command.import_slot() != expected_slot(command.kind())))
-                return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
+                co_return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                             "JavaScript command protocol or import slot is not admitted");
             if (command.kind() == JavaScriptCommandKind::HostCapability) {
                 const auto native =
                     control->materialized->native_bindings.find(command.import_slot());
                 if (native == control->materialized->native_bindings.end())
-                    return fail(
+                    co_return fail(
                         ProgramTerminalStatus::Failed, "P_JS_HOST_CAPABILITY_BINDING",
                         "JavaScript host capability import slot is absent from the admitted run");
                 try {
@@ -2131,10 +2133,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                             "Native binding input");
                     if (detail::canonical_json_bytes(input).size() >
                         native->second.binding.metadata().resource_declaration.max_input_bytes)
-                        return fail(ProgramTerminalStatus::Failed, "P_JS_HOST_CAPABILITY_INPUT",
+                        co_return fail(ProgramTerminalStatus::Failed, "P_JS_HOST_CAPABILITY_INPUT",
                                     "Native binding input exceeds its admitted byte limit");
                 } catch (const std::exception& error) {
-                    return fail(ProgramTerminalStatus::Failed, "P_JS_HOST_CAPABILITY_INPUT",
+                    co_return fail(ProgramTerminalStatus::Failed, "P_JS_HOST_CAPABILITY_INPUT",
                                 error.what());
                 }
             }
@@ -2144,33 +2146,33 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (command.kind() == JavaScriptCommandKind::CallCore) {
                     if (arguments.at("name").get<std::string>() !=
                         control->materialized->root->core_name)
-                        return fail(
+                        co_return fail(
                             ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                             "JavaScript command references a Core outside the admitted root");
                 } else if (command.kind() == JavaScriptCommandKind::Spawn) {
-                    control->validate_child_binding(
-                        arguments.at("child_binding").get<std::string>(), operation_id);
+                    (co_await control->validate_child_binding(
+                        arguments.at("child_binding").get<std::string>(), operation_id));
                 } else if (command.kind() == JavaScriptCommandKind::Await) {
                     const auto child = JavaScriptCommand::from_json(arguments.at("command"));
-                    if (auto child_failure = validate_javascript_command(
-                            child, operation_id + "/await", scope_depth + 1))
-                        return child_failure;
+                    if (auto child_failure = (co_await validate_javascript_command(
+                            child, operation_id + "/await", scope_depth + 1)))
+                        co_return child_failure;
                 } else if (command.kind() == JavaScriptCommandKind::Join) {
                     const auto  mode            = arguments.at("mode").get<std::string>();
                     const auto& encoded_members = arguments.at("members");
                     if ((mode != "all" && mode != "race" && mode != "quorum") ||
                         !encoded_members.is_array() || encoded_members.empty() ||
                         encoded_members.size() > 1'000'000u)
-                        return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE_LIMIT",
+                        co_return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE_LIMIT",
                                     "JavaScript join member bounds are invalid");
                     if (mode == "race" && encoded_members.size() < 2)
-                        return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
+                        co_return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                                     "JavaScript race requires at least two members");
                     if (mode == "quorum") {
                         const auto required =
                             arguments.at("required_successes").get<std::uint64_t>();
                         if (required == 0 || required > encoded_members.size())
-                            return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
+                            co_return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND",
                                         "JavaScript quorum bounds are invalid");
                     }
                     if (arguments.contains("max_in_flight")) {
@@ -2178,32 +2180,32 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             arguments.at("max_in_flight").get<std::uint64_t>();
                         if (max_in_flight == 0 ||
                             max_in_flight > control->granted_budget.max_concurrency)
-                            return fail(ProgramTerminalStatus::BudgetExhausted,
+                            co_return fail(ProgramTerminalStatus::BudgetExhausted,
                                         "P_CONCURRENCY_BUDGET",
                                         "JavaScript join max_in_flight exceeds its admitted "
                                         "concurrency budget");
                     }
                     for (std::size_t index = 0; index < encoded_members.size(); ++index) {
                         const auto member = JavaScriptCommand::from_json(encoded_members.at(index));
-                        if (auto member_failure = validate_javascript_command(
+                        if (auto member_failure = (co_await validate_javascript_command(
                                 member, operation_id + "/member/" + std::to_string(index),
-                                scope_depth + 1))
-                            return member_failure;
+                                scope_depth + 1)))
+                            co_return member_failure;
                     }
                 } else if (command.kind() == JavaScriptCommandKind::CancelScope) {
                     const auto scope = arguments.at("scope").get<std::string>();
                     if (scope != "run" && scope != "root" && scope != "current" &&
                         scope != "nested")
-                        return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE",
+                        co_return fail(ProgramTerminalStatus::Failed, "P_JS_SCOPE",
                                     "JavaScript cancelScope references an unknown scope");
                 }
             } catch (const ProgramDiagnosticError& error) {
-                return fail(ProgramTerminalStatus::Failed, error.diagnostic().code,
+                co_return fail(ProgramTerminalStatus::Failed, error.diagnostic().code,
                             error.diagnostic().message);
             } catch (const std::exception& error) {
-                return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND", error.what());
+                co_return fail(ProgramTerminalStatus::Failed, "P_JS_CONTROL_COMMAND", error.what());
             }
-            return std::nullopt;
+            co_return std::nullopt;
         };
 
         // #402: the checkpoints a recovered command's calls continue from;
@@ -2293,7 +2295,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     control->resolve_core_provider_call_broker(operation_id);
                 // Core tool calls cross the host's tool Hooks like any other.
                 resources.hook_runtime = control->hook_runtime();
-                const auto grant = control->resolve_core_tool_grant(operation_id);
+                const auto grant = (co_await control->resolve_core_tool_grant(operation_id));
                 if (grant && grant->owner_scope == control->owner_scope &&
                     grant->program_version_id == control->program_version_id &&
                     grant->run_id == control->run_id &&
@@ -2857,11 +2859,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     co_return result;
                 }
                 try {
-                    auto child = control->launch_child(task.child_binding, std::move(child_input),
+                    auto child = (co_await control->launch_child(task.child_binding, std::move(child_input),
                                                        operation.id(), result.attempt_identity,
                                                        exact_budget ? task.requested_budget
                                                                     : task.reserved_budget,
-                                                       exact_budget);
+                                                       exact_budget));
                     result.child_run_id = child->run_id;
                     bool cancel_child = false;
                     {
@@ -4220,12 +4222,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         mapped = cancellation();
                                     } else {
                                         try {
-                                            auto child = control->launch_child(
+                                            auto child = (co_await control->launch_child(
                                                 map.child_binding, std::move(child_input),
                                                 operation_id,
                                                 execution_key_prefix + ":" +
                                                     std::to_string(item_index),
-                                                std::nullopt);
+                                                std::nullopt));
                                             bool cancel_child = false;
                                             {
                                                 std::lock_guard lock(parallel_map->mutex);
@@ -4450,8 +4452,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto      ordinal = spawn_occurrences[base]++;
                     execution_key           = base + ":" + std::to_string(ordinal);
                 }
-                auto child = control->launch_child(*operation.child_binding(), std::move(state),
-                                                   operation_id, execution_key, std::nullopt);
+                auto child = (co_await control->launch_child(*operation.child_binding(), std::move(state),
+                                                   operation_id, execution_key, std::nullopt));
                 PlanExecution result;
                 result.output        = json{{"child_run_id", child->run_id},
                                             {"program_version_id", child->program_version_id}};
@@ -4707,7 +4709,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (auto failure = reserve_operations(operation_id, command_count))
                         co_return std::move(*failure);
                     if (auto failure =
-                            validate_javascript_command(command, operation_id, scope_depth))
+                            (co_await validate_javascript_command(command, operation_id, scope_depth)))
                         co_return std::move(*failure);
                 }
                 if (operation_token->is_cancelled())
@@ -4962,10 +4964,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (command.kind() == JavaScriptCommandKind::Spawn) {
                     const auto binding = arguments.at("child_binding").get<std::string>();
                     auto child = reconnect_child_only
-                                     ? control->reconnect_existing_child(
-                                           binding, arguments.at("input"), operation_id)
-                                     : control->launch_child(binding, arguments.at("input"),
-                                                             operation_id, operation_id);
+                                     ? (co_await control->reconnect_existing_child(
+                                           binding, arguments.at("input"), operation_id))
+                                     : (co_await control->launch_child(binding, arguments.at("input"),
+                                                             operation_id, operation_id));
                     scope->attach(child);
                     PlanExecution result;
                     result.output        = json{{"child_run_id", child->run_id},
@@ -5835,22 +5837,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     ? control->recorded_replay->commands : durable_prior_commands;
                 bool       child_resume_authorized      = false;
                 auto       child_recovery_mode = ChildRecoveryMode::None;
-                const auto can_resume_child = [&] {
+                const auto can_resume_child = [&]() -> asio::awaitable<ChildRecoveryMode> {
                     auto        candidate       = command_value;
                     auto        child_operation = operation_id;
                     std::size_t depth           = 0;
                     while (candidate.kind() == JavaScriptCommandKind::Await) {
                         if (++depth > kMaxJavaScriptStructuredScopeDepth)
-                            return ChildRecoveryMode::None;
+                            co_return ChildRecoveryMode::None;
                         candidate =
                             JavaScriptCommand::from_json(candidate.arguments().at("command"));
                         child_operation += "/await";
                     }
                     if (candidate.kind() != JavaScriptCommandKind::Spawn)
-                        return ChildRecoveryMode::None;
+                        co_return ChildRecoveryMode::None;
                     const auto args = candidate.arguments();
-                    return control->can_recover_child(args.at("child_binding").get<std::string>(),
-                                                      args.at("input"), child_operation);
+                    co_return (co_await control->can_recover_child(args.at("child_binding").get<std::string>(),
+                                                      args.at("input"), child_operation));
                 };
                 const auto prior = std::find_if(
                     prior_commands.rbegin(), prior_commands.rend(),
@@ -5993,10 +5995,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         std::lock_guard lock(await_starts_mutex);
                         await_starts = *starts;
                     }
-                    child_recovery_mode = can_resume_child();
+                    child_recovery_mode = co_await can_resume_child();
                     if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {
                         if (auto failure =
-                                validate_javascript_command(command_value, operation_id, 0))
+                                (co_await validate_javascript_command(command_value, operation_id, 0)))
                             co_return std::move(*failure);
                         // A checkpoint only returns its journaled value and
                         // stages internal events. No external dispatch needs
@@ -6004,7 +6006,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         checkpoint_resume_authorized = true;
                     } else if (child_recovery_mode != ChildRecoveryMode::None) {
                         if (auto failure =
-                                validate_javascript_command(command_value, operation_id, 0))
+                                (co_await validate_javascript_command(command_value, operation_id, 0)))
                             co_return std::move(*failure);
                         child_resume_authorized = true;
                     } else if (checkpoint_id && resume_checkpoint &&
@@ -6012,7 +6014,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                    *control, prior_commands, ordinal,
                                    resume_checkpoint->core_thread_id)) {
                         if (auto failure =
-                                validate_javascript_command(command_value, operation_id, 0))
+                                (co_await validate_javascript_command(command_value, operation_id, 0)))
                             co_return std::move(*failure);
                         const auto resume_operation = javascript_call_core_operation_for_thread(
                             *control, command_value, operation_id,
@@ -6052,7 +6054,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         // #402: the command's calls that saved a Core checkpoint
                         // continue from it; one that saved none is reconciled.
                         if (auto failure =
-                                validate_javascript_command(command_value, operation_id, 0))
+                                (co_await validate_javascript_command(command_value, operation_id, 0)))
                             co_return std::move(*failure);
                         {
                             std::lock_guard lock(plan_mutex);
@@ -6135,7 +6137,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                     if (auto failure = reserve_operations(operation_id, command_count))
                         co_return std::move(*failure);
-                    if (auto failure = validate_javascript_command(command_value, operation_id, 0))
+                    if (auto failure = (co_await validate_javascript_command(command_value, operation_id, 0)))
                         co_return std::move(*failure);
 
                     const auto durable_before_dispatch =
@@ -6498,7 +6500,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (const graph::CancelledException& error) {
         outcome.execution_trace          = core_progress->completed_nodes();
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
@@ -6513,7 +6515,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         auto cause                       = terminal_cause_at_deadline(control, deadline);
         if (cause == CancellationCause::None) cause = CancellationCause::User;
         apply_terminal_cause(control, outcome, cause, error.what());
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (const NestedOperationFailure& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(),
                                  error.operation_id, error.attempts);
@@ -6538,7 +6540,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
                                           error.what());
         }
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (const graph::NodeExecutionError& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what(), error.node_name(),
                                  static_cast<std::uint32_t>(error.attempts()));
@@ -6554,7 +6556,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline), error.what());
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (const ProgramDiagnosticError& error) {
         const auto& diagnostic   = error.diagnostic();
         std::string operation_id = "root";
@@ -6576,7 +6578,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              diagnostic.message);
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
         retain_provider_failure(*outcome.failure, std::current_exception());
@@ -6595,7 +6597,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
                                           error.what());
         }
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     } catch (...) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", "Unknown Core failure");
         outcome.usage.wall_time_ms       = elapsed_ms(started_at);
@@ -6606,8 +6608,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
-        apply_durable_javascript_disposition(outcome);
+        needs_durable_disposition = true;
     }
+
+    if (needs_durable_disposition) co_await apply_durable_javascript_disposition(outcome);
 
     if (outcome.failure) {
         auto& witness = outcome.failure->witness;
@@ -6705,7 +6709,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                !control->recorded_replay, monetary && monetary->exceeded());
     outcome.provider_budget_authority = usage->authority_snapshot();
     cancel_deadline_timer(control->deadline_executor, std::move(timer));
-    control->complete(std::move(outcome));
+    (co_await control->complete_async(std::move(outcome)));
     co_return;
 }
 

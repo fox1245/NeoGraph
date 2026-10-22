@@ -6,6 +6,7 @@
 
 #include "program_expansion_fixture.h"
 #include "operation_lock.h"
+#include "fixtures/manual_executor.h"
 #include <neograph/program/core_tool_grant_store.h>
 
 #include <neograph/async/host_loop.h>
@@ -41,6 +42,8 @@ using namespace neograph;
 using namespace neograph::program;
 using namespace neograph::program_test;
 using namespace std::chrono_literals;
+using neograph::host_test::HostedRuntime;
+using neograph::host_test::ManualExecutor;
 
 namespace {
 
@@ -146,60 +149,6 @@ RuntimeConfig runtime_config(ExecutorFixture& fixture) {
     RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
     return config;
 }
-
-// A host's executor: work queues up, the host runs it from its own loop, and nothing runs inline.
-class ManualExecutor final : public sp::runtime::Executor {
-public:
-    void post(Task task) override { ready_.push_back(std::move(task)); }
-    Timer schedule(sp::runtime::SteadyTime at, Task task) override {
-        const auto id = ++last_timer_;
-        timers_.emplace(id, Timed{at, std::move(task)});
-        return id;
-    }
-    void cancel(Timer id) noexcept override { timers_.erase(id); }
-    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now(); }
-    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
-    bool in_thread() const noexcept override { return running_ != 0; }
-    bool host_pumped() const noexcept override { return true; }
-    void shutdown() noexcept override {}
-
-    bool step() {
-        for (auto it = timers_.begin(); it != timers_.end();) {
-            if (it->second.at <= now()) {
-                ready_.push_back(std::move(it->second.task));
-                it = timers_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        if (ready_.empty()) return false;
-        auto task = std::move(ready_.front());
-        ready_.pop_front();
-        ++running_;
-        try { task(); } catch (...) { --running_; throw; }
-        --running_;
-        return true;
-    }
-    std::size_t timers() const { return timers_.size(); }
-
-    // Runs the host until `done`, waiting for the next timer when nothing is ready. False if it took too long.
-    template <typename Done>
-    bool run_until(Done done, std::chrono::milliseconds limit = 10s) {
-        const auto stop = std::chrono::steady_clock::now() + limit;
-        while (!done()) {
-            if (std::chrono::steady_clock::now() > stop) return false;
-            if (!step()) std::this_thread::sleep_for(1ms);
-        }
-        return true;
-    }
-
-private:
-    struct Timed { sp::runtime::SteadyTime at; Task task; };
-    std::deque<Task> ready_;
-    std::map<Timer, Timed> timers_;
-    Timer last_timer_ = 0;
-    unsigned running_ = 0;
-};
 
 // A transition store over the in-memory one whose backend "blocks for long": every operation an awaiting coroutine makes
 // runs on a pool thread, as a PostgreSQL store's does. It records the threads its operations ran on, and can hold the
@@ -449,15 +398,12 @@ private:
     asio::awaitable<void> pause() const {
         asio::steady_timer timer(co_await asio::this_coro::executor);
         timer.expires_after(1ms);
+        // A host loop wakes for a deadline it has been told about.
+        async::note_deadline(co_await asio::this_coro::executor, timer.expiry());
         co_await timer.async_wait(asio::use_awaitable);
     }
 
     std::shared_ptr<InMemoryProgramTransitionStore> inner_;
-};
-
-struct HostedRuntime {
-    std::shared_ptr<ManualExecutor> host = std::make_shared<ManualExecutor>();
-    async::HostLoop                 loop{host};
 };
 
 // co_spawn builds a default result for a failure, and a ProgramHandle has none: the handle is kept on the side.
@@ -487,6 +433,7 @@ private:
     static asio::awaitable<void> pause() {
         asio::steady_timer timer(co_await asio::this_coro::executor);
         timer.expires_after(1ms);
+        async::note_deadline(co_await asio::this_coro::executor, timer.expiry());
         co_await timer.async_wait(asio::use_awaitable);
     }
 };
@@ -871,7 +818,7 @@ TEST(ProgramRuntimeExecutorTest, ARunWaitingForAStoreLeavesTheExecutorFreeForAno
     io_thread.join();
 }
 
-TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterIsRefusedWhereTheHostLoopRunsTheProgram) {
+TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterServesAProgramRunByTheHostLoop) {
     ExecutorFixture fixture(1, {}, std::make_shared<DelayedJournal>());
     fixture.runtime.reset();
     const auto version = fixture.admit("executor-record");
@@ -881,27 +828,52 @@ TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterIsRefusedWhereTheHostLo
     config.executor      = hosted.loop.executor();
     ProgramRuntime runtime(std::move(config));
 
-    // The runtime's entry points wait for a store through a blocking view. On a host loop nothing can complete a store that
-    // is not synchronous while a thread waits for it, so the view refuses instead of hanging.
+    // The runtime's entry points await their stores on the host loop (#557), so a store that completes in a later turn
+    // is served: nothing waits for it, and nothing is refused.
     bool                         done = false;
     std::exception_ptr           failure;
-    std::optional<ProgramHandle> handle;
-    hosted.loop.spawn(start_and_keep(runtime, version, invocation("trace-late"), handle),
-                      [&](std::exception_ptr error, int) {
+    std::optional<ProgramResult> result;
+    hosted.loop.spawn(runtime.run_async("tenant:runtime", version, invocation("trace-late")),
+                      [&](std::exception_ptr error, ProgramResult value) {
                           failure = error;
-                          done    = true;
+                          if (!error) result = std::move(value);
+                          done = true;
                       });
     ASSERT_TRUE(hosted.host->run_until([&] { return done; }));
-    ASSERT_TRUE(failure);
-    EXPECT_FALSE(handle);
+    if (failure) std::rethrow_exception(failure);
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->status(), ProgramTerminalStatus::Completed);
+
+    // The synchronous form is still refused there, before it touches a store.
     try {
-        std::rethrow_exception(failure);
+        (void)runtime.start("tenant:runtime", version, invocation("trace-late-sync"));
+        FAIL() << "a synchronous start was accepted";
     } catch (const ProgramBlockingCallRefused& error) {
-        EXPECT_NE(error.operation().find("ProgramTransitionStore::"), std::string::npos) << error.operation();
-        EXPECT_NE(std::string(error.what()).find("event loop"), std::string::npos) << error.what();
-    } catch (...) {
-        ADD_FAILURE() << "the call failed with another error";
+        EXPECT_EQ(error.operation(), "ProgramRuntime::start");
+        EXPECT_EQ(error.alternative(), "ProgramRuntime::start_async");
     }
+}
+
+TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterIsRefusedBySynchronousCallsInsideAHostTurn) {
+    // A runtime with its own pools, called from a handler of an unrelated host loop: the call would wait for a store that
+    // only a later turn of that loop can complete, so it is refused before the store is touched.
+    ExecutorFixture fixture(1, {}, std::make_shared<DelayedJournal>());
+    const auto      version = fixture.admit("executor-record");
+
+    HostedRuntime hosted;
+    std::optional<std::string> verdict;
+    auto call = [&]() -> asio::awaitable<int> {
+        try {
+            (void)fixture.runtime->start("tenant:runtime", version, invocation("trace-in-turn"));
+            verdict = "started";
+        } catch (const ProgramBlockingCallRefused& error) {
+            verdict = error.operation();
+        }
+        co_return 0;
+    };
+    hosted.loop.spawn(call(), [](std::exception_ptr, int) {});
+    ASSERT_TRUE(hosted.host->run_until([&] { return verdict.has_value(); }));
+    EXPECT_EQ(*verdict, "ProgramRuntime::start");
 }
 
 TEST(ProgramRuntimeExecutorTest, AStoreThatCompletesLaterServesARuntimeWithItsOwnPools) {

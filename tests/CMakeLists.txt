@@ -153,6 +153,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_record_identity.cpp
         test_program_runtime.cpp
         test_program_runtime_executor.cpp
+        test_program_host_pumped_stores.cpp
         test_program_store_awaitable.cpp
         test_program_runtime_instruction.cpp
         test_program_invocation.cpp

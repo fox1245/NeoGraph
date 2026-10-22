@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=c26dd9eeb2d12e8a1d44a024e5393babd5138731c710fb7539bd4251cd62cb8b -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=b4aa03031c33ac61d3eb03186b888ff22717cd34c921e6702b0bd54f44cb4439 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -225,10 +225,11 @@ loop.spawn(runtime.run_async(owner, version, invocation),
   その executor の strand で実行されるので、ノード本体は自分のスレッドをブロックしてはいけません。
 - **ロック。** ストアに触れる臨界区間は、コルーチンがブロックせずに待てる `OperationLock` を持ちます。`std::mutex` は
   メモリだけを守ります。
-- **awaitable なストア。** Program ストアのインターフェース 5 つは `asio::awaitable` を返し、run の attempt はそれを await します。
-  インメモリのストアのように操作がすぐ完了するストアはターンを使いません。ランタイムの同期エントリーポイント、終端の公開、
-  子の起動は、ブロッキングビューを通してストアを待ちます。このビューは、待っているスレッドしか回せないループを待つ代わりに
-  `program::ProgramBlockingCallRefused` で拒否します。
+- **awaitable なストア。** Program ストアのインターフェース 5 つは `asio::awaitable` を返し、ランタイムのすべての操作がループ上でそれを await します。
+  エントリーポイント、終端の公開、子の起動、Core ツール grant リゾルバー（`RuntimeConfig::core_tool_grant_awaitable_resolver`）、
+  `ProgramCatalog` の `_async` 形式、`ModuleResolver::resolve_async` がそうです。インメモリのストアのように操作がすぐ完了するストアは
+  ターンを使わず、ホストループの後のターンで完了するストアも動きます。同期形式は同じコルーチンを呼び出したスレッドで最後まで実行し、
+  上記のとおり拒否するので、待っているスレッドしか回せないループを待つことはありません。
 - **ランタイムを破棄すると** 実行中の run はキャンセルされますが、終了は待ちません。attempt が終わるまでランタイムの
   状態を保持するので、ハンドルが終了状態になるまでループを回し続けてください。
 
@@ -257,8 +258,12 @@ CI はモジュールをビルドし、Node 22 と 24 で、ネットワーク�
 - `checks.cpp` は `HostLoop` の上に `ProgramRuntime` も作ります。実行器のないランタイムと同期の `start` は拒否され、
   インメモリのストアを使うノード 1 つの Program がホストのターンで結果まで実行されます。
   続いて、ホストのターンで awaitable なストアから run とバージョンを読み戻し、ブロッキングビューがループ上での待機を拒否することを示します。
+  また、Program ストアと遷移ストアが呼び出しをループの後のターンでしか完了しない状態で Program を実行し、そのようなストアでカタログを読みます。
 - `tests/test_program_runtime_executor.cpp` は、シングルスレッドの `io_context` と手動の実行器の上の `HostLoop` で Program を
   ネイティブに実行するので、ネイティブビルドも同じ経路を扱います。
+- `tests/test_program_host_pumped_stores.cpp` は、呼び出しをループの後のターンでしか完了しないストアの上の `HostLoop` で、Program の
+  ライフサイクル全体をネイティブに実行します。開始、モデルノード、中断と再開、フォーク、子、Core ツール grant、完了、キャンセルを扱い、
+  何もブロックされず、拒否もされません。
 - `tests/test_program_store_awaitable.cpp` は、ストアの契約をネイティブで実行します。インラインのストアは中断せずに完了し、
   プールに回すストアは待っているコルーチンを自分の executor で再開し、ブロッキングビューはあとで完了するストアを待つか拒否します。
 - `tests/test_host_loop.cpp` は、手動の executor を相手にループとホストシームのプロバイダーをネイティブで実行するので、
@@ -290,9 +295,8 @@ NeoGraph が呼び出しを所有している場合は型付きのエラーで�
   `SchemaProvider` に渡します。
 - **ホストが回すプロバイダーに対するブロッキングのエントリーポイント。** `run()`、`Provider::dispatch` などは拒否します（上記）。
 - **ホストのデータベース上の Program ストア。** ストアのインターフェースは awaitable です。SQLite と PostgreSQL のストアはシステムライブラリを必要とするため、ホストのデータベースには自前の
-  ストアが必要です。操作がすぐ完了するストア（ホストの同期ストレージ）は、ホストループ上のランタイムで使えます。
-  ホストのイベントループを通してしか完了しないストアは、ランタイムのエントリーポイント、終端の公開、子の起動がまだ
-  ストアを待つため、そこで `ProgramBlockingCallRefused` により拒否されます（[#556](https://github.com/fox1245/NeoGraph/issues/556)）。
+  ストアが必要です。操作がすぐ完了するストア（ホストの同期ストレージ）も、ホストのイベントループを通してしか完了しないストアも、
+  `_async` 形式を通して、ホストループ上のランタイムで使えます（[#557](https://github.com/fox1245/NeoGraph/issues/557)）。
   同期の Program 呼び出しはホストループで拒否されるので、`_async` 形式を使ってください。
 - **ネイティブ Program コントロール。** C v1 プラグイン ABI は 64 ビットのレイアウトなので、wasm32 では
   `NativeControlBinding::create` が `NativeControlUnavailable` で拒否します。

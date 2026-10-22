@@ -294,6 +294,9 @@ public:
         std::string_view content_identity,
         ModuleLifecycle lifecycle) final;
 
+    /** True when every awaitable operation completes at once on the calling thread, not on a pool thread. */
+    bool completes_at_once() const noexcept { return !offloads(); }
+
 protected:
     /** True for a backend that blocks for long: each operation then runs on a pool thread. */
     virtual bool offloads() const noexcept { return false; }
@@ -355,10 +358,13 @@ public:
 
     ModuleResolution resolve(const ModuleCoordinate& root,
                              const PolicySnapshot& policy) const;
+    /// The same resolution, awaiting the module store; the arguments are taken by value.
+    asio::awaitable<ModuleResolution> resolve_async(ModuleCoordinate root, PolicySnapshot policy) const;
 
 private:
-    // Only the reads of the store are called, so the view of a const store is safe.
-    std::shared_ptr<BlockingModuleStore> store_;
+    // Only the reads of the store are called, and they are const.
+    std::shared_ptr<const ModuleStore> store_;
+    bool                               synchronous_ = false;  ///< the store is a SyncModuleStore
 };
 
 }  // namespace neograph::program

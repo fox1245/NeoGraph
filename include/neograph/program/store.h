@@ -197,6 +197,9 @@ public:
         std::string_view owner_scope,
         const std::vector<std::string>& pinned_version_ids) final;
 
+    /** True when every awaitable operation completes at once on the calling thread, not on a pool thread. */
+    bool completes_at_once() const noexcept { return !offloads(); }
+
 protected:
     /** True for a backend that blocks for long: each operation then runs on a pool thread. */
     virtual bool offloads() const noexcept { return false; }

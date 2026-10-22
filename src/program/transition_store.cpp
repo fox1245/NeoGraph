@@ -1993,7 +1993,7 @@ asio::awaitable<std::optional<ProgramRunRecord>> SyncProgramTransitionStore::loa
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load");
-    if (!offloads()) co_return load_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunRecord> {
         return load_sync(owner_scope, run_id);
@@ -2004,7 +2004,7 @@ asio::awaitable<std::optional<ProgramJournalRecord>> SyncProgramTransitionStore:
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::latest");
-    if (!offloads()) co_return latest_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return latest_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramJournalRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramJournalRecord> {
         return latest_sync(owner_scope, run_id);
@@ -2015,7 +2015,7 @@ asio::awaitable<std::optional<ProgramRunPublicationHead>> SyncProgramTransitionS
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_publication_head");
-    if (!offloads()) co_return load_run_publication_head_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_run_publication_head_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunPublicationHead>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunPublicationHead> {
         return load_run_publication_head_sync(owner_scope, run_id);
@@ -2027,7 +2027,7 @@ asio::awaitable<std::vector<ProgramEvent>> SyncProgramTransitionStore::load_even
     std::string_view run_id,
     std::uint64_t after_sequence) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_events");
-    if (!offloads()) co_return load_events_sync(owner_scope, run_id, after_sequence);
+    if (!detail::offload_store_call(offloads())) co_return load_events_sync(owner_scope, run_id, after_sequence);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramEvent>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramEvent> {
         return load_events_sync(owner_scope, run_id, after_sequence);
@@ -2039,7 +2039,7 @@ asio::awaitable<std::vector<ProgramEffectOutboxEntry>> SyncProgramTransitionStor
     std::string_view run_id,
     std::uint64_t after_sequence) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effects");
-    if (!offloads()) co_return load_effects_sync(owner_scope, run_id, after_sequence);
+    if (!detail::offload_store_call(offloads())) co_return load_effects_sync(owner_scope, run_id, after_sequence);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramEffectOutboxEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramEffectOutboxEntry> {
         return load_effects_sync(owner_scope, run_id, after_sequence);
@@ -2051,7 +2051,7 @@ asio::awaitable<std::vector<ProgramJavaScriptCommandJournalEntry>> SyncProgramTr
     std::string_view run_id,
     std::uint64_t after_sequence) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_javascript_commands");
-    if (!offloads()) co_return load_javascript_commands_sync(owner_scope, run_id, after_sequence);
+    if (!detail::offload_store_call(offloads())) co_return load_javascript_commands_sync(owner_scope, run_id, after_sequence);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramJavaScriptCommandJournalEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramJavaScriptCommandJournalEntry> {
         return load_javascript_commands_sync(owner_scope, run_id, after_sequence);
@@ -2062,7 +2062,7 @@ asio::awaitable<std::optional<ProgramCommandPublicationHead>> SyncProgramTransit
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_command_publication_head");
-    if (!offloads()) co_return load_command_publication_head_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_command_publication_head_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramCommandPublicationHead>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramCommandPublicationHead> {
         return load_command_publication_head_sync(owner_scope, run_id);
@@ -2074,7 +2074,7 @@ asio::awaitable<std::vector<ProgramContextPublication>> SyncProgramTransitionSto
     std::string_view run_id,
     std::uint64_t after_sequence) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_context_publications");
-    if (!offloads()) co_return load_context_publications_sync(owner_scope, run_id, after_sequence);
+    if (!detail::offload_store_call(offloads())) co_return load_context_publications_sync(owner_scope, run_id, after_sequence);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramContextPublication>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), after_sequence]() mutable -> std::vector<ProgramContextPublication> {
         return load_context_publications_sync(owner_scope, run_id, after_sequence);
@@ -2085,7 +2085,7 @@ asio::awaitable<std::vector<HookOutboxEntry>> SyncProgramTransitionStore::load_h
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_hook_outbox_entries");
-    if (!offloads()) co_return load_hook_outbox_entries_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_hook_outbox_entries_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<HookOutboxEntry>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::vector<HookOutboxEntry> {
         return load_hook_outbox_entries_sync(owner_scope, run_id);
@@ -2096,7 +2096,7 @@ asio::awaitable<ProgramEffectiveRuntimeState> SyncProgramTransitionStore::load_e
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_effective_runtime_state");
-    if (!offloads()) co_return load_effective_runtime_state_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_effective_runtime_state_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramEffectiveRuntimeState>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> ProgramEffectiveRuntimeState {
         return load_effective_runtime_state_sync(owner_scope, run_id);
@@ -2107,7 +2107,7 @@ asio::awaitable<std::vector<ProgramChildSynthesisRecord>> SyncProgramTransitionS
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_syntheses");
-    if (!offloads()) co_return load_child_syntheses_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_child_syntheses_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::vector<ProgramChildSynthesisRecord>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::vector<ProgramChildSynthesisRecord> {
         return load_child_syntheses_sync(owner_scope, run_id);
@@ -2118,7 +2118,7 @@ asio::awaitable<std::optional<MigrationPlan>> SyncProgramTransitionStore::load_m
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_migration_plan");
-    if (!offloads()) co_return load_migration_plan_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_migration_plan_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<MigrationPlan>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<MigrationPlan> {
         return load_migration_plan_sync(owner_scope, run_id);
@@ -2129,7 +2129,7 @@ asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::lo
     std::string_view owner_scope,
     std::string_view lineage_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage");
-    if (!offloads()) co_return load_lineage_sync(owner_scope, lineage_id);
+    if (!detail::offload_store_call(offloads())) co_return load_lineage_sync(owner_scope, lineage_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id)]() mutable -> std::optional<ProgramRunLineage> {
         return load_lineage_sync(owner_scope, lineage_id);
@@ -2140,7 +2140,7 @@ asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::lo
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_run_lineage");
-    if (!offloads()) co_return load_run_lineage_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_run_lineage_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramRunLineage> {
         return load_run_lineage_sync(owner_scope, run_id);
@@ -2152,7 +2152,7 @@ asio::awaitable<std::optional<ProgramRunLineage>> SyncProgramTransitionStore::lo
     std::string_view lineage_id,
     std::string_view head_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_lineage_head");
-    if (!offloads()) co_return load_lineage_head_sync(owner_scope, lineage_id, head_id);
+    if (!detail::offload_store_call(offloads())) co_return load_lineage_head_sync(owner_scope, lineage_id, head_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunLineage>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), head_id = std::string(head_id)]() mutable -> std::optional<ProgramRunLineage> {
         return load_lineage_head_sync(owner_scope, lineage_id, head_id);
@@ -2164,7 +2164,7 @@ asio::awaitable<std::optional<ProgramRunGeneration>> SyncProgramTransitionStore:
     std::string_view lineage_id,
     std::uint64_t generation) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation");
-    if (!offloads()) co_return load_generation_sync(owner_scope, lineage_id, generation);
+    if (!detail::offload_store_call(offloads())) co_return load_generation_sync(owner_scope, lineage_id, generation);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramRunGeneration>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), generation]() mutable -> std::optional<ProgramRunGeneration> {
         return load_generation_sync(owner_scope, lineage_id, generation);
@@ -2176,7 +2176,7 @@ asio::awaitable<std::optional<ProgramTransitionPublication>> SyncProgramTransiti
     std::string_view lineage_id,
     std::uint64_t generation) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_generation_initial_publication");
-    if (!offloads()) co_return load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
+    if (!detail::offload_store_call(offloads())) co_return load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramTransitionPublication>>([this, owner_scope = std::string(owner_scope), lineage_id = std::string(lineage_id), generation]() mutable -> std::optional<ProgramTransitionPublication> {
         return load_generation_initial_publication_sync(owner_scope, lineage_id, generation);
@@ -2188,7 +2188,7 @@ asio::awaitable<std::optional<GraphMigrationCapsule>> SyncProgramTransitionStore
     std::string_view source_run_id,
     std::string_view source_lineage_head_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_graph_migration_capsule");
-    if (!offloads()) co_return load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
+    if (!detail::offload_store_call(offloads())) co_return load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<GraphMigrationCapsule>>([this, owner_scope = std::string(owner_scope), source_run_id = std::string(source_run_id), source_lineage_head_id = std::string(source_lineage_head_id)]() mutable -> std::optional<GraphMigrationCapsule> {
         return load_graph_migration_capsule_sync(owner_scope, source_run_id, source_lineage_head_id);
@@ -2199,7 +2199,7 @@ asio::awaitable<std::optional<ProgramExecutionLease>> SyncProgramTransitionStore
     std::string_view owner_scope,
     std::string_view run_id) const {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_execution_lease");
-    if (!offloads()) co_return load_execution_lease_sync(owner_scope, run_id);
+    if (!detail::offload_store_call(offloads())) co_return load_execution_lease_sync(owner_scope, run_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<ProgramExecutionLease>>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable -> std::optional<ProgramExecutionLease> {
         return load_execution_lease_sync(owner_scope, run_id);
@@ -2211,7 +2211,7 @@ asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::comp
     std::string_view expected_journal_head,
     ProgramTransitionPublication publication) {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish");
-    if (!offloads()) co_return compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
+    if (!detail::offload_store_call(offloads())) co_return compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication)]() mutable -> ProgramTransitionPublishResult {
         return compare_publish_sync(owner_scope, expected_journal_head, std::move(publication));
@@ -2225,7 +2225,7 @@ asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::comp
     std::optional<ProgramExecutionLease> expected_lease,
     std::optional<ProgramExecutionLease> next_lease) {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_execution");
-    if (!offloads()) co_return compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    if (!detail::offload_store_call(offloads())) co_return compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication), expected_lease = std::move(expected_lease), next_lease = std::move(next_lease)]() mutable -> ProgramTransitionPublishResult {
         return compare_publish_execution_sync(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
@@ -2240,7 +2240,7 @@ asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::comp
     const GraphMigrationCapsule& capsule,
     const ProgramExecutionLease& execution_lease) {
     detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_graph_safe_point");
-    if (!offloads()) co_return compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+    if (!detail::offload_store_call(offloads())) co_return compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), expected_journal_head = std::string(expected_journal_head), publication = std::move(publication), evidence = evidence, capsule = capsule, execution_lease = execution_lease]() mutable -> ProgramTransitionPublishResult {
         return compare_publish_graph_safe_point_sync(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);

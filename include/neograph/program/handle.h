@@ -57,6 +57,12 @@ public:
     const std::string& program_version_id() const noexcept;
     std::uint64_t      attempt() const noexcept;
 
+    /**
+     * Cancels the run. Cancelling an interrupted run publishes its Cancelled state through the transition store, and
+     * the call waits for that. It does not wait on a thread that runs the runtime's executor (a node body) or on a
+     * host-pumped executor: there the run stops in memory at once and the rest is a task of the executor. Use
+     * cancel_async to wait for the Cancelled state there.
+     */
     bool                                  cancel() noexcept;
     ProgramResult                         wait() const;
     asio::awaitable<ProgramResult>        wait_async() const;
@@ -67,7 +73,20 @@ public:
     std::optional<ExactProgramHandoff>    latest_handoff() const;
     /** Hold the source before it consumes the next completed top-level checkpoint. */
     ProgramHandoff                        next_handoff() const;
+    /**
+     * The awaitable form of next_handoff (#557): the coordination lock is awaited, not waited for. The returned
+     * awaitable keeps the run's control alive, so it may outlive the handle that made it.
+     */
+    asio::awaitable<ProgramHandoff>       next_handoff_async() const;
     ProgramRunRecord                      snapshot() const;
+    /**
+     * Awaitable forms of cancel, latest_handoff and snapshot (#557). They await the transition store on the
+     * runtime's executor instead of blocking a thread, so they work on a host-pumped executor, where the
+     * synchronous forms cannot read a store that completes only in a later turn.
+     */
+    asio::awaitable<bool>                 cancel_async();
+    asio::awaitable<std::optional<ExactProgramHandoff>> latest_handoff_async() const;
+    asio::awaitable<ProgramRunRecord>     snapshot_async() const;
     /**
      * Notices about the run, none of them an error. ProgramRuntime::fork gives
      * one when it creates the run: a fork that cannot replay provider calls

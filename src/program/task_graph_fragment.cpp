@@ -1101,7 +1101,7 @@ TaskGraphPublishResult InMemoryTaskGraphFragmentStore::compare_update_sync(
 asio::awaitable<TaskGraphPublishResult> SyncTaskGraphFragmentStore::publish(
     const TaskGraphFragmentRecord& record) {
     detail::assert_no_pure_lock_held("TaskGraphFragmentStore::publish");
-    if (!offloads()) co_return publish_sync(record);
+    if (!detail::offload_store_call(offloads())) co_return publish_sync(record);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<TaskGraphPublishResult>([this, record = record]() mutable -> TaskGraphPublishResult {
         return publish_sync(record);
@@ -1111,7 +1111,7 @@ asio::awaitable<TaskGraphPublishResult> SyncTaskGraphFragmentStore::publish(
 asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentStore::load(
     std::string_view fragment_id) const {
     detail::assert_no_pure_lock_held("TaskGraphFragmentStore::load");
-    if (!offloads()) co_return load_sync(fragment_id);
+    if (!detail::offload_store_call(offloads())) co_return load_sync(fragment_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, fragment_id = std::string(fragment_id)]() mutable -> std::optional<TaskGraphFragmentRecord> {
         return load_sync(fragment_id);
@@ -1123,7 +1123,7 @@ asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentSto
     std::string_view parent_run_id,
     std::string_view expansion_operation_id) const {
     detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published_lineage");
-    if (!offloads()) co_return find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
+    if (!detail::offload_store_call(offloads())) co_return find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expansion_operation_id = std::string(expansion_operation_id)]() mutable -> std::optional<TaskGraphFragmentRecord> {
         return find_published_lineage_sync(owner_scope, parent_run_id, expansion_operation_id);
@@ -1136,7 +1136,7 @@ asio::awaitable<std::optional<TaskGraphFragmentRecord>> SyncTaskGraphFragmentSto
     std::string_view expansion_operation_id,
     std::string_view proposal_hash) const {
     detail::assert_no_pure_lock_held("TaskGraphFragmentStore::find_published");
-    if (!offloads()) co_return find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
+    if (!detail::offload_store_call(offloads())) co_return find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<std::optional<TaskGraphFragmentRecord>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expansion_operation_id = std::string(expansion_operation_id), proposal_hash = std::string(proposal_hash)]() mutable -> std::optional<TaskGraphFragmentRecord> {
         return find_published_sync(owner_scope, parent_run_id, expansion_operation_id, proposal_hash);
@@ -1148,7 +1148,7 @@ asio::awaitable<TaskGraphPublishResult> SyncTaskGraphFragmentStore::compare_upda
     std::uint64_t expected_revision,
     const TaskGraphFragmentRecord& record) {
     detail::assert_no_pure_lock_held("TaskGraphFragmentStore::compare_update");
-    if (!offloads()) co_return compare_update_sync(fragment_id, expected_revision, record);
+    if (!detail::offload_store_call(offloads())) co_return compare_update_sync(fragment_id, expected_revision, record);
     // The work runs on a pool thread and may outlive this frame: it owns its arguments.
     co_return co_await detail::offload_sync_call<TaskGraphPublishResult>([this, fragment_id = std::string(fragment_id), expected_revision, record = record]() mutable -> TaskGraphPublishResult {
         return compare_update_sync(fragment_id, expected_revision, record);

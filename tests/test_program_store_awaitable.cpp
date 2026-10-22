@@ -326,3 +326,49 @@ TEST(ProgramStoreAwaitableTest, AViewThatAwaitsASynchronousStoreGetsTheSameAnswe
             EXPECT_EQ(store->threads(), std::set<std::thread::id>{std::this_thread::get_id()});
     }
 }
+
+// ---- The private io_context of a blocking wait ----
+
+TEST(ProgramStoreAwaitableTest, ABlockingWaitReusesTheContextOfAFinishedOneAndNestsOnAnotherOne) {
+    asio::io_context* first = nullptr;
+    {
+        neograph::program::detail::BlockingIoContext wait;
+        first = &wait.get();
+    }
+    {
+        // The context a wait has finished with is handed out again, restarted.
+        neograph::program::detail::BlockingIoContext wait;
+        EXPECT_EQ(&wait.get(), first);
+        bool ran = false;
+        asio::post(wait.get(), [&] { ran = true; });
+        wait.get().run();
+        EXPECT_TRUE(ran);
+    }
+    {
+        neograph::program::detail::BlockingIoContext reused;
+        EXPECT_EQ(&reused.get(), first);
+        // A wait inside a wait cannot share its context: the outer one is running.
+        neograph::program::detail::BlockingIoContext nested;
+        EXPECT_NE(&nested.get(), &reused.get());
+        bool ran = false;
+        asio::post(reused.get(), [&] { ran = true; });
+        reused.get().run();
+        EXPECT_TRUE(ran);
+    }
+    // A context that did not end cleanly is dropped, not handed out again.
+    {
+        neograph::program::detail::BlockingIoContext wait;
+        wait.discard();
+    }
+    EXPECT_NO_THROW(neograph::program::detail::BlockingIoContext{});
+}
+
+TEST(ProgramStoreAwaitableTest, ARunToCompletionCallNestsInsideAnother) {
+    // The synchronous API of the runtime is called from a node body that runs inside another such call.
+    const auto inner = []() -> asio::awaitable<int> { co_return 7; };
+    const auto outer = [&]() -> asio::awaitable<int> {
+        const auto value = neograph::program::detail::run_to_completion(inner(), "inner");
+        co_return value + 1;
+    };
+    EXPECT_EQ(neograph::program::detail::run_to_completion(outer(), "outer"), 8);
+}

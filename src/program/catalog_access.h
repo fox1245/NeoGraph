@@ -52,6 +52,32 @@ public:
      */
     static std::optional<ProgramVersion> load_admitted_version(
         const ProgramCatalog& catalog, std::string_view owner_scope, std::string_view version_id);
+
+    /**
+     * Throws ProgramBlockingCallRefused when a synchronous call cannot wait for this catalog here, as the catalog's
+     * own synchronous operations do (see ProgramCatalog::Impl::require_blocking_allowed). For a caller that runs the
+     * catalog's awaitable operations to completion itself.
+     */
+    static void require_blocking_allowed(const ProgramCatalog& catalog, std::string_view operation);
+
+    // The same operations, awaited (arguments by value). They are the bodies of the four above.
+    static asio::awaitable<std::shared_ptr<const MaterializedProgram>> pin_async(
+        const ProgramCatalog& catalog, ProgramVersion version);
+    static asio::awaitable<std::shared_ptr<const MaterializedProgram>> pin_with_binding_async(
+        ProgramCatalog& catalog, std::string owner_scope, std::string version_id,
+        CatalogCapabilityBinding binding);
+    static asio::awaitable<std::shared_ptr<const MaterializedProgram>> pin_recorded_async(
+        ProgramCatalog& catalog, ProgramVersion version, RecordedBindingSet requested,
+        std::vector<ProgramEvent> source_events);
+    static asio::awaitable<std::optional<ProgramVersion>> load_admitted_version_async(
+        const ProgramCatalog& catalog, std::string owner_scope, std::string version_id);
+
+private:
+    // The body of pin_recorded and pin_recorded_async. A RecordedBindingSet cannot be copied and only its fingerprint
+    // is compared, so the body takes that.
+    static asio::awaitable<std::shared_ptr<const MaterializedProgram>> pin_recorded_core(
+        ProgramCatalog& catalog, ProgramVersion version, std::string requested_fingerprint,
+        std::vector<ProgramEvent> source_events);
 };
 
 }  // namespace neograph::program::detail

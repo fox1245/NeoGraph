@@ -167,8 +167,11 @@ struct ProgramExecutorIdentity {
      /// Process-wide limits for admitted child publication and dispatch.
       ProgramChildQuotaConfig                  child_quota;
       /// Optional host-owned lifecycle observer. Programs never receive it.
+      /// A hook of the cancellation of an interrupted run runs while the cancellation holds the runtime's
+      /// process-wide transition lock, so it must not call back into the runtime.
       std::shared_ptr<HookRuntime>              hook_runtime;
-      /// Required on reconnect when the run has durable context or hook state.
+      /// Required on reconnect when the run has durable context or hook state. A reconnect calls it while it holds
+      /// the runtime's process-wide transition lock, so it must not call back into the runtime.
       ProgramRuntimeRecoveryHandler             runtime_recovery_handler;
       std::shared_ptr<ProgramSynthesisGateway>  child_synthesis_gateway;
       ProgramChildSynthesisGrantResolver        child_synthesis_grant_resolver;
@@ -184,6 +187,8 @@ struct ProgramExecutorIdentity {
       /// Rebound for each Program attempt and Core operation. Missing, stale or
       /// incomplete grants deny mediated tool calls before dispatch.
       ProgramCoreToolGrantResolver core_tool_grant_resolver;
+      /// The same for a host that cannot block (#557): the resolver awaits its store. When both are set, this one is used.
+      ProgramCoreToolGrantAwaitableResolver core_tool_grant_awaitable_resolver;
       /// Optional host broker for each built-in Core provider call. When set,
       /// a missing or stale binding denies that operation before Core runs.
       ProgramCoreProviderCallResolver core_provider_call_resolver;
@@ -391,12 +396,14 @@ public:
                       ProgramInvocation     invocation);
 
     /**
-     * Awaitable forms of the operations above (#557). Each one does what its synchronous namesake does, on this
-     * runtime's executor, and completes on the executor of the coroutine that awaits it. They take their arguments by
-     * value, so nothing they read can dangle across a suspension; the exceptions are the ProgramHandoff that
-     * reserve_synthesis_async and prepare_child_synthesis_async refer to, which the caller keeps alive until the call
-     * completes (reserve_synthesis_async refreshes its journal head), and the ProgramRuntime itself, which must
-     * outlive the call as it does for the synchronous form.
+     * Awaitable forms of the operations above (#557). Each one is the coroutine body that its synchronous namesake
+     * runs to completion on the calling thread: it runs on this runtime's executor, awaits the stores (the
+     * transition, Program, grant, fragment and module stores, and the catalog's) and completes on the executor of the
+     * coroutine that awaits it. It never blocks a thread, so a store that completes only in a later turn of a host's
+     * event loop works. They take their arguments by value, so nothing they read can dangle across a suspension; the
+     * exceptions are the ProgramHandoff that reserve_synthesis_async and prepare_child_synthesis_async refer to, which
+     * the caller keeps alive until the call completes (reserve_synthesis_async refreshes its journal head), and the
+     * ProgramRuntime itself, which must outlive the call as it does for the synchronous form.
      *
      * On a host-pumped executor the synchronous forms are refused (ProgramBlockingCallRefused). These are the way to
      * use the runtime there. resume_async returns the Program's result, as it always has; resume_handle_async is the
@@ -468,11 +475,54 @@ private:
     ProgramRuntime(std::shared_ptr<Impl> impl, Borrowed) noexcept;
     ProgramRuntime borrowed() const noexcept;
 
+    // The coroutine body of each operation (#557). The awaitable form runs it on the runtime's executor; the
+    // synchronous form runs the same body to completion on the calling thread. They take their arguments by value.
     asio::awaitable<ProgramHandle> migrate_graph_core(ProgramHandle source, ProgramGraphMigrationTarget target);
-    ProgramHandle start_resolved(std::string_view      owner_scope,
-                                 const ProgramVersion& version,
-                                 ProgramInvocation     invocation,
-                                 bool                  active_selection = false);
+    asio::awaitable<ProgramActiveRun> start_active_core(RunInvocation invocation,
+                                                        std::shared_ptr<ProgramEventSink> events);
+    asio::awaitable<ProgramHandle> start_core(RunInvocation invocation, std::shared_ptr<ProgramEventSink> events);
+    asio::awaitable<ProgramHandle> start_core(std::string owner_scope, ProgramVersion version,
+                                              ProgramInvocation invocation);
+    asio::awaitable<ProgramHandle> start_resolved_core(std::string owner_scope, ProgramVersion version,
+                                                       ProgramInvocation invocation, bool active_selection = false);
+    asio::awaitable<ProgramHandle> start_child_core(std::string owner_scope, ProgramHandle parent,
+                                                    ModuleLinkReceipt link, ProgramVersion version,
+                                                    ProgramInvocation invocation);
+    asio::awaitable<ProgramHandle> replay_recorded_core(std::string source_run_id, RunInvocation invocation,
+                                                        RecordedBindingSet recorded,
+                                                        std::shared_ptr<ProgramEventSink> events);
+    asio::awaitable<ProgramHandle> fork_core(ExactProgramCheckpointReference source, RunInvocation invocation,
+                                             ProgramResume resume, std::shared_ptr<ProgramEventSink> events);
+    asio::awaitable<ProgramHandle> fork_core(std::string owner_scope, ExactProgramCheckpointReference source,
+                                             ProgramVersion target, ProgramInvocation invocation,
+                                             ProgramResume resume);
+    asio::awaitable<ProgramHandle> replace_core(ExactProgramHandoffReference source, RunInvocation invocation,
+                                                std::shared_ptr<ProgramEventSink> events);
+    /// The lease is the caller's object, which the caller keeps alive until the awaitable completes: a call that
+    /// fails before the replacement commits leaves it valid, so that the source can still be released or retried.
+    asio::awaitable<ProgramHandle> replace_core(ProgramHandoff* source, RunInvocation invocation,
+                                                std::shared_ptr<ProgramEventSink> events);
+    asio::awaitable<ProgramHandle> replace_core(std::string owner_scope, ExactProgramHandoffReference source,
+                                                ProgramVersion target, ProgramInvocation invocation);
+    asio::awaitable<ProgramHandle> replace_core(std::string owner_scope, ProgramHandoff* source,
+                                                ProgramVersion target, ProgramInvocation invocation);
+    asio::awaitable<std::vector<ProgramHandle>> recover_children_core(std::string owner_scope,
+                                                                       std::string parent_run_id);
+    asio::awaitable<ProgramSynthesisReservation> reserve_synthesis_core(
+        std::string owner_scope, ProgramHandle source, ProgramHandoff* handoff, ProgramSynthesisProposal proposal,
+        std::string expected_lineage_head);
+    asio::awaitable<ProgramChildSynthesisRecord> prepare_child_synthesis_core(
+        std::string owner_scope, ProgramHandle parent, const ProgramHandoff* handoff,
+        ProgramSynthesisProposal proposal, ProgramChildSynthesisGrant grant, std::string binding_name);
+    asio::awaitable<ProgramChildSynthesisRecord> recover_child_synthesis_core(
+        std::string owner_scope, std::string parent_run_id, std::string proposal_id);
+    /// `transition_lock_held`: the caller holds the process-wide transition lock (a replacement or a graph migration
+    /// reconnecting to the run it publishes), which is not recursive for a coroutine.
+    asio::awaitable<ProgramHandle> reconnect_core(std::string owner_scope, std::string run_id,
+                                                  bool transition_lock_held = false);
+    asio::awaitable<ProgramHandle> resume_core(std::string owner_scope, std::string run_id, ProgramResume resume);
+    asio::awaitable<ProgramHandle> reconcile_core(std::string owner_scope, std::string run_id,
+                                                  ProgramEffectResolution resolution);
 
     std::shared_ptr<Impl> impl_;
     bool                  borrowed_ = false;
