@@ -17,6 +17,11 @@
 // operations, as synchronous code does. Awaited calls the awaitable operations that the
 // Program runtime and a host's coroutine call, and waits for each on a private io_context.
 // The conformance suites run on every backend in both forms (store_cases()).
+//
+// JavaScript runs the suites against the adapters of wasm/js_stores.h over the reference JavaScript store (the
+// in-memory C++ stores, wasm/memory_stores.h), under Node, in the Emscripten build. It is built only when
+// NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES is defined. It keeps its values in the process like the in-memory backend, so it
+// has no stored form to restart from or to corrupt, and its cases that need one are skipped with the same reasons.
 
 #include "unique_temp_dir.h"
 
@@ -33,6 +38,10 @@
 #include <neograph/program/postgres_transition_store.h>
 #include <libpq-fe.h>
 #endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+#include "../../wasm/js_stores.h"
+#include "../../wasm/test/js_store_deployment.h"
+#endif
 
 #include <cstdlib>
 #include <memory>
@@ -45,15 +54,22 @@
 
 namespace neograph::program::test_support {
 
-enum class StoreBackend { InMemory, Sqlite, PostgreSql };
+enum class StoreBackend { InMemory, Sqlite, PostgreSql, JavaScript };
 
 inline const char* backend_name(StoreBackend backend) {
     switch (backend) {
     case StoreBackend::InMemory: return "InMemory";
     case StoreBackend::Sqlite: return "SQLite";
     case StoreBackend::PostgreSql: return "PostgreSQL";
+    case StoreBackend::JavaScript: return "JavaScript";
     }
     return "Unknown";
+}
+
+// Whether the backend keeps its data in a stored form that a restart reads and a tamper can change. The in-memory and
+// JavaScript backends keep typed values in the process.
+inline bool backend_is_durable(StoreBackend backend) noexcept {
+    return backend == StoreBackend::Sqlite || backend == StoreBackend::PostgreSql;
 }
 
 // Names the parameter in test listings instead of its bytes.
@@ -66,6 +82,9 @@ inline std::vector<StoreBackend> store_backends() {
 #endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
     out.push_back(StoreBackend::PostgreSql);
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+    out.push_back(StoreBackend::JavaScript);
 #endif
     return out;
 }
@@ -245,6 +264,12 @@ public:
             memory_catalog_     = std::make_shared<InMemoryProgramStore>();
             return;
         }
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+        if (backend == StoreBackend::JavaScript) {
+            reference_ = std::make_unique<wasm::testing::ReferenceStores>();
+            return;
+        }
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (backend == StoreBackend::Sqlite) {
             directory_.emplace("neograph-program-conformance-");
@@ -275,14 +300,19 @@ public:
     StoreBackend backend() const noexcept { return backend_; }
     StoreForm    form() const noexcept { return form_; }
 
-    // False only for the in-memory stores: they have no stored form to restart from or corrupt.
-    bool durable() const noexcept { return backend_ != StoreBackend::InMemory; }
+    // False for the stores that keep typed values in the process (in memory, JavaScript): they have no stored form to
+    // restart from or corrupt.
+    bool durable() const noexcept { return backend_is_durable(backend_); }
 
     // A store over this deployment's data. The in-memory deployment hands out its one
     // store each time; a database deployment opens a new connection each time, so two
     // calls are two writers and a call after the first store is gone is a restart.
     std::shared_ptr<ProgramTransitionStore> transition_store() const {
         if (backend_ == StoreBackend::InMemory) return memory_transitions_;
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+        // New adapters each time, over the one reference store: a second call is a second writer on the same data.
+        if (backend_ == StoreBackend::JavaScript) return wasm::adapt_js_stores(reference_->handle()).transitions;
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (backend_ == StoreBackend::Sqlite)
             return std::make_shared<SQLiteProgramTransitionStore>(database_);
@@ -305,6 +335,9 @@ public:
 
     std::shared_ptr<ProgramStore> program_store() const {
         if (backend_ == StoreBackend::InMemory) return memory_catalog_;
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+        if (backend_ == StoreBackend::JavaScript) return wasm::adapt_js_stores(reference_->handle()).programs;
+#endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
         if (backend_ == StoreBackend::Sqlite)
             return std::make_shared<SQLiteProgramStore>(database_);
@@ -325,6 +358,12 @@ public:
             memory_transitions_->fail_next_publication_for_testing(memory_fault_point(stage));
             return;
         }
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+        if (backend_ == StoreBackend::JavaScript) {
+            reference_->fail_next_publication(memory_fault_point(stage));
+            return;
+        }
+#endif
         arm_table_fault(detail::transition_stage_table(backend_, stage));
     }
 
@@ -493,6 +532,9 @@ private:
     StoreForm    form_ = StoreForm::Direct;
     std::shared_ptr<InMemoryProgramTransitionStore> memory_transitions_;
     std::shared_ptr<InMemoryProgramStore>           memory_catalog_;
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+    std::unique_ptr<wasm::testing::ReferenceStores> reference_;
+#endif
     std::optional<neograph::graph::test_support::UniqueTempDir> directory_;
     std::string database_;
     const char* url_ = nullptr;

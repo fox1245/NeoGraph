@@ -8,8 +8,8 @@
 // module runs on the one thread of the request. The settings come from the Worker's bindings (see wrangler.toml);
 // the API key is a secret binding, never a value in the code or the module.
 //
-// Build the module with NEOGRAPH_BUILD_WASM_JS=ON (wasm/README.md) and copy neograph.mjs, neograph_module.mjs and
-// neograph_module.wasm from its wasm/ directory next to this file.
+// Build the module with NEOGRAPH_BUILD_WASM_JS=ON (wasm/README.md) and copy neograph.mjs, stores.mjs,
+// neograph_module.mjs and neograph_module.wasm from its wasm/ directory next to this file.
 import wasmModule from './neograph_module.wasm';
 import { load, NeoGraphError } from './neograph.mjs';
 

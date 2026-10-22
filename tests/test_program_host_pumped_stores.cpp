@@ -680,6 +680,55 @@ TEST(ProgramHostPumpedStores, AResumeAndAForkAwaitTheirStores) {
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
 }
 
+namespace {
+
+// Sets a flag when its first event arrives, and nothing else.
+class FirstEventSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent&) override { seen_first = true; }
+    bool seen_first = false;
+};
+
+}  // namespace
+
+// A host that asks to cancel a run when its first event arrives can only do so once the handle exists: the handle of a
+// resume is returned after the first event was delivered (#557). The cancellation then ends the run Cancelled.
+TEST(ProgramHostPumpedStores, AResumedRunCancelledAtItsFirstEventEndsCancelled) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    host.grant_tool("review-resume-cancel", host.review);
+
+    std::optional<ProgramResult>    paused, ended;
+    std::optional<ProgramRunRecord> stored;
+    bool                            applied = false;
+    auto                            sink    = std::make_shared<FirstEventSink>();
+    bool                            first_event_before_handle = false;
+    auto script = [&]() -> asio::awaitable<int> {
+        auto first = co_await host.runtime->start_async(top_level(host.review.id(), "review-resume-cancel"));
+        paused     = co_await first.wait_async();
+        host.stores.pump_all();
+        auto answer = answer_for(*paused, json{{"decision", "approved"}}, "trace-resume-cancel");
+        answer.events = sink;
+        auto resumed_handle =
+            co_await host.runtime->resume_handle_async(kOwner, "review-resume-cancel", std::move(answer));
+        first_event_before_handle = sink->seen_first;
+        // Let the attempt of the resumed run start before the cancellation arrives, as a host's own callback does.
+        co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
+        applied                   = co_await resumed_handle.cancel_async();
+        ended                     = co_await resumed_handle.wait_async();
+        stored                    = co_await resumed_handle.snapshot_async();
+        co_return 0;
+    };
+    host.run(script());
+    ASSERT_TRUE(paused && ended && stored);
+    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*paused);
+    EXPECT_TRUE(first_event_before_handle) << "the first event of a resume arrives before its handle does";
+    EXPECT_TRUE(applied);
+    EXPECT_EQ(ended->status(), ProgramTerminalStatus::Cancelled) << failure_text(*ended);
+    ASSERT_TRUE(stored->terminal_result());
+    EXPECT_EQ(stored->terminal_result()->status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
 TEST(ProgramHostPumpedStores, AnInterruptedRunIsCancelledThroughAHostPumpedStore) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
     std::optional<ProgramResult> paused, cancelled;

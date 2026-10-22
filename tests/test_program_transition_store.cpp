@@ -21,11 +21,15 @@
 
 #include <array>
 #include <atomic>
+#if NEOGRAPH_BUILD_THREADS
 #include <barrier>
+#endif
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#if NEOGRAPH_BUILD_THREADS
 #include <future>
+#endif
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -700,18 +704,28 @@ void exercise_command_head_concurrency(BlockingProgramTransitionStore& writer,
                                        BlockingProgramTransitionStore& reader) {
     auto publication = start_publication();
     ASSERT_EQ(writer.compare_publish("owner-a", {}, publication), ProgramTransitionPublishResult::Published);
+    // One read of the head: its record and journal belong to one committed snapshot, and so does its newest command.
+    const auto read_head = [&] {
+        const auto head = reader.load_command_publication_head("owner-a", "run-1");
+        if (!head || head->run_record.journal_head() != head->journal_record.id ||
+            (head->latest_command ? head->latest_command->sequence() : 0) + 1 !=
+                head->journal_record.sequence) {
+            throw std::runtime_error("command publication read mixed two committed snapshots");
+        }
+    };
+    const auto next_publication = [&](std::uint64_t sequence) {
+        return javascript_command_publication(
+            publication, javascript_command_entry(sequence, sequence % 2 == 0, (sequence + 1) / 2),
+            20 + static_cast<std::int64_t>(sequence));
+    };
+#if NEOGRAPH_BUILD_THREADS
     std::atomic<bool> done{false};
     std::promise<void> started;
     auto observing = std::async(std::launch::async, [&] {
         started.set_value();
         std::size_t reads = 0;
         do {
-            const auto head = reader.load_command_publication_head("owner-a", "run-1");
-            if (!head || head->run_record.journal_head() != head->journal_record.id ||
-                (head->latest_command ? head->latest_command->sequence() : 0) + 1 !=
-                    head->journal_record.sequence) {
-                throw std::runtime_error("command publication read mixed two committed snapshots");
-            }
+            read_head();
             ++reads;
         } while (!done.load());
         return reads;
@@ -720,9 +734,7 @@ void exercise_command_head_concurrency(BlockingProgramTransitionStore& writer,
     // Always release the reader, including when a backend throws on a write.
     try {
         for (std::uint64_t sequence = 1; sequence <= 32; ++sequence) {
-            auto next = javascript_command_publication(
-                publication, javascript_command_entry(sequence, sequence % 2 == 0, (sequence + 1) / 2),
-                20 + static_cast<std::int64_t>(sequence));
+            auto next = next_publication(sequence);
             if (writer.compare_publish("owner-a", publication.journal_record.id, next) !=
                 ProgramTransitionPublishResult::Published) {
                 throw std::runtime_error("command publication writer failed");
@@ -736,6 +748,23 @@ void exercise_command_head_concurrency(BlockingProgramTransitionStore& writer,
     }
     done.store(true);
     EXPECT_GT(observing.get(), 0U);
+#else
+    // A build without threads has no reader running beside the writer: the reader takes its turn after every write,
+    // which is the interleaving one thread has.
+    read_head();
+    std::size_t reads = 1;
+    for (std::uint64_t sequence = 1; sequence <= 32; ++sequence) {
+        auto next = next_publication(sequence);
+        if (writer.compare_publish("owner-a", publication.journal_record.id, next) !=
+            ProgramTransitionPublishResult::Published) {
+            throw std::runtime_error("command publication writer failed");
+        }
+        publication = std::move(next);
+        read_head();
+        ++reads;
+    }
+    EXPECT_GT(reads, 0U);
+#endif
 }
 
 // An existing user wrapper need not implement the new virtual read.
@@ -2563,6 +2592,7 @@ TEST_P(ProgramTransitionStoreConformance, ConcurrentCasHasOneWinner) {
                                           ContinuationState::Completed, 20);
     auto failed =
         terminal_publication(start, ProgramTerminalStatus::Failed, ContinuationState::Failed, 21);
+#if NEOGRAPH_BUILD_THREADS
     std::barrier ready(3);
     auto         publish = [&](BlockingProgramTransitionStore& writer, ProgramTransitionPublication value) {
         ready.arrive_and_wait();
@@ -2573,6 +2603,11 @@ TEST_P(ProgramTransitionStoreConformance, ConcurrentCasHasOneWinner) {
     ready.arrive_and_wait();
     auto ar = a.get();
     auto br = b.get();
+#else
+    // A build without threads has one thread: the two writers take turns, and the second one finds the head moved.
+    auto ar = store.compare_publish("owner-a", start.journal_record.id, completed);
+    auto br = other->compare_publish("owner-a", start.journal_record.id, failed);
+#endif
     EXPECT_NE(ar, br);
     EXPECT_TRUE((ar == ProgramTransitionPublishResult::Published &&
                  br == ProgramTransitionPublishResult::Conflict) ||
@@ -2691,6 +2726,7 @@ TEST_P(ProgramTransitionStoreConformance, ExactCheckpointReplacementPublishesOne
                                  boundary.publication.run_record,
                                  boundary.completed_checkpoint);
 
+#if NEOGRAPH_BUILD_THREADS
     std::barrier ready(3);
     auto publish = [&](BlockingProgramTransitionStore& writer, ProgramTransitionPublication value) {
         ready.arrive_and_wait();
@@ -2701,6 +2737,11 @@ TEST_P(ProgramTransitionStoreConformance, ExactCheckpointReplacementPublishesOne
     ready.arrive_and_wait();
     const auto a = first_result.get();
     const auto b = second_result.get();
+#else
+    // A build without threads has one thread: the two writers take turns, and the second one finds the lineage moved.
+    const auto a = store.compare_publish("owner-a", {}, first);
+    const auto b = other->compare_publish("owner-a", {}, second);
+#endif
     EXPECT_TRUE((a == ProgramTransitionPublishResult::Published &&
                  b == ProgramTransitionPublishResult::Conflict) ||
                 (b == ProgramTransitionPublishResult::Published &&

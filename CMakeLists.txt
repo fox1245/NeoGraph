@@ -133,6 +133,12 @@ option(NEOGRAPH_BUILD_WASM
 option(NEOGRAPH_BUILD_WASM_JS
        "Build neograph_js, the JavaScript module: graphs whose model calls go through the host's fetch (Emscripten, single-thread, needs NEOGRAPH_BUILD_LLM)"
        OFF)
+option(NEOGRAPH_WASM_JS_PROGRAMS
+       "Add the Program API to neograph_js (needs NEOGRAPH_BUILD_PROGRAM; a JavaScript Program source also needs NEOGRAPH_BUILD_QUICKJS_CONTROL). Turn it off for a module that runs graphs only and is about half the size"
+       ON)
+option(NEOGRAPH_BUILD_WASM_STORE_TESTS
+       "Build the Program store conformance suites and the JavaScript store checks for Node (Emscripten, single-thread, needs NEOGRAPH_BUILD_WASM and NEOGRAPH_BUILD_PROGRAM; fetches googletest)"
+       OFF)
 # Q0 / issue #24: keep the embedded JavaScript runtime independently opt-in
 # while it is being qualified.  It is deliberately separate from the existing
 # Program operation-tree component so Core-only and legacy Program consumers do
@@ -795,6 +801,19 @@ if(NEOGRAPH_BUILD_PROGRAM)
     endif()
     add_library(neograph::program ALIAS neograph_program)
 
+    # The Program stores of a JavaScript host: the adapters from a JavaScript object to the five store interfaces
+    # (wasm/js_stores.*) and the in-memory stores as the reference JavaScript store (wasm/memory_stores.*), with their
+    # JavaScript half, wasm/stores.mjs. An object library, so that the functions that only JavaScript calls are kept
+    # in whatever links it.
+    if(EMSCRIPTEN AND (NEOGRAPH_BUILD_WASM OR NEOGRAPH_BUILD_WASM_JS))
+        add_library(neograph_wasm_js_stores OBJECT wasm/js_stores.cpp wasm/memory_stores.cpp)
+        target_link_libraries(neograph_wasm_js_stores PUBLIC neograph_program)
+        # The adapters begin a publication with the first step of the transition state machine, a header of src/program.
+        target_include_directories(neograph_wasm_js_stores PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
+        target_compile_options(neograph_wasm_js_stores PRIVATE ${_neograph_wasm_codegen})
+        configure_file("${PROJECT_SOURCE_DIR}/wasm/stores.mjs" "${CMAKE_BINARY_DIR}/wasm/stores.mjs" COPYONLY)
+    endif()
+
     # Persistent Program lifecycle adapter. Kept separate from the core
     # SQLite checkpoint target so consumers can opt into the dependency.
     if(NEOGRAPH_BUILD_SQLITE)
@@ -853,6 +872,64 @@ if(NEOGRAPH_BUILD_WASM)
     target_link_options(neograph_wasm_checks PRIVATE ${_neograph_wasm_link})
     set_target_properties(neograph_wasm_checks PROPERTIES
         OUTPUT_NAME checks
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
+endif()
+
+# The Program store conformance suites against the JavaScript adapters, under Node (wasm/test/store_conformance_test.mjs).
+# The suites of tests/ that every store backend meets (ProgramTransitionStoreConformance, ProgramStoreConformance and
+# the graph migration capsule row) run in the single-thread build with the JavaScript backend of
+# tests/fixtures/program_store_backends.h. Their cases that race two writers on threads take turns on the one thread.
+if(NEOGRAPH_BUILD_WASM_STORE_TESTS)
+    if(NOT NEOGRAPH_BUILD_WASM OR NOT TARGET neograph_wasm_js_stores)
+        message(FATAL_ERROR "NEOGRAPH_BUILD_WASM_STORE_TESTS=ON needs NEOGRAPH_BUILD_WASM=ON and NEOGRAPH_BUILD_PROGRAM=ON")
+    endif()
+    if(NEOGRAPH_THREADS)
+        message(FATAL_ERROR "NEOGRAPH_BUILD_WASM_STORE_TESTS=ON is the single-thread build: NEOGRAPH_THREADS=OFF")
+    endif()
+    include(FetchContent)
+    FetchContent_Declare(googletest
+        GIT_REPOSITORY https://github.com/google/googletest.git
+        GIT_TAG v1.15.2
+        GIT_SHALLOW TRUE)
+    set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    # No pthread: there is no thread to create in this build.
+    set(gtest_disable_pthreads ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+
+    add_executable(neograph_wasm_store_conformance EXCLUDE_FROM_ALL
+        tests/test_program_transition_store.cpp
+        tests/test_program_catalog.cpp
+        tests/test_graph_migration_capsule.cpp
+        wasm/test/js_store_deployment.cpp)
+    target_include_directories(neograph_wasm_store_conformance PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_wasm_store_conformance PRIVATE neograph_wasm_js_stores neograph_program GTest::gtest_main)
+    target_compile_definitions(neograph_wasm_store_conformance PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES)
+    if(NEOGRAPH_BUILD_QUICKJS_CONTROL)
+        target_compile_definitions(neograph_wasm_store_conformance PRIVATE NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+    endif()
+    # The suites are template-heavy and long: compile them for speed of the build, not of the run.
+    target_compile_options(neograph_wasm_store_conformance PRIVATE -O1)
+    target_link_options(neograph_wasm_store_conformance PRIVATE -O1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=5242880
+                        -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createStoreConformanceModule -sENVIRONMENT=node
+                        -sINVOKE_RUN=0 -sEXIT_RUNTIME=1
+                        -sEXPORTED_RUNTIME_METHODS=callMain,UTF8ToString,stringToUTF8,lengthBytesUTF8)
+    set_target_properties(neograph_wasm_store_conformance PROPERTIES
+        OUTPUT_NAME store_conformance
+        SUFFIX ".mjs"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
+
+    # The adapters against a JavaScript store whose methods settle Promises in later tasks of the event loop
+    # (wasm/test/js_stores_test.mjs drives it): a module with no main, whose host loop JavaScript pumps.
+    add_executable(neograph_wasm_store_checks EXCLUDE_FROM_ALL wasm/store_checks.cpp)
+    target_link_libraries(neograph_wasm_store_checks PRIVATE neograph_wasm_js_stores neograph_program)
+    target_compile_options(neograph_wasm_store_checks PRIVATE -O1)
+    target_link_options(neograph_wasm_store_checks PRIVATE -O1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576
+                        -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createStoreChecksModule -sENVIRONMENT=node
+                        -sEXPORTED_RUNTIME_METHODS=UTF8ToString,stringToUTF8,lengthBytesUTF8 --no-entry)
+    set_target_properties(neograph_wasm_store_checks PROPERTIES
+        OUTPUT_NAME store_checks
+        SUFFIX ".mjs"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
 endif()
 
@@ -1040,6 +1117,20 @@ if(NEOGRAPH_BUILD_LLM)
     if(NEOGRAPH_BUILD_WASM_JS)
         add_executable(neograph_js wasm/module.cpp)
         target_link_libraries(neograph_js PRIVATE neograph_llm neograph_core SchemaProvider::js_host)
+        # The Program API of the module (wasm/programs.cpp): compile and admit a Program from its source, start a run,
+        # observe its events, resume, fork, cancel. It needs the Program component; a JavaScript source needs the
+        # QuickJS control runtime as well, and without it only a document source is accepted. A module without it
+        # (NEOGRAPH_WASM_JS_PROGRAMS=OFF) runs graphs only, and neograph.mjs says so from programs().
+        if(NEOGRAPH_WASM_JS_PROGRAMS AND TARGET neograph_program)
+            target_sources(neograph_js PRIVATE wasm/programs.cpp)
+            target_link_libraries(neograph_js PRIVATE neograph_program)
+            target_include_directories(neograph_js PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
+            if(TARGET neograph_wasm_js_stores)
+                # The Program stores of a JavaScript host (wasm/js_stores.h); stores.mjs is copied beside the module.
+                target_link_libraries(neograph_js PRIVATE neograph_wasm_js_stores)
+                target_compile_definitions(neograph_js PRIVATE NEOGRAPH_JS_STORES)
+            endif()
+        endif()
         target_compile_options(neograph_js PRIVATE ${_neograph_wasm_codegen})
         target_link_options(neograph_js PRIVATE -O3 -flto -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=1048576
                             -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createNeoGraphModule
@@ -1051,6 +1142,10 @@ if(NEOGRAPH_BUILD_LLM)
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/wasm")
         # The API beside the module it wraps; a change to it reconfigures and copies it again.
         configure_file("${PROJECT_SOURCE_DIR}/wasm/neograph.mjs" "${CMAKE_BINARY_DIR}/wasm/neograph.mjs" COPYONLY)
+        configure_file("${PROJECT_SOURCE_DIR}/wasm/neograph.d.ts" "${CMAKE_BINARY_DIR}/wasm/neograph.d.ts" COPYONLY)
+        # neograph.mjs imports the bridge to the host's stores, a module of its own that a module without Program support
+        # does not use.
+        configure_file("${PROJECT_SOURCE_DIR}/wasm/stores.mjs" "${CMAKE_BINARY_DIR}/wasm/stores.mjs" COPYONLY)
     endif()
 endif()
 
