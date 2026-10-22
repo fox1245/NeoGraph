@@ -19,7 +19,7 @@ The plan is in [#535](https://github.com/fox1245/NeoGraph/issues/535), and this 
 |---|---|
 | Toolchain | Emscripten 6.0.13, pinned in CI to the emsdk release commit. |
 | Build modes | Single-thread (the default on WebAssembly) and pthread, both built and run in CI. The JavaScript module is single-thread. |
-| Runtime | Node.js 22 and 24, in CI. The Workers example runs in Node, called with a `Request`; it has not run on workerd. Browsers, Deno and WASI are not verified. |
+| Runtime | Node.js 22 and 24, in CI. The Workers example runs in Node, called with a `Request`; it has not run on workerd. The graph smoke also runs in Chromium through `smoke.html` and `serve_smoke.py` (below); the JavaScript module in a browser, Deno and WASI are not verified. |
 | SDK | SchemaProvider 0.4.0, interface revision 7, at the commit that `cmake/NeoGraphSchemaProvider.cmake` pins. It builds without libcurl and without threads, and its JavaScript host (`sp_js_host`) is the executor and the `fetch` transport of the module. |
 | Components | Core, LLM (model calls through the host), and optionally Program (the runtime on the host's loop, with in-memory stores). |
 
@@ -312,9 +312,19 @@ Calls into these fail with a typed error where NeoGraph owns the call, and are n
 
 ## Browser
 
-The browser harness is not in the tree: `serve_smoke.py` expects a `smoke.html` that does not exist, and no browser
-run has been recorded (#435). A Node.js run is not browser evidence. The module is built for the `web`, `worker` and
-`node` environments, but only Node is run.
+`smoke.html` runs the generated `smoke.js` at `http://127.0.0.1:8765/smoke.html` when served by `serve_smoke.py`:
+
+```bash
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+```
+
+`serve_smoke.py` sends `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`.
+`smoke.html` checks for cross-origin isolation and `SharedArrayBuffer`, loads `/smoke.js`, and sets
+`document.body.dataset.result = "pass"` and `document.body.dataset.exitCode = "0"` when the program prints
+`doubled = 42` and `trace = d` and exits with `0` and no stderr output. Verified with the default single-thread build
+in headless Chromium 140.0.7339.186 (`doubled = 42`, `trace = d`, exit code `0`); the pthread build runs in Node only
+(its `main` blocks the main thread without `-sPROXY_TO_PTHREAD`), CI runs Node only, and the JavaScript module
+(`neograph.mjs`) has not been run in a browser.
 
 ## Milestones
 

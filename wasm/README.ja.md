@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=a536a05a6ce1901d70a120936b2705ad36eba9b86c5e421ab45d4ab7c73e8dc9 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=c26dd9eeb2d12e8a1d44a024e5393babd5138731c710fb7539bd4251cd62cb8b -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -20,7 +20,7 @@
 |---|---|
 | ツールチェーン | Emscripten 6.0.13。CI では emsdk のリリースコミットに固定しています。 |
 | ビルドモード | シングルスレッド（WebAssembly の既定）と pthread。どちらも CI でビルドして実行します。JavaScript モジュールはシングルスレッドです。 |
-| ランタイム | CI の Node.js 22 と 24。Workers の例は `Request` を渡して Node で実行しており、workerd では実行していません。ブラウザー、Deno、WASI は未検証です。 |
+| ランタイム | CI の Node.js 22 と 24。Workers の例は `Request` を渡して Node で実行しており、workerd では実行していません。グラフ smoke は `smoke.html` と `serve_smoke.py` により Chromium でも動きます（下記）。ブラウザーでの JavaScript モジュール、Deno、WASI は未検証です。 |
 | SDK | SchemaProvider 0.4.0、インターフェースのリビジョン 7。`cmake/NeoGraphSchemaProvider.cmake` が固定するコミットを使います。libcurl もスレッドも使わずにビルドされ、SDK の JavaScript ホスト（`sp_js_host`）がモジュールの executor と `fetch` トランスポートです。 |
 | コンポーネント | Core、LLM（ホストを通すモデル呼び出し）、および任意で Program（ホストのループ上のランタイム、インメモリのストア）。 |
 
@@ -307,9 +307,19 @@ NeoGraph が呼び出しを所有している場合は型付きのエラーで�
 
 ## ブラウザー
 
-ブラウザー用のハーネスはツリーにありません。`serve_smoke.py` は存在しない `smoke.html` を前提としており、ブラウザーでの
-実行記録もありません（#435）。Node.js での実行は、ブラウザーでの動作の証拠にはなりません。モジュールは `web`、`worker`、
-`node` の環境向けにビルドされますが、実行しているのは Node だけです。
+`smoke.html` は、`serve_smoke.py` で配信すると `http://127.0.0.1:8765/smoke.html` で生成済みの `smoke.js` を実行します。
+
+```bash
+python3 wasm/serve_smoke.py build-wasm/wasm --port 8765
+```
+
+`serve_smoke.py` は `Cross-Origin-Opener-Policy: same-origin` と `Cross-Origin-Embedder-Policy: require-corp` を返します。
+`smoke.html` はクロスオリジン分離と `SharedArrayBuffer` を確認してから `/smoke.js` を読み込み、プログラムが
+`doubled = 42` と `trace = d` を出力して標準エラー出力なしに終了コード `0` で終わると、`document.body.dataset.result = "pass"`
+と `document.body.dataset.exitCode = "0"` を設定します。既定のシングルスレッドビルドをヘッドレス Chromium 140.0.7339.186 で
+確認済みです（`doubled = 42`、`trace = d`、終了コード `0`）。pthread ビルドは Node のみで実行し（`-sPROXY_TO_PTHREAD` なしでは
+`main` がメインスレッドを塞ぎます）、CI が実行するのは Node のみで、JavaScript モジュール（`neograph.mjs`）はブラウザーでは
+実行していません。
 
 ## マイルストーン
 
