@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=b2017d5b55e55b13e5099782146c99d416fcef29a17f13a0994ae7a6548f37aa -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=820b9997966b41772a0c0404dbb9fdb8cc47266bea540342f13bc3658c4ae695 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -580,7 +580,7 @@ Program과 QuickJS가 있는 모듈을 `-DCMAKE_CXX_FLAGS_RELEASE="-Oz -DNDEBUG"
 속도는 재지 않았습니다.
 
 CI는 싱글 스레드 smoke를 `.wasm` 6,000,000바이트, gzip한 크기 1,750,000바이트(측정한 크기에 약 9%를 더한 값)로 제한하고,
-모듈은 `.wasm` 6,850,000바이트, gzip한 크기 2,010,000바이트로 제한하며, 크기를 잡 요약에 보고합니다. Worker 스크립트에는 요금제에 따른 크기 제한이 있으니,
+모듈(CI는 Program과 QuickJS를 포함해 빌드합니다)은 `.wasm` 14,400,000바이트, gzip한 크기 4,300,000바이트로 제한하며, 크기를 잡 요약에 보고합니다. Worker 스크립트에는 요금제에 따른 크기 제한이 있으니,
 모듈의 압축 크기를 사용하는 요금제의 제한과 비교하세요. 이전 버전의 이 문서에 있던 712 KB는 타입이 있는 SDK 이전에 잰 값이어서
 더 이상 맞지 않습니다.
 

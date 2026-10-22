@@ -628,7 +628,8 @@ The module with Programs and QuickJS built with `-DCMAKE_CXX_FLAGS_RELEASE="-Oz 
 10,378,540 B and 3,122,630 B gzipped; its speed was not measured.
 
 CI fails the single-thread smoke above 6,000,000 bytes of `.wasm` or 1,750,000 bytes gzipped (the measured size plus
-about 9%), and the module above 6,850,000 bytes of `.wasm` or 2,010,000 bytes gzipped, and reports the sizes in the job summary. A Worker's script has a size
+about 9%), and the module, which it builds with Programs and QuickJS, above 14,400,000 bytes of `.wasm` or 4,300,000 bytes
+gzipped, and reports the sizes in the job summary. A Worker's script has a size
 limit that depends on its plan; compare the module's compressed size with the limit of yours. The 712 KB figure in
 earlier versions of this page was measured before the typed SDK and no longer applies.
 

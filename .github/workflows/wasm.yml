@@ -50,13 +50,14 @@ jobs:
     # The job also builds the Program component, QuickJS and the two store test modules.
     timeout-minutes: 45
     env:
-      # The size gates. Budgets are the measured size (-O3 -flto, Release) plus about 9%: the graph smoke is 5.51 MB
-      # and 1.61 MB gzipped. The JavaScript module adds the LLM component, the SDK's JavaScript host and the C API
-      # (6.27 MB and 1.84 MB gzipped).
+      # The size gates. Budgets are the measured size (-O3 -flto, Release) plus about 9%: the graph smoke is 5.62 MB
+      # and 1.64 MB gzipped. The JavaScript module adds the LLM component, the SDK's JavaScript host, the C API, the
+      # Program component with the QuickJS control runtime, and the adapters for the host's stores (13.21 MB and
+      # 3.93 MB gzipped; the module that runs graphs only is 6.47 MB and 1.89 MB).
       MAX_WASM_BYTES: 6000000
       MAX_GZIP_BYTES: 1750000
-      MAX_MODULE_WASM_BYTES: 6850000
-      MAX_MODULE_GZIP_BYTES: 2010000
+      MAX_MODULE_WASM_BYTES: 14400000
+      MAX_MODULE_GZIP_BYTES: 4300000
     steps:
       - uses: actions/checkout@v4
       - name: Check out the pinned emsdk
