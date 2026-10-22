@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=820b9997966b41772a0c0404dbb9fdb8cc47266bea540342f13bc3658c4ae695 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=f54e1a1db994c330527456105294e83cafd203fe4ef6f37465cbd8476b292264 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -194,7 +194,7 @@ programs.release();
 
 一切都在宿主的事件循环上运行：运行时在那里 await 它的存储、定时器和模型调用，这些都不会阻塞它。控制源码是例外：`define()` 和 `main()` 的每一步都在同一个线程的 QuickJS 中运行，
 永不结束的源码会占住循环，直到时间限制把它停下：`define()` 在 Program 被准入时运行，限时 5 秒；`main()` 的各步受运行的墙钟时间预算限制（默认 60 秒，`budget.wallTimeMs`）。
-QuickJS 的栈限制在这个构建中不起作用，所以无限递归的源码会让引擎自己的栈溢出，模块无法捕获它：调用永远不会敲定。请只运行宿主信任或已审查过的控制源码。暂停的图的检查点保存在模块的内存里，所以运行只有在启动它的 `Programs` 对象存活期间才能被恢复或分叉。
+QuickJS 的栈限制在这个构建中不起作用，所以无限递归的源码会让引擎自己的栈溢出，模块无法捕获它：调用永远不会敲定，该模块实例随之无法使用，在 Node 中，若宿主不处理，未捕获的 `RangeError` 会使进程退出。请只运行宿主信任或已审查过的控制源码。暂停的图的检查点保存在模块的内存里，所以运行只有在启动它的 `Programs` 对象存活期间才能被恢复或分叉。
 
 ## 工作原理
 

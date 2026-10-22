@@ -234,9 +234,10 @@ those blocks it. A control source is the exception: `define()` and each step of 
 thread, and a source that never ends holds the loop until its time limit stops it: 5 seconds for `define()`, which runs
 when the Program is admitted, and the run's wall-time budget (60 seconds by default, `budget.wallTimeMs`) for the steps of
 `main()`. The stack limit of QuickJS does not work in this build, so a source that recurses without end overflows the
-engine's own stack, which the module cannot catch: the call never settles. Run only control sources that the host trusts
-or has vetted. The checkpoints of a paused graph are kept in the module's memory, so a run can be resumed or forked only while
-the `Programs` object that started it is alive.
+engine's own stack, which the module cannot catch: the call never settles, the module instance is left unusable, and in
+Node the uncaught `RangeError` ends the process unless the host handles it. Run only control sources that the host
+trusts or has vetted. The checkpoints of a paused graph are kept in the module's memory, so a run can be resumed or
+forked only while the `Programs` object that started it is alive.
 
 ## How it works
 
