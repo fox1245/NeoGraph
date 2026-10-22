@@ -436,8 +436,9 @@ int main() {
             asio::use_future);
         io.run();
         const auto resumed           = resumed_future.get();
-        const auto completed_journal = journal->latest("installed-consumer", completed.run_id());
-        const auto resumed_journal   = journal->latest("installed-consumer", resumed.run_id());
+        const BlockingProgramTransitionStore journal_view(journal);
+        const auto completed_journal = journal_view.latest("installed-consumer", completed.run_id());
+        const auto resumed_journal   = journal_view.latest("installed-consumer", resumed.run_id());
 
         runtime_contract =
             completed.status() == ProgramTerminalStatus::Completed &&
