@@ -34,23 +34,29 @@ Local patches (keep when updating the vendored release)
   leaves the module instance unusable. The patch defines CONFIG_STACK_CHECK on
   every target, so js_check_stack_overflow compares __builtin_frame_address(0),
   which on WebAssembly is the pointer of the shadow stack in linear memory,
-  with rt->stack_limit. On Emscripten only: update_stack_limit() caps the size
-  at NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 KiB, also for a size of 0, which
-  upstream reads as "no limit"; defined in neograph/quickjs-prefix.h, which both
-  the engine and the Program runtime include, because the runtime reports it in
-  the witness of a limit diagnostic) and keeps the limit
-  NEOGRAPH_QUICKJS_WASM_STACK_RESERVE (16 KiB) above emscripten_stack_get_end();
-  js_call_bound_function allocates NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD (128)
-  bytes more per level. The numbers come from measurement. The host's stack
-  (about 984 KiB under V8, Node 22 and 24) is used at 1.5 to 20 times the rate
-  of the shadow stack, depending on the recursion: JavaScript calls at the
-  low end, the parser, JSON, Array.prototype.flat and Proxy chains at 4 to 10
-  times, and a chain of bound functions at 20 times before the pad. All but
-  two of the 84 recursion shapes that were tried (calls, getters, Proxy traps,
+  with rt->stack_limit. On Emscripten only: update_stack_limit() honours the
+  size as far as the shadow stack holds, keeps the limit
+  NEOGRAPH_QUICKJS_WASM_STACK_RESERVE (16 KiB) above emscripten_stack_get_end(),
+  and reads a size of 0, which upstream takes for "no limit", as all the shadow
+  stack allows; JS_GetAppliedMaxStackSize(rt) (declared in neograph/quickjs.h,
+  renamed in neograph/quickjs-prefix.h) returns the size in force, so that the
+  witness of a limit diagnostic reports it. js_call_bound_function allocates
+  NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD (128) bytes more per level. The size is
+  the embedder's choice: NeoGraph's Program runtime asks for 48 KiB unless its
+  host sets another (JavaScriptCompileLimits::kDefaultStackBytes). The host's
+  stack (about 984 KiB under V8, Node 22 and 24) is used at 1.5 to 7 times the
+  rate of the shadow stack, depending on the recursion (measured with the 17
+  shapes of wasm/test/program_test.mjs): JavaScript calls at the low end (1.5 to
+  1.7), the parser and Array.prototype.flat at 4 to 6 times, JSON.stringify of
+  nested data at 6 to 7 times. A chain of bound functions used it 20 times as
+  fast until the pad. All but two of the 84 recursion shapes that were tried (calls, getters, Proxy traps,
   callbacks of builtins, generators, nested source, JSON, flat) are caught at
-  48 KiB, and are still caught with the cap doubled, on both Node versions with
-  and without the baseline compiler. The two are Object.getPrototypeOf and
-  Object.isExtensible through a chain of about 5,000 Proxy objects without
-  traps, which upstream does not check on any target. The text of
+  48 KiB, and are still caught with the size doubled, on both Node versions with
+  and without the baseline compiler (wasm/README.md has the sizes that
+  wasm/test/program_test.mjs's shapes tolerate). A size that the host's stack
+  cannot carry ends in a trap, which the module cannot recover from. The two
+  that no size catches are Object.getPrototypeOf and Object.isExtensible
+  through a chain of about 5,000 Proxy objects without traps, which upstream
+  does not check on any target. The text of
   js_get_stack_pointer is unchanged, and so are the needles of
   cmake/NeoGraphQuickJSMsvcPort.cmake. Other targets are unchanged.

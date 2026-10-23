@@ -21,16 +21,39 @@
 namespace neograph::program {
 
 struct JavaScriptCompileLimits {
+    /// The default of `max_stack_bytes`: 512 KiB of the C stack in a native build, and 48 KiB of the
+    /// module's own stack in a WebAssembly (Emscripten) build. The host's call stack, which a module
+    /// can neither read nor recover from, is used up between 1.5 and 7 times as fast as the
+    /// module's, depending on what recurses, so what a module can count safely is a small share of
+    /// what a native thread has (wasm/README.md has the measurements).
+#if defined(__EMSCRIPTEN__)
+    static constexpr std::size_t kDefaultStackBytes = 48u * 1024u;
+#else
+    static constexpr std::size_t kDefaultStackBytes = 512u * 1024u;
+#endif
+
     std::size_t   memory_limit_bytes          = 32u * 1024u * 1024u;
-    /// Stack bytes the control runtime may use. A WebAssembly (Emscripten) build counts the module's
-    /// own stack in linear memory and applies at most 48 KiB, whatever this asks for
-    /// (deps/quickjs/NEOGRAPH_PROVENANCE); the `max_stack_bytes` of a limit diagnostic's witness
-    /// reports the value applied.
-    std::size_t   max_stack_bytes             = 512u * 1024u;
+    /// Stack bytes the control runtime may use. A WebAssembly (Emscripten) build counts the
+    /// module's own stack in linear memory and honours this as far as that stack holds
+    /// (javascript_stack_ceiling()); a value that the host's call stack cannot carry ends in a trap
+    /// that the module cannot recover from (deps/quickjs/NEOGRAPH_PROVENANCE). The `max_stack_bytes`
+    /// of a limit diagnostic's witness reports the value in force.
+    std::size_t   max_stack_bytes             = kDefaultStackBytes;
     std::uint64_t max_interrupt_polls         = 1'000'000u;
     std::uint64_t max_wall_time_ms            = 60'000u;
     std::size_t   max_generated_document_bytes = 16u * 1024u * 1024u;
 };
+
+#if defined(__EMSCRIPTEN__)
+/**
+ * WebAssembly only: the size of the module's own stack less 64 KiB. That is the engine's own reserve
+ * (16 KiB) and room for the frames that are already on the stack when the engine starts, so a
+ * `max_stack_bytes` up to it is honoured in full while those frames take less than 48 KiB, and a
+ * larger one is cut to what the stack holds at the time. The `max_stack_bytes` in the witness of a
+ * limit diagnostic is the size in force.
+ */
+NEOGRAPH_PROGRAM_API std::size_t javascript_stack_ceiling() noexcept;
+#endif
 
 /**
  * Host-owned admissible runtime budget interval for a JavaScript Program.

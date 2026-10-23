@@ -275,14 +275,12 @@
 
 #if defined(__EMSCRIPTEN__)
 /*
- * The most stack bytes that a WebAssembly build applies, whatever
- * JS_SetMaxStackSize() asks for (update_stack_limit in quickjs.c and the local
- * patch recorded in NEOGRAPH_PROVENANCE). It lives here because NeoGraph's
- * JavaScript runtime reports it in the witness of a limit diagnostic.
+ * WebAssembly only: the stack size in force (quickjs.c, update_stack_limit and
+ * the local patch recorded in NEOGRAPH_PROVENANCE). It is declared in
+ * neograph/quickjs.h, because NeoGraph's JavaScript runtime reports it in the
+ * witness of a limit diagnostic.
  */
-#ifndef NEOGRAPH_QUICKJS_WASM_MAX_STACK
-#define NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 * 1024)
-#endif
+#define JS_GetAppliedMaxStackSize neograph_qjs_JS_GetAppliedMaxStackSize
 #endif
 
 #endif
