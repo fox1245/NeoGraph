@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e96b83a42b0c6f870b31c942731345c385ddfcb1cce9a293c573016cbbfeb6d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=c118bff63084de9cdd636763eb5839da9476b3512ef76cdf99fcfd5833b464e2 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -172,7 +172,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **JavaScript の `main()` を持つ再開された Program の実行は、Core 呼び出しが始まる前に終わっても、`P_TRANSITION_CONFLICT` の `failed` ではなく求められた状態で終わります (#557)。** 中断された `ng.callCore` を再開すると、その呼び出しが使えるウォールクロック時間、モデルトークン、金額、Core ステップを、ジャーナルに予約として確保し、呼び出しが測った使用量でその予約を精算します。呼び出しが始まる前に取り消された実行（再開直後の `cancel()`、または JavaScript モジュールで投げられた `onEvent` が実行を取り消す場合）は何も精算しておらず、その実行が公開した終了状態は、この試行に与えられた枠の全体を残りの予算として持ち出していました。これは測定された使用量なしに予約を返すことになるため、遷移検証器が拒否し、公開は失敗し、実行は `P_TRANSITION_CONFLICT` の `failed` で終わり、レコードは `running` のまま残り、`reconnect` はそれをまだ実行中の実行として復旧していました。
   - **現在** このような実行は、再開が残した残りの予算のまま終了状態を公開し、予約は返しません。ジャーナルが検証した使用量なしには何も解放せず、検証器は変わっていません。実行は `cancelled` で終わるか、自身のエラーのコードで `failed` になり、ストアはそれを終了したものとして保持し、`reconnect` はその結果を返します。**動作の変更:** このような実行の `remaining_budget` には、再開がその呼び出しのために予約したウォールクロック時間、モデルトークン、金額、Core ステップが含まれなくなります。
   - **再開の最初のイベントで投げるハンドラー。** 最初のイベント（`Started`、試行ができる前に渡される）で投げると、保留中の効果を曖昧と記録しないまま `AmbiguousEffect` を返す分岐で終わっていました。その結果は拒否され（`P_RUNTIME_INTERNAL`、"Ambiguous Program result requires one ambiguous pending effect"）、レコードは `running` のまま残りました。現在は、JavaScript の `main()` を持たない Program の再開と同じく `P_EVENT_SINK` の `failed` で終わり、再開が残した残りの予算を持ちます。
-  - **変わらないこと。** 呼び出しが始まったあと、つまり呼び出しの最初のイベントまたはそれ以降に終わる実行は、これまでどおり測定された使用量で予約を精算し、呼び出しが使わなかった分を取り戻します。
+  - **変わらないこと。** 呼び出しが始まったあと、つまり呼び出しの最初のイベントまたはそれ以降に終わる実行は、これまでどおり測定された使用量で予約を精算し、呼び出しが使わなかった分を取り戻します。ホストの容量を待っている間（`RuntimeConfig::host_admission`）に止まる再開された実行や、試行が読む時点で Core のチェックポイントが失われている再開された実行は、これまでどおり `P_TRANSITION_CONFLICT` の `failed` で終わり、レコードは `running` のまま残ります。
   - **テスト。** 再開された実行を、Core 呼び出しが始まる前と、呼び出しの最初のイベントで終わらせます。試行をチェックポイントの最初の読み込みで止めた状態でのインメモリと SQLite（`ProgramRuntimeTest`）、テストが回すホストループ（`ProgramHostPumpedStores`）、JavaScript モジュール（`wasm/test/program_test.mjs`）で行います。呼び出しが始まる前に終わる実行は、以前のエンジンでは `P_TRANSITION_CONFLICT` と、`running` のまま残るレコードで失敗し、`Started` でハンドラーが投げる実行は `P_RUNTIME_INTERNAL` で失敗していました。
 
 ### セキュリティ

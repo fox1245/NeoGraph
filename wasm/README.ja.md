@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=d059218fbda0ddb2d96ce1887bfcad2fa004b743e9afdf1024aa57bbd8fb292b -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=aac3a26c74fbf5a8e2c5ffc95abe31778174f78dfddfadbe40beb43f11522e20 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
