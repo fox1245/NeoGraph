@@ -442,24 +442,30 @@ export async function load(options = {}) {
     /**
      * Programs over a provider and a set of stores.
      *
-     * @param {{provider: object, owner?: string, stores?: object, limits?: object, budget?: object}} config
+     * @param {{provider: object, owner?: string, stores?: object, limits?: object, budget?: object,
+     *   javascript?: {stackBytes?: number, defineTimeMs?: number}}} config
      *   `provider` is as for `compile`. `stores` are the host's stores (any of `transitions`, `programs`, `grants`,
      *   `fragments`, `modules`); a store left out is in memory. `limits` is the budget ceiling of the admitted Programs and
      *   `budget` the default budget of a run (`wallTimeMs`, `modelTokens`, `maxConcurrency`, `maxProgramOperations`, ...).
+     *   `javascript` sets the limits of the control source: `stackBytes`, the stack that `define()` and `main()` may use
+     *   (49152, 48 KiB, by default; a whole number from 16384 up to what the module's own stack holds, which the error of
+     *   a value above it states), and `defineTimeMs`, the time `define()` may run when a source is admitted (5000 by
+     *   default, up to 3600000). The host's own call stack is what a larger `stackBytes` has to fit in, and a source
+     *   that overflows it ends in a trap that the module cannot recover from: see README.md before raising it.
      * @returns {Programs}
      */
     programs(config) {
       if (typeof module._ng_programs_create !== 'function') {
         throw new NeoGraphError({ message: 'this build of the module has no Program support' });
       }
-      const { provider, stores, owner, limits, budget } = config ?? {};
+      const { provider, stores, owner, limits, budget, javascript } = config ?? {};
       if (!provider) throw new NeoGraphError({ message: 'programs() needs a provider' });
       let text;
       try {
         text = JSON.stringify({
           provider: JSON.parse(providerJson(provider)),
           ...(owner !== undefined && { owner }), ...(limits !== undefined && { limits }),
-          ...(budget !== undefined && { budget }),
+          ...(budget !== undefined && { budget }), ...(javascript !== undefined && { javascript }),
         });
       } catch (error) {
         throw error instanceof NeoGraphError ? error : new NeoGraphError({ message: String(error?.message ?? error) });

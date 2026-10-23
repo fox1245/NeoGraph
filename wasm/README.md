@@ -179,13 +179,14 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores })`** makes a `Programs` object over one provider and
+- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** makes a `Programs` object over one provider and
   one set of stores, and throws a `NeoGraphError` when the provider is invalid or the module was built without Program
   support. `provider` is as for `compile`, with one addition: `catalogue`, the SDK's model catalogue (`{ version: 1,
   models: [...] }`), which is laid over the embedded one. `owner` scopes the Programs and runs of the object.
   `stores` are the host's own stores ([Program stores in JavaScript](#program-stores-in-javascript)); a store that is left
   out is in memory. `limits` is the most any admitted Program may be given and `budget` the budget of a run that gives
-  none, both written as below.
+  none, both written as below. `javascript` is `{ stackBytes, defineTimeMs }`, the stack that a control source may use
+  and the time that `define()` may run, described after the budgets.
 - **`programs.admit(source)`** compiles a Program and admits it, and resolves with `{ id, bundleId, name }`. `source` is
   the text of a JavaScript control source, `{ javascript, name }`, or `{ document, name }` for a Program already in the
   document form. A source the compiler or the admission policy refuses rejects with a `NeoGraphError` of type `compile`
@@ -235,19 +236,58 @@ programs.release();
 Everything runs on the host's event loop: the runtime awaits its stores, the timers and the model calls there, and none of
 those blocks it. A control source is the exception: `define()` and each step of `main()` run in QuickJS on the same
 thread, and a source that never ends holds the loop until its time limit stops it: 5 seconds for `define()`, which runs
-when the Program is admitted, and the run's wall-time budget (60 seconds by default, `budget.wallTimeMs`) for the steps of
-`main()`. The stack limit of QuickJS is on in this build, so a source that recurses without end, or nests deeper than
-the parser can follow, fails with the diagnostic `P_JS_RESOURCE_LIMIT` instead of overflowing the host's stack: `admit`
-rejects with a `compile` error, and a `main()` that does it ends its run `failed`. The limit counts the module's own
-stack in linear memory, 48 KiB of it however large a limit the compiler asks for, because the host's call stack, which
-the module can neither read nor recover from, is used up between 1.5 and 20 times as fast as that one, depending on what
-recurses. 48 KiB allows about 200 nested calls (about 30 through the comparator of `sort`, about 80 through the callback
-of `map`) and about 130 nested parentheses, array or object literals or calls in a source (about 40 nested functions); a
-native build, with 512 KiB, allows about three times as many. The limit does not see a chain of Proxy objects without
-traps that `Object.getPrototypeOf` or `Object.isExtensible` follows: a chain of about 5,000 of them still overflows the
-host's stack. The 48 KiB is calibrated against the host stack of Node 22 and 24, about 984 KiB: the worst of the shapes
-that were tried still passes with about a third of that stack, and a host with a smaller stack has less margin. The
-witness of the diagnostic reports the 48 KiB in `max_stack_bytes`, not the limit that the compiler asked for.
+when the Program is admitted (`javascript.defineTimeMs` chooses another time, from 1 to 3,600,000 milliseconds), and the
+run's wall-time budget (60 seconds by default, `budget.wallTimeMs`) for the steps of `main()`. The stack limit of QuickJS
+is on in this build, so a source that recurses without end, or nests deeper than the parser can follow, fails with the
+diagnostic `P_JS_RESOURCE_LIMIT` instead of overflowing the host's stack: `admit` rejects with a `compile` error, and a
+`main()` that does it ends its run `failed`. The limit counts the module's own stack in linear memory, for `define()` and
+`main()` alike, and the `max_stack_bytes` in the witness of the diagnostic reports the size in force. That is 48 KiB
+unless the developer chooses another size with `javascript.stackBytes`. How deep a control source can go grows with it,
+at about four nested calls per KiB:
+
+| `stackBytes` | nested calls | through the comparator of `sort` | through the callback of `map` | parentheses, array or object literals or calls in a source |
+| --- | --- | --- | --- | --- |
+| 48 KiB (49152, the default) | 190 | 32 | 57 | 131 |
+| 96 KiB | 382 | 64 | 115 | 265 |
+| 128 KiB | 510 | 85 | 154 | 354 |
+
+A native build, with 512 KiB of the C stack, allows about four times as many nested calls (about 700 with GCC on x86-64;
+it depends on the compiler and its flags) and nested literals in a source (about 500) as the module does at its default.
+The limit does not see a chain of Proxy objects without traps that `Object.getPrototypeOf` or `Object.isExtensible`
+follows: a chain of about 5,000 of them still overflows the host's stack. Functions nested deeper than the parser can
+follow are refused too, but not always with this diagnostic: function expressions (about 40 deep at the default) end
+with `P_JS_RESOURCE_LIMIT`, while function declarations (about 180 deep) and, at the default size, arrow functions
+(about 85 deep) end with `P_JS_EVALUATION` and the message `SyntaxError: missing formal parameter`, because the engine
+reports the overflow of the parser in that position as a syntax error. `admit` rejects with a `compile` error in every
+case.
+
+The size is the developer's choice, and the module enforces one bound on it: `stackBytes` is a whole number from 16384 up
+to what the module's own stack holds, 983,040 in the module that this directory builds (its stack of 1 MiB less 64 KiB,
+which are the engine's own reserve and the frames already on the stack when it starts). A larger value, a value that is not
+a whole number, and a member that does not exist are refused when `programs()` is called, with an error that states the
+bounds. What the host's own call stack carries is not something the module can read, and it is what runs out first: the
+host's stack is used up faster than the module's, about 1.5 times as fast by plain calls and about 6 to 7 times as fast
+by `JSON.stringify` of deeply nested data, which is the worst shape that was tried. Measured on Node 22 and 24, whose
+host stack is about 984 KiB, with the optimizing and with the baseline compiler (`node --liftoff-only`), every one of the
+17 shapes that `wasm/test/program_test.mjs` refuses (recursion through calls, getters, Proxy traps and the callbacks of
+`sort`, `map` and `JSON.parse`, constructors and generators, a constructor reached through 5,000 bound functions,
+`JSON.stringify` and `Array.prototype.flat` of data nested 100,000 deep, `JSON.parse` of text nested 100,000 deep, and
+source nested 2,000 deep) ends with `P_JS_RESOURCE_LIMIT` at each of the sizes 48, 64, 96, 128 and 144 KiB. At 160 KiB
+`JSON.stringify` of nested data overflows the host's stack, at 192 KiB `Array.prototype.flat` of it does too, at 256 KiB
+seven of the shapes do, and at 512 KiB fourteen. With the host stack halved (`node --stack-size=492`) the largest size
+at which every shape is caught is 64 KiB, and at 96 KiB the same two shapes overflow. An eighth of the host's stack
+(about 123 KiB of Node's) is therefore caught for all of these shapes, and a quarter is not. The default of 48 KiB is a
+third of the first size that overflowed. Raise `stackBytes` only as far as your sources need, keep it within an eighth of the call stack of the host
+that runs them (a Worker, a browser tab and a Node process have different stacks), and try a source that recurses
+without end against the setting on that host before relying on it: a size that the host's stack cannot carry ends in
+the trap described below. The witness of the diagnostic reports the size in force in `max_stack_bytes`.
+
+A source that runs both natively and in the module should stay within the module's limit. A native build counts the C
+stack of the thread that runs the source, 512 KiB by default (`JavaScriptCompileLimits::max_stack_bytes` for `define()`
+and `RuntimeConfig::javascript_stack_bytes` for `main()`), the module counts its own stack, 48 KiB by default, and a call
+uses a different number of bytes in each. The same source can therefore be refused in one and run in the other: write a
+source meant for both for the smaller figures of the table above (190 nested calls, 131 nested literals), or set both
+limits to depths that were measured.
 
 A host that admits control sources it does not trust should do so in a Worker that it can discard. The limit above stops
 the shapes of recursion that were tried, but a trap in WebAssembly cannot be recovered in the same module instance: if the

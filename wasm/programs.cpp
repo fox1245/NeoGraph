@@ -149,6 +149,48 @@ RunBudget budget_from(const json& description, RunBudget base) {
     return base;
 }
 
+// What a developer can set of the QuickJS control runtime, written the way JavaScript writes it: `{stackBytes, defineTimeMs}`.
+// A member that is absent keeps its default. Like a budget, an amount that is not a whole number within its bounds, and a
+// name that is not a member, is refused, and the message states the bounds.
+struct JavaScriptOptions {
+    std::size_t   stack_bytes    = JavaScriptCompileLimits::kDefaultStackBytes;
+    std::uint64_t define_time_ms = 5'000;
+};
+
+// The stack counts the module's own stack in linear memory (deps/quickjs/NEOGRAPH_PROVENANCE). Its floor is what a small
+// Program needs to be admitted and run (wasm/test/program_test.mjs runs one at the floor), its ceiling what that stack
+// holds. What the host's call stack carries is below the ceiling, and is the developer's to judge (wasm/README.md).
+constexpr std::size_t   kMinStackBytes        = 16 * 1024;
+constexpr std::uint64_t kMaxDefineTimeMs      = 3'600'000;
+
+JavaScriptOptions javascript_options_from(const json& description) {
+    JavaScriptOptions options;
+    if (description.is_null()) return options;
+    if (!description.is_object()) throw std::invalid_argument("javascript is an object of amounts");
+    const auto range = [](std::uint64_t smallest, std::uint64_t largest) {
+        return "a whole number from " + std::to_string(smallest) + " to " + std::to_string(largest);
+    };
+    const auto whole = [&](const std::string& name, std::uint64_t smallest, std::uint64_t largest) -> std::uint64_t {
+        const auto& value = description.at(name);
+        // Every refusal of a member states its bounds, whatever was wrong with the value.
+        if (!value.is_number()) throw std::invalid_argument("javascript." + name + " must be " + range(smallest, largest));
+        const double amount = value.get<double>();
+        if (!(amount >= static_cast<double>(smallest)) || amount > static_cast<double>(largest) || amount != std::floor(amount))
+            throw std::invalid_argument("javascript." + name + " must be " + range(smallest, largest));
+        return static_cast<std::uint64_t>(amount);
+    };
+    for (const auto& [name, value] : description.items()) {
+        (void)value;
+        if (name == "stackBytes") options.stack_bytes = static_cast<std::size_t>(whole(name, kMinStackBytes, javascript_stack_ceiling()));
+        else if (name == "defineTimeMs") options.define_time_ms = whole(name, 1, kMaxDefineTimeMs);
+        else
+            throw std::invalid_argument("javascript has no member " + name + ": stackBytes is " +
+                                        range(kMinStackBytes, javascript_stack_ceiling()) + ", defineTimeMs is " +
+                                        range(1, kMaxDefineTimeMs));
+    }
+    return options;
+}
+
 json budget_json(const RunBudget& budget) {
     return json{{"wallTimeMs", budget.wall_time_ms},
                 {"modelTokens", budget.model_tokens},
@@ -311,6 +353,7 @@ struct Host {
                                          RunBudget{3'600'000, 100'000'000, 1'000'000'000, 16, 100'000, 100'000, 1, 4, 4});
         default_budget     = budget_from(config.value("budget", json::object()),
                                          RunBudget{60'000, 10'000, 1'000'000, 4, 32, 100, 0, 0, 0});
+        const auto javascript = javascript_options_from(config.value("javascript", json()));
         policy.emplace(make_policy(profile, owner, limits_of(ceiling)));
 
         std::shared_ptr<ProgramStore>           programs;
@@ -340,9 +383,11 @@ struct Host {
 
         auto context = neograph::wasm::node_context_from(config.at("provider"));
         // A control source runs in QuickJS on the one thread of the host's loop, so a source that never ends holds the loop
-        // until its time limit. The default limit of a minute is too long for that thread.
+        // until its time limit. The default limit of a minute is too long for that thread, so define() gets 5 seconds
+        // unless the developer chooses another time. The stack is the developer's choice too (see javascript_options_from).
         JavaScriptCompileLimits javascript_limits;
-        javascript_limits.max_wall_time_ms = 5'000;
+        javascript_limits.max_wall_time_ms = javascript.define_time_ms;
+        javascript_limits.max_stack_bytes  = javascript.stack_bytes;
         ProgramCompilerConfig compiler_config{"js-module/1", javascript_limits};
         compiler = std::make_shared<ProgramCompiler>(registry, std::move(compiler_config));
 
@@ -358,6 +403,7 @@ struct Host {
         runtime_config.transitions         = transitions;
         runtime_config.task_graph_fragments = fragments;
         runtime_config.executor            = loop().executor();
+        runtime_config.javascript_stack_bytes = javascript.stack_bytes;
         runtime = std::make_unique<ProgramRuntime>(std::move(runtime_config));
     }
 
@@ -591,7 +637,7 @@ int begin(int handle, int call, Make make) {
 
 }  // namespace
 
-// `config_json`: {owner?, provider: {descriptor, api_key, model, ...} (as for ng_compile), limits?, budget?}. `stores`: the
+// `config_json`: {owner?, provider: {descriptor, api_key, model, ...} (as for ng_compile), limits?, budget?, javascript?}. `stores`: the
 // handle of the host's stores object (see wasm/stores.mjs), or 0 for the in-memory stores. Returns a handle, or 0 with
 // ng_error() set.
 extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_create(const char* config_json, int stores) {
