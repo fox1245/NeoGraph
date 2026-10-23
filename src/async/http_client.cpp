@@ -35,6 +35,7 @@
 #include <chrono>
 #include <functional>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -82,6 +83,81 @@ constexpr bool is_redirect_status(int status) noexcept {
            status == 307 || status == 308;
 }
 
+// ── Connect phase ─────────────────────────────────────────────────
+//
+// RequestOptions::connect_timeout bounds name resolution, the TCP connect and
+// the TLS handshake with one deadline, and nothing after them: the response
+// (or an event stream) is bounded only by RequestOptions::timeout.
+
+using SteadyClock = std::chrono::steady_clock;
+
+std::optional<SteadyClock::time_point> connect_deadline(const RequestOptions& opts) {
+    if (opts.connect_timeout.count() <= 0) return std::nullopt;
+    return SteadyClock::now() + opts.connect_timeout;
+}
+
+// Awaits `step`, abandoning it with asio::error::timed_out once `deadline`
+// passes. The step is raced against a timer as the whole-exchange timeout is.
+template <typename T>
+asio::awaitable<T> bounded_step(asio::any_io_executor ex, asio::awaitable<T> step,
+                                SteadyClock::time_point deadline) {
+    using asio::experimental::awaitable_operators::operator||;
+    asio::steady_timer timer(ex);
+    timer.expires_at(deadline);
+    try {
+        auto res = co_await (detail::capture_awaitable(std::move(step))
+                             || timer.async_wait(asio::use_awaitable));
+        if (res.index() == 1) {
+            throw asio::system_error(asio::error::timed_out,
+                                     "async HTTP: connect timeout");
+        }
+        auto captured = std::get<0>(std::move(res));
+        if (captured.error) std::rethrow_exception(captured.error);
+        if (!captured.value) throw std::runtime_error("async HTTP: missing result");
+        co_return std::move(*captured.value);
+    } catch (const asio::multiple_exceptions& error) {
+        detail::rethrow_first_exception(error);
+    }
+}
+
+asio::awaitable<bool> resolve_and_connect(asio::ip::tcp::socket& sock,
+                                          const std::string& host,
+                                          const std::string& port) {
+    asio::ip::tcp::resolver resolver{sock.get_executor()};
+    auto endpoints = co_await resolver.async_resolve(
+        host, port, asio::use_awaitable);
+    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+    co_return true;
+}
+
+asio::awaitable<bool> client_handshake(
+    asio::ssl::stream<asio::ip::tcp::socket&>& stream) {
+    co_await stream.async_handshake(
+        asio::ssl::stream_base::client, asio::use_awaitable);
+    co_return true;
+}
+
+asio::awaitable<void> connect_socket(
+    asio::any_io_executor ex, asio::ip::tcp::socket& sock,
+    const std::string& host, const std::string& port,
+    const std::optional<SteadyClock::time_point>& deadline) {
+    if (!deadline) {
+        (void)co_await resolve_and_connect(sock, host, port);
+        co_return;
+    }
+    (void)co_await bounded_step(ex, resolve_and_connect(sock, host, port), *deadline);
+}
+
+asio::awaitable<void> handshake_stream(
+    asio::any_io_executor ex, asio::ssl::stream<asio::ip::tcp::socket&>& stream,
+    const std::optional<SteadyClock::time_point>& deadline) {
+    if (!deadline) {
+        (void)co_await client_handshake(stream);
+        co_return;
+    }
+    (void)co_await bounded_step(ex, client_handshake(stream), *deadline);
+}
+
 // ── Single-exchange primitives ────────────────────────────────────
 // These run once and close the connection; the public API wraps them
 // with timeout + redirect logic.
@@ -98,12 +174,10 @@ asio::awaitable<HttpResponse> async_post_once(
     std::string req = detail::build_request(
         host, port, path, body, headers, tls,
         detail::ConnDirective::close);
-    asio::ip::tcp::resolver resolver{ex};
-    auto endpoints = co_await resolver.async_resolve(
-        host, port, asio::use_awaitable);
+    const auto deadline = connect_deadline(opts);
 
     asio::ip::tcp::socket sock{ex};
-    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+    co_await connect_socket(ex, sock, host, port, deadline);
 
     if (!tls) {
         auto r = co_await detail::run_exchange(sock, req, opts);
@@ -127,8 +201,7 @@ asio::awaitable<HttpResponse> async_post_once(
             "SNI setup"};
     }
     tls_stream.set_verify_callback(asio::ssl::host_name_verification{host});
-    co_await tls_stream.async_handshake(
-        asio::ssl::stream_base::client, asio::use_awaitable);
+    co_await handshake_stream(ex, tls_stream, deadline);
 
     auto r = co_await detail::run_exchange(tls_stream, req, opts);
 
@@ -157,12 +230,10 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
     std::string req = detail::build_request(
         host, port, path, body, headers, tls,
         detail::ConnDirective::close, method);
-    asio::ip::tcp::resolver resolver{ex};
-    auto endpoints = co_await resolver.async_resolve(
-        host, port, asio::use_awaitable);
+    const auto deadline = connect_deadline(opts);
 
     asio::ip::tcp::socket sock{ex};
-    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+    co_await connect_socket(ex, sock, host, port, deadline);
 
     if (!tls) {
         auto r = co_await detail::run_exchange_stream(sock, req, on_chunk, opts, on_head);
@@ -186,8 +257,7 @@ asio::awaitable<detail::StreamExchangeResult> async_post_stream_once(
             "SNI setup"};
     }
     tls_stream.set_verify_callback(asio::ssl::host_name_verification{host});
-    co_await tls_stream.async_handshake(
-        asio::ssl::stream_base::client, asio::use_awaitable);
+    co_await handshake_stream(ex, tls_stream, deadline);
 
     auto r = co_await detail::run_exchange_stream(tls_stream, req, on_chunk, opts, on_head);
 
@@ -358,12 +428,10 @@ asio::awaitable<HttpResponse> async_get_once(
     std::string req = detail::build_request(
         host, port, path, /*body=*/"", headers, tls,
         detail::ConnDirective::close, "GET");
-    asio::ip::tcp::resolver resolver{ex};
-    auto endpoints = co_await resolver.async_resolve(
-        host, port, asio::use_awaitable);
+    const auto deadline = connect_deadline(opts);
 
     asio::ip::tcp::socket sock{ex};
-    co_await asio::async_connect(sock, endpoints, asio::use_awaitable);
+    co_await connect_socket(ex, sock, host, port, deadline);
 
     if (!tls) {
         auto r = co_await detail::run_exchange(sock, req, opts);
@@ -387,8 +455,7 @@ asio::awaitable<HttpResponse> async_get_once(
             "SNI setup"};
     }
     tls_stream.set_verify_callback(asio::ssl::host_name_verification{host});
-    co_await tls_stream.async_handshake(
-        asio::ssl::stream_base::client, asio::use_awaitable);
+    co_await handshake_stream(ex, tls_stream, deadline);
 
     auto r = co_await detail::run_exchange(tls_stream, req, opts);
     try {

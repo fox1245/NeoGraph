@@ -16,6 +16,7 @@
 #include <asio/detached.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
 #include <asio/read.hpp>
 #include <asio/read_until.hpp>
 #include <asio/redirect_error.hpp>
@@ -34,6 +35,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -241,6 +243,24 @@ TEST(RequestOptions, NegativeDeadlineAndRedirectLimitAreRejected) {
     }, asio::detached);
     pool_io.run();
     EXPECT_NE(pool_error.find("negative"), std::string::npos);
+}
+
+TEST(RequestOptions, NegativeConnectTimeoutIsRejected) {
+    asio::io_context io;
+    std::string error;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        neograph::async::RequestOptions opts;
+        opts.connect_timeout = std::chrono::milliseconds(-1);
+        try {
+            auto request = neograph::async::async_post(
+                io.get_executor(), "127.0.0.1", "1", "/invalid", "{}", {}, false, opts);
+            (void)co_await std::move(request);
+        } catch (const std::exception& ex) {
+            error = ex.what();
+        }
+    }, asio::detached);
+    io.run();
+    EXPECT_NE(error.find("connect_timeout cannot be negative"), std::string::npos) << error;
 }
 
 TEST(RequestOptions, CloseDelimitedBodyIsReadUntilEof) {
@@ -636,6 +656,124 @@ TEST(RequestOptions, TimeoutTriggers) {
     // Sanity: completed close to the timeout, not way over.
     EXPECT_LT(elapsed, std::chrono::milliseconds(2000));
     EXPECT_GE(elapsed, std::chrono::milliseconds(100));
+}
+
+namespace {
+
+// A TCP listener that accepts connections and never sends a byte, so an HTTPS
+// client stays in its TLS handshake against it.
+struct SilentAcceptor {
+    asio::io_context                   io;
+    asio::ip::tcp::acceptor            acceptor{io, asio::ip::tcp::endpoint(
+                                           asio::ip::make_address("127.0.0.1"), 0)};
+    std::vector<asio::ip::tcp::socket> held;   // touched by the I/O thread only
+    std::thread                        worker;
+    unsigned short                     port = acceptor.local_endpoint().port();
+
+    SilentAcceptor() {
+        accept_next();
+        worker = std::thread([this] { io.run(); });
+    }
+    ~SilentAcceptor() {
+        asio::post(io, [this] {
+            std::error_code ec;
+            acceptor.close(ec);
+            held.clear();
+        });
+        if (worker.joinable()) worker.join();
+    }
+    void accept_next() {
+        acceptor.async_accept([this](std::error_code ec, asio::ip::tcp::socket socket) {
+            if (ec) return;
+            held.push_back(std::move(socket));
+            accept_next();
+        });
+    }
+};
+
+}  // namespace
+
+TEST(RequestOptions, ConnectTimeoutEndsAHandshakeThatNeverFinishes) {
+    // Every one-shot entry point bounds name resolution, connect and the TLS
+    // handshake by connect_timeout, not by the whole-exchange timeout, which
+    // is set far above it here.
+    SilentAcceptor peer;
+    const std::string port = std::to_string(peer.port);
+    using Call = std::function<asio::awaitable<void>(asio::io_context&,
+                                                     const neograph::async::RequestOptions&)>;
+    const std::vector<std::pair<const char*, Call>> calls = {
+        {"async_post", [&](asio::io_context& io, const neograph::async::RequestOptions& opts)
+             -> asio::awaitable<void> {
+             (void)co_await neograph::async::async_post(
+                 io.get_executor(), "127.0.0.1", port, "/", "{}", {}, true, opts);
+         }},
+        {"async_get", [&](asio::io_context& io, const neograph::async::RequestOptions& opts)
+             -> asio::awaitable<void> {
+             (void)co_await neograph::async::async_get(
+                 io.get_executor(), "127.0.0.1", port, "/", {}, true, opts);
+         }},
+        {"async_post_stream", [&](asio::io_context& io, const neograph::async::RequestOptions& opts)
+             -> asio::awaitable<void> {
+             (void)co_await neograph::async::async_post_stream(
+                 io.get_executor(), "127.0.0.1", port, "/", "{}", {}, true,
+                 [](std::string_view) {}, opts);
+         }},
+        {"async_request_stream", [&](asio::io_context& io, const neograph::async::RequestOptions& opts)
+             -> asio::awaitable<void> {
+             (void)co_await neograph::async::async_request_stream(
+                 io.get_executor(), "POST", "127.0.0.1", port, "/", "{}", {}, true,
+                 nullptr, [](std::string_view) {}, opts);
+         }},
+    };
+    for (const auto& [name, call] : calls) {
+        SCOPED_TRACE(name);
+        neograph::async::RequestOptions opts;
+        opts.connect_timeout = std::chrono::milliseconds(200);
+        opts.timeout = std::chrono::milliseconds(20000);
+        asio::io_context io;
+        std::error_code code;
+        asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+            try {
+                co_await call(io, opts);
+            } catch (const asio::system_error& error) {
+                code = error.code();
+            }
+        }, asio::detached);
+        const auto start = std::chrono::steady_clock::now();
+        io.run();
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        EXPECT_EQ(code, asio::error::timed_out);
+        EXPECT_GE(elapsed, std::chrono::milliseconds(150));
+        EXPECT_LT(elapsed, std::chrono::milliseconds(5000));
+    }
+}
+
+TEST(RequestOptions, ConnectTimeoutDoesNotBoundTheResponse) {
+    // The reply takes three times as long as connect_timeout, and arrives.
+    RoutedMock mock([](const std::string&) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
+        return http_response(200, "late");
+    });
+    neograph::async::RequestOptions opts;
+    opts.connect_timeout = std::chrono::milliseconds(200);
+
+    asio::io_context io;
+    std::string body;
+    std::string streamed;
+    int stream_status = 0;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto response = co_await neograph::async::async_post(
+            io.get_executor(), "127.0.0.1", std::to_string(mock.port), "/", "{}", {}, false, opts);
+        body = response.body;
+        auto stream = co_await neograph::async::async_post_stream(
+            io.get_executor(), "127.0.0.1", std::to_string(mock.port), "/", "{}", {}, false,
+            [&](std::string_view chunk) { streamed.append(chunk); }, opts);
+        stream_status = stream.status;
+    }, asio::detached);
+    io.run();
+    EXPECT_EQ(body, "late");
+    EXPECT_EQ(streamed, "late");
+    EXPECT_EQ(stream_status, 200);
 }
 
 TEST(RequestOptions, PoolTimeoutTriggers) {
