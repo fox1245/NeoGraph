@@ -830,6 +830,27 @@ TEST(HostLoop, APostFromAnotherThreadWhileATurnRunsIsNotLeftWithoutATurn) {
     EXPECT_TRUE(loop.idle());
 }
 
+TEST(HostLoop, APostToALoopFromTheTurnOfAnotherLoopNestedInItsTurnIsRunByThatTurn) {
+    // A handler of one loop pumps another loop, and a handler there posts back to the first. The first loop's turn is
+    // still running and polls on, so the post needs no turn of its own, as it would if the second loop did not exist.
+    auto outer_host = std::make_shared<ManualExecutor>();
+    auto inner_host = std::make_shared<ManualExecutor>();
+    async::HostLoop outer(outer_host), inner(inner_host);
+    bool back = false;
+    asio::post(outer.executor(), [&] {
+        asio::post(inner.executor(), [&] { asio::post(outer.executor(), [&back] { back = true; }); });
+        while (inner_host->step()) {}
+        EXPECT_FALSE(back) << "the post waits for the outer turn to poll on";
+    });
+    ASSERT_TRUE(outer_host->step()) << "the outer loop's turn";
+    EXPECT_TRUE(back);
+    EXPECT_EQ(outer_host->pending(), 0u) << "the outer loop's running turn ran the post; no further turn was queued";
+    EXPECT_TRUE(outer.idle());
+    while (inner_host->step()) {}
+    EXPECT_TRUE(inner.idle());
+    EXPECT_EQ(outer_host->tasks_run, 1u);
+}
+
 TEST(HostLoop, WakesFromManyThreadsQueueOneTurnAtATime) {
     auto executor = std::make_shared<ManualExecutor>();
     async::HostLoop loop(executor);
