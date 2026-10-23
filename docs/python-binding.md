@@ -379,6 +379,7 @@ Python exposes the C++ execution abilities rather than a separate Python schedul
 | Runtime identity, deadlines and budgets | `RunMetadata`, `RunConfig` | `RunMetadata`, `RunConfig.model_token_budget` | Same per-run values |
 | Retry and node-cache policy | `RetryPolicy`, `CacheScope` | graph/node setters and cache scopes | Same runtime policy |
 | Checkpoint, HITL and time travel | checkpoint stores and resume APIs | resume, exact `resume_from`, fork, state history/update | Same checkpoint contract |
+| Serving an agent over A2A or ACP | `A2AServer`, `ACPServer` | official SDK servers behind `ProtocolHostAdapter` | Sessions, cancellation, token streaming and graph interrupts (`input-required`, permission request); no collaboration envelope, Program-backed tasks or tenant isolation |
 | Program authoring and local execution | compiler, Catalog and `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost`, handles/results | Native owner-scoped convenience host |
 | Mandatory lifecycle Hooks | registry, runner and `HookRuntime` | definitions plus `create_hook_runtime` callbacks | Same fail-closed lifecycle boundary |
 | Runtime context and strict dispatch | context stores, receipts and interposition | matching immutable values, stores and `StrictRuntimeProfile` | Same native controller |
@@ -783,8 +784,25 @@ The [pybind11 GIL documentation](https://pybind11.readthedocs.io/en/stable/advan
 
 - MCP client tools are available through `neograph_engine.mcp` when built.
 - A2A client types are available through `neograph_engine.a2a` when built.
-- `ProtocolHostAdapter` integrates official Python A2A/ACP server SDKs with NeoGraph session semantics.
+- `ProtocolHostAdapter` integrates official Python A2A/ACP server SDKs with NeoGraph session semantics, including graph interrupts (see [Hosting an agent behind the A2A and ACP SDKs](#hosting-an-agent-behind-the-a2a-and-acp-sdks)).
 - `neograph_engine.tracing` and `neograph_engine.openinference` emit vendor-neutral OTel/OpenInference data for Phoenix, Langfuse, Arize and compatible backends.
+
+### Hosting an agent behind the A2A and ACP SDKs
+
+The Python package has no A2A or ACP server. The official SDKs own the transport and the wire format, and `ProtocolHostAdapter` runs the engine for their callbacks: the A2A context id or ACP session id is the NeoGraph `thread_id`, checkpoints resume the conversation, `cancel(request_id)` cancels the underlying `run_async()`, and `stream()` yields token events followed by one final event. [Examples 27 and 28](../bindings/python/examples/README.md) host the same demo graph through each SDK.
+
+A graph that pauses for a human (`interrupt_before`, a `NodeInterrupt`, a tool gate) is reported to the protocol client, and the client's answer resumes the checkpoint the run paused at:
+
+| Adapter call | What it does |
+|---|---|
+| `stream(payload, thread_id=..., interrupts=True)` | Ends with one `interrupt` event instead of the `final` one. `event.interrupt` is a `ProtocolInterrupt`: `reason`, `payload`, `node`, `checkpoint_id`, `interrupt_id`. |
+| `resume_stream(answer, thread_id=..., interrupt=None)` | Resumes with `resume_value(answer, interrupt)`; yields `token` events, then `final` or another `interrupt`. |
+| `resume_payload(answer, thread_id=...)` | The same without streaming; returns the response text. |
+| `pending_interrupt(thread_id)`, `discard_interrupt(thread_id)` | The pause the adapter remembers for a thread, and forgetting it (a canceled task, a cancelled permission request). |
+
+`ProtocolHostAdapter(..., resume_value=callable)` maps the protocol's answer to the value the paused node reads from `input.ctx.resume_value`. The default is the answer itself: the text of an A2A follow-up message, or the id of the ACP permission option (`"approve"` or `"reject"`), as the native servers do. Without `interrupts=True`, `stream()`, `run()` and `run_payload()` raise `ProtocolInterrupted` for a paused graph; before, they returned the last message of the state as if it were the answer. The pause is remembered in memory per thread, and the engine needs a checkpoint store to resume it. After a restart, pass a `ProtocolInterrupt` built from stored ids as `interrupt=` (with a `checkpoint_id` it resumes exactly that checkpoint). With no recorded pause and no `interrupt=`, `resume_stream()` and `resume_payload()` raise `LookupError`, because resuming a thread that is not paused would return the text of its last turn.
+
+The A2A executor renders the pause as an `input-required` task and resumes it on the next message to that task; the ACP agent sends `session/request_permission` in the same turn. [A2A](a2a.md#interrupts-when-you-host-from-python) and [ACP](acp.md#permission-requests-when-you-host-from-python) describe each mapping. The NeoGraph collaboration envelope, Program-backed A2A tasks and tenant isolation of the native servers are not part of this path.
 
 ### Native A2A discovery and streaming
 

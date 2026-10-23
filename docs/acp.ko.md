@@ -14,7 +14,7 @@ Agent Client Protocol(ACP)은 에디터를 코딩 에이전트나 대화 에이�
 | 에이전트(서버) | `neograph::acp` | `NEOGRAPH_BUILD_ACP`(켜짐) | 공식 SDK 사용 |
 | Streamable HTTP·WebSocket 에이전트(실험적) | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`(**꺼짐**) | 없음 |
 
-Python 패키지에는 네이티브 ACP 서버가 없습니다. Python으로 에이전트를 만들려면 공식 SDK(`pip install "neograph-engine[acp]"`)를 설치하고, 그 뒤에서 `neograph_engine.ProtocolHostAdapter`로 엔진을 실행하세요. 이 어댑터는 ACP 세션 ID를 NeoGraph `thread_id`에 대응시키고, 체크포인트에서 재개하고, 취소를 전달하고, 토큰을 스트리밍합니다. [Python 예제](../bindings/python/examples/README.md)에 이런 에이전트가 있습니다. ACP에는 Python 3.10 이상이 필요합니다.
+Python 패키지에는 네이티브 ACP 서버가 없습니다. Python으로 에이전트를 만들려면 공식 SDK(`pip install "neograph-engine[acp]"`)를 설치하고, 그 뒤에서 `neograph_engine.ProtocolHostAdapter`로 엔진을 실행하세요. 이 어댑터는 ACP 세션 ID를 NeoGraph `thread_id`에 대응시키고, 체크포인트에서 재개하고, 취소를 전달하고, 토큰을 스트리밍하고, 그래프 인터럽트를 권한 요청으로 바꿉니다([Python에서 호스팅할 때의 권한 요청](#permission-requests-when-you-host-from-python) 참고). [Python 예제](../bindings/python/examples/README.md)에 이런 에이전트가 있습니다. ACP에는 Python 3.10 이상이 필요합니다.
 
 ## 버전
 
@@ -206,6 +206,18 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 - **WebSocket**은 같은 엔드포인트(`Upgrade: websocket`인 `GET`)에서 제공됩니다. 텍스트 프레임 하나가 양방향 JSON-RPC 메시지 하나이고 `initialize`가 먼저 옵니다. 바이너리 프레임은 무시됩니다. 프레임은 RFC 6455를 따릅니다. 클라이언트 프레임은 마스킹되어야 하고, ping에는 응답하며, 메시지는 조각으로 나뉠 수 있습니다. `max_payload_bytes`를 넘는 메시지는 코드 1009로 연결을 닫고, 소켓을 닫으면 연결이 끝납니다.
 - **초안과 다른 점.** 초안은 HTTP/2를 요구하지만 이 서버는 HTTP/1.1을 쓰므로 스트림과 `POST`마다 별도의 TCP 연결이 되며, 다중화는 리버스 프록시가 맡아야 합니다. WebSocket 업그레이드의 101 응답에는 `Acp-Connection-Id`가 없습니다. 쿠키를 설정하지 않고, `Acp-Protocol-Version`을 검사하지 않으며, 스트림에는 이벤트 ID도 재개도 없습니다. `initialize` 응답은 연결 ID를 헤더로만 주고 본문에 `connectionId`로 넣지 않습니다. `ACPServer`에는 `session/load`가 없으므로 초안의 재연결 흐름은 `session/resume`이 맡고, 세션 스트림은 `session/new`나 `session/resume`이 답한 뒤에야 열 수 있습니다. 클라이언트가 에이전트의 요청에 답하는 `POST`에서는 `Acp-Session-Id` 헤더가 선택입니다. 같은 범위의 두 번째 스트림은 첫 번째를 대체합니다.
 - **보안.** 다른 호스트를 지정하지 않으면 `127.0.0.1`에 바인드하며, 루프백이 아닌 바인드는 `authenticator`가 없으면 거절됩니다. 모든 요청, 스트림, 업그레이드와 서버가 제공하지 않는 경로까지 본문을 읽기 전에 검사합니다. 먼저 Host와 Origin(`allowed_hosts`, `allowed_origins`. [MCP](mcp.md)·[A2A](a2a.md) 서버와 같은 규칙), 다음에 `authenticator`(HTTP 401과 `WWW-Authenticate: Bearer`), 마지막에 `max_payload_bytes`(HTTP 413, 기본 4 MiB)입니다. 연결은 그것을 만든 주체에게만 응답합니다. 클라이언트는 서버가 프로세스를 띄우게 할 수 없습니다. `mcpServers`를 담은 `session/new`나 `session/resume`은 `allow_client_mcp_servers`를 켜지 않는 한 `-32602`로 거절되며(ACP는 에이전트가 클라이언트가 나열한 stdio MCP 서버를 띄우기를 기대하지만, 여기서는 그 서버가 클라이언트가 아니라 서버 호스트에서 실행됩니다), 클라이언트가 지정한 `cwd`는 `_acp_cwd`로 그래프에 전달되므로 서버에서 그것을 쓰는 노드가 직접 검사해야 합니다. 에이전트를 기다리는 메시지의 양은 제한됩니다(`max_payload_bytes`의 두 배, 최소 1 MiB). 이를 넘는 `POST`는 `Retry-After`가 붙은 `503`으로, WebSocket 메시지는 JSON-RPC 오류로 답합니다. 느리거나 놀고 있는 TCP 연결, 그리고 한 주체가 쓸 수 있는 `max_connections`와 스트림 자리의 몫은 상대별로 제한하지 않으니, 인터넷에 노출하는 서버는 이를 제한하는 리버스 프록시 뒤에 두세요. 에이전트는 에디터를 대신해 파일을 읽고 쓰므로 원격 바인드는 그것을 노출하는 것으로 보세요. 브라우저는 WebSocket에 `Authorization`을 붙일 수 없으니, 그런 연결의 인증은 리버스 프록시에서 하세요.
+<a id="permission-requests-when-you-host-from-python"></a>
+## Python에서 호스팅할 때의 권한 요청
+
+`ProtocolHostAdapter`는 멈추는 그래프(`interrupt_before`, `NodeInterrupt`, 도구 게이트)를 네이티브 서버와 같은 모양으로 만듭니다. 같은 턴 안의 `session/request_permission`입니다. [예제 28](../bindings/python/examples/28_acp_agent.py)이 그 에이전트입니다.
+
+- **질문.** `adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)`는 그래프가 멈추면 최종 이벤트 대신 `interrupt` 이벤트로 끝납니다. 이 이벤트의 `ProtocolInterrupt`에는 `reason`, `payload`(노드가 `NodeInterrupt`에 넘긴 값), `node`, `checkpoint_id`가 있습니다. `prompt()`는 연결로 `request_permission`을 보냅니다. `ToolCallUpdate`의 제목은 이유이고 `rawInput`은 페이로드이며, 옵션은 `approve`(`allow_once`)와 `reject`(`reject_once`)입니다. 네이티브 서버와 같습니다.
+- **답.** 클라이언트가 옵션을 고르면 `prompt()`는 `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)`를 호출합니다. 이 호출은 실행이 멈춘 체크포인트에서 재개하고, 나머지 턴을 `agent_message_chunk` 업데이트로 스트리밍합니다. 옵션 ID가 멈춘 노드가 `input.ctx.resume_value`로 읽는 값이므로, 노드는 `"approve"` 또는 `"reject"`를 봅니다. 그래프가 또 물으면 루프가 다시 묻습니다. 노드가 다른 모양을 기대하면 `ProtocolHostAdapter`에 `resume_value=lambda answer, interrupt: ...`를 넘기세요.
+- **취소.** 클라이언트가 `cancelled`로 답하면 턴은 `stopReason: "cancelled"`로 끝납니다. 요청이 기다리는 동안이나 재개된 턴이 실행되는 동안의 `session/cancel`도 마찬가지입니다. 어느 쪽이든 에이전트가 `adapter.discard_interrupt(thread_id)`를 호출하므로 질문이 남지 않습니다. 세션의 다음 프롬프트는 새 턴을 시작하며, 답으로 취급되지 않습니다. 버려진 멈춤은 체크포인트 저장소에 열린 채로 남으며, 엔진은 그 바로 뒤에 오는 멈춤을 재개하지 못합니다(`NodeInterrupt ancestry crosses super-step boundaries`). 다음 프롬프트가 다시 권한을 요청하면, 세션의 어떤 턴이 완료될 때까지 그 요청에 답하는 것이 실패합니다.
+- **`interrupts=True` 없이.** 그래프가 멈추면 `stream()`, `run()`, `run_payload()`는 `ProtocolInterrupted`를 던집니다. 예전에는 상태의 마지막 메시지, 곧 사용자 자신의 텍스트를 에이전트의 답처럼 돌려주었습니다.
+- **체크포인트 저장소.** 멈춘 실행을 재개하려면 엔진에 저장소가 필요합니다. 예제는 영속 저장소를 받지 않으면 메모리 저장소를 씁니다.
+- **재시작.** 질문은 턴 안에 있습니다. 에이전트가 기다리는 중에 재시작하면 턴은 연결과 함께 끝나고, 다음 프롬프트는 새 턴을 시작합니다. 네이티브 서버는 그런 세션을 `session/resume`으로 복원할 수 있지만 어댑터는 그럴 수 없습니다.
+- **버전.** 예제는 `agent-client-protocol` 0.12.1로 테스트했습니다.
 
 ## 테스트와 상호 운용성
 

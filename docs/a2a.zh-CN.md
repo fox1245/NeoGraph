@@ -13,7 +13,7 @@ NeoGraph 两端都支持。`A2AServer` 把编译好的图发布为智能体。`A
 |---|---|---|---|
 | 服务器和客户端 | `neograph::a2a` | `NEOGRAPH_BUILD_A2A`（开） | `neograph_engine.a2a` 中的客户端 |
 
-Python 包里只有客户端。要在 Python 中提供智能体，请使用官方 A2A Python SDK（`pip install "neograph-engine[a2a]"` 会装上它），并在它背后用 `neograph_engine.ProtocolHostAdapter` 运行引擎。该适配器把 A2A 上下文 ID 对应到 NeoGraph 的 `thread_id`，从检查点恢复，转发取消，并流式输出令牌。[Python 示例](../bindings/python/examples/README.md)里有这样的服务器。
+Python 包里只有客户端。要在 Python 中提供智能体，请使用官方 A2A Python SDK（`pip install "neograph-engine[a2a]"` 会装上它），并在它背后用 `neograph_engine.ProtocolHostAdapter` 运行引擎。该适配器把 A2A 上下文 ID 对应到 NeoGraph 的 `thread_id`，从检查点恢复，转发取消，流式输出令牌，并把图中断变成 `input-required` 任务（见[在 Python 中托管时的中断](#interrupts-when-you-host-from-python)）。[Python 示例](../bindings/python/examples/README.md)里有这样的服务器。
 
 ## 版本
 
@@ -267,6 +267,17 @@ int main(int argc, char** argv) {
 - **失败。** 失败的运行是一个 `failed` 任务，状态消息是失败的公开消息，`metadata["neograph/failure"]` 为 `{code, retryable, retryable_by_class}`。引擎用完节点的尝试次数后 `retryable` 为 `false`，`retryable_by_class` 表示失败的类别是否允许重试。异常文本不会出现在网络上。如果在任何节点完成之前 Hook 就拦下了运行，结果是 `rejected`。达到 `max_steps` 的图会以错误码 `NG.StepLimit` 失败。
 - **请求错误**（未知任务 `-32001`，向已终止的任务发消息 `-32004`，与任务不一致的 `contextId` `-32602`，任务仍在运行 `-32603` 且原因为 `TASK_BUSY`）列在参考文档的 [A2A 错误映射](reference-en.md#a2a-error-mapping)中，所有协议的失败类别则在[协议失败映射](reference-en.md#protocol-failure-mapping)中。这里不再重复。
 - **Program。** 基于 Program 的智能体（`A2AServer` 背后的已准入 `ProgramVersion`）还接受 NeoGraph 协作信封，见 [A2A 协作扩展](reference-en.md#a2a-collaboration-extension)。等待输入的 Program 任务目前还不能通过 A2A 回答：消息会收到 `-32004`，任务继续等待。服务器重启后，会从 `CollaborationMailbox` 恢复 Program 任务。对仍在运行的已恢复任务调用 `SubscribeToTask`，会先发送 Task，再跟随持久 run 直到它结束，并以最终状态收尾；无法跟随 run 时，不会空着关闭，而是以错误事件结束。
+
+<a id="interrupts-when-you-host-from-python"></a>
+## 在 Python 中托管时的中断
+
+`ProtocolHostAdapter` 让暂停的图（`interrupt_before`、`NodeInterrupt`、工具闸门）具有与原生服务器相同的形态：一个由后续消息恢复的 `input-required` 任务。[示例 27](../bindings/python/examples/27_a2a_server.py) 就是这个执行器。
+
+- **提问。** 图暂停时，`adapter.stream(text, thread_id=..., request_id=..., interrupts=True)` 以一个 `interrupt` 事件结束，而不是最终事件。该事件的 `ProtocolInterrupt` 含有 `reason`、`payload`（节点传给 `NodeInterrupt` 的值）、`node` 和 `checkpoint_id`。执行器发布一个转到 `TASK_STATE_INPUT_REQUIRED` 的状态更新，其消息中原因是文本，负载是数据部分，`metadata["neograph/interrupt"]` 则带有节点、检查点和中断 ID，与原生服务器一致。
+- **回答。** 发给该任务的下一条消息会在任务仍为 `input-required` 时到达 `execute()`。执行器把它的文本连同任务自身元数据所指的暂停一起交给 `adapter.resume_stream(text, thread_id=..., request_id=..., interrupt=...)`，它从运行暂停时的检查点恢复，并像其他轮次一样流式输出该轮的其余部分。任务以 `completed` 结束；如果图再次提问，则再次进入 `input-required`。这段文本就是暂停的节点从 `input.ctx.resume_value` 读到的值，原生服务器也是如此。如果节点期望别的形态（例如 dict），请给 `ProtocolHostAdapter` 传入 `resume_value=lambda answer, interrupt: ...`。
+- **状态。** 适配器按线程在内存中记住暂停，引擎需要有检查点存储才能恢复它。示例根据任务自身元数据所指的暂停来回答该任务：它用 `metadata["neograph/interrupt"]` 重新构造 `ProtocolInterrupt(thread_id=..., checkpoint_id=..., interrupt_id=...)` 并作为 `interrupt=` 传入，因此重启之后同样有效。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 会抛出 `LookupError`：恢复一个并未暂停的线程，返回的会是它上一轮的文本。任务被取消时，请调用 `adapter.discard_interrupt(thread_id)`。对等待中的任务执行 `CancelTask`，会像前文所述那样让它以 `canceled` 结束。适配器按 A2A 上下文区分线程，而原生服务器按任务区分：同一上下文中的新任务从先前任务留下的状态开始。适配器每个线程只记住一个问题，所以更新的暂停会取代更早暂停的记录，因此示例从任务而不是从适配器取得暂停。无人回答的暂停会作为未结束状态留在检查点存储中，引擎无法恢复紧随其后的暂停（`NodeInterrupt ancestry crosses super-step boundaries`）：对等待中的任务执行 `CancelTask` 之后，或在另一个任务等待时新任务又暂停，该上下文的下一次暂停在被回答时会失败，直到该上下文的某一轮完成为止。
+- **没有 `interrupts=True` 时。** 图暂停时，`stream()`、`run()` 和 `run_payload()` 会抛出 `ProtocolInterrupted`。此前它们会返回状态里的最后一条消息，也就是用户自己的文本，并把它当作智能体的回答。
+- **未覆盖的部分。** NeoGraph 协作信封和基于 Program 的任务是原生服务器的功能；SDK 只提供标准方法。
 
 ## 测试与互操作
 

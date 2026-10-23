@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -373,6 +373,7 @@ Python 暴露的是 C++ 的执行能力，而不是另外一套 Python 调度器
 | 运行时标识、截止时间和预算 | `RunMetadata`、`RunConfig` | `RunMetadata`、`RunConfig.model_token_budget` | 每次运行的取值相同 |
 | 重试与节点缓存策略 | `RetryPolicy`、`CacheScope` | 图/节点的 setter 和缓存作用域 | 运行时策略相同 |
 | 检查点、HITL 与时间旅行 | 检查点存储和 resume API | resume、精确的 `resume_from`、fork、状态历史/更新 | 检查点契约相同 |
+| 通过 A2A 或 ACP 提供智能体 | `A2AServer`、`ACPServer` | `ProtocolHostAdapter` 背后的官方 SDK 服务器 | 会话、取消、token 流式输出和图中断（`input-required`、权限请求）；没有协作信封、基于 Program 的任务和租户隔离 |
 | Program 的编写与本地执行 | 编译器、Catalog 和 `ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、句柄/结果 | 原生的、按 owner 划分作用域的便捷宿主 |
 | 强制的生命周期 Hook | 注册表、runner 和 `HookRuntime` | 定义，加上 `create_hook_runtime` 回调 | 生命周期边界相同，均为失败时关闭 |
 | 运行时上下文与严格分发 | 上下文存储、回执（receipt）和拦截 | 对应的不可变值、存储和 `StrictRuntimeProfile` | 同一个原生控制器 |
@@ -778,8 +779,26 @@ Provider 的 `invoke` 和 `dispatch` 是同步的 Python 方法。它们的绑�
 
 - 构建时包含 MCP 的话，MCP 客户端工具可通过 `neograph_engine.mcp` 使用。
 - 构建时包含 A2A 的话，A2A 客户端类型可通过 `neograph_engine.a2a` 使用。
-- `ProtocolHostAdapter` 把官方的 Python A2A/ACP 服务端 SDK 与 NeoGraph 的会话语义对接起来。
+- `ProtocolHostAdapter` 把官方的 Python A2A/ACP 服务端 SDK 与 NeoGraph 的会话语义对接起来，其中包括图中断（见[在 A2A 和 ACP 的 SDK 背后托管智能体](#hosting-an-agent-behind-the-a2a-and-acp-sdks)）。
 - `neograph_engine.tracing` 和 `neograph_engine.openinference` 输出与厂商无关的 OTel/OpenInference 数据，可用于 Phoenix、Langfuse、Arize 及兼容的后端。
+
+<a id="hosting-an-agent-behind-the-a2a-and-acp-sdks"></a>
+### 在 A2A 和 ACP 的 SDK 背后托管智能体
+
+Python 包没有 A2A 或 ACP 服务器。传输和 wire 格式由官方 SDK 负责，`ProtocolHostAdapter` 为它们的回调运行引擎：A2A 的上下文 ID 或 ACP 的会话 ID 就是 NeoGraph 的 `thread_id`，检查点让对话得以延续，`cancel(request_id)` 会取消底层的 `run_async()`，`stream()` 先产出 token 事件，再产出一个最终事件。[示例 27 和 28](../bindings/python/examples/README.md) 用各自的 SDK 托管同一个演示图。
+
+因等待人工而暂停的图（`interrupt_before`、`NodeInterrupt`、工具闸门）会被报告给协议客户端，客户端的回答则从运行暂停时的检查点恢复。
+
+| 适配器调用 | 作用 |
+|---|---|
+| `stream(payload, thread_id=..., interrupts=True)` | 以一个 `interrupt` 事件结束，而不是 `final` 事件。`event.interrupt` 是 `ProtocolInterrupt`：`reason`、`payload`、`node`、`checkpoint_id`、`interrupt_id`。 |
+| `resume_stream(answer, thread_id=..., interrupt=None)` | 用 `resume_value(answer, interrupt)` 恢复；先产出 `token` 事件，再以 `final` 或另一个 `interrupt` 结束。 |
+| `resume_payload(answer, thread_id=...)` | 不做流式输出的同一操作，返回响应文本。 |
+| `pending_interrupt(thread_id)`、`discard_interrupt(thread_id)` | 适配器为某个线程记住的暂停，以及忘掉它（任务被取消、权限请求被取消）。 |
+
+`ProtocolHostAdapter(..., resume_value=callable)` 把协议的回答映射成暂停的节点从 `input.ctx.resume_value` 读到的值。默认就是回答本身：A2A 后续消息的文本，或 ACP 权限选项的 ID（`"approve"` 或 `"reject"`），原生服务器也是如此。没有 `interrupts=True` 时，图暂停会让 `stream()`、`run()` 和 `run_payload()` 抛出 `ProtocolInterrupted`；此前它们会把状态里的最后一条消息当作回答返回。暂停按线程记在内存里，引擎需要有检查点存储才能恢复它。重启之后，把用保存的 ID 构造的 `ProtocolInterrupt` 作为 `interrupt=` 传入（带有 `checkpoint_id` 时，会精确恢复那个检查点）。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 和 `resume_payload()` 会抛出 `LookupError`，因为恢复一个并未暂停的线程，返回的会是它上一轮的文本。
+
+A2A 执行器把暂停呈现为 `input-required` 任务，并在发给该任务的下一条消息时恢复它；ACP 智能体在同一轮中发送 `session/request_permission`。两种映射分别见 [A2A](a2a.md#interrupts-when-you-host-from-python) 和 [ACP](acp.md#permission-requests-when-you-host-from-python)。原生服务器的 NeoGraph 协作信封、基于 Program 的 A2A 任务和租户隔离不在这条路径上。
 
 ### 原生 A2A 的发现与流式调用
 
