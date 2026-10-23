@@ -99,7 +99,16 @@
  * MCPHttpServerConfig and A2AHttpConfig), then the authenticator, then the
  * size limit. A connection belongs to the principal that created it. The
  * agent can read and write files and run commands in the client's name, so
- * treat a remote bind as exposing that.
+ * treat a remote bind as exposing that. A client cannot make the server start
+ * processes: `mcpServers` in `session/new` and `session/resume` is refused
+ * unless ACPHttpConfig::allow_client_mcp_servers is set, and the `cwd` it
+ * names reaches the graph as `_acp_cwd`, so a node that uses it on the server
+ * has to check it. The bytes of messages waiting for the agent are bounded
+ * (two messages of `max_payload_bytes`, at least 1 MiB; a POST beyond it is
+ * answered 503 with `Retry-After`, and a WebSocket message beyond it with a
+ * JSON-RPC error). Slow or idle TCP connections are not limited per peer: a
+ * server that faces the internet belongs behind a reverse proxy that does
+ * that.
  */
 #pragma once
 
@@ -199,6 +208,17 @@ struct NEOGRAPH_API ACPHttpConfig {
     /// Origin. On a remote bind an empty list checks nothing, and a
     /// non-empty one admits only the listed names.
     std::vector<std::string> allowed_hosts;
+
+    /// Accept stdio MCP servers named by the client in `session/new` and
+    /// `session/resume` (`mcpServers`). ACPServer starts each as a process of
+    /// this host, with the command line and environment entries the client
+    /// sends, in the `cwd` the client names. For an editor that launched the
+    /// agent on its own machine that is how it extends the agent; for a
+    /// remote client it is command execution on the server. So a request that
+    /// lists any is refused with JSON-RPC `-32602` (`data.reason`
+    /// `"mcp_servers_not_accepted"`) unless this is true; an empty list is
+    /// always accepted.
+    bool allow_client_mcp_servers = false;
 
     /// Authenticates every request, stream and upgrade when set (HTTP 401 and
     /// `WWW-Authenticate: Bearer` otherwise). The principal it returns is

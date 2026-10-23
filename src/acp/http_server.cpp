@@ -52,6 +52,10 @@ using neograph::detail::HttpRequestGuard;
 /// read. A peer that cannot keep up (or never opens its stream) loses its
 /// connection instead of growing the server.
 constexpr std::size_t kMaxQueuedBytes = 8 * 1024 * 1024;
+/// The input queue of the agent holds at least this many bytes, and two
+/// messages of max_payload_bytes when that is more; a POST or message beyond
+/// it is refused.
+constexpr std::size_t kMinInputBytes = 1024 * 1024;
 /// Requests of one connection that have not been answered yet.
 constexpr std::size_t kMaxOpenRequests = 1024;
 /// How long a POST of `initialize` waits for the agent's answer.
@@ -140,17 +144,27 @@ thread_local std::string t_upgrade_principal;
 // --- The agent's stdin and stdout ------------------------------------------
 
 /// The input of ACPServer::run(): one line per message, blocking until one
-/// arrives or the source is closed.
+/// arrives or the source is closed. The bytes that wait are bounded, so a peer
+/// that sends faster than the agent reads gets a refusal instead of growing
+/// the server.
 class LineSource final : public std::streambuf {
 public:
-    bool push(std::string line) {
+    enum class Push { Accepted, Full, Closed };
+
+    explicit LineSource(std::size_t limit) : limit_(limit) {}
+
+    /// A message is always taken when none waits, so one larger than the limit
+    /// is not refused for good.
+    Push push(std::string line) {
         {
             std::lock_guard lock(mutex_);
-            if (closed_) return false;
+            if (closed_) return Push::Closed;
+            if (!lines_.empty() && bytes_ + line.size() > limit_) return Push::Full;
+            bytes_ += line.size();
             lines_.push_back(std::move(line));
         }
         ready_.notify_one();
-        return true;
+        return Push::Accepted;
     }
 
     /// End of input. Lines not read yet are dropped: the connection is going.
@@ -159,6 +173,7 @@ public:
             std::lock_guard lock(mutex_);
             closed_ = true;
             lines_.clear();
+            bytes_ = 0;
         }
         ready_.notify_all();
     }
@@ -170,15 +185,18 @@ protected:
         if (lines_.empty()) return traits_type::eof();
         current_ = std::move(lines_.front());
         lines_.pop_front();
+        bytes_ -= current_.size();
         current_.push_back('\n');
         setg(current_.data(), current_.data(), current_.data() + current_.size());
         return traits_type::to_int_type(current_.front());
     }
 
 private:
+    const std::size_t       limit_;
     std::mutex              mutex_;
     std::condition_variable ready_;
     std::deque<std::string> lines_;
+    std::size_t             bytes_ = 0;
     std::string             current_;
     bool                    closed_ = false;
 };
@@ -289,11 +307,12 @@ struct Connection : std::enable_shared_from_this<Connection> {
     };
 
     Connection(std::string connection_id, std::string principal_in, bool websocket_in,
-               ACPHttpConnection parts_in)
+               ACPHttpConnection parts_in, std::size_t input_limit)
         : id(std::move(connection_id)),
           principal(std::move(principal_in)),
           websocket(websocket_in),
           parts(std::move(parts_in)),
+          source(input_limit),
           in(&source),
           out(&sink) {}
 
@@ -628,8 +647,9 @@ struct ACPHttpServer::Impl {
             status = 500;
             return nullptr;
         }
-        auto connection = std::make_shared<Connection>(random_id("conn-"), principal, websocket,
-                                                       std::move(parts));
+        auto connection = std::make_shared<Connection>(
+            random_id("conn-"), principal, websocket, std::move(parts),
+            std::max<std::size_t>(kMinInputBytes, 2 * config.max_payload_bytes));
         connection->sink.set_deliver(
             [this, raw = connection.get()](std::string line) { route(*raw, std::move(line)); });
         try {
@@ -863,6 +883,28 @@ struct ACPHttpServer::Impl {
                 }
             }
         }
+        // The stdio MCP servers that session/new and session/resume may name are
+        // started as processes of this host with the client's command line, which
+        // is how an editor extends the agent it launched itself. For a remote
+        // client that is command execution on the server, so it is refused
+        // unless the embedding application accepts it.
+        const bool names_mcp_servers =
+            (method == "session/new" || method == "session/resume") &&
+            envelope.contains("params") && envelope["params"].is_object() &&
+            envelope["params"].contains("mcpServers") &&
+            envelope["params"]["mcpServers"].is_array() &&
+            !envelope["params"]["mcpServers"].empty();
+        if (names_mcp_servers && !config.allow_client_mcp_servers) {
+            if (has_id) {
+                json refusal = rpc_error(
+                    -32602,
+                    "Invalid params: this agent does not start MCP servers named by a remote client",
+                    envelope["id"]);
+                refusal["error"]["data"] = json{{"reason", "mcp_servers_not_accepted"}};
+                deliver(connection, connection.connection_box, refusal.dump());
+            }
+            return {0, 0, "", false};
+        }
         if (!has_method || !has_id) return {};  // a notification or a response
 
         Connection::Route route;
@@ -905,6 +947,24 @@ struct ACPHttpServer::Impl {
             return {429, -32000, "Too many requests are waiting for an answer", false};
         }
         return {};
+    }
+
+    /// Take back what admit() recorded for a request that was not handed to the
+    /// agent after all.
+    void unadmit(Connection& connection, const json& envelope) {
+        if (!envelope.contains("id") || !envelope.contains("method")) return;
+        Connection::Route route;
+        bool              found = false;
+        {
+            std::lock_guard lock(connection.mutex);
+            if (auto it = connection.routes.find(envelope["id"].dump());
+                it != connection.routes.end()) {
+                route = std::move(it->second);
+                connection.routes.erase(it);
+                found = true;
+            }
+        }
+        if (found && route.claimed_fresh) registry->release(route.session, &connection);
     }
 
     // --- HTTP routes ---------------------------------------------------------
@@ -990,9 +1050,19 @@ struct ACPHttpServer::Impl {
             return;
         }
         connection->touch();
-        if (admission.forward && !connection->source.push(std::move(line))) {
-            http_error(response, 404, -32600, "Unknown Acp-Connection-Id");
-            return;
+        if (admission.forward) {
+            switch (connection->source.push(std::move(line))) {
+                case LineSource::Push::Accepted:
+                    break;
+                case LineSource::Push::Full:
+                    unadmit(*connection, envelope);
+                    response.set_header("Retry-After", "1");
+                    http_error(response, 503, -32000, "The agent has too many messages waiting");
+                    return;
+                case LineSource::Push::Closed:
+                    http_error(response, 404, -32600, "Unknown Acp-Connection-Id");
+                    return;
+            }
         }
         response.status = 202;
         response.set_content("", "application/json");
@@ -1171,7 +1241,12 @@ struct ACPHttpServer::Impl {
             return;
         }
         connection.touch();
-        if (admission.forward) connection.source.push(std::move(line));
+        if (admission.forward &&
+            connection.source.push(std::move(line)) == LineSource::Push::Full) {
+            unadmit(connection, envelope);
+            send_error(connection, -32000, "The agent has too many messages waiting",
+                       envelope.contains("id") ? envelope["id"] : json());
+        }
     }
 
     void handle_websocket(const httplib::Request&, httplib::ws::WebSocket& socket) {

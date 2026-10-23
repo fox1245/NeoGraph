@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=f634d51e3c41fce0652401053b5929c60a812ca72ecbea5a1622de518aae243b -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=529240bafbe89bb162789931d6e2f8246eaeaff0966a6581aecc3baa8bd115e1 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3626,7 +3626,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 
 `session/new` 和 `session/resume` 中的 stdio `mcpServers` 通过 NeoGraph 的 MCP 客户端（以 `NEOGRAPH_BUILD_MCP_CLIENT` 构建）在会话的 `cwd` 中启动，环境是最小的：agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上客户端的 `env` 项，可能含有 provider API 密钥的其余 agent 环境不会传递；节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE MCP 服务器不会被声明，并以 `-32602` 拒绝。无法启动的服务器会使请求以 `-32603` 和 `data.reason: "mcp_server_unavailable"` 失败。
 
-**远程传输（实验性）。** `<neograph/acp/http_server.h>`（`neograph::acp_http_server`，`NEOGRAPH_BUILD_ACP_HTTP_SERVER`，默认关）新增 `ACPHttpServer`，它遵循 ACP 项目的远程传输草案，在一个端点（`/acp`）上通过 Streamable HTTP 和 WebSocket 升级，为每个连接提供一个 `ACPServer`；stdio 仍是标准传输。有 `ACPHttpServer(factory, config)`、`start()`、`start_async()`、`stop()`、`port()`、`connection_count()`、`client()` 和 `attach_client()`；工厂返回 `ACPHttpConnection`（`server`、`owner`），并收到 `ACPHttpConfig::authenticator` 返回的主体。`ACPHttpConfig`：`host`（`127.0.0.1`）、`port`、`endpoint`、`streamable_http`、`websocket`、`max_connections`（16）、`max_payload_bytes`（4 MiB）、`http_threads`（8）、`max_http_threads`（64）、`max_queued_requests`（64）、`connection_idle_timeout`（60 秒）、`keepalive_interval`（15 秒）、`allowed_origins`、`allowed_hosts` 和 `authenticator`。非回环的 `host` 没有 `authenticator` 时抛出 `std::invalid_argument`。Host、Origin、认证和大小限制在每个路由、流和升级请求上、读取正文之前检查。服务器使用 HTTP/1.1（草案要求 HTTP/2），线上格式的细节可能随草案变化。见 [ACP](acp.md#remote-transports-experimental)。
+**远程传输（实验性）。** `<neograph/acp/http_server.h>`（`neograph::acp_http_server`，`NEOGRAPH_BUILD_ACP_HTTP_SERVER`，默认关）新增 `ACPHttpServer`，它遵循 ACP 项目的远程传输草案，在一个端点（`/acp`）上通过 Streamable HTTP 和 WebSocket 升级，为每个连接提供一个 `ACPServer`；stdio 仍是标准传输。有 `ACPHttpServer(factory, config)`、`start()`、`start_async()`、`stop()`、`port()`、`connection_count()`、`client()` 和 `attach_client()`；工厂返回 `ACPHttpConnection`（`server`、`owner`），并收到 `ACPHttpConfig::authenticator` 返回的主体。`ACPHttpConfig`：`host`（`127.0.0.1`）、`port`、`endpoint`、`streamable_http`、`websocket`、`max_connections`（16）、`max_payload_bytes`（4 MiB）、`http_threads`（8）、`max_http_threads`（64）、`max_queued_requests`（64）、`connection_idle_timeout`（60 秒）、`keepalive_interval`（15 秒）、`allowed_origins`、`allowed_hosts`、`allow_client_mcp_servers`（关）和 `authenticator`。非回环的 `host` 没有 `authenticator` 时抛出 `std::invalid_argument`。Host、Origin、认证和大小限制在每个路由、流和升级请求上、读取正文之前检查。服务器使用 HTTP/1.1（草案要求 HTTP/2），线上格式的细节可能随草案变化。见 [ACP](acp.md#remote-transports-experimental)。
 
 **公共头文件：** [`include/neograph/acp/`](../include/neograph/acp/)。
 

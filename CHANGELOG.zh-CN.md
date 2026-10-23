@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=54c3fc4475298fac8390237187a6a37d567e9dd1795d140d01740298a73e6972 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6a20554e949014e41ad155cc398379261fa7988eb631c9c9c4c82239a046c937 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -18,9 +18,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **一个连接对应一个 `ACPServer`。** `ACPHttpServer(factory, config)` 为每个连接创建一个智能体，驱动方式与 stdio 完全相同：消息按到达顺序处理，连接结束就取消它的提示词。各连接彼此独立。会话 ID 属于一个存活的连接，对另一个连接持有的 ID 执行 `session/resume` 会被以 `session_busy` 拒绝。`ACPHttpServer::client()` 和 `attach_client()` 给图节点一个 `ACPClient`（新增：接受解析器的构造函数和 `bind`），它的 `fs/*` 和权限请求会到达拥有该会话的连接。
   - **Streamable HTTP。** `initialize` 的 `POST` 创建连接（`200` 和 `Acp-Connection-Id`）。其他 `POST` 以 `202` 应答，答复通过 server-sent-event 流送达：一个连接流，以及每个会话一个的会话流（`Acp-Session-Id`）。`DELETE` 结束连接，既没有流也没有请求的时间达到 `connection_idle_timeout`（60 秒）的连接会被关闭，其提示词被取消。
   - **WebSocket。** 同一端点上带 `Upgrade: websocket` 的 `GET`，每个文本帧是一条 JSON-RPC 消息，遵循 RFC 6455 的分帧：客户端帧必须带掩码，支持 ping 和 pong 以及分片，超过 `max_payload_bytes` 的消息会以代码 1009 关闭连接。
-  - **安全。** 默认绑定回环地址，远程绑定需要 `authenticator`。Host 和 Origin（`allowed_hosts` 和 `allowed_origins`，规则与 MCP 和 A2A 服务器相同）、authenticator 和大小限制（`max_payload_bytes`，4 MiB）在每个路由、流和升级请求上、读取正文之前检查。连接只对创建它的主体应答。
+  - **安全。** 默认绑定回环地址，远程绑定需要 `authenticator`。Host 和 Origin（`allowed_hosts` 和 `allowed_origins`，规则与 MCP 和 A2A 服务器相同）、authenticator 和大小限制（`max_payload_bytes`，4 MiB）在每个路由、流和升级请求上、读取正文之前检查。连接只对创建它的主体应答。客户端无法让服务器启动进程：`session/new` 和 `session/resume` 中的 `mcpServers` 会以 `-32602` 被拒绝，除非设置了 `allow_client_mcp_servers`。等待智能体处理的消息量有上限，超出上限的 `POST` 得到 `503`。
   - **与草案的不同。** 草案要求 HTTP/2，而服务器使用 HTTP/1.1，所以每个流和每个 `POST` 都是独立的 TCP 连接。101 响应不带 `Acp-Connection-Id`，不设置 cookie，也不检查 `Acp-Protocol-Version`。
-  - **重新构建。** `ACPClient` 增加了一个成员，所以使用它的原生代码需要用新头文件重新构建。
+  - **C++ 使用方须重新构建：`ACPClient` 增加了成员。** `ACPClient` 增加了 resolver，以及接受它的构造函数和 `bind` 重载。请将 NeoGraph 与 C++ 使用方一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
   - **测试。** `tests/test_acp_http_server.cpp` 运行完整的会话、权限请求往返、`fs/read_text_file` 往返、取消、同时存在的两个连接、提示词进行到一半时断开的连接、Host、Origin、大小和认证检查，以及原始的 WebSocket 帧（无掩码、分片、ping、二进制）。`bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py` 用官方 Python SDK（`agent-client-protocol` 0.12）为草案传输提供的客户端，在两种传输上驱动 probe 智能体（`neograph_acp_probe_agent --http`）。
 - **Python：每个 run、stream 和 resume 入口都接受相同的单次运行值，被恢复的那一轮也可以流式输出。** `run_stream`、`run_async`、`run_stream_async`、`resume` 和 `resume_async` 丢弃了 `run` 与 `resume_from` 接受的 `RunMetadata`，而且没有任何 resume 入口接受流式回调。
   - **所有入口都有 `metadata`。** 上述入口现在接受 `RunMetadata`（截止时间、trace 与运行标识、所有者范围）。没有它，asyncio 和流式路径无法携带截止时间或标识；安装了生命周期 Hook 运行时的引擎在这些路径上会 fail-closed 地失败，因为 Hook 会拒绝没有所有者范围或运行标识的事件。恢复使用它自己的 `RunMetadata`，被中断运行的截止时间不会沿用。参数在调用时被复制，所以之后再修改该对象不会影响已在进行的运行，同一个对象也可以用于多次调用。**行为变更：** 不是 `RunMetadata` 的值在每个入口上都会抛出 `TypeError`；`run` 和 `resume_from` 此前对此抛出 `RuntimeError`。
