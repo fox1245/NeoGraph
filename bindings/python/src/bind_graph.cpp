@@ -217,6 +217,12 @@ using neograph::graph::RunConfig;
 using neograph::graph::RunMetadata;
 using neograph::graph::RunResult;
 
+// The ``metadata`` argument of an entry point. Absent means the defaults. Converting the argument copies the
+// caller's RunMetadata, so changing that object after the call does not reach a run that has begun.
+RunMetadata metadata_or_default(std::optional<RunMetadata> metadata) {
+    return metadata ? std::move(*metadata) : RunMetadata{};
+}
+
 // The stream callback of a synchronous entry point. The engine calls it on the thread that drives the run and may
 // copy it into fan-out workers, so the Python callable lives in a shared_ptr whose last owner takes the GIL to
 // drop it. A callback that raises does not stop the run: the callback observes the run, it does not steer it.
@@ -945,18 +951,20 @@ void init_graph(py::module_& m) {
             "Raises ``RuntimeError`` on bad shape.")
 
         .def("run",
-            [](GraphEngine& self, const RunConfig& cfg, py::object metadata) {
+            [](GraphEngine& self, const RunConfig& cfg, std::optional<RunMetadata> metadata) {
+                const RunMetadata run_metadata = metadata_or_default(std::move(metadata));
                 // Release the GIL for the entire run. Built-in node
                 // types do no Python callbacks; concurrent runs from
                 // other Python threads stay live.
-                std::optional<RunMetadata> owned_metadata;
-                if (!metadata.is_none()) owned_metadata = metadata.cast<RunMetadata>();
                 py::gil_scoped_release release;
-                return owned_metadata ? self.run(cfg, *owned_metadata) : self.run(cfg);
+                return self.run(cfg, run_metadata);
             },
             py::arg("config"),
             py::arg("metadata") = py::none(),
-            "Run the graph synchronously to completion (or interrupt).")
+            "Run the graph synchronously to completion (or interrupt).\n\n"
+            "``metadata`` is an optional ``RunMetadata`` (deadline, trace and run "
+            "identity, owner scope). Every run, stream and resume entry point takes "
+            "it.")
 
         .def("set_store",
             [](py::object self, py::object store_obj) {
@@ -1033,22 +1041,27 @@ void init_graph(py::module_& m) {
             [](GraphEngine& self,
                const std::string& thread_id,
                py::object resume_value,
-               std::optional<std::string> interrupt_id) {
+               std::optional<std::string> interrupt_id,
+               std::optional<py::function> callback,
+               std::optional<RunMetadata> metadata) {
                 // Convert while we still hold the GIL, then drop it for the
                 // run — same shape as the resume_async binding below.
                 json rv = resume_value.is_none() ? json()
                                                  : py_to_json(resume_value);
-                py::gil_scoped_release release;
-                if (!interrupt_id) return self.resume(thread_id, rv);
+                const auto stream = sync_stream_callback(std::move(callback));
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
+                if (interrupt_id) run_metadata.resume_interrupt_id = std::move(*interrupt_id);
                 RunConfig config;
                 config.thread_id = thread_id;
-                RunMetadata metadata;
-                metadata.resume_interrupt_id = std::move(*interrupt_id);
-                return self.resume(config, rv, nullptr, metadata);
+                py::gil_scoped_release release;
+                return self.resume(config, rv, stream, run_metadata);
             },
             py::arg("thread_id"),
             py::arg("resume_value") = py::none(),
             py::arg("interrupt_id") = py::none(),
+            py::kw_only(),
+            py::arg("callback") = py::none(),
+            py::arg("metadata") = py::none(),
             "Continue an interrupted run, synchronously.\n\n"
             "``resume_value`` is the human's answer. The node that asked reads "
             "it from ``input.ctx.resume_value``, in the step the resume "
@@ -1062,45 +1075,59 @@ void init_graph(py::module_& m) {
             "``interrupt_id`` names the interrupt this answers, from "
             "``RunResult.interrupts`` (#388). Without it the step's first pending "
             "interrupt is answered; every other interrupt of that step asks again "
-            "with its own payload.")
+            "with its own payload.\n\n"
+            "``callback(GraphEvent)`` receives the events of the resumed turn, "
+            "as ``run_stream`` does for a run: a turn that continues after an "
+            "approval streams its tokens too. ``metadata`` is a fresh "
+            "``RunMetadata`` for this attempt; a deadline from the interrupted run "
+            "is not carried over. Both are keyword-only.")
 
         .def("resume_from",
             [](GraphEngine& self,
                RunConfig config,
                std::string checkpoint_id,
                py::object resume_value,
-               py::object metadata,
-               std::optional<std::string> interrupt_id) {
+               std::optional<RunMetadata> metadata,
+               std::optional<std::string> interrupt_id,
+               std::optional<py::function> callback) {
                 json value = resume_value.is_none() ? json() : py_to_json(resume_value);
-                RunMetadata owned_metadata;
-                if (!metadata.is_none()) owned_metadata = metadata.cast<RunMetadata>();
-                if (interrupt_id) owned_metadata.resume_interrupt_id = std::move(*interrupt_id);
+                const auto stream = sync_stream_callback(std::move(callback));
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
+                if (interrupt_id) run_metadata.resume_interrupt_id = std::move(*interrupt_id);
                 py::gil_scoped_release release;
                 return self.resume_from(std::move(config), std::move(checkpoint_id),
-                                        std::move(value), {}, std::move(owned_metadata), {});
+                                        std::move(value), stream, std::move(run_metadata), {});
             },
             py::arg("config"),
             py::arg("checkpoint_id"),
             py::arg("resume_value") = py::none(),
             py::arg("metadata") = py::none(),
             py::arg("interrupt_id") = py::none(),
+            py::kw_only(),
+            py::arg("callback") = py::none(),
             "Resume from exactly checkpoint_id. Never substitutes a newer checkpoint. "
-            "interrupt_id names the interrupt this answers (#388).")
+            "interrupt_id names the interrupt this answers (#388). "
+            "``callback(GraphEvent)`` receives the events of the resumed turn "
+            "(keyword-only), as for ``resume``.")
 
         .def("run_stream",
             [](GraphEngine& self,
                const RunConfig& cfg,
-               py::function py_cb) {
+               py::function py_cb,
+               std::optional<RunMetadata> metadata) {
                 const auto stream = sync_stream_callback(std::move(py_cb));
+                const RunMetadata run_metadata = metadata_or_default(std::move(metadata));
                 py::gil_scoped_release release;
-                return self.run_stream(cfg, stream);
+                return self.run_stream(cfg, stream, run_metadata);
             },
             py::arg("config"),
             py::arg("callback"),
+            py::arg("metadata") = py::none(),
             "Run the graph and invoke `callback(GraphEvent)` for every "
             "event admitted by config.stream_mode. Exceptions raised "
             "from the Python callback are printed to stderr and "
-            "swallowed; they do not abort the run.")
+            "swallowed; they do not abort the run. ``metadata`` is an "
+            "optional ``RunMetadata``, as for ``run``.")
 
         .def("get_state",
             [](const GraphEngine& self, const std::string& thread_id) -> py::object {
@@ -1319,19 +1346,24 @@ void init_graph(py::module_& m) {
         // hopped back to the asyncio loop via
         // `loop.call_soon_threadsafe(fut.set_result, …)`.
         //
+        // Every method takes the same per-run values as its synchronous
+        // peer (metadata, stream callback).
+        //
         // The engine and its Python wrapper stay alive for the in-flight
         // coroutine (EngineLease), and cancelling the Future cancels the run
         // (begin_async_call).
         .def("run_async",
-            [](py::object self_obj, RunConfig cfg) {
+            [](py::object self_obj, RunConfig cfg, std::optional<RunMetadata> metadata) {
                 auto lease = lease_engine(std::move(self_obj));
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
                 auto call = begin_async_call(cfg);
                 auto future = call.future;
                 spawn_on_runtime(std::move(call), lease,
-                    lease->engine->run_async(std::move(cfg)));
+                    lease->engine->run_async(std::move(cfg), std::move(run_metadata)));
                 return *future;
             },
             py::arg("config"),
+            py::arg("metadata") = py::none(),
             "Awaitable peer of run(). Use under an asyncio loop:\n\n"
             "    import asyncio\n"
             "    async def go():\n"
@@ -1341,6 +1373,8 @@ void init_graph(py::module_& m) {
             "Multiple concurrent run_async() calls overlap on the "
             "binding's internal asio worker; combine with "
             "asyncio.gather to fan out across thread_ids.\n\n"
+            "``metadata`` is an optional ``RunMetadata``, as for ``run``; it is "
+            "copied when the call is made.\n\n"
             "v0.3+: cancelling the returned Future "
             "(`fut.cancel()`, asyncio task cancel, FastAPI "
             "request_disconnected) propagates through the engine "
@@ -1351,21 +1385,26 @@ void init_graph(py::module_& m) {
         .def("run_stream_async",
             [](py::object self_obj,
                RunConfig cfg,
-               py::function py_cb) {
+               py::function py_cb,
+               std::optional<RunMetadata> metadata) {
                 auto lease = lease_engine(std::move(self_obj));
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
                 auto call = begin_async_call(cfg);
                 auto future = call.future;
                 auto stream = async_stream_callback(call.loop, std::move(py_cb));
                 spawn_on_runtime(std::move(call), lease,
-                    lease->engine->run_stream_async(std::move(cfg), std::move(stream)));
+                    lease->engine->run_stream_async(
+                        std::move(cfg), std::move(stream), std::move(run_metadata)));
                 return *future;
             },
             py::arg("config"),
             py::arg("callback"),
+            py::arg("metadata") = py::none(),
             "Awaitable peer of run_stream(). The callback is invoked "
             "for each GraphEvent — events are hopped onto the asyncio "
             "loop, so the callback runs on the user's Python thread, "
-            "not on the engine worker.\n\n"
+            "not on the engine worker. ``metadata`` is an optional "
+            "``RunMetadata``, as for ``run_async``.\n\n"
             "v0.3+: cancelling the returned Future propagates into "
             "in-flight LLM HTTP requests via asio cancellation, so "
             "a cancelled stream stops billable token generation.")
@@ -1374,43 +1413,72 @@ void init_graph(py::module_& m) {
             [](py::object self_obj,
                std::string thread_id,
                py::object resume_value,
-               std::optional<std::string> interrupt_id) {
-                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
-                auto self_h = hold_py(std::move(self_obj));
-                py::object asyncio = py::module_::import("asyncio");
-                py::object loop = asyncio.attr("get_running_loop")();
-                py::object future = loop.attr("create_future")();
-
-                auto fut_h  = hold_py(future);
-                auto loop_h = hold_py(loop);
-
-                // Heap-pin both string and json — same coroutine-frame
-                // dangling-reference concern as run_async.
-                auto tid_h = std::make_shared<std::string>(std::move(thread_id));
-                auto rv_h  = std::make_shared<json>(py_to_json(resume_value));
-                auto engine_cb_h = std::make_shared<GraphStreamCallback>();
-
+               std::optional<std::string> interrupt_id,
+               std::optional<py::function> callback,
+               std::optional<RunMetadata> metadata) {
+                auto lease = lease_engine(std::move(self_obj));
+                json value = resume_value.is_none() ? json() : py_to_json(resume_value);
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
+                if (interrupt_id) run_metadata.resume_interrupt_id = std::move(*interrupt_id);
                 RunConfig config;
-                config.thread_id = *tid_h;
-                RunMetadata metadata;
-                if (interrupt_id) metadata.resume_interrupt_id = std::move(*interrupt_id);
-                asio::co_spawn(
-                    AsyncRuntime::executor(),
-                    self->resume_async(std::move(config), *rv_h, *engine_cb_h, std::move(metadata)),
-                    [self, self_h, tid_h, rv_h, engine_cb_h, fut_h, loop_h]
-                    (std::exception_ptr e, RunResult result) {
-                        resolve_future_async(fut_h, loop_h, e,
-                                             std::move(result));
-                    });
-
-                return future;
+                config.thread_id = std::move(thread_id);
+                auto call = begin_async_call(config);
+                auto future = call.future;
+                auto stream = async_stream_callback(call.loop, std::move(callback));
+                spawn_on_runtime(std::move(call), lease,
+                    lease->engine->resume_async(
+                        std::move(config), std::move(value), std::move(stream),
+                        std::move(run_metadata)));
+                return *future;
             },
             py::arg("thread_id"),
             py::arg("resume_value") = py::none(),
             py::arg("interrupt_id") = py::none(),
+            py::kw_only(),
+            py::arg("callback") = py::none(),
+            py::arg("metadata") = py::none(),
             "Awaitable peer of resume(). Restart an interrupted run "
             "from the most recent checkpoint, optionally injecting a "
-            "value (typically the human's response in HITL flows).")
+            "value (typically the human's response in HITL flows).\n\n"
+            "``callback(GraphEvent)`` receives the events of the resumed turn on "
+            "the loop thread, as for ``run_stream_async``. ``metadata`` is a "
+            "fresh ``RunMetadata`` for this attempt. Both are keyword-only. "
+            "Cancelling the returned Future cancels the resumed run, as it "
+            "does for ``run_async``.")
+
+        .def("resume_from_async",
+            [](py::object self_obj,
+               RunConfig config,
+               std::string checkpoint_id,
+               py::object resume_value,
+               std::optional<RunMetadata> metadata,
+               std::optional<std::string> interrupt_id,
+               std::optional<py::function> callback) {
+                auto lease = lease_engine(std::move(self_obj));
+                json value = resume_value.is_none() ? json() : py_to_json(resume_value);
+                RunMetadata run_metadata = metadata_or_default(std::move(metadata));
+                if (interrupt_id) run_metadata.resume_interrupt_id = std::move(*interrupt_id);
+                auto call = begin_async_call(config);
+                auto future = call.future;
+                auto stream = async_stream_callback(call.loop, std::move(callback));
+                spawn_on_runtime(std::move(call), lease,
+                    lease->engine->resume_from_async(
+                        std::move(config), std::move(checkpoint_id), std::move(value),
+                        std::move(stream), std::move(run_metadata)));
+                return *future;
+            },
+            py::arg("config"),
+            py::arg("checkpoint_id"),
+            py::arg("resume_value") = py::none(),
+            py::arg("metadata") = py::none(),
+            py::arg("interrupt_id") = py::none(),
+            py::kw_only(),
+            py::arg("callback") = py::none(),
+            "Awaitable peer of resume_from(): resume from exactly "
+            "checkpoint_id, never from a newer checkpoint. Arguments are "
+            "those of ``resume_from``; ``callback`` delivers events on the "
+            "loop thread. Cancelling the returned Future cancels the "
+            "resumed run.")
 
         .def_property_readonly("name", &GraphEngine::get_graph_name);
 
