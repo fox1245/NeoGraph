@@ -225,6 +225,39 @@ await check('a fork that is cancelled while the stores are still answering ends 
   }
 });
 
+await check('forks of one pause started in the same tick take their shares one after another while the stores answer later', async () => {
+  const reference = neograph.memoryStores();
+  const programs = neograph.programs({ provider: provider(), stores: later(reference, { delayMs: 3 }) });
+  try {
+    const version = await programs.admit(SOURCE);
+    const run = programs.start(version, { input: ask('Crowd') });
+    const paused = await run.result;
+    assert.equal(paused.status, 'interrupted');
+    // The lineage read, the debit and the publication of each fork wait for a later task, and the forks are made in one
+    // turn: a share read before the earlier forks have published would be half of the same amount for all of them.
+    const seen = [[], [], []];
+    const forks = seen.map((events, i) => run.fork(`go-${i}`, { runId: `run-crowd-${i}`, onEvent: (event) => events.push(event) }));
+    const results = await Promise.all(forks.map((fork) => fork.result));
+    assert.deepEqual(results.map((result) => result.status), ['completed', 'completed', 'completed']);
+    let left = paused.remainingBudget.modelTokens;
+    for (const [i, events] of seen.entries()) {
+      const share = events.find((event) => event.kind === 'started').payload.model_tokens;
+      assert.equal(share, Math.floor(left / 2), `fork ${i} took half of what the forks before it left`);
+      left -= share;
+    }
+    const resumed = await run.resume('own').result;
+    assert.equal(resumed.status, 'completed');
+    assert.equal(resumed.remainingBudget.modelTokens, left - resumed.usage.modelTokens);
+    // The same request made again is the same fork, with the share it was given; the stores hold the amount.
+    const again = await run.fork('go-1', { runId: 'run-crowd-1' }).result;
+    assert.equal(again.status, 'completed');
+    assert.deepEqual(again.remainingBudget, results[1].remainingBudget);
+  } finally {
+    programs.release();
+    reference.release();
+  }
+});
+
 await check('a stores object with a misspelt member, or without the lineage readers, is refused', () => {
   const reference = neograph.memoryStores();
   try {

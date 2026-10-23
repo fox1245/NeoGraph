@@ -332,7 +332,8 @@ export async function load(options = {}) {
     /**
      * Forks the run at the checkpoint it is waiting at, answering the interrupt in the fork. The paused run is not
      * touched and can still be resumed. The fork takes half of what the paused run has left of its budget, or what
-     * `options.budget` asks for, which must leave the paused run some wall time and Core steps.
+     * `options.budget` asks for, which must leave the paused run some wall time and Core steps. Forks of one pause may be made
+     * together: each reads what is left after the forks before it. A fork made again under the same `runId` is that fork.
      * @param {unknown} value what the interrupted node receives in the fork
      * @param {{input?: object, budget?: object, runId?: string, onEvent?: (event: object) => void, signal?: AbortSignal}} [options]
      */
