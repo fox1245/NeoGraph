@@ -405,6 +405,10 @@ public:
     /// The runtimes of one transition store share these claims (see PendingCancellations); set once, when the control
     /// is registered.
     void              set_pending_cancellations(std::shared_ptr<PendingCancellations> pending);
+    /// Answers, for a control, whether a later attempt of the same run executes in this process; set when the control
+    /// is registered. A handle of an attempt that the run has left has nothing to cancel while that attempt executes.
+    void              set_executing_attempt_check(std::function<bool(const RunControl*)> check);
+    bool              superseded_by_executing_attempt() const noexcept;
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
     /// Makes `child` one of this run's children. A child of a run that is already terminal or cancelling is cancelled
@@ -571,6 +575,7 @@ private:
     mutable PureConditionVariable             handoff_cv_;
     std::shared_ptr<ReentrantOperationLock>   handoff_coordination_mutex_;
     std::shared_ptr<PendingCancellations>     pending_cancellations_;
+    std::function<bool(const RunControl*)>    executing_attempt_check_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;
     std::uint64_t                            handoff_request_id_ = 0;

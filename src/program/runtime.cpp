@@ -2733,10 +2733,13 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
                                                        std::optional<ProgramPendingInput>  pending_input,
                                                        std::optional<ProgramPendingEffect> pending_effect) {
     const auto timestamp = now_ms();
-    auto       journal   = ProgramJournalRecord::create(ProgramJournalRecordData{
+    // The attempt of the record that is cancelled, not of the control: a handle of an earlier attempt can cancel the
+    // run once a later attempt has paused, and the journal admits a Cancelled record only in its predecessor's attempt.
+    const auto attempt = previous.continuation().attempt;
+    auto       journal = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous.journal_head(), control.run_id, control.program_version_id, control.bundle_id,
         previous_journal.sequence + 1,
-        ProgramContinuation{"root", ContinuationState::Cancelled, control.attempt},
+        ProgramContinuation{"root", ContinuationState::Cancelled, attempt},
         previous.remaining_budget(), RunBudget{}, previous.exact_checkpoint(), timestamp});
     ProgramResultData result_data;
     result_data.status             = ProgramTerminalStatus::Cancelled;
@@ -2744,7 +2747,7 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
     result_data.program_version_id = control.program_version_id;
     result_data.bundle_id          = control.bundle_id;
     result_data.operation_id       = control.operation_id;
-    result_data.attempt            = control.attempt;
+    result_data.attempt            = attempt;
     result_data.remaining_budget   = previous.remaining_budget();
     result_data.checkpoint         = previous.exact_checkpoint();
     auto       cancelled_result    = ProgramResult::create(std::move(result_data));
@@ -2754,7 +2757,7 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
                      control.program_version_id, control.bundle_id, control.operation_id,
                      checkpoint ? checkpoint->core_generation_id : std::string{},
                      checkpoint ? checkpoint->core_thread_id : std::string{}, control.trace_id,
-                     control.attempt, ProgramEventKind::Terminal,
+                     attempt, ProgramEventKind::Terminal,
                      ProgramTerminalEvent{ProgramTerminalStatus::Cancelled}});
     ProgramRunRecordData data;
     data.owner_scope                    = control.owner_scope;
@@ -2787,7 +2790,7 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
         journal = ProgramJournalRecord::create(ProgramJournalRecordData{
             previous.journal_head(), control.run_id, control.program_version_id, control.bundle_id,
             previous_journal.sequence + 1,
-            ProgramContinuation{"root", ContinuationState::Failed, control.attempt},
+            ProgramContinuation{"root", ContinuationState::Failed, attempt},
             previous.remaining_budget(), RunBudget{}, previous.exact_checkpoint(), timestamp});
         ProgramResultData blocked_data;
         blocked_data.status             = ProgramTerminalStatus::Failed;
@@ -2795,7 +2798,7 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
         blocked_data.program_version_id = control.program_version_id;
         blocked_data.bundle_id          = control.bundle_id;
         blocked_data.operation_id       = control.operation_id;
-        blocked_data.attempt            = control.attempt;
+        blocked_data.attempt            = attempt;
         blocked_data.remaining_budget   = previous.remaining_budget();
         blocked_data.checkpoint         = previous.exact_checkpoint();
         blocked_data.failure = ProgramFailure{
@@ -2966,8 +2969,29 @@ bool RunControl::cancel_without_waiting(CancellationCause cause, bool durable) n
         cancel_children_in_background(cause);
         return true;
     }
-    // An interrupted run is not executing: its Cancelled state is the store's to record.
-    return durable && interrupted && schedule_interrupted_cancellation(cause);
+    // An interrupted run is not executing: its Cancelled state is the store's to record. This handle may be the handle
+    // of an attempt that the run has left: while a later attempt executes there is nothing to cancel, and the claim
+    // would keep that attempt from being resumed once it pauses.
+    if (!durable || !interrupted || superseded_by_executing_attempt()) return false;
+    return schedule_interrupted_cancellation(cause);
+}
+
+bool RunControl::superseded_by_executing_attempt() const noexcept {
+    try {
+        std::function<bool(const RunControl*)> check;
+        {
+            std::lock_guard lock(mutex_);
+            check = executing_attempt_check_;
+        }
+        return check && check(this);
+    } catch (...) {
+        return false;
+    }
+}
+
+void RunControl::set_executing_attempt_check(std::function<bool(const RunControl*)> check) {
+    std::lock_guard lock(mutex_);
+    executing_attempt_check_ = std::move(check);
 }
 
 // Schedules the Cancelled state of an interrupted run as a task of the executor, and returns whether it did. The claim
@@ -5749,6 +5773,23 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         }
         control->set_pending_cancellations(process_state->pending_cancellations);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
+        // Whether a later attempt of the run executes in this process: a control of the same run, with a higher attempt,
+        // that has no result yet.
+        control->set_executing_attempt_check([weak_process_state](const detail::RunControl* requester) {
+            const auto state = weak_process_state.lock();
+            if (!state) return false;
+            std::vector<std::shared_ptr<detail::RunControl>> later;
+            {
+                std::lock_guard process_lock(state->controls_mutex);
+                for (const auto& entry : state->controls) {
+                    if (entry.owner_scope != requester->owner_scope || entry.run_id != requester->run_id) continue;
+                    if (const auto live = entry.control.lock(); live && live->attempt > requester->attempt)
+                        later.push_back(live);
+                }
+            }
+            return std::any_of(later.begin(), later.end(),
+                               [](const auto& control) { return !control->try_result().has_value(); });
+        });
         control->set_handoff_coordination_mutex(
             process_state->transition_mutex,
             [weak_process_state](const detail::RunControl* requester) {
