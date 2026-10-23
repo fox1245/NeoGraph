@@ -191,6 +191,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - **再開の最初のイベントで投げるハンドラー。** 最初のイベント（`Started`、試行ができる前に渡される）で投げると、保留中の効果を曖昧と記録しないまま `AmbiguousEffect` を返す分岐で終わっていました。その結果は拒否され（`P_RUNTIME_INTERNAL`、"Ambiguous Program result requires one ambiguous pending effect"）、レコードは `running` のまま残りました。現在は、JavaScript の `main()` を持たない Program の再開と同じく `P_EVENT_SINK` の `failed` で終わり、再開が残した残りの予算を持ちます。
   - **変わらないこと。** 呼び出しが始まったあと、つまり呼び出しの最初のイベントまたはそれ以降に終わる実行は、これまでどおり測定された使用量で予約を精算し、呼び出しが使わなかった分を取り戻します。ホストの容量を待っている間（`RuntimeConfig::host_admission`）に止まる再開された実行や、試行が読む時点で Core のチェックポイントが失われている再開された実行は、これまでどおり `P_TRANSITION_CONFLICT` の `failed` で終わり、レコードは `running` のまま残ります。
   - **テスト。** 再開された実行を、Core 呼び出しが始まる前と、呼び出しの最初のイベントで終わらせます。試行をチェックポイントの最初の読み込みで止めた状態でのインメモリと SQLite（`ProgramRuntimeTest`）、テストが回すホストループ（`ProgramHostPumpedStores`）、JavaScript モジュール（`wasm/test/program_test.mjs`）で行います。呼び出しが始まる前に終わる実行は、以前のエンジンでは `P_TRANSITION_CONFLICT` と、`running` のまま残るレコードで失敗し、`Started` でハンドラーが投げる実行は `P_RUNTIME_INTERNAL` で失敗していました。
+- **A2A クライアントは、`Content-Type` がイベントストリームだと示すときだけ応答をイベントストリームとして読みます。** これまでは、本体に `data: ` を含む応答をすべてサーバー送信イベントとみなし、その後のテキストを解析していました。そのため、タスクや `history` にその文字列を含む JSON-RPC 応答（リクエストのメッセージがそのまま返ってくる場合を含む）が `A2A response not valid JSON` で失敗しました。今後は、メディアタイプが `text/event-stream` の応答だけがイベントストリームで、そのメッセージは最初の `data:` イベントです。それ以外の応答はすべて JSON です。**動作変更:** そのコンテンツタイプなしでイベントを送るサーバーは、ストリームとして読まれなくなります。
 
 ### セキュリティ
 

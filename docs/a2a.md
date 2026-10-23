@@ -205,6 +205,8 @@ TaskState.Completed
 
 Other calls on the client: `send_message_stream(text, on_event)` delivers status and artifact updates as they arrive and returns the assembled task; `get_task(id)` reads a task; `cancel_task(id)` cancels one, including a task that waits for input. A message to a task that is already terminal fails with `-32004`. The Python client is in the 0.14.0 wheel, and the Python script above works against this server with it.
 
+A reply is read as JSON unless its `Content-Type` is `text/event-stream`, in which case the JSON-RPC message is its first `data:` event. The text a reply holds never decides, `data: ` included.
+
 ## Use a remote agent as a node
 
 `A2ACallerNode` reads a channel, sends its text to the remote agent and writes the reply into another channel. Several nodes can share one client; their calls run concurrently.

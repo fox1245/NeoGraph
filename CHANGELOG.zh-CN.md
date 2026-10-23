@@ -191,6 +191,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **在恢复的第一个事件处抛出的处理器。** 在第一个事件（`Started`，在尝试出现之前送达）处抛出时，运行会走入一个返回 `AmbiguousEffect` 却没有把待处理效果标记为不明确的分支。该结果被拒绝（`P_RUNTIME_INTERNAL`，"Ambiguous Program result requires one ambiguous pending effect"），记录保持 `running`。现在它与没有 JavaScript `main()` 的 Program 的恢复一样，以 `P_EVENT_SINK` 结束为 `failed`，并带着恢复所留下的剩余预算。
   - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。在等待宿主容量期间（`RuntimeConfig::host_admission`）停止的已恢复运行，或其尝试读取时 Core 检查点已经丢失的已恢复运行，仍会以 `P_TRANSITION_CONFLICT` 结束为 `failed`，记录保持 `running`。
   - **测试。** 在 Core 调用开始之前，以及在调用的第一个事件处，结束一个已恢复的运行：让尝试停在它第一次加载检查点处，在内存存储和 SQLite 上 (`ProgramRuntimeTest`)，在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`)，以及在 JavaScript 模块中 (`wasm/test/program_test.mjs`)。在调用开始之前结束的运行，在之前的引擎上会因 `P_TRANSITION_CONFLICT` 而失败，记录保持 `running`；在 `Started` 处抛出的处理器则因 `P_RUNTIME_INTERNAL` 而失败。
+- **A2A 客户端只有在 `Content-Type` 表明是事件流时，才把响应当作事件流来读。** 以前，只要响应体里含有 `data: `，就把它当作服务器发送事件，并解析其后的文本，所以任务或 `history` 里含有该字符串的 JSON-RPC 响应（包括原样回显请求消息的情况）会以 `A2A response not valid JSON` 失败。现在只有媒体类型为 `text/event-stream` 的响应才是事件流，其消息是第一个 `data:` 事件；其他响应一律是 JSON。**行为变更：** 不带该内容类型而发送事件的服务器，不再被当作流来读。
 
 ### 安全
 

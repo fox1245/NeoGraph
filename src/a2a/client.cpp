@@ -15,7 +15,10 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <optional>
 #include <stdexcept>
+#include <string_view>
 
 namespace neograph::a2a {
 
@@ -33,20 +36,98 @@ std::string normalize_base_url(std::string url) {
     return url;
 }
 
-/// SSE-or-plain JSON parser. A2A Streamable HTTP can return either
-/// the JSON-RPC envelope verbatim or wrapped in `data: {...}` SSE
-/// frames; both round-trip through the same shape.
-json parse_response_body(const std::string& body) {
-    auto data_pos = body.find("data: ");
-    if (data_pos == std::string::npos) {
-        return json::parse(body);
+/// True when a response declares a server-sent-event body: the media type of
+/// its Content-Type, without parameters, is `text/event-stream`.
+bool is_event_stream(const async::HttpResponse& response) {
+    auto type = response.get_header("Content-Type");
+    type = type.substr(0, type.find(';'));
+    while (!type.empty() && (type.front() == ' ' || type.front() == '\t')) type.remove_prefix(1);
+    while (!type.empty() && (type.back() == ' ' || type.back() == '\t')) type.remove_suffix(1);
+    constexpr std::string_view kEventStream = "text/event-stream";
+    return type.size() == kEventStream.size()
+        && std::equal(type.begin(), type.end(), kEventStream.begin(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) == b;
+           });
+}
+
+/// Carve `data:` events out of an SSE byte stream (WHATWG SSE framing).
+/// Holds a tail buffer across calls so an event split across two chunks
+/// survives. Line endings may be LF, CRLF or CR (sse-starlette, which backs
+/// a2a-sdk, emits CRLF); they are normalised to LF before framing. The
+/// `data:` lines of one event are joined with '\n'.
+struct SseFrameSplitter {
+    std::string carry;
+    bool        prev_cr = false;
+
+    void feed(std::string_view chunk,
+              const std::function<void(std::string_view)>& on_frame) {
+        for (char c : chunk) {
+            if (c == '\r') {
+                carry.push_back('\n');
+                prev_cr = true;
+            } else if (c == '\n' && prev_cr) {
+                prev_cr = false;  // second half of a CRLF pair
+            } else {
+                carry.push_back(c);
+                prev_cr = false;
+            }
+        }
+        std::size_t pos = 0;
+        for (;;) {
+            auto end = carry.find("\n\n", pos);
+            if (end == std::string::npos) break;
+            emit(std::string_view(carry.data() + pos, end - pos), on_frame);
+            pos = end + 2;
+        }
+        carry.erase(0, pos);
     }
-    auto json_start = data_pos + 6;
-    auto json_end   = body.find('\n', json_start);
-    auto json_str   = (json_end != std::string::npos)
-                          ? body.substr(json_start, json_end - json_start)
-                          : body.substr(json_start);
-    return json::parse(json_str);
+
+    /// The stream ended: an unterminated last event is still an event.
+    void finish(const std::function<void(std::string_view)>& on_frame) {
+        if (!carry.empty()) emit(carry, on_frame);
+        carry.clear();
+    }
+
+  private:
+    static void emit(std::string_view event,
+                     const std::function<void(std::string_view)>& on_frame) {
+        std::string data;
+        bool has_data = false;
+        std::size_t line_start = 0;
+        while (line_start <= event.size()) {
+            auto line_end = event.find('\n', line_start);
+            std::string_view line = (line_end == std::string_view::npos)
+                                      ? event.substr(line_start)
+                                      : event.substr(line_start, line_end - line_start);
+            if (line.rfind("data:", 0) == 0) {
+                auto payload = line.substr(5);
+                if (!payload.empty() && payload.front() == ' ') payload.remove_prefix(1);
+                if (has_data) data.push_back('\n');
+                data.append(payload);
+                has_data = true;
+            }
+            if (line_end == std::string_view::npos) break;
+            line_start = line_end + 1;
+        }
+        if (has_data) on_frame(data);
+    }
+};
+
+/// The JSON-RPC envelope of a unary reply. The body is JSON unless the
+/// response says it is an event stream (`Content-Type: text/event-stream`),
+/// in which case the envelope is the first `data:` event. What the body
+/// contains never decides: an agent's text may well hold "data: ".
+json parse_response_body(const async::HttpResponse& response) {
+    if (!is_event_stream(response)) return json::parse(response.body);
+    SseFrameSplitter splitter;
+    std::optional<std::string> first;
+    const auto take = [&first](std::string_view payload) {
+        if (!first) first = std::string(payload);
+    };
+    splitter.feed(response.body, take);
+    splitter.finish(take);
+    if (!first) throw json::parse_error("event stream without a data event");
+    return json::parse(*first);
 }
 
 constexpr int kMethodNotFound = -32601;
@@ -361,7 +442,7 @@ A2AClient::post_rpc(const std::string& url, const std::string& method, const jso
 
     json resp;
     try {
-        resp = parse_response_body(res.body);
+        resp = parse_response_body(res);
     } catch (const json::exception& e) {
         throw std::runtime_error(
             std::string("A2A response not valid JSON: ") + e.what());
@@ -605,69 +686,6 @@ Task A2AClient::cancel_task(const std::string& task_id) {
 // message/stream — SSE consumer
 // ---------------------------------------------------------------------------
 namespace {
-
-/// Carve `data:` events out of an SSE byte stream (WHATWG SSE framing).
-/// Holds a tail buffer across calls so an event split across two chunks
-/// survives. Line endings may be LF, CRLF or CR (sse-starlette, which backs
-/// a2a-sdk, emits CRLF); they are normalised to LF before framing. The
-/// `data:` lines of one event are joined with '\n'.
-struct SseFrameSplitter {
-    std::string carry;
-    bool        prev_cr = false;
-
-    void feed(std::string_view chunk,
-              const std::function<void(std::string_view)>& on_frame) {
-        for (char c : chunk) {
-            if (c == '\r') {
-                carry.push_back('\n');
-                prev_cr = true;
-            } else if (c == '\n' && prev_cr) {
-                prev_cr = false;  // second half of a CRLF pair
-            } else {
-                carry.push_back(c);
-                prev_cr = false;
-            }
-        }
-        std::size_t pos = 0;
-        for (;;) {
-            auto end = carry.find("\n\n", pos);
-            if (end == std::string::npos) break;
-            emit(std::string_view(carry.data() + pos, end - pos), on_frame);
-            pos = end + 2;
-        }
-        carry.erase(0, pos);
-    }
-
-    /// The stream ended: an unterminated last event is still an event.
-    void finish(const std::function<void(std::string_view)>& on_frame) {
-        if (!carry.empty()) emit(carry, on_frame);
-        carry.clear();
-    }
-
-  private:
-    static void emit(std::string_view event,
-                     const std::function<void(std::string_view)>& on_frame) {
-        std::string data;
-        bool has_data = false;
-        std::size_t line_start = 0;
-        while (line_start <= event.size()) {
-            auto line_end = event.find('\n', line_start);
-            std::string_view line = (line_end == std::string_view::npos)
-                                      ? event.substr(line_start)
-                                      : event.substr(line_start, line_end - line_start);
-            if (line.rfind("data:", 0) == 0) {
-                auto payload = line.substr(5);
-                if (!payload.empty() && payload.front() == ' ') payload.remove_prefix(1);
-                if (has_data) data.push_back('\n');
-                data.append(payload);
-                has_data = true;
-            }
-            if (line_end == std::string_view::npos) break;
-            line_start = line_end + 1;
-        }
-        if (has_data) on_frame(data);
-    }
-};
 
 /// Fold one stream event into the Task the caller receives at the end.
 /// 1.0 streams have no terminal Task frame: the initial Task plus status /

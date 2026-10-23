@@ -71,6 +71,9 @@ struct MockA2AServer {
     /// When false the well-known card path answers 404 (no card).
     bool serve_card = true;
 
+    /// Send the JSON-RPC reply as one server-sent event instead of a JSON body.
+    bool reply_as_event_stream = false;
+
     /// Card returned from /.well-known/agent-card.json.
     json card = json::parse(R"({
         "name": "mock-agent",
@@ -131,7 +134,12 @@ struct MockA2AServer {
                 envelope["result"] = next_result;
             }
             res.status = 200;
-            res.set_content(envelope.dump(), "application/json");
+            if (reply_as_event_stream) {
+                res.set_content("data: " + envelope.dump() + "\r\n\r\n",
+                                "text/event-stream; charset=utf-8");
+            } else {
+                res.set_content(envelope.dump(), "application/json");
+            }
         });
 
         port = svr.bind_to_any_port("127.0.0.1");
@@ -161,6 +169,31 @@ TEST(A2AClient, FetchAgentCardReadsWellKnownPath) {
     EXPECT_EQ(card.name,             "mock-agent");
     EXPECT_EQ(card.protocol_version, "0.3.0");
     EXPECT_EQ(card.preferred_transport, "JSONRPC");
+}
+
+// A reply is JSON unless its Content-Type says it is an event stream: the text
+// of a task, or of the message it echoes back in `history`, may hold "data: ".
+TEST(A2AClient, ReplyTextHoldingDataColonIsStillJson) {
+    MockA2AServer srv;
+    srv.next_result["history"][0]["parts"][0]["text"] =
+        "Here is the data: 1,2,3\nand data: more";
+    A2AClient client(srv.url());
+    const auto task = client.send_message_sync("data: ping");
+
+    ASSERT_EQ(task.history.size(), 1u);
+    ASSERT_EQ(task.history[0].parts.size(), 1u);
+    EXPECT_EQ(task.history[0].parts[0].text, "Here is the data: 1,2,3\nand data: more");
+}
+
+TEST(A2AClient, ReplyAsAnEventStreamIsReadFromItsDataEvent) {
+    MockA2AServer srv;
+    srv.reply_as_event_stream = true;
+    A2AClient client(srv.url());
+    const auto task = client.send_message_sync("hello");
+
+    EXPECT_EQ(task.id, "task-1");
+    ASSERT_EQ(task.history.size(), 1u);
+    EXPECT_EQ(task.history[0].parts[0].text, "hello back");
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_HARNESS
