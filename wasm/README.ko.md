@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=aac3a26c74fbf5a8e2c5ffc95abe31778174f78dfddfadbe40beb43f11522e20 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=8e30105731bb1ac98766f4394fa60e0e4f62118a6fc7b7636239550b62b97b13 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -179,12 +179,12 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores })`**는 공급자 하나와 저장소 한 벌 위의 `Programs` 객체를 만들며,
+- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`**는 공급자 하나와 저장소 한 벌 위의 `Programs` 객체를 만들며,
   공급자가 잘못되었거나 모듈이 Program 지원 없이 빌드되었으면 `NeoGraphError`를 던집니다. `provider`는 `compile`과 같고 하나가
   더해집니다. `catalogue`는 SDK의 모델 카탈로그(`{ version: 1, models: [...] }`)이며, 내장 카탈로그 위에 덧씌워집니다.
   `owner`는 객체의 Program과 실행의 범위를 정합니다. `stores`는 호스트 자신의 저장소입니다([JavaScript의 Program 저장소](#program-stores-in-javascript)).
   생략한 저장소는 메모리에 있습니다. `limits`는 승인되는 Program에 줄 수 있는 최대치이고, `budget`은 예산을 주지 않은 실행의 예산이며,
-  둘 다 아래처럼 씁니다.
+  둘 다 아래처럼 씁니다. `javascript`는 `{ stackBytes, defineTimeMs }`로, 제어 소스가 쓸 수 있는 스택과 `define()`이 실행될 수 있는 시간이며 예산 뒤에서 설명합니다.
 - **`programs.admit(source)`**는 Program을 컴파일하고 승인한 뒤 `{ id, bundleId, name }`으로 결정됩니다. `source`는 JavaScript 제어
   소스의 텍스트, `{ javascript, name }`, 또는 이미 문서 형태인 Program을 위한 `{ document, name }`입니다. 컴파일러나 승인 정책이
   거부한 소스는 `compile` 또는 `admission` 타입의 `NeoGraphError`로 거부되며, `diagnostics`에 `{ code, message, pointer, witness }`가
@@ -223,8 +223,20 @@ programs.release();
 
 모든 것은 호스트의 이벤트 루프 위에서 실행됩니다. 런타임은 저장소, 타이머, 모델 호출을 거기서 await하며 그중 무엇도 루프를 막지 않습니다.
 제어 소스는 예외입니다. `define()`과 `main()`의 각 단계는 같은 스레드의 QuickJS에서 실행되므로, 끝나지 않는 소스는 시간 제한이
-멈출 때까지 루프를 붙잡습니다. 시간 제한은 Program을 승인할 때 실행되는 `define()`에는 5초이고, `main()`의 단계에는 실행의 벽시계 시간 예산(기본 60초, `budget.wallTimeMs`)입니다.
-QuickJS의 스택 제한이 이 빌드에서는 켜져 있으므로, 끝없이 재귀하거나 파서가 따라갈 수 있는 것보다 깊게 중첩된 소스는 호스트의 스택을 넘치게 하는 대신 진단 `P_JS_RESOURCE_LIMIT`로 실패합니다. `admit`은 `compile` 오류로 거부되고, 그런 `main()`은 실행을 `failed`로 끝냅니다. 이 제한은 모듈 자신의 선형 메모리 스택을 세며, 컴파일러가 얼마를 요구하든 그중 48 KiB만 씁니다. 모듈이 읽을 수도 복구할 수도 없는 호스트의 호출 스택은 무엇이 재귀하느냐에 따라 그 스택보다 1.5배에서 20배 빠르게 소진되기 때문입니다. 48 KiB로는 중첩 호출 약 200개(`sort`의 비교 함수를 거치면 약 30개, `map`의 콜백을 거치면 약 80개)와 소스 안의 중첩 괄호, 배열·객체 리터럴, 호출 약 130개(중첩 함수는 약 40개)를 쓸 수 있으며, 512 KiB를 쓰는 네이티브 빌드는 약 세 배를 허용합니다. 트랩이 없는 Proxy 객체의 체인을 `Object.getPrototypeOf`나 `Object.isExtensible`이 따라가는 경우는 이 제한이 보지 못하며, 약 5,000개의 체인은 여전히 호스트의 스택을 넘치게 합니다. 48 KiB는 Node 22와 24의 호스트 스택(약 984 KiB)에 맞춰 보정한 값입니다. 시험한 형태 중 가장 나쁜 것도 그 스택의 약 3분의 1로 통과하며, 스택이 더 작은 호스트는 여유가 더 적습니다. 진단의 witness는 `max_stack_bytes`에 컴파일러가 요구한 한도가 아니라 이 48 KiB를 보고합니다.
+멈출 때까지 루프를 붙잡습니다. 시간 제한은 Program을 승인할 때 실행되는 `define()`에는 5초(`javascript.defineTimeMs`로 1밀리초부터 3,600,000밀리초까지 다른 시간을 정할 수 있습니다)이고, `main()`의 단계에는 실행의 벽시계 시간 예산(기본 60초, `budget.wallTimeMs`)입니다.
+QuickJS의 스택 제한이 이 빌드에서는 켜져 있으므로, 끝없이 재귀하거나 파서가 따라갈 수 있는 것보다 깊게 중첩된 소스는 호스트의 스택을 넘치게 하는 대신 진단 `P_JS_RESOURCE_LIMIT`로 실패합니다. `admit`은 `compile` 오류로 거부되고, 그런 `main()`은 실행을 `failed`로 끝냅니다. 이 제한은 모듈 자신의 선형 메모리 스택을 세며 `define()`과 `main()`에 똑같이 적용되고, 진단 witness의 `max_stack_bytes`는 적용 중인 크기를 보고합니다. 개발자가 `javascript.stackBytes`로 다른 크기를 고르지 않으면 48 KiB입니다. 제어 소스가 얼마나 깊이 들어갈 수 있는지는 크기에 따라 늘어나며, KiB당 중첩 호출 약 4개입니다.
+
+| `stackBytes` | 중첩 호출 | `sort`의 비교 함수를 거치는 호출 | `map`의 콜백을 거치는 호출 | 소스 안의 중첩 괄호, 배열·객체 리터럴, 호출 |
+| --- | --- | --- | --- | --- |
+| 48 KiB (49152, 기본값) | 190 | 32 | 57 | 131 |
+| 96 KiB | 382 | 64 | 115 | 265 |
+| 128 KiB | 510 | 85 | 154 | 354 |
+
+512 KiB의 C 스택을 쓰는 네이티브 빌드는 모듈이 기본값에서 허용하는 것의 약 네 배의 중첩 호출(x86-64의 GCC에서 약 700개이며 컴파일러와 그 옵션에 따라 다릅니다)과 소스 안 중첩 리터럴(약 500개)을 허용합니다. 트랩이 없는 Proxy 객체의 체인을 `Object.getPrototypeOf`나 `Object.isExtensible`이 따라가는 경우는 이 제한이 보지 못하며, 약 5,000개의 체인은 여전히 호스트의 스택을 넘치게 합니다. 파서가 따라갈 수 있는 것보다 깊게 중첩된 함수도 거부되지만, 항상 이 진단으로 거부되는 것은 아닙니다. 함수 표현식(기본값에서 약 40단계)은 `P_JS_RESOURCE_LIMIT`로 끝나고, 함수 선언(약 180단계)과 기본 크기에서의 화살표 함수(약 85단계)는 `P_JS_EVALUATION`과 `SyntaxError: missing formal parameter`라는 메시지로 끝납니다. 엔진이 그 위치에서 파서의 넘침을 구문 오류로 보고하기 때문입니다. 어느 경우든 `admit`은 `compile` 오류로 거부됩니다.
+
+크기는 개발자가 정하며, 모듈이 강제하는 한계는 하나입니다. `stackBytes`는 16384부터 모듈 자신의 스택이 담을 수 있는 크기까지의 정수이고, 이 디렉터리가 빌드하는 모듈에서는 983,040입니다(1 MiB의 스택에서 64 KiB를 뺀 값이며, 이 64 KiB는 엔진 자신의 예약분과 엔진이 시작할 때 이미 스택에 쌓여 있는 프레임입니다). 더 큰 값, 정수가 아닌 값, 존재하지 않는 멤버는 `programs()`를 호출할 때 한계를 밝히는 오류와 함께 거부됩니다. 호스트 자신의 호출 스택이 얼마나 견디는지는 모듈이 읽을 수 없는데, 먼저 바닥나는 것은 그쪽입니다. 호스트의 스택은 모듈의 스택보다 빨리 소진되며, 일반 호출은 약 1.5배, 시험한 형태 중 가장 나쁜 것인 깊게 중첩된 데이터의 `JSON.stringify`는 약 6~7배 빠릅니다. 호스트 스택이 약 984 KiB인 Node 22와 24에서 최적화 컴파일러와 기준 컴파일러(`node --liftoff-only`) 모두로 측정하면, `wasm/test/program_test.mjs`가 거부하는 17가지 형태(호출, getter, Proxy 트랩, `sort`·`map`·`JSON.parse`의 콜백을 거치는 재귀, 생성자와 제너레이터, 5,000개의 bound 함수를 거쳐 닿는 생성자, 100,000단계로 중첩된 데이터의 `JSON.stringify`와 `Array.prototype.flat`, 100,000단계로 중첩된 텍스트의 `JSON.parse`, 2,000단계로 중첩된 소스)는 모두 48, 64, 96, 128, 144 KiB에서 `P_JS_RESOURCE_LIMIT`로 끝납니다. 160 KiB에서는 중첩된 데이터의 `JSON.stringify`가 호스트의 스택을 넘치게 하고, 192 KiB에서는 그 데이터의 `Array.prototype.flat`도 그러하며, 256 KiB에서는 일곱 가지 형태가, 512 KiB에서는 열네 가지 형태가 그렇습니다. 호스트의 스택을 절반으로 줄이면(`node --stack-size=492`) 모든 형태가 잡히는 가장 큰 크기는 64 KiB이고, 96 KiB에서는 같은 두 형태가 넘칩니다. 따라서 호스트 스택의 8분의 1(Node의 스택에서는 약 123 KiB)은 이 형태들 모두에서 잡히고, 4분의 1은 그렇지 않습니다. 기본값 48 KiB는 처음으로 넘친 크기의 3분의 1입니다. `stackBytes`는 소스가 필요로 하는 만큼만 올리고, 그 소스를 실행할 호스트의 호출 스택(Worker, 브라우저 탭, Node 프로세스는 스택이 저마다 다릅니다)의 8분의 1 안에 두며, 끝없이 재귀하는 소스를 그 호스트에서 설정대로 시험해 본 뒤에 믿으세요. 호스트의 스택이 견디지 못하는 크기는 아래에 설명한 트랩으로 끝납니다.
+
+네이티브와 모듈 양쪽에서 실행되는 소스는 모듈의 제한 안에 두어야 합니다. 네이티브 빌드는 소스를 실행하는 스레드의 C 스택을 세며 기본값은 512 KiB(`define()`은 `JavaScriptCompileLimits::max_stack_bytes`, `main()`은 `RuntimeConfig::javascript_stack_bytes`)이고, 모듈은 자신의 스택을 세며 기본값은 48 KiB입니다. 호출 하나가 쓰는 바이트 수가 둘에서 다릅니다. 따라서 같은 소스가 한쪽에서는 거부되고 다른 쪽에서는 실행될 수 있습니다. 양쪽을 위한 소스는 위 표의 작은 쪽 수치(중첩 호출 190개, 중첩 리터럴 131개)에 맞춰 쓰거나, 두 제한을 측정한 깊이로 맞추세요.
 
 신뢰하지 않는 제어 소스를 승인하는 호스트는 버릴 수 있는 Worker에서 그렇게 해야 합니다. 위의 제한은 시험해 본 재귀의 형태를 막지만, WebAssembly의 트랩은 같은 모듈 인스턴스에서 복구할 수 없습니다. 호스트의 스택이 넘치면 호출은 결정되지 않고, 그 인스턴스는 쓸 수 없게 되며, Node에서는 호스트가 처리하지 않으면 잡히지 않은 `RangeError`로 프로세스가 종료됩니다. 모듈에서는 호스트가 신뢰하거나 검증한 제어 소스만 실행하세요.
 

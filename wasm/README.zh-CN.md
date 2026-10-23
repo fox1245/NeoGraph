@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=aac3a26c74fbf5a8e2c5ffc95abe31778174f78dfddfadbe40beb43f11522e20 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=8e30105731bb1ac98766f4394fa60e0e4f62118a6fc7b7636239550b62b97b13 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -168,10 +168,10 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores })`** 创建一个基于一个提供方和一套存储的 `Programs` 对象；提供方无效，或模块构建时不带 Program 支持，
+- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** 创建一个基于一个提供方和一套存储的 `Programs` 对象；提供方无效，或模块构建时不带 Program 支持，
   就抛出 `NeoGraphError`。`provider` 与 `compile` 相同，只多一项：`catalogue`，即 SDK 的模型目录（`{ version: 1, models: [...] }`），它叠加在内置目录之上。`owner` 为该对象的
   Program 和运行划定范围。`stores` 是宿主自己的存储（[JavaScript 中的 Program 存储](#program-stores-in-javascript)）；省略的存储放在内存中。`limits` 是任何被准入的 Program 可获得的上限，
-  `budget` 是没有给出预算的运行所用的预算，二者的写法见下。
+  `budget` 是没有给出预算的运行所用的预算，二者的写法见下。`javascript` 是 `{ stackBytes, defineTimeMs }`，即控制源码可以使用的栈，以及 `define()` 可以运行的时间，在预算之后说明。
 - **`programs.admit(source)`** 编译并准入 Program，以 `{ id, bundleId, name }` 完成。`source` 是 JavaScript 控制源码的文本、`{ javascript, name }`，或者给已经是文档形式的 Program 用的
   `{ document, name }`。被编译器或准入策略拒绝的源码，会以 `compile` 或 `admission` 类型的 `NeoGraphError` 被拒绝，其 `diagnostics` 列出 `{ code, message, pointer, witness }`。再次准入同一份源码，得到同一个版本。
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** 立即返回一个 `ProgramRun`。**`programs.run(version, options)`** 就是 `start(...).result`。
@@ -194,8 +194,20 @@ programs.release();
 - **错误。** 除 `compile` 和 `admission` 之外，运行时的拒绝是 `program` 类型的 `NeoGraphError`，带 `code`（例如预算超出该版本准入范围时为 `P_START_BUDGET`）和它的 `witness`。
 
 一切都在宿主的事件循环上运行：运行时在那里 await 它的存储、定时器和模型调用，这些都不会阻塞它。控制源码是例外：`define()` 和 `main()` 的每一步都在同一个线程的 QuickJS 中运行，
-永不结束的源码会占住循环，直到时间限制把它停下：`define()` 在 Program 被准入时运行，限时 5 秒；`main()` 的各步受运行的墙钟时间预算限制（默认 60 秒，`budget.wallTimeMs`）。
-QuickJS 的栈限制在这个构建中是开启的，所以无限递归、或嵌套得比解析器能跟上的更深的源码，会以诊断 `P_JS_RESOURCE_LIMIT` 失败，而不是让宿主的栈溢出：`admit` 以 `compile` 错误被拒绝，出现这种情况的 `main()` 会让其运行以 `failed` 结束。这一限制数的是模块自己在线性内存中的栈，无论编译器要求多少，只用其中的 48 KiB，因为模块既读不到也无法从中恢复的宿主调用栈，按递归的内容不同，消耗得比它快 1.5 到 20 倍。48 KiB 允许约 200 层嵌套调用（经过 `sort` 的比较函数约 30 层，经过 `map` 的回调约 80 层），以及源码中约 130 层嵌套的括号、数组或对象字面量和调用（嵌套函数约 40 层）；使用 512 KiB 的原生构建允许约三倍。这一限制看不到由 `Object.getPrototypeOf` 或 `Object.isExtensible` 跟随的、没有陷阱的 Proxy 对象链：约 5,000 个这样的链仍会让宿主的栈溢出。48 KiB 是针对 Node 22 和 24 的宿主栈（约 984 KiB）校准的：试过的形态里最差的一种，在大约三分之一的栈下仍能通过，栈更小的宿主余量更少。诊断的 witness 在 `max_stack_bytes` 中报告的是这 48 KiB，而不是编译器要求的上限。
+永不结束的源码会占住循环，直到时间限制把它停下：`define()` 在 Program 被准入时运行，限时 5 秒（`javascript.defineTimeMs` 可以在 1 到 3,600,000 毫秒之间另选一个时间）；`main()` 的各步受运行的墙钟时间预算限制（默认 60 秒，`budget.wallTimeMs`）。
+QuickJS 的栈限制在这个构建中是开启的，所以无限递归、或嵌套得比解析器能跟上的更深的源码，会以诊断 `P_JS_RESOURCE_LIMIT` 失败，而不是让宿主的栈溢出：`admit` 以 `compile` 错误被拒绝，出现这种情况的 `main()` 会让其运行以 `failed` 结束。这一限制数的是模块自己在线性内存中的栈，对 `define()` 和 `main()` 同样适用，诊断 witness 中的 `max_stack_bytes` 报告生效的大小。开发者不用 `javascript.stackBytes` 另选大小时，它是 48 KiB。控制源码能走多深随大小增长，每 KiB 约 4 层嵌套调用：
+
+| `stackBytes` | 嵌套调用 | 经过 `sort` 比较函数的调用 | 经过 `map` 回调的调用 | 源码中嵌套的括号、数组或对象字面量、调用 |
+| --- | --- | --- | --- | --- |
+| 48 KiB（49152，默认值） | 190 | 32 | 57 | 131 |
+| 96 KiB | 382 | 64 | 115 | 265 |
+| 128 KiB | 510 | 85 | 154 | 354 |
+
+使用 512 KiB C 栈的原生构建，允许的嵌套调用约为模块在默认值下允许的四倍（x86-64 上的 GCC 约为 700 层，随编译器及其选项而异），源码中的嵌套字面量也约为四倍（约 500 层）。这一限制看不到由 `Object.getPrototypeOf` 或 `Object.isExtensible` 跟随的、没有陷阱的 Proxy 对象链：约 5,000 个这样的链仍会让宿主的栈溢出。嵌套得比解析器能跟上的更深的函数同样会被拒绝，但并不总是以这个诊断被拒绝：函数表达式（默认值下约 40 层）以 `P_JS_RESOURCE_LIMIT` 结束，而函数声明（约 180 层）以及默认大小下的箭头函数（约 85 层）以 `P_JS_EVALUATION` 和消息 `SyntaxError: missing formal parameter` 结束，因为引擎在该位置把解析器的溢出报告为语法错误。无论哪种情况，`admit` 都以 `compile` 错误被拒绝。
+
+大小由开发者决定，模块只强制一项界限：`stackBytes` 是从 16384 到模块自己的栈所能容纳的大小之间的整数，在本目录构建的模块里是 983,040（1 MiB 的栈减去 64 KiB，这 64 KiB 是引擎自己的预留，以及引擎启动时栈上已有的帧）。更大的值、不是整数的值、不存在的成员，都会在调用 `programs()` 时被拒绝，错误信息会写明界限。宿主自己的调用栈能承受多少，模块读不到，而最先耗尽的正是它：宿主的栈比模块的栈消耗得更快，普通调用约快 1.5 倍，试过的形态里最差的一种，即对嵌套很深的数据做 `JSON.stringify`，约快 6 到 7 倍。在宿主栈约 984 KiB 的 Node 22 和 24 上，分别用优化编译器和基线编译器（`node --liftoff-only`）测量，`wasm/test/program_test.mjs` 所拒绝的 17 种形态（经过调用、getter、Proxy 陷阱、`sort`、`map` 和 `JSON.parse` 回调的递归，构造函数和生成器，经过 5,000 个 bound 函数才到达的构造函数，对嵌套 100,000 层的数据做 `JSON.stringify` 和 `Array.prototype.flat`，对嵌套 100,000 层的文本做 `JSON.parse`，以及嵌套 2,000 层的源码）在 48、64、96、128 和 144 KiB 下都以 `P_JS_RESOURCE_LIMIT` 结束。到 160 KiB 时，对嵌套数据做 `JSON.stringify` 会让宿主的栈溢出，到 192 KiB 时对该数据做 `Array.prototype.flat` 也会，256 KiB 时有七种形态会，512 KiB 时有十四种。把宿主的栈减半（`node --stack-size=492`）后，所有形态都能被拦住的最大大小是 64 KiB，96 KiB 时同样的两种形态会溢出。所以宿主栈的八分之一（Node 的栈约为 123 KiB）对这些形态都能拦住，四分之一则不能。默认的 48 KiB 是最先溢出的大小的三分之一。`stackBytes` 只按源码的需要调高，并保持在运行它的宿主调用栈的八分之一以内（Worker、浏览器标签页和 Node 进程的栈各不相同），而且在信赖某个设置之前，先在那个宿主上用无限递归的源码试一试：宿主的栈承受不了的大小，会以下面描述的陷阱告终。
+
+既要在原生又要在模块中运行的源码，应当保持在模块的限制之内。原生构建数的是运行源码的线程的 C 栈，默认 512 KiB（`define()` 用 `JavaScriptCompileLimits::max_stack_bytes`，`main()` 用 `RuntimeConfig::javascript_stack_bytes`），模块数的是自己的栈，默认 48 KiB，而一次调用在两者中用掉的字节数不同。因此同一份源码可能在一边被拒绝、在另一边却能运行：面向两者的源码，要按上表中较小的数字来写（190 层嵌套调用、131 层嵌套字面量），或者把两个限制设成测量过的深度。
 
 准入不受信任的控制源码的宿主，应当在可以丢弃的 Worker 里进行。上面的限制能挡住试过的递归形态，但 WebAssembly 中的陷阱无法在同一个模块实例里恢复：宿主的栈一旦溢出，调用永远不会敲定，该实例随之无法使用，在 Node 中，若宿主不处理，未捕获的 `RangeError` 会使进程退出。请只在模块中运行宿主信任或已审查过的控制源码。
 

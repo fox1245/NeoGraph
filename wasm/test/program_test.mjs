@@ -709,12 +709,11 @@ await check('a control source that recurses too deep is refused and the module g
 });
 
 await check('the witness of a stack overflow reports the stack that was applied', () => withProgram(async (programs) => {
-  // The compiler asks for 512 KiB; the module applies at most 48 KiB, and the witness says so.
+  // A module applies 48 KiB unless the developer chooses another (see below), and the witness says so.
   await assert.rejects(programs.admit(RUNAWAY['direct recursion']), (error) => {
     const diagnostic = error.diagnostics.find((d) => d.code === 'P_JS_RESOURCE_LIMIT');
     assert.ok(diagnostic, JSON.stringify(error.diagnostics));
-    const applied = diagnostic.witness.max_stack_bytes;
-    assert.ok(applied > 0 && applied <= 48 * 1024, JSON.stringify(diagnostic.witness));
+    assert.equal(diagnostic.witness.max_stack_bytes, 48 * 1024, JSON.stringify(diagnostic.witness));
     return true;
   });
 }));
@@ -742,7 +741,7 @@ await check('a main() that recurses without end fails its run and the module goe
     const result = await settles(programs.start(version, { input: ask('x') }).result, 'the run');
     assert.equal(result.status, 'failed');
     assert.equal(result.failure.code, 'P_JS_RESOURCE_LIMIT');
-    assert.ok(result.failure.witness.max_stack_bytes <= 48 * 1024, JSON.stringify(result.failure.witness));
+    assert.equal(result.failure.witness.max_stack_bytes, 48 * 1024, JSON.stringify(result.failure.witness));
     assert.equal(server.requests.length, before, 'no model call was sent');
     const good = await settles(programs.admit(SOURCE), 'a later admit');
     assert.equal((await settles(programs.start(good, { input: ask('after') }).result, 'a later start')).status, 'interrupted');
@@ -750,6 +749,130 @@ await check('a main() that recurses without end fails its run and the module goe
   } finally {
     process.off('uncaughtException', record);
     process.off('unhandledRejection', record);
+    programs.release();
+  }
+});
+
+// The stack of the control source is the developer's choice: `javascript.stackBytes` of programs({...}), 48 KiB unless
+// it is given. The checks below raise it to 96 KiB, twice the default, because that is the value at which the recursion
+// shapes above (direct recursion among them) were all caught on Node 22 and 24, with the optimizing and with the baseline
+// compiler (wasm/README.md has the figures). A larger value is not tried here: past what the host's own call stack carries
+// the engine does not stop in time, and the instance is lost.
+const RAISED = 96 * 1024;
+const recursion = (depth) => `function f(n) { return n === 0 ? 0 : 1 + f(n - 1); } if (f(${depth}) !== ${depth}) throw new Error("recursion");`;
+const inMain = (body) => SOURCE.replace('export function* main(input) {', `export function* main(input) {\n  ${body}`);
+const isResourceLimit = (error) => error instanceof NeoGraphError && error.type === 'compile'
+  && error.diagnostics.some((d) => d.code === 'P_JS_RESOURCE_LIMIT');
+const witnessOf = (error) => error.diagnostics.find((d) => d.code === 'P_JS_RESOURCE_LIMIT').witness.max_stack_bytes;
+
+await check('a developer can raise the stack of the control source, and a source past it still fails cleanly', async () => {
+  const stray = [];
+  const record = (error) => stray.push(error);
+  process.on('uncaughtException', record);
+  process.on('unhandledRejection', record);
+  const fixed = neograph.programs({ provider: provider() });
+  const raised = neograph.programs({ provider: provider(), javascript: { stackBytes: RAISED } });
+  try {
+    // 300 nested calls are past the default (about 200) and within 96 KiB (about 400), in define() and in main().
+    await settles(assert.rejects(fixed.admit(inDefine(recursion(300))), isResourceLimit), 'admit past the default');
+    const deep = await settles(raised.admit(inDefine(recursion(300))), 'admit at the raised limit');
+    assert.match(deep.id, /^sha256:/);
+    const inMainSource = inMain(recursion(300));
+    const fixedMain = await settles(fixed.admit(inMainSource), 'admit of main() past the default');   // define() is fine
+    const raisedMain = await settles(raised.admit(inMainSource), 'admit of main() at the raised limit');
+    assert.equal(raisedMain.id, fixedMain.id, 'the limit is not part of the identity of a version');
+    const failed = await settles(fixed.start(fixedMain, { input: ask('x') }).result, 'run past the default');
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.failure.code, 'P_JS_RESOURCE_LIMIT');
+    assert.equal(failed.failure.witness.max_stack_bytes, 48 * 1024);
+    assert.equal((await settles(raised.start(raisedMain, { input: ask('x') }).result, 'run at the raised limit')).status, 'interrupted');
+
+    // Past the raised limit a source fails as cleanly as it does past the default, and the witness says what was applied.
+    for (const [name, source] of Object.entries(RUNAWAY)) {
+      await settles(assert.rejects(raised.admit(source), (error) => {
+        assert.ok(isResourceLimit(error), `${name}: ${JSON.stringify(error.diagnostics)}`);
+        assert.equal(witnessOf(error), RAISED, name);
+        return true;
+      }), `admit of ${name} at the raised limit`);
+    }
+    const recursing = await settles(raised.admit(inMain('function g() { return g() + 1; }\n  g();')), 'admit');
+    const endless = await settles(raised.start(recursing, { input: ask('x') }).result, 'the run');
+    assert.equal(endless.status, 'failed');
+    assert.equal(endless.failure.code, 'P_JS_RESOURCE_LIMIT');
+    assert.equal(endless.failure.witness.max_stack_bytes, RAISED);
+    assert.equal((await settles(raised.start(await raised.admit(SOURCE), { input: ask('after') }).result, 'a later start')).status, 'interrupted');
+    assert.deepEqual(stray.map(String), []);
+  } finally {
+    process.off('uncaughtException', record);
+    process.off('unhandledRejection', record);
+    fixed.release();
+    raised.release();
+  }
+});
+
+await check('a stack limit or a define() time limit that makes no sense is refused, and the bounds are stated', async () => {
+  const refused = (javascript) => assert.throws(() => neograph.programs({ provider: provider(), javascript }),
+    (error) => error instanceof NeoGraphError && /javascript/.test(error.message), JSON.stringify(javascript));
+  const bounds = (name, value) => {
+    try {
+      neograph.programs({ provider: provider(), javascript: { [name]: value } }).release();
+    } catch (error) {
+      const found = /from (\d+) to (\d+)/.exec(error.message);
+      assert.ok(found, error.message);
+      return { floor: Number(found[1]), ceiling: Number(found[2]) };
+    }
+    throw new Error(`${name} ${value} was accepted`);
+  };
+  // Every refusal that concerns a member says what the member takes: its bounds, whatever was wrong with the value.
+  const statesBounds = (javascript) => assert.throws(() => neograph.programs({ provider: provider(), javascript }),
+    (error) => error instanceof NeoGraphError && /javascript/.test(error.message) && /from \d+ to \d+/.test(error.message),
+    JSON.stringify(javascript));
+  for (const name of ['stackBytes', 'defineTimeMs']) {
+    for (const value of [0, -1, 1.5, '98304', null, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 53, [1], {}]) {
+      refused({ [name]: value });
+      statesBounds({ [name]: value });
+    }
+  }
+  refused({ stackBytes: 1 });
+  statesBounds({ stackBytes: 1 });
+  refused({ stackByte: RAISED });                 // a misspelt member does not leave the default in force unnoticed
+  statesBounds({ stackByte: RAISED });            // and the refusal says which members there are
+  for (const javascript of [7, 'x', [], [{ stackBytes: RAISED }]]) refused(javascript);
+  const stack = bounds('stackBytes', 2 ** 40);
+  assert.ok(stack.floor <= 48 * 1024 && 48 * 1024 <= RAISED && RAISED <= stack.ceiling, JSON.stringify(stack));
+  for (const stackBytes of [stack.floor, RAISED, stack.ceiling]) neograph.programs({ provider: provider(), javascript: { stackBytes } }).release();
+  refused({ stackBytes: stack.floor - 1 });
+  refused({ stackBytes: stack.ceiling + 1 });
+  const time = bounds('defineTimeMs', 2 ** 40);
+  assert.ok(time.floor <= 1000 && 5000 <= time.ceiling, JSON.stringify(time));
+  for (const defineTimeMs of [time.floor, 5000, time.ceiling]) neograph.programs({ provider: provider(), javascript: { defineTimeMs } }).release();
+  refused({ defineTimeMs: time.floor - 1 });
+  refused({ defineTimeMs: time.ceiling + 1 });
+  // The smallest stack that is accepted still admits and runs a Program.
+  const programs = neograph.programs({ provider: provider(), javascript: { stackBytes: stack.floor } });
+  try {
+    const version = await settles(programs.admit(SOURCE), 'admit at the smallest stack');
+    const result = await settles(programs.start(version, { input: ask('small') }).result, 'start at the smallest stack');
+    assert.equal(result.status, 'interrupted');
+    assert.equal((await settles(programs.start(version, { input: ask('again') }).result, 'start again')).status, 'interrupted');
+  } finally {
+    programs.release();
+  }
+});
+
+await check('the time limit of define() is the developer\'s choice', async () => {
+  const programs = neograph.programs({ provider: provider(), javascript: { defineTimeMs: 1000 } });
+  try {
+    const started = Date.now();
+    await assert.rejects(programs.admit('export function define() { for (;;) {} }'), (error) => {
+      assert.ok(error instanceof NeoGraphError && error.type === 'compile');
+      assert.ok(error.diagnostics.some((d) => d.code === 'P_JS_TIMEOUT'), JSON.stringify(error.diagnostics));
+      return true;
+    });
+    const took = Date.now() - started;
+    assert.ok(took >= 900 && took < 4000, `${took} ms`);     // the default is 5 s
+    assert.equal((await programs.admit(SOURCE)).name, 'js:program');
+  } finally {
     programs.release();
   }
 });

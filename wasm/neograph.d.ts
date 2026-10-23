@@ -228,6 +228,25 @@ export interface MemoryStores extends ProgramStores {
   release(): void;
 }
 
+/**
+ * The limits of the QuickJS runtime that runs a Program's control source. A member that is left out keeps its default; a
+ * value that is not a whole number within its bounds, and a member that does not exist, is refused with a NeoGraphError
+ * that states the bounds.
+ */
+export interface JavaScriptOptions {
+  /**
+   * The stack, in bytes, that `define()` and `main()` may use. The module counts its own stack in linear memory, and a
+   * source that uses more fails with the diagnostic `P_JS_RESOURCE_LIMIT`, whose `witness.max_stack_bytes` is this value.
+   * The default is 49152 (48 KiB). The smallest value is 16384 and the largest is what the module's own stack holds, which
+   * the error of a larger value states. That is more than the host's call stack carries: the host's stack is used up
+   * 1.5 to 7 times as fast, depending on what recurses, and a source that overflows it ends in a trap that the module
+   * cannot recover from, which loses the instance. README.md has what Node's default stack carries.
+   */
+  stackBytes?: number;
+  /** How long `define()` may run when a source is admitted, in milliseconds, from 1 to 3600000. The default is 5000. */
+  defineTimeMs?: number;
+}
+
 export interface ProgramsConfig {
   provider: ProviderConfig;
   /** The owner scope of the Programs and runs. */
@@ -237,6 +256,8 @@ export interface ProgramsConfig {
   limits?: RunBudget;
   /** The budget of a run that gives none. */
   budget?: RunBudget;
+  /** The limits of the control source's runtime. */
+  javascript?: JavaScriptOptions;
 }
 
 export interface Programs {
