@@ -207,6 +207,100 @@ void translate_node_execution_error(std::exception_ptr eptr) {
     }
 }
 
+// ── Plumbing shared by the run, stream and resume entry points ───────────────
+
+using neograph::graph::CancelToken;
+using neograph::graph::GraphEngine;
+using neograph::graph::GraphEvent;
+using neograph::graph::GraphStreamCallback;
+using neograph::graph::RunConfig;
+using neograph::graph::RunMetadata;
+using neograph::graph::RunResult;
+
+// The stream callback of a synchronous entry point. The engine calls it on the thread that drives the run and may
+// copy it into fan-out workers, so the Python callable lives in a shared_ptr whose last owner takes the GIL to
+// drop it. A callback that raises does not stop the run: the callback observes the run, it does not steer it.
+GraphStreamCallback sync_stream_callback(std::optional<py::function> callback) {
+    if (!callback) return {};
+    auto held = std::shared_ptr<py::function>(
+        new py::function(std::move(*callback)), &delete_with_gil<py::function>);
+    return [held](const GraphEvent& event) {
+        py::gil_scoped_acquire acquire;
+        try {
+            (*held)(event);
+        } catch (const py::error_already_set&) {
+            PyErr_Print();
+        }
+    };
+}
+
+// The stream callback of an asyncio entry point. The engine emits on the asio worker; each event hops to the
+// loop thread through call_soon_threadsafe, where the callable runs. The event is copied so the queued call sees
+// a stable object after the emit returns.
+GraphStreamCallback async_stream_callback(
+    const std::shared_ptr<py::object>& loop, std::optional<py::function> callback) {
+    if (!callback) return {};
+    auto held = std::shared_ptr<py::function>(
+        new py::function(std::move(*callback)), &delete_with_gil<py::function>);
+    return [held, loop](const GraphEvent& event) {
+        py::gil_scoped_acquire acquire;
+        try {
+            if (loop->attr("is_closed")().cast<bool>()) return;
+            loop->attr("call_soon_threadsafe")(*held, py::cast(GraphEvent(event)));
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    };
+}
+
+// The Future an asyncio entry point returns and the loop it belongs to, held so that the asio worker can drop
+// them without owning the GIL.
+struct AsyncCall {
+    std::shared_ptr<py::object> future;
+    std::shared_ptr<py::object> loop;
+};
+
+// Creates the Future on the running loop and ties its cancellation to the run: the config's cancel token (the
+// caller's, or one made here) is cancelled when the Future is. GraphEngine forks one child of it per operation,
+// so the cancel reaches the super-step loop and the cooperative stop token of an in-flight SDK request. It is not
+// a provider-side acknowledgement or evidence of zero usage.
+AsyncCall begin_async_call(RunConfig& config) {
+    py::object loop = py::module_::import("asyncio").attr("get_running_loop")();
+    py::object future = loop.attr("create_future")();
+    if (!config.cancel_token) config.cancel_token = std::make_shared<CancelToken>();
+    py::cpp_function on_done([token = config.cancel_token](py::object finished) {
+        try {
+            if (finished.attr("cancelled")().cast<bool>()) token->cancel();
+        } catch (const py::error_already_set&) {
+            PyErr_Clear();
+        }
+    });
+    future.attr("add_done_callback")(on_done);
+    return {hold_py(std::move(future)), hold_py(std::move(loop))};
+}
+
+// What an in-flight coroutine reads: the engine and the Python wrapper that owns dynamic attributes pinning
+// Python-defined Store / CheckpointStore trampolines. The C++ shared_ptr alone does not preserve those overrides.
+struct EngineLease {
+    std::shared_ptr<GraphEngine> engine;
+    std::shared_ptr<py::object> wrapper;
+};
+
+std::shared_ptr<EngineLease> lease_engine(py::object self_obj) {
+    auto engine = self_obj.cast<std::shared_ptr<GraphEngine>>();
+    return std::make_shared<EngineLease>(EngineLease{std::move(engine), hold_py(std::move(self_obj))});
+}
+
+// Runs `run` on the asio runtime and resolves the call's Future with its outcome (or its exception). `keep`
+// stays alive until the completion handler has run.
+void spawn_on_runtime(AsyncCall call, std::shared_ptr<void> keep, asio::awaitable<RunResult> run) {
+    asio::co_spawn(
+        AsyncRuntime::executor(), std::move(run),
+        [call, keep](std::exception_ptr error, RunResult result) {
+            resolve_future_async(call.future, call.loop, error, std::move(result));
+        });
+}
+
 } // namespace
 
 void close_async_runtime() { AsyncRuntime::close_if_started(); }
@@ -997,30 +1091,9 @@ void init_graph(py::module_& m) {
             [](GraphEngine& self,
                const RunConfig& cfg,
                py::function py_cb) {
-                // The engine internally copies the std::function<...>
-                // (each fan-out worker can carry its own copy). If the
-                // std::function holds a py::function directly, copying
-                // it touches the CPython refcount — which is illegal
-                // while the GIL is released. Wrap the callable in a
-                // shared_ptr so copies are pure atomic shared_ptr
-                // increments; the destructor explicitly acquires the
-                // GIL before dropping the py::function.
-                auto sp = std::shared_ptr<py::function>(
-                    new py::function(std::move(py_cb)), &delete_with_gil<py::function>);
-                auto cb = [sp](const GraphEvent& ev) {
-                    py::gil_scoped_acquire acquire;
-                    try {
-                        (*sp)(ev);
-                    } catch (const py::error_already_set&) {
-                        // Don't let a Python callback crash an engine
-                        // worker — print and swallow. The C++ callback
-                        // contract is best-effort observability; we
-                        // don't propagate to keep the run alive.
-                        PyErr_Print();
-                    }
-                };
+                const auto stream = sync_stream_callback(std::move(py_cb));
                 py::gil_scoped_release release;
-                return self.run_stream(cfg, cb);
+                return self.run_stream(cfg, stream);
             },
             py::arg("config"),
             py::arg("callback"),
@@ -1246,59 +1319,17 @@ void init_graph(py::module_& m) {
         // hopped back to the asyncio loop via
         // `loop.call_soon_threadsafe(fut.set_result, …)`.
         //
-        // Keep both the C++ engine and its Python wrapper alive for the
-        // in-flight coroutine. The wrapper owns dynamic attributes that pin
-        // Python-defined Store / CheckpointStore trampoline instances; the
-        // C++ shared_ptr alone is not enough to preserve those overrides.
-        //
-        // run_async and run_stream_async own their config/callback values in
-        // their coroutine frames. The shared_ptr holders here also keep the
-        // Python-facing objects and resume_async's reference parameters alive
-        // until the completion callback runs.
+        // The engine and its Python wrapper stay alive for the in-flight
+        // coroutine (EngineLease), and cancelling the Future cancels the run
+        // (begin_async_call).
         .def("run_async",
             [](py::object self_obj, RunConfig cfg) {
-                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
-                auto self_h = hold_py(std::move(self_obj));
-                py::object asyncio = py::module_::import("asyncio");
-                py::object loop = asyncio.attr("get_running_loop")();
-                py::object future = loop.attr("create_future")();
-
-                auto fut_h  = hold_py(future);
-                auto loop_h = hold_py(loop);
-
-                // Always provide a parent cancel token for Future.cancel.
-                // GraphEngine forks and binds one child per operation.
-                if (!cfg.cancel_token) {
-                    cfg.cancel_token = std::make_shared<CancelToken>();
-                }
-                auto cancel_tok = cfg.cancel_token;
-                auto cfg_h  = std::make_shared<RunConfig>(std::move(cfg));
-
-                // Future cancellation trips the graph operation child and
-                // the SDK request's cooperative stop token. It is not a
-                // provider-side acknowledgement or evidence of zero usage.
-                py::cpp_function on_done(
-                    [cancel_tok](py::object fut) {
-                        try {
-                            if (fut.attr("cancelled")().cast<bool>()) {
-                                cancel_tok->cancel();
-                            }
-                        } catch (const py::error_already_set&) {
-                            PyErr_Clear();
-                        }
-                    });
-                future.attr("add_done_callback")(on_done);
-
-                asio::co_spawn(
-                    AsyncRuntime::executor(),
-                    self->run_async(*cfg_h),
-                    [self, self_h, cfg_h, fut_h, loop_h, cancel_tok]
-                        (std::exception_ptr e, RunResult result) {
-                            resolve_future_async(fut_h, loop_h, e,
-                                                 std::move(result));
-                        });
-
-                return future;
+                auto lease = lease_engine(std::move(self_obj));
+                auto call = begin_async_call(cfg);
+                auto future = call.future;
+                spawn_on_runtime(std::move(call), lease,
+                    lease->engine->run_async(std::move(cfg)));
+                return *future;
             },
             py::arg("config"),
             "Awaitable peer of run(). Use under an asyncio loop:\n\n"
@@ -1321,96 +1352,13 @@ void init_graph(py::module_& m) {
             [](py::object self_obj,
                RunConfig cfg,
                py::function py_cb) {
-                auto self = self_obj.cast<std::shared_ptr<GraphEngine>>();
-                auto self_h = hold_py(std::move(self_obj));
-                py::object asyncio = py::module_::import("asyncio");
-                py::object loop = asyncio.attr("get_running_loop")();
-                py::object future = loop.attr("create_future")();
-
-                auto fut_h  = hold_py(future);
-                auto loop_h = hold_py(loop);
-
-                // v0.3 cancel propagation: same shape as run_async.
-                if (!cfg.cancel_token) {
-                    cfg.cancel_token = std::make_shared<CancelToken>();
-                }
-                auto cancel_tok = cfg.cancel_token;
-                auto cfg_h  = std::make_shared<RunConfig>(std::move(cfg));
-
-                py::cpp_function on_done(
-                    [cancel_tok](py::object fut) {
-                        try {
-                            if (fut.attr("cancelled")().cast<bool>()) {
-                                cancel_tok->cancel();
-                            }
-                        } catch (const py::error_already_set&) {
-                            PyErr_Clear();
-                        }
-                    });
-                future.attr("add_done_callback")(on_done);
-
-                // The user's py::function lives in a shared_ptr with
-                // a GIL-acquiring deleter so std::function copies on
-                // the asio side don't bump CPython refcounts under a
-                // released GIL. (Same idiom as the run_stream binding
-                // in commit 1.)
-                auto cb_h = std::shared_ptr<py::function>(
-                    new py::function(std::move(py_cb)),
-                    [](py::function* p) {
-                        py::gil_scoped_acquire g;
-                        delete p;
-                    });
-
-                // Trampoline lambda hops events from the asio worker
-                // thread onto the asyncio loop thread via
-                // call_soon_threadsafe. ev is heap-copied + handed to
-                // a Python-owned wrapper so the queued call sees a
-                // stable object after the engine emit returns.
-                auto cb_loop_h = loop_h;
-                auto cb_lambda =
-                    [cb_h, cb_loop_h](const GraphEvent& ev) {
-                        py::gil_scoped_acquire g;
-                        try {
-                            if (cb_loop_h->attr("is_closed")()
-                                    .cast<bool>()) return;
-                            auto* ev_owned = new GraphEvent(ev);
-                            py::object ev_py = py::cast(
-                                ev_owned,
-                                py::return_value_policy::take_ownership);
-                            cb_loop_h->attr("call_soon_threadsafe")(
-                                *cb_h, ev_py);
-                        } catch (const py::error_already_set&) {
-                            PyErr_Clear();
-                        }
-                    };
-
-                // Heap-pin the GraphStreamCallback std::function. The
-                // engine's run_stream_async takes `const
-                // GraphStreamCallback&` and the coroutine frame stores
-                // that reference; if we pass a stack-local
-                // std::function, it dies when this lambda returns and
-                // the coroutine reads dangling memory on the asio
-                // worker — segfault deep inside the engine before the
-                // node's Python run(input) ever fires.
-                //
-                // (Caught the hard way: the engine's run_async path
-                // sidesteps this because it constructs the empty
-                // GraphStreamCallback at the call site itself.)
-                auto engine_cb_h =
-                    std::make_shared<GraphStreamCallback>(
-                        std::move(cb_lambda));
-
-                asio::co_spawn(
-                    AsyncRuntime::executor(),
-                    self->run_stream_async(*cfg_h, *engine_cb_h),
-                    [self, self_h, cfg_h, engine_cb_h, fut_h, loop_h,
-                          cancel_tok]
-                        (std::exception_ptr e, RunResult result) {
-                            resolve_future_async(fut_h, loop_h, e,
-                                                 std::move(result));
-                        });
-
-                return future;
+                auto lease = lease_engine(std::move(self_obj));
+                auto call = begin_async_call(cfg);
+                auto future = call.future;
+                auto stream = async_stream_callback(call.loop, std::move(py_cb));
+                spawn_on_runtime(std::move(call), lease,
+                    lease->engine->run_stream_async(std::move(cfg), std::move(stream)));
+                return *future;
             },
             py::arg("config"),
             py::arg("callback"),
