@@ -2085,9 +2085,29 @@ void ACPServer::run() {
 // ---------------------------------------------------------------------------
 ACPClient::ACPClient() = default;
 ACPClient::ACPClient(ACPServer* server) : server_(server) {}
+ACPClient::ACPClient(ServerResolver resolver) : resolver_(std::move(resolver)) {}
 
-void ACPClient::bind(ACPServer* server)             { server_ = server; }
-bool ACPClient::bound() const noexcept              { return server_ != nullptr; }
+void ACPClient::bind(ACPServer* server)             { server_ = server; resolver_ = nullptr; }
+void ACPClient::bind(ServerResolver resolver)       { resolver_ = std::move(resolver); server_ = nullptr; }
+bool ACPClient::bound() const noexcept              { return server_ != nullptr || bool(resolver_); }
+
+ACPServer* ACPClient::target(std::string_view session_id,
+                             std::shared_ptr<ACPServer>& keep,
+                             const char* caller) const {
+    if (resolver_) {
+        keep = resolver_(session_id);
+        if (!keep) {
+            throw std::runtime_error(std::string(caller) + ": no connection serves session "
+                                     + std::string(session_id));
+        }
+        return keep.get();
+    }
+    if (!server_) {
+        throw std::runtime_error(std::string(caller)
+            + ": not bound to a server (call ACPServer::attach_client)");
+    }
+    return server_;
+}
 void ACPClient::set_timeout(std::chrono::milliseconds t) { timeout_ = t; }
 void ACPClient::set_permission_timeout(std::optional<std::chrono::milliseconds> t) {
     permission_timeout_ = t;
@@ -2098,8 +2118,8 @@ ACPClient::read_text_file(std::string_view session_id,
                           std::string_view path,
                           std::optional<int> line,
                           std::optional<int> limit) {
-    if (!server_) throw std::runtime_error(
-        "ACPClient::read_text_file: not bound to a server (call ACPServer::attach_client)");
+    std::shared_ptr<ACPServer> keep;
+    auto* server = target(session_id, keep, "ACPClient::read_text_file");
 
     ReadTextFileRequest req;
     req.session_id = std::string(session_id);
@@ -2108,8 +2128,8 @@ ACPClient::read_text_file(std::string_view session_id,
     req.limit      = limit;
 
     neograph::json params; to_json(params, req);
-    auto result = server_->call_client("fs/read_text_file",
-                                       std::move(params), timeout_);
+    auto result = server->call_client("fs/read_text_file",
+                                      std::move(params), timeout_);
     ReadTextFileResponse resp;
     from_json(result, resp);
     return std::move(resp.content);
@@ -2119,8 +2139,8 @@ void
 ACPClient::write_text_file(std::string_view session_id,
                            std::string_view path,
                            std::string_view content) {
-    if (!server_) throw std::runtime_error(
-        "ACPClient::write_text_file: not bound to a server (call ACPServer::attach_client)");
+    std::shared_ptr<ACPServer> keep;
+    auto* server = target(session_id, keep, "ACPClient::write_text_file");
 
     WriteTextFileRequest req;
     req.session_id = std::string(session_id);
@@ -2128,16 +2148,16 @@ ACPClient::write_text_file(std::string_view session_id,
     req.content    = std::string(content);
 
     neograph::json params; to_json(params, req);
-    (void)server_->call_client("fs/write_text_file",
-                               std::move(params), timeout_);
+    (void)server->call_client("fs/write_text_file",
+                              std::move(params), timeout_);
 }
 
 RequestPermissionOutcome
 ACPClient::request_permission(std::string_view session_id,
                               const ToolCallUpdate& tool_call,
                               const std::vector<PermissionOption>& options) {
-    if (!server_) throw std::runtime_error(
-        "ACPClient::request_permission: not bound to a server (call ACPServer::attach_client)");
+    std::shared_ptr<ACPServer> keep;
+    auto* server = target(session_id, keep, "ACPClient::request_permission");
 
     RequestPermissionRequest req;
     req.session_id = std::string(session_id);
@@ -2147,7 +2167,7 @@ ACPClient::request_permission(std::string_view session_id,
     neograph::json params; to_json(params, req);
     neograph::json result;
     try {
-        result = server_->call_client(
+        result = server->call_client(
             "session/request_permission", std::move(params),
             permission_timeout_.value_or(std::chrono::milliseconds::max()));
     } catch (const neograph::graph::CancelledException&) {
@@ -2162,6 +2182,11 @@ ACPClient::request_permission(std::string_view session_id,
 
 std::vector<std::shared_ptr<neograph::Tool>>
 ACPClient::session_tools(std::string_view session_id) const {
+    if (resolver_) {
+        const auto server = resolver_(session_id);
+        return server ? server->session_tools(session_id)
+                      : std::vector<std::shared_ptr<neograph::Tool>>{};
+    }
     if (!server_) return {};
     return server_->session_tools(session_id);
 }
