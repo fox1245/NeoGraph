@@ -72,9 +72,32 @@
 #define CONFIG_ATOMICS
 #endif
 
-#if !defined(__EMSCRIPTEN__)
-/* enable stack limitation */
+/* enable stack limitation. NeoGraph patch: upstream leaves it out on
+   Emscripten; there the limit is applied to the WebAssembly shadow stack, which
+   js_get_stack_pointer() reads through __builtin_frame_address(0), and is
+   capped by update_stack_limit(). */
 #define CONFIG_STACK_CHECK
+
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/stack.h>
+/* NeoGraph patch: the most shadow-stack bytes the engine may use between the
+   stack top and its limit, whatever JS_SetMaxStackSize() asks for. The shadow
+   stack is not what runs out first. The host's own call stack does (about
+   984 KiB for V8 in Node 22 and 24), and the engine uses it between 1.5 and 20
+   times as fast as it uses the shadow stack, depending on what recurses:
+   calls, the parser, JSON, chains of Proxy objects. When the host's stack is
+   exhausted, the host raises a RangeError that nothing in the module can
+   catch, and the module instance is lost. At this value the recursion shapes
+   that were tried are still caught when it is doubled. */
+#ifndef NEOGRAPH_QUICKJS_WASM_MAX_STACK
+#define NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 * 1024)
+#endif
+/* Shadow-stack bytes below the limit that the engine itself still needs to
+   raise and unwind the error. */
+#define NEOGRAPH_QUICKJS_WASM_STACK_RESERVE (16 * 1024)
+/* Shadow-stack bytes that a bound function adds to every level of a chain
+   (see js_call_bound_function). */
+#define NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD 128
 #endif
 
 
@@ -2849,6 +2872,23 @@ JSRuntime *JS_GetRuntime(JSContext *ctx)
     return ctx->rt;
 }
 
+#if defined(__EMSCRIPTEN__)
+/* NeoGraph patch: there is no unlimited stack here, and the limit never lies
+   below the end of the shadow stack. */
+static void update_stack_limit(JSRuntime *rt)
+{
+    size_t size = rt->stack_size;
+    uintptr_t lowest = (uintptr_t)emscripten_stack_get_end() +
+        NEOGRAPH_QUICKJS_WASM_STACK_RESERVE;
+
+    if (size == 0 || size > NEOGRAPH_QUICKJS_WASM_MAX_STACK)
+        size = NEOGRAPH_QUICKJS_WASM_MAX_STACK;
+    if (rt->stack_top > lowest && rt->stack_top - lowest > size)
+        rt->stack_limit = rt->stack_top - size;
+    else
+        rt->stack_limit = lowest;
+}
+#else
 static void update_stack_limit(JSRuntime *rt)
 {
     if (rt->stack_size == 0) {
@@ -2857,6 +2897,7 @@ static void update_stack_limit(JSRuntime *rt)
         rt->stack_limit = rt->stack_top - rt->stack_size;
     }
 }
+#endif
 
 void JS_SetMaxStackSize(JSRuntime *rt, size_t stack_size)
 {
@@ -17739,7 +17780,14 @@ static JSValue js_call_bound_function(JSContext *ctx, JSValueConst func_obj,
     arg_count = bf->argc + argc;
     if (js_check_stack_overflow(ctx->rt, sizeof(JSValue) * arg_count))
         return JS_ThrowStackOverflow(ctx);
+#if defined(__EMSCRIPTEN__)
+    /* NeoGraph patch: a chain of bound functions uses the host's call stack
+       much faster than the shadow stack, so each level reserves some of it. */
+    arg_buf = alloca(sizeof(JSValue) * arg_count +
+                     NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD);
+#else
     arg_buf = alloca(sizeof(JSValue) * arg_count);
+#endif
     for(i = 0; i < bf->argc; i++) {
         arg_buf[i] = bf->argv[i];
     }
