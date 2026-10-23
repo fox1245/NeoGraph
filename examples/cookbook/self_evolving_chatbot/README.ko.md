@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=5e8b456c422e1632b7dc164f60229dd3372717aa002db3a96e9789dddf02c5c4 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ko source_sha256=0f156d0fd420b1d9eb27d6baf6b13d9976ef73b5af5937e3045b39e10e9e6ca2 -->
 # 매턴 하니스를 제안하는 챗봇
 
 ## 현재 타입 Program chat 계약
@@ -135,7 +135,7 @@ tenant session 기본은 12turn/100model call/200,000model token입니다. dispa
 
 Program compile/operation/Core step/child-depth/wall-time budget은 restart/replacement로 갱신하지 않으며 idle도 wall-time을 소모합니다. dynamic successor는 held checkpoint에서 host-only `ProgramRuntime::reserve_synthesis`로 먼저 예약합니다.
 
-같은 DB/session/provider/model로 재개하면 첫 turn이 family를 reconnect하고 마지막 checkpoint를 reconcile합니다. stored result는 재사용하며 pending/uncertain call은 자동 재전송하지 않습니다. interrupted compilation intent는 무료 재컴파일 없이 남습니다. replacement 전 저장된 admitted successor는 정확한 held checkpoint에서 publish하고 이미 committed replacement는 lineage로 해결합니다. DB/session당 server process 하나만 지원합니다. loopback listener와 `alice-demo`/`bob-demo`는 production 인증이 아니며 explicit cancellation은 process-loss restart와 달리 family를 닫습니다.
+같은 DB/session/provider/model로 재개하면 첫 turn이 family를 reconnect하고 마지막 checkpoint를 reconcile합니다. stored result는 재사용하며 pending/uncertain call은 자동 재전송하지 않습니다. interrupted compilation intent는 무료 재컴파일 없이 남습니다. replacement 전 저장된 admitted successor는 정확한 held checkpoint에서 publish하고 이미 committed replacement는 lineage로 해결합니다. DB/session당 server process 하나만 지원합니다. loopback listener는 loopback `Host` 이름과 자기 origin에만 응답하고(그 밖에는 `403`) 다른 origin의 페이지는 닿지 못합니다. 이 listener와 `alice-demo`/`bob-demo`는 production 인증이 아니며 explicit cancellation은 process-loss restart와 달리 family를 닫습니다.
 
 ## 검증
 
