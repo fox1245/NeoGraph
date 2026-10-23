@@ -332,7 +332,11 @@ private:
  * @brief Optional per-run metadata without changing the stable RunConfig ABI.
  *
  * The engine copies this metadata into RunContext and preserves it through
- * subgraphs. Python does not expose this C++-only extension yet.
+ * subgraphs. Python takes it as `neograph_engine.RunMetadata` on every run,
+ * stream and resume entry point: the deadline (as `timeout_ms`), `trace_id`,
+ * `run_id`, `owner_scope`, `budget_cancel_token` and `resume_interrupt_id`.
+ * The scheduler, executor and retry-ceiling fields serve the Program runtime
+ * and are not exposed.
  */
 struct RunMetadata {
     std::optional<std::chrono::steady_clock::time_point> deadline;
