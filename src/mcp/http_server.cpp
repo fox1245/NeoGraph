@@ -1,5 +1,7 @@
 #include <neograph/mcp/http_server.h>
 
+#include "../core/http_request_guard.h"
+
 // cpp-httplib v0.61.0 uses blocking Server handlers, bounded below with its
 // runtime ThreadPool. Keep the TLS macro consistent with every NeoGraph TU that
 // instantiates httplib types to avoid the macro-gated layout ODR trap.
@@ -45,37 +47,12 @@ json rpc_error(int code, std::string message, json id = nullptr) {
     return response;
 }
 
-bool is_loopback_bind(const std::string& host) {
-    return host == "127.0.0.1" || host == "::1" || host == "localhost";
-}
+using neograph::detail::HttpRequestGuard;
 
 std::string lower(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return value;
-}
-
-// The host of a Host header value, `uri-host [":" port]` (RFC 9110 section
-// 7.2), in lowercase and without its port; nullopt when the value is not of
-// that form. An IPv6 address keeps its brackets. cpp-httplib has already
-// answered 400 to a repeated Host and to characters a Host cannot hold.
-std::optional<std::string> host_name_of(const std::string& value) {
-    std::size_t end = 0;
-    if (!value.empty() && value.front() == '[') {
-        end = value.find(']');
-        if (end == std::string::npos) return std::nullopt;
-        ++end;
-    } else {
-        end = std::min(value.find(':'), value.size());
-    }
-    if (end == 0 || value.compare(0, end, "[]") == 0) return std::nullopt;
-    if (end < value.size()) {
-        if (value[end] != ':') return std::nullopt;
-        for (std::size_t i = end + 1; i < value.size(); ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(value[i]))) return std::nullopt;
-        }
-    }
-    return lower(value.substr(0, end));
 }
 
 bool media_type_contains(const std::string& header, const std::string& expected) {
@@ -248,16 +225,15 @@ struct MCPHttpServer::Impl {
             config.session_idle_timeout.count() < 0) {
             throw std::invalid_argument("MCP HTTP limits and port must be valid");
         }
-        if (!is_loopback_bind(config.host) && !config.bearer_authorizer) {
+        if (!HttpRequestGuard::is_loopback_bind(config.host) && !config.bearer_authorizer) {
             throw std::invalid_argument("remote MCP HTTP binds require a bearer authorizer");
         }
-        for (const auto& name : config.allowed_hosts) {
-            if (name != "*" && host_name_of(name) != lower(name)) {
-                throw std::invalid_argument(
-                    "MCP HTTP allowed_hosts entries are host names without a port, "
-                    "IPv6 addresses in brackets, or *");
-            }
-        }
+        HttpRequestGuard::require_host_names(
+            config.allowed_hosts,
+            "MCP HTTP allowed_hosts entries are host names without a port, "
+            "IPv6 addresses in brackets, or *");
+        guard.allowed_hosts   = config.allowed_hosts;
+        guard.allowed_origins = config.allowed_origins;
         if (!config.protected_resource_metadata.is_null()) {
             metadata_url = metadata_url_of(config.protected_resource_metadata);
             const auto& metadata = config.protected_resource_metadata;
@@ -337,9 +313,8 @@ struct MCPHttpServer::Impl {
     std::thread         listener;
     std::atomic<bool>   running{false};
     int                 bound_port = 0;
-    /// Own loopback origins admitted without a listing, each reported once.
-    mutable std::mutex               admitted_origins_mutex;
-    mutable std::vector<std::string> admitted_origins;
+    /// The Host and Origin checks (DNS rebinding).
+    HttpRequestGuard guard{"MCP HTTP server"};
 
     std::mutex                                      sessions_mutex;
     std::map<std::string, std::shared_ptr<Session>> sessions;
@@ -386,74 +361,30 @@ struct MCPHttpServer::Impl {
     // names and the listed ones; a remote bind checks Host only when
     // allowed_hosts lists names.
     bool validate_host(const httplib::Request& request, httplib::Response& response) const {
-        const auto& allowed  = config.allowed_hosts;
-        const bool  loopback = is_loopback_bind(config.host);
-        if ((!loopback && allowed.empty()) ||
-            std::find(allowed.begin(), allowed.end(), "*") != allowed.end()) {
-            return true;
+        switch (guard.check_host(request.has_header("Host")
+                                     ? std::optional<std::string>(request.get_header_value("Host"))
+                                     : std::nullopt)) {
+            case HttpRequestGuard::Verdict::Allowed:
+                return true;
+            case HttpRequestGuard::Verdict::HostMissingOrInvalid:
+                http_error(response, 400, -32600, "Host header is missing or invalid");
+                return false;
+            default:
+                http_error(response, 403, -32003, "Host is not allowed");
+                return false;
         }
-        const auto name = request.has_header("Host")
-                              ? host_name_of(request.get_header_value("Host"))
-                              : std::nullopt;
-        if (!name) {
-            http_error(response, 400, -32600, "Host header is missing or invalid");
-            return false;
-        }
-        if (loopback && (*name == "localhost" || *name == "127.0.0.1" || *name == "[::1]")) {
-            return true;
-        }
-        for (const auto& entry : allowed) {
-            if (lower(entry) == *name) return true;
-        }
-        http_error(response, 403, -32003, "Host is not allowed");
-        return false;
     }
 
+    // On a loopback bind a page with the server's own loopback origin needs
+    // no listing (#491); the guard knows the rule.
     bool validate_origin(const httplib::Request& request, httplib::Response& response) const {
-        if (!request.has_header("Origin")) return true;
-        const auto origin = request.get_header_value("Origin");
-        if (std::find(config.allowed_origins.begin(), config.allowed_origins.end(), origin) !=
-            config.allowed_origins.end()) {
-            return true;
-        }
-        if (own_loopback_origin(origin)) {
-            report_admitted_origin(origin);
+        if (guard.check_origin(request.has_header("Origin")
+                                   ? std::optional<std::string>(request.get_header_value("Origin"))
+                                   : std::nullopt) == HttpRequestGuard::Verdict::Allowed) {
             return true;
         }
         http_error(response, 403, -32003, "Origin is not allowed");
         return false;
-    }
-
-    // A browser sends the origin of the page it runs. On a loopback bind, a
-    // page with this server's own loopback address and port is served by
-    // this machine, so its origin needs no listing (#491). Browsers send it
-    // in this form: lowercase, no path, no default port. A DNS-rebinding page
-    // sends its own origin and is refused.
-    bool own_loopback_origin(const std::string& origin) const {
-        if (!is_loopback_bind(config.host)) return false;
-        const auto port = bound_port == 80 ? std::string() : ":" + std::to_string(bound_port);
-        for (const char* host : {"localhost", "127.0.0.1", "[::1]"}) {
-            if (origin == "http://" + std::string(host) + port) return true;
-        }
-        return false;
-    }
-
-    void report_admitted_origin(const std::string& origin) const {
-        {
-            std::lock_guard lock(admitted_origins_mutex);
-            if (std::find(admitted_origins.begin(), admitted_origins.end(), origin) !=
-                admitted_origins.end()) {
-                return;
-            }
-            admitted_origins.push_back(origin);
-        }
-        // FILE* stderr: see graph_executor.cpp.
-        std::fprintf(stderr,
-                     "[neograph] warning: the MCP HTTP server admits Origin %s, its own loopback "
-                     "origin, although allowed_origins does not list it. A page on another "
-                     "origin still has to be listed.\n",
-                     origin.c_str());
-        std::fflush(stderr);
     }
 
     bool expired(const Session& session, Clock::time_point now) const {
@@ -834,10 +765,12 @@ struct MCPHttpServer::Impl {
     bool bind() {
         if (config.port == 0) {
             bound_port = http.bind_to_any_port(config.host);
-            return bound_port >= 0;
+            if (bound_port < 0) return false;
+        } else {
+            if (!http.bind_to_port(config.host, config.port)) return false;
+            bound_port = config.port;
         }
-        if (!http.bind_to_port(config.host, config.port)) return false;
-        bound_port = config.port;
+        guard.bind(config.host, bound_port);
         return true;
     }
 
