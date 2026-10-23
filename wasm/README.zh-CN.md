@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=f395370984ce0ff537b358013a071205c840787625f2913d3f21b30ca3a238cc -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=ba4298418fa697a43ef969c9b091a7532203e3e70a0436e231cc9a90df616c0a -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -194,7 +194,7 @@ programs.release();
 
 一切都在宿主的事件循环上运行：运行时在那里 await 它的存储、定时器和模型调用，这些都不会阻塞它。控制源码是例外：`define()` 和 `main()` 的每一步都在同一个线程的 QuickJS 中运行，
 永不结束的源码会占住循环，直到时间限制把它停下：`define()` 在 Program 被准入时运行，限时 5 秒；`main()` 的各步受运行的墙钟时间预算限制（默认 60 秒，`budget.wallTimeMs`）。
-QuickJS 的栈限制在这个构建中是开启的，所以无限递归、或嵌套得比解析器能跟上的更深的源码，会以诊断 `P_JS_RESOURCE_LIMIT` 失败，而不是让宿主的栈溢出：`admit` 以 `compile` 错误被拒绝，出现这种情况的 `main()` 会让其运行以 `failed` 结束。这一限制数的是模块自己在线性内存中的栈，无论编译器要求多少，只用其中的 48 KiB，因为模块既读不到也无法从中恢复的宿主调用栈，按递归的内容不同，消耗得比它快 1.5 到 20 倍。48 KiB 允许约 200 层嵌套调用（经过 `sort` 的比较函数约 30 层，经过 `map` 的回调约 80 层），以及源码中约 130 层嵌套的括号、数组或对象字面量和调用（嵌套函数约 40 层）；使用 512 KiB 的原生构建允许约三倍。这一限制看不到由 `Object.getPrototypeOf` 或 `Object.isExtensible` 跟随的、没有陷阱的 Proxy 对象链：约 5,000 个这样的链仍会让宿主的栈溢出。48 KiB 是针对 Node 22 和 24 的宿主栈（约 984 KiB）校准的：试过的形态里最差的一种，在大约三分之一的栈下仍能通过，栈更小的宿主余量更少。
+QuickJS 的栈限制在这个构建中是开启的，所以无限递归、或嵌套得比解析器能跟上的更深的源码，会以诊断 `P_JS_RESOURCE_LIMIT` 失败，而不是让宿主的栈溢出：`admit` 以 `compile` 错误被拒绝，出现这种情况的 `main()` 会让其运行以 `failed` 结束。这一限制数的是模块自己在线性内存中的栈，无论编译器要求多少，只用其中的 48 KiB，因为模块既读不到也无法从中恢复的宿主调用栈，按递归的内容不同，消耗得比它快 1.5 到 20 倍。48 KiB 允许约 200 层嵌套调用（经过 `sort` 的比较函数约 30 层，经过 `map` 的回调约 80 层），以及源码中约 130 层嵌套的括号、数组或对象字面量和调用（嵌套函数约 40 层）；使用 512 KiB 的原生构建允许约三倍。这一限制看不到由 `Object.getPrototypeOf` 或 `Object.isExtensible` 跟随的、没有陷阱的 Proxy 对象链：约 5,000 个这样的链仍会让宿主的栈溢出。48 KiB 是针对 Node 22 和 24 的宿主栈（约 984 KiB）校准的：试过的形态里最差的一种，在大约三分之一的栈下仍能通过，栈更小的宿主余量更少。诊断的 witness 在 `max_stack_bytes` 中报告的是这 48 KiB，而不是编译器要求的上限。
 
 准入不受信任的控制源码的宿主，应当在可以丢弃的 Worker 里进行。上面的限制能挡住试过的递归形态，但 WebAssembly 中的陷阱无法在同一个模块实例里恢复：宿主的栈一旦溢出，调用永远不会敲定，该实例随之无法使用，在 Node 中，若宿主不处理，未捕获的 `RangeError` 会使进程退出。请只在模块中运行宿主信任或已审查过的控制源码。
 

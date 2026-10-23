@@ -243,7 +243,8 @@ of `map`) and about 130 nested parentheses, array or object literals or calls in
 native build, with 512 KiB, allows about three times as many. The limit does not see a chain of Proxy objects without
 traps that `Object.getPrototypeOf` or `Object.isExtensible` follows: a chain of about 5,000 of them still overflows the
 host's stack. The 48 KiB is calibrated against the host stack of Node 22 and 24, about 984 KiB: the worst of the shapes
-that were tried still passes with about a third of that stack, and a host with a smaller stack has less margin.
+that were tried still passes with about a third of that stack, and a host with a smaller stack has less margin. The
+witness of the diagnostic reports the 48 KiB in `max_stack_bytes`, not the limit that the compiler asked for.
 
 A host that admits control sources it does not trust should do so in a Worker that it can discard. The limit above stops
 the shapes of recursion that were tried, but a trap in WebAssembly cannot be recovered in the same module instance: if the

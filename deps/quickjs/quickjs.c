@@ -80,17 +80,19 @@
 
 #if defined(__EMSCRIPTEN__)
 #include <emscripten/stack.h>
-/* NeoGraph patch: the most shadow-stack bytes the engine may use between the
-   stack top and its limit, whatever JS_SetMaxStackSize() asks for. The shadow
-   stack is not what runs out first. The host's own call stack does (about
-   984 KiB for V8 in Node 22 and 24), and the engine uses it between 1.5 and 20
-   times as fast as it uses the shadow stack, depending on what recurses:
-   calls, the parser, JSON, chains of Proxy objects. When the host's stack is
-   exhausted, the host raises a RangeError that nothing in the module can
-   catch, and the module instance is lost. At this value the recursion shapes
-   that were tried are still caught when it is doubled. */
+/* NeoGraph patch: NEOGRAPH_QUICKJS_WASM_MAX_STACK is the most shadow-stack
+   bytes the engine may use between the stack top and its limit, whatever
+   JS_SetMaxStackSize() asks for. It is defined in neograph/quickjs-prefix.h, so
+   that NeoGraph's JavaScript runtime can report it. The shadow stack is not
+   what runs out first. The host's own call stack does (about 984 KiB for V8 in
+   Node 22 and 24), and the engine uses it between 1.5 and 20 times as fast as
+   it uses the shadow stack, depending on what recurses: calls, the parser,
+   JSON, chains of Proxy objects. When the host's stack is exhausted, the host
+   raises a RangeError that nothing in the module can catch, and the module
+   instance is lost. At this value the recursion shapes that were tried are
+   still caught when it is doubled. */
 #ifndef NEOGRAPH_QUICKJS_WASM_MAX_STACK
-#define NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 * 1024)
+#error "NEOGRAPH_QUICKJS_WASM_MAX_STACK comes from neograph/quickjs-prefix.h"
 #endif
 /* Shadow-stack bytes below the limit that the engine itself still needs to
    raise and unwind the error. */

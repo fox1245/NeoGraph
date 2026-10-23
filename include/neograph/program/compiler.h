@@ -22,8 +22,10 @@ namespace neograph::program {
 
 struct JavaScriptCompileLimits {
     std::size_t   memory_limit_bytes          = 32u * 1024u * 1024u;
-    /// Stack bytes the control runtime may use. A WebAssembly (Emscripten) build counts the module's own stack in
-    /// linear memory and applies at most 48 KiB, whatever this asks for (deps/quickjs/NEOGRAPH_PROVENANCE).
+    /// Stack bytes the control runtime may use. A WebAssembly (Emscripten) build counts the module's
+    /// own stack in linear memory and applies at most 48 KiB, whatever this asks for
+    /// (deps/quickjs/NEOGRAPH_PROVENANCE); the `max_stack_bytes` of a limit diagnostic's witness
+    /// reports the value applied.
     std::size_t   max_stack_bytes             = 512u * 1024u;
     std::uint64_t max_interrupt_polls         = 1'000'000u;
     std::uint64_t max_wall_time_ms            = 60'000u;
