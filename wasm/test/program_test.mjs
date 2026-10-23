@@ -193,6 +193,152 @@ await check('a fork answers the same pause another way and the first call is not
   assert.deepEqual(replies(resumed), [replyTo('Fork me'), replyTo('approved')]);
 }));
 
+// What a fork is given, from the `started` event of its run (the journal's budget members are snake_case).
+const grantedTo = (events) => events.find((event) => event.kind === 'started').payload;
+const half = (value) => (value > 1 ? Math.floor(value / 2) : value);
+
+await check('forks of one pause started in the same tick take their shares one after another', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Many') });
+  const paused = await original.result;
+  assert.equal(paused.status, 'interrupted');
+  const left = paused.remainingBudget;
+
+  // Three forks in the same turn of the event loop: none of them can wait for another to finish. Each takes half of what the
+  // forks before it left, because the share is read from the paused run's lineage once the earlier forks have debited it.
+  // (Half of the tokens left after two forks still pays for the model call that each fork makes.)
+  const seen = [[], [], []];
+  const forks = seen.map((events, i) => original.fork(`answer-${i}`, {
+    runId: `run-same-tick-${i}`, onEvent: (event) => events.push(event),
+  }));
+  const results = await Promise.all(forks.map((fork) => fork.result));
+  assert.deepEqual(results.map((r) => r.status), ['completed', 'completed', 'completed']);
+  assert.deepEqual(results.map((r) => r.runId), forks.map((fork) => fork.id));
+
+  const granted = seen.map(grantedTo);
+  const expected = { model_tokens: left.modelTokens, max_core_steps: left.maxCoreSteps, max_program_operations: left.maxProgramOperations };
+  for (const [i, share] of granted.entries()) {
+    for (const [member, remaining] of Object.entries(expected)) {
+      assert.equal(share[member], half(remaining), `fork ${i} took half of what the earlier forks left of ${member}`);
+      expected[member] = remaining - share[member];
+    }
+  }
+  assert.ok(granted.every((share) => share.wall_time_ms > 0 && share.max_core_steps > 0));
+
+  // The paused run keeps what the forks left, and is resumable: its own second call is the only one it adds.
+  const resumed = await original.resume('own answer').result;
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.remainingBudget.modelTokens, expected.model_tokens - resumed.usage.modelTokens);
+  assert.deepEqual(replies(resumed), [replyTo('Many'), replyTo('own answer')]);
+}));
+
+await check('forks of one pause started in the same tick end at the budget, in order, and never in a conflict', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Too many') });
+  const paused = await original.result;
+  assert.equal(paused.status, 'interrupted');
+  const left = paused.remainingBudget;
+  // Every fork halves what is left, so the amounts shrink until a fork cannot pay for a model call (its run ends
+  // `budget_exhausted`) and, when the Core steps left are the ones it would take, until the fork is refused for the budget.
+  const seen = Array.from({ length: 10 }, () => []);
+  const forks = seen.map((events, i) => original.fork(`answer-${i}`, { runId: `run-crowd-${i}`, onEvent: (event) => events.push(event) }));
+  const outcomes = await Promise.allSettled(forks.map((fork) => fork.result));
+  const ran = outcomes.filter((outcome) => outcome.status === 'fulfilled');
+  const refused = outcomes.filter((outcome) => outcome.status === 'rejected');
+  assert.ok(ran.length >= 3 && refused.length >= 1, `ran ${ran.length}, refused ${refused.length}`);
+  assert.deepEqual(outcomes.map((outcome) => outcome.status),
+    [...ran.map(() => 'fulfilled'), ...refused.map(() => 'rejected')], 'the refusals come last');
+  assert.deepEqual(ran.slice(0, 3).map((outcome) => outcome.value.status), ['completed', 'completed', 'completed']);
+  for (const outcome of ran.slice(3)) assert.equal(outcome.value.status, 'budget_exhausted');
+  for (const outcome of refused) {
+    assert.ok(outcome.reason instanceof NeoGraphError);
+    assert.equal(outcome.reason.type, 'program');
+    assert.equal(outcome.reason.code, 'P_FORK_SOURCE_BUDGET');
+  }
+  // What the forks that ran were given adds up to less than the paused run had, and it keeps some of each.
+  const given = seen.slice(0, ran.length).map(grantedTo);
+  const total = (member) => given.reduce((sum, share) => sum + share[member], 0);
+  assert.ok(total('model_tokens') < left.modelTokens);
+  assert.ok(total('max_core_steps') < left.maxCoreSteps);
+  assert.ok(total('max_program_operations') <= left.maxProgramOperations);
+  assert.ok(total('wall_time_ms') < left.wallTimeMs);
+}));
+
+await check('a fork that waits for its turn can be cancelled, and the forks behind it still take theirs', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Cancel in line') });
+  assert.equal((await original.result).status, 'interrupted');
+  const forks = ['a', 'b', 'c'].map((answer) => original.fork(answer, { runId: `run-line-${answer}` }));
+  // The forks are sent (a send is a microtask) while the first is still being made: the second is cancelled in its place.
+  await sleep(0);
+  assert.equal(await forks[1].cancel(), true);
+  const results = await Promise.all(forks.map((fork) => fork.result));
+  assert.deepEqual(results.map((result) => result.status), ['completed', 'cancelled', 'completed']);
+  assert.equal((await original.resume('own').result).status, 'completed', 'the paused run keeps what is left');
+}));
+
+await check('forks that ask for more than the paused run has left are refused for the budget, not for a conflict', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Greedy') });
+  const paused = await original.result;
+  const want = Math.floor(paused.remainingBudget.modelTokens * 0.6);
+  const outcomes = await Promise.allSettled([0, 1, 2].map((i) =>
+    original.fork(`answer-${i}`, { runId: `run-greedy-${i}`, budget: { modelTokens: want } }).result));
+  assert.equal(outcomes[0].status, 'fulfilled');
+  assert.equal(outcomes[0].value.status, 'completed');
+  for (const outcome of outcomes.slice(1)) {
+    assert.equal(outcome.status, 'rejected');
+    assert.equal(outcome.reason.code, 'P_FORK_BUDGET', 'the second fork asks for more than the first left');
+  }
+  const resumed = await original.resume('rest').result;
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.remainingBudget.modelTokens, paused.remainingBudget.modelTokens - want - resumed.usage.modelTokens);
+}));
+
+await check('a fork made again under its run id is that fork with the share it was given', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Replay') });
+  const paused = await original.result;
+  const events = [];
+  const first = await original.fork('x', { runId: 'run-replayed', onEvent: (event) => events.push(event) }).result;
+  assert.equal(first.status, 'completed');
+  const sibling = await original.fork('y', { runId: 'run-sibling' }).result;
+  assert.equal(sibling.status, 'completed');
+  const given = grantedTo(events);
+  assert.equal(given.model_tokens, half(paused.remainingBudget.modelTokens));
+
+  // The record of the fork holds the amounts it was given, so the same request later is the same fork: the share is not
+  // taken again from what the sibling left, and nothing is debited a second time.
+  const before = server.requests.length;
+  const again = await original.fork('x', { runId: 'run-replayed' }).result;
+  assert.equal(again.runId, 'run-replayed');
+  assert.equal(again.status, first.status);
+  assert.deepEqual(again.remainingBudget, first.remainingBudget);
+  assert.deepEqual(again.output, first.output);
+  assert.equal(server.requests.length, before, 'the fork was not run again');
+  await assert.rejects(original.fork('another answer', { runId: 'run-replayed' }).result,
+    (error) => error instanceof NeoGraphError && error.code === 'P_RUN_CONFLICT');
+
+  const resumed = await original.resume('own').result;
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.remainingBudget.modelTokens,
+    paused.remainingBudget.modelTokens - given.model_tokens
+      - (sibling.remainingBudget.modelTokens + sibling.usage.modelTokens) - resumed.usage.modelTokens);
+}));
+
+await check('a fork made again with another budget, or under the id of a run that is not its fork, is a conflict that debits nothing', () => withProgram(async (programs, version) => {
+  const original = programs.start(version, { input: ask('Mismatch') });
+  const paused = await original.result;
+  const first = await original.fork('x', { runId: 'run-first-fork' }).result;
+  assert.equal(first.status, 'completed');
+  const conflict = (error) => error instanceof NeoGraphError && error.type === 'program' && error.code === 'P_RUN_CONFLICT';
+  // The stored share is only where the request starts from: what the request asks for is still compared with the record.
+  await assert.rejects(original.fork('x', { runId: 'run-first-fork', budget: { modelTokens: 5 } }).result, conflict);
+  const plain = programs.start(version, { input: ask('Not a fork'), runId: 'run-not-a-fork' });
+  assert.equal((await plain.result).status, 'interrupted');
+  await assert.rejects(original.fork('x', { runId: 'run-not-a-fork' }).result, conflict);
+  // Nothing was debited but the first fork's share.
+  const resumed = await original.resume('own').result;
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.remainingBudget.modelTokens,
+    paused.remainingBudget.modelTokens - half(paused.remainingBudget.modelTokens) - resumed.usage.modelTokens);
+}));
+
 await check('a paused run is cancelled, and the stores keep what happened to it', () => withProgram(async (programs, version) => {
   const run = programs.start(version, { input: ask('Stop here') });
   assert.equal((await run.result).status, 'interrupted');

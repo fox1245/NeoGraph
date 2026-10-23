@@ -43,6 +43,7 @@
 #include <utility>
 #include <vector>
 
+#include "operation_lock.h"
 #include "provider_binding.h"
 
 namespace {
@@ -299,6 +300,9 @@ struct Host {
     // arrives meanwhile (an event handler that threw does that) is kept and applied once the handle exists.
     std::set<std::string> starting;
     std::set<std::string> cancel_requested;
+    // The forks of one paused run take their turns (see fork_handle), one lock per paused run. A lock lives while a fork holds
+    // or awaits it, and its entry is dropped by the next fork that finds it expired.
+    std::map<std::string, std::weak_ptr<neograph::program::detail::OperationLock>> fork_turns;
     bool closed = false;
 
     Host(const json& config, int stores_handle) {
@@ -459,7 +463,7 @@ struct Host {
         const auto source_run = options.at("runId").get<std::string>();
         const auto new_run    = options.at("newRunId").get<std::string>();
         const auto version    = options.at("version").get<std::string>();
-        // From here until the handle exists the fork can be cancelled by name, whatever the lineage read below waits for.
+        // From here until the handle exists the fork can be cancelled by name, whatever its turn and the stores take to answer.
         begin_run(new_run);
         std::optional<ProgramHandle> handle;
         try {
@@ -474,15 +478,37 @@ struct Host {
         co_return result_json(result);
     }
 
+    std::shared_ptr<neograph::program::detail::OperationLock> fork_turns_of(const std::string& source_run) {
+        auto& slot = fork_turns[source_run];
+        if (auto held = slot.lock()) return held;
+        auto made = std::make_shared<neograph::program::detail::OperationLock>();
+        slot      = made;
+        std::erase_if(fork_turns, [](const auto& entry) { return entry.second.expired(); });
+        return made;
+    }
+
+    // What a fork of `source_run` that runs as `new_run` is given unless its options say otherwise. A fork that was made
+    // before has the amounts its record holds, which are what the runtime compares a repeated request with: the same fork
+    // again is the same fork, and the share is not taken a second time from what the forks since then left. Otherwise it is
+    // half of what the paused run has left, read from the lineage, where a fork's share is debited.
+    asio::awaitable<RunBudget> fork_share_of(const std::string& source_run, const std::string& new_run) {
+        const auto made = co_await transitions->load(owner, new_run);
+        if (made && made->fork_source_run_id() == source_run) co_return made->invocation().budget;
+        const auto lineage = co_await transitions->load_run_lineage(owner, source_run);
+        if (!lineage) throw std::invalid_argument("no run " + source_run + " to fork");
+        co_return fork_share(lineage->remaining_budget());
+    }
+
     asio::awaitable<ProgramHandle> fork_handle(json options, int call, std::string source_run, std::string new_run,
                                                std::string version) {
         std::shared_ptr<ProgramEventSink> sink;
         if (options.value("stream", false)) sink = std::make_shared<JsEventSink>(call);
-        // The fork takes its share of what the paused run has left now. The lineage is where a fork's share is debited, so
-        // a second fork of the same pause takes half of the rest, not half of what the run had when it paused.
-        const auto lineage = co_await transitions->load_run_lineage(owner, source_run);
-        if (!lineage) throw std::invalid_argument("no run " + source_run + " to fork");
-        const auto share = fork_share(lineage->remaining_budget());
+        // The forks of one paused run take their turns, from the read of what the run has left to the publication of the
+        // fork, which debits it. The share of each is then half of what the forks before it left, however many are made in
+        // the same turn of the event loop and however long the stores take to answer.
+        const auto turns = fork_turns_of(source_run);
+        const auto turn  = co_await turns->lock_async();
+        const auto share = co_await fork_share_of(source_run, new_run);
         auto request = invocation(options, version, new_run, budget_from(options.value("budget", json::object()), share),
                                   options.value("input", json::object()));
         request.message_sequence = 2;

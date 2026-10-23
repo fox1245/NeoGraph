@@ -185,7 +185,7 @@ export interface ForkOptions extends ProgramRunOptions {
   input?: object;
   /** Overrides what the fork takes of the paused run's remaining budget; it must leave the paused run some wall time and Core steps. */
   budget?: RunBudget;
-  /** The id of the fork. Generated when left out. */
+  /** The id of the fork. Generated when left out. A fork made again under the same id is that fork, with the amounts it was first given. */
   runId?: string;
 }
 
@@ -197,7 +197,10 @@ export interface ProgramRun {
   readonly result: Promise<ProgramResult>;
   /** Answers the interrupt the run waits at and continues it. */
   resume(value?: unknown, options?: ProgramRunOptions): ProgramRun;
-  /** Forks the run at the checkpoint it waits at, answering the interrupt in the fork. The paused run stays resumable. */
+  /**
+   * Forks the run at the checkpoint it waits at, answering the interrupt in the fork. The paused run stays resumable. The forks
+   * of one pause may be made together; each takes half of what the paused run has left after the forks before it.
+   */
   fork(value?: unknown, options?: ForkOptions): ProgramRun;
   /**
    * Resolves with whether this call cancelled the run (false when it had already ended). A resume or a fork that has not

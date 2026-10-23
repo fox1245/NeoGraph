@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=ba4298418fa697a43ef969c9b091a7532203e3e70a0436e231cc9a90df616c0a -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=31b192c3ba74646e6ecec9c863a9f0dda6a3cc8af3096d929a12c9b87511ad95 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -177,7 +177,7 @@ programs.release();
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** 立即返回一个 `ProgramRun`。**`programs.run(version, options)`** 就是 `start(...).result`。
 - **`ProgramRun`** 有 `id`、`versionId`、`result`、`resume(value, options)`、`fork(value, options)` 和 `cancel()`。`result` 在运行结束或等待回答时完成；失败或被取消的运行以该状态完成，
   只有调用本身无法发出时才被拒绝（未知的版本、超出该版本准入范围的预算、已经用过的 run id）。`resume` 回答运行所等待的中断，并返回 id 相同的 `ProgramRun`。`fork` 把同一次暂停作为新的运行
-  （`options.runId` 为它命名）继续下去，带着它自己的回答，拿走暂停的运行所剩预算的一半（或 `options.budget` 所要求的数量，它必须给暂停的运行留下一些墙钟时间和 Core 步骤），并让暂停的运行仍可恢复；已经完成的节点不会再次运行。同一次暂停的分叉请一个接一个地做。`cancel()` 以“这次调用是否取消了该运行”完成。
+  （`options.runId` 为它命名）继续下去，带着它自己的回答，拿走暂停的运行所剩预算的一半（或 `options.budget` 所要求的数量，它必须给暂停的运行留下一些墙钟时间和 Core 步骤），并让暂停的运行仍可恢复；已经完成的节点不会再次运行。同一次暂停的多个分叉可以一起创建：它们依次轮流，每个分叉读取前面的分叉给暂停的运行留下的数量，并拿走其中的一半。要拿走暂停的运行所剩的全部墙钟时间或 Core 步骤的分叉会被拒绝（`P_FORK_SOURCE_BUDGET`），要求超过剩余数量的分叉也会被拒绝（`P_FORK_BUDGET`），两者都不是冲突。以同一个 `runId` 再次创建的分叉就是那个分叉，保有它最初得到的数量。已发出、在等待轮到自己时被取消的分叉，仍会在轮到它时拿走自己的份额，然后以取消结束。`cancel()` 以“这次调用是否取消了该运行”完成。
   尚未发出的 resume 或 fork（它在等待所继续的运行的结果）会被 `cancel()` 或已中止的 `signal` 撤回，其 `result` 以 `cancelled` 错误被拒绝；`signal` 一开始就已中止，则不会发出调用。
 - **`programs.result(runId)`** 读取存储中关于某次运行的内容：它最新的结果（等待中的运行的暂停也算结果），还没有结果时为 `{ runId, status: 'running' }`，存储不认识该运行时为 `null`。**`programs.release()`** 取消正在执行的运行并释放对象，已经发出的调用先完成。
   在中断处等待的运行在存储中保持原样。
@@ -475,12 +475,12 @@ CI 构建该模块，并在 Node 22 和 24 下运行以下测试，不需要网�
 - `test/llm_host_test.mjs`：本地 HTTP 服务器像 Chat Completions 端点一样应答，包括缓冲响应，以及一个字符被切在两个数据块之间的
   服务器发送事件响应。测试通过模块运行单节点图，检查最终状态、流式事件的顺序、发出的请求（运行时给出的密钥和模型）、
   提供方的拒绝、通过 `AbortSignal` 取消、超时、并发运行，以及模型调用进行期间宿主的定时器仍在运行。
-- `test/program_test.mjs`：针对同一个服务器的 Program API。Program 被编译并准入（被拒绝的源码会说明原因），运行流式输出事件、在中断处暂停并被恢复，分叉在不重新询问第一次调用的情况下给同一次暂停另一个回答，
+- `test/program_test.mjs`：针对同一个服务器的 Program API。Program 被编译并准入（被拒绝的源码会说明原因），运行流式输出事件、在中断处暂停并被恢复，分叉在不重新询问第一次调用的情况下给同一次暂停另一个回答，在事件循环的同一轮中创建的同一次暂停的分叉各拿走前面的分叉所剩的一半、其余的因预算被拒绝，再次创建的分叉保有自己的份额，
   暂停的运行被取消并从存储读回，同时进行的运行各自保持自己的回答，`AbortSignal` 关闭模型调用的连接，`onEvent` 抛出的错误会取消它的运行。发出之前被取消的 fork 会被撤回，已中止的 signal 不会启动任何东西，永不结束的控制源码会被时间限制停下，递归过深的源码（`define()` 和源码中的十七种形态，以及 `main()`）会带着诊断失败，并让模块之后仍能准入和运行 Program。必须保持为失败的失败也被检查：
   目录里没有上限的模型不会被调用，无法覆盖一次调用的预算会在调用发出之前耗尽运行，超出版本准入范围的预算被拒绝，密钥不在任何结果或事件中。Node 示例作为子进程运行。
 - `test/program_stores_test.mjs`：模块的 `stores` 选项。参考存储原样、以及包装成在后续任务中应答，都能服务完整的生命周期（调用之间宿主的定时器继续运行）；被拒绝的调用、抛出的错误和不是值的值，
   都带着存储的消息和方法名 fail closed，且不调用模型；缺少必需方法的对象被拒绝；一个把变化写入日志的包装层，让第二个对象在由日志重放得到的存储之上读回已完成的运行，看到暂停的运行仍在暂停，
-  并启动第一个对象的 Program；存储仍在应答时被取消的 fork 以取消结束；拼错的成员和缺少的谱系读取方法会被拒绝；释放对象会取消正在执行的运行，让等待的运行保持原样。
+  并启动第一个对象的 Program；存储仍在应答时被取消的 fork 以取消结束，一起创建的 fork 依次拿走各自的份额；拼错的成员和缺少的谱系读取方法会被拒绝；释放对象会取消正在执行的运行，让等待的运行保持原样。
 - `test/workers_test.mjs`：以 `Request` 调用 Workers 示例导出的 `fetch` 处理程序，对着同一个服务器，分别缓冲和流式。它展示的是
   处理程序的逻辑及其对平台 API 的使用，并不是在 workerd 上运行。
 - `checks.cpp`（见下文）对宿主驱动的提供方运行一次同步运行，检查它被拒绝且没有发送任何东西。

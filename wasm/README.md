@@ -199,7 +199,9 @@ programs.release();
   version admits, a run id that was used before). `resume` answers the interrupt the run waits at and returns a `ProgramRun` with
   the same id. `fork` continues the same pause as a new run (`options.runId` names it) with its own answer, takes half
   of what the paused run has left of its budget (or what `options.budget` asks for, which must leave the paused run some wall time and Core steps), and leaves
-  the paused run resumable; the finished node is not run again. Make the forks of one pause one after another. `cancel()` resolves with whether this call cancelled
+  the paused run resumable; the finished node is not run again. The forks of one pause may be made together: they take their turns, and each reads what the paused run has left after the forks
+  before it, so each takes half of what the forks before it left. A fork that would take all the wall time or Core steps the paused run has left is refused
+  (`P_FORK_SOURCE_BUDGET`), and so is one that asks for more than it has left (`P_FORK_BUDGET`); neither is a conflict. A fork made again under the same `runId` is that fork, with the amounts it was first given. A fork that is cancelled after it was sent, while it waits for its turn, still takes its turn and its share and then ends cancelled. `cancel()` resolves with whether this call cancelled
   the run. A resume or a fork that has not been sent yet, because it waits for the run it continues, is withdrawn by
   `cancel()` or an aborted `signal` instead, and its `result` rejects with a `cancelled` error; a `signal` that is
   aborted already means the call is not made.
@@ -577,7 +579,8 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   while a call is in flight.
 - `test/program_test.mjs`: the Program API against the same server. A Program is compiled and admitted (and a refused
   source says why), a run streams its events, pauses at the interrupt and is resumed, a fork answers the same pause another
-  way without asking the first call again, a paused run is cancelled and read back from the stores, runs in flight
+  way without asking the first call again, the forks of one pause made in the same turn of the event loop take half of what the
+  earlier ones left and the rest are refused for the budget, a fork made again keeps its share, a paused run is cancelled and read back from the stores, runs in flight
   together keep their own answers, an `AbortSignal` closes the connection of a model call, and an error thrown by
   `onEvent` cancels its run. A fork that is cancelled before it is sent is withdrawn, an aborted signal starts nothing, and a
   control source that never ends is stopped by its time limit, while one that recurses too deep (seventeen shapes in
@@ -590,7 +593,7 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   value that is not one fail closed with the store's message and the name of the method, and the model is not called; an
   object without a required method is refused; a wrapper that writes what changes to a log lets a second object, over a
   store replayed from the log, read back a finished run, see that a paused one is still paused and start the first object's
-  Program; a fork cancelled while the stores are still answering ends cancelled; a misspelt member and a missing lineage
+  Program; a fork cancelled while the stores are still answering ends cancelled, and forks made together take their shares in turn; a misspelt member and a missing lineage
   reader are refused; releasing an object cancels a run that is executing and leaves one that waits as it is.
 - `test/workers_test.mjs`: the Workers example's exported `fetch` handler is called with a `Request` against the same
   server, buffered and streamed. It shows the handler's logic and its use of the platform APIs; it is not a run on
