@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=4b649bf22d24cddb4680ff9e204e21718eeabbd674b7430877bed4b2405d17e0 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -380,6 +380,8 @@ Pythonでは、Python専用のスケジューラーを別に用意するので�
 
 生の `ProgramCatalog`、遷移ストア、置き換え／マイグレーションのコントローラー、合成ゲートウェイ、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。権限を持つこれらの経路の一部だけを公開すると、必須の `proposal -> compile -> admit -> publish -> migrate/spawn` のプロトコルを迂回できてしまいます。`_HAVE_PROGRAM` は、生のコントロールプレーンの管理までC++と同等であることを示すものではありません。
 
+`GraphEngine::run_until_safe_point_async` と `resume_from_until_safe_point_async` には、Pythonでの対応メソッドがありません。セーフポイントのリクエストは正確に1つの `GraphGenerationIdentity` を指し、エンジンは、その世代（generation）にリンクされている場合にだけリクエストを受け付けます。Programカタログは、実体化するエンジンに対してこのリンクを行います。`GraphEngine.compile` は世代を持たないエンジンを作るので、すべてのリクエストを拒否します。セーフポイントの取得は、上に挙げた置き換え／マイグレーションのコントローラーが担います。
+
 ### 実行時のリトライの上書き
 
 ```python
@@ -415,6 +417,8 @@ result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
 Pythonのノードの内側では、同じ値を `input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms`、`model_token_budget` から参照できます。
+
+すべての run、stream、resume のエントリポイントが `metadata` を受け取ります。`run`、`run_stream`、`run_async`、`run_stream_async`、`resume`、`resume_from`、`resume_async`、`resume_from_async` です。オブジェクトは呼び出した時点でコピーされるので、あとから変更しても進行中の実行には届かず、1つの `RunMetadata` を複数の呼び出しに使えます。再開は独自の `RunMetadata` を受け取ります。以前の試行で決めた絶対デッドラインは古くなっている可能性があるため、中断した実行のデッドラインは引き継がれません。`resume` と `resume_async` では、キーワードで渡します。`RunMetadata` 以外の引数を渡すと `TypeError` が発生します。
 
 `RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` は、デフォルトではデッドラインなしで始まります。渡すタイムアウトと `metadata.set_timeout_ms(timeout)` には、steady clockの残り範囲に収まる、0以上の整数のミリ秒を指定できます。符号付きのdurationへの変換や、デッドラインへの加算を行う前に、この範囲が検証されます。負の整数や大きすぎる整数を渡すと、`OverflowError` か `ValueError` が発生します。セッターが失敗しても、以前のデッドラインは変わりません。0を指定すると、即時のデッドラインになります。デッドラインを取り除くには、`metadata.clear_deadline()` を使います。
 
@@ -736,9 +740,9 @@ profile.attach(engine)
 
 ## HITLと状態
 
-静的な `interrupt_before` / `interrupt_after`、動的な `NodeInterrupt`、同期の `resume`、asyncioの `resume_async`、正確な指定の `resume_from` には、チェックポイントストアが必要です。
+静的な `interrupt_before` / `interrupt_after`、動的な `NodeInterrupt`、同期の `resume`、asyncioの `resume_async`、正確な指定の `resume_from` と `resume_from_async` には、チェックポイントストアが必要です。
 
-`ng.Send` でディスパッチされたPythonノードが `ng.NodeInterrupt` を送出すると、他のノードと同じように実行が一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async` は、チェックポイント付きで中断した `RunResult` を返します。`resume`、`resume_async`、`resume_from` は、答えを渡してその Send を実行します。そのとき、Send を出力したノードと、終了済みの Send は、再実行されずにリプレイされます。1つのステップで複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` に、それぞれが `{"id", "node", "value"}` として並び、`result.interrupt_id` は最初のものを示します。`resume`、`resume_async`、`resume_from` に `interrupt_id=` を渡すと、その割り込みに答えます。渡さなければ最初の割り込みに答えます。その再開では、一時停止している他のノードや Send が、それぞれの質問をあらためて出し、次の再開でそれに答えます（#388）。保留中でない `interrupt_id` を渡すと、`ValueError` が発生します。`RunMetadata.resume_interrupt_id` も同じIDを保持します。
+`ng.Send` でディスパッチされたPythonノードが `ng.NodeInterrupt` を送出すると、他のノードと同じように実行が一時停止します。`run`、`run_stream`、`run_async`、`run_stream_async` は、チェックポイント付きで中断した `RunResult` を返します。`resume`、`resume_async`、`resume_from`、`resume_from_async` は、答えを渡してその Send を実行します。そのとき、Send を出力したノードと、終了済みの Send は、再実行されずにリプレイされます。1つのステップで複数のノードや Send が `ng.NodeInterrupt` を送出すると、`result.interrupts` に、それぞれが `{"id", "node", "value"}` として並び、`result.interrupt_id` は最初のものを示します。`resume`、`resume_async`、`resume_from`、`resume_from_async` に `interrupt_id=` を渡すと、その割り込みに答えます。渡さなければ最初の割り込みに答えます。その再開では、一時停止している他のノードや Send が、それぞれの質問をあらためて出し、次の再開でそれに答えます（#388）。保留中でない `interrupt_id` を渡すと、`ValueError` が発生します。`RunMetadata.resume_interrupt_id` も同じIDを保持します。
 
 答えが届くのは、再開が再び入ったステップの中で、その答えを受けるノードや Send だけです。再開後の実行の、これより後のステップでは、`input.ctx.resume_value` と、ツールゲートの `ToolGateContext.resume_value` が `None` になります。そこで質問するノードやゲートは、実行をもう一度一時停止させます（#393）。`interrupt_before` の一時停止の後に再開すると、ゲートが止めていたノードに値が渡されます。`interrupt_after` の一時停止の後に再開すると、どのノードにも渡されません。1つのステップでゲート付きのノードが複数実行可能になった場合は、ゲートが1つずつ答えられます。ステップのすべてのゲートに答えるまで、実行は次のゲート付きノードの前で再び一時停止し、すべてに答えた後で、各ゲート付きノードが自分のゲートへの答えを受け取ります（#396）。1つのステップの中では、失敗したノードや Send が、質問を出したものより優先されます。順序は関係ありません。実行は失敗を送出し、割り込みは報告されません。失敗と並んで一時停止するのは、不確かな効果（payloadの `kind` が `tool_effect_reconciliation` の `NodeInterrupt`）だけで、照合できるようにするためです（#392）。
 
@@ -753,11 +757,22 @@ if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
+承認のあとに続くターンも、最初のターンと同じようにストリーミングできます。`resume`、`resume_from`、`resume_async`、`resume_from_async` は `callback=` を受け取り、`run_stream` が実行に対して行うのと同じように、再開したターンの `GraphEvent` を受け取ります。同期の呼び出しでは呼び出しを駆動するスレッドで、asyncioの呼び出しではループスレッドで受け取ります。コールバックが例外を送出しても、実行は止まりません。同期の呼び出しでは例外が `sys.unraisablehook` に渡され、デフォルトではstderrに出力されます。asyncioの呼び出しでは例外がループ上で送出され、ループの例外ハンドラーが報告します。`callback` は4つのメソッドすべてでキーワード専用で、`resume` と `resume_async` の `metadata` も同様です。
+
+```python
+async def approve(engine, thread_id, answer, on_event):
+    # The resumed turn streams its tokens and carries a deadline of its own.
+    metadata = ng.RunMetadata(timeout_ms=30_000, trace_id="trace-42")
+    return await engine.resume_async(
+        thread_id, answer, callback=on_event, metadata=metadata
+    )
+```
+
 状態の確認とタイムトラベルには、`get_state_history`、`update_state`、`fork` を使います。`get_state_view()` は、Pydanticを使ったフラットなチャネルアクセスを提供します。`get_state()` は、正規の入れ子の表現を返します。
 
 ## 非同期とキャンセル
 
-`run_async`、`run_stream_async`、`resume_async` は、`asyncio.Future` オブジェクトを返します。これらのグラフのFutureをキャンセルすると、`CancelToken` を通じてキャンセルが要求されます。操作が終わるのは、ネイティブのI/Oがキャンセル可能な境界に達してからです。グラフのストリーミングのコールバックは、呼び出し側のasyncioのループスレッドに戻ってきます。インタープリターが終了するとき、モジュールがインポート時に登録した `atexit` フックが、ファイナライズが始まる前に、これらのFutureを支えるスレッドと、Pythonのノードやツールの本体を実行するプールを止めます。実行中のPythonコードは終わるまで待ち、まだ待機中の実行は破棄します。その後の `run_async`、`run_stream_async`、`resume_async` の呼び出しは `RuntimeError` を送出します。
+`run_async`、`run_stream_async`、`resume_async`、`resume_from_async` は、`asyncio.Future` オブジェクトを返します。これらのグラフのFutureをキャンセルすると、`CancelToken` を通じてキャンセルが要求されます。再開した実行も同じです。呼び出しが `cancel_token` を設定した `RunConfig` を受け取る場合、Futureをキャンセルするとそのトークンがキャンセルされます。操作が終わるのは、ネイティブのI/Oがキャンセル可能な境界に達してからです。グラフのストリーミングのコールバックは、呼び出し側のasyncioのループスレッドに戻ってきます。インタープリターが終了するとき、モジュールがインポート時に登録した `atexit` フックが、ファイナライズが始まる前に、これらのFutureを支えるスレッドと、Pythonのノードやツールの本体を実行するプールを止めます。実行中のPythonコードは終わるまで待ち、まだ待機中の実行は破棄します。その後の `run_async`、`run_stream_async`、`resume_async`、`resume_from_async` の呼び出しは `RuntimeError` を送出します。
 
 プロバイダーの `invoke` と `dispatch` は、同期のPythonメソッドです。バインディングは、ネイティブの呼び出しが動いている間はGILを解放し、Pythonのプロバイダーのオーバーライドやイベントコールバックを呼ぶときにGILを取得します。イベントコールバックは、所有権を持つ `ProviderEvent` の値を受け取り、ネイティブのワーカースレッド上で動くことがあります。コールバックからasyncioが管理する状態を更新する必要がある場合は、`loop.call_soon_threadsafe` を使ってください。
 

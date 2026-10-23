@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=4b649bf22d24cddb4680ff9e204e21718eeabbd674b7430877bed4b2405d17e0 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -379,6 +379,8 @@ Python은 별도의 Python 스케줄러를 두지 않고 C++의 실행 기능을
 
 원시 `ProgramCatalog`, 전환 저장소, 교체/마이그레이션 컨트롤러, 합성 게이트웨이, Hook 저널, RPC executor는 호스트를 구성할 때 쓰는 API로 남아 있습니다. 권한을 가진 이 경로들의 일부만 노출하면 `proposal -> compile -> admit -> publish -> migrate/spawn`이라는 필수 프로토콜을 우회하게 됩니다. `_HAVE_PROGRAM`은 원시 컨트롤 플레인 관리 기능의 동등성까지 보장하지 않습니다.
 
+`GraphEngine::run_until_safe_point_async`와 `resume_from_until_safe_point_async`에는 Python 대응 메서드가 없습니다. 세이프 포인트 요청은 정확히 하나의 `GraphGenerationIdentity`를 가리키며, 엔진은 그 세대(generation)에 연결(link)된 경우에만 요청을 받아들입니다. Program 카탈로그는 자신이 구체화하는 엔진에 대해 이 연결을 수행합니다. `GraphEngine.compile`은 세대가 없는 엔진을 만들므로 모든 요청을 거부합니다. 세이프 포인트 캡처는 위에 나열한 교체·마이그레이션 컨트롤러의 몫입니다.
+
 ### 런타임에서 재시도 정책 덮어쓰기
 
 ```python
@@ -414,6 +416,8 @@ result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
 Python 노드 안에서는 `input.ctx.trace_id`, `run_id`, `has_deadline`, `deadline_remaining_ms`, `model_token_budget`으로 같은 값을 읽을 수 있습니다.
+
+모든 run, stream, resume 진입점이 `metadata`를 받습니다. `run`, `run_stream`, `run_async`, `run_stream_async`, `resume`, `resume_from`, `resume_async`, `resume_from_async`가 그렇습니다. 객체는 호출하는 시점에 복사되므로, 이후에 바꿔도 이미 진행 중인 실행에는 영향이 없고, 하나의 `RunMetadata`를 여러 호출에 쓸 수 있습니다. 재개는 자체 `RunMetadata`를 받습니다. 이전 시도에서 정한 절대 데드라인은 이미 낡았을 수 있으므로, 중단된 실행의 데드라인은 이어받지 않습니다. `resume`과 `resume_async`에서는 키워드로 전달합니다. `RunMetadata`가 아닌 인자를 넘기면 `TypeError`가 발생합니다.
 
 `RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)`는 기본적으로 데드라인 없이 시작합니다. 생성자에 넘기는 timeout과 `metadata.set_timeout_ms(timeout)`는 steady clock이 표현할 수 있는 남은 범위 안의 0 이상 정수 밀리초만 받습니다. 부호 있는 duration으로 변환하거나 데드라인에 더하기 전에 이 범위를 검증합니다. 음수이거나 범위를 넘는 정수는 `OverflowError` 또는 `ValueError`를 발생시키며, setter가 실패해도 이전 데드라인은 그대로 남습니다. 0은 즉시 만료되는 데드라인을 설정합니다. 데드라인을 없애려면 `metadata.clear_deadline()`을 호출합니다.
 
@@ -727,9 +731,9 @@ profile.attach(engine)
 
 ## HITL과 상태
 
-정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기 `resume`, asyncio `resume_async`, 정확한 `resume_from`에는 체크포인트 저장소가 필요합니다.
+정적 `interrupt_before`/`interrupt_after`, 동적 `NodeInterrupt`, 동기 `resume`, asyncio `resume_async`, 정확한 `resume_from`과 `resume_from_async`에는 체크포인트 저장소가 필요합니다.
 
-`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 발생시키면 다른 노드와 마찬가지로 실행이 일시 중지됩니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 인터럽트된 `RunResult`를 반환합니다. `resume`, `resume_async`, `resume_from`은 응답을 넘겨 그 Send를 실행하고, Send를 내보낸 노드와 이미 끝난 Send는 다시 실행하지 않고 재생(replay)합니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 발생시키면 `result.interrupts`가 모두를 `{"id", "node", "value"}` 형태로 나열하고, `result.interrupt_id`는 그중 첫 번째를 가리킵니다. `resume`, `resume_async`, `resume_from`은 `interrupt_id=`를 받아 그 인터럽트에 응답하며, 지정하지 않으면 첫 번째 인터럽트에 응답합니다. 멈춰 있던 다른 노드나 Send는 그 재개에서 각자 같은 질문을 다시 던지고, 다음 재개가 그 질문에 응답합니다(#388). 대기 중이 아닌 `interrupt_id`를 지정하면 `ValueError`가 발생합니다. 같은 id를 `RunMetadata.resume_interrupt_id`로도 전달할 수 있습니다. 응답은 재개가 다시 들어간 스텝에서 응답을 받은 노드나 Send에만 전달됩니다. 재개된 실행의 이후 스텝에서는 `input.ctx.resume_value`와 도구 게이트의 `ToolGateContext.resume_value`가 모두 `None`이므로, 거기서 질문하는 노드나 게이트는 실행을 다시 일시 중지시킵니다(#393). `interrupt_before`로 멈춘 뒤의 재개는 그 게이트가 붙잡고 있던 노드에 값을 전달하고, `interrupt_after`로 멈춘 뒤의 재개는 어떤 노드에도 값을 전달하지 않습니다. 한 스텝에서 게이트가 있는 노드 여럿이 ready 상태이면 게이트마다 따로 응답합니다. 스텝의 게이트가 모두 응답받을 때까지 실행은 다음 게이트 노드 앞에서 다시 멈추고, 그 뒤에 각 게이트 노드가 자기 게이트의 응답을 받습니다(#396). 한 스텝 안에서는 순서와 상관없이 실패한 노드나 Send가 질문하는 쪽보다 우선합니다. 실행은 실패를 발생시키고 인터럽트는 보고하지 않습니다. 불확실한 효과(payload의 `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`)만은 실패와 함께 있어도 일시 중지하여 조정(reconcile)할 수 있게 합니다(#392).
+`ng.Send`로 디스패치된 Python 노드가 `ng.NodeInterrupt`를 발생시키면 다른 노드와 마찬가지로 실행이 일시 중지됩니다. `run`, `run_stream`, `run_async`, `run_stream_async`는 체크포인트가 있는 인터럽트된 `RunResult`를 반환합니다. `resume`, `resume_async`, `resume_from`, `resume_from_async`는 응답을 넘겨 그 Send를 실행하고, Send를 내보낸 노드와 이미 끝난 Send는 다시 실행하지 않고 재생(replay)합니다. 한 스텝의 노드나 Send 여럿이 `ng.NodeInterrupt`를 발생시키면 `result.interrupts`가 모두를 `{"id", "node", "value"}` 형태로 나열하고, `result.interrupt_id`는 그중 첫 번째를 가리킵니다. `resume`, `resume_async`, `resume_from`, `resume_from_async`는 `interrupt_id=`를 받아 그 인터럽트에 응답하며, 지정하지 않으면 첫 번째 인터럽트에 응답합니다. 멈춰 있던 다른 노드나 Send는 그 재개에서 각자 같은 질문을 다시 던지고, 다음 재개가 그 질문에 응답합니다(#388). 대기 중이 아닌 `interrupt_id`를 지정하면 `ValueError`가 발생합니다. 같은 id를 `RunMetadata.resume_interrupt_id`로도 전달할 수 있습니다. 응답은 재개가 다시 들어간 스텝에서 응답을 받은 노드나 Send에만 전달됩니다. 재개된 실행의 이후 스텝에서는 `input.ctx.resume_value`와 도구 게이트의 `ToolGateContext.resume_value`가 모두 `None`이므로, 거기서 질문하는 노드나 게이트는 실행을 다시 일시 중지시킵니다(#393). `interrupt_before`로 멈춘 뒤의 재개는 그 게이트가 붙잡고 있던 노드에 값을 전달하고, `interrupt_after`로 멈춘 뒤의 재개는 어떤 노드에도 값을 전달하지 않습니다. 한 스텝에서 게이트가 있는 노드 여럿이 ready 상태이면 게이트마다 따로 응답합니다. 스텝의 게이트가 모두 응답받을 때까지 실행은 다음 게이트 노드 앞에서 다시 멈추고, 그 뒤에 각 게이트 노드가 자기 게이트의 응답을 받습니다(#396). 한 스텝 안에서는 순서와 상관없이 실패한 노드나 Send가 질문하는 쪽보다 우선합니다. 실행은 실패를 발생시키고 인터럽트는 보고하지 않습니다. 불확실한 효과(payload의 `kind`가 `tool_effect_reconciliation`인 `NodeInterrupt`)만은 실패와 함께 있어도 일시 중지하여 조정(reconcile)할 수 있게 합니다(#392).
 
 `input.ctx.resume_interrupt_id`는 `input.ctx.resume_value`가 어느 인터럽트에 응답하는지 노드에 알려 줍니다(#406). 값이 노드 자신의 `NodeInterrupt`에 응답하는 것이면 그 인터럽트의 id이고, `result.interrupt_id`가 보고하는 `"s3:review"` 같은 값입니다. 재개가 `interrupt_id=`로 지정했든 첫 번째 인터럽트에 응답했든 마찬가지입니다. 값이 노드를 붙잡은 `interrupt_before` 게이트의 승인이면 `None`입니다. 게이트 뒤에 있으면서 자기 질문도 하는 노드는 `resume_interrupt_id`가 `None`인 동안 `ng.NodeInterrupt`를 발생시켜, 실행 승인을 자기 질문의 응답으로 받아들이지 않습니다. 이 패턴은 [핵심 개념 가이드](concepts.md)에 있습니다.
 
@@ -742,11 +746,22 @@ if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
+승인 뒤에 이어지는 턴도 첫 턴처럼 스트리밍할 수 있습니다. `resume`, `resume_from`, `resume_async`, `resume_from_async`는 `callback=`을 받으며, 이 콜백은 `run_stream`이 실행에 대해 하는 것과 같이 재개된 턴의 `GraphEvent`를 받습니다. 동기 호출에서는 호출을 구동하는 스레드에서, asyncio 호출에서는 루프 스레드에서 받습니다. 콜백이 예외를 발생시켜도 실행은 멈추지 않습니다. 동기 호출에서는 예외가 `sys.unraisablehook`으로 전달되어 기본적으로 stderr에 출력되고, asyncio 호출에서는 루프에서 예외가 발생해 루프의 예외 핸들러가 보고합니다. `callback`은 네 메서드 모두에서 키워드 전용이며, `resume`과 `resume_async`의 `metadata`도 그렇습니다.
+
+```python
+async def approve(engine, thread_id, answer, on_event):
+    # The resumed turn streams its tokens and carries a deadline of its own.
+    metadata = ng.RunMetadata(timeout_ms=30_000, trace_id="trace-42")
+    return await engine.resume_async(
+        thread_id, answer, callback=on_event, metadata=metadata
+    )
+```
+
 상태 조회와 시간 여행에는 `get_state_history`, `update_state`, `fork`를 사용합니다. `get_state_view()`는 Pydantic 기반의 평평한 채널 접근을 제공하고, `get_state()`는 표준 중첩 표현을 그대로 유지합니다.
 
 ## 비동기와 취소
 
-`run_async`, `run_stream_async`, `resume_async`는 `asyncio.Future` 객체를 반환합니다. 이 그래프 Future를 취소하면 `CancelToken`으로 취소를 요청합니다. 네이티브 I/O가 취소 경계에 도달해야 작업이 끝납니다. 그래프 스트리밍 콜백은 호출자의 asyncio 루프 스레드로 돌아와서 실행됩니다. 인터프리터가 종료되면 모듈이 import될 때 등록한 `atexit` 훅이 종료 처리가 시작되기 전에 이 Future를 뒷받침하는 스레드와 Python 노드·도구 본문을 실행하는 풀을 멈춥니다. 실행 중인 Python 코드는 끝나기를 기다리고, 아직 기다리는 실행은 버리며, 이후의 `run_async`, `run_stream_async`, `resume_async` 호출은 `RuntimeError`를 발생시킵니다.
+`run_async`, `run_stream_async`, `resume_async`, `resume_from_async`는 `asyncio.Future` 객체를 반환합니다. 이 그래프 Future를 취소하면 `CancelToken`으로 취소를 요청하며, 재개된 실행도 마찬가지입니다. 호출이 `cancel_token`이 설정된 `RunConfig`를 받는 경우 Future를 취소하면 그 토큰이 취소됩니다. 네이티브 I/O가 취소 경계에 도달해야 작업이 끝납니다. 그래프 스트리밍 콜백은 호출자의 asyncio 루프 스레드로 돌아와서 실행됩니다. 인터프리터가 종료되면 모듈이 import될 때 등록한 `atexit` 훅이 종료 처리가 시작되기 전에 이 Future를 뒷받침하는 스레드와 Python 노드·도구 본문을 실행하는 풀을 멈춥니다. 실행 중인 Python 코드는 끝나기를 기다리고, 아직 기다리는 실행은 버리며, 이후의 `run_async`, `run_stream_async`, `resume_async`, `resume_from_async` 호출은 `RuntimeError`를 발생시킵니다.
 
 Provider의 `invoke`와 `dispatch`는 동기 Python 메서드입니다. 바인딩은 네이티브 호출이 실행되는 동안 GIL을 놓았다가, Python provider 오버라이드와 이벤트 콜백을 실행할 때 GIL을 다시 잡습니다. 이벤트 콜백은 소유권을 가진 `ProviderEvent` 값을 받으며 네이티브 워커 스레드에서 실행될 수 있습니다. 콜백이 asyncio가 소유한 상태를 갱신해야 한다면 `loop.call_soon_threadsafe`를 사용합니다.
 

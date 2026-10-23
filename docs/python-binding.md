@@ -386,6 +386,8 @@ Python exposes the C++ execution abilities rather than a separate Python schedul
 
 Raw `ProgramCatalog`, transition stores, replacement/migration controllers, synthesis gateways, Hook journals and RPC executors remain host-composition APIs. Exposing only fragments of those authority-bearing paths would bypass the required `proposal -> compile -> admit -> publish -> migrate/spawn` protocol. `_HAVE_PROGRAM` does not claim raw control-plane administration parity.
 
+`GraphEngine::run_until_safe_point_async` and `resume_from_until_safe_point_async` have no Python peer. A safe-point request names one exact `GraphGenerationIdentity`, and an engine accepts it only when it was linked to that generation, which the Program catalog does for the engines it materializes. `GraphEngine.compile` builds an engine that has no generation, so it rejects every request. Capturing a safe point belongs to the replacement and migration controllers above.
+
 ### Runtime retry overrides
 
 ```python
@@ -421,6 +423,8 @@ result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
 Inside a Python node, the same values are available through `input.ctx.trace_id`, `run_id`, `has_deadline`, `deadline_remaining_ms`, and `model_token_budget`.
+
+Every run, stream and resume entry point takes `metadata`: `run`, `run_stream`, `run_async`, `run_stream_async`, `resume`, `resume_from`, `resume_async` and `resume_from_async`. The object is copied when the call is made, so changing it afterwards does not reach a run in flight, and one `RunMetadata` can serve several calls. A resume takes its own `RunMetadata`: the deadline of the interrupted run is not carried over, because an absolute deadline from an earlier attempt would be stale. `resume` and `resume_async` take it as a keyword. An argument that is not a `RunMetadata` raises `TypeError`.
 
 `RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` starts without a deadline by default. A supplied timeout and `metadata.set_timeout_ms(timeout)` accept nonnegative integer milliseconds within the remaining steady-clock range, validated before signed duration conversion or deadline addition. Negative or oversized integers raise `OverflowError` or `ValueError`; a failed setter leaves the previous deadline intact. Zero sets an immediate deadline. Use `metadata.clear_deadline()` to remove it.
 
@@ -733,9 +737,9 @@ The profile is host-stepped, as in C++: the host appends RAW records and activat
 
 ## HITL and state
 
-Static `interrupt_before`/`interrupt_after`, dynamic `NodeInterrupt`, synchronous `resume`, asyncio `resume_async`, and exact `resume_from` require a checkpoint store.
+Static `interrupt_before`/`interrupt_after`, dynamic `NodeInterrupt`, synchronous `resume`, asyncio `resume_async`, and exact `resume_from` and `resume_from_async` require a checkpoint store.
 
-A Python node dispatched by `ng.Send` that raises `ng.NodeInterrupt` pauses the run like any other node: `run`, `run_stream`, `run_async` and `run_stream_async` return an interrupted `RunResult` with a checkpoint, and `resume`, `resume_async` and `resume_from` run that Send with the answer while the node that emitted the Sends and the Sends that finished replay without running again. When several nodes or Sends of one step raise `ng.NodeInterrupt`, `result.interrupts` lists every one as `{"id", "node", "value"}` and `result.interrupt_id` names the first. `resume`, `resume_async` and `resume_from` take `interrupt_id=` and answer that interrupt, or the first one without it; each other paused node or Send asks its own question again on that resume, and the next resume answers it (#388). An `interrupt_id` that is not pending raises `ValueError`. `RunMetadata.resume_interrupt_id` carries the same id. The answer reaches only the node or Send it answers, in the step the resume re-enters: in every later step of the resumed run `input.ctx.resume_value`, and a tool gate's `ToolGateContext.resume_value`, are `None`, so a node or gate that asks there pauses the run again (#393). A resume after an `interrupt_before` pause gives the value to the node the gate held; one after an `interrupt_after` pause gives it to no node. When several gated nodes are ready in one step, each gate is answered on its own: the run pauses again before the next gated node until every gate of the step is answered, and each gated node then receives the answer to its own gate (#396). In one step, a node or Send that fails outranks one that asks, whatever their order: the run raises the failure and reports no interrupt; only an uncertain effect (a `NodeInterrupt` whose payload `kind` is `tool_effect_reconciliation`) still pauses beside a failure, so that it can be reconciled (#392).
+A Python node dispatched by `ng.Send` that raises `ng.NodeInterrupt` pauses the run like any other node: `run`, `run_stream`, `run_async` and `run_stream_async` return an interrupted `RunResult` with a checkpoint, and `resume`, `resume_async`, `resume_from` and `resume_from_async` run that Send with the answer while the node that emitted the Sends and the Sends that finished replay without running again. When several nodes or Sends of one step raise `ng.NodeInterrupt`, `result.interrupts` lists every one as `{"id", "node", "value"}` and `result.interrupt_id` names the first. `resume`, `resume_async`, `resume_from` and `resume_from_async` take `interrupt_id=` and answer that interrupt, or the first one without it; each other paused node or Send asks its own question again on that resume, and the next resume answers it (#388). An `interrupt_id` that is not pending raises `ValueError`. `RunMetadata.resume_interrupt_id` carries the same id. The answer reaches only the node or Send it answers, in the step the resume re-enters: in every later step of the resumed run `input.ctx.resume_value`, and a tool gate's `ToolGateContext.resume_value`, are `None`, so a node or gate that asks there pauses the run again (#393). A resume after an `interrupt_before` pause gives the value to the node the gate held; one after an `interrupt_after` pause gives it to no node. When several gated nodes are ready in one step, each gate is answered on its own: the run pauses again before the next gated node until every gate of the step is answered, and each gated node then receives the answer to its own gate (#396). In one step, a node or Send that fails outranks one that asks, whatever their order: the run raises the failure and reports no interrupt; only an uncertain effect (a `NodeInterrupt` whose payload `kind` is `tool_effect_reconciliation`) still pauses beside a failure, so that it can be reconciled (#392).
 
 `input.ctx.resume_interrupt_id` tells a node which interrupt `input.ctx.resume_value` answers (#406): the id of the node's own `NodeInterrupt` (`"s3:review"`, as `result.interrupt_id` reports it), whether the resume named it with `interrupt_id=` or answered the first one, and `None` when the value is the approval of the `interrupt_before` gate that held the node. A gated node that also asks its own question raises `ng.NodeInterrupt` while `resume_interrupt_id` is `None`, so the approval to run is not taken as its answer; the [concepts guide](concepts.md) shows the pattern.
 
@@ -748,11 +752,22 @@ if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
+A turn that continues after an approval can stream like the first one. `resume`, `resume_from`, `resume_async` and `resume_from_async` take `callback=`, which receives the `GraphEvent`s of the resumed turn as `run_stream` does for a run: on the thread that drives a synchronous call, and on the loop thread for an asyncio one. An exception that the callback raises does not stop the run: on a synchronous call it goes to `sys.unraisablehook`, which prints it to stderr by default, and on an asyncio call it is raised on the loop, where the loop's exception handler reports it. `callback` is keyword-only on all four, and so is `metadata` on `resume` and `resume_async`.
+
+```python
+async def approve(engine, thread_id, answer, on_event):
+    # The resumed turn streams its tokens and carries a deadline of its own.
+    metadata = ng.RunMetadata(timeout_ms=30_000, trace_id="trace-42")
+    return await engine.resume_async(
+        thread_id, answer, callback=on_event, metadata=metadata
+    )
+```
+
 Use `get_state_history`, `update_state`, and `fork` for inspection and time-travel. `get_state_view()` provides flat Pydantic-backed channel access while `get_state()` retains the canonical nested representation.
 
 ## Async and cancellation
 
-`run_async`, `run_stream_async`, and `resume_async` return `asyncio.Future` objects. Cancelling these graph Futures requests cancellation through `CancelToken`; native I/O must reach its cancellation boundary before the operation finishes. Graph streaming callbacks return to the caller's asyncio loop thread. When the interpreter exits, an `atexit` hook that the module registers on import stops the thread behind these Futures, and the pools that run Python node and tool bodies, before finalization starts: it lets the Python code that is running finish, abandons runs that are still waiting, and a later `run_async`, `run_stream_async` or `resume_async` raises `RuntimeError`.
+`run_async`, `run_stream_async`, `resume_async` and `resume_from_async` return `asyncio.Future` objects. Cancelling one of these graph Futures requests cancellation through `CancelToken`, a resumed run included. When the call takes a `RunConfig` whose `cancel_token` is set, cancelling the Future cancels that token. Native I/O must reach its cancellation boundary before the operation finishes. Graph streaming callbacks return to the caller's asyncio loop thread. When the interpreter exits, an `atexit` hook that the module registers on import stops the thread behind these Futures, and the pools that run Python node and tool bodies, before finalization starts: it lets the Python code that is running finish, abandons runs that are still waiting, and a later `run_async`, `run_stream_async`, `resume_async` or `resume_from_async` raises `RuntimeError`.
 
 Provider `invoke` and `dispatch` are synchronous Python methods. Their bindings release the GIL while the native call runs, then acquire it for Python provider overrides and event callbacks. Event callbacks receive owned `ProviderEvent` values and may run on a native worker thread. Use `loop.call_soon_threadsafe` when a callback must update asyncio-owned state.
 
