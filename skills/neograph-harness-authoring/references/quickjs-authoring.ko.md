@@ -1,167 +1,113 @@
-<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ko source_sha256=53dc89ee33f26b7d0f9c6d328453f73aaaf9e53f0b8b4cea360ca1cdc2b800c8 -->
+<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ko source_sha256=9c608357cfda36a56045f97d4b5bbd5398e96e016e90c4b6690f4d2d2e3949fe -->
 # QuickJS 소스 작성
 
 **Languages:** [English](quickjs-authoring.md) | [한국어](quickjs-authoring.ko.md) | [日本語](quickjs-authoring.ja.md) | [简体中文](quickjs-authoring.zh-CN.md)
 
-## 호스트 계약 확인
+## 이름은 호스트에서 가져온다
 
-코드를 쓰기 전에 아래 바인딩을 확인합니다. 제공된 설정을 쓰거나 사용 가능한 스키마를
-살펴보고, 빠진 이름을 그럴듯하게 짐작해서 채워서는 안 됩니다.
+요청과 제공된 매니페스트가 쓸 수 있는 모든 이름을 줍니다. 노드 타입, 리듀서, 조건,
+그래프(Core) 이름, 자식 바인딩, 임포트 슬롯, 입력 형태, `main`이 반환해야 하는 값이
+그것입니다. 매니페스트는 구문(시그니처, 옵션 키, 한도)만 나열하며 애플리케이션
+노드는 담고 있지 않습니다. 필요한 이름이 없으면 어떤 이름이 없는지 말하십시오.
+그럴듯하기만 한 이름은 틀린 이름입니다.
 
-| 계약 | 필요한 것 |
+그래프 이름도 그중 하나입니다. 호스트가 이름을 주면 그 문자열 그대로 `ng.graph(...)`와
+모든 `ng.callCore(...)`에 넘기십시오. 작업 내용에서 이름을 지어내지 마십시오.
+
+## 모듈
+
+전역 `ng`를 쓰는 ES 모듈입니다. `define`을 내보내고, 작업에 런타임 제어가 필요하면
+제너레이터 `main`도 내보냅니다. `require`, `module.exports`, `export default`,
+`import`는 없습니다.
+
+    // GRAPH, REDUCER, NODE_TYPE은 호스트가 준 이름을 대신하는 자리표시자입니다.
+    export function define() {
+      const g = ng.graph("GRAPH");
+      g.channel("value", {reducer: "REDUCER", initial: 0});
+      g.node("step", {type: "NODE_TYPE"});
+      g.entry("step");
+      g.exit("step");
+      return g;
+    }
+
+    export function* main(input) {
+      const result = yield ng.callCore("GRAPH", {value: input.value}, "run");
+      return {value: result.channels.value.value};  // 그래프 실행의 출력
+    }
+
+`async`, Promise, 타이머, `eval`, `Date`, I/O는 쓰지 마십시오. `Date`와 `eval`은 예외를
+던지고, `setTimeout`은 존재하지 않으며, `Math.random()`은 항상 0을 반환합니다. 반환하는
+값과 모든 명령 입력은 순수 JSON이어야 합니다. `undefined`, 함수, `Date`, `Map`은
+안 됩니다.
+
+## define(): 그래프
+
+`define()`은 동기 함수이며 `ng.graph(name)`이 준 빌더를 반환합니다. `ng.callCore` 같은
+명령은 여기에 없습니다.
+
+- 빌더 메서드는 모두 같은 빌더를 반환하며 노드 핸들은 반환하지 않습니다. 매니페스트의
+  시그니처와 옵션 키를 그대로 쓰십시오. 키는 snake_case이고(`initial_delay_ms`이지
+  `initialDelay`가 아닙니다) 알 수 없는 키는 거부됩니다.
+- 그래프에는 `entry`와 `exit`가 필요합니다. 모든 엣지, 배리어, 인터럽트, 재시도는
+  선언된 노드를 가리켜야 합니다. `__start__`와 `__end__`는 노드 이름이 될 수 없습니다.
+- `node(name, {type, ...config})`: `type`은 필수이며 등록되어 있어야 합니다.
+  `channel(name, {reducer, initial})`: 등록된 리듀서를 지정하십시오.
+- `conditionalEdge(from, condition, routes)`: `routes`는 등록된 조건이 반환할 수 있는
+  모든 레이블을, 그리고 그 레이블만을 노드에 대응시킵니다.
+- 팬아웃은 한 노드에서 나가는 여러 엣지입니다. 모든 분기를 기다려야 하는 조인에는
+  `barrier(join, [branchNodes])`도 필요합니다. 한 채널에 동시에 쓰려면 그 쓰기를
+  병합하는 리듀서가 필요합니다.
+
+## main(): 런타임 명령
+
+`main`은 동기 제너레이터입니다. 각 `yield`는 `ng` 생성자가 만든 명령을 정확히 하나
+런타임에 넘기고 그 명령의 결과를 돌려받습니다. 원시 배열, 일반 객체, Promise,
+`yield*`는 거부됩니다. 분기, 반복, `map` 같은 평범한 JavaScript로 명령과 명령 배열을
+만들고, 여러 개를 한꺼번에 실행하려면 `ng.all(commands, {max_in_flight: N})`을 한 번
+`yield`하십시오.
+
+| 생성자 | 의미 |
 |---|---|
-| JS API 매니페스트 | 이 빌드에서 쓰는 builder와 command의 정확한 시그니처 |
-| 레지스트리 | 노드/리듀서/조건/import 이름, 노드 설정 스키마, effect |
-| 호출 | 입력 JSON의 형태와 callCore에서 쓸 수 있는 Core 이름 |
-| 결과 | Core 채널 이름과, 제너레이터가 마지막에 내놓아야 하는 출력 |
-| 자식 | 승인(admission)된 바인딩 이름, 자식의 입력/출력, 부여된 한도 |
-| 컴파일러 브리지 | 받아들이는 소스 봉투(envelope), 진단, 남은 수정 허용량 |
+| `ng.callCore(name, input, site)` | 그래프를 실행합니다. `name`은 `ng.graph`에 준 문자열이고 `input`은 채널 이름을 값에 대응시킵니다. 그래프 실행의 출력은 `result.channels.NAME.value`로 읽습니다. |
+| `ng.all(commands, options, site)` | 명령들을 한 번에 `max_in_flight`개씩 함께 실행하고 결과를 순서대로 반환합니다. `ng.parallel`도 같습니다. |
+| `ng.race(commands, options, site)` | 가장 먼저 나온 결과가 이깁니다. 명령이 두 개 이상 필요합니다. |
+| `ng.quorum(commands, k, site)` | `k`개가 성공하면 끝납니다. `1 <= k <= commands.length`. |
+| `ng.join(commands, mode, options, site)` | 일반 형태입니다. `mode`는 `"all"`, `"race"`, `"quorum"`(`required_successes`와 함께)입니다. `failure_policy`는 `"fail_fast"` 또는 `"collect"`입니다. |
+| `ng.spawn(binding, input, site)` | 호스트가 승인한 자식을 시작합니다. 결과를 받으려면 `ng.await(spawnCommand, timeoutMs, site)`로 감싸십시오. |
+| `ng.emit(value, site)`, `ng.checkpoint(value, site)` | JSON 값을 실행 저널에 기록합니다. |
+| `ng.cancelScope("current", reason, site)` | 실행을 취소 상태로 끝냅니다. |
+| `ng.hostCapability(slot, input, site)` | 호스트가 승인한 임포트 슬롯(정수)을 호출합니다. |
 
-내장 JS 매니페스트가 나열하는 것은 문법이지 애플리케이션 노드가 아닙니다. 예를 들어
-probe.node는 capability 테스트 팔레트에 속하며 애플리케이션의 LLM 노드가 아닙니다. 고정된
-capability probe는 케이스별 그래프/command 계약을 확인할 뿐, 임의의 프로덕션 동작을
-확인하지 않습니다.
+- `site`는 선택 사항인 마지막 인자로, `"review:" + id` 같은 안정적인 레이블입니다. id나
+  인덱스에서 만들고 시간이나 난수에서는 만들지 마십시오. 복구된 실행은 `main`을 다시
+  실행하므로 같은 결과에 대해 같은 명령을 내야 합니다.
+- 옵션 키는 snake_case입니다. `max_in_flight`, `required_successes`, await 타임아웃은
+  양의 정수입니다.
+- 명령이 하나라도 실패하면(`ng.all`의 멤버 하나여도) 실행이 끝나고 `main`은 다시 재개되지
+  않으므로, `yield` 둘레의 `try`/`catch`로는 복구할 수 없습니다. 논리적 재시도는 결과의
+  필드(예: `done` 플래그)를 보고 반복하십시오. 실패하는 노드의 재시도는 `define()`의
+  `retryPolicy`가 맡습니다.
+- 결과는 작업이 말하는 형태로 읽으십시오. 응답이 `status` 같은 필드를 가진다고 하면
+  그 필드는 `result.status`입니다. `channels` 래퍼는 그래프 실행의 출력에만 해당하므로,
+  작업이 다르게 설명한 응답에 붙이지 마십시오.
+- `define()`만 있는 모듈은 Core 결과를 반환합니다. `main`이 있으면 반환값은 호스트가
+  승인한 출력 계약과 일치해야 합니다.
 
-## 컴파일 시점 그래프와 런타임 Program
+## 응답과 수정
 
-**define()**은 컴파일 시점에 실행되는 동기 함수로, 열려 있는 builder 하나를 반환합니다. 노드와
-엣지는 이 builder로 만듭니다. builder의 메서드는 노드 핸들이 아니라 builder 자신을 반환합니다.
-노드의 동작은 호스트가 등록한 C++ 구현에서 오며, 일반 JS 콜백은 그래프 노드가 아닙니다.
+소스 평가에서는 문자열 필드 `source` 하나만 가진 JSON 객체 하나로 답하고, 그 필드에
+모듈 전체를 담습니다. JSON으로 이스케이프하고(`\n`, `\"`) 중괄호 앞뒤에는 아무것도
+두지 마십시오. Markdown 펜스, 설명 문장, 패치, Program JSON은 안 됩니다.
 
-**main(input)**은 나중에 실행되는 선택적 동기 제너레이터입니다. 순수 JS로 분기를 고르고, 배열과
-반복문을 만들고, JSON을 변환할 수 있습니다. 런타임 effect는 제너레이터에서 yield하는 봉인된(sealed)
-ng command로 수행합니다. define() 안에서 런타임 command를 호출하거나, 게시된 그래프를
-수정하거나, 그래프 모양의 객체를 반환하거나, async 함수, promise, 타이머, require(), ambient
-I/O, eval, 동적 import를 써서는 안 됩니다.
+    {"source": "export function define() {\n  ...\n}\n"}
 
-이 배선(plumbing) 예제는 호스트가 probe 팔레트를 등록해 두었고 숫자형 input.value가 필요하다고
-가정합니다. 예제의 노드는 아무 일도 하지 않으므로, 데이터 흐름만 보여 줄 뿐 LLM 동작이나 이름이
-붙은 capability 케이스의 답은 아닙니다.
+Harness MCP에서는 먼저 `neograph_schema`를 호출한 뒤, 모듈을 `harness.mode:
+"javascript"`와 `source_id`, `source`, 그리고 필요한 모든 작업, 워커, 예산, 정책
+필드와 함께 보냅니다. 소스만으로는 요청이 되지 않습니다. `neograph_compile`은 그
+도구가 있을 때만 쓰십시오.
 
-~~~javascript
-export function define() {
-  const g = ng.graph("example");
-  g.channel("value", {reducer: "probe.overwrite", initial: 0});
-  g.node("step", {type: "probe.node"});
-  g.entry("step");
-  g.exit("step");
-  return g;
-}
-
-export function* main(input) {
-  const result = yield ng.callCore("example", {value: input.value}, "copy:value");
-  return {value: result.channels.value.value};
-}
-~~~
-
-callCore에는 호스트가 제공한 그래프 이름을 그대로 써야 합니다. "main", "example", "capability",
-노드 이름 중 어느 것도 어디서나 통하는 별칭이 아닙니다.
-
-## 데이터 흐름과 토폴로지
-
-일반적인 callCore 입력은 채널 이름을 들어오는 값에 대응시킨 맵입니다. 선언된 각 채널은 등록된
-리듀서를 적용합니다. 일반적인 Core 결과에는 직렬화된 채널이 들어 있으며, 읽어야 하는 것은 채널을
-감싼 래퍼가 아니라 채널의 값입니다.
-
-예를 들어 챗봇의 기존 템플릿은 answer 노드를 다음과 같이 호출합니다.
-
-~~~javascript
-const reply = yield ng.callCore(
-  "main", {payload: {phase: "answer", task: task}}, "answer"
-);
-const answer = reply.channels.result.value;
-~~~
-
-여기서 payload/result는 선언된 채널이고, chat.step은 payload.phase를 읽습니다. 이 이름과 동작은
-그 호스트의 레지스트리와 템플릿에서 온 것입니다. 이 조각을 다른 레지스트리에 복사한다고 해서
-같은 바인딩이 생기지는 않습니다.
-
-선언만 있는 모듈은 Core 결과의 형태를 그대로 유지합니다. main()이 있으면 제너레이터의 반환값이
-따로 승인(admission)된 Program 출력 계약과 맞아야 합니다. capability 평가기는 가끔
-{accepted: true} 같은 합성(synthetic) command 응답을 제공합니다. 이때는 합성 응답에 Core 채널
-래퍼를 덧붙이지 말고, 해당 케이스에 명시된 응답 계약을 따릅니다.
-
-| 목적 | 구성 방법과 주의할 점 |
-|---|---|
-| 선형 경로 | 노드, entry/exit, 그리고 이들을 잇는 모든 엣지를 추가한다 |
-| 조건부 라우팅 | conditionalEdge(from, registeredCondition, routes)를 쓰고, 조건의 모든 레이블을 노드에 대응시킨다 |
-| 정적 fan-out/fan-in | 나가는 분기 엣지와 들어오는 join 엣지를 모두 추가한다. join이 모든 분기를 기다려야 하면 barrier(joinNode, branchNames)를 추가한다 |
-| 병렬 쓰기 | 동시 쓰기를 처리할 수 있는 호스트 리듀서/채널을 고른다. 엣지만으로는 병합 방식이 정해지지 않는다 |
-| 그래프 인터럽트/재시도 | 매니페스트의 interruptBefore/After와 retryPolicy 키를 쓴다. JS 반복문이나 논리적 재시도와는 별개다 |
-
-## 런타임 command 구성
-
-- callCore(coreName, input, site)는 command를 만듭니다. 이를 yield하면 Core를 호출하고 그
-  결과를 돌려받습니다.
-- all(commands, {max_in_flight: N}, site)는 봉인된 command를 받습니다. 목록은 일반 JS로 만들고,
-  all command는 한 번만 yield합니다. 배열 자체를 yield하거나, command를 Promise로 바꾸거나,
-  봉인된 command에 yield*를 쓰면 안 됩니다.
-- spawn(binding, input, site)은 호스트가 승인(admission)한 자식 바인딩을 고릅니다. 결과를
-  기다리려면 command를 await(spawnCommand, timeoutMs, site)로 감쌉니다.
-- checkpoint(state, site)는 명시적인 JSON 상태를 게시합니다. 그 자체로 컴파일, 승인(admission),
-  교체를 하지는 않습니다.
-- emit과 cancelScope는 매니페스트에 선언된 의미를 따릅니다. hostCapability는 승인(admission)된
-  import 슬롯이 있어야 하며, 임의의 네이티브 API로 가는 통로가 아닙니다.
-
-예를 들어 승인(admission)된 바인딩과 그 정확한 원래 입력이 있다면 다음과 같이 씁니다.
-
-~~~javascript
-const result = yield ng.await(
-  ng.spawn(binding, originalChildInput, "child:spawn"),
-  timeoutMs,
-  "child:wait"
-);
-~~~
-
-emit으로 내보낸 자식 ID는 그 자체로 봉인된 await command가 아닙니다. 호스트의 실제 join/복구
-계약을 따릅니다. 교체 후에도 자식을 유지해야 하면 [runtime-handoffs.md](runtime-handoffs.md)를
-참고하세요.
-
-소스 사이트(source-site) 레이블은 영속 좌표의 일부가 됩니다. 안정적인 작업 식별자나 결정적인
-인덱스에서 만들고, 시계나 난수 값은 쓰지 않습니다. 이미 완료된 연산은 재생(replay)할 때 원래
-입력을 그대로 유지해야 합니다. JS 반복문, 재시도, 병렬 분기, 새 자식이 예산을 다시 채워 주지는
-않습니다.
-
-accepted=false처럼 성공한 결과를 보고 도는 반복문은 논리적 재시도입니다. 실패한 Core command는
-Program의 결과이므로, 일반 JS try/catch로 이어서 실행할 수 있다고 가정하면 안 됩니다. 호스트의
-실패/재개/조정 계약을 따릅니다.
-
-## 출력, 컴파일, 수정
-
-현재 인터페이스가 요구하는 봉투(envelope)를 씁니다.
-- 소스 평가: source 문자열에 완전한 모듈이 들어 있는 JSON 객체 하나만 내놓습니다. Markdown
-  펜스, 패치, ProgramBundle JSON, 설명하는 글은 넣지 않습니다.
-- Harness MCP: 먼저 neograph_schema로 확인합니다. 모듈은 harness.mode="javascript", source_id,
-  source에 담고, 필요한 task/worker/budget/policy 필드를 모두 함께 지정합니다. source만으로는
-  완전한 MCP 요청이 아닙니다.
-- 호스트 네이티브 제안: 그 호스트의 스키마를 따릅니다. 이 Skill은 범용 자유 형식 컴파일/교체
-  RPC를 정의하지 않습니다.
-
-제공된 컴파일러 브리지로 제출합니다. 평가 모드에서는 호스트가 반환된 소스를 제출하고 진단
-결과를 돌려주며, 모델이 호출할 수 있는 도구가 있다는 뜻은 아닙니다. MCP 모드에서는
-neograph_compile 도구를 쓸 수 있을 때만 사용합니다.
-
-실패하면 보고된 code/path/소스 사이트를 찾아, 위반한 계약을 고칩니다. 예를 들면 다음과
-같습니다.
-- 알 수 없는 노드/리듀서/조건: 등록된 바인딩과 설정에 맞춥니다.
-- 잘못된 Core 바인딩: command 전체에서 승인(admission)된 그래프 이름과 맞춥니다.
-- command가 아닌 값을 yield: 봉인된 command 하나를 만들거나, 승인(admission)된 구조화 join을
-  씁니다.
-- 잘못된 출력/입력: 채널 매핑이나 Program 결과 계약을 바로잡습니다.
-- 빠진 엣지/barrier: 소스의 표현만이 아니라, 낮춰진(lowered) 토폴로지를 고칩니다.
-
-남은 수정 허용량 안에서 완전한 대체 소스를 반환합니다. 진단을 지우거나, grant를 넓히거나, 관련
-없는 연산을 추가하거나, 컴파일러와 작업별 검사가 받아들이기 전에 성공했다고 주장해서는 안
-됩니다.
-
-체크아웃한 저장소의 capability 브리지는 다음과 같이 확인하고 사용할 수 있습니다.
-
-~~~text
-program_dsl_capability_probe --manifest
-program_dsl_capability_probe graph_basics source.js
-~~~
-
-빌드 타깃은 program_dsl_capability_probe입니다. 이름이 붙은 케이스는 각자 제공된 계약이
-필요합니다. 컴파일에 성공했다는 것만으로 케이스를 통과한 것은 아니며, probe가 성공해도
-프로덕션 실행 권한이 생기지는 않습니다. 실행 스크립트 scripts/run_dsl_capability_eval.ts는
-횟수가 제한된 모델/진단 반복을 수행합니다.
+거부되면 `code`, `message`, 컴파일된 정의 안을 가리키는 JSON `pointer`, `witness`가 있는
+진단이 돌아옵니다. 진단이 가리키는 원인을 고치고, 작업이 정한 것은 그대로 두며,
+같은 봉투에 전체 모듈을 반환하십시오. 권한을 넓히거나 무관한 동작을 더하거나
+호스트의 검사가 받아들이기 전에 성공했다고 주장하지 마십시오. 컴파일되는 소스도
+잘못된 토폴로지를 만들 수 있습니다.
