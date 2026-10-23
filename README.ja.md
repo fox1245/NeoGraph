@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=b47665c0105adc41193273cb836de3da5dcad51b41719a7ac493a1aa96a9f476 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 <a id="typed-provider-calls"></a>
 ## 型付き provider 呼び出し
 
-モデル呼び出しには、検証済みのディスクリプター、ランタイムオプション、型付きのリクエストを使います。ディスクリプターの承認は、閉じたバージョン付きデータだけを受け付け、リクエスト/レスポンスのインタープリターは実行しません。認証情報は、公開するディスクリプターファイルではなく、ランタイムオプションに置きます。`SchemaProvider::Defaults` には、型付きの OpenRouter ルーティングと Responses の保持設定が入っています。画像、Veo、Decisions は、別の型付きクライアントと権限を使います。
+モデル呼び出しには、検証済みのディスクリプター、ランタイムオプション、型付きのリクエストを使います。ディスクリプターの承認は、閉じたバージョン付きデータだけを受け付け、リクエスト/レスポンスのインタープリターは実行しません。認証情報は、公開するディスクリプターファイルではなく、ランタイムオプションに置きます。`SchemaProvider::Defaults` には、型付きの OpenRouter ルーティングと Responses の保持設定が入っています。画像、動画、音楽、音声、埋め込み、リランク、モデレーション、構造化された判定は SchemaProvider のエンドポイントで、チャットと同じプロバイダー経路で呼び出します。
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -403,7 +403,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 修復を経たインストール済みホイール。cibuildwheel==2.23.0 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 
-ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、ネイティブ ARM64、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.13 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。
+ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。Linux ARM64 はホスト型ランナーではなくプロジェクト自前の ARM サーバーでビルドとテストを行い(`ci-extended.yml` のホスト型 ARM ジョブは無効です)、aarch64 ホイールはリリースタグでのみビルドします。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.13 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。
 
 - [ドキュメント目次](docs/README.md)
 - [コンセプトとグラフの意味論](docs/concepts.md)

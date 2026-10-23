@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=b47665c0105adc41193273cb836de3da5dcad51b41719a7ac493a1aa96a9f476 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 <a id="typed-provider-calls"></a>
 ## 带类型的 provider 调用
 
-模型调用使用经过校验的描述符、运行时选项和带类型的请求。描述符准入只接受封闭的、带版本的数据，不会执行请求/响应解释器。凭据放在运行时选项里，不放在公开的描述符文件中。`SchemaProvider::Defaults` 包含带类型的 OpenRouter 路由和 Responses 保留设置。图像、Veo 和 Decisions 使用各自带类型的客户端和授权。
+模型调用使用经过校验的描述符、运行时选项和带类型的请求。描述符准入只接受封闭的、带版本的数据，不会执行请求/响应解释器。凭据放在运行时选项里，不放在公开的描述符文件中。`SchemaProvider::Defaults` 包含带类型的 OpenRouter 路由和 Responses 保留设置。图像、视频、音乐、语音、嵌入、重排、审核和结构化决策都是 SchemaProvider 端点，与聊天走同一条提供方路径。
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -403,7 +403,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==2.23.0 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
 | `runtime-archive` | 共享 SDK 原生归档的可移植性目标/CTest。需要 Ninja 和平台运行时依赖。 |
 
-本地 Windows/WSL 的结果不能替代原生 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 都会运行 `ci.yml`：在 Linux、macOS 和 Windows 上运行完整的原生测试，再加两行已安装使用方的检查；仅修改文档时会跳过。`ci-extended.yml` 每晚运行，也可以按需运行：sanitizer、模糊测试金丝雀、性能关卡、原生 ARM64、gRPC、Visual Studio 生成器，以及其余八行已安装使用方的检查。发布候选版本在打标签之前请运行它。`wheels.yml` 在打包相关变更时为每个平台构建一个 CPython 3.12 的 wheel。在发布标签上，它为 Linux（x86_64 和 aarch64）、macOS（arm64）和 Windows（AMD64）构建 CPython 3.9–3.13 的 wheel，最低平台版本为 glibc 2.34 和 macOS 14。
+本地 Windows/WSL 的结果不能替代原生 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 都会运行 `ci.yml`：在 Linux、macOS 和 Windows 上运行完整的原生测试，再加两行已安装使用方的检查；仅修改文档时会跳过。`ci-extended.yml` 每晚运行，也可以按需运行：sanitizer、模糊测试金丝雀、性能关卡、gRPC、Visual Studio 生成器，以及其余八行已安装使用方的检查。Linux ARM64 在项目自己的 ARM 服务器上构建和测试，而不是托管运行器（`ci-extended.yml` 的托管 ARM 作业已关闭）；aarch64 wheel 只在发布标签上构建。发布候选版本在打标签之前请运行它。`wheels.yml` 在打包相关变更时为每个平台构建一个 CPython 3.12 的 wheel。在发布标签上，它为 Linux（x86_64 和 aarch64）、macOS（arm64）和 Windows（AMD64）构建 CPython 3.9–3.13 的 wheel，最低平台版本为 glibc 2.34 和 macOS 14。
 
 - [文档索引](docs/README.md)
 - [核心概念与图语义](docs/concepts.md)
