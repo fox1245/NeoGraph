@@ -887,6 +887,50 @@ TEST(HostLoop, AWakeThatTheHostRefusesIsRetriedByTheNextOne) {
     EXPECT_TRUE(loop.idle());
 }
 
+TEST(HostLoop, AWakeThatCountedOnATurnTheHostRefusedIsNotLeftWithoutOne) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    bool first = false, second = false;
+    int asked = 0;
+    // The host refuses the first turn the loop asks for. While it does, another thread posts and wakes the loop: it
+    // finds a turn scheduled, and returns having counted on it.
+    executor->before_post = [&]() -> bool {
+        if (++asked != 1) return false;
+        std::thread([&, ex = loop.executor()] { asio::post(ex, [&second] { second = true; }); }).join();
+        return true;
+    };
+    asio::post(loop.executor(), [&first] { first = true; });
+    executor->before_post = nullptr;
+    EXPECT_EQ(asked, 2) << "the loop asked the host again for the turn that the other wake counted on";
+    while (executor->step()) {}
+    EXPECT_TRUE(second) << "the work of the wake that counted on the refused turn waited for a wake that never came";
+    EXPECT_TRUE(first);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, ARefusedTurnIsAskedForAgainOnlyWhileAWakeCountsOnIt) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    bool ran = false;
+    int asked = 0;
+    // The host refuses every time, and one other wake counts on the first turn only.
+    executor->before_post = [&]() -> bool {
+        if (++asked == 1)
+            std::thread([&, ex = loop.executor()] { asio::post(ex, [&ran] { ran = true; }); }).join();
+        return true;
+    };
+    loop.wake();
+    EXPECT_EQ(asked, 2) << "one more ask for the wake that counted on the turn, and no spinning after that";
+    EXPECT_EQ(executor->pending(), 0u);
+    EXPECT_TRUE(loop.idle()) << "a refused turn is not left scheduled";
+    executor->before_post = nullptr;
+    EXPECT_FALSE(ran);
+    loop.wake();  // the host takes posts again, and the next wake schedules the turn
+    EXPECT_EQ(executor->pending(), 1u);
+    while (executor->step()) {}
+    EXPECT_TRUE(ran);
+}
+
 namespace {
 // A tool that blocks a thread of the process's pool, as a legacy synchronous tool does.
 class PoolTool final : public Tool {

@@ -87,18 +87,30 @@ public:
     //     that stops at its batch schedules the next. Only the thread that runs the turn is in that case; a post from
     //     another thread while the turn runs schedules one more turn, which finds nothing to do if the first
     //     already ran the work.
-    //   - One window stays: if the host refuses the post (it throws, as an executor that is shutting down may), a wake
-    //     that found the flag set in the meantime has counted on a turn that never comes, and its work waits for the
-    //     next wake. A host that refuses posts is not running turns anyway.
+    //   - The host may refuse the post (it throws, as an executor that is shutting down may). A wake that found the
+    //     flag set while the post was being asked for counted on a turn that then does not come, and it has returned.
+    //     So that wake leaves a note (`relied_`) and looks at the flag again, and the wake whose post was refused hands
+    //     the flag back first and then looks for a note, as in a handshake: one of the two sees the other. The one
+    //     that sees it asks the host for the turn, so that the work of the other is not left without one. A refusal
+    //     that no wake counted on, or one that repeats, leaves the work to the next wake: `HostLoop::wake()` or any
+    //     post, which the host makes once it takes posts again.
     void wake() noexcept {
         if (closed_.load()) return;
         if (runs_turn_of(this) && running_) return;
-        if (scheduled_.exchange(true)) return;
-        try {
-            host_->post([self = shared_from_this()] { self->turn(); });
-        } catch (...) {
-            // The host took nothing: the next wake asks again.
+        for (int asked = 0;;) {
+            if (scheduled_.exchange(true)) {
+                relied_.store(true);
+                if (scheduled_.load()) return;
+                continue;  // the flag was handed back in the meantime
+            }
+            try {
+                host_->post([self = shared_from_this()] { self->turn(); });
+                return;
+            } catch (...) {
+                // The host took nothing.
+            }
             scheduled_.store(false);
+            if (!relied_.exchange(false) || ++asked == max_asks) return;
         }
     }
 
@@ -250,6 +262,9 @@ private:
 
     // How soon a turn looks again for a timer that Asio has not dispatched at its deadline.
     static constexpr std::chrono::milliseconds redispatch_delay{1};
+    // How many times one wake asks a host that refuses for a turn: the refusal of a wake that others counted on is
+    // asked again, but a host that keeps refusing is not asked for ever.
+    static constexpr int max_asks = 3;
 
     std::shared_ptr<sp::runtime::Executor> host_;
     HostLoop::Options options_;
@@ -265,6 +280,8 @@ private:
     // What wake reads from any thread. Everything else here belongs to the host thread, except `host_`, which is only
     // read after the constructor.
     std::atomic<bool> scheduled_{false}, closed_{false};
+    // Set by a wake that found a turn scheduled and returned; read and cleared by a wake whose post was refused.
+    std::atomic<bool> relied_{false};
     // Whether a turn is running. The host thread's: wake reads it only after finding that it is on that thread.
     bool running_ = false;
 };
