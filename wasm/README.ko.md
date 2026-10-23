@@ -209,8 +209,10 @@ programs.release();
   `failure`는 `{ code, message, node, attempts, witness }`입니다.
 - **이벤트**는 런타임이 쓴 순서대로 오는 실행의 저널 항목 `{ sequence, kind, run_id, operation_id, payload, ... }`입니다. 모델의 답은
   `payload.type === 'llm_token'`인 이벤트로 옵니다. `onEvent`가 던진 오류는 그 실행을 취소하고 `result`를 그 오류로 거부하며,
-  `signal`은 호출이 대기 중일 때 중단되면 호출을 취소하고, 호출이 결정된 뒤에는 효과가 없습니다(일시 정지한 실행에는 `cancel()`을 쓰세요). 런타임이 지원하지 않는 경우가 하나 있습니다. 첫 노드가 시작되기 전에 취소된 재개된 실행은 `P_TRANSITION_CONFLICT`와 함께 `failed`로 끝나고
-  레코드는 `running`으로 남습니다. 런타임이 중단된 명령의 예약을 쥐고 있는 동안에는 취소를 게시할 수 없기 때문입니다. 재개된 실행은 노드가 시작된 뒤에 취소하거나, 끝나도록 두세요.
+  `signal`은 호출이 대기 중일 때 중단되면 호출을 취소하고, 호출이 결정된 뒤에는 효과가 없습니다(일시 정지한 실행에는 `cancel()`을 쓰세요). 재개된 실행이 Core 호출이 시작되기 전에 취소되거나 `onEvent`가 던지면 `cancelled`로 끝나고, 저장소도 그 실행을
+  `cancelled`로 보관합니다. 재개는 그 호출을 위해 벽시계 시간, 모델 토큰, 금액, Core 스텝을 예약해 두는데, 호출이 그중 아무것도 쓰기 전에
+  끝나는 실행은 그것을 돌려받지 못합니다. 이 실행의 `remainingBudget`에서 그 네 가지는 0으로 나옵니다. 호출이 시작된 뒤에
+  끝나는 실행은 호출이 쓰지 않은 만큼을 돌려받습니다.
 - **예산.** 예산은 `{ wallTimeMs, modelTokens, monetaryMicrounits, maxConcurrency, maxProgramOperations, maxCoreSteps, ... }`입니다.
   생략한 항목은 기본값을 유지합니다. 벽시계 시간 60초, 모델 토큰 10,000, 동시 분기 4, Program 연산 32, Core 스텝 100이며, 이는 JavaScript
   소스가 선언할 수 있는 최댓값이기도 합니다. 금액은 0부터 2^53까지의 정수여야 하고 이름은 예산의 멤버여야 하며, 아니면 호출이 거부됩니다.

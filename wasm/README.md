@@ -216,10 +216,11 @@ programs.release();
 - **Events** are the run's journal entries, `{ sequence, kind, run_id, operation_id, payload, ... }`, in the order the
   runtime wrote them. A model reply arrives as events with `payload.type === 'llm_token'`. An error thrown by `onEvent`
   cancels that run and rejects its `result` with the error; `signal` cancels the call when it aborts while the call is
-  pending, and has no effect once the call has settled (use `cancel()` for a run that paused). One case is not
-  supported by the runtime: a resumed run that is cancelled before its first node starts ends `failed` with
-  `P_TRANSITION_CONFLICT` and its record stays `running`, because the runtime cannot publish a cancellation while the
-  reservation of the interrupted command is held. Cancel a resumed run once a node has started, or let it end.
+  pending, and has no effect once the call has settled (use `cancel()` for a run that paused). A resumed run that is
+  cancelled, or whose `onEvent` throws, before its Core call has started ends `cancelled`, and the stores keep it as
+  `cancelled`. The resume reserved wall time, model tokens, money and Core steps for the call, and a run that ends before
+  the call has used any of it gives none of it back: those four read 0 in its `remainingBudget`. A run that ends once
+  the call has started gets back what the call did not use.
 - **Budgets.** A budget is `{ wallTimeMs, modelTokens, monetaryMicrounits, maxConcurrency, maxProgramOperations,
   maxCoreSteps, ... }`; a member that is left out keeps the default: 60 s of wall time, 10,000 model tokens, 4 concurrent
   branches, 32 Program operations and 100 Core steps, which are also the largest values a JavaScript source can declare.

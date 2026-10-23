@@ -185,8 +185,9 @@ programs.release();
   `timed_out`、`failed`、`ambiguous_effect` 或 `checkpoint_incompatible`。`output` 是 `main()` 返回的值（运行等待期间则是 `output.channels` 下的图状态）。`trace` 列出自运行开始或恢复以来执行过的节点。
   `interrupt` 是 `{ node, value, kind, pendingId }`，`failure` 是 `{ code, message, node, attempts, witness }`。
 - **事件**是按运行时写入的顺序到达的运行日志条目 `{ sequence, kind, run_id, operation_id, payload, ... }`。模型的回复以 `payload.type === 'llm_token'` 的事件到达。`onEvent` 抛出的错误会取消该运行，
-  并以该错误拒绝它的 `result`；`signal` 在调用尚未完成时中止，就取消该调用；调用一旦敲定则没有作用（对已暂停的运行请用 `cancel()`）。运行时不支持其中一种情况：在第一个节点开始之前被取消的、已恢复的运行，会以 `P_TRANSITION_CONFLICT` 结束为 `failed`，其记录保持 `running`，
-  因为运行时在持有被中断命令的预留时无法发布取消。请在已恢复的运行中有节点开始之后再取消，或者让它自己结束。
+  并以该错误拒绝它的 `result`；`signal` 在调用尚未完成时中止，就取消该调用；调用一旦敲定则没有作用（对已暂停的运行请用 `cancel()`）。已恢复的运行如果在其 Core 调用开始之前被取消，或 `onEvent` 抛出错误，就会以 `cancelled` 结束，存储也将其保存为
+  `cancelled`。恢复会为该调用预留墙钟时间、模型 token、金额和 Core 步骤；在调用用到其中任何一项之前就结束的运行，不会退回这些预留：
+  它的 `remainingBudget` 中这四项为 0。在调用开始之后结束的运行，会取回调用没有用到的部分。
 - **预算。** 预算是 `{ wallTimeMs, modelTokens, monetaryMicrounits, maxConcurrency, maxProgramOperations, maxCoreSteps, ... }`；省略的成员保持默认值：60 秒墙钟时间、10,000 个模型 token、
   4 个并发分支、32 个 Program 操作和 100 个 Core 步骤，这也是 JavaScript 源码能声明的最大值。数额是 0 到 2^53 的整数，名字必须是预算的成员，否则调用被拒绝。只有在最坏情况放得进剩余预算时才会发送模型调用：最坏情况是模型的输入上限加输出上限，
   从目录中读取（输出也可以用 `maxOutputTokens` 给定）。任何目录都没有给出上限的模型不会被调用，运行以 `NG.ConfigError` 结束为 `failed`。`catalogue` 用来说明这些上限。请给 `modelTokens` 一个正数：给 0 的运行在调用之前不受限制，运行时在调用之后才计费。
