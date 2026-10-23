@@ -1229,6 +1229,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_abandoned_pause_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_backend_tests(neograph_abandoned_pause_tests "core;interrupt")
+    # #604: a thread whose history branches. The cases named Defect fail on the
+    # current stores and are skipped unless NEOGRAPH_TEST_LINEAR_HISTORY=1.
+    add_executable(neograph_linear_history_tests test_linear_history.cpp)
+    target_link_libraries(neograph_linear_history_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_backend_tests(neograph_linear_history_tests "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)
