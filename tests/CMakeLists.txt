@@ -451,6 +451,25 @@ if(NEOGRAPH_BUILD_A2A)
     )
 endif()
 
+# The experimental ACP remote transports (Streamable HTTP and WebSocket). Its
+# own binary, so that it runs without the aggregate test binary.
+if(NEOGRAPH_BUILD_ACP_HTTP_SERVER)
+    add_executable(neograph_acp_http_server_tests
+        test_acp_http_server.cpp
+    )
+    target_link_libraries(neograph_acp_http_server_tests PRIVATE
+        neograph::acp_http_server
+        neograph::acp
+        neograph::core
+        SchemaProvider::transport
+        httplib
+        asio
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        GTest::gtest_main
+    )
+endif()
+
 if(NEOGRAPH_BUILD_UTIL)
     target_sources(neograph_tests PRIVATE test_request_queue.cpp)
 endif()
@@ -860,6 +879,9 @@ if(TARGET neograph_a2a_http_limits_tests)
 endif()
 if(TARGET neograph_acp_tests)
     neograph_discover_tests(neograph_acp_tests)
+endif()
+if(TARGET neograph_acp_http_server_tests)
+    neograph_discover_tests(neograph_acp_http_server_tests)
 endif()
 if(TARGET neograph_quickjs_tests)
     neograph_discover_tests(neograph_quickjs_tests)

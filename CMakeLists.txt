@@ -158,6 +158,9 @@ option(NEOGRAPH_BUILD_MCP_HTTP_SERVER
        OFF)
 option(NEOGRAPH_BUILD_A2A      "Build neograph::a2a (Agent-to-Agent client)" ON)
 option(NEOGRAPH_BUILD_ACP      "Build neograph::acp (Agent Client Protocol server)" ON)
+option(NEOGRAPH_BUILD_ACP_HTTP_SERVER
+       "Build opt-in, experimental neograph::acp_http_server (ACP over Streamable HTTP and WebSocket; follows a draft)"
+       OFF)
 option(NEOGRAPH_BUILD_UTIL     "Build neograph::util (utilities)"        ON)
 option(NEOGRAPH_BUILD_POSTGRES "Build PostgresCheckpointStore (libpq)" ON)
 option(NEOGRAPH_BUILD_SQLITE   "Build SqliteCheckpointStore (libsqlite3)" ON)
@@ -233,10 +236,10 @@ endif()
 set(_neograph_unavailable_components "")
 if(NEOGRAPH_WASM_HOST)
     set(_neograph_unavailable_components
-        ASYNC MCP_CLIENT MCP_HTTP_SERVER A2A GRPC POSTGRES SQLITE PYBIND)
+        ASYNC MCP_CLIENT MCP_HTTP_SERVER ACP_HTTP_SERVER A2A GRPC POSTGRES SQLITE PYBIND)
 elseif(NOT NEOGRAPH_THREADS)
     set(_neograph_unavailable_components
-        ASYNC MCP_CLIENT MCP_HTTP_SERVER A2A GRPC PYBIND)
+        ASYNC MCP_CLIENT MCP_HTTP_SERVER ACP_HTTP_SERVER A2A GRPC PYBIND)
 endif()
 foreach(_component IN LISTS _neograph_unavailable_components)
     if(NEOGRAPH_BUILD_${_component})
@@ -534,7 +537,7 @@ if(NOT NEOGRAPH_BUILD_ASYNC AND (_neograph_llm_needs_async OR NEOGRAPH_BUILD_MCP
         "the dependent components OFF in the same configure call.")
 endif()
 if(NEOGRAPH_BUILD_ASYNC OR _neograph_llm_needs_async OR NEOGRAPH_BUILD_MCP_CLIENT OR
-   NEOGRAPH_BUILD_MCP_HTTP_SERVER OR NEOGRAPH_BUILD_A2A)
+   NEOGRAPH_BUILD_MCP_HTTP_SERVER OR NEOGRAPH_BUILD_ACP_HTTP_SERVER OR NEOGRAPH_BUILD_A2A)
     find_package(OpenSSL REQUIRED)
 endif()
 
@@ -1342,9 +1345,9 @@ endif()
 # Gemini CLI + Neovim/CodeCompanion. Exposes a NeoGraph engine as the
 # "agent" side. The default transport is newline-delimited JSON over
 # std::cin/std::cout, which is what every editor uses to talk to a
-# locally-launched agent sub-process. HTTP/WebSocket transport remains
-# a future addition (the dispatcher is transport-agnostic — feed JSON
-# envelopes into ACPServer::handle_message and you're done).
+# locally-launched agent sub-process. The library depends on Core only.
+# The experimental remote transports (Streamable HTTP and WebSocket, which
+# follow a draft of the protocol) are a separate opt-in library below.
 # ===========================================================================
 if(NEOGRAPH_BUILD_ACP)
     add_library(neograph_acp
@@ -1371,6 +1374,31 @@ if(NEOGRAPH_BUILD_ACP)
     endif()
 
     add_library(neograph::acp ALIAS neograph_acp)
+endif()
+
+# neograph::acp_http_server — EXPERIMENTAL ACP over Streamable HTTP and
+# WebSocket (src/acp/http_server.cpp). Opt-in and off by default: it needs
+# cpp-httplib and OpenSSL, which neograph::acp does not.
+if(NEOGRAPH_BUILD_ACP_HTTP_SERVER)
+    if(NOT NEOGRAPH_BUILD_ACP)
+        message(FATAL_ERROR
+            "NEOGRAPH_BUILD_ACP_HTTP_SERVER=ON requires NEOGRAPH_BUILD_ACP=ON")
+    endif()
+    add_library(neograph_acp_http_server
+        src/acp/http_server.cpp
+    )
+    target_include_directories(neograph_acp_http_server
+        PUBLIC
+            $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    )
+    target_compile_definitions(neograph_acp_http_server PRIVATE
+        NEOGRAPH_BUILDING_LIBRARY
+        CPPHTTPLIB_OPENSSL_SUPPORT)
+    target_link_libraries(neograph_acp_http_server
+        PUBLIC neograph_acp
+        PRIVATE httplib OpenSSL::SSL OpenSSL::Crypto)
+    add_library(neograph::acp_http_server ALIAS neograph_acp_http_server)
 endif()
 
 # ===========================================================================
@@ -1475,6 +1503,7 @@ set(_NEOGRAPH_VERSIONED_LIBRARY_TARGETS
     neograph_mcp_http_server
     neograph_a2a
     neograph_acp
+    neograph_acp_http_server
     neograph_grpc)
 if(UNIX AND NOT APPLE)
     set(_NEOGRAPH_LIBRARY_INSTALL_RPATH "$ORIGIN")
@@ -2591,7 +2620,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
         endif()
     endforeach()
 
-    foreach(_comp program program_sqlite program_postgres async llm mcp_types mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp grpc util postgres sqlite)
+    foreach(_comp program program_sqlite program_postgres async llm mcp_types mcp mcp_server harness mcp_sqlite mcp_http_server a2a acp acp_http_server grpc util postgres sqlite)
         if(TARGET neograph_${_comp})
             list(APPEND NEOGRAPH_EXPORT_TARGETS neograph_${_comp})
             list(APPEND NEOGRAPH_COMPONENTS_BUILT ${_comp})
@@ -2633,7 +2662,7 @@ if(NEOGRAPH_INSTALL_EXPORT)
     endif()
     string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES
         "find_dependency(SchemaProvider 0.4.0 EXACT CONFIG REQUIRED COMPONENTS ${NEOGRAPH_SCHEMAPROVIDER_COMPONENTS})")
-    if(TARGET neograph_async OR (TARGET neograph_llm AND NOT NEOGRAPH_LLM_HOST_ONLY) OR TARGET neograph_mcp_http_server)
+    if(TARGET neograph_async OR (TARGET neograph_llm AND NOT NEOGRAPH_LLM_HOST_ONLY) OR TARGET neograph_mcp_http_server OR TARGET neograph_acp_http_server)
         string(APPEND NEOGRAPH_CONFIG_DEPENDENCIES "\nfind_dependency(OpenSSL)")
     endif()
     if(TARGET neograph_postgres OR TARGET neograph_program_postgres)
