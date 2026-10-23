@@ -191,6 +191,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **재개의 첫 이벤트에서 던지는 핸들러.** 첫 이벤트(`Started`, 시도가 생기기 전에 전달됨)에서 던지면, 대기 중인 효과를 모호함으로 표시하지 않은 채 `AmbiguousEffect`를 돌려주는 분기로 끝났습니다. 그 결과는 거부되었고(`P_RUNTIME_INTERNAL`, "Ambiguous Program result requires one ambiguous pending effect") 레코드는 `running`으로 남았습니다. 이제 JavaScript `main()`이 없는 Program의 재개와 같이 `P_EVENT_SINK`와 함께 `failed`로 끝나며, 재개가 남겨 준 남은 예산을 그대로 가집니다.
   - **변하지 않은 것.** 호출이 시작된 뒤, 즉 호출의 첫 이벤트나 그 이후에 끝나는 실행은 이전처럼 측정된 사용량으로 예약을 정산하고, 호출이 쓰지 않은 만큼을 돌려받습니다. 호스트 용량을 기다리는 동안(`RuntimeConfig::host_admission`) 멈추는 재개된 실행이나, 시도가 읽을 때 Core 체크포인트가 사라진 재개된 실행은 여전히 `P_TRANSITION_CONFLICT`와 함께 `failed`로 끝나고 레코드는 `running`으로 남습니다.
   - **테스트.** 재개된 실행을 Core 호출이 시작되기 전과 호출의 첫 이벤트에서 끝냅니다. 시도를 체크포인트의 첫 로드에서 붙잡아 두고 인메모리와 SQLite에서(`ProgramRuntimeTest`), 테스트가 구동하는 호스트 루프에서(`ProgramHostPumpedStores`), JavaScript 모듈에서(`wasm/test/program_test.mjs`) 합니다. 호출이 시작되기 전에 끝나는 실행은 이전 엔진에서 `P_TRANSITION_CONFLICT`와 `running`으로 남은 레코드로 실패했고, `Started`에서 핸들러가 던지는 실행은 `P_RUNTIME_INTERNAL`로 실패했습니다.
+- **A2A 클라이언트는 `Content-Type`이 이벤트 스트림이라고 할 때만 응답을 이벤트 스트림으로 읽습니다.** 본문에 `data: `가 들어 있는 응답을 모두 서버 전송 이벤트로 보고 그 뒤의 텍스트를 파싱했습니다. 그래서 작업이나 `history`에 그 문자열이 있는 JSON-RPC 응답(요청 메시지가 그대로 되돌아오는 경우 포함)이 `A2A response not valid JSON`으로 실패했습니다. 이제 미디어 타입이 `text/event-stream`인 응답만 이벤트 스트림이며 그 메시지는 첫 `data:` 이벤트이고, 그 밖의 응답은 모두 JSON입니다. **동작 변경:** 그 콘텐츠 타입 없이 이벤트를 보내는 서버는 더 이상 스트림으로 읽히지 않습니다.
 
 ### 보안
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=0c5c60196bee90e5e6009b6fc8ca7255e2b3365504528791a3a4adb985af8732 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=edad56beafb7746077551336c44d837a290406832842f1080e8c26d7362a168c -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -205,6 +205,8 @@ TaskState.Completed
 ```
 
 客户端的其他调用：`send_message_stream(text, on_event)` 会在状态和工件更新到达时逐个交给回调，并返回组装好的任务；`get_task(id)` 读取任务；`cancel_task(id)` 取消任务，包括正在等待输入的任务。向已经终止的任务发送消息会以 `-32004` 失败。这个 Python 客户端在 0.14.0 的 wheel 中也有，上面的 Python 脚本用它同样能配合这个服务器工作。
+
+只有当响应的 `Content-Type` 为 `text/event-stream` 时，才把它当作服务器发送事件来读，此时 JSON-RPC 消息是第一个 `data:` 事件；其余情况一律按 JSON 读取。响应里的文本即使含有 `data: `，也不会影响判断。
 
 ## 把远程智能体用作节点
 

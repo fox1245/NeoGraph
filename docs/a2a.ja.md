@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=0c5c60196bee90e5e6009b6fc8ca7255e2b3365504528791a3a4adb985af8732 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=edad56beafb7746077551336c44d837a290406832842f1080e8c26d7362a168c -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -205,6 +205,8 @@ TaskState.Completed
 ```
 
 クライアントのその他の呼び出しは次のとおりです。`send_message_stream(text, on_event)` は、ステータスとアーティファクトの更新を届いた順に渡し、組み立てたタスクを返します。`get_task(id)` はタスクを読み、`cancel_task(id)` は、入力待ちのタスクを含め、タスクをキャンセルします。すでに終了したタスクにメッセージを送ると、`-32004` で失敗します。この Python クライアントは 0.14.0 のホイールにも入っており、上の Python スクリプトはホイールでもこのサーバーで動きます。
+
+応答は `Content-Type` が `text/event-stream` のときだけサーバー送信イベントとして読み、その場合の JSON-RPC メッセージは最初の `data:` イベントです。それ以外は JSON として読みます。応答に含まれるテキストは、`data: ` を含んでいても判断に使われません。
 
 ## リモートエージェントをノードとして使う
 

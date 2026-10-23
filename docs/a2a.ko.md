@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=0c5c60196bee90e5e6009b6fc8ca7255e2b3365504528791a3a4adb985af8732 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=edad56beafb7746077551336c44d837a290406832842f1080e8c26d7362a168c -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -205,6 +205,8 @@ TaskState.Completed
 ```
 
 클라이언트의 다른 호출은 다음과 같습니다. `send_message_stream(text, on_event)`은 상태와 아티팩트 업데이트를 도착하는 대로 전달하고 조립된 태스크를 돌려줍니다. `get_task(id)`는 태스크를 읽고, `cancel_task(id)`는 입력을 기다리는 태스크를 포함해 태스크를 취소합니다. 이미 종료된 태스크에 메시지를 보내면 `-32004`로 실패합니다. 이 Python 클라이언트는 0.14.0 휠에도 있으며, 위 Python 스크립트는 휠로도 이 서버와 동작합니다.
+
+응답은 `Content-Type`이 `text/event-stream`일 때만 서버 전송 이벤트로 읽고, 그때 JSON-RPC 메시지는 첫 `data:` 이벤트입니다. 그 외에는 JSON으로 읽습니다. 응답에 담긴 텍스트는 `data: `가 들어 있어도 판단에 쓰이지 않습니다.
 
 ## 원격 에이전트를 노드로 쓰기
 
