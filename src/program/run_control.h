@@ -521,6 +521,17 @@ struct CommandBudgetReservation {
 
 CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept;
 
+/// The remaining budget that the journal of a JavaScript run holds beneath the reservation of a command, or nothing when
+/// the journal holds no reservation (a Program without a JavaScript `main()` never reserves one).
+///
+/// The grant of an attempt that starts with a reservation held, as the attempt of a resume or of a recovery does,
+/// includes that reservation. A run that ends before the command has settled it has no usage to settle it with: it must
+/// not publish the grant as its remaining budget, which would return the reservation unmeasured, and the transition
+/// validator refuses that. It ends with this remainder instead, and the reservation is not returned.
+///
+/// Awaits the transition store, and throws what the store throws.
+asio::awaitable<std::optional<RunBudget>> held_command_remainder(const RunControl& control);
+
 /// The effect identity of JavaScript command `command_ordinal` of a bundle, as
 /// the command journal records it.
 std::string javascript_command_effect_identity(std::string_view         bundle_id,

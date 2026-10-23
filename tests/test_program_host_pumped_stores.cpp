@@ -16,6 +16,7 @@
 #include "fixtures/manual_executor.h"
 #include "fixtures/thread_census.h"
 #include "fixtures/typed_provider.h"
+#include "fixtures/vanishing_checkpoint_store.h"
 #include "program_expansion_fixture.h"
 
 #include <neograph/graph/node.h>
@@ -75,6 +76,34 @@ public:
         }
         graph::NodeOutput output;
         output.writes.push_back(graph::ChannelWrite{"value", in.ctx.resume_value->at("decision")});
+        co_return output;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
+// Asks for the result of an effect that may have run, until it is resumed with one, then writes the result.
+class EffectNode final : public graph::GraphNode {
+public:
+    explicit EffectNode(std::string name) : name_(std::move(name)) {}
+    asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        ++approvals_run;
+        if (!in.ctx.resume_value) {
+            throw graph::NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-effect-1"},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect", json{{"effect_id", "effect-search-1"},
+                                     {"idempotency", "non_idempotent"},
+                                     {"tool", "search"},
+                                     {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 4102444800000ULL}});
+        }
+        graph::NodeOutput output;
+        output.writes.push_back(graph::ChannelWrite{"value", in.ctx.resume_value->at("result")});
         co_return output;
     }
     std::string get_name() const override { return name_; }
@@ -150,6 +179,10 @@ RegistrySnapshot host_registry(ExecutionGuarantee = ExecutionGuarantee::Strict) 
     builder.add_node(
         host_manifest({ExecutableKind::Node, "host-approve", "1.0.0", digest('3')}),
         [](const std::string& name, const json&, const graph::NodeContext&) { return std::make_unique<ApproveNode>(name); },
+        json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
+    builder.add_node(
+        host_manifest({ExecutableKind::Node, "host-effect", "1.0.0", digest('8')}),
+        [](const std::string& name, const json&, const graph::NodeContext&) { return std::make_unique<EffectNode>(name); },
         json{{"type", "object"}}, json{{"writes", json::array({"value"})}});
     builder.add_node(
         host_manifest({ExecutableKind::Node, "host-tool", "1.0.0", digest('4')}),
@@ -340,8 +373,13 @@ public:
     enum Wrap : unsigned { Programs = 1, Transitions = 2, Grants = 4, Fragments = 8, Modules = 16, All = 31 };
 
     // `javascript` makes the catalog admit a Program with a JavaScript main(), which a Program of documents does not need.
-    explicit HostPumpedProgramHost(unsigned wrap = All, bool javascript = false)
-        : fixture(1, {}, {}, {}, javascript ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict, javascript) {
+    // `checkpoints` replaces the in-memory store of Core checkpoints, and `configure` changes the runtime's configuration
+    // before the runtime is made.
+    explicit HostPumpedProgramHost(unsigned wrap = All, bool javascript = false,
+                                   std::shared_ptr<CheckpointStore>  checkpoints = {},
+                                   std::function<void(RuntimeConfig&)> configure   = {})
+        : fixture(1, std::move(checkpoints), {}, {}, javascript ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict,
+                  javascript) {
         fixture.runtime.reset();
         approvals_asked = 0;
         approvals_run   = 0;
@@ -400,6 +438,7 @@ public:
                 return granted;
             });
         config.executor = hosted.loop.executor();
+        if (configure) configure(config);
         runtime = std::make_unique<ProgramRuntime>(std::move(config));
     }
 
@@ -952,7 +991,13 @@ enum class EndOfAResumedRun {
     CancelBeforeTheCallStarts,
     HandlerThrowsAtTheStartedEvent,
     CancelAtTheStartOfTheCall,
-    HandlerThrowsAtTheStartOfTheCall
+    HandlerThrowsAtTheStartOfTheCall,
+    // The checkpoint of the resume is gone when its attempt reads it.
+    CheckpointGoneAtTheStartedEvent,
+    // The attempt waits for host capacity and is cancelled; the host refuses it; the host's resolver throws.
+    CancelledWhileWaitingForHostCapacity,
+    RefusedByHostAdmission,
+    HostAdmissionResolverThrows
 };
 
 struct ResumedJavaScriptEnd {
@@ -966,7 +1011,30 @@ struct ResumedJavaScriptEnd {
 // Resumes a paused run of the JavaScript Program and ends it before the first node of the resumed call runs: before the
 // call has started, or at its first event.
 ResumedJavaScriptEnd end_a_resumed_javascript_run(EndOfAResumedRun how, const std::string& run_id) {
-    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, true);
+    auto       checkpoints = std::make_shared<neograph::test::VanishingCheckpointStore>();
+    const auto host_profile = neograph::HostResourceProfile::create(neograph::HostResourceProfileData{
+        "host-pumped-resumed-v1",
+        neograph::HostResourceVector{.cpu_millis = 1},
+        {},
+        neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured, 1, false}});
+    auto       controller = std::make_shared<neograph::HostAdmissionController>(
+        neograph::HostAdmissionControllerConfig{host_profile});
+    const bool at_host_admission = how == EndOfAResumedRun::CancelledWhileWaitingForHostCapacity ||
+                                   how == EndOfAResumedRun::RefusedByHostAdmission ||
+                                   how == EndOfAResumedRun::HostAdmissionResolverThrows;
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, true, checkpoints, [&](RuntimeConfig& config) {
+        if (!at_host_admission) return;
+        config.host_admission          = controller;
+        config.host_admission_resolver = [how](const ProgramHostAdmissionContext& context) {
+            neograph::HostAdmissionRequest request;
+            request.resources.cpu_millis = 1;
+            if (context.attempt < 2) return request;
+            if (how == EndOfAResumedRun::RefusedByHostAdmission) request.resources.cpu_millis = 1000;
+            if (how == EndOfAResumedRun::HostAdmissionResolverThrows)
+                throw std::runtime_error("the resolver failed");
+            return request;
+        };
+    });
     const auto            version = host.admit_javascript(kJavaScriptApproval);
     ResumedJavaScriptEnd  end;
     auto                  sink = std::make_shared<FirstCoreEventSink>();
@@ -987,14 +1055,36 @@ ResumedJavaScriptEnd end_a_resumed_javascript_run(EndOfAResumedRun how, const st
                 throw std::runtime_error("the handler rejected the resume");
             };
         }
+        if (how == EndOfAResumedRun::CheckpointGoneAtTheStartedEvent) {
+            // The checkpoint is gone from the first event of the resume on, before its attempt exists.
+            sink->watched = ProgramEventKind::Started;
+            sink->action  = [&] {
+                end.held = host.fixture.journal->latest(kOwner, run_id);
+                checkpoints->vanish();
+            };
+        }
+        // The capacity of the host is taken, so that the attempt of the resume has to wait for it.
+        std::optional<neograph::HostResourceLease> capacity;
+        if (how == EndOfAResumedRun::CancelledWhileWaitingForHostCapacity) {
+            neograph::HostAdmissionRequest request;
+            request.resources.cpu_millis = 1;
+            capacity                      = controller->try_reserve(std::move(request));
+            EXPECT_TRUE(capacity.has_value()) << "the first attempt gave its capacity back";
+        }
         auto handle = co_await host.runtime->resume_handle_async(kOwner, run_id, std::move(answer));
         // The resume is published and its attempt is not running yet: the reservation of the call is held.
-        if (how != EndOfAResumedRun::HandlerThrowsAtTheStartedEvent) end.held = host.fixture.journal->latest(kOwner, run_id);
+        if (how != EndOfAResumedRun::HandlerThrowsAtTheStartedEvent &&
+            how != EndOfAResumedRun::CheckpointGoneAtTheStartedEvent)
+            end.held = host.fixture.journal->latest(kOwner, run_id);
         switch (how) {
             case EndOfAResumedRun::CancelBeforeTheCallStarts:
+            case EndOfAResumedRun::CancelledWhileWaitingForHostCapacity:
                 end.applied = co_await handle.cancel_async();
                 break;
             case EndOfAResumedRun::HandlerThrowsAtTheStartedEvent:
+            case EndOfAResumedRun::CheckpointGoneAtTheStartedEvent:
+            case EndOfAResumedRun::RefusedByHostAdmission:
+            case EndOfAResumedRun::HostAdmissionResolverThrows:
                 break;
             case EndOfAResumedRun::CancelAtTheStartOfTheCall:
                 sink->action = [&] { end.applied = handle.cancel(); };
@@ -1081,6 +1171,128 @@ TEST(ProgramHostPumpedStores, AResumedJavaScriptRunWhoseHandlerThrowsAtTheStartO
     expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Failed, ContinuationState::Failed, true);
     ASSERT_TRUE(end.ended && end.ended->failure());
     EXPECT_EQ(end.ended->failure()->code, "P_EVENT_SINK");
+}
+
+// The checkpoint a resume continues from can be gone when its attempt reads it (a restarted process over stores that do not
+// agree): the run ends CheckpointIncompatible before its call has started, and returns none of the reservation.
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunWhoseCheckpointIsGoneEndsCheckpointIncompatible) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::CheckpointGoneAtTheStartedEvent, "js-checkpoint-gone");
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::CheckpointIncompatible,
+                                               ContinuationState::CheckpointIncompatible, false);
+    ASSERT_TRUE(end.ended && end.ended->failure());
+    EXPECT_EQ(end.ended->failure()->code, "P_CHECKPOINT_INCOMPATIBLE");
+}
+
+// The attempt of a resume that waits for host capacity has started nothing and holds the reservation of its call: the
+// cancellation, the host's refusal and a throwing resolver each end the run terminal with the remaining budget the resume
+// left it.
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunCancelledWhileItWaitsForHostCapacityEndsCancelled) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::CancelledWhileWaitingForHostCapacity, "js-host-cancel");
+    EXPECT_TRUE(end.applied);
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Cancelled, ContinuationState::Cancelled, false);
+}
+
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunRefusedByHostAdmissionEndsFailedWithItsCode) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::RefusedByHostAdmission, "js-host-refused");
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Failed, ContinuationState::Failed, false);
+    ASSERT_TRUE(end.ended && end.ended->failure());
+    EXPECT_EQ(end.ended->failure()->code, "P_HOST_ADMISSION");
+}
+
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunWhoseHostAdmissionResolverThrowsEndsFailed) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::HostAdmissionResolverThrows, "js-host-resolver-throws");
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Failed, ContinuationState::Failed, false);
+    ASSERT_TRUE(end.ended && end.ended->failure());
+    EXPECT_EQ(end.ended->failure()->code, "P_RUNTIME_CORE_FAILURE");
+}
+
+namespace {
+
+// A Program with a JavaScript main() that calls one graph, whose node leaves an effect to reconcile.
+const char* const kJavaScriptEffect = R"JS(
+export function define() {
+  const graph = ng.graph("main");
+  graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+  graph.node("effect", {type: "host-effect"});
+  graph.entry("effect");
+  graph.exit("effect");
+  return graph;
+}
+
+export function* main(input) {
+  const output = yield ng.callCore("main", {}, "reconcile:host-pumped");
+  return {value: output.value};
+}
+)JS";
+
+ProgramEffectResolution resolution_for(std::string call_id, ProgramEffectReconciliation how, std::optional<json> result,
+                                       std::string trace, std::shared_ptr<ProgramEventSink> events) {
+    return ProgramEffectResolution{std::move(call_id), how, std::move(result), std::move(trace), std::move(events)};
+}
+
+}  // namespace
+
+// The first event of a reconciliation, Started, is delivered once it is published and before its attempt exists. When the
+// handler throws on it, no node of the continued call has run: the run ends Failed with the code of the handler's error
+// and the remaining budget the reconciliation left it, on the host's loop as on threads.
+TEST(ProgramHostPumpedStores, AReconciledJavaScriptCallCoreWhoseHandlerThrowsAtItsStartedEventEndsFailedWithTheHandlersCode) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, true);
+    const auto            version = host.admit_javascript(kJavaScriptEffect);
+    const std::string     run_id  = "js-reconcile-throws";
+
+    std::optional<ProgramResult>        paused, ambiguous, ended, found;
+    std::optional<ProgramJournalRecord> held, latest;
+    std::optional<ProgramRunRecord>     record;
+    auto                                sink = std::make_shared<FirstCoreEventSink>();
+    sink->watched = ProgramEventKind::Started;
+    sink->action  = [&] {
+        held = host.fixture.journal->latest(kOwner, run_id);
+        throw std::runtime_error("the handler rejected the reconciliation");
+    };
+    auto script = [&]() -> asio::awaitable<int> {
+        auto invocation   = top_level(version.id(), run_id);
+        invocation.budget = RunBudget{10000, 1000, 1000, 1, 8, 20, 0, 0, 0};
+        invocation.validate();
+        auto first = co_await host.runtime->start_async(std::move(invocation));
+        paused     = co_await first.wait_async();
+        host.stores.pump_all();
+        const auto call_id = pending_call_id(*paused);
+        auto       unknown_resolution   = resolution_for(call_id, ProgramEffectReconciliation::Unknown, std::nullopt, "trace-unknown", nullptr);
+        auto       completed_resolution = resolution_for(call_id, ProgramEffectReconciliation::Completed, json{{"result", "reconciled"}},
+                                                         "trace-completed", sink);
+        auto       unknown = co_await host.runtime->reconcile_async(kOwner, run_id, std::move(unknown_resolution));
+        ambiguous = co_await unknown.wait_async();
+        auto handle = co_await host.runtime->reconcile_async(kOwner, run_id, std::move(completed_resolution));
+        ended  = co_await handle.wait_async();
+        record = co_await handle.snapshot_async();
+        co_return 0;
+    };
+    host.run(script());
+    latest = host.fixture.journal->latest(kOwner, run_id);
+    host.stores.pump_all(false);
+    auto reconnect_script = [&]() -> asio::awaitable<int> {
+        auto handle = co_await host.runtime->reconnect_async(kOwner, run_id);
+        found       = co_await handle.wait_async();
+        co_return 0;
+    };
+    host.run(reconnect_script());
+
+    ASSERT_TRUE(paused && ambiguous && ended && record && held && latest && found);
+    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*paused);
+    ASSERT_EQ(ambiguous->status(), ProgramTerminalStatus::AmbiguousEffect) << failure_text(*ambiguous);
+    EXPECT_EQ(held->continuation.state, ContinuationState::Running);
+    EXPECT_EQ(ended->status(), ProgramTerminalStatus::Failed) << failure_text(*ended);
+    ASSERT_TRUE(ended->failure());
+    EXPECT_EQ(ended->failure()->code, "P_EVENT_SINK");
+    EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+    EXPECT_EQ(latest->sequence, held->sequence + 1);
+    EXPECT_EQ(latest->remaining_budget, held->remaining_budget);
+    EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+    ASSERT_TRUE(record->terminal_result());
+    EXPECT_EQ(record->continuation().state, ContinuationState::Failed);
+    EXPECT_EQ(found->status(), ProgramTerminalStatus::Failed) << failure_text(*found);
+    EXPECT_EQ(approvals_run.load(), 1) << "no node ran after the reconciliation";
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
 }
 
 TEST(ProgramHostPumpedStores, AnInterruptedRunIsCancelledThroughAHostPumpedStore) {
