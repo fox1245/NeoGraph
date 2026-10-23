@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=9141b5a2b6a600de92af0370ad877ff8ee8ade87d01cd47484b4414acebe352a -->
+<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=2cfa8ee50bd6b765e0c18b9f82a11f4154fff8b7c1c6f7fa589de795fa9c6984 -->
 # ACP: 그래프를 에디터 에이전트로 쓰기
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
