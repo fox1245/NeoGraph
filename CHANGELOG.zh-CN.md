@@ -157,6 +157,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **C++ 使用方需要重新构建：新增或改变了成员和函数 (#556, #557)。** `RuntimeConfig` 新增 `core_tool_grant_awaitable_resolver`。`ProgramHandle` 新增四个 awaitable 函数，`ProgramCatalog` 新增 `_async` 函数和 `completes_inline()`，`ModuleResolver` 新增 `resolve_async`，`ProgramSynthesisGateway` 新增 `continue_child_async`。五个 `Sync...Store` 基类新增 `completes_at_once()`。`ProgramRuntime` 新增了私有的协程主体，`RunControl` 持有的回调返回 awaitable。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **C++ 使用方需要重新构建：Program 存储接口发生了变化 (#556)。** `ProgramTransitionStore`、`ProgramStore`、`ProgramCoreToolGrantStore`、`TaskGraphFragmentStore` 和 `ModuleStore` 的操作返回 `asio::awaitable<T>`。原先实现这些接口的类改为从对应的 `Sync...Store` 类派生，并把操作名改为 `..._sync`（或自己返回 awaitable）；原先通过接口调用存储的代码改用 `Blocking...Store` 视图读取，或者 await。`inspect_program_replacement_chain` 接收 `BlockingProgramTransitionStore`。请将 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（参见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **请重新构建 C++ 使用方：`RequestOptions` 增加了成员。** `async::RequestOptions` 增加了 `connect_timeout`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **行为变更：A2A 客户端不再在 30 秒后结束一次交换。** `A2AClient::set_timeout` 的默认值 30 秒是整个 HTTP 交换的期限，因此任务运行超过 30 秒的阻塞式 `SendMessage`，以及开着超过这么久的事件流，即使代理仍在工作，在默认设置下也会以 `A2A request failed` 失败。现在默认值是对连接（域名解析、TCP 连接和 TLS 握手，通过 `RequestOptions::connect_timeout`）的 30 秒限制，对交换本身没有限制。`set_timeout(seconds)` 仍和以前一样限制整个交换，新的 `set_connect_timeout(seconds)` 设置连接的限制；两者设为 0 都表示取消限制，所以以前会取消所有限制的 `set_timeout(0)`，现在会保留对连接的限制。依靠 30 秒限制来结束卡住的代理、或来停止没有其他办法取消的阻塞调用的调用方，请调用 `set_timeout`。
+  - **消费者叫停时，流随之结束。** `send_message_stream` 在 `on_event` 返回 `false` 或事件带有错误时关闭连接，而不是把流读到结尾。交换没有期限后，永不结束的流否则会一直占住这次调用。
+  - Python 的 `A2AClient.set_timeout(seconds)` 不变：它截断为整数秒，因此小于 1 的值现在表示对交换没有限制，而以前表示完全没有限制。Python 没有 `set_connect_timeout`。
+- **请重新构建 C++ 使用方：`A2AClient` 增加了成员。** `A2AClient` 增加了 `set_connect_timeout` 和一个数据成员。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
 

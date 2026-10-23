@@ -16,11 +16,16 @@
 #include <neograph/graph/run_context.h>
 #include <neograph/graph/state.h>
 
+#include <asio/io_context.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
+
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include <httplib.h>
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <mutex>
 #include <set>
@@ -70,6 +75,9 @@ struct MockA2AServer {
 
     /// When false the well-known card path answers 404 (no card).
     bool serve_card = true;
+
+    /// The reply to an RPC waits this long before it is sent.
+    std::atomic<int> reply_delay_ms{0};
 
     /// Send the JSON-RPC reply as one server-sent event instead of a JSON body.
     bool reply_as_event_stream = false;
@@ -133,6 +141,9 @@ struct MockA2AServer {
             } else {
                 envelope["result"] = next_result;
             }
+            if (const int delay = reply_delay_ms.load(); delay > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+            }
             res.status = 200;
             if (reply_as_event_stream) {
                 res.set_content("data: " + envelope.dump() + "\r\n\r\n",
@@ -194,6 +205,83 @@ TEST(A2AClient, ReplyAsAnEventStreamIsReadFromItsDataEvent) {
     EXPECT_EQ(task.id, "task-1");
     ASSERT_EQ(task.history.size(), 1u);
     EXPECT_EQ(task.history[0].parts[0].text, "hello back");
+}
+
+// Connecting is bounded on its own; a slow reply and a long stream are not.
+TEST(A2AClient, ReplyThatTakesLongerThanTheConnectTimeoutIsDelivered) {
+    MockA2AServer srv;
+    srv.reply_delay_ms = 2200;
+    A2AClient client(srv.url());
+    client.set_connect_timeout(std::chrono::seconds(1));
+    const auto task = client.send_message_sync("slow");
+    EXPECT_EQ(task.id, "task-1");
+}
+
+TEST(A2AClient, ExplicitTimeoutStillBoundsTheWholeExchange) {
+    MockA2AServer srv;
+    srv.reply_delay_ms = 2500;
+    A2AClient client(srv.url());
+    client.set_timeout(std::chrono::seconds(1));
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        (void)client.send_message_sync("slow");
+        FAIL() << "a reply after the timeout was delivered";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("A2A request failed"), std::string::npos) << e.what();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+    EXPECT_LT(elapsed, std::chrono::milliseconds(2400));
+}
+
+namespace {
+
+/// A TCP listener that accepts connections and never says a byte.
+struct SilentPeer {
+    asio::io_context io;
+    asio::ip::tcp::acceptor acceptor{io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
+    std::vector<asio::ip::tcp::socket> held;  // the I/O thread's
+    std::thread worker;
+    unsigned short port = acceptor.local_endpoint().port();
+
+    SilentPeer() {
+        accept_next();
+        worker = std::thread([this] { io.run(); });
+    }
+    ~SilentPeer() {
+        asio::post(io, [this] {
+            std::error_code ec;
+            acceptor.close(ec);
+            held.clear();
+        });
+        if (worker.joinable()) worker.join();
+    }
+    void accept_next() {
+        acceptor.async_accept([this](std::error_code ec, asio::ip::tcp::socket socket) {
+            if (ec) return;
+            held.push_back(std::move(socket));
+            accept_next();
+        });
+    }
+};
+
+}  // namespace
+
+TEST(A2AClient, ConnectTimeoutEndsATlsHandshakeThatNeverFinishes) {
+    SilentPeer peer;
+    A2AClient client("https://127.0.0.1:" + std::to_string(peer.port));
+    client.set_connect_timeout(std::chrono::seconds(1));
+    const auto expect_timeout = [](const char* what, const std::function<void()>& call) {
+        SCOPED_TRACE(what);
+        const auto start = std::chrono::steady_clock::now();
+        EXPECT_THROW(call(), std::runtime_error);
+        const auto elapsed = std::chrono::steady_clock::now() - start;
+        EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+        EXPECT_LT(elapsed, std::chrono::milliseconds(5000));
+    };
+    expect_timeout("card", [&] { (void)client.fetch_agent_card(); });
+    expect_timeout("unary call", [&] { (void)client.rpc_call("message/send", json::object()); });
+    expect_timeout("stream", [&] { (void)client.send_message_stream("hi", nullptr); });
 }
 
 #ifdef NEOGRAPH_TESTS_HAVE_HARNESS
@@ -614,6 +702,9 @@ struct MockV1Server {
     std::string sse_body;
     std::string probe_sse_body;
     int stream_status = 200;
+    /// When positive, SendStreamingMessage sends `sse_body` and then keeps the
+    /// stream open for this long before it ends it.
+    int stream_hold_ms = 0;
 
     MockV1Server() {
         card = json::parse(R"({
@@ -663,6 +754,20 @@ struct MockV1Server {
                                 {"data", "Message has no field named \"kind\""}};
             } else if (method == "SendStreamingMessage") {
                 res.status = stream_status;
+                if (stream_hold_ms > 0) {
+                    res.set_chunked_content_provider(
+                        "text/event-stream",
+                        [this](std::size_t offset, httplib::DataSink& sink) {
+                            if (offset == 0) {
+                                sink.write(sse_body.data(), sse_body.size());
+                                return true;
+                            }
+                            std::this_thread::sleep_for(std::chrono::milliseconds(stream_hold_ms));
+                            sink.done();
+                            return true;
+                        });
+                    return;
+                }
                 res.set_content(sse_body, "text/event-stream");
                 return;
             } else if (method == "GetTask" || method == "CancelTask") {
@@ -1250,3 +1355,42 @@ TEST(A2AClientEndpoint, MessageIdsAreRandomVersion4Uuids) {
     }
 }
 }  // namespace
+
+TEST(A2AClientV1, ConsumerEndingAStreamClosesTheConnection) {
+    // The agent keeps the stream open after its first event. A consumer that
+    // returns false is done at once; the call does not wait for the end of a
+    // stream that may have none.
+    MockV1Server srv;
+    srv.stream_hold_ms = 3000;
+    srv.sse_body = "data: " + json({{"result", {{"task", {{"id", "t-s"}, {"contextId", "c-s"},
+                       {"status", {{"state", "TASK_STATE_WORKING"}}}}}}}}).dump() + "\n\n";
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    int events = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const auto task = client.send_message_stream("stop early", [&](const StreamEvent&) {
+        ++events;
+        return false;
+    });
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_EQ(events, 1);
+    EXPECT_EQ(task.id, "t-s");
+    EXPECT_LT(elapsed, std::chrono::milliseconds(2000));
+}
+
+TEST(A2AClientV1, ErrorFrameEndsTheStreamAndThrows) {
+    MockV1Server srv;
+    srv.stream_hold_ms = 3000;
+    srv.sse_body = "data: " + json({{"error", {{"code", -32001}, {"message", "no such task"}}}}).dump()
+                 + "\n\n";
+    A2AClient client(srv.url());
+    (void)client.fetch_agent_card();
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        (void)client.send_message_stream("fails", nullptr);
+        FAIL() << "an error frame was not thrown";
+    } catch (const A2ARpcError& e) {
+        EXPECT_EQ(e.code(), -32001);
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(2000));
+}

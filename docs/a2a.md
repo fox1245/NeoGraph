@@ -207,6 +207,8 @@ Other calls on the client: `send_message_stream(text, on_event)` delivers status
 
 A reply is read as JSON unless its `Content-Type` is `text/event-stream`, in which case the JSON-RPC message is its first `data:` event. The text a reply holds never decides, `data: ` included.
 
+A call has no deadline of its own: `send_message_sync` waits until the agent answers and a stream until the agent ends it, since a task may run for minutes. Connecting is bounded: name resolution, the TCP connect and the TLS handshake have 30 s together, and `set_connect_timeout(seconds)` changes that. `set_timeout(seconds)` bounds the whole exchange of each request, the reply or the stream read to its end included, and the call throws when it runs over. For both, 0 removes the bound. The Python `set_timeout` takes seconds and truncates them to whole seconds, so a value below 1 removes the bound; Python has no `set_connect_timeout`. A stream that its caller ends by returning `false` from `on_event` is closed at once instead of being read to its end.
+
 ## Use a remote agent as a node
 
 `A2ACallerNode` reads a channel, sends its text to the remote agent and writes the reply into another channel. Several nodes can share one client; their calls run concurrently.

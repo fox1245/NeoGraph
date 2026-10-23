@@ -52,8 +52,9 @@ class NEOGRAPH_API A2ARpcError : public std::runtime_error {
  * @brief A2A client — call a remote agent over JSON-RPC + HTTP.
  *
  * Thread-safe for concurrent use of one instance. `base_url` is immutable;
- * `set_timeout` is synchronized and each request snapshots the timeout before
- * network I/O, so a timeout update cannot race or alter an in-flight request.
+ * `set_timeout` and `set_connect_timeout` are synchronized and each request
+ * snapshots them before network I/O, so an update cannot race or alter an
+ * in-flight request.
  * JSON-RPC request IDs are process-local atomic counters. Agent-card cache
  * initialization and `force` refreshes are single-flight and synchronized;
  * waiting callers receive a copy, and no network I/O occurs under the state
@@ -95,8 +96,21 @@ class NEOGRAPH_API A2AClient {
     ///                 The well-known card path is appended on discovery.
     explicit A2AClient(std::string base_url);
 
-    /// Override the default 30 s request timeout.
+    /// Bound the whole exchange of each request (connect, write, and reading
+    /// the reply or the event stream to its end) to `t`; an exchange that is
+    /// not done by then throws. The default is no bound: a blocking
+    /// `SendMessage` runs until the agent answers and a stream until the
+    /// agent ends it, since a task may take minutes. Zero removes a bound set
+    /// earlier. Connecting is bounded separately, see
+    /// @ref set_connect_timeout.
     void set_timeout(std::chrono::seconds t);
+
+    /// Bound the time to resolve the host, connect and finish the TLS
+    /// handshake of each request to `t` (default 30 s). Unlike
+    /// @ref set_timeout it stops counting once the request can be written,
+    /// so a slow reply or a long stream is not affected. Zero removes the
+    /// bound.
+    void set_connect_timeout(std::chrono::seconds t);
 
     /// Allow the AgentCard to direct RPCs to an interface URL on another
     /// origin than `base_url` (default false: such URLs are ignored and RPCs
@@ -159,8 +173,11 @@ class NEOGRAPH_API A2AClient {
     ///
     /// `on_event` is invoked synchronously on the network thread for
     /// each parsed StreamEvent. Return `true` to keep reading or
-    /// `false` to abort early. The final Task (or a status-update with
-    /// `final=true`) ends the stream regardless.
+    /// `false` to abort early: the connection is closed at once and the
+    /// call returns the task assembled so far. An error frame ends the
+    /// call the same way and is thrown as A2ARpcError. The final Task (or
+    /// a status-update with `final=true`) ends the stream regardless. The
+    /// stream has no time limit unless @ref set_timeout sets one.
     using EventCallback = std::function<bool(const StreamEvent&)>;
 
     Task send_message_stream(const std::string& text,
@@ -188,7 +205,8 @@ class NEOGRAPH_API A2AClient {
 
   private:
     std::string base_url_;
-    std::chrono::seconds timeout_ = std::chrono::seconds(30);
+    std::chrono::seconds timeout_ = std::chrono::seconds(0);          // 0 = no whole-exchange bound
+    std::chrono::seconds connect_timeout_ = std::chrono::seconds(30); // 0 = no connect bound
     std::atomic<int> request_id_{0};
 
     mutable std::shared_ptr<std::mutex> state_mutex_ = std::make_shared<std::mutex>();
@@ -235,6 +253,7 @@ class NEOGRAPH_API A2AClient {
     std::string request_authorization_header() const;
 
     std::chrono::seconds request_timeout() const;
+    std::chrono::seconds request_connect_timeout() const;
 };
 
 } // namespace neograph::a2a

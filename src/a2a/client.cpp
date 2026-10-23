@@ -312,6 +312,11 @@ void A2AClient::set_timeout(std::chrono::seconds t) {
     timeout_ = t;
 }
 
+void A2AClient::set_connect_timeout(std::chrono::seconds t) {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    connect_timeout_ = t;
+}
+
 void A2AClient::set_allow_cross_origin_interfaces(bool allow) {
     std::lock_guard<std::mutex> lock(*state_mutex_);
     allow_cross_origin_ = allow;
@@ -336,6 +341,11 @@ std::string A2AClient::request_authorization_header() const {
 std::chrono::seconds A2AClient::request_timeout() const {
     std::lock_guard<std::mutex> lock(*state_mutex_);
     return timeout_;
+}
+
+std::chrono::seconds A2AClient::request_connect_timeout() const {
+    std::lock_guard<std::mutex> lock(*state_mutex_);
+    return connect_timeout_;
 }
 
 std::optional<WireDialect> A2AClient::wire_dialect() const {
@@ -419,6 +429,7 @@ A2AClient::post_rpc(const std::string& url, const std::string& method, const jso
 
     async::RequestOptions opts;
     opts.timeout = request_timeout();
+    opts.connect_timeout = request_connect_timeout();
 
     auto ex = co_await asio::this_coro::executor;
     async::HttpResponse res;
@@ -562,6 +573,7 @@ A2AClient::fetch_agent_card_async(bool force) {
     };
     async::RequestOptions opts;
     opts.timeout = request_timeout();
+    opts.connect_timeout = request_connect_timeout();
 
     auto ex = co_await asio::this_coro::executor;
     auto path = endpoint.prefix + kDiscoveryPath;
@@ -764,6 +776,7 @@ Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
 
     async::RequestOptions opts;
     opts.timeout = request_timeout();
+    opts.connect_timeout = request_connect_timeout();
 
     Task acc;
     SseFrameSplitter splitter;
@@ -807,28 +820,41 @@ Task A2AClient::stream_once(WireDialect dialect, const std::string& tenant,
         if (on_event && !on_event(ev)) aborted = true;
     };
 
+    // The consumer returning false, or an error frame, ends the call: the
+    // connection is dropped at once instead of being read to the end of a
+    // stream that may have no end.
+    struct StreamStopped {};
+    bool stopped = false;
+
     auto chunk_callback = [&](std::string_view chunk) {
         if (!saw_events && !rpc_error && raw_body.size() < kMaxStreamErrorBody) {
             raw_body.append(chunk.substr(0, kMaxStreamErrorBody - raw_body.size()));
         }
         splitter.feed(chunk, frame_handler);
+        if (aborted) throw StreamStopped{};
     };
 
     async::run_sync([&]() -> asio::awaitable<void> {
         auto ex = co_await asio::this_coro::executor;
-        auto res = co_await async::async_post_stream(
-            ex,
-            endpoint.host,
-            endpoint.port,
-            endpoint.prefix.empty() ? "/" : endpoint.prefix,
-            body_str,
-            std::move(headers),
-            endpoint.tls,
-            chunk_callback,
-            opts);
-        http_status = res.status;
+        try {
+            auto res = co_await async::async_request_stream(
+                ex,
+                "POST",
+                endpoint.host,
+                endpoint.port,
+                endpoint.prefix.empty() ? "/" : endpoint.prefix,
+                body_str,
+                std::move(headers),
+                endpoint.tls,
+                [&http_status](const async::HttpResponseHead& head) { http_status = head.status; },
+                chunk_callback,
+                opts);
+            http_status = res.status;
+        } catch (const StreamStopped&) {
+            stopped = true;
+        }
     }());
-    splitter.finish(frame_handler);
+    if (!stopped) splitter.finish(frame_handler);
 
     if (http_status < 200 || http_status >= 300) {
         throw HttpStatusError(http_status, raw_body);
