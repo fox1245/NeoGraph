@@ -1167,19 +1167,25 @@ from .state_view import StateView  # noqa: E402
 __all__.append("StateView")
 
 # Protocol hosting bridge. A2A and ACP transports remain owned by their
-# official Python SDKs; this adapter preserves NeoGraph session resume and
-# cancellation semantics inside those SDK callbacks.
+# official Python SDKs; this adapter preserves NeoGraph session resume,
+# cancellation and graph-interrupt semantics inside those SDK callbacks.
 from .protocol import (  # noqa: E402
     ProtocolHostAdapter,
+    ProtocolInterrupt,
+    ProtocolInterrupted,
     ProtocolStreamEvent,
     last_message_text,
     message_input,
+    read_interrupt,
 )
 __all__.extend([
     "ProtocolHostAdapter",
+    "ProtocolInterrupt",
+    "ProtocolInterrupted",
     "ProtocolStreamEvent",
     "last_message_text",
     "message_input",
+    "read_interrupt",
 ])
 
 
