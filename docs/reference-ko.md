@@ -3208,7 +3208,9 @@ JSON-RPC 배치(MCP `2025-03-26`)는 메시지마다 따로 처리하고, 그 �
 `startup_timeout`은 실행부터 initialized 알림까지를, `request_timeout`은 각 요청을
 제한합니다. 취소되거나 타임아웃된 요청은 강화된 세션을 끝냅니다. 클라이언트는
 `notifications/cancelled`를 보내고, 서버가 멈추도록 `cancel_grace`(500 ms)를 기다린 뒤
-프로세스 트리를 종료하며, 이후의 요청은 `MCPFailure::shutdown`으로 실패합니다.
+프로세스 트리를 종료하며, 이후의 요청은 `MCPFailure::shutdown`으로 실패합니다. JSON이 아닌
+stdout 줄은 세션당 `max_stdout_text_lines`(1000줄), `max_stdout_text_bytes`(256 KiB)까지
+건너뛰고 호스트의 stderr에 경고를 한 번 쓰며, 손상된 메시지일 수 있는 줄은 세션을 끝냅니다.
 
 **제한과 실패:** `rpc_call_async(method, params, deadline, cancel_token)`과
 `call_tool_result_async()`는 절대 steady-clock deadline과 `graph::CancelToken`을 받습니다.

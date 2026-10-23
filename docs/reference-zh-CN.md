@@ -3140,7 +3140,9 @@ POST 应答，并在应答到达后停止读取该流。服务器在应答之前
 持续读取服务器的 stderr，并保留最后 `max_stderr_bytes`（64 KiB）；stderr 输出不会结束会话。
 `startup_timeout` 约束从启动到 initialized 通知的过程，`request_timeout` 约束每个请求。被取消
 或超时的请求会结束加固会话：客户端发送 `notifications/cancelled`，等待 `cancel_grace`
-（500 ms）让服务器停止，然后终止进程树；之后的请求以 `MCPFailure::shutdown` 失败。
+（500 ms）让服务器停止，然后终止进程树；之后的请求以 `MCPFailure::shutdown` 失败。不是 JSON 的 stdout 行每个会话最多跳过
+`max_stdout_text_lines`（1000 行）、`max_stdout_text_bytes`（256 KiB），并向宿主的 stderr
+写一次警告；可能是损坏消息的行会结束会话。
 
 **约束与失败：** `rpc_call_async(method, params, deadline, cancel_token)` 和
 `call_tool_result_async()` 接受绝对的 steady-clock 截止时间和 `graph::CancelToken`。取消和

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=a8f7e349912caf07dfb404ab4028ca0be14f572ae5a92d04c088205b301b832c -->
+<!-- neograph-i18n: source=docs/mcp.md locale=ko source_sha256=b9bf9962a4940a79256307c271914555f4c900c6f3ae49155c71703f8c96c16e -->
 # MCP: 그래프를 도구로 공개하고, 도구를 쓰는 그래프 만들기
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -188,6 +188,8 @@ False 5
 0.14.0 휠에도 이 Python 클라이언트가 들어 있습니다. stdio 전송은 위 서버와, HTTP 클라이언트는 아래에서 설명하는 HTTP 서버와 동작하며, `MCPClient.shutdown()`도 있습니다. 0.13.1 이하의 휠에는 `shutdown()`이 없고, 그 휠의 HTTP 클라이언트는 해당 HTTP 서버에 세션을 열지 못했습니다. 그런 휠이라면 현재 소스로 빌드하세요.
 
 HTTP에서는 `MCPClient("http://127.0.0.1:8000/mcp")`처럼 서버의 엔드포인트 URL을 주며, 이 URL은 그대로 사용됩니다. 찾아낸 도구는 자신의 세션을 유지하므로 `MCPClient` 객체가 소멸된 뒤에도 쓸 수 있습니다.
+
+stdio 서버는 stdout에 메시지만 써야 합니다. 서버가 그래도 배너나 로그 줄을 거기에 찍으면, 클라이언트는 JSON이 아닌 줄을 세션당 `StdioClientConfig::max_stdout_text_lines`(1000)줄, `max_stdout_text_bytes`(256 KiB)까지 건너뛰고, 첫 줄을 건너뛸 때 호스트의 stderr에 경고를 한 번 씁니다. 그 텍스트는 인용하지 않습니다. 한도를 넘은 다음 줄은 `MCPFailure::protocol`로 세션을 끝내며, 어느 한도든 0이면 아무것도 건너뛰지 않습니다. 손상된 메시지일 수 있는 줄은 건너뛰지 않습니다. `{`로 시작하거나 `[` 다음에 `{`가 오거나 `"jsonrpc"`를 포함하는 줄, 그리고 객체나 배치가 아닌 JSON은 즉시 세션을 끝냅니다. 건너뛰면 그 줄이 답하는 호출이 타임아웃까지 기다리게 되기 때문입니다. 서버는 로그를 stderr에 씁니다. `argv`만 받는 생성자는 기본값을 씁니다.
 
 ## 그래프 노드에서 도구 호출하기
 

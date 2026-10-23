@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=a8f7e349912caf07dfb404ab4028ca0be14f572ae5a92d04c088205b301b832c -->
+<!-- neograph-i18n: source=docs/mcp.md locale=zh-CN source_sha256=b9bf9962a4940a79256307c271914555f4c900c6f3ae49155c71703f8c96c16e -->
 # MCP：把图公开为工具，以及使用工具的图
 
 **Languages:** [English](mcp.md) | [한국어](mcp.ko.md) | [日本語](mcp.ja.md) | [简体中文](mcp.zh-CN.md)
@@ -188,6 +188,8 @@ False 5
 0.14.0 的 wheel 包含这个 Python 客户端：stdio 传输可以配合上面的服务器工作，HTTP 客户端可以配合下文的 HTTP 服务器工作，也提供 `MCPClient.shutdown()`。0.13.1 及更早的 wheel 没有 `shutdown()`，其 HTTP 客户端也无法在该 HTTP 服务器上建立会话；使用这些 wheel 时，请从当前源码构建。
 
 对于 HTTP，`MCPClient("http://127.0.0.1:8000/mcp")` 接收服务器的端点 URL，并原样使用。发现到的工具会保留自己的会话，因此在 `MCPClient` 对象销毁之后仍可使用。
+
+stdio 服务器只向 stdout 写入消息。如果服务器仍在那里打印横幅或日志行，客户端会跳过不是 JSON 的行，每个会话最多跳过 `StdioClientConfig::max_stdout_text_lines`（1000）行、`max_stdout_text_bytes`（256 KiB），并在跳过第一行时向宿主的 stderr 写一次警告，不引用该文本。超过上限之后的下一行会以 `MCPFailure::protocol` 结束会话；任一上限设为 0 则什么都不跳过。可能是损坏消息的行不会被跳过：以 `{` 开头、以 `[` 后接 `{` 开头或包含 `"jsonrpc"` 的行，以及不是对象或批量的 JSON，都会立即结束会话，因为跳过它们会让它们所答复的调用一直等到超时。服务器把日志写到 stderr。只接收 `argv` 的构造函数使用默认值。
 
 ## 在图节点中调用工具
 

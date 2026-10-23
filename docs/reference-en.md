@@ -3281,7 +3281,10 @@ its last `max_stderr_bytes` (64 KiB); stderr output never ends the session.
 `request_timeout` every request. A request that is cancelled or times out ends
 a hardened session: the client sends `notifications/cancelled`, waits
 `cancel_grace` (500 ms) for the server to stop, and then terminates the process
-tree; later requests fail with `MCPFailure::shutdown`.
+tree; later requests fail with `MCPFailure::shutdown`. A stdout line that is not
+JSON is skipped, up to `max_stdout_text_lines` (1000) and `max_stdout_text_bytes`
+(256 KiB) per session, with one warning on the host's stderr; a line that could
+be a damaged message ends the session.
 
 **Bounds and failures:** `rpc_call_async(method, params, deadline,
 cancel_token)` and `call_tool_result_async()` take an absolute steady-clock

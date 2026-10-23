@@ -85,6 +85,27 @@ struct BoundaryDirectory {
     }
 };
 
+std::filesystem::path noise_fixture() {
+    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_noise.py";
+}
+
+mcp::StdioClientConfig noise_config(const std::string& mode, int count = 0) {
+    mcp::StdioClientConfig config;
+    config.argv = {python_cmd(), noise_fixture().string(), mode, std::to_string(count)};
+    config.request_timeout = std::chrono::milliseconds(3000);
+    return config;
+}
+
+mcp::MCPFailure failure_of_initialize(mcp::MCPClient& client) {
+    try {
+        client.initialize();
+    } catch (const mcp::MCPTransportError& e) {
+        return e.failure();
+    }
+    ADD_FAILURE() << "initialize succeeded";
+    return mcp::MCPFailure::connection;
+}
+
 mcp::StdioClientConfig boundary_config(const std::string& mode) {
     mcp::StdioClientConfig config;
     config.argv = {python_cmd(),
@@ -505,7 +526,7 @@ TEST(MCPStdioAsync, MalformedSubprocessFrameIsAProtocolFailure) {
     if (!python3_available()) GTEST_SKIP() << "python3 not available";
     mcp::MCPClient client({
         python_cmd(), "-c",
-        "import sys; sys.stdin.readline(); print('not-json', flush=True)",
+        "import sys; sys.stdin.readline(); print('{\"jsonrpc\": \"2.0\", \"id\": 1, \"res', flush=True)",
     });
     try {
         client.initialize();
@@ -513,6 +534,96 @@ TEST(MCPStdioAsync, MalformedSubprocessFrameIsAProtocolFailure) {
     } catch (const mcp::MCPTransportError& e) {
         EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
     }
+}
+
+// A server prints a banner or a log line to stdout although only messages
+// belong there. Such text is skipped; anything that could be a damaged message
+// still ends the session at once, since skipping it would leave the call it
+// answers waiting for its timeout.
+TEST(MCPStdioAsync, TextOnStdoutThatIsNotJsonIsSkipped) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    mcp::MCPClient client({python_cmd(), noise_fixture().string(), "banner"});
+    ASSERT_TRUE(client.initialize());
+    EXPECT_EQ(client.get_initialize_result().server_info.value("name", ""), "noise");
+    const auto tools = client.get_tools();
+    ASSERT_EQ(tools.size(), 1u);
+    EXPECT_EQ(tools[0]->get_name(), "probe");
+}
+
+TEST(MCPStdioAsync, NonJsonTextBeforeAnEndOfFileIsAConnectionFailure) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    mcp::MCPClient client({
+        python_cmd(), "-c",
+        "import sys; sys.stdin.readline(); print('not-json', flush=True)",
+    });
+    EXPECT_EQ(failure_of_initialize(client), mcp::MCPFailure::connection);
+}
+
+TEST(MCPStdioAsync, ADamagedMessageOnStdoutIsNeverSkipped) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    for (const char* mode : {"cut", "split", "prefixed", "scalar"}) {
+        SCOPED_TRACE(mode);
+        mcp::MCPClient client({python_cmd(), noise_fixture().string(), mode});
+        EXPECT_EQ(failure_of_initialize(client), mcp::MCPFailure::protocol);
+    }
+}
+
+TEST(MCPStdioAsync, SkippedStdoutTextIsBoundedByLines) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    auto config = noise_config("flood", 5);
+    config.max_stdout_text_lines = 4;
+    mcp::MCPClient client(config);
+    try {
+        client.initialize();
+        FAIL() << "five lines of text passed a limit of four";
+    } catch (const mcp::MCPTransportError& e) {
+        EXPECT_EQ(e.failure(), mcp::MCPFailure::protocol);
+        EXPECT_NE(std::string(e.what()).find("not JSON-RPC"), std::string::npos) << e.what();
+    }
+
+    // Exactly the limit is still skipped.
+    config.max_stdout_text_lines = 5;
+    mcp::MCPClient within(config);
+    EXPECT_TRUE(within.initialize());
+}
+
+TEST(MCPStdioAsync, SkippedStdoutTextIsBoundedByBytes) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    // "log line N\n" is 11 bytes.
+    auto config = noise_config("flood", 5);
+    config.max_stdout_text_bytes = 54;
+    mcp::MCPClient client(config);
+    EXPECT_EQ(failure_of_initialize(client), mcp::MCPFailure::protocol);
+
+    config.max_stdout_text_bytes = 55;
+    mcp::MCPClient within(config);
+    EXPECT_TRUE(within.initialize());
+}
+
+TEST(MCPStdioAsync, ZeroLimitSkipsNoStdoutText) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    for (int which = 0; which < 2; ++which) {
+        auto config = noise_config("banner");
+        (which == 0 ? config.max_stdout_text_lines : config.max_stdout_text_bytes) = 0;
+        mcp::MCPClient client(config);
+        EXPECT_EQ(failure_of_initialize(client), mcp::MCPFailure::protocol);
+    }
+}
+
+TEST(MCPStdioAsync, FirstSkippedStdoutLineIsReportedOnceWithoutQuotingIt) {
+    if (!python3_available()) GTEST_SKIP() << "python3 not available";
+    testing::internal::CaptureStderr();
+    {
+        mcp::MCPClient client(noise_config("flood", 5));
+        ASSERT_TRUE(client.initialize());
+        client.shutdown();
+    }
+    const auto err = testing::internal::GetCapturedStderr();
+    const std::string warning = "an MCP stdio server wrote text that is not JSON-RPC";
+    const auto first = err.find(warning);
+    ASSERT_NE(first, std::string::npos) << err;
+    EXPECT_EQ(err.find(warning, first + 1), std::string::npos) << "reported more than once";
+    EXPECT_EQ(err.find("log line"), std::string::npos) << "the server's text was quoted";
 }
 
 TEST(MCPStdioAsync, InvalidInitializeResultIsAProtocolFailure) {

@@ -161,6 +161,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **스트림은 소비자가 멈추면 끝납니다.** `send_message_stream`은 `on_event`가 `false`를 반환하거나 이벤트가 오류를 담고 있으면 스트림을 끝까지 읽지 않고 연결을 닫습니다. 교환에 기한이 없으므로, 끝나지 않는 스트림이 호출을 붙잡아 둘 수 있기 때문입니다.
   - Python의 `A2AClient.set_timeout(seconds)`는 그대로입니다. 정수 초로 잘라 쓰므로 1 미만 값은 이제 교환에 한도가 없다는 뜻이며, 전에는 한도가 전혀 없다는 뜻이었습니다. Python에는 `set_connect_timeout`이 없습니다.
 - **C++ 소비자는 다시 빌드해야 합니다: `A2AClient`에 멤버가 추가되었습니다.** `A2AClient`에 `set_connect_timeout`과 데이터 멤버가 하나 추가되었습니다. NeoGraph, C++ 소비자, Python 확장을 함께 다시 빌드하십시오([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
+- **C++ 소비자는 다시 빌드해야 합니다: `StdioClientConfig`에 멤버가 추가되었습니다.** `mcp::StdioClientConfig`에 `max_stdout_text_lines`와 `max_stdout_text_bytes`가 추가되었습니다. NeoGraph, C++ 소비자, Python 확장을 함께 다시 빌드하십시오([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ### 수정됨
 
@@ -198,6 +199,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **변하지 않은 것.** 호출이 시작된 뒤, 즉 호출의 첫 이벤트나 그 이후에 끝나는 실행은 이전처럼 측정된 사용량으로 예약을 정산하고, 호출이 쓰지 않은 만큼을 돌려받습니다. 호스트 용량을 기다리는 동안(`RuntimeConfig::host_admission`) 멈추는 재개된 실행이나, 시도가 읽을 때 Core 체크포인트가 사라진 재개된 실행은 여전히 `P_TRANSITION_CONFLICT`와 함께 `failed`로 끝나고 레코드는 `running`으로 남습니다.
   - **테스트.** 재개된 실행을 Core 호출이 시작되기 전과 호출의 첫 이벤트에서 끝냅니다. 시도를 체크포인트의 첫 로드에서 붙잡아 두고 인메모리와 SQLite에서(`ProgramRuntimeTest`), 테스트가 구동하는 호스트 루프에서(`ProgramHostPumpedStores`), JavaScript 모듈에서(`wasm/test/program_test.mjs`) 합니다. 호출이 시작되기 전에 끝나는 실행은 이전 엔진에서 `P_TRANSITION_CONFLICT`와 `running`으로 남은 레코드로 실패했고, `Started`에서 핸들러가 던지는 실행은 `P_RUNTIME_INTERNAL`로 실패했습니다.
 - **A2A 클라이언트는 `Content-Type`이 이벤트 스트림이라고 할 때만 응답을 이벤트 스트림으로 읽습니다.** 본문에 `data: `가 들어 있는 응답을 모두 서버 전송 이벤트로 보고 그 뒤의 텍스트를 파싱했습니다. 그래서 작업이나 `history`에 그 문자열이 있는 JSON-RPC 응답(요청 메시지가 그대로 되돌아오는 경우 포함)이 `A2A response not valid JSON`으로 실패했습니다. 이제 미디어 타입이 `text/event-stream`인 응답만 이벤트 스트림이며 그 메시지는 첫 `data:` 이벤트이고, 그 밖의 응답은 모두 JSON입니다. **동작 변경:** 그 콘텐츠 타입 없이 이벤트를 보내는 서버는 더 이상 스트림으로 읽히지 않습니다.
+- **MCP stdio 클라이언트는 서버의 stdout에 있는 JSON이 아닌 텍스트를 건너뜁니다.** 시작 배너나 로그 줄처럼 JSON-RPC 메시지가 아닌 줄 하나가 세션을 끝내고 대기 중인 모든 호출을 실패시켰습니다. 사양이 책임을 지우는 쪽은 서버인데도 그랬습니다. 이제 세션은 JSON이 아닌 줄을 세션당 `StdioClientConfig::max_stdout_text_lines`(1000)줄, `max_stdout_text_bytes`(256 KiB)까지 건너뛰고, 텍스트를 인용하지 않은 경고를 호스트의 stderr에 한 번 씁니다. 한도를 넘은 줄은 `MCPFailure::protocol`로 세션을 끝내며, 한도를 0으로 하면 아무것도 건너뛰지 않습니다. 손상된 메시지일 수 있는 줄은 건너뛰지 않습니다. 건너뛰면 그 줄이 답하는 호출이 타임아웃까지 기다리기 때문입니다. `{`로 시작하거나 `[` 다음에 `{`가 오거나 `"jsonrpc"`를 포함하는 줄, 그리고 객체나 배치가 아닌 JSON은 전과 같이 세션을 끝냅니다.
 
 ### 보안
 

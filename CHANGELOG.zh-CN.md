@@ -161,6 +161,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **消费者叫停时，流随之结束。** `send_message_stream` 在 `on_event` 返回 `false` 或事件带有错误时关闭连接，而不是把流读到结尾。交换没有期限后，永不结束的流否则会一直占住这次调用。
   - Python 的 `A2AClient.set_timeout(seconds)` 不变：它截断为整数秒，因此小于 1 的值现在表示对交换没有限制，而以前表示完全没有限制。Python 没有 `set_connect_timeout`。
 - **请重新构建 C++ 使用方：`A2AClient` 增加了成员。** `A2AClient` 增加了 `set_connect_timeout` 和一个数据成员。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **请重新构建 C++ 使用方：`StdioClientConfig` 增加了成员。** `mcp::StdioClientConfig` 增加了 `max_stdout_text_lines` 和 `max_stdout_text_bytes`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
 
@@ -198,6 +199,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。在等待宿主容量期间（`RuntimeConfig::host_admission`）停止的已恢复运行，或其尝试读取时 Core 检查点已经丢失的已恢复运行，仍会以 `P_TRANSITION_CONFLICT` 结束为 `failed`，记录保持 `running`。
   - **测试。** 在 Core 调用开始之前，以及在调用的第一个事件处，结束一个已恢复的运行：让尝试停在它第一次加载检查点处，在内存存储和 SQLite 上 (`ProgramRuntimeTest`)，在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`)，以及在 JavaScript 模块中 (`wasm/test/program_test.mjs`)。在调用开始之前结束的运行，在之前的引擎上会因 `P_TRANSITION_CONFLICT` 而失败，记录保持 `running`；在 `Started` 处抛出的处理器则因 `P_RUNTIME_INTERNAL` 而失败。
 - **A2A 客户端只有在 `Content-Type` 表明是事件流时，才把响应当作事件流来读。** 以前，只要响应体里含有 `data: `，就把它当作服务器发送事件，并解析其后的文本，所以任务或 `history` 里含有该字符串的 JSON-RPC 响应（包括原样回显请求消息的情况）会以 `A2A response not valid JSON` 失败。现在只有媒体类型为 `text/event-stream` 的响应才是事件流，其消息是第一个 `data:` 事件；其他响应一律是 JSON。**行为变更：** 不带该内容类型而发送事件的服务器，不再被当作流来读。
+- **MCP stdio 客户端会跳过服务器 stdout 上不是 JSON 的文本。** 那里只要出现一行不是 JSON-RPC 消息的内容（例如启动横幅或日志行），就会结束会话并让所有待处理的调用失败，尽管规范把责任放在服务器一方。现在会话会跳过不是 JSON 的行，每个会话最多跳过 `StdioClientConfig::max_stdout_text_lines`（1000）行、`max_stdout_text_bytes`（256 KiB），并向宿主的 stderr 写一次不引用该文本的警告。超出上限的那一行会以 `MCPFailure::protocol` 结束会话，上限设为 0 则什么都不跳过。可能是损坏消息的行绝不跳过，因为跳过会让它所答复的调用一直等到超时：以 `{` 开头、以 `[` 后接 `{` 开头或提到 `"jsonrpc"` 的行，以及不是对象或批量的 JSON，仍和以前一样结束会话。
 
 ### 安全
 
