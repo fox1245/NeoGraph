@@ -14,6 +14,7 @@
 #include "fixtures/fork_share.h"
 #include "fixtures/host_pumped_stores.h"
 #include "fixtures/manual_executor.h"
+#include "fixtures/thread_census.h"
 #include "fixtures/typed_provider.h"
 #include "program_expansion_fixture.h"
 
@@ -27,7 +28,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -320,16 +320,6 @@ struct PumpedStores {
     }
 };
 
-std::size_t thread_count() {
-#ifdef __linux__
-    std::size_t count = 0;
-    for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator("/proc/self/task")) ++count;
-    return count;
-#else
-    return 0;
-#endif
-}
-
 class HostPumpedProgramHost {
 public:
     // The model every llm_call node of the Programs answers from.
@@ -516,19 +506,50 @@ RunInvocation fork_invocation(const ProgramVersion& version, const ProgramResult
         << "a store call was completed by a thread other than the host's"
 // The runtime started no thread. A tool the Core dispatches runs on the process's blocking pool, which starts
 // threads on first use, so the tests that run a tool do not check this.
-#define EXPECT_NO_THREAD_STARTED(threads_before_) \
-    do {                                          \
-        if ((threads_before_) != 0) EXPECT_EQ(thread_count(), (threads_before_)) << "the runtime started a thread"; \
+#define EXPECT_NO_THREAD_STARTED(census_)                                                               \
+    do {                                                                                                 \
+        if ((census_).available()) {                                                                     \
+            const auto started_ = (census_).started();                                                   \
+            EXPECT_TRUE(started_.empty()) << "the runtime started " << started_.size() << " thread(s)"; \
+        }                                                                                                \
     } while (false)
 
 }  // namespace
+
+// ---- The census the tests below rely on ----
+
+TEST(ThreadCensus, ReportsAThreadStartedAfterItAndNotOneThatEnded) {
+    std::atomic<bool> stop{false};
+    std::thread       earlier([&] {
+        while (!stop) std::this_thread::yield();
+    });
+    const neograph::test::ThreadCensus census;
+    if (!census.available()) {
+        stop = true;
+        earlier.join();
+        GTEST_SKIP() << "the platform cannot list threads";
+    }
+    EXPECT_TRUE(census.started().empty());
+    // A thread that was listed and has since ended is not a start.
+    stop = true;
+    earlier.join();
+    EXPECT_TRUE(census.started().empty());
+    // A thread that appears after the census is one.
+    std::atomic<bool> release{false};
+    std::thread       later([&] {
+        while (!release) std::this_thread::yield();
+    });
+    EXPECT_EQ(census.started().size(), 1U);
+    release = true;
+    later.join();
+}
 
 // ---- One path at a time ----
 
 TEST(ProgramHostPumpedStores, StartingARunReadsTheCatalogOverAHostPumpedProgramStore) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Programs);
     host.stores.programs->set_pumped(true);
-    const auto threads_before = thread_count();
+    const neograph::test::ThreadCensus census;
 
     std::optional<ProgramResult> result;
     auto script = [&]() -> asio::awaitable<int> {
@@ -544,12 +565,12 @@ TEST(ProgramHostPumpedStores, StartingARunReadsTheCatalogOverAHostPumpedProgramS
     EXPECT_TRUE(host.stores.programs->operation("program.get_version") > 0 ||
                 host.stores.programs->operation("program.get_bundle") > 0);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
-    EXPECT_NO_THREAD_STARTED(threads_before);
+    EXPECT_NO_THREAD_STARTED(census);
 }
 
 TEST(ProgramHostPumpedStores, ATerminalStateIsPublishedThroughAHostPumpedTransitionStore) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
-    const auto threads_before = thread_count();
+    const neograph::test::ThreadCensus census;
     // The run starts over plain stores. Its node switches the transition store to host turns, so that everything the
     // run does after it, the publication of its terminal state included, waits for the loop.
     on_child_node = [&] { host.stores.transitions->set_pumped(true); };
@@ -572,7 +593,7 @@ TEST(ProgramHostPumpedStores, ATerminalStateIsPublishedThroughAHostPumpedTransit
     ASSERT_TRUE(stored);
     EXPECT_EQ(stored->continuation().state, ContinuationState::Completed);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
-    EXPECT_NO_THREAD_STARTED(threads_before);
+    EXPECT_NO_THREAD_STARTED(census);
 }
 
 TEST(ProgramHostPumpedStores, ACoreToolGrantIsReadFromAHostPumpedGrantStore) {
@@ -600,7 +621,7 @@ TEST(ProgramHostPumpedStores, ACoreToolGrantIsReadFromAHostPumpedGrantStore) {
 
 TEST(ProgramHostPumpedStores, AChildIsStartedAndItsCompletionPublishedOverHostPumpedStores) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Transitions | HostPumpedProgramHost::Fragments);
-    const auto threads_before = thread_count();
+    const neograph::test::ThreadCensus census;
 
     std::optional<ProgramResult> result;
     auto script = [&]() -> asio::awaitable<int> {
@@ -629,7 +650,7 @@ TEST(ProgramHostPumpedStores, AChildIsStartedAndItsCompletionPublishedOverHostPu
     ASSERT_EQ(record->children().size(), 2U);
     for (const auto& child_record : record->children()) EXPECT_EQ(child_record.state, ProgramChildState::Completed);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
-    EXPECT_NO_THREAD_STARTED(threads_before);
+    EXPECT_NO_THREAD_STARTED(census);
 }
 
 TEST(ProgramHostPumpedStores, AResumeAndAForkAwaitTheirStores) {
