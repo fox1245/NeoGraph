@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=08d9ec0679709dd660011a3c246db4a65efd04a2472b6b623e198f89fcdb8759 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=282603967f39bb07e25bcbd1d96eae655f40cd4fb295501d304619ed3e24afeb -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -214,8 +214,16 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **带有 JavaScript `main()` 的已恢复 Program 运行，在其 Core 调用开始之前结束时，会以被要求的状态结束，而不是以 `P_TRANSITION_CONFLICT` 结束为 `failed` (#557)。** 恢复一个被中断的 `ng.callCore` 时，会把该调用可用的墙钟时间、模型 token、金额和 Core 步骤作为预留记入日志，调用再用它测得的用量结算这笔预留。在调用开始之前被取消的运行（恢复后立即调用 `cancel()`，或 JavaScript 模块中抛出的 `onEvent` 取消了该运行）没有结算任何东西，而它发布的终态却把这次尝试获得的全部额度当作剩余预算。这相当于在没有测得用量的情况下退还预留，转换校验器会拒绝它：发布失败，运行以 `P_TRANSITION_CONFLICT` 结束为 `failed`，其记录保持 `running`，`reconnect` 还会把它当作仍在运行的运行来恢复。
   - **现在** 这样的运行会带着恢复所留下的剩余预算发布终态，并且不退还预留。没有日志验证过的用量就不会释放任何东西，校验器没有改变。运行以 `cancelled` 结束，或以自身错误的代码结束为 `failed`，存储将其保存为已终止，`reconnect` 返回该结果。**行为变更：** 这样的运行的 `remaining_budget` 不再包含恢复为该调用预留的墙钟时间、模型 token、金额和 Core 步骤。
   - **在恢复的第一个事件处抛出的处理器。** 在第一个事件（`Started`，在尝试出现之前送达）处抛出时，运行会走入一个返回 `AmbiguousEffect` 却没有把待处理效果标记为不明确的分支。该结果被拒绝（`P_RUNTIME_INTERNAL`，"Ambiguous Program result requires one ambiguous pending effect"），记录保持 `running`。现在它与没有 JavaScript `main()` 的 Program 的恢复一样，以 `P_EVENT_SINK` 结束为 `failed`，并带着恢复所留下的剩余预算。
-  - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。在等待宿主容量期间（`RuntimeConfig::host_admission`）停止的已恢复运行，或其尝试读取时 Core 检查点已经丢失的已恢复运行，仍会以 `P_TRANSITION_CONFLICT` 结束为 `failed`，记录保持 `running`。
+  - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。
   - **测试。** 在 Core 调用开始之前，以及在调用的第一个事件处，结束一个已恢复的运行：让尝试停在它第一次加载检查点处，在内存存储和 SQLite 上 (`ProgramRuntimeTest`)，在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`)，以及在 JavaScript 模块中 (`wasm/test/program_test.mjs`)。在调用开始之前结束的运行，在之前的引擎上会因 `P_TRANSITION_CONFLICT` 而失败，记录保持 `running`；在 `Started` 处抛出的处理器则因 `P_RUNTIME_INTERNAL` 而失败。
+- **持有某个 JavaScript 命令的预留的运行，在该命令运行之前结束时，以终态结束 (#557)。** 带有 JavaScript `main()` 的运行，在命令运行期间，把该命令的墙钟时间、模型 token、金额和 Core 步骤作为预留记在日志里：恢复一个被中断的 `ng.callCore` 之后，以及进程在命令中途停止之后（`reconnect()` 会恢复这样的运行）。以这种方式开始的尝试，其额度包含这笔预留。上一条处理的是在恢复的尝试中结束的运行。另外四种在命令运行之前结束的情形，要么把该额度当作剩余预算发布（这等于在没有测得用量的情况下退还预留，转换校验器会拒绝），要么构造出任何存储都不接受的结果。发布失败，运行以指向失败本身的代码结束为 `failed`，记录保持 `running`，之后的 `reconnect()` 会把这个运行再跑一遍。
+  - **其尝试读取时，Core 检查点已经丢失、或已不是日志所发布的那一个的、对被中断的 `ng.callCore` 的恢复**（重启后的进程所用的各个存储互不一致）以 `P_TRANSITION_CONFLICT` 结束为 `failed`。现在以 `checkpoint_incompatible` 和 `P_CHECKPOINT_INCOMPATIBLE` 结束。
+  - **在尝试等待宿主容量期间结束的、恢复了被中断的 `ng.callCore` 的运行**（`RuntimeConfig::host_admission`），在被取消、被宿主拒绝、以及宿主的 `host_admission_resolver` 抛出异常时，都以 `P_TRANSITION_CONFLICT` 结束为 `failed`。现在分别以 `cancelled`、带 `P_HOST_ADMISSION` 的 `failed`、带 `P_RUNTIME_CORE_FAILURE` 的 `failed` 结束。
+  - **对一个已暂停的 `ng.callCore` 用 `Completed` 调用 `reconcile()`，而处理器在 `Started` 处抛出异常**，会像上一条之前的恢复一样，走入一个返回 `AmbiguousEffect` 却没有把待处理效果标记为不明确的分支。该结果被拒绝（`P_RUNTIME_INTERNAL`），记录保持 `running`。现在以带 `P_EVENT_SINK` 的 `failed` 结束。
+  - **进程在命令中途停止后由 `reconnect()` 恢复的运行，在恢复的尝试到达该命令之前结束**（被取消，或因自身的错误结束），以 `P_TRANSITION_CONFLICT` 结束为 `failed`。现在以 `cancelled` 结束，或以自身的代码结束为 `failed`。该命令可能已经发出，也没有人测量过它用了多少：运行不会被要求去核对该命令，预留也不退还。
+  - **现在** 这样的运行会带着日志在预留之下持有的剩余预算发布终态，与上一条一样不退还预留。没有日志验证过的用量就不会释放任何东西，校验器没有改变。存储将该运行保存为已终止，`reconnect()` 返回该结果。**行为变更：** 这样的运行的 `remaining_budget` 不再包含预留所持有的墙钟时间、模型 token、金额和 Core 步骤。
+  - **不变的部分。** 在命令开始之后（第一个事件或更晚）结束的运行，包括被宿主接纳后才取消的已恢复运行，仍用测得的用量结算预留，并取回命令没有用到的部分。
+  - **测试。** 让尝试在开始之前停住，针对每种结束方式，在内存存储和 SQLite 上 (`ProgramRuntimeTest`) 测试；除由 `reconnect()` 恢复的运行外，也在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`) 测试。它们在之前的引擎上都失败：以 `P_TRANSITION_CONFLICT` 并留下 `running` 的记录，核对（reconcile）则以 `P_RUNTIME_INTERNAL` 失败。
 - **A2A 客户端只有在 `Content-Type` 表明是事件流时，才把响应当作事件流来读。** 以前，只要响应体里含有 `data: `，就把它当作服务器发送事件，并解析其后的文本，所以任务或 `history` 里含有该字符串的 JSON-RPC 响应（包括原样回显请求消息的情况）会以 `A2A response not valid JSON` 失败。现在只有媒体类型为 `text/event-stream` 的响应才是事件流，其消息是第一个 `data:` 事件；其他响应一律是 JSON。**行为变更：** 不带该内容类型而发送事件的服务器，不再被当作流来读。
 - **MCP stdio 客户端会跳过服务器 stdout 上不是 JSON 的文本。** 那里只要出现一行不是 JSON-RPC 消息的内容（例如启动横幅或日志行），就会结束会话并让所有待处理的调用失败，尽管规范把责任放在服务器一方。现在会话会跳过不是 JSON 的行，每个会话最多跳过 `StdioClientConfig::max_stdout_text_lines`（1000）行、`max_stdout_text_bytes`（256 KiB），并向宿主的 stderr 写一次不引用该文本的警告。超出上限的那一行会以 `MCPFailure::protocol` 结束会话，上限设为 0 则什么都不跳过。可能是损坏消息的行绝不跳过，因为跳过会让它所答复的调用一直等到超时：以 `{` 开头、以 `[` 后接 `{` 开头或提到 `"jsonrpc"` 的行，以及不是对象或批量的 JSON，仍和以前一样结束会话。
 
