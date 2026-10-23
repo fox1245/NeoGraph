@@ -517,6 +517,11 @@ if(NEOGRAPH_BUILD_ACP)
     add_executable(neograph_acp_probe_agent fixtures/acp_probe_agent.cpp)
     target_link_libraries(neograph_acp_probe_agent PRIVATE
         neograph::core neograph::acp SchemaProvider::transport)
+    if(NEOGRAPH_BUILD_ACP_HTTP_SERVER)
+        # --http serves the same agent over the remote transports.
+        target_link_libraries(neograph_acp_probe_agent PRIVATE neograph::acp_http_server)
+        target_compile_definitions(neograph_acp_probe_agent PRIVATE NEOGRAPH_ACP_PROBE_HTTP)
+    endif()
 endif()
 
 if(NEOGRAPH_BUILD_GRPC)
