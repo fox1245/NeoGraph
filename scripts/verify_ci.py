@@ -160,7 +160,7 @@ def definitions(**values):
 def minimal_options():
     # Same explicit optional-component boundary used by the old install gate.
     return definitions(**{f"NEOGRAPH_BUILD_{name}": "OFF" for name in (
-        "ASYNC", "LLM", "MCP", "MCP_HTTP_SERVER", "A2A", "ACP", "UTIL",
+        "ASYNC", "LLM", "MCP", "MCP_HTTP_SERVER", "A2A", "ACP", "ACP_HTTP_SERVER", "UTIL",
         "POSTGRES", "SQLITE", "GRPC", "PYBIND", "HARNESS_MCP_BINARY", "PROGRAM",
     )}, NEOGRAPH_USE_LIBCURL="OFF")
 
@@ -267,7 +267,9 @@ def native(args):
                           NEOGRAPH_BUILD_PROGRAM="ON", NEOGRAPH_BUILD_QUICKJS_CONTROL="ON",
                           NEOGRAPH_BUILD_TESTS="ON", NEOGRAPH_BUILD_EXAMPLES="OFF")
     if args.profile == "native-linux":
-        options += definitions(NEOGRAPH_BUILD_PYBIND="ON")
+        # The ACP remote transports (experimental, off by default) are built and
+        # tested where their dependencies are known to be present.
+        options += definitions(NEOGRAPH_BUILD_PYBIND="ON", NEOGRAPH_BUILD_ACP_HTTP_SERVER="ON")
     generator = None
     if system == "Windows":
         # Ninja compiles files in parallel; the Visual Studio generator runs each project's
@@ -312,6 +314,7 @@ def sanitizer(args):
     asan = args.profile == "asan"
     options = definitions(CMAKE_BUILD_TYPE="Debug", NEOGRAPH_BUILD_TESTS="ON",
                           NEOGRAPH_BUILD_EXAMPLES="ON", NEOGRAPH_BUILD_BENCHMARKS="OFF",
+                          NEOGRAPH_BUILD_ACP_HTTP_SERVER="ON",
                           NEOGRAPH_BUILD_POSTGRES="ON" if asan else "OFF")
     env = os.environ.copy()
     if asan:
