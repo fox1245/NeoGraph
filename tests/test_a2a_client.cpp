@@ -79,8 +79,10 @@ struct MockA2AServer {
     /// The reply to an RPC waits this long before it is sent.
     std::atomic<int> reply_delay_ms{0};
 
-    /// Send the JSON-RPC reply as one server-sent event instead of a JSON body.
+    /// Send the JSON-RPC reply as one server-sent event instead of a JSON body,
+    /// labelled with this Content-Type.
     bool reply_as_event_stream = false;
+    std::string event_stream_content_type = "text/event-stream; charset=utf-8";
 
     /// Card returned from /.well-known/agent-card.json.
     json card = json::parse(R"({
@@ -147,7 +149,7 @@ struct MockA2AServer {
             res.status = 200;
             if (reply_as_event_stream) {
                 res.set_content("data: " + envelope.dump() + "\r\n\r\n",
-                                "text/event-stream; charset=utf-8");
+                                event_stream_content_type);
             } else {
                 res.set_content(envelope.dump(), "application/json");
             }
@@ -205,6 +207,30 @@ TEST(A2AClient, ReplyAsAnEventStreamIsReadFromItsDataEvent) {
     EXPECT_EQ(task.id, "task-1");
     ASSERT_EQ(task.history.size(), 1u);
     EXPECT_EQ(task.history[0].parts[0].text, "hello back");
+}
+
+// The media type of the Content-Type decides, compared without case and
+// without its parameters; a reply that is not labelled as an event stream is
+// JSON, whatever its body looks like.
+TEST(A2AClient, OnlyTheMediaTypeOfAnEventStreamMakesAReplyOne) {
+    struct Case { const char* content_type; bool read; };
+    for (const Case& c : {Case{"text/event-stream", true},
+                          Case{"TEXT/Event-Stream;charset=utf-8", true},
+                          Case{"text/event-stream ; q=1", true},
+                          Case{"application/json", false},
+                          Case{"text/event-streams", false},
+                          Case{"text/plain", false}}) {
+        SCOPED_TRACE(c.content_type);
+        MockA2AServer srv;
+        srv.reply_as_event_stream = true;
+        srv.event_stream_content_type = c.content_type;
+        A2AClient client(srv.url());
+        if (c.read) {
+            EXPECT_EQ(client.send_message_sync("hi").id, "task-1");
+        } else {
+            EXPECT_THROW((void)client.send_message_sync("hi"), std::runtime_error);
+        }
+    }
 }
 
 // Connecting is bounded on its own; a slow reply and a long stream are not.
