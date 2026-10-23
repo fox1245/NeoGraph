@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=31b192c3ba74646e6ecec9c863a9f0dda6a3cc8af3096d929a12c9b87511ad95 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=d059218fbda0ddb2d96ce1887bfcad2fa004b743e9afdf1024aa57bbd8fb292b -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -550,6 +550,7 @@ CI는 모듈을 빌드해 Node 22와 24에서, 네트워크도 키도 없이 다
   네이티브로 실행하므로, 네이티브 빌드도 같은 경로를 다룹니다.
 - `tests/test_program_host_pumped_stores.cpp`는 호출을 루프의 이후 턴에서만 완료하는 저장소 위의 `HostLoop`에서 Program의 수명 주기 전체를
   네이티브로 실행합니다. 시작, 모델 노드, 중단과 재개, 포크, 자식, Core 도구 grant, 완료, 취소를 다루며 아무것도 막히거나 거부되지 않습니다.
+  또한 한 일시 정지의 fork를 한 턴에 여러 개 만들어, 그 예산의 합이 일시 정지한 실행이 가졌던 양을 넘지 않음을 보입니다.
 - `tests/test_program_store_awaitable.cpp`는 저장소 계약을 네이티브로 실행합니다. 인라인 저장소는 중단 없이 완료되고, 풀로
   넘기는 저장소는 기다리던 코루틴을 자기 executor에서 재개하며, 블로킹 뷰는 나중에 완료되는 저장소를 기다리거나 거부합니다.
 - `tests/test_host_loop.cpp`는 수동 executor를 상대로 루프와 호스트 seam 공급자를 네이티브로 실행하므로, 네이티브 빌드도

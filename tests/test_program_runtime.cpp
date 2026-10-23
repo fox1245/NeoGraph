@@ -9242,6 +9242,165 @@ TEST(ProgramRuntimeTest, ForkLargerThanTheSourceRemainderIsStillRefusedAsBefore)
     }
 }
 
+// The forks of one pause that several threads make at the same time. Each is published against the lineage the one before
+// it left (the runtime takes its fork lock before it reads the lineage), so the budgets they take add up to at most what the
+// paused run had, whatever the order, and the paused run keeps the rest.
+namespace {
+
+struct ConcurrentFork {
+    std::optional<ProgramResult> result;
+    std::string                  refusal;  // the code of the runtime's refusal, or the text of another failure
+};
+
+// Runs a pause of the interrupting Program under a budget that can be shared, and makes `count` forks of it from `count`
+// threads released together, each asking for `each`. `check` sees the fixture and the outcomes.
+void fork_from_threads(int count, std::uint64_t numerator, std::uint64_t denominator,
+                       const std::function<void(AdmittedRuntime&, const ProgramResult&, const RunBudget& left,
+                                                const RunBudget& each, const std::vector<ConcurrentFork>&)>& check) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(4);
+    auto            document = program_document("runtime-interrupt");
+    document["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][4]["maximum"] = 16;
+    const auto version = fixture.admit_document(std::move(document));
+    const auto source =
+        fixture.runtime
+            ->start("tenant:runtime", version,
+                    ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 16, 20, 0, 0, 0},
+                                      "trace-concurrent-fork-source", {}})
+            .wait();
+    ASSERT_EQ(source.status(), ProgramTerminalStatus::Interrupted);
+    const auto pending_id = pending_call_id(source);
+    const auto lineage    = fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+    ASSERT_TRUE(lineage);
+    const auto left = lineage->remaining_budget();
+    const auto each = neograph::test::fork_fraction(left, numerator, denominator);
+
+    std::vector<ConcurrentFork> outcomes(static_cast<std::size_t>(count));
+    std::barrier                start(count);
+    std::vector<std::thread>    threads;
+    for (int i = 0; i < count; ++i) {
+        threads.emplace_back([&, i] {
+            RunInvocation invocation;
+            invocation.owner_scope        = "tenant:runtime";
+            invocation.agent_id           = "test-concurrent-fork";
+            invocation.program_version_id = version.id();
+            invocation.run_id             = "concurrent-fork-" + std::to_string(i);
+            invocation.budget             = each;
+            invocation.input              = json::object();
+            invocation.message_sequence   = 25;
+            invocation.idempotency_key    = "test-concurrent-fork:" + invocation.run_id;
+            invocation.correlation_id     = "trace-" + invocation.run_id;
+            invocation.validate();
+            start.arrive_and_wait();
+            try {
+                outcomes[static_cast<std::size_t>(i)].result =
+                    fixture.runtime
+                        ->fork(ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+                               invocation,
+                               ProgramResume{json{{"decision", "forked"}}, "trace-concurrent-fork-resume", {}, pending_id})
+                        .wait();
+            } catch (const ProgramDiagnosticError& error) {
+                outcomes[static_cast<std::size_t>(i)].refusal = error.diagnostic().code;
+            } catch (const std::exception& error) {
+                outcomes[static_cast<std::size_t>(i)].refusal = std::string("exception: ") + error.what();
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    check(fixture, source, left, each, outcomes);
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, ForksOfOnePauseMadeByThreadsAtTheSameTimeAllFitAndTakeTheirBudgetOnce) {
+    for (int round = 0; round < 15; ++round) {
+        SCOPED_TRACE("round " + std::to_string(round));
+        fork_from_threads(4, 1, 5, [](AdmittedRuntime& fixture, const ProgramResult& source, const RunBudget& left,
+                                      const RunBudget& each, const std::vector<ConcurrentFork>& outcomes) {
+            RunBudget expected = left;
+            for (std::size_t i = 0; i < outcomes.size(); ++i) {
+                ASSERT_TRUE(outcomes[i].result) << "fork " << i << ": " << outcomes[i].refusal;
+                EXPECT_EQ(outcomes[i].result->status(), ProgramTerminalStatus::Completed) << failure_detail(*outcomes[i].result);
+                const auto record = fixture.journal->load("tenant:runtime", "concurrent-fork-" + std::to_string(i));
+                ASSERT_TRUE(record);
+                // The child's record holds the amounts it was given.
+                EXPECT_EQ(record->invocation().budget, each);
+                expected = neograph::test::fork_remainder(expected, each);
+            }
+            const auto after = fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+            ASSERT_TRUE(after);
+            EXPECT_EQ(after->remaining_budget(), expected);
+
+            // A fork made again is that fork: it is not debited a second time and runs nothing.
+            const auto calls = interrupt_calls.load();
+            for (std::size_t i = 0; i < outcomes.size(); ++i) {
+                RunInvocation invocation;
+                invocation.owner_scope        = "tenant:runtime";
+                invocation.agent_id           = "test-concurrent-fork";
+                invocation.program_version_id = source.program_version_id();
+                invocation.run_id             = "concurrent-fork-" + std::to_string(i);
+                invocation.budget             = each;
+                invocation.input              = json::object();
+                invocation.message_sequence   = 25;
+                invocation.idempotency_key    = "test-concurrent-fork:" + invocation.run_id;
+                invocation.correlation_id     = "trace-" + invocation.run_id;
+                invocation.validate();
+                const auto again =
+                    fixture.runtime
+                        ->fork(ExactProgramCheckpointReference{source.run_id(), source.checkpoint()->checkpoint_id},
+                               invocation,
+                               ProgramResume{json{{"decision", "forked"}}, "trace-concurrent-fork-resume", {},
+                                             pending_call_id(source)})
+                        .wait();
+                EXPECT_EQ(again.run_id(), outcomes[i].result->run_id());
+            }
+            EXPECT_EQ(interrupt_calls.load(), calls);
+            const auto replayed = fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+            ASSERT_TRUE(replayed);
+            EXPECT_EQ(replayed->remaining_budget(), expected);
+
+            // The paused run is still resumable with what is left.
+            const auto resumed =
+                fixture.runtime
+                    ->resume("tenant:runtime", source.run_id(),
+                             ProgramResume{json{{"decision", "source"}}, "trace-concurrent-fork-source-resume", {},
+                                           pending_call_id(source)})
+                    .wait();
+            EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_detail(resumed);
+        });
+    }
+}
+
+TEST(ProgramRuntimeTest, ForksOfOnePauseMadeByThreadsAtTheSameTimeNeverTakeMoreThanItHasLeft) {
+    for (int round = 0; round < 15; ++round) {
+        SCOPED_TRACE("round " + std::to_string(round));
+        // Two fifths each: two fit and the others ask for more than those two left, whichever threads get there first.
+        fork_from_threads(4, 2, 5, [](AdmittedRuntime& fixture, const ProgramResult& source, const RunBudget& left,
+                                      const RunBudget& each, const std::vector<ConcurrentFork>& outcomes) {
+            int completed = 0, refused = 0;
+            for (std::size_t i = 0; i < outcomes.size(); ++i) {
+                const auto id = "concurrent-fork-" + std::to_string(i);
+                if (outcomes[i].result) {
+                    ++completed;
+                    EXPECT_EQ(outcomes[i].result->status(), ProgramTerminalStatus::Completed) << failure_detail(*outcomes[i].result);
+                    EXPECT_TRUE(fixture.journal->load("tenant:runtime", id));
+                } else {
+                    ++refused;
+                    EXPECT_EQ(outcomes[i].refusal, "P_FORK_BUDGET") << "fork " << i;
+                    EXPECT_FALSE(fixture.journal->load("tenant:runtime", id));
+                }
+            }
+            EXPECT_EQ(completed, 2);
+            EXPECT_EQ(refused, 2);
+            const auto after = fixture.journal->load_run_lineage("tenant:runtime", source.run_id());
+            ASSERT_TRUE(after);
+            EXPECT_EQ(after->remaining_budget(),
+                      neograph::test::fork_remainder(neograph::test::fork_remainder(left, each), each));
+        });
+    }
+}
+
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 TEST(ProgramRuntimeTest, ExactForkLineageSurvivesSqliteRuntimeReconnect) {
     static std::atomic<unsigned> sequence{0};

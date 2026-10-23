@@ -27,6 +27,26 @@ inline neograph::program::RunBudget fork_share(neograph::program::RunBudget rema
     return remaining;
 }
 
+// A fork's budget of `numerator`/`denominator` of each amount the source has left, for forks that take fixed shares of
+// one pause: at least one of an amount the source has, none of one it has none of. max_concurrency is the source's own,
+// the fork takes no child budget, and the retry ceiling is left unset.
+inline neograph::program::RunBudget fork_fraction(neograph::program::RunBudget remaining, std::uint64_t numerator,
+                                                  std::uint64_t denominator) {
+    const auto part = [&](std::uint64_t value) -> std::uint64_t {
+        return value == 0 ? 0 : (value * numerator / denominator > 1 ? value * numerator / denominator : 1);
+    };
+    remaining.wall_time_ms           = part(remaining.wall_time_ms);
+    remaining.model_tokens           = part(remaining.model_tokens);
+    remaining.monetary_microunits    = part(remaining.monetary_microunits);
+    remaining.max_program_operations = part(remaining.max_program_operations);
+    remaining.max_core_steps         = part(remaining.max_core_steps);
+    remaining.max_dynamic_compiles   = part(remaining.max_dynamic_compiles);
+    remaining.max_child_depth        = 0;
+    remaining.max_total_children     = 0;
+    remaining.max_node_retries.reset();
+    return remaining;
+}
+
 // What the source has left after a fork took `share` of `remaining`: the
 // amounts less the share, and max_concurrency as it was.
 inline neograph::program::RunBudget fork_remainder(neograph::program::RunBudget remaining,
