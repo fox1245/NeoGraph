@@ -342,6 +342,32 @@ def test_a_failing_callback_is_reported_and_does_not_abort_a_sync_run(entry, mon
     assert all(item.object is explode for item in reported)
 
 
+@pytest.mark.parametrize("entry", ["run_stream_async", "resume_async", "resume_from_async"])
+def test_a_failing_callback_is_left_to_the_loop_and_does_not_abort_an_asyncio_run(entry):
+    engine = _engine(_node_type(entry))
+    reported = []
+
+    def explode(_event):
+        raise RuntimeError("callback exploded")
+
+    async def go():
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+        checkpoint_id = None
+        if entry != "run_stream_async":
+            setup = ng.RunMetadata(run_id="setup", owner_scope="setup")
+            paused = engine.run(ng.RunConfig(thread_id=f"loop-explode-{entry}"), setup)
+            checkpoint_id = paused.checkpoint_id
+        result = await _call(entry, engine, f"loop-explode-{entry}", checkpoint_id, callback=explode)
+        await asyncio.sleep(0.05)
+        return result
+
+    result = asyncio.run(go())
+
+    assert not result.interrupted
+    assert result.output["channels"]["answer"]["value"] == "done"
+    assert reported and all("callback exploded" in repr(item.get("exception")) for item in reported)
+
+
 def test_a_callback_that_exits_does_not_end_the_process(monkeypatch):
     """SystemExit in a callback is reported like any other exception; it never reaches Py_Exit."""
     engine = _engine("entrypoints.probe")
