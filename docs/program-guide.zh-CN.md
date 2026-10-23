@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=040da06ca047c7e1b48e33eb823de6adec8ad90fa9aa93dc11068de2dc32141c -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=1c4ad7303ff4ca8e871ff65f9601b0212fac06c2d41cb4304bf977fff92126e7 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -405,7 +405,7 @@ attempt，在另外一个线程上运行截止时间定时器，`LocalProgramHos
   由 `make_durable_core_tool_grant_awaitable_resolver` 根据存储创建）、`ProgramCatalog`（`resolve_version_async`、`admit_async` 等
   `_async` 形式）以及 `ModuleResolver::resolve_async`。`_async` 形式在运行时的 executor 上运行这个主体；同步形式在调用线程上把同一个主体
   运行到结束，并在会卡住该线程的地方被拒绝。因此，只在宿主事件循环的后续回合才完成的存储，可以通过 `_async` 形式在由宿主驱动的 executor 上工作
-  （包括 `ProgramHandle::cancel_async`、`snapshot_async`、`latest_handoff_async` 和 `next_handoff_async`），而在该循环的回合内同步形式会被拒绝。`ProgramHandle::cancel()` 是例外：在由宿主驱动的 executor 上它不等待，所以不会被拒绝。它在内存中停止正在执行的运行；对被中断的运行，它把 Cancelled 状态作为 executor 上的任务来调度，并返回 true，表示它接受了这次取消。在该任务运行之前，运行保持 `Interrupted`（这期间对它的 `resume` 会以 `P_RESUME_CONFLICT` 被拒绝），没有记录任何内容的任务会向句柄添加一条 `P_CANCELLATION_NOT_RECORDED` notice。对已结束或已取消的运行，以及取消已在等待处理的运行，它返回 false。要知道状态何时写入，请 await `cancel_async()`。
+  （包括 `ProgramHandle::cancel_async`、`snapshot_async`、`latest_handoff_async` 和 `next_handoff_async`），而在该循环的回合内同步形式会被拒绝。`ProgramHandle::cancel()` 是例外：在由宿主驱动的 executor 上它不等待，所以不会被拒绝。它在内存中停止正在执行的运行；对被中断的运行，它把 Cancelled 状态作为 executor 上的任务来调度，并返回 true，表示它接受了这次取消。在该任务运行之前，运行保持 `Interrupted`（这期间对它的 `resume` 和 `reconcile` 会分别以 `P_RESUME_CONFLICT` 和 `P_RECONCILE_CONFLICT` 被拒绝），没有记录任何内容的任务会向句柄添加一条 `P_CANCELLATION_NOT_RECORDED` notice。对已结束或已取消的运行，以及取消已在等待处理的运行，它返回 false。要知道状态何时写入，请 await `cancel_async()`。
   仍会阻塞调用方的有 `ProgramHandoff::reference()`、`RuntimeInstructionController`、`inspect_program_replacement_chain` 和 `hook_runtime`，
   运行时还用 `graph::CheckpointStore` 的同步调用读取该存储。
 - **丢弃 awaitable 的调用什么也不会做。** 这些操作带有 `[[nodiscard]]`：请 `co_await` 它们，或者使用阻塞视图。
