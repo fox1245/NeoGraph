@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c2e86ec9eea71f0a2104c58acf7d44055e584475c1cc71fbf70b0ea8dd597df9 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=08d9ec0679709dd660011a3c246db4a65efd04a2472b6b623e198f89fcdb8759 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -34,7 +34,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **回答。** `resume_stream()` 和 `resume_payload()` 从运行暂停时的检查点恢复（带着中断 ID 的 `resume_from_async`），因此恢复后的那一轮也会流式输出 token，再次暂停的那一轮则产出另一个 `interrupt`。暂停的节点从 `input.ctx.resume_value` 读到 `resume_value(answer, interrupt)`。默认就是回答本身，这与原生服务器传入的一致：A2A 后续消息的文本，或 ACP 权限选项的 ID。`ProtocolHostAdapter(resume_value=...)` 可替换这一映射。
   - **示例。** `27_a2a_server.py` 让任务进入 `input-required`（原因为文本，负载为数据部分，节点、检查点和中断 ID 在 `metadata["neograph/interrupt"]` 中），并在发给该任务的下一条消息时恢复它。`28_acp_agent.py` 在同一轮中发送带有选项 `approve` 和 `reject` 的 `session/request_permission`，并用客户端选中的选项恢复；`cancelled` 结果，或等待期间的 `session/cancel`，会让该轮以 `cancelled` 结束。以 `approve:` 开头的提示会让演示图暂停。
   - **行为变更。** 图暂停时，不带 `interrupts=True` 的 `run()`、`run_payload()` 和 `stream()` 会抛出携带 `ProtocolInterrupt` 的 `ProtocolInterrupted`；此前它们返回状态里的最后一条消息，或自定义 `output_reader` 由暂停的结果得出的值；现在 `output_reader` 不再收到暂停的结果。从不暂停的图行为不变，所有新参数都是可选的。
-  - **限制。** 暂停只记在进程内，引擎需要有检查点存储才能恢复它。重启之后，把用保存的 ID 构造的 `ProtocolInterrupt` 作为 `interrupt=` 传入；A2A 示例总是根据任务自身元数据所指的暂停来回答该任务。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 和 `resume_payload()` 会抛出 `LookupError`：对于并未暂停的线程，引擎对恢复请求的回答是它上一轮的文本。无人回答的暂停（以 `cancelled` 结束的权限请求、被取消的任务）会作为未结束状态留在检查点存储中，引擎无法恢复紧随其后的暂停（`NodeInterrupt ancestry crosses super-step boundaries`），因此该线程的下一次暂停在被回答时会失败，直到该线程的某一轮完成为止。ACP 的问题存在于它所在的那一轮，智能体重启后就会丢失；原生服务器用 `session/resume` 恢复它。原生服务器的协作信封、基于 Program 的 A2A 任务和租户隔离不在适配器路径上。
+  - **限制。** 暂停只记在进程内，引擎需要有检查点存储才能恢复它。重启之后，把用保存的 ID 构造的 `ProtocolInterrupt` 作为 `interrupt=` 传入；A2A 示例总是根据任务自身元数据所指的暂停来回答该任务。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 和 `resume_payload()` 会抛出 `LookupError`：对于并未暂停的线程，引擎对恢复请求的回答是它上一轮的文本。无人回答的暂停（以 `cancelled` 结束的权限请求、被取消的任务）会作为未结束状态留在检查点存储中，紧随其后的暂停可以正常恢复。ACP 的问题存在于它所在的那一轮，智能体重启后就会丢失；原生服务器用 `session/resume` 恢复它。原生服务器的协作信封、基于 Program 的 A2A 任务和租户隔离不在适配器路径上。
   - `bindings/python/tests/test_protocol_interrupts.py` 用假引擎和真实的 `NodeInterrupt` 驱动适配器，`test_protocol_sdk_e2e.py` 则用官方 SDK 客户端（`a2a-sdk` 1.2.2、`agent-client-protocol` 0.12.1）运行两个示例：暂停、恢复它并流式输出 token 的回答、拒绝、被取消的权限请求，以及问题等待期间的取消。
 - **按 epoch 选择的稳定优先装配布局 (#329)。** 提供方的提示词缓存只复用从第一个字节起就完全相同的请求开头，所以历史之前有制品发生变化，每次调用都会错过缓存。把 `ContextEpochData::assembly_layout` 设为 `StableFirst` 的 epoch（需要 `ordered_artifact_ids`）按宿主指令、`Stable` 制品、`Slow` 制品、RAW 消息、`Volatile` 制品、受信任的补充输入这个顺序装配。默认的 `Legacy` 就是 0.16.0 的装配方式：没有要求新布局的 epoch，以及此前存储的所有 epoch，编码结果与之前逐字节相同；在两种布局表示同一个提示词的地方，有测试逐次调用比较两种请求体。
   - **顺序属于 epoch。** 记录的列表就是顺序，内容的哈希不参与，所以文本变化的同级制品保持原位。`order_context_artifacts` 构造该列表：先按稳定性类别，再按 `priority`（高者在前），再按 `producer_id`，最后按宿主给出的键；四项都相同的两个制品会因含混而被拒绝。
