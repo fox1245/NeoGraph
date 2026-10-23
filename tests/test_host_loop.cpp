@@ -943,6 +943,37 @@ TEST(HostLoop, ARefusedTurnIsAskedForAgainOnlyWhileAWakeCountsOnIt) {
     EXPECT_TRUE(ran);
 }
 
+TEST(HostLoop, PostersAreNotStoppedOrSpunByAHostThatRefusesEveryThirdPost) {
+    // Several threads post while the host refuses one post in three. The posters return, none asks the host over and
+    // over, and once the host takes posts again one wake runs everything that was left without a turn.
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    std::atomic<unsigned> asked{0}, finished{0};
+    executor->before_post = [&]() -> bool { return asked.fetch_add(1) % 3 == 0; };
+    constexpr unsigned threads = 4, posts_each = 400, total = threads * posts_each;
+    std::size_t ran = 0;  // written by handlers only, which run on the host thread
+    Gate gate;
+    std::vector<std::thread> posters;
+    for (unsigned t = 0; t < threads; ++t) {
+        posters.emplace_back([&, ex = loop.executor()] {
+            gate.pass();
+            for (unsigned i = 0; i < posts_each; ++i) asio::post(ex, [&ran] { ++ran; });
+            ++finished;
+        });
+    }
+    gate.open();
+    while (finished.load() < threads) {
+        if (!executor->step()) std::this_thread::yield();
+    }
+    for (auto& poster : posters) poster.join();
+    EXPECT_LE(asked.load(), 6 * total) << "the loop asked the host again and again";
+    executor->before_post = nullptr;
+    loop.wake();
+    EXPECT_TRUE(executor->run_until([&] { return ran == total; }, 30s)) << ran << " of " << total << " handlers ran";
+    while (executor->step()) {}
+    EXPECT_TRUE(loop.idle());
+}
+
 TEST(HostLoop, ATurnQueuedWhileAnotherRunsAndTakenByANestedPumpLosesNoWork) {
     // A handler of the running turn pumps the host, which takes the turn that another thread's post has queued. That
     // second call finds the first turn still running and returns; the running turn polls on and runs the post.
