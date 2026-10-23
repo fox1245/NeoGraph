@@ -2,6 +2,7 @@
 #include <neograph/graph/invocation.h>
 #include <neograph/graph/types.h>
 
+#include "../core/http_request_guard.h"
 #include "../core/tool_failure.h"
 #include "ids.h"
 
@@ -26,6 +27,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -646,6 +648,9 @@ struct A2AServer::Impl {
     int                                           bound_port = 0;
     bool                                          generated_card_url = false;
     std::atomic<bool>                             trust_forwarded_headers{false};
+    /// The Host and Origin checks (DNS rebinding), applied to every request
+    /// before it is routed. The bind address is recorded by start().
+    neograph::detail::HttpRequestGuard            guard{"A2A server"};
 
     // #493: cpp-httplib checks for shutdown before it first calls a chunked
     // content provider, so svr.stop() cut a stream whose headers were out
@@ -929,6 +934,11 @@ struct A2AServer::Impl {
 
     void register_routes();
 
+    /// The pre-routing handler: refuses a request whose Host or Origin the
+    /// guard does not admit, whatever its route, before its body is read.
+    httplib::Server::HandlerResponse guard_request(const httplib::Request& req,
+                                                   httplib::Response&      res) const;
+
     // --- runs ----------------------------------------------------------------
 
     Task execute_graph(const Message& inbound, const std::string& task_id,
@@ -1150,7 +1160,42 @@ AgentCard A2AServer::Impl::served_card(const httplib::Request& req) const {
     return c;
 }
 
+httplib::Server::HandlerResponse A2AServer::Impl::guard_request(
+    const httplib::Request& req, httplib::Response& res) const {
+    using Verdict = neograph::detail::HttpRequestGuard::Verdict;
+    const auto header = [&req](const char* name) {
+        return req.has_header(name) ? std::optional<std::string>(req.get_header_value(name))
+                                    : std::nullopt;
+    };
+    auto verdict = guard.check_host(header("Host"));
+    if (verdict == Verdict::Allowed) verdict = guard.check_origin(header("Origin"));
+    if (verdict == Verdict::Allowed) return httplib::Server::HandlerResponse::Unhandled;
+
+    const bool malformed = verdict == Verdict::HostMissingOrInvalid;
+    const std::string message = malformed                      ? "Host header is missing or invalid"
+                                : verdict == Verdict::HostNotAllowed ? "Host is not allowed"
+                                                                     : "Origin is not allowed";
+    res.status = malformed ? 400 : 403;
+    if (req.method == "POST" && req.path == "/") {
+        // The JSON-RPC endpoint answers in its own envelope, as for the
+        // other refusals of a peer (see the 403 of a collaboration link).
+        RpcError e = rpc_error(-32600, message);
+        if (!malformed) e.reason = "PERMISSION_DENIED";
+        e.domain = kNeoGraphDomain;
+        res.set_content(jsonrpc_error(e, json(nullptr)).dump(), "application/json");
+    } else {
+        res.set_content(json{{"error", message}}.dump(), "application/json");
+    }
+    return httplib::Server::HandlerResponse::Handled;
+}
+
 void A2AServer::Impl::register_routes() {
+    // Checked for every route, 404s included, and before a body is read.
+    svr.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
+        return guard_request(req, res);
+    });
+    svr.set_payload_max_length(A2AHttpConfig{}.max_payload_bytes);
+
     svr.Get("/.well-known/agent-card.json",
             [this](const httplib::Request& req, httplib::Response& res) {
                 // One card per protocol version (as @a2a-js legacyCompat
@@ -2542,6 +2587,7 @@ bool A2AServer::start(const std::string& host, int port) {
         impl_->bound_port = port;
     }
     impl_->bind_card_endpoint(host);
+    impl_->guard.bind(host, impl_->bound_port);
 #ifdef NEOGRAPH_A2A_PROGRAM
     try {
         impl_->recover_program_tasks();
@@ -2568,6 +2614,7 @@ bool A2AServer::start_async(const std::string& host, int port) {
         impl_->bound_port = port;
     }
     impl_->bind_card_endpoint(host);
+    impl_->guard.bind(host, impl_->bound_port);
 #ifdef NEOGRAPH_A2A_PROGRAM
     try {
         impl_->recover_program_tasks();
@@ -2604,6 +2651,22 @@ void A2AServer::stop() {
 bool A2AServer::is_running() const { return impl_->running.load(std::memory_order_acquire); }
 
 int A2AServer::port() const { return impl_->bound_port; }
+
+void A2AServer::set_http_config(A2AHttpConfig config) {
+    if (config.max_payload_bytes == 0) {
+        throw std::invalid_argument("A2A HTTP max_payload_bytes must be positive");
+    }
+    neograph::detail::HttpRequestGuard::require_host_names(
+        config.allowed_hosts,
+        "A2A HTTP allowed_hosts entries are host names without a port, "
+        "IPv6 addresses in brackets, or *");
+    if (impl_->running.load(std::memory_order_acquire) || impl_->svr.is_running()) {
+        throw std::logic_error("A2AServer::set_http_config must be called before the server starts");
+    }
+    impl_->guard.allowed_hosts   = std::move(config.allowed_hosts);
+    impl_->guard.allowed_origins = std::move(config.allowed_origins);
+    impl_->svr.set_payload_max_length(config.max_payload_bytes);
+}
 
 void A2AServer::set_trust_forwarded_headers(bool enabled) {
     impl_->trust_forwarded_headers.store(enabled, std::memory_order_relaxed);
