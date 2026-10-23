@@ -236,6 +236,18 @@ struct ProgramExecutorIdentity {
        */
       asio::any_io_executor                     executor;
       ProgramExecutorIdentity                   executor_identity;
+      /**
+       * The stack, in bytes, that the QuickJS control runtime may use while it runs the `main()` of a JavaScript
+       * Program; a run that exceeds it ends `failed` with P_JS_RESOURCE_LIMIT. The stack that `define()` may use while a
+       * source is compiled is ProgramCompilerConfig::javascript.max_stack_bytes. 0, the default, is
+       * JavaScriptCompileLimits::kDefaultStackBytes: 512 KiB in a native build and 48 KiB in a WebAssembly build. There
+       * the limit counts the module's own stack, honoured as far as that stack holds, and what the host's call stack
+       * carries is the embedder's to judge (wasm/README.md). Must not exceed JavaScriptCompileLimits::memory_limit_bytes.
+       * The stack is not part of the identity of a version: a resume runs `main()` again from its start, answering from the
+       * journal what the paused run asked, under the stack of the runtime that resumes it, so a runtime with a smaller
+       * stack than the one that paused the run can end the resumed run with P_JS_RESOURCE_LIMIT.
+       */
+      std::size_t                               javascript_stack_bytes = 0;
   };
 /**
  * Experimental owner-scoped new-run selection. The activation is the exact

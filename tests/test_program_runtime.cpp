@@ -4449,6 +4449,144 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorExecutesYieldedCoreCommand) {
     EXPECT_EQ(completed_calls.load(), 1U);
 }
 
+// The stack of a control source's main() is the runtime's own setting (RuntimeConfig::javascript_stack_bytes), not the
+// compiler's: the witness of the failure reports the stack that was in force.
+static constexpr const char* kRecursingMain = R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            function down(depth) {
+                return depth === 0 ? 0 : 1 + down(depth - 1);
+            }
+
+            export function* main(input) {
+                const depth = down(input.depth);
+                const core = yield ng.callCore("main", {requested: "x"});
+                return {depth, value: core.value};
+            }
+        )JS";
+
+// The stacks, in KiB, that the tests of RuntimeConfig::javascript_stack_bytes try for "a stack that stops a hundred
+// nested calls".
+static constexpr std::size_t kStacksTriedKiB[] = {8, 12, 16, 24, 32, 48, 64};
+
+TEST(ProgramRuntimeTest, JavaScriptControlStackIsTheRuntimesSetting) {
+    // A native build keeps its default; a WebAssembly build's is smaller.
+    static_assert(JavaScriptCompileLimits{}.max_stack_bytes == JavaScriptCompileLimits::kDefaultStackBytes);
+#if !defined(__EMSCRIPTEN__)
+    static_assert(JavaScriptCompileLimits::kDefaultStackBytes == 512u * 1024u);
+#endif
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(kRecursingMain);
+    const auto      run     = [&](std::size_t depth) {
+        return fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json{{"depth", depth}}, grant(), "trace-javascript-stack", {}});
+    };
+
+    // The default: a hundred nested calls run, and a source that never stops recursing fails with the default stack
+    // in its witness.
+    const auto shallow = run(100);
+    ASSERT_EQ(shallow.status(), ProgramTerminalStatus::Completed)
+        << (shallow.failure() ? shallow.failure()->code + ": " + shallow.failure()->message : "no failure detail");
+    EXPECT_EQ(shallow.output().at("depth"), 100);
+    const auto endless_default = run(1'000'000'000);
+    ASSERT_EQ(endless_default.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(endless_default.failure().has_value());
+    EXPECT_EQ(endless_default.failure()->code, "P_JS_RESOURCE_LIMIT");
+    EXPECT_EQ(endless_default.failure()->witness.at("max_stack_bytes").get<std::size_t>(),
+              JavaScriptCompileLimits::kDefaultStackBytes);
+
+    // A runtime configured with a small stack: it applies to main(), the witness reports it, and a source that needs
+    // more than it fails where the default stack would have run it. How small a stack still starts the source depends
+    // on how the build lays out its frames (a sanitizer or a debug build uses several times what an optimized one
+    // does), so the stacks are tried in ascending order, and the first at which the recursion is what fails is the one
+    // that is checked. A stack too small to start the source ends with P_JS_RUNTIME instead.
+    std::size_t applied = 0;
+    for (const std::size_t kib : kStacksTriedKiB) {
+        fixture.javascript_stack_bytes = kib * 1024u;
+        fixture.runtime                = fixture.make_runtime();
+        const auto small               = run(100);
+        ASSERT_EQ(small.status(), ProgramTerminalStatus::Failed) << "a stack of " << kib << " KiB ran a hundred nested calls";
+        ASSERT_TRUE(small.failure().has_value());
+        if (small.failure()->code == "P_JS_RUNTIME") continue;
+        EXPECT_EQ(small.failure()->code, "P_JS_RESOURCE_LIMIT");
+        EXPECT_EQ(small.failure()->witness.at("max_stack_bytes").get<std::size_t>(), kib * 1024u);
+        applied = kib * 1024u;
+        break;
+    }
+    EXPECT_NE(applied, 0u) << "no stack tried both started the source and stopped a hundred nested calls";
+}
+
+TEST(ProgramRuntimeTest, RuntimeRefusesAJavaScriptStackBeyondTheMemoryLimit) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    fixture.javascript_stack_bytes = JavaScriptCompileLimits{}.memory_limit_bytes + 1;
+    EXPECT_THROW((void)fixture.make_runtime(), std::invalid_argument);
+}
+
+// The stack is not part of the identity of a version: a resume runs main() again from its start, answering from the
+// journal what the paused run asked, under the stack of the runtime that resumes it. A runtime whose stack is smaller than
+// what the paused run used ends the resumed run with the diagnostic of the limit; one whose stack suffices completes it.
+TEST(ProgramRuntimeTest, JavaScriptResumeRunsMainAgainUnderTheStackOfTheResumingRuntime) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    function down(depth) { return depth === 0 ? 0 : 1 + down(depth - 1); }
+    const depth = down(input.depth);
+    const output = yield ng.callCore("main", {}, "resume:call-core");
+    return {depth, value: output.value};
+)JS"));
+    const auto pause = [&](const std::string& trace) {
+        auto paused = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json{{"depth", 100}}, javascript_budget(1), trace, {}});
+        EXPECT_EQ(paused.status(), ProgramTerminalStatus::Interrupted)
+            << (paused.failure() ? paused.failure()->code + ": " + paused.failure()->message : "no failure detail");
+        return paused;
+    };
+
+    // Another runtime over the same stores, with a stack that a hundred nested calls do not fit: the resumed run fails
+    // where the run that paused did not. As in JavaScriptControlStackIsTheRuntimesSetting, the stacks are tried in
+    // ascending order, and a stack too small to start the source ends with P_JS_RUNTIME instead.
+    std::size_t applied = 0;
+    for (const std::size_t kib : kStacksTriedKiB) {
+        const auto paused = pause("trace-js-stack-resume-" + std::to_string(kib));
+        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted);
+        fixture.javascript_stack_bytes = kib * 1024u;
+        const auto small               = fixture.make_runtime();
+        const auto refused =
+            small->resume("tenant:runtime", paused.run_id(),
+                          resume_for(paused, json{{"decision", "approved"}}, "trace-js-stack-small-" + std::to_string(kib)))
+                .wait();
+        ASSERT_EQ(refused.status(), ProgramTerminalStatus::Failed) << "a stack of " << kib << " KiB ran a hundred nested calls";
+        ASSERT_TRUE(refused.failure().has_value());
+        if (refused.failure()->code == "P_JS_RUNTIME") continue;
+        EXPECT_EQ(refused.failure()->code, "P_JS_RESOURCE_LIMIT");
+        EXPECT_EQ(refused.failure()->witness.at("max_stack_bytes").get<std::size_t>(), kib * 1024u);
+        applied = kib * 1024u;
+        break;
+    }
+    EXPECT_NE(applied, 0u) << "no stack tried both started the source and stopped a hundred nested calls";
+
+    // The runtime that paused a run resumes it under its own, default stack.
+    const auto first   = pause("trace-js-stack-resume-first");
+    const auto resumed = fixture.runtime
+                             ->resume("tenant:runtime", first.run_id(),
+                                      resume_for(first, json{{"decision", "approved"}}, "trace-js-stack-default"))
+                             .wait();
+    ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
+        << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message : "no failure detail");
+    EXPECT_EQ(resumed.output(), (json{{"depth", 100}, {"value", "approved"}}));
+}
+
 TEST(ProgramRuntimeTest, JavaScriptCommandJournalPersistsCoordinateAndResult) {
     completed_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
