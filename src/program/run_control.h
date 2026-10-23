@@ -26,14 +26,17 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <map>
 #include <memory>
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace neograph::program::detail {
@@ -74,6 +77,72 @@ struct RunOutcome {
     std::vector<std::string>              execution_trace;
     std::optional<UsageAccumulator::AuthoritySnapshot> provider_budget_authority;
     std::vector<ProgramMonetaryRecord>    monetary_records;
+};
+
+/**
+ * The interrupted runs whose cancellation was accepted and is not recorded yet. Where ProgramHandle::cancel() cannot wait
+ * for the transition store it schedules the Cancelled state of an interrupted run as a task of the executor, and keeps
+ * a claim on the run until that task ends. There is one claim per run, shared by the runtimes that use one transition
+ * store: a second call finds the claim and schedules nothing, and a resume of the run, which would compete with that
+ * task for the same record, is refused while the claim stands.
+ */
+class PendingCancellations : public std::enable_shared_from_this<PendingCancellations> {
+public:
+    using Key = std::pair<std::string, std::string>;
+
+    /// Held by the task that records the cancellation; releases the run when it ends, or when the task is destroyed
+    /// without having run (the executor went away).
+    class Claim {
+    public:
+        Claim() noexcept = default;
+        Claim(Claim&& other) noexcept : set_(std::move(other.set_)), key_(std::move(other.key_)) {}
+        Claim& operator=(Claim&& other) noexcept {
+            if (this != &other) {
+                release();
+                set_ = std::move(other.set_);
+                key_ = std::move(other.key_);
+            }
+            return *this;
+        }
+        Claim(const Claim&)            = delete;
+        Claim& operator=(const Claim&) = delete;
+        ~Claim() { release(); }
+
+        explicit operator bool() const noexcept { return static_cast<bool>(set_); }
+        void     release() noexcept {
+            if (auto set = std::move(set_)) set->end(key_);
+            set_.reset();
+        }
+
+    private:
+        friend class PendingCancellations;
+        Claim(std::shared_ptr<PendingCancellations> set, Key key) noexcept
+            : set_(std::move(set)), key_(std::move(key)) {}
+        std::shared_ptr<PendingCancellations> set_;
+        Key                                   key_;
+    };
+
+    /// The claim on the run, or an empty claim when one stands already.
+    Claim begin(std::string_view owner_scope, std::string_view run_id) {
+        Key             key{std::string(owner_scope), std::string(run_id)};
+        std::lock_guard lock(mutex_);
+        if (!runs_.insert(key).second) return {};
+        return Claim(shared_from_this(), std::move(key));
+    }
+
+    bool pending(std::string_view owner_scope, std::string_view run_id) const {
+        std::lock_guard lock(mutex_);
+        return runs_.count(Key{std::string(owner_scope), std::string(run_id)}) != 0;
+    }
+
+private:
+    void end(const Key& key) noexcept {
+        std::lock_guard lock(mutex_);
+        runs_.erase(key);
+    }
+
+    mutable PureMutex mutex_;
+    std::set<Key>     runs_;
 };
 
 /**
@@ -313,19 +382,27 @@ public:
     std::vector<ProgramNotice> notices_snapshot() const;
 
     /// Cancels the run. Where the run is interrupted this publishes its Cancelled state, which is a store write: a
-    /// coroutine awaits cancel_async; this synchronous form is for a thread that may wait, and stops the run in memory
-    /// only where it may not (see the definition).
+    /// coroutine awaits cancel_async; the synchronous cancel is for a thread that may wait, and schedules the write as a
+    /// task of the executor where it may not (see the definition).
     /**
      * `held` is the process-wide coordination lock when the caller already holds it: a replacement, a migration or a
      * reconnect that cancels a run, or the cancellation of an ancestor. That lock is not reentrant for a coroutine, so
      * a nested cancellation must not take it again (and it passes it on to the children it cancels).
+     * When a store call fails, the run is stopped in memory and the result is whatever that gives (false for an
+     * interrupted run). `failure`, when given, receives the exception, which the result cannot carry.
      */
     asio::awaitable<bool> cancel_async(CancellationCause cause,
-                                       std::shared_ptr<ReentrantOperationLock> held = {});
+                                       std::shared_ptr<ReentrantOperationLock> held = {},
+                                       std::exception_ptr* failure = nullptr);
+    /// The synchronous cancellation: the result says whether it accepted the cancellation (see ProgramHandle::cancel).
     bool              cancel(CancellationCause cause) noexcept;
-    /// Stops the run in memory at once and leaves the work that needs the store to a task of the executor. With
-    /// `durable`, that includes the Cancelled state of an interrupted run.
+    /// Stops an executing run in memory at once and leaves the work that needs the store to a task of the executor.
+    /// With `durable`, that includes the Cancelled state of an interrupted run, which the task writes. True when the
+    /// call stopped an executing run, or scheduled that task.
     bool              cancel_without_waiting(CancellationCause cause, bool durable) noexcept;
+    /// The runtimes of one transition store share these claims (see PendingCancellations); set once, when the control
+    /// is registered.
+    void              set_pending_cancellations(std::shared_ptr<PendingCancellations> pending);
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
     /// Makes `child` one of this run's children. A child of a run that is already terminal or cancelling is cancelled
@@ -438,6 +515,12 @@ public:
     asio::awaitable<ProgramRunRecord>     snapshot_async() const;
     void              cancel_children(CancellationCause cause) noexcept;
     void              cancel_children_in_background(CancellationCause cause) noexcept;
+    bool              schedule_interrupted_cancellation(CancellationCause cause) noexcept;
+    static asio::awaitable<void> record_scheduled_cancellation(std::shared_ptr<RunControl> self,
+                                                               CancellationCause cause,
+                                                               PendingCancellations::Claim claim);
+    /// Adds the P_CANCELLATION_NOT_RECORDED notice, unless another path has ended the run since.
+    void              report_unrecorded_cancellation(std::exception_ptr failure) noexcept;
     asio::awaitable<void> cancel_children_async(CancellationCause cause,
                                                 std::shared_ptr<ReentrantOperationLock> held = {});
 
@@ -485,6 +568,7 @@ private:
     std::vector<std::weak_ptr<RunControl>> children_;
     mutable PureConditionVariable             handoff_cv_;
     std::shared_ptr<ReentrantOperationLock>   handoff_coordination_mutex_;
+    std::shared_ptr<PendingCancellations>     pending_cancellations_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;
     std::uint64_t                            handoff_request_id_ = 0;
