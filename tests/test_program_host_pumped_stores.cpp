@@ -25,12 +25,17 @@
 
 #include "provider_binding.h"
 
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+#include <neograph/program/sqlite_transition_store.h>
+#endif
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
@@ -237,6 +242,30 @@ json review_document() {
                 {"declared_budget_requirements", budget_requirements()}};
 }
 
+// A chain of nodes of the given types; every node writes `value`.
+json chain_document(const std::vector<std::pair<std::string, std::string>>& nodes) {
+    json definition{{"schema_version", 1}, {"name", "main"}, {"conditional_edges", json::array()}};
+    definition["channels"] = {{"value", {{"reducer", "runtime-overwrite"}, {"initial", ""}}}};
+    definition["nodes"]    = json::object();
+    json edges             = json::array();
+    std::string previous   = "__start__";
+    for (const auto& [name, type] : nodes) {
+        definition["nodes"][name] = {{"type", type}};
+        edges.push_back(json{{"from", previous}, {"to", name}});
+        previous = name;
+    }
+    edges.push_back(json{{"from", previous}, {"to", "__end__"}});
+    definition["edges"] = std::move(edges);
+    return json{{"program_schema_version", 2U},
+                {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+                {"root", {{"op", "call_core"}, {"name", "main"}, {"definition", std::move(definition)}}},
+                {"declared_budget_requirements", budget_requirements()}};
+}
+
+// Two approvals in a row: the run pauses twice, in two attempts.
+json two_pause_document() { return chain_document({{"approve-one", "host-approve"}, {"approve-two", "host-approve"}}); }
+
 // act: a Program that only gates a tool call.
 json tool_only_document() {
     json definition{{"schema_version", 1}, {"name", "main"}, {"conditional_edges", json::array()}};
@@ -373,12 +402,14 @@ public:
     enum Wrap : unsigned { Programs = 1, Transitions = 2, Grants = 4, Fragments = 8, Modules = 16, All = 31 };
 
     // `javascript` makes the catalog admit a Program with a JavaScript main(), which a Program of documents does not need.
-    // `checkpoints` replaces the in-memory store of Core checkpoints, and `configure` changes the runtime's configuration
-    // before the runtime is made.
+    // `checkpoints` replaces the in-memory store of Core checkpoints, `configure` changes the runtime's configuration
+    // before the runtime is made, and `journal` is the transition store the runtime reads, behind the wrapper when
+    // Transitions is pumped; empty: in memory.
     explicit HostPumpedProgramHost(unsigned wrap = All, bool javascript = false,
                                    std::shared_ptr<CheckpointStore>  checkpoints = {},
-                                   std::function<void(RuntimeConfig&)> configure   = {})
-        : fixture(1, std::move(checkpoints), {}, {}, javascript ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict,
+                                   std::function<void(RuntimeConfig&)> configure   = {},
+                                   std::shared_ptr<ProgramTransitionStore> journal = {})
+        : fixture(1, std::move(checkpoints), std::move(journal), {}, javascript ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict,
                   javascript) {
         fixture.runtime.reset();
         approvals_asked = 0;
@@ -506,6 +537,7 @@ public:
     std::shared_ptr<MemoryGrantStore>          inner_grants  = std::make_shared<MemoryGrantStore>();
     std::shared_ptr<ProgramCatalog>            setup_catalog = make_catalog(fixture.store.shared(), inner_modules);
     ProgramVersion                             review        = admit(review_document());
+    ProgramVersion                             two_pause     = admit(two_pause_document());
     ProgramVersion                             tool_only     = admit(tool_only_document());
     ProgramVersion                             child         = admit(child_program_document());
     ProgramVersion                             parent        = admit(expand_task_graph_document(expansion_proposal()));
@@ -1341,15 +1373,19 @@ struct PausedReview {
     std::optional<ProgramResult> paused;
 };
 
-PausedReview pause_review(HostPumpedProgramHost& host, const std::string& run_id) {
+PausedReview pause_run(HostPumpedProgramHost& host, const ProgramVersion& version, const std::string& run_id) {
     PausedReview out;
     auto script = [&]() -> asio::awaitable<int> {
-        out.handle = co_await host.runtime->start_async(top_level(host.review.id(), run_id));
+        out.handle = co_await host.runtime->start_async(top_level(version.id(), run_id));
         out.paused = co_await out.handle->wait_async();
         co_return 0;
     };
     host.run(script());
     return out;
+}
+
+PausedReview pause_review(HostPumpedProgramHost& host, const std::string& run_id) {
+    return pause_run(host, host.review, run_id);
 }
 
 std::optional<ContinuationState> stored_state(HostPumpedProgramHost& host, const std::string& run_id) {
@@ -1361,6 +1397,11 @@ std::optional<ContinuationState> stored_state(HostPumpedProgramHost& host, const
 std::uint64_t journal_sequence(HostPumpedProgramHost& host, const std::string& run_id) {
     const auto latest = host.fixture.journal->latest(kOwner, run_id);
     return latest ? latest->sequence : 0;
+}
+
+std::uint64_t stored_attempt(HostPumpedProgramHost& host, const std::string& run_id) {
+    const auto latest = host.fixture.journal->latest(kOwner, run_id);
+    return latest ? latest->continuation.attempt : 0;
 }
 
 std::size_t cancelled_terminals(HostPumpedProgramHost& host, const std::string& run_id) {
@@ -1768,6 +1809,89 @@ TEST(ProgramHostPumpedStores, AnAcceptedCancelWhoseTaskNeverRunsLeavesTheRunInte
     ASSERT_TRUE(stored);
     EXPECT_EQ(stored->continuation().state, ContinuationState::Interrupted);
 }
+
+// ---- A handle of an earlier attempt ----
+//
+// A handle holds the result of the attempt it came from. After the run was resumed through another handle, the first
+// one still holds Interrupted, so a cancel() on it looks like the cancellation of an interrupted run. It must not
+// claim the run while a later attempt executes, and what it cancels once the run is interrupted again is the record
+// that is stored, under that record's attempt: the attempt of a run only grows.
+
+namespace {
+
+void a_handle_of_an_earlier_attempt(std::shared_ptr<ProgramTransitionStore> journal, const std::string& run_id) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, false, {}, {}, std::move(journal));
+    auto                  first = pause_run(host, host.two_pause, run_id);
+    ASSERT_TRUE(first.handle && first.paused);
+    ASSERT_EQ(first.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*first.paused);
+    ASSERT_EQ(first.paused->attempt(), 1U);
+    host.stores.transitions->set_pumped(true);
+
+    // Resume it. The resumed attempt is registered and has not run yet when resume_handle_async returns: the run
+    // executes, and the first handle is the handle of an earlier attempt.
+    bool                         stale_accepted = true;
+    std::optional<ProgramHandle> second;
+    std::optional<ProgramResult> second_pause;
+    auto script = [&]() -> asio::awaitable<int> {
+        auto answer = answer_for(*first.paused, json{{"decision", "one"}}, "trace-earlier-attempt-1");
+        second      = co_await host.runtime->resume_handle_async(kOwner, run_id, std::move(answer));
+        stale_accepted = first.handle->cancel();
+        second_pause   = co_await second->wait_async();
+        co_return 0;
+    };
+    host.run(script());
+    EXPECT_FALSE(stale_accepted) << "the run executes in a later attempt: this handle has nothing to cancel";
+    ASSERT_TRUE(second && second_pause);
+    ASSERT_EQ(second_pause->status(), ProgramTerminalStatus::Interrupted) << failure_text(*second_pause);
+    EXPECT_EQ(second_pause->attempt(), 2U);
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    EXPECT_TRUE(first.handle->notices().empty()) << "no cancellation was scheduled, so none is reported";
+    EXPECT_EQ(stored_state(host, run_id), ContinuationState::Interrupted);
+    EXPECT_EQ(stored_attempt(host, run_id), 2U);
+
+    // The second attempt paused too, and the first handle cannot tell. The cancellation is of the run that is stored,
+    // and it is written under the attempt of that record.
+    const auto sequence = journal_sequence(host, run_id);
+    EXPECT_TRUE(first.handle->cancel());
+    ASSERT_TRUE(pump_until_cancelled(host, *first.handle));
+    EXPECT_EQ(stored_state(host, run_id), ContinuationState::Cancelled);
+    EXPECT_EQ(journal_sequence(host, run_id), sequence + 1U);
+    EXPECT_EQ(stored_attempt(host, run_id), 2U) << "the attempt of the run went backwards";
+    const auto stored = host.fixture.journal->load(kOwner, run_id);
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().attempt, 2U);
+    ASSERT_TRUE(stored->terminal_result());
+    EXPECT_EQ(stored->terminal_result()->attempt(), 2U);
+    const auto events = host.fixture.journal->load_events(kOwner, run_id, 0);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+    EXPECT_EQ(events.back().attempt, 2U);
+    EXPECT_EQ(cancelled_terminals(host, run_id), 1U);
+}
+
+}  // namespace
+
+TEST(ProgramHostPumpedStores, AHandleOfAnEarlierAttemptDoesNotCancelARunThatExecutesAndKeepsTheStoredAttempt) {
+    a_handle_of_an_earlier_attempt({}, "earlier-attempt-memory");
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+TEST(ProgramHostPumpedStores, AHandleOfAnEarlierAttemptDoesNotCancelARunThatExecutesAndKeepsTheStoredAttemptOnSqlite) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("neograph-earlier-attempt-" + graph::Checkpoint::generate_id() + ".db");
+    struct Cleanup {
+        std::filesystem::path path;
+        ~Cleanup() {
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+            std::filesystem::remove(path.string() + "-wal", ignored);
+            std::filesystem::remove(path.string() + "-shm", ignored);
+        }
+    } cleanup{path};
+    a_handle_of_an_earlier_attempt(std::make_shared<SQLiteProgramTransitionStore>(path.string()),
+                                   "earlier-attempt-sqlite");
+}
+#endif
 
 // ---- The whole lifecycle ----
 
