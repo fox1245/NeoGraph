@@ -7,6 +7,7 @@ local HTTP fixture to exercise the typed SchemaProvider Chat protocol.
 """
 import concurrent.futures
 import contextlib
+import http.client
 import http.server
 import json
 import os
@@ -447,6 +448,84 @@ class ChatTest(unittest.TestCase):
                 release.set()
                 provider.shutdown()
                 thread.join()
+
+    @staticmethod
+    def raw_request(server, method, path, headers, body=None):
+        """One request with exactly the given headers: the Host is the one listed, or none."""
+        connection = http.client.HTTPConnection("127.0.0.1", server.port, timeout=30)
+        try:
+            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            if body is not None:
+                connection.putheader("Content-Length", str(len(body)))
+            connection.endheaders(body)
+            response = connection.getresponse()
+            return response.status, response.read()
+        finally:
+            connection.close()
+
+    def test_a_page_with_another_host_or_origin_reaches_neither_the_page_nor_the_api(self):
+        # A page on another origin reaches a loopback listener once its host name is pointed at
+        # this machine (DNS rebinding): the browser then sends that name as Host, and its own
+        # origin as Origin when it sends one.
+        s = self.server()
+        port = s.port
+        token = {"Authorization": "Bearer alice-demo"}
+        turns = s.state("alice")["turn"]
+        for host in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}", "LOCALHOST", "127.0.0.1"):
+            for path in ("/", "/api/state"):
+                status, _ = self.raw_request(s, "GET", path, {"Host": host, **token})
+                self.assertEqual(status, 200, (host, path))
+        for origin in (f"http://127.0.0.1:{port}", f"http://localhost:{port}", f"http://[::1]:{port}"):
+            status, _ = self.raw_request(s, "GET", "/api/state",
+                                         {"Host": f"127.0.0.1:{port}", "Origin": origin, **token})
+            self.assertEqual(status, 200, origin)
+
+        refused_body = json.dumps({"error": "Host is not allowed"}).encode()
+        for host in ("attacker.example", f"attacker.example:{port}", "127.0.0.1.attacker.example",
+                     f"localhost.attacker.example:{port}", "10.0.0.5"):
+            for path in ("/", "/api/state", "/nothing"):
+                status, body = self.raw_request(s, "GET", path, {"Host": host, **token})
+                self.assertEqual(status, 403, (host, path))
+                self.assertEqual(json.loads(body), json.loads(refused_body))
+            # The refusal comes before the token check, and before anything runs.
+            status, _ = self.raw_request(s, "GET", "/api/state", {"Host": host})
+            self.assertEqual(status, 403, host)
+            payload = json.dumps({"request_id": "rebound", "message": "hello"}).encode()
+            status, _ = self.raw_request(s, "POST", "/api/turn", {
+                "Host": host, "Content-Type": "application/json", **token}, payload)
+            self.assertEqual(status, 403, host)
+        self.assertEqual(s.state("alice")["turn"], turns)
+
+        for host in ("[::1", "127.0.0.1:8768:1", "127.0.0.1:port"):
+            status, _ = self.raw_request(s, "GET", "/api/state", {"Host": host, **token})
+            self.assertEqual(status, 400, host)
+        status, _ = self.raw_request(s, "GET", "/api/state", token)
+        self.assertEqual(status, 400)
+
+        other = port + 1 if port < 65535 else port - 1
+        for origin in ("http://attacker.example", f"http://attacker.example:{port}", "null",
+                       f"http://127.0.0.1:{other}", f"https://127.0.0.1:{port}",
+                       f"http://127.0.0.1.attacker.example:{port}"):
+            for path in ("/", "/api/state"):
+                status, body = self.raw_request(
+                    s, "GET", path, {"Host": f"127.0.0.1:{port}", "Origin": origin, **token})
+                self.assertEqual(status, 403, (origin, path))
+                self.assertEqual(json.loads(body), {"error": "Origin is not allowed"})
+            payload = json.dumps({"request_id": "cross-origin", "message": "hello"}).encode()
+            status, _ = self.raw_request(s, "POST", "/api/turn", {
+                "Host": f"127.0.0.1:{port}", "Origin": origin,
+                "Content-Type": "application/json", **token}, payload)
+            self.assertEqual(status, 403, origin)
+        self.assertEqual(s.state("alice")["turn"], turns)
+        # What the guard lets through still meets the demo's own rules.
+        status, _ = self.raw_request(s, "GET", "/api/state", {"Host": f"127.0.0.1:{port}"})
+        self.assertEqual(status, 401)
+        status, _ = self.raw_request(s, "POST", "/api/turn", {
+            "Host": f"127.0.0.1:{port}", "Content-Type": "application/json", **token,
+        }, b"{" + b" " * 13000 + b"}")
+        self.assertEqual(status, 413)
 
 
 if __name__ == "__main__":
