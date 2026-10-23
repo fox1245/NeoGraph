@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=4b649bf22d24cddb4680ff9e204e21718eeabbd674b7430877bed4b2405d17e0 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -380,6 +380,8 @@ Python 暴露的是 C++ 的执行能力，而不是另外一套 Python 调度器
 
 原始的 `ProgramCatalog`、转换存储（transition store）、替换/迁移控制器、synthesis 网关、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。只暴露这些带权限路径的片段，会绕过必需的 `proposal -> compile -> admit -> publish -> migrate/spawn` 协议。`_HAVE_PROGRAM` 并不声称与原始控制面的管理能力对等。
 
+`GraphEngine::run_until_safe_point_async` 和 `resume_from_until_safe_point_async` 没有对应的 Python 方法。安全点请求指向唯一一个 `GraphGenerationIdentity`，引擎只有在已链接到该代（generation）时才接受请求，Program 目录会为它所实例化的引擎做这件事。`GraphEngine.compile` 构建的引擎没有代，因此会拒绝每一个请求。捕获安全点属于上面列出的替换与迁移控制器。
+
 ### 运行时覆盖重试策略
 
 ```python
@@ -415,6 +417,8 @@ result = engine.resume_from(config, checkpoint_id, {"approved": True}, metadata)
 ```
 
 在 Python 节点内，通过 `input.ctx.trace_id`、`run_id`、`has_deadline`、`deadline_remaining_ms` 和 `model_token_budget` 可以拿到同样的值。
+
+每个 run、stream 和 resume 入口都接受 `metadata`：`run`、`run_stream`、`run_async`、`run_stream_async`、`resume`、`resume_from`、`resume_async` 和 `resume_from_async`。该对象在调用时被复制，所以之后再修改它不会影响已在进行的运行，同一个 `RunMetadata` 也可以用于多次调用。恢复使用它自己的 `RunMetadata`：被中断运行的截止时间不会沿用，因为较早一次尝试留下的绝对截止时间已经过期。`resume` 和 `resume_async` 以关键字参数接受它。传入不是 `RunMetadata` 的参数会抛出 `TypeError`。
 
 `RunMetadata(timeout_ms=None, trace_id="", run_id="", owner_scope="", budget_cancel_token=None)` 默认没有截止时间。传入的超时值和 `metadata.set_timeout_ms(timeout)` 接受非负整数毫秒，且不能超出 steady clock 剩余的范围；校验发生在转换为有符号时长、以及加上截止时间之前。负数或过大的整数会抛出 `OverflowError` 或 `ValueError`；setter 失败时，原来的截止时间保持不变。设为 0 表示截止时间立即到达。要去掉截止时间，用 `metadata.clear_deadline()`。
 
@@ -728,9 +732,9 @@ profile.attach(engine)
 
 ## HITL 与状态
 
-静态的 `interrupt_before`/`interrupt_after`、动态的 `NodeInterrupt`、同步的 `resume`、asyncio 的 `resume_async`，以及精确的 `resume_from`，都需要检查点存储。
+静态的 `interrupt_before`/`interrupt_after`、动态的 `NodeInterrupt`、同步的 `resume`、asyncio 的 `resume_async`，以及精确的 `resume_from` 和 `resume_from_async`，都需要检查点存储。
 
-由 `ng.Send` 分发的 Python 节点如果抛出 `ng.NodeInterrupt`，会像其他节点一样让运行暂停：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的、已中断的 `RunResult`；`resume`、`resume_async` 和 `resume_from` 带着回应运行这个 Send，而发出这些 Send 的节点和已经完成的 Send 则直接重放，不会再运行。同一步里有多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 把每一个都列为 `{"id", "node", "value"}`，`result.interrupt_id` 指的是第一个。`resume`、`resume_async` 和 `resume_from` 接受 `interrupt_id=`，回应它指定的那个中断，不带时回应第一个；本次恢复中，其余暂停的节点或 Send 会再次提出各自的问题，由下一次恢复来回应（#388）。`interrupt_id` 如果不是待处理的中断，会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带的是同一个 id。回应只送达它所回应的那个节点或 Send，而且只在恢复重新进入的那一步里有效：恢复后的运行在之后每一步中，`input.ctx.resume_value` 以及工具闸门的 `ToolGateContext.resume_value` 都是 `None`，所以在那里提问的节点或闸门会让运行再次暂停（#393）。`interrupt_before` 暂停之后的恢复，会把这个值交给被该闸门拦住的节点；`interrupt_after` 暂停之后的恢复，则不把它交给任何节点。同一步里有多个带闸门的节点同时就绪时，每个闸门单独回应：在下一个带闸门的节点之前，运行会再次暂停，直到这一步的每个闸门都得到回应，然后每个带闸门的节点收到的是对它自己那个闸门的回应（#396）。在同一步里，失败的节点或 Send 比提问的节点或 Send 优先，与它们的顺序无关：运行会抛出该失败，且不报告任何中断；只有不确定的副作用（payload 的 `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`）在出现失败时仍会暂停，以便对账（#392）。
+由 `ng.Send` 分发的 Python 节点如果抛出 `ng.NodeInterrupt`，会像其他节点一样让运行暂停：`run`、`run_stream`、`run_async` 和 `run_stream_async` 返回带检查点的、已中断的 `RunResult`；`resume`、`resume_async`、`resume_from` 和 `resume_from_async` 带着回应运行这个 Send，而发出这些 Send 的节点和已经完成的 Send 则直接重放，不会再运行。同一步里有多个节点或 Send 抛出 `ng.NodeInterrupt` 时，`result.interrupts` 把每一个都列为 `{"id", "node", "value"}`，`result.interrupt_id` 指的是第一个。`resume`、`resume_async`、`resume_from` 和 `resume_from_async` 接受 `interrupt_id=`，回应它指定的那个中断，不带时回应第一个；本次恢复中，其余暂停的节点或 Send 会再次提出各自的问题，由下一次恢复来回应（#388）。`interrupt_id` 如果不是待处理的中断，会抛出 `ValueError`。`RunMetadata.resume_interrupt_id` 携带的是同一个 id。回应只送达它所回应的那个节点或 Send，而且只在恢复重新进入的那一步里有效：恢复后的运行在之后每一步中，`input.ctx.resume_value` 以及工具闸门的 `ToolGateContext.resume_value` 都是 `None`，所以在那里提问的节点或闸门会让运行再次暂停（#393）。`interrupt_before` 暂停之后的恢复，会把这个值交给被该闸门拦住的节点；`interrupt_after` 暂停之后的恢复，则不把它交给任何节点。同一步里有多个带闸门的节点同时就绪时，每个闸门单独回应：在下一个带闸门的节点之前，运行会再次暂停，直到这一步的每个闸门都得到回应，然后每个带闸门的节点收到的是对它自己那个闸门的回应（#396）。在同一步里，失败的节点或 Send 比提问的节点或 Send 优先，与它们的顺序无关：运行会抛出该失败，且不报告任何中断；只有不确定的副作用（payload 的 `kind` 为 `tool_effect_reconciliation` 的 `NodeInterrupt`）在出现失败时仍会暂停，以便对账（#392）。
 
 `input.ctx.resume_interrupt_id` 告诉节点，`input.ctx.resume_value` 回应的是哪个中断（#406）。如果该值回应的是节点自身的 `NodeInterrupt`，它就是这个中断的 id（`result.interrupt_id` 报告的 `"s3:review"` 这样的值），无论恢复是用 `interrupt_id=` 指定的，还是回应了第一个中断。如果该值是拦住此节点的 `interrupt_before` 闸门的批准，它就是 `None`。位于闸门之后、同时也会提出自己问题的节点，在 `resume_interrupt_id` 为 `None` 时抛出 `ng.NodeInterrupt`，这样就不会把放行的批准当作对自己问题的回应。[核心概念指南](concepts.md)给出了这种写法。
 
@@ -743,11 +747,22 @@ if result.interrupted:
     result = engine.resume(result_thread_id, {"approved": True})
 ```
 
+批准之后继续的那一轮也可以像第一轮一样流式输出。`resume`、`resume_from`、`resume_async` 和 `resume_from_async` 接受 `callback=`，它接收被恢复那一轮的 `GraphEvent`，与 `run_stream` 对一次运行所做的相同：同步调用在驱动该调用的线程上接收，asyncio 调用在事件循环线程上接收。回调抛出的异常不会让运行停止：同步调用中，它交给 `sys.unraisablehook`，默认打印到 stderr；asyncio 调用中，它在事件循环上抛出，由事件循环的异常处理器报告。`callback` 在这四个方法上都只能以关键字传入，`resume` 和 `resume_async` 的 `metadata` 也一样。
+
+```python
+async def approve(engine, thread_id, answer, on_event):
+    # The resumed turn streams its tokens and carries a deadline of its own.
+    metadata = ng.RunMetadata(timeout_ms=30_000, trace_id="trace-42")
+    return await engine.resume_async(
+        thread_id, answer, callback=on_event, metadata=metadata
+    )
+```
+
 检查状态和时间旅行，用 `get_state_history`、`update_state` 和 `fork`。`get_state_view()` 提供基于 Pydantic 的扁平通道访问，`get_state()` 则保留规范的嵌套表示。
 
 ## 异步与取消
 
-`run_async`、`run_stream_async` 和 `resume_async` 返回 `asyncio.Future` 对象。取消这些图的 Future，会通过 `CancelToken` 发出取消请求；原生 I/O 要到达它的取消边界，操作才会结束。图的流式回调会回到调用方的 asyncio 事件循环线程。解释器退出时，模块在导入时注册的 `atexit` 钩子会在终结开始之前，停止支撑这些 Future 的线程，以及运行 Python 节点和工具主体的线程池。它会等正在运行的 Python 代码结束，丢弃仍在等待的运行；之后再调用 `run_async`、`run_stream_async` 或 `resume_async` 会抛出 `RuntimeError`。
+`run_async`、`run_stream_async`、`resume_async` 和 `resume_from_async` 返回 `asyncio.Future` 对象。取消这些图的 Future，会通过 `CancelToken` 发出取消请求，被恢复的运行也一样。如果调用接受的 `RunConfig` 设置了 `cancel_token`，取消 Future 就会取消该令牌；原生 I/O 要到达它的取消边界，操作才会结束。图的流式回调会回到调用方的 asyncio 事件循环线程。解释器退出时，模块在导入时注册的 `atexit` 钩子会在终结开始之前，停止支撑这些 Future 的线程，以及运行 Python 节点和工具主体的线程池。它会等正在运行的 Python 代码结束，丢弃仍在等待的运行；之后再调用 `run_async`、`run_stream_async`、`resume_async` 或 `resume_from_async` 会抛出 `RuntimeError`。
 
 Provider 的 `invoke` 和 `dispatch` 是同步的 Python 方法。它们的绑定在原生调用运行期间释放 GIL，随后在执行 Python 的 provider 重写和事件回调时重新获取。事件回调收到的是持有所有权的 `ProviderEvent` 值，可能在原生 worker 线程上运行。回调需要更新属于 asyncio 的状态时，请使用 `loop.call_soon_threadsafe`。
 
