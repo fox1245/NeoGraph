@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=cc577ea31f254a2330244d184f02f8f713b0080f9b479cb13874fe7d58a1ec17 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=f634d51e3c41fce0652401053b5929c60a812ca72ecbea5a1622de518aae243b -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3670,7 +3670,7 @@ Python `neograph_engine.a2a`는 `WireDialect`, `AgentInterface`, `AgentCard.supp
 
 ### `neograph::acp` — Agent Client Protocol
 
-**헤더:** `<neograph/acp/{server,types}.h>`
+**헤더:** `<neograph/acp/{server,types}.h>`(실험적 원격 전송은 `<neograph/acp/http_server.h>`)
 stdio 위 줄 단위 JSON으로 주고받는 에디터↔에이전트 JSON-RPC 2.0이다 (Zed, Gemini CLI, Neovim CodeCompanion). ACP 프로토콜 버전 1이며, 공식 스키마 v1.25.0과 공식 Python(0.12, 1.0)·TypeScript SDK로 검증한다. client→agent는 `initialize`, `session/{new,resume,prompt,cancel}`이다. agent→client는 `session/update`, `session/request_permission`이며, `fs/*`, `terminal/*`, `elicitation/*`는 클라이언트가 해당 capability를 알렸을 때만 지연 바인딩된 `ACPClient`로 보낸다. 클라이언트가 `error`로 답하면 메서드, 코드, 메시지, `data`를 담은 `acp::ACPClientError`를 던지며, 요청이 성공할 수 없다는 코드이면 재시도되지 않는 `acp::ACPClientRefusal`이 된다([프로토콜 실패 매핑](#protocol-failure-mapping)). `ACPServer::handle_message`는 각 프롬프트 턴을 워커 스레드에서 실행하며, 동시에 최대 `max_inflight_prompts`(32)개, 세션당 한 개만 받는다. 거절된 턴은 JSON-RPC `-32603`이고 `data.reason`은 `"overloaded"` 또는 `"session_busy"`이다. `-32000`은 ACP의 "Authentication required"이므로 쓰지 않는다. `initialize` 전 호출은 `-32600`, 알 수 없는 세션은 `-32002`이며, 에이전트가 알지만 체크포인트가 없는 세션의 `session/resume`은 성공한다.
 
 프롬프트는 text와 `resource_link` 블록(기본 콘텐츠이며, 기본 어댑터는 링크를 입력에 `[name](uri)`로 넣는다)을 받고, image·audio·embedded resource는 `capabilities().prompt`로 알렸을 때만 받는다. 형식이 잘못되었거나 알리지 않은 블록은 `-32602`이다. 기본 어댑터는 `_acp_session_id`, `_acp_cwd`, `_acp_additional_directories`, `_acp_mcp_tools`를 채운다. 바꾸려면 `build_session_state`(또는 기존 `build_initial_state`)를 재정의한다. `agentInfo`는 항상 ACP `Implementation`이며, 빠진 name이나 version은 채운다.
@@ -3693,6 +3693,8 @@ stdio 위 줄 단위 JSON으로 주고받는 에디터↔에이전트 JSON-RPC 2
 `session/cancel`은 진행 중인 턴만 취소한다. 실행 중인 턴이 없을 때 온 취소는 무시한다(메시지 순서를 바꾸는 전송은 `set_pre_armed_cancel(true)`로 이전의 사전 취소를 유지할 수 있다). `requestId`가 실행 중인 `session/prompt`의 id인 `$/cancel_request` 알림도 같은 방식으로 턴을 취소하며, 그 프롬프트는 여전히 응답을 하나(`stopReason: "cancelled"`) 받는다. 알 수 없거나 끝난 요청 등 다른 요청의 `requestId`는 무시한다. 취소 뒤 대기 중인 agent→client 요청은 응답할 시간 500 ms를 받고, 그 뒤 서버는 `$/cancel_request`를 보내고 턴을 끝낸다. 권한 요청은 `ACPClient::set_permission_timeout`으로 정하지 않으면 시간 제한이 없다. stdin이 EOF에 닿으면 `run()`은 진행 중인 턴이 `set_eof_grace`(1초) 동안 끝나기를 기다린 뒤 취소한다.
 
 `session/new`와 `session/resume`의 stdio `mcpServers`는 NeoGraph의 MCP 클라이언트(`NEOGRAPH_BUILD_MCP_CLIENT`로 빌드)로 세션의 `cwd`에서 시작하며, 환경은 최소한으로, 에이전트의 `PATH`(Windows에서는 `SystemRoot`도)에 클라이언트의 `env` 항목을 더한 것이다. provider API 키가 있을 수 있는 나머지 에이전트 환경은 넘기지 않는다. 노드는 `ACPClient::session_tools(session_id)`로 그 도구를 쓴다. HTTP와 SSE MCP 서버는 알리지 않으며 `-32602`로 거절한다. 시작하지 못한 서버는 요청을 `-32603`, `data.reason: "mcp_server_unavailable"`로 실패시킨다.
+
+**원격 전송(실험적).** `<neograph/acp/http_server.h>`(`neograph::acp_http_server`, `NEOGRAPH_BUILD_ACP_HTTP_SERVER`, 기본값 꺼짐)는 `ACPHttpServer`를 추가합니다. 이것은 ACP 프로젝트의 원격 전송 초안을 따라, 한 엔드포인트(`/acp`)에서 Streamable HTTP와 WebSocket 업그레이드로 연결마다 `ACPServer` 하나를 제공합니다. stdio는 계속 표준 전송입니다. `ACPHttpServer(factory, config)`, `start()`, `start_async()`, `stop()`, `port()`, `connection_count()`, `client()`, `attach_client()`가 있고, 팩토리는 `ACPHttpConnection`(`server`, `owner`)을 돌려주며 `ACPHttpConfig::authenticator`가 돌려준 주체를 받습니다. `ACPHttpConfig`: `host`(`127.0.0.1`), `port`, `endpoint`, `streamable_http`, `websocket`, `max_connections`(16), `max_payload_bytes`(4 MiB), `http_threads`(8), `max_http_threads`(64), `max_queued_requests`(64), `connection_idle_timeout`(60초), `keepalive_interval`(15초), `allowed_origins`, `allowed_hosts`, `authenticator`. 루프백이 아닌 `host`에 `authenticator`가 없으면 `std::invalid_argument`를 던집니다. Host, Origin, 인증, 크기 제한은 모든 경로, 스트림, 업그레이드에서 본문을 읽기 전에 검사합니다. 서버는 HTTP/1.1을 쓰며(초안은 HTTP/2를 요구합니다), 와이어 세부는 초안과 함께 바뀔 수 있습니다. [ACP](acp.md#remote-transports-experimental)를 보세요.
 
 **공개 헤더:** [`include/neograph/acp/`](../include/neograph/acp/).
 

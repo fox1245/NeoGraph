@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b9779784b9fa0724ed2c5305b216954a130be11a7d129a83ff648eea9e0bd309 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=54c3fc4475298fac8390237187a6a37d567e9dd1795d140d01740298a73e6972 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,14 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **실험적 ACP 원격 전송: 한 엔드포인트의 Streamable HTTP와 WebSocket, 기본값은 꺼짐.** `neograph::acp_http_server`(`NEOGRAPH_BUILD_ACP_HTTP_SERVER`, 기본값 꺼짐)는 ACP 프로젝트가 초안으로 제안한 원격 전송으로 `ACPServer` 에이전트를 제공합니다. stdio는 표준 전송으로 남으며 바뀌지 않습니다. 와이어 세부는 초안이 분명히 정한 부분을 따르며, 초안이 바뀌면 달라질 수 있습니다. 자세한 내용은 [`docs/acp.md`](docs/acp.md#remote-transports-experimental)에 있습니다.
+  - **연결 하나에 `ACPServer` 하나.** `ACPHttpServer(factory, config)`는 연결마다 에이전트를 만들고 stdio와 똑같이 구동합니다. 메시지는 도착한 순서대로 처리되고, 끝난 연결은 자신의 프롬프트를 취소합니다. 연결은 서로 독립입니다. 세션 ID는 살아 있는 연결 하나에 속하며, 다른 연결이 가진 ID를 `session/resume`하면 `session_busy`로 거절됩니다. `ACPHttpServer::client()`와 `attach_client()`는 그래프 노드에 `ACPClient`를 주며(새로 생긴 resolver를 받는 생성자와 `bind`), 그 `fs/*`와 권한 요청은 세션을 가진 연결에 도달합니다.
+  - **Streamable HTTP.** `initialize`의 `POST`가 연결을 만듭니다(`200`과 `Acp-Connection-Id`). 그 밖의 `POST`는 `202`로 답하고, 답은 server-sent-event 스트림으로 갑니다. 연결 스트림과, 세션마다 하나씩 있는 세션 스트림(`Acp-Session-Id`)입니다. `DELETE`는 연결을 끝내며, 스트림도 요청도 `connection_idle_timeout`(60초) 동안 없는 연결은 닫히고 그 프롬프트는 취소됩니다.
+  - **WebSocket.** 같은 엔드포인트에서 `Upgrade: websocket`인 `GET`을 받고, 텍스트 프레임 하나가 JSON-RPC 메시지 하나이며, RFC 6455 프레이밍을 따릅니다. 클라이언트 프레임은 마스킹되어야 하고, ping과 pong, 조각화를 지원하며, `max_payload_bytes`를 넘는 메시지는 코드 1009로 연결을 닫습니다.
+  - **보안.** 기본은 루프백 바인드이며 원격 바인드에는 `authenticator`가 필요합니다. Host와 Origin(`allowed_hosts`, `allowed_origins`. MCP·A2A 서버와 같은 규칙), authenticator, 크기 제한(`max_payload_bytes`, 4 MiB)을 모든 경로, 스트림, 업그레이드에서 본문을 읽기 전에 검사합니다. 연결은 그것을 만든 주체에게만 응답합니다.
+  - **초안과 다른 점.** 초안은 HTTP/2를 요구하지만 서버는 HTTP/1.1을 쓰므로 스트림과 `POST`마다 별도의 TCP 연결이 됩니다. 101 응답에는 `Acp-Connection-Id`가 없고, 쿠키를 설정하지 않으며, `Acp-Protocol-Version`을 검사하지 않습니다.
+  - **재빌드.** `ACPClient`에 멤버가 하나 늘었으므로, 이를 쓰는 네이티브 코드는 새 헤더로 다시 빌드해야 합니다.
+  - **테스트.** `tests/test_acp_http_server.cpp`는 전체 세션, 권한 요청 왕복, `fs/read_text_file` 왕복, 취소, 동시에 연결된 둘, 프롬프트 도중 끊어진 연결, Host·Origin·크기·인증 검사, 원시 WebSocket 프레임(마스킹 없음, 조각, ping, 바이너리)을 실행합니다. `bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py`는 공식 Python SDK(`agent-client-protocol` 0.12)가 초안 전송용으로 제공하는 클라이언트로 두 전송 모두에서 probe 에이전트(`neograph_acp_probe_agent --http`)를 구동합니다.
 - **Python: 모든 run, stream, resume 진입점이 같은 실행별 값을 받고, 재개된 턴도 스트리밍할 수 있습니다.** `run_stream`, `run_async`, `run_stream_async`, `resume`, `resume_async`는 `run`과 `resume_from`이 받던 `RunMetadata`를 버렸고, 어떤 resume 진입점도 스트림 콜백을 받지 않았습니다.
   - **어디서나 `metadata`.** 위 진입점이 `RunMetadata`(데드라인, 트레이스·실행 식별자, 소유자 범위)를 받습니다. 이것이 없으면 asyncio·스트리밍 경로는 데드라인이나 식별자를 실을 수 없었고, 생명주기 Hook 런타임이 설치된 엔진은 이 경로에서 fail-closed로 실패했습니다. Hook은 소유자 범위나 실행 식별자가 없는 이벤트를 거부하기 때문입니다. 재개는 자체 `RunMetadata`를 받으며, 중단된 실행의 데드라인은 이어받지 않습니다. 인자는 호출하는 시점에 복사되므로, 이후에 객체를 바꿔도 진행 중인 실행에는 영향이 없고 하나의 객체를 여러 호출에 쓸 수 있습니다. **동작 변경:** `RunMetadata`가 아닌 값은 모든 진입점에서 `TypeError`를 발생시킵니다. `run`과 `resume_from`은 이때 `RuntimeError`를 발생시켰습니다.
   - **resume 진입점의 `callback=`.** `resume`, `resume_from`(빈 콜백을 넘기던), `resume_async`(빈 콜백을 만들던)가 스트림 콜백을 받으므로, 사람의 승인 뒤에 이어지는 턴도 토큰과 이벤트를 스트리밍합니다. 콜백은 `run_stream`을 따릅니다. 동기 호출에서는 호출을 구동하는 스레드에서, asyncio 호출에서는 루프 스레드에서 실행됩니다.

@@ -336,6 +336,7 @@ Measure a workload with its actual nodes, provider, stores, concurrency, and bui
 | `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | Optional persistent stores; both default on. |
 | `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP client and stdio server components; both default on (`NEOGRAPH_BUILD_MCP` sets their default). |
 | `NEOGRAPH_BUILD_MCP_HTTP_SERVER` | MCP Streamable HTTP server transport; default off. |
+| `NEOGRAPH_BUILD_ACP_HTTP_SERVER` | Experimental ACP Streamable HTTP and WebSocket transports (they follow a draft of the protocol); default off. |
 | `NEOGRAPH_BUILD_HARNESS_MCP_BINARY` | Build and install the `neograph-harness-mcp` executable; default off. |
 | `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | Protocol integrations; A2A and ACP default on, gRPC defaults off. |
 | `NEOGRAPH_BUILD_ASYNC` | HTTP, SSE and WebSocket helpers; default on. |

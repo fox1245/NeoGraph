@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
+<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=d6c0969438c8807fc2a0db7bad4789dbf7f7110c6b864b32417f0715f51bd282 -->
 # ACP: グラフをエディターのエージェントとして使う
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -12,6 +12,7 @@ Agent Client Protocol(ACP)は、エディターをコーディング用や対話
 | 役割 | C++ ターゲット | CMake オプション(既定値) | Python |
 |---|---|---|---|
 | エージェント(サーバー) | `neograph::acp` | `NEOGRAPH_BUILD_ACP`(オン) | 公式 SDK を使用 |
+| Streamable HTTP と WebSocket のエージェント(実験的) | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`(**オフ**) | なし |
 
 Python パッケージにはネイティブの ACP サーバーがありません。Python でエージェントを書くには、公式 SDK(`pip install "neograph-engine[acp]"`)を入れ、その背後で `neograph_engine.ProtocolHostAdapter` を使ってエンジンを動かします。このアダプターは、ACP のセッション ID を NeoGraph の `thread_id` に対応づけ、チェックポイントから再開し、キャンセルを伝え、トークンをストリーミングします。[Python サンプル](../bindings/python/examples/README.md)にそのようなエージェントがあります。ACP には Python 3.10 以降が必要です。
 
@@ -181,6 +182,31 @@ stop reason: end_turn
 - **MCP サーバー。** クライアントは `session/new` で stdio の MCP サーバーを渡せます。エージェントは NeoGraph の MCP クライアントを使い、セッションの `cwd` で、最小限の環境(`PATH` とクライアントの `env` の項目)でそれらを起動するので、エージェントの環境にある provider のキーは渡りません。ノードは `ACPClient::session_tools(session_id)` でそれらのツールにアクセスします。HTTP と SSE の MCP サーバーは `-32602` で拒否されます。[MCP ガイド](mcp.md)を参照してください。
 - **ケイパビリティ。** `ACPServer::capabilities()` が `initialize` で通知する内容です。プロンプトはテキストと `resource_link` ブロックを受け付け、画像、音声、埋め込みリソースは、`capabilities().prompt` で有効にしたときだけ受け付けます。
 
+## リモートトランスポート(実験的)
+
+stdio は、ACP が定義し、すべてのエディターが実装しているトランスポートです。リモートトランスポート、つまり同じエンドポイントで WebSocket へのアップグレードも受け付ける Streamable HTTP は、ACP プロジェクトのドラフト提案としてしか存在しません。`neograph::acp_http_server` はエージェントをこの両方で提供し、ドラフトが明示している部分には従うので、ドラフトが変わればワイヤ上の詳細も変わることがあります。**実験的で、既定はオフ**です。求めない限り何もリンクされない別ライブラリ(`NEOGRAPH_BUILD_ACP_HTTP_SERVER`、既定はオフ)であり、サーバーは `start()` の後でしか待ち受けません。stdio の `ACPServer::run()` は変わりません。
+
+```cpp
+#include <neograph/acp/http_server.h>
+
+// One ACPServer per connection: the factory builds it, the transport drives it.
+acp::ACPHttpServer server([engine](std::string_view /*principal*/) {
+    acp::ACPHttpConnection connection;
+    connection.server = std::make_unique<acp::ACPServer>(
+        engine, json{{"name", "release-notes"}, {"version", "1.0.0"}});
+    return connection;
+});
+server.start_async();  // 127.0.0.1 and a free port, see server.port()
+```
+
+`neograph::acp` も一緒に引き込む `neograph::acp_http_server` をリンクします。ファクトリは接続ごとに 1 回、任意の `authenticator` が返したプリンシパル(なければ空文字列)とともに呼ばれます。
+
+- **接続。** ACP の接続 1 つが `ACPServer` 1 つで、stdio とまったく同じように駆動されます。メッセージは届いた順に処理され、終わった接続は入力の終端なので、実行中のプロンプトはキャンセルされます。接続は互いに独立で、同じエンジン上でプロンプトを同時に実行でき、`max_connections`(16)が数を制限します。セッション id は生きている接続 1 つに属します。別の生きている接続が持つ id を `session/resume` すると、`-32603` と `data.reason` `"session_busy"` で拒否されます。接続のセッションは接続とともに終わり、再接続の後は `session/resume` がエンジンのチェックポイントストアからセッションを復元します。エディターを呼び出すノードは `ACPHttpServer::client()` をキャプチャするか(またはバインドされていない `ACPClient` を `attach_client()` に渡し)、各呼び出しはそのセッションを持つ接続に届きます。
+- **Streamable HTTP** は `ACPHttpConfig::endpoint`(`/acp`)で提供されます。`Acp-Connection-Id` なしで `initialize` を `POST` すると接続が作られ、`200` で応答が本文として返り、id は `Acp-Connection-Id` ヘッダーに入ります。それ以外の `POST` はこのヘッダーを付け、本文なしの `202` で応答され、実際の答えはストリームで届きます。`Accept: text/event-stream` の `GET` は server-sent-event ストリームを開きます。ヘッダーだけなら接続ストリーム(`session/new` と `session/resume` への答え)、`Acp-Session-Id` もあればセッションストリーム(`session/update`、`session/request_permission` や `fs/*` などエージェントのリクエスト、そのセッションのリクエストへの答え)です。`session/resume` で復元したセッションは、クライアントがストリームを開くまで専用のストリームを持たず、その間のメッセージは接続ストリームで届きます。`DELETE` は接続を終わらせます。`params.sessionId` でセッションを指すリクエストは同じ `Acp-Session-Id` を送る必要があり、そのセッションは接続のものでなければなりません。バッチは `501` です。開いているストリームがないときのメッセージは、上限のあるキューで待ちます。接続を失った後に再送されるものはなく、ストリームもリクエストもない状態が `connection_idle_timeout`(60 秒)続いた接続は閉じられ、そのプロンプトはキャンセルされます。
+- **WebSocket** は同じエンドポイント(`Upgrade: websocket` の `GET`)で提供されます。テキストフレーム 1 つが、どちらの向きでも JSON-RPC メッセージ 1 つで、最初が `initialize` です。バイナリフレームは無視されます。フレームは RFC 6455 に従います。クライアントのフレームはマスクされている必要があり、ping には応答し、メッセージは分割されていてもかまいません。`max_payload_bytes` を超えるメッセージはコード 1009 で接続を閉じ、ソケットを閉じると接続が終わります。
+- **ドラフトとの違い。** ドラフトは HTTP/2 を必須としていますが、このサーバーは HTTP/1.1 なので、ストリームと `POST` のそれぞれが別の TCP 接続になり、多重化はリバースプロキシに任せます。WebSocket アップグレードの 101 応答には `Acp-Connection-Id` がありません。クッキーは設定せず、`Acp-Protocol-Version` は検査せず、ストリームにイベント id や再開はありません。
+- **セキュリティ。** 別のホストを指定しない限り `127.0.0.1` にバインドし、ループバックでないバインドは `authenticator` がなければ拒否されます。すべてのリクエスト、ストリーム、アップグレード、およびサーバーが提供しないパスも、本文を読む前に検査されます。まず Host と Origin(`allowed_hosts` と `allowed_origins`。[MCP](mcp.md) と [A2A](a2a.md) のサーバーと同じ規則)、次に `authenticator`(HTTP 401 と `WWW-Authenticate: Bearer`)、最後に `max_payload_bytes`(HTTP 413、既定は 4 MiB)です。接続は、それを作ったプリンシパルにだけ応答します。エージェントはエディターの名前でファイルを読み書きするので、リモートバインドはそれを公開することだと考えてください。ブラウザーは WebSocket に `Authorization` を付けられないので、そうした接続の認証はリバースプロキシで行ってください。
+
 ## テストと相互運用性
 
-`tests/fixtures/acp_probe_agent.cpp` は、公開 API で作った小さな ACP エージェントです。相互運用スイートは、公式 SDK のクライアントをこのエージェントに接続して検査します。単体テストは `tests/test_acp_server.cpp` と `tests/test_acp_types.cpp` です。
+`tests/fixtures/acp_probe_agent.cpp` は、公開 API で作った小さな ACP エージェントです。相互運用スイートは、公式 SDK のクライアントをこのエージェントに接続して検査します。単体テストは `tests/test_acp_server.cpp` と `tests/test_acp_types.cpp` で、リモートトランスポートには専用の `tests/test_acp_http_server.cpp` があります。`bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py` は、公式 Python SDK(`agent-client-protocol` 0.12)がドラフトのトランスポート用に提供するクライアントを `neograph_acp_probe_agent --http` に対して両方のトランスポートで実行します。TypeScript SDK はこれらのトランスポートに対しては実行していません。

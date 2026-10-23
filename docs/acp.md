@@ -11,6 +11,7 @@ The Agent Client Protocol (ACP) connects an editor to a coding or chat agent. Th
 | Role | C++ target | CMake option (default) | Python |
 |---|---|---|---|
 | Agent (server) | `neograph::acp` | `NEOGRAPH_BUILD_ACP` (on) | through the official SDK |
+| Agent over Streamable HTTP and WebSocket (experimental) | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER` (**off**) | none |
 
 The Python package does not contain a native ACP server. To write the agent in Python, install the official SDK (`pip install "neograph-engine[acp]"`) and run your engine behind it with `neograph_engine.ProtocolHostAdapter`, which maps an ACP session id to a NeoGraph `thread_id`, resumes from checkpoints, forwards cancellation and streams tokens. The [Python examples](../bindings/python/examples/README.md) include such an agent. ACP needs Python 3.10 or newer.
 
@@ -180,6 +181,31 @@ Change `"approve"` to `"reject"` and the update reads `Not published (reject): R
 - **MCP servers.** A client may pass stdio MCP servers in `session/new`. The agent starts them with NeoGraph's MCP client in the session's `cwd` with a minimal environment (`PATH` and the client's `env` entries), so provider keys in the agent's environment do not reach them. Nodes reach their tools through `ACPClient::session_tools(session_id)`. HTTP and SSE MCP servers are refused with `-32602`. See the [MCP guide](mcp.md).
 - **Capabilities.** `ACPServer::capabilities()` is what `initialize` advertises. Prompts accept text and `resource_link` blocks; image, audio and embedded resources only when you turn them on in `capabilities().prompt`.
 
+## Remote transports (experimental)
+
+stdio is the transport that ACP defines and that every editor implements. A remote transport, Streamable HTTP with a WebSocket upgrade on the same endpoint, exists only as a draft proposal of the ACP project. `neograph::acp_http_server` serves an agent over both and follows that draft where it is explicit, so its wire details may change when the draft does. It is **experimental and off by default**: a separate library (`NEOGRAPH_BUILD_ACP_HTTP_SERVER`, default off) that nothing links unless asked, and a server that listens only after `start()`. `ACPServer::run()` on stdio does not change.
+
+```cpp
+#include <neograph/acp/http_server.h>
+
+// One ACPServer per connection: the factory builds it, the transport drives it.
+acp::ACPHttpServer server([engine](std::string_view /*principal*/) {
+    acp::ACPHttpConnection connection;
+    connection.server = std::make_unique<acp::ACPServer>(
+        engine, json{{"name", "release-notes"}, {"version", "1.0.0"}});
+    return connection;
+});
+server.start_async();  // 127.0.0.1 and a free port, see server.port()
+```
+
+Link `neograph::acp_http_server`, which brings `neograph::acp`. The factory is called once per connection, with the principal that the optional `authenticator` returned (empty without one).
+
+- **Connections.** One ACP connection is one `ACPServer`, driven exactly as on stdio: messages are handled in the order they arrive, and a connection that ends is an end of input, so its running prompts are cancelled. Connections are independent and may run prompts at the same time on the same engine; `max_connections` (16) limits them. A session id belongs to one live connection: `session/resume` of an id that another live connection holds is refused with `-32603` and `data.reason` `"session_busy"`. A connection's sessions end with it; after a reconnect, `session/resume` restores a session from the engine's checkpoint store. Nodes that call the editor capture `ACPHttpServer::client()` (or pass an unbound `ACPClient` to `attach_client()`), and each call reaches the connection that owns the session.
+- **Streamable HTTP** on `ACPHttpConfig::endpoint` (`/acp`). A `POST` of `initialize` without `Acp-Connection-Id` creates the connection and is answered `200` with the response as the body and the id in the `Acp-Connection-Id` header. Every other `POST` carries that header, is answered `202` with no body, and its answer comes on a stream. A `GET` with `Accept: text/event-stream` opens a server-sent-event stream: the connection stream with the header alone (the answers to `session/new` and `session/resume`), the session stream with `Acp-Session-Id` too (`session/update`, the agent's requests such as `session/request_permission` and `fs/*`, and the answers to that session's requests). A session that `session/resume` brought back has no stream of its own until the client opens one, and its messages use the connection stream meanwhile. A `DELETE` ends the connection. A request that names a session in `params.sessionId` must send the same `Acp-Session-Id`, and the session must be one of the connection. A batch is `501`. A message with no stream open waits in a bounded queue; nothing is replayed after a connection is lost, and a connection with no stream and no request for `connection_idle_timeout` (60 s) is closed, cancelling its prompts.
+- **WebSocket** on the same endpoint (`GET` with `Upgrade: websocket`). Each text frame is one JSON-RPC message in either direction, `initialize` first; binary frames are ignored. Frames follow RFC 6455: client frames must be masked, pings are answered, messages may be fragmented. A message over `max_payload_bytes` closes the connection with code 1009, and closing the socket ends the connection.
+- **Where it differs from the draft.** The draft requires HTTP/2; this server speaks HTTP/1.1, so each stream and each `POST` is its own TCP connection, and multiplexing is for a reverse proxy to provide. The 101 response of a WebSocket upgrade does not carry `Acp-Connection-Id`. No cookies are set, `Acp-Protocol-Version` is not checked, and streams have no event ids or resumption.
+- **Security.** The server binds `127.0.0.1` unless you name another host, and a non-loopback bind is refused unless `authenticator` is set. Every request, stream and upgrade, and any path the server does not serve, is checked before its body is read: Host and Origin (`allowed_hosts` and `allowed_origins`, with the rules of the [MCP](mcp.md) and [A2A](a2a.md) servers), then `authenticator` (HTTP 401 with `WWW-Authenticate: Bearer`), then `max_payload_bytes` (HTTP 413, 4 MiB by default). A connection answers only to the principal that created it. The agent reads and writes files in the editor's name, so treat a remote bind as exposing that. A browser cannot set `Authorization` on a WebSocket; authenticate those in a reverse proxy.
+
 ## Tests and interoperability
 
-`tests/fixtures/acp_probe_agent.cpp` is a small ACP agent built on the public API; the interop suites run the official SDK clients against it. The unit tests are `tests/test_acp_server.cpp` and `tests/test_acp_types.cpp`.
+`tests/fixtures/acp_probe_agent.cpp` is a small ACP agent built on the public API; the interop suites run the official SDK clients against it. The unit tests are `tests/test_acp_server.cpp` and `tests/test_acp_types.cpp`; the remote transports have their own, `tests/test_acp_http_server.cpp`. `bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py` runs the client that the official Python SDK (`agent-client-protocol` 0.12) ships for the draft transport against `neograph_acp_probe_agent --http`, over both transports; the TypeScript SDK is not run against them.
