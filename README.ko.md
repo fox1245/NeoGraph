@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=b47665c0105adc41193273cb836de3da5dcad51b41719a7ac493a1aa96a9f476 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -278,7 +278,7 @@ cmake --build build-program --parallel --target example_program_quickstart
 <a id="typed-provider-calls"></a>
 ## 타입이 지정된 provider 호출
 
-모델 호출에는 검증된 디스크립터, 런타임 옵션, 타입이 지정된 요청을 씁니다. 디스크립터 승인은 닫힌 버전 데이터만 받으며, 요청·응답 인터프리터를 실행하지 않습니다. 자격 증명은 공개 디스크립터 파일이 아니라 런타임 옵션에 둡니다. `SchemaProvider::Defaults`에는 타입이 지정된 OpenRouter 라우팅과 Responses 보존 설정이 들어 있습니다. 이미지, Veo, Decisions는 별도의 타입 클라이언트와 권한을 씁니다.
+모델 호출에는 검증된 디스크립터, 런타임 옵션, 타입이 지정된 요청을 씁니다. 디스크립터 승인은 닫힌 버전 데이터만 받으며, 요청·응답 인터프리터를 실행하지 않습니다. 자격 증명은 공개 디스크립터 파일이 아니라 런타임 옵션에 둡니다. `SchemaProvider::Defaults`에는 타입이 지정된 OpenRouter 라우팅과 Responses 보존 설정이 들어 있습니다. 이미지, 비디오, 음악, 음성, 임베딩, 리랭크, 모더레이션, 구조화된 결정은 SchemaProvider 엔드포인트이며 채팅과 같은 프로바이더 경로로 호출합니다.
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -403,7 +403,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 복구를 거친 설치형 휠. cibuildwheel==2.23.0과 네이티브/컨테이너 provider 필요. `--arch x86_64\|aarch64\|arm64\|AMD64` 필수. 선택 옵션 `--python cp312`는 모든 CPython 대신 하나만 빌드합니다. |
 | `runtime-archive` | 공유 SDK 네이티브 아카이브 이식성 타깃/CTest. Ninja와 플랫폼 런타임 의존성 필요. |
 
-로컬 Windows/WSL 결과가 네이티브 ARM/macOS나 VS2026 새니타이저 행을 대신하지는 않습니다. push와 pull request마다 `ci.yml`이 실행됩니다. Linux, macOS, Windows의 전체 네이티브 테스트에 설치형 소비자 행 두 개가 더해지며, 문서만 바꾼 변경은 건너뜁니다. `ci-extended.yml`은 매일 밤과 요청 시에 실행됩니다. 새니타이저, 퍼즈 카나리, 성능 게이트, 네이티브 ARM64, gRPC, Visual Studio 제너레이터, 나머지 설치형 소비자 행 여덟 개를 다룹니다. 릴리스 후보에서는 태그를 붙이기 전에 실행하세요. `wheels.yml`은 패키징 변경 때 플랫폼마다 CPython 3.12 휠 하나를 빌드합니다. 릴리스 태그에서는 Linux(x86_64, aarch64), macOS(arm64), Windows(AMD64)용으로 CPython 3.9–3.13 휠을 빌드하며, 최소 플랫폼 버전은 glibc 2.34와 macOS 14입니다.
+로컬 Windows/WSL 결과가 네이티브 ARM/macOS나 VS2026 새니타이저 행을 대신하지는 않습니다. push와 pull request마다 `ci.yml`이 실행됩니다. Linux, macOS, Windows의 전체 네이티브 테스트에 설치형 소비자 행 두 개가 더해지며, 문서만 바꾼 변경은 건너뜁니다. `ci-extended.yml`은 매일 밤과 요청 시에 실행됩니다. 새니타이저, 퍼즈 카나리, 성능 게이트, gRPC, Visual Studio 제너레이터, 나머지 설치형 소비자 행 여덟 개를 다룹니다. Linux ARM64는 호스팅 러너가 아니라 프로젝트의 자체 ARM 서버에서 빌드하고 테스트하며(`ci-extended.yml`의 호스팅 ARM 잡은 꺼져 있습니다), aarch64 휠은 릴리스 태그에서만 빌드합니다. 릴리스 후보에서는 태그를 붙이기 전에 실행하세요. `wheels.yml`은 패키징 변경 때 플랫폼마다 CPython 3.12 휠 하나를 빌드합니다. 릴리스 태그에서는 Linux(x86_64, aarch64), macOS(arm64), Windows(AMD64)용으로 CPython 3.9–3.13 휠을 빌드하며, 최소 플랫폼 버전은 glibc 2.34와 macOS 14입니다.
 
 - [문서 목차](docs/README.md)
 - [핵심 개념과 그래프 의미](docs/concepts.md)

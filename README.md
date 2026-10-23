@@ -275,7 +275,7 @@ The [Program quickstart](examples/63_program_quickstart.cpp) compiles and admits
 
 ## Typed provider calls
 
-Model calls use a validated descriptor, runtime options, and a typed request. Descriptor admission accepts closed, versioned data; it does not execute a request/response interpreter. Credentials belong in runtime options, not public descriptor files. `SchemaProvider::Defaults` contains typed OpenRouter routing and Responses retention controls. Images, Veo, and Decisions use separate typed clients and authorization.
+Model calls use a validated descriptor, runtime options, and a typed request. Descriptor admission accepts closed, versioned data; it does not execute a request/response interpreter. Credentials belong in runtime options, not public descriptor files. `SchemaProvider::Defaults` contains typed OpenRouter routing and Responses retention controls. Images, video, music, speech, embeddings, reranking, moderation and structured decisions are SchemaProvider endpoints, called through the same provider path as chat.
 
 ```cpp
 #include <neograph/llm/schema_provider.h>
@@ -416,8 +416,9 @@ Local Windows/WSL results do not replace native ARM/macOS or VS2026 sanitizer
 rows. Every push and pull request runs `ci.yml`: the full native suite on Linux,
 macOS and Windows plus two installed-consumer rows; documentation-only changes
 skip it. `ci-extended.yml` runs nightly and on demand: sanitizers, the fuzz
-canary, performance gates, native ARM64, gRPC, the Visual Studio generator and
-the other eight installed-consumer rows. Run it on a release candidate before
+canary, performance gates, gRPC, the Visual Studio generator and
+the other eight installed-consumer rows. Linux ARM64 is built and tested on the project's own ARM server,
+not on a hosted runner (the hosted ARM job of `ci-extended.yml` is switched off); the aarch64 wheels are built only on release tags. Run it on a release candidate before
 tagging. `wheels.yml` builds one CPython 3.12 wheel per platform for packaging changes. On
 release tags it builds wheels for CPython 3.9–3.13 on Linux (x86_64 and aarch64), macOS (arm64)
 and Windows (AMD64), with glibc 2.34 and macOS 14 as the minimum platform versions.

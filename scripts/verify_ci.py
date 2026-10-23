@@ -267,9 +267,10 @@ def native(args):
                           NEOGRAPH_BUILD_PROGRAM="ON", NEOGRAPH_BUILD_QUICKJS_CONTROL="ON",
                           NEOGRAPH_BUILD_TESTS="ON", NEOGRAPH_BUILD_EXAMPLES="OFF")
     if args.profile == "native-linux":
-        # The ACP remote transports (experimental, off by default) are built and
-        # tested where their dependencies are known to be present.
-        options += definitions(NEOGRAPH_BUILD_PYBIND="ON", NEOGRAPH_BUILD_ACP_HTTP_SERVER="ON")
+        # The ACP remote transports (experimental, off by default) and the MCP HTTP server
+        # (off by default) are built and tested where their dependencies are known to be present.
+        options += definitions(NEOGRAPH_BUILD_PYBIND="ON", NEOGRAPH_BUILD_ACP_HTTP_SERVER="ON",
+                               NEOGRAPH_BUILD_MCP_HTTP_SERVER="ON")
     generator = None
     if system == "Windows":
         # Ninja compiles files in parallel; the Visual Studio generator runs each project's
