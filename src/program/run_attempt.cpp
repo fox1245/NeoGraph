@@ -1944,6 +1944,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     bool                                  completed_over_budget = false;
     try {
         const auto control_source = control->materialized->bundle.control_source();
+        // A resume of an interrupted callCore reserves the capacity of the call in the journal, and the call settles
+        // the reservation with the usage it measured. The grant of this attempt includes the reservation, but a run
+        // that ends before the call has settled it must not return it unmeasured: it ends with the remainder the
+        // journal holds, and the reservation stays unreturned.
+        if (control_source && javascript_core_resume_value) {
+            const auto held =
+                co_await control->async_transitions().latest(control->owner_scope, control->run_id);
+            if (held && has_resource_reservation(held->inflight_reservation))
+                unreconciled_javascript_remaining = held->remaining_budget;
+        }
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
             if (const auto durable = co_await control->async_transitions().load(

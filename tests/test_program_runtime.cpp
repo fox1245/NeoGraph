@@ -7208,6 +7208,296 @@ TEST(ProgramRuntimeTest, JavaScriptInterruptedCallCoreResumesItsExactPendingCoor
     EXPECT_TRUE(commands.back().completed());
 }
 
+namespace {
+
+// Holds the attempt of a resumed run on the first event of the Core call it resumes until the test lets it go: the
+// call has started and none of its nodes has run. The held event can also be rejected, as a host callback that throws
+// rejects it.
+class HoldFirstCoreEventSink final : public ProgramEventSink {
+public:
+    explicit HoldFirstCoreEventSink(bool reject_it) : reject_it_(reject_it) {}
+
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != ProgramEventKind::Core || held_.exchange(true)) return;
+        nodes_run_when_held = interrupt_calls.load();
+        entered_.set_value();
+        released_.wait();
+        if (reject_it_) throw std::runtime_error("the handler rejected the first Core event");
+    }
+    bool entered() { return entered_future_.wait_for(std::chrono::seconds(10)) == std::future_status::ready; }
+    void release() {
+        if (!released_flag_.exchange(true)) release_.set_value();
+    }
+
+    unsigned nodes_run_when_held = 0;
+
+private:
+    bool                     reject_it_;
+    std::atomic<bool>        held_{false};
+    std::promise<void>       entered_;
+    std::future<void>        entered_future_ = entered_.get_future();
+    std::promise<void>       release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::atomic<bool>        released_flag_{false};
+};
+
+// An in-memory checkpoint store that holds the first load by id made after it is armed, until the test lets it go. The
+// attempt of a resumed run loads its checkpoint before it does anything else, so a test that arms the store when the
+// resume starts can end the run before the attempt has begun.
+class HoldingCheckpointStore final : public InMemoryCheckpointStore {
+public:
+    void arm() {
+        std::lock_guard lock(mutex_);
+        armed_ = true;
+    }
+    bool held() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10), [this] { return held_; });
+    }
+    void release() {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+    std::optional<Checkpoint> load_by_id(const std::string& id) override {
+        {
+            std::unique_lock lock(mutex_);
+            if (armed_ && !held_) {
+                held_ = true;
+                cv_.notify_all();
+                cv_.wait(lock, [this] { return released_; });
+            }
+        }
+        return InMemoryCheckpointStore::load_by_id(id);
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    bool                    armed_ = false, held_ = false, released_ = false;
+};
+
+// Arms a HoldingCheckpointStore on the first event of a resume, which is delivered once the resume is published and
+// before its attempt exists.
+class ArmOnStartedSink final : public ProgramEventSink {
+public:
+    explicit ArmOnStartedSink(HoldingCheckpointStore& store) : store_(store) {}
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind == ProgramEventKind::Started) store_.arm();
+    }
+
+private:
+    HoldingCheckpointStore& store_;
+};
+
+}  // namespace
+
+// A resume of a run with a JavaScript main() withholds the capacity of the interrupted callCore as a reservation in the
+// journal, and the call settles it with the usage it measured. A run that ends before the call has started returned
+// nothing of it, and the journal cannot show that no node ran: it ends in the state it was asked to (#557) with the
+// remaining budget the resume left it, and gives none of the reservation back.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunCancelledBeforeItsCoreCallStartsEndsCancelled) {
+    // In memory and on SQLite alike: the stores share the check of the transition.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        auto            gate = std::make_shared<HoldingCheckpointStore>();
+        AdmittedRuntime fixture(1, gate, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:cancelled-first");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1), "trace-js-cancel-first", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+        // The attempt of the resume waits at its first load of the checkpoint, and the cancellation arrives before it has
+        // done anything.
+        auto handle = fixture.runtime->resume(
+            "tenant:runtime", interrupted.run_id(),
+            resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-cancel-first-resume",
+                       std::make_shared<ArmOnStartedSink>(*gate)));
+        ASSERT_TRUE(gate->held()) << "the attempt never loaded its checkpoint";
+        const auto held = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(held.has_value());
+        ASSERT_EQ(held->continuation.state, ContinuationState::Running);
+        ASSERT_EQ(held->continuation.attempt, 2U);
+        ASSERT_NE(held->inflight_reservation, RunBudget{}) << "the resume holds the reservation of the call";
+
+        EXPECT_TRUE(handle.cancel());
+        gate->release();
+        const auto ended = handle.wait();
+
+        EXPECT_EQ(ended.status(), ProgramTerminalStatus::Cancelled) << failure_detail(ended);
+        EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+        const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->continuation.state, ContinuationState::Cancelled);
+        EXPECT_EQ(latest->sequence, held->sequence + 1) << "the cancellation is the one publication after the resume";
+        EXPECT_EQ(latest->remaining_budget, held->remaining_budget) << "nothing of the reservation was returned";
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+        EXPECT_EQ(ended.remaining_budget(), held->remaining_budget);
+        const auto record = fixture.journal->load("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(record.has_value());
+        EXPECT_EQ(record->continuation().state, ContinuationState::Cancelled);
+        ASSERT_TRUE(record->terminal_result().has_value());
+        EXPECT_EQ(record->terminal_result()->status(), ProgramTerminalStatus::Cancelled);
+
+        // A runtime that starts over the same stores finds a run that ended, and does not run it again.
+        auto       fresh = fixture.make_runtime();
+        const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        EXPECT_EQ(found.status(), ProgramTerminalStatus::Cancelled) << failure_detail(found);
+        EXPECT_EQ(interrupt_calls.load(), 1U);
+    }
+}
+
+// Once the Core call has started, the call settles the reservation with the usage it measured, and the part it did not
+// use is returned, whether the run is cancelled or its handler throws. These two stay as they were.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunCancelledAtTheStartOfItsCoreCallSettlesTheReservation) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:cancelled-at-start");
+    return {value: output.value};
+)JS"));
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-cancel-start", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+    auto sink   = std::make_shared<HoldFirstCoreEventSink>(false);
+    auto handle = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-cancel-start-resume", sink));
+    ASSERT_TRUE(sink->entered());
+    ASSERT_EQ(sink->nodes_run_when_held, 1U) << "the node had not run again when the attempt was held";
+    const auto held = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(held.has_value());
+    ASSERT_NE(held->inflight_reservation, RunBudget{});
+
+    EXPECT_TRUE(handle.cancel());
+    sink->release();
+    const auto ended = handle.wait();
+
+    EXPECT_EQ(ended.status(), ProgramTerminalStatus::Cancelled) << failure_detail(ended);
+    EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+    const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->continuation.state, ContinuationState::Cancelled);
+    EXPECT_EQ(latest->sequence, held->sequence + 2) << "the call settled its reservation, then the run ended";
+    EXPECT_GT(latest->remaining_budget.model_tokens, held->remaining_budget.model_tokens)
+        << "the unused part of the reservation came back";
+    EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+}
+
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunWhoseHandlerThrowsAtTheStartOfItsCoreCallEndsFailedWithTheHandlersCode) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:handler-throws");
+    return {value: output.value};
+)JS"));
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-throw-start", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+    auto sink   = std::make_shared<HoldFirstCoreEventSink>(true);
+    auto handle = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-throw-start-resume", sink));
+    ASSERT_TRUE(sink->entered());
+    ASSERT_EQ(sink->nodes_run_when_held, 1U) << "the node had not run again when the attempt was held";
+    const auto held = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(held.has_value());
+    ASSERT_NE(held->inflight_reservation, RunBudget{});
+    sink->release();
+    const auto ended = handle.wait();
+
+    EXPECT_EQ(ended.status(), ProgramTerminalStatus::Failed) << failure_detail(ended);
+    ASSERT_TRUE(ended.failure().has_value());
+    EXPECT_EQ(ended.failure()->code, "P_EVENT_SINK");
+    EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+    const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+    EXPECT_EQ(latest->sequence, held->sequence + 2);
+    EXPECT_GT(latest->remaining_budget.model_tokens, held->remaining_budget.model_tokens);
+    auto       fresh = fixture.make_runtime();
+    const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    EXPECT_EQ(found.status(), ProgramTerminalStatus::Failed) << failure_detail(found);
+}
+
+namespace {
+
+// Rejects a resume on its first event, Started, which is delivered once the resume is published and before its attempt
+// exists. `before_throwing` runs first, as a host's callback does.
+class RejectResumeSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != ProgramEventKind::Started) return;
+        if (before_throwing) before_throwing();
+        throw std::runtime_error("the handler rejected the resume");
+    }
+    std::function<void()> before_throwing;
+};
+
+}  // namespace
+
+// The resumed call has not run when its resume is rejected, so the run ends Failed with the code of the handler's error,
+// the remaining budget the resume left it, and none of the reservation of the call returned.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunWhoseHandlerThrowsAtItsStartedEventEndsFailedWithTheHandlersCode) {
+    // In memory and on SQLite alike.
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:handler-throws-at-started");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1), "trace-js-throw-started", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+        std::optional<ProgramJournalRecord> held;
+        auto                                sink = std::make_shared<RejectResumeSink>();
+        sink->before_throwing = [&] { held = fixture.journal->latest("tenant:runtime", interrupted.run_id()); };
+        const auto ended = fixture.runtime
+                               ->resume("tenant:runtime", interrupted.run_id(),
+                                        resume_for(interrupted, json{{"decision", "approved"}},
+                                                   "trace-js-throw-started-resume", sink))
+                               .wait();
+
+        ASSERT_TRUE(held.has_value());
+        ASSERT_EQ(held->continuation.state, ContinuationState::Running);
+        ASSERT_NE(held->inflight_reservation, RunBudget{}) << "the resume holds the reservation of the call";
+        EXPECT_EQ(ended.status(), ProgramTerminalStatus::Failed) << failure_detail(ended);
+        ASSERT_TRUE(ended.failure().has_value());
+        EXPECT_EQ(ended.failure()->code, "P_EVENT_SINK");
+        EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+        const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+        EXPECT_EQ(latest->sequence, held->sequence + 1);
+        EXPECT_EQ(latest->remaining_budget, held->remaining_budget);
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+        EXPECT_EQ(ended.remaining_budget(), held->remaining_budget);
+        auto       fresh = fixture.make_runtime();
+        const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        EXPECT_EQ(found.status(), ProgramTerminalStatus::Failed) << failure_detail(found);
+        EXPECT_EQ(interrupt_calls.load(), 1U);
+    }
+}
+
 TEST(ProgramRuntimeTest, JavaScriptExactResumeStillValidatesMalformedTerminalOutput) {
     interrupt_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);

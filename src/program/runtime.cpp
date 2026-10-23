@@ -9572,19 +9572,16 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         sink_error = error.what();
     }
     if (sink_error) {
+        // The observer rejected the resume before its attempt started: no node of the resumed call has run. The run
+        // ends Failed with the code of the observer's error and the remaining budget the resume left it. When the
+        // resume holds the reservation of a JavaScript callCore, that reservation is not part of the remainder and is
+        // not returned, since nothing has measured its use.
         detail::RunOutcome failed;
         failed.remaining_budget = resumed_remaining;
         failed.checkpoint       = checkpoint;
-        if (javascript_pending && javascript_pending->core_resume_operation_id) {
-            failed.status = ProgramTerminalStatus::AmbiguousEffect;
-            failed.interrupt =
-                ProgramInterrupt{"javascript", javascript_pending->command.to_json(), std::nullopt,
-                                 javascript_command_pending_effect(*control, *javascript_pending)};
-        } else {
-            failed.status = ProgramTerminalStatus::Failed;
-            failed.failure =
-                ProgramFailure{"P_EVENT_SINK", *sink_error, "root", "", 0, json::object()};
-        }
+        failed.status           = ProgramTerminalStatus::Failed;
+        failed.failure =
+            ProgramFailure{"P_EVENT_SINK", *sink_error, "root", "", 0, json::object()};
         (co_await control->complete_async(std::move(failed)));
         co_return ProgramHandle(std::move(control));
     }

@@ -407,6 +407,59 @@ await check('an error thrown by onEvent cancels that run and leaves the module r
   assert.equal((await programs.start(version, { input: ask('after') }).result).status, 'interrupted');
 }));
 
+// A resumed run holds the reservation of the call it resumes until a node of the call has run. A run that is cancelled
+// before the first node starts returns none of it, and is cancelled all the same: the stores keep it as cancelled, and
+// it is not run again.
+await check('an error thrown by onEvent at the first event of a resume ends that run cancelled in the stores', () => withProgram(async (programs, version) => {
+  const run = programs.start(version, { input: ask('Resume me') });
+  const paused = await run.result;
+  assert.equal(paused.status, 'interrupted');
+  const requestsAtPause = server.requests.length;
+  const boom = new Error('the listener failed at the resume');
+  let events = 0;
+  const resumed = run.resume('approved', { onEvent: () => { events += 1; throw boom; } });
+  await assert.rejects(resumed.result, (error) => error === boom);
+  assert.equal(events, 1, 'the listener is not called again after it threw');
+  const stored = await programs.result(run.id);
+  assert.equal(stored?.status, 'cancelled', 'the record of the run is terminal');
+  assert.equal(stored.runId, run.id);
+  // The resume reserved these four for the call, and the call used none: they are not given back.
+  const reserved = ['wallTimeMs', 'modelTokens', 'monetaryMicrounits', 'maxCoreSteps'];
+  assert.deepEqual(reserved.map((name) => stored.remainingBudget[name]), [0, 0, 0, 0]);
+  for (const name of Object.keys(paused.remainingBudget).filter((member) => !reserved.includes(member)))
+    assert.equal(stored.remainingBudget[name], paused.remainingBudget[name], `${name} is what the pause left`);
+  assert.equal(server.requests.length, requestsAtPause, 'no node ran after the resume, so no model call was made');
+  assert.equal(await run.cancel(), false, 'a run that ended is not cancelled again');
+  assert.equal((await programs.start(version, { input: ask('after') }).result).status, 'interrupted', 'the module runs on');
+}));
+
+await check('a resumed run cancelled at its first event ends cancelled in the stores', () => withProgram(async (programs, version) => {
+  const run = programs.start(version, { input: ask('Cancel at the first event') });
+  assert.equal((await run.result).status, 'interrupted');
+  const requestsAtPause = server.requests.length;
+  let cancellation = null;
+  const resumed = run.resume('approved', { onEvent: () => { cancellation ??= resumed.cancel(); } });
+  const result = await resumed.result;
+  assert.equal(result.status, 'cancelled');
+  assert.equal(await cancellation, true);
+  assert.equal((await programs.result(run.id))?.status, 'cancelled');
+  assert.equal(server.requests.length, requestsAtPause, 'no node ran after the resume, so no model call was made');
+  assert.equal(await resumed.cancel(), false, 'a run that ended is not cancelled again');
+  assert.equal((await programs.start(version, { input: ask('after') }).result).status, 'interrupted', 'the module runs on');
+}));
+
+await check('a resumed run cancelled as soon as the resume is sent ends cancelled in the stores', () => withProgram(async (programs, version) => {
+  const run = programs.start(version, { input: ask('Cancel right away') });
+  assert.equal((await run.result).status, 'interrupted');
+  const resumed = run.resume('approved');
+  await Promise.resolve();   // the resume is sent; its attempt has not reached the model
+  const cancelled = resumed.cancel();
+  assert.equal((await resumed.result).status, 'cancelled');
+  assert.equal(await cancelled, true);
+  assert.equal((await programs.result(run.id))?.status, 'cancelled');
+  assert.equal((await programs.start(version, { input: ask('after') }).result).status, 'interrupted', 'the module runs on');
+}));
+
 await check("the provider's refusal is a failed run, not a thrown one", () => withProgram(async (programs, version) => {
   const result = await programs.start(version, { input: ask('x') }).result;
   assert.equal(result.status, 'failed');
