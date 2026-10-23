@@ -435,6 +435,22 @@ if(NEOGRAPH_BUILD_A2A)
     )
 endif()
 
+# The Host and Origin checks and the request size limit of the A2A server.
+# Its own binary, so that it runs without the aggregate test binary.
+if(NEOGRAPH_BUILD_A2A)
+    add_executable(neograph_a2a_http_limits_tests
+        test_a2a_http_limits.cpp
+    )
+    target_link_libraries(neograph_a2a_http_limits_tests PRIVATE
+        neograph::a2a
+        httplib
+        asio
+        OpenSSL::SSL
+        OpenSSL::Crypto
+        GTest::gtest_main
+    )
+endif()
+
 if(NEOGRAPH_BUILD_UTIL)
     target_sources(neograph_tests PRIVATE test_request_queue.cpp)
 endif()
@@ -838,6 +854,9 @@ if(TARGET neograph_harness_program_store_tests)
 endif()
 if(TARGET neograph_a2a_agent_card_candidate_tests)
     neograph_discover_tests(neograph_a2a_agent_card_candidate_tests)
+endif()
+if(TARGET neograph_a2a_http_limits_tests)
+    neograph_discover_tests(neograph_a2a_http_limits_tests)
 endif()
 if(TARGET neograph_acp_tests)
     neograph_discover_tests(neograph_acp_tests)

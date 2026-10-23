@@ -1069,6 +1069,12 @@ TEST(A2AServer, NullConfigurationMembersKeepTheirDefaults) {
 
 namespace {
 
+A2AHttpConfig proxy_host_config() {
+    A2AHttpConfig config;
+    config.allowed_hosts = {"agent.example.com"};
+    return config;
+}
+
 neograph::json card_with_headers(int port, const httplib::Headers& headers) {
     httplib::Client c("127.0.0.1", port);
     auto res = c.Get("/.well-known/agent-card.json", headers);
@@ -1082,6 +1088,9 @@ TEST(A2AServer, ForwardedHeadersAreIgnoredUnlessTheHostTrustsThem) {
     auto card = build_card(0);
     card.url.clear();
     A2AServer server(build_echo_engine(), std::move(card));
+    // A loopback server answers a proxy's public Host name only when it is
+    // listed.
+    server.set_http_config(proxy_host_config());
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
     const httplib::Headers proxied = {{"Host", "agent.example.com"},
                                       {"X-Forwarded-Proto", "https"},
@@ -1095,6 +1104,7 @@ TEST(A2AServer, TrustedForwardedHeadersSetTheDerivedCardUrl) {
     auto card = build_card(0);
     card.url.clear();
     A2AServer server(build_echo_engine(), std::move(card));
+    server.set_http_config(proxy_host_config());
     server.set_trust_forwarded_headers(true);
     ASSERT_TRUE(server.start_async("127.0.0.1", 0));
 

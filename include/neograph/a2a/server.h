@@ -29,6 +29,10 @@
  *     PushNotificationNotSupportedError; GetExtendedAgentCard answers
  *     UnsupportedOperationError. Neither feature is claimed in the card.
  *
+ * Requests are checked before they are routed: a loopback bind answers only
+ * the loopback Host names and its own origin unless A2AHttpConfig lists
+ * more, and a body over A2AHttpConfig::max_payload_bytes gets HTTP 413.
+ *
  * Every run executes on its own worker thread; a stream or a blocking send
  * only observes it, so the task outlives a dropped connection. A failed run
  * reports only typed public fields (the failure's public message and
@@ -55,6 +59,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #ifdef NEOGRAPH_A2A_PROGRAM
 namespace neograph::program {
@@ -126,6 +131,49 @@ class NEOGRAPH_API StructuredOutputAdapter final : public GraphAgentAdapter {
     int         version_;
     std::string data_channel_;
     std::string input_channel_;
+};
+
+/**
+ * @brief Which Host and Origin values an A2AServer answers, and how large a
+ * request body it reads. Set with A2AServer::set_http_config() before start.
+ *
+ * A web page on another origin can reach a server bound to a loopback
+ * address when its host name is re-pointed at this machine (DNS rebinding):
+ * the browser then sends that name in `Host`, and the page's own origin in
+ * `Origin` when it sends one. The checks cover every route of the server
+ * (the agent card, the JSON-RPC endpoint and its event streams, and any path
+ * it does not serve) and run before a request body is read. A refused
+ * request gets HTTP 403, or 400 for a missing or malformed Host.
+ */
+struct NEOGRAPH_API A2AHttpConfig {
+    /// Exact allowed Origin values. An Origin header is rejected unless
+    /// listed, except that a loopback bind also admits its own loopback
+    /// origin: `http://localhost:<port>`, `http://127.0.0.1:<port>` or
+    /// `http://[::1]:<port>` at the port it is bound to (and writes a line to
+    /// stderr the first time it admits each one). A request without an
+    /// Origin header is not checked.
+    std::vector<std::string> allowed_origins;
+
+    /// Host header names the server answers: host names, IPv4 addresses and
+    /// bracketed IPv6 addresses (`[::1]`), compared with the Host header's
+    /// host without its port and ignoring case. `*` admits any Host. A
+    /// loopback bind (`127.0.0.1`, `::1`, `localhost`) always admits
+    /// `localhost`, `127.0.0.1` and `[::1]` and refuses every other Host
+    /// unless it is listed, with or without an Origin. On a remote bind an
+    /// empty list checks nothing, and a non-empty one admits only the listed
+    /// names. Behind a reverse proxy or a tunnel that forwards the public
+    /// Host to a loopback server, list that name (or `*`).
+    std::vector<std::string> allowed_hosts;
+
+    /// The largest request body the server reads; a larger one is answered
+    /// with HTTP 413. The default, 4 MiB, fits the largest request an agent
+    /// legitimately receives: a message whose parts carry long text or one
+    /// inline file (base64 makes it a third larger than the file, so a file
+    /// of a little under 3 MiB). A larger file travels as a `uri` part. A
+    /// task keeps the messages it received in its history, and the server
+    /// keeps up to 1024 tasks, so the cap also bounds what one request can
+    /// add to memory; the HTTP library's own default is 100 MiB.
+    std::size_t max_payload_bytes = 4 * 1024 * 1024;
 };
 
 /**
@@ -224,6 +272,19 @@ class NEOGRAPH_API A2AServer {
 
     /// Bound port — useful when caller passed 0 to bind a free port.
     int port() const;
+
+    /// Set the Host and Origin checks and the request size limit (see
+    /// A2AHttpConfig). Without a call, a loopback bind answers only the
+    /// loopback Host names and its own loopback origin, a remote bind checks
+    /// no Host and admits a request that carries an Origin only when it is
+    /// listed, and bodies are limited to the default of
+    /// A2AHttpConfig::max_payload_bytes.
+    /// @throws std::invalid_argument for an `allowed_hosts` entry that is not
+    ///         a host name without a port, an IPv6 address in brackets or
+    ///         `*`, or for a zero `max_payload_bytes`.
+    /// @throws std::logic_error while the server is listening: call it before
+    ///         start() or start_async().
+    void set_http_config(A2AHttpConfig config);
 
     /// When the card has no configured `url`, the served card advertises the
     /// address the client used, with the `http` scheme. Behind a
