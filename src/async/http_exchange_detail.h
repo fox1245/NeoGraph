@@ -186,6 +186,9 @@ inline void validate_request_options(const RequestOptions& opts) {
     if (opts.timeout.count() < 0) {
         throw std::invalid_argument("async HTTP: timeout cannot be negative");
     }
+    if (opts.connect_timeout.count() < 0) {
+        throw std::invalid_argument("async HTTP: connect_timeout cannot be negative");
+    }
     if (opts.max_redirects < 0) {
         throw std::invalid_argument(
             "async HTTP: max_redirects cannot be negative");

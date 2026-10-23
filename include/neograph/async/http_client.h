@@ -71,6 +71,17 @@ struct RequestOptions {
     /// rather than as a total budget.
     std::chrono::milliseconds timeout{0};
 
+    /// Deadline for establishing the connection only: name resolution, the
+    /// TCP connect and, for HTTPS, the TLS handshake. Zero = none (the
+    /// default). It stops counting once the request can be written, so a
+    /// response or an event stream that takes long is not affected by it;
+    /// `timeout` is the bound for the whole exchange and, when both are set,
+    /// whichever expires first ends the call. Expiry throws
+    /// asio::system_error(asio::error::timed_out). Honoured by async_post,
+    /// async_get, async_post_stream and async_request_stream; ConnPool and
+    /// CurlH2Pool do not read it.
+    std::chrono::milliseconds connect_timeout{0};
+
     /// For ConnPool, permit one replay after a stale keep-alive connection
     /// fails. The one-shot clients never replay a request.
     /// Disabled by default because a transport error cannot prove that a
