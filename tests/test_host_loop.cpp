@@ -857,16 +857,28 @@ TEST(HostLoop, WakesFromManyThreadsQueueOneTurnAtATime) {
     std::atomic<bool> stop{false};
     std::vector<std::thread> wakers;
     for (int i = 0; i < 4; ++i) wakers.emplace_back([&] { while (!stop.load()) loop.wake(); });
-    std::size_t most_queued = 0;
+    // The host's queue is looked at from a thread of its own too: seen only between two steps of the host, a second
+    // turn that was queued while the first one ran could not be told from the first one.
+    std::atomic<std::size_t> most_queued{0};
+    std::thread observer([&] {
+        while (!stop.load()) {
+            const auto queued = executor->pending();
+            auto most = most_queued.load();
+            while (queued > most && !most_queued.compare_exchange_weak(most, queued)) {}
+        }
+    });
     const auto until = std::chrono::steady_clock::now() + 300ms;
     while (std::chrono::steady_clock::now() < until) {
-        most_queued = std::max(most_queued, executor->pending());
+        const auto queued = executor->pending();
+        auto most = most_queued.load();
+        while (queued > most && !most_queued.compare_exchange_weak(most, queued)) {}
         executor->step();
     }
     stop = true;
     for (auto& waker : wakers) waker.join();
+    observer.join();
     while (executor->step()) {}
-    EXPECT_LE(most_queued, 1u) << "the host's queue holds one turn of the loop, however many threads wake it";
+    EXPECT_LE(most_queued.load(), 1u) << "the host's queue holds one turn of the loop, however many threads wake it";
     EXPECT_GT(executor->tasks_run, 0u);
     EXPECT_TRUE(loop.idle());
 }
@@ -929,6 +941,26 @@ TEST(HostLoop, ARefusedTurnIsAskedForAgainOnlyWhileAWakeCountsOnIt) {
     EXPECT_EQ(executor->pending(), 1u);
     while (executor->step()) {}
     EXPECT_TRUE(ran);
+}
+
+TEST(HostLoop, ATurnQueuedWhileAnotherRunsAndTakenByANestedPumpLosesNoWork) {
+    // A handler of the running turn pumps the host, which takes the turn that another thread's post has queued. That
+    // second call finds the first turn still running and returns; the running turn polls on and runs the post.
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    bool posted_ran = false, nested_pumped = false;
+    asio::post(loop.executor(), [&] {
+        std::thread([&, ex = loop.executor()] { asio::post(ex, [&posted_ran] { posted_ran = true; }); }).join();
+        EXPECT_EQ(executor->pending(), 1u) << "the other thread's post queued a turn";
+        nested_pumped = executor->step();
+        EXPECT_FALSE(posted_ran) << "the nested call did not poll";
+    });
+    ASSERT_TRUE(executor->step());
+    EXPECT_TRUE(nested_pumped);
+    EXPECT_TRUE(posted_ran) << "the running turn polled on after the handler returned";
+    EXPECT_EQ(executor->pending(), 0u) << "no turn is left queued";
+    EXPECT_TRUE(loop.idle());
+    EXPECT_EQ(executor->tasks_run, 2u);
 }
 
 namespace {
@@ -995,7 +1027,11 @@ TEST(HostLoop, DestroyingTheLoopDropsWhatOtherThreadsQueuedAndItsScheduledTurnFi
     EXPECT_EQ(ran, 0) << "a turn of a closed loop runs nothing";
 }
 
-TEST(HostLoop, PostsRacingWithTheHostsTurnsAreRunOrDroppedWhenTheLoopIsDestroyed) {
+// The posting threads end before the loop is destroyed, as the contract requires: a post that races with the destructor
+// would use an io_context that is being destroyed, and the loop cannot wait for it. What can fail here is the work that
+// other threads queued while the host pumped: a handler that is neither run nor destroyed, or a turn scheduled before
+// the close that runs work after it.
+TEST(HostLoop, WorkQueuedByThreadsWhileTheHostPumpsIsRunOrDroppedWhenTheLoopIsDestroyedAfterThem) {
     for (int round = 0; round < 8; ++round) {
         auto executor = std::make_shared<ManualExecutor>();
         auto probe = std::make_shared<int>(0);
