@@ -20,9 +20,20 @@ class HostLoopCore;
 
 // The number of HostLoop turns the calling thread is running (they nest only when a handler runs another loop).
 thread_local unsigned host_turn_depth = 0;
-// The loop whose turn the calling thread is running, the innermost one; null outside a turn. Work posted from inside
-// a loop's own turn is run by that turn, and nothing else is: a thread that posts from outside it is not this one.
-thread_local const HostLoopCore* host_turn_core = nullptr;
+// The turns the calling thread is running, innermost first (they nest only when a handler runs another loop). Work
+// posted from inside a loop's own turn is run by that turn, and nothing else is: a thread that posts from outside it is
+// not this one. A loop whose turn is further out is still running it, so a post to it from a nested loop needs no turn.
+struct HostTurnLink {
+    const HostLoopCore* core;
+    const HostTurnLink* outer;
+};
+thread_local const HostTurnLink* host_turn_top = nullptr;
+
+bool runs_turn_of(const HostLoopCore* core) noexcept {
+    for (const auto* link = host_turn_top; link; link = link->outer)
+        if (link->core == core) return true;
+    return false;
+}
 
 // Found through the io_context, so that note_deadline can reach the loop from any executor derived from it.
 class HostLoopService final : public asio::execution_context::service {
@@ -81,7 +92,7 @@ public:
     //     next wake. A host that refuses posts is not running turns anyway.
     void wake() noexcept {
         if (closed_.load()) return;
-        if (host_turn_core == this && running_) return;
+        if (runs_turn_of(this) && running_) return;
         if (scheduled_.exchange(true)) return;
         try {
             host_->post([self = shared_from_this()] { self->turn(); });
@@ -139,15 +150,15 @@ private:
         bool more = false;
         std::exception_ptr failure;
         struct TurnScope {
-            explicit TurnScope(const HostLoopCore* core) noexcept : outer(host_turn_core) {
+            explicit TurnScope(const HostLoopCore* core) noexcept : link{core, host_turn_top} {
                 ++host_turn_depth;
-                host_turn_core = core;
+                host_turn_top = &link;
             }
             ~TurnScope() {
                 --host_turn_depth;
-                host_turn_core = outer;
+                host_turn_top = link.outer;
             }
-            const HostLoopCore* outer;
+            HostTurnLink link;
         } in_turn(this);
         try {
             io_->restart();
