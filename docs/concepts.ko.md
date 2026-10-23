@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=d11995f74e289c51ca6668736d585dd8c228687402fcec1a10bbb9cd6aaeeb8a -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -427,9 +427,10 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 엔진은 `interrupted=True`이고 `interrupt_node`가 채워진 `RunResult`를 반환합니다. 재개하려면 다음과 같이 합니다.
 
 ```python
-result = await engine.resume_async(thread_id="t1",
-                                   checkpoint_id=result.checkpoint_id,
-                                   new_input={...})  # optional
+# By thread: continue from the latest checkpoint, with the human's answer (optional).
+result = await engine.resume_async("t1", {"approved": True})
+# From exactly one checkpoint, never from a newer one.
+result = await engine.resume_from_async(config, checkpoint_id, {"approved": True})
 ```
 
 재개는 자신이 응답하는 인터럽트의 게이트만 건너뜁니다. `interrupt_before`로 멈춘 실행을 재개하면 그때 멈춰 있던 노드를 실행하고, `NodeInterrupt`로 멈춘 실행을 재개하면 그 스텝을 이어서 진행합니다. 그 밖의 재개는 모두, 곧 실행하려는 `interrupt_before` 노드 앞에서 다시 멈춥니다. `interrupt_after`로 멈춘 뒤의 재개나, 프로세스가 중단된 뒤 스텝의 체크포인트에서 복구하는 경우가 여기에 해당합니다. 재개 값은 `interrupt_before`로 멈춰 있던 노드에만 전달되고 다른 노드에는 전달되지 않습니다. `interrupt_after` 뒤의 재개나 다른 체크포인트에서의 재개는 어떤 노드에도 값을 전달하지 않습니다(#393). 한 스텝에서 ready 상태인 게이트 노드가 여럿이면 하나씩 응답합니다(#396). 재개는 실행이 멈춘 게이트에만 응답하고, 스텝이 실행되기 전에 같은 스텝의 나머지 게이트 노드 중 아직 응답받지 못한 노드는 각자의 `interrupt_before` 중지로 실행을 다시 멈춥니다. 스텝의 게이트가 모두 응답받으면 스텝이 실행되며, 게이트 노드마다 자기 게이트의 응답을 받습니다.

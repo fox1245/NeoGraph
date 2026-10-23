@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=d11995f74e289c51ca6668736d585dd8c228687402fcec1a10bbb9cd6aaeeb8a -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -421,9 +421,10 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 引擎会返回 `interrupted=True` 且设置了 `interrupt_node` 的 `RunResult`。恢复运行的方法如下：
 
 ```python
-result = await engine.resume_async(thread_id="t1",
-                                   checkpoint_id=result.checkpoint_id,
-                                   new_input={...})  # optional
+# By thread: continue from the latest checkpoint, with the human's answer (optional).
+result = await engine.resume_async("t1", {"approved": True})
+# From exactly one checkpoint, never from a newer one.
+result = await engine.resume_from_async(config, checkpoint_id, {"approved": True})
 ```
 
 恢复只会跳过它所回应的那个中断的闸门。恢复 `interrupt_before` 暂停，会运行被它拦下的节点；恢复 `NodeInterrupt`，则继续该中断所在的那一步。其他恢复方式，比如 `interrupt_after` 暂停之后的恢复，或进程停止后从某一步的检查点恢复，在即将运行 `interrupt_before` 节点时仍会先暂停。恢复值只交给 `interrupt_before` 暂停所拦下的那个节点，不交给其他节点；`interrupt_after` 暂停之后的恢复，或从其他任何检查点恢复，都不会把恢复值交给任何节点（#393）。同一步里有多个带闸门的节点同时就绪时，要逐个回应（#396）：一次恢复只回应运行所停在的那个闸门；该步运行之前，其余尚未回应闸门的带闸门节点，会各自以自己的 `interrupt_before` 暂停再次让运行停下。该步的所有闸门都回应后，这一步才会运行，每个带闸门的节点收到的是对它自己那个闸门的回应。

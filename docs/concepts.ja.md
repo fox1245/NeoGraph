@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=d11995f74e289c51ca6668736d585dd8c228687402fcec1a10bbb9cd6aaeeb8a -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -419,9 +419,10 @@ engine.set_checkpoint_store(ng.InMemoryCheckpointStore())
 エンジンは、`interrupted=True` を立て、`interrupt_node` を設定した `RunResult` を返します。再開するには、次のようにします。
 
 ```python
-result = await engine.resume_async(thread_id="t1",
-                                   checkpoint_id=result.checkpoint_id,
-                                   new_input={...})  # optional
+# By thread: continue from the latest checkpoint, with the human's answer (optional).
+result = await engine.resume_async("t1", {"approved": True})
+# From exactly one checkpoint, never from a newer one.
+result = await engine.resume_from_async(config, checkpoint_id, {"approved": True})
 ```
 
 再開で通過するのは、答えた割り込み自身のゲートだけです。`interrupt_before` の一時停止から再開すると、止めていたノードが実行されます。`NodeInterrupt` から再開すると、そのステップが続きます。これ以外の再開、たとえば `interrupt_after` の一時停止後の再開や、プロセス停止後にステップのチェックポイントから復旧する場合は、これから実行する `interrupt_before` のノードの手前で、あらためて停止します。再開値が渡されるのは、`interrupt_before` の一時停止が止めていたノードだけです。`interrupt_after` の一時停止後の再開や、それ以外のチェックポイントからの再開では、どのノードにも値は渡されません（#393）。
