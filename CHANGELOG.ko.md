@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e96b83a42b0c6f870b31c942731345c385ddfcb1cce9a293c573016cbbfeb6d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=c118bff63084de9cdd636763eb5839da9476b3512ef76cdf99fcfd5833b464e2 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -172,7 +172,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **JavaScript `main()`이 있는 재개된 Program 실행이 Core 호출이 시작되기 전에 끝나면, `P_TRANSITION_CONFLICT`와 함께 `failed`가 아니라 요청받은 상태로 끝납니다 (#557).** 중단된 `ng.callCore`를 재개하면, 그 호출이 쓸 수 있는 벽시계 시간, 모델 토큰, 금액, Core 스텝을 저널에 예약으로 따로 잡아 두고, 호출이 측정한 사용량으로 그 예약을 정산합니다. 호출이 시작되기 전에 취소된 실행(재개 직후의 `cancel()`, 또는 JavaScript 모듈에서 던진 `onEvent`가 실행을 취소하는 경우)은 아무것도 정산하지 않았는데, 그 실행이 게시한 종료 상태는 이번 시도에 주어진 전체 한도를 남은 예산으로 가져갔습니다. 이는 측정된 사용량 없이 예약을 돌려주는 것이라 전이 검증기가 거부했고, 게시는 실패했으며, 실행은 `P_TRANSITION_CONFLICT`와 함께 `failed`로 끝나고 레코드는 `running`으로 남았습니다. `reconnect`는 그 실행을 아직 실행 중인 것으로 복구했습니다.
   - **이제** 이런 실행은 재개가 남겨 준 남은 예산 그대로 종료 상태를 게시하고, 예약은 돌려주지 않습니다. 저널이 검증한 사용량 없이는 아무것도 풀지 않으며, 검증기는 바뀌지 않았습니다. 실행은 `cancelled`로, 또는 자기 오류의 코드와 함께 `failed`로 끝나고, 저장소는 이를 종료된 것으로 보관하며, `reconnect`는 그 결과를 돌려줍니다. **동작 변경:** 이런 실행의 `remaining_budget`에는 재개가 그 호출을 위해 예약한 벽시계 시간, 모델 토큰, 금액, Core 스텝이 더 이상 포함되지 않습니다.
   - **재개의 첫 이벤트에서 던지는 핸들러.** 첫 이벤트(`Started`, 시도가 생기기 전에 전달됨)에서 던지면, 대기 중인 효과를 모호함으로 표시하지 않은 채 `AmbiguousEffect`를 돌려주는 분기로 끝났습니다. 그 결과는 거부되었고(`P_RUNTIME_INTERNAL`, "Ambiguous Program result requires one ambiguous pending effect") 레코드는 `running`으로 남았습니다. 이제 JavaScript `main()`이 없는 Program의 재개와 같이 `P_EVENT_SINK`와 함께 `failed`로 끝나며, 재개가 남겨 준 남은 예산을 그대로 가집니다.
-  - **변하지 않은 것.** 호출이 시작된 뒤, 즉 호출의 첫 이벤트나 그 이후에 끝나는 실행은 이전처럼 측정된 사용량으로 예약을 정산하고, 호출이 쓰지 않은 만큼을 돌려받습니다.
+  - **변하지 않은 것.** 호출이 시작된 뒤, 즉 호출의 첫 이벤트나 그 이후에 끝나는 실행은 이전처럼 측정된 사용량으로 예약을 정산하고, 호출이 쓰지 않은 만큼을 돌려받습니다. 호스트 용량을 기다리는 동안(`RuntimeConfig::host_admission`) 멈추는 재개된 실행이나, 시도가 읽을 때 Core 체크포인트가 사라진 재개된 실행은 여전히 `P_TRANSITION_CONFLICT`와 함께 `failed`로 끝나고 레코드는 `running`으로 남습니다.
   - **테스트.** 재개된 실행을 Core 호출이 시작되기 전과 호출의 첫 이벤트에서 끝냅니다. 시도를 체크포인트의 첫 로드에서 붙잡아 두고 인메모리와 SQLite에서(`ProgramRuntimeTest`), 테스트가 구동하는 호스트 루프에서(`ProgramHostPumpedStores`), JavaScript 모듈에서(`wasm/test/program_test.mjs`) 합니다. 호출이 시작되기 전에 끝나는 실행은 이전 엔진에서 `P_TRANSITION_CONFLICT`와 `running`으로 남은 레코드로 실패했고, `Started`에서 핸들러가 던지는 실행은 `P_RUNTIME_INTERNAL`로 실패했습니다.
 
 ### 보안

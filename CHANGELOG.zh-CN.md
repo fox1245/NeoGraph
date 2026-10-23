@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e96b83a42b0c6f870b31c942731345c385ddfcb1cce9a293c573016cbbfeb6d4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c118bff63084de9cdd636763eb5839da9476b3512ef76cdf99fcfd5833b464e2 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -172,7 +172,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **带有 JavaScript `main()` 的已恢复 Program 运行，在其 Core 调用开始之前结束时，会以被要求的状态结束，而不是以 `P_TRANSITION_CONFLICT` 结束为 `failed` (#557)。** 恢复一个被中断的 `ng.callCore` 时，会把该调用可用的墙钟时间、模型 token、金额和 Core 步骤作为预留记入日志，调用再用它测得的用量结算这笔预留。在调用开始之前被取消的运行（恢复后立即调用 `cancel()`，或 JavaScript 模块中抛出的 `onEvent` 取消了该运行）没有结算任何东西，而它发布的终态却把这次尝试获得的全部额度当作剩余预算。这相当于在没有测得用量的情况下退还预留，转换校验器会拒绝它：发布失败，运行以 `P_TRANSITION_CONFLICT` 结束为 `failed`，其记录保持 `running`，`reconnect` 还会把它当作仍在运行的运行来恢复。
   - **现在** 这样的运行会带着恢复所留下的剩余预算发布终态，并且不退还预留。没有日志验证过的用量就不会释放任何东西，校验器没有改变。运行以 `cancelled` 结束，或以自身错误的代码结束为 `failed`，存储将其保存为已终止，`reconnect` 返回该结果。**行为变更：** 这样的运行的 `remaining_budget` 不再包含恢复为该调用预留的墙钟时间、模型 token、金额和 Core 步骤。
   - **在恢复的第一个事件处抛出的处理器。** 在第一个事件（`Started`，在尝试出现之前送达）处抛出时，运行会走入一个返回 `AmbiguousEffect` 却没有把待处理效果标记为不明确的分支。该结果被拒绝（`P_RUNTIME_INTERNAL`，"Ambiguous Program result requires one ambiguous pending effect"），记录保持 `running`。现在它与没有 JavaScript `main()` 的 Program 的恢复一样，以 `P_EVENT_SINK` 结束为 `failed`，并带着恢复所留下的剩余预算。
-  - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。
+  - **不变的部分。** 在调用开始之后（调用的第一个事件或更晚）结束的运行，仍像以前那样用测得的用量结算预留，并取回调用没有用到的部分。在等待宿主容量期间（`RuntimeConfig::host_admission`）停止的已恢复运行，或其尝试读取时 Core 检查点已经丢失的已恢复运行，仍会以 `P_TRANSITION_CONFLICT` 结束为 `failed`，记录保持 `running`。
   - **测试。** 在 Core 调用开始之前，以及在调用的第一个事件处，结束一个已恢复的运行：让尝试停在它第一次加载检查点处，在内存存储和 SQLite 上 (`ProgramRuntimeTest`)，在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`)，以及在 JavaScript 模块中 (`wasm/test/program_test.mjs`)。在调用开始之前结束的运行，在之前的引擎上会因 `P_TRANSITION_CONFLICT` 而失败，记录保持 `running`；在 `Started` 处抛出的处理器则因 `P_RUNTIME_INTERNAL` 而失败。
 
 ### 安全
