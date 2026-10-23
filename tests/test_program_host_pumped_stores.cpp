@@ -54,6 +54,7 @@ using namespace std::chrono_literals;
 const std::string kOwner = "tenant:runtime";
 
 std::atomic<int> approvals_asked{0};
+std::atomic<int> approvals_run{0};
 std::atomic<int> model_calls{0};
 std::atomic<int> tool_runs{0};
 std::atomic<int> child_runs{0};
@@ -67,6 +68,7 @@ class ApproveNode final : public graph::GraphNode {
 public:
     explicit ApproveNode(std::string name) : name_(std::move(name)) {}
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        ++approvals_run;
         if (!in.ctx.resume_value) {
             ++approvals_asked;
             throw graph::NodeInterrupt("approval required", json{{"request", "approve"}});
@@ -337,9 +339,12 @@ public:
     // path it pins, so that the others complete at once and the path is the only thing that can wait or be refused.
     enum Wrap : unsigned { Programs = 1, Transitions = 2, Grants = 4, Fragments = 8, Modules = 16, All = 31 };
 
-    explicit HostPumpedProgramHost(unsigned wrap = All) {
+    // `javascript` makes the catalog admit a Program with a JavaScript main(), which a Program of documents does not need.
+    explicit HostPumpedProgramHost(unsigned wrap = All, bool javascript = false)
+        : fixture(1, {}, {}, {}, javascript ? ExecutionGuarantee::Unmanaged : ExecutionGuarantee::Strict, javascript) {
         fixture.runtime.reset();
         approvals_asked = 0;
+        approvals_run   = 0;
         model_calls     = 0;
         tool_runs       = 0;
         child_runs      = 0;
@@ -428,6 +433,12 @@ public:
         ASSERT_TRUE(finished) << "the loop ran out of turns before the script ended";
     }
 
+    ProgramVersion admit_javascript(std::string source) {
+        ProgramCompiler compiler(fixture.registry, {"program-runtime-test/v1"});
+        auto bundle = compiler.compile(ProgramSource::from_javascript("host-pumped.js", std::move(source)));
+        return setup_catalog->admit(bundle, ProgramAdmission{kOwner, fixture.profile, fixture.policy, {}});
+    }
+
     ProgramVersion admit(json document) {
         const auto      schema = document["program_schema_version"].get<std::uint32_t>();
         ProgramCompiler compiler(fixture.registry, {"program-runtime-test/v1"});
@@ -445,7 +456,7 @@ public:
     }
 
     // Setup runs on plain stores, on this thread, before the loop is pumped: this catalog admits every Program.
-    Fixture                                    fixture{1};
+    Fixture                                    fixture;
     PumpedStores                               stores;
     HostedRuntime                              hosted;
     std::optional<graph::NodeContext>          context       = bound_model();
@@ -902,6 +913,174 @@ TEST(ProgramHostPumpedStores, AResumedRunCancelledAtItsFirstEventEndsCancelled) 
     ASSERT_TRUE(stored->terminal_result());
     EXPECT_EQ(stored->terminal_result()->status(), ProgramTerminalStatus::Cancelled);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
+namespace {
+
+// A Program with a JavaScript main() that calls one graph, whose node asks until it is resumed.
+const char* const kJavaScriptApproval = R"JS(
+export function define() {
+  const graph = ng.graph("main");
+  graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+  graph.node("approve", {type: "host-approve"});
+  graph.entry("approve");
+  graph.exit("approve");
+  return graph;
+}
+
+export function* main(input) {
+  const output = yield ng.callCore("main", {}, "resume:host-pumped");
+  return {value: output.value};
+}
+)JS";
+
+// Acts on the first event of a kind: by default of the Core call that a resume continues, when no node of the call has
+// run yet.
+class FirstCoreEventSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != watched || acted) return;
+        acted = true;
+        if (action) action();
+    }
+    ProgramEventKind      watched = ProgramEventKind::Core;
+    std::function<void()> action;  // may throw, as a host callback that rejects the event does
+    bool                  acted = false;
+};
+
+enum class EndOfAResumedRun {
+    CancelBeforeTheCallStarts,
+    HandlerThrowsAtTheStartedEvent,
+    CancelAtTheStartOfTheCall,
+    HandlerThrowsAtTheStartOfTheCall
+};
+
+struct ResumedJavaScriptEnd {
+    std::optional<ProgramResult>        paused, ended;
+    std::optional<ProgramJournalRecord> held, latest;
+    std::optional<ProgramRunRecord>     record;
+    std::optional<ProgramResult>        found;
+    bool                                applied = false;
+};
+
+// Resumes a paused run of the JavaScript Program and ends it before the first node of the resumed call runs: before the
+// call has started, or at its first event.
+ResumedJavaScriptEnd end_a_resumed_javascript_run(EndOfAResumedRun how, const std::string& run_id) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, true);
+    const auto            version = host.admit_javascript(kJavaScriptApproval);
+    ResumedJavaScriptEnd  end;
+    auto                  sink = std::make_shared<FirstCoreEventSink>();
+    auto script = [&]() -> asio::awaitable<int> {
+        auto invocation   = top_level(version.id(), run_id);
+        invocation.budget = RunBudget{10000, 1000, 1000, 1, 8, 20, 0, 0, 0};
+        invocation.validate();
+        auto first        = co_await host.runtime->start_async(std::move(invocation));
+        end.paused        = co_await first.wait_async();
+        host.stores.pump_all();
+        auto answer   = answer_for(*end.paused, json{{"decision", "approved"}}, "trace-js-" + run_id);
+        answer.events = sink;
+        if (how == EndOfAResumedRun::HandlerThrowsAtTheStartedEvent) {
+            // The resume is rejected on its first event, once it is published, before its handle exists.
+            sink->watched = ProgramEventKind::Started;
+            sink->action  = [&] {
+                end.held = host.fixture.journal->latest(kOwner, run_id);
+                throw std::runtime_error("the handler rejected the resume");
+            };
+        }
+        auto handle = co_await host.runtime->resume_handle_async(kOwner, run_id, std::move(answer));
+        // The resume is published and its attempt is not running yet: the reservation of the call is held.
+        if (how != EndOfAResumedRun::HandlerThrowsAtTheStartedEvent) end.held = host.fixture.journal->latest(kOwner, run_id);
+        switch (how) {
+            case EndOfAResumedRun::CancelBeforeTheCallStarts:
+                end.applied = co_await handle.cancel_async();
+                break;
+            case EndOfAResumedRun::HandlerThrowsAtTheStartedEvent:
+                break;
+            case EndOfAResumedRun::CancelAtTheStartOfTheCall:
+                sink->action = [&] { end.applied = handle.cancel(); };
+                break;
+            case EndOfAResumedRun::HandlerThrowsAtTheStartOfTheCall:
+                sink->action = [] { throw std::runtime_error("the handler rejected the first Core event"); };
+                break;
+        }
+        end.ended  = co_await handle.wait_async();
+        end.record = co_await handle.snapshot_async();
+        co_return 0;
+    };
+    host.run(script());
+    end.latest = host.fixture.journal->latest(kOwner, run_id);
+    // Host turns for the stores are over: a fresh read of the run, as a reconnect makes it.
+    host.stores.pump_all(false);
+    auto reconnect_script = [&]() -> asio::awaitable<int> {
+        auto handle = co_await host.runtime->reconnect_async(kOwner, run_id);
+        end.found   = co_await handle.wait_async();
+        co_return 0;
+    };
+    host.run(reconnect_script());
+    EXPECT_EQ(approvals_run.load(), 1) << "no node ran after the resume";
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+    return end;
+}
+
+// Before the Core call of a resumed run has started, nothing settles the reservation of the call: the run ends in the
+// state it was asked to with the remaining budget the resume left it, and gives none of the reservation back. Once the
+// call has started, it settles the reservation with the usage it measured, and the part it did not use comes back.
+void expect_the_end_of_a_resumed_javascript_run(const ResumedJavaScriptEnd& end, ProgramTerminalStatus status,
+                                                ContinuationState state, bool call_started) {
+    ASSERT_TRUE(end.paused && end.ended && end.held && end.latest && end.record && end.found);
+    ASSERT_EQ(end.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*end.paused);
+    EXPECT_NE(end.held->inflight_reservation, RunBudget{}) << "the resume holds the reservation of the call";
+    EXPECT_EQ(end.ended->status(), status) << failure_text(*end.ended);
+    EXPECT_EQ(end.latest->continuation.state, state);
+    EXPECT_EQ(end.latest->inflight_reservation, RunBudget{});
+    if (call_started) {
+        EXPECT_EQ(end.latest->sequence, end.held->sequence + 2) << "the call settled its reservation, then the run ended";
+        EXPECT_GT(end.latest->remaining_budget.model_tokens, end.held->remaining_budget.model_tokens)
+            << "the unused part of the reservation came back";
+    } else {
+        EXPECT_EQ(end.latest->sequence, end.held->sequence + 1) << "the ending is the one publication after the resume";
+        EXPECT_EQ(end.latest->remaining_budget, end.held->remaining_budget) << "nothing of the reservation was returned";
+        EXPECT_EQ(end.ended->remaining_budget(), end.held->remaining_budget);
+    }
+    ASSERT_TRUE(end.record->terminal_result());
+    EXPECT_EQ(end.record->terminal_result()->status(), status);
+    EXPECT_EQ(end.record->continuation().state, state);
+    EXPECT_EQ(end.found->status(), status) << failure_text(*end.found);
+}
+
+}  // namespace
+
+// The first event of a resume, Started, is delivered once the resume is published and before its attempt exists. When
+// the handler throws on it, no node of the resumed call has run: the run ends Failed with the code of the handler's
+// error and the remaining budget the resume left it, and none of the reservation of the call comes back.
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunWhoseHandlerThrowsAtItsStartedEventEndsFailedWithTheHandlersCode) {
+    EndOfAResumedRun how = EndOfAResumedRun::HandlerThrowsAtTheStartedEvent;
+    const auto       end = end_a_resumed_javascript_run(how, "js-throws-at-started");
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Failed, ContinuationState::Failed, false);
+    ASSERT_TRUE(end.ended && end.ended->failure());
+    EXPECT_EQ(end.ended->failure()->code, "P_EVENT_SINK");
+}
+
+// A run with a JavaScript main() holds the reservation of the Core call it resumes. One that is cancelled before the
+// call has started ends terminal on the host's loop too, and returns none of the reservation (#557).
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunCancelledBeforeItsCoreCallStartsEndsCancelled) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::CancelBeforeTheCallStarts, "js-cancel-right-away");
+    EXPECT_TRUE(end.applied);
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Cancelled, ContinuationState::Cancelled, false);
+}
+
+// The two that follow end a run once its call has started: they were never affected, and stay as they were.
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunCancelledAtTheStartOfItsCoreCallSettlesTheReservation) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::CancelAtTheStartOfTheCall, "js-cancel-at-start");
+    EXPECT_TRUE(end.applied);
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Cancelled, ContinuationState::Cancelled, true);
+}
+
+TEST(ProgramHostPumpedStores, AResumedJavaScriptRunWhoseHandlerThrowsAtTheStartOfItsCoreCallEndsFailedWithTheHandlersCode) {
+    const auto end = end_a_resumed_javascript_run(EndOfAResumedRun::HandlerThrowsAtTheStartOfTheCall, "js-handler-throws");
+    expect_the_end_of_a_resumed_javascript_run(end, ProgramTerminalStatus::Failed, ContinuationState::Failed, true);
+    ASSERT_TRUE(end.ended && end.ended->failure());
+    EXPECT_EQ(end.ended->failure()->code, "P_EVENT_SINK");
 }
 
 TEST(ProgramHostPumpedStores, AnInterruptedRunIsCancelledThroughAHostPumpedStore) {
