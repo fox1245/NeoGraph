@@ -446,6 +446,103 @@ await check('a control source that never ends is stopped by its time limit', asy
   }
 });
 
+// A control source that recurses without end, or nests deeper than the engine can parse, is stopped by QuickJS's own stack
+// limit, which the module applies to its linear-memory stack: `admit` and the run fail with a diagnostic, nothing reaches
+// the host as an uncaught exception, and the module instance goes on working. (Without the limit the engine overflows
+// the host's own call stack, which no code in the module can catch.)
+const settles = (promise, what, ms = 30000) => Promise.race([
+  promise,
+  sleep(ms).then(() => { throw new Error(`${what} did not settle within ${ms} ms`); }),
+]);
+const GRAPH = 'ng.graph("g").channel("messages", {reducer: "append", initial: []}).node("n", {type: "llm_call"}).entry("n").exit("n")';
+const inDefine = (body) => `export function define() { ${body} return ${GRAPH}; }`;
+const RUNAWAY = {
+  'direct recursion': inDefine('function f() { return f() + 1; } f();'),
+  'mutual recursion': inDefine('function a() { return b() + 1; } function b() { return a() + 1; } a();'),
+  'a sort comparator that recurses': inDefine('function g() { [2, 1].sort((x, y) => { g(); return x - y; }); } g();'),
+  'a map callback that recurses': inDefine('function walk() { return [1].map(walk); } walk();'),
+  'a getter that recurses': inDefine('const o = { get x() { return o.x + 1; } }; o.x;'),
+  'a Proxy trap that recurses': inDefine('const p = new Proxy({}, { get(target, key) { return p[key]; } }); p.x;'),
+  'a JSON reviver that recurses': inDefine('JSON.parse("[1]", function reviver() { return JSON.parse("[1]", reviver); });'),
+  'a constructor that constructs itself': inDefine('function C() { new C(); } new C();'),
+  'a generator that delegates to itself': inDefine('function* g() { yield* g(); } g().next();'),
+  'a constructor reached through 5,000 bound functions': inDefine('function f() {} let g = f; for (let i = 0; i < 5000; i++) { Object.defineProperty(g, "name", { value: "f" }); g = g.bind(null); } new g();'),
+  'JSON.stringify of an array nested 100,000 deep': inDefine('let a = []; for (let i = 0; i < 100000; i++) a = [a]; JSON.stringify(a);'),
+  'Array.prototype.flat of an array nested 100,000 deep': inDefine('let a = []; for (let i = 0; i < 100000; i++) a = [a]; a.flat(Infinity);'),
+  'JSON.parse of text nested 100,000 deep': inDefine('JSON.parse("[".repeat(100000));'),
+  'parentheses nested 2,000 deep': `${inDefine('')}\nconst x = ${'('.repeat(2000)}1${')'.repeat(2000)};`,
+  'array literals nested 2,000 deep': `${inDefine('')}\nconst x = ${'['.repeat(2000)}1${']'.repeat(2000)};`,
+  'object literals nested 2,000 deep': `${inDefine('')}\nconst x = ${'{a:'.repeat(2000)}1${'}'.repeat(2000)};`,
+  'calls nested 2,000 deep': `${inDefine('')}\nfunction f(x) { return x; }\nconst x = ${'f('.repeat(2000)}1${')'.repeat(2000)};`,
+};
+
+await check('a control source that recurses too deep is refused and the module goes on', async () => {
+  const stray = [];
+  const record = (error) => stray.push(error);
+  process.on('uncaughtException', record);
+  process.on('unhandledRejection', record);
+  const programs = neograph.programs({ provider: provider() });
+  try {
+    for (const [name, source] of Object.entries(RUNAWAY)) {
+      await settles(assert.rejects(programs.admit(source), (error) => {
+        assert.ok(error instanceof NeoGraphError, name);
+        assert.equal(error.type, 'compile', name);
+        assert.ok(error.diagnostics.some((d) => d.code === 'P_JS_RESOURCE_LIMIT'), `${name}: ${JSON.stringify(error.diagnostics)}`);
+        return true;
+      }), `admit of ${name}`);
+    }
+    assert.deepEqual(stray.map(String), []);
+    // The same Programs object admits and runs a Program afterwards, and so does a new one of the same module instance.
+    const version = await settles(programs.admit(SOURCE), 'a later admit');
+    assert.equal((await settles(programs.start(version, { input: ask('after') }).result, 'a later start')).status, 'interrupted');
+    const other = neograph.programs({ provider: provider() });
+    try {
+      assert.equal((await settles(other.admit(SOURCE), 'admit on a new Programs object')).id, version.id);
+    } finally {
+      other.release();
+    }
+    assert.deepEqual(stray.map(String), []);
+  } finally {
+    process.off('uncaughtException', record);
+    process.off('unhandledRejection', record);
+    programs.release();
+  }
+});
+
+await check('recursion and nesting that stay within the limit are not affected', () => withProgram(async (programs) => {
+  const within = [
+    inDefine('function f(n) { return n === 0 ? 0 : 1 + f(n - 1); } if (f(100) !== 100) throw new Error("recursion");'),
+    inDefine('') + `\nconst x = ${'('.repeat(100)}1${')'.repeat(100)};`,
+    inDefine('let a = []; for (let i = 0; i < 50; i++) a = [a]; if (JSON.stringify(a).length !== 102) throw new Error("json");'),
+  ];
+  for (const source of within) assert.match((await settles(programs.admit(source), 'admit')).id, /^sha256:/);
+}));
+
+await check('a main() that recurses without end fails its run and the module goes on', async () => {
+  const stray = [];
+  const record = (error) => stray.push(error);
+  process.on('uncaughtException', record);
+  process.on('unhandledRejection', record);
+  const programs = neograph.programs({ provider: provider() });
+  try {
+    const recursing = SOURCE.replace('export function* main(input) {', 'export function* main(input) {\n  function f() { return f() + 1; }\n  f();');
+    assert.notEqual(recursing, SOURCE);
+    const version = await settles(programs.admit(recursing), 'admit');       // define() is fine; main() is not
+    const before = server.requests.length;
+    const result = await settles(programs.start(version, { input: ask('x') }).result, 'the run');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.failure.code, 'P_JS_RESOURCE_LIMIT');
+    assert.equal(server.requests.length, before, 'no model call was sent');
+    const good = await settles(programs.admit(SOURCE), 'a later admit');
+    assert.equal((await settles(programs.start(good, { input: ask('after') }).result, 'a later start')).status, 'interrupted');
+    assert.deepEqual(stray.map(String), []);
+  } finally {
+    process.off('uncaughtException', record);
+    process.off('unhandledRejection', record);
+    programs.release();
+  }
+});
+
 // The example is the documented way in: run it against the same server.
 await check('the Node example runs end to end', async () => {
   const example = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'examples', 'node', 'program.mjs');

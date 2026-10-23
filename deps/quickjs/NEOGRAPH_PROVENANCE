@@ -27,3 +27,29 @@ Local patches (keep when updating the vendored release)
   spot "XXX: potential arithmetic overflow"; the int multiplication could wrap
   and allocate less than the size recorded in *psize. Found by CodeQL
   (cpp/integer-multiplication-cast-to-long).
+- quickjs.c stack limit on Emscripten. Upstream defines CONFIG_STACK_CHECK
+  only when __EMSCRIPTEN__ is not defined, so JS_SetMaxStackSize had no effect
+  in a WebAssembly build: a source that recursed without end exhausted the
+  host's call stack, which the host reports as an uncatchable RangeError that
+  leaves the module instance unusable. The patch defines CONFIG_STACK_CHECK on
+  every target, so js_check_stack_overflow compares __builtin_frame_address(0),
+  which on WebAssembly is the pointer of the shadow stack in linear memory,
+  with rt->stack_limit. On Emscripten only: update_stack_limit() caps the size
+  at NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 KiB, also for a size of 0, which
+  upstream reads as "no limit"; a definition of that name on the command line
+  replaces the value) and keeps the limit
+  NEOGRAPH_QUICKJS_WASM_STACK_RESERVE (16 KiB) above emscripten_stack_get_end();
+  js_call_bound_function allocates NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD (128)
+  bytes more per level. The numbers come from measurement. The host's stack
+  (about 984 KiB under V8, Node 22 and 24) is used at 1.5 to 20 times the rate
+  of the shadow stack, depending on the recursion: JavaScript calls at the
+  low end, the parser, JSON, Array.prototype.flat and Proxy chains at 4 to 10
+  times, and a chain of bound functions at 20 times before the pad. All but
+  two of the 84 recursion shapes that were tried (calls, getters, Proxy traps,
+  callbacks of builtins, generators, nested source, JSON, flat) are caught at
+  48 KiB, and are still caught with the cap doubled, on both Node versions with
+  and without the baseline compiler. The two are Object.getPrototypeOf and
+  Object.isExtensible through a chain of about 5,000 Proxy objects without
+  traps, which upstream does not check on any target. The text of
+  js_get_stack_pointer is unchanged, and so are the needles of
+  cmake/NeoGraphQuickJSMsvcPort.cmake. Other targets are unchanged.
