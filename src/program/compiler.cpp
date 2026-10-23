@@ -25,9 +25,23 @@
 #include <utility>
 #include <vector>
 
+#if defined(__EMSCRIPTEN__)
+#include <emscripten/stack.h>
+#endif
+
 using neograph::detail::check_walk_depth;
 
 namespace neograph::program {
+
+#if defined(__EMSCRIPTEN__)
+std::size_t javascript_stack_ceiling() noexcept {
+    constexpr std::size_t kHeadroom = 64u * 1024u;
+    const auto total =
+        static_cast<std::size_t>(emscripten_stack_get_base() - emscripten_stack_get_end());
+    return total > kHeadroom ? total - kHeadroom : 0;
+}
+#endif
+
 namespace {
 
 constexpr std::array<std::string_view, 9> kBudgetResources = {
