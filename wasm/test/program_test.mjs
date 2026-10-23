@@ -453,7 +453,7 @@ await check('the Node example runs end to end', async () => {
   const { stdout, stderr } = await promisify(execFile)(process.execPath,
     [example, server.url, '/v1/chat/completions', 'fixture-model', 'Say hello', '--answer', 'approved'],
     { env: { ...process.env, API_KEY: KEY, NEOGRAPH_WASM_DIR: directory } });
-  assert.match(stdout, new RegExp(replyTo('Say hello').replace(/[()]/g, '\\$&')));
+  assert.ok(stdout.includes(replyTo('Say hello')), `the example printed the model's reply:\n${stdout}`);
   assert.match(stdout, /-- interrupted before second/);
   assert.match(stdout, /-- completed/);
   assert.match(stderr, /^completed, 8 model tokens, 9984 left/m);
