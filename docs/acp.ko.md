@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=2cfa8ee50bd6b765e0c18b9f82a11f4154fff8b7c1c6f7fa589de795fa9c6984 -->
+<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=57ea896ef5521c1f506851271ba4fd7906b774cf53672ba83b76cb48da547dbe -->
 # ACP: 그래프를 에디터 에이전트로 쓰기
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -213,7 +213,7 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 
 - **질문.** `adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)`는 그래프가 멈추면 최종 이벤트 대신 `interrupt` 이벤트로 끝납니다. 이 이벤트의 `ProtocolInterrupt`에는 `reason`, `payload`(노드가 `NodeInterrupt`에 넘긴 값), `node`, `checkpoint_id`가 있습니다. `prompt()`는 연결로 `request_permission`을 보냅니다. `ToolCallUpdate`의 제목은 이유이고 `rawInput`은 페이로드이며, 옵션은 `approve`(`allow_once`)와 `reject`(`reject_once`)입니다. 네이티브 서버와 같습니다.
 - **답.** 클라이언트가 옵션을 고르면 `prompt()`는 `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)`를 호출합니다. 이 호출은 실행이 멈춘 체크포인트에서 재개하고, 나머지 턴을 `agent_message_chunk` 업데이트로 스트리밍합니다. 옵션 ID가 멈춘 노드가 `input.ctx.resume_value`로 읽는 값이므로, 노드는 `"approve"` 또는 `"reject"`를 봅니다. 그래프가 또 물으면 루프가 다시 묻습니다. 노드가 다른 모양을 기대하면 `ProtocolHostAdapter`에 `resume_value=lambda answer, interrupt: ...`를 넘기세요.
-- **취소.** 클라이언트가 `cancelled`로 답하면 턴은 `stopReason: "cancelled"`로 끝납니다. 요청이 기다리는 동안이나 재개된 턴이 실행되는 동안의 `session/cancel`도 마찬가지입니다. 어느 쪽이든 에이전트가 `adapter.discard_interrupt(thread_id)`를 호출하므로 질문이 남지 않습니다. 세션의 다음 프롬프트는 새 턴을 시작하며, 답으로 취급되지 않습니다. 버려진 멈춤은 체크포인트 저장소에 열린 채로 남으며, 엔진은 그 바로 뒤에 오는 멈춤을 재개하지 못합니다(`NodeInterrupt ancestry crosses super-step boundaries`). 다음 프롬프트가 다시 권한을 요청하면, 세션의 어떤 턴이 완료될 때까지 그 요청에 답하는 것이 실패합니다.
+- **취소.** 클라이언트가 `cancelled`로 답하면 턴은 `stopReason: "cancelled"`로 끝납니다. 요청이 기다리는 동안이나 재개된 턴이 실행되는 동안의 `session/cancel`도 마찬가지입니다. 어느 쪽이든 에이전트가 `adapter.discard_interrupt(thread_id)`를 호출하므로 질문이 남지 않습니다. 세션의 다음 프롬프트는 새 턴을 시작하며, 답으로 취급되지 않습니다. 버려진 멈춤은 체크포인트 저장소에 열린 채로 남으며, 다음 프롬프트가 다시 권한을 요청하면 그 요청에 답하는 것은 정상적으로 재개됩니다.
 - **`interrupts=True` 없이.** 그래프가 멈추면 `stream()`, `run()`, `run_payload()`는 `ProtocolInterrupted`를 던집니다. 예전에는 상태의 마지막 메시지, 곧 사용자 자신의 텍스트를 에이전트의 답처럼 돌려주었습니다.
 - **체크포인트 저장소.** 멈춘 실행을 재개하려면 엔진에 저장소가 필요합니다. 예제는 영속 저장소를 받지 않으면 메모리 저장소를 씁니다.
 - **재시작.** 질문은 턴 안에 있습니다. 에이전트가 기다리는 중에 재시작하면 턴은 연결과 함께 끝나고, 다음 프롬프트는 새 턴을 시작합니다. 네이티브 서버는 그런 세션을 `session/resume`으로 복원할 수 있지만 어댑터는 그럴 수 없습니다.

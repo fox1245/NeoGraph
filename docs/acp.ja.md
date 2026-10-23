@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=2cfa8ee50bd6b765e0c18b9f82a11f4154fff8b7c1c6f7fa589de795fa9c6984 -->
+<!-- neograph-i18n: source=docs/acp.md locale=ja source_sha256=57ea896ef5521c1f506851271ba4fd7906b774cf53672ba83b76cb48da547dbe -->
 # ACP: グラフをエディターのエージェントとして使う
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -213,7 +213,7 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 
 - **質問。** `adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)` は、グラフが停止すると最終イベントの代わりに `interrupt` イベントで終わります。このイベントの `ProtocolInterrupt` には `reason`、`payload`(ノードが `NodeInterrupt` に渡した値)、`node`、`checkpoint_id` があります。`prompt()` は接続に対して `request_permission` を送ります。`ToolCallUpdate` のタイトルは理由、`rawInput` はペイロードで、選択肢は `approve`(`allow_once`)と `reject`(`reject_once`)です。ネイティブサーバーと同じです。
 - **答え。** クライアントが選択肢を選ぶと、`prompt()` は `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)` を呼びます。この呼び出しは、実行が停止したチェックポイントから再開し、残りのターンを `agent_message_chunk` の更新としてストリーミングします。選択肢の ID が、停止したノードが `input.ctx.resume_value` から読む値なので、ノードは `"approve"` か `"reject"` を受け取ります。グラフがまた質問すれば、ループはもう一度尋ねます。ノードが別の形を期待するなら、`ProtocolHostAdapter` に `resume_value=lambda answer, interrupt: ...` を渡してください。
-- **キャンセル。** クライアントが `cancelled` と答えると、ターンは `stopReason: "cancelled"` で終わります。リクエストの待機中や、再開したターンの実行中の `session/cancel` も同じです。どちらの場合も、エージェントは `adapter.discard_interrupt(thread_id)` を呼ぶので、質問は残りません。セッションの次のプロンプトは新しいターンを始め、答えとは見なされません。放棄された停止はチェックポイントストアに開いたまま残り、エンジンはその直後の停止を再開できません(`NodeInterrupt ancestry crosses super-step boundaries`)。次のプロンプトが再び権限を求めた場合、セッションのいずれかのターンが完了するまで、その要求に答えると失敗します。
+- **キャンセル。** クライアントが `cancelled` と答えると、ターンは `stopReason: "cancelled"` で終わります。リクエストの待機中や、再開したターンの実行中の `session/cancel` も同じです。どちらの場合も、エージェントは `adapter.discard_interrupt(thread_id)` を呼ぶので、質問は残りません。セッションの次のプロンプトは新しいターンを始め、答えとは見なされません。放棄された停止はチェックポイントストアに開いたまま残ります。次のプロンプトが再び権限を求めた場合、その要求に答えると通常どおり再開されます。
 - **`interrupts=True` なしの場合。** グラフが停止すると、`stream()`、`run()`、`run_payload()` は `ProtocolInterrupted` を送出します。以前は、状態の最後のメッセージ、つまりユーザー自身のテキストを、エージェントの答えのように返していました。
 - **チェックポイントストア。** 停止した実行を再開するには、エンジンにストアが必要です。サンプルは、永続ストアを渡されない限りメモリ上のストアを使います。
 - **再起動。** 質問はターンの中にあります。待機中にエージェントを再起動すると、ターンは接続とともに終わり、次のプロンプトは新しいターンを始めます。ネイティブサーバーはそのようなセッションを `session/resume` で復元できますが、アダプターにはできません。

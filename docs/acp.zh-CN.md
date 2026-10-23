@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=2cfa8ee50bd6b765e0c18b9f82a11f4154fff8b7c1c6f7fa589de795fa9c6984 -->
+<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=57ea896ef5521c1f506851271ba4fd7906b774cf53672ba83b76cb48da547dbe -->
 # ACP：把图作为编辑器中的智能体
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -213,7 +213,7 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 
 - **提问。** 图暂停时，`adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)` 以一个 `interrupt` 事件结束，而不是最终事件。该事件的 `ProtocolInterrupt` 含有 `reason`、`payload`（节点传给 `NodeInterrupt` 的值）、`node` 和 `checkpoint_id`。`prompt()` 通过连接发送 `request_permission`：`ToolCallUpdate` 的标题是原因，`rawInput` 是负载，选项为 `approve`（`allow_once`）和 `reject`（`reject_once`），与原生服务器一致。
 - **回答。** 客户端选择某个选项后，`prompt()` 调用 `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)`。它从运行暂停时的检查点恢复，并以 `agent_message_chunk` 更新流式输出该轮的其余部分。选项 ID 就是暂停的节点从 `input.ctx.resume_value` 读到的值，所以节点看到的是 `"approve"` 或 `"reject"`。如果图再次提问，循环会再次询问。如果节点期望别的形态，请给 `ProtocolHostAdapter` 传入 `resume_value=lambda answer, interrupt: ...`。
-- **取消。** 客户端回答 `cancelled` 时，该轮以 `stopReason: "cancelled"` 结束；请求在等待期间或恢复后的轮次在运行期间收到 `session/cancel`，结果相同。无论哪种情况，智能体都会调用 `adapter.discard_interrupt(thread_id)`，因此不会留下悬而未决的问题。会话的下一条提示开始新的一轮，不会被当作回答。被放弃的暂停会作为未结束状态留在检查点存储中，引擎无法恢复紧随其后的暂停（`NodeInterrupt ancestry crosses super-step boundaries`）：如果下一条提示再次请求权限，对该请求的回答会失败，直到该会话的某一轮完成为止。
+- **取消。** 客户端回答 `cancelled` 时，该轮以 `stopReason: "cancelled"` 结束；请求在等待期间或恢复后的轮次在运行期间收到 `session/cancel`，结果相同。无论哪种情况，智能体都会调用 `adapter.discard_interrupt(thread_id)`，因此不会留下悬而未决的问题。会话的下一条提示开始新的一轮，不会被当作回答。被放弃的暂停会作为未结束状态留在检查点存储中；如果下一条提示再次请求权限，对该请求的回答可以正常恢复。
 - **没有 `interrupts=True` 时。** 图暂停时，`stream()`、`run()` 和 `run_payload()` 会抛出 `ProtocolInterrupted`。此前它们会返回状态里的最后一条消息，也就是用户自己的文本，并把它当作智能体的回答。
 - **检查点存储。** 引擎需要有检查点存储才能恢复暂停的运行；示例除非被传入持久存储，否则使用内存存储。
 - **重启。** 问题存在于该轮之中。如果智能体在等待期间重启，该轮会随连接一起结束，下一条提示开始新的一轮；原生服务器可以用 `session/resume` 恢复这样的会话，适配器做不到。

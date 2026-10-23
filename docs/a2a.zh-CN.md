@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=e5eb8cd811611adb812540ab84e709c596588f66572bc85b5769c4cbf3f3006c -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=a2bd844d0bdc8fe766b594b46e632531828f4472afc8e5b9325274e6dde2d9f3 -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -275,7 +275,7 @@ int main(int argc, char** argv) {
 
 - **提问。** 图暂停时，`adapter.stream(text, thread_id=..., request_id=..., interrupts=True)` 以一个 `interrupt` 事件结束，而不是最终事件。该事件的 `ProtocolInterrupt` 含有 `reason`、`payload`（节点传给 `NodeInterrupt` 的值）、`node` 和 `checkpoint_id`。执行器发布一个转到 `TASK_STATE_INPUT_REQUIRED` 的状态更新，其消息中原因是文本，负载是数据部分，`metadata["neograph/interrupt"]` 则带有节点、检查点和中断 ID，与原生服务器一致。
 - **回答。** 发给该任务的下一条消息会在任务仍为 `input-required` 时到达 `execute()`。执行器把它的文本连同任务自身元数据所指的暂停一起交给 `adapter.resume_stream(text, thread_id=..., request_id=..., interrupt=...)`，它从运行暂停时的检查点恢复，并像其他轮次一样流式输出该轮的其余部分。任务以 `completed` 结束；如果图再次提问，则再次进入 `input-required`。这段文本就是暂停的节点从 `input.ctx.resume_value` 读到的值，原生服务器也是如此。如果节点期望别的形态（例如 dict），请给 `ProtocolHostAdapter` 传入 `resume_value=lambda answer, interrupt: ...`。
-- **状态。** 适配器按线程在内存中记住暂停，引擎需要有检查点存储才能恢复它。示例根据任务自身元数据所指的暂停来回答该任务：它用 `metadata["neograph/interrupt"]` 重新构造 `ProtocolInterrupt(thread_id=..., checkpoint_id=..., interrupt_id=...)` 并作为 `interrupt=` 传入，因此重启之后同样有效。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 会抛出 `LookupError`：恢复一个并未暂停的线程，返回的会是它上一轮的文本。任务被取消时，请调用 `adapter.discard_interrupt(thread_id)`。对等待中的任务执行 `CancelTask`，会像前文所述那样让它以 `canceled` 结束。适配器按 A2A 上下文区分线程，而原生服务器按任务区分：同一上下文中的新任务从先前任务留下的状态开始。适配器每个线程只记住一个问题，所以更新的暂停会取代更早暂停的记录，因此示例从任务而不是从适配器取得暂停。无人回答的暂停会作为未结束状态留在检查点存储中，引擎无法恢复紧随其后的暂停（`NodeInterrupt ancestry crosses super-step boundaries`）：对等待中的任务执行 `CancelTask` 之后，或在另一个任务等待时新任务又暂停，该上下文的下一次暂停在被回答时会失败，直到该上下文的某一轮完成为止。
+- **状态。** 适配器按线程在内存中记住暂停，引擎需要有检查点存储才能恢复它。示例根据任务自身元数据所指的暂停来回答该任务：它用 `metadata["neograph/interrupt"]` 重新构造 `ProtocolInterrupt(thread_id=..., checkpoint_id=..., interrupt_id=...)` 并作为 `interrupt=` 传入，因此重启之后同样有效。既没有记录的暂停、又没有 `interrupt=` 时，`resume_stream()` 会抛出 `LookupError`：恢复一个并未暂停的线程，返回的会是它上一轮的文本。任务被取消时，请调用 `adapter.discard_interrupt(thread_id)`。对等待中的任务执行 `CancelTask`，会像前文所述那样让它以 `canceled` 结束。适配器按 A2A 上下文区分线程，而原生服务器按任务区分：同一上下文中的新任务从先前任务留下的状态开始。适配器每个线程只记住一个问题，所以更新的暂停会取代更早暂停的记录，因此示例从任务而不是从适配器取得暂停。无人回答的暂停会作为未结束状态留在检查点存储中；对等待中的任务执行 `CancelTask` 之后，或在另一个任务等待时新任务又暂停，该上下文的下一次暂停也可以正常恢复。
 - **没有 `interrupts=True` 时。** 图暂停时，`stream()`、`run()` 和 `run_payload()` 会抛出 `ProtocolInterrupted`。此前它们会返回状态里的最后一条消息，也就是用户自己的文本，并把它当作智能体的回答。
 - **未覆盖的部分。** NeoGraph 协作信封和基于 Program 的任务是原生服务器的功能；SDK 只提供标准方法。
 
