@@ -632,6 +632,8 @@ endif()
 
 if(TARGET neograph_harness)
     target_link_libraries(neograph_tests PRIVATE neograph::harness)
+    # test_a2a_client.cpp runs its Harness adapter tests when this is set.
+    target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTS_HAVE_HARNESS)
 endif()
 
 if(NEOGRAPH_BUILD_MCP_HTTP_SERVER)

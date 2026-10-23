@@ -77,9 +77,11 @@ struct RequestOptions {
     /// response or an event stream that takes long is not affected by it;
     /// `timeout` is the bound for the whole exchange and, when both are set,
     /// whichever expires first ends the call. Expiry throws
-    /// asio::system_error(asio::error::timed_out). Honoured by async_post,
-    /// async_get, async_post_stream and async_request_stream; ConnPool and
-    /// CurlH2Pool do not read it.
+    /// asio::system_error(asio::error::timed_out). A name lookup that is
+    /// already running cannot be interrupted (the system resolver cannot be
+    /// cancelled), so the deadline is then noticed when the lookup returns.
+    /// Honoured by async_post, async_get, async_post_stream and
+    /// async_request_stream; ConnPool and CurlH2Pool do not read it.
     std::chrono::milliseconds connect_timeout{0};
 
     /// For ConnPool, permit one replay after a stale keep-alive connection

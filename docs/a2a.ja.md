@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=6fb08145d2a4d88ff1d6823ac465bcd59f0debc2f607428eb5413b6d2011d308 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ja source_sha256=01490e5a0a068a4082b91e0571f88dbf747cccf6164cd0b1882eedfca6401b57 -->
 # A2A: エージェントがエージェントを呼び出す
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -208,7 +208,7 @@ TaskState.Completed
 
 応答は `Content-Type` が `text/event-stream` のときだけサーバー送信イベントとして読み、その場合の JSON-RPC メッセージは最初の `data:` イベントです。それ以外は JSON として読みます。応答に含まれるテキストは、`data: ` を含んでいても判断に使われません。
 
-呼び出しには独自の期限がありません。`send_message_sync` はエージェントが答えるまで、ストリームはエージェントが終えるまで待ちます。タスクは数分かかることがあるためです。接続には上限があります。名前解決、TCP 接続、TLS ハンドシェイクを合わせて 30 秒で、`set_connect_timeout(seconds)` で変更できます。`set_timeout(seconds)` は各リクエストのやり取り全体（応答やストリームを最後まで読むことを含む）を制限し、超えると呼び出しは例外を投げます。どちらも 0 を指定すると制限がなくなります。Python の `set_timeout` は秒数を受け取って整数秒に切り捨てるため、1 未満の値は制限をなくします。Python に `set_connect_timeout` はありません。呼び出し側が `on_event` から `false` を返して終えたストリームは、最後まで読まずにすぐ閉じます。
+呼び出しには独自の期限がありません。`send_message_sync` はエージェントが答えるまで、ストリームはエージェントが終えるまで待ちます。タスクは数分かかることがあるためです。接続には上限があります。名前解決、TCP 接続、TLS ハンドシェイクを合わせて 30 秒で（すでに実行中の名前解決は中断できないため、これを超えることがあります）、`set_connect_timeout(seconds)` で変更できます。`set_timeout(seconds)` は各リクエストのやり取り全体（応答やストリームを最後まで読むことを含む）を制限し、超えると呼び出しは例外を投げます。どちらも 0 を指定すると制限がなくなります。Python の `set_timeout` は秒数を受け取って整数秒に切り捨てるため、1 未満の値は制限をなくします。Python に `set_connect_timeout` はありません。呼び出し側が `on_event` から `false` を返して終えたストリームは、最後まで読まずにすぐ閉じます。クライアントが期限を設けない呼び出しも、それが属する処理とともに終わります。`A2ACallerNode` の呼び出しは実行の cancel token かノードの `attempt_timeout_ms` で、`make_harness_capability_executor` が行う呼び出しは Harness ジョブの cancel token か `call_timeout`（既定 30 秒、0 で無効）で終わり、`send_message_sync` はそのような token を最後の引数に取ります。
 
 ## リモートエージェントをノードとして使う
 

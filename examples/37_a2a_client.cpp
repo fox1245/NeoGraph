@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
 
     auto client = std::make_shared<A2AClient>(base_url);
     // Tight timeout — when no demo server is running we want a fast
-    // failure, not a 30 s hang.
+    // failure, not an open-ended wait.
     client->set_timeout(std::chrono::seconds(5));
 
     // Phase 1 — discovery.
