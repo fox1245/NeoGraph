@@ -7,6 +7,7 @@
 #include "program_expansion_fixture.h"
 #include "operation_lock.h"
 #include "fixtures/manual_executor.h"
+#include "fixtures/thread_census.h"
 #include <neograph/program/core_tool_grant_store.h>
 
 #include <neograph/async/host_loop.h>
@@ -29,7 +30,6 @@
 #include <condition_variable>
 #include <chrono>
 #include <deque>
-#include <filesystem>
 #include <future>
 #include <map>
 #include <memory>
@@ -133,16 +133,6 @@ RunBudget grant(std::uint64_t wall_time_ms = 10000) {
 
 ProgramInvocation invocation(std::string trace, std::uint64_t wall_time_ms = 10000) {
     return ProgramInvocation{json::object(), grant(wall_time_ms), std::move(trace), {}};
-}
-
-std::size_t thread_count() {
-#ifdef __linux__
-    std::size_t count = 0;
-    for ([[maybe_unused]] const auto& entry : std::filesystem::directory_iterator("/proc/self/task")) ++count;
-    return count;
-#else
-    return 0;
-#endif
 }
 
 RuntimeConfig runtime_config(ExecutorFixture& fixture) {
@@ -635,7 +625,7 @@ TEST(ProgramRuntimeExecutorTest, AProgramRunsOnAHostPumpedExecutorWithoutAThread
     HostedRuntime hosted;
     auto          config = runtime_config(fixture);
     config.executor      = hosted.loop.executor();
-    const auto threads_before = thread_count();
+    const neograph::test::ThreadCensus census;
     ProgramRuntime runtime(std::move(config));
 
     bool                         done = false;
@@ -657,7 +647,10 @@ TEST(ProgramRuntimeExecutorTest, AProgramRunsOnAHostPumpedExecutorWithoutAThread
     const auto nodes = node_threads();
     ASSERT_EQ(nodes.size(), 1U);
     EXPECT_EQ(nodes.front(), std::this_thread::get_id());
-    if (threads_before != 0) EXPECT_EQ(thread_count(), threads_before);
+    if (census.available()) {
+        const auto started = census.started();
+        EXPECT_TRUE(started.empty()) << "the runtime started " << started.size() << " thread(s)";
+    }
 }
 
 TEST(ProgramRuntimeExecutorTest, AHandleCannotBeWaitedOnWhileTheHostLoopMustRunTheProgram) {
