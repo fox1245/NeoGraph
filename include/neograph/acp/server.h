@@ -53,6 +53,7 @@
 #include <neograph/tool_execution.h>
 
 #include <chrono>
+#include <functional>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -266,6 +267,11 @@ public:
  */
 class NEOGRAPH_API ACPClient {
   public:
+    /// Finds the ACPServer that serves a session, or an empty pointer when
+    /// none does.
+    using ServerResolver =
+        std::function<std::shared_ptr<ACPServer>(std::string_view session_id)>;
+
     /// Construct an unbound client. Bind it to a server later via
     /// @ref bind or @ref ACPServer::attach_client. This is the form
     /// you want when nodes capture the client during compile() — long
@@ -275,10 +281,22 @@ class NEOGRAPH_API ACPClient {
     /// Construct a client already bound to `server`.
     explicit ACPClient(ACPServer* server);
 
+    /// Construct a client for a host that serves several connections, each
+    /// with its own ACPServer (see ACPHttpServer::client()): every call goes
+    /// to the server `resolver` names for the call's session id, and throws
+    /// std::runtime_error when it names none. The server stays alive for the
+    /// duration of the call.
+    explicit ACPClient(ServerResolver resolver);
+
     /// Late-binding hook — set the back-pointer to the server. Idempotent.
     void bind(ACPServer* server);
 
-    /// True once @ref bind has been called with a non-null server.
+    /// Late-binding hook for a host that serves several connections (see
+    /// ACPHttpServer::attach_client): route every call through `resolver`.
+    void bind(ServerResolver resolver);
+
+    /// True once @ref bind has been called with a non-null server, or when
+    /// the client was made with a resolver.
     bool bound() const noexcept;
 
     /// Per-call timeout for fs/* requests (default 30 s). Editors usually
@@ -327,7 +345,14 @@ class NEOGRAPH_API ACPClient {
         std::string_view session_id) const;
 
   private:
+    /// The server a call for `session_id` goes to; `keep` holds it alive.
+    /// Throws std::runtime_error naming `caller` when there is none.
+    ACPServer* target(std::string_view session_id,
+                      std::shared_ptr<ACPServer>& keep,
+                      const char* caller) const;
+
     ACPServer*               server_ = nullptr;
+    ServerResolver           resolver_;
     std::chrono::milliseconds timeout_{std::chrono::seconds(30)};
     std::optional<std::chrono::milliseconds> permission_timeout_;
 };
