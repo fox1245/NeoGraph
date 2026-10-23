@@ -225,7 +225,10 @@ RunMetadata metadata_or_default(std::optional<RunMetadata> metadata) {
 
 // The stream callback of a synchronous entry point. The engine calls it on the thread that drives the run and may
 // copy it into fan-out workers, so the Python callable lives in a shared_ptr whose last owner takes the GIL to
-// drop it. A callback that raises does not stop the run: the callback observes the run, it does not steer it.
+// drop it. A callback that raises does not stop the run: the callback observes the run, it does not steer it. The
+// exception goes to sys.unraisablehook, which prints it to stderr by default. PyErr_Print would exit the process
+// for SystemExit, and the error that pybind11 catches has already left the error indicator, so PyErr_Print alone
+// printed nothing.
 GraphStreamCallback sync_stream_callback(std::optional<py::function> callback) {
     if (!callback) return {};
     auto held = std::shared_ptr<py::function>(
@@ -234,8 +237,9 @@ GraphStreamCallback sync_stream_callback(std::optional<py::function> callback) {
         py::gil_scoped_acquire acquire;
         try {
             (*held)(event);
-        } catch (const py::error_already_set&) {
-            PyErr_Print();
+        } catch (py::error_already_set& error) {
+            error.restore();
+            PyErr_WriteUnraisable(held->ptr());
         }
     };
 }
@@ -1124,10 +1128,11 @@ void init_graph(py::module_& m) {
             py::arg("callback"),
             py::arg("metadata") = py::none(),
             "Run the graph and invoke `callback(GraphEvent)` for every "
-            "event admitted by config.stream_mode. Exceptions raised "
-            "from the Python callback are printed to stderr and "
-            "swallowed; they do not abort the run. ``metadata`` is an "
-            "optional ``RunMetadata``, as for ``run``.")
+            "event admitted by config.stream_mode. An exception raised "
+            "from the Python callback is reported through "
+            "``sys.unraisablehook`` (stderr by default) and does not "
+            "abort the run. ``metadata`` is an optional ``RunMetadata``, "
+            "as for ``run``.")
 
         .def("get_state",
             [](const GraphEngine& self, const std::string& thread_id) -> py::object {
