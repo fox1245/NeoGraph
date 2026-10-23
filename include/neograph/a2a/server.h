@@ -292,7 +292,9 @@ class NEOGRAPH_API A2AServer {
     /// public URL, always preferred) or enable this to take the scheme and
     /// host from RFC 7239 `Forwarded`, else `X-Forwarded-Proto` /
     /// `X-Forwarded-Host`. Off by default: those headers are set by the
-    /// client unless a proxy you control overwrites them.
+    /// client unless a proxy you control overwrites them. A server bound to
+    /// a loopback address also answers the proxy's public `Host` only when
+    /// A2AHttpConfig::allowed_hosts lists it.
     void set_trust_forwarded_headers(bool enabled);
 
   private:
