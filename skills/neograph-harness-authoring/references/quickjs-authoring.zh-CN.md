@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=zh-CN source_sha256=9c608357cfda36a56045f97d4b5bbd5398e96e016e90c4b6690f4d2d2e3949fe -->
+<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=zh-CN source_sha256=2b43b221e43adde43479b04affc783981618f19917ad94444136151aaf21275e -->
 # QuickJS 源码编写
 
 **Languages:** [English](quickjs-authoring.md) | [한국어](quickjs-authoring.ko.md) | [日本語](quickjs-authoring.ja.md) | [简体中文](quickjs-authoring.zh-CN.md)
@@ -16,7 +16,8 @@
 ## 模块
 
 使用全局 `ng` 的 ES 模块。它导出 `define`；任务需要运行时控制时，还导出生成器
-`main`。没有 `require`、`module.exports`、`export default` 或 `import`。
+`main`。没有 `require`、`module.exports` 和 `export default`，动态 `import()` 会被拒绝。
+静态 `import` 只对宿主已封存并在任务中给出名称的模块有效，其他任何 `import` 都会被拒绝。
 
     // GRAPH、REDUCER、NODE_TYPE 代表宿主提供的名称。
     export function define() {
@@ -43,10 +44,12 @@
 在这里不存在。
 
 - 构建器的每个方法都返回同一个构建器，从不返回节点句柄。请严格使用清单中的签名和
-  选项键。键采用 snake_case（是 `initial_delay_ms`，不是 `initialDelay`），未知的键会
-  被拒绝。
-- 图需要 `entry` 和 `exit`。每条边、屏障、中断和重试都必须指向已声明的节点。
-  `__start__` 和 `__end__` 不能作为节点名。
+  选项键。键采用 snake_case（是 `initial_delay_ms`，不是 `initialDelay`）。未知的键在
+  `channel`、`retryPolicy` 和命令选项中会被拒绝；`node` 配置中多出的键会传给节点类型，
+  是否接受由宿主的注册表决定。
+- 图需要 `entry`；没有它就不会运行任何东西，编译器会拒绝。`exit(node)` 标明运行在哪里
+  结束（没有出边的节点同样会结束运行）。每条边、屏障、中断和重试都必须指向已声明的
+  节点。`__start__` 和 `__end__` 不能作为节点名，但边或路由的目标可以是 `__end__`。
 - `node(name, {type, ...config})`：`type` 必填且必须已注册。
   `channel(name, {reducer, initial})`：指定已注册的归约器。
 - `conditionalEdge(from, condition, routes)`：`routes` 把已注册条件可能返回的每个标签，
@@ -57,7 +60,7 @@
 ## main()：运行时命令
 
 `main` 是同步生成器。每个 `yield` 恰好向运行时交出一个由 `ng` 构造函数创建的命令，
-并取回该命令的结果。原始数组、普通对象、Promise 和 `yield*` 都会被拒绝。用分支、
+并取回该命令的结果。原始数组、普通对象、Promise 以及对命令使用的 `yield*` 都会被拒绝。用分支、
 循环、`map` 等普通 JavaScript 构建命令和命令数组；要同时运行多个命令，请只 `yield`
 一次 `ng.all(commands, {max_in_flight: N})`。
 
@@ -70,10 +73,10 @@
 | `ng.join(commands, mode, options, site)` | 通用形式。`mode` 为 `"all"`、`"race"` 或 `"quorum"`（配合 `required_successes`）。`failure_policy` 为 `"fail_fast"` 或 `"collect"`。 |
 | `ng.spawn(binding, input, site)` | 启动宿主批准的子项。要取得其结果，用 `ng.await(spawnCommand, timeoutMs, site)` 包住它。 |
 | `ng.emit(value, site)`, `ng.checkpoint(value, site)` | 把一个 JSON 值记入运行日志。 |
-| `ng.cancelScope("current", reason, site)` | 以已取消状态结束运行。 |
+| `ng.cancelScope(scope, reason, site)` | 取消 `"current"`、`"nested"`、`"root"` 或 `"run"`；其他名称会使运行失败。在 `main` 的最上层，它以已取消状态结束运行。 |
 | `ng.hostCapability(slot, input, site)` | 调用宿主批准的导入槽位（整数）。 |
 
-- `site` 是可选的最后一个参数，是形如 `"review:" + id` 的稳定标签。请由 id 或索引生成，
+- `site` 是可选的最后一个参数，是形如 `"item:" + id` 的稳定标签。请由 id 或索引生成，
   不要由时间或随机数生成。恢复后的运行会重新执行 `main`，所以对相同的结果必须产出
   相同的命令。
 - 选项键采用 snake_case。`max_in_flight`、`required_successes` 和 await 超时都是正整数。
@@ -97,7 +100,8 @@
 模块，并附上 `source_id`、`source` 以及所有必需的任务、工作者、预算和策略字段。只有源码
 不构成请求。仅当 `neograph_compile` 工具可用时才使用它。
 
-被拒绝时会返回诊断，其中有 `code`、`message`、指向编译后定义的 JSON `pointer` 和
-`witness`。请修复诊断指出的原因，保留任务已确定的内容，并在同一封装中返回完整的模块。
+编译器拒绝时会返回诊断，其中有 `code`、`message`、指向编译后定义的 JSON `pointer` 和
+`witness`；宿主自己对结果做的检查则可能只返回一条普通的错误信息。请修复拒绝所指出的原因，
+保留任务已确定的内容，并在同一封装中返回完整的模块。
 不要扩大权限，不要添加无关操作，在宿主的检查接受之前不要声称成功。能够编译的源码
 仍可能构建出错误的拓扑。

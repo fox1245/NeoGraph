@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ko source_sha256=9c608357cfda36a56045f97d4b5bbd5398e96e016e90c4b6690f4d2d2e3949fe -->
+<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ko source_sha256=2b43b221e43adde43479b04affc783981618f19917ad94444136151aaf21275e -->
 # QuickJS 소스 작성
 
 **Languages:** [English](quickjs-authoring.md) | [한국어](quickjs-authoring.ko.md) | [日本語](quickjs-authoring.ja.md) | [简体中文](quickjs-authoring.zh-CN.md)
@@ -17,8 +17,9 @@
 ## 모듈
 
 전역 `ng`를 쓰는 ES 모듈입니다. `define`을 내보내고, 작업에 런타임 제어가 필요하면
-제너레이터 `main`도 내보냅니다. `require`, `module.exports`, `export default`,
-`import`는 없습니다.
+제너레이터 `main`도 내보냅니다. `require`, `module.exports`, `export default`는 없고,
+동적 `import()`는 거부됩니다. 정적 `import`는 호스트가 봉인하고 작업에서 이름을 알려
+준 모듈에 대해서만 동작하며, 그 밖의 `import`는 거부됩니다.
 
     // GRAPH, REDUCER, NODE_TYPE은 호스트가 준 이름을 대신하는 자리표시자입니다.
     export function define() {
@@ -46,10 +47,15 @@
 명령은 여기에 없습니다.
 
 - 빌더 메서드는 모두 같은 빌더를 반환하며 노드 핸들은 반환하지 않습니다. 매니페스트의
-  시그니처와 옵션 키를 그대로 쓰십시오. 키는 snake_case이고(`initial_delay_ms`이지
-  `initialDelay`가 아닙니다) 알 수 없는 키는 거부됩니다.
-- 그래프에는 `entry`와 `exit`가 필요합니다. 모든 엣지, 배리어, 인터럽트, 재시도는
-  선언된 노드를 가리켜야 합니다. `__start__`와 `__end__`는 노드 이름이 될 수 없습니다.
+  시그니처와 옵션 키를 그대로 쓰십시오. 키는 snake_case입니다(`initial_delay_ms`이지
+  `initialDelay`가 아닙니다). 알 수 없는 키는 `channel`, `retryPolicy`, 명령 옵션에서
+  거부됩니다. `node` 설정의 추가 키는 노드 타입으로 전달되며, 받아들일지는 호스트의
+  레지스트리가 정합니다.
+- 그래프에는 `entry`가 필요합니다. 없으면 아무것도 실행되지 않으므로 컴파일러가
+  거부합니다. `exit(node)`는 실행이 끝나는 곳을 표시합니다(나가는 엣지가 없는 노드도
+  실행을 끝냅니다). 모든 엣지, 배리어, 인터럽트, 재시도는 선언된 노드를 가리켜야
+  합니다. `__start__`와 `__end__`는 노드 이름이 될 수 없지만, 엣지나 라우트의 대상은
+  `__end__`가 될 수 있습니다.
 - `node(name, {type, ...config})`: `type`은 필수이며 등록되어 있어야 합니다.
   `channel(name, {reducer, initial})`: 등록된 리듀서를 지정하십시오.
 - `conditionalEdge(from, condition, routes)`: `routes`는 등록된 조건이 반환할 수 있는
@@ -62,7 +68,7 @@
 
 `main`은 동기 제너레이터입니다. 각 `yield`는 `ng` 생성자가 만든 명령을 정확히 하나
 런타임에 넘기고 그 명령의 결과를 돌려받습니다. 원시 배열, 일반 객체, Promise,
-`yield*`는 거부됩니다. 분기, 반복, `map` 같은 평범한 JavaScript로 명령과 명령 배열을
+명령에 쓴 `yield*`는 거부됩니다. 분기, 반복, `map` 같은 평범한 JavaScript로 명령과 명령 배열을
 만들고, 여러 개를 한꺼번에 실행하려면 `ng.all(commands, {max_in_flight: N})`을 한 번
 `yield`하십시오.
 
@@ -75,10 +81,10 @@
 | `ng.join(commands, mode, options, site)` | 일반 형태입니다. `mode`는 `"all"`, `"race"`, `"quorum"`(`required_successes`와 함께)입니다. `failure_policy`는 `"fail_fast"` 또는 `"collect"`입니다. |
 | `ng.spawn(binding, input, site)` | 호스트가 승인한 자식을 시작합니다. 결과를 받으려면 `ng.await(spawnCommand, timeoutMs, site)`로 감싸십시오. |
 | `ng.emit(value, site)`, `ng.checkpoint(value, site)` | JSON 값을 실행 저널에 기록합니다. |
-| `ng.cancelScope("current", reason, site)` | 실행을 취소 상태로 끝냅니다. |
+| `ng.cancelScope(scope, reason, site)` | `"current"`, `"nested"`, `"root"`, `"run"`을 취소합니다. 다른 이름은 실행을 실패시킵니다. `main`의 최상위에서는 실행을 취소 상태로 끝냅니다. |
 | `ng.hostCapability(slot, input, site)` | 호스트가 승인한 임포트 슬롯(정수)을 호출합니다. |
 
-- `site`는 선택 사항인 마지막 인자로, `"review:" + id` 같은 안정적인 레이블입니다. id나
+- `site`는 선택 사항인 마지막 인자로, `"item:" + id` 같은 안정적인 레이블입니다. id나
   인덱스에서 만들고 시간이나 난수에서는 만들지 마십시오. 복구된 실행은 `main`을 다시
   실행하므로 같은 결과에 대해 같은 명령을 내야 합니다.
 - 옵션 키는 snake_case입니다. `max_in_flight`, `required_successes`, await 타임아웃은
@@ -106,8 +112,9 @@ Harness MCP에서는 먼저 `neograph_schema`를 호출한 뒤, 모듈을 `harne
 필드와 함께 보냅니다. 소스만으로는 요청이 되지 않습니다. `neograph_compile`은 그
 도구가 있을 때만 쓰십시오.
 
-거부되면 `code`, `message`, 컴파일된 정의 안을 가리키는 JSON `pointer`, `witness`가 있는
-진단이 돌아옵니다. 진단이 가리키는 원인을 고치고, 작업이 정한 것은 그대로 두며,
-같은 봉투에 전체 모듈을 반환하십시오. 권한을 넓히거나 무관한 동작을 더하거나
+컴파일러가 거부하면 `code`, `message`, 컴파일된 정의 안을 가리키는 JSON `pointer`,
+`witness`가 있는 진단이 돌아옵니다. 호스트가 결과에 대해 직접 하는 검사는 대신 평범한
+오류 메시지를 돌려줄 수 있습니다. 거부가 가리키는 원인을 고치고, 작업이 정한 것은
+그대로 두며, 같은 봉투에 전체 모듈을 반환하십시오. 권한을 넓히거나 무관한 동작을 더하거나
 호스트의 검사가 받아들이기 전에 성공했다고 주장하지 마십시오. 컴파일되는 소스도
 잘못된 토폴로지를 만들 수 있습니다.
