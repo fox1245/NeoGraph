@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=edad56beafb7746077551336c44d837a290406832842f1080e8c26d7362a168c -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=6fb08145d2a4d88ff1d6823ac465bcd59f0debc2f607428eb5413b6d2011d308 -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -207,6 +207,8 @@ TaskState.Completed
 클라이언트의 다른 호출은 다음과 같습니다. `send_message_stream(text, on_event)`은 상태와 아티팩트 업데이트를 도착하는 대로 전달하고 조립된 태스크를 돌려줍니다. `get_task(id)`는 태스크를 읽고, `cancel_task(id)`는 입력을 기다리는 태스크를 포함해 태스크를 취소합니다. 이미 종료된 태스크에 메시지를 보내면 `-32004`로 실패합니다. 이 Python 클라이언트는 0.14.0 휠에도 있으며, 위 Python 스크립트는 휠로도 이 서버와 동작합니다.
 
 응답은 `Content-Type`이 `text/event-stream`일 때만 서버 전송 이벤트로 읽고, 그때 JSON-RPC 메시지는 첫 `data:` 이벤트입니다. 그 외에는 JSON으로 읽습니다. 응답에 담긴 텍스트는 `data: `가 들어 있어도 판단에 쓰이지 않습니다.
+
+호출에는 자체 기한이 없습니다. `send_message_sync`는 에이전트가 답할 때까지, 스트림은 에이전트가 끝낼 때까지 기다립니다. 작업이 몇 분 걸릴 수 있기 때문입니다. 연결에는 한도가 있습니다. 이름 해석, TCP 연결, TLS 핸드셰이크를 합쳐 30초이며 `set_connect_timeout(seconds)`로 바꿀 수 있습니다. `set_timeout(seconds)`는 각 요청의 교환 전체(응답이나 스트림을 끝까지 읽는 일 포함)를 제한하며, 넘으면 호출이 예외를 던집니다. 둘 다 0이면 한도를 없앱니다. Python의 `set_timeout`은 초를 받아 정수 초로 잘라 쓰므로 1 미만 값은 한도를 없앱니다. Python에는 `set_connect_timeout`이 없습니다. 호출자가 `on_event`에서 `false`를 반환해 끝낸 스트림은 끝까지 읽지 않고 즉시 닫습니다.
 
 ## 원격 에이전트를 노드로 쓰기
 

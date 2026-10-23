@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=edad56beafb7746077551336c44d837a290406832842f1080e8c26d7362a168c -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=6fb08145d2a4d88ff1d6823ac465bcd59f0debc2f607428eb5413b6d2011d308 -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -207,6 +207,8 @@ TaskState.Completed
 客户端的其他调用：`send_message_stream(text, on_event)` 会在状态和工件更新到达时逐个交给回调，并返回组装好的任务；`get_task(id)` 读取任务；`cancel_task(id)` 取消任务，包括正在等待输入的任务。向已经终止的任务发送消息会以 `-32004` 失败。这个 Python 客户端在 0.14.0 的 wheel 中也有，上面的 Python 脚本用它同样能配合这个服务器工作。
 
 只有当响应的 `Content-Type` 为 `text/event-stream` 时，才把它当作服务器发送事件来读，此时 JSON-RPC 消息是第一个 `data:` 事件；其余情况一律按 JSON 读取。响应里的文本即使含有 `data: `，也不会影响判断。
+
+调用本身没有期限：`send_message_sync` 会一直等到代理答复，流会一直读到代理结束它，因为任务可能运行数分钟。连接有上限：域名解析、TCP 连接和 TLS 握手合计 30 秒，可用 `set_connect_timeout(seconds)` 修改。`set_timeout(seconds)` 限制每个请求的整个交换（包括读完答复或流），超出时调用会抛出异常。两者设为 0 都表示取消限制。Python 的 `set_timeout` 接收秒数并截断为整数秒，因此小于 1 的值会取消限制；Python 没有 `set_connect_timeout`。调用方在 `on_event` 中返回 `false` 来结束的流会立即关闭，而不是读到结尾。
 
 ## 把远程智能体用作节点
 
