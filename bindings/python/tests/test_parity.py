@@ -352,3 +352,4 @@ def test_run_metadata_and_model_budget_reach_python_nodes():
 
 def test_exact_resume_surface_is_exposed():
     assert hasattr(ng.GraphEngine, "resume_from")
+    assert hasattr(ng.GraphEngine, "resume_from_async")
