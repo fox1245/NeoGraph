@@ -445,8 +445,11 @@ public:
     ~HostPumpedProgramHost() {
         // The runtime cancels what is left, and the host's turns finish it before the loop goes.
         runtime.reset();
-        hosted.host->run_until([] { return false; }, 50ms);
+        if (drain_on_destroy) hosted.host->run_until([] { return false; }, 50ms);
     }
+
+    // False: the loop goes with the work it still has queued, as a host that shuts down does.
+    bool drain_on_destroy = true;
 
     // Lets the tool be used by `run_id`, in each of its first four attempts.
     void grant_tool(const std::string& run_id, const ProgramVersion& version) {
@@ -1321,6 +1324,449 @@ TEST(ProgramHostPumpedStores, AnInterruptedRunIsCancelledThroughAHostPumpedStore
     EXPECT_EQ(stored->continuation().state, ContinuationState::Cancelled);
     EXPECT_GT(host.stores.transitions->suspended(), 0U);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
+// ---- The synchronous cancel() of an interrupted run ----
+//
+// A host-pumped executor cannot be waited on, so ProgramHandle::cancel() does not write the Cancelled state of an
+// interrupted run itself. It accepts the cancellation, and a task of the loop writes the state: the call is true when
+// it stopped a live run or scheduled the cancellation of an interrupted one, and false when the run is over, or
+// cancelled, or its cancellation is pending already.
+
+namespace {
+
+// A run that waits for its answer, over plain stores, and the handle that started it.
+struct PausedReview {
+    std::optional<ProgramHandle> handle;
+    std::optional<ProgramResult> paused;
+};
+
+PausedReview pause_review(HostPumpedProgramHost& host, const std::string& run_id) {
+    PausedReview out;
+    auto script = [&]() -> asio::awaitable<int> {
+        out.handle = co_await host.runtime->start_async(top_level(host.review.id(), run_id));
+        out.paused = co_await out.handle->wait_async();
+        co_return 0;
+    };
+    host.run(script());
+    return out;
+}
+
+std::optional<ContinuationState> stored_state(HostPumpedProgramHost& host, const std::string& run_id) {
+    const auto stored = host.fixture.journal->load(kOwner, run_id);
+    if (!stored) return std::nullopt;
+    return stored->continuation().state;
+}
+
+std::uint64_t journal_sequence(HostPumpedProgramHost& host, const std::string& run_id) {
+    const auto latest = host.fixture.journal->latest(kOwner, run_id);
+    return latest ? latest->sequence : 0;
+}
+
+std::size_t cancelled_terminals(HostPumpedProgramHost& host, const std::string& run_id) {
+    std::size_t count = 0;
+    for (const auto& event : host.fixture.journal->load_events(kOwner, run_id, 0))
+        if (event.kind == ProgramEventKind::Terminal &&
+            std::get<ProgramTerminalEvent>(event.payload).status == ProgramTerminalStatus::Cancelled)
+            ++count;
+    return count;
+}
+
+bool pump_until_cancelled(HostPumpedProgramHost& host, const ProgramHandle& handle) {
+    return host.hosted.host->run_until([&] {
+        const auto result = handle.try_result();
+        return result && result->status() == ProgramTerminalStatus::Cancelled;
+    });
+}
+
+bool has_notice(const ProgramHandle& handle, const std::string& code) {
+    for (const auto& notice : handle.notices())
+        if (notice.code == code) return true;
+    return false;
+}
+
+}  // namespace
+
+TEST(ProgramHostPumpedStores, ASynchronousCancelOfAnInterruptedRunIsAcceptedAndRecordedByATaskOfTheLoop) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  run = pause_review(host, "sync-cancel-out-of-turn");
+    ASSERT_TRUE(run.handle && run.paused);
+    ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
+    host.stores.transitions->set_pumped(true);
+    const auto operations = host.stores.transitions->operations();
+    const auto sequence   = journal_sequence(host, "sync-cancel-out-of-turn");
+
+    // Made by the host's thread between its turns: the call neither waits nor is refused.
+    EXPECT_TRUE(run.handle->cancel());
+    // The task is only queued: it has not taken the coordination lock or read a store when cancel() returns.
+    EXPECT_EQ(host.stores.transitions->operations(), operations);
+    EXPECT_FALSE(run.handle->cancel()) << "a cancellation that is pending is not scheduled twice";
+    EXPECT_EQ(stored_state(host, "sync-cancel-out-of-turn"), ContinuationState::Interrupted);
+    ASSERT_TRUE(run.handle->try_result());
+    EXPECT_EQ(run.handle->try_result()->status(), ProgramTerminalStatus::Interrupted);
+
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle)) << "the loop ran out of turns before the run was cancelled";
+    EXPECT_EQ(stored_state(host, "sync-cancel-out-of-turn"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-out-of-turn"), 1U);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-out-of-turn"), sequence + 1U);
+    EXPECT_FALSE(run.handle->cancel()) << "cancelled already";
+
+    // Nothing is written after the one Cancelled record.
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-out-of-turn"), 1U);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-out-of-turn"), sequence + 1U);
+    EXPECT_TRUE(run.handle->notices().empty());
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
+TEST(ProgramHostPumpedStores, ASynchronousCancelInsideAHostTurnIsAcceptedAndRecordedByATaskOfTheLoop) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  run = pause_review(host, "sync-cancel-in-turn");
+    ASSERT_TRUE(run.handle && run.paused);
+    ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
+    host.stores.transitions->set_pumped(true);
+    const auto sequence = journal_sequence(host, "sync-cancel-in-turn");
+
+    bool          accepted = false;
+    bool          again    = true;
+    std::uint64_t reads    = 0;
+    auto          script   = [&]() -> asio::awaitable<int> {
+        const auto before = host.stores.transitions->operations();
+        accepted          = run.handle->cancel();
+        // The runtime's executor never runs work inline, so the task is queued here too: it has not read the record,
+        // and so has not taken the coordination lock, when cancel() returns.
+        reads = host.stores.transitions->operations() - before;
+        again = run.handle->cancel();
+        co_return 0;
+    };
+    host.run(script());
+    EXPECT_TRUE(accepted);
+    EXPECT_FALSE(again);
+    EXPECT_EQ(reads, 0U);
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
+    EXPECT_EQ(stored_state(host, "sync-cancel-in-turn"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-in-turn"), 1U);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-in-turn"), sequence + 1U);
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
+TEST(ProgramHostPumpedStores, ASynchronousCancelOfAReconnectedInterruptedRunIsAccepted) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  run = pause_review(host, "sync-cancel-reconnected");
+    ASSERT_TRUE(run.handle && run.paused);
+    host.stores.transitions->set_pumped(true);
+
+    std::optional<ProgramHandle> reconnected;
+    auto script = [&]() -> asio::awaitable<int> {
+        reconnected = co_await host.runtime->reconnect_async(kOwner, "sync-cancel-reconnected");
+        co_return 0;
+    };
+    host.run(script());
+    ASSERT_TRUE(reconnected);
+    ASSERT_TRUE(reconnected->try_result());
+    EXPECT_EQ(reconnected->try_result()->status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_TRUE(reconnected->cancel());
+    EXPECT_FALSE(reconnected->cancel());
+    ASSERT_TRUE(pump_until_cancelled(host, *reconnected));
+    EXPECT_EQ(stored_state(host, "sync-cancel-reconnected"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-reconnected"), 1U);
+}
+
+// A run that nothing in the process runs any more is read back from the stores, and its handle holds a different
+// control from the one that ran the attempt. It holds the same claim: a second cancel() schedules nothing, and a resume
+// is refused until the Cancelled state is written.
+TEST(ProgramHostPumpedStores, ASynchronousCancelOfARunReadBackFromTheStoresHoldsTheClaimToo) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    host.grant_tool("sync-cancel-read-back", host.review);
+    auto run = pause_review(host, "sync-cancel-read-back");
+    ASSERT_TRUE(run.handle && run.paused);
+    const auto paused = *run.paused;
+    run.handle.reset();  // no handle keeps the control of the attempt that paused
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    host.stores.transitions->set_pumped(true);
+
+    std::optional<ProgramHandle> read_back;
+    auto script = [&]() -> asio::awaitable<int> {
+        read_back = co_await host.runtime->reconnect_async(kOwner, "sync-cancel-read-back");
+        co_return 0;
+    };
+    host.run(script());
+    ASSERT_TRUE(read_back && read_back->try_result());
+    EXPECT_EQ(read_back->try_result()->status(), ProgramTerminalStatus::Interrupted);
+
+    EXPECT_TRUE(read_back->cancel());
+    EXPECT_FALSE(read_back->cancel()) << "a cancellation that is pending is not scheduled twice";
+    std::string                  refusal;
+    std::optional<ProgramHandle> resumed;
+    auto resume = [&]() -> asio::awaitable<int> {
+        try {
+            auto answer = answer_for(paused, json{{"decision", "approved"}}, "trace-resume-read-back");
+            resumed     = co_await host.runtime->resume_handle_async(kOwner, "sync-cancel-read-back", std::move(answer));
+        } catch (const ProgramDiagnosticError& error) {
+            refusal = error.diagnostic().code;
+        }
+        co_return 0;
+    };
+    host.run(resume());
+    EXPECT_FALSE(resumed) << "a run was resumed after its cancellation was accepted";
+    EXPECT_EQ(refusal, "P_RESUME_CONFLICT");
+    ASSERT_TRUE(pump_until_cancelled(host, *read_back));
+    EXPECT_EQ(stored_state(host, "sync-cancel-read-back"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-read-back"), 1U);
+    EXPECT_EQ(model_calls.load(), 0);
+}
+
+// The resume is started after the call accepted the cancellation, before the loop wrote it. It must not win: the
+// Cancelled record is written, and the resume is refused, so no resumed run continues after the accepted call.
+namespace {
+void resume_after_an_accepted_cancel(bool cancel_inside_the_turn) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    host.grant_tool("sync-cancel-then-resume", host.review);
+    auto run = pause_review(host, "sync-cancel-then-resume");
+    ASSERT_TRUE(run.handle && run.paused);
+    ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
+    host.stores.transitions->set_pumped(true);
+
+    bool                         accepted = false;
+    std::string                  refusal;
+    std::optional<ProgramHandle> resumed;
+    auto resume = [&]() -> asio::awaitable<void> {
+        try {
+            auto answer = answer_for(*run.paused, json{{"decision", "approved"}}, "trace-resume-after-cancel");
+            resumed     = co_await host.runtime->resume_handle_async(kOwner, "sync-cancel-then-resume", std::move(answer));
+        } catch (const ProgramDiagnosticError& error) {
+            refusal = error.diagnostic().code;
+        }
+    };
+    if (cancel_inside_the_turn) {
+        auto script = [&]() -> asio::awaitable<int> {
+            accepted = run.handle->cancel();
+            co_await resume();
+            co_return 0;
+        };
+        host.run(script());
+    } else {
+        accepted    = run.handle->cancel();
+        auto script = [&]() -> asio::awaitable<int> {
+            co_await resume();
+            co_return 0;
+        };
+        host.run(script());
+    }
+    EXPECT_TRUE(accepted);
+    EXPECT_FALSE(resumed) << "a run was resumed after its cancellation was accepted";
+    EXPECT_EQ(refusal, "P_RESUME_CONFLICT");
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
+    EXPECT_EQ(stored_state(host, "sync-cancel-then-resume"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-then-resume"), 1U);
+    EXPECT_EQ(model_calls.load(), 0) << "the resumed run would have called the model";
+    EXPECT_EQ(tool_runs.load(), 0);
+
+    // Once the state is written the resume is refused for the state.
+    refusal.clear();
+    auto again = [&]() -> asio::awaitable<int> {
+        co_await resume();
+        co_return 0;
+    };
+    host.run(again());
+    EXPECT_EQ(refusal, "P_RESUME_STATE");
+    EXPECT_FALSE(resumed);
+}
+}  // namespace
+
+TEST(ProgramHostPumpedStores, AResumeStartedAfterAnAcceptedCancelIsRefusedAndTheRunEndsCancelled) {
+    resume_after_an_accepted_cancel(false);
+}
+
+TEST(ProgramHostPumpedStores, AResumeInTheSameTurnAsAnAcceptedCancelIsRefusedAndTheRunEndsCancelled) {
+    resume_after_an_accepted_cancel(true);
+}
+
+// A resume that is under way when cancel() is called has passed the claim check, and meets the scheduled cancellation at
+// the compare-and-swap of the run's record. Whichever turn of the resume the call falls in, one of the two wins: the
+// run is never both resumed and cancelled, and a cancellation that lost says so in the handle's notices.
+TEST(ProgramHostPumpedStores, AResumeUnderWayAndAnAcceptedCancelHaveOneWinnerWhateverTurnTheCallFallsIn) {
+    int cancelled_runs = 0;
+    int resumed_runs   = 0;
+    for (int turns = 0; turns <= 60; ++turns) {
+        SCOPED_TRACE("cancel() after " + std::to_string(turns) + " turns of the resume");
+        model_calls.store(0);
+        tool_runs.store(0);
+        // No tool grant: a resumed run that wins ends without running the tool, which would complete on a thread of its own.
+        HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+        auto run = pause_review(host, "sync-cancel-race");
+        ASSERT_TRUE(run.handle && run.paused);
+        host.stores.transitions->set_pumped(true);
+
+        std::string                  refusal;
+        std::optional<ProgramHandle> resumed;
+        bool                         resume_ended = false;
+        auto                         resume       = [&]() -> asio::awaitable<int> {
+            try {
+                auto answer = answer_for(*run.paused, json{{"decision", "approved"}}, "trace-resume-race");
+                resumed     = co_await host.runtime->resume_handle_async(kOwner, "sync-cancel-race", std::move(answer));
+            } catch (const ProgramDiagnosticError& error) {
+                refusal = error.diagnostic().code;
+            }
+            co_return 0;
+        };
+        host.hosted.loop.spawn(resume(), [&](std::exception_ptr, int) { resume_ended = true; });
+        for (int turn = 0; turn < turns; ++turn)
+            if (!host.hosted.host->step()) break;
+        const bool accepted = run.handle->cancel();
+        ASSERT_TRUE(host.hosted.host->run_until([&] { return resume_ended; })) << "the resume did not end";
+        // The cancellation task ends: the run is cancelled, or the notice says that the resume won.
+        ASSERT_TRUE(host.hosted.host->run_until([&] {
+            return stored_state(host, "sync-cancel-race") == ContinuationState::Cancelled ||
+                   has_notice(*run.handle, "P_CANCELLATION_NOT_RECORDED");
+        })) << "the scheduled cancellation neither recorded the state nor reported that it could not";
+        EXPECT_TRUE(accepted);
+        if (stored_state(host, "sync-cancel-race") == ContinuationState::Cancelled) {
+            ++cancelled_runs;
+            EXPECT_FALSE(resumed) << "a run that was resumed was also cancelled";
+            EXPECT_TRUE(refusal == "P_RESUME_CONFLICT" || refusal == "P_RESUME_STATE") << refusal;
+            EXPECT_EQ(cancelled_terminals(host, "sync-cancel-race"), 1U);
+            EXPECT_EQ(model_calls.load(), 0);
+        } else {
+            ++resumed_runs;
+            ASSERT_TRUE(resumed) << "neither a Cancelled record nor a resumed run, refusal: " << refusal;
+            EXPECT_TRUE(refusal.empty());
+            EXPECT_EQ(cancelled_terminals(host, "sync-cancel-race"), 0U);
+            EXPECT_EQ(run.handle->notices().at(0).witness.value("reason", std::string{}), "state_changed");
+            ASSERT_TRUE(host.hosted.host->run_until([&] { return resumed->try_result().has_value(); }));
+            EXPECT_NE(resumed->try_result()->status(), ProgramTerminalStatus::Cancelled);
+            EXPECT_NE(resumed->try_result()->status(), ProgramTerminalStatus::Interrupted);
+        }
+        EXPECT_EQ(tool_runs.load(), 0);
+    }
+    // Both outcomes are reached: the cancellation wins while the resume has yet to publish, and loses once it has.
+    EXPECT_GT(cancelled_runs, 0);
+    EXPECT_GT(resumed_runs, 0);
+}
+
+// The error of the scheduled task has no caller to reach. The run stays as it was, interrupted and resumable; the
+// handle's notices say that the cancellation was not recorded, and a later cancel() tries again.
+namespace {
+void a_failed_scheduled_cancellation(const char* failing_operation) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  run = pause_review(host, "sync-cancel-store-failure");
+    ASSERT_TRUE(run.handle && run.paused);
+    host.stores.transitions->set_pumped(true);
+    const auto sequence = journal_sequence(host, "sync-cancel-store-failure");
+
+    host.stores.transitions->fail_next(failing_operation);
+    EXPECT_TRUE(run.handle->cancel());
+    ASSERT_TRUE(host.hosted.host->run_until([&] { return has_notice(*run.handle, "P_CANCELLATION_NOT_RECORDED"); }))
+        << "the failure of the scheduled cancellation was not reported";
+    EXPECT_EQ(stored_state(host, "sync-cancel-store-failure"), ContinuationState::Interrupted);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-store-failure"), sequence);
+    ASSERT_TRUE(run.handle->try_result());
+    EXPECT_EQ(run.handle->try_result()->status(), ProgramTerminalStatus::Interrupted);
+    const auto notices = run.handle->notices();
+    ASSERT_EQ(notices.size(), 1U);
+    EXPECT_EQ(notices[0].witness.value("run_id", std::string{}), "sync-cancel-store-failure");
+    EXPECT_EQ(notices[0].witness.value("reason", std::string{}), "store_error");
+    EXPECT_NE(notices[0].witness.value("error", std::string{}).find("injected store failure"), std::string::npos)
+        << notices[0].witness.dump();
+
+    // The run was not cancelled, so the caller may try again.
+    EXPECT_TRUE(run.handle->cancel());
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
+    EXPECT_EQ(stored_state(host, "sync-cancel-store-failure"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-store-failure"), 1U);
+    EXPECT_EQ(run.handle->notices().size(), 1U);
+}
+}  // namespace
+
+TEST(ProgramHostPumpedStores, AStoreFailureWhileTheScheduledCancelReadsTheRunIsReportedAndLeavesItInterrupted) {
+    a_failed_scheduled_cancellation("transition.load");
+}
+
+TEST(ProgramHostPumpedStores, AStoreFailureWhileTheScheduledCancelPublishesIsReportedAndLeavesItInterrupted) {
+    a_failed_scheduled_cancellation("transition.compare_publish");
+}
+
+TEST(ProgramHostPumpedStores, ASynchronousCancelOfARunThatIsOverIsFalseAndWritesNothing) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    host.grant_tool("sync-cancel-completed", host.review);
+
+    // A run that completed, and the handle of the attempt that paused before it.
+    auto run = pause_review(host, "sync-cancel-completed");
+    ASSERT_TRUE(run.handle && run.paused);
+    host.stores.transitions->set_pumped(true);
+    std::optional<ProgramHandle> resumed;
+    auto script = [&]() -> asio::awaitable<int> {
+        auto answer = answer_for(*run.paused, json{{"decision", "approved"}}, "trace-resume-completed");
+        resumed     = co_await host.runtime->resume_handle_async(kOwner, "sync-cancel-completed", std::move(answer));
+        (void)co_await resumed->wait_async();
+        co_return 0;
+    };
+    host.run(script());
+    ASSERT_TRUE(resumed && resumed->try_result());
+    ASSERT_EQ(resumed->try_result()->status(), ProgramTerminalStatus::Completed) << failure_text(*resumed->try_result());
+
+    host.hosted.host->run_until([] { return false; }, 20ms);  // what the finished run still does with its store
+    const auto operations = host.stores.transitions->operations();
+    const auto sequence   = journal_sequence(host, "sync-cancel-completed");
+    EXPECT_FALSE(resumed->cancel());
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    EXPECT_EQ(host.stores.transitions->operations(), operations) << "a run that is over costs the cancel no store call";
+    EXPECT_EQ(stored_state(host, "sync-cancel-completed"), ContinuationState::Completed);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-completed"), sequence);
+
+    // The handle of the attempt that paused still holds its Interrupted result, which the call cannot know is stale:
+    // it accepts, and the task finds that the run is not interrupted any more. Nothing is written, and the notice says so.
+    EXPECT_TRUE(run.handle->cancel());
+    ASSERT_TRUE(host.hosted.host->run_until([&] { return has_notice(*run.handle, "P_CANCELLATION_NOT_RECORDED"); }));
+    EXPECT_EQ(stored_state(host, "sync-cancel-completed"), ContinuationState::Completed);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-completed"), sequence);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-completed"), 0U);
+    EXPECT_EQ(run.handle->notices().at(0).witness.value("reason", std::string{}), "state_changed");
+}
+
+TEST(ProgramHostPumpedStores, ACancelledRunIsNotCancelledAgainBySynchronousCancel) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  run = pause_review(host, "sync-cancel-after-async");
+    ASSERT_TRUE(run.handle && run.paused);
+    host.stores.transitions->set_pumped(true);
+    bool applied = false;
+    auto script  = [&]() -> asio::awaitable<int> {
+        applied = co_await run.handle->cancel_async();
+        co_return 0;
+    };
+    host.run(script());
+    ASSERT_TRUE(applied);
+    host.hosted.host->run_until([] { return false; }, 20ms);  // what the cancelled run still does with its store
+    const auto operations = host.stores.transitions->operations();
+    const auto sequence   = journal_sequence(host, "sync-cancel-after-async");
+    EXPECT_FALSE(run.handle->cancel());
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    EXPECT_EQ(host.stores.transitions->operations(), operations);
+    EXPECT_EQ(journal_sequence(host, "sync-cancel-after-async"), sequence);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-after-async"), 1U);
+}
+
+// The loop goes before the task runs: the run keeps its Interrupted record, nothing crashes, and the work queued on the
+// loop is destroyed with it.
+TEST(ProgramHostPumpedStores, AnAcceptedCancelWhoseTaskNeverRunsLeavesTheRunInterrupted) {
+    std::shared_ptr<ProgramTransitionStore>        journal;
+    std::shared_ptr<neograph::host_test::ManualExecutor> executor;
+    {
+        HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+        host.drain_on_destroy = false;
+        journal               = host.fixture.journal.shared();
+        executor              = host.hosted.host;
+        auto run              = pause_review(host, "sync-cancel-loop-gone");
+        ASSERT_TRUE(run.handle && run.paused);
+        host.stores.transitions->set_pumped(true);
+        EXPECT_TRUE(run.handle->cancel());
+    }
+    // The host runs the turn it had queued for the loop, which is gone: that only lets go of the loop's state.
+    executor->run_until([] { return false; }, 20ms);
+    test_support::TransitionStoreHandle after(journal);
+    const auto stored = after->load(kOwner, "sync-cancel-loop-gone");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().state, ContinuationState::Interrupted);
 }
 
 // ---- The whole lifecycle ----

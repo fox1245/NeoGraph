@@ -3257,6 +3257,100 @@ TEST(ProgramRuntimeTest, InterruptedCancellationHookBlockPersistsFailureAfterRec
     ASSERT_TRUE(durable);
     EXPECT_EQ(durable->continuation().state, ContinuationState::Failed);
 }
+// ProgramHandle::cancel() of an interrupted run. On a runtime that owns its threads the call waits for the store and
+// returns what cancel_async would: it is true when the run was cancelled by this call, and false when it was not.
+TEST(ProgramRuntimeTest, CancelOfAnInterruptedRunWritesTheCancelledStateBeforeItReturns) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    auto            handle  = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-cancel-interrupted", {}, "cancel-interrupted"});
+    const auto paused = handle.wait();
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted);
+
+    EXPECT_TRUE(handle.cancel());
+    const auto stored = fixture.journal->load("tenant:runtime", "cancel-interrupted");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().state, ContinuationState::Cancelled) << "the call waited for the store";
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Cancelled);
+
+    // Cancelled already: nothing to accept and nothing written.
+    const auto head = fixture.journal->latest("tenant:runtime", "cancel-interrupted");
+    ASSERT_TRUE(head);
+    EXPECT_FALSE(handle.cancel());
+    EXPECT_EQ(fixture.journal->latest("tenant:runtime", "cancel-interrupted")->id, head->id);
+
+    // A resume that comes after is refused for the state, and the run does not run again.
+    try {
+        (void)fixture.runtime->resume("tenant:runtime", "cancel-interrupted",
+                                      resume_for(paused, json{{"decision", "approved"}}, "trace-resume-cancelled"));
+        FAIL() << "a cancelled run must not resume";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_RESUME_STATE");
+    }
+    EXPECT_EQ(interrupt_calls.load(), 1U);
+}
+
+// On a thread that runs the runtime's tasks (here the thread that delivers an event) the call does not wait. It
+// schedules the Cancelled state of the interrupted run on the executor and says that it accepted the cancellation.
+TEST(ProgramRuntimeTest, CancelOfAnInterruptedRunOnAnAttemptThreadIsAcceptedAndRecordedByATask) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-interrupt");
+    auto            target  = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-cancel-target", {}, "cancel-target"});
+    const auto paused = target.wait();
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted);
+
+    std::atomic<int> verdict{-1};  // -1: not called; 0: false; 1: true
+    std::atomic<int> second{-1};
+    std::atomic<int> state_at_return{-1};
+    auto             sink = std::make_shared<CallbackSink>();
+    sink->set_callback([&](const ProgramEvent& event) {
+        // The terminal event of a run is delivered on a thread of the runtime's pool; the first events are the caller's.
+        if (event.kind != ProgramEventKind::Terminal) return;
+        int expected = -1;
+        if (!verdict.compare_exchange_strong(expected, 2)) return;
+        verdict.store(target.cancel() ? 1 : 0);
+        const auto stored = fixture.journal->load("tenant:runtime", "cancel-target");
+        state_at_return.store(stored ? static_cast<int>(stored->continuation().state) : -2);
+        second.store(target.cancel() ? 1 : 0);
+    });
+    auto other = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-cancel-other", sink, "cancel-other"});
+    EXPECT_EQ(other.wait().status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(verdict.load(), 1) << "an interrupted run is cancelled by this call";
+    EXPECT_EQ(second.load(), 0) << "the second call finds the cancellation pending, or done";
+    // The attempt thread belongs to the runtime's own pool, and Asio starts the task on the calling thread at once: it
+    // took the coordination lock and, over a store that completes at once, finished before cancel() returned.
+    EXPECT_EQ(state_at_return.load(), static_cast<int>(ContinuationState::Cancelled));
+
+    // The task of the executor writes the Cancelled state.
+    for (int tries = 0; tries < 2000; ++tries) {
+        const auto stored = fixture.journal->load("tenant:runtime", "cancel-target");
+        if (stored && stored->continuation().state == ContinuationState::Cancelled) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const auto stored = fixture.journal->load("tenant:runtime", "cancel-target");
+    ASSERT_TRUE(stored);
+    EXPECT_EQ(stored->continuation().state, ContinuationState::Cancelled);
+    EXPECT_FALSE(target.cancel());
+
+    // A resume that starts after the call was accepted is refused, whichever side of the write it falls on.
+    try {
+        (void)fixture.runtime->resume("tenant:runtime", "cancel-target",
+                                      resume_for(paused, json{{"decision", "approved"}}, "trace-resume-target"));
+        FAIL() << "a cancelled run must not resume";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_TRUE(error.diagnostic().code == "P_RESUME_STATE" || error.diagnostic().code == "P_RESUME_CONFLICT")
+            << error.diagnostic().code;
+    }
+    EXPECT_EQ(interrupt_calls.load(), 2U) << "neither the target nor a resumed run ran again";
+}
+
 TEST(ProgramRuntimeTest, RejectsCrossScopeStartBeforePublishingRun) {
     completed_calls.store(0);
     AdmittedRuntime   fixture;

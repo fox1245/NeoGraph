@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -40,11 +41,22 @@ public:
     void set_pumped(bool pumped) { pumped_.store(pumped); }
     bool pumped() const { return pumped_.load(); }
 
+    /// The next call of `name` ("transition.compare_publish", "program.load"...) throws instead of reaching the store, once.
+    void fail_next(std::string name) {
+        std::lock_guard lock(mutex_);
+        fail_next_ = std::move(name);
+    }
+
     /// Awaited first by every operation of a wrapper: suspends until the host's next turn while the stores are pumped.
     asio::awaitable<void> turn(const char* store, const char* operation) {
         {
             std::lock_guard lock(mutex_);
-            ++operations_[std::string(store) + "." + operation];
+            const auto name = std::string(store) + "." + operation;
+            ++operations_[name];
+            if (!fail_next_.empty() && fail_next_ == name) {
+                fail_next_.clear();
+                throw std::runtime_error("injected store failure: " + name);
+            }
         }
         if (!pumped_.load()) co_return;
         ++suspended_;
@@ -76,6 +88,7 @@ private:
     std::thread::id                    host_;
     mutable std::mutex                 mutex_;
     std::map<std::string, std::uint64_t> operations_;
+    std::string                        fail_next_;
     std::atomic<std::uint64_t>         suspended_{0};
     std::atomic<std::uint64_t>         off_thread_{0};
 };

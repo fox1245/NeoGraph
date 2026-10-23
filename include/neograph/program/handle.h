@@ -58,11 +58,25 @@ public:
     std::uint64_t      attempt() const noexcept;
 
     /**
-     * Cancels the run. Cancelling an interrupted run publishes its Cancelled state through the transition store, and
-     * the call waits for that. It does not wait on a thread that runs the runtime's executor (a node body) or on a
-     * host-pumped executor: there a run that is executing stops in memory at once, and the Cancelled state of an
-     * interrupted run is not guaranteed (the call may return false and leave it Interrupted). Use cancel_async, which
-     * waits for the Cancelled state and publishes it.
+     * Cancels the run, and returns whether the call accepted the cancellation.
+     *
+     * A run that is executing stops in memory at once. An interrupted run needs its Cancelled state published through
+     * the transition store. Where the call may wait it waits for that write, and returns whether it was made. On a
+     * thread that runs the runtime's executor (a node body, an event sink) and on a host-pumped executor a wait could
+     * not end, so the call does not wait: it schedules the write as a task of the executor and returns true. The run
+     * stays Interrupted until that task has run. Use cancel_async to wait for the state, and to know that it was written.
+     *
+     * True: this call stopped an executing run, or made or scheduled the Cancelled state of an interrupted one.
+     * False: the run is over or cancelled already, the Cancelled state is scheduled already (a second call schedules
+     * nothing), or the executor cannot take the task.
+     *
+     * While a scheduled write is pending, resume() of the run is refused with P_RESUME_CONFLICT, so a resume that
+     * starts after the call was accepted cannot continue the run. A resume that reached the store first wins; the
+     * task then finds that the run is not interrupted any more. The handle of an attempt that paused still holds its
+     * Interrupted result after the run was resumed through another handle, so cancel() on it is accepted too.
+     * A task that records nothing (the store failed, or the run is not interrupted any more) cannot report to its
+     * caller: it adds a P_CANCELLATION_NOT_RECORDED notice to notices() and leaves the run as it was, and a later
+     * cancel() tries again.
      */
     bool                                  cancel() noexcept;
     ProgramResult                         wait() const;
@@ -114,6 +128,11 @@ public:
      * call's ProgramMonetaryRecord has one. The call is charged as reported and the run's status and
      * budgets are as they would be without the notice; a call that a durable
      * journal replays, and a `held` call, give none.
+     * cancel() reports P_CANCELLATION_NOT_RECORDED when a cancellation that it
+     * scheduled did not record the Cancelled state of an interrupted run. The
+     * witness is {run_id, reason, error}, with reason `store_error` (and the
+     * store's message in error) or `state_changed` (the run was not interrupted
+     * any more). The run is as it was.
      */
     std::vector<ProgramNotice>            notices() const;
     ProgramHandle resume(ProgramRuntime& runtime, ProgramResume resume) const;

@@ -2829,7 +2829,8 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
 // The durable half of a cancellation (#557): a run that is interrupted has no attempt to stop, so the cancellation
 // is the publication of its Cancelled terminal state. A live run is stopped in memory, which needs no store.
 asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
-                                              std::shared_ptr<ReentrantOperationLock> held) {
+                                              std::shared_ptr<ReentrantOperationLock> held,
+                                              std::exception_ptr* failure) {
     try {
         if (const auto next = following_successor()) co_return co_await next->cancel_async(cause, held);
         std::shared_ptr<ReentrantOperationLock> coordination_mutex;
@@ -2930,48 +2931,126 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
         co_await cancel_children_async(cause, held_here);
         co_return true;
     } catch (...) {
+        if (failure) *failure = std::current_exception();
     }
     // A store failed: stop the run in memory, which needs no store.
     co_return cancel_without_waiting(cause, false);
 }
 
-// The cancellation that waits for nothing: the run stops in memory at once, and what needs the store (the release of a
-// held graph migration, the cancellation of the children, and, with `durable`, the Cancelled state of an interrupted run)
-// is a task of the executor.
+// The cancellation that waits for nothing: an executing run stops in memory at once, and what needs the store (the
+// release of a held graph migration, the cancellation of the children, and, with `durable`, the Cancelled state of an
+// interrupted run) is a task of the executor. The result says whether the call accepted the cancellation: true when it
+// stopped an executing run, or scheduled the Cancelled state of an interrupted one; false when the run is over or
+// cancelled already, when that state is already scheduled, or when the executor cannot take the task.
 bool RunControl::cancel_without_waiting(CancellationCause cause, bool durable) noexcept {
-    bool applied = false;
+    bool applied     = false;
+    bool interrupted = false;
     try {
         std::lock_guard lock(mutex_);
         if (!result_ && !terminal_decided_ && cancellation_cause_ == CancellationCause::None) {
             cancellation_cause_ = cause;
             applied             = true;
+        } else {
+            // A run that paused holds the Interrupted result that its terminal publication left (an AmbiguousEffect run
+            // does not: cancel_async leaves that state as it is). The result is the handle's own view, which can be
+            // stale: the store decides when the task runs.
+            interrupted = result_ && result_->status() == ProgramTerminalStatus::Interrupted;
         }
     } catch (...) {
     }
     cancel_token->cancel();
     abort_handoff();
     abort_graph_migration();
-    if (applied) cancel_children_in_background(cause);
-    if (durable && !applied) {
-        // An interrupted run is not executing: its Cancelled state is the store's to record.
-        try {
-            asio::co_spawn(
-                scheduler->attempts,
-                [keep = shared_from_this(), cause]() -> asio::awaitable<void> {
-                    (void)co_await keep->cancel_async(cause);
-                },
-                asio::detached);
-        } catch (...) {
-        }
+    if (applied) {
+        cancel_children_in_background(cause);
+        return true;
     }
-    return applied;
+    // An interrupted run is not executing: its Cancelled state is the store's to record.
+    return durable && interrupted && schedule_interrupted_cancellation(cause);
 }
 
-// The synchronous cancellation of a threaded host. It does the same work as cancel_async on the calling thread. It does
-// not wait where waiting could not end: on a thread that runs the runtime's executor (a node body, a deadline) it
-// would block a thread that a suspended operation may need, and on a host-pumped executor nothing could finish. There
-// it stops the run in memory only and leaves the rest to a task of the executor (cancel_without_waiting); use
-// cancel_async to wait for the Cancelled state of an interrupted run.
+// Schedules the Cancelled state of an interrupted run as a task of the executor, and returns whether it did. The claim
+// on the run (PendingCancellations) is taken first, so that a second call schedules nothing and a resume that starts
+// afterwards is refused until the task has ended.
+bool RunControl::schedule_interrupted_cancellation(CancellationCause cause) noexcept {
+    try {
+        std::shared_ptr<PendingCancellations> pending;
+        {
+            std::lock_guard lock(mutex_);
+            pending = pending_cancellations_;
+        }
+        PendingCancellations::Claim claim;
+        if (pending) {
+            claim = pending->begin(owner_scope, run_id);
+            if (!claim) return false;
+        }
+        // The runtime's executor does not run work inline when the host gave it (see Impl), so on a host-pumped executor
+        // the task is queued, in a turn of the loop as well: it has taken no lock and read no record when this returns.
+        // The claim above is what keeps a resume that is called next from overtaking it.
+        asio::co_spawn(
+            scheduler->attempts,
+            [keep = shared_from_this(), cause, claim = std::move(claim)]() mutable -> asio::awaitable<void> {
+                co_await record_scheduled_cancellation(std::move(keep), cause, std::move(claim));
+            },
+            asio::detached);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// The task that records the Cancelled state. Nothing can receive its error, so a cancellation that records nothing is
+// reported on the handle (a notice), and the run stays as it was: interrupted, and cancellable again.
+asio::awaitable<void> RunControl::record_scheduled_cancellation(std::shared_ptr<RunControl> self,
+                                                                CancellationCause cause,
+                                                                PendingCancellations::Claim claim) {
+    std::exception_ptr failure;
+    bool               recorded = false;
+    try {
+        recorded = co_await self->cancel_async(cause, {}, &failure);
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    claim.release();
+    if (!recorded) self->report_unrecorded_cancellation(std::move(failure));
+}
+
+void RunControl::report_unrecorded_cancellation(std::exception_ptr failure) noexcept {
+    try {
+        {
+            // Only an interrupted run is left as it was. Another path may have ended it since (a cancel_async of the
+            // caller's, for one), and an executing run was stopped in memory whatever the store did.
+            std::lock_guard lock(mutex_);
+            if (!result_ || result_->status() != ProgramTerminalStatus::Interrupted) return;
+        }
+        json witness{{"run_id", run_id}, {"reason", failure ? "store_error" : "state_changed"}};
+        if (failure) {
+            std::string message;
+            try {
+                std::rethrow_exception(failure);
+            } catch (const std::exception& error) {
+                message = error.what();
+            } catch (...) {
+                message = "non-standard exception";
+            }
+            for (auto& c : message)  // keep the text valid whatever what() held
+                if (static_cast<unsigned char>(c) < 0x20 || static_cast<unsigned char>(c) > 0x7e) c = '?';
+            witness["error"] = std::move(message);
+        }
+        add_notice(ProgramNotice{
+            "P_CANCELLATION_NOT_RECORDED",
+            "A scheduled cancellation did not record the Cancelled state of an interrupted run, which is as it was",
+            std::move(witness)});
+    } catch (...) {
+    }
+}
+
+// The synchronous cancellation. Its result says whether the call accepted the cancellation, and it does the same work as
+// cancel_async. Where it may wait it waits for the store, on the calling thread, so the result is whether the state was
+// written. It does not wait where waiting could not end: on a thread that runs the runtime's executor (a node body, a
+// deadline) it would block a thread that a suspended operation may need, and on a host-pumped executor nothing could
+// finish. There an executing run stops in memory and the Cancelled state of an interrupted run is scheduled as a task
+// of the executor (cancel_without_waiting); cancel_async is the call that waits until that state is published.
 bool RunControl::cancel(CancellationCause cause) noexcept {
     try {
         if (const auto next = following_successor()) return next->cancel(cause);
@@ -2980,7 +3059,7 @@ bool RunControl::cancel(CancellationCause cause) noexcept {
                                        scheduler->stores_inline);
     } catch (...) {
         if (const auto next = following_successor()) return next->cancel(cause);
-        return cancel_without_waiting(cause, false);
+        return cancel_without_waiting(cause, true);
     }
 }
 
@@ -3532,6 +3611,11 @@ asio::awaitable<std::optional<ExactProgramHandoff>> RunControl::latest_handoff_a
 std::optional<ExactProgramHandoff> RunControl::latest_handoff() const {
     return scheduler->run_blocking(latest_handoff_async(), "ProgramHandle::latest_handoff",
                                    "ProgramHandle::latest_handoff_async", scheduler->stores_inline);
+}
+
+void RunControl::set_pending_cancellations(std::shared_ptr<PendingCancellations> pending) {
+    std::lock_guard lock(mutex_);
+    pending_cancellations_ = std::move(pending);
 }
 
 void RunControl::set_handoff_coordination_mutex(
@@ -4774,6 +4858,9 @@ struct ProcessRuntimeState {
         std::make_shared<detail::ReentrantOperationLock>();
     detail::PureMutex         controls_mutex;
     std::vector<ControlEntry> controls;
+    // The cancellations of interrupted runs that a task of an executor has yet to record.
+    std::shared_ptr<detail::PendingCancellations> pending_cancellations =
+        std::make_shared<detail::PendingCancellations>();
 };
 
 std::shared_ptr<ProcessRuntimeState> process_runtime_state(const ProgramTransitionStore& transitions) {
@@ -5038,9 +5125,13 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
 
     // A control for a run read back from the store: the run's events are loaded first, which only a coroutine can await.
     asio::awaitable<std::shared_ptr<detail::RunControl>> make_record_control(ProgramRunRecord record) {
-        auto events = co_await transitions->load_events(record.owner_scope(), record.run_id(), 0);
-        co_return std::make_shared<detail::RunControl>(std::move(record), std::move(events), transitions,
-                                                       config.native_history_archive, scheduler);
+        auto events  = co_await transitions->load_events(record.owner_scope(), record.run_id(), 0);
+        auto control = std::make_shared<detail::RunControl>(std::move(record), std::move(events), transitions,
+                                                            config.native_history_archive, scheduler);
+        // Not registered: this control runs nothing. A cancel() of its handle still takes the claim that keeps a second
+        // cancel() and a resume from competing with the scheduled cancellation (see register_control).
+        control->set_pending_cancellations(process_state->pending_cancellations);
+        co_return control;
     }
 
     // The synchronous form of an operation: its coroutine body, run to completion on the calling thread.
@@ -5645,6 +5736,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 handler(std::move(handle), std::move(*lease));
             };
         }
+        control->set_pending_cancellations(process_state->pending_cancellations);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
         control->set_handoff_coordination_mutex(
             process_state->transition_mutex,
@@ -9219,6 +9311,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
                                                            ProgramResume resume_value) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program resume run_id must not be empty");
+    // A cancellation that ProgramHandle::cancel accepted and a task has yet to record: the resume would compete with it
+    // for the same record, and the call was accepted first.
+    if (impl_->process_state->pending_cancellations->pending(owner_scope, run_id))
+        throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program run has a cancellation that is not recorded yet");
 
     const auto previous = (co_await impl_->transitions->load(owner_scope, run_id));
     if (!previous) {
