@@ -47,8 +47,18 @@ public:
         fail_next_ = std::move(name);
     }
 
+    /// The next call of `name` does not complete until release_held(): the coroutine that made it yields to the loop
+    /// again and again. A test uses it to keep one operation (and the lock it runs under) in flight while others go on.
+    void hold_next(std::string name) {
+        std::lock_guard lock(mutex_);
+        hold_next_ = std::move(name);
+    }
+    void release_held() { holding_.store(false); }
+    bool is_held() const { return holding_.load(); }
+
     /// Awaited first by every operation of a wrapper: suspends until the host's next turn while the stores are pumped.
     asio::awaitable<void> turn(const char* store, const char* operation) {
+        bool hold = false;
         {
             std::lock_guard lock(mutex_);
             const auto name = std::string(store) + "." + operation;
@@ -57,11 +67,17 @@ public:
                 fail_next_.clear();
                 throw std::runtime_error("injected store failure: " + name);
             }
+            if (!hold_next_.empty() && hold_next_ == name) {
+                hold_next_.clear();
+                holding_.store(true);
+                hold = true;
+            }
         }
         if (!pumped_.load()) co_return;
         ++suspended_;
         co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
         if (std::this_thread::get_id() != host_) ++off_thread_;
+        while (hold && holding_.load()) co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
     }
 
     /// Calls made to one store (by its name: "transition", "program", "grant", "fragment", "module"), or to all.
@@ -89,6 +105,8 @@ private:
     mutable std::mutex                 mutex_;
     std::map<std::string, std::uint64_t> operations_;
     std::string                        fail_next_;
+    std::string                        hold_next_;
+    std::atomic<bool>                  holding_{false};
     std::atomic<std::uint64_t>         suspended_{0};
     std::atomic<std::uint64_t>         off_thread_{0};
 };
