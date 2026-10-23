@@ -6,6 +6,8 @@
 #include <cppdotenv/dotenv.hpp>
 #include <httplib.h>
 
+#include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cstdlib>
 #include <filesystem>
@@ -20,6 +22,55 @@ std::string tenant(const httplib::Request& request) {
     if (token == "Bearer alice-demo") return "alice";
     if (token == "Bearer bob-demo") return "bob";
     throw std::invalid_argument("Use a demo tenant token");
+}
+
+// The host of a Host header value, `uri-host [":" port]`, in lowercase and without its
+// port; empty when the value is not of that form. An IPv6 address keeps its brackets.
+std::string host_of(const std::string& value) {
+    std::size_t end = 0;
+    if (!value.empty() && value.front() == '[') {
+        end = value.find(']');
+        if (end == std::string::npos) return {};
+        ++end;
+    } else {
+        end = std::min(value.find(':'), value.size());
+    }
+    if (end == 0 || value.compare(0, end, "[]") == 0) return {};
+    if (end < value.size()) {
+        if (value[end] != ':') return {};
+        for (std::size_t i = end + 1; i < value.size(); ++i)
+            if (!std::isdigit(static_cast<unsigned char>(value[i]))) return {};
+    }
+    std::string host = value.substr(0, end);
+    std::transform(host.begin(), host.end(), host.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return host;
+}
+
+// A page on another origin reaches this loopback listener once its host name is pointed at
+// this machine (DNS rebinding): the browser then sends that name as Host, and its own origin
+// as Origin when it sends one. Only the loopback names and this server's own origin pass;
+// the answer to anything else is a refusal that is sent before the route (or any body) is read.
+httplib::Server::HandlerResponse refuse_foreign_page(const httplib::Request& req,
+                                                    httplib::Response& res, unsigned port) {
+    const auto refuse = [&res](int status, const char* message) {
+        res.status = status;
+        res.set_content(json{{"error", message}}.dump(), "application/json");
+        return httplib::Server::HandlerResponse::Handled;
+    };
+    const std::string host = host_of(req.get_header_value("Host"));
+    if (host.empty()) return refuse(400, "Host header is missing or invalid");
+    if (host != "localhost" && host != "127.0.0.1" && host != "[::1]")
+        return refuse(403, "Host is not allowed");
+    if (req.has_header("Origin")) {
+        // A browser sends its origin in this form: lowercase, no path, no default port.
+        const std::string suffix = port == 80 ? "" : ":" + std::to_string(port);
+        const std::string origin = req.get_header_value("Origin");
+        if (origin != "http://localhost" + suffix && origin != "http://127.0.0.1" + suffix &&
+            origin != "http://[::1]" + suffix)
+            return refuse(403, "Origin is not allowed");
+    }
+    return httplib::Server::HandlerResponse::Unhandled;
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -150,6 +201,9 @@ int main(int argc, char** argv) {
         server.set_payload_max_length(12288);
         server.set_read_timeout(10);
         server.set_write_timeout(180);
+        server.set_pre_routing_handler([port](const httplib::Request& req, httplib::Response& res) {
+            return refuse_foreign_page(req, res, port);
+        });
         server.set_default_headers({{"Cache-Control", "no-store"},
                                     {"X-Content-Type-Options", "nosniff"},
                                     {"Content-Security-Policy",
