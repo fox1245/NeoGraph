@@ -9777,6 +9777,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
                                                               ProgramEffectResolution resolution) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconcile run_id must not be empty");
+    // reconcile consumes an interrupted run as resume does (an unknown outcome moves it to AmbiguousEffect, which a
+    // cancellation leaves alone), so it too is refused while a cancellation that was accepted is not recorded yet.
+    if (impl_->process_state->pending_cancellations->pending(owner_scope, run_id))
+        throw_runtime_diagnostic("P_RECONCILE_CONFLICT", "Program run has a cancellation that is not recorded yet");
     const auto previous = (co_await impl_->transitions->load(owner_scope, run_id));
     if (!previous) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");

@@ -29,6 +29,9 @@
 #include <neograph/program/sqlite_transition_store.h>
 #endif
 
+#include <asio/detached.hpp>
+#include <asio/this_coro.hpp>
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -64,6 +67,7 @@ std::atomic<int> approvals_run{0};
 std::atomic<int> model_calls{0};
 std::atomic<int> tool_runs{0};
 std::atomic<int> child_runs{0};
+std::atomic<int> effect_runs{0};
 // Runs inside the child node, before it returns: a test switches stores to host turns from here.
 std::function<void()> on_child_node;
 
@@ -95,6 +99,7 @@ public:
     explicit EffectNode(std::string name) : name_(std::move(name)) {}
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
         ++approvals_run;
+        ++effect_runs;
         if (!in.ctx.resume_value) {
             throw graph::NodeInterrupt(
                 "capability result required",
@@ -266,6 +271,9 @@ json chain_document(const std::vector<std::pair<std::string, std::string>>& node
 // Two approvals in a row: the run pauses twice, in two attempts.
 json two_pause_document() { return chain_document({{"approve-one", "host-approve"}, {"approve-two", "host-approve"}}); }
 
+// One effect whose outcome the host reconciles.
+json effect_document() { return chain_document({{"effect", "host-effect"}}); }
+
 // act: a Program that only gates a tool call.
 json tool_only_document() {
     json definition{{"schema_version", 1}, {"name", "main"}, {"conditional_edges", json::array()}};
@@ -417,6 +425,7 @@ public:
         model_calls     = 0;
         tool_runs       = 0;
         child_runs      = 0;
+        effect_runs     = 0;
         on_child_node   = nullptr;
 
         LinkHelper link{fixture.store, *fixture.child_bindings};
@@ -538,6 +547,7 @@ public:
     std::shared_ptr<ProgramCatalog>            setup_catalog = make_catalog(fixture.store.shared(), inner_modules);
     ProgramVersion                             review        = admit(review_document());
     ProgramVersion                             two_pause     = admit(two_pause_document());
+    ProgramVersion                             effect        = admit(effect_document());
     ProgramVersion                             tool_only     = admit(tool_only_document());
     ProgramVersion                             child         = admit(child_program_document());
     ProgramVersion                             parent        = admit(expand_task_graph_document(expansion_proposal()));
@@ -1560,13 +1570,20 @@ TEST(ProgramHostPumpedStores, ASynchronousCancelOfARunReadBackFromTheStoresHolds
 // The resume is started after the call accepted the cancellation, before the loop wrote it. It must not win: the
 // Cancelled record is written, and the resume is refused, so no resumed run continues after the accepted call.
 namespace {
-void resume_after_an_accepted_cancel(bool cancel_inside_the_turn) {
+// `lock_held`: the cancellation of another run is under way, and every cancellation takes the coordination lock first,
+// so the task of the accepted cancel() waits behind it. A resume does not take that lock, and would reach the store
+// before the task if nothing stopped it.
+void resume_after_an_accepted_cancel(bool cancel_inside_the_turn, bool lock_held = false) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
     host.grant_tool("sync-cancel-then-resume", host.review);
-    auto run = pause_review(host, "sync-cancel-then-resume");
-    ASSERT_TRUE(run.handle && run.paused);
+    auto run    = pause_review(host, "sync-cancel-then-resume");
+    auto holder = pause_review(host, "sync-cancel-lock-holder");
+    ASSERT_TRUE(run.handle && run.paused && holder.handle);
     ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
     host.stores.transitions->set_pumped(true);
+    // The other cancellation takes the lock, and its first read of the store does not complete until the test says so.
+    auto hold_the_lock = [&]() -> asio::awaitable<void> { (void)co_await holder.handle->cancel_async(); };
+    if (lock_held) host.stores.transitions->hold_next("transition.load");
 
     bool                         accepted = false;
     std::string                  refusal;
@@ -1581,12 +1598,14 @@ void resume_after_an_accepted_cancel(bool cancel_inside_the_turn) {
     };
     if (cancel_inside_the_turn) {
         auto script = [&]() -> asio::awaitable<int> {
+            if (lock_held) asio::co_spawn(co_await asio::this_coro::executor, hold_the_lock, asio::detached);
             accepted = run.handle->cancel();
             co_await resume();
             co_return 0;
         };
         host.run(script());
     } else {
+        if (lock_held) asio::co_spawn(host.hosted.loop.executor(), hold_the_lock, asio::detached);
         accepted    = run.handle->cancel();
         auto script = [&]() -> asio::awaitable<int> {
             co_await resume();
@@ -1597,6 +1616,7 @@ void resume_after_an_accepted_cancel(bool cancel_inside_the_turn) {
     EXPECT_TRUE(accepted);
     EXPECT_FALSE(resumed) << "a run was resumed after its cancellation was accepted";
     EXPECT_EQ(refusal, "P_RESUME_CONFLICT");
+    host.stores.transitions->release_held();
     ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
     EXPECT_EQ(stored_state(host, "sync-cancel-then-resume"), ContinuationState::Cancelled);
     EXPECT_EQ(cancelled_terminals(host, "sync-cancel-then-resume"), 1U);
@@ -1621,6 +1641,14 @@ TEST(ProgramHostPumpedStores, AResumeStartedAfterAnAcceptedCancelIsRefusedAndThe
 
 TEST(ProgramHostPumpedStores, AResumeInTheSameTurnAsAnAcceptedCancelIsRefusedAndTheRunEndsCancelled) {
     resume_after_an_accepted_cancel(true);
+}
+
+TEST(ProgramHostPumpedStores, AResumeThatCouldOvertakeAnAcceptedCancelBehindAnotherCancellationIsRefused) {
+    resume_after_an_accepted_cancel(false, true);
+}
+
+TEST(ProgramHostPumpedStores, AResumeInTheSameTurnThatCouldOvertakeAnAcceptedCancelIsRefused) {
+    resume_after_an_accepted_cancel(true, true);
 }
 
 // A resume that is under way when cancel() is called has passed the claim check, and meets the scheduled cancellation at
@@ -1810,7 +1838,7 @@ TEST(ProgramHostPumpedStores, AnAcceptedCancelWhoseTaskNeverRunsLeavesTheRunInte
     EXPECT_EQ(stored->continuation().state, ContinuationState::Interrupted);
 }
 
-// ---- A handle of an earlier attempt ----
+// ---- A handle of an earlier attempt, and reconcile ----
 //
 // A handle holds the result of the attempt it came from. After the run was resumed through another handle, the first
 // one still holds Interrupted, so a cancel() on it looks like the cancellation of an interrupted run. It must not
@@ -1867,6 +1895,7 @@ void a_handle_of_an_earlier_attempt(std::shared_ptr<ProgramTransitionStore> jour
     EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
     EXPECT_EQ(events.back().attempt, 2U);
     EXPECT_EQ(cancelled_terminals(host, run_id), 1U);
+    EXPECT_EQ(effect_runs.load(), 0);
 }
 
 }  // namespace
@@ -1892,6 +1921,64 @@ TEST(ProgramHostPumpedStores, AHandleOfAnEarlierAttemptDoesNotCancelARunThatExec
                                    "earlier-attempt-sqlite");
 }
 #endif
+
+// reconcile consumes an interrupted run as resume does: with the outcome of its effect declared unknown it moves the
+// record to AmbiguousEffect, which cancel_async leaves alone. It does not take the coordination lock either, so with
+// the task of an accepted cancel() waiting behind another cancellation it would reach the store first. It is refused
+// while the accepted cancellation is pending.
+TEST(ProgramHostPumpedStores, AReconcileThatCouldOvertakeAnAcceptedCancelBehindAnotherCancellationIsRefused) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    auto                  control = pause_run(host, host.effect, "reconcile-control");
+    auto                  holder  = pause_run(host, host.effect, "reconcile-lock-holder");
+    auto                  run     = pause_run(host, host.effect, "sync-cancel-then-reconcile");
+    ASSERT_TRUE(control.paused && holder.handle && run.handle && run.paused);
+    ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
+    ASSERT_TRUE(run.paused->interrupt() && run.paused->interrupt()->pending_effect);
+    host.stores.transitions->set_pumped(true);
+
+    // The control: with no cancellation pending, the same reconcile of a paused run goes through.
+    std::optional<ProgramResult> ambiguous;
+    auto reconcile_control = [&]() -> asio::awaitable<int> {
+        ProgramEffectResolution resolution{pending_call_id(*control.paused), ProgramEffectReconciliation::Unknown,
+                                           std::nullopt, "trace-reconcile-control", {}};
+        auto handle = co_await host.runtime->reconcile_async(kOwner, "reconcile-control", std::move(resolution));
+        ambiguous   = co_await handle.wait_async();
+        co_return 0;
+    };
+    host.run(reconcile_control());
+    ASSERT_TRUE(ambiguous);
+    EXPECT_EQ(ambiguous->status(), ProgramTerminalStatus::AmbiguousEffect) << failure_text(*ambiguous);
+    EXPECT_EQ(stored_state(host, "reconcile-control"), ContinuationState::AmbiguousEffect);
+
+    bool                         accepted = false;
+    std::string                  refusal;
+    std::optional<ProgramHandle> reconciled;
+    // The other cancellation takes the lock, and its first read of the store does not complete until the test says so.
+    auto hold_the_lock = [&]() -> asio::awaitable<void> { (void)co_await holder.handle->cancel_async(); };
+    host.stores.transitions->hold_next("transition.load");
+    auto reconcile = [&]() -> asio::awaitable<int> {
+        asio::co_spawn(co_await asio::this_coro::executor, hold_the_lock, asio::detached);
+        accepted = run.handle->cancel();
+        try {
+            ProgramEffectResolution resolution{pending_call_id(*run.paused), ProgramEffectReconciliation::Unknown,
+                                               std::nullopt, "trace-reconcile-after-cancel", {}};
+            reconciled = co_await host.runtime->reconcile_async(kOwner, "sync-cancel-then-reconcile", std::move(resolution));
+        } catch (const ProgramDiagnosticError& error) {
+            refusal = error.diagnostic().code;
+        }
+        co_return 0;
+    };
+    host.run(reconcile());
+    EXPECT_TRUE(accepted);
+    EXPECT_FALSE(reconciled) << "the run was reconciled after its cancellation was accepted";
+    EXPECT_EQ(refusal, "P_RECONCILE_CONFLICT");
+    host.stores.transitions->release_held();
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
+    EXPECT_EQ(stored_state(host, "sync-cancel-then-reconcile"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-then-reconcile"), 1U);
+    EXPECT_TRUE(run.handle->notices().empty());
+    EXPECT_EQ(effect_runs.load(), 3) << "each run asked for its effect once, and none ran again";
+}
 
 // ---- The whole lifecycle ----
 
