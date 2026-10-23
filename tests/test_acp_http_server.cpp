@@ -1025,6 +1025,120 @@ TEST(ACPHttpServer, TheConnectionLimitIsEnforced) {
 }
 
 // ===========================================================================
+// What a remote client can make the server do
+// ===========================================================================
+
+TEST(ACPHttpServer, AClientCannotMakeTheServerStartMcpServersUnlessTheApplicationAllowsIt) {
+    // The stdio MCP servers of session/new are processes of the server's host
+    // with the client's command line. A program that does not exist keeps the
+    // allowed case harmless: the agent answers that it could not start it.
+    const json servers = json::array(
+        {json{{"name", "x"}, {"command", "/nonexistent/acp-http-test-program"}, {"args", json::array()}}});
+    const auto is_refusal = [](const json& answer) {
+        return answer.contains("error") && answer["error"]["code"] == -32602 &&
+               answer["error"].contains("data") &&
+               answer["error"]["data"]["reason"] == "mcp_servers_not_accepted";
+    };
+    {
+        Fixture   fixture;
+        HttpAgent agent(fixture.port());
+        ASSERT_EQ(agent.initialize().status, 200);
+        auto stream = agent.stream();
+        ASSERT_EQ(agent.post(request(2, "session/new", {{"cwd", "/work"}, {"mcpServers", servers}})).status, 202);
+        const auto refused = stream->response(2);
+        ASSERT_TRUE(refused.has_value());
+        EXPECT_TRUE(is_refusal(*refused)) << refused->dump();
+
+        // A resume that names servers is refused the same way, and so is a
+        // notification, which the agent would otherwise run without a reply.
+        ASSERT_EQ(agent.post(request(3, "session/resume",
+                                     {{"sessionId", "sess-x"}, {"cwd", "/work"}, {"mcpServers", servers}}),
+                             "sess-x").status, 202);
+        const auto resume = stream->response(3);
+        ASSERT_TRUE(resume.has_value());
+        EXPECT_TRUE(is_refusal(*resume)) << resume->dump();
+        ASSERT_EQ(agent.post(notification("session/new", {{"cwd", "/work"}, {"mcpServers", servers}})).status, 202);
+
+        // An empty list is how every client says "none".
+        const auto session = agent.new_session(*stream, 4);
+        EXPECT_FALSE(session.empty());
+    }
+    {
+        Fixture fixture;
+        WsAgent agent(fixture.port());
+        ASSERT_TRUE(agent.connect());
+        ASSERT_TRUE(agent.send(initialize_request(1)));
+        ASSERT_TRUE(agent.response(1).has_value());
+        ASSERT_TRUE(agent.send(request(2, "session/new", {{"cwd", "/work"}, {"mcpServers", servers}})));
+        const auto refused = agent.response(2);
+        ASSERT_TRUE(refused.has_value());
+        EXPECT_TRUE(is_refusal(*refused)) << refused->dump();
+        ASSERT_TRUE(agent.send(new_session_request(3)));
+        const auto created = agent.response(3);
+        ASSERT_TRUE(created.has_value());
+        EXPECT_TRUE(created->contains("result")) << created->dump();
+    }
+    {
+        auto config                     = test_config();
+        config.allow_client_mcp_servers = true;
+        Fixture   fixture(config);
+        HttpAgent agent(fixture.port());
+        ASSERT_EQ(agent.initialize().status, 200);
+        auto stream = agent.stream();
+        ASSERT_EQ(agent.post(request(2, "session/new", {{"cwd", "/work"}, {"mcpServers", servers}})).status, 202);
+        const auto answer = stream->response(2);
+        ASSERT_TRUE(answer.has_value());
+        // It reached the agent, which could not start the program.
+        ASSERT_TRUE(answer->contains("error")) << answer->dump();
+        EXPECT_EQ((*answer)["error"]["code"], -32603) << answer->dump();
+    }
+}
+
+TEST(ACPHttpServer, WhatPilesUpForABusyAgentIsBoundedAndRefused) {
+    auto config              = test_config();
+    config.max_payload_bytes = 64 * 1024;  // so the agent's input holds 1 MiB
+    Fixture fixture(config);
+
+    // One connection holds the shared engine with a running prompt.
+    HttpAgent busy(fixture.port());
+    ASSERT_EQ(busy.initialize().status, 200);
+    auto       busy_stream  = busy.stream();
+    const auto busy_session = busy.new_session(*busy_stream, 2);
+    ASSERT_EQ(busy.post(prompt_request(3, busy_session, "wait"), busy_session).status, 202);
+    ASSERT_TRUE(fixture.wait_for([&] { return fixture.probe->entered.load() == 1; }));
+
+    // On a second connection, session/resume of a session the agent does not
+    // know reads the engine's checkpoints, which the engine refuses while a run
+    // is active: the agent's reader waits for it (up to two seconds) and reads
+    // nothing else meanwhile.
+    const std::string pad(48 * 1024, 'x');
+    HttpAgent         other(fixture.port());
+    ASSERT_EQ(other.initialize().status, 200);
+    auto other_stream = other.stream();
+    ASSERT_EQ(other.post(request(2, "session/resume", {{"sessionId", "sess-unknown"}, {"cwd", "/work"}}),
+                         "sess-unknown").status, 202);
+    int   accepted = 0;
+    Reply refusal;
+    for (int i = 0; i < 200 && refusal.status == -1; ++i) {
+        const auto reply = other.post(notification("$/pad", {{"pad", pad}}));
+        if (reply.status == 202) {
+            ++accepted;
+        } else {
+            refusal = reply;
+        }
+    }
+    ASSERT_EQ(refusal.status, 503) << "accepted " << accepted << " messages of 48 KiB";
+    EXPECT_EQ(refusal.json_body()["error"]["code"], -32000);
+    EXPECT_LT(accepted, 100);  // about 1 MiB, not everything that was sent
+
+    // A refused request leaves nothing behind: once the agent reads again, the
+    // same connection works.
+    fixture.probe->release.store(true);
+    ASSERT_TRUE(other_stream->response(2).has_value());
+    EXPECT_FALSE(other.new_session(*other_stream, 3).empty());
+}
+
+// ===========================================================================
 // Guard and authentication (both transports)
 // ===========================================================================
 
