@@ -742,10 +742,41 @@ struct ChildQuotaReservation {
     ~ChildQuotaReservation() { release(); }
 };
 
-// The terminal publications below await the transition store; none of them throws.
+// The remaining budget that the journal holds beneath the reservation of a JavaScript command, for an attempt that ends
+// before it has begun (see detail::held_command_remainder): the attempt has run nothing, so the reservation is neither
+// settled nor returned. Nothing when the journal holds none, and when the store cannot be read: the end of the attempt
+// then keeps the grant, as it did, and its publication fails closed.
+asio::awaitable<std::optional<RunBudget>> held_remainder_of_unstarted_attempt(const detail::RunControl& control) {
+    try {
+        co_return co_await detail::held_command_remainder(control);
+    } catch (...) {
+        co_return std::nullopt;
+    }
+}
+
+// An attempt whose first event, Started, the observer rejected: no node of it has run. The run ends Failed with the code
+// of the observer's error and `remaining`, the budget the resume or the reconciliation left it. The reservation of a
+// JavaScript callCore that the journal holds is not part of `remaining` and is not returned, since nothing has measured
+// its use.
+asio::awaitable<void> complete_attempt_event_sink_rejected(const std::shared_ptr<detail::RunControl>& control,
+                                                           RunBudget                                   remaining,
+                                                           CoreCheckpointIdentity                      checkpoint,
+                                                           std::string                                 message) {
+    detail::RunOutcome failed;
+    failed.remaining_budget = std::move(remaining);
+    failed.checkpoint       = std::move(checkpoint);
+    failed.status           = ProgramTerminalStatus::Failed;
+    failed.failure = ProgramFailure{"P_EVENT_SINK", std::move(message), "root", "", 0, json::object()};
+    co_await control->complete_async(std::move(failed));
+}
+
+// The terminal publications below await the transition store; none of them throws. An attempt that has not begun
+// (`attempt_unstarted`) ends with the remainder beneath the reservation of a command that its journal holds, not with its
+// grant, which includes the reservation.
 asio::awaitable<void> complete_attempt_launch_failure(std::shared_ptr<detail::RunControl> control,
                                                       std::optional<std::string>          checkpoint_id,
-                                                      std::exception_ptr                  error) {
+                                                      std::exception_ptr                  error,
+                                                      bool                                attempt_unstarted = false) {
     std::string message = "Program execution coroutine failed";
     if (error) {
         try {
@@ -763,12 +794,15 @@ asio::awaitable<void> complete_attempt_launch_failure(std::shared_ptr<detail::Ru
         }
     }
 
+    std::optional<RunBudget> held;
+    if (attempt_unstarted) held = co_await held_remainder_of_unstarted_attempt(*control);
+
     detail::RunOutcome outcome;
     outcome.status           = ProgramTerminalStatus::Failed;
-    outcome.remaining_budget = control->granted_budget;
+    outcome.remaining_budget = held ? *held : control->granted_budget;
 
     outcome.usage.program_operations = control->attempt == 1 ? 1 : 0;
-    if (control->attempt == 1) outcome.remaining_budget.max_program_operations = 0;
+    if (control->attempt == 1 && !held) outcome.remaining_budget.max_program_operations = 0;
     outcome.failure =
         ProgramFailure{"P_RUNTIME_CORE_FAILURE", std::move(message), "root", "", 0, json::object()};
     if (checkpoint_id) {
@@ -791,18 +825,22 @@ std::optional<CoreCheckpointIdentity> attempt_checkpoint(
 
 asio::awaitable<void> complete_attempt_admission_cancelled(
     std::shared_ptr<detail::RunControl> control,
-    std::optional<std::string>          checkpoint_id) {
+    std::optional<std::string>          checkpoint_id,
+    bool                                attempt_unstarted) {
     const auto cause = control->seal_terminal_cause();
     if (cause == detail::CancellationCause::None) {
         co_await complete_attempt_launch_failure(
             control, checkpoint_id,
             std::make_exception_ptr(
-                std::runtime_error("Host admission stopped without a Program cancellation cause")));
+                std::runtime_error("Host admission stopped without a Program cancellation cause")),
+            attempt_unstarted);
         co_return;
     }
 
+    std::optional<RunBudget> held;
+    if (attempt_unstarted) held = co_await held_remainder_of_unstarted_attempt(*control);
     detail::RunOutcome outcome;
-    outcome.remaining_budget = control->granted_budget;
+    outcome.remaining_budget = held ? *held : control->granted_budget;
     outcome.checkpoint       = attempt_checkpoint(control, checkpoint_id);
     if (cause == detail::CancellationCause::Timeout) {
         outcome.status = ProgramTerminalStatus::TimedOut;
@@ -833,10 +871,13 @@ asio::awaitable<void> complete_attempt_admission_cancelled(
 
 asio::awaitable<void> complete_attempt_host_admission_failure(std::shared_ptr<detail::RunControl> control,
                                                               std::optional<std::string>          checkpoint_id,
-                                                              HostAdmissionError                  error) {
+                                                              HostAdmissionError                  error,
+                                                              bool                                attempt_unstarted) {
+    std::optional<RunBudget> held;
+    if (attempt_unstarted) held = co_await held_remainder_of_unstarted_attempt(*control);
     detail::RunOutcome outcome;
     outcome.status           = ProgramTerminalStatus::Failed;
-    outcome.remaining_budget = control->granted_budget;
+    outcome.remaining_budget = held ? *held : control->granted_budget;
     outcome.checkpoint       = attempt_checkpoint(control, checkpoint_id);
     outcome.failure          = ProgramFailure{"P_HOST_ADMISSION",
                                      error.what(),
@@ -915,12 +956,16 @@ asio::awaitable<void> execute_host_admitted_attempt(
         if (deadline_wait) cancel_host_admission_deadline(control, std::move(deadline_wait));
     };
     // A handler cannot suspend: it only notes how the attempt stopped, and the terminal publication follows it.
-    enum class Stopped { Cancelled, QueueTimeout, AdmissionFailed } stopped = Stopped::Cancelled;
+    enum class Stopped { Cancelled, QueueTimeout, AdmissionFailed, LaunchFailed } stopped = Stopped::Cancelled;
     std::optional<HostAdmissionError> admission_error;
+    std::exception_ptr                launch_error;
+    // Once the attempt has begun, what stops it is not an admission outcome and the run has done work: the publications
+    // below then keep the grant of the attempt, as they always did.
+    bool attempt_started = false;
     try {
         if (control->cancel_token->is_cancelled()) {
             stop_deadline();
-            co_await complete_attempt_admission_cancelled(control, checkpoint_id);
+            co_await complete_attempt_admission_cancelled(control, checkpoint_id, true);
             co_return;
         }
 
@@ -935,9 +980,10 @@ asio::awaitable<void> execute_host_admitted_attempt(
         stop_deadline();
 
         if (control->cancel_token->is_cancelled()) {
-            co_await complete_attempt_admission_cancelled(control, checkpoint_id);
+            co_await complete_attempt_admission_cancelled(control, checkpoint_id, true);
             co_return;
         }
+        attempt_started = true;
         co_await detail::execute_run_attempt(control, std::move(input), checkpoint_id,
                                              std::move(javascript_core_resume_value));
         co_return;
@@ -947,13 +993,21 @@ asio::awaitable<void> execute_host_admitted_attempt(
         admission_error = error;
         stopped = error.failure() == HostAdmissionFailure::QueueTimeout ? Stopped::QueueTimeout
                                                                         : Stopped::AdmissionFailed;
+    } catch (...) {
+        // The host's resolver threw, or the lease was empty: the attempt cannot be launched, which is the one outcome
+        // left to an attempt that has not begun. One that has begun fails its launch where the coroutine ends.
+        if (attempt_started) throw;
+        launch_error = std::current_exception();
+        stopped      = Stopped::LaunchFailed;
     }
     stop_deadline();
     if (stopped == Stopped::QueueTimeout) (void)co_await control->cancel_async(detail::CancellationCause::Timeout);
-    if (stopped == Stopped::AdmissionFailed)
-        co_await complete_attempt_host_admission_failure(control, checkpoint_id, *admission_error);
+    if (stopped == Stopped::LaunchFailed)
+        co_await complete_attempt_launch_failure(control, checkpoint_id, launch_error, !attempt_started);
+    else if (stopped == Stopped::AdmissionFailed)
+        co_await complete_attempt_host_admission_failure(control, checkpoint_id, *admission_error, !attempt_started);
     else
-        co_await complete_attempt_admission_cancelled(control, checkpoint_id);
+        co_await complete_attempt_admission_cancelled(control, checkpoint_id, !attempt_started);
 }
 
 // The attempt's coroutine failed: close the run, on the attempts executor, awaiting the terminal publication.
@@ -1394,25 +1448,6 @@ json javascript_resume_terminal_result(const json& value, const RunBudget& consu
                                {"program_operations", consumed_reservation.max_program_operations},
                                {"core_steps", consumed_reservation.max_core_steps},
                                {"peak_concurrency", 0U}}}};
-}
-
-ProgramPendingEffect javascript_command_pending_effect(
-    const detail::RunControl& control, const JavaScriptPendingCommand& pending_command) {
-    const auto               command_json = pending_command.command.to_json();
-    ProgramPendingEffectData pending;
-    pending.operation_id         = "root.javascript." + std::to_string(pending_command.ordinal);
-    pending.call_id              = pending_command.effect_identity;
-    pending.effect_id            = pending_command.effect_identity;
-    pending.result_schema        = json::object();
-    pending.payload              = json{{"bundle_id", control.bundle_id},
-                                        {"command_ordinal", pending_command.ordinal},
-                                        {"command", command_json},
-                                        {"effect_identity", pending_command.effect_identity}};
-    pending.effect_mode          = EffectMode::Brokered;
-    pending.idempotency          = ProgramEffectIdempotency::NonIdempotent;
-    pending.core_node            = "javascript";
-    pending.core_interrupt_value = command_json;
-    return ProgramPendingEffect(std::move(pending));
 }
 
 ProgramJavaScriptCommandJournalEntry javascript_completion_entry(
@@ -9572,17 +9607,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         sink_error = error.what();
     }
     if (sink_error) {
-        // The observer rejected the resume before its attempt started: no node of the resumed call has run. The run
-        // ends Failed with the code of the observer's error and the remaining budget the resume left it. When the
-        // resume holds the reservation of a JavaScript callCore, that reservation is not part of the remainder and is
-        // not returned, since nothing has measured its use.
-        detail::RunOutcome failed;
-        failed.remaining_budget = resumed_remaining;
-        failed.checkpoint       = checkpoint;
-        failed.status           = ProgramTerminalStatus::Failed;
-        failed.failure =
-            ProgramFailure{"P_EVENT_SINK", *sink_error, "root", "", 0, json::object()};
-        (co_await control->complete_async(std::move(failed)));
+        // The observer rejected the resume before its attempt started: no node of the resumed call has run.
+        co_await complete_attempt_event_sink_rejected(control, resumed_remaining, checkpoint, *sink_error);
         co_return ProgramHandle(std::move(control));
     }
 
@@ -9973,20 +9999,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
         sink_error = error.what();
     }
     if (sink_error) {
-        detail::RunOutcome failure;
-        failure.remaining_budget = resumed_remaining;
-        failure.checkpoint       = checkpoint;
-        if (resume_javascript_core) {
-            failure.status    = ProgramTerminalStatus::AmbiguousEffect;
-            failure.interrupt = ProgramInterrupt{
-                "javascript", javascript_pending->command.to_json(), std::nullopt,
-                javascript_command_pending_effect(*live_control, *javascript_pending)};
-        } else {
-            failure.status = ProgramTerminalStatus::Failed;
-            failure.failure =
-                ProgramFailure{"P_EVENT_SINK", *sink_error, "root", "", 0, json::object()};
-        }
-        (co_await live_control->complete_async(std::move(failure)));
+        // The observer rejected the reconciliation before its attempt started: no node of the call has run.
+        co_await complete_attempt_event_sink_rejected(live_control, resumed_remaining, checkpoint, *sink_error);
         co_return ProgramHandle(std::move(live_control));
     }
     auto attempt_input = !javascript_commands.empty() || reconcile_plan_operation

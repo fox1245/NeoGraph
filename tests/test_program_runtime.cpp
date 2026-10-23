@@ -32,6 +32,7 @@
 #include "fixtures/unique_temp_dir.h"
 #include "fixtures/coarse_clock_store.h"
 #include "fixtures/fork_share.h"
+#include "fixtures/vanishing_checkpoint_store.h"
 #include "javascript.h"
 #include "registry_access.h"
 #include "run_control.h"
@@ -7484,6 +7485,365 @@ TEST(ProgramRuntimeTest, AResumedJavaScriptRunWhoseHandlerThrowsAtItsStartedEven
         ASSERT_TRUE(ended.failure().has_value());
         EXPECT_EQ(ended.failure()->code, "P_EVENT_SINK");
         EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+        const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);
+        EXPECT_EQ(latest->sequence, held->sequence + 1);
+        EXPECT_EQ(latest->remaining_budget, held->remaining_budget);
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+        EXPECT_EQ(ended.remaining_budget(), held->remaining_budget);
+        auto       fresh = fixture.make_runtime();
+        const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        EXPECT_EQ(found.status(), ProgramTerminalStatus::Failed) << failure_detail(found);
+        EXPECT_EQ(interrupt_calls.load(), 1U);
+    }
+}
+
+namespace {
+
+// What a resumed JavaScript run leaves behind when it ends before the Core call it resumes has started: the terminal
+// state, as the one publication after the resume, the remaining budget the resume left it, none of the reservation of
+// the call returned, and a record that a runtime starting over the stores finds ended.
+void expect_a_resumed_javascript_run_ended_without_returning_its_reservation(
+    AdmittedRuntime& fixture, const std::string& run_id, const ProgramJournalRecord& held,
+    const ProgramResult& ended, ProgramTerminalStatus status, ContinuationState state) {
+    EXPECT_EQ(held.continuation.state, ContinuationState::Running);
+    EXPECT_NE(held.inflight_reservation, RunBudget{}) << "the resume holds the reservation of the call";
+    EXPECT_EQ(ended.status(), status) << failure_detail(ended);
+    const auto latest = fixture.journal->latest("tenant:runtime", run_id);
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->continuation.state, state);
+    EXPECT_EQ(latest->sequence, held.sequence + 1) << "the ending is the one publication after the resume";
+    EXPECT_EQ(latest->remaining_budget, held.remaining_budget) << "nothing of the reservation was returned";
+    EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+    EXPECT_EQ(ended.remaining_budget(), held.remaining_budget);
+    const auto record = fixture.journal->load("tenant:runtime", run_id);
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->continuation().state, state);
+    ASSERT_TRUE(record->terminal_result().has_value());
+    EXPECT_EQ(record->terminal_result()->status(), status);
+    auto       fresh = fixture.make_runtime();
+    const auto found = fresh->reconnect("tenant:runtime", run_id).wait();
+    EXPECT_EQ(found.status(), status) << failure_detail(found);
+}
+
+// Makes the checkpoints vanish on the first event of a resume, which is delivered once the resume is published and before
+// its attempt exists. `before_vanishing` runs first, as a host's callback does.
+class VanishOnStartedSink final : public ProgramEventSink {
+public:
+    explicit VanishOnStartedSink(neograph::test::VanishingCheckpointStore& store) : store_(store) {}
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != ProgramEventKind::Started) return;
+        if (before_vanishing) before_vanishing();
+        store_.vanish();
+    }
+    std::function<void()> before_vanishing;
+
+private:
+    neograph::test::VanishingCheckpointStore& store_;
+};
+
+}  // namespace
+
+// The checkpoint a resume continues from can be gone, or changed, when the attempt of the resume reads it: the stores of
+// a restarted process do not have to agree. The attempt then ends the run CheckpointIncompatible before the call it
+// resumes has started, with the remaining budget the resume left it and none of the reservation of the call returned.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunWhoseCheckpointIsGoneEndsCheckpointIncompatible) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        auto            checkpoints = std::make_shared<neograph::test::VanishingCheckpointStore>();
+        AdmittedRuntime fixture(1, checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:checkpoint-gone");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1), "trace-js-checkpoint-gone", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+        std::optional<ProgramJournalRecord> held;
+        auto                                sink = std::make_shared<VanishOnStartedSink>(*checkpoints);
+        sink->before_vanishing = [&] { held = fixture.journal->latest("tenant:runtime", interrupted.run_id()); };
+        const auto ended = fixture.runtime
+                               ->resume("tenant:runtime", interrupted.run_id(),
+                                        resume_for(interrupted, json{{"decision", "approved"}},
+                                                   "trace-js-checkpoint-gone-resume", sink))
+                               .wait();
+
+        ASSERT_TRUE(held.has_value());
+        expect_a_resumed_javascript_run_ended_without_returning_its_reservation(
+            fixture, interrupted.run_id(), *held, ended, ProgramTerminalStatus::CheckpointIncompatible,
+            ContinuationState::CheckpointIncompatible);
+        ASSERT_TRUE(ended.failure().has_value());
+        EXPECT_EQ(ended.failure()->code, "P_CHECKPOINT_INCOMPATIBLE");
+        EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+    }
+}
+
+namespace {
+
+enum class EndAtHostAdmission { CancelledWhileWaiting, CapacityExceeded, ResolverThrows, CancelledAfterAdmission };
+
+// Resumes a paused run of a JavaScript Program under a runtime with host admission, and ends the resumed attempt at
+// the point `how` names. The first attempt of the run is admitted at once; only the attempt of the resume is held,
+// refused, made to throw, or admitted and then cancelled when its Core call has just started.
+void end_a_resumed_javascript_run_at_host_admission(EndAtHostAdmission how, bool durable) {
+    interrupt_calls.store(0);
+    JoinTestStores  stores(durable);
+    AdmittedRuntime fixture(1, {}, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
+    const output = yield ng.callCore("main", {}, "resume:host-admission");
+    return {value: output.value};
+)JS"));
+
+    const auto host_profile =
+        neograph::HostResourceProfile::create(neograph::HostResourceProfileData{
+            "runtime-host-resumed-v1",
+            neograph::HostResourceVector{.cpu_millis = 1},
+            {},
+            neograph::HostResourceEvidence{"test", neograph::HostResourceConfidence::Measured, 1, false}});
+    auto host = std::make_shared<neograph::HostAdmissionController>(
+        neograph::HostAdmissionControllerConfig{host_profile});
+
+    std::optional<ProgramJournalRecord> held;
+    std::promise<void>                  asked;
+    std::promise<void>                  proceed;
+    auto                                proceed_future = proceed.get_future().share();
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    config.host_admission          = host;
+    config.host_admission_resolver = [&](const ProgramHostAdmissionContext& context) {
+        neograph::HostAdmissionRequest request;
+        request.resources.cpu_millis = 1;
+        if (context.attempt < 2) return request;
+        held = fixture.journal->latest(std::string(context.owner_scope), std::string(context.run_id));
+        switch (how) {
+            case EndAtHostAdmission::CancelledWhileWaiting:
+                asked.set_value();
+                proceed_future.wait();
+                break;
+            case EndAtHostAdmission::CapacityExceeded:
+                request.resources.cpu_millis = 1000;
+                break;
+            case EndAtHostAdmission::ResolverThrows:
+                throw std::runtime_error("the resolver failed");
+            case EndAtHostAdmission::CancelledAfterAdmission:
+                break;
+        }
+        return request;
+    };
+    fixture.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(1), "trace-js-host-admission", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+
+    auto sink = std::make_shared<HoldFirstCoreEventSink>(false);
+    auto handle = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-host-admission-resume",
+                   how == EndAtHostAdmission::CancelledAfterAdmission ? sink : nullptr));
+    if (how == EndAtHostAdmission::CancelledWhileWaiting) {
+        ASSERT_EQ(asked.get_future().wait_for(std::chrono::seconds(10)), std::future_status::ready)
+            << "the attempt never asked for host capacity";
+        EXPECT_TRUE(handle.cancel());
+        proceed.set_value();
+    }
+    if (how == EndAtHostAdmission::CancelledAfterAdmission) {
+        ASSERT_TRUE(sink->entered());
+        EXPECT_TRUE(handle.cancel());
+        sink->release();
+    }
+    const auto ended = handle.wait();
+    ASSERT_TRUE(held.has_value());
+
+    if (how == EndAtHostAdmission::CancelledAfterAdmission) {
+        // Once the admitted attempt has started the Core call, the call settles the reservation with the usage it
+        // measured, and the part it did not use comes back: the end is not the one of an attempt that never started.
+        const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(ended.status(), ProgramTerminalStatus::Cancelled) << failure_detail(ended);
+        EXPECT_EQ(latest->continuation.state, ContinuationState::Cancelled);
+        EXPECT_EQ(latest->sequence, held->sequence + 2) << "the call settled its reservation, then the run ended";
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+        EXPECT_GT(latest->remaining_budget.model_tokens, held->remaining_budget.model_tokens)
+            << "the unused part of the reservation came back";
+        return;
+    }
+    const bool cancelled = how == EndAtHostAdmission::CancelledWhileWaiting;
+    expect_a_resumed_javascript_run_ended_without_returning_its_reservation(
+        fixture, interrupted.run_id(), *held, ended,
+        cancelled ? ProgramTerminalStatus::Cancelled : ProgramTerminalStatus::Failed,
+        cancelled ? ContinuationState::Cancelled : ContinuationState::Failed);
+    EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the resume";
+    if (how == EndAtHostAdmission::CapacityExceeded) {
+        ASSERT_TRUE(ended.failure().has_value());
+        EXPECT_EQ(ended.failure()->code, "P_HOST_ADMISSION");
+    }
+    if (how == EndAtHostAdmission::ResolverThrows) {
+        ASSERT_TRUE(ended.failure().has_value());
+        EXPECT_EQ(ended.failure()->code, "P_RUNTIME_CORE_FAILURE");
+    }
+}
+
+}  // namespace
+
+// The attempt of a resume that waits for host capacity has started nothing, and the reservation of the call it resumes
+// is held in the journal: a cancellation while it waits ends the run Cancelled, with the remaining budget the resume
+// left it and none of the reservation returned.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunCancelledWhileItWaitsForHostCapacityEndsCancelled) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        end_a_resumed_javascript_run_at_host_admission(EndAtHostAdmission::CancelledWhileWaiting, durable);
+    }
+}
+
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunRefusedByHostAdmissionEndsFailedWithItsCode) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        end_a_resumed_javascript_run_at_host_admission(EndAtHostAdmission::CapacityExceeded, durable);
+    }
+}
+
+// The resolver of the host is host code: when it throws for the attempt of a resume, the attempt cannot be launched, and
+// the run ends Failed the same way.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunWhoseHostAdmissionResolverThrowsEndsFailed) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        end_a_resumed_javascript_run_at_host_admission(EndAtHostAdmission::ResolverThrows, durable);
+    }
+}
+
+// Admitted by the host and cancelled once its Core call has started, the run settles the reservation as it did before.
+TEST(ProgramRuntimeTest, AResumedJavaScriptRunCancelledAfterHostAdmissionSettlesTheReservation) {
+    end_a_resumed_javascript_run_at_host_admission(EndAtHostAdmission::CancelledAfterAdmission, false);
+}
+
+namespace {
+
+// Holds the only scheduler thread of a runtime on its first Core event until the test lets it go, so that the attempt of
+// a run started or recovered afterwards waits in the queue and a cancellation can arrive before it has begun.
+class HoldSchedulerSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != ProgramEventKind::Core || held_.exchange(true)) return;
+        entered_.set_value();
+        released_.wait();
+    }
+    bool entered() { return entered_future_.wait_for(std::chrono::seconds(10)) == std::future_status::ready; }
+    void release() {
+        if (!released_flag_.exchange(true)) release_.set_value();
+    }
+
+private:
+    std::atomic<bool>        held_{false};
+    std::promise<void>       entered_;
+    std::future<void>        entered_future_ = entered_.get_future();
+    std::promise<void>       release_;
+    std::shared_future<void> released_ = release_.get_future().share();
+    std::atomic<bool>        released_flag_{false};
+};
+
+}  // namespace
+
+// A run recovered after its process stopped inside a command holds the reservation of the command in the journal, and is
+// no resume: nothing carries it a value to continue a Core call with. One that is cancelled before the recovered attempt
+// has reached the command ends Cancelled with the remaining budget the journal holds, and the reservation is not
+// returned: the command may have been sent, and nothing has measured what it used.
+TEST(ProgramRuntimeTest, ARecoveredJavaScriptCommandCancelledBeforeItIsReachedEndsCancelled) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite transition store" : "in-memory transition store");
+        interrupt_calls.store(0);
+        blocking_calls.store(0);
+        blocking_active.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, {}, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version = fixture.admit_javascript(javascript_runtime_source("runtime-blocking", R"JS(
+    yield ng.callCore("main", {}, "recover:cancelled-first");
+    return {status: "unexpected"};
+)JS"));
+        const auto blocker_version = fixture.admit("runtime-completed");
+
+        auto original = fixture.runtime->start(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1, 4), "trace-js-recover-cancel", {}});
+        for (unsigned i = 0; blocking_active.load() == 0 && i < 5000; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ASSERT_EQ(blocking_active.load(), 1U) << "the process stopped inside the command";
+        const auto held = fixture.journal->latest("tenant:runtime", original.run_id());
+        ASSERT_TRUE(held.has_value());
+
+        // A runtime of the restarted process, whose only scheduler thread another run holds.
+        auto fresh    = fixture.make_runtime();
+        auto blocker  = std::make_shared<HoldSchedulerSink>();
+        auto blocking = fresh->start("tenant:runtime", blocker_version,
+                                     ProgramInvocation{json::object(), grant(), "trace-js-recover-holder", blocker});
+        ASSERT_TRUE(blocker->entered());
+        auto recovered = fresh->reconnect("tenant:runtime", original.run_id());
+        EXPECT_TRUE(recovered.cancel());
+        blocker->release();
+        const auto ended = recovered.wait();
+        (void)blocking.wait();
+
+        expect_a_resumed_javascript_run_ended_without_returning_its_reservation(
+            fixture, original.run_id(), *held, ended, ProgramTerminalStatus::Cancelled, ContinuationState::Cancelled);
+        EXPECT_EQ(blocking_calls.load(), 1U) << "the recovered attempt never reached the command";
+        original.cancel();
+        (void)original.wait();
+    }
+}
+
+// A reconciliation that completes a paused JavaScript callCore publishes the continuation of the call and delivers its first
+// event, Started, before its attempt exists. When the handler throws on that event, no node of the call has run: the run
+// ends Failed with the code of the handler's error and the remaining budget the reconciliation left it, as the resume of a
+// paused callCore does. The reconciliation used to answer with an ambiguous effect that was not ambiguous, which no result
+// may carry (P_RUNTIME_INTERNAL), and the run stayed running.
+TEST(ProgramRuntimeTest, AReconciledJavaScriptCallCoreWhoseHandlerThrowsAtItsStartedEventEndsFailedWithTheHandlersCode) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-effect-nonidempotent", R"JS(
+    const output = yield ng.callCore("main", {}, "reconcile:handler-throws-at-started");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), javascript_budget(1), "trace-js-reconcile-throw", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+        ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_effect);
+        const auto pending = *interrupted.interrupt()->pending_effect;
+        ASSERT_EQ(fixture.runtime
+                      ->reconcile("tenant:runtime", interrupted.run_id(),
+                                  ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Unknown,
+                                                          std::nullopt, "trace-js-reconcile-unknown", {}})
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+
+        std::optional<ProgramJournalRecord> held;
+        auto                                sink = std::make_shared<RejectResumeSink>();
+        sink->before_throwing = [&] { held = fixture.journal->latest("tenant:runtime", interrupted.run_id()); };
+        const auto ended = fixture.runtime
+                               ->reconcile("tenant:runtime", interrupted.run_id(),
+                                           ProgramEffectResolution{pending.call_id(),
+                                                                   ProgramEffectReconciliation::Completed,
+                                                                   json{{"result", "reconciled"}},
+                                                                   "trace-js-reconcile-throw-completed", sink})
+                               .wait();
+
+        ASSERT_TRUE(held.has_value());
+        ASSERT_EQ(held->continuation.state, ContinuationState::Running);
+        EXPECT_EQ(ended.status(), ProgramTerminalStatus::Failed) << failure_detail(ended);
+        ASSERT_TRUE(ended.failure().has_value());
+        EXPECT_EQ(ended.failure()->code, "P_EVENT_SINK");
+        EXPECT_EQ(interrupt_calls.load(), 1U) << "no node ran after the reconciliation";
         const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
         ASSERT_TRUE(latest.has_value());
         EXPECT_EQ(latest->continuation.state, ContinuationState::Failed);

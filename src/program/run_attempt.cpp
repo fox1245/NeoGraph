@@ -1830,6 +1830,13 @@ CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept
     return CommandBudgetReservation{std::move(available), std::move(reservation)};
 }
 
+asio::awaitable<std::optional<RunBudget>> held_command_remainder(const RunControl& control) {
+    if (!control.materialized->bundle.control_source()) co_return std::nullopt;
+    const auto held = co_await control.async_transitions().latest(control.owner_scope, control.run_id);
+    if (held && has_resource_reservation(held->inflight_reservation)) co_return held->remaining_budget;
+    co_return std::nullopt;
+}
+
 void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observer) noexcept {
     join_member_launch_observer.store(observer, std::memory_order_release);
 }
@@ -1945,15 +1952,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     try {
         const auto control_source = control->materialized->bundle.control_source();
         // A resume of an interrupted callCore reserves the capacity of the call in the journal, and the call settles
-        // the reservation with the usage it measured. The grant of this attempt includes the reservation, but a run
-        // that ends before the call has settled it must not return it unmeasured: it ends with the remainder the
-        // journal holds, and the reservation stays unreturned.
-        if (control_source && javascript_core_resume_value) {
-            const auto held =
-                co_await control->async_transitions().latest(control->owner_scope, control->run_id);
-            if (held && has_resource_reservation(held->inflight_reservation))
-                unreconciled_javascript_remaining = held->remaining_budget;
-        }
+        // the reservation with the usage it measured; the attempt that recovers a run stopped inside a command finds the
+        // reservation of that command held. The grant of this attempt includes the reservation, but a run that ends
+        // before the command has settled it must not return it unmeasured: it ends with the remainder the journal
+        // holds, and the reservation stays unreturned.
+        if (control_source) unreconciled_javascript_remaining = co_await held_command_remainder(*control);
         if (checkpoint_id) {
             resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
             if (const auto durable = co_await control->async_transitions().load(
@@ -1979,6 +1982,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 apply_checkpoint_incompatible(
                     outcome, control, *checkpoint_id, resume_checkpoint,
                     "Journal-published Core checkpoint changed after resume admission");
+                // No node of the call this attempt continues has run: it ends with the remainder beneath the reservation.
+                co_await apply_durable_javascript_disposition(outcome);
                 cancel_deadline_timer(control->deadline_executor, std::move(timer));
                 (co_await control->complete_async(std::move(outcome)));
                 co_return;
