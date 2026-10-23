@@ -13,6 +13,7 @@ node, a stream callback and a checkpoint Hook observe.
 """
 
 import asyncio
+import sys
 import threading
 import time
 
@@ -323,8 +324,10 @@ def test_a_resume_without_a_callback_streams_nothing(entry):
 
 
 @pytest.mark.parametrize("entry", ["run_stream", "resume", "resume_from"])
-def test_a_failing_callback_does_not_abort_a_sync_run(entry):
+def test_a_failing_callback_is_reported_and_does_not_abort_a_sync_run(entry, monkeypatch):
     engine = _engine(_node_type(entry))
+    reported = []
+    monkeypatch.setattr(sys, "unraisablehook", reported.append)
 
     def explode(_event):
         raise RuntimeError("callback exploded")
@@ -333,6 +336,22 @@ def test_a_failing_callback_does_not_abort_a_sync_run(entry):
 
     assert not result.interrupted
     assert result.output["channels"]["answer"]["value"] == "done"
+    assert reported, "the exception of the callback was dropped without a trace"
+    assert all(isinstance(item.exc_value, RuntimeError) for item in reported)
+    assert all("callback exploded" in str(item.exc_value) for item in reported)
+    assert all(item.object is explode for item in reported)
+
+
+def test_a_callback_that_exits_does_not_end_the_process(monkeypatch):
+    """SystemExit in a callback is reported like any other exception; it never reaches Py_Exit."""
+    engine = _engine("entrypoints.probe")
+    reported = []
+    monkeypatch.setattr(sys, "unraisablehook", reported.append)
+
+    result = engine.run_stream(ng.RunConfig(thread_id="callback-exit"), lambda _event: sys.exit(3))
+
+    assert not result.interrupted
+    assert reported and all(item.exc_type is SystemExit for item in reported)
 
 
 @pytest.mark.parametrize("entry", ["resume_async", "resume_from_async"])
