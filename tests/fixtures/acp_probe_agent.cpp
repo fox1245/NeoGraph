@@ -35,10 +35,18 @@
 // text; the suites assert that neither ever reaches the wire.
 //
 // Usage: neograph_acp_probe_agent [--agent-info JSON] [--load-session]
-//                                 [--no-resume] [--image]
+//                                 [--no-resume] [--image] [--http]
+//
+// --http (built with NEOGRAPH_BUILD_ACP_HTTP_SERVER) serves the same agent
+// over the experimental Streamable HTTP and WebSocket transports on a free
+// loopback port instead of stdio: it prints "listening <port>" on stdout and
+// runs until stdin reaches end of file.
 
 #include <neograph/neograph.h>
 #include <neograph/acp/server.h>
+#ifdef NEOGRAPH_ACP_PROBE_HTTP
+#include <neograph/acp/http_server.h>
+#endif
 #include <neograph/hook_outbox.h>
 #include <neograph/tool.h>
 #include <neograph/types.h>
@@ -160,6 +168,10 @@ class ProbeNode : public GraphNode {
             reply("written");
         } else if (verb == "terminal") {
             auto* server = g_server.load();
+            if (!server) {  // one agent per connection: no single server to ask
+                reply("terminal:unsupported");
+                co_return out;
+            }
             auto result = server->call_client(
                 "terminal/create", json{{"sessionId", sid}, {"command", "true"}},
                 std::chrono::seconds(5));
@@ -270,16 +282,52 @@ int main(int argc, char** argv) {
     client->set_timeout(std::chrono::seconds(10));
     auto engine = build_engine(client);
     json info{{"name", "neograph-acp-probe"}, {"version", "0.0.1"}};
-    for (int i = 1; i + 1 < argc; ++i) {
-        if (std::string(argv[i]) == "--agent-info") info = json::parse(argv[i + 1]);
-    }
-    ACPServer server(engine, info);
+    bool http = false;
     for (int i = 1; i < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--load-session") server.capabilities().load_session = true;
-        if (a == "--no-resume") server.capabilities().session.resume = false;
-        if (a == "--image") server.capabilities().prompt.image = true;
+        if (std::string(argv[i]) == "--agent-info" && i + 1 < argc) info = json::parse(argv[i + 1]);
+        if (std::string(argv[i]) == "--http") http = true;
     }
+    const auto configure = [&](ACPServer& server) {
+        for (int i = 1; i < argc; ++i) {
+            const std::string a = argv[i];
+            if (a == "--load-session") server.capabilities().load_session = true;
+            if (a == "--no-resume") server.capabilities().session.resume = false;
+            if (a == "--image") server.capabilities().prompt.image = true;
+        }
+    };
+
+    if (http) {
+#ifdef NEOGRAPH_ACP_PROBE_HTTP
+        ACPHttpConfig config;
+        config.keepalive_interval = std::chrono::seconds(1);
+        ACPHttpServer server(
+            [&](std::string_view) {
+                ACPHttpConnection connection;
+                connection.server = std::make_unique<ACPServer>(engine, info);
+                configure(*connection.server);
+                return connection;
+            },
+            config);
+        server.attach_client(client);
+        if (!server.start_async()) {
+            std::cerr << "[acp-probe] cannot listen\n";
+            return 1;
+        }
+        std::cout << "listening " << server.port() << std::endl;
+        std::cerr << "[acp-probe] ready\n";
+        char ignored;
+        while (std::cin.get(ignored)) {
+        }
+        server.stop();
+        return 0;
+#else
+        std::cerr << "[acp-probe] built without NEOGRAPH_BUILD_ACP_HTTP_SERVER\n";
+        return 2;
+#endif
+    }
+
+    ACPServer server(engine, info);
+    configure(server);
     server.attach_client(client);
     g_server.store(&server);
     std::cerr << "[acp-probe] ready\n";

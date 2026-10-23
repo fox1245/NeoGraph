@@ -1,5 +1,9 @@
 # Official ACP Python SDK, current stable line (the main CI job pins the same).
 agent-client-protocol==0.12.1
+# The `http` extra of the SDK (its Streamable HTTP and WebSocket client), for
+# test_acp_sdk_remote_interop.py.
+httpx==0.28.1
+websockets==17.2
 # Official MCP Python SDK (FastMCP) for the stdio MCP server the client
 # passes in session/new mcpServers.
 mcp==1.30.0
