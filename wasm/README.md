@@ -233,11 +233,25 @@ Everything runs on the host's event loop: the runtime awaits its stores, the tim
 those blocks it. A control source is the exception: `define()` and each step of `main()` run in QuickJS on the same
 thread, and a source that never ends holds the loop until its time limit stops it: 5 seconds for `define()`, which runs
 when the Program is admitted, and the run's wall-time budget (60 seconds by default, `budget.wallTimeMs`) for the steps of
-`main()`. The stack limit of QuickJS does not work in this build, so a source that recurses without end overflows the
-engine's own stack, which the module cannot catch: the call never settles, the module instance is left unusable, and in
-Node the uncaught `RangeError` ends the process unless the host handles it. Run only control sources that the host
-trusts or has vetted. The checkpoints of a paused graph are kept in the module's memory, so a run can be resumed or
-forked only while the `Programs` object that started it is alive.
+`main()`. The stack limit of QuickJS is on in this build, so a source that recurses without end, or nests deeper than
+the parser can follow, fails with the diagnostic `P_JS_RESOURCE_LIMIT` instead of overflowing the host's stack: `admit`
+rejects with a `compile` error, and a `main()` that does it ends its run `failed`. The limit counts the module's own
+stack in linear memory, 48 KiB of it however large a limit the compiler asks for, because the host's call stack, which
+the module can neither read nor recover from, is used up between 1.5 and 20 times as fast as that one, depending on what
+recurses. 48 KiB allows about 200 nested calls (about 30 through the comparator of `sort`, about 80 through the callback
+of `map`) and about 130 nested parentheses, array or object literals or calls in a source (about 40 nested functions); a
+native build, with 512 KiB, allows about three times as many. The limit does not see a chain of Proxy objects without
+traps that `Object.getPrototypeOf` or `Object.isExtensible` follows: a chain of about 5,000 of them still overflows the
+host's stack. The 48 KiB is calibrated against the host stack of Node 22 and 24, about 984 KiB: the worst of the shapes
+that were tried still passes with about a third of that stack, and a host with a smaller stack has less margin.
+
+A host that admits control sources it does not trust should do so in a Worker that it can discard. The limit above stops
+the shapes of recursion that were tried, but a trap in WebAssembly cannot be recovered in the same module instance: if the
+host's stack overflows, the call never settles, the instance is left unusable, and in Node the uncaught `RangeError` ends
+the process unless the host handles it. Run in the module only control sources that the host trusts or has vetted.
+
+The checkpoints of a paused graph are kept in the module's memory, so a run can be resumed or forked only while the
+`Programs` object that started it is alive.
 
 ## How it works
 
@@ -565,7 +579,9 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   way without asking the first call again, a paused run is cancelled and read back from the stores, runs in flight
   together keep their own answers, an `AbortSignal` closes the connection of a model call, and an error thrown by
   `onEvent` cancels its run. A fork that is cancelled before it is sent is withdrawn, an aborted signal starts nothing, and a
-  control source that never ends is stopped by its time limit. The failures that must stay failures are checked too: a model with no limits in the catalogue
+  control source that never ends is stopped by its time limit, while one that recurses too deep (seventeen shapes in
+  `define()` and in the source, and `main()`) fails with a diagnostic and leaves the module able to admit and run a
+  Program. The failures that must stay failures are checked too: a model with no limits in the catalogue
   is not called, a budget that cannot cover a call exhausts the run before it is sent, a budget outside what the version
   admits is refused, and the key is in no result or event. The Node example is run as a child process.
 - `test/program_stores_test.mjs`: the module's `stores` option. The reference store serves a whole lifecycle as it is and
