@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=01490e5a0a068a4082b91e0571f88dbf747cccf6164cd0b1882eedfca6401b57 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=e5eb8cd811611adb812540ab84e709c596588f66572bc85b5769c4cbf3f3006c -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
