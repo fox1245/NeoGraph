@@ -3,6 +3,7 @@
 #include <neograph/grpc/tool_service.h>
 #include <neograph/grpc/grpc_checkpoint.h>
 #include "../src/grpc/error_details.h"
+#include "../src/grpc/serve.h"
 #include <neograph/hook_outbox.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/tool_dispatch.h>
@@ -15,6 +16,7 @@
 #include <grpcpp/server_builder.h>
 
 #include <algorithm>
+#include <climits>
 #include <future>
 #include <set>
 #include <thread>
@@ -777,6 +779,8 @@ public:
         return std::chrono::steady_clock::now() - started;
     }
     bool returned() const { return returned_; }
+    // Asks the server to stop without waiting for it, so that several servers stop together.
+    void request_stop() { thread_.request_stop(); }
 
 private:
     int port_ = 0;
@@ -907,6 +911,235 @@ TEST(GraphHostGRPCContract, StoppingABuiltInServerLetsACallInFlightFinish) {
     const auto [status, result] = call.get();
     EXPECT_TRUE(status.ok()) << status.error_message();
     EXPECT_EQ(result, R"("done")");
+}
+
+std::size_t count_of(const std::string& text, const std::string& part) {
+    std::size_t count = 0;
+    for (auto at = text.find(part); at != std::string::npos; at = text.find(part, at + 1)) ++count;
+    return count;
+}
+
+// A built-in server that serves without TLS on an address other than
+// loopback says so once on stderr, before it reports that it is serving.
+TEST(GraphHostGRPCContract, InsecureServerOnANonLoopbackAddressWarnsOnce) {
+    const std::string line = "[neograph] warning: the gRPC server for neograph.v1.";
+    testing::internal::CaptureStderr();
+    {
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_tool_server("0.0.0.0:0", {}, options);
+        });
+        server.stop();
+    }
+    const auto remote = testing::internal::GetCapturedStderr();
+    EXPECT_EQ(count_of(remote, line + "ToolService listens on 0.0.0.0:0 with insecure credentials"),
+              1u)
+        << remote;
+
+    // Every built-in server says it, the graph and the checkpoint server too.
+    testing::internal::CaptureStderr();
+    {
+        BuiltInServer graph([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_server("0.0.0.0:0", NodeContext{}, "", options);
+        });
+        graph.stop();
+        BuiltInServer checkpoint([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_checkpoint_server(
+                "0.0.0.0:0", std::make_shared<InMemoryCheckpointStore>(), {}, options);
+        });
+        checkpoint.stop();
+    }
+    EXPECT_EQ(count_of(testing::internal::GetCapturedStderr(), line), 2u);
+
+    // A loopback address says nothing.
+    testing::internal::CaptureStderr();
+    {
+        BuiltInServer server([](const neograph::grpc::ServeOptions& options) {
+            neograph::grpc::run_tool_server("127.0.0.1:0", {}, options);
+        });
+        server.stop();
+    }
+    EXPECT_EQ(count_of(testing::internal::GetCapturedStderr(), line), 0u);
+}
+
+TEST(GraphHostGRPCContract, TheWarningNamesOnlyTargetsThatCanBeReachedFromOutside) {
+    for (const char* local : {
+             "127.0.0.1:50051", "127.0.0.1:0", "127.0.0.1", "127.1.2.3:80", "localhost:50051",
+             "LocalHost:1", "localhost", "[::1]:50051", "::1", "dns:///localhost:50051",
+             "dns:localhost:50051", "ipv4:127.0.0.1:50051", "ipv4:127.0.0.1:1,127.0.0.2:2",
+             "ipv6:[::1]:50051", "unix:/tmp/neograph.sock", "unix:relative.sock",
+             "unix-abstract:neograph"}) {
+        EXPECT_TRUE(detail::is_loopback_target(local)) << local;
+    }
+    for (const char* remote : {
+             "0.0.0.0:50051", "0.0.0.0:0", "[::]:50051", "::", ":50051", "50051", "",
+             "192.168.1.5:50051", "10.0.0.1", "example.com:443", "localhost.example.com:80",
+             "127.0.0.1.example.com:80", "172.16.0.1:80", "127.0.0:80", "127.0.0.1.5:80",
+             "127.0.0.256:80", "[::2]:80", "[::1", "dns://192.0.2.53/example.com:443",
+             "dns:///example.com:443", "dns://127.0.0.1", "ipv4:127.0.0.1:1,10.0.0.1:2",
+             "ipv4:0.0.0.0:50051", "ipv6:[::]:50051", "vsock:3:5000", "unknown:thing"}) {
+        EXPECT_FALSE(detail::is_loopback_target(remote)) << remote;
+    }
+}
+
+// ToolService on 127.0.0.1 with a tool that answers with the size of its
+// arguments (a small response to a large request) and one that answers with
+// a payload twice as large as its arguments (a large response to a small request).
+BuiltInServer sized_tool_server(std::function<void(neograph::grpc::ServeOptions&)> configure) {
+    return BuiltInServer([configure = std::move(configure)](
+                             const neograph::grpc::ServeOptions& base) {
+        neograph::grpc::ServeOptions options = base;
+        configure(options);
+        neograph::grpc::run_tool_server(
+            "127.0.0.1:0",
+            {{"size",
+              [](const std::string& arguments) {
+                  return "{\"bytes\":" + std::to_string(arguments.size()) + "}";
+              }},
+             {"mirror",
+              [](const std::string& arguments) {
+                  return "\"" + std::string(arguments.size() * 2, 'x') + "\"";
+              }}},
+            options);
+    });
+}
+
+::grpc::StatusCode call_tool(int port, const std::string& tool, std::size_t argument_bytes) {
+    // The client lifts its own receive limit, so that only the server's matters.
+    ::grpc::ChannelArguments channel_arguments;
+    channel_arguments.SetMaxReceiveMessageSize(-1);
+    auto stub = pb::ToolService::NewStub(::grpc::CreateCustomChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials(),
+        channel_arguments));
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 20s);
+    pb::ToolCallRequest request;
+    request.set_name(tool);
+    // {"data":"xxx"} of exactly argument_bytes bytes.
+    constexpr std::size_t kFrame = sizeof(R"({"data":""})") - 1;
+    request.set_arguments_json(R"({"data":")" + std::string(argument_bytes - kFrame, 'x') + R"("})");
+    pb::ToolCallResponse response;
+    return stub->CallTool(&context, request, &response).error_code();
+}
+
+// ServeOptions::max_receive_message_bytes and max_send_message_bytes reach the
+// server; with neither set, gRPC's own limits stand: 4 MiB in, no limit out.
+// The four servers run side by side and stop together: after a message of a few
+// hundred KiB gRPC takes about ten seconds to let a server stop.
+TEST(GraphHostGRPCContract, MessageSizeLimitsReachTheBuiltInServers) {
+    constexpr std::size_t kMiB = 1024 * 1024;
+    auto defaults = sized_tool_server([](neograph::grpc::ServeOptions&) {});
+    auto larger_receive = sized_tool_server([](neograph::grpc::ServeOptions& options) {
+        options.max_receive_message_bytes = 8 * kMiB;
+    });
+    auto smaller_receive = sized_tool_server([](neograph::grpc::ServeOptions& options) {
+        options.max_receive_message_bytes = 4096;
+    });
+    auto send_limited = sized_tool_server([](neograph::grpc::ServeOptions& options) {
+        options.max_send_message_bytes = 4096;
+    });
+
+    {
+        SCOPED_TRACE("defaults");
+        EXPECT_EQ(call_tool(defaults.port(), "size", 3 * kMiB), ::grpc::StatusCode::OK);
+        EXPECT_EQ(call_tool(defaults.port(), "size", 5 * kMiB),
+                  ::grpc::StatusCode::RESOURCE_EXHAUSTED);
+        // A response of 6 MiB is sent: gRPC sets no limit on what a server sends.
+        EXPECT_EQ(call_tool(defaults.port(), "mirror", 3 * kMiB), ::grpc::StatusCode::OK);
+    }
+    {
+        SCOPED_TRACE("a larger receive limit");
+        EXPECT_EQ(call_tool(larger_receive.port(), "size", 5 * kMiB), ::grpc::StatusCode::OK);
+        EXPECT_EQ(call_tool(larger_receive.port(), "size", 9 * kMiB),
+                  ::grpc::StatusCode::RESOURCE_EXHAUSTED);
+    }
+    {
+        SCOPED_TRACE("a smaller receive limit");
+        EXPECT_EQ(call_tool(smaller_receive.port(), "size", 1024), ::grpc::StatusCode::OK);
+        EXPECT_EQ(call_tool(smaller_receive.port(), "size", 8192),
+                  ::grpc::StatusCode::RESOURCE_EXHAUSTED);
+        // The limit is on what the server receives, not on what it sends.
+        EXPECT_EQ(call_tool(smaller_receive.port(), "mirror", 4000), ::grpc::StatusCode::OK);
+    }
+    {
+        SCOPED_TRACE("a send limit");
+        EXPECT_EQ(call_tool(send_limited.port(), "mirror", 1024), ::grpc::StatusCode::OK);
+        EXPECT_EQ(call_tool(send_limited.port(), "mirror", 8192),
+                  ::grpc::StatusCode::RESOURCE_EXHAUSTED);
+        // The limit is on what the server sends, not on what it receives.
+        EXPECT_EQ(call_tool(send_limited.port(), "size", 3 * kMiB), ::grpc::StatusCode::OK);
+    }
+    for (auto* server : {&defaults, &larger_receive, &smaller_receive, &send_limited})
+        server->request_stop();
+}
+
+TEST(GraphHostGRPCContract, MessageSizeLimitsAboveWhatGrpcTakesAreRefusedBeforeTheServerStarts) {
+    if constexpr (sizeof(std::size_t) > sizeof(int)) {
+        const std::size_t too_large = static_cast<std::size_t>(INT_MAX) + 1;
+        int bound = 0;
+        // A server that does start returns at once instead of serving on.
+        std::stop_source stopped;
+        stopped.request_stop();
+        for (int which = 0; which < 2; ++which) {
+            neograph::grpc::ServeOptions options;
+            options.stop = stopped.get_token();
+            options.on_serving = [&bound](int port) { bound = port; };
+            (which == 0 ? options.max_receive_message_bytes : options.max_send_message_bytes) =
+                too_large;
+            EXPECT_THROW(neograph::grpc::run_tool_server("127.0.0.1:0", {}, options),
+                         std::invalid_argument);
+            EXPECT_THROW(neograph::grpc::run_server("127.0.0.1:0", NodeContext{}, "", options),
+                         std::invalid_argument);
+            EXPECT_THROW(neograph::grpc::run_checkpoint_server(
+                             "127.0.0.1:0", std::make_shared<InMemoryCheckpointStore>(), {}, options),
+                         std::invalid_argument);
+        }
+        EXPECT_EQ(bound, 0);
+    }
+}
+
+// ServeOptions::credentials is what the server listens with.
+TEST(GraphHostGRPCContract, TheCallersCredentialsAreTheOnesTheServerListensWith) {
+    {
+        // Insecure credentials the caller passes serve like the default, and a
+        // caller that chose them is not warned about a remote address.
+        testing::internal::CaptureStderr();
+        BuiltInServer server([](const neograph::grpc::ServeOptions& base) {
+            neograph::grpc::ServeOptions options = base;
+            options.credentials = ::grpc::InsecureServerCredentials();
+            neograph::grpc::run_tool_server("0.0.0.0:0", {}, options);
+        });
+        const auto notes = testing::internal::GetCapturedStderr();
+        EXPECT_EQ(count_of(notes, "[neograph] warning: the gRPC server"), 0u) << notes;
+        const auto health = health_check(server.port(), "neograph.v1.ToolService");
+        ASSERT_TRUE(health.status.ok()) << health.status.error_message();
+        EXPECT_EQ(health.response, kServing);
+    }
+    {
+        // TLS credentials that cannot be used are an error of the start, which
+        // insecure credentials would not give: the options' credentials reach
+        // the listener, for each of the built-in servers.
+        auto unusable = [] {
+            ::grpc::SslServerCredentialsOptions tls;
+            tls.pem_key_cert_pairs.push_back({"not a private key", "not a certificate"});
+            return ::grpc::SslServerCredentials(tls);
+        };
+        bool serving = false;
+        // A server that does start returns at once instead of serving on.
+        std::stop_source stopped;
+        stopped.request_stop();
+        neograph::grpc::ServeOptions options;
+        options.stop = stopped.get_token();
+        options.on_serving = [&serving](int) { serving = true; };
+        options.credentials = unusable();
+        EXPECT_THROW(neograph::grpc::run_tool_server("127.0.0.1:0", {}, options),
+                     std::runtime_error);
+        EXPECT_THROW(neograph::grpc::run_server("127.0.0.1:0", NodeContext{}, "", options),
+                     std::runtime_error);
+        EXPECT_THROW(neograph::grpc::run_checkpoint_server(
+                         "127.0.0.1:0", std::make_shared<InMemoryCheckpointStore>(), {}, options),
+                     std::runtime_error);
+        EXPECT_FALSE(serving);
+    }
 }
 } // namespace
 

@@ -102,14 +102,15 @@ private:
 // ── Server side ──────────────────────────────────────────────────────
 //
 // Build + run a blocking gRPC CheckpointService backed by `backend`
-// (e.g. a SqliteCheckpointStore) on `address` ("0.0.0.0:50071"), until
-// the process is signalled. Insecure credentials — front with mTLS in
-// prod via your own ServerBuilder if needed.
+// (e.g. a SqliteCheckpointStore) on `address` ("127.0.0.1:50071"), until
+// the process is signalled. Insecure credentials, and on an address other
+// than loopback one warning on stderr — pass TLS or mTLS credentials in the
+// ServeOptions overload below, or front it with your own ServerBuilder.
 NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend);
 /// The CheckpointService as a generated service base, for an embedder's own
-/// grpc::ServerBuilder (TLS, auth, ports). A backend failure is a non-OK
+/// grpc::ServerBuilder (auth, more services, ports). A backend failure is a non-OK
 /// status (UNAVAILABLE), never "no checkpoint" or an empty list; a malformed
 /// SaveCheckpoint is INVALID_ARGUMENT. No backend exception text crosses the
 /// wire.
@@ -122,8 +123,9 @@ NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend,
     std::shared_ptr<sp::NativeArchive> native_archive);
-/// The same, until `options.stop` is requested (see ServeOptions). Every
-/// built-in server also answers the standard health service.
+/// The same, until `options.stop` is requested, with the credentials and the
+/// message size limits of `options` (see ServeOptions). Every built-in server
+/// also answers the standard health service.
 NEOGRAPH_API void run_checkpoint_server(
     const std::string& address,
     std::shared_ptr<neograph::graph::CheckpointStore> backend,

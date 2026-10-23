@@ -53,17 +53,20 @@ namespace neograph::grpc {
 using ToolFn = std::function<std::string(const std::string&)>;
 
 /// Build the ToolService as a generated service base, so embedders can
-/// register it with their own grpc::ServerBuilder (TLS, auth, ports).
+/// register it with their own grpc::ServerBuilder (auth, more services, ports).
 NEOGRAPH_API std::unique_ptr<::grpc::Service> make_tool_service(
     std::unordered_map<std::string, ToolFn> tools);
 
 /// Build + run a blocking gRPC ToolService on `address`
-/// ("0.0.0.0:50091") serving `tools`, until the process is signalled.
-/// Insecure credentials, with the standard health service.
+/// ("127.0.0.1:50091") serving `tools`, until the process is signalled.
+/// Insecure credentials, with the standard health service; on an address
+/// other than loopback, one warning goes to stderr. For TLS or message size
+/// limits use the overload with ServeOptions.
 NEOGRAPH_API void run_tool_server(
     const std::string& address,
     std::unordered_map<std::string, ToolFn> tools);
-/// The same, until `options.stop` is requested (see ServeOptions).
+/// The same, until `options.stop` is requested, with the credentials and the
+/// message size limits of `options` (see ServeOptions).
 NEOGRAPH_API void run_tool_server(
     const std::string& address,
     std::unordered_map<std::string, ToolFn> tools,
