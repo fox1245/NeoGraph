@@ -16,8 +16,9 @@ The graph name is one of these. When the host gives it, pass exactly that string
 ## The module
 
 An ES module with the global `ng`. It exports `define` and, when the task needs
-runtime control, a generator `main`. There is no `require`, `module.exports`,
-`export default` or `import`.
+runtime control, a generator `main`. There is no `require`, `module.exports` or
+`export default`, and dynamic `import()` is rejected. A static `import` works only for
+a module the host sealed and named in the task; any other `import` is rejected.
 
     // GRAPH, REDUCER and NODE_TYPE stand for names the host supplied.
     export function define() {
@@ -46,9 +47,13 @@ such as `ng.callCore` do not exist here.
 
 - Every builder method returns the same builder, never a node handle. Use the
   manifest's signatures and option keys exactly. Keys are snake_case
-  (`initial_delay_ms`, not `initialDelay`), and an unknown key is rejected.
-- A graph needs `entry` and `exit`. Every edge, barrier, interrupt and retry must
-  name a declared node. `__start__` and `__end__` are never node names.
+  (`initial_delay_ms`, not `initialDelay`). An unknown key is rejected in `channel`,
+  `retryPolicy` and command options; extra keys in a `node` config go to the node
+  type, and the host's registry decides whether it accepts them.
+- A graph needs `entry`; without it nothing would run and the compiler rejects it.
+  `exit(node)` marks where the run ends (a node with no outgoing edge ends it too).
+  Every edge, barrier, interrupt and retry must name a declared node. `__start__` and
+  `__end__` are never node names, but an edge or a route can target `__end__`.
 - `node(name, {type, ...config})`: `type` is required and must be registered.
   `channel(name, {reducer, initial})`: name the registered reducer.
 - `conditionalEdge(from, condition, routes)`: `routes` maps every label the
@@ -61,7 +66,7 @@ such as `ng.callCore` do not exist here.
 
 `main` is a synchronous generator. Each `yield` hands the runtime exactly one
 command built by an `ng` constructor and returns that command's result. A raw
-array, a plain object, a Promise or `yield*` is rejected. Ordinary JavaScript
+array, a plain object, a Promise or `yield*` on a command is rejected. Ordinary JavaScript
 (branches, loops, `map`) builds commands and arrays of commands; run many at
 once by yielding one `ng.all(commands, {max_in_flight: N})`.
 
@@ -74,10 +79,10 @@ once by yielding one `ng.all(commands, {max_in_flight: N})`.
 | `ng.join(commands, mode, options, site)` | General form. `mode` is `"all"`, `"race"` or `"quorum"` (with `required_successes`). `failure_policy` is `"fail_fast"` or `"collect"`. |
 | `ng.spawn(binding, input, site)` | Start the host-admitted child. Wrap it in `ng.await(spawnCommand, timeoutMs, site)` to get its result. |
 | `ng.emit(value, site)`, `ng.checkpoint(value, site)` | Record a JSON value in the run's journal. |
-| `ng.cancelScope("current", reason, site)` | End the run as cancelled. |
+| `ng.cancelScope(scope, reason, site)` | Cancel `"current"`, `"nested"`, `"root"` or `"run"`; another name fails the run. At the top level of `main` it ends the run as cancelled. |
 | `ng.hostCapability(slot, input, site)` | Call the host-admitted import slot (an integer). |
 
-- `site` is an optional last argument: a stable label such as `"review:" + id`.
+- `site` is an optional last argument: a stable label such as `"item:" + id`.
   Derive it from ids or indexes, never from time or randomness. A recovered run
   re-runs `main`, so it must yield the same commands for the same results.
 - Option keys are snake_case. `max_in_flight`, `required_successes` and the await
@@ -107,8 +112,9 @@ For the Harness MCP, call `neograph_schema` first, then send the module as
 task, worker, budget and policy field. Source alone is not a request. Use
 `neograph_compile` only if the tool is available.
 
-A rejection comes back as diagnostics with `code`, `message`, a JSON `pointer`
-into the lowered definition, and a `witness`. Fix the cause they cite, keep
-everything the task fixed, and return the complete module in the same envelope.
+A compiler rejection comes back as diagnostics with `code`, `message`, a JSON
+`pointer` into the lowered definition and a `witness`; a check the host runs on the
+result may return a plain error message instead. Fix the cause the rejection cites,
+keep everything the task fixed, and return the complete module in the same envelope.
 Do not widen grants, add unrelated operations, or claim success before the host's
 checks accept it. A source that compiles can still build the wrong topology.

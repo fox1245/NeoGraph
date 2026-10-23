@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ja source_sha256=9c608357cfda36a56045f97d4b5bbd5398e96e016e90c4b6690f4d2d2e3949fe -->
+<!-- neograph-i18n: source=skills/neograph-harness-authoring/references/quickjs-authoring.md locale=ja source_sha256=2b43b221e43adde43479b04affc783981618f19917ad94444136151aaf21275e -->
 # QuickJS ソースの作成
 
 **Languages:** [English](quickjs-authoring.md) | [한국어](quickjs-authoring.ko.md) | [日本語](quickjs-authoring.ja.md) | [简体中文](quickjs-authoring.zh-CN.md)
@@ -18,7 +18,9 @@
 
 グローバルの `ng` を使う ES モジュールです。`define` をエクスポートし、タスクが
 ランタイム制御を必要とするときはジェネレータ `main` もエクスポートします。
-`require`、`module.exports`、`export default`、`import` はありません。
+`require`、`module.exports`、`export default` はなく、動的な `import()` は拒否されます。
+静的な `import` は、ホストが封印してタスクで名前を伝えたモジュールに対してだけ動作し、
+それ以外の `import` は拒否されます。
 
     // GRAPH、REDUCER、NODE_TYPE はホストが与えた名前を表すプレースホルダです。
     export function define() {
@@ -47,11 +49,14 @@
 
 - ビルダーのメソッドはすべて同じビルダーを返し、ノードハンドルは返しません。
   マニフェストのシグネチャとオプションキーをそのまま使ってください。キーは
-  snake_case で（`initial_delay_ms` であって `initialDelay` ではありません）、未知の
-  キーは拒否されます。
-- グラフには `entry` と `exit` が必要です。すべてのエッジ、バリア、インタラプト、
-  リトライは宣言済みのノードを指さなければなりません。`__start__` と `__end__` は
-  ノード名になりません。
+  snake_case です（`initial_delay_ms` であって `initialDelay` ではありません）。未知の
+  キーは `channel`、`retryPolicy`、コマンドのオプションで拒否されます。`node` の設定の
+  追加キーはノード型に渡され、受け付けるかどうかはホストのレジストリが決めます。
+- グラフには `entry` が必要です。なければ何も実行されないため、コンパイラは拒否します。
+  `exit(node)` は実行が終わる場所を示します（出ていくエッジのないノードも実行を終えます）。
+  すべてのエッジ、バリア、インタラプト、リトライは宣言済みのノードを指さなければなりません。
+  `__start__` と `__end__` はノード名になりませんが、エッジやルートの行き先は `__end__` に
+  できます。
 - `node(name, {type, ...config})`: `type` は必須で、登録済みでなければなりません。
   `channel(name, {reducer, initial})`: 登録済みのリデューサを指定してください。
 - `conditionalEdge(from, condition, routes)`: `routes` は、登録済みの条件が返しうる
@@ -64,7 +69,7 @@
 
 `main` は同期ジェネレータです。各 `yield` は `ng` のコンストラクタが作ったコマンドを
 ちょうど一つランタイムに渡し、そのコマンドの結果を受け取ります。生の配列、
-プレーンなオブジェクト、Promise、`yield*` は拒否されます。分岐、ループ、`map` などの
+プレーンなオブジェクト、Promise、コマンドに対する `yield*` は拒否されます。分岐、ループ、`map` などの
 通常の JavaScript でコマンドやコマンドの配列を作り、複数を同時に実行するには
 `ng.all(commands, {max_in_flight: N})` を一度だけ `yield` してください。
 
@@ -77,10 +82,10 @@
 | `ng.join(commands, mode, options, site)` | 一般形です。`mode` は `"all"`、`"race"`、`"quorum"`（`required_successes` を伴う）です。`failure_policy` は `"fail_fast"` または `"collect"` です。 |
 | `ng.spawn(binding, input, site)` | ホストが承認した子を開始します。結果を得るには `ng.await(spawnCommand, timeoutMs, site)` で包みます。 |
 | `ng.emit(value, site)`, `ng.checkpoint(value, site)` | JSON 値を実行ジャーナルに記録します。 |
-| `ng.cancelScope("current", reason, site)` | 実行をキャンセル状態で終えます。 |
+| `ng.cancelScope(scope, reason, site)` | `"current"`、`"nested"`、`"root"`、`"run"` をキャンセルします。ほかの名前は実行を失敗させます。`main` の最上位では実行をキャンセル状態で終えます。 |
 | `ng.hostCapability(slot, input, site)` | ホストが承認したインポートスロット（整数）を呼び出します。 |
 
-- `site` は省略可能な最後の引数で、`"review:" + id` のような安定したラベルです。id や
+- `site` は省略可能な最後の引数で、`"item:" + id` のような安定したラベルです。id や
   インデックスから作り、時刻や乱数からは作らないでください。復旧した実行は `main` を
   再実行するので、同じ結果に対して同じコマンドを出さなければなりません。
 - オプションキーは snake_case です。`max_in_flight`、`required_successes`、await の
@@ -108,8 +113,9 @@ Harness MCP では、まず `neograph_schema` を呼び、モジュールを `ha
 ポリシーのフィールドとともに送ります。ソースだけではリクエストになりません。
 `neograph_compile` は、そのツールがあるときだけ使ってください。
 
-拒否されると、`code`、`message`、コンパイル後の定義の中を指す JSON `pointer`、
-`witness` を持つ診断が返ります。診断が示す原因を直し、タスクが定めたことはそのままに
-して、同じ封筒で完全なモジュールを返してください。権限を広げたり、無関係な操作を
+コンパイラに拒否されると、`code`、`message`、コンパイル後の定義の中を指す JSON
+`pointer`、`witness` を持つ診断が返ります。ホストが結果に対して自前で行う検査は、
+代わりにただのエラーメッセージを返すことがあります。拒否が示す原因を直し、タスクが
+定めたことはそのままにして、同じ封筒で完全なモジュールを返してください。権限を広げたり、無関係な操作を
 加えたり、ホストの検査が受理する前に成功したと主張したりしないでください。
 コンパイルできるソースでも、誤ったトポロジーを作ることがあります。
