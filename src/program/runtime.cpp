@@ -1,4 +1,5 @@
 #include <neograph/program/runtime.h>
+#include <neograph/program/compiler.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/schema.h>
 #include <neograph/async/host_loop.h>
@@ -5108,6 +5109,13 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             (!config.catalog || config.catalog->completes_inline()) &&
             (sync_transitions && sync_transitions->completes_at_once()) &&
             (!config.task_graph_fragments || (sync_fragments && sync_fragments->completes_at_once()));
+        // The stack of a JavaScript control source: 0 is the default of JavaScriptCompileLimits.
+        const JavaScriptCompileLimits javascript_defaults;
+        executors->javascript_stack_bytes = config.javascript_stack_bytes == 0
+                                                ? javascript_defaults.max_stack_bytes
+                                                : config.javascript_stack_bytes;
+        if (executors->javascript_stack_bytes > javascript_defaults.memory_limit_bytes)
+            throw std::invalid_argument("RuntimeConfig::javascript_stack_bytes exceeds the JavaScript memory limit");
         scheduler = std::move(executors);
         // #543: a fork may send a call its source journaled and the journal cannot adopt only when the host says so.
         if (config.fork_may_resend_provider_calls && config.core_provider_call_resolver) {

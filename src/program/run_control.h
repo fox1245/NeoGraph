@@ -163,6 +163,8 @@ struct RuntimeScheduler {
     /// RuntimeConfig::executor_identity.running_in_this_thread; empty: found from host_executor when it is the
     /// executor of an io_context or a thread_pool, or a strand of either.
     std::function<bool()> running_in_this_thread;
+    /// RuntimeConfig::javascript_stack_bytes, 0 resolved to the default: the stack of a JavaScript control source.
+    std::size_t javascript_stack_bytes = 0;
     /// Every store the runtime reads is a Sync...Store, so its awaitable operations complete at once (the catalog's
     /// stores are not part of this answer: the catalog answers for itself).
     bool stores_inline = true;

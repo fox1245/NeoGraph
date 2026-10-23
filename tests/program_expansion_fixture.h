@@ -224,6 +224,8 @@ struct BasicAdmittedRuntime {
     ProgramCoreToolGrantResolver                    core_tool_grant_resolver;
     ProgramCoreProviderCallResolver                 core_provider_call_resolver;
     bool                                            require_core_provider_call_broker = false;
+    /// RuntimeConfig::javascript_stack_bytes of the next make_runtime(); 0 is the default.
+    std::size_t                                     javascript_stack_bytes = 0;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit BasicAdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -314,6 +316,7 @@ struct BasicAdmittedRuntime {
         config.core_provider_call_resolver = core_provider_call_resolver;
         config.require_core_provider_call_broker = require_core_provider_call_broker;
         config.runtime_recovery_handler = std::move(recovery_handler);
+        config.javascript_stack_bytes = javascript_stack_bytes;
         return std::make_unique<ProgramRuntime>(std::move(config));
     }
     std::unique_ptr<ProgramRuntime> make_runtime() const {

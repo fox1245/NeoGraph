@@ -6383,6 +6383,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         if (control_source) {
             try {
                 JavaScriptCompileLimits javascript_limits;
+                javascript_limits.max_stack_bytes = control->scheduler->javascript_stack_bytes;
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
                     deadline - std::chrono::steady_clock::now());
                 javascript_limits.max_wall_time_ms =
