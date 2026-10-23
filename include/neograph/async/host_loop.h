@@ -34,6 +34,9 @@
  *     It must therefore be safe to call from several threads at once when work is posted from threads other than the
  *     host's. Its `schedule`, `cancel` and `now` are called on the host's thread only, from inside a turn or from the
  *     calls listed above as the host's. `on_error` runs on the host's thread.
+ *   - A host executor that refuses a post (it throws) leaves the loop without a turn. The work posted meanwhile waits
+ *     for the next wake: `wake()`, or any post once the host takes posts again. A post that found the turn being asked
+ *     for, while the host refused it, is not left behind: the loop asks again, a few times at most.
  *   - The loop must outlive such posts. Its destructor destroys the handlers that did not run and cannot wait for a
  *     thread that is still posting or still holds a work guard on executor(): join those threads, or wait for the work
  *     they post, before the loop is destroyed, and do not use a copy of executor() after that.

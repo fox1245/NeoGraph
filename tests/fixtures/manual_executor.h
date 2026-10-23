@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstddef>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -35,6 +36,8 @@ public:
 
     // A refused post throws, as the SDK's contract allows for an executor that is stopping: the task was not accepted.
     void post(Task task) override {
+        // Runs first, on the posting thread, with no lock held: it may block or start threads that post.
+        if (before_post && before_post()) throw std::runtime_error("the host executor refuses work");
         std::lock_guard<std::mutex> lock(mutex_);
         if (refusing_) throw std::runtime_error("the host executor refuses work");
         ready_.push_back(std::move(task));
@@ -107,6 +110,8 @@ public:
         return true;
     }
 
+    // Called at the start of every `post`; returning true refuses that post. Set it before the executor is used.
+    std::function<bool()> before_post;
     std::atomic<int> shutdowns{0};
     std::atomic<std::size_t> tasks_run{0};
     std::chrono::steady_clock::duration clock_lead{};
