@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=cdc4300edb845368b427f2b90eb0051e74fae14610f7039ae415a5bf6ed69281 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=ko source_sha256=2769be0d70b9216a7b558b1115895f41285a6c9937abefc5e2449c5f8da761a3 -->
 # Python API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -144,8 +144,8 @@ python 01_minimal.py
 | # | 예제 | Offline | 보여 주는 것 |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 로컬 MCP 서버를 띄워 `fetch`를 찾고, 재진입 정책을 명시해 호출 세 번을 실행한다. MCP가 켜진 빌드가 필요하며 스모크 테스트는 Linux에서 한다. |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 공식 A2A SDK로 에이전트를 호스팅한다. `127.0.0.1:9999`의 에이전트 카드와 JSON-RPC, 스트리밍 아티팩트를 제공한다. `--self-check`는 빈 포트에서 서버를 띄우고 SDK의 클라이언트로 두 턴을 진행한다. `neograph-engine[a2a]`가 필요하다. |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 공식 ACP SDK로 stdio 위에서 에이전트를 호스팅한다. initialize, 세션 생성, prompt, 토큰 업데이트, `end_turn`을 거친다. `--self-check`는 에이전트를 자식 프로세스로 실행하고 SDK의 클라이언트로 두 턴을 진행한다. `neograph-engine[acp]`가 필요하다. |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 공식 A2A SDK로 에이전트를 호스팅한다. `127.0.0.1:9999`의 에이전트 카드와 JSON-RPC, 스트리밍 아티팩트를 제공한다. `approve:`로 시작하는 프롬프트는 그래프를 멈추게 한다. 태스크는 `input-required`가 되고, 그 태스크로 오는 다음 메시지가 실행을 재개한다. `--self-check`는 빈 포트에서 서버를 띄우고 SDK의 클라이언트로 두 턴과 한 번의 승인을 진행한다. `neograph-engine[a2a]`가 필요하다. |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 공식 ACP SDK로 stdio 위에서 에이전트를 호스팅한다. initialize, 세션 생성, prompt, 토큰 업데이트, `end_turn`을 거친다. `approve:`로 시작하는 프롬프트는 그래프를 멈추게 한다. 에이전트는 `session/request_permission`을 보내고 클라이언트가 고른 옵션으로 재개한다. `--self-check`는 에이전트를 자식 프로세스로 실행하고 SDK의 클라이언트로 두 턴과 한 번의 승인을 진행한다. `neograph-engine[acp]`가 필요하다. |
 | 45 | [`45_a2a_client.py`](45_a2a_client.py) | yes | A2A 클라이언트: `ng.a2a.A2AClient`가 에이전트 카드를 가져오고 메시지를 보내며, 예제 27의 SDK 에이전트가 내보내는 스트림을 읽는다. 그 에이전트는 이 스크립트가 빈 포트에서 스레드로 띄운다. `neograph-engine[a2a]`가 필요하다. |
 
 ### 영속성과 운영
@@ -189,7 +189,7 @@ with example_provider(script) as chosen:
 
 16번과 17번을 실행하려면 `gradio`를 설치하고, 스크립트를 실행한 뒤 출력된 로컬 URL을 여세요. `hello`를 보내고, 이어서 `research apples`를 보내세요. 17번에서는 실제 Crawl4AI `/md` 서비스, 또는 이를 충실하게 흉내 내는 로컬 peer가 `{"success": true, "markdown": "..."}`를 반환해야 합니다. 실행 중인 빌드가 Postgres를 지원하고 데이터베이스에 연결할 수 있을 때만 Postgres를 설정하세요. 엔진 상태는 UI 기록과 따로 확인하세요.
 
-예제 27과 28은 와이어 처리에 공식 Python SDK를, 체크포인트를 인식하는 엔진 실행에 `ProtocolHostAdapter`를 씁니다. A2A를 확인하려면 SDK 클라이언트가 에이전트 카드를 가져오고, 메시지를 보내고, 스트림을 끝까지 읽어야 합니다. ACP를 확인하려면 클라이언트가 서브프로세스로 연결해 `initialize`, `session/new`, `session/prompt`를 호출해야 하며, stdout은 프로토콜 메시지 전용입니다. 같은 컨텍스트/세션에서 두 번째 프롬프트를 보내고 `(turn 2)`가 나오는지 확인하세요. 취소하면 진행 중인 요청을 멈춰야 하며, 성공처럼 보이는 대체 결과를 만들어서는 안 됩니다.
+예제 27과 28은 와이어 처리에 공식 Python SDK를, 체크포인트를 인식하는 엔진 실행에 `ProtocolHostAdapter`를 씁니다. A2A를 확인하려면 SDK 클라이언트가 에이전트 카드를 가져오고, 메시지를 보내고, 스트림을 끝까지 읽어야 합니다. ACP를 확인하려면 클라이언트가 서브프로세스로 연결해 `initialize`, `session/new`, `session/prompt`를 호출해야 하며, stdout은 프로토콜 메시지 전용입니다. 같은 컨텍스트/세션에서 두 번째 프롬프트를 보내고 `(turn 2)`가 나오는지 확인하세요. `approve: deploy`를 보내 보세요. A2A는 상태 메시지가 ``Run `deploy`?``인 `input-required` 태스크로 답하고, 같은 태스크 ID로 텍스트 `approve`를 보내면 `NeoGraph ran: deploy`로 완료됩니다. ACP는 권한 요청을 보내고, 옵션 `approve`가 같은 텍스트로 턴을 끝냅니다. 취소하면 진행 중인 요청을 멈춰야 하며, 성공처럼 보이는 대체 결과를 만들어서는 안 됩니다.
 
 영속 ACP 세션을 쓰려면 `NEOGRAPH_ACP_POSTGRES_URL`과 `NEOGRAPH_ACP_SQLITE_PATH` 중 정확히 하나를 설정하세요. 첫 프롬프트가 끝나면 `session/load`에 필요한 체크포인트가 만들어집니다. 세션마다 활성 에이전트 프로세스를 하나만 두세요. 체크포인트 저장소는 프로세스 사이의 동시 쓰기를 직렬화하지 않습니다. 이 예제는 풍부한 콘텐츠 블록을 그대로 돌려주지만, 이미지/오디오 콘텐츠를 해석하거나 편집기의 파일 시스템/터미널 콜백을 제공하지는 않습니다.
 

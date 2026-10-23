@@ -13,7 +13,7 @@ NeoGraph は両側に対応しています。`A2AServer` はコンパイル済�
 |---|---|---|---|
 | サーバーとクライアント | `neograph::a2a` | `NEOGRAPH_BUILD_A2A`(オン) | `neograph_engine.a2a` のクライアント |
 
-Python パッケージにあるのはクライアントだけです。Python でエージェントを提供するには、公式の A2A Python SDK(`pip install "neograph-engine[a2a]"` で入ります)を使い、その背後で `neograph_engine.ProtocolHostAdapter` を使ってエンジンを動かします。このアダプターは、A2A のコンテキスト ID を NeoGraph の `thread_id` に対応づけ、チェックポイントから再開し、キャンセルを伝え、トークンをストリーミングします。[Python サンプル](../bindings/python/examples/README.md)にそのようなサーバーがあります。
+Python パッケージにあるのはクライアントだけです。Python でエージェントを提供するには、公式の A2A Python SDK(`pip install "neograph-engine[a2a]"` で入ります)を使い、その背後で `neograph_engine.ProtocolHostAdapter` を使ってエンジンを動かします。このアダプターは、A2A のコンテキスト ID を NeoGraph の `thread_id` に対応づけ、チェックポイントから再開し、キャンセルを伝え、トークンをストリーミングし、グラフのインタラプトを `input-required` タスクにします([Python でホストするときのインタラプト](#interrupts-when-you-host-from-python)を参照)。[Python サンプル](../bindings/python/examples/README.md)にそのようなサーバーがあります。
 
 ## バージョン
 
@@ -267,6 +267,17 @@ int main(int argc, char** argv) {
 - **失敗。** 失敗した実行は `failed` のタスクで、ステータスメッセージは失敗の公開メッセージ、`metadata["neograph/failure"]` は `{code, retryable, retryable_by_class}` です。`retryable` はエンジンがノードの試行を使い切ると `false` になり、`retryable_by_class` は失敗の分類が再試行を許すかどうかを示します。例外のテキストはネットワークに出ません。どのノードも終わる前に Hook がブロックした場合は `rejected` になります。`max_steps` に達したグラフは、コード `NG.StepLimit` で失敗します。
 - **リクエストのエラー**(未知のタスク `-32001`、終了済みタスクへのメッセージ `-32004`、タスクのものと異なる `contextId` は `-32602`、まだ実行中のタスクは `-32603` と理由 `TASK_BUSY`)は、リファレンスの [A2A エラーマッピング](reference-en.md#a2a-error-mapping)に、すべてのプロトコルの失敗クラスは[プロトコル失敗マッピング](reference-en.md#protocol-failure-mapping)にあります。ここには再掲しません。
 - **Program。** Program ベースのエージェント(`A2AServer` の背後にある承認済みの `ProgramVersion`)は、NeoGraph のコラボレーションエンベロープも受け付けます。[A2A コラボレーション拡張](reference-en.md#a2a-collaboration-extension)を参照してください。入力待ちの Program タスクには、まだ A2A で答えられません。メッセージには `-32004` が返り、タスクは待ち続けます。サーバーを再起動すると、`CollaborationMailbox` から Program タスクを復旧します。復旧したタスクがまだ実行中のときに `SubscribeToTask` を呼ぶと、先に Task を送り、永続 run が終わるまで追って、最終状態で終わります。run を追えないときは、空のまま閉じず、エラーイベントで終わります。
+
+<a id="interrupts-when-you-host-from-python"></a>
+## Python でホストするときのインタラプト
+
+`ProtocolHostAdapter` は、停止するグラフ(`interrupt_before`、`NodeInterrupt`、ツールゲート)を、ネイティブサーバーと同じ形にします。後続のメッセージが再開させる `input-required` タスクです。[サンプル 27](../bindings/python/examples/27_a2a_server.py)がその実行器です。
+
+- **質問。** `adapter.stream(text, thread_id=..., request_id=..., interrupts=True)` は、グラフが停止すると最終イベントの代わりに `interrupt` イベントで終わります。このイベントの `ProtocolInterrupt` には `reason`、`payload`(ノードが `NodeInterrupt` に渡した値)、`node`、`checkpoint_id` があります。実行器は `TASK_STATE_INPUT_REQUIRED` へのステータス更新を発行します。そのメッセージには理由がテキストとして、ペイロードがデータパートとして入り、`metadata["neograph/interrupt"]` にはノード、チェックポイント、インタラプト ID が入ります。ネイティブサーバーと同じです。
+- **答え。** そのタスクへの次のメッセージは、タスクがまだ `input-required` のまま `execute()` に届きます。実行器はそのテキストを、タスク自身のメタデータが示す停止とともに `adapter.resume_stream(text, thread_id=..., request_id=..., interrupt=...)` に渡します。この呼び出しは、実行が停止したチェックポイントから再開し、残りのターンを他のターンと同じようにストリーミングします。タスクは `completed` で終わり、グラフがまた質問すれば再び `input-required` になります。このテキストが、停止したノードが `input.ctx.resume_value` から読む値で、ネイティブサーバーも同じです。ノードが別の形(たとえば dict)を期待するなら、`ProtocolHostAdapter` に `resume_value=lambda answer, interrupt: ...` を渡してください。
+- **状態。** アダプターは停止をスレッドごとにメモリに覚えており、それを再開するにはエンジンにチェックポイントストアが必要です。サンプルは、タスク自身のメタデータが示す停止からそのタスクに答えます。`metadata["neograph/interrupt"]` から `ProtocolInterrupt(thread_id=..., checkpoint_id=..., interrupt_id=...)` を作り直して `interrupt=` に渡すので、再起動のあとでも動作します。記録された停止も `interrupt=` もない場合、`resume_stream()` は `LookupError` を送出します。停止していないスレッドを再開すると、最後のターンのテキストが返ってしまうためです。タスクをキャンセルしたら `adapter.discard_interrupt(thread_id)` を呼んでください。待機中のタスクへの `CancelTask` は、前述のとおりタスクを `canceled` で終わらせます。アダプターはスレッドを A2A のコンテキストで区別しますが、ネイティブサーバーはタスクで区別します。同じコンテキストの新しいタスクは、先行するタスクが残した状態から始まります。アダプターが覚える質問はスレッドごとに 1 つなので、より新しい停止が古い停止の記録を置き換えます。そのためサンプルは、停止をアダプターではなくタスクから取ります。誰も答えなかった停止はチェックポイントストアに開いたまま残り、エンジンはその直後の停止を再開できません(`NodeInterrupt ancestry crosses super-step boundaries`)。待機中のタスクへの `CancelTask` のあとや、別のタスクが待っている間に新しいタスクが停止した場合、そのコンテキストの次の停止は、答えるときに失敗します。コンテキストのいずれかのターンが完了するまで、それは続きます。
+- **`interrupts=True` なしの場合。** グラフが停止すると、`stream()`、`run()`、`run_payload()` は `ProtocolInterrupted` を送出します。以前は、状態の最後のメッセージ、つまりユーザー自身のテキストを、エージェントの答えのように返していました。
+- **対象外。** NeoGraph のコラボレーションエンベロープと Program ベースのタスクは、ネイティブサーバーの機能です。SDK が提供するのは標準のメソッドだけです。
 
 ## テストと相互運用性
 

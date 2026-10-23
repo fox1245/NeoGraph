@@ -14,7 +14,7 @@ Agent Client Protocol(ACP)は、エディターをコーディング用や対話
 | エージェント(サーバー) | `neograph::acp` | `NEOGRAPH_BUILD_ACP`(オン) | 公式 SDK を使用 |
 | Streamable HTTP と WebSocket のエージェント(実験的) | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`(**オフ**) | なし |
 
-Python パッケージにはネイティブの ACP サーバーがありません。Python でエージェントを書くには、公式 SDK(`pip install "neograph-engine[acp]"`)を入れ、その背後で `neograph_engine.ProtocolHostAdapter` を使ってエンジンを動かします。このアダプターは、ACP のセッション ID を NeoGraph の `thread_id` に対応づけ、チェックポイントから再開し、キャンセルを伝え、トークンをストリーミングします。[Python サンプル](../bindings/python/examples/README.md)にそのようなエージェントがあります。ACP には Python 3.10 以降が必要です。
+Python パッケージにはネイティブの ACP サーバーがありません。Python でエージェントを書くには、公式 SDK(`pip install "neograph-engine[acp]"`)を入れ、その背後で `neograph_engine.ProtocolHostAdapter` を使ってエンジンを動かします。このアダプターは、ACP のセッション ID を NeoGraph の `thread_id` に対応づけ、チェックポイントから再開し、キャンセルを伝え、トークンをストリーミングし、グラフのインタラプトを権限リクエストにします([Python でホストするときの権限リクエスト](#permission-requests-when-you-host-from-python)を参照)。[Python サンプル](../bindings/python/examples/README.md)にそのようなエージェントがあります。ACP には Python 3.10 以降が必要です。
 
 ## バージョン
 
@@ -206,6 +206,18 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 - **WebSocket** は同じエンドポイント(`Upgrade: websocket` の `GET`)で提供されます。テキストフレーム 1 つが、どちらの向きでも JSON-RPC メッセージ 1 つで、最初が `initialize` です。バイナリフレームは無視されます。フレームは RFC 6455 に従います。クライアントのフレームはマスクされている必要があり、ping には応答し、メッセージは分割されていてもかまいません。`max_payload_bytes` を超えるメッセージはコード 1009 で接続を閉じ、ソケットを閉じると接続が終わります。
 - **ドラフトとの違い。** ドラフトは HTTP/2 を必須としていますが、このサーバーは HTTP/1.1 なので、ストリームと `POST` のそれぞれが別の TCP 接続になり、多重化はリバースプロキシに任せます。WebSocket アップグレードの 101 応答には `Acp-Connection-Id` がありません。クッキーは設定せず、`Acp-Protocol-Version` は検査せず、ストリームにイベント id や再開はありません。`initialize` の応答は接続 id をヘッダーでのみ返し、本文に `connectionId` としては入れません。`ACPServer` には `session/load` がないため、ドラフトの再接続の流れは `session/resume` が担い、セッションストリームは `session/new` または `session/resume` が応答した後でないと開けません。エージェントのリクエストへのクライアントの応答である `POST` では、`Acp-Session-Id` ヘッダーは任意です。同じ範囲の 2 本目のストリームは 1 本目を置き換えます。
 - **セキュリティ。** 別のホストを指定しない限り `127.0.0.1` にバインドし、ループバックでないバインドは `authenticator` がなければ拒否されます。すべてのリクエスト、ストリーム、アップグレード、およびサーバーが提供しないパスも、本文を読む前に検査されます。まず Host と Origin(`allowed_hosts` と `allowed_origins`。[MCP](mcp.md) と [A2A](a2a.md) のサーバーと同じ規則)、次に `authenticator`(HTTP 401 と `WWW-Authenticate: Bearer`)、最後に `max_payload_bytes`(HTTP 413、既定は 4 MiB)です。接続は、それを作ったプリンシパルにだけ応答します。クライアントはサーバーにプロセスを起動させることができません。`mcpServers` を含む `session/new` や `session/resume` は、`allow_client_mcp_servers` を有効にしない限り `-32602` で拒否され(ACP はエージェントがクライアントの列挙した stdio MCP サーバーを起動することを期待しますが、ここではそれらはクライアントではなくサーバーのホストで動きます)、クライアントが指定した `cwd` は `_acp_cwd` としてグラフに渡るので、サーバー上でそれを使うノードが自分で検査する必要があります。エージェントを待つメッセージの量には上限があります(`max_payload_bytes` の 2 倍、最小 1 MiB)。それを超える `POST` には `Retry-After` 付きの `503` を、WebSocket のメッセージには JSON-RPC エラーを返します。遅い TCP 接続や遊んでいる TCP 接続、および 1 つのプリンシパルが使える `max_connections` とストリーム枠の割合は、相手ごとには制限されません。インターネットに面するサーバーは、それらを制限するリバースプロキシの背後に置いてください。エージェントはエディターの名前でファイルを読み書きするので、リモートバインドはそれを公開することだと考えてください。ブラウザーは WebSocket に `Authorization` を付けられないので、そうした接続の認証はリバースプロキシで行ってください。
+<a id="permission-requests-when-you-host-from-python"></a>
+## Python でホストするときの権限リクエスト
+
+`ProtocolHostAdapter` は、停止するグラフ(`interrupt_before`、`NodeInterrupt`、ツールゲート)を、ネイティブサーバーと同じ形にします。同じターンの中の `session/request_permission` です。[サンプル 28](../bindings/python/examples/28_acp_agent.py)がそのエージェントです。
+
+- **質問。** `adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)` は、グラフが停止すると最終イベントの代わりに `interrupt` イベントで終わります。このイベントの `ProtocolInterrupt` には `reason`、`payload`(ノードが `NodeInterrupt` に渡した値)、`node`、`checkpoint_id` があります。`prompt()` は接続に対して `request_permission` を送ります。`ToolCallUpdate` のタイトルは理由、`rawInput` はペイロードで、選択肢は `approve`(`allow_once`)と `reject`(`reject_once`)です。ネイティブサーバーと同じです。
+- **答え。** クライアントが選択肢を選ぶと、`prompt()` は `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)` を呼びます。この呼び出しは、実行が停止したチェックポイントから再開し、残りのターンを `agent_message_chunk` の更新としてストリーミングします。選択肢の ID が、停止したノードが `input.ctx.resume_value` から読む値なので、ノードは `"approve"` か `"reject"` を受け取ります。グラフがまた質問すれば、ループはもう一度尋ねます。ノードが別の形を期待するなら、`ProtocolHostAdapter` に `resume_value=lambda answer, interrupt: ...` を渡してください。
+- **キャンセル。** クライアントが `cancelled` と答えると、ターンは `stopReason: "cancelled"` で終わります。リクエストの待機中や、再開したターンの実行中の `session/cancel` も同じです。どちらの場合も、エージェントは `adapter.discard_interrupt(thread_id)` を呼ぶので、質問は残りません。セッションの次のプロンプトは新しいターンを始め、答えとは見なされません。放棄された停止はチェックポイントストアに開いたまま残り、エンジンはその直後の停止を再開できません(`NodeInterrupt ancestry crosses super-step boundaries`)。次のプロンプトが再び権限を求めた場合、セッションのいずれかのターンが完了するまで、その要求に答えると失敗します。
+- **`interrupts=True` なしの場合。** グラフが停止すると、`stream()`、`run()`、`run_payload()` は `ProtocolInterrupted` を送出します。以前は、状態の最後のメッセージ、つまりユーザー自身のテキストを、エージェントの答えのように返していました。
+- **チェックポイントストア。** 停止した実行を再開するには、エンジンにストアが必要です。サンプルは、永続ストアを渡されない限りメモリ上のストアを使います。
+- **再起動。** 質問はターンの中にあります。待機中にエージェントを再起動すると、ターンは接続とともに終わり、次のプロンプトは新しいターンを始めます。ネイティブサーバーはそのようなセッションを `session/resume` で復元できますが、アダプターにはできません。
+- **バージョン。** サンプルは `agent-client-protocol` 0.12.1 でテストしています。
 
 ## テストと相互運用性
 

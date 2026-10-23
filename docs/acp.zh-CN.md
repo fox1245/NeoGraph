@@ -14,7 +14,7 @@ Agent Client Protocol（ACP）把编辑器与编码智能体或对话智能体�
 | 智能体（服务器） | `neograph::acp` | `NEOGRAPH_BUILD_ACP`（开） | 通过官方 SDK |
 | 通过 Streamable HTTP 和 WebSocket 提供的智能体（实验性） | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`（**关**） | 无 |
 
-Python 包中没有原生的 ACP 服务器。要用 Python 编写智能体，请安装官方 SDK（`pip install "neograph-engine[acp]"`），并在它背后用 `neograph_engine.ProtocolHostAdapter` 运行引擎。该适配器把 ACP 会话 ID 对应到 NeoGraph 的 `thread_id`，从检查点恢复，转发取消，并流式输出令牌。[Python 示例](../bindings/python/examples/README.md)里有这样的智能体。ACP 需要 Python 3.10 或更高版本。
+Python 包中没有原生的 ACP 服务器。要用 Python 编写智能体，请安装官方 SDK（`pip install "neograph-engine[acp]"`），并在它背后用 `neograph_engine.ProtocolHostAdapter` 运行引擎。该适配器把 ACP 会话 ID 对应到 NeoGraph 的 `thread_id`，从检查点恢复，转发取消，流式输出令牌，并把图中断变成权限请求（见[在 Python 中托管时的权限请求](#permission-requests-when-you-host-from-python)）。[Python 示例](../bindings/python/examples/README.md)里有这样的智能体。ACP 需要 Python 3.10 或更高版本。
 
 ## 版本
 
@@ -206,6 +206,18 @@ server.start_async();  // 127.0.0.1 and a free port, see server.port()
 - **WebSocket** 在同一端点上提供（带 `Upgrade: websocket` 的 `GET`）。每个文本帧是一条 JSON-RPC 消息，两个方向都是如此，第一条是 `initialize`；二进制帧会被忽略。帧遵循 RFC 6455：客户端帧必须带掩码，ping 会得到应答，消息可以分片。超过 `max_payload_bytes` 的消息会以代码 1009 关闭连接，关闭套接字即结束连接。
 - **与草案的不同。** 草案要求 HTTP/2；本服务器使用 HTTP/1.1，因此每个流和每个 `POST` 都是独立的 TCP 连接，多路复用由反向代理提供。WebSocket 升级的 101 响应不带 `Acp-Connection-Id`。不设置 cookie，不检查 `Acp-Protocol-Version`，流也没有事件 ID 和续传。`initialize` 的应答只在头中带连接 ID，正文里没有 `connectionId`。`ACPServer` 没有 `session/load`，所以草案的重连流程由 `session/resume` 承担，会话流也只能在 `session/new` 或 `session/resume` 应答之后打开。对于客户端回答智能体请求的 `POST`，`Acp-Session-Id` 头是可选的。同一范围上的第二个流会取代第一个。
 - **安全。** 除非指定其他主机，否则绑定 `127.0.0.1`；非回环地址的绑定在没有设置 `authenticator` 时会被拒绝。每个请求、流和升级请求，以及服务器不提供的路径，都在读取正文之前检查：先是 Host 和 Origin（`allowed_hosts` 和 `allowed_origins`，规则与 [MCP](mcp.md) 和 [A2A](a2a.md) 服务器相同），然后是 `authenticator`（HTTP 401 和 `WWW-Authenticate: Bearer`），最后是 `max_payload_bytes`（HTTP 413，默认 4 MiB）。连接只对创建它的主体应答。客户端无法让服务器启动进程：带有 `mcpServers` 的 `session/new` 或 `session/resume` 会以 `-32602` 被拒绝，除非设置了 `allow_client_mcp_servers`（ACP 期望智能体启动客户端列出的 stdio MCP 服务器，而这里它们会在服务器的主机上而不是客户端上运行）；客户端指定的 `cwd` 会作为 `_acp_cwd` 传给图，在服务器上使用它的节点必须自行检查。等待智能体处理的消息量有上限（`max_payload_bytes` 的两倍，至少 1 MiB）：超出时 `POST` 得到带 `Retry-After` 的 `503`，WebSocket 消息得到 JSON-RPC 错误。缓慢或空闲的 TCP 连接，以及一个主体可占用的 `max_connections` 和流名额的份额，都不按对端限制；面向互联网的服务器请放在能限制这些的反向代理之后。智能体以编辑器的名义读写文件，所以要把远程绑定看作是把这种能力暴露出去。浏览器无法在 WebSocket 上设置 `Authorization`，这类连接请在反向代理中认证。
+<a id="permission-requests-when-you-host-from-python"></a>
+## 在 Python 中托管时的权限请求
+
+`ProtocolHostAdapter` 让暂停的图（`interrupt_before`、`NodeInterrupt`、工具闸门）具有与原生服务器相同的形态：同一轮中的一次 `session/request_permission`。[示例 28](../bindings/python/examples/28_acp_agent.py) 就是这个智能体。
+
+- **提问。** 图暂停时，`adapter.stream(payload, thread_id=..., request_id=..., interrupts=True)` 以一个 `interrupt` 事件结束，而不是最终事件。该事件的 `ProtocolInterrupt` 含有 `reason`、`payload`（节点传给 `NodeInterrupt` 的值）、`node` 和 `checkpoint_id`。`prompt()` 通过连接发送 `request_permission`：`ToolCallUpdate` 的标题是原因，`rawInput` 是负载，选项为 `approve`（`allow_once`）和 `reject`（`reject_once`），与原生服务器一致。
+- **回答。** 客户端选择某个选项后，`prompt()` 调用 `adapter.resume_stream(option_id, thread_id=..., request_id=..., interrupt=interrupt)`。它从运行暂停时的检查点恢复，并以 `agent_message_chunk` 更新流式输出该轮的其余部分。选项 ID 就是暂停的节点从 `input.ctx.resume_value` 读到的值，所以节点看到的是 `"approve"` 或 `"reject"`。如果图再次提问，循环会再次询问。如果节点期望别的形态，请给 `ProtocolHostAdapter` 传入 `resume_value=lambda answer, interrupt: ...`。
+- **取消。** 客户端回答 `cancelled` 时，该轮以 `stopReason: "cancelled"` 结束；请求在等待期间或恢复后的轮次在运行期间收到 `session/cancel`，结果相同。无论哪种情况，智能体都会调用 `adapter.discard_interrupt(thread_id)`，因此不会留下悬而未决的问题。会话的下一条提示开始新的一轮，不会被当作回答。被放弃的暂停会作为未结束状态留在检查点存储中，引擎无法恢复紧随其后的暂停（`NodeInterrupt ancestry crosses super-step boundaries`）：如果下一条提示再次请求权限，对该请求的回答会失败，直到该会话的某一轮完成为止。
+- **没有 `interrupts=True` 时。** 图暂停时，`stream()`、`run()` 和 `run_payload()` 会抛出 `ProtocolInterrupted`。此前它们会返回状态里的最后一条消息，也就是用户自己的文本，并把它当作智能体的回答。
+- **检查点存储。** 引擎需要有检查点存储才能恢复暂停的运行；示例除非被传入持久存储，否则使用内存存储。
+- **重启。** 问题存在于该轮之中。如果智能体在等待期间重启，该轮会随连接一起结束，下一条提示开始新的一轮；原生服务器可以用 `session/resume` 恢复这样的会话，适配器做不到。
+- **版本。** 示例用 `agent-client-protocol` 0.12.1 测试。
 
 ## 测试与互操作
 

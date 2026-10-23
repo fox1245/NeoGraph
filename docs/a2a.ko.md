@@ -13,7 +13,7 @@ NeoGraph는 양쪽을 모두 지원합니다. `A2AServer`는 컴파일된 그래
 |---|---|---|---|
 | 서버와 클라이언트 | `neograph::a2a` | `NEOGRAPH_BUILD_A2A`(켜짐) | `neograph_engine.a2a`의 클라이언트 |
 
-Python 패키지에는 클라이언트만 있습니다. Python에서 에이전트를 서비스하려면 공식 A2A Python SDK(`pip install "neograph-engine[a2a]"`로 설치됨)를 쓰고, 그 뒤에서 `neograph_engine.ProtocolHostAdapter`로 엔진을 실행하세요. 이 어댑터는 A2A 컨텍스트 ID를 NeoGraph `thread_id`에 대응시키고, 체크포인트에서 재개하고, 취소를 전달하고, 토큰을 스트리밍합니다. [Python 예제](../bindings/python/examples/README.md)에 이런 서버가 있습니다.
+Python 패키지에는 클라이언트만 있습니다. Python에서 에이전트를 서비스하려면 공식 A2A Python SDK(`pip install "neograph-engine[a2a]"`로 설치됨)를 쓰고, 그 뒤에서 `neograph_engine.ProtocolHostAdapter`로 엔진을 실행하세요. 이 어댑터는 A2A 컨텍스트 ID를 NeoGraph `thread_id`에 대응시키고, 체크포인트에서 재개하고, 취소를 전달하고, 토큰을 스트리밍하고, 그래프 인터럽트를 `input-required` 태스크로 바꿉니다([Python에서 호스팅할 때의 인터럽트](#interrupts-when-you-host-from-python) 참고). [Python 예제](../bindings/python/examples/README.md)에 이런 서버가 있습니다.
 
 ## 버전
 
@@ -267,6 +267,17 @@ int main(int argc, char** argv) {
 - **실패.** 실패한 실행은 `failed` 태스크이며, 상태 메시지는 실패의 공개 메시지, `metadata["neograph/failure"]`는 `{code, retryable, retryable_by_class}`입니다. `retryable`은 엔진이 노드의 시도를 다 쓰면 `false`가 되고, `retryable_by_class`는 실패의 분류가 재시도를 허용하는지를 알려 줍니다. 예외 텍스트는 네트워크로 나가지 않습니다. 어떤 노드도 끝나기 전에 Hook이 막으면 `rejected`가 됩니다. `max_steps`에 도달한 그래프는 코드 `NG.StepLimit`으로 실패합니다.
 - **요청 오류**(알 수 없는 태스크 `-32001`, 종료된 태스크에 메시지 `-32004`, 태스크의 것과 다른 `contextId` `-32602`, 아직 실행 중인 태스크 `-32603`과 사유 `TASK_BUSY`)는 레퍼런스의 [A2A 오류 매핑](reference-en.md#a2a-error-mapping)에, 모든 프로토콜의 실패 분류는 [프로토콜 실패 매핑](reference-en.md#protocol-failure-mapping)에 있습니다. 여기에 다시 옮기지 않았습니다.
 - **Program.** Program 기반 에이전트(`A2AServer` 뒤의 승인된 `ProgramVersion`)는 NeoGraph 협업 봉투(collaboration envelope)도 받습니다. [A2A 협업 확장](reference-en.md#a2a-collaboration-extension)을 보세요. 입력을 기다리는 Program 태스크에는 아직 A2A로 답할 수 없습니다. 메시지는 `-32004`를 받고 태스크는 계속 기다립니다. 서버를 다시 시작하면 `CollaborationMailbox`에서 Program 태스크를 복구합니다. 복구한 태스크가 아직 실행 중일 때 `SubscribeToTask`를 호출하면 Task를 먼저 보낸 다음, 영속 run이 끝날 때까지 따라가서 최종 상태로 마칩니다. run을 따라갈 수 없으면 빈 채로 닫지 않고 오류 이벤트로 마칩니다.
+
+<a id="interrupts-when-you-host-from-python"></a>
+## Python에서 호스팅할 때의 인터럽트
+
+`ProtocolHostAdapter`는 멈추는 그래프(`interrupt_before`, `NodeInterrupt`, 도구 게이트)를 네이티브 서버와 같은 모양으로 만듭니다. 후속 메시지가 재개하는 `input-required` 태스크입니다. [예제 27](../bindings/python/examples/27_a2a_server.py)이 그 실행기입니다.
+
+- **질문.** `adapter.stream(text, thread_id=..., request_id=..., interrupts=True)`는 그래프가 멈추면 최종 이벤트 대신 `interrupt` 이벤트로 끝납니다. 이 이벤트의 `ProtocolInterrupt`에는 `reason`, `payload`(노드가 `NodeInterrupt`에 넘긴 값), `node`, `checkpoint_id`가 있습니다. 실행기는 `TASK_STATE_INPUT_REQUIRED`로 가는 상태 업데이트를 게시합니다. 그 메시지에는 이유가 텍스트로, 페이로드가 데이터 파트로 들어 있고, `metadata["neograph/interrupt"]`에는 노드, 체크포인트, 인터럽트 ID가 들어 있습니다. 네이티브 서버와 같습니다.
+- **답.** 그 태스크로 오는 다음 메시지는 태스크가 아직 `input-required`인 채로 `execute()`에 도착합니다. 실행기는 그 텍스트를 태스크 자신의 메타데이터가 가리키는 멈춤과 함께 `adapter.resume_stream(text, thread_id=..., request_id=..., interrupt=...)`에 넘깁니다. 이 호출은 실행이 멈춘 체크포인트에서 재개하고, 나머지 턴을 다른 턴과 똑같이 스트리밍합니다. 태스크는 `completed`로 끝나며, 그래프가 또 물으면 다시 `input-required`가 됩니다. 이 텍스트가 멈춘 노드가 `input.ctx.resume_value`로 읽는 값이고, 네이티브 서버도 마찬가지입니다. 노드가 다른 모양(예를 들어 dict)을 기대하면 `ProtocolHostAdapter`에 `resume_value=lambda answer, interrupt: ...`를 넘기세요.
+- **상태.** 어댑터는 멈춤을 스레드별로 메모리에 기억하며, 엔진에는 이를 재개하기 위한 체크포인트 저장소가 필요합니다. 예제는 태스크 자신의 메타데이터가 가리키는 멈춤에서 그 태스크에 답합니다. `metadata["neograph/interrupt"]`로 `ProtocolInterrupt(thread_id=..., checkpoint_id=..., interrupt_id=...)`를 다시 만들어 `interrupt=`로 넘기므로, 재시작한 뒤에도 동작합니다. 기억된 멈춤도 없고 `interrupt=`도 없으면 `resume_stream()`은 `LookupError`를 던집니다. 멈추지 않은 스레드를 재개하면 마지막 턴의 텍스트가 돌아오기 때문입니다. 태스크가 취소되면 `adapter.discard_interrupt(thread_id)`를 호출하세요. 기다리는 태스크에 대한 `CancelTask`는 위에서 설명한 대로 태스크를 `canceled`로 끝냅니다. 어댑터는 스레드를 A2A 컨텍스트로 구분하며, 네이티브 서버는 태스크로 구분합니다. 같은 컨텍스트의 새 태스크는 앞선 태스크들이 남긴 상태에서 시작합니다. 어댑터는 스레드마다 질문을 하나만 기억하므로 더 새로운 멈춤이 앞선 멈춤의 기록을 대체하고, 그래서 예제는 멈춤을 어댑터가 아니라 태스크에서 가져옵니다. 아무도 답하지 않은 멈춤은 체크포인트 저장소에 열린 채로 남으며, 엔진은 그 바로 뒤에 오는 멈춤을 재개하지 못합니다(`NodeInterrupt ancestry crosses super-step boundaries`). 기다리는 태스크에 `CancelTask`를 보낸 뒤나, 다른 태스크가 기다리는 동안 새 태스크가 멈춘 경우, 그 컨텍스트의 다음 멈춤은 답할 때 실패하며 컨텍스트의 어떤 턴이 완료될 때까지 이어집니다.
+- **`interrupts=True` 없이.** 그래프가 멈추면 `stream()`, `run()`, `run_payload()`는 `ProtocolInterrupted`를 던집니다. 예전에는 상태의 마지막 메시지, 곧 사용자 자신의 텍스트를 에이전트의 답처럼 돌려주었습니다.
+- **다루지 않는 것.** NeoGraph 협업 봉투와 Program 기반 태스크는 네이티브 서버의 기능입니다. SDK는 표준 메서드만 제공합니다.
 
 ## 테스트와 상호 운용성
 

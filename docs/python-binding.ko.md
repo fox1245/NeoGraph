@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -372,6 +372,7 @@ Python은 별도의 Python 스케줄러를 두지 않고 C++의 실행 기능을
 | 런타임 식별자, 데드라인, 예산 | `RunMetadata`, `RunConfig` | `RunMetadata`, `RunConfig.model_token_budget` | 실행마다 같은 값 |
 | 재시도 및 노드 캐시 정책 | `RetryPolicy`, `CacheScope` | 그래프/노드 setter와 캐시 범위 | 같은 런타임 정책 |
 | 체크포인트, HITL, 시간 여행 | 체크포인트 저장소와 resume API | resume, 정확한 `resume_from`, fork, 상태 이력/갱신 | 같은 체크포인트 계약 |
+| A2A 또는 ACP로 에이전트 서비스하기 | `A2AServer`, `ACPServer` | `ProtocolHostAdapter` 뒤의 공식 SDK 서버 | 세션, 취소, 토큰 스트리밍, 그래프 인터럽트(`input-required`, 권한 요청). 협업 봉투, Program 기반 태스크, 테넌트 격리는 없음 |
 | Program 작성과 로컬 실행 | 컴파일러, Catalog, `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost`, 핸들/결과 | 네이티브 소유자 범위의 편의용 호스트 |
 | 필수 수명 주기 Hook | 레지스트리, 러너, `HookRuntime` | 정의와 `create_hook_runtime` 콜백 | 같은 실패 시 차단 수명 주기 경계 |
 | 런타임 컨텍스트와 strict dispatch | 컨텍스트 저장소, receipt, 인터포지션 | 대응하는 불변 값, 저장소, `StrictRuntimeProfile` | 같은 네이티브 컨트롤러 |
@@ -777,8 +778,26 @@ GIL을 놓는 일과 Python 콜백을 위해 다시 잡는 일이 바인딩에�
 
 - 빌드에 포함되어 있으면 MCP 클라이언트 도구를 `neograph_engine.mcp`로 쓸 수 있습니다.
 - 빌드에 포함되어 있으면 A2A 클라이언트 타입을 `neograph_engine.a2a`로 쓸 수 있습니다.
-- `ProtocolHostAdapter`는 공식 Python A2A/ACP 서버 SDK를 NeoGraph의 세션 의미론과 통합합니다.
+- `ProtocolHostAdapter`는 공식 Python A2A/ACP 서버 SDK를 NeoGraph의 세션 의미론과 통합하며, 그래프 인터럽트도 다룹니다([A2A·ACP SDK 뒤에서 에이전트 호스팅하기](#hosting-an-agent-behind-the-a2a-and-acp-sdks) 참고).
 - `neograph_engine.tracing`과 `neograph_engine.openinference`는 Phoenix, Langfuse, Arize 및 호환 백엔드를 위한 벤더 중립적인 OTel/OpenInference 데이터를 내보냅니다.
+
+<a id="hosting-an-agent-behind-the-a2a-and-acp-sdks"></a>
+### A2A·ACP SDK 뒤에서 에이전트 호스팅하기
+
+Python 패키지에는 A2A나 ACP 서버가 없습니다. 전송과 와이어 형식은 공식 SDK가 맡고, `ProtocolHostAdapter`가 그 콜백을 위해 엔진을 실행합니다. A2A 컨텍스트 ID나 ACP 세션 ID가 NeoGraph `thread_id`이고, 체크포인트가 대화를 이어 주며, `cancel(request_id)`는 아래의 `run_async()`를 취소하고, `stream()`은 토큰 이벤트들과 최종 이벤트 하나를 냅니다. [예제 27과 28](../bindings/python/examples/README.md)은 같은 데모 그래프를 각 SDK로 호스팅합니다.
+
+사람을 기다리느라 멈춘 그래프(`interrupt_before`, `NodeInterrupt`, 도구 게이트)는 프로토콜 클라이언트에 보고되고, 클라이언트의 답은 실행이 멈춘 체크포인트에서 재개합니다.
+
+| 어댑터 호출 | 하는 일 |
+|---|---|
+| `stream(payload, thread_id=..., interrupts=True)` | `final` 이벤트 대신 `interrupt` 이벤트 하나로 끝납니다. `event.interrupt`는 `ProtocolInterrupt`이며 `reason`, `payload`, `node`, `checkpoint_id`, `interrupt_id`가 있습니다. |
+| `resume_stream(answer, thread_id=..., interrupt=None)` | `resume_value(answer, interrupt)`로 재개합니다. `token` 이벤트를 낸 뒤 `final` 또는 또 다른 `interrupt`로 끝납니다. |
+| `resume_payload(answer, thread_id=...)` | 스트리밍 없이 같은 일을 하고 응답 텍스트를 돌려줍니다. |
+| `pending_interrupt(thread_id)`, `discard_interrupt(thread_id)` | 어댑터가 스레드에 대해 기억하는 멈춤, 그리고 그것을 잊기(취소된 태스크, 취소된 권한 요청). |
+
+`ProtocolHostAdapter(..., resume_value=callable)`는 프로토콜의 답을, 멈춘 노드가 `input.ctx.resume_value`로 읽는 값으로 바꿉니다. 기본값은 답 그대로입니다. A2A 후속 메시지의 텍스트, 또는 ACP 권한 옵션의 ID(`"approve"` 또는 `"reject"`)이며, 네이티브 서버도 같습니다. `interrupts=True` 없이 그래프가 멈추면 `stream()`, `run()`, `run_payload()`는 `ProtocolInterrupted`를 던집니다. 예전에는 상태의 마지막 메시지를 답인 것처럼 돌려주었습니다. 멈춤은 스레드별로 메모리에 기억되며, 엔진에는 이를 재개하기 위한 체크포인트 저장소가 필요합니다. 재시작한 뒤에는 저장해 둔 ID로 만든 `ProtocolInterrupt`를 `interrupt=`로 넘기세요(`checkpoint_id`가 있으면 정확히 그 체크포인트를 재개합니다). 기억된 멈춤도 `interrupt=`도 없으면 `resume_stream()`과 `resume_payload()`는 `LookupError`를 던집니다. 멈추지 않은 스레드를 재개하면 마지막 턴의 텍스트가 돌아오기 때문입니다.
+
+A2A 실행기는 멈춤을 `input-required` 태스크로 보여 주고 그 태스크로 오는 다음 메시지에서 재개합니다. ACP 에이전트는 같은 턴 안에서 `session/request_permission`을 보냅니다. 각 대응은 [A2A](a2a.md#interrupts-when-you-host-from-python)와 [ACP](acp.md#permission-requests-when-you-host-from-python)에 있습니다. 네이티브 서버의 NeoGraph 협업 봉투, Program 기반 A2A 태스크, 테넌트 격리는 이 경로에 포함되지 않습니다.
 
 ### 네이티브 A2A 탐색과 스트리밍
 

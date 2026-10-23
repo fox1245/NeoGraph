@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=48d330e941d3a821b2d3299f10c810fbf236a2a6952951f72607ed5d0f5b9141 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -373,6 +373,7 @@ Pythonでは、Python専用のスケジューラーを別に用意するので�
 | 実行ごとの識別情報、デッドライン、予算 | `RunMetadata`、`RunConfig` | `RunMetadata`、`RunConfig.model_token_budget` | 実行ごとの値は同じ |
 | リトライとノードキャッシュのポリシー | `RetryPolicy`、`CacheScope` | グラフ／ノードのセッターとキャッシュスコープ | 同じランタイムポリシー |
 | チェックポイント、HITL、タイムトラベル | チェックポイントストアと再開のAPI | resume、`resume_from` の正確な指定、フォーク、状態の履歴／更新 | 同じチェックポイントの契約 |
+| A2A または ACP でエージェントを提供する | `A2AServer`、`ACPServer` | `ProtocolHostAdapter` の背後の公式 SDK サーバー | セッション、キャンセル、トークンのストリーミング、グラフのインタラプト(`input-required`、権限リクエスト)。コラボレーションエンベロープ、Program ベースのタスク、テナント分離はなし |
 | Programの作成とローカル実行 | コンパイラー、Catalog、`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、ハンドル／結果 | ネイティブの、オーナー単位の簡易ホスト |
 | 必須のライフサイクルHook | レジストリ、ランナー、`HookRuntime` | 定義と `create_hook_runtime` のコールバック | 同じフェイルクローズのライフサイクル境界 |
 | ランタイムコンテキストとstrictディスパッチ | コンテキストストア、レシート、インターポジション | 対応する不変の値、ストア、`StrictRuntimeProfile` | 同じネイティブのコントローラー |
@@ -788,8 +789,26 @@ GILを解放することと、Pythonのコールバックのために再取得�
 
 - MCPクライアントのツールは、ビルドされている場合、`neograph_engine.mcp` から使えます。
 - A2Aクライアントの型は、ビルドされている場合、`neograph_engine.a2a` から使えます。
-- `ProtocolHostAdapter` は、公式のPython向けA2A／ACPサーバーSDKを、NeoGraphのセッションの意味論に統合します。
+- `ProtocolHostAdapter` は、公式のPython向けA2A／ACPサーバーSDKを、NeoGraphのセッションの意味論に統合し、グラフのインタラプトも扱います([A2A と ACP の SDK の背後でエージェントをホストする](#hosting-an-agent-behind-the-a2a-and-acp-sdks)を参照)。
 - `neograph_engine.tracing` と `neograph_engine.openinference` は、ベンダー中立なOTel／OpenInferenceのデータを出力します。送信先は、Phoenix、Langfuse、Arizeと、それらと互換性のあるバックエンドです。
+
+<a id="hosting-an-agent-behind-the-a2a-and-acp-sdks"></a>
+### A2A と ACP の SDK の背後でエージェントをホストする
+
+Python パッケージには A2A や ACP のサーバーがありません。トランスポートとワイヤー形式は公式 SDK が担い、`ProtocolHostAdapter` がそのコールバックのためにエンジンを動かします。A2A のコンテキスト ID や ACP のセッション ID が NeoGraph の `thread_id` になり、チェックポイントが会話を引き継ぎ、`cancel(request_id)` は内側の `run_async()` をキャンセルし、`stream()` はトークンイベントに続けて最終イベントを 1 つ返します。[サンプル 27 と 28](../bindings/python/examples/README.md) は、同じデモグラフをそれぞれの SDK でホストします。
+
+人を待って停止したグラフ(`interrupt_before`、`NodeInterrupt`、ツールゲート)はプロトコルのクライアントに報告され、クライアントの答えが、実行が停止したチェックポイントを再開します。
+
+| アダプターの呼び出し | 動作 |
+|---|---|
+| `stream(payload, thread_id=..., interrupts=True)` | `final` イベントの代わりに `interrupt` イベント 1 つで終わります。`event.interrupt` は `ProtocolInterrupt` で、`reason`、`payload`、`node`、`checkpoint_id`、`interrupt_id` を持ちます。 |
+| `resume_stream(answer, thread_id=..., interrupt=None)` | `resume_value(answer, interrupt)` で再開します。`token` イベントを返し、続けて `final` か、別の `interrupt` で終わります。 |
+| `resume_payload(answer, thread_id=...)` | ストリーミングなしで同じことをし、応答テキストを返します。 |
+| `pending_interrupt(thread_id)`、`discard_interrupt(thread_id)` | アダプターがスレッドについて覚えている停止と、それを忘れること(キャンセルされたタスク、キャンセルされた権限リクエスト)。 |
+
+`ProtocolHostAdapter(..., resume_value=callable)` は、プロトコルの答えを、停止したノードが `input.ctx.resume_value` から読む値に変換します。既定は答えそのものです。A2A の後続メッセージのテキスト、または ACP の権限オプションの ID(`"approve"` か `"reject"`)で、ネイティブサーバーも同じです。`interrupts=True` なしでグラフが停止すると、`stream()`、`run()`、`run_payload()` は `ProtocolInterrupted` を送出します。以前は、状態の最後のメッセージを答えのように返していました。停止はスレッドごとにメモリに覚えられ、それを再開するにはエンジンにチェックポイントストアが必要です。再起動のあとは、保存しておいた ID から作った `ProtocolInterrupt` を `interrupt=` に渡してください(`checkpoint_id` があれば、そのチェックポイントを正確に再開します)。記録された停止も `interrupt=` もない場合、`resume_stream()` と `resume_payload()` は `LookupError` を送出します。停止していないスレッドを再開すると、最後のターンのテキストが返ってしまうためです。
+
+A2A の実行器は停止を `input-required` タスクとして示し、そのタスクへの次のメッセージで再開します。ACP のエージェントは同じターンの中で `session/request_permission` を送ります。それぞれの対応は [A2A](a2a.md#interrupts-when-you-host-from-python) と [ACP](acp.md#permission-requests-when-you-host-from-python) にあります。ネイティブサーバーの NeoGraph コラボレーションエンベロープ、Program ベースの A2A タスク、テナント分離は、この経路には含まれません。
 
 ### ネイティブA2Aのdiscoveryとストリーミング
 

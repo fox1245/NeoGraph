@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=cdc4300edb845368b427f2b90eb0051e74fae14610f7039ae415a5bf6ed69281 -->
+<!-- neograph-i18n: source=bindings/python/examples/README.md locale=zh-CN source_sha256=2769be0d70b9216a7b558b1115895f41285a6c9937abefc5e2449c5f8da761a3 -->
 # Python API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -144,8 +144,8 @@ python 01_minimal.py
 | # | 示例 | Offline | 演示内容 |
 |---|---|---|---|
 | 26 | [`26_mcp_tools.py`](26_mcp_tools.py) | yes | 启动本地 MCP 服务器，发现 `fetch`，并用显式可重入策略执行三次调用。需要启用 MCP 的构建，冒烟测试在 Linux 上进行。 |
-| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的智能体卡片与 JSON-RPC，以及流式工件。`--self-check` 在空闲端口上启动服务器，并用 SDK 自带的客户端进行两轮对话。需要 `neograph-engine[a2a]`。 |
-| 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。`--self-check` 把智能体作为子进程运行，并用 SDK 的客户端进行两轮对话。需要 `neograph-engine[acp]`。 |
+| 27 | [`27_a2a_server.py`](27_a2a_server.py) | yes | 通过官方 A2A SDK 托管智能体：`127.0.0.1:9999` 上的智能体卡片与 JSON-RPC，以及流式工件。以 `approve:` 开头的提示会让图暂停：任务进入 `input-required`，发给它的下一条消息会恢复运行。`--self-check` 在空闲端口上启动服务器，并用 SDK 自带的客户端进行两轮对话和一次批准。需要 `neograph-engine[a2a]`。 |
+| 28 | [`28_acp_agent.py`](28_acp_agent.py) | yes | 通过官方 ACP SDK 在 stdio 上托管智能体：initialize、创建会话、prompt、token 更新、`end_turn`。以 `approve:` 开头的提示会让图暂停：智能体发送 `session/request_permission`，并用客户端选中的选项恢复。`--self-check` 把智能体作为子进程运行，并用 SDK 的客户端进行两轮对话和一次批准。需要 `neograph-engine[acp]`。 |
 | 45 | [`45_a2a_client.py`](45_a2a_client.py) | yes | A2A 客户端：`ng.a2a.A2AClient` 获取智能体卡片、发送消息，并读取示例 27 的 SDK 智能体产生的流；服务器由脚本在空闲端口上用线程启动。需要 `neograph-engine[a2a]`。 |
 
 ### 持久化与运维
@@ -189,7 +189,7 @@ with example_provider(script) as chosen:
 
 为 16/17 安装 `gradio`，启动脚本并访问打印出的本地 URL。先提交 `hello`，再提交 `research apples`。在 17 中，真实的 Crawl4AI `/md` 服务或忠实实现协议的本地对端必须返回 `{"success": true, "markdown": "..."}`。只有运行中的构建支持 Postgres 且数据库可达时，才配置 Postgres。请分别检查引擎状态和 UI 历史。
 
-示例 27/28 用官方 Python SDK 处理 wire 层，用 `ProtocolHostAdapter` 完成能感知检查点的引擎执行。A2A 验证需要用 SDK 客户端获取智能体卡片、发送消息并消费流。ACP 验证需要客户端子进程连接，用来执行 `initialize`、`session/new` 和 `session/prompt`；stdout 专用于协议消息。在同一上下文/会话中发送第二条提示，预期得到 `(turn 2)`。取消应当停止正在进行的请求，而不是生成看起来像成功的兜底结果。
+示例 27/28 用官方 Python SDK 处理 wire 层，用 `ProtocolHostAdapter` 完成能感知检查点的引擎执行。A2A 验证需要用 SDK 客户端获取智能体卡片、发送消息并消费流。ACP 验证需要客户端子进程连接，用来执行 `initialize`、`session/new` 和 `session/prompt`；stdout 专用于协议消息。在同一上下文/会话中发送第二条提示，预期得到 `(turn 2)`。再发送 `approve: deploy`：A2A 会返回状态消息为 ``Run `deploy`?`` 的 `input-required` 任务，用同一个任务 ID 发送文本 `approve` 后，它以 `NeoGraph ran: deploy` 完成；ACP 会发送权限请求，选项 `approve` 让该轮以同样的文本结束。取消应当停止正在进行的请求，而不是生成看起来像成功的兜底结果。
 
 要使用持久化的 ACP 会话，请恰好设置 `NEOGRAPH_ACP_POSTGRES_URL` 和 `NEOGRAPH_ACP_SQLITE_PATH` 中的一个。第一条提示完成后，会创建 `session/load` 所需的检查点。每个会话只保留一个活动的智能体进程；检查点存储不会对跨进程的并发写入做串行化。这个示例会回显富内容块，但不解释图像/音频内容，也不提供编辑器的文件系统/终端回调。
 
