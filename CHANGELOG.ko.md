@@ -14,6 +14,13 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **Python: 모든 run, stream, resume 진입점이 같은 실행별 값을 받고, 재개된 턴도 스트리밍할 수 있습니다.** `run_stream`, `run_async`, `run_stream_async`, `resume`, `resume_async`는 `run`과 `resume_from`이 받던 `RunMetadata`를 버렸고, 어떤 resume 진입점도 스트림 콜백을 받지 않았습니다.
+  - **어디서나 `metadata`.** 위 진입점이 `RunMetadata`(데드라인, 트레이스·실행 식별자, 소유자 범위)를 받습니다. 이것이 없으면 asyncio·스트리밍 경로는 데드라인이나 식별자를 실을 수 없었고, 생명주기 Hook 런타임이 설치된 엔진은 이 경로에서 fail-closed로 실패했습니다. Hook은 소유자 범위나 실행 식별자가 없는 이벤트를 거부하기 때문입니다. 재개는 자체 `RunMetadata`를 받으며, 중단된 실행의 데드라인은 이어받지 않습니다. 인자는 호출하는 시점에 복사되므로, 이후에 객체를 바꿔도 진행 중인 실행에는 영향이 없고 하나의 객체를 여러 호출에 쓸 수 있습니다. **동작 변경:** `RunMetadata`가 아닌 값은 모든 진입점에서 `TypeError`를 발생시킵니다. `run`과 `resume_from`은 이때 `RuntimeError`를 발생시켰습니다.
+  - **resume 진입점의 `callback=`.** `resume`, `resume_from`(빈 콜백을 넘기던), `resume_async`(빈 콜백을 만들던)가 스트림 콜백을 받으므로, 사람의 승인 뒤에 이어지는 턴도 토큰과 이벤트를 스트리밍합니다. 콜백은 `run_stream`을 따릅니다. 동기 호출에서는 호출을 구동하는 스레드에서, asyncio 호출에서는 루프 스레드에서 실행됩니다.
+  - **`resume_from_async`**: `resume_from`의 awaitable 짝입니다. 정확한 체크포인트, `metadata=`, `interrupt_id=`, `callback=`을 받습니다.
+  - **호환성.** 새 인자는 기존 인자 뒤에 붙습니다. resume 진입점의 `callback`과 `resume`·`resume_async`의 `metadata`는 키워드 전용이므로, 동작하던 호출의 의미는 그대로입니다.
+  - **바인딩하지 않은 것.** `run_until_safe_point_async`에는 Python 대응 메서드가 없습니다. 세이프 포인트 요청은 하나의 호스트 세대에 연결된 엔진에 묶이는데, Program 카탈로그는 그런 엔진을 연결하지만 `GraphEngine.compile`은 연결하지 않으므로 이 진입점은 모든 요청을 거부하게 됩니다.
+  - `bindings/python/tests/test_run_entrypoints.py`는 여덟 진입점을 각각 호출하고 노드, Hook, 스트림 콜백이 관찰하는 값을 확인합니다. 하나의 `RunMetadata`를 공유하는 동시 호출도 포함합니다.
 - **에포크마다 선택하는 안정 우선 조립 레이아웃 (#329).** 공급자의 프롬프트 캐시는 첫 바이트부터 똑같은 요청의 앞부분만 재사용하므로, 히스토리 앞에서 바뀌는 아티팩트가 있으면 호출마다 캐시를 놓칩니다. `ContextEpochData::assembly_layout`을 `StableFirst`로 설정한 에포크(`ordered_artifact_ids`가 필요)는 호스트 지침, `Stable` 아티팩트, `Slow` 아티팩트, RAW 메시지, `Volatile` 아티팩트, 신뢰된 보조 입력 순으로 조립됩니다. 기본값인 `Legacy`는 0.16.0의 조립 방식입니다. 새 레이아웃을 요청하지 않은 에포크와 그 전에 저장된 모든 에포크는 이전과 바이트 단위로 같게 인코딩되며, 두 레이아웃이 같은 프롬프트를 뜻하는 곳에서는 테스트가 호출마다 두 본문을 비교합니다.
   - **순서는 에포크의 것입니다.** 기록된 목록이 곧 순서이며 내용의 해시는 관여하지 않으므로, 텍스트가 바뀌는 형제 아티팩트도 자리를 지킵니다. `order_context_artifacts`가 목록을 만듭니다. 안정성 클래스, 그다음 높은 `priority`, 그다음 `producer_id`, 그다음 호스트가 주는 키 순이며, 네 가지가 모두 같은 두 아티팩트는 모호하다며 거부됩니다.
   - **레이아웃이 지킬 수 없는 배치는 옮기지 않고 거부합니다.** `Stable`과 `Slow` 아티팩트는 `BeforeHistory`에, `Volatile` 아티팩트는 `AfterHistory`에 있어야 하고, 목록은 `Stable`, `Slow`, `Volatile` 순이어야 합니다. 거부는 `ContextStabilityError`(`StableOutsideHistoryHead`, `VolatileOutsideTail`, `TierOrderViolated`)로 전달됩니다. 따라서 기본 배치 `BeforeLatestUser`로 만든 아티팩트는 이런 에포크에 들어가려면 자신의 배치가 필요합니다. `validate_context_layout`은 조립하지 않고 같은 검사를 수행합니다.
@@ -143,6 +150,8 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **Python: `resume_async`의 Future를 취소하면 재개된 실행이 멈춥니다.** 이 호출은 취소 토큰을 만들지 않았으므로 Future를 취소해도 기다림만 끝나고 실행은 계속되었고, 그 노드의 `input.ctx.cancel_token`은 `None`이었습니다. 이제 `run_async`처럼 Future를 실행의 취소 토큰에 연결합니다. **동작 변경:** 취소된 `resume_async`는 이제 실행을 멈춥니다.
+- **Python: 스트림 콜백이 발생시킨 예외가 보고됩니다.** `run_stream`은 그런 예외를 stderr에 출력하고 실행은 중단하지 않는다고 문서화했습니다. 실행은 계속되었지만 아무것도 출력되지 않았습니다. pybind11이 이미 오류를 지웠기 때문에 `PyErr_Print`가 출력할 오류가 없었습니다. 이제 예외는 `sys.unraisablehook`으로 전달되어 기본적으로 stderr에 출력됩니다. `PyErr_Print`는 `SystemExit`에서 프로세스를 종료시키므로 쓰지 않습니다. **동작 변경:** 예외를 발생시키는 콜백이 더는 조용하지 않습니다. `resume`과 `resume_from`의 콜백도 같은 경로를 탑니다.
 - **Python 바인딩이 `ContextArtifactKind.UntrustedSupplemental`을 노출하고, 아티팩트 스키마가 모든 종류와 배치를 나열합니다 (#329).** 이 종류는 C++에 있었지만 바인딩되어 있지 않아서 Python 호스트가 이 종류를 만들거나 비교할 수 없었습니다. `schemas/context-artifact-v1.schema.json`은 배치 두 가지와 종류 다섯 가지만 나열해서, 코드가 쓰는 저장된 아티팩트를 거부했습니다.
 - **Python 바인딩이 `ContextPlacement.AfterHistory`와 `ContextPlacement.BeforeHistory`를 노출합니다 (#329).** 이 enum은 `BeforeLatestUser`와 `AfterLatestUser`만 바인딩해서, C++ 조립기가 네 가지 배치를 모두 정렬하는데도 Python 호스트는 히스토리 앞이나 뒤에 놓이는 컨텍스트 아티팩트를 만들 수 없었습니다. `test_every_context_placement_is_bound_and_assembles_in_its_documented_place`는 배치마다 아티팩트 하나를 컨트롤러로 조립하고, 제공자가 받는 순서를 확인합니다.
 - **`HostLoop`이 호스트가 Asio보다 먼저 도달한 타이머를 더 이상 잃지 않습니다 (#535).** 기록된 기한 뒤에 폴링했는데 준비된 핸들러가 없던 턴은, 그 시점까지 기한이 된 타이머를 Asio가 모두 디스패치했다고 가정하고 기한을 버렸습니다. 이를 정하는 것은 Asio이고 호스트의 타이머가 먼저 실행될 수 있습니다. Asio의 Windows 리액터는 타이머가 만료되었음을 자체 스레드로부터 전달받으므로 기한에 맞춰 한 폴링은 타이머가 아직 디스패치되지 않은 상태를 만날 수 있고, 호스트의 시계는 Asio의 시계보다 앞설 수 있습니다. 그 턴은 기한을 버리고 대기가 걸린 채로 루프를 유휴 상태로 두었으며, 그래서 재시도 백오프나 다른 `HostTimer`를 기다리는 실행이 끝나지 않았습니다. `HostLoop.ARetryBackoffWaitsOnTheHostsTimer`와 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer`가 CI의 Windows 잡에서 간헐적으로 실패했습니다.

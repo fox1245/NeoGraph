@@ -14,6 +14,13 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **Python: すべての run、stream、resume のエントリポイントが同じ実行ごとの値を受け取り、再開したターンもストリーミングできます。** `run_stream`、`run_async`、`run_stream_async`、`resume`、`resume_async` は、`run` と `resume_from` が受け取っていた `RunMetadata` を捨てており、どの resume のエントリポイントもストリームのコールバックを受け取りませんでした。
+  - **どこでも `metadata`。** 上のエントリポイントが `RunMetadata`（デッドライン、トレースと実行の識別子、オーナースコープ）を受け取ります。これがないと、asyncioとストリーミングの経路はデッドラインも識別子も運べず、ライフサイクルHookランタイムを設定したエンジンは、この経路でfail-closedで失敗しました。Hookは、オーナースコープや実行の識別子のないイベントを拒否するからです。再開は独自の `RunMetadata` を受け取り、中断した実行のデッドラインは引き継がれません。引数は呼び出した時点でコピーされるので、あとからオブジェクトを変更しても進行中の実行には届かず、1つのオブジェクトを複数の呼び出しに使えます。**動作の変更:** `RunMetadata` 以外の値は、すべてのエントリポイントで `TypeError` になります。`run` と `resume_from` は、この場合に `RuntimeError` を送出していました。
+  - **resume のエントリポイントの `callback=`。** `resume`、`resume_from`（空のコールバックを渡していました）、`resume_async`（空のコールバックを作っていました）がストリームのコールバックを受け取るので、人の承認のあとに続くターンもトークンとイベントをストリーミングします。コールバックは `run_stream` に従います。同期の呼び出しでは呼び出しを駆動するスレッドで、asyncioの呼び出しではループスレッドで実行されます。
+  - **`resume_from_async`**: `resume_from` のawaitable版です。正確なチェックポイント、`metadata=`、`interrupt_id=`、`callback=` を受け取ります。
+  - **互換性。** 新しい引数は既存の引数の後ろに付きます。resume のエントリポイントの `callback` と、`resume`・`resume_async` の `metadata` はキーワード専用なので、動いていた呼び出しの意味は変わりません。
+  - **バインドしていないもの。** `run_until_safe_point_async` には、Pythonでの対応メソッドがありません。セーフポイントのリクエストは、1つのホスト世代にリンクされたエンジンに結び付きます。Programカタログはそのようなエンジンをリンクしますが、`GraphEngine.compile` はしないので、このエントリポイントはすべてのリクエストを拒否することになります。
+  - `bindings/python/tests/test_run_entrypoints.py` は、8つのエントリポイントをそれぞれ呼び出し、ノード、Hook、ストリームのコールバックが観測する値を確かめます。1つの `RunMetadata` を共有する同時呼び出しも含みます。
 - **エポックごとに選ぶ、安定性優先のアセンブリレイアウト (#329)。** プロバイダーのプロンプトキャッシュは、最初のバイトから同一なリクエストの先頭だけを再利用するので、履歴の前で変わるアーティファクトがあると、呼び出しのたびにキャッシュを外します。`ContextEpochData::assembly_layout` を `StableFirst` にしたエポック（`ordered_artifact_ids` が必要）は、ホストの指示、`Stable` のアーティファクト、`Slow` のアーティファクト、RAW メッセージ、`Volatile` のアーティファクト、信頼された補助入力の順に組み立てられます。既定の `Legacy` は 0.16.0 のアセンブリです。新しいレイアウトを求めないエポックと、それ以前に保存されたすべてのエポックは、これまでとバイト単位で同じにエンコードされ、2 つのレイアウトが同じプロンプトを意味するところでは、テストが呼び出しごとに 2 つの本文を比べます。
   - **順序はエポックのものです。** 記録されたリストがそのまま順序で、内容のハッシュは関与しないので、テキストが変わる兄弟のアーティファクトも位置を保ちます。リストは `order_context_artifacts` が作ります。安定性クラス、次に高い `priority`、次に `producer_id`、次にホストが与えるキーの順で、4 つがすべて同じ 2 つのアーティファクトはあいまいとして拒否されます。
   - **レイアウトが守れない配置は、移さずに拒否します。** `Stable` と `Slow` のアーティファクトは `BeforeHistory` に、`Volatile` のものは `AfterHistory` に置かれ、リストは `Stable`、`Slow`、`Volatile` の順でなければなりません。拒否は `ContextStabilityError`（`StableOutsideHistoryHead`、`VolatileOutsideTail`、`TierOrderViolated`）で伝わります。そのため、既定の配置 `BeforeLatestUser` で作ったアーティファクトは、このようなエポックに入るには自分の配置が必要です。`validate_context_layout` は、組み立てずに同じ検査を行います。
@@ -143,6 +150,8 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 
 ### 修正
 
+- **Python: `resume_async` のFutureをキャンセルすると、再開した実行が止まります。** この呼び出しはキャンセルトークンを作らなかったので、Futureをキャンセルしても待機が終わるだけで実行は続き、そのノードの `input.ctx.cancel_token` は `None` でした。今は `run_async` と同じように、Futureを実行のキャンセルトークンに結び付けます。**動作の変更:** キャンセルした `resume_async` は、実行を止めるようになりました。
+- **Python: ストリームのコールバックが送出した例外が報告されます。** `run_stream` は、そのような例外はstderrに出力され、実行は中断されないと記載していました。実行は続きましたが、何も出力されませんでした。pybind11がすでにエラーを消していたため、`PyErr_Print` が出力するエラーがなかったのです。今は例外が `sys.unraisablehook` に渡され、デフォルトではstderrに出力されます。`PyErr_Print` は `SystemExit` でプロセスを終了させるため使いません。**動作の変更:** 例外を送出するコールバックは、もう黙ってはいません。`resume` と `resume_from` のコールバックも同じ経路を通ります。
 - **Python バインディングが `ContextArtifactKind.UntrustedSupplemental` を公開し、アーティファクトのスキーマがすべての種類と配置を挙げます (#329)。** この種類は C++ にありましたがバインドされておらず、Python のホストはこの種類を作ることも比べることもできませんでした。`schemas/context-artifact-v1.schema.json` は配置を 2 つ、種類を 5 つしか挙げておらず、コードが書く保存済みのアーティファクトを拒否していました。
 - **Python バインディングが `ContextPlacement.AfterHistory` と `ContextPlacement.BeforeHistory` を公開します (#329)。** この enum は `BeforeLatestUser` と `AfterLatestUser` しかバインドしておらず、C++ のアセンブラは 4 つの配置をすべて並べるにもかかわらず、Python ホストは履歴の前や後ろに置くコンテキストアーティファクトを作れませんでした。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` は配置ごとに 1 つのアーティファクトをコントローラ経由で組み立て、プロバイダーが受け取る順序を確認します。
 - **`HostLoop` が、ホストが Asio より先に到達したタイマーを失わなくなりました (#535)。** 記録された期限の後にポーリングして準備のできたハンドラーがなかったターンは、その時点で期限の来た Asio のタイマーをすべてディスパッチ済みと見なして期限を捨てていました。これを決めるのは Asio で、ホストのタイマーが先に動くことがあります。Asio の Windows 用リアクターはタイマーが満了したことを専用のスレッドから知らされるため、期限に合わせたポーリングはタイマーがまだディスパッチされていない状態に出会うことがあり、ホストの時計は Asio の時計より進んでいることもあります。そのターンは期限を捨て、待機が残ったままループをアイドルにしたため、リトライのバックオフなど `HostTimer` を待つ実行が終わりませんでした。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` と `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` が CI の Windows ジョブで断続的に失敗していました。

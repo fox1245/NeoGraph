@@ -14,6 +14,13 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 已添加
+- **Python：每个 run、stream 和 resume 入口都接受相同的单次运行值，被恢复的那一轮也可以流式输出。** `run_stream`、`run_async`、`run_stream_async`、`resume` 和 `resume_async` 丢弃了 `run` 与 `resume_from` 接受的 `RunMetadata`，而且没有任何 resume 入口接受流式回调。
+  - **所有入口都有 `metadata`。** 上述入口现在接受 `RunMetadata`（截止时间、trace 与运行标识、所有者范围）。没有它，asyncio 和流式路径无法携带截止时间或标识；安装了生命周期 Hook 运行时的引擎在这些路径上会 fail-closed 地失败，因为 Hook 会拒绝没有所有者范围或运行标识的事件。恢复使用它自己的 `RunMetadata`，被中断运行的截止时间不会沿用。参数在调用时被复制，所以之后再修改该对象不会影响已在进行的运行，同一个对象也可以用于多次调用。**行为变更：** 不是 `RunMetadata` 的值在每个入口上都会抛出 `TypeError`；`run` 和 `resume_from` 此前对此抛出 `RuntimeError`。
+  - **resume 入口的 `callback=`。** `resume`、`resume_from`（此前传入空回调）和 `resume_async`（此前构造空回调）现在接受流式回调，所以人工批准之后继续的那一轮会流式输出它的 token 和事件。回调遵循 `run_stream`：同步调用在驱动该调用的线程上执行，asyncio 调用在事件循环线程上执行。
+  - **`resume_from_async`**：`resume_from` 的 awaitable 对应版本，接受精确检查点、`metadata=`、`interrupt_id=` 和 `callback=`。
+  - **兼容性。** 新参数排在已有参数之后。resume 入口的 `callback` 以及 `resume` 和 `resume_async` 的 `metadata` 只能以关键字传入，所以原来可用的调用含义不变。
+  - **未绑定的部分。** `run_until_safe_point_async` 没有对应的 Python 方法。安全点请求绑定到链接了某一个宿主代（generation）的引擎；Program 目录会链接这样的引擎，而 `GraphEngine.compile` 不会，所以这个入口会拒绝每一个请求。
+  - `bindings/python/tests/test_run_entrypoints.py` 逐一调用这八个入口，检查节点、Hook 和流式回调所观察到的值，也包括共用同一个 `RunMetadata` 的并发调用。
 - **按 epoch 选择的稳定优先装配布局 (#329)。** 提供方的提示词缓存只复用从第一个字节起就完全相同的请求开头，所以历史之前有制品发生变化，每次调用都会错过缓存。把 `ContextEpochData::assembly_layout` 设为 `StableFirst` 的 epoch（需要 `ordered_artifact_ids`）按宿主指令、`Stable` 制品、`Slow` 制品、RAW 消息、`Volatile` 制品、受信任的补充输入这个顺序装配。默认的 `Legacy` 就是 0.16.0 的装配方式：没有要求新布局的 epoch，以及此前存储的所有 epoch，编码结果与之前逐字节相同；在两种布局表示同一个提示词的地方，有测试逐次调用比较两种请求体。
   - **顺序属于 epoch。** 记录的列表就是顺序，内容的哈希不参与，所以文本变化的同级制品保持原位。`order_context_artifacts` 构造该列表：先按稳定性类别，再按 `priority`（高者在前），再按 `producer_id`，最后按宿主给出的键；四项都相同的两个制品会因含混而被拒绝。
   - **布局无法满足的放置位置会被拒绝，而不是被挪动。** `Stable` 和 `Slow` 制品必须放在 `BeforeHistory`，`Volatile` 制品必须放在 `AfterHistory`，列表必须先列 `Stable`，再列 `Slow`，最后列 `Volatile`。拒绝以 `ContextStabilityError`（`StableOutsideHistoryHead`、`VolatileOutsideTail`、`TierOrderViolated`）传递。因此用默认放置位置 `BeforeLatestUser` 创建的制品，要加入这样的 epoch，需要先有自己的放置位置。`validate_context_layout` 不进行装配，直接执行同样的检查。
@@ -143,6 +150,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **Python：取消 `resume_async` 的 Future 会停止被恢复的运行。** 这个调用没有创建取消令牌，所以取消它的 Future 只会结束等待，运行仍在继续，它的节点里 `input.ctx.cancel_token` 是 `None`。现在它像 `run_async` 一样，把 Future 与运行的取消令牌关联起来。**行为变更：** 被取消的 `resume_async` 现在会停止它的运行。
+- **Python：流式回调抛出的异常会被报告。** `run_stream` 的文档说这类异常会打印到 stderr 且不会中止运行。运行确实继续了，但什么也没有打印：pybind11 已经清除了错误，`PyErr_Print` 没有可打印的错误。现在异常交给 `sys.unraisablehook`，默认打印到 stderr；不使用 `PyErr_Print`，因为它遇到 `SystemExit` 会退出进程。**行为变更：** 抛出异常的回调不再无声无息。`resume` 和 `resume_from` 的回调走同一条路径。
 - **Python 绑定公开 `ContextArtifactKind.UntrustedSupplemental`，制品 schema 列出所有种类和放置位置 (#329)。** 该种类在 C++ 中存在但未被绑定，所以 Python 宿主无法创建或比较这个种类。`schemas/context-artifact-v1.schema.json` 只列出两种放置位置和五种种类，会拒绝代码写出的已存储制品。
 - **Python 绑定公开 `ContextPlacement.AfterHistory` 和 `ContextPlacement.BeforeHistory` (#329)。** 该枚举只绑定了 `BeforeLatestUser` 和 `AfterLatestUser`，因此尽管 C++ 组装器会排列全部四种位置，Python 宿主仍无法创建放在历史之前或之后的上下文制品。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` 为每种位置通过控制器组装一个制品，并检查提供方收到的顺序。
 - **`HostLoop` 不再丢失宿主先于 Asio 到达的定时器 (#535)。** 在已记录的截止时间之后轮询、却没有就绪处理程序的回合，会假定 Asio 已分发了到那时为止所有到期的定时器，并丢弃该截止时间。但这由 Asio 决定，宿主的定时器可能先运行：Asio 的 Windows reactor 由自己的线程得知定时器已到期，所以在截止时间上做的轮询可能发现定时器尚未分发，宿主的时钟也可能比 Asio 的时钟快。该回合丢弃了截止时间，使循环在等待仍未结束时进入空闲，于是等待重试退避或其他 `HostTimer` 的运行永远不会结束。`HostLoop.ARetryBackoffWaitsOnTheHostsTimer` 和 `HostLoop.AHostTimerArmedAfterADelayFiresOnTheHostsTimer` 曾在 CI 的 Windows 作业中间歇性失败。
