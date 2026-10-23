@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=faed88529c59a389348b12b563d87661b14d1256ca7667e0f728c3529e6f7124 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=040da06ca047c7e1b48e33eb823de6adec8ad90fa9aa93dc11068de2dc32141c -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -413,7 +413,7 @@ C++ 호스트는 `RuntimeConfig`로 `ProgramRuntime`을 만듭니다. 호스트�
   `_async` 형태는 그 본문을 런타임의 executor에서 실행합니다. 동기 형태는 같은 본문을 호출한 스레드에서 끝까지 실행하며,
   그 스레드가 멈출 곳에서는 거부됩니다. 따라서 호스트 이벤트 루프의 이후 턴에서만 완료되는 저장소가 호스트가 구동하는
   executor에서 `_async` 형태로 동작하고(`ProgramHandle::cancel_async`, `snapshot_async`, `latest_handoff_async`,
-  `next_handoff_async` 포함), 그 루프의 턴 안에서는 동기 형태가 거부됩니다. 아직 호출자를 막는 것은 `ProgramHandoff::reference()`,
+  `next_handoff_async` 포함), 그 루프의 턴 안에서는 동기 형태가 거부됩니다. `ProgramHandle::cancel()`은 예외입니다. 호스트가 구동하는 executor에서는 기다리지 않으므로 거부되지 않습니다. 실행 중인 run은 메모리에서 멈추고, 중단된 run은 Cancelled 상태를 executor의 태스크로 예약한 뒤 취소를 받아들였다는 뜻으로 true를 반환합니다. 그 태스크가 실행되기 전까지 run은 `Interrupted`로 남고(그동안 그 run의 `resume`은 `P_RESUME_CONFLICT`로 거부됩니다), 아무것도 기록하지 못한 태스크는 핸들에 `P_CANCELLATION_NOT_RECORDED` notice를 추가합니다. 이미 끝났거나 취소된 run, 그리고 취소가 보류 중인 run에서는 false를 반환합니다. 상태가 언제 기록되는지 알아야 하면 `cancel_async()`를 await하십시오. 아직 호출자를 막는 것은 `ProgramHandoff::reference()`,
   `RuntimeInstructionController`, `inspect_program_replacement_chain`, `hook_runtime`이며, 런타임은 `graph::CheckpointStore`를
   그 저장소의 동기 호출로 읽습니다.
 - **awaitable을 버리는 호출은 아무 일도 하지 않습니다.** 연산은 `[[nodiscard]]`입니다. `co_await`하거나 블로킹 뷰를 쓰십시오.
