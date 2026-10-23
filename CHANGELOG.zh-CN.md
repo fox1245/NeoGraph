@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5bf04597ff46a6a4a206320b047fbd80a37e96d568a479aaa139f61f874c225d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=c2e86ec9eea71f0a2104c58acf7d44055e584475c1cc71fbf70b0ea8dd597df9 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -172,6 +172,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 
+- **无人回答的暂停之后出现的暂停可以恢复了 (#600)。** 宿主没有恢复某个 `NodeInterrupt`，而是在同一线程上用 `resume_if_exists` 再次启动 run（被取消的任务、已关闭的会话、下一条消息）时，第一个暂停仍是新 run 所保存检查点的父节点；若新 run 的第一个超步也暂停，恢复这第二个暂停会在任何节点运行之前以 `NodeInterrupt ancestry crosses super-step boundaries` 失败。对它做 `fork`、以及处于同一状态的持久子图的子图，也是如此。如果两个暂停之间新 run 有一个步骤已经完成，该步骤会保存一个 Completed 检查点，第二个暂停挂在它下面，因此不受影响。现在恢复所重放的 pending write 属于该暂停自己的超步：沿祖先的遍历读取该步骤的各个暂停以及该步骤开始时所在的检查点，到了更早步骤的暂停处，读取记录在其下、属于本步骤的 write（新 run 该步骤中已完成的兄弟节点），然后停止。
+  - **无人回答的暂停的 write 不会被重放。** 它们带着更早的步骤号，所以第一轮中已完成的兄弟节点不会代替第二轮的兄弟节点；第二轮中已完成的兄弟节点会被重放，而不是再次运行。延续线程的 run 从所延续检查点的下一个步骤开始，因此它的第一个暂停不会与前一个暂停处于同一步骤。无人回答的暂停仍留在存储中，依然可以用检查点 ID 恢复。
+  - **其他检查保持不变。** 环、缺失的父节点、属于其他线程或其他 schema 的父节点，以及父节点是更晚步骤的暂停的暂停，仍和以前一样被拒绝；阻塞式遍历（`fork`、`resume_pending_writes`）和 awaitable 遍历（`resume`）都是如此，两者现在共用这些检查。**行为变更：**父节点是更晚步骤的暂停的暂停，其拒绝信息现在是 `NodeInterrupt ancestry runs backwards across super-steps`，`NodeInterrupt ancestry crosses super-step boundaries` 不再被抛出。
+  - `tests/test_abandoned_pause.cpp` 在内存存储和 SQLite 存储上覆盖：无人回答的暂停之后的第二个、第三个暂停和 fan-out 暂停，其两侧同一步骤的多个暂停，两者之间的状态更新，从相同步骤号重新开始的 run，`fork`，按检查点 ID 恢复，持久子图，以及上述拒绝。按存储参数化的 39 个用例中有 33 个在旧引擎上失败；其余六个在两边都通过，用来固定修复不应改变的情形（暂停之间有步骤完成，以及不带 `resume_if_exists` 从头开始的 run）。
 - **Python：取消 `resume_async` 的 Future 会停止被恢复的运行。** 这个调用没有创建取消令牌，所以取消它的 Future 只会结束等待，运行仍在继续，它的节点里 `input.ctx.cancel_token` 是 `None`。现在它像 `run_async` 一样，把 Future 与运行的取消令牌关联起来。**行为变更：** 被取消的 `resume_async` 现在会停止它的运行。
 - **Python：流式回调抛出的异常会被报告。** `run_stream` 的文档说这类异常会打印到 stderr 且不会中止运行。运行确实继续了，但什么也没有打印：pybind11 已经清除了错误，`PyErr_Print` 没有可打印的错误。现在异常交给 `sys.unraisablehook`，默认打印到 stderr；不使用 `PyErr_Print`，因为它遇到 `SystemExit` 会退出进程。**行为变更：** 抛出异常的回调不再无声无息。`resume` 和 `resume_from` 的回调走同一条路径。
 - **Python 绑定公开 `ContextArtifactKind.UntrustedSupplemental`，制品 schema 列出所有种类和放置位置 (#329)。** 该种类在 C++ 中存在但未被绑定，所以 Python 宿主无法创建或比较这个种类。`schemas/context-artifact-v1.schema.json` 只列出两种放置位置和五种种类，会拒绝代码写出的已存储制品。

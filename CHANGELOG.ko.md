@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=5bf04597ff46a6a4a206320b047fbd80a37e96d568a479aaa139f61f874c225d -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=c2e86ec9eea71f0a2104c58acf7d44055e584475c1cc71fbf70b0ea8dd597df9 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -172,6 +172,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 수정됨
 
+- **응답이 없던 일시 정지 뒤에 온 일시 정지를 재개할 수 있습니다 (#600).** `NodeInterrupt`를 재개하지 않고 같은 스레드에서 `resume_if_exists`로 다시 run을 시작한 호스트(취소된 태스크, 닫힌 세션, 다음 메시지)에서는 첫 번째 일시 정지가 새 run이 저장하는 체크포인트의 부모로 남았고, 새 run의 첫 슈퍼스텝도 일시 정지하면 그 두 번째 일시 정지를 재개할 때 노드가 하나도 실행되기 전에 `NodeInterrupt ancestry crosses super-step boundaries`로 실패했습니다. 그 일시 정지의 `fork`와, 같은 상태에 있는 영속 서브그래프의 자식도 마찬가지였습니다. 두 일시 정지 사이에 새 run의 스텝이 하나라도 완료되었다면 그 스텝이 Completed 체크포인트를 저장해 두 번째 일시 정지가 거기에 달렸으므로 영향을 받지 않았습니다. 이제 재개가 재생하는 pending write는 그 일시 정지 자신의 슈퍼스텝의 것입니다. 조상을 따라가는 탐색은 그 스텝의 일시 정지들과 그 스텝이 시작된 체크포인트를 읽고, 더 이른 스텝의 일시 정지에서는 그 아래에 이 스텝 몫으로 기록된 write(새 run의 스텝에서 끝난 형제들)를 읽은 뒤 멈춥니다.
+  - **응답이 없던 일시 정지의 write는 재생되지 않습니다.** 그 write는 더 이른 스텝을 달고 있으므로, 첫 번째 턴에서 끝난 형제가 두 번째 턴의 형제를 대신하지 않으며, 두 번째 턴에서 끝난 형제는 다시 실행되지 않고 재생됩니다. 스레드를 이어 가는 run은 이어 가는 체크포인트의 다음 스텝에서 시작하므로, 그 run의 첫 일시 정지는 앞선 일시 정지와 같은 스텝이 되는 일이 없습니다. 응답이 없던 일시 정지는 저장소에 남아 있으며 체크포인트 ID로 여전히 재개할 수 있습니다.
+  - **나머지 검사는 그대로입니다.** 순환, 없거나 다른 스레드의 또는 다른 스키마의 부모, 그리고 부모가 더 나중 스텝의 일시 정지인 일시 정지는 전과 같이 거부되며, 이는 블로킹 탐색(`fork`, `resume_pending_writes`)과 awaitable 탐색(`resume`) 모두에 해당합니다. 두 탐색은 이제 검사를 공유합니다. **동작 변경:** 부모가 더 나중 스텝의 일시 정지인 일시 정지의 거부 메시지는 이제 `NodeInterrupt ancestry runs backwards across super-steps`이며, `NodeInterrupt ancestry crosses super-step boundaries`는 더 이상 던져지지 않습니다.
+  - `tests/test_abandoned_pause.cpp`는 응답이 없던 일시 정지 뒤의 두 번째·세 번째 일시 정지와 fan-out 일시 정지, 그 양쪽에 있는 한 스텝의 일시 정지들, 둘 사이의 상태 갱신, 같은 스텝 번호에서 다시 시작하는 run, `fork`, 체크포인트 ID로의 재개, 영속 서브그래프, 위의 거부 사례를 인메모리 저장소와 SQLite 저장소에서 확인합니다. 저장소별로 매개변수화된 39개 사례 중 33개는 이전 엔진에서 실패했으며, 나머지 여섯 개는 양쪽에서 통과하고 수정이 건드리면 안 되는 경우(일시 정지 사이에 스텝이 완료되는 경우, `resume_if_exists` 없이 처음부터 다시 시작하는 run)를 고정합니다.
 - **Python: `resume_async`의 Future를 취소하면 재개된 실행이 멈춥니다.** 이 호출은 취소 토큰을 만들지 않았으므로 Future를 취소해도 기다림만 끝나고 실행은 계속되었고, 그 노드의 `input.ctx.cancel_token`은 `None`이었습니다. 이제 `run_async`처럼 Future를 실행의 취소 토큰에 연결합니다. **동작 변경:** 취소된 `resume_async`는 이제 실행을 멈춥니다.
 - **Python: 스트림 콜백이 발생시킨 예외가 보고됩니다.** `run_stream`은 그런 예외를 stderr에 출력하고 실행은 중단하지 않는다고 문서화했습니다. 실행은 계속되었지만 아무것도 출력되지 않았습니다. pybind11이 이미 오류를 지웠기 때문에 `PyErr_Print`가 출력할 오류가 없었습니다. 이제 예외는 `sys.unraisablehook`으로 전달되어 기본적으로 stderr에 출력됩니다. `PyErr_Print`는 `SystemExit`에서 프로세스를 종료시키므로 쓰지 않습니다. **동작 변경:** 예외를 발생시키는 콜백이 더는 조용하지 않습니다. `resume`과 `resume_from`의 콜백도 같은 경로를 탑니다.
 - **Python 바인딩이 `ContextArtifactKind.UntrustedSupplemental`을 노출하고, 아티팩트 스키마가 모든 종류와 배치를 나열합니다 (#329).** 이 종류는 C++에 있었지만 바인딩되어 있지 않아서 Python 호스트가 이 종류를 만들거나 비교할 수 없었습니다. `schemas/context-artifact-v1.schema.json`은 배치 두 가지와 종류 다섯 가지만 나열해서, 코드가 쓰는 저장된 아티팩트를 거부했습니다.
