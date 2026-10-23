@@ -70,10 +70,14 @@ public:
      * False: the run is over or cancelled already, the Cancelled state is scheduled already (a second call schedules
      * nothing), or the executor cannot take the task.
      *
-     * While a scheduled write is pending, resume() of the run is refused with P_RESUME_CONFLICT, so a resume that
-     * starts after the call was accepted cannot continue the run. A resume that reached the store first wins; the
-     * task then finds that the run is not interrupted any more. The handle of an attempt that paused still holds its
-     * Interrupted result after the run was resumed through another handle, so cancel() on it is accepted too.
+     * While a scheduled write is pending, resume() and reconcile() of the run are refused with P_RESUME_CONFLICT and
+     * P_RECONCILE_CONFLICT, so a resume or reconcile that starts after the call was accepted cannot continue the run
+     * (a reconcile with an unknown outcome would move the record to AmbiguousEffect, which a cancellation leaves
+     * alone). One that reached the store first wins; the task then finds that the run is not interrupted any more.
+     * The handle of an attempt that paused still holds its Interrupted result after the run was resumed through
+     * another handle. While a later attempt executes, cancel() on it returns false and schedules nothing. Once that
+     * attempt has paused too, the handle cannot tell: cancel() is accepted, and the Cancelled state is written in the
+     * attempt of the record it cancels.
      * A task that records nothing (the store failed, or the run is not interrupted any more) cannot report to its
      * caller: it adds a P_CANCELLATION_NOT_RECORDED notice to notices() and leaves the run as it was, and a later
      * cancel() tries again.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=040da06ca047c7e1b48e33eb823de6adec8ad90fa9aa93dc11068de2dc32141c -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=1c4ad7303ff4ca8e871ff65f9601b0212fac06c2d41cb4304bf977fff92126e7 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -414,7 +414,7 @@ WebAssembly ホストなら `async::HostLoop::executor()` です。するとラ�
   そうです。`_async` 形式はその本体をランタイムの executor で実行します。同期形式は同じ本体を呼び出したスレッドで最後まで実行し、
   そのスレッドが止まってしまう場所では拒否されます。したがって、ホストのイベントループの後のターンでしか完了しないストアが、
   ホストが駆動する executor で `_async` 形式を通して動き（`ProgramHandle::cancel_async`、`snapshot_async`、`latest_handoff_async`、
-  `next_handoff_async` を含みます）、そのループのターンの中では同期形式が拒否されます。`ProgramHandle::cancel()` は例外です。ホストが駆動する executor では待たないので拒否されません。実行中の run はメモリ上で止め、中断された run については Cancelled 状態を executor のタスクとして予約し、キャンセルを受け付けたという意味で true を返します。そのタスクが実行されるまで run は `Interrupted` のままで（その間、その run の `resume` は `P_RESUME_CONFLICT` で拒否されます）、何も記録できなかったタスクはハンドルに `P_CANCELLATION_NOT_RECORDED` の notice を追加します。すでに終了またはキャンセル済みの run と、キャンセルが保留中の run では false を返します。状態がいつ書き込まれるかを知る必要があるときは `cancel_async()` を await してください。まだ呼び出し側をブロックするのは
+  `next_handoff_async` を含みます）、そのループのターンの中では同期形式が拒否されます。`ProgramHandle::cancel()` は例外です。ホストが駆動する executor では待たないので拒否されません。実行中の run はメモリ上で止め、中断された run については Cancelled 状態を executor のタスクとして予約し、キャンセルを受け付けたという意味で true を返します。そのタスクが実行されるまで run は `Interrupted` のままで（その間、その run の `resume` と `reconcile` はそれぞれ `P_RESUME_CONFLICT` と `P_RECONCILE_CONFLICT` で拒否されます）、何も記録できなかったタスクはハンドルに `P_CANCELLATION_NOT_RECORDED` の notice を追加します。すでに終了またはキャンセル済みの run と、キャンセルが保留中の run では false を返します。状態がいつ書き込まれるかを知る必要があるときは `cancel_async()` を await してください。まだ呼び出し側をブロックするのは
   `ProgramHandoff::reference()`、`RuntimeInstructionController`、`inspect_program_replacement_chain`、`hook_runtime` で、
   ランタイムは `graph::CheckpointStore` をそのストアの同期呼び出しで読みます。
 - **awaitable を捨てる呼び出しは何もしません。** 操作は `[[nodiscard]]` です。`co_await` するか、ブロッキングビューを使ってください。
