@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=5e8b456c422e1632b7dc164f60229dd3372717aa002db3a96e9789dddf02c5c4 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=zh-CN source_sha256=0f156d0fd420b1d9eb27d6baf6b13d9976ef73b5af5937e3045b39e10e9e6ca2 -->
 # 自进化聊天机器人
 
 ## 当前类型化 Program chat 契约
@@ -130,7 +130,7 @@ tenant session 默认12turn/100model call/200,000model token。dispatch 前预�
 
 Program compile/operation/Core step/child-depth/wall-time budget 不因 restart/replacement 重置；idle 消耗 wall-time。dynamic successor 在 held checkpoint 以 host-only `ProgramRuntime::reserve_synthesis` 先预留。
 
-以相同 DB/session/provider/model 重开，首 turn reconnect family 并 reconcile 最后 checkpoint。stored result 复用，pending/uncertain call 不自动再发。interrupted compilation intent 保留，不免费 recompile。replacement 前保存的 admitted successor 可从 exact held checkpoint publish，已 committed replacement 通过 lineage 解决。每 DB/session 支持一个 server process；loopback listener 和 `alice-demo`/`bob-demo` 不是 production 认证。explicit cancellation 关闭 family，与 process-loss restart 不同。
+以相同 DB/session/provider/model 重开，首 turn reconnect family 并 reconcile 最后 checkpoint。stored result 复用，pending/uncertain call 不自动再发。interrupted compilation intent 保留，不免费 recompile。replacement 前保存的 admitted successor 可从 exact held checkpoint publish，已 committed replacement 通过 lineage 解决。每 DB/session 支持一个 server process；loopback listener 只应答 loopback 的 `Host` 名称和自己的 origin（其余返回 `403`），其他 origin 的页面无法访问。该 listener 和 `alice-demo`/`bob-demo` 不是 production 认证。explicit cancellation 关闭 family，与 process-loss restart 不同。
 
 ## 验证
 

@@ -244,7 +244,9 @@ resolved through the lineage.
 
 This example supports one server process per database/session. The fixed local
 `alice-demo` / `bob-demo` bearer tokens illustrate server-side owner selection;
-they are not production authentication. The HTTP listener binds loopback. Explicit
+they are not production authentication. The HTTP listener binds loopback and answers
+only the loopback `Host` names and its own origin (anything else gets `403`), so a page
+on another origin cannot reach it. Explicit
 cancellation closes the family; it is different from a process-loss restart.
 
 ## Verify

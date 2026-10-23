@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=5e8b456c422e1632b7dc164f60229dd3372717aa002db3a96e9789dddf02c5c4 -->
+<!-- neograph-i18n: source=examples/cookbook/self_evolving_chatbot/README.md locale=ja source_sha256=0f156d0fd420b1d9eb27d6baf6b13d9976ef73b5af5937e3045b39e10e9e6ca2 -->
 # 自己進化型チャットボット
 
 ## 現在の型付き Program chat 契約
@@ -135,7 +135,7 @@ tenant session の既定は12turn/100model call/200,000model token。dispatch �
 
 Program compile/operation/Core step/child-depth/wall-time budget は restart/replacement で更新しません。idle も wall-time を消費。dynamic successor は held checkpoint で host-only `ProgramRuntime::reserve_synthesis` により先に予約します。
 
-同じ DB/session/provider/model で再開し、最初の turn が family を reconnect して最後の checkpoint を reconcile します。stored result は再利用、pending/uncertain call は自動再送しません。interrupted compilation intent は無料 recompile なしで残ります。replacement 前に保存した admitted successor は exact held checkpoint から publish、committed replacement は lineage で解決します。DB/session あたり一 server process のみ。loopback listener と `alice-demo`/`bob-demo` は production 認証ではなく、explicit cancellation は process-loss restart と違い family を閉じます。
+同じ DB/session/provider/model で再開し、最初の turn が family を reconnect して最後の checkpoint を reconcile します。stored result は再利用、pending/uncertain call は自動再送しません。interrupted compilation intent は無料 recompile なしで残ります。replacement 前に保存した admitted successor は exact held checkpoint から publish、committed replacement は lineage で解決します。DB/session あたり一 server process のみ。loopback listener は loopback の `Host` 名と自身の origin にだけ応答し(それ以外は `403`)、別 origin のページは届きません。この listener と `alice-demo`/`bob-demo` は production 認証ではなく、explicit cancellation は process-loss restart と違い family を閉じます。
 
 ## 検証
 
