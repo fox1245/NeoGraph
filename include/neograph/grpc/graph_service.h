@@ -37,14 +37,17 @@ std::unique_ptr<neograph::v1::GraphService::Service> make_graph_service(
     std::size_t max_inflight_runs = 0);
 
 /// Convenience: build + run a blocking gRPC server on `address`
-/// (e.g. "0.0.0.0:50051") with insecure credentials and the standard
-/// health service until the process is signalled. For TLS / auth wire your
-/// own `grpc::ServerBuilder` against `make_graph_service()`.
+/// (e.g. "127.0.0.1:50051") with insecure credentials and the standard
+/// health service until the process is signalled. On an address other than
+/// loopback, one warning goes to stderr. For TLS or message size limits use
+/// the overload with ServeOptions; for authentication wire your own
+/// `grpc::ServerBuilder` against `make_graph_service()`.
 void run_server(const std::string& address,
                 neograph::graph::NodeContext ctx,
                 std::string default_graph_json = "");
 
-/// The same, until `options.stop` is requested (see ServeOptions).
+/// The same, until `options.stop` is requested, with the credentials and the
+/// message size limits of `options` (see ServeOptions).
 void run_server(const std::string& address,
                 neograph::graph::NodeContext ctx,
                 std::string default_graph_json,
