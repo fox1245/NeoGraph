@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=cc577ea31f254a2330244d184f02f8f713b0080f9b479cb13874fe7d58a1ec17 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=f634d51e3c41fce0652401053b5929c60a812ca72ecbea5a1622de518aae243b -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3602,7 +3602,7 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 
 ### `neograph::acp` — Agent 客户端协议
 
-**头文件：** `<neograph/acp/{server,types}.h>`
+**头文件：** `<neograph/acp/{server,types}.h>`（实验性的远程传输在 `<neograph/acp/http_server.h>`）
 编辑器↔agent 通过 stdio 上的换行分隔 JSON 进行 JSON-RPC 2.0 通信（Zed、Gemini CLI、Neovim CodeCompanion）。协议为 ACP 版本 1，已用官方 schema v1.25.0 以及官方 Python（0.12、1.0）和 TypeScript SDK 验证。client→agent：`initialize`、`session/{new,resume,prompt,cancel}`。agent→client：`session/update`、`session/request_permission`；`fs/*`、`terminal/*` 和 `elicitation/*` 只在客户端声明了相应能力时，才通过延迟绑定的 `ACPClient` 发送。客户端以 `error` 应答时，会抛出携带方法、代码、消息和 `data` 的 `acp::ACPClientError`；如果代码表明请求不可能成功，则是不会重试的 `acp::ACPClientRefusal`（[协议失败映射](#protocol-failure-mapping)）。`ACPServer::handle_message` 在工作线程上运行每个提示轮次，同时最多 `max_inflight_prompts`（32）个，每个会话一个。被拒绝的轮次返回 JSON-RPC `-32603`，`data.reason` 为 `"overloaded"` 或 `"session_busy"`；`-32000` 是 ACP 的 "Authentication required"，因此不使用。`initialize` 之前的调用返回 `-32600`，未知会话返回 `-32002`；对 agent 已知但没有检查点的会话执行 `session/resume` 会成功。
 
 提示接受 text 和 `resource_link` 块（基础内容；默认适配器把链接以 `[name](uri)` 形式写入输入），image、audio 和嵌入资源只在 `capabilities().prompt` 声明后才接受。格式错误或未声明的块返回 `-32602`。默认适配器会写入 `_acp_session_id`、`_acp_cwd`、`_acp_additional_directories` 和 `_acp_mcp_tools`；如需修改，重写 `build_session_state`（或旧的 `build_initial_state`）。`agentInfo` 始终是 ACP `Implementation`，缺少的 name 或 version 会被补齐。
@@ -3625,6 +3625,8 @@ Python 的 `neograph_engine.a2a` 导出 `WireDialect`、`AgentInterface`、`Agen
 `session/cancel` 只取消正在进行的轮次；没有轮次运行时收到的取消会被忽略（会重排消息的传输可以用 `set_pre_armed_cancel(true)` 保留以前的预先取消）。`requestId` 为正在运行的 `session/prompt` 的 id 的 `$/cancel_request` 通知也以同样的方式取消该轮，这个提示仍然只得到一个响应（`stopReason: "cancelled"`）；其他请求（未知或已结束）的 `requestId` 会被忽略。取消后，等待中的 agent→client 请求有 500 ms 的回答时间，之后服务器发送 `$/cancel_request` 并结束轮次。权限请求默认没有超时，除非用 `ACPClient::set_permission_timeout` 设置。stdin 到达 EOF 时，`run()` 会让进行中的轮次在 `set_eof_grace`（1 秒）内完成，然后取消它们。
 
 `session/new` 和 `session/resume` 中的 stdio `mcpServers` 通过 NeoGraph 的 MCP 客户端（以 `NEOGRAPH_BUILD_MCP_CLIENT` 构建）在会话的 `cwd` 中启动，环境是最小的：agent 的 `PATH`（Windows 上还有 `SystemRoot`）加上客户端的 `env` 项，可能含有 provider API 密钥的其余 agent 环境不会传递；节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE MCP 服务器不会被声明，并以 `-32602` 拒绝。无法启动的服务器会使请求以 `-32603` 和 `data.reason: "mcp_server_unavailable"` 失败。
+
+**远程传输（实验性）。** `<neograph/acp/http_server.h>`（`neograph::acp_http_server`，`NEOGRAPH_BUILD_ACP_HTTP_SERVER`，默认关）新增 `ACPHttpServer`，它遵循 ACP 项目的远程传输草案，在一个端点（`/acp`）上通过 Streamable HTTP 和 WebSocket 升级，为每个连接提供一个 `ACPServer`；stdio 仍是标准传输。有 `ACPHttpServer(factory, config)`、`start()`、`start_async()`、`stop()`、`port()`、`connection_count()`、`client()` 和 `attach_client()`；工厂返回 `ACPHttpConnection`（`server`、`owner`），并收到 `ACPHttpConfig::authenticator` 返回的主体。`ACPHttpConfig`：`host`（`127.0.0.1`）、`port`、`endpoint`、`streamable_http`、`websocket`、`max_connections`（16）、`max_payload_bytes`（4 MiB）、`http_threads`（8）、`max_http_threads`（64）、`max_queued_requests`（64）、`connection_idle_timeout`（60 秒）、`keepalive_interval`（15 秒）、`allowed_origins`、`allowed_hosts` 和 `authenticator`。非回环的 `host` 没有 `authenticator` 时抛出 `std::invalid_argument`。Host、Origin、认证和大小限制在每个路由、流和升级请求上、读取正文之前检查。服务器使用 HTTP/1.1（草案要求 HTTP/2），线上格式的细节可能随草案变化。见 [ACP](acp.md#remote-transports-experimental)。
 
 **公共头文件：** [`include/neograph/acp/`](../include/neograph/acp/)。
 

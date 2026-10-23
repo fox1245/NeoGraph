@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
+<!-- neograph-i18n: source=docs/acp.md locale=ko source_sha256=d6c0969438c8807fc2a0db7bad4789dbf7f7110c6b864b32417f0715f51bd282 -->
 # ACP: 그래프를 에디터 에이전트로 쓰기
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -12,6 +12,7 @@ Agent Client Protocol(ACP)은 에디터를 코딩 에이전트나 대화 에이�
 | 역할 | C++ 타깃 | CMake 옵션(기본값) | Python |
 |---|---|---|---|
 | 에이전트(서버) | `neograph::acp` | `NEOGRAPH_BUILD_ACP`(켜짐) | 공식 SDK 사용 |
+| Streamable HTTP·WebSocket 에이전트(실험적) | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`(**꺼짐**) | 없음 |
 
 Python 패키지에는 네이티브 ACP 서버가 없습니다. Python으로 에이전트를 만들려면 공식 SDK(`pip install "neograph-engine[acp]"`)를 설치하고, 그 뒤에서 `neograph_engine.ProtocolHostAdapter`로 엔진을 실행하세요. 이 어댑터는 ACP 세션 ID를 NeoGraph `thread_id`에 대응시키고, 체크포인트에서 재개하고, 취소를 전달하고, 토큰을 스트리밍합니다. [Python 예제](../bindings/python/examples/README.md)에 이런 에이전트가 있습니다. ACP에는 Python 3.10 이상이 필요합니다.
 
@@ -181,6 +182,31 @@ stop reason: end_turn
 - **MCP 서버.** 클라이언트는 `session/new`에 stdio MCP 서버를 넘길 수 있습니다. 에이전트는 NeoGraph의 MCP 클라이언트로 이 서버들을 세션의 `cwd`에서 최소한의 환경(`PATH`와 클라이언트의 `env` 항목)으로 시작하므로, 에이전트 환경에 있는 provider 키는 전달되지 않습니다. 노드는 `ACPClient::session_tools(session_id)`로 이 도구들에 접근합니다. HTTP·SSE MCP 서버는 `-32602`로 거절합니다. [MCP 가이드](mcp.md)를 보세요.
 - **기능.** `ACPServer::capabilities()`가 `initialize`에서 알리는 내용입니다. 프롬프트는 텍스트와 `resource_link` 블록을 받으며, 이미지, 오디오, 임베디드 리소스는 `capabilities().prompt`에서 켠 경우에만 받습니다.
 
+## 원격 전송(실험적)
+
+stdio는 ACP가 정의하고 모든 에디터가 구현하는 전송입니다. 원격 전송, 곧 같은 엔드포인트에서 WebSocket 업그레이드를 함께 쓰는 Streamable HTTP는 ACP 프로젝트의 초안 제안으로만 있습니다. `neograph::acp_http_server`는 에이전트를 이 두 전송으로 제공하며 초안이 분명히 정한 부분은 따르므로, 초안이 바뀌면 와이어 세부가 바뀔 수 있습니다. **실험적이며 기본값은 꺼짐**입니다. 요청하지 않으면 아무것도 링크하지 않는 별도 라이브러리(`NEOGRAPH_BUILD_ACP_HTTP_SERVER`, 기본값 꺼짐)이고, 서버는 `start()` 뒤에야 연결을 받습니다. stdio의 `ACPServer::run()`은 바뀌지 않습니다.
+
+```cpp
+#include <neograph/acp/http_server.h>
+
+// One ACPServer per connection: the factory builds it, the transport drives it.
+acp::ACPHttpServer server([engine](std::string_view /*principal*/) {
+    acp::ACPHttpConnection connection;
+    connection.server = std::make_unique<acp::ACPServer>(
+        engine, json{{"name", "release-notes"}, {"version", "1.0.0"}});
+    return connection;
+});
+server.start_async();  // 127.0.0.1 and a free port, see server.port()
+```
+
+`neograph::acp`를 함께 가져오는 `neograph::acp_http_server`를 링크하세요. 팩토리는 연결마다 한 번, 선택 사항인 `authenticator`가 돌려준 주체(principal)와 함께 호출됩니다(없으면 빈 문자열).
+
+- **연결.** ACP 연결 하나는 `ACPServer` 하나이며 stdio와 똑같이 구동됩니다. 메시지는 도착한 순서대로 처리되고, 끝난 연결은 입력의 끝이므로 실행 중인 프롬프트가 취소됩니다. 연결은 서로 독립이며 같은 엔진에서 프롬프트를 동시에 실행할 수 있고, `max_connections`(16)가 개수를 제한합니다. 세션 ID는 살아 있는 연결 하나에 속합니다. 다른 살아 있는 연결이 가진 ID를 `session/resume`하면 `-32603`과 `data.reason` `"session_busy"`로 거절됩니다. 연결의 세션은 연결과 함께 끝나며, 다시 연결한 뒤에는 `session/resume`이 엔진의 체크포인트 저장소에서 세션을 복원합니다. 에디터를 호출하는 노드는 `ACPHttpServer::client()`를 캡처하거나(또는 연결되지 않은 `ACPClient`를 `attach_client()`에 넘기거나) 하며, 각 호출은 그 세션을 가진 연결에 도달합니다.
+- **Streamable HTTP**는 `ACPHttpConfig::endpoint`(`/acp`)에서 제공됩니다. `Acp-Connection-Id` 없이 `initialize`를 `POST`하면 연결이 만들어지고, `200`으로 답하며 응답이 본문이 되고 ID는 `Acp-Connection-Id` 헤더에 들어갑니다. 그 밖의 `POST`는 이 헤더를 싣고, 본문 없이 `202`로 답하며, 실제 답은 스트림으로 옵니다. `Accept: text/event-stream`인 `GET`은 server-sent-event 스트림을 엽니다. 헤더만 있으면 연결 스트림(`session/new`와 `session/resume`의 답)이고, `Acp-Session-Id`까지 있으면 세션 스트림(`session/update`, `session/request_permission`·`fs/*` 같은 에이전트의 요청, 그 세션 요청의 답)입니다. `session/resume`으로 되살린 세션은 클라이언트가 스트림을 열 때까지 자기 스트림이 없으며, 그동안 그 메시지는 연결 스트림으로 갑니다. `DELETE`는 연결을 끝냅니다. `params.sessionId`로 세션을 지목하는 요청은 같은 `Acp-Session-Id`를 보내야 하고, 그 세션은 연결의 것이어야 합니다. 배치는 `501`입니다. 열린 스트림이 없을 때의 메시지는 크기가 제한된 큐에서 기다리며, 연결을 잃은 뒤에는 아무것도 다시 보내지 않습니다. 스트림도 요청도 `connection_idle_timeout`(60초) 동안 없는 연결은 닫히고 그 프롬프트는 취소됩니다.
+- **WebSocket**은 같은 엔드포인트(`Upgrade: websocket`인 `GET`)에서 제공됩니다. 텍스트 프레임 하나가 양방향 JSON-RPC 메시지 하나이고 `initialize`가 먼저 옵니다. 바이너리 프레임은 무시됩니다. 프레임은 RFC 6455를 따릅니다. 클라이언트 프레임은 마스킹되어야 하고, ping에는 응답하며, 메시지는 조각으로 나뉠 수 있습니다. `max_payload_bytes`를 넘는 메시지는 코드 1009로 연결을 닫고, 소켓을 닫으면 연결이 끝납니다.
+- **초안과 다른 점.** 초안은 HTTP/2를 요구하지만 이 서버는 HTTP/1.1을 쓰므로 스트림과 `POST`마다 별도의 TCP 연결이 되며, 다중화는 리버스 프록시가 맡아야 합니다. WebSocket 업그레이드의 101 응답에는 `Acp-Connection-Id`가 없습니다. 쿠키를 설정하지 않고, `Acp-Protocol-Version`을 검사하지 않으며, 스트림에는 이벤트 ID도 재개도 없습니다.
+- **보안.** 다른 호스트를 지정하지 않으면 `127.0.0.1`에 바인드하며, 루프백이 아닌 바인드는 `authenticator`가 없으면 거절됩니다. 모든 요청, 스트림, 업그레이드와 서버가 제공하지 않는 경로까지 본문을 읽기 전에 검사합니다. 먼저 Host와 Origin(`allowed_hosts`, `allowed_origins`. [MCP](mcp.md)·[A2A](a2a.md) 서버와 같은 규칙), 다음에 `authenticator`(HTTP 401과 `WWW-Authenticate: Bearer`), 마지막에 `max_payload_bytes`(HTTP 413, 기본 4 MiB)입니다. 연결은 그것을 만든 주체에게만 응답합니다. 에이전트는 에디터를 대신해 파일을 읽고 쓰므로 원격 바인드는 그것을 노출하는 것으로 보세요. 브라우저는 WebSocket에 `Authorization`을 붙일 수 없으니, 그런 연결의 인증은 리버스 프록시에서 하세요.
+
 ## 테스트와 상호 운용성
 
-`tests/fixtures/acp_probe_agent.cpp`는 공개 API로 만든 작은 ACP 에이전트입니다. 상호 운용 테스트 모음은 공식 SDK 클라이언트를 이 에이전트에 붙여 검사합니다. 단위 테스트는 `tests/test_acp_server.cpp`와 `tests/test_acp_types.cpp`입니다.
+`tests/fixtures/acp_probe_agent.cpp`는 공개 API로 만든 작은 ACP 에이전트입니다. 상호 운용 테스트 모음은 공식 SDK 클라이언트를 이 에이전트에 붙여 검사합니다. 단위 테스트는 `tests/test_acp_server.cpp`와 `tests/test_acp_types.cpp`이고, 원격 전송에는 별도의 `tests/test_acp_http_server.cpp`가 있습니다. `bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py`는 공식 Python SDK(`agent-client-protocol` 0.12)가 초안 전송용으로 제공하는 클라이언트를 `neograph_acp_probe_agent --http`에 두 전송 모두로 붙여 실행하며, TypeScript SDK는 이 전송들에 대해 실행하지 않습니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=73b28dd51c2fc661d2c85c5ed50ae9c98514bbb8a628e7382509575a429fe4db -->
+<!-- neograph-i18n: source=docs/acp.md locale=zh-CN source_sha256=d6c0969438c8807fc2a0db7bad4789dbf7f7110c6b864b32417f0715f51bd282 -->
 # ACP：把图作为编辑器中的智能体
 
 **Languages:** [English](acp.md) | [한국어](acp.ko.md) | [日本語](acp.ja.md) | [简体中文](acp.zh-CN.md)
@@ -12,6 +12,7 @@ Agent Client Protocol（ACP）把编辑器与编码智能体或对话智能体�
 | 角色 | C++ 目标 | CMake 选项（默认值） | Python |
 |---|---|---|---|
 | 智能体（服务器） | `neograph::acp` | `NEOGRAPH_BUILD_ACP`（开） | 通过官方 SDK |
+| 通过 Streamable HTTP 和 WebSocket 提供的智能体（实验性） | `neograph::acp_http_server` | `NEOGRAPH_BUILD_ACP_HTTP_SERVER`（**关**） | 无 |
 
 Python 包中没有原生的 ACP 服务器。要用 Python 编写智能体，请安装官方 SDK（`pip install "neograph-engine[acp]"`），并在它背后用 `neograph_engine.ProtocolHostAdapter` 运行引擎。该适配器把 ACP 会话 ID 对应到 NeoGraph 的 `thread_id`，从检查点恢复，转发取消，并流式输出令牌。[Python 示例](../bindings/python/examples/README.md)里有这样的智能体。ACP 需要 Python 3.10 或更高版本。
 
@@ -181,6 +182,31 @@ stop reason: end_turn
 - **MCP 服务器。** 客户端可以在 `session/new` 中传入 stdio MCP 服务器。智能体用 NeoGraph 的 MCP 客户端，在会话的 `cwd` 中以最小环境（`PATH` 和客户端的 `env` 条目）启动它们，所以智能体环境中的 provider 密钥不会传给它们。节点通过 `ACPClient::session_tools(session_id)` 使用这些工具。HTTP 和 SSE 的 MCP 服务器会以 `-32602` 拒绝。见 [MCP 指南](mcp.md)。
 - **能力。** `ACPServer::capabilities()` 就是 `initialize` 所公布的内容。提示词接受文本和 `resource_link` 块；图像、音频和嵌入资源只有在 `capabilities().prompt` 中开启后才接受。
 
+## 远程传输（实验性）
+
+stdio 是 ACP 定义、所有编辑器都实现的传输。远程传输，即在同一端点上同时支持 WebSocket 升级的 Streamable HTTP，目前只是 ACP 项目的草案提案。`neograph::acp_http_server` 通过这两种方式提供智能体，并在草案写得明确的地方遵循它，所以草案变化时，线上格式的细节可能随之变化。它是**实验性的，默认关闭**：一个单独的库（`NEOGRAPH_BUILD_ACP_HTTP_SERVER`，默认关），不要求就不会被链接；服务器只有在 `start()` 之后才会监听。stdio 上的 `ACPServer::run()` 不变。
+
+```cpp
+#include <neograph/acp/http_server.h>
+
+// One ACPServer per connection: the factory builds it, the transport drives it.
+acp::ACPHttpServer server([engine](std::string_view /*principal*/) {
+    acp::ACPHttpConnection connection;
+    connection.server = std::make_unique<acp::ACPServer>(
+        engine, json{{"name", "release-notes"}, {"version", "1.0.0"}});
+    return connection;
+});
+server.start_async();  // 127.0.0.1 and a free port, see server.port()
+```
+
+链接 `neograph::acp_http_server`，它会带上 `neograph::acp`。工厂对每个连接调用一次，参数是可选的 `authenticator` 返回的主体（principal），没有则为空字符串。
+
+- **连接。** 一个 ACP 连接就是一个 `ACPServer`，驱动方式与 stdio 完全相同：消息按到达顺序处理，连接结束就是输入结束，所以它正在运行的提示词会被取消。连接彼此独立，可以在同一个引擎上同时运行提示词，`max_connections`（16）限制其数量。会话 ID 属于一个存活的连接：对另一个存活连接持有的 ID 执行 `session/resume`，会被以 `-32603` 和 `data.reason` 为 `"session_busy"` 拒绝。连接的会话随连接结束；重新连接之后，`session/resume` 从引擎的检查点存储恢复会话。调用编辑器的节点捕获 `ACPHttpServer::client()`（或把未绑定的 `ACPClient` 传给 `attach_client()`），每次调用都会到达拥有该会话的连接。
+- **Streamable HTTP** 在 `ACPHttpConfig::endpoint`（`/acp`）上提供。不带 `Acp-Connection-Id` 的 `initialize` `POST` 会创建连接，以 `200` 应答，响应作为正文，ID 放在 `Acp-Connection-Id` 头中。其他 `POST` 都带这个头，以没有正文的 `202` 应答，真正的答复通过流送达。带 `Accept: text/event-stream` 的 `GET` 打开一个 server-sent-event 流：只带这个头的是连接流（`session/new` 和 `session/resume` 的答复），再带 `Acp-Session-Id` 的是会话流（`session/update`、`session/request_permission` 和 `fs/*` 这类智能体的请求，以及该会话请求的答复）。由 `session/resume` 恢复的会话在客户端打开流之前没有自己的流，其间它的消息走连接流。`DELETE` 结束连接。在 `params.sessionId` 中指明会话的请求必须发送相同的 `Acp-Session-Id`，且该会话必须属于这个连接。批量请求返回 `501`。没有打开的流时，消息在有上限的队列中等待；连接丢失后不会重发任何内容；既没有流也没有请求的时间达到 `connection_idle_timeout`（60 秒）的连接会被关闭，其提示词被取消。
+- **WebSocket** 在同一端点上提供（带 `Upgrade: websocket` 的 `GET`）。每个文本帧是一条 JSON-RPC 消息，两个方向都是如此，第一条是 `initialize`；二进制帧会被忽略。帧遵循 RFC 6455：客户端帧必须带掩码，ping 会得到应答，消息可以分片。超过 `max_payload_bytes` 的消息会以代码 1009 关闭连接，关闭套接字即结束连接。
+- **与草案的不同。** 草案要求 HTTP/2；本服务器使用 HTTP/1.1，因此每个流和每个 `POST` 都是独立的 TCP 连接，多路复用由反向代理提供。WebSocket 升级的 101 响应不带 `Acp-Connection-Id`。不设置 cookie，不检查 `Acp-Protocol-Version`，流也没有事件 ID 和续传。
+- **安全。** 除非指定其他主机，否则绑定 `127.0.0.1`；非回环地址的绑定在没有设置 `authenticator` 时会被拒绝。每个请求、流和升级请求，以及服务器不提供的路径，都在读取正文之前检查：先是 Host 和 Origin（`allowed_hosts` 和 `allowed_origins`，规则与 [MCP](mcp.md) 和 [A2A](a2a.md) 服务器相同），然后是 `authenticator`（HTTP 401 和 `WWW-Authenticate: Bearer`），最后是 `max_payload_bytes`（HTTP 413，默认 4 MiB）。连接只对创建它的主体应答。智能体以编辑器的名义读写文件，所以要把远程绑定看作是把这种能力暴露出去。浏览器无法在 WebSocket 上设置 `Authorization`，这类连接请在反向代理中认证。
+
 ## 测试与互操作
 
-`tests/fixtures/acp_probe_agent.cpp` 是用公开 API 搭建的小型 ACP 智能体。互操作测试套件让官方 SDK 客户端连接它。单元测试是 `tests/test_acp_server.cpp` 和 `tests/test_acp_types.cpp`。
+`tests/fixtures/acp_probe_agent.cpp` 是用公开 API 搭建的小型 ACP 智能体。互操作测试套件让官方 SDK 客户端连接它。单元测试是 `tests/test_acp_server.cpp` 和 `tests/test_acp_types.cpp`；远程传输另有 `tests/test_acp_http_server.cpp`。`bindings/python/tests/interop/acp_suite/test_acp_sdk_remote_interop.py` 用官方 Python SDK（`agent-client-protocol` 0.12）为草案传输提供的客户端，在两种传输上对 `neograph_acp_probe_agent --http` 运行；TypeScript SDK 没有针对这些传输运行。

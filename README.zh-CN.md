@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=9cad6efa3db9b5f3166d7c9c9ac08dabc8fb0322f0542fb48c44debd81ff4840 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -340,6 +340,7 @@ NeoGraph 适合状态转换明确、含分支或循环、并行任务、检查�
 | `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | 可选的持久化存储。两者默认都开启。 |
 | `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP 客户端和 stdio 服务器组件。两者默认都开启（默认值由 `NEOGRAPH_BUILD_MCP` 决定）。 |
 | `NEOGRAPH_BUILD_MCP_HTTP_SERVER` | MCP Streamable HTTP 服务器传输。默认关闭。 |
+| `NEOGRAPH_BUILD_ACP_HTTP_SERVER` | 实验性的 ACP Streamable HTTP 和 WebSocket 传输（遵循协议草案）。默认关闭。 |
 | `NEOGRAPH_BUILD_HARNESS_MCP_BINARY` | 构建并安装 `neograph-harness-mcp` 可执行文件。默认关闭。 |
 | `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | 协议集成。A2A 和 ACP 默认开启，gRPC 默认关闭。 |
 | `NEOGRAPH_BUILD_ASYNC` | HTTP、SSE 和 WebSocket 辅助库。默认开启。 |

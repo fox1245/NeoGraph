@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=9cad6efa3db9b5f3166d7c9c9ac08dabc8fb0322f0542fb48c44debd81ff4840 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -340,6 +340,7 @@ NeoGraph は、状態遷移が明示されていて、分岐やループ、並�
 | `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | オプションの永続ストア。どちらも既定はオン。 |
 | `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP クライアントと stdio サーバーのコンポーネント。どちらも既定はオン(`NEOGRAPH_BUILD_MCP` が既定値を決めます)。 |
 | `NEOGRAPH_BUILD_MCP_HTTP_SERVER` | MCP の Streamable HTTP サーバートランスポート。既定はオフ。 |
+| `NEOGRAPH_BUILD_ACP_HTTP_SERVER` | 実験的な ACP の Streamable HTTP と WebSocket のトランスポート(プロトコルのドラフトに従う)。既定はオフ。 |
 | `NEOGRAPH_BUILD_HARNESS_MCP_BINARY` | `neograph-harness-mcp` の実行ファイルをビルドしてインストールします。既定はオフ。 |
 | `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | プロトコル連携。A2A と ACP は既定でオン、gRPC は既定でオフ。 |
 | `NEOGRAPH_BUILD_ASYNC` | HTTP、SSE、WebSocket のヘルパー。既定はオン。 |

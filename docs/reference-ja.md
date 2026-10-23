@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=cc577ea31f254a2330244d184f02f8f713b0080f9b479cb13874fe7d58a1ec17 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=f634d51e3c41fce0652401053b5929c60a812ca72ecbea5a1622de518aae243b -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3209,7 +3209,7 @@ Python の `neograph_engine.a2a` は `WireDialect`、`AgentInterface`、`AgentCa
 **公開ヘッダー:** [`include/neograph/a2a/`](../include/neograph/a2a/)。
 
 ### `neograph::acp` — Agent Client Protocol
-**ヘッダー:** `<neograph/acp/{server,types}.h>`
+**ヘッダー:** `<neograph/acp/{server,types}.h>`(実験的なリモートトランスポートは `<neograph/acp/http_server.h>`)
 stdio 上の改行区切り JSON によるエディター↔エージェント JSON-RPC 2.0 です (Zed、Gemini CLI、Neovim CodeCompanion)。ACP プロトコルバージョン 1 で、公式スキーマ v1.25.0 と公式 Python (0.12、1.0)・TypeScript SDK で検証しています。client→agent は `initialize`、`session/{new,resume,prompt,cancel}` です。agent→client は `session/update`、`session/request_permission` で、`fs/*`、`terminal/*`、`elicitation/*` はクライアントが capability を通知したときだけ、遅延バインドされた `ACPClient` から送ります。クライアントが `error` で答えると、メソッド、コード、メッセージ、`data` を持つ `acp::ACPClientError` を送出し、リクエストが成功しえないことを示すコードならリトライされない `acp::ACPClientRefusal` になります([プロトコル失敗のマッピング](#protocol-failure-mapping))。`ACPServer::handle_message` は各プロンプトターンをワーカースレッドで実行し、同時に最大 `max_inflight_prompts` (32) 件、セッションごとに 1 件に制限します。拒否したターンは JSON-RPC `-32603` で、`data.reason` は `"overloaded"` または `"session_busy"` です。`-32000` は ACP の "Authentication required" なので使いません。`initialize` 前の呼び出しは `-32600`、不明なセッションは `-32002` で、エージェントが知っていてもチェックポイントのないセッションの `session/resume` は成功します。
 
 プロンプトは text と `resource_link` ブロック (基本コンテンツで、既定アダプターはリンクを入力に `[name](uri)` として入れます) を受け付け、image・audio・埋め込みリソースは `capabilities().prompt` で通知したときだけ受け付けます。不正な、または通知していないブロックは `-32602` です。既定アダプターは `_acp_session_id`、`_acp_cwd`、`_acp_additional_directories`、`_acp_mcp_tools` を設定します。変えるには `build_session_state` (または従来の `build_initial_state`) をオーバーライドします。`agentInfo` は常に ACP `Implementation` で、欠けた name や version は補います。
@@ -3232,6 +3232,8 @@ stdio 上の改行区切り JSON によるエディター↔エージェント J
 `session/cancel` は進行中のターンだけを取り消し、ターンが実行中でないときの取り消しは無視します (メッセージの順序を入れ替えるトランスポートは `set_pre_armed_cancel(true)` で従来の事前取り消しを維持できます)。`requestId` が実行中の `session/prompt` の id である `$/cancel_request` 通知も同じようにターンを取り消し、そのプロンプトには引き続き応答が 1 つ (`stopReason: "cancelled"`) 返ります。未知または終了済みなど、ほかのリクエストの `requestId` は無視します。取り消し後、保留中の agent→client 要求には回答のために 500 ms が与えられ、その後サーバーは `$/cancel_request` を送ってターンを終えます。権限要求は `ACPClient::set_permission_timeout` で設定しない限りタイムアウトしません。stdin が EOF に達すると、`run()` は実行中のターンが `set_eof_grace` (1 秒) の間に終わるのを待ってから取り消します。
 
 `session/new` と `session/resume` の stdio `mcpServers` は NeoGraph の MCP クライアント (`NEOGRAPH_BUILD_MCP_CLIENT` でビルド) でセッションの `cwd` から起動し、環境は最小限で、エージェントの `PATH`(Windows では `SystemRoot` も)にクライアントの `env` を加えたものです。プロバイダーの API キーを含みうるエージェントのその他の環境は渡しません。ノードは `ACPClient::session_tools(session_id)` でそのツールを使います。HTTP と SSE の MCP サーバーは通知せず、`-32602` で拒否します。起動できないサーバーは要求を `-32603`、`data.reason: "mcp_server_unavailable"` で失敗させます。
+
+**リモートトランスポート(実験的)。** `<neograph/acp/http_server.h>`(`neograph::acp_http_server`、`NEOGRAPH_BUILD_ACP_HTTP_SERVER`、既定はオフ)は `ACPHttpServer` を追加します。これは ACP プロジェクトのリモートトランスポートのドラフトに従い、1 つのエンドポイント(`/acp`)で Streamable HTTP と WebSocket アップグレードにより、接続ごとに `ACPServer` を 1 つ提供します。stdio は引き続き標準のトランスポートです。`ACPHttpServer(factory, config)`、`start()`、`start_async()`、`stop()`、`port()`、`connection_count()`、`client()`、`attach_client()` があり、ファクトリは `ACPHttpConnection`(`server`、`owner`)を返し、`ACPHttpConfig::authenticator` が返したプリンシパルを受け取ります。`ACPHttpConfig`: `host`(`127.0.0.1`)、`port`、`endpoint`、`streamable_http`、`websocket`、`max_connections`(16)、`max_payload_bytes`(4 MiB)、`http_threads`(8)、`max_http_threads`(64)、`max_queued_requests`(64)、`connection_idle_timeout`(60 秒)、`keepalive_interval`(15 秒)、`allowed_origins`、`allowed_hosts`、`authenticator`。ループバックでない `host` に `authenticator` がなければ `std::invalid_argument` を投げます。Host、Origin、認証、サイズ制限は、すべてのルート、ストリーム、アップグレードで、本文を読む前に検査されます。サーバーは HTTP/1.1 を使い(ドラフトは HTTP/2 を必須としています)、ワイヤ上の詳細はドラフトとともに変わることがあります。[ACP](acp.md#remote-transports-experimental)を参照してください。
 
 **公開ヘッダー:** [`include/neograph/acp/`](../include/neograph/acp/)。
 ### `neograph::async` — HTTP/SSE/WS ヘルパー

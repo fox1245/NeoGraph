@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=9cad6efa3db9b5f3166d7c9c9ac08dabc8fb0322f0542fb48c44debd81ff4840 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=2fd9980e415f10950941c5994752d0bc09b1717e1f9a772c1c62ee7e95d0c451 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -340,6 +340,7 @@ NeoGraph는 상태 전이가 분명하고, 분기나 루프, 병렬 작업, 체�
 | `NEOGRAPH_BUILD_SQLITE` / `NEOGRAPH_BUILD_POSTGRES` | 선택 사항인 영속 저장소. 둘 다 기본값은 켜짐. |
 | `NEOGRAPH_BUILD_MCP_CLIENT` / `NEOGRAPH_BUILD_MCP_SERVER` | MCP 클라이언트와 stdio 서버 구성 요소. 둘 다 기본값은 켜짐(`NEOGRAPH_BUILD_MCP`가 기본값을 정함). |
 | `NEOGRAPH_BUILD_MCP_HTTP_SERVER` | MCP Streamable HTTP 서버 전송. 기본값은 꺼짐. |
+| `NEOGRAPH_BUILD_ACP_HTTP_SERVER` | 실험적인 ACP Streamable HTTP·WebSocket 전송(프로토콜 초안을 따름). 기본값은 꺼짐. |
 | `NEOGRAPH_BUILD_HARNESS_MCP_BINARY` | `neograph-harness-mcp` 실행 파일을 빌드하고 설치합니다. 기본값은 꺼짐. |
 | `NEOGRAPH_BUILD_A2A` / `NEOGRAPH_BUILD_ACP` / `NEOGRAPH_BUILD_GRPC` | 프로토콜 연동. A2A와 ACP는 기본값이 켜짐, gRPC는 꺼짐. |
 | `NEOGRAPH_BUILD_ASYNC` | HTTP, SSE, WebSocket 헬퍼. 기본값은 켜짐. |
