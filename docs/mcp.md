@@ -188,6 +188,8 @@ The 0.14.0 wheel includes this Python client: its stdio transport works against 
 
 For HTTP, `MCPClient("http://127.0.0.1:8000/mcp")` takes the server's endpoint URL and uses it as given. A discovered tool keeps its session, so it stays usable after the `MCPClient` object is destroyed.
 
+A stdio server writes only messages to stdout. When it prints a banner or a log line there anyway, the client skips a line that is not JSON, up to `StdioClientConfig::max_stdout_text_lines` (1000) lines and `max_stdout_text_bytes` (256 KiB) per session, and writes one warning to the host's stderr when it skips the first one; the text is not quoted. The line after a limit ends the session with `MCPFailure::protocol`, and 0 for either limit skips nothing. A line is never skipped when it could be a damaged message: a line that starts with `{`, or with `[` and then `{`, or contains `"jsonrpc"`, and JSON that is not an object or a batch, end the session at once, since skipping them would leave the call they answer waiting for its timeout. A server logs to stderr. The constructor that takes only an `argv` uses the defaults.
+
 ## Call a tool from a graph node
 
 A node can hold a client and call a tool. The run's deadline and cancel token bound the call; if the run is cancelled, the client sends `notifications/cancelled` to the server and drops the late reply.

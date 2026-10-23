@@ -65,6 +65,18 @@ struct NEOGRAPH_API StdioClientConfig {
     std::vector<std::pair<std::string, std::string>> environment;
     bool replace_environment = false;
     std::size_t max_frame_bytes = 16 * 1024 * 1024;
+    /// A stdio server writes only JSON-RPC messages to stdout (MCP: it MUST
+    /// NOT write anything else), but servers print banners and log lines
+    /// there. The session skips a stdout line that is not JSON, up to
+    /// max_stdout_text_lines lines and max_stdout_text_bytes bytes (newlines
+    /// included) per session, and reports the first one on the host's stderr
+    /// without quoting it. The next line past a limit ends the session with
+    /// MCPFailure::protocol; 0 for either limit skips nothing. A line is
+    /// never skipped when it could be a damaged message: one that starts with
+    /// '{' or a '[' that opens a batch, or mentions "jsonrpc". Those, and JSON
+    /// that is not an object or a batch, end the session at once.
+    std::size_t max_stdout_text_lines = 1000;
+    std::size_t max_stdout_text_bytes = 256 * 1024;
     /// The session drains the server's stderr for as long as it runs and keeps
     /// its last max_stderr_bytes bytes; stderr output never ends the session
     /// (MCP: a client SHOULD NOT treat stderr as an error). Captured bytes are

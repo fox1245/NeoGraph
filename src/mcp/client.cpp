@@ -58,6 +58,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdio>
 #include <array>
 #include <limits>
 #include <cerrno>
@@ -680,6 +681,10 @@ private:
     asio::awaitable<void> do_notify(json notification);
 
     asio::awaitable<std::string> async_read_line_locked(AsyncHandle& out);
+    /// A stdout line that is not JSON: true when it is text to skip (a banner
+    /// or a log line), false when it may be a damaged message. Throws a
+    /// protocol failure once the skipped text passes the session's limits.
+    bool skip_stdout_text(const std::string& line);
     asio::awaitable<void> async_write_frame_locked(AsyncHandle& in, const json& j);
 
     /// One reader routes responses by id. It starts when a call is in
@@ -719,6 +724,12 @@ private:
     std::atomic<bool> startup_complete_{false};
     std::string abuffer_; ///< Pending bytes on the single async reader.
     std::size_t max_frame_bytes_ = 16 * 1024 * 1024;
+    /// Stdout text that is not JSON-RPC, skipped so far and allowed per
+    /// session. Only the reader coroutine reads or writes the counters.
+    std::size_t max_stdout_text_lines_ = 1000;
+    std::size_t max_stdout_text_bytes_ = 256 * 1024;
+    std::size_t stdout_text_lines_ = 0;
+    std::size_t stdout_text_bytes_ = 0;
     std::chrono::milliseconds request_timeout_{30000};
     // Capacity-one channel serializes only frame writes. A waiting writer
     // suspends cooperatively; it never blocks the transport's I/O thread.
@@ -957,6 +968,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
     auto sess = std::shared_ptr<StdioSession>(new StdioSession());
     sess->hardened_ = hardened;
     sess->max_frame_bytes_ = config.max_frame_bytes;
+    sess->max_stdout_text_lines_ = config.max_stdout_text_lines;
+    sess->max_stdout_text_bytes_ = config.max_stdout_text_bytes;
     sess->max_stderr_bytes_ = config.max_stderr_bytes;
     sess->cancel_grace_ = config.cancel_grace;
     sess->request_timeout_ = config.request_timeout;
@@ -1229,6 +1242,8 @@ std::shared_ptr<StdioSession> StdioSession::spawn_impl(
         auto sess = std::shared_ptr<StdioSession>(new StdioSession());
         sess->hardened_ = hardened;
         sess->max_frame_bytes_ = config.max_frame_bytes;
+        sess->max_stdout_text_lines_ = config.max_stdout_text_lines;
+        sess->max_stdout_text_bytes_ = config.max_stdout_text_bytes;
         sess->max_stderr_bytes_ = config.max_stderr_bytes;
         sess->cancel_grace_ = config.cancel_grace;
         sess->request_timeout_ = config.request_timeout;
@@ -1418,6 +1433,55 @@ StdioSession::async_read_line_locked(AsyncHandle& out) {
     co_return line;
 }
 
+namespace {
+
+/// Whether a stdout line that is not valid JSON could be a message that was
+/// cut, split over lines or prefixed by other text. A message is a JSON
+/// object, or a batch of them, and is named by "jsonrpc", so a line that
+/// starts like one or mentions it is never taken for a log line. Skipping
+/// such a line would hide the reply a call is waiting for until its timeout.
+bool may_be_damaged_message(std::string_view line) {
+    constexpr std::string_view blanks = " \t";
+    const auto first = line.find_first_not_of(blanks);
+    if (first == std::string_view::npos) return false;
+    if (line[first] == '{') return true;
+    if (line[first] == '[') {
+        const auto next = line.find_first_not_of(blanks, first + 1);
+        if (next == std::string_view::npos || line[next] == '{') return true;
+    }
+    return line.find("\"jsonrpc\"") != std::string_view::npos;
+}
+
+}  // namespace
+
+bool StdioSession::skip_stdout_text(const std::string& line) {
+    if (may_be_damaged_message(line)) return false;
+    const auto bytes = line.size() + 1;
+    const bool lines_used_up = stdout_text_lines_ >= max_stdout_text_lines_;
+    const bool bytes_used_up = bytes > max_stdout_text_bytes_
+        || stdout_text_bytes_ > max_stdout_text_bytes_ - bytes;
+    if (lines_used_up || bytes_used_up) {
+        throw MCPTransportError(
+            MCPFailure::protocol,
+            "MCP stdio server wrote more than " + std::to_string(max_stdout_text_lines_)
+                + " lines or " + std::to_string(max_stdout_text_bytes_)
+                + " bytes of text that is not JSON-RPC to stdout");
+    }
+    if (stdout_text_lines_ == 0) {
+        // FILE* stderr: see graph_executor.cpp.
+        std::fprintf(stderr,
+                     "[neograph] warning: an MCP stdio server wrote text that is not JSON-RPC "
+                     "to stdout, where only messages belong. Such lines are skipped, up to %zu "
+                     "lines or %zu bytes in this session, and not reported again. Log output "
+                     "belongs on the server's stderr.\n",
+                     max_stdout_text_lines_, max_stdout_text_bytes_);
+        std::fflush(stderr);
+    }
+    ++stdout_text_lines_;
+    stdout_text_bytes_ += bytes;
+    return true;
+}
+
 asio::awaitable<void> StdioSession::run_reader() {
     std::exception_ptr fail;
     try {
@@ -1428,6 +1492,9 @@ asio::awaitable<void> StdioSession::run_reader() {
                 try {
                     resp = json::parse(line);
                 } catch (const json::parse_error& e) {
+                    // A banner or a log line on stdout is not a message; a
+                    // damaged message is a protocol failure.
+                    if (skip_stdout_text(line)) continue;
                     throw MCPTransportError(
                         MCPFailure::protocol,
                         std::string("MCP stdio response JSON: ") + e.what());
