@@ -50,7 +50,10 @@ class NEOGRAPH_API A2ACallerNode : public neograph::graph::GraphNode {
     /// v0.4 PR 9a: unified ``run`` — reads ``input_key`` from state,
     /// forwards to the remote A2A agent, writes the response (and
     /// task_id / context_id continuation handles) back. Cancel
-    /// propagates through the underlying A2AClient transport.
+    /// propagates through the underlying A2AClient transport: the run's
+    /// token, or the node's `attempt_timeout_ms`, ends a call in flight. The
+    /// client itself puts no deadline on the exchange unless `set_timeout`
+    /// sets one.
     asio::awaitable<neograph::graph::NodeOutput>
     run(neograph::graph::NodeInput in) override;
 

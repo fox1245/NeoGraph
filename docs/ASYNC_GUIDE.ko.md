@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=6683a6d1c43ac965183efed84bcb41bd6eb07d6f3cd7aa66f84de0dd8b61dea3 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=ko source_sha256=17d11f173d6302e253ca780f4fbdfb7b45a653d75761d94e0e93b92d08aa3a16 -->
 # NeoGraph 비동기 가이드
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -88,7 +88,7 @@ public:
 
 NeoGraph의 `async_post_stream`은 기존 사용처가 쓰는 별도의 범용 HTTP 유틸리티로 남아 있으며, SDK의 libcurl 디스패치가 이를 대체하지 않습니다. chunked, 크기가 제한된 `Content-Length`, 연결 종료로 끝나는(close-delimited) 응답 본문을 지원합니다. 비어 있지 않은 고정 길이 본문은 콜백에 한 번 전달되고, 길이가 0인 본문은 콜백을 호출하지 않습니다. 반환되는 `HttpStreamResponse.status`는 200과 2xx가 아닌 상태를 그대로 보존하므로, 호출자는 SSE가 아닌 응답을 빈 성공으로 취급하지 않고 JSON 오류 본문을 해석할 수 있습니다.
 
-`RequestOptions`의 기본값은 상태/헤더 64 KiB, 디코딩된 본문 16 MiB, 전송 청크 1 MiB 한도이며, 0이면 해당 한도를 끕니다. 고정 길이 분기는 메모리를 할당하기 전에 본문 한도를 검사합니다. 올바르지 않거나 모호한 프레이밍, 너무 이른 EOF, 이미 버퍼에 들어온 초과 바이트는 거부합니다. 반환된 뒤에 도착하는 바이트까지 감지한다는 약속은 아닙니다. 리다이렉트 본문은 따로 처리합니다. 홉(hop)별 타임아웃의 기본값은 0이고 리다이렉트는 꺼져 있습니다. `connect_timeout`(기본값 0, 제한 없음)은 `async_post`, `async_get`, `async_post_stream`, `async_request_stream`의 이름 해석, TCP 연결, TLS 핸드셰이크만 제한하며, 풀(pool)은 이 값을 읽지 않습니다. 이 범용 옵션은 SDK 정책도, 모델 지출 허용(spending grant)도 아닙니다.
+`RequestOptions`의 기본값은 상태/헤더 64 KiB, 디코딩된 본문 16 MiB, 전송 청크 1 MiB 한도이며, 0이면 해당 한도를 끕니다. 고정 길이 분기는 메모리를 할당하기 전에 본문 한도를 검사합니다. 올바르지 않거나 모호한 프레이밍, 너무 이른 EOF, 이미 버퍼에 들어온 초과 바이트는 거부합니다. 반환된 뒤에 도착하는 바이트까지 감지한다는 약속은 아닙니다. 리다이렉트 본문은 따로 처리합니다. 홉(hop)별 타임아웃의 기본값은 0이고 리다이렉트는 꺼져 있습니다. `connect_timeout`(기본값 0, 제한 없음)은 `async_post`, `async_get`, `async_post_stream`, `async_request_stream`의 이름 해석, TCP 연결, TLS 핸드셰이크만 제한하며, 풀(pool)은 이 값을 읽지 않으며, 이미 진행 중인 이름 조회는 중단할 수 없으므로 그 경우 한도는 조회가 돌아온 뒤에 알아차립니다. 이 범용 옵션은 SDK 정책도, 모델 지출 허용(spending grant)도 아닙니다.
 
 ## Python과 수명 경계
 

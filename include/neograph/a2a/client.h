@@ -34,7 +34,13 @@
 #include <stdexcept>
 #include <string>
 
+namespace neograph::graph { class CancelToken; }
+
 namespace neograph::a2a {
+
+#ifdef NEOGRAPH_A2A_TESTING
+namespace test { class A2AClientTestAccess; }
+#endif
 
 /// JSON-RPC error object returned by the remote agent. `what()` carries
 /// "A2A RPC error (code=<n>): <message>".
@@ -108,8 +114,9 @@ class NEOGRAPH_API A2AClient {
     /// Bound the time to resolve the host, connect and finish the TLS
     /// handshake of each request to `t` (default 30 s). Unlike
     /// @ref set_timeout it stops counting once the request can be written,
-    /// so a slow reply or a long stream is not affected. Zero removes the
-    /// bound.
+    /// so a slow reply or a long stream is not affected. A name lookup that
+    /// is already running cannot be interrupted, so the bound is then noticed
+    /// when it returns. Zero removes the bound.
     void set_connect_timeout(std::chrono::seconds t);
 
     /// Allow the AgentCard to direct RPCs to an interface URL on another
@@ -144,14 +151,22 @@ class NEOGRAPH_API A2AClient {
      * @param text Plain text content for a single TextPart.
      * @param task_id Optional existing task to continue.
      * @param context_id Optional grouping id.
+     * @param cancel Optional token of the work the call belongs to. Cancelling
+     *        it ends the call at once: the connection is closed and the call
+     *        throws graph::CancelledException. The default has no deadline on
+     *        the exchange (see @ref set_timeout), so a caller that cannot
+     *        wait without end passes its token or sets a timeout.
      */
     Task send_message_sync(
         const std::string& text,
         const std::string& task_id    = "",
-        const std::string& context_id = "");
+        const std::string& context_id = "",
+        graph::CancelToken* cancel    = nullptr);
 
     /// Send an arbitrary Message (multipart, file, structured data).
-    Task send_message_sync(const MessageSendParams& params);
+    /// @param cancel As for the overload above.
+    Task send_message_sync(const MessageSendParams& params,
+                           graph::CancelToken* cancel = nullptr);
 
     /// Async variant — server's response payload may be either a Message or
     /// a Task; we coerce both into a Task with the message in `history` so
@@ -204,6 +219,9 @@ class NEOGRAPH_API A2AClient {
     std::string endpoint_url() const;
 
   private:
+#ifdef NEOGRAPH_A2A_TESTING
+    friend class test::A2AClientTestAccess;
+#endif
     std::string base_url_;
     std::chrono::seconds timeout_ = std::chrono::seconds(0);          // 0 = no whole-exchange bound
     std::chrono::seconds connect_timeout_ = std::chrono::seconds(30); // 0 = no connect bound

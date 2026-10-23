@@ -641,20 +641,22 @@ A2AClient::send_message_async(const MessageSendParams& params) {
     co_return task_from_result(result);
 }
 
-Task A2AClient::send_message_sync(const MessageSendParams& params) {
-    return async::run_sync(send_message_async(params));
+Task A2AClient::send_message_sync(const MessageSendParams& params,
+                                  graph::CancelToken* cancel) {
+    return async::run_sync(send_message_async(params), cancel);
 }
 
 Task A2AClient::send_message_sync(const std::string& text,
                                   const std::string& task_id,
-                                  const std::string& context_id) {
+                                  const std::string& context_id,
+                                  graph::CancelToken* cancel) {
     MessageSendParams params;
     params.message.message_id = fresh_message_id();
     params.message.role       = Role::User;
     params.message.parts.push_back(Part::text_part(text));
     if (!task_id.empty())    params.message.task_id    = task_id;
     if (!context_id.empty()) params.message.context_id = context_id;
-    return send_message_sync(params);
+    return send_message_sync(params, cancel);
 }
 
 // ---------------------------------------------------------------------------

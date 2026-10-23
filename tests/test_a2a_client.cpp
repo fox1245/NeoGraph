@@ -33,6 +33,18 @@
 #include <thread>
 #include <vector>
 
+#ifdef NEOGRAPH_A2A_TESTING
+namespace neograph::a2a::test {
+/// Reads the private timeouts, so a test can check the defaults without
+/// waiting out 30 s.
+class A2AClientTestAccess {
+  public:
+    static std::chrono::seconds timeout(const A2AClient& c) { return c.timeout_; }
+    static std::chrono::seconds connect_timeout(const A2AClient& c) { return c.connect_timeout_; }
+};
+}  // namespace neograph::a2a::test
+#endif
+
 using namespace neograph;
 using namespace neograph::a2a;
 
@@ -309,6 +321,113 @@ TEST(A2AClient, ConnectTimeoutEndsATlsHandshakeThatNeverFinishes) {
     expect_timeout("unary call", [&] { (void)client.rpc_call("message/send", json::object()); });
     expect_timeout("stream", [&] { (void)client.send_message_stream("hi", nullptr); });
 }
+
+#ifdef NEOGRAPH_A2A_TESTING
+// The defaults: connecting is bounded and the exchange is not. A reply or a
+// stream that outlasts them cannot be waited for in a test (30 s), so the
+// values themselves are what is checked.
+TEST(A2AClient, DefaultsBoundConnectingAndNotTheExchange) {
+    using Access = neograph::a2a::test::A2AClientTestAccess;
+    A2AClient client("http://127.0.0.1:1");
+    EXPECT_EQ(Access::timeout(client), std::chrono::seconds(0));
+    EXPECT_EQ(Access::connect_timeout(client), std::chrono::seconds(30));
+
+    client.set_timeout(std::chrono::seconds(7));
+    client.set_connect_timeout(std::chrono::seconds(3));
+    EXPECT_EQ(Access::timeout(client), std::chrono::seconds(7));
+    EXPECT_EQ(Access::connect_timeout(client), std::chrono::seconds(3));
+
+    // Zero removes a bound; set_timeout(0) leaves the connect bound alone.
+    client.set_timeout(std::chrono::seconds(0));
+    EXPECT_EQ(Access::connect_timeout(client), std::chrono::seconds(3));
+    client.set_connect_timeout(std::chrono::seconds(0));
+    EXPECT_EQ(Access::connect_timeout(client), std::chrono::seconds(0));
+}
+#endif
+
+// With no deadline on the exchange, the token of the work a call belongs to is
+// what ends a call that the agent never answers.
+TEST(A2ACallerNode, CancelEndsACallThatTheAgentDoesNotAnswer) {
+    SilentPeer peer;  // plain HTTP: accepts, never answers the card request
+    auto client = std::make_shared<A2AClient>("http://127.0.0.1:" + std::to_string(peer.port));
+    A2ACallerNode node("caller", client);
+    neograph::graph::GraphState state;
+    state.init_channel("prompt", neograph::graph::ReducerType::OVERWRITE,
+        [](const json&, const json& incoming) { return incoming; });
+    state.write("prompt", "question");
+    neograph::graph::RunContext ctx;
+
+    auto cancel = std::make_shared<neograph::graph::CancelToken>();
+    std::thread canceller([cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cancel->cancel();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_THROW((void)neograph::async::run_sync(node.run({state, ctx}), cancel.get()),
+                 neograph::graph::CancelledException);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(5000));
+    canceller.join();
+}
+
+#ifdef NEOGRAPH_TESTS_HAVE_HARNESS
+TEST(A2AClient, HarnessAdapterEndsTheCallWhenItsJobIsCancelled) {
+    SilentPeer peer;
+    auto client = std::make_shared<A2AClient>("http://127.0.0.1:" + std::to_string(peer.port));
+    auto executor = make_harness_capability_executor({{"research", client}});
+    json tool = {
+        {"id", "research.ask"},
+        {"executor", {{"kind", "a2a"}, {"agent", "research"}}},
+    };
+    auto cancel = std::make_shared<neograph::graph::CancelToken>();
+    std::thread canceller([cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cancel->cancel();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_THROW((void)executor(tool, {{"question", "What changed?"}}, cancel),
+                 neograph::graph::CancelledException);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(5000));
+    canceller.join();
+}
+
+// A job whose token is never cancelled (the Program-hosted Harness hands each
+// Tool call a fresh token) is still not held by an agent that never answers.
+TEST(A2AClient, HarnessAdapterBoundsACallTheAgentDoesNotAnswer) {
+    SilentPeer peer;
+    auto client = std::make_shared<A2AClient>("http://127.0.0.1:" + std::to_string(peer.port));
+    auto executor = make_harness_capability_executor({{"research", client}},
+                                                     std::chrono::seconds(1));
+    json tool = {
+        {"id", "research.ask"},
+        {"executor", {{"kind", "a2a"}, {"agent", "research"}}},
+    };
+    auto cancel = std::make_shared<neograph::graph::CancelToken>();
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        (void)executor(tool, {{"question", "What changed?"}}, cancel);
+        FAIL() << "a call to a silent agent returned";
+    } catch (const neograph::graph::CancelledException&) {
+        FAIL() << "the deadline surfaced as a cancellation of the job";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("did not answer within 1 s"), std::string::npos) << e.what();
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+    EXPECT_LT(elapsed, std::chrono::milliseconds(5000));
+    EXPECT_FALSE(cancel->is_cancelled()) << "the deadline cancelled the job's own token";
+
+    // A zero call_timeout bounds nothing; the job's token still ends the call.
+    auto unbounded = make_harness_capability_executor({{"research", client}},
+                                                      std::chrono::seconds(0));
+    std::thread canceller([cancel] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        cancel->cancel();
+    });
+    EXPECT_THROW((void)unbounded(tool, {{"question", "What changed?"}}, cancel),
+                 neograph::graph::CancelledException);
+    canceller.join();
+}
+#endif
 
 #ifdef NEOGRAPH_TESTS_HAVE_HARNESS
 TEST(A2AClient, HarnessAdapterCallsConfiguredAgent) {

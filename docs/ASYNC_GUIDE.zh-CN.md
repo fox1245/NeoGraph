@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=6683a6d1c43ac965183efed84bcb41bd6eb07d6f3cd7aa66f84de0dd8b61dea3 -->
+<!-- neograph-i18n: source=docs/ASYNC_GUIDE.md locale=zh-CN source_sha256=17d11f173d6302e253ca780f4fbdfb7b45a653d75761d94e0e93b92d08aa3a16 -->
 # NeoGraph 异步指南
 
 **Languages:** [English](ASYNC_GUIDE.md) | [한국어](ASYNC_GUIDE.ko.md) | [日本語](ASYNC_GUIDE.ja.md) | [简体中文](ASYNC_GUIDE.zh-CN.md)
@@ -88,7 +88,7 @@ public:
 
 NeoGraph 的 `async_post_stream` 仍是一个独立的通用 HTTP 工具，供保留下来的使用方使用；SDK 的 libcurl 分发并没有取代它。它支持分块（chunked）、有上限的 `Content-Length`，以及以连接关闭为结束标志的响应体。非空的定长响应体只会向回调交付一次；长度为零的响应体不会触发回调。返回的 `HttpStreamResponse.status` 会保留 200 和非 2xx 的状态码，因此调用方可以解读 JSON 错误响应体，而不会把非 SSE 的回复当成空的成功。
 
-`RequestOptions` 默认的状态行/头部上限是 64 KiB，解码后响应体上限是 16 MiB，传输块上限是 1 MiB；设为零表示取消对应的上限。定长分支在分配内存之前就检查响应体上限。无效或有歧义的分帧、过早出现的 EOF，以及已经缓冲的多余字节，都会被拒绝；但这并不承诺能检测到返回之后才到达的字节。重定向的响应体单独处理。每一跳的默认超时为零，重定向默认关闭。`connect_timeout`（默认为零，即不限制）只约束 `async_post`、`async_get`、`async_post_stream` 和 `async_request_stream` 的域名解析、TCP 连接和 TLS 握手，连接池不读取它。这些通用选项不是 SDK 的策略，也不是模型消费额度的授权。
+`RequestOptions` 默认的状态行/头部上限是 64 KiB，解码后响应体上限是 16 MiB，传输块上限是 1 MiB；设为零表示取消对应的上限。定长分支在分配内存之前就检查响应体上限。无效或有歧义的分帧、过早出现的 EOF，以及已经缓冲的多余字节，都会被拒绝；但这并不承诺能检测到返回之后才到达的字节。重定向的响应体单独处理。每一跳的默认超时为零，重定向默认关闭。`connect_timeout`（默认为零，即不限制）只约束 `async_post`、`async_get`、`async_post_stream` 和 `async_request_stream` 的域名解析、TCP 连接和 TLS 握手，连接池不读取它；已经在进行的域名解析无法被中断，此时期限要等解析返回后才会被察觉。这些通用选项不是 SDK 的策略，也不是模型消费额度的授权。
 
 ## Python 与生命周期的边界
 

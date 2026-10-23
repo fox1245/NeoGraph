@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=6fb08145d2a4d88ff1d6823ac465bcd59f0debc2f607428eb5413b6d2011d308 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=zh-CN source_sha256=01490e5a0a068a4082b91e0571f88dbf747cccf6164cd0b1882eedfca6401b57 -->
 # A2A：智能体调用智能体
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -208,7 +208,7 @@ TaskState.Completed
 
 只有当响应的 `Content-Type` 为 `text/event-stream` 时，才把它当作服务器发送事件来读，此时 JSON-RPC 消息是第一个 `data:` 事件；其余情况一律按 JSON 读取。响应里的文本即使含有 `data: `，也不会影响判断。
 
-调用本身没有期限：`send_message_sync` 会一直等到代理答复，流会一直读到代理结束它，因为任务可能运行数分钟。连接有上限：域名解析、TCP 连接和 TLS 握手合计 30 秒，可用 `set_connect_timeout(seconds)` 修改。`set_timeout(seconds)` 限制每个请求的整个交换（包括读完答复或流），超出时调用会抛出异常。两者设为 0 都表示取消限制。Python 的 `set_timeout` 接收秒数并截断为整数秒，因此小于 1 的值会取消限制；Python 没有 `set_connect_timeout`。调用方在 `on_event` 中返回 `false` 来结束的流会立即关闭，而不是读到结尾。
+调用本身没有期限：`send_message_sync` 会一直等到代理答复，流会一直读到代理结束它，因为任务可能运行数分钟。连接有上限：域名解析、TCP 连接和 TLS 握手合计 30 秒（已经在进行的域名解析无法被中断，可能超出这个时间），可用 `set_connect_timeout(seconds)` 修改。`set_timeout(seconds)` 限制每个请求的整个交换（包括读完答复或流），超出时调用会抛出异常。两者设为 0 都表示取消限制。Python 的 `set_timeout` 接收秒数并截断为整数秒，因此小于 1 的值会取消限制；Python 没有 `set_connect_timeout`。调用方在 `on_event` 中返回 `false` 来结束的流会立即关闭，而不是读到结尾。客户端没有设置期限的调用，仍会随它所属的工作一起结束：`A2ACallerNode` 的调用随运行的 cancel token 或节点的 `attempt_timeout_ms` 结束，`make_harness_capability_executor` 发出的调用随 Harness 作业的 cancel token 或其 `call_timeout`（默认 30 秒，0 表示不限制）结束，`send_message_sync` 把这样的 token 作为最后一个参数。
 
 ## 把远程智能体用作节点
 
