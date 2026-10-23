@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=9e1d3870eaf6b627ea0cd8ac3745cacfd056f42eb40874a69c74ebc38df80013 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e96b83a42b0c6f870b31c942731345c385ddfcb1cce9a293c573016cbbfeb6d4 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -85,6 +85,13 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - **테스트와 예제.** `wasm/test/program_test.mjs`는 로컬 OpenAI 호환 서버를 상대로 Node 22와 24에서 이 표면을 실행합니다. 승인과 그 거부, 문서 소스, 이벤트 스트림, 일시 정지와 재개, fork, 취소와 `AbortSignal`, 저장소에서 실행을 다시 읽기, 동시에 진행되는 실행, 계속 돌아가는 호스트 이벤트 루프, 공급자의 거부, 한도가 없는 모델, 범위를 벗어난 예산, 해제된 객체, 그리고 진단과 함께 실패해야 하고 잡히지 않은 것을 남기지 않으며 모듈이 이후에도 Program을 승인하고 실행하게 두어야 하는 열일곱 가지 재귀와 중첩의 형태(`define()`, 소스, `main()`에서)입니다. `wasm/test/program_stores_test.mjs`는 호스트의 저장소를 모듈을 통해 실행합니다(값과 Promise, 거부와 잘못된 값, 없는 메서드, 두 번째 객체가 로그를 재생하는 영속 래퍼, 해제). `wasm/examples/node/program.mjs`는 일시 정지가 있는 두 호출짜리 Program이며 테스트가 자식 프로세스로도 실행합니다.
 
 ### 변경됨
+- **루프백 A2A 서버는 루프백 `Host` 이름과 자기 출처에만 응답하고, 4 MiB를 넘는 본문은 읽지 않습니다.** `A2AServer`는 `Host`도 `Origin`도 확인하지 않았고 HTTP 라이브러리의 본문 한도 100 MiB를 그대로 썼습니다. 다른 출처의 페이지는 자기 호스트 이름을 이 머신으로 다시 가리키게 하면(DNS 리바인딩) 루프백 주소에 바인드한 서버에 닿았고, 어떤 클라이언트든 100 MiB 본문을 보낼 수 있었습니다. `start()` 전에 호출하는 `A2AServer::set_http_config(A2AHttpConfig)`는 MCP HTTP 서버와 같은 필드를 같은 의미로 받습니다. `allowed_hosts`, `allowed_origins`, `max_payload_bytes`입니다.
+  - **Host.** 루프백 바인드(`127.0.0.1`, `::1`, `localhost`)에서는 포트와 관계없이 `localhost`, `127.0.0.1`, `[::1]`과 `allowed_hosts`의 이름에만 응답하고, 그 밖의 `Host`는 `Origin`이 있든 없든 `403`으로 거절합니다. `Host`가 없거나 `host[:port]` 형태가 아니면 `400`입니다. 항목은 포트 없는 호스트 이름, 대괄호로 감싼 IPv6 주소, 또는 모든 `Host`를 뜻하는 `*`이고 대소문자를 구분하지 않고 비교합니다. 루프백이 아닌 바인드에서는 목록이 비어 있으면 예전처럼 아무것도 확인하지 않고, 비어 있지 않으면 나열한 이름만 받아들입니다.
+  - **Origin.** `Origin`이 있는 요청은 `allowed_origins`에 있거나, 루프백 바인드에서 서버 자신의 출처이면 받아들이고 아니면 `403`입니다. 서버 자신의 출처는 바인드한 포트의 `http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<port>`이며, 각각 처음 받아들일 때 stderr에 한 번 알립니다. `Origin`이 없는 요청은 확인하지 않습니다. 루프백이 아닌 바인드는 목록에 있는 출처만 받아들입니다.
+  - **모든 경로, 본문을 읽기 전에.** 확인은 라우팅 전에 실행되므로 에이전트 카드, 이벤트 스트림을 포함한 JSON-RPC 엔드포인트, 그 밖의 모든 경로에 적용되고, 거절된 요청의 본문은 읽지 않습니다. JSON-RPC 엔드포인트는 JSON-RPC `-32600` 오류(ErrorInfo reason `PERMISSION_DENIED`)로, 다른 경로는 `{"error": "..."}`로 답합니다.
+  - **요청 크기.** `max_payload_bytes`를 넘는 본문은 `413`을 받습니다. 기본값은 4 MiB로, 긴 메시지나 3 MiB가 조금 안 되는 인라인 파일 하나(base64는 크기를 3분의 1 키웁니다)가 들어갑니다. 더 큰 파일은 `uri` 파트로 보냅니다.
+  - 포트가 붙은 `allowed_hosts` 항목, 대괄호 없는 IPv6 주소, 빈 항목, 0인 `max_payload_bytes`는 `std::invalid_argument`를 던지고, 서버가 리슨 중일 때 이 함수를 호출하면 `std::logic_error`를 던집니다.
+  - **동작 변경:** 공개 `Host`를 그대로 전달하는 로컬 리버스 프록시나 터널 뒤의 루프백 A2A 서버는 그 이름(또는 `*`)을 목록에 넣을 때까지 그 요청을 거절합니다. 목록에 없는 `Origin`이 붙은 요청(루프백 바인드에서는 목록에 없고 서버 자신의 출처도 아닌 요청)은 어떤 바인드에서든 `403`을 받습니다. 서버 쪽 A2A 클라이언트처럼 `Origin`을 보내지 않는 클라이언트는 영향이 없습니다. 예전에는 읽던 4 MiB를 넘는 본문은 `max_payload_bytes`를 올리지 않으면 `413`을 받습니다.
 - **프레임워크 간 벤치마크 표는 체크인된 기록에서 스크립트가 렌더링하는 하나의 코호트입니다.** `benchmarks/README.md`에는 더 이상 손으로 입력한 표나 값이 고정된 차트가 없습니다.
   - **한 세션, 한 머신, 교차 라운드.** NeoGraph(`origin/master` 커밋을 기본 하드닝 Release 빌드와, 엔진 상한인 하드닝 없는 빌드로)와 Python 프레임워크 다섯 개(각 기본 브랜치의 최신 커밋을 git에서 정확한 커밋으로 설치한 것, 그리고 매칭 셀에는 최신 릴리스)를 한 대의 조용한 Arm 머신에서 무작위 순서의 라운드로, 셀마다 새 프로세스 하나로 실행했습니다. `benchmarks/records/`에 원본 샘플과 출처 정보(커밋, 컴파일러와 플래그, CPU, 커널, 패키지 버전, 부하 평균, 스크립트의 sha256)가 담긴 기록이 있습니다. `scripts/render_bench_report.py`가 이 기록에서 표와 차트를 네 언어로 생성하며, 문서가 기록과 다르면 `bench_report_current`가 실패합니다.
   - **비율은 매칭되는 레짐 사이에서만.** `worker_count=1`의 NeoGraph는 각 프레임워크의 `async def` 노드 코루틴 경로와, `set_worker_count_auto()`는 각 스레드 풀 경로(LangGraph `invoke`, 동기 컴포넌트를 쓴 Haystack `run_async`)와 비교합니다. pydantic-graph와 AutoGen에는 스레드 풀 경로가 없고, LlamaIndex의 경로(이벤트 루프의 기본 실행기에서 실행되는 일반 `def` 스텝)는 측정하지 않았으므로, 셋 다 `해당 없음`으로 표시합니다. 각 프레임워크의 문서가 가장 먼저 보여 주는 API는 절대 시간만 담아 따로 보고하며 비율은 만들지 않습니다. NeoGraph의 두 워커 모드를 나란히 보여 주므로 하나의 "N배 빠름" 수치는 공개하지 않습니다.

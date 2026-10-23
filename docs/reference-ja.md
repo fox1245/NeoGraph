@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=9ed62be79045f166be82885c224fd03dd573e55c1c03350c98da783d2a577bef -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=cc577ea31f254a2330244d184f02f8f713b0080f9b479cb13874fe7d58a1ec17 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -3187,6 +3187,8 @@ run の失敗 class は [プロトコル失敗のマッピング](#protocol-fail
 | in-flight 上限に到達 | `-32603`、ErrorInfo reason `RESOURCE_EXHAUSTED`、domain `neograph`、metadata `retryAfterSeconds` |
 | agent が求める credential がない、または不正(collaboration message、または strict 認証でのすべてのリクエスト) | `WWW-Authenticate` 付きの HTTP 401。body は ErrorInfo reason `UNAUTHENTICATED`、domain `neograph` の JSON-RPC `-32600` |
 | collaboration link が許可しない認証済み peer | HTTP 403。body は ErrorInfo reason `PERMISSION_DENIED`、domain `neograph` の JSON-RPC `-32600` |
+| サーバーが受け入れない `Host` または `Origin` (`A2AHttpConfig`) | どのパスでも HTTP 403。JSON-RPC エンドポイントの body は ErrorInfo reason `PERMISSION_DENIED`、domain `neograph` の `-32600`。ないか形式の誤った `Host` は HTTP 400 |
+| `A2AHttpConfig::max_payload_bytes` (既定 4 MiB) を超えるリクエスト body | HTTP 413 |
 | terminal な task の cancel | `-32002` TaskNotCancelableError。task は変わらない |
 | push notification 設定; extended card; card が `streaming = false` のときの streaming method | `-32003`; `-32004`; `-32004` |
 | 1.0 でも 0.3 でもない `A2A-Version` | `-32009` VersionNotSupportedError |

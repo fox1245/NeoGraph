@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=9e1d3870eaf6b627ea0cd8ac3745cacfd056f42eb40874a69c74ebc38df80013 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e96b83a42b0c6f870b31c942731345c385ddfcb1cce9a293c573016cbbfeb6d4 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -85,6 +85,13 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **测试与示例。** `wasm/test/program_test.mjs` 在 Node 22 和 24 下针对本地的 OpenAI 兼容服务器运行这套接口：准入及其拒绝、文档形式的源码、事件流、暂停及其恢复、分叉、取消与 `AbortSignal`、从存储读回运行、同时进行的运行、始终在转动的宿主事件循环、提供方的拒绝、没有上限的模型、越界的预算、被释放的对象，以及十七种必须带着诊断失败、不留下任何未捕获错误、并让模块之后仍能准入和运行 Program 的递归与嵌套形态（在 `define()`、源码和 `main()` 中）；`wasm/test/program_stores_test.mjs` 通过模块运行宿主的存储（值与 Promise、拒绝与格式错误的值、缺少的方法、由第二个对象重放其日志的持久包装层，以及释放）。`wasm/examples/node/program.mjs` 是一个带暂停的两次调用的 Program，测试也把它作为子进程运行。
 
 ### 变更
+- **回环 A2A 服务器只应答回环的 `Host` 名称和它自己的来源，并且不读取超过 4 MiB 的请求体。** `A2AServer` 既不检查 `Host` 也不检查 `Origin`，并沿用 HTTP 库 100 MiB 的请求体上限。其他来源的网页只要把自己的主机名重新指向这台机器（DNS 重绑定），就能访问绑定在回环地址上的服务器，任何客户端也都能发送 100 MiB 的请求体。在 `start()` 之前调用的 `A2AServer::set_http_config(A2AHttpConfig)` 接受与 MCP HTTP 服务器相同的字段，含义也相同：`allowed_hosts`、`allowed_origins` 和 `max_payload_bytes`。
+  - **Host。** 在回环绑定（`127.0.0.1`、`::1`、`localhost`）上，服务器应答 `localhost`、`127.0.0.1`、`[::1]`（不限端口）以及 `allowed_hosts` 中的名称，其他 `Host` 无论是否带 `Origin` 都返回 `403`。缺失或不是 `host[:port]` 形式的 `Host` 返回 `400`。条目是不带端口的主机名、带方括号的 IPv6 地址，或表示任意 `Host` 的 `*`，比较时忽略大小写。在非回环绑定上，列表为空时和以前一样不做检查，非空时只接受所列名称。
+  - **Origin。** 带 `Origin` 的请求，如果 `allowed_origins` 列出了该来源，或在回环绑定上它是服务器自己的来源，就被接受，否则返回 `403`。服务器自己的来源是绑定端口上的 `http://localhost:<port>`、`http://127.0.0.1:<port>` 和 `http://[::1]:<port>`，每个来源第一次被接受时在 stderr 上报告一次。不带 `Origin` 的请求不检查。非回环绑定只接受已列出的来源。
+  - **每条路由，在读取请求体之前。** 检查在路由之前进行，因此覆盖 Agent Card、含事件流的 JSON-RPC 端点以及其他任何路径，被拒绝的请求的请求体不会被读取。JSON-RPC 端点以 JSON-RPC `-32600` 错误（ErrorInfo reason `PERMISSION_DENIED`）应答，其他路径应答 `{"error": "..."}`。
+  - **请求大小。** 超过 `max_payload_bytes` 的请求体返回 `413`。默认值为 4 MiB：一条长消息，或一个略小于 3 MiB 的内联文件（base64 会使其增大三分之一）；更大的文件请用 `uri` 部分传送。
+  - 带端口的 `allowed_hosts` 条目、不带方括号的 IPv6 地址、空条目以及为 0 的 `max_payload_bytes` 会抛出 `std::invalid_argument`；服务器正在监听时调用该函数会抛出 `std::logic_error`。
+  - **行为变更：** 位于转发公开 `Host` 的本地反向代理或隧道之后的回环 A2A 服务器，会拒绝这些请求，直到把该名称（或 `*`）列入。带有未列出的 `Origin` 的请求（在回环绑定上：既未列出也不是服务器自己的来源）在任何绑定上都返回 `403`；不发送 `Origin` 的客户端（如服务端的 A2A 客户端）不受影响。以前会被读取的超过 4 MiB 的请求体，除非调高 `max_payload_bytes`，现在返回 `413`。
 - **跨框架基准表现在是同一批测量（cohort），由脚本根据已入库的记录渲染。** `benchmarks/README.md` 不再包含手工输入的表格或写死数值的图表。
   - **一个会话、一台机器、交错轮次。** NeoGraph（`origin/master` 提交，分别采用默认加固 Release 构建和作为引擎上限的未加固构建）与五个 Python 框架（各默认分支的最新提交，按确切提交从 git 安装；匹配单元另加最新发布版）在一台安静的 Arm 机器上，以打乱的轮次、每个单元一个全新进程运行。`benchmarks/records/` 中的记录包含原始样本和来源信息：提交、编译器与标志、CPU、内核、软件包版本、平均负载以及脚本的 sha256。`scripts/render_bench_report.py` 据此以四种语言生成表格和图表，文档与记录不一致时 `bench_report_current` 会失败。
   - **只在匹配的运行方式之间给出比值。** `worker_count=1` 的 NeoGraph 与各框架使用 `async def` 节点的协程路径比较，`set_worker_count_auto()` 与各线程池路径（LangGraph 的 `invoke`、使用同步组件的 Haystack `run_async`）比较。pydantic-graph 和 AutoGen 没有线程池路径，LlamaIndex 的路径（在事件循环默认执行器上运行的普通 `def` 步骤）未计时，三者都标为“不适用”。各框架文档最先展示的 API 单独报告，只给绝对时间、不形成比值。NeoGraph 的两种 worker 模式并列展示，因此不发布单一的“快 N 倍”数字。

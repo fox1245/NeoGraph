@@ -3727,6 +3727,8 @@ A run's failure classes reach the peer as [Protocol failure mapping](#protocol-f
 | The in-flight limit is reached | `-32603`, ErrorInfo reason `RESOURCE_EXHAUSTED`, domain `neograph`, metadata `retryAfterSeconds` |
 | Credentials the agent requires are missing or invalid (a collaboration message, or every request under strict authentication) | HTTP 401 with `WWW-Authenticate`; the body is JSON-RPC `-32600` with ErrorInfo reason `UNAUTHENTICATED`, domain `neograph` |
 | An authenticated peer the collaboration link does not permit | HTTP 403; the body is JSON-RPC `-32600` with ErrorInfo reason `PERMISSION_DENIED`, domain `neograph` |
+| A `Host` or `Origin` the server does not admit (`A2AHttpConfig`) | HTTP 403 on any route; the JSON-RPC endpoint's body is `-32600` with ErrorInfo reason `PERMISSION_DENIED`, domain `neograph`. A missing or malformed `Host` is HTTP 400 |
+| A request body over `A2AHttpConfig::max_payload_bytes` (default 4 MiB) | HTTP 413 |
 | Cancel of a terminal task | `-32002` TaskNotCancelableError; the task is unchanged |
 | Push-notification configuration; extended card; a streaming method when the card has `streaming = false` | `-32003`; `-32004`; `-32004` |
 | An `A2A-Version` other than 1.0 or 0.3 | `-32009` VersionNotSupportedError |

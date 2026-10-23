@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=9ed62be79045f166be82885c224fd03dd573e55c1c03350c98da783d2a577bef -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=cc577ea31f254a2330244d184f02f8f713b0080f9b479cb13874fe7d58a1ec17 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -3579,6 +3579,8 @@ run 的失败 class 按 [协议失败映射](#protocol-failure-mapping) 到达 p
 | 达到 in-flight 上限 | `-32603`，ErrorInfo reason `RESOURCE_EXHAUSTED`，domain `neograph`，metadata `retryAfterSeconds` |
 | 缺少 agent 要求的 credential 或 credential 无效（collaboration message，或 strict 认证下的所有请求） | 带 `WWW-Authenticate` 的 HTTP 401；body 为 ErrorInfo reason `UNAUTHENTICATED`、domain `neograph` 的 JSON-RPC `-32600` |
 | collaboration link 不允许的已认证 peer | HTTP 403；body 为 ErrorInfo reason `PERMISSION_DENIED`、domain `neograph` 的 JSON-RPC `-32600` |
+| 服务器不接受的 `Host` 或 `Origin`（`A2AHttpConfig`） | 任何路由都返回 HTTP 403；JSON-RPC 端点的 body 为 ErrorInfo reason `PERMISSION_DENIED`、domain `neograph` 的 `-32600`。缺失或格式错误的 `Host` 返回 HTTP 400 |
+| 超过 `A2AHttpConfig::max_payload_bytes`（默认 4 MiB）的请求 body | HTTP 413 |
 | 取消 terminal task | `-32002` TaskNotCancelableError；task 不变 |
 | push notification 配置；extended card；card 为 `streaming = false` 时的 streaming method | `-32003`；`-32004`；`-32004` |
 | 既非 1.0 也非 0.3 的 `A2A-Version` | `-32009` VersionNotSupportedError |

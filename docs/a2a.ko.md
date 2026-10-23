@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=a15e12725cfad3f149714a9a1176e279273fc478f82e946c386ac2329e4c8092 -->
+<!-- neograph-i18n: source=docs/a2a.md locale=ko source_sha256=0c5c60196bee90e5e6009b6fc8ca7255e2b3365504528791a3a4adb985af8732 -->
 # A2A: 에이전트끼리 호출하기
 
 **Languages:** [English](a2a.md) | [한국어](a2a.ko.md) | [日本語](a2a.ja.md) | [简体中文](a2a.zh-CN.md)
@@ -122,8 +122,9 @@ int main() {
 - 기본 어댑터는 최종 답을 완료된 태스크의 상태 메시지에만 담습니다. 태스크에는 아티팩트가 없으므로 아티팩트를 읽는 클라이언트는 아무것도 받지 못합니다. 답을 아티팩트로 돌려주려면 `build_output_artifact()`를 재정의하세요. [예제 78](../examples/78_a2a_input_required.cpp)이 `response` 채널을 이런 방식으로 아티팩트로 만듭니다.
 - 그래프 실행 하나가 태스크 하나이며, 태스크 ID는 그 실행의 `thread_id`입니다. 태스크마다 자신의 워커 스레드에서 실행되므로, 연결이 끊겨도 태스크는 계속됩니다. 서버는 동시에 태스크 32개까지 받으며, 그 이상은 JSON-RPC 오류 `-32603`(사유 `RESOURCE_EXHAUSTED`)을 받습니다.
 - `interrupt_before`(또는 노드가 던진 `NodeInterrupt`)가 태스크를 `input-required` 상태로 만듭니다. 상태 메시지에는 사유가, `metadata["neograph/interrupt"]`에는 노드와 체크포인트가 담기며, 같은 태스크 ID로 후속 메시지를 보내면 그 체크포인트에서 실행을 재개합니다. 후속 메시지의 텍스트가 재개 값이 됩니다. 체크포인트 저장소가 없으면 후속 메시지를 입력으로 삼아 그래프를 처음부터 다시 실행하므로, 그래프가 멈출 수 있다면 엔진에 저장소를 지정하세요.
-- 카드는 `GET /.well-known/agent-card.json`으로, JSON-RPC 엔드포인트는 `POST /`로 제공합니다. `AgentCard::url`이 없으면 카드는 클라이언트가 접속한 주소를 `http` 스킴으로 알립니다. TLS를 종료하는 리버스 프록시 뒤에서는 `AgentCard::url`을 공개 URL로 정하거나, `A2AServer::set_trust_forwarded_headers(true)`를 호출해 프록시가 보낸 `Forwarded`(RFC 7239) 또는 `X-Forwarded-Proto` / `X-Forwarded-Host` 헤더에서 스킴과 호스트를 가져오게 합니다. 이 헤더는 클라이언트가 직접 넣을 수 있으므로 기본값은 꺼짐이며, 직접 관리하는 프록시가 이 헤더를 덮어쓸 때만 켭니다. `url` 없이 직렬화한 카드는 빈 문자열을 쓰지 않고 이 멤버를 생략합니다(선호 전송의 첫 인터페이스가 있으면 그 URL을 씁니다).
+- 카드는 `GET /.well-known/agent-card.json`으로, JSON-RPC 엔드포인트는 `POST /`로 제공합니다. `AgentCard::url`이 없으면 카드는 클라이언트가 접속한 주소를 `http` 스킴으로 알립니다. TLS를 종료하는 리버스 프록시 뒤에서는 `AgentCard::url`을 공개 URL로 정하거나, `A2AServer::set_trust_forwarded_headers(true)`를 호출해 프록시가 보낸 `Forwarded`(RFC 7239) 또는 `X-Forwarded-Proto` / `X-Forwarded-Host` 헤더에서 스킴과 호스트를 가져오게 합니다. 이 헤더는 클라이언트가 직접 넣을 수 있으므로 기본값은 꺼짐이며, 직접 관리하는 프록시가 이 헤더를 덮어쓸 때만 켭니다. 루프백 주소에 바인드한 서버는 프록시의 공개 `Host`를 `A2AHttpConfig::allowed_hosts`에 나열했을 때만 받아들입니다(아래 항목 참조). `url` 없이 직렬화한 카드는 빈 문자열을 쓰지 않고 이 멤버를 생략합니다(선호 전송의 첫 인터페이스가 있으면 그 URL을 씁니다).
 - 이 서버는 요청을 인증하지 않습니다. 인증기를 받는 것은 Program 기반 생성자뿐입니다. 루프백 주소에 바인드하거나, 인증하는 프록시를 앞에 두세요.
+- **Host, Origin, 요청 크기.** 다른 출처의 웹 페이지는 자기 호스트 이름을 이 머신으로 다시 가리키게 하면 루프백 주소에 바인드한 서버에 닿을 수 있습니다(DNS 리바인딩). 그래서 루프백 바인드(`127.0.0.1`, `::1`, `localhost`)는 포트와 관계없이 `Host`가 `localhost`, `127.0.0.1`, `[::1]`이거나 `A2AHttpConfig::allowed_hosts`에 있는 이름일 때만 응답합니다. 다른 `Host`는 `403`, 없거나 `host[:port]` 형태가 아닌 `Host`는 `400`입니다. `Origin`이 있는 요청은 그 출처가 `allowed_origins`에 있거나, 루프백 바인드에서 서버 자신의 출처(`http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<port>`)가 아니면 `403`입니다(각 출처를 처음 받아들일 때 stderr에 한 줄 씁니다). 더 넣으려면 `start()` 전에 `A2AServer::set_http_config()`를 호출하세요. `allowed_hosts`의 항목은 `agent.example.com`이나 `[::1]`처럼 포트 없는 이름이고 대소문자를 구분하지 않고 비교하며, `*`는 어떤 `Host`든 받아들입니다. 루프백이 아닌 바인드에서는 `allowed_hosts`가 비어 있으면 `Host`를 확인하지 않고, 비어 있지 않으면 나열한 이름만 받아들입니다. 확인은 모든 경로(카드, 이벤트 스트림을 포함한 JSON-RPC 엔드포인트, 그 밖의 모든 경로)에 적용되며 본문을 읽기 전에 실행됩니다. `max_payload_bytes`를 넘는 본문은 `413`을 받습니다. 기본값은 4 MiB로, 긴 메시지나 3 MiB가 조금 안 되는 인라인 파일 하나가 들어갑니다(더 큰 파일은 `uri` 파트로 보냅니다). 공개 `Host`를 그대로 전달하는 로컬 리버스 프록시나 터널 뒤에서는 그 이름(또는 `*`)을 목록에 넣으세요.
 
 `neograph::core`와 `neograph::a2a`를 링크합니다.
 
