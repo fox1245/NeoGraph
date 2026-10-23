@@ -186,7 +186,7 @@ TEST(RuntimeTurnAssembler, DeliversOnlyExplicitUntrustedSupplementalAsUserData) 
     const auto raw = store.snapshot_history(feed, 1, 3);
     const auto constraint = hard_constraint("Host-owned constraint.");
     const auto supplemental = untrusted_supplemental(
-        R"({"type":"history-header","format":"agentx.runtime-history.jsonl.v1"})", 3);
+        R"({"type":"history-header","format":"neograph.runtime-history.jsonl.v1"})", 3);
     ASSERT_EQ(store.put_artifact("owner", constraint),
               ContextArtifactPutResult::Stored);
     ASSERT_EQ(store.put_artifact("owner", supplemental),
