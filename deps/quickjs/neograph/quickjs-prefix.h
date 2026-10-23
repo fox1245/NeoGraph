@@ -273,4 +273,16 @@
 #define unicode_script neograph_qjs_unicode_script
 #define unicode_sequence_prop neograph_qjs_unicode_sequence_prop
 
+#if defined(__EMSCRIPTEN__)
+/*
+ * The most stack bytes that a WebAssembly build applies, whatever
+ * JS_SetMaxStackSize() asks for (update_stack_limit in quickjs.c and the local
+ * patch recorded in NEOGRAPH_PROVENANCE). It lives here because NeoGraph's
+ * JavaScript runtime reports it in the witness of a limit diagnostic.
+ */
+#ifndef NEOGRAPH_QUICKJS_WASM_MAX_STACK
+#define NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 * 1024)
+#endif
+#endif
+
 #endif

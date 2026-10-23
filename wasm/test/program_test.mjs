@@ -509,6 +509,17 @@ await check('a control source that recurses too deep is refused and the module g
   }
 });
 
+await check('the witness of a stack overflow reports the stack that was applied', () => withProgram(async (programs) => {
+  // The compiler asks for 512 KiB; the module applies at most 48 KiB, and the witness says so.
+  await assert.rejects(programs.admit(RUNAWAY['direct recursion']), (error) => {
+    const diagnostic = error.diagnostics.find((d) => d.code === 'P_JS_RESOURCE_LIMIT');
+    assert.ok(diagnostic, JSON.stringify(error.diagnostics));
+    const applied = diagnostic.witness.max_stack_bytes;
+    assert.ok(applied > 0 && applied <= 48 * 1024, JSON.stringify(diagnostic.witness));
+    return true;
+  });
+}));
+
 await check('recursion and nesting that stay within the limit are not affected', () => withProgram(async (programs) => {
   const within = [
     inDefine('function f(n) { return n === 0 ? 0 : 1 + f(n - 1); } if (f(100) !== 100) throw new Error("recursion");'),
@@ -532,6 +543,7 @@ await check('a main() that recurses without end fails its run and the module goe
     const result = await settles(programs.start(version, { input: ask('x') }).result, 'the run');
     assert.equal(result.status, 'failed');
     assert.equal(result.failure.code, 'P_JS_RESOURCE_LIMIT');
+    assert.ok(result.failure.witness.max_stack_bytes <= 48 * 1024, JSON.stringify(result.failure.witness));
     assert.equal(server.requests.length, before, 'no model call was sent');
     const good = await settles(programs.admit(SOURCE), 'a later admit');
     assert.equal((await settles(programs.start(good, { input: ask('after') }).result, 'a later start')).status, 'interrupted');

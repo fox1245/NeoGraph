@@ -2843,12 +2843,23 @@ const char* interrupt_reason_name(InterruptReason reason) noexcept {
     return "none";
 }
 
+// The stack the engine was given. A WebAssembly build applies at most
+// NEOGRAPH_QUICKJS_WASM_MAX_STACK whatever the limits ask for (see
+// deps/quickjs/NEOGRAPH_PROVENANCE), and the witness must not report more.
+std::size_t applied_stack_bytes(const JavaScriptCompileLimits& limits) noexcept {
+#if defined(__EMSCRIPTEN__)
+    return std::min<std::size_t>(limits.max_stack_bytes, NEOGRAPH_QUICKJS_WASM_MAX_STACK);
+#else
+    return limits.max_stack_bytes;
+#endif
+}
+
 json resource_witness(const JavaScriptCompileLimits& limits,
                       const InterruptBudget&         budget,
                       const AllocationAccounting*    accounting = nullptr) {
     json witness{{"engine", "quickjs"},
                  {"memory_limit_bytes", limits.memory_limit_bytes},
-                 {"max_stack_bytes", limits.max_stack_bytes},
+                 {"max_stack_bytes", applied_stack_bytes(limits)},
                  {"max_interrupt_polls", limits.max_interrupt_polls},
                  {"interrupt_polls", budget.polls},
                  {"max_wall_time_ms", limits.max_wall_time_ms},

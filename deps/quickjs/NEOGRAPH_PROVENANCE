@@ -36,8 +36,9 @@ Local patches (keep when updating the vendored release)
   which on WebAssembly is the pointer of the shadow stack in linear memory,
   with rt->stack_limit. On Emscripten only: update_stack_limit() caps the size
   at NEOGRAPH_QUICKJS_WASM_MAX_STACK (48 KiB, also for a size of 0, which
-  upstream reads as "no limit"; a definition of that name on the command line
-  replaces the value) and keeps the limit
+  upstream reads as "no limit"; defined in neograph/quickjs-prefix.h, which both
+  the engine and the Program runtime include, because the runtime reports it in
+  the witness of a limit diagnostic) and keeps the limit
   NEOGRAPH_QUICKJS_WASM_STACK_RESERVE (16 KiB) above emscripten_stack_get_end();
   js_call_bound_function allocates NEOGRAPH_QUICKJS_WASM_BOUND_FRAME_PAD (128)
   bytes more per level. The numbers come from measurement. The host's stack
