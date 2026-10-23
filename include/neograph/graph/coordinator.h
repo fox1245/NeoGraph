@@ -92,7 +92,11 @@ struct ResumeContext {
  * The writes recorded under the checkpoint and, for a NodeInterrupt
  * checkpoint, the writes of its super-step recorded under its ancestors (the
  * step's parent checkpoint, an earlier interrupt of the same step), stopping
- * at a fork or migration boundary. One per task id, the nearest first: what
+ * at a fork or migration boundary. The walk ends at the first ancestor that is
+ * not an interrupt of the checkpoint's own step, such as the interrupt of an
+ * earlier step that a later run on the thread started after (#600): the writes
+ * recorded under it for the checkpoint's step are read, and the ones that
+ * carry its own step are not. One per task id, the nearest first: what
  * CheckpointCoordinator::load_for_resume() replays.
  */
 NEOGRAPH_API std::vector<PendingWrite> resume_pending_writes(CheckpointStore& store,

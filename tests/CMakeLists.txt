@@ -1222,6 +1222,12 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_gate_identity_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_backend_tests(neograph_gate_identity_tests "core;interrupt")
+    # #600: a pause that follows an abandoned pause on the same thread resumes,
+    # and takes only the pending writes of its own super-step.
+    add_executable(neograph_abandoned_pause_tests test_abandoned_pause.cpp)
+    target_link_libraries(neograph_abandoned_pause_tests PRIVATE
+        neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_backend_tests(neograph_abandoned_pause_tests "core;interrupt")
 endif()
 
 if(NEOGRAPH_BUILD_PROGRAM)

@@ -284,6 +284,11 @@ struct RunConfig {
      *    interrupted run, use ``resume()`` / ``resume_async()`` instead.
      * 4. If no checkpoint exists for ``thread_id``, behaves as if the
      *    flag were unset (fresh run from ``input``). No error.
+     * 5. If the latest checkpoint is a ``NodeInterrupt`` pause, the run
+     *    does not resume it: the pause stays in the store, unanswered, and
+     *    the run goes on from the state the paused step started from, one
+     *    step later. A pause of this run is resumed on its own, with the
+     *    pending writes of its own step (#600).
      *
      * Requires a configured ``CheckpointStore`` — without one the flag
      * is a no-op.

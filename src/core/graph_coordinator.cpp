@@ -151,10 +151,69 @@ bool is_external_resume_boundary(const Checkpoint& checkpoint,
            !checkpoint.metadata.at("migrated_from").get<std::string>().empty();
 }
 
+// A resume of a NodeInterrupt checkpoint replays the writes of its super-step.
+// The pauses of one super-step form a chain, newest first: a pause, and the
+// earlier pauses of the same step it was resumed from (a step in which several
+// nodes ask is answered one at a time, and each answer saves the next pause).
+// The writes of the siblings that finished sit under those pauses and under the
+// checkpoint the step started from.
+//
+// The walk ends at the first checkpoint that is not a pause of the selected
+// step, after reading the writes recorded under it:
+//   - a checkpoint of another phase: the checkpoint the step started from;
+//   - a pause of an earlier step: a pause that was never resumed, with a run
+//     started on the thread after it. A run that continues a thread starts at
+//     the step after the checkpoint it continues from and, until one of its
+//     steps completes, saves every checkpoint and records every pending write
+//     with that checkpoint as the parent, so the earlier pause is where the
+//     step started from. The writes recorded under it for the selected step
+//     are read; its own writes carry its own step and are not.
+// The steps of a chain of resumes are equal: a resume re-enters the step of the
+// pause it answers. A run that continues a thread never starts at the step of
+// the checkpoint it continues from, so its first pause is never of an earlier
+// pause's step.
+bool pause_chain_continues(const Checkpoint& current, std::int64_t selected_step,
+                           const std::string& thread_id) {
+    if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
+        current.parent_id.empty()) return false;
+    if (current.parent_id == current.id) {
+        throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+    }
+    if (is_external_resume_boundary(current, thread_id)) return false;
+    return current.step == selected_step;
+}
+
+void require_visitable(const Checkpoint& current, const std::string& thread_id,
+                       bool node_interrupt_resume,
+                       std::unordered_set<std::string>& visited) {
+    if (!visited.insert(current.id).second) {
+        throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
+    }
+    if (current.id.empty() || current.thread_id != thread_id ||
+        (node_interrupt_resume &&
+         current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
+        throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
+    }
+}
+
+void require_parent(const std::optional<Checkpoint>& parent, const Checkpoint& current,
+                    const std::string& thread_id, std::int64_t selected_step) {
+    if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
+        parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
+        throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
+    }
+    // Checkpoints are saved in step order along a thread: a pause is never the
+    // child of a later step's pause.
+    if (detail::checkpoint_resume_phase(*parent) == CheckpointPhase::NodeInterrupt &&
+        parent->step > selected_step) {
+        throw std::runtime_error("NodeInterrupt ancestry runs backwards across super-steps");
+    }
+}
+
 // The pending writes a resume of `checkpoint` replays, nearest first and one
 // per task id: the rows under it, and for a NodeInterrupt checkpoint the rows
 // of its super-step under its ancestors (an earlier interrupt of the same step,
-// the step's parent checkpoint).
+// the checkpoint the step started from).
 std::vector<PendingWrite> collect_resume_writes(CheckpointStore& store, const std::string& thread_id,
                                                 const Checkpoint& checkpoint) {
     std::vector<PendingWrite> results;
@@ -162,38 +221,21 @@ std::vector<PendingWrite> collect_resume_writes(CheckpointStore& store, const st
     Checkpoint current = checkpoint;
     const bool node_interrupt_resume =
         detail::checkpoint_resume_phase(checkpoint) == CheckpointPhase::NodeInterrupt;
-    // Pending rows under a NodeInterrupt checkpoint's ancestors can only
-    // belong to the paused super-step. Ordinary Completed checkpoints keep
-    // their historical behavior: replay every row under the selected ID.
+    // A NodeInterrupt resume takes only the rows of the paused super-step from
+    // the checkpoint and its ancestors; the earlier pause that the walk can end
+    // at (see pause_chain_continues) holds rows of its own step too, which are
+    // skipped. Ordinary Completed checkpoints keep their historical behavior:
+    // replay every row under the selected ID.
     std::unordered_set<std::string> visited;
     while (true) {
-        if (!visited.insert(current.id).second) {
-            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
-        }
-        if (current.id.empty() || current.thread_id != thread_id ||
-            (node_interrupt_resume &&
-             current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
-            throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
-        }
+        require_visitable(current, thread_id, node_interrupt_resume, visited);
         for (auto& pw : store.get_writes(thread_id, current.id)) {
             if (node_interrupt_resume && pw.step != checkpoint.step) continue;
             if (task_ids.insert(pw.task_id).second) results.push_back(std::move(pw));
         }
-        if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
-            current.parent_id.empty()) break;
-        if (current.parent_id == current.id) {
-            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
-        }
-        if (is_external_resume_boundary(current, thread_id)) break;
+        if (!pause_chain_continues(current, checkpoint.step, thread_id)) break;
         auto parent = store.load_by_id(current.parent_id);
-        if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
-            parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
-            throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
-        }
-        if (detail::checkpoint_resume_phase(*parent) == CheckpointPhase::NodeInterrupt &&
-            parent->step != checkpoint.step) {
-            throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
-        }
+        require_parent(parent, current, thread_id, checkpoint.step);
         current = std::move(*parent);
     }
     return results;
@@ -220,34 +262,15 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
     // for a NodeInterrupt resume are scoped to the selected super-step.
     Checkpoint current = std::move(checkpoint);
     while (true) {
-        if (!visited.insert(current.id).second) {
-            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
-        }
-        if (current.id.empty() || current.thread_id != thread_id ||
-            (node_interrupt_resume &&
-             current.schema_version != CHECKPOINT_SCHEMA_VERSION)) {
-            throw std::runtime_error("Incompatible checkpoint in NodeInterrupt ancestry");
-        }
+        require_visitable(current, thread_id, node_interrupt_resume, visited);
         auto writes = co_await store->get_writes_async(thread_id, current.id);
         for (const auto& pw : writes) {
             if (node_interrupt_resume && pw.step != selected_step) continue;
             results.emplace(pw.task_id, pending_to_node_result(pw, archive));
         }
-        if (detail::checkpoint_resume_phase(current) != CheckpointPhase::NodeInterrupt ||
-            current.parent_id.empty()) break;
-        if (current.parent_id == current.id) {
-            throw std::runtime_error("Cycle in NodeInterrupt checkpoint ancestry");
-        }
-        if (is_external_resume_boundary(current, thread_id)) break;
+        if (!pause_chain_continues(current, selected_step, thread_id)) break;
         auto parent = co_await store->load_by_id_async(current.parent_id);
-        if (!parent || parent->id != current.parent_id || parent->thread_id != thread_id ||
-            parent->schema_version != CHECKPOINT_SCHEMA_VERSION) {
-            throw std::runtime_error("Missing or incompatible parent checkpoint in NodeInterrupt ancestry");
-        }
-        if (detail::checkpoint_resume_phase(*parent) == CheckpointPhase::NodeInterrupt &&
-            parent->step != selected_step) {
-            throw std::runtime_error("NodeInterrupt ancestry crosses super-step boundaries");
-        }
+        require_parent(parent, current, thread_id, selected_step);
         current = std::move(*parent);
     }
     co_return results;
