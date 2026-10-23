@@ -1,7 +1,8 @@
 // The engine on a host's event loop (#535): async::HostLoop pumps an io_context from tasks the host runs, and a
 // SchemaProvider built over the SDK's host seam sends through a transport the host supplies. The host here is a
 // manual executor that the test runs from its own thread, as a JavaScript host runs its microtasks, so nothing
-// waits and nothing runs on another thread. No network, no libcurl, no key.
+// waits and the loop's work runs on that thread only. The last tests hand work to the loop from other threads, as a
+// blocking tool's completion does (#602). No network, no libcurl, no key.
 #include <gtest/gtest.h>
 
 #include <neograph/async/host_loop.h>
@@ -11,8 +12,10 @@
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/llm/schema_provider.h>
+#include <neograph/tool.h>
 
 #include "../src/core/host_timer.h"
+#include "fixtures/manual_executor.h"
 
 #include <descriptor/descriptor.h>
 #include <runtime/host.h>
@@ -25,10 +28,9 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <deque>
-#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -39,58 +41,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-// A host's executor: work queues up, the host runs it from its own loop, and nothing runs inline. A timer runs when
-// the clock reaches it and the host next looks. `clock_lead` makes the host's clock run ahead of the one Asio's
-// timers use, so that a host timer runs before the Asio timer that expires at the same instant has been dispatched.
-class ManualExecutor final : public sp::runtime::Executor {
-public:
-    explicit ManualExecutor(bool pumped = true) : pumped_(pumped) {}
-    void post(Task task) override { ready_.push_back(std::move(task)); }
-    Timer schedule(sp::runtime::SteadyTime at, Task task) override {
-        const auto id = ++last_timer_;
-        timers_.emplace(id, Timed{at, std::move(task)});
-        return id;
-    }
-    void cancel(Timer id) noexcept override { timers_.erase(id); }
-    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now() + clock_lead; }
-    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
-    bool in_thread() const noexcept override { return running_ != 0; }
-    bool host_pumped() const noexcept override { return pumped_; }
-    void shutdown() noexcept override { ++shutdowns; }
-
-    // Runs the tasks that are ready and the timers that are due; false when there was nothing to run.
-    bool step() {
-        for (auto it = timers_.begin(); it != timers_.end();) {
-            if (it->second.at <= now()) {
-                ready_.push_back(std::move(it->second.task));
-                it = timers_.erase(it);
-            } else {
-                ++it;
-            }
-        }
-        if (ready_.empty()) return false;
-        auto task = std::move(ready_.front());
-        ready_.pop_front();
-        ++running_;
-        ++tasks_run;
-        try { task(); } catch (...) { --running_; throw; }
-        --running_;
-        return true;
-    }
-    std::size_t pending() const { return ready_.size(); }
-    std::size_t timers() const { return timers_.size(); }
-    int shutdowns = 0;
-    std::size_t tasks_run = 0;
-    std::chrono::steady_clock::duration clock_lead{};
-
-private:
-    struct Timed { sp::runtime::SteadyTime at; Task task; };
-    std::deque<Task> ready_;
-    std::map<Timer, Timed> timers_;
-    Timer last_timer_ = 0;
-    unsigned running_ = 0;
-    bool pumped_;
-};
+using host_test::ManualExecutor;
 
 // The host's HTTP: each request is answered by tasks on the host executor, in the chunks given. `hold` keeps the
 // answer back, as a request in flight does; a cancelled attempt ends with one Cancelled completion from a later task.
@@ -789,4 +740,260 @@ TEST(HostLoop, ABlockingEndpointCallIsRefusedBeforeAnythingIsSent) {
     EXPECT_EQ(bridged_refusal->error.kind, sp::ErrorKind::Misuse);
     EXPECT_EQ(bridged_refusal->error.reason, "runtime.blocking.host_pumped");
     EXPECT_EQ(host.transport->requests, 0);
+}
+
+// ---- Work handed to the loop from other threads (#602) ---------------------------------------------------------------
+//
+// The loop's turns, and the handlers in them, run on the host's thread only. Handing it work does not: a post to its
+// executor, and HostLoop::wake, are safe from any thread, as for an io_context. A blocking tool that runs on the
+// process's pool completes by posting its continuation from the pool's thread.
+
+namespace {
+
+// Holds the posting threads until the host is ready for them.
+class Gate {
+public:
+    void open() { open_.store(true); }
+    void pass() const {
+        while (!open_.load()) std::this_thread::yield();
+    }
+
+private:
+    std::atomic<bool> open_{false};
+};
+
+// `threads` threads post `posts_each` handlers each while the test thread plays the host. Every handler runs, on the
+// host thread. A post whose wake is lost leaves a handler queued with no turn scheduled, and the pump times out.
+void expect_posts_from_threads_to_run(unsigned threads, unsigned posts_each, std::size_t turn_handlers) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop::Options options;
+    options.turn_handlers = turn_handlers;
+    async::HostLoop loop(executor, options);
+    const auto host_thread = std::this_thread::get_id();
+    const std::size_t total = std::size_t{threads} * posts_each;
+    std::size_t ran = 0;     // written by handlers only, which run on the host thread
+    bool elsewhere = false;  // a handler ran on another thread
+    Gate gate;
+    std::vector<std::thread> posters;
+    for (unsigned t = 0; t < threads; ++t) {
+        posters.emplace_back([&, ex = loop.executor()] {
+            gate.pass();
+            for (unsigned i = 0; i < posts_each; ++i) {
+                asio::post(ex, [&] {
+                    if (std::this_thread::get_id() != host_thread) elsewhere = true;
+                    ++ran;
+                });
+            }
+        });
+    }
+    gate.open();
+    const bool finished = executor->run_until([&] { return ran == total; }, 30s);
+    for (auto& poster : posters) poster.join();
+    EXPECT_TRUE(finished) << "a post from another thread was left without a turn: " << ran << " of " << total;
+    EXPECT_FALSE(elsewhere) << "a handler ran on a thread other than the host's";
+    while (executor->step()) {}
+    EXPECT_EQ(ran, total);
+    EXPECT_EQ(executor->pending(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+}  // namespace
+
+TEST(HostLoop, PostsFromSeveralThreadsRunOnTheHostThreadWhileTheHostPumps) {
+    for (int round = 0; round < 12; ++round) expect_posts_from_threads_to_run(4, 1500, 256);
+}
+
+TEST(HostLoop, PostsFromSeveralThreadsRunWhenEveryTurnTakesOneHandler) {
+    // Each turn ends with more work and schedules the next one, while the other threads wake the loop too.
+    for (int round = 0; round < 6; ++round) expect_posts_from_threads_to_run(3, 300, 1);
+}
+
+TEST(HostLoop, APostFromAnotherThreadWhileATurnRunsIsNotLeftWithoutATurn) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    std::atomic<bool> in_turn{false}, posted{false};
+    bool second = false;
+    std::thread poster([&, ex = loop.executor()] {
+        while (!in_turn.load()) std::this_thread::yield();
+        asio::post(ex, [&second] { second = true; });
+        posted = true;
+    });
+    // The first handler holds its turn open until the other thread has posted and woken the loop.
+    asio::post(loop.executor(), [&] {
+        in_turn = true;
+        while (!posted.load()) std::this_thread::yield();
+    });
+    const bool finished = executor->run_until([&] { return second; });
+    poster.join();
+    EXPECT_TRUE(finished);
+    while (executor->step()) {}
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, WakesFromManyThreadsQueueOneTurnAtATime) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> wakers;
+    for (int i = 0; i < 4; ++i) wakers.emplace_back([&] { while (!stop.load()) loop.wake(); });
+    std::size_t most_queued = 0;
+    const auto until = std::chrono::steady_clock::now() + 300ms;
+    while (std::chrono::steady_clock::now() < until) {
+        most_queued = std::max(most_queued, executor->pending());
+        executor->step();
+    }
+    stop = true;
+    for (auto& waker : wakers) waker.join();
+    while (executor->step()) {}
+    EXPECT_LE(most_queued, 1u) << "the host's queue holds one turn of the loop, however many threads wake it";
+    EXPECT_GT(executor->tasks_run, 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, AWakeThatTheHostRefusesIsRetriedByTheNextOne) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    executor->refuse_posts(true);
+    std::thread([&] { loop.wake(); }).join();
+    EXPECT_EQ(executor->pending(), 0u) << "the host took nothing";
+    EXPECT_TRUE(loop.idle()) << "a refused turn is not left scheduled";
+    executor->refuse_posts(false);
+    bool ran = false;
+    std::thread([&, ex = loop.executor()] { asio::post(ex, [&ran] { ran = true; }); }).join();
+    EXPECT_EQ(executor->pending(), 1u) << "the next post schedules the turn";
+    while (executor->step()) {}
+    EXPECT_TRUE(ran);
+    EXPECT_TRUE(loop.idle());
+}
+
+namespace {
+// A tool that blocks a thread of the process's pool, as a legacy synchronous tool does.
+class PoolTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return ChatTool{"pool", "blocks a pool thread", json{{"type", "object"}}}; }
+    std::string execute(const json&) override {
+        std::this_thread::sleep_for(1ms);
+        ran_on = std::this_thread::get_id();
+        return "done";
+    }
+    std::string get_name() const override { return "pool"; }
+    std::thread::id ran_on;
+};
+}  // namespace
+
+TEST(HostLoop, ABlockingToolFinishesOnThePoolAndItsContinuationRunsOnTheHostThread) {
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+    PoolTool tool;
+    const auto host_thread = std::this_thread::get_id();
+    int calls = 0;
+    bool resumed_elsewhere = false, ran_on_host = false;
+    bool done = false;
+    auto drive = [&]() -> asio::awaitable<void> {
+        for (int i = 0; i < 40; ++i) {
+            const auto result = co_await tool.execute_async(json::object());
+            if (result != "done") co_return;
+            if (std::this_thread::get_id() != host_thread) resumed_elsewhere = true;
+            if (tool.ran_on == host_thread) ran_on_host = true;
+            ++calls;
+        }
+    };
+    loop.spawn(drive(), [&](std::exception_ptr error) { done = !error; });
+    ASSERT_TRUE(executor->run_until([&] { return done; }, 30s)) << calls << " of 40 calls finished";
+    EXPECT_EQ(calls, 40);
+    EXPECT_FALSE(resumed_elsewhere) << "the coroutine continued on a thread other than the host's";
+    EXPECT_FALSE(ran_on_host) << "the tool ran on the host thread";
+    while (executor->step()) {}
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, DestroyingTheLoopDropsWhatOtherThreadsQueuedAndItsScheduledTurnFindsItClosed) {
+    auto executor = std::make_shared<ManualExecutor>();
+    auto probe = std::make_shared<int>(0);  // every queued handler holds a copy
+    std::atomic<int> ran{0};
+    {
+        async::HostLoop loop(executor);
+        std::vector<std::thread> posters;
+        for (int t = 0; t < 4; ++t) {
+            posters.emplace_back([&, ex = loop.executor()] {
+                for (int i = 0; i < 100; ++i) asio::post(ex, [&ran, probe] { ++ran; });
+            });
+        }
+        for (auto& poster : posters) poster.join();
+        EXPECT_EQ(executor->pending(), 1u) << "one turn is queued, however many threads posted";
+        EXPECT_GT(probe.use_count(), 1);
+    }
+    EXPECT_EQ(probe.use_count(), 1) << "the loop destroyed the handlers it never ran";
+    EXPECT_EQ(ran, 0);
+    EXPECT_EQ(executor->pending(), 1u) << "the turn it had scheduled is the host's to run";
+    while (executor->step()) {}
+    EXPECT_EQ(ran, 0) << "a turn of a closed loop runs nothing";
+}
+
+TEST(HostLoop, PostsRacingWithTheHostsTurnsAreRunOrDroppedWhenTheLoopIsDestroyed) {
+    for (int round = 0; round < 8; ++round) {
+        auto executor = std::make_shared<ManualExecutor>();
+        auto probe = std::make_shared<int>(0);
+        std::atomic<int> ran{0}, posted{0};
+        {
+            async::HostLoop loop(executor);
+            std::atomic<bool> stop{false};
+            std::vector<std::thread> posters;
+            for (int t = 0; t < 4; ++t) {
+                posters.emplace_back([&, ex = loop.executor()] {
+                    while (!stop.load()) {
+                        asio::post(ex, [&ran, probe] { ++ran; });
+                        ++posted;
+                    }
+                });
+            }
+            // Pump until the posters have been running for a while, and at least one handler has run.
+            const auto started = std::chrono::steady_clock::now();
+            auto elapsed = [&] { return std::chrono::steady_clock::now() - started; };
+            while (elapsed() < 8ms || (ran == 0 && elapsed() < 10s)) executor->step();
+            stop = true;
+            for (auto& poster : posters) poster.join();
+            // The host stops pumping with work still queued, and drops the loop.
+        }
+        EXPECT_EQ(probe.use_count(), 1) << "a handler that did not run was destroyed with the loop";
+        EXPECT_GT(ran, 0);
+        EXPECT_LE(ran, posted);
+        const int run_before = ran;
+        while (executor->step()) {}
+        EXPECT_EQ(ran, run_before) << "a turn that was scheduled before the loop closed ran work";
+    }
+}
+
+namespace {
+// Posts to the loop's executor when its coroutine frame is destroyed, which a closing loop does to a frame that
+// has not finished.
+asio::awaitable<void> wait_and_post_when_destroyed(bool* ran) {
+    struct PostsWhenDestroyed {
+        asio::any_io_executor executor;
+        bool* ran;
+        ~PostsWhenDestroyed() {
+            asio::post(executor, [ran = this->ran] { *ran = true; });
+        }
+    };
+    PostsWhenDestroyed guard{co_await asio::this_coro::executor, ran};
+    async::HostTimer timer(guard.executor);
+    timer.arm_after(10s);
+    co_await timer.async_wait(asio::use_awaitable);
+}
+}  // namespace
+
+TEST(HostLoop, WorkPostedFromAFrameThatTheLoopsCloseDestroysIsDroppedWithoutATurn) {
+    auto executor = std::make_shared<ManualExecutor>();
+    bool ran = false, completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(wait_and_post_when_destroyed(&ran), [&](std::exception_ptr) { completed = true; });
+        while (executor->step()) {}
+        EXPECT_EQ(executor->timers(), 1u);
+    }
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_EQ(executor->pending(), 0u) << "the closed loop schedules no turn for the post";
+    while (executor->step()) {}
+    EXPECT_FALSE(ran);
+    EXPECT_FALSE(completed);
 }
