@@ -4,6 +4,7 @@
 #include <asio/execution_context.hpp>
 #include <asio/steady_timer.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <iterator>
@@ -19,6 +20,9 @@ class HostLoopCore;
 
 // The number of HostLoop turns the calling thread is running (they nest only when a handler runs another loop).
 thread_local unsigned host_turn_depth = 0;
+// The loop whose turn the calling thread is running, the innermost one; null outside a turn. Work posted from inside
+// a loop's own turn is run by that turn, and nothing else is: a thread that posts from outside it is not this one.
+thread_local const HostLoopCore* host_turn_core = nullptr;
 
 // Found through the io_context, so that note_deadline can reach the loop from any executor derived from it.
 class HostLoopService final : public asio::execution_context::service {
@@ -51,7 +55,7 @@ public:
     }
 
     void close() noexcept {
-        closed_ = true;
+        closed_.store(true);
         disarm();
         deadlines_.clear();
         sentinel_.reset();
@@ -59,21 +63,38 @@ public:
         io_.reset();
     }
 
-    // A turn is scheduled on the host. Work posted during a turn is run by that turn.
+    // A turn is scheduled on the host, unless one already is. Safe from any thread (#602): it is what a post to the
+    // executor does after it queued the work, and a completion that arrives on a thread of its own makes that post.
+    //
+    //   - No lock is held. `scheduled_` is claimed with one atomic exchange, so at most one turn of this loop is
+    //     queued on the host at a time, and the winner alone calls `host->post`, on its own thread, with nothing of
+    //     the loop's held. The host executor's `post` is therefore called from any thread that posts to the loop.
+    //   - The work is queued before the wake. If the exchange finds a turn already scheduled, that turn has not
+    //     cleared `scheduled_` yet, and it clears it before it polls, so it polls after this post. If the turn
+    //     cleared it first, the exchange schedules the next one.
+    //   - A post from inside this loop's own turn needs no turn: the turn polls on until it runs dry, and a turn
+    //     that stops at its batch schedules the next. Only the thread that runs the turn is in that case; a post from
+    //     another thread while the turn runs schedules one more turn, which finds nothing to do if the first
+    //     already ran the work.
+    //   - One window stays: if the host refuses the post (it throws, as an executor that is shutting down may), a wake
+    //     that found the flag set in the meantime has counted on a turn that never comes, and its work waits for the
+    //     next wake. A host that refuses posts is not running turns anyway.
     void wake() noexcept {
-        if (closed_ || scheduled_ || running_) return;
-        scheduled_ = true;
+        if (closed_.load()) return;
+        if (host_turn_core == this && running_) return;
+        if (scheduled_.exchange(true)) return;
         try {
             host_->post([self = shared_from_this()] { self->turn(); });
         } catch (...) {
-            scheduled_ = false;
+            // The host took nothing: the next wake asks again.
+            scheduled_.store(false);
         }
     }
 
     // The deadline stays noted until Asio has dispatched the timers up to it (see watch), whatever the host's clock
     // says.
     void wake_at(sp::runtime::SteadyTime at) noexcept {
-        if (closed_) return;
+        if (closed_.load()) return;
         try {
             deadlines_.emplace(at, ++noted_);
             watch();
@@ -90,7 +111,7 @@ public:
     // Takes back one noted deadline for `at`: the earliest note for that time. The loop then waits on, and arms the host
     // timer for, the next one, or for none.
     void forget_at(sp::runtime::SteadyTime at) noexcept {
-        if (closed_) return;
+        if (closed_.load()) return;
         try {
             const auto noted = deadlines_.lower_bound({at, 0});
             if (noted == deadlines_.end() || noted->first != at) return;
@@ -106,20 +127,28 @@ public:
         }
     }
 
-    bool idle() const noexcept { return closed_ || (!scheduled_ && !running_ && timer_ == 0); }
+    bool idle() const noexcept { return closed_.load() || (!scheduled_.load() && !running_ && timer_ == 0); }
 
 private:
     void turn() {
-        scheduled_ = false;
-        if (closed_ || running_) return;
+        // Cleared before the poll, so that a post that lands after this point schedules the next turn (see wake).
+        scheduled_.store(false);
+        if (closed_.load() || running_) return;
         running_ = true;
         const auto started = host_->now();
         bool more = false;
         std::exception_ptr failure;
         struct TurnScope {
-            TurnScope() noexcept { ++host_turn_depth; }
-            ~TurnScope() { --host_turn_depth; }
-        } in_turn;
+            explicit TurnScope(const HostLoopCore* core) noexcept : outer(host_turn_core) {
+                ++host_turn_depth;
+                host_turn_core = core;
+            }
+            ~TurnScope() {
+                --host_turn_depth;
+                host_turn_core = outer;
+            }
+            const HostLoopCore* outer;
+        } in_turn(this);
         try {
             io_->restart();
             std::size_t handled = 0;
@@ -141,7 +170,7 @@ private:
             } catch (...) {
             }
         }
-        if (closed_) return;
+        if (closed_.load()) return;
         if (more) wake();
         arm(started);
     }
@@ -169,7 +198,7 @@ private:
     }
 
     void dispatched(sp::runtime::SteadyTime up_to, std::uint64_t covers) {
-        if (closed_) return;
+        if (closed_.load()) return;
         if (watched_ <= up_to) watching_ = false;
         for (auto it = deadlines_.begin(); it != deadlines_.end() && it->first <= up_to;)
             it = it->second <= covers ? deadlines_.erase(it) : std::next(it);
@@ -222,7 +251,11 @@ private:
     bool watching_ = false;
     sp::runtime::Executor::Timer timer_ = 0;
     sp::runtime::SteadyTime armed_at_{};
-    bool scheduled_ = false, running_ = false, closed_ = false;
+    // What wake reads from any thread. Everything else here belongs to the host thread, except `host_`, which is only
+    // read after the constructor.
+    std::atomic<bool> scheduled_{false}, closed_{false};
+    // Whether a turn is running. The host thread's: wake reads it only after finding that it is on that thread.
+    bool running_ = false;
 };
 
 void host_loop_wake(HostLoopCore* core) noexcept {

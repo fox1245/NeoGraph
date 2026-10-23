@@ -19,7 +19,24 @@
  * do; when it reaches a provider on a host-pumped executor it fails with the SDK's `runtime.blocking.host_pumped`
  * refusal instead. Use the `_async` forms on a HostLoop.
  *
- * HostLoop is not thread-safe. Create it, use executor() and destroy it on the host's thread.
+ * Threads (#602). The loop is the host's. Its turns, and every handler in them, run one at a time on the host's thread,
+ * and a handler never runs on any other. Create the loop, take executor(), call `spawn`, `wake_at`, `forget_at`,
+ * `idle`, `note_deadline` and `forget_deadline`, and destroy the loop on that thread.
+ *
+ * Handing work to the loop is the one thing other threads may do, as with an io_context:
+ *   - `execute`, `post` and `dispatch` on a copy of executor() that was taken on the host's thread (so `asio::post`, the
+ *     completion of an operation bound to it, and a coroutine's continuation), and `wake()`, may be called from any
+ *     thread, while the loop exists. A blocking tool that runs on the process's blocking pool completes this way: its
+ *     continuation is posted from the pool's thread and runs in a later turn, on the host's thread.
+ *   - A post from another thread schedules a turn if none is scheduled. A post from inside a turn is run by that turn.
+ *     At most one turn of the loop is queued on the host at a time.
+ *   - The host executor's `post` is called from the posting thread, whichever it is, with no lock of the loop's held.
+ *     It must therefore be safe to call from several threads at once when work is posted from threads other than the
+ *     host's. Its `schedule`, `cancel` and `now` are called on the host's thread only, from inside a turn or from the
+ *     calls listed above as the host's. `on_error` runs on the host's thread.
+ *   - The loop must outlive such posts. Its destructor destroys the handlers that did not run and cannot wait for a
+ *     thread that is still posting or still holds a work guard on executor(): join those threads, or wait for the work
+ *     they post, before the loop is destroyed, and do not use a copy of executor() after that.
  */
 #pragma once
 
@@ -52,7 +69,7 @@ NEOGRAPH_API void host_loop_wake(HostLoopCore* core) noexcept;
 
 /// The io_context's executor, plus a turn of the loop whenever work is executed on it. Properties are forwarded, so
 /// the adapted executors that Asio derives from it (blocking.never for a post, a strand's inner executor) wake the
-/// loop too.
+/// loop too. `execute` may be called from any thread (see the note on threads above).
 template <typename Executor>
 class PumpedExecutor {
 public:
@@ -132,14 +149,14 @@ public:
         wake();
     }
 
-    /// Schedules a turn if none is scheduled.
+    /// Schedules a turn if none is scheduled. May be called from any thread.
     void wake() noexcept;
     /// Schedules a turn no earlier than `at` for an Asio timer that expires then.
     void wake_at(sp::runtime::SteadyTime at) noexcept;
     /// Takes back one `wake_at` for `at` whose timer was cancelled. Does nothing if none is noted.
     void forget_at(sp::runtime::SteadyTime at) noexcept;
 
-    /// True when no turn is scheduled and no handler is ready.
+    /// True when no turn is scheduled and no handler is ready. The host's thread asks.
     bool idle() const noexcept;
 
 private:
