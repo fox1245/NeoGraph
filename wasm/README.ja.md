@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=31b192c3ba74646e6ecec9c863a9f0dda6a3cc8af3096d929a12c9b87511ad95 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=d059218fbda0ddb2d96ce1887bfcad2fa004b743e9afdf1024aa57bbd8fb292b -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -534,7 +534,7 @@ CI はモジュールをビルドし、Node 22 と 24 で、ネットワーク�
   ネイティブに実行するので、ネイティブビルドも同じ経路を扱います。
 - `tests/test_program_host_pumped_stores.cpp` は、呼び出しをループの後のターンでしか完了しないストアの上の `HostLoop` で、Program の
   ライフサイクル全体をネイティブに実行します。開始、モデルノード、中断と再開、フォーク、子、Core ツール grant、完了、キャンセルを扱い、
-  何もブロックされず、拒否もされません。
+  何もブロックされず、拒否もされません。また 1 つの一時停止の fork を 1 ターンに複数作り、その予算の合計が一時停止中の実行の持っていた量を超えないことを示します。
 - `tests/test_program_store_awaitable.cpp` は、ストアの契約をネイティブで実行します。インラインのストアは中断せずに完了し、
   プールに回すストアは待っているコルーチンを自分の executor で再開し、ブロッキングビューはあとで完了するストアを待つか拒否します。
 - `tests/test_host_loop.cpp` は、手動の executor を相手にループとホストシームのプロバイダーをネイティブで実行するので、

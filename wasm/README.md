@@ -610,7 +610,8 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   manual executor, so a native build covers the same paths.
 - `tests/test_program_host_pumped_stores.cpp` runs a whole Program lifecycle natively on a `HostLoop` over stores that
   complete a call only in a later turn of the loop: a start, a model node, an interrupt and its resume, a fork, a child, a
-  Core tool grant, a completion and a cancellation, with nothing blocked or refused.
+  Core tool grant, a completion and a cancellation, with nothing blocked or refused. It also makes several forks of one pause in
+  one turn, and shows that their budgets add up to at most what the paused run had.
 - `tests/test_program_store_awaitable.cpp` runs the store contract natively: an inline store completes without suspending,
   an offloading one resumes the awaiting coroutine on its own executor, and a blocking view waits for a store that completes
   later or refuses.

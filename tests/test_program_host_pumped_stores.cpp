@@ -26,8 +26,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
@@ -699,6 +701,158 @@ TEST(ProgramHostPumpedStores, AResumeAndAForkAwaitTheirStores) {
     EXPECT_EQ(model_calls.load(), 2);
     EXPECT_GT(host.stores.transitions->suspended(), 0U);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
+namespace {
+
+struct ForkAttempt {
+    std::optional<ProgramResult> result;
+    std::string                  refusal;  // the code of the runtime's refusal, or the text of another failure
+    bool                         done = false;
+};
+
+// One fork of `source`, as a task of the host's loop; its outcome lands in `attempt`.
+asio::awaitable<int> fork_once(ProgramRuntime& runtime, const ProgramResult& source, RunInvocation invocation,
+                               ForkAttempt& attempt) {
+    ExactProgramCheckpointReference reference{source.run_id(), source.checkpoint()->checkpoint_id};
+    auto                            answer = answer_for(source, json{{"decision", "forked"}}, "trace-fork-" + source.run_id());
+    try {
+        auto handle    = co_await runtime.fork_async(std::move(reference), std::move(invocation), std::move(answer));
+        attempt.result = co_await handle.wait_async();
+    } catch (const ProgramDiagnosticError& error) {
+        attempt.refusal = error.diagnostic().code;
+    } catch (const std::exception& error) {
+        attempt.refusal = std::string("exception: ") + error.what();
+    }
+    attempt.done = true;
+    co_return 0;
+}
+
+RunInvocation shared_fork_invocation(const ProgramVersion& version, std::string run_id, const RunBudget& budget) {
+    auto invocation             = top_level(version.id(), std::move(run_id));
+    invocation.budget           = budget;
+    invocation.message_sequence = 19;
+    invocation.idempotency_key  = "host-pumped-fork:" + invocation.run_id;
+    invocation.validate();
+    return invocation;
+}
+
+// The Program of the tests below: it asks once and ends with the answer. It admits enough operations to be shared.
+ProgramVersion shareable_program(HostPumpedProgramHost& host) {
+    auto document = program_document("host-approve");
+    document["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][4]["maximum"] = 16;
+    return host.admit(std::move(document));
+}
+
+// Starts a run of `version` and waits until it is paused, over the host's turns.
+ProgramResult pause_a_run(HostPumpedProgramHost& host, const ProgramVersion& version, const std::string& run_id) {
+    std::optional<ProgramResult> paused;
+    auto script = [&]() -> asio::awaitable<int> {
+        auto invocation                           = top_level(version.id(), run_id);
+        invocation.budget.max_program_operations = 16;
+        auto handle                               = co_await host.runtime->start_async(std::move(invocation));
+        paused                                    = co_await handle.wait_async();
+        co_return 0;
+    };
+    host.run(script());
+    EXPECT_TRUE(paused && paused->status() == ProgramTerminalStatus::Interrupted);
+    return *paused;
+}
+
+// Makes `count` forks of `source` in one turn of the loop, each asking for `each`, and pumps the loop until every one has
+// ended.
+std::vector<ForkAttempt> fork_in_one_turn(HostPumpedProgramHost& host, const ProgramVersion& version, const ProgramResult& source,
+                                          int count, const RunBudget& each) {
+    host.stores.pump_all();
+    std::vector<ForkAttempt> attempts(static_cast<std::size_t>(count));
+    // No turn of the loop runs between these spawns: the forks start together, as a host's microtasks do.
+    for (int i = 0; i < count; ++i) {
+        auto& attempt = attempts[static_cast<std::size_t>(i)];
+        host.hosted.loop.spawn(
+            fork_once(*host.runtime, source, shared_fork_invocation(version, "same-turn-fork-" + std::to_string(i), each), attempt),
+            [](std::exception_ptr, int) {});
+    }
+    const bool finished = host.hosted.host->run_until(
+        [&] { return std::all_of(attempts.begin(), attempts.end(), [](const ForkAttempt& a) { return a.done; }); }, 30s);
+    EXPECT_TRUE(finished) << "the loop ran out of turns before every fork ended";
+    host.stores.pump_all(false);
+    return attempts;
+}
+
+}  // namespace
+
+// The forks of one pause that a host makes in the same turn of its loop cannot wait for one another, and the stores
+// answer in later turns. Each is published against the lineage the one before it left, so the budgets they take add up to
+// at most what the paused run had, and the paused run keeps the rest.
+TEST(ProgramHostPumpedStores, ForksOfOnePauseMadeInTheSameTurnAreServedOneAfterAnother) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    const auto            version = shareable_program(host);
+    const auto            source  = pause_a_run(host, version, "pause-shared");
+    const auto            left    = host.fixture.journal->load_run_lineage(kOwner, "pause-shared")->remaining_budget();
+
+    // Four forks of a fifth of what is left: all fit.
+    const auto each_fifth = neograph::test::fork_fraction(left, 1, 5);
+    const auto fits       = fork_in_one_turn(host, version, source, 4, each_fifth);
+    RunBudget  taken{};
+    for (std::size_t i = 0; i < fits.size(); ++i) {
+        ASSERT_TRUE(fits[i].result) << "fork " << i << ": " << fits[i].refusal;
+        EXPECT_EQ(fits[i].result->status(), ProgramTerminalStatus::Completed) << failure_text(*fits[i].result);
+        const auto record = host.fixture.journal->load(kOwner, "same-turn-fork-" + std::to_string(i));
+        ASSERT_TRUE(record);
+        // The record holds the amounts the fork was given, whatever the forks around it did.
+        EXPECT_EQ(record->invocation().budget, each_fifth);
+        taken.wall_time_ms += record->invocation().budget.wall_time_ms;
+        taken.model_tokens += record->invocation().budget.model_tokens;
+        taken.max_program_operations += record->invocation().budget.max_program_operations;
+        taken.max_core_steps += record->invocation().budget.max_core_steps;
+    }
+    const auto after = host.fixture.journal->load_run_lineage(kOwner, "pause-shared");
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->remaining_budget().wall_time_ms, left.wall_time_ms - taken.wall_time_ms);
+    EXPECT_EQ(after->remaining_budget().model_tokens, left.model_tokens - taken.model_tokens);
+    EXPECT_EQ(after->remaining_budget().max_program_operations, left.max_program_operations - taken.max_program_operations);
+    EXPECT_EQ(after->remaining_budget().max_core_steps, left.max_core_steps - taken.max_core_steps);
+
+    // The same forks again, in one turn, are the forks that were made: nothing is debited a second time.
+    const auto again = fork_in_one_turn(host, version, source, 4, each_fifth);
+    for (std::size_t i = 0; i < again.size(); ++i) {
+        ASSERT_TRUE(again[i].result) << "replayed fork " << i << ": " << again[i].refusal;
+        EXPECT_EQ(again[i].result->run_id(), fits[i].result->run_id());
+    }
+    const auto replayed = host.fixture.journal->load_run_lineage(kOwner, "pause-shared");
+    ASSERT_TRUE(replayed);
+    EXPECT_EQ(replayed->remaining_budget(), after->remaining_budget());
+}
+
+TEST(ProgramHostPumpedStores, ForksMadeInTheSameTurnThatAskForMoreThanIsLeftAreRefusedForTheBudget) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    const auto            version = shareable_program(host);
+    const auto            source  = pause_a_run(host, version, "pause-oversubscribed");
+    const auto            left    = host.fixture.journal->load_run_lineage(kOwner, "pause-oversubscribed")->remaining_budget();
+
+    // Four forks of two fifths: two fit, and the others ask for more than the first two left.
+    const auto each     = neograph::test::fork_fraction(left, 2, 5);
+    const auto attempts = fork_in_one_turn(host, version, source, 4, each);
+    int        completed = 0, refused = 0;
+    for (std::size_t i = 0; i < attempts.size(); ++i) {
+        if (attempts[i].result) {
+            ++completed;
+            EXPECT_EQ(attempts[i].result->status(), ProgramTerminalStatus::Completed) << failure_text(*attempts[i].result);
+        } else {
+            ++refused;
+            EXPECT_EQ(attempts[i].refusal, "P_FORK_BUDGET") << "fork " << i;
+            EXPECT_FALSE(host.fixture.journal->load(kOwner, "same-turn-fork-" + std::to_string(i)));
+        }
+    }
+    EXPECT_EQ(completed, 2);
+    EXPECT_EQ(refused, 2);
+    const auto after = host.fixture.journal->load_run_lineage(kOwner, "pause-oversubscribed");
+    ASSERT_TRUE(after);
+    EXPECT_EQ(after->remaining_budget().model_tokens, left.model_tokens - 2 * each.model_tokens);
+    EXPECT_EQ(after->remaining_budget().wall_time_ms, left.wall_time_ms - 2 * each.wall_time_ms);
+    EXPECT_EQ(after->remaining_budget().max_program_operations, left.max_program_operations - 2 * each.max_program_operations);
+    EXPECT_EQ(after->remaining_budget().max_core_steps, left.max_core_steps - 2 * each.max_core_steps);
 }
 
 namespace {

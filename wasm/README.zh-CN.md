@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=31b192c3ba74646e6ecec9c863a9f0dda6a3cc8af3096d929a12c9b87511ad95 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=d059218fbda0ddb2d96ce1887bfcad2fa004b743e9afdf1024aa57bbd8fb292b -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -491,7 +491,7 @@ CI 构建该模块，并在 Node 22 和 24 下运行以下测试，不需要网�
 - `tests/test_program_runtime_executor.cpp` 在单线程 `io_context` 和手动执行器之上的 `HostLoop` 上原生运行 Program，
   所以原生构建也覆盖同样的路径。
 - `tests/test_program_host_pumped_stores.cpp` 在只在循环的后续回合才完成调用的存储之上的 `HostLoop` 上，原生运行 Program 的整个生命周期：启动、
-  模型节点、中断及其恢复、分叉、子运行、Core 工具 grant、完成和取消，没有任何东西被阻塞或拒绝。
+  模型节点、中断及其恢复、分叉、子运行、Core 工具 grant、完成和取消，没有任何东西被阻塞或拒绝。它还在一轮中对同一次暂停创建多个分叉，并显示它们的预算之和不超过暂停的运行原有的数量。
 - `tests/test_program_store_awaitable.cpp` 在原生环境中运行存储契约：内联存储不挂起即完成，交给线程池的存储在自己的 executor 上
   恢复等待的协程，阻塞视图会等待稍后完成的存储，或者拒绝。
 - `tests/test_host_loop.cpp` 针对手动 executor 在原生环境中运行循环和宿主接缝提供方，所以原生构建也覆盖相同的路径。
