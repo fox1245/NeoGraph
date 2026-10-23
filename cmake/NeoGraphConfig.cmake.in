@@ -21,7 +21,7 @@ include(CMakeFindDependencyMacro)
 # return early when an installed dependency is unavailable.
 set(_neograph_known_components
     core program async llm mcp_types mcp mcp_server harness mcp_sqlite
-    mcp_http_server a2a acp grpc util postgres sqlite)
+    mcp_http_server a2a acp acp_http_server grpc util postgres sqlite)
 set(_neograph_components_to_reset
     ${_neograph_known_components}
     ${NeoGraph_FIND_COMPONENTS})
