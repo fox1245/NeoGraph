@@ -2494,7 +2494,7 @@ public:
 | `list(thread_id, limit)` / `_async` | List checkpoints for a thread, newest first, up to `limit`. |
 | `delete_thread(thread_id)` / `_async` | Delete all checkpoints for a thread. |
 | `put_writes(thread_id, parent_cp, write)` / `_async` | Record a successful node execution mid-super-step. Engine calls this immediately after a node returns and *before* its writes apply to GraphState. Default no-op. |
-| `get_writes(thread_id, parent_cp)` / `_async` | Load pending writes attached to a parent checkpoint. Engine calls this on resume to skip already-completed tasks. Default empty. |
+| `get_writes(thread_id, parent_cp)` / `_async` | Load pending writes attached to a parent checkpoint, in insertion order. Engine calls this on resume to skip already-completed tasks; when a task id has several rows, a resume replays the newest. Default empty. |
 | `clear_writes(thread_id, parent_cp)` / `_async` | Discard pending writes after the successor super-step's checkpoint has been durably saved. Default no-op. |
 
 ### InMemoryCheckpointStore

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=1a32d1d2528f4213882c9f61c0659e6727985a4bfcdd7ede43c45384476fc457 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2400,7 +2400,7 @@ public:
 | `list(thread_id, limit)` / `_async` | 列出某线程的检查点，最新优先，最多 `limit`。 |
 | `delete_thread(thread_id)` / `_async` | 删除某线程的所有检查点。 |
 | `put_writes(thread_id, parent_cp, write)` / `_async` | 在超级步骤中途记录成功的节点执行。引擎在节点返回后且其写入应用到 GraphState **之前**立即调用。默认无操作。 |
-| `get_writes(thread_id, parent_cp)` / `_async` | 加载附加到父检查点的待处理写入。引擎在恢复时调用此方法以跳过已完成的任务。默认空。 |
+| `get_writes(thread_id, parent_cp)` / `_async` | 按插入顺序加载附加到父检查点的待处理写入。引擎在恢复时调用此方法以跳过已完成的任务；同一个 task id 有多行时，恢复会重放最新的一行。默认空。 |
 | `clear_writes(thread_id, parent_cp)` / `_async` | 在后继超级步骤的检查点被持久保存后丢弃待处理写入。默认无操作。 |
 
 ### InMemoryCheckpointStore

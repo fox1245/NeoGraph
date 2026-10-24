@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ko source_sha256=92f92feeb9b5ec0d95a58303a3acbaa324cb1ce09d751ad0921218e540bd9282 -->
 # NeoGraph 핵심 개념 — 처음부터 읽는 안내서
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -437,7 +437,7 @@ result = await engine.resume_from_async(config, checkpoint_id, {"approved": True
 
 ### `NodeInterrupt`로 하는 동적 인터럽트
 
-노드 본문 안에서 예외를 던집니다(Python은 `raise ng.NodeInterrupt(reason)`, C++는 `throw NodeInterrupt(...)`). 엔진이 이를 잡아 상태를 저장하고, 예외를 던진 노드에서 중단된 `RunResult`를 반환합니다. 재개 API는 같습니다. ready batch의 노드와 `Send` 대상 노드 모두 이렇게 동작하며, 동기·비동기·스트리밍 진입점에서도 마찬가지입니다. 중단된 스텝에서 이미 끝난 형제 노드는 재개할 때 다시 실행하지 않고 재생(replay)합니다. 그 스텝 앞에 체크포인트가 없어도 같습니다.
+노드 본문 안에서 예외를 던집니다(Python은 `raise ng.NodeInterrupt(reason)`, C++는 `throw NodeInterrupt(...)`). 엔진이 이를 잡아 상태를 저장하고, 예외를 던진 노드에서 중단된 `RunResult`를 반환합니다. 재개 API는 같습니다. ready batch의 노드와 `Send` 대상 노드 모두 이렇게 동작하며, 동기·비동기·스트리밍 진입점에서도 마찬가지입니다. 중단된 스텝에서 이미 끝난 형제 노드는 재개할 때 다시 실행하지 않고 재생(replay)합니다. 그 스텝 앞에 체크포인트가 없어도 같습니다. 같은 체크포인트에서 그 스텝이 두 번 이상 실행되었다면(앞선 시도가 일시 중지를 저장하기 전에 실패하거나 취소된 경우), 재개는 각 task id에 대해 마지막으로 기록된 결과, 즉 일시 중지한 시도의 결과를 재생합니다(#604).
 
 한 스텝에서 발생한 여러 인터럽트는 한 번에 하나씩 응답합니다(#388). 한 슈퍼스텝의 노드나 Send 여럿이 `NodeInterrupt`를 발생시키면 실행은 그 모두에서 일시 중지됩니다. `RunResult.interrupts`에는 각 인터럽트가 `{id, node, value}` 형태로 나열됩니다. id는 일시 중지된 호출의 task id이며 `s3:review`, Send라면 `s3:send[1]:worker:<hash>` 같은 형태입니다. `interrupt_node`, `interrupt_value`, `interrupt_id`는 그중 첫 번째 인터럽트를 가리킵니다. 재개하면 `interrupt_id=`로 지정한 인터럽트(C++에서는 `RunMetadata::resume_interrupt_id`)에 응답하고, 지정하지 않으면 첫 번째에 응답합니다. 그 스텝에서 멈춘 나머지 노드와 Send는 값 없이 다시 실행되어 각자 같은 질문을 다시 던지고, 그다음 재개가 그 질문에 응답합니다. 대기 중이 아닌 인터럽트를 지정하면 아무것도 실행하기 전에 `ValueError`(C++는 `std::invalid_argument`)가 발생합니다. 인터럽트 여러 개로 멈춘 체크포인트는 메타데이터(`_neograph.interrupts`)에 그 목록을 담고, 하나로 멈춘 체크포인트는 달라지지 않습니다. 재개 값은 멈춘 스텝에서 응답받은 호출에만 전달됩니다(#393). 재개된 실행의 이후 스텝에 있는 노드는 `ctx.resume_value`를 받지 못하므로, 거기서 질문하는 노드나 도구 게이트는 다른 질문에 대한 응답을 가져다 쓰지 않고 실행을 다시 멈춥니다. 부모를 통해 재개한 서브그래프는 부모에서 응답받은 노드를 통해 응답을 받습니다. `messages` 채널이 있는 그래프에서는 그 값을 사용자 메시지로도 여전히 받습니다. 다만 어시스턴트 턴의 도구 호출에 아직 결과가 없을 때는 받지 않습니다. 그 자리의 메시지는 호출과 결과 사이에 끼어들어 다음 모델 호출이 거부되므로, 응답은 질문한 게이트나 노드에만 전달됩니다(#544). JavaScript의 join과 plan 수준의 `parallel`, `quorum`도 같은 규칙을 따릅니다. 재개할 때마다 멈춘 멤버 하나가 응답을 받고 나머지는 다시 질문합니다.
 
