@@ -1514,6 +1514,16 @@ TEST(ProgramCompilerTest, RejectsInvalidJavaScriptCompilerLimits) {
     EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(zero_document_bytes)),
                  std::invalid_argument);
 
+    // Below the floor a stack limit is a count of KiB given as bytes; the floor itself is accepted.
+    for (const std::size_t tiny : {std::size_t{1}, std::size_t{512}, JavaScriptCompileLimits::kMinStackBytes - 1}) {
+        ProgramCompilerConfig too_small{"program-compiler-test/javascript-limits/v1"};
+        too_small.javascript.max_stack_bytes = tiny;
+        EXPECT_THROW((void)ProgramCompiler(complete_snapshot(), std::move(too_small)), std::invalid_argument) << tiny;
+    }
+    ProgramCompilerConfig at_the_floor{"program-compiler-test/javascript-limits/v1"};
+    at_the_floor.javascript.max_stack_bytes = JavaScriptCompileLimits::kMinStackBytes;
+    EXPECT_NO_THROW((void)ProgramCompiler(complete_snapshot(), std::move(at_the_floor)));
+
     ProgramCompilerConfig oversized_stack{"program-compiler-test/javascript-limits/v1"};
     oversized_stack.javascript.memory_limit_bytes = 1024;
     oversized_stack.javascript.max_stack_bytes    = 2048;

@@ -641,13 +641,42 @@ JSValue graph_internal_error(JSContext* context, std::string message) {
     return JS_ThrowInternalError(context, "%s", message.c_str());
 }
 
+// The stack the engine has in force. A WebAssembly build honours the size it was given only as far as its shadow
+// stack holds (see deps/quickjs/NEOGRAPH_PROVENANCE), and a witness must not report more than that.
+std::size_t stack_in_force([[maybe_unused]] JSRuntime* runtime,
+                           [[maybe_unused]] const JavaScriptCompileLimits& limits) noexcept {
+#if defined(__EMSCRIPTEN__)
+    return runtime ? JS_GetAppliedMaxStackSize(runtime) : limits.max_stack_bytes;
+#else
+    return limits.max_stack_bytes;
+#endif
+}
+
+// What a failure to start the engine says about itself. A stack or a memory limit that is too small for the build
+// (a sanitizer build needs about 10 KiB of stack to start a source) fails here, before any source runs, and a failure
+// that names neither limit leaves the host guessing which setting to raise.
+json start_failure_witness(JSRuntime* runtime, const JavaScriptCompileLimits& limits) {
+    return json{{"engine", "quickjs"},
+                {"max_stack_bytes", stack_in_force(runtime, limits)},
+                {"memory_limit_bytes", limits.memory_limit_bytes}};
+}
+
+std::string start_failure_message(std::string what, JSRuntime* runtime, const JavaScriptCompileLimits& limits) {
+    return what + " (the stack limit is " + std::to_string(stack_in_force(runtime, limits)) +
+           " bytes and the memory limit " + std::to_string(limits.memory_limit_bytes) +
+           " bytes: one of them may be too small to start the engine)";
+}
+
 class QuickJsScope final {
 public:
     explicit QuickJsScope(const JavaScriptCompileLimits& limits) {
         accounting_.memory_limit_bytes = limits.memory_limit_bytes;
         runtime_ = JS_NewRuntime2(&kAccountedAllocator, &accounting_);
         if (!runtime_) {
-            throw JavaScriptCompileError("P_JS_RUNTIME", "QuickJS runtime initialization failed");
+            throw JavaScriptCompileError(
+                "P_JS_RUNTIME",
+                start_failure_message("QuickJS runtime initialization failed", nullptr, limits),
+                start_failure_witness(nullptr, limits));
         }
         JS_SetRuntimeOpaque(runtime_, &accounting_);
         JS_SetMemoryLimit(runtime_, limits.memory_limit_bytes);
@@ -667,9 +696,11 @@ public:
             context_ = nullptr;
         }
         if (!context_) {
+            auto message = start_failure_message("QuickJS context initialization failed", runtime_, limits);
+            auto witness = start_failure_witness(runtime_, limits);
             JS_FreeRuntime(runtime_);
             runtime_ = nullptr;
-            throw JavaScriptCompileError("P_JS_RUNTIME", "QuickJS context initialization failed");
+            throw JavaScriptCompileError("P_JS_RUNTIME", std::move(message), std::move(witness));
         }
     }
 
@@ -2753,24 +2784,29 @@ enum class HostContext {
     Program,
 };
 
-void install_host(JSContext* context, HostContext profile) {
+void install_host(JSContext* context, HostContext profile, const JavaScriptCompileLimits& limits) {
     const bool definition_context = profile == HostContext::Definition;
     if (definition_context) ensure_graph_builder_class(JS_GetRuntime(context));
     if (!install_strict_intrinsics(context)) {
-        throw JavaScriptCompileError("P_JS_RUNTIME",
-                                     "QuickJS strict profile initialization failed");
+        throw JavaScriptCompileError(
+            "P_JS_RUNTIME",
+            start_failure_message("QuickJS strict profile initialization failed", JS_GetRuntime(context), limits),
+            start_failure_witness(JS_GetRuntime(context), limits));
     }
     JSValue global = JS_GetGlobalObject(context);
     JSValue host   = JS_NewObject(context);
     if (JS_IsException(host)) {
         JS_FreeValue(context, global);
-        throw JavaScriptCompileError("P_JS_RUNTIME",
-                                     "QuickJS could not allocate the NeoGraph host object");
+        throw JavaScriptCompileError(
+            "P_JS_RUNTIME",
+            start_failure_message("QuickJS could not allocate the NeoGraph host object", JS_GetRuntime(context), limits),
+            start_failure_witness(JS_GetRuntime(context), limits));
     }
 
     const auto fail = [&] {
         JS_FreeValue(context, global);
-        throw JavaScriptCompileError("P_JS_RUNTIME", exception_text(context));
+        throw JavaScriptCompileError("P_JS_RUNTIME", exception_text(context),
+                                     start_failure_witness(JS_GetRuntime(context), limits));
     };
 
     const int version_status = JS_DefinePropertyValueStr(
@@ -2827,6 +2863,10 @@ void validate_limits(const JavaScriptCompileLimits& limits) {
     if (limits.max_stack_bytes > limits.memory_limit_bytes) {
         throw std::invalid_argument("JavaScript compiler stack limit exceeds memory limit");
     }
+    if (limits.max_stack_bytes < JavaScriptCompileLimits::kMinStackBytes) {
+        throw std::invalid_argument("JavaScript compiler stack limit is below the minimum of " +
+                                    std::to_string(JavaScriptCompileLimits::kMinStackBytes) + " bytes");
+    }
 }
 
 const char* interrupt_reason_name(InterruptReason reason) noexcept {
@@ -2856,15 +2896,8 @@ std::chrono::steady_clock::time_point deadline_after(std::chrono::steady_clock::
     return from + std::chrono::milliseconds(static_cast<std::int64_t>(limit_ms));
 }
 
-// The stack the engine has in force. A WebAssembly build honours the size it was given only as far as its shadow
-// stack holds (see deps/quickjs/NEOGRAPH_PROVENANCE), and the witness must not report more than that.
-std::size_t applied_stack_bytes([[maybe_unused]] JSContext* context,
-                                [[maybe_unused]] const JavaScriptCompileLimits& limits) noexcept {
-#if defined(__EMSCRIPTEN__)
-    return JS_GetAppliedMaxStackSize(JS_GetRuntime(context));
-#else
-    return limits.max_stack_bytes;
-#endif
+std::size_t applied_stack_bytes(JSContext* context, const JavaScriptCompileLimits& limits) noexcept {
+    return stack_in_force(JS_GetRuntime(context), limits);
 }
 
 json resource_witness(JSContext*                     context,
@@ -2999,7 +3032,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
     capture.source                   = script;
     JS_SetContextOpaque(scope.context(), &capture);
     try {
-        install_host(scope.context(), HostContext::Definition);
+        install_host(scope.context(), HostContext::Definition, limits);
         InterruptBudget budget;
         budget.limit    = limits.max_interrupt_polls;
         budget.deadline = deadline_after(started_at, limits.max_wall_time_ms);
@@ -3335,7 +3368,7 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
     auto* context = impl->scope.context();
     JS_SetContextOpaque(context, &impl->capture);
     try {
-        install_host(context, HostContext::Program);
+        install_host(context, HostContext::Program, limits);
         JS_SetInterruptHandler(impl->scope.runtime(), interrupt_after_budget, &impl->budget);
         refresh_external_interrupt(impl->budget);
         if (impl->budget.reason != InterruptReason::None)

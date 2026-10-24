@@ -32,6 +32,13 @@ struct JavaScriptCompileLimits {
     static constexpr std::size_t kDefaultStackBytes = 512u * 1024u;
 #endif
 
+    /// The smallest `max_stack_bytes`, and the smallest RuntimeConfig::javascript_stack_bytes, that is
+    /// accepted: a smaller value is nearly always a count of KiB given as bytes. It is a floor against
+    /// that mistake, not a promise that a source runs in so little: a build may need more to start
+    /// the engine (a sanitizer build needs about 10 KiB), and a source that cannot start fails with a
+    /// diagnostic whose witness reports the stack.
+    static constexpr std::size_t kMinStackBytes = 4u * 1024u;
+
     std::size_t   memory_limit_bytes          = 32u * 1024u * 1024u;
     /// Stack bytes the control runtime may use. A WebAssembly (Emscripten) build counts the
     /// module's own stack in linear memory and honours this as far as that stack holds
