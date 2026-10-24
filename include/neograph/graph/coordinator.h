@@ -96,7 +96,9 @@ struct ResumeContext {
  * not an interrupt of the checkpoint's own step, such as the interrupt of an
  * earlier step that a later run on the thread started after (#600): the writes
  * recorded under it for the checkpoint's step are read, and the ones that
- * carry its own step are not. One per task id, the nearest first: what
+ * carry its own step are not. One per task id: the nearest checkpoint first,
+ * and within a checkpoint the newest row of a task id (a step started again
+ * from the same checkpoint leaves a row for every attempt). What
  * CheckpointCoordinator::load_for_resume() replays.
  */
 NEOGRAPH_API std::vector<PendingWrite> resume_pending_writes(CheckpointStore& store,

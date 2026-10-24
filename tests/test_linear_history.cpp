@@ -1,29 +1,38 @@
-// #604: the checkpoint stores assume that the history of a thread is one line.
+// #604: the checkpoint stores and the resume assume that the history of a
+// thread is one line.
 //
 // A channel value is stored once per (thread, channel, version) and the value
-// stored first is kept; the rows of a task's pending write are appended and the
-// oldest one per task id is the one a resume replays. Both are right while a
-// thread only grows. They are wrong as soon as the history of a thread
-// branches: a new run on a thread that already has checkpoints without
-// resume_if_exists, a resume of an older checkpoint, or a retry of a step that
-// an earlier attempt left unfinished. The versions of the new branch start
-// again from the checkpoint it continues, so another branch has used them, and
-// the task ids are the same because they are built from the step and the node.
+// stored first is kept; the rows of a task's pending write are appended and a
+// resume replays one row per task id. Both are right while a thread only grows.
+// They are wrong as soon as the history of a thread branches: a new run on a
+// thread that already has checkpoints without resume_if_exists, a resume of an
+// older checkpoint, or a retry of a step that an earlier attempt left
+// unfinished. The versions of the new branch start again from the checkpoint it
+// continues, so another branch has used them, and the task ids are the same
+// because they are built from the step and the node.
 //
-// The cases named ...Defect... state what the contract has to be and fail on
-// the stores of this tree. They are skipped unless NEOGRAPH_TEST_LINEAR_HISTORY
-// is set to 1, so that CI stays green until the defect is fixed:
+// Pending writes: a resume replays the newest row of a task id, which is the
+// row of the attempt whose pause it resumes. The cases of the pending-writes
+// sections of this file pin that, and run by default.
+//
+// Channel values: the channel-value half of #604 is open. The cases named
+// Defect... state what a store has to do when two checkpoints of a thread use
+// the same channel version, and fail on the stores of this tree. They are
+// skipped unless NEOGRAPH_TEST_LINEAR_HISTORY is set to 1, so that CI stays
+// green while the stores keep one value per (thread, channel, version):
 //
 //     NEOGRAPH_TEST_LINEAR_HISTORY=1 ./neograph_linear_history_tests
 //
-// The change that fixes #604 deletes REQUIRE_LINEAR_HISTORY_FIX() and the
-// helper behind it, which turns every case on. The other cases pass today and
-// have to keep passing: they pin the behaviour of a thread that only grows and
-// of a fork, which is the supported way to branch.
+// The change that fixes the channel values deletes REQUIRE_LINEAR_HISTORY_FIX()
+// and the helper behind it, which turns those cases on. The other cases pass
+// today and have to keep passing: they pin the behaviour of a thread that only
+// grows and of a fork, which is the supported way to branch.
 
 #include "fixtures/checkpoint_backends.h"
 #include "fixtures/unique_temp_dir.h"
 
+#include <neograph/async/run_sync.h>
+#include <neograph/graph/coordinator.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
@@ -53,11 +62,12 @@ bool linear_history_cases_enabled() {
     return value != nullptr && std::string(value) == "1";
 }
 
-#define REQUIRE_LINEAR_HISTORY_FIX()                                                        \
-    do {                                                                                    \
-        if (!linear_history_cases_enabled())                                                \
-            GTEST_SKIP() << "#604: fails until the stores keep the branches of a thread "   \
-                            "apart; set NEOGRAPH_TEST_LINEAR_HISTORY=1 to run";             \
+#define REQUIRE_LINEAR_HISTORY_FIX()                                                   \
+    do {                                                                               \
+        if (!linear_history_cases_enabled())                                           \
+            GTEST_SKIP() << "#604: the channel-value half is open (the stores keep "   \
+                            "one value per channel version); set "                     \
+                            "NEOGRAPH_TEST_LINEAR_HISTORY=1 to run";                   \
     } while (false)
 
 std::mutex&                 runs_mutex() { static std::mutex m; return m; }
@@ -125,6 +135,28 @@ private:
     json        config_;
 };
 
+// Asks in the turn its configuration names, and finishes at once with its name
+// and the turn in every other: a step that has a task in one attempt and not in
+// another.
+class AskOnTurnNode final : public GraphNode {
+public:
+    AskOnTurnNode(std::string name, json config) : name_(std::move(name)), config_(std::move(config)) {}
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
+        count_run(probe_of(config_) + "/" + name_);
+        const auto turn = turn_of(in);
+        if (turn == config_.value("turn", std::string()) && !in.ctx.resume_value)
+            throw NodeInterrupt("approve " + name_, json{{"asks", name_}, {"turn", turn}});
+        NodeOutput out;
+        out.writes.push_back(ChannelWrite{"results", json::array({name_ + "@" + turn})});
+        co_return out;
+    }
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+    json        config_;
+};
+
 void register_types() {
     static const bool registered = [] {
         auto& factory = NodeFactory::instance();
@@ -132,6 +164,12 @@ void register_types() {
             "linear_history.ask",
             [](const std::string& name, const json& config, const NodeContext&) {
                 return std::make_unique<AskNode>(name, config);
+            },
+            json{{"type", "object"}});
+        factory.register_type(
+            "linear_history.ask_on_turn",
+            [](const std::string& name, const json& config, const NodeContext&) {
+                return std::make_unique<AskOnTurnNode>(name, config);
             },
             json{{"type", "object"}});
         factory.register_type(
@@ -178,6 +216,20 @@ json fan_out(const std::string& probe) {
                        {"calm", typed(probe, "linear_history.plain")}},
                   json::array({edge("__start__", "ask"), edge("__start__", "calm"),
                                edge("ask", "__end__"), edge("calm", "__end__")}));
+}
+
+// ask, calm and late in the first super-step. ask always pauses and calm
+// finishes; late pauses in turn "t2" and finishes in any other.
+json fan_out_late(const std::string& probe) {
+    json late = typed(probe, "linear_history.ask_on_turn");
+    late["turn"] = "t2";
+    return define("linear_history_fan_out_late",
+                  json{{"ask", typed(probe, "linear_history.ask")},
+                       {"calm", typed(probe, "linear_history.plain")},
+                       {"late", late}},
+                  json::array({edge("__start__", "ask"), edge("__start__", "calm"),
+                               edge("__start__", "late"), edge("ask", "__end__"),
+                               edge("calm", "__end__"), edge("late", "__end__")}));
 }
 
 template <typename Store>
@@ -288,6 +340,55 @@ std::optional<std::size_t> blob_count_of(CheckpointStore& store) {
     return std::nullopt;
 }
 
+// A row of the progress log for `task_id`. `tag` tells a test which attempt
+// wrote it.
+PendingWrite row_of(const std::string& task_id, const std::string& tag, std::int64_t step) {
+    PendingWrite write;
+    write.task_id   = task_id;
+    write.task_path = task_id;
+    write.node_name = task_id.substr(task_id.find(':') + 1);
+    write.writes    = json::array({json{{"channel", "results"}, {"value", tag}}});
+    write.command   = json();
+    write.sends     = json::array();
+    write.step      = step;
+    write.timestamp = 1;
+    return write;
+}
+
+std::map<std::string, std::string> tags_of(const std::vector<PendingWrite>& rows) {
+    std::map<std::string, std::string> tags;
+    for (const auto& row : rows) {
+        EXPECT_TRUE(tags.emplace(row.task_id, row.writes[0]["value"].get<std::string>()).second)
+            << "two rows for " << row.task_id;
+    }
+    return tags;
+}
+
+std::map<std::string, std::string> tags_of(const ResumeContext& context) {
+    std::map<std::string, std::string> tags;
+    for (const auto& [task_id, result] : context.replay_results)
+        tags.emplace(task_id, result.writes.at(0).value.get<std::string>());
+    return tags;
+}
+
+// A pause of super-step 1 whose step started from the Completed checkpoint
+// "root" of thread "t". The rows of the step are recorded under "root".
+struct PausedStep {
+    Checkpoint root;
+    Checkpoint pause;
+};
+
+PausedStep paused_step() {
+    PausedStep step;
+    step.root            = cp_with("t", "root", "", "root", 1);
+    step.root.next_nodes = {"ask", "calm", "late", "other"};
+    step.pause           = cp_with("t", "pause", "root", "pause", 2);
+    step.pause.interrupt_phase = CheckpointPhase::NodeInterrupt;
+    step.pause.step            = 1;
+    step.pause.next_nodes      = {"ask", "calm", "late", "other"};
+    return step;
+}
+
 using test_support::Backend;
 
 class LinearHistory : public ::testing::TestWithParam<Backend> {
@@ -384,7 +485,7 @@ TEST_P(LinearHistory, AValueThatDoesNotChangeIsStoredOnce) {
 
 TEST_P(LinearHistory, PendingWritesAreKeptInOrderPerParent) {
     // The store keeps every row, oldest first; which row of a task id a resume
-    // uses is the engine's choice, not the store's.
+    // uses is the engine's choice, not the store's (it replays the newest).
     auto backend = store();
     PendingWrite write;
     write.task_id   = "s1:calm";
@@ -405,6 +506,94 @@ TEST_P(LinearHistory, PendingWritesAreKeptInOrderPerParent) {
     EXPECT_NE(rows[1].writes.dump().find("new"), std::string::npos);
     EXPECT_TRUE(backend->get_writes("t", "other-parent").empty());
     EXPECT_TRUE(backend->get_writes("other-thread", "parent").empty());
+}
+
+// ── Pending writes: which row of a task id a resume replays ─────────────────
+//
+// A step that was started again from the same checkpoint (an attempt failed or
+// was cancelled before it saved its pause, and the host ran the turn again)
+// leaves the rows of every attempt under that checkpoint, in the order they
+// were recorded. A resume replays the newest row of each task id, the one of
+// the attempt whose pause it resumes, and the nearest checkpoint of the walk
+// still decides first.
+
+TEST_P(LinearHistory, EveryReadOfAResumeReplaysTheNewestRowOfATaskId) {
+    auto backend = store();
+    auto step    = paused_step();
+    backend->save(step.root);
+    backend->save(step.pause);
+    // Two attempts of step 1 from "root". calm and late finished in the first;
+    // calm and other in the second, in which late did not finish.
+    for (const auto& [task, tag] : std::vector<std::pair<const char*, const char*>>{
+             {"s1:calm", "attempt-1"}, {"s1:late", "attempt-1"},
+             {"s1:calm", "attempt-2"}, {"s1:other", "attempt-2"}})
+        backend->put_writes("t", "root", row_of(task, tag, 1));
+    ASSERT_EQ(backend->get_writes("t", "root").size(), 4U);
+
+    const std::map<std::string, std::string> expected{
+        {"s1:calm", "attempt-2"}, {"s1:late", "attempt-1"}, {"s1:other", "attempt-2"}};
+
+    EXPECT_EQ(tags_of(resume_pending_writes(*backend, step.pause)), expected)
+        << "the walk of fork";
+    CheckpointCoordinator coordinator(backend, "t");
+    const auto            latest = coordinator.load_for_resume();
+    ASSERT_EQ(latest.checkpoint_id, "pause");
+    EXPECT_EQ(tags_of(latest), expected) << "the blocking resume";
+    EXPECT_EQ(tags_of(neograph::async::run_sync(coordinator.load_for_resume_async())), expected)
+        << "the awaitable resume of the latest checkpoint";
+    EXPECT_EQ(tags_of(neograph::async::run_sync(coordinator.load_for_resume_by_id_async("pause"))),
+              expected)
+        << "the awaitable resume by checkpoint id";
+
+    // What fork carries over to the copy is the same selection, one row per task id.
+    Checkpoint copy = step.pause;
+    copy.id         = "pause-copy";
+    copy.thread_id  = "t-copy";
+    copy.parent_id  = "";
+    backend->save(copy);
+    copy_resume_pending_writes(*backend, step.pause, copy);
+    EXPECT_EQ(tags_of(backend->get_writes("t-copy", "pause-copy")), expected);
+}
+
+TEST_P(LinearHistory, ANearerCheckpointKeepsItsRowOverANewerRowOfAnAncestor) {
+    // The walk goes from the resumed checkpoint to its ancestors of the same
+    // step, nearest first. A row under the pause itself decides before any row
+    // under the checkpoint the step started from, whichever was recorded last.
+    auto backend = store();
+    auto step    = paused_step();
+    backend->save(step.root);
+    backend->save(step.pause);
+    backend->put_writes("t", "pause", row_of("s1:calm", "under-the-pause", 1));
+    backend->put_writes("t", "root", row_of("s1:calm", "under-the-root", 1));
+    backend->put_writes("t", "root", row_of("s1:late", "under-the-root", 1));
+
+    const std::map<std::string, std::string> expected{{"s1:calm", "under-the-pause"},
+                                                      {"s1:late", "under-the-root"}};
+    EXPECT_EQ(tags_of(resume_pending_writes(*backend, step.pause)), expected);
+    CheckpointCoordinator coordinator(backend, "t");
+    EXPECT_EQ(tags_of(neograph::async::run_sync(coordinator.load_for_resume_by_id_async("pause"))),
+              expected);
+}
+
+TEST_P(LinearHistory, AResumeOfACompletedCheckpointReplaysTheNewestRowOfATaskId) {
+    // A checkpoint that is not a pause is resumed with every row under its id,
+    // and the newest row of a task id is the one it replays. This is also what
+    // resuming the checkpoint that two attempts of a step both started from
+    // does: the attempt that finished last.
+    auto backend = store();
+    auto step    = paused_step();
+    backend->save(step.root);
+    for (const auto& [task, tag] : std::vector<std::pair<const char*, const char*>>{
+             {"s1:calm", "attempt-1"}, {"s1:other", "attempt-1"}, {"s1:calm", "attempt-2"}})
+        backend->put_writes("t", "root", row_of(task, tag, 1));
+
+    const std::map<std::string, std::string> expected{{"s1:calm", "attempt-2"},
+                                                      {"s1:other", "attempt-1"}};
+    EXPECT_EQ(tags_of(resume_pending_writes(*backend, step.root)), expected);
+    CheckpointCoordinator coordinator(backend, "t");
+    EXPECT_EQ(tags_of(coordinator.load_for_resume()), expected);
+    EXPECT_EQ(tags_of(neograph::async::run_sync(coordinator.load_for_resume_by_id_async("root"))),
+              expected);
 }
 
 // ── Channel values: a version that two branches of a thread both use ────────
@@ -619,6 +808,29 @@ TEST_P(LinearHistory, DefectALegacySubgraphKeepsTheValuesOfASecondParentRun) {
 
 // ── Pending writes: the row of another attempt at the same step ─────────────
 
+namespace {
+
+// How the pause of the retried step is answered. resume and resume_from run
+// the awaitable walk; fork copies the rows with the blocking one.
+enum class Answer { Resume, ResumeFrom, ForkThenResume };
+
+const char* answer_name(Answer how) {
+    switch (how) {
+    case Answer::Resume: return "resume";
+    case Answer::ResumeFrom: return "resume_from";
+    case Answer::ForkThenResume: return "fork then resume";
+    }
+    return "";
+}
+
+// A thread that fails to save the pause of a step, and the retry of that step.
+struct RetriedStep {
+    std::string parent;  // the checkpoint both attempts continued from
+    std::string pause;   // the pause of the retry
+};
+
+}  // namespace
+
 class LinearHistoryAttempts : public ::testing::TestWithParam<Backend> {
 protected:
     void SetUp() override {
@@ -637,38 +849,64 @@ protected:
         return store;
     }
 
+    // The thread is at a Completed checkpoint. A run starts on it (the next
+    // turn), finishes calm and fails to save its pause: its row for task
+    // "s<n>:calm" stays under the checkpoint it continued from, with the first
+    // attempt's turn in it. The host starts the turn again. Its calm runs and
+    // is recorded under the same parent with the same task id; its ask pauses.
+    void retry_after_a_failed_attempt(GraphEngine& engine, CheckpointStore& backend,
+                                      const std::function<void()>& arm, const std::string& thread,
+                                      RetriedStep& out) {
+        ASSERT_EQ(run_turn(engine, thread, "t1", true).status(), RunStatus::Interrupted);
+        ASSERT_EQ(answer(engine, thread, "yes").status(), RunStatus::Completed);
+        const auto parent = backend.load_latest(thread);
+        ASSERT_TRUE(parent);
+        ASSERT_EQ(parent->interrupt_phase, CheckpointPhase::Completed);
+
+        arm();
+        EXPECT_ANY_THROW((void)run_turn(engine, thread, "t2", true)) << "the pause could not be saved";
+        ASSERT_EQ(backend.load_latest(thread)->id, parent->id) << "the failed attempt saved nothing";
+        const auto left_behind = backend.get_writes(thread, parent->id);
+        ASSERT_EQ(left_behind.size(), 1U) << "the failed attempt left its row for calm";
+        EXPECT_NE(left_behind[0].writes.dump().find("calm@t2"), std::string::npos);
+
+        const auto retried = run_turn(engine, thread, "t3", true);
+        ASSERT_EQ(retried.status(), RunStatus::Interrupted);
+        ASSERT_EQ(backend.load_by_id(retried.checkpoint_id)->parent_id, parent->id);
+        out.parent = parent->id;
+        out.pause  = retried.checkpoint_id;
+    }
+
+    // Answers the retry's pause the way `how` says. The fork is a thread of its own.
+    RunResult answer_retry(GraphEngine& engine, const std::string& thread, const RetriedStep& retried,
+                           Answer how) {
+        switch (how) {
+        case Answer::Resume: return answer(engine, thread, "yes");
+        case Answer::ResumeFrom: return answer_from(engine, thread, retried.pause, "yes");
+        case Answer::ForkThenResume: {
+            const auto forked = thread + "-fork";
+            EXPECT_FALSE(engine.fork(thread, forked, retried.pause).empty());
+            return answer(engine, forked, "yes");
+        }
+        }
+        return {};
+    }
+
 private:
     test_support::UniqueTempDir dir_{"ng-linear-history-attempts-"};
 };
 
-TEST_P(LinearHistoryAttempts, DefectARetriedStepDoesNotReplayTheRowOfTheAttemptThatFailed) {
-    REQUIRE_LINEAR_HISTORY_FIX();
-    // The thread is at a Completed checkpoint. A run starts on it (the next
-    // turn), finishes calm and fails to save its pause: its row for task
-    // "s<n>:calm" stays under the checkpoint it continued from, with the first
-    // attempt's turn in it. The host starts the turn again. Its calm runs and is
-    // recorded under the same parent with the same task id; its ask pauses. The
-    // resume has to replay the row of the attempt that paused, not the older one.
+TEST_P(LinearHistoryAttempts, ARetriedStepDoesNotReplayTheRowOfTheAttemptThatFailed) {
+    // The resume has to replay the row of the attempt that paused, not the
+    // older one.
     const auto probe = unique_probe("attempts");
     std::function<void()> arm;
     auto                  backend = open(arm);
     auto                  engine  = build(fan_out(probe), backend);
-    ASSERT_EQ(run_turn(*engine, "t", "t1", true).status(), RunStatus::Interrupted);
-    ASSERT_EQ(answer(*engine, "t", "yes").status(), RunStatus::Completed);
-    const auto parent = backend->load_latest("t");
-    ASSERT_TRUE(parent);
-    ASSERT_EQ(parent->interrupt_phase, CheckpointPhase::Completed);
-
-    arm();
-    EXPECT_ANY_THROW((void)run_turn(*engine, "t", "t2", true)) << "the pause could not be saved";
-    EXPECT_EQ(backend->load_latest("t")->id, parent->id) << "the failed attempt saved nothing";
-    const auto left_behind = backend->get_writes("t", parent->id);
-    ASSERT_EQ(left_behind.size(), 1U) << "the failed attempt left its row for calm";
-    EXPECT_NE(left_behind[0].writes.dump().find("calm@t2"), std::string::npos);
-
-    const auto retried = run_turn(*engine, "t", "t3", true);
-    ASSERT_EQ(retried.status(), RunStatus::Interrupted);
-    ASSERT_EQ(backend->load_by_id(retried.checkpoint_id)->parent_id, parent->id);
+    RetriedStep           retried;
+    ASSERT_NO_FATAL_FAILURE(retry_after_a_failed_attempt(*engine, *backend, arm, "t", retried));
+    ASSERT_EQ(backend->get_writes("t", retried.parent).size(), 2U)
+        << "the rows of both attempts are under the parent";
 
     const auto done = answer(*engine, "t", "yes");
     ASSERT_EQ(done.status(), RunStatus::Completed);
@@ -676,6 +914,59 @@ TEST_P(LinearHistoryAttempts, DefectARetriedStepDoesNotReplayTheRowOfTheAttemptT
     EXPECT_EQ(results.count("calm@t3"), 1U) << "the retry's calm is in the result";
     EXPECT_EQ(results.count("calm@t2"), 0U) << "the failed attempt's calm was replayed";
     EXPECT_EQ(results.count("ask=yes@t3"), 1U);
+    EXPECT_EQ(runs(probe, "calm"), 3) << "the retry's calm is replayed, not run again";
+}
+
+TEST_P(LinearHistoryAttempts, EveryWayToAnswerTheRetriedPauseReplaysTheRowOfTheRetry) {
+    // resume and resume_from read the rows through the awaitable walk; fork
+    // copies them through the blocking one, and the copy is then resumed.
+    for (const auto how : {Answer::Resume, Answer::ResumeFrom, Answer::ForkThenResume}) {
+        SCOPED_TRACE(answer_name(how));
+        const auto probe = unique_probe("attempts-ways");
+        const auto thread = std::string("t-") + std::to_string(static_cast<int>(how));
+        std::function<void()> arm;
+        auto                  backend = open(arm);
+        auto                  engine  = build(fan_out(probe), backend);
+        RetriedStep           retried;
+        ASSERT_NO_FATAL_FAILURE(retry_after_a_failed_attempt(*engine, *backend, arm, thread, retried));
+
+        const auto done = answer_retry(*engine, thread, retried, how);
+        ASSERT_EQ(done.status(), RunStatus::Completed);
+        const auto results = results_of(done);
+        EXPECT_EQ(results.count("calm@t3"), 1U) << "the retry's calm is in the result";
+        EXPECT_EQ(results.count("calm@t2"), 0U) << "the failed attempt's calm was replayed";
+        EXPECT_EQ(runs(probe, "calm"), 3) << "the retry's calm is replayed, not run again";
+    }
+}
+
+TEST_P(LinearHistoryAttempts, ARetriedStepReplaysTheNewestRowOfEachTaskIdItHas) {
+    // late pauses in the failed attempt and finishes in the retry, so under the
+    // parent the stale row of calm comes first, followed by the retry's rows of
+    // calm and of a task id the failed attempt has no row for.
+    const auto probe = unique_probe("attempts-late");
+    std::function<void()> arm;
+    auto                  backend = open(arm);
+    auto                  engine  = build(fan_out_late(probe), backend);
+    RetriedStep           retried;
+    ASSERT_NO_FATAL_FAILURE(retry_after_a_failed_attempt(*engine, *backend, arm, "t", retried));
+    const auto rows = backend->get_writes("t", retried.parent);
+    ASSERT_EQ(rows.size(), 3U) << "calm of the failed attempt, then calm and late of the retry";
+    EXPECT_NE(rows[0].writes.dump().find("calm@t2"), std::string::npos);
+    std::set<std::string> task_ids;
+    for (const auto& row : rows) task_ids.insert(row.task_id);
+    EXPECT_EQ(task_ids.size(), 2U);
+    ASSERT_EQ(runs(probe, "calm"), 3);
+    ASSERT_EQ(runs(probe, "late"), 3);
+
+    const auto done = answer(*engine, "t", "yes");
+    ASSERT_EQ(done.status(), RunStatus::Completed);
+    const auto results = results_of(done);
+    EXPECT_EQ(results.count("calm@t3"), 1U);
+    EXPECT_EQ(results.count("late@t3"), 1U);
+    EXPECT_EQ(results.count("calm@t2"), 0U) << "the failed attempt's calm was replayed";
+    EXPECT_EQ(results.count("ask=yes@t3"), 1U);
+    EXPECT_EQ(runs(probe, "calm"), 3) << "calm of the retry is replayed";
+    EXPECT_EQ(runs(probe, "late"), 3) << "late of the retry is replayed";
 }
 
 TEST_P(LinearHistoryAttempts, ARetriedStepStillReplaysItsOwnFinishedSibling) {

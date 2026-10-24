@@ -210,10 +210,27 @@ void require_parent(const std::optional<Checkpoint>& parent, const Checkpoint& c
     }
 }
 
+// Offers the rows stored under one checkpoint to the selection of a resume:
+// the newest row of each task id that no nearer checkpoint of the walk has
+// supplied, in the order they are found. A store returns a checkpoint's rows in
+// insertion order. A step that was started again from the same checkpoint (an
+// earlier attempt failed or was cancelled before it saved its pause) leaves the
+// rows of every attempt under it, all with the same task ids, and the attempt
+// whose pause is resumed recorded last.
+void select_newest_rows(std::vector<PendingWrite>& rows, bool node_interrupt_resume,
+                        std::int64_t selected_step, std::unordered_set<std::string>& task_ids,
+                        std::vector<PendingWrite>& selected) {
+    for (auto row = rows.rbegin(); row != rows.rend(); ++row) {
+        if (node_interrupt_resume && row->step != selected_step) continue;
+        if (task_ids.insert(row->task_id).second) selected.push_back(std::move(*row));
+    }
+}
+
 // The pending writes a resume of `checkpoint` replays, nearest first and one
 // per task id: the rows under it, and for a NodeInterrupt checkpoint the rows
 // of its super-step under its ancestors (an earlier interrupt of the same step,
-// the checkpoint the step started from).
+// the checkpoint the step started from). Within a checkpoint the newest row of
+// a task id is the one replayed.
 std::vector<PendingWrite> collect_resume_writes(CheckpointStore& store, const std::string& thread_id,
                                                 const Checkpoint& checkpoint) {
     std::vector<PendingWrite> results;
@@ -229,10 +246,8 @@ std::vector<PendingWrite> collect_resume_writes(CheckpointStore& store, const st
     std::unordered_set<std::string> visited;
     while (true) {
         require_visitable(current, thread_id, node_interrupt_resume, visited);
-        for (auto& pw : store.get_writes(thread_id, current.id)) {
-            if (node_interrupt_resume && pw.step != checkpoint.step) continue;
-            if (task_ids.insert(pw.task_id).second) results.push_back(std::move(pw));
-        }
+        auto rows = store.get_writes(thread_id, current.id);
+        select_newest_rows(rows, node_interrupt_resume, checkpoint.step, task_ids, results);
         if (!pause_chain_continues(current, checkpoint.step, thread_id)) break;
         auto parent = store.load_by_id(current.parent_id);
         require_parent(parent, current, thread_id, checkpoint.step);
@@ -250,10 +265,12 @@ std::unordered_map<std::string, NodeResult> load_resume_writes(
     return results;
 }
 
-asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_async(
-    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint,
-    std::shared_ptr<sp::NativeArchive> archive) {
-    std::unordered_map<std::string, NodeResult> results;
+// The awaitable twin of collect_resume_writes: the same walk and selection
+// over the asynchronous store calls.
+asio::awaitable<std::vector<PendingWrite>> collect_resume_writes_async(
+    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint) {
+    std::vector<PendingWrite> results;
+    std::unordered_set<std::string> task_ids;
     std::unordered_set<std::string> visited;
     const bool node_interrupt_resume =
         detail::checkpoint_resume_phase(checkpoint) == CheckpointPhase::NodeInterrupt;
@@ -263,16 +280,24 @@ asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_
     Checkpoint current = std::move(checkpoint);
     while (true) {
         require_visitable(current, thread_id, node_interrupt_resume, visited);
-        auto writes = co_await store->get_writes_async(thread_id, current.id);
-        for (const auto& pw : writes) {
-            if (node_interrupt_resume && pw.step != selected_step) continue;
-            results.emplace(pw.task_id, pending_to_node_result(pw, archive));
-        }
+        auto rows = co_await store->get_writes_async(thread_id, current.id);
+        select_newest_rows(rows, node_interrupt_resume, selected_step, task_ids, results);
         if (!pause_chain_continues(current, selected_step, thread_id)) break;
         auto parent = co_await store->load_by_id_async(current.parent_id);
         require_parent(parent, current, thread_id, selected_step);
         current = std::move(*parent);
     }
+    co_return results;
+}
+
+asio::awaitable<std::unordered_map<std::string, NodeResult>> load_resume_writes_async(
+    std::shared_ptr<CheckpointStore> store, std::string thread_id, Checkpoint checkpoint,
+    std::shared_ptr<sp::NativeArchive> archive) {
+    // GCC-13: await outside the range-for initializer.
+    const auto rows = co_await collect_resume_writes_async(std::move(store), std::move(thread_id),
+                                                           std::move(checkpoint));
+    std::unordered_map<std::string, NodeResult> results;
+    for (const auto& pw : rows) results.emplace(pw.task_id, pending_to_node_result(pw, archive));
     co_return results;
 }
 
