@@ -31,15 +31,36 @@
  *   - A post from another thread schedules a turn if none is scheduled. A post from inside a turn is run by that turn.
  *     At most one turn of the loop is queued on the host at a time.
  *   - The host executor's `post` is called from the posting thread, whichever it is, with no lock of the loop's held.
- *     It must therefore be safe to call from several threads at once when work is posted from threads other than the
- *     host's. Its `schedule`, `cancel` and `now` are called on the host's thread only, from inside a turn or from the
- *     calls listed above as the host's. `on_error` runs on the host's thread.
+ *     It must queue the task and return without running it and without waiting for the host's thread, and it must be
+ *     safe to call from several threads at once when work is posted from threads other than the host's. Its
+ *     `schedule`, `cancel` and `now` are called on the host's thread only, from inside a turn or from the calls
+ *     listed above as the host's. `on_error` runs on the host's thread.
  *   - A host executor that refuses a post (it throws) leaves the loop without a turn. The work posted meanwhile waits
  *     for the next wake: `wake()`, or any post once the host takes posts again. A post that found the turn being asked
  *     for, while the host refused it, is not left behind: the loop asks again, a few times at most.
- *   - The loop must outlive such posts. Its destructor destroys the handlers that did not run and cannot wait for a
- *     thread that is still posting or still holds a work guard on executor(): join those threads, or wait for the work
- *     they post, before the loop is destroyed, and do not use a copy of executor() after that.
+ *   - The loop must outlive the posts of threads that the host owns. Its destructor destroys the handlers that did not
+ *     run and cannot wait for a thread that is still posting or still holds a work guard on executor(): join those
+ *     threads, or wait for the work they post, before the loop is destroyed, and do not use a copy of executor() after
+ *     that.
+ *
+ * Work on the process's pools (#605). The host cannot join the pools that run a synchronous tool, a process tool or a
+ * synchronous checkpoint store for a coroutine of the loop, so the library does not ask it to: the loop may be destroyed
+ * while such work is still running. Only executors run by a HostLoop (`is_host_pumped`) use this handoff; other
+ * executors are unchanged. The destructor takes the coroutine that awaits the pool and destroys it on the host's
+ * thread, as it does every coroutine that has not finished, and the result is dropped when the work ends. A pool thread
+ * posts the result with a lock held that the destructor takes, so it either posts before the destructor runs (the
+ * handler is destroyed with the loop's other queued handlers) or finds the coroutine gone, and it touches nothing of the
+ * loop in the second case. The host executor is asked for the turn after that lock is released, as for any post,
+ * re-asks after a refusal included, and the destructor waits for any such pool wake that is already in progress before
+ * returning, so `host->post` is never called after `~HostLoop()` has returned. The run that awaited never completes:
+ * the `done` of `spawn` or `co_spawn` is destroyed without being called, as for any run that is in flight when the loop
+ * is destroyed. A resource lease (`ResourceLease` or `HostResourceLease`) held for a pool tool call stays held until the
+ * pool work itself has finished, so another run cannot enter the same non-reentrant tool while the abandoned call is
+ * still running on the pool; a `SingleFlight` leader whose coroutine is destroyed publishes a failure to its followers
+ * instead of leaving them waiting. What the work did is not undone, and the tool, and whatever else the work uses, must
+ * stay alive until the pool thread has returned from it: the library holds no reference to a `Tool` that it was given
+ * by reference. The destructor releases the loop's reference to the host executor and `Options::on_error` on the
+ * host's thread once any in-progress pool wake has returned, so a pool thread that finishes later holds neither.
  */
 #pragma once
 
@@ -136,7 +157,8 @@ public:
     /// Client runs on: a Client shuts its executor down when it is destroyed. The loop's turns and the Clients'
     /// tasks are then separate queues of one host event loop.
     explicit HostLoop(std::shared_ptr<sp::runtime::Executor> host, Options options = {});
-    /// Destroys the io_context, and with it every coroutine that has not finished.
+    /// Destroys the io_context, and with it every coroutine that has not finished, those that await work on a pool of
+    /// the process included (see the note on pools above).
     ~HostLoop();
     HostLoop(const HostLoop&) = delete;
     HostLoop& operator=(const HostLoop&) = delete;

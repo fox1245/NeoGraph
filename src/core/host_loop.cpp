@@ -1,17 +1,24 @@
 #include <neograph/async/host_loop.h>
 
+#include "loop_handoff.h"
+
 #include <asio/error_code.hpp>
+#include <asio/post.hpp>
 #include <asio/execution_context.hpp>
 #include <asio/steady_timer.hpp>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace neograph::async {
 namespace detail {
@@ -34,6 +41,12 @@ bool runs_turn_of(const HostLoopCore* core) noexcept {
         if (link->core == core) return true;
     return false;
 }
+
+// While a pool thread posts the result of its work with the loop's gate held (HostLoopCore::post_handoff), a wake of
+// that loop is noted and made after the gate is released, whole: the claim of the turn, the host executor's `post` and
+// the re-asks after a refusal all happen without the gate, so no host code runs under it.
+thread_local const HostLoopCore* wake_deferred_for = nullptr;
+thread_local bool wake_deferred = false;
 
 // Found through the io_context, so that note_deadline can reach the loop from any executor derived from it.
 class HostLoopService final : public asio::execution_context::service {
@@ -70,8 +83,133 @@ public:
         disarm();
         deadlines_.clear();
         sentinel_.reset();
+        // The coroutines that await work on a pool of the process are held by that work, not by the io_context, and
+        // go the same way, while the io_context they ran on still exists.
+        take_handoffs();
         // Destroys the coroutines that have not finished. Their frames may wake the loop, which is closed.
         io_.reset();
+        // Wait for any pool thread that has already posted a handoff and is still inside wake() to finish calling
+        // host_->post, so no pool thread calls the host executor after the destructor returns, then release the loop's
+        // reference to the host executor and on_error callback on the host thread.
+        {
+            std::unique_lock<std::mutex> lock(handoff_mutex_);
+            wake_done_.wait(lock, [this] { return waking_ == 0; });
+        }
+        take_handoffs();
+        host_.reset();
+        options_.on_error = nullptr;
+    }
+
+    // ---- Work that a pool thread does for a coroutine of this loop (loop_handoff.h) ---------------------------------
+    //
+    // The gate is `handoff_mutex_`. A pool thread posts the continuation with it held, so the io_context is alive for
+    // the whole post, and close() takes the continuations that are still waiting with it held, so a pool thread
+    // either posted before that (the io_context destroys the handler as it does any queued one) or finds the
+    // continuation taken and touches nothing of the loop. A post that succeeded notes an in-flight pool wake (`waking_`)
+    // before releasing the gate, and close() waits for `waking_` to reach zero after setting `closed_`, so no pool
+    // thread calls `host_->post` after close() returns.
+
+    void track(LoopHandoff* handoff, std::shared_ptr<HostLoopCore> core) {
+        std::lock_guard<std::mutex> lock(handoff_mutex_);
+        const std::size_t needed = abandoned_.size() + handoffs_.size() + 1;
+        abandoned_.reserve(needed);
+        spare_.reserve(needed);
+        handoffs_.insert(handoff);
+        handoff->core_ = std::move(core);
+    }
+
+    void post_handoff(LoopHandoff& handoff) noexcept {
+        bool wake_up = false;
+        {
+            std::lock_guard<std::mutex> lock(handoff_mutex_);
+            if (handoff.state_ != LoopHandoff::State::Open) return;  // the loop took the continuation
+            handoffs_.erase(&handoff);
+            handoff.state_ = LoopHandoff::State::Posted;
+            struct DeferWake {
+                explicit DeferWake(const HostLoopCore* core) noexcept {
+                    wake_deferred_for = core;
+                    wake_deferred = false;
+                }
+                ~DeferWake() { wake_deferred_for = nullptr; }
+            } defer(this);
+            std::shared_ptr<Resume> holder;
+            try {
+                holder = std::make_shared<Resume>(std::move(handoff.resume_));
+                asio::post(handoff.executor_, [holder]() mutable { (*holder)(); });
+            } catch (...) {
+                // Not posted (out of memory). The continuation is kept for the host thread to destroy in turn() or
+                // take_handoffs(), never destroyed on the pool thread.
+                handoff.state_ = LoopHandoff::State::Taken;
+                Resume unposted = holder ? std::move(*holder) : std::move(handoff.resume_);
+                abandoned_.emplace_back(std::move(unposted), std::move(handoff.executor_));
+            }
+            // Released with the gate held: a strand of the loop's executor touches its io_context when it dies.
+            handoff.executor_ = asio::any_io_executor();
+            // Requested unconditionally once the handoff is queued or set aside: a post to a strand that already has a
+            // handler queued appends to the strand without calling PumpedExecutor::execute, so wake_deferred stays
+            // false even when an earlier wake was refused by the host, and an abandoned continuation needs a turn to
+            // destroy its coroutine frame on the host thread.
+            if (!closed_.load()) {
+                ++waking_;
+                wake_up = true;
+            }
+        }
+        if (wake_up) {
+            wake();
+            std::lock_guard<std::mutex> lock(handoff_mutex_);
+            if (--waking_ == 0) wake_done_.notify_all();
+        }
+    }
+
+    // A handoff that is destroyed unfinished: the pool discarded its work.
+    void release_handoff(LoopHandoff& handoff) noexcept {
+        bool wake_up = false;
+        {
+            std::lock_guard<std::mutex> lock(handoff_mutex_);
+            if (handoff.state_ != LoopHandoff::State::Open) return;
+            handoffs_.erase(&handoff);
+            handoff.state_ = LoopHandoff::State::Taken;
+            abandoned_.emplace_back(std::move(handoff.resume_), std::move(handoff.executor_));
+            handoff.executor_ = asio::any_io_executor();
+            if (!closed_.load()) {
+                ++waking_;
+                wake_up = true;
+            }
+        }
+        if (wake_up) {
+            wake();
+            std::lock_guard<std::mutex> lock(handoff_mutex_);
+            if (--waking_ == 0) wake_done_.notify_all();
+        }
+    }
+
+    // The host's thread, once the loop is closed and before its io_context is destroyed.
+    void take_handoffs() noexcept { (void)drain_handoffs(true); }
+
+    bool drain_handoffs(bool take_open) noexcept {
+        bool drained = false;
+        std::vector<std::pair<Resume, asio::any_io_executor>> batch;
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lock(handoff_mutex_);
+                if (take_open) {
+                    for (LoopHandoff* handoff : handoffs_) {
+                        handoff->state_ = LoopHandoff::State::Taken;
+                        abandoned_.emplace_back(std::move(handoff->resume_), std::move(handoff->executor_));
+                    }
+                    handoffs_.clear();
+                }
+                if (abandoned_.empty()) {
+                    if (spare_.capacity() < batch.capacity()) spare_.swap(batch);
+                    return drained;
+                }
+                if (batch.capacity() < spare_.capacity()) batch.swap(spare_);
+                abandoned_.swap(batch);
+            }
+            drained = true;
+            // Destroyed here, without the gate: the coroutines that awaited the pool.
+            batch.clear();
+        }
     }
 
     // A turn is scheduled on the host, unless one already is. Safe from any thread (#602): it is what a post to the
@@ -96,12 +234,21 @@ public:
     //     post, which the host makes once it takes posts again.
     void wake() noexcept {
         if (closed_.load()) return;
+        if (wake_deferred_for == this) {
+            wake_deferred = true;
+            return;
+        }
         if (runs_turn_of(this) && running_) return;
         for (int asked = 0;;) {
+            if (closed_.load()) return;
             if (scheduled_.exchange(true)) {
                 relied_.store(true);
                 if (scheduled_.load()) return;
                 continue;  // the flag was handed back in the meantime
+            }
+            if (closed_.load()) {
+                scheduled_.store(false);
+                return;
             }
             try {
                 host_->post([self = shared_from_this()] { self->turn(); });
@@ -119,7 +266,7 @@ public:
     // The deadline stays noted until Asio has dispatched the timers up to it (see watch), whatever the host's clock
     // says.
     void wake_at(sp::runtime::SteadyTime at) noexcept {
-        if (closed_.load()) return;
+        if (closed_.load() || !host_) return;
         try {
             deadlines_.emplace(at, ++noted_);
             watch();
@@ -158,8 +305,9 @@ private:
     void turn() {
         // Cleared before the poll, so that a post that lands after this point schedules the next turn (see wake).
         scheduled_.store(false);
-        if (closed_.load() || running_) return;
+        if (closed_.load() || !io_ || !host_ || running_) return;
         running_ = true;
+        (void)drain_handoffs(false);
         const auto started = host_->now();
         bool more = false;
         std::exception_ptr failure;
@@ -178,7 +326,11 @@ private:
             io_->restart();
             std::size_t handled = 0;
             for (;;) {
-                if (io_->poll_one() == 0) break;
+                if (io_->poll_one() == 0) {
+                    if (!drain_handoffs(false)) break;
+                    io_->restart();
+                    continue;
+                }
                 if (++handled == options_.turn_handlers) {
                     more = true;
                     break;
@@ -189,7 +341,7 @@ private:
             more = true;
         }
         running_ = false;
-        if (failure && options_.on_error) {
+        if (!closed_.load() && failure && options_.on_error) {
             try {
                 options_.on_error(failure);
             } catch (...) {
@@ -234,6 +386,7 @@ private:
     // turn that has just run started: an earlier deadline that is still noted was not dispatched by that turn, so
     // look again soon instead of at a time that has passed.
     void arm(sp::runtime::SteadyTime polled = {}) noexcept {
+        if (closed_.load() || !host_) return;
         try {
             if (deadlines_.empty()) {
                 disarm();
@@ -254,7 +407,7 @@ private:
         if (timer_ == 0) return;
         const auto timer = timer_;
         timer_ = 0;
-        host_->cancel(timer);
+        if (host_) host_->cancel(timer);
     }
 
     void timer_fired() {
@@ -280,16 +433,61 @@ private:
     sp::runtime::Executor::Timer timer_ = 0;
     sp::runtime::SteadyTime armed_at_{};
     // What wake reads from any thread. Everything else here belongs to the host thread, except `host_`, which is only
-    // read after the constructor.
+    // read while the loop is open and is released on the host thread at the end of close().
     std::atomic<bool> scheduled_{false}, closed_{false};
     // Set by a wake that found a turn scheduled and returned; read and cleared by a wake whose post was refused.
     std::atomic<bool> relied_{false};
+    // The gate and what it guards (see post_handoff): work that pool threads are doing for this loop's coroutines.
+    std::mutex handoff_mutex_;
+    std::condition_variable wake_done_;
+    std::unordered_set<LoopHandoff*> handoffs_;
+    std::vector<std::pair<Resume, asio::any_io_executor>> abandoned_;
+    std::vector<std::pair<Resume, asio::any_io_executor>> spare_;
+    std::size_t waking_ = 0;
     // Whether a turn is running. The host thread's: wake reads it only after finding that it is on that thread.
     bool running_ = false;
 };
 
 void host_loop_wake(HostLoopCore* core) noexcept {
     if (core) core->wake();
+}
+
+namespace {
+std::atomic<std::size_t> active_handoffs{0};
+}  // namespace
+
+LoopHandoff::LoopHandoff(asio::any_io_executor executor, Resume resume, std::shared_ptr<HostLoopCore> core)
+    : core_(std::move(core)), executor_(std::move(executor)), resume_(std::move(resume)) {
+    active_handoffs.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::shared_ptr<LoopHandoff> LoopHandoff::open(const asio::any_io_executor& executor, Resume resume) {
+    std::shared_ptr<HostLoopCore> core;
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        if (asio::has_service<HostLoopService>(context)) {
+            if (auto* found = asio::use_service<HostLoopService>(context).core) core = found->shared_from_this();
+        }
+    } catch (...) {
+    }
+    if (!core) throw std::logic_error("LoopHandoff requires a HostLoop executor");
+    std::shared_ptr<LoopHandoff> handoff(new LoopHandoff(executor, std::move(resume), nullptr));
+    auto* raw_core = core.get();
+    raw_core->track(handoff.get(), std::move(core));
+    return handoff;
+}
+
+LoopHandoff::~LoopHandoff() {
+    if (auto core = std::move(core_)) core->release_handoff(*this);
+    active_handoffs.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+void LoopHandoff::finish() noexcept {
+    if (auto core = std::move(core_)) core->post_handoff(*this);
+}
+
+std::size_t LoopHandoff::active_count() noexcept {
+    return active_handoffs.load(std::memory_order_acquire);
 }
 
 }  // namespace detail

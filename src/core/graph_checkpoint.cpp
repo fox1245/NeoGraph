@@ -1,5 +1,7 @@
 #include <neograph/graph/checkpoint.h>
+#include <neograph/async/host_loop.h>
 #include <neograph/async/run_sync.h>
+#include "loop_handoff.h"
 #include "managed_budget_journal.h"
 
 #include <asio/async_result.hpp>
@@ -111,6 +113,30 @@ void post_checkpoint_completion(asio::any_io_executor& caller_executor,
     barrier->cv.notify_one();
 }
 
+// Runs `work` (which stores its own result and does not throw) on the pool, then calls `handler` on `caller_executor`.
+template <typename Handler, typename Work>
+void run_on_checkpoint_pool(const asio::any_io_executor& caller_executor, Handler handler, Work work) {
+    if (async::is_host_pumped(caller_executor)) {
+        // A HostLoop may be destroyed while the store works, and the host cannot join the pool: the handoff keeps the
+        // pool thread from touching the loop after that, and the loop destroys the awaiting coroutine (#605).
+        auto handoff = async::detail::LoopHandoff::open(
+            caller_executor, [handler = std::move(handler)]() mutable { handler(); });
+        asio::post(blocking_checkpoint_pool().get_executor(),
+                   [work = std::move(work), handoff = std::move(handoff)]() mutable {
+                       work();
+                       handoff->finish();
+                   });
+        return;
+    }
+    auto completion = std::make_shared<Handler>(std::move(handler));
+    asio::post(blocking_checkpoint_pool().get_executor(),
+               [work = std::move(work), completion = std::move(completion),
+                executor = caller_executor]() mutable {
+                   work();
+                   post_checkpoint_completion(executor, std::move(completion));
+               });
+}
+
 bool is_exact_in_memory_store(const InMemoryCheckpointStore& store) {
     return typeid(store) == typeid(InMemoryCheckpointStore);
 }
@@ -126,24 +152,21 @@ asio::awaitable<void> run_blocking_checkpoint(Fn fn) {
     auto result = std::make_shared<Result>();
 
     auto caller_executor = co_await asio::this_coro::executor;
-    auto caller_work = asio::make_work_guard(caller_executor);
+    // Keeps a native caller's context running while the pool works. A HostLoop does not need it: its turns poll, and
+    // the loop destroys this frame itself if it is destroyed first (#605).
+    std::optional<asio::executor_work_guard<asio::any_io_executor>> caller_work;
+    if (!async::is_host_pumped(caller_executor)) caller_work.emplace(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
         [fn = std::move(fn), result, caller_executor](auto handler) mutable {
-            using Handler = std::decay_t<decltype(handler)>;
-            auto completion = std::make_shared<Handler>(std::move(handler));
-            asio::post(
-                blocking_checkpoint_pool().get_executor(),
-                [fn = std::move(fn), result, completion = std::move(completion),
-                 caller_executor]() mutable {
-                    try {
-                        fn();
-                    } catch (...) {
-                        result->error = std::current_exception();
-                    }
-                    post_checkpoint_completion(
-                        caller_executor, std::move(completion));
-                });
+            run_on_checkpoint_pool(caller_executor, std::move(handler),
+                                   [fn = std::move(fn), result]() mutable {
+                                       try {
+                                           fn();
+                                       } catch (...) {
+                                           result->error = std::current_exception();
+                                       }
+                                   });
         },
         completion_token);
 
@@ -163,24 +186,21 @@ asio::awaitable<T> run_blocking_checkpoint(Fn fn) {
     auto result = std::make_shared<Result>();
 
     auto caller_executor = co_await asio::this_coro::executor;
-    auto caller_work = asio::make_work_guard(caller_executor);
+    // Keeps a native caller's context running while the pool works. A HostLoop does not need it: its turns poll, and
+    // the loop destroys this frame itself if it is destroyed first (#605).
+    std::optional<asio::executor_work_guard<asio::any_io_executor>> caller_work;
+    if (!async::is_host_pumped(caller_executor)) caller_work.emplace(caller_executor);
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
         [fn = std::move(fn), result, caller_executor](auto handler) mutable {
-            using Handler = std::decay_t<decltype(handler)>;
-            auto completion = std::make_shared<Handler>(std::move(handler));
-            asio::post(
-                blocking_checkpoint_pool().get_executor(),
-                [fn = std::move(fn), result, completion = std::move(completion),
-                 caller_executor]() mutable {
-                    try {
-                        result->value.emplace(fn());
-                    } catch (...) {
-                        result->error = std::current_exception();
-                    }
-                    post_checkpoint_completion(
-                        caller_executor, std::move(completion));
-                });
+            run_on_checkpoint_pool(caller_executor, std::move(handler),
+                                   [fn = std::move(fn), result]() mutable {
+                                       try {
+                                           result->value.emplace(fn());
+                                       } catch (...) {
+                                           result->error = std::current_exception();
+                                       }
+                                   });
         },
         completion_token);
 

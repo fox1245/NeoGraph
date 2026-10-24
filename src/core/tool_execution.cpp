@@ -4,6 +4,7 @@
 #include <neograph/tool.h>
 
 #include "host_timer.h"
+#include "loop_handoff.h"
 #include "pipe_write.h"
 #include "text_safety.h"
 #include "tool_failure.h"
@@ -71,6 +72,32 @@ struct SingleFlightState {
     ToolExecutionResult result;
     std::uint32_t waiters = 0;
 };
+
+struct SingleFlightTable {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::shared_ptr<SingleFlightState>> entries;
+};
+
+// Holds the admission leases of a tool call that runs on the blocking pool under a HostLoop: if the loop is
+// destroyed while the pool thread still runs the tool, the awaiting coroutine frame dies on the host thread, and the
+// pool task keeps the leases until the work has finished (#605).
+struct PoolLeaseHolder {
+    ResourceLease resource;
+    std::optional<HostResourceLease> host;
+};
+
+struct PendingPoolLeases {
+    const Tool* tool = nullptr;
+    std::shared_ptr<PoolLeaseHolder> leases;
+};
+
+thread_local PendingPoolLeases pending_pool_leases;
+
+std::shared_ptr<PoolLeaseHolder> take_pending_pool_leases(const Tool& tool) noexcept {
+    if (pending_pool_leases.tool != &tool) return {};
+    pending_pool_leases.tool = nullptr;
+    return std::move(pending_pool_leases.leases);
+}
 
 bool is_identifier_char(unsigned char value) {
     return std::isalnum(value) || value == '_' || value == '-';
@@ -343,8 +370,40 @@ asio::awaitable<std::string> execute_blocking_tool_async(Tool& tool, json argume
         std::exception_ptr error;
     };
 
+    auto leases = take_pending_pool_leases(tool);
     const auto caller_executor = co_await asio::this_coro::executor;
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
+    if (async::is_host_pumped(caller_executor)) {
+        // The pool thread writes the outcome here before it hands the continuation back, and the continuation moves it
+        // out. What the pool thread still holds afterwards is an empty husk: it must not release an exception while the
+        // resumed caller is reading or rethrowing it.
+        auto slot = std::make_shared<Result>();
+        auto result = co_await asio::async_initiate<decltype(completion_token), void(Result)>(
+            [&tool, arguments = std::move(arguments), caller_executor, slot,
+             leases = std::move(leases)](auto handler) mutable {
+                // The handoff owns the handler and, with it, the awaiting coroutine until the pool thread has posted
+                // it: a HostLoop that is destroyed meanwhile destroys the coroutine itself, and the pool thread
+                // touches nothing of the loop afterwards (#605).
+                auto handoff = async::detail::LoopHandoff::open(
+                    caller_executor, [handler = std::move(handler), slot]() mutable { handler(std::move(*slot)); });
+                asio::post(blocking_tool_pool().get_executor(),
+                           [&tool, arguments = std::move(arguments), slot,
+                            leases = std::move(leases), handoff = std::move(handoff)]() mutable {
+                               try {
+                                   slot->value = tool.execute(arguments);
+                               } catch (...) {
+                                   slot->error = std::current_exception();
+                               }
+                               leases.reset();
+                               handoff->finish();
+                           });
+            },
+            completion_token);
+
+        if (result.error) std::rethrow_exception(result.error);
+        co_return std::move(result.value);
+    }
+
     auto result = co_await asio::async_initiate<decltype(completion_token), void(Result)>(
         [&tool, arguments = std::move(arguments), caller_executor](auto handler) mutable {
             const auto completion_executor = caller_executor;
@@ -666,12 +725,32 @@ asio::awaitable<std::string> execute_process_tool_async(
         std::string value;
         std::exception_ptr error;
     };
+    auto leases = take_pending_pool_leases(tool);
     const auto caller_executor = co_await asio::this_coro::executor;
     auto result = std::make_shared<Result>();
     auto completion_token = asio::bind_executor(caller_executor, asio::use_awaitable);
     co_await asio::async_initiate<decltype(completion_token), void()>(
         [spec, output_limit_bytes, timeout, cancel_token = context.cancel_token,
-         result, caller_executor](auto handler) mutable {
+         result, caller_executor, leases = std::move(leases)](auto handler) mutable {
+            if (async::is_host_pumped(caller_executor)) {
+                // As in execute_blocking_tool_async: a HostLoop that is destroyed while the process runs takes the
+                // awaiting coroutine, and the late result is dropped (#605).
+                auto handoff = async::detail::LoopHandoff::open(
+                    caller_executor, [handler = std::move(handler)]() mutable { handler(); });
+                asio::post(blocking_tool_pool().get_executor(),
+                           [spec, output_limit_bytes, timeout, cancel_token = std::move(cancel_token),
+                            result, leases = std::move(leases), handoff = std::move(handoff)]() mutable {
+                               try {
+                                   result->value = run_process(spec, output_limit_bytes, timeout,
+                                                               cancel_token).output;
+                               } catch (...) {
+                                   result->error = std::current_exception();
+                               }
+                               leases.reset();
+                               handoff->finish();
+                           });
+                return;
+            }
             using Handler = std::decay_t<decltype(handler)>;
             auto completion = std::make_shared<Handler>(std::move(handler));
             asio::post(blocking_tool_pool().get_executor(),
@@ -1021,8 +1100,7 @@ public:
     std::shared_ptr<ToolExecutionPolicyRegistry> policies;
     std::shared_ptr<ResourceArbiter> arbiter;
     std::shared_ptr<HostAdmissionController> host_admission;
-    std::mutex singleflight_mutex;
-    std::unordered_map<std::string, std::shared_ptr<SingleFlightState>> singleflight;
+    std::shared_ptr<SingleFlightTable> singleflight = std::make_shared<SingleFlightTable>();
 };
 
 ToolExecutionController::ToolExecutionController(ToolExecutionControllerConfig config)
@@ -1050,6 +1128,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     Tool& tool, json arguments, ToolExecutionContext context, bool retry_after_timeout) {
     const auto policy = impl_->policies->resolve(tool.get_name());
     bool started = false;
+    auto singleflight_table = impl_->singleflight;
     std::shared_ptr<SingleFlightState> singleflight_state;
     std::string singleflight_key;
     bool singleflight_leader = false;
@@ -1062,23 +1141,41 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     // into the deadline.
     const bool deadline_bounds_queue = context.deadline &&
         *context.deadline <= std::chrono::steady_clock::now() + policy.queue_timeout;
-    auto publish_singleflight = [&, this](ToolExecutionResult result) {
+    auto publish_singleflight = [&](ToolExecutionResult result) {
         // Text leaves the boundary as well-formed UTF-8 (text_safety.h).
         result.output = detail::valid_utf8(std::move(result.output));
         result.error = bound_error_text(detail::valid_utf8(std::move(result.error)),
                                          policy.error_limit_bytes);
         if (!singleflight_leader) return result;
-        std::lock_guard<std::mutex> map_lock(impl_->singleflight_mutex);
-        const auto found = impl_->singleflight.find(singleflight_key);
-        if (found != impl_->singleflight.end()
+        singleflight_leader = false;
+        std::lock_guard<std::mutex> map_lock(singleflight_table->mutex);
+        const auto found = singleflight_table->entries.find(singleflight_key);
+        if (found != singleflight_table->entries.end()
             && found->second == singleflight_state) {
             std::lock_guard<std::mutex> state_lock(singleflight_state->mutex);
             singleflight_state->result = result;
             singleflight_state->completed = true;
-            impl_->singleflight.erase(found);
+            singleflight_table->entries.erase(found);
         }
         return result;
     };
+    // If a HostLoop is destroyed while the leader coroutine is suspended, its frame is destroyed without reaching
+    // publish_singleflight; publish a failure here so followers on other executors do not wait until timeout (#605).
+    struct SingleFlightLeaderGuard {
+        bool& leader;
+        const ToolExecutionPolicy& policy;
+        bool& started;
+        decltype(publish_singleflight)& publish;
+        ~SingleFlightLeaderGuard() {
+            if (!leader) return;
+            try {
+                (void)publish(detail::ordinary_tool_failure(
+                    policy, started, "single-flight leader was abandoned"));
+            } catch (...) {
+            }
+        }
+    } leader_guard{singleflight_leader, policy, started, publish_singleflight};
+    auto active_leases = std::make_shared<PoolLeaseHolder>();
     try {
         policy.validate();
         const auto identity = context.identity;
@@ -1087,9 +1184,9 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             singleflight_key = derive_resource_key(
                 policy, tool.get_name(), arguments, identity);
             {
-                std::lock_guard<std::mutex> lock(impl_->singleflight_mutex);
-                const auto found = impl_->singleflight.find(singleflight_key);
-                if (found != impl_->singleflight.end()) {
+                std::lock_guard<std::mutex> lock(singleflight_table->mutex);
+                const auto found = singleflight_table->entries.find(singleflight_key);
+                if (found != singleflight_table->entries.end()) {
                     singleflight_state = found->second;
                     std::lock_guard<std::mutex> state_lock(singleflight_state->mutex);
                     if (singleflight_state->waiters >= policy.max_pending) {
@@ -1098,7 +1195,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     ++singleflight_state->waiters;
                 } else {
                     singleflight_state = std::make_shared<SingleFlightState>();
-                    impl_->singleflight.emplace(singleflight_key, singleflight_state);
+                    singleflight_table->entries.emplace(singleflight_key, singleflight_state);
                     singleflight_leader = true;
                 }
             }
@@ -1138,12 +1235,21 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         }
 
 
-        auto invoke = [&tool, &policy, &arguments, &context,
+        auto invoke = [&tool, &policy, &arguments, &context, &active_leases,
                        &started]() -> asio::awaitable<std::string> {
             if (context.cancel_token) {
                 context.cancel_token->throw_if_cancelled("before tool execution");
             }
             started = true;
+            struct OfferPoolLeases {
+                const Tool* tool;
+                OfferPoolLeases(const Tool& t, std::shared_ptr<PoolLeaseHolder> l) noexcept : tool(&t) {
+                    pending_pool_leases = {&t, std::move(l)};
+                }
+                ~OfferPoolLeases() {
+                    if (pending_pool_leases.tool == tool) pending_pool_leases = {};
+                }
+            } offer(tool, active_leases);
             if (policy.implementation == ToolExecutionImplementation::BlockingProcess) {
                 co_return co_await detail::execute_process_tool_async(
                     tool, arguments, context, policy.output_limit_bytes,
@@ -1152,6 +1258,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             // ContextualAsyncTool has no safe synchronous fallback by design:
             // its context-bearing entry point is the contract it opted into.
             if (auto* contextual = dynamic_cast<ContextualAsyncTool*>(&tool)) {
+                pending_pool_leases = {};
                 co_return co_await contextual->execute_async(arguments, context);
             }
             if (policy.implementation == ToolExecutionImplementation::BlockingThread) {
@@ -1261,8 +1368,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
         };
 
         if (policy.concurrency == ToolConcurrency::Reentrant) {
-            std::optional<HostResourceLease> host_lease;
-            if (host_admission) host_lease.emplace(co_await reserve_host());
+            if (host_admission) active_leases->host.emplace(co_await reserve_host());
             if (context.cancel_token) {
                 context.cancel_token->throw_if_cancelled("after tool resource admission");
             }
@@ -1301,14 +1407,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                      std::max(context.requested_priority, context.inherited_priority)));
         request.fairness_weight = policy.fairness_weight;
 
-        auto lease = co_await impl_->arbiter->acquire_async(std::move(request),
-                                                             context.cancel_token);
+        active_leases->resource = co_await impl_->arbiter->acquire_async(std::move(request),
+                                                                         context.cancel_token);
         if (context.cancel_token) {
             context.cancel_token->throw_if_cancelled("after tool resource admission");
         }
 
-        std::optional<HostResourceLease> host_lease;
-        if (host_admission) host_lease.emplace(co_await reserve_host());
+        if (host_admission) active_leases->host.emplace(co_await reserve_host());
         if (context.cancel_token) {
             context.cancel_token->throw_if_cancelled("after host resource admission");
         }
