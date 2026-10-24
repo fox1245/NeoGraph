@@ -860,20 +860,28 @@ await check('a stack limit or a define() time limit that makes no sense is refus
   }
 });
 
+// What proves that the limit the developer chose is the one that applied is the diagnostic, not the clock: its witness
+// carries the limit in force, so it says 1000 or 250 whatever the load of the machine. The clock only bounds the run
+// from both sides, generously: the deadline starts after the call does, so it cannot end sooner than the limit (less a
+// margin for the two clocks), and a host that is slow, not stuck, still ends it well within 20 seconds.
 await check('the time limit of define() is the developer\'s choice', async () => {
-  const programs = neograph.programs({ provider: provider(), javascript: { defineTimeMs: 1000 } });
-  try {
-    const started = Date.now();
-    await assert.rejects(programs.admit('export function define() { for (;;) {} }'), (error) => {
-      assert.ok(error instanceof NeoGraphError && error.type === 'compile');
-      assert.ok(error.diagnostics.some((d) => d.code === 'P_JS_TIMEOUT'), JSON.stringify(error.diagnostics));
-      return true;
-    });
-    const took = Date.now() - started;
-    assert.ok(took >= 900 && took < 4000, `${took} ms`);     // the default is 5 s
-    assert.equal((await programs.admit(SOURCE)).name, 'js:program');
-  } finally {
-    programs.release();
+  for (const defineTimeMs of [250, 1000]) {
+    const programs = neograph.programs({ provider: provider(), javascript: { defineTimeMs } });
+    try {
+      const started = Date.now();
+      await assert.rejects(programs.admit('export function define() { for (;;) {} }'), (error) => {
+        assert.ok(error instanceof NeoGraphError && error.type === 'compile');
+        const timeout = error.diagnostics.find((d) => d.code === 'P_JS_TIMEOUT');
+        assert.ok(timeout, JSON.stringify(error.diagnostics));
+        assert.equal(timeout.witness.max_wall_time_ms, defineTimeMs, JSON.stringify(timeout.witness));
+        return true;
+      });
+      const took = Date.now() - started;
+      assert.ok(took >= defineTimeMs * 0.8 && took < 20000, `${took} ms for a limit of ${defineTimeMs} ms`);
+      assert.equal((await programs.admit(SOURCE)).name, 'js:program');
+    } finally {
+      programs.release();
+    }
   }
 });
 
