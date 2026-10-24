@@ -11,7 +11,7 @@ Unit and integration tests replay recorded or scripted provider traffic. They ca
   - Claude 5.5 models;
   - image input;
   - a forced tool call on every preset and a full tool round trip;
-  - generated images kept from OpenRouter Chat and Gemini Generate;
+  - generated images kept from Gemini Generate;
   - Gemini speech, buffered and streamed, and a Lyria clip, with the Generate response modalities and speech settings;
   - an OpenAI Responses hosted web search, buffered and streamed;
   - the Anthropic Messages controls: thinking modes and effort, tool choice, the temperature rule, prompt caching, and the same controls through OpenRouter;
@@ -38,7 +38,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 ```
 
 - **Keys.** The env file holds `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY`. The script passes them to the test processes only. It never prints or stores them, and it replaces any key value that appears in a failure message.
-- **Models.** `tests/live/manifest.json` maps each model role (such as `openai.chat`, `anthropic.messages`, or `anthropic.messages.adaptive`) to its default model id under `models`, and `live_support.live_model(role)` resolves it for the Python suite. Setting `NG_LIVE_MODEL_<ROLE>` in the environment or the env file (with `.` and `-` replaced by `_` and uppercased, for example `NG_LIVE_MODEL_OPENAI_CHAT`) overrides that role's model without changing code.
+- **Models.** `tests/live/manifest.json` maps each model role (such as `openai.chat`, `anthropic.messages`, or `anthropic.messages.adaptive`) to its default model id under `models`, and `live_support.live_model(role)` resolves it for the Python suite. Google models are called directly with `GEMINI_API_KEY` (`google.generate` and `google.interactions` roles), not through OpenRouter. Setting `NG_LIVE_MODEL_<ROLE>` in the environment or the env file (with `.` and `-` replaced by `_` and uppercased, for example `NG_LIVE_MODEL_OPENAI_CHAT`) overrides that role's model without changing code.
 - **Clean tree.** `run` refuses a working tree with uncommitted changes, because the report names a commit.
 - **Version.** `run` refuses a `neograph_engine` whose version is not the tree's version.
 - **Output.** It writes `tests/live/report.json`: the commit, a hash of the tree, the NeoGraph version, the SchemaProvider pin, and every case with its result.

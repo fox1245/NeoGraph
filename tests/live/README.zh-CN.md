@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=1e2a8175a45682b2b8acd37bcef658f4993750cc0e379fd7e983364261e38e83 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=35dc6382d17b6c83ead0c106b60b92a35350a6139b38d9fa91a5019009e8872c -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@
   - Claude 5.5 模型；
   - 图像输入；
   - 每个预设上的强制工具调用，以及完整的工具往返；
-  - 保留 OpenRouter Chat 和 Gemini Generate 生成的图像；
+  - 保留 Gemini Generate 生成的图像；
   - 使用 Generate 响应模态和语音设置的 Gemini 语音合成（缓冲和流式）以及 Lyria 片段；
   - OpenAI Responses 的 hosted 网页搜索（缓冲和流式）；
   - Anthropic Messages 的控制项：thinking 模式和 effort、tool choice、temperature 规则、提示缓存，以及经 OpenRouter 的相同控制项；
@@ -39,7 +39,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 ```
 
 - **密钥。** env 文件中包含 `OPENAI_API_KEY`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY` 和 `OPENROUTER_API_KEY`。脚本只把它们传给测试进程，从不打印或保存；失败消息中出现的密钥值会被替换。
-- **模型。** `tests/live/manifest.json` 中的 `models` 部分将每个模型角色（如 `openai.chat`、`anthropic.messages` 或 `anthropic.messages.adaptive`）映射到默认模型 ID，Python 套件通过 `live_support.live_model(role)` 解析它。在环境变量或 env 文件中设置 `NG_LIVE_MODEL_<ROLE>`（将 `.` 和 `-` 替换为 `_` 并转为大写，例如 `NG_LIVE_MODEL_OPENAI_CHAT`）即可在不修改代码的情况下覆盖该角色的模型。
+- **模型。** `tests/live/manifest.json` 中的 `models` 部分将每个模型角色（如 `openai.chat`、`anthropic.messages` 或 `anthropic.messages.adaptive`）映射到默认模型 ID，Python 套件通过 `live_support.live_model(role)` 解析它。Google 模型使用 `GEMINI_API_KEY`（`google.generate` 和 `google.interactions` 角色）直接调用，不经由 OpenRouter。在环境变量或 env 文件中设置 `NG_LIVE_MODEL_<ROLE>`（将 `.` 和 `-` 替换为 `_` 并转为大写，例如 `NG_LIVE_MODEL_OPENAI_CHAT`）即可在不修改代码的情况下覆盖该角色的模型。
 - **干净的工作树。** 报告指向一个提交，所以 `run` 拒绝存在未提交更改的工作树。
 - **版本。** `run` 拒绝版本与工作树版本不同的 `neograph_engine`。
 - **输出。** 它写入 `tests/live/report.json`，其中包含提交、工作树哈希、NeoGraph 版本、固定的 SchemaProvider 提交，以及每个用例及其结果。
