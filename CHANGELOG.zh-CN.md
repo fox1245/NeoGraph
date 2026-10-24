@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=11dd3e6073a7d3366b277c7cc146949ec7492ceddd784dbbffef8b2c117809fb -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=034d4be5b281ffec810542a2e53cecceb7863e53e8f8597f22dc0142e7e37a41 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -195,6 +195,9 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **行为变更：** 在开始之前就结束的已 reconcile 的调用（被取消、超过期限、宿主拒绝其容量，或处理器在第一个事件 `Started` 处抛出）与恢复一样 (#557)，以 reconcile 留给它的剩余预算结束；为该调用预留的墙钟时间、模型 token、金额和 Core 步骤不会退还，因为没有任何东西度量过它们的使用。此前，这样的运行会退还全部预算。
   - **不变。** 以 `Unknown` 或 `Failed` 结束的 reconcile、把非 Core 调用的 JavaScript 命令按完成处理的 reconcile，以及没有 JavaScript `main()` 的运行的 reconcile，走的路径与之前相同。
   - **测试。** `ProgramRuntimeTest`（内存与 SQLite）和 `ProgramHostPumpedStores` 完成一个被 reconcile 的 `ng.callCore`，把其尝试获得的预算与日志比较，在第一个调用之后 reconcile 第二个调用，并恢复在调用内部停止的、已 reconcile 的尝试。在之前的引擎上，它们都没能越过 reconcile，运行以上述代码结束为 `failed`。
+- **在副作用仍处于挂起状态的 JavaScript 命令中停止的运行，用 `resume()` 恢复时获得的是其 journal 所持有的额度。** 这适用于运行在副作用结清之前停止在某个 JavaScript 命令内部（`reconnect()` 以指明该命令的 `result.interrupt.pending_effect` 返回 `Interrupted`，而非在 `pending_input` 上暂停的普通 `callCore`），且宿主用 `resume()`（在 Python 中只有这一种）而非 `ProgramRuntime::reconcile()` 继续该运行的情形。对同一状态调用 `reconcile()` 本就授予 journal 所持有的额度，即未预留的剩余额度加上该命令曾预留的 wall time 和 Core 步骤。而 `resume()` 先前授予了该命令包括 token 和金额在内的全部预留，但 journal 已经消耗了这部分预留，因此该 attempt 的限额比 journal 的更宽：之后的计费命令可能会被发出，并在发布结果时被 journal 以 `P_JS_COMMAND_JOURNAL` 拒绝。
+  - **`resume()` 与 `reconcile()` 现在一致。** attempt 只取回为该停止命令预留的 wall time 和 Core 步骤。为该停止命令预留的 token 和金额保持为已消耗，因为无法得知它实际用了多少；因此在这样的 `resume()` 之后，运行只能花费该命令开始时未被预留的部分（对同一状态调用 `reconcile()` 本就如此）。之后不再放得下的计费命令会在发送之前被拒绝，结果为 `BudgetExhausted` 和 `P_MONEY_BUDGET`。之后不产生花费的命令会继续 `main()`，运行得以完成。被恢复的 attempt 在调度器上运行之前的取消会使运行以 `Cancelled` 结束。Python 的 `LocalProgramHost.resume()` 行为相同。
+  - `tests/test_program_command_recovery.cpp` 在 JavaScript 命令中停止一个运行，并分别用 `resume()` 和 `reconcile()` 回答。它比较 `Started` 时的授予额度与 journal 的剩余额度，并检查之后的计费命令、计费调用的 join、两个进程尝试和发送的 provider 调用与授予额度、attempt 开始之前的取消，以及被恢复的命令不会再次发送。
 - **无人回答的暂停之后出现的暂停可以恢复了 (#600)。** 宿主没有恢复某个 `NodeInterrupt`，而是在同一线程上用 `resume_if_exists` 再次启动 run（被取消的任务、已关闭的会话、下一条消息）时，第一个暂停仍是新 run 所保存检查点的父节点；若新 run 的第一个超步也暂停，恢复这第二个暂停会在任何节点运行之前以 `NodeInterrupt ancestry crosses super-step boundaries` 失败。对它做 `fork`、以及处于同一状态的持久子图的子图，也是如此。如果两个暂停之间新 run 有一个步骤已经完成，该步骤会保存一个 Completed 检查点，第二个暂停挂在它下面，因此不受影响。现在恢复所重放的 pending write 属于该暂停自己的超步：沿祖先的遍历读取该步骤的各个暂停以及该步骤开始时所在的检查点，到了更早步骤的暂停处，读取记录在其下、属于本步骤的 write（新 run 该步骤中已完成的兄弟节点），然后停止。
   - **无人回答的暂停的 write 不会被重放。** 它们带着更早的步骤号，所以第一轮中已完成的兄弟节点不会代替第二轮的兄弟节点；第二轮中已完成的兄弟节点会被重放，而不是再次运行。延续线程的 run 从所延续检查点的下一个步骤开始，因此它的第一个暂停不会与前一个暂停处于同一步骤。无人回答的暂停仍留在存储中，依然可以用检查点 ID 恢复。
   - **其他检查保持不变。** 环、缺失的父节点、属于其他线程或其他 schema 的父节点，以及父节点是更晚步骤的暂停的暂停，仍和以前一样被拒绝；阻塞式遍历（`fork`、`resume_pending_writes`）和 awaitable 遍历（`resume`）都是如此，两者现在共用这些检查。**行为变更：**父节点是更晚步骤的暂停的暂停，其拒绝信息现在是 `NodeInterrupt ancestry runs backwards across super-steps`，`NodeInterrupt ancestry crosses super-step boundaries` 不再被抛出。
