@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=09508fa650f13a6172729a396ae7f833b3b77ffb9eaacce83827c4ed19ac7b29 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=zh-CN source_sha256=2b1edd2874749ce5d0bc9d01ffd13e06e8bb22a499b2572cca9079e67bbc2272 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -50,6 +50,7 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 一个进程通过编译缓存为许多客户的拓扑提供服务。模拟二进制什么都不需要，实时版本需要 key。 |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 按客户选择并演化拓扑的聊天服务器。ProgramChat 有 `--mock` 模式，Core 服务器需要 key。 |
 | [`topology-retrieval/`](topology-retrieval/) | 为示例 64 提供输入的候选选择（稠密、BM25、排名融合、重排）。`--mock` 需要 `pip install faiss-cpu numpy`。 |
+| [`program-coding-swarm/`](program-coding-swarm/) | 在 Program API 上运行分层多模块编码工作流的实验性概念验证（experimental proof of concept）：并行子 harness（`ng.all`）、按模块划分预算与模型角色、宿主所有的验证与评审裁决门禁、孙代二次意见 harness、SQLite 代际替换与回滚，以及 `central` 与 `delegated` 合成模式对比（默认 `--mock`，支持输出 JSON 报告的 `--live`）。 |
 
 每份 cookbook 还记录了它暴露的摩擦点，有助于找出公共 API 的粗糙之处。
 
@@ -66,6 +67,7 @@ native archive 是经过认证的 owner-private custody，不是加密或 vendor
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 已执行真实浏览器 tenant 隔离/generation 替换，以及 SQLite 六个、PostgreSQL 六个 black-box 场景；显式 host model policy；无 vendor inference |
 | [`the-beast/`](the-beast/) | 类型化 C++ 迁移；已执行真实 strict Core 编译·演化·检查点回滚；不声称所有 live 变体通过 |
 | [`topology-retrieval/`](topology-retrieval/) | 已执行 mock Python ranking/index 复用，以及真实 C++ registry 准入(admission)/迁移和 unknown-key 拒绝；外部 pointer 不是权限 |
+| [`program-coding-swarm/`](program-coding-swarm/) | 实验性概念验证（experimental proof of concept）；离线脚本化 provider 检验并行子 harness、不可再生预算划分、宿主验证/裁决门禁、孙代二次意见 harness、SQLite 代际替换/回滚及 central/delegated 合成；live 模式需要 `ANTHROPIC_API_KEY` 和 `OPENROUTER_API_KEY` |
 
 Python MCP server、Jarvis CLI/REPL driver 和 retrieval HTTP client 是 protocol client，不是 provider binding 实现。Assembly Python speaker 使用 A2A binding，Jarvis pybind benchmark 使用已迁移 native binding。其运行证据与上方 C++ 运行分开。SDK runtime 当前仅在 Linux/POSIX 上获得验证，不声称已验证 macOS/Windows transport。live multitenant 1,000/32 不是 smoke。
 

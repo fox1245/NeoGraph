@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=b90fd568959f2dc1274da5546bb82e3c1fb7b497d3976d87ee65cdcc10ba5482 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=e62e74335dad073ea7848821bc3fae0ccaec2c004123a47a829e134e4e332ec5 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ## [未リリース]
 
 ### 追加
+- **クックブック `examples/cookbook/program-coding-swarm/`: Program API 上の階層型マルチモジュール・コーディングワークフローの実験的な概念実証（experimental proof of concept）。** ルート Program が `orchestrator` モデルロールでトイ・モジュールの分割を計画して結合結果をレビューし、JavaScript の `main()` がモジュールごとに子 Harness を並列（`ng.all`、または `--sequential` / `--concurrency <n>`）で起動します。重要度に応じて切り出される非更新型の予算、`demo-models.json` または `live-models.json` から解決されるロール別のモデル（`implementer-cheap`、`implementer-strong`、`reviewer`、`second-opinion`）、ホスト所有の検証・レビュー判定ゲート、重要モジュール向けの孫セカンドオピニオン Harness、`SqliteProgramStore` 上での実行中の世代置換とロールバック、および `ProgramSynthesisGateway` による `--synthesis=central` と `--synthesis=delegated` の比較（`--report <file.json>`、`--runs <k>`、`--max-cost-usd`、`--max-cost-usd-other`）を示します。
 - **WebAssembly モジュールで、制御ソースのスタックと `define()` の時間を開発者が決めます: `neograph.programs({ javascript: { stackBytes, defineTimeMs } })`。** モジュールは、`JavaScriptCompileLimits::max_stack_bytes` がいくつを求めても、制御ソースに自身のスタックの最大 48 KiB しか適用せず、`define()` には固定の 5 秒を与え、JavaScript API にはどちらも変える手段がありませんでした。48 KiB と 5 秒は今は既定値で、開発者が選べます。
   - **`stackBytes`。** 16384 から、モジュール自身のスタックが収められるサイズ（`wasm/` がビルドするモジュールでは 983,040）までの整数で、`define()` にも `main()` にも同じように働きます。それより大きい値、整数でない値、存在しないメンバーは、`programs()` を呼んだときに、限界を示すエラーとともに拒否されます。モジュールが強制するのはそれだけです。エンジンはリニアメモリ上の自身のスタックの中にとどまり、ホストの呼び出しスタックがどこまで耐えるかは開発者が判断します。`P_JS_RESOURCE_LIMIT` 診断の witness の `max_stack_bytes` は有効なサイズを報告します。
   - **`defineTimeMs`。** ソースを承認するときに `define()` が実行できる時間で、1 ミリ秒から 3,600,000 ミリ秒まで、既定値は従来どおり 5,000 です。

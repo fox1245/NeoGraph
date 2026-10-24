@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=27262697cc4b4af544b9c921e9374be1f6e401c80b9b45124fb4fe5c7b906ae4 -->
+<!-- neograph-i18n: source=examples/README.md locale=ja source_sha256=d3155f01f10377484a3a7e1107f4c84adb87543e48a273c9532581b532414a86 -->
 # C++ API の例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -224,6 +224,7 @@ Program は Core グラフを、永続的な識別子、予算、admission を�
 | [`cookbook/multi_tenant_chatbot/`](cookbook/multi_tenant_chatbot/) | yes | コンパイルキャッシュを通して、1 つのプロセスが多数の顧客のトポロジーを処理する。モックのバイナリには何も要らず、ライブ版にはキーが必要。 |
 | [`cookbook/self_evolving_chatbot/`](cookbook/self_evolving_chatbot/) | key | 顧客ごとにトポロジーを選び、進化させるチャットサーバー。ProgramChat には `--mock` モードがあり、Core のサーバーにはキーが必要。 |
 | [`cookbook/topology-retrieval/`](cookbook/topology-retrieval/) | yes | サンプル 64 に入力を渡す候補の選択(dense、BM25、順位融合、再ランキング)。`--mock` には `pip install faiss-cpu numpy` が必要。 |
+| [`cookbook/program-coding-swarm/`](cookbook/program-coding-swarm/) | yes | Program API 上で階層型マルチモジュール・コーディングワークフローを実行する実験的な概念実証: 並列子ハーネス、モジュールごとの予算とモデルロール、ホスト所有の検証・レビュー判定ゲート、孫セカンドオピニオンハーネス、SQLite 世代置換とロールバック、`central` と `delegated` の合成モード比較（既定は `--mock`、JSON レポート付きの `--live`）。 |
 | [`cookbook/byo-openai/`](cookbook/byo-openai/) と [`cookbook/openrouter-provider/`](cookbook/openrouter-provider/) | service | Python のプロバイダーレシピ。ノードの中で自前の OpenAI クライアントを使う方法と、型付きの OpenRouter リクエスト。Chat エンドポイントが必要(キー、または `bindings/python/examples/_scripted.py` のスクリプト化したモデルのようなローカルのピア)。 |
 
 この表の `yes` は、プロジェクトの既定の実行にキーが要らないという意味です。スモークテストの対象になるバイナリは、`ctest -L examples-offline` に `cookbook.*` として現れます。

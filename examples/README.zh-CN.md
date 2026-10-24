@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=27262697cc4b4af544b9c921e9374be1f6e401c80b9b45124fb4fe5c7b906ae4 -->
+<!-- neograph-i18n: source=examples/README.md locale=zh-CN source_sha256=d3155f01f10377484a3a7e1107f4c84adb87543e48a273c9532581b532414a86 -->
 # C++ API 示例
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -224,6 +224,7 @@ Program 为 Core 图加上一套生命周期，带有持久标识、预算和准
 | [`cookbook/multi_tenant_chatbot/`](cookbook/multi_tenant_chatbot/) | yes | 一个进程通过编译缓存为许多客户的拓扑提供服务。模拟二进制什么都不需要，实时版本需要 key。 |
 | [`cookbook/self_evolving_chatbot/`](cookbook/self_evolving_chatbot/) | key | 按客户选择并演化拓扑的聊天服务器。ProgramChat 有 `--mock` 模式，Core 服务器需要 key。 |
 | [`cookbook/topology-retrieval/`](cookbook/topology-retrieval/) | yes | 为示例 64 提供输入的候选选择（稠密、BM25、排名融合、重排）。`--mock` 需要 `pip install faiss-cpu numpy`。 |
+| [`cookbook/program-coding-swarm/`](cookbook/program-coding-swarm/) | yes | 在 Program API 上运行分层多模块编码工作流的实验性概念验证：并行子 harness、按模块划分预算与模型角色、宿主所有的验证与评审裁决门禁、孙代二次意见 harness、SQLite 代际替换与回滚，以及 `central` 与 `delegated` 合成模式对比（默认 `--mock`，支持输出 JSON 报告的 `--live`）。 |
 | [`cookbook/byo-openai/`](cookbook/byo-openai/) 和 [`cookbook/openrouter-provider/`](cookbook/openrouter-provider/) | service | Python provider 配方：在节点内使用自己的 OpenAI 客户端，以及类型化的 OpenRouter 请求。需要 Chat 端点（一个 key，或本地对端，例如 `bindings/python/examples/_scripted.py` 里的脚本化模型）。 |
 
 此表中的 `yes` 表示项目的默认运行不需要 key；做过冒烟测试的二进制会以 `cookbook.*` 的名字出现在 `ctest -L examples-offline` 中。

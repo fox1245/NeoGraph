@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=b90fd568959f2dc1274da5546bb82e3c1fb7b497d3976d87ee65cdcc10ba5482 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=e62e74335dad073ea7848821bc3fae0ccaec2c004123a47a829e134e4e332ec5 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ## [未发布]
 
 ### 已添加
+- **Cookbook `examples/cookbook/program-coding-swarm/`：在 Program API 上运行分层多模块编码工作流的实验性概念验证（experimental proof of concept）。** 根 Program 使用 `orchestrator` 模型角色规划玩具模块拆分并审查合并结果，其 JavaScript `main()` 为每个模块并行派生一个子 Harness（`ng.all`，或 `--sequential` / `--concurrency <n>`），演示按关键度划分的不可再生预算、由 `demo-models.json` 或 `live-models.json` 解析的不同模型角色（`implementer-cheap`、`implementer-strong`、`reviewer`、`second-opinion`）、宿主所有的验证与评审裁决门禁、面向关键模块的孙代二次意见 Harness、`SqliteProgramStore` 上的运行中代际替换与回滚，以及通过 `ProgramSynthesisGateway` 对比 `--synthesis=central` 与 `--synthesis=delegated`（`--report <file.json>`、`--runs <k>`、`--max-cost-usd`、`--max-cost-usd-other`）。
 - **在 WebAssembly 模块中，由开发者决定控制源码的栈和 `define()` 的时间：`neograph.programs({ javascript: { stackBytes, defineTimeMs } })`。** 无论 `JavaScriptCompileLimits::max_stack_bytes` 要求多少，模块最多只给控制源码应用自己栈中的 48 KiB，给 `define()` 的是固定的 5 秒，而 JavaScript API 没有办法改变其中任何一项。现在 48 KiB 和 5 秒是默认值，由开发者选择。
   - **`stackBytes`。** 从 16384 到模块自己的栈所能容纳的大小（在 `wasm/` 构建的模块里是 983,040）之间的整数，对 `define()` 和 `main()` 同样适用。更大的值、不是整数的值、不存在的成员，都会在调用 `programs()` 时被拒绝，错误信息会写明界限。模块强制的只有这一点：引擎留在线性内存中它自己的栈里，宿主的调用栈能承受多少由开发者判断。`P_JS_RESOURCE_LIMIT` 诊断 witness 中的 `max_stack_bytes` 报告生效的大小。
   - **`defineTimeMs`。** 准入源码时 `define()` 可以运行多久，范围是 1 到 3,600,000 毫秒，默认值仍是 5,000。
