@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=034d4be5b281ffec810542a2e53cecceb7863e53e8f8597f22dc0142e7e37a41 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b90fd568959f2dc1274da5546bb82e3c1fb7b497d3976d87ee65cdcc10ba5482 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -188,6 +188,9 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 - **C++ 소비자는 다시 빌드해야 합니다: `StdioClientConfig`에 멤버가 추가되었습니다.** `mcp::StdioClientConfig`에 `max_stdout_text_lines`와 `max_stdout_text_bytes`가 추가되었습니다. NeoGraph, C++ 소비자, Python 확장을 함께 다시 빌드하십시오([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참고).
 
 ### 수정됨
+- **여러 호출을 동시에 기다리는 JavaScript `main()`이 시작한 자식들이 발행하는 동안 `P_JS_COMMAND_JOURNAL`로 실패하지 않습니다 (#614).** 타임아웃이 있는 `ng.await`는 시작을 명령 저널에 기록하고, `ng.spawn`은 자식마다 run 레코드에 기록합니다. 둘 다 run의 헤드를 기준으로 하는 compare이며, 자식이 연결되거나 디스패치되거나 조인될 때마다 그 헤드가 움직입니다. 명령 발행은 헤드를 다시 읽고 재시도했지만 세 번뿐이었고, 자식 레코드는 다섯 번뿐이었습니다. 스레드 실행기를 쓰는 Release 빌드에서 생성한 자식 넷을 기다리는 `main()`은 열 번에 한 번꼴로 `Failed`와 `P_JS_COMMAND_JOURNAL`("Could not durably record the start of a JavaScript await")로 끝났고, 천 번에 몇 번꼴로 `P_CHILD_CONFLICT`("Parent-child dispatch lost its transition CAS")로 끝났습니다. Program과 자식은 아무 잘못도 하지 않았습니다.
+  - **진 compare는 최대 64번까지 다시 시도합니다.** compare는 헤드를 읽은 뒤 쓰기 전에 같은 run의 다른 발행이 기록되었을 때만 지므로, 재시도할 때마다 더 새로운 헤드를 읽습니다. JavaScript 명령 발행(대기 중인 항목, await의 시작, join의 확정된 멤버, 명령의 결과)과 자식 레코드 발행(연결, 디스패치, 완료)이 같은 한도를 공유하며, 스스로 일치하지 않는 헤드 읽기도 다시 읽고 같은 한도에 포함됩니다. 한도를 모두 쓰면 run은 전과 같이(`P_JS_COMMAND_JOURNAL`, 자식 레코드는 `P_CHILD_CONFLICT`로) 실패하되, 이제 3번이나 5번이 아니라 최대 64번 시도한 뒤에 실패합니다.
+  - `tests/test_program_runtime.cpp`는 저장소 래퍼로 한 멤버의 await 시작 레코드 compare를 연달아 열 번 거부하고(그 멤버의 시작이 이어서 기록되고 네 시작이 모두 기록된 채 run이 완료됩니다), 끝없이 거부하며(그 레코드의 compare 64번이 모두 거부된 뒤 run이 `P_JS_COMMAND_JOURNAL`로 실패합니다), 자식 넷 사례를 스레드 네 개짜리 실행기에서 40번 실행합니다.
 - **시계가 셀 수 없는 JavaScript 벽시계 시간 한도는 과거의 마감이 아니라 한도 없음입니다.** `JavaScriptCompileLimits::max_wall_time_ms`는 `std::chrono::milliseconds(limit)`를 steady clock에 더해 마감이 되었습니다. 시계의 나노초는 부호 있는 64비트로 약 292년(9.2조 밀리초)에서 넘치고 `2^63` 밀리초는 밀리초 값에 아예 들어가지 않으므로, 약 9.2e12를 넘는 한도는 호스트가 "무제한"으로 줄 수 있는 `UINT64_MAX`를 포함해 `define()`과 `main()`을 곧바로 `P_JS_TIMEOUT`으로 끝냈습니다(덧셈이 넘쳤습니다). 이제 마감은 가장 늦은 시각에서 멈춥니다. JavaScript 모듈은 영향을 받지 않았습니다. `defineTimeMs`는 3,600,000밀리초로 제한됩니다.
 
 - **중단된 JavaScript `ng.callCore`를 `Completed`로 `reconcile()`하면 `P_JS_COMMAND_JOURNAL_MISMATCH`로 실패하지 않고 `main()`이 계속됩니다 (#613).** Core 노드의 효과(effect)에서 중단된 JavaScript `main()` 실행은 그 호출의 벽시계 시간, 모델 토큰, 금액, Core 스텝에 대한 예약을 갖고 있지 않습니다. 중단이 예약을 풀기 때문입니다. 재개(resume)는 호출을 이어 갈 때 예약을 다시 잡습니다. 호출을 완료로 처리하는 reconcile은 그러지 않았습니다. 그 시도는 저널에서 예약을 찾지 못했고, 실행은 `P_JS_COMMAND_JOURNAL_MISMATCH`("Exact Core resume has no durable command resource reservation")와 함께 `failed`로 끝났으며, 호스트가 준 결과는 쓰이지 않았습니다.
