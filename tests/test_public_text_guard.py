@@ -3,14 +3,16 @@
 
 Every rule fires on a sample and stays quiet on its allowed cases; --diff
 reports added lines only; --tree honours the scope switch and the allowlist.
-Fake secrets are assembled at run time, so this file never holds a token-shaped
-string.
+Fake secrets are assembled at run time, and private or predecessor names are
+tested through fixture names registered via the SHA-256 digest mechanism, so
+this file never holds a token-shaped string or a private name.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +28,19 @@ sys.modules[spec.name] = guard  # dataclasses resolve annotations through sys.mo
 spec.loader.exec_module(guard)
 
 HAVE_GIT = shutil.which("git") is not None
+
+BUILTIN_PREDECESSOR_DIGESTS = guard.PREDECESSOR_NAME_DIGESTS
+BUILTIN_INTERNAL_TOOL_DIGESTS = guard.INTERNAL_TOOL_DIGESTS
+BUILTIN_PRIVATE_PROJECT_DIGESTS = guard.PRIVATE_PROJECT_DIGESTS
+
+# Fixture names registered through the guard's lower-case SHA-256 digest mechanism.
+FIXTURE_PREDECESSOR_DIGEST = guard.digest_token("FabulaGraph")
+FIXTURE_INTERNAL_DIGESTS = frozenset((guard.digest_token("PeerBot"), guard.digest_token("TaskSheet")))
+FIXTURE_PRIVATE_PROJECT_DIGEST = guard.digest_token("Moonstone")
+
+guard.PREDECESSOR_NAME_DIGESTS = frozenset((FIXTURE_PREDECESSOR_DIGEST,))
+guard.INTERNAL_TOOL_DIGESTS = FIXTURE_INTERNAL_DIGESTS
+guard.PRIVATE_PROJECT_DIGESTS = frozenset((FIXTURE_PRIVATE_PROJECT_DIGEST,))
 
 
 def rules_for(line: str, path: str = "src/sample.cpp") -> set:
@@ -45,19 +60,22 @@ class RuleTest(unittest.TestCase):
 
     def test_predecessor_name(self):
         self.assertFires("predecessor-name", [
-            "// ported from NexaGraph", "nexagraph", "Nexa-Graph", "NEXA_GRAPH", "see Nexa Graph docs",
-            "src/nexagraph/grpc_client.cpp",
+            "// ported from FabulaGraph", "fabulagraph", "FABULAGRAPH", "Fabula-Graph",
+            "FABULA_GRAPH", "fabula.graph", "see Fabula Graph docs",
+            "src/fabulagraph/grpc_client.cpp",
         ])
-        self.assertQuiet("predecessor-name", ["NeoGraph", "Alexa Graph", "Nexa alone", "graph nexa"])
+        self.assertQuiet("predecessor-name", [
+            "NeoGraph", "Alexa Graph", "Fabula alone", "graph fabula", "FabulaGraphX",
+        ])
 
     def test_private_repo_link(self):
         self.assertFires("private-repo-link", [
-            "https://github.com/fox1245/re-agent",
-            "see github.com/fox1245/NeoGraph-v1-redesign-backup for history",
-            "git@github.com:fox1245/re-agent.git",
-            "https://raw.githubusercontent.com/fox1245/re-agent/main/x.py",
+            "https://github.com/fox1245/private-service",
+            "see github.com/fox1245/NeoGraph-old-archive for history",
+            "git@github.com:fox1245/private-service.git",
+            "https://raw.githubusercontent.com/fox1245/private-service/main/x.py",
             "https://github.com/fox1245/not-a-listed-repo",
-            "https://GitHub.com/Fox1245/RE-Agent",
+            "https://GitHub.com/Fox1245/Private-Service",
         ])
         self.assertQuiet("private-repo-link", [
             "https://github.com/fox1245/NeoGraph",
@@ -69,18 +87,20 @@ class RuleTest(unittest.TestCase):
             "https://github.com/fox1245/NeoProtocol",
             "(https://github.com/fox1245/NeoGraph).",
             "https://github.com/fox1245",
-            "https://github.com/someone-else/re-agent",
+            "https://github.com/someone-else/private-service",
             "handle fox1245 owns the organisation",
         ])
 
     def test_internal_process_wording(self):
         self.assertFires("internal-process-wording", [
-            "the AgentX peer", "a WorkOrder was run", "Analysis Graph provenance",
+            "PeerBot", "peerbot", "PEERBOT", "the PeerBot peer",
+            "TaskSheet", "tasksheet", "a TaskSheet was run",
+            "Analysis Graph provenance",
         ])
         self.assertQuiet("internal-process-wording", [
             "owner_scope", "owner_id", "OwnerScope owner_scope_", "owner-qualified id",
-            "agentx", "work order", "workorder", "the owners of a program", "program owner",
-            "std::string owner", "AgentXY",
+            "task sheet", "the owners of a program", "program owner",
+            "std::string owner", "PeerBotXY", "TaskSheets",
         ])
 
     def test_owner_intent(self):
@@ -185,8 +205,18 @@ class RuleTest(unittest.TestCase):
         self.assertNotIn(secret[:12], guard.Finding("a", 1, "secret-shaped", findings[0].excerpt).render())
 
     def test_private_project_name(self):
-        self.assertFires("private-project-name", ["the Capstone project", "CAPSTONE-2026", "(Capstone)"])
-        self.assertQuiet("private-project-name", ["capstone", "Capstones", "CapstoneX", "keystone"])
+        self.assertFires("private-project-name", [
+            "Moonstone", "moonstone", "MOONSTONE", "the Moonstone project",
+            "MOONSTONE-2026", "(Moonstone)", "Moon-Stone", "MOON_STONE", "see Moon Stone docs",
+        ])
+        self.assertQuiet("private-project-name", [
+            "Moonstones", "MoonstoneX", "keystone", "Moon alone", "stone moon",
+        ])
+
+    def test_passed_in_digest_list(self):
+        custom = [guard.digest_token("SecretCodename")]
+        self.assertIsNotNone(guard.find_private_project_name("uses Secret-Codename here", custom))
+        self.assertIsNone(guard.find_private_project_name("uses SecretCodenameX here", custom))
 
     def test_allowed_on_purpose(self):
         line = (
@@ -197,13 +227,13 @@ class RuleTest(unittest.TestCase):
         self.assertEqual(rules_for(line), set())
 
     def test_one_finding_per_rule_and_line(self):
-        findings = guard.scan_text("a.cpp", "NexaGraph and nexagraph again\nclean\nNexaGraph")
+        findings = guard.scan_text("a.cpp", "FabulaGraph and fabulagraph again\nclean\nFabulaGraph")
         self.assertEqual([(f.line, f.rule) for f in findings], [(1, "predecessor-name"), (3, "predecessor-name")])
 
     def test_long_line_excerpt_keeps_the_match_visible(self):
-        line = "x" * 400 + " NexaGraph " + "y" * 400
+        line = "x" * 400 + " FabulaGraph " + "y" * 400
         (finding,) = guard.scan_text("a.json", line)
-        self.assertIn("NexaGraph", finding.excerpt)
+        self.assertIn("FabulaGraph", finding.excerpt)
         self.assertLess(len(finding.excerpt), 200)
 
     def test_rule_table_is_stable(self):
@@ -215,6 +245,10 @@ class RuleTest(unittest.TestCase):
         for rule in guard.RULES:
             self.assertTrue(rule.summary)
             self.assertTrue(rule.kinds <= guard.ALL_KINDS)
+        for group in (BUILTIN_PREDECESSOR_DIGESTS, BUILTIN_INTERNAL_TOOL_DIGESTS, BUILTIN_PRIVATE_PROJECT_DIGESTS):
+            self.assertTrue(group)
+            for digest in group:
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
 
 class FileSelectionTest(unittest.TestCase):
@@ -278,7 +312,7 @@ class AllowlistTest(unittest.TestCase):
                     guard.parse_allowlist(bad)
 
     def test_allowlist_silences_only_its_rule_and_path(self):
-        text = "NexaGraph at /home/alice/x\n"
+        text = "FabulaGraph at /home/alice/x\n"
         entries = guard.parse_allowlist("src/a.cpp\thome-path\tsample path in a test\n")
         self.assertEqual({f.rule for f in guard.scan_text("src/a.cpp", text, entries)}, {"predecessor-name"})
         self.assertEqual(
@@ -348,6 +382,9 @@ class RepositoryModeTest(unittest.TestCase):
             GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", HOME=self._tmp.name,
             GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
             GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com",
+            NEOGRAPH_GUARD_PREDECESSOR_DIGESTS=FIXTURE_PREDECESSOR_DIGEST,
+            NEOGRAPH_GUARD_INTERNAL_DIGESTS=",".join(sorted(FIXTURE_INTERNAL_DIGESTS)),
+            NEOGRAPH_GUARD_PRIVATE_PROJECT_DIGESTS=FIXTURE_PRIVATE_PROJECT_DIGEST,
         )
         self.git("init", "-q")
 
@@ -378,11 +415,11 @@ class RepositoryModeTest(unittest.TestCase):
     # --tree ---------------------------------------------------------------
 
     def test_tree_reports_path_line_rule_excerpt(self):
-        self.write("src/a.cpp", "int ok;\n// ported from NexaGraph\n")
+        self.write("src/a.cpp", "int ok;\n// ported from FabulaGraph\n")
         self.commit()
         code, out, err = self.run_guard("--tree")
         self.assertEqual(code, 1, err)
-        self.assertEqual(out.splitlines(), ["src/a.cpp:2: predecessor-name: // ported from NexaGraph"])
+        self.assertEqual(out.splitlines(), ["src/a.cpp:2: predecessor-name: // ported from FabulaGraph"])
         self.assertIn("predecessor-name=1", err)
 
     def test_tree_clean_exits_zero(self):
@@ -392,21 +429,21 @@ class RepositoryModeTest(unittest.TestCase):
         self.assertEqual((code, out), (0, ""), err)
 
     def test_tree_skips_third_party_binary_and_lock_files(self):
-        bad = "// NexaGraph at /home/alice/x\n"
+        bad = "// FabulaGraph at /home/alice/x\n"
         self.write("deps/lib/a.c", bad)
         self.write("node_modules/p/i.js", bad)
         self.write("THIRD_PARTY_LICENSES", bad)
         self.write("package-lock.json", bad)
         self.write("bindings/python/tests/interop/s/spec/x.schema.json", bad)
         self.write("bindings/python/tests/interop/s/spec/x.proto", bad)
-        self.write("blob.dat", "NexaGraph\0\x01\x02", mode="wb")
+        self.write("blob.dat", "FabulaGraph\0\x01\x02", mode="wb")
         self.write("src/ok.cpp", "int ok;\n")
         self.commit()
         code, out, err = self.run_guard("--tree")
         self.assertEqual((code, out), (0, ""), err)
 
     def test_scope_code_skips_documents_only(self):
-        bad = "NexaGraph\n"
+        bad = "FabulaGraph\n"
         for name in ("README.md", "docs/guide.md", "docs/page.html", "CHANGELOG.ko.md", "notes.md"):
             self.write(name, bad)
         self.write("src/a.cpp", bad)
@@ -448,7 +485,7 @@ class RepositoryModeTest(unittest.TestCase):
 
     def test_allowlist_is_applied_by_path_and_rule(self):
         key = "sk-" + "Z8y7X6w5" * 5
-        self.write("tests/fixtures/keys.json", '{"k": "' + key + '"}\n// NexaGraph\n')
+        self.write("tests/fixtures/keys.json", '{"k": "' + key + '"}\n// FabulaGraph\n')
         self.write("allow.txt", "tests/fixtures/*\tsecret-shaped\tfake key for the redaction test\n")
         self.commit()
         code, out, err = self.run_guard("--tree")
@@ -475,28 +512,28 @@ class RepositoryModeTest(unittest.TestCase):
     def test_non_git_tree_is_walked(self):
         plain = Path(self._tmp.name) / "plain"
         (plain / "src").mkdir(parents=True)
-        (plain / "src" / "a.cpp").write_text("// NexaGraph\n", encoding="utf-8")
+        (plain / "src" / "a.cpp").write_text("// FabulaGraph\n", encoding="utf-8")
         (plain / "build-x").mkdir()
-        (plain / "build-x" / "gen.cpp").write_text("// NexaGraph\n", encoding="utf-8")
+        (plain / "build-x" / "gen.cpp").write_text("// FabulaGraph\n", encoding="utf-8")
         proc = subprocess.run(
             [sys.executable, str(SCRIPT), "--root", str(plain), "--allowlist", str(plain / "none.txt"), "--tree"],
             env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertEqual(proc.returncode, 1)
-        self.assertEqual(proc.stdout.decode().splitlines(), ["src/a.cpp:1: predecessor-name: // NexaGraph"])
+        self.assertEqual(proc.stdout.decode().splitlines(), ["src/a.cpp:1: predecessor-name: // FabulaGraph"])
 
     # --diff ---------------------------------------------------------------
 
     def start_topic(self):
         """A base commit tagged 'base' that already holds a violation, then new work."""
-        self.write("src/old.cpp", "int a;\n// legacy NexaGraph note\nint b;\n")
+        self.write("src/old.cpp", "int a;\n// legacy FabulaGraph note\nint b;\n")
         self.write("src/doc.cpp", "int x;\n")
         self.commit("base")
         self.git("tag", "base")
 
     def test_diff_reports_only_added_lines(self):
         self.start_topic()
-        self.write("src/old.cpp", "int a;\n// legacy NexaGraph note\nint b;\n// fine\n// see /home/alice/src\n")
+        self.write("src/old.cpp", "int a;\n// legacy FabulaGraph note\nint b;\n// fine\n// see /home/alice/src\n")
         self.commit("topic")
         code, out, err = self.run_guard("--diff", "base")
         self.assertEqual(code, 1, err)
@@ -515,8 +552,8 @@ class RepositoryModeTest(unittest.TestCase):
     def test_diff_sees_uncommitted_staged_and_untracked_additions(self):
         self.start_topic()
         self.write("src/doc.cpp", "int x;\n// owner-local note\n")  # unstaged edit
-        self.write("src/new.cpp", "// ported from NexaGraph\n")  # untracked
-        self.write("src/staged.cpp", "// Capstone work\n")
+        self.write("src/new.cpp", "// ported from FabulaGraph\n")  # untracked
+        self.write("src/staged.cpp", "// Moonstone work\n")
         self.git("add", "src/staged.cpp")
         code, out, err = self.run_guard("--diff", "base")
         self.assertEqual(code, 1, err)
@@ -524,8 +561,8 @@ class RepositoryModeTest(unittest.TestCase):
             sorted(out.splitlines()),
             [
                 "src/doc.cpp:2: owner-intent: // owner-local note",
-                "src/new.cpp:1: predecessor-name: // ported from NexaGraph",
-                "src/staged.cpp:1: private-project-name: // Capstone work",
+                "src/new.cpp:1: predecessor-name: // ported from FabulaGraph",
+                "src/staged.cpp:1: private-project-name: // Moonstone work",
             ],
         )
 
@@ -538,7 +575,7 @@ class RepositoryModeTest(unittest.TestCase):
         # the base branch moves on: it rewrites the legacy line and adds a violation of its own;
         # the topic still has the old line and must not be blamed for either
         self.write("src/old.cpp", "int a;\n// reworded\nint b;\n")
-        self.write("src/other.cpp", "// NexaGraph on the base branch\n")
+        self.write("src/other.cpp", "// FabulaGraph on the base branch\n")
         self.commit("base moves")
         self.git("tag", "base2")
         self.git("checkout", "-q", "topic")
@@ -547,9 +584,9 @@ class RepositoryModeTest(unittest.TestCase):
 
     def test_diff_skips_out_of_scope_and_honours_scope_and_allowlist(self):
         self.start_topic()
-        self.write("deps/x/a.c", "// NexaGraph\n")
-        self.write("README.md", "NexaGraph\n")
-        self.write("src/fix.cpp", "// NexaGraph\n// Capstone\n")
+        self.write("deps/x/a.c", "// FabulaGraph\n")
+        self.write("README.md", "FabulaGraph\n")
+        self.write("src/fix.cpp", "// FabulaGraph\n// Moonstone\n")
         self.write("allow.txt", "src/fix.cpp\tprivate-project-name\tsample for the guard test\n")
         self.commit("topic")
         _, out_all, _ = self.run_guard("--diff", "base")

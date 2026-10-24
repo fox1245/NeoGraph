@@ -33,6 +33,11 @@ Rules (name: what it finds)
   secret-shaped             a string shaped like an API key, token or private key
   private-project-name      the name of a private project
 
+Predecessor, internal-tooling and private project names are stored as SHA-256
+hex digests of their lower-case form and matched by tokenising scanned lines
+into words (and joined two-word or hyphenated forms), lower-casing and hashing
+each token, so the guard never spells out the names it rejects.
+
 Not flagged on purpose: e-mail addresses, hardware model names, private-network,
 loopback, link-local and documentation addresses, version numbers, and the
 project's GitHub handle inside a link to a public repository.
@@ -57,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import ipaddress
 import os
 import re
@@ -64,7 +70,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ALLOWLIST = Path(__file__).resolve().with_name("public_text_allowlist.txt")
@@ -317,12 +323,114 @@ _REVIEW_PROCESS = re.compile(
     re.IGNORECASE,
 )
 
+# SHA-256 digests (lowercase hex) of the lower-cased predecessor project name,
+# internal tooling and peer product names, and private project names. Storing
+# digests keeps the guard from spelling out the names it rejects.
+PREDECESSOR_NAME_DIGESTS: FrozenSet[str] = frozenset(
+    (
+        "c4a68831d7ac5a7e1327574da58994015746ad1475b0a92da6062d8f2613b21c",
+    )
+)
+INTERNAL_TOOL_DIGESTS: FrozenSet[str] = frozenset(
+    (
+        "941182db2f077d066a18394d4ae2e1ec5f8cd3ce90294c885bc87e9cd3e12b51",
+        "bc413450c0f3657007918c2f81ad025fccac11ad15f143d318b94d4b51d53eee",
+    )
+)
+PRIVATE_PROJECT_DIGESTS: FrozenSet[str] = frozenset(
+    (
+        "c182db28dc3e5f090b951513ba90e4001739822317fd0580b315566b85d48b9a",
+    )
+)
+
+_WORD_TOKEN = re.compile(r"[A-Za-z0-9]+")
+_JOIN_SEPARATOR = re.compile(r"^[\s_.\-]$")
+_INTERNAL_PROCESS_PHRASE = re.compile(r"Analysis Graph provenance")
+
+
+def digest_token(token: str) -> str:
+    """Return the SHA-256 hex digest of the lower-cased token."""
+    return hashlib.sha256(token.lower().encode("utf-8")).hexdigest()
+
+
+def _active_digests(base: Iterable[str], env_var: str) -> FrozenSet[str]:
+    extra = os.environ.get(env_var, "")
+    if not extra:
+        return frozenset(base)
+    return frozenset(base) | frozenset(d.strip() for d in extra.split(",") if d.strip())
+
+
+def find_digested_token(
+    line: str,
+    digests: Iterable[str],
+    allow_joined: bool = True,
+) -> Optional[Span]:
+    """Find the first word token (or joined two-token form) whose lower-case digest is in digests."""
+    known = digests if isinstance(digests, (set, frozenset)) else frozenset(digests)
+    if not known:
+        return None
+    tokens = list(_WORD_TOKEN.finditer(line))
+    for index, match in enumerate(tokens):
+        word = match.group(0).lower()
+        if digest_token(word) in known:
+            return match.span()
+        if allow_joined and index + 1 < len(tokens):
+            nxt = tokens[index + 1]
+            sep = line[match.end() : nxt.start()]
+            if _JOIN_SEPARATOR.match(sep):
+                joined = word + nxt.group(0).lower()
+                if digest_token(joined) in known:
+                    return (match.start(), nxt.end())
+    return None
+
+
+def find_predecessor_name(
+    line: str,
+    digests: Optional[Iterable[str]] = None,
+) -> Optional[Span]:
+    target = (
+        _active_digests(PREDECESSOR_NAME_DIGESTS, "NEOGRAPH_GUARD_PREDECESSOR_DIGESTS")
+        if digests is None
+        else digests
+    )
+    return find_digested_token(line, target, allow_joined=True)
+
+
+def find_internal_process_wording(
+    line: str,
+    digests: Optional[Iterable[str]] = None,
+) -> Optional[Span]:
+    target = (
+        _active_digests(INTERNAL_TOOL_DIGESTS, "NEOGRAPH_GUARD_INTERNAL_DIGESTS")
+        if digests is None
+        else digests
+    )
+    span_a = find_digested_token(line, target, allow_joined=False)
+    match_b = _INTERNAL_PROCESS_PHRASE.search(line)
+    span_b = match_b.span() if match_b is not None else None
+    if span_a is not None and span_b is not None:
+        return span_a if span_a[0] <= span_b[0] else span_b
+    return span_a if span_a is not None else span_b
+
+
+def find_private_project_name(
+    line: str,
+    digests: Optional[Iterable[str]] = None,
+) -> Optional[Span]:
+    target = (
+        _active_digests(PRIVATE_PROJECT_DIGESTS, "NEOGRAPH_GUARD_PRIVATE_PROJECT_DIGESTS")
+        if digests is None
+        else digests
+    )
+    return find_digested_token(line, target, allow_joined=True)
+
+
 RULES: Tuple[Rule, ...] = (
     Rule(
         "predecessor-name",
         "name of a predecessor project",
         ALL_KINDS,
-        regex_finder(re.compile(r"nexa[\s_.\-]?graph", re.IGNORECASE)),
+        find_predecessor_name,
     ),
     Rule(
         "private-repo-link",
@@ -341,12 +449,7 @@ RULES: Tuple[Rule, ...] = (
         "internal-process-wording",
         "wording that refers to internal tooling",
         ALL_KINDS,
-        regex_finder(
-            re.compile(
-                r"(?<![A-Za-z0-9])AgentX(?![A-Za-z0-9])|(?<![A-Za-z0-9])WorkOrder"
-                r"|Analysis Graph provenance"
-            )
-        ),
+        find_internal_process_wording,
     ),
     Rule(
         "owner-intent",
@@ -390,7 +493,7 @@ RULES: Tuple[Rule, ...] = (
         "private-project-name",
         "name of a private project",
         ALL_KINDS,
-        regex_finder(re.compile(r"(?<![A-Za-z0-9])(?:Capstone|CAPSTONE)(?![A-Za-z0-9])")),
+        find_private_project_name,
     ),
 )
 
