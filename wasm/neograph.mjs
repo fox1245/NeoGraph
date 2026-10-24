@@ -450,8 +450,10 @@ export async function load(options = {}) {
      *   `javascript` sets the limits of the control source: `stackBytes`, the stack that `define()` and `main()` may use
      *   (49152, 48 KiB, by default; a whole number from 16384 up to what the module's own stack holds, which the error of
      *   a value above it states), and `defineTimeMs`, the time `define()` may run when a source is admitted (5000 by
-     *   default, up to 3600000). The host's own call stack is what a larger `stackBytes` has to fit in, and a source
-     *   that overflows it ends in a trap that the module cannot recover from: see README.md before raising it.
+     *   default, up to 3600000). The host's own call stack is what a larger `stackBytes` has to fit in, and the module
+     *   accepts values far above what it carries: a source that overflows it ends in a trap that the module cannot
+     *   recover from, and on Node's default stack 160 KiB is enough for that. Keep `stackBytes` within an eighth of the
+     *   host's call stack, and see README.md before raising it.
      * @returns {Programs}
      */
     programs(config) {
