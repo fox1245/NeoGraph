@@ -1578,6 +1578,12 @@ asio::awaitable<std::optional<ProgramRunRecord>> load_active_agent_run(
     co_return co_await transitions->load(owner, generation->run_id());
 }
 
+// A compare-and-publish of a run's record loses when another publication of the same run was written between the read of
+// the head and the write: a child that is attached, dispatched or joined, or the command record of another member of a
+// join. Each lost compare is such a publication, so a retry reads a newer head, and a run with several children in
+// flight loses more than a few in a row (#614). The bound only stops a store that never accepts.
+constexpr int kRunPublicationAttempts = 64;
+
 struct ChildRecordPublication {
     ProgramTransitionPublishResult  result = ProgramTransitionPublishResult::Conflict;
     std::optional<ProgramRunRecord> record;
@@ -4703,7 +4709,7 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
     if (!command_ordinal) co_return ProgramTransitionPublishResult::Conflict;
 
-    for (int retry = 0; retry < 3; ++retry) {
+    for (int retry = 0; retry < kRunPublicationAttempts; ++retry) {
         const auto head = co_await async_transitions().load_command_publication_head(owner_scope, run_id);
         // The default store implementation reads optimistically. A child join
         // can advance its head between reads; retry that miss before treating
