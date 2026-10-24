@@ -16,7 +16,11 @@ public IP addresses, key-shaped strings and private project names.
 untracked additions, so it is the quick check to run before pushing. Each
 finding is printed as "path:line: rule: excerpt" and the exit status is 1; a
 secret-shaped excerpt is masked. Rules are listed by --list-rules and described
-in the script's header. Third-party and generated files (deps/,
+in the script's header. Predecessor, internal-tooling and private project names
+are stored as SHA-256 hex digests of their lower-case form and matched by
+tokenising scanned lines into words (and joined two-word or hyphenated forms),
+lower-casing and hashing each token, so neither the guard nor its tests spell
+out those names in plain text. Third-party and generated files (deps/,
 THIRD_PARTY_LICENSES*, node_modules/, lock files, the interop spec copies under
 bindings/python/tests/interop/*/spec/) and binary files are skipped.
 
