@@ -9628,12 +9628,24 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         javascript_pending &&
         (previous->pending_effect().has_value() || !javascript_pending->core_resume_operation_id ||
          synthetic_terminal_checkpoint);
-    // The resumed attempt needs the withheld grant to replay the generator and
-    // return a reconciled result. The durable command settlement below still
-    // consumes the full reservation, so replay cannot dispatch later work.
-    const auto attempt_budget      = restore_reserved_resources(available_budget,
-                                                                 previous_journal->inflight_reservation);
-    auto       resumed_remaining   = available_budget;
+    // The attempt is granted what the journal holds for it, as reconcile_core
+    // does for the same command. The host's answer to a stopped JavaScript
+    // command does not say what the command spent, so the provider currency it
+    // reserved (tokens and money) stays consumed. Only its wall time and Core
+    // steps return to the run: they bound how long main() replays and goes on,
+    // not what it may spend. A grant wider than the journal's would let a later
+    // command send provider calls that the journal never debits.
+    RunBudget released_execution = previous_journal->inflight_reservation;
+    RunBudget spent_reservation  = previous_journal->inflight_reservation;
+    if (reconcile_javascript_command) {
+        released_execution                = RunBudget{};
+        released_execution.wall_time_ms   = previous_journal->inflight_reservation.wall_time_ms;
+        released_execution.max_core_steps = previous_journal->inflight_reservation.max_core_steps;
+        spent_reservation.wall_time_ms    = 0;
+        spent_reservation.max_core_steps  = 0;
+    }
+    const auto attempt_budget      = restore_reserved_resources(available_budget, released_execution);
+    auto       resumed_remaining   = reconcile_javascript_command ? attempt_budget : available_budget;
     auto       resumed_reservation = previous_journal->inflight_reservation;
     if (reconcile_javascript_command) {
         resumed_reservation = RunBudget{};
@@ -9713,8 +9725,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
             (co_await impl_->transitions->load_javascript_commands(owner_scope, run_id));
         command_entries.push_back(javascript_completion_entry(
             entries, *javascript_pending,
-            javascript_resume_terminal_result(resume_value.value,
-                                              previous_journal->inflight_reservation)));
+            javascript_resume_terminal_result(resume_value.value, spent_reservation)));
     }
     std::vector<ProgramEvent> started_events;
     started_events.push_back(started);
