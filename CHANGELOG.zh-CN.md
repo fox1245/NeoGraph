@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=59a612a5ab947d4fe750779513eb29e448785bcd5587e545dac11fc265c69447 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=eff69f461903b437f2bf1bb8aaecc6a680039265111417d4fcd5ada084e59847 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -20,6 +20,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **宿主的栈能承受什么，在 Node 22 和 24 上测得**（宿主栈约 984 KiB，优化编译器和基线编译器都测过）：`wasm/test/program_test.mjs` 所拒绝的 17 种递归和嵌套形态，在 48、64、96、128 和 144 KiB 下都以 `P_JS_RESOURCE_LIMIT` 结束。对嵌套 100,000 层的数据做 `JSON.stringify`，在 160 KiB 时会让宿主的栈溢出，256 KiB 时有七种形态会，512 KiB 时有十四种。把宿主的栈减半后，所有形态都能被拦住的最大大小是 64 KiB。请把 `stackBytes` 保持在宿主调用栈的八分之一以内。栈承受不了的大小会以模块无法恢复的陷阱告终，所以准入不受信任源码的宿主仍应在可以丢弃的 Worker 里进行。`wasm/README.md` 有一张表，列出源码在 48、96 和 128 KiB 下能走多深。
   - **既在原生又在模块中运行的源码。** 原生的限制是 512 KiB 的 C 栈，而模块的限制数的是它自己的栈，所以同一份源码可能在一边被拒绝、在另一边却能运行。面向两者的源码应当保持在模块的限制之内（默认值下约 190 层嵌套调用，源码中约 131 层嵌套字面量）。
   - **C++ API。** `JavaScriptCompileLimits::max_stack_bytes` 默认为 `JavaScriptCompileLimits::kDefaultStackBytes`：WebAssembly 构建中是 48 KiB，其他构建中仍是 512 KiB。WebAssembly 构建会在栈所能容纳的范围内遵从更大的值，而不是把它截成 48 KiB（`javascript_stack_ceiling()` 是栈的大小减去 64 KiB）。`RuntimeConfig::javascript_stack_bytes`（0 为默认值）是 `main()` 的栈，此前无论编译器怎样配置，它都是 `JavaScriptCompileLimits` 的默认值。无论限制是多少，版本的 id 都相同；为原生构建以 `-O2 -DNDEBUG` 编译的 `quickjs.c` 得到相同的目标文件。
+  - **小于 4,096 字节的栈会被拒绝，小到无法启动引擎的栈会明说。** `JavaScriptCompileLimits::max_stack_bytes` 和 `RuntimeConfig::javascript_stack_bytes` 小于 `JavaScriptCompileLimits::kMinStackBytes`（4,096）时，创建 `ProgramCompiler` 或 `ProgramRuntime` 会抛出 `std::invalid_argument`。这样的值几乎总是把 KiB 的数量当成字节传入了，而在这样的值下每个 JavaScript 运行都会立刻失败。这个下限并不保证源码能在这么小的栈里运行（消毒器构建启动一份源码需要约 10 KiB）。引擎无法启动时，诊断 `P_JS_RUNTIME` 现在会在消息和 witness（`max_stack_bytes`、`memory_limit_bytes`）中带上栈和内存的限制，而不再不说明原因。
   - **C++ 使用方须重新构建：`RuntimeConfig` 增加了成员。** `RuntimeConfig` 增加了 `javascript_stack_bytes`。请将 NeoGraph 与 C++ 使用方一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
   - **测试。** `wasm/test/program_test.mjs` 把栈提高到 96 KiB，检查嵌套得比默认值更深的源码在 `define()` 和 `main()` 中都能以相同的版本 id 运行，检查提高后每种递归形态仍然干净地失败且 witness 里是这个大小，检查错误的值和界限被拒绝，并检查最小大小的模块仍能准入并运行 Program。`tests/test_program_runtime.cpp` 检查运行时把 `javascript_stack_bytes` 应用于 `main()`，并拒绝超过内存限制的值。
 - **实验性的 ACP 远程传输：同一端点上的 Streamable HTTP 和 WebSocket，默认关闭。** `neograph::acp_http_server`（`NEOGRAPH_BUILD_ACP_HTTP_SERVER`，默认关）通过 ACP 项目以草案形式提出的远程传输提供 `ACPServer` 智能体。stdio 仍是标准传输，没有变化。线上格式的细节在草案写得明确的地方遵循它，草案变化时可能随之变化。详见 [`docs/acp.md`](docs/acp.md#remote-transports-experimental)。
@@ -187,6 +188,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **请重新构建 C++ 使用方：`StdioClientConfig` 增加了成员。** `mcp::StdioClientConfig` 增加了 `max_stdout_text_lines` 和 `max_stdout_text_bytes`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
+- **时钟数不了的 JavaScript 墙钟时间限制是没有限制，而不是已经过去的截止时间。** `JavaScriptCompileLimits::max_wall_time_ms` 是把 `std::chrono::milliseconds(limit)` 加到 steady clock 上得到截止时间的。时钟的纳秒数在有符号 64 位下约 292 年（9.2 万亿毫秒）就会溢出，`2^63` 毫秒更是根本放不进毫秒计数，所以大于约 9.2e12 的限制，包括宿主可能用来表示"无限制"的 `UINT64_MAX`，会让 `define()` 和 `main()` 立刻以 `P_JS_TIMEOUT` 结束（加法发生了溢出）。现在截止时间饱和在最晚的时间点。JavaScript 模块不受影响：`defineTimeMs` 的上限是 3,600,000 毫秒。
 
 - **无人回答的暂停之后出现的暂停可以恢复了 (#600)。** 宿主没有恢复某个 `NodeInterrupt`，而是在同一线程上用 `resume_if_exists` 再次启动 run（被取消的任务、已关闭的会话、下一条消息）时，第一个暂停仍是新 run 所保存检查点的父节点；若新 run 的第一个超步也暂停，恢复这第二个暂停会在任何节点运行之前以 `NodeInterrupt ancestry crosses super-step boundaries` 失败。对它做 `fork`、以及处于同一状态的持久子图的子图，也是如此。如果两个暂停之间新 run 有一个步骤已经完成，该步骤会保存一个 Completed 检查点，第二个暂停挂在它下面，因此不受影响。现在恢复所重放的 pending write 属于该暂停自己的超步：沿祖先的遍历读取该步骤的各个暂停以及该步骤开始时所在的检查点，到了更早步骤的暂停处，读取记录在其下、属于本步骤的 write（新 run 该步骤中已完成的兄弟节点），然后停止。
   - **无人回答的暂停的 write 不会被重放。** 它们带着更早的步骤号，所以第一轮中已完成的兄弟节点不会代替第二轮的兄弟节点；第二轮中已完成的兄弟节点会被重放，而不是再次运行。延续线程的 run 从所延续检查点的下一个步骤开始，因此它的第一个暂停不会与前一个暂停处于同一步骤。无人回答的暂停仍留在存储中，依然可以用检查点 ID 恢复。
