@@ -238,9 +238,11 @@ export interface JavaScriptOptions {
    * The stack, in bytes, that `define()` and `main()` may use. The module counts its own stack in linear memory, and a
    * source that uses more fails with the diagnostic `P_JS_RESOURCE_LIMIT`, whose `witness.max_stack_bytes` is this value.
    * The default is 49152 (48 KiB). The smallest value is 16384 and the largest is what the module's own stack holds, which
-   * the error of a larger value states. That is more than the host's call stack carries: the host's stack is used up
-   * 1.5 to 7 times as fast, depending on what recurses, and a source that overflows it ends in a trap that the module
-   * cannot recover from, which loses the instance. README.md has what Node's default stack carries.
+   * the error of a larger value states. That is more than the host's call stack carries, and the module accepts it all
+   * the same: the host's stack is used up 1.5 to 7 times as fast, depending on what recurses, and a source that overflows
+   * it ends in a trap that the module cannot recover from, which loses the instance. On Node's default stack (about
+   * 984 KiB) `JSON.stringify` of deeply nested data overflows it at 160 KiB, so keep this within an eighth of the host's
+   * call stack (about 123 KiB there). README.md has the measurements.
    */
   stackBytes?: number;
   /** How long `define()` may run when a source is admitted, in milliseconds, from 1 to 3600000. The default is 5000. */
