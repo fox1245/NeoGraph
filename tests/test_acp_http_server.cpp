@@ -1583,6 +1583,12 @@ TEST(ACPHttpServer, ConnectionsOverTheLimitAreRefusedOnBothTransports) {
     Fixture fixture(config);
     WsAgent first(fixture.port());
     ASSERT_TRUE(first.connect());
+    // The server counts a connection when its agent starts, which is just after it answers the
+    // upgrade with 101. An upgrade that arrives in between is admitted and closed with 1013
+    // instead of being answered 503. Waiting for the agent's first answer makes the count
+    // certain before the second connection is made.
+    ASSERT_TRUE(first.send(initialize_request(1)));
+    ASSERT_TRUE(first.response(1));
     WsAgent second(fixture.port());
     EXPECT_FALSE(second.connect());
     EXPECT_EQ(second.status(), 503);
