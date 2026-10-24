@@ -1340,6 +1340,97 @@ TEST(ProgramHostPumpedStores, AReconciledJavaScriptCallCoreWhoseHandlerThrowsAtI
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
 }
 
+namespace {
+
+// Records the budget a reconciled attempt is granted at its first event, Started, and runs `action` there: the journal
+// is read from it.
+class GrantedBudgetSink final : public ProgramEventSink {
+public:
+    void on_event(const ProgramEvent& event) override {
+        if (event.kind != ProgramEventKind::Started || granted) return;
+        granted = std::get<ProgramStartedEvent>(event.payload).budget;
+        if (action) action();
+    }
+    std::optional<RunBudget> granted;
+    std::function<void()>    action;
+};
+
+}  // namespace
+
+// #613: the reconciliation of a paused JavaScript callCore, completed, continues main() with the result it was given on
+// the host's loop as on threads. The pause released the reservation of the call; the reconciliation reserves it again, so
+// the attempt holds one and is granted what the journal holds.
+TEST(ProgramHostPumpedStores, AReconciledJavaScriptCallCoreContinuesMainWithTheReconciledResult) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions, true);
+    const auto            version = host.admit_javascript(kJavaScriptEffect);
+    const std::string     run_id  = "js-reconcile-continues";
+
+    std::optional<ProgramResult>        paused, ambiguous, ended, found;
+    std::optional<ProgramJournalRecord> before, held, latest;
+    std::optional<ProgramRunRecord>     record;
+    auto                                sink = std::make_shared<GrantedBudgetSink>();
+    sink->action = [&] { held = host.fixture.journal->latest(kOwner, run_id); };
+    auto script = [&]() -> asio::awaitable<int> {
+        auto invocation   = top_level(version.id(), run_id);
+        invocation.budget = RunBudget{10000, 777, 333, 1, 8, 20, 0, 0, 0};
+        invocation.validate();
+        auto first = co_await host.runtime->start_async(std::move(invocation));
+        paused     = co_await first.wait_async();
+        host.stores.pump_all();
+        before = host.fixture.journal->latest(kOwner, run_id);
+        const auto call_id = pending_call_id(*paused);
+        auto       unknown_resolution = resolution_for(call_id, ProgramEffectReconciliation::Unknown, std::nullopt, "trace-unknown", nullptr);
+        auto       completed_resolution = resolution_for(call_id, ProgramEffectReconciliation::Completed, json{{"result", "reconciled"}},
+                                                         "trace-completed", sink);
+        auto       unknown = co_await host.runtime->reconcile_async(kOwner, run_id, std::move(unknown_resolution));
+        ambiguous = co_await unknown.wait_async();
+        auto handle = co_await host.runtime->reconcile_async(kOwner, run_id, std::move(completed_resolution));
+        ended  = co_await handle.wait_async();
+        record = co_await handle.snapshot_async();
+        co_return 0;
+    };
+    host.run(script());
+    latest = host.fixture.journal->latest(kOwner, run_id);
+    host.stores.pump_all(false);
+    auto reconnect_script = [&]() -> asio::awaitable<int> {
+        auto handle = co_await host.runtime->reconnect_async(kOwner, run_id);
+        found       = co_await handle.wait_async();
+        co_return 0;
+    };
+    host.run(reconnect_script());
+
+    ASSERT_TRUE(paused && ambiguous && ended && record && before && held && latest && found && sink->granted);
+    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*paused);
+    ASSERT_EQ(ambiguous->status(), ProgramTerminalStatus::AmbiguousEffect) << failure_text(*ambiguous);
+    EXPECT_EQ(before->inflight_reservation, RunBudget{}) << "a paused call holds no reservation";
+    EXPECT_EQ(ended->status(), ProgramTerminalStatus::Completed) << failure_text(*ended);
+    EXPECT_EQ(ended->output(), (json{{"value", "reconciled"}}));
+    EXPECT_EQ(approvals_run.load(), 2) << "the call ran again with the reconciled result";
+
+    EXPECT_EQ(held->continuation.state, ContinuationState::Running);
+    EXPECT_NE(held->inflight_reservation, RunBudget{}) << "the reconciliation reserves the call";
+    EXPECT_EQ(held->remaining_budget.model_tokens, 0U);
+    EXPECT_EQ(held->remaining_budget.monetary_microunits, 0U);
+    EXPECT_EQ(held->inflight_reservation.model_tokens, 777U);
+    EXPECT_EQ(held->inflight_reservation.monetary_microunits, 333U);
+    RunBudget held_in_total = held->remaining_budget;
+    held_in_total.wall_time_ms += held->inflight_reservation.wall_time_ms;
+    held_in_total.model_tokens += held->inflight_reservation.model_tokens;
+    held_in_total.monetary_microunits += held->inflight_reservation.monetary_microunits;
+    held_in_total.max_core_steps += held->inflight_reservation.max_core_steps;
+    EXPECT_EQ(*sink->granted, held_in_total) << "the attempt is granted what the journal holds, no more";
+
+    EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
+    EXPECT_EQ(latest->inflight_reservation, RunBudget{}) << "the call settled its reservation";
+    EXPECT_EQ(latest->remaining_budget.model_tokens, 777U) << "nothing was spent, so nothing is lost";
+    EXPECT_EQ(latest->remaining_budget.monetary_microunits, 333U);
+    ASSERT_TRUE(record->terminal_result());
+    EXPECT_EQ(record->continuation().state, ContinuationState::Completed);
+    EXPECT_EQ(found->status(), ProgramTerminalStatus::Completed) << failure_text(*found);
+    EXPECT_EQ(found->output(), (json{{"value", "reconciled"}}));
+    EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
+}
+
 TEST(ProgramHostPumpedStores, AnInterruptedRunIsCancelledThroughAHostPumpedStore) {
     HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
     std::optional<ProgramResult> paused, cancelled;

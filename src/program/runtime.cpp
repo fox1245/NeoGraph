@@ -9967,12 +9967,19 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
             ? restore_reserved_resources(available_budget,
                                          previous_journal->inflight_reservation)
             : restore_reserved_resources(available_budget, released_execution);
-    const auto resumed_remaining =
-        resume_javascript_core ? available_budget : attempt_budget;
-    const auto resumed_reservation = (ambiguous || resume_javascript_core)
-                                         ? previous_journal->inflight_reservation
-                                         : RunBudget{};
-    auto       journal             = ProgramJournalRecord::create(ProgramJournalRecordData{
+    auto resumed_remaining = resume_javascript_core ? available_budget : attempt_budget;
+    auto resumed_reservation = (ambiguous || resume_javascript_core)
+                                   ? previous_journal->inflight_reservation
+                                   : RunBudget{};
+    // #613: a paused JavaScript callCore holds no reservation, because the pause
+    // released it. The attempt that continues the call needs one, as a resume
+    // makes it (resume_core), so that the call settles its usage against it.
+    if (resume_javascript_core && resumed_reservation == RunBudget{}) {
+        auto reservation    = detail::reserve_command_resources(attempt_budget);
+        resumed_remaining   = std::move(reservation.remaining);
+        resumed_reservation = std::move(reservation.reservation);
+    }
+    auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous->journal_head(), std::string(run_id), previous->program_version_id(),
         previous->bundle_id(), previous_journal->sequence + 1,
         ProgramContinuation{"root", next_state, next_attempt}, resumed_remaining,
