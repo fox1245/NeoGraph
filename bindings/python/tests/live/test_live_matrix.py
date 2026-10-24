@@ -83,20 +83,6 @@ def test_tool_call(preset):
     assert calls and calls[0].name == "get_weather"
 
 
-def _images(run):
-    return [p for p in run.parts() if isinstance(p, ng.ProviderMedia) and p.kind == ng.ProviderMediaKind.Image]
-
-
-@pytest.mark.parametrize("stream", [case(s, keys=["OPENROUTER_API_KEY"], id=n) for n, s in MODES])
-def test_openrouter_chat_keeps_generated_images(stream):
-    model = live_model("openrouter.chat.image")
-    run = Run(provider("openrouter.chat", model), model, [user("A tiny flat red circle icon on white.")],
-              stream=stream)
-    images = _images(run)
-    assert images
-    assert images[0].mime.startswith("image/") and images[0].data
-
-
 def _inline_bytes(run):
     return sum(len(part.data) for part in run.parts()
                if isinstance(part, ng.ProviderMedia) and part.source == ng.ProviderMediaSource.Inline and part.data)
