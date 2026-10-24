@@ -10094,7 +10094,8 @@ TEST(ProgramRuntimeTest, LifecycleHookParentDeadlineBeforeEpochDoesNotOverflowTo
               system_clock::time_point::min() +
                   std::chrono::duration_cast<system_clock::duration>(remaining));
     EXPECT_EQ(neograph::program::detail::deadline_after(
-                  epoch + std::chrono::hours(24), steady_clock::duration::max()),
+                  system_clock::time_point::max() - std::chrono::hours(24),
+                  std::chrono::hours(48)),
               system_clock::time_point::max());
 
     AdmittedRuntime fixture;
