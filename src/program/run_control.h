@@ -629,6 +629,12 @@ std::string javascript_command_effect_identity(std::string_view         bundle_i
                                                std::uint64_t            command_ordinal,
                                                const JavaScriptCommand& command);
 
+// A compare-and-publish of a run's record loses when another publication of the same run was written between the read of
+// the head and the write: a child that is attached, dispatched or joined, or the command record of another member of a
+// join. Each lost compare is such a publication, so a retry reads a newer head, and a run with several children in
+// flight loses more than a few in a row (#614). The bound only stops a store that never accepts.
+inline constexpr int kRunPublicationAttempts = 64;
+
 /// Test seam: when set, called on the thread that launches each member of a
 /// JavaScript join, right before the launch, with the member's index and
 /// whether it replays a recorded result. A test may hold a launch to force the

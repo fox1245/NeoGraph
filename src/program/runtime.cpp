@@ -1578,12 +1578,6 @@ asio::awaitable<std::optional<ProgramRunRecord>> load_active_agent_run(
     co_return co_await transitions->load(owner, generation->run_id());
 }
 
-// A compare-and-publish of a run's record loses when another publication of the same run was written between the read of
-// the head and the write: a child that is attached, dispatched or joined, or the command record of another member of a
-// join. Each lost compare is such a publication, so a retry reads a newer head, and a run with several children in
-// flight loses more than a few in a row (#614). The bound only stops a store that never accepts.
-constexpr int kRunPublicationAttempts = 64;
-
 struct ChildRecordPublication {
     ProgramTransitionPublishResult  result = ProgramTransitionPublishResult::Conflict;
     std::optional<ProgramRunRecord> record;
@@ -1597,7 +1591,7 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
     std::string                             parent_run_id,
     std::shared_ptr<ProgramTransitionStore> transitions,
     ProgramChildRecord                      child) {
-    for (int attempt = 0; attempt < 5; ++attempt) {
+    for (int attempt = 0; attempt < detail::kRunPublicationAttempts; ++attempt) {
         const auto previous = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
         if (!previous) co_return ChildRecordPublication{};
         const auto existing = find_child(*previous, child.child_run_id);
@@ -1637,7 +1631,10 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
         }
         if (previous->continuation().state != ContinuationState::Running) co_return ChildRecordPublication{};
         const auto previous_journal = co_await transitions->latest(owner_scope, previous->run_id());
-        if (!previous_journal || previous_journal->id != previous->journal_head()) co_return ChildRecordPublication{};
+        if (!previous_journal) co_return ChildRecordPublication{};
+        // The record and the journal are two reads. A publication between them leaves a pair that does not match; read
+        // both again.
+        if (previous_journal->id != previous->journal_head()) continue;
 
         auto children = previous->children();
         if (existing) {
