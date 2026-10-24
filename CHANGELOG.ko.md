@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=7738e1b03a713f084b1e334808b58bab8d54b6829f74bf8d04ae1d29407ceffe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=88db004868214b62019b5cb7931a4c96be04202092fe2f4a899267951323ffe5 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -190,6 +190,10 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ### 수정됨
 - **시계가 셀 수 없는 JavaScript 벽시계 시간 한도는 과거의 마감이 아니라 한도 없음입니다.** `JavaScriptCompileLimits::max_wall_time_ms`는 `std::chrono::milliseconds(limit)`를 steady clock에 더해 마감이 되었습니다. 시계의 나노초는 부호 있는 64비트로 약 292년(9.2조 밀리초)에서 넘치고 `2^63` 밀리초는 밀리초 값에 아예 들어가지 않으므로, 약 9.2e12를 넘는 한도는 호스트가 "무제한"으로 줄 수 있는 `UINT64_MAX`를 포함해 `define()`과 `main()`을 곧바로 `P_JS_TIMEOUT`으로 끝냈습니다(덧셈이 넘쳤습니다). 이제 마감은 가장 늦은 시각에서 멈춥니다. JavaScript 모듈은 영향을 받지 않았습니다. `defineTimeMs`는 3,600,000밀리초로 제한됩니다.
 
+- **중단된 JavaScript `ng.callCore`를 `Completed`로 `reconcile()`하면 `P_JS_COMMAND_JOURNAL_MISMATCH`로 실패하지 않고 `main()`이 계속됩니다 (#613).** Core 노드의 효과(effect)에서 중단된 JavaScript `main()` 실행은 그 호출의 벽시계 시간, 모델 토큰, 금액, Core 스텝에 대한 예약을 갖고 있지 않습니다. 중단이 예약을 풀기 때문입니다. 재개(resume)는 호출을 이어 갈 때 예약을 다시 잡습니다. 호출을 완료로 처리하는 reconcile은 그러지 않았습니다. 그 시도는 저널에서 예약을 찾지 못했고, 실행은 `P_JS_COMMAND_JOURNAL_MISMATCH`("Exact Core resume has no durable command resource reservation")와 함께 `failed`로 끝났으며, 호스트가 준 결과는 쓰이지 않았습니다.
+  - **이제** reconcile이 재개와 같이 호출의 자원을 예약합니다. 호출을 이어 가는 시도는 예약을 갖고 저널이 가진 만큼을 부여받으며, 호출은 그 예약으로 정산하고, `main()`은 reconcile된 결과로 계속되며, 실행은 쓰지 않은 토큰과 금액을 남긴 채 끝납니다. reconcile된 호출 안에서 멈춘 뒤 재시작한 프로세스가 복구한 시도는 저널에서 예약을 찾습니다.
+  - **그대로인 것.** `Unknown` 또는 `Failed`로 끝나는 reconcile, Core 호출이 아닌 JavaScript 명령을 완료로 처리하는 reconcile, JavaScript `main()`이 없는 실행의 reconcile은 전과 같은 경로를 탑니다.
+  - **테스트.** `ProgramRuntimeTest`(인메모리와 SQLite)와 `ProgramHostPumpedStores`가 reconcile된 `ng.callCore`를 완료시키고, 시도가 부여받은 예산을 저널과 비교하고, 첫 호출 뒤의 두 번째 호출을 reconcile하고, 호출 안에서 멈춘 reconcile된 시도를 복구합니다. 이전 엔진에서는 어느 것도 reconcile을 넘지 못했고, 실행은 위 코드와 함께 `failed`로 끝났습니다.
 - **응답이 없던 일시 정지 뒤에 온 일시 정지를 재개할 수 있습니다 (#600).** `NodeInterrupt`를 재개하지 않고 같은 스레드에서 `resume_if_exists`로 다시 run을 시작한 호스트(취소된 태스크, 닫힌 세션, 다음 메시지)에서는 첫 번째 일시 정지가 새 run이 저장하는 체크포인트의 부모로 남았고, 새 run의 첫 슈퍼스텝도 일시 정지하면 그 두 번째 일시 정지를 재개할 때 노드가 하나도 실행되기 전에 `NodeInterrupt ancestry crosses super-step boundaries`로 실패했습니다. 그 일시 정지의 `fork`와, 같은 상태에 있는 영속 서브그래프의 자식도 마찬가지였습니다. 두 일시 정지 사이에 새 run의 스텝이 하나라도 완료되었다면 그 스텝이 Completed 체크포인트를 저장해 두 번째 일시 정지가 거기에 달렸으므로 영향을 받지 않았습니다. 이제 재개가 재생하는 pending write는 그 일시 정지 자신의 슈퍼스텝의 것입니다. 조상을 따라가는 탐색은 그 스텝의 일시 정지들과 그 스텝이 시작된 체크포인트를 읽고, 더 이른 스텝의 일시 정지에서는 그 아래에 이 스텝 몫으로 기록된 write(새 run의 스텝에서 끝난 형제들)를 읽은 뒤 멈춥니다.
   - **응답이 없던 일시 정지의 write는 재생되지 않습니다.** 그 write는 더 이른 스텝을 달고 있으므로, 첫 번째 턴에서 끝난 형제가 두 번째 턴의 형제를 대신하지 않으며, 두 번째 턴에서 끝난 형제는 다시 실행되지 않고 재생됩니다. 스레드를 이어 가는 run은 이어 가는 체크포인트의 다음 스텝에서 시작하므로, 그 run의 첫 일시 정지는 앞선 일시 정지와 같은 스텝이 되는 일이 없습니다. 응답이 없던 일시 정지는 저장소에 남아 있으며 체크포인트 ID로 여전히 재개할 수 있습니다.
   - **나머지 검사는 그대로입니다.** 순환, 없거나 다른 스레드의 또는 다른 스키마의 부모, 그리고 부모가 더 나중 스텝의 일시 정지인 일시 정지는 전과 같이 거부되며, 이는 블로킹 탐색(`fork`, `resume_pending_writes`)과 awaitable 탐색(`resume`) 모두에 해당합니다. 두 탐색은 이제 검사를 공유합니다. **동작 변경:** 부모가 더 나중 스텝의 일시 정지인 일시 정지의 거부 메시지는 이제 `NodeInterrupt ancestry runs backwards across super-steps`이며, `NodeInterrupt ancestry crosses super-step boundaries`는 더 이상 던져지지 않습니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=7738e1b03a713f084b1e334808b58bab8d54b6829f74bf8d04ae1d29407ceffe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=88db004868214b62019b5cb7931a4c96be04202092fe2f4a899267951323ffe5 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -190,6 +190,10 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 ### 修正
 - **クロックが数えられない JavaScript のウォールクロック制限は、過去の期限ではなく制限なしです。** `JavaScriptCompileLimits::max_wall_time_ms` は `std::chrono::milliseconds(limit)` を steady clock に足して期限になっていました。クロックのナノ秒は符号付き 64 ビットでは約 292 年（9.2 兆ミリ秒）であふれ、`2^63` ミリ秒はミリ秒の値にそもそも収まらないため、約 9.2e12 を超える制限は、ホストが「無制限」として渡しうる `UINT64_MAX` も含めて、`define()` と `main()` をすぐに `P_JS_TIMEOUT` で終わらせていました（加算がオーバーフローしていました）。期限は今は最も遅い時刻で止まります。JavaScript モジュールは影響を受けませんでした。`defineTimeMs` は 3,600,000 ミリ秒までに制限されています。
 
+- **中断された JavaScript の `ng.callCore` を `Completed` で `reconcile()` すると、`P_JS_COMMAND_JOURNAL_MISMATCH` で失敗せず `main()` が続きます (#613)。** Core ノードの効果（effect）で中断された JavaScript の `main()` を持つ実行は、その呼び出しのウォールクロック時間、モデルトークン、金額、Core ステップの予約を持ちません。中断が予約を解放するためです。再開（resume）は呼び出しを続けるときに予約を取り直します。呼び出しを完了として扱う reconcile は取り直しませんでした。その試行はジャーナルに予約を見つけられず、実行は `P_JS_COMMAND_JOURNAL_MISMATCH`（"Exact Core resume has no durable command resource reservation"）で `failed` になり、ホストが渡した結果は使われませんでした。
+  - **現在は** reconcile が再開と同じく呼び出しの資源を予約します。呼び出しを続ける試行は予約を持ち、ジャーナルが保持する分を付与され、呼び出しはその予約に対して精算し、`main()` は reconcile された結果で続き、実行は使わなかったトークンと金額を残して終わります。reconcile された呼び出しの内部で止まった後に、再起動したプロセスが復旧する試行は、ジャーナルに予約を見つけます。
+  - **変わらないもの。** `Unknown` または `Failed` で終わる reconcile、Core 呼び出しではない JavaScript コマンドを完了として扱う reconcile、JavaScript の `main()` を持たない実行の reconcile は、従来と同じ経路を通ります。
+  - **テスト。** `ProgramRuntimeTest`（インメモリと SQLite）と `ProgramHostPumpedStores` が、reconcile された `ng.callCore` を完了させ、試行が付与された予算をジャーナルと比べ、最初の呼び出しの後の 2 つ目の呼び出しを reconcile し、呼び出しの内部で止まった reconcile 済みの試行を復旧します。以前のエンジンでは、どれも reconcile を越えられず、実行は上記のコードで `failed` になりました。
 - **応答のなかった一時停止の後に来た一時停止を再開できます (#600)。** `NodeInterrupt` を再開せず、同じスレッドで `resume_if_exists` を付けて run を始め直したホスト(キャンセルされたタスク、閉じられたセッション、次のメッセージ)では、最初の一時停止が新しい run の保存するチェックポイントの親として残り、新しい run の最初のスーパーステップも一時停止すると、その二つ目の一時停止の再開は、ノードが一つも実行される前に `NodeInterrupt ancestry crosses super-step boundaries` で失敗しました。その一時停止の `fork` と、同じ状態にある永続サブグラフの子も同じでした。二つの一時停止の間に新しい run のステップが完了していれば、そのステップが Completed チェックポイントを保存して二つ目の一時停止がそこにぶら下がるため、影響を受けませんでした。今は、再開が再生する pending write はその一時停止自身のスーパーステップのものです。祖先をたどる探索は、そのステップの一時停止と、そのステップが始まったチェックポイントを読み、より前のステップの一時停止では、その下にこのステップの分として記録された write(新しい run のステップで終わった兄弟)を読んでから止まります。
   - **応答のなかった一時停止の write は再生されません。** その write はより前のステップを持つため、最初のターンで終わった兄弟が二つ目のターンの兄弟の代わりになることはなく、二つ目のターンで終わった兄弟は再実行されずに再生されます。スレッドを引き継ぐ run は、引き継ぐチェックポイントの次のステップから始まるので、その最初の一時停止が直前の一時停止と同じステップになることはありません。応答のなかった一時停止はストアに残り、チェックポイント ID で引き続き再開できます。
   - **ほかの検査はそのままです。** 循環、存在しない親、別スレッドの親、別スキーマの親、そして親がより後のステップの一時停止である一時停止は、これまでどおり拒否されます。ブロッキング探索(`fork`、`resume_pending_writes`)と awaitable 探索(`resume`)の両方で同様で、二つの探索は検査を共有するようになりました。**動作の変更:** 親がより後のステップの一時停止である一時停止の拒否メッセージは `NodeInterrupt ancestry runs backwards across super-steps` になり、`NodeInterrupt ancestry crosses super-step boundaries` はもう投げられません。
