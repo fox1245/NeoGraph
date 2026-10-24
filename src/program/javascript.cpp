@@ -2843,6 +2843,19 @@ const char* interrupt_reason_name(InterruptReason reason) noexcept {
     return "none";
 }
 
+// The deadline `limit_ms` milliseconds after `from`. A limit that the steady clock cannot count (its nanoseconds
+// overflow a signed 64-bit count at about 292 years, and 2^63 ms overflow the millisecond count itself) is no limit in
+// practice, so it saturates to the latest time point instead of becoming a deadline in the past.
+std::chrono::steady_clock::time_point deadline_after(std::chrono::steady_clock::time_point from,
+                                                     std::uint64_t                         limit_ms) noexcept {
+    using clock               = std::chrono::steady_clock;
+    const auto latest         = clock::time_point::max();
+    if (from >= latest) return latest;
+    const auto room_ms = std::chrono::duration_cast<std::chrono::milliseconds>(latest - from).count();
+    if (limit_ms >= static_cast<std::uint64_t>(room_ms)) return latest;
+    return from + std::chrono::milliseconds(static_cast<std::int64_t>(limit_ms));
+}
+
 // The stack the engine has in force. A WebAssembly build honours the size it was given only as far as its shadow
 // stack holds (see deps/quickjs/NEOGRAPH_PROVENANCE), and the witness must not report more than that.
 std::size_t applied_stack_bytes([[maybe_unused]] JSContext* context,
@@ -2989,7 +3002,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
         install_host(scope.context(), HostContext::Definition);
         InterruptBudget budget;
         budget.limit    = limits.max_interrupt_polls;
-        budget.deadline = started_at + std::chrono::milliseconds(limits.max_wall_time_ms);
+        budget.deadline = deadline_after(started_at, limits.max_wall_time_ms);
         JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
         refresh_external_interrupt(budget);
         if (budget.reason != InterruptReason::None)
@@ -3146,9 +3159,9 @@ struct JavaScriptGenerator::Impl {
         capture.max_native_builder_bytes = configured_limits.max_generated_document_bytes;
         capture.accounting               = &scope.accounting();
         budget.limit                     = configured_limits.max_interrupt_polls;
-        budget.deadline =
-            deadline.value_or(std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(configured_limits.max_wall_time_ms));
+        budget.deadline = deadline ? *deadline
+                                   : deadline_after(std::chrono::steady_clock::now(),
+                                                    configured_limits.max_wall_time_ms);
         budget.cancellation_requested = std::move(cancellation_requested);
     }
 

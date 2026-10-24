@@ -780,6 +780,39 @@ TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsWallTimeCeiling) {
     }
 }
 
+// A wall-time limit is a count of milliseconds that becomes a deadline on the steady clock, whose nanoseconds
+// overflow a signed 64-bit count at about 292 years (9.2e12 ms), and 2^63 ms overflow the millisecond count itself.
+// A limit beyond what the clock counts is no limit in practice: it must not become a deadline in the past.
+TEST(ProgramCompilerTest, JavaScriptWallTimeLimitBeyondTheClockIsNotAnImmediateTimeout) {
+    const auto source = ProgramSource::from_javascript(
+        "huge-wall-time.js",
+        R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "local-reducer", initial: 0});
+                graph.node("draft", {type: "local-node"});
+                graph.entry("draft");
+                graph.exit("draft");
+                return graph;
+            }
+        )JS");
+    for (const std::uint64_t limit : {std::uint64_t{9'300'000'000'000}, std::uint64_t{10'000'000'000'000},
+                                      std::uint64_t{1} << 63, (std::uint64_t{1} << 63) + 1,
+                                      std::numeric_limits<std::uint64_t>::max()}) {
+        ProgramCompilerConfig config;
+        config.compiler_build_id           = "program-compiler-test/javascript-huge-wall-time/v1";
+        config.javascript.max_wall_time_ms = limit;
+        ProgramCompiler compiler(complete_snapshot(), std::move(config));
+        try {
+            const auto bundle = compiler.compile(source);
+            EXPECT_EQ(bundle.source_kind(), SourceKind::JavaScript) << limit;
+        } catch (const ProgramCompileError& error) {
+            ADD_FAILURE() << "a wall-time limit of " << limit << " ms ended the evaluation: "
+                          << error.diagnostics().front().code;
+        }
+    }
+}
+
 TEST(ProgramCompilerTest, JavaScriptSourceStopsAtItsDeclaredBudgetWallTime) {
     ProgramCompilerConfig config;
     config.compiler_build_id = "program-compiler-test/javascript-budget-wall-time/v1";
