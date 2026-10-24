@@ -589,7 +589,7 @@ def main():
     parser.add_argument("--work-dir", required=True, type=Path, help="Fresh owned output directory; never cleaned automatically")
     parser.add_argument("--jobs", required=True, type=jobs_count, help="parallel build jobs: a number or auto")
     parser.add_argument("--ccache", action="store_true",
-                        help="native-linux, asan, tsan: use explicitly provisioned ccache")
+                        help="native-linux, native-posix, asan, tsan: use explicitly provisioned ccache")
     parser.add_argument("--shared", action="store_true", help="install: shared-library mode")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--core-only", action="store_true", help="install: Core-only consumer")
@@ -609,8 +609,8 @@ def main():
         parser.error("--quickjs requires --program")
     if any((args.shared, args.core_only, args.program, args.quickjs)) and args.profile != "install":
         parser.error("consumer switches apply only to install")
-    if args.ccache and args.profile not in ("native-linux", "asan", "tsan"):
-        parser.error("--ccache applies only to native-linux, asan and tsan")
+    if args.ccache and args.profile not in ("native-linux", "native-posix", "asan", "tsan"):
+        parser.error("--ccache applies only to native-linux, native-posix, asan and tsan")
     if args.arch and args.profile != "wheel" or args.release_tag and args.profile != "sdist":
         parser.error("--arch applies to wheel; --release-tag applies to sdist")
     if args.generator and args.profile != "native-windows":
