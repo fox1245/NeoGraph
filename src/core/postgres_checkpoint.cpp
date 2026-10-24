@@ -312,6 +312,30 @@ int64_t now_ms() {
 // ── Schema DDL and once-only retained-envelope migration ──────────────
 
 constexpr const char* kSchemaDDL = R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
+    thread_id            TEXT   NOT NULL,
+    parent_checkpoint_id TEXT   NOT NULL,
+    seq                  INT    NOT NULL,
+    task_id              TEXT   NOT NULL,
+    task_path            TEXT   NOT NULL DEFAULT '',
+    node_name            TEXT   NOT NULL DEFAULT '',
+    writes_json          JSONB  NOT NULL DEFAULT '[]'::jsonb,
+    command_json         JSONB  NOT NULL DEFAULT 'null'::jsonb,
+    sends_json           JSONB  NOT NULL DEFAULT '[]'::jsonb,
+    step                 BIGINT NOT NULL DEFAULT 0,
+    timestamp_ms         BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (thread_id, parent_checkpoint_id, task_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS neograph_checkpoint_blobs (
+    thread_id  TEXT   NOT NULL,
+    channel    TEXT   NOT NULL,
+    version    BIGINT NOT NULL,
+    blob_data  JSONB  NOT NULL,
+    blob_text  TEXT,
+    PRIMARY KEY (thread_id, channel, version)
+);
+
 CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     thread_id          TEXT    NOT NULL,
     checkpoint_id      TEXT    NOT NULL,
@@ -333,10 +357,6 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoints (
     PRIMARY KEY (thread_id, checkpoint_id)
 );
 
-ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape JSONB;
-ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS metadata_text TEXT;
-ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape_text TEXT;
-
 -- A thread's latest checkpoint is the one saved last, as in the in-memory
 -- store: save_seq is the save order, and a re-save of an ID takes the next
 -- value. A timestamp or step cannot order saves: a later run on a thread
@@ -344,43 +364,78 @@ ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape_text 
 -- inside one millisecond share the timestamp. Adding the nullable column
 -- and its default rewrites no row: rows saved before it keep save_seq NULL
 -- and their (timestamp_ms, step) order, behind every numbered row. The
--- default numbers a row whose writer does not set save_seq. The ALTER TABLE
--- statements above serialize concurrent initializers before the sequence.
-ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS save_seq BIGINT;
-CREATE SEQUENCE IF NOT EXISTS neograph_checkpoints_save_seq
-    OWNED BY neograph_checkpoints.save_seq;
-ALTER TABLE neograph_checkpoints
-    ALTER COLUMN save_seq SET DEFAULT nextval('neograph_checkpoints_save_seq');
+-- default numbers a row whose writer does not set save_seq. Guarding the
+-- in-place migration DDL behind catalog checks avoids acquiring
+-- AccessExclusiveLock on tables whose schema is already current.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'neograph_checkpoint_blobs'::regclass
+          AND attname = 'blob_text'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE neograph_checkpoint_blobs ADD COLUMN IF NOT EXISTS blob_text TEXT;
+    END IF;
 
-DROP INDEX IF EXISTS neograph_checkpoints_recent;
-CREATE INDEX IF NOT EXISTS neograph_checkpoints_save_order
-    ON neograph_checkpoints (thread_id, save_seq DESC NULLS LAST, timestamp_ms DESC, step DESC);
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'neograph_checkpoints'::regclass
+          AND attname = 'checkpoint_shape'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape JSONB;
+    END IF;
 
-CREATE TABLE IF NOT EXISTS neograph_checkpoint_blobs (
-    thread_id  TEXT   NOT NULL,
-    channel    TEXT   NOT NULL,
-    version    BIGINT NOT NULL,
-    blob_data  JSONB  NOT NULL,
-    blob_text  TEXT,
-    PRIMARY KEY (thread_id, channel, version)
-);
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'neograph_checkpoints'::regclass
+          AND attname = 'metadata_text'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS metadata_text TEXT;
+    END IF;
 
-ALTER TABLE neograph_checkpoint_blobs ADD COLUMN IF NOT EXISTS blob_text TEXT;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'neograph_checkpoints'::regclass
+          AND attname = 'checkpoint_shape_text'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS checkpoint_shape_text TEXT;
+    END IF;
 
-CREATE TABLE IF NOT EXISTS neograph_checkpoint_writes (
-    thread_id            TEXT   NOT NULL,
-    parent_checkpoint_id TEXT   NOT NULL,
-    seq                  INT    NOT NULL,
-    task_id              TEXT   NOT NULL,
-    task_path            TEXT   NOT NULL DEFAULT '',
-    node_name            TEXT   NOT NULL DEFAULT '',
-    writes_json          JSONB  NOT NULL DEFAULT '[]'::jsonb,
-    command_json         JSONB  NOT NULL DEFAULT 'null'::jsonb,
-    sends_json           JSONB  NOT NULL DEFAULT '[]'::jsonb,
-    step                 BIGINT NOT NULL DEFAULT 0,
-    timestamp_ms         BIGINT NOT NULL DEFAULT 0,
-    PRIMARY KEY (thread_id, parent_checkpoint_id, task_id, seq)
-);
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attribute
+        WHERE attrelid = 'neograph_checkpoints'::regclass
+          AND attname = 'save_seq'
+          AND NOT attisdropped
+    ) THEN
+        ALTER TABLE neograph_checkpoints ADD COLUMN IF NOT EXISTS save_seq BIGINT;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_attrdef d
+        JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+        WHERE d.adrelid = 'neograph_checkpoints'::regclass
+          AND a.attname = 'save_seq'
+          AND NOT a.attisdropped
+    ) THEN
+        CREATE SEQUENCE IF NOT EXISTS neograph_checkpoints_save_seq
+            OWNED BY neograph_checkpoints.save_seq;
+        ALTER TABLE neograph_checkpoints
+            ALTER COLUMN save_seq SET DEFAULT nextval('neograph_checkpoints_save_seq');
+    END IF;
+
+    IF to_regclass('neograph_checkpoints_recent') IS NOT NULL THEN
+        DROP INDEX IF EXISTS neograph_checkpoints_recent;
+    END IF;
+
+    IF to_regclass('neograph_checkpoints_save_order') IS NULL THEN
+        CREATE INDEX IF NOT EXISTS neograph_checkpoints_save_order
+            ON neograph_checkpoints (thread_id, save_seq DESC NULLS LAST, timestamp_ms DESC, step DESC);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_obligations (
     thread_id TEXT PRIMARY KEY
@@ -570,10 +625,10 @@ bool retained_row_requires_obligation(PGresult* result, int row) {
 }
 
 void initialize_schema(pg_conn* connection) {
-    (void)exec_sql(connection, kSchemaDDL);
-    // Marker and backfill commit together. Concurrent initializers serialize
-    // on the marker; existing obligations and journal heads remain untouched.
+    // Schema DDL, marker, and backfill run under the namespace advisory lock
+    // so concurrent store constructors and slot rebuilds serialize cleanly.
     journal_transaction(connection, "neograph:retained-provider-finite-scope/v2", [&] {
+        (void)exec_sql(connection, kSchemaDDL);
         auto marker = exec_sql(connection, kSqlRetainedMigration);
         if (PQntuples(marker) != 0) {
             auto retained = exec_sql(connection, kSqlRetainedMetadata);
@@ -1741,9 +1796,9 @@ auto journal_transaction_async(pg_conn* c, const std::string& key, Fn& operation
 }
 
 asio::awaitable<void> initialize_schema_async(pg_conn* connection) {
-    co_await exec_sql_async(connection, kSchemaDDL);
     const std::string migration_key = "neograph:retained-provider-finite-scope/v2";
     auto migration = [&]() -> asio::awaitable<bool> {
+        co_await exec_sql_async(connection, kSchemaDDL);
         const std::vector<std::string> no_params;
         auto marker = co_await exec_params_async(connection, kSqlRetainedMigration, no_params);
         if (PQntuples(marker) != 0) {
