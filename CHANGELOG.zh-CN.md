@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7738e1b03a713f084b1e334808b58bab8d54b6829f74bf8d04ae1d29407ceffe -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=88db004868214b62019b5cb7931a4c96be04202092fe2f4a899267951323ffe5 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -190,6 +190,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
 ### 修复
 - **时钟数不了的 JavaScript 墙钟时间限制是没有限制，而不是已经过去的截止时间。** `JavaScriptCompileLimits::max_wall_time_ms` 是把 `std::chrono::milliseconds(limit)` 加到 steady clock 上得到截止时间的。时钟的纳秒数在有符号 64 位下约 292 年（9.2 万亿毫秒）就会溢出，`2^63` 毫秒更是根本放不进毫秒计数，所以大于约 9.2e12 的限制，包括宿主可能用来表示"无限制"的 `UINT64_MAX`，会让 `define()` 和 `main()` 立刻以 `P_JS_TIMEOUT` 结束（加法发生了溢出）。现在截止时间饱和在最晚的时间点。JavaScript 模块不受影响：`defineTimeMs` 的上限是 3,600,000 毫秒。
 
+- **对被中断的 JavaScript `ng.callCore` 以 `Completed` 调用 `reconcile()` 时，`main()` 会继续，而不是以 `P_JS_COMMAND_JOURNAL_MISMATCH` 失败 (#613)。** 在 Core 节点的 effect 处被中断、且带有 JavaScript `main()` 的运行，不持有该调用的墙钟时间、模型 token、金额和 Core 步骤的预留，因为中断会释放它们。恢复（resume）继续该调用时会重新预留。把该调用按完成处理的 reconcile 却没有。它的尝试在日志中找不到预留，运行以 `P_JS_COMMAND_JOURNAL_MISMATCH`（"Exact Core resume has no durable command resource reservation"）结束为 `failed`，宿主给出的结果从未被使用。
+  - **现在** reconcile 与恢复一样为该调用预留资源。继续该调用的尝试持有预留，并获得日志所持有的量；调用按这笔预留结算，`main()` 以 reconcile 的结果继续，运行结束时保留未花费的 token 和金额。若进程在已 reconcile 的调用内部停止，重启后的进程所恢复的尝试能在日志中找到预留。
+  - **不变。** 以 `Unknown` 或 `Failed` 结束的 reconcile、把非 Core 调用的 JavaScript 命令按完成处理的 reconcile，以及没有 JavaScript `main()` 的运行的 reconcile，走的路径与之前相同。
+  - **测试。** `ProgramRuntimeTest`（内存与 SQLite）和 `ProgramHostPumpedStores` 完成一个被 reconcile 的 `ng.callCore`，把其尝试获得的预算与日志比较，在第一个调用之后 reconcile 第二个调用，并恢复在调用内部停止的、已 reconcile 的尝试。在之前的引擎上，它们都没能越过 reconcile，运行以上述代码结束为 `failed`。
 - **无人回答的暂停之后出现的暂停可以恢复了 (#600)。** 宿主没有恢复某个 `NodeInterrupt`，而是在同一线程上用 `resume_if_exists` 再次启动 run（被取消的任务、已关闭的会话、下一条消息）时，第一个暂停仍是新 run 所保存检查点的父节点；若新 run 的第一个超步也暂停，恢复这第二个暂停会在任何节点运行之前以 `NodeInterrupt ancestry crosses super-step boundaries` 失败。对它做 `fork`、以及处于同一状态的持久子图的子图，也是如此。如果两个暂停之间新 run 有一个步骤已经完成，该步骤会保存一个 Completed 检查点，第二个暂停挂在它下面，因此不受影响。现在恢复所重放的 pending write 属于该暂停自己的超步：沿祖先的遍历读取该步骤的各个暂停以及该步骤开始时所在的检查点，到了更早步骤的暂停处，读取记录在其下、属于本步骤的 write（新 run 该步骤中已完成的兄弟节点），然后停止。
   - **无人回答的暂停的 write 不会被重放。** 它们带着更早的步骤号，所以第一轮中已完成的兄弟节点不会代替第二轮的兄弟节点；第二轮中已完成的兄弟节点会被重放，而不是再次运行。延续线程的 run 从所延续检查点的下一个步骤开始，因此它的第一个暂停不会与前一个暂停处于同一步骤。无人回答的暂停仍留在存储中，依然可以用检查点 ID 恢复。
   - **其他检查保持不变。** 环、缺失的父节点、属于其他线程或其他 schema 的父节点，以及父节点是更晚步骤的暂停的暂停，仍和以前一样被拒绝；阻塞式遍历（`fork`、`resume_pending_writes`）和 awaitable 遍历（`resume`）都是如此，两者现在共用这些检查。**行为变更：**父节点是更晚步骤的暂停的暂停，其拒绝信息现在是 `NodeInterrupt ancestry runs backwards across super-steps`，`NodeInterrupt ancestry crosses super-step boundaries` 不再被抛出。
