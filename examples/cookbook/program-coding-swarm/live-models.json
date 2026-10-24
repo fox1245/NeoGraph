@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "claude-sonnet-5-5",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "context_window": 200000,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.000003",
+        "cache_write": "0.00000375",
+        "cache_write_1h": "0.000006",
+        "cache_read": "0.0000003",
+        "output": "0.000015"
+      }
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash-1017",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 131072,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.00000015",
+        "cache_read": "0.00000003",
+        "output": "0.0000006",
+        "ceiling_input": "0.00000044",
+        "ceiling_output": "0.00000132"
+      }
+    },
+    {
+      "id": "inception/mercury-3",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 131072,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.00000025",
+        "output": "0.000001",
+        "ceiling_input": "0.0000006",
+        "ceiling_output": "0.000002"
+      }
+    }
+  ],
+  "providers": {
+    "anthropic": {
+      "id": "coding-swarm-anthropic",
+      "family": "anthropic.messages",
+      "base_url": "https://api.anthropic.com",
+      "path": "/v1/messages",
+      "env_key": "ANTHROPIC_API_KEY"
+    },
+    "openrouter": {
+      "id": "coding-swarm-openrouter",
+      "family": "openai.chat",
+      "base_url": "https://openrouter.ai",
+      "path": "/api/v1/chat/completions",
+      "env_key": "OPENROUTER_API_KEY"
+    }
+  },
+  "roles": {
+    "orchestrator": {
+      "backend": "anthropic",
+      "model": "claude-sonnet-5-5",
+      "max_output_tokens": 768
+    },
+    "implementer": {
+      "backend": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "max_output_tokens": 768,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "implementer-cheap": {
+      "backend": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "max_output_tokens": 768,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "implementer-strong": {
+      "backend": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "max_output_tokens": 1024,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "reviewer": {
+      "backend": "openrouter",
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "max_output_tokens": 512,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "second-opinion": {
+      "backend": "openrouter",
+      "model": "inception/mercury-3",
+      "max_output_tokens": 512,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    }
+  }
+}
