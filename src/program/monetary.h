@@ -5,8 +5,8 @@
  * A Program run's RunBudget::monetary_microunits is its monetary ceiling in
  * micro-USD (1e-6 USD). Like every RunBudget field it is an amount granted to
  * the run, and 0 grants nothing: child and fork budgets are carved out of
- * their parent's amounts, and a completed run that used model tokens against
- * model_tokens = 0 is already reported BudgetExhausted. Nothing charged money
+ * their parent's amounts, and a run granted model_tokens = 0 sends no model
+ * call (it ends BudgetExhausted). Nothing charged money
  * before the provider binding (#372); the binding keeps that meaning, so a run
  * with monetary_microunits = 0 refuses every priced call before it is sent.
  *

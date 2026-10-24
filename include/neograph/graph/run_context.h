@@ -81,6 +81,8 @@ struct RunContext {
 
     /// Program-supplied token ceiling and terminal signal. Zero/null leave generic Core runs unchanged.
     std::uint64_t                     model_token_budget = 0;
+    /// `model_token_budget` is enforced even at 0: a Program run granted no tokens may send no model call.
+    bool                              model_token_budget_bounded = false;
     std::shared_ptr<std::atomic_bool> budget_exhausted;
     /// Durable Program run identity used by host-brokered journal effects.
     std::string run_id;
@@ -150,6 +152,10 @@ struct RunContext {
     /// Stable host/Program identity copied to each dispatched tool call.
     ToolExecutionIdentity tool_execution_identity;
 
+    /// Whether `model_token_budget` is a ceiling for this run (see model_token_ceiling_enforced()).
+    bool model_tokens_enforced() const noexcept {
+        return model_token_ceiling_enforced(model_token_budget, model_token_budget_bounded);
+    }
 };
 
 /**
@@ -174,6 +180,7 @@ inline ProviderCallIdentity make_provider_call_identity(const RunContext& ctx,
     identity.call_ordinal = ordinal;
     identity.usage = ctx.usage;
     identity.model_token_budget = ctx.model_token_budget;
+    identity.model_token_budget_bounded = ctx.model_token_budget_bounded;
     identity.budget_exhausted = ctx.budget_exhausted;
     identity.budget_cancel_token = ctx.budget_cancel_token;
     identity.managed_budget_lease = ctx.managed_budget_lease;

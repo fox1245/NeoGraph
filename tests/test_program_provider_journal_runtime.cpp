@@ -301,7 +301,7 @@ private:
 enum class Topology { Llm, React, ReactPausedBeforeTools, Approval };
 
 struct Options {
-    std::uint64_t model_tokens = 1000;   // 0 = unbounded dispatch
+    std::uint64_t model_tokens = 1000;   // 0 grants nothing: no call is sent
     std::string deployment = digest('a');
     std::size_t threads = 2;
     // Child-capable roots use checkpoint recovery rather than migration leases.
@@ -1117,7 +1117,6 @@ struct PausedWithCompletedCall {
         auto shared = std::make_shared<Shared>();
         shared->interrupt_after_call = true;
         Options options;
-        options.model_tokens = 0;
         Wire wire(files, shared, options);
         const auto version = wire.admit(owner, Topology::Approval);
         interrupted = wire.runtime().run(owner, version, wire.invocation(run, "", Topology::Approval));
@@ -1133,7 +1132,6 @@ struct PausedWithCompletedCall {
         auto shared = std::make_shared<Shared>();
         shared->interrupt_after_call = true;
         Options options;
-        options.model_tokens = 0;
         change(copy, *shared, options);
         Wire wire(copy, shared, options);
         auto result = wire.runtime().resume(owner, run, resume_after(interrupted, "trace-conflict")).wait();

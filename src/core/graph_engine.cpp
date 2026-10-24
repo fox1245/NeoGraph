@@ -1944,6 +1944,7 @@ GraphEngine::execute_graph_async(
     ctx.usage        = config.usage ? config.usage
                                      : std::make_shared<UsageAccumulator>();
     ctx.model_token_budget = config.model_token_budget;
+    ctx.model_token_budget_bounded = config.model_token_budget_bounded;
     const bool finite_standalone = config.model_token_budget != 0 && !config.usage &&
         !(resources && resources->provider_call_broker);
     const std::string_view budget_owner = metadata.owner_scope.empty() && ctx.native_history_archive && finite_standalone

@@ -303,11 +303,11 @@ asio::awaitable<sp::runtime::Result> RuntimeInterpositionController::invoke_asyn
     auto& turn = *assembled_turn;
     ProviderBudgetClaim claim;
     try {
-        claim = reserve_provider_dispatch(turn.request,
-            ProviderDispatchBudget{identity.usage, identity.model_token_budget,
-                identity.budget_exhausted, identity.budget_cancel_token,
-                identity.managed_budget_lease, identity.managed_budget_store,
-                graph::managed_provider_effect_id(identity)});
+        ProviderDispatchBudget budget{identity.usage, identity.model_token_budget,
+            identity.budget_exhausted, identity.budget_cancel_token,
+            identity.managed_budget_lease, identity.managed_budget_store,
+            graph::managed_provider_effect_id(identity), identity.model_token_budget_bounded};
+        claim = reserve_provider_dispatch(turn.request, std::move(budget));
     } catch (const ProviderFailure& failure) {
         co_return failure.outcome();
     }
