@@ -5164,9 +5164,35 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         auto control = std::make_shared<detail::RunControl>(std::move(record), std::move(events), transitions,
                                                             config.native_history_archive, scheduler);
         // Not registered: this control runs nothing. A cancel() of its handle still takes the claim that keeps a second
-        // cancel() and a resume from competing with the scheduled cancellation (see register_control).
+        // cancel() and a resume from competing with the scheduled cancellation (see register_control), and it is told
+        // when a later attempt of the run executes, as the handle of a registered control is: it has nothing to cancel
+        // either.
         control->set_pending_cancellations(process_state->pending_cancellations);
+        control->set_executing_attempt_check(executing_attempt_check());
         co_return control;
+    }
+
+    // Whether a later attempt of the run executes in this process: a control of the same run, with a higher attempt, that
+    // has no result yet. A handle of an attempt that the run has left (one that a resume has moved on from, whether it is
+    // the handle that ran the attempt or one read back from the stores) has nothing to cancel while that attempt
+    // executes, and ProgramHandle::cancel() says so by returning false.
+    std::function<bool(const detail::RunControl*)> executing_attempt_check() const {
+        return [weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state)](
+                   const detail::RunControl* requester) {
+            const auto state = weak_process_state.lock();
+            if (!state) return false;
+            std::vector<std::shared_ptr<detail::RunControl>> later;
+            {
+                std::lock_guard process_lock(state->controls_mutex);
+                for (const auto& entry : state->controls) {
+                    if (entry.owner_scope != requester->owner_scope || entry.run_id != requester->run_id) continue;
+                    if (const auto live = entry.control.lock(); live && live->attempt > requester->attempt)
+                        later.push_back(live);
+                }
+            }
+            return std::any_of(later.begin(), later.end(),
+                               [](const auto& control) { return !control->try_result().has_value(); });
+        };
     }
 
     // The synchronous form of an operation: its coroutine body, run to completion on the calling thread.
@@ -5773,23 +5799,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         }
         control->set_pending_cancellations(process_state->pending_cancellations);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
-        // Whether a later attempt of the run executes in this process: a control of the same run, with a higher attempt,
-        // that has no result yet.
-        control->set_executing_attempt_check([weak_process_state](const detail::RunControl* requester) {
-            const auto state = weak_process_state.lock();
-            if (!state) return false;
-            std::vector<std::shared_ptr<detail::RunControl>> later;
-            {
-                std::lock_guard process_lock(state->controls_mutex);
-                for (const auto& entry : state->controls) {
-                    if (entry.owner_scope != requester->owner_scope || entry.run_id != requester->run_id) continue;
-                    if (const auto live = entry.control.lock(); live && live->attempt > requester->attempt)
-                        later.push_back(live);
-                }
-            }
-            return std::any_of(later.begin(), later.end(),
-                               [](const auto& control) { return !control->try_result().has_value(); });
-        });
+        control->set_executing_attempt_check(executing_attempt_check());
         control->set_handoff_coordination_mutex(
             process_state->transition_mutex,
             [weak_process_state](const detail::RunControl* requester) {

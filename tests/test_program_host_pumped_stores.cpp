@@ -1971,6 +1971,51 @@ TEST(ProgramHostPumpedStores, AHandleOfAnEarlierAttemptDoesNotCancelARunThatExec
 }
 #endif
 
+// The handle of a run that was read back from the stores while it was interrupted is a handle of that attempt too, and it
+// is not told by the control that ran the attempt: no handle keeps that control, and the reconnect builds another from the
+// record. Once the run is resumed through the runtime, cancel() on the read-back handle has nothing to cancel while the
+// later attempt executes: it returns false, takes no claim and leaves no notice, as the handle that ran the attempt does.
+TEST(ProgramHostPumpedStores, AReconnectedHandleOfAnEarlierAttemptDoesNotCancelARunThatExecutes) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    const std::string     run_id = "earlier-attempt-reconnected";
+    auto                  first  = pause_run(host, host.two_pause, run_id);
+    ASSERT_TRUE(first.handle && first.paused);
+    ASSERT_EQ(first.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*first.paused);
+    first.handle.reset();  // no handle keeps the control of the attempt that paused, so the reconnect reads the record back
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    host.stores.transitions->set_pumped(true);
+
+    std::optional<ProgramHandle> reconnected;
+    auto reconnect = [&]() -> asio::awaitable<int> {
+        reconnected = co_await host.runtime->reconnect_async(kOwner, run_id);
+        co_return 0;
+    };
+    host.run(reconnect());
+    ASSERT_TRUE(reconnected && reconnected->try_result());
+    ASSERT_EQ(reconnected->try_result()->status(), ProgramTerminalStatus::Interrupted);
+
+    bool                         stale_accepted = true;
+    std::optional<ProgramHandle> second;
+    std::optional<ProgramResult> second_pause;
+    auto script = [&]() -> asio::awaitable<int> {
+        auto answer    = answer_for(*first.paused, json{{"decision", "one"}}, "trace-earlier-attempt-reconnected");
+        second         = co_await host.runtime->resume_handle_async(kOwner, run_id, std::move(answer));
+        stale_accepted = reconnected->cancel();
+        second_pause   = co_await second->wait_async();
+        co_return 0;
+    };
+    host.run(script());
+    EXPECT_FALSE(stale_accepted) << "the run executes in a later attempt: this handle has nothing to cancel";
+    ASSERT_TRUE(second && second_pause);
+    ASSERT_EQ(second_pause->status(), ProgramTerminalStatus::Interrupted) << failure_text(*second_pause);
+    EXPECT_EQ(second_pause->attempt(), 2U);
+    host.hosted.host->run_until([] { return false; }, 20ms);
+    EXPECT_TRUE(reconnected->notices().empty()) << "no cancellation was scheduled, so none is reported";
+    EXPECT_EQ(stored_state(host, run_id), ContinuationState::Interrupted);
+    EXPECT_EQ(stored_attempt(host, run_id), 2U);
+    EXPECT_EQ(cancelled_terminals(host, run_id), 0U);
+}
+
 // reconcile consumes an interrupted run as resume does: with the outcome of its effect declared unknown it moves the
 // record to AmbiguousEffect, which cancel_async leaves alone. It does not take the coordination lock either, so with
 // the task of an accepted cancel() waiting behind another cancellation it would reach the store first. It is refused
