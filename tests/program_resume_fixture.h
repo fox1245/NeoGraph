@@ -153,28 +153,37 @@ struct Peer {
     /// durable state; a request sent after that never happened.
     const std::atomic<bool>*      alive;
     std::mutex                    mutex;
-    std::map<std::string, int>    sent;  // call tag -> requests
+    std::map<std::string, int>    attempted;  // call tag -> broker invocations
+    int                           attempted_total = 0;
+    std::map<std::string, int>    sent;       // call tag -> requests
     int                           total = 0;
     std::function<void(const std::string&)> after_send;  // runs once the reply is ready
 
     void reset() {
         std::lock_guard lock(mutex);
+        attempted.clear();
+        attempted_total = 0;
         sent.clear();
         total = 0;
         after_send = nullptr;
     }
 };
 
+std::string request_tag(const ProviderRequest& request) {
+    const auto& chat = std::get<sp::chat::Request>(request.payload);
+    std::string tag;
+    for (const auto& message : chat.messages) tag = message.text;
+    for (const auto& message : chat.canonical_messages)
+        for (const auto& part : message.parts)
+            if (const auto* text = std::get_if<sp::Text>(&part)) tag = text->value;
+    return tag;
+}
+
 std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer> peer) {
     return std::make_shared<neograph::test::LocalProvider>(
         [peer](ProviderRequest request, const PreparedProviderRequest&, const auto&)
             -> asio::awaitable<sp::runtime::Result> {
-            const auto& chat = std::get<sp::chat::Request>(request.payload);
-            std::string tag;
-            for (const auto& message : chat.messages) tag = message.text;
-            for (const auto& message : chat.canonical_messages)
-                for (const auto& part : message.parts)
-                    if (const auto* text = std::get_if<sp::Text>(&part)) tag = text->value;
+            const auto tag = request_tag(request);
             if (!peer->alive || *peer->alive) {
                 {
                     std::lock_guard lock(peer->mutex);
@@ -187,6 +196,27 @@ std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer> peer) {
         },
         "upstream-descriptor", client_for(std::string(kOpenRouter), std::string(kModel), kInputLimit));
 }
+
+class CountingProviderCallBroker final : public graph::ProviderCallBroker {
+public:
+    CountingProviderCallBroker(std::shared_ptr<graph::ProviderCallBroker> inner, std::shared_ptr<Peer> peer)
+        : inner_(std::move(inner)), peer_(std::move(peer)) {}
+
+    asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
+                                                std::shared_ptr<Provider>   provider,
+                                                ProviderRequest             request) override {
+        if (peer_ && (!peer_->alive || *peer_->alive)) {
+            std::lock_guard lock(peer_->mutex);
+            ++peer_->attempted[request_tag(request)];
+            ++peer_->attempted_total;
+        }
+        return inner_->invoke(std::move(identity), std::move(provider), std::move(request));
+    }
+
+private:
+    std::shared_ptr<graph::ProviderCallBroker> inner_;
+    std::shared_ptr<Peer>                      peer_;
+};
 
 // ---------------------------------------------------------------------------
 // Durable operations and crash images
@@ -610,6 +640,9 @@ RegistrySnapshot model_registry() {
 /// one SQLite file so that a crash image is one consistent copy.
 class Host {
 public:
+    /// When set, the budget run() grants and a JavaScript source is compiled for, instead of budget().
+    std::optional<RunBudget> granted;
+
     Host(World& world, std::shared_ptr<Peer> peer, std::optional<std::filesystem::path> durable)
         : peer_(std::move(peer)), durable_(std::move(durable)), registry_(model_registry()) {
         AdmissionProfileBuilder profile;
@@ -658,14 +691,20 @@ public:
         runtime.core_provider_calls_journaled     = static_cast<bool>(journal_);
         if (journal_) {
             runtime.core_provider_call_resolver =
-                [journal = journal_, deployment = program::detail::provider_deployment_identity("resume-model")](
+                [journal = journal_, peer = peer_,
+                 deployment = program::detail::provider_deployment_identity("resume-model")](
                     const ProgramCoreProviderCallContext& call) -> std::optional<ProgramCoreProviderCallBinding> {
-                return journal->bind_priced(call, deployment);
+                auto binding   = journal->bind_priced(call, deployment);
+                binding.broker = std::make_shared<CountingProviderCallBroker>(std::move(binding.broker), peer);
+                return binding;
             };
         } else {
             runtime.core_provider_call_resolver =
-                [](const ProgramCoreProviderCallContext& call) -> std::optional<ProgramCoreProviderCallBinding> {
-                return bind_priced_provider_call(call);
+                [peer = peer_](
+                    const ProgramCoreProviderCallContext& call) -> std::optional<ProgramCoreProviderCallBinding> {
+                auto binding   = bind_priced_provider_call(call);
+                binding.broker = std::make_shared<CountingProviderCallBroker>(std::move(binding.broker), peer);
+                return binding;
             };
         }
         runtime_ = std::make_unique<ProgramRuntime>(std::move(runtime));
@@ -678,7 +717,8 @@ public:
     /// Compiles once per program: a bundle admits into any host's catalog.
     ProgramBundle compile(const ProgramSource& source) const {
         ProgramCompiler compiler(registry_, {"resume-model/v1"});
-        return source.kind() == SourceKind::JavaScript ? compiler.compile(source, budget()) : compiler.compile(source);
+        return source.kind() == SourceKind::JavaScript ? compiler.compile(source, granted.value_or(budget()))
+                                                       : compiler.compile(source);
     }
     ProgramVersion admit(ProgramSource source) { return admit(compile(source)); }
     ProgramVersion admit(const ProgramBundle& bundle) {
@@ -703,9 +743,11 @@ public:
         return granted;
     }
 
+    ProgramRuntime& runtime() { return *runtime_; }
+
     ProgramResult run(const ProgramVersion& version, const std::string& run_id, json input,
                       std::optional<std::uint64_t> node_retries = std::nullopt) {
-        ProgramInvocation invocation{std::move(input), budget(node_retries), "trace-" + run_id, {}};
+        ProgramInvocation invocation{std::move(input), granted.value_or(budget(node_retries)), "trace-" + run_id, {}};
         invocation.requested_run_id = run_id;
         return runtime_->run(kOwner, version, std::move(invocation));
     }
