@@ -8,18 +8,22 @@
 #include <neograph/async/host_loop.h>
 #include <neograph/async/run_sync.h>
 #include <neograph/graph/cancel.h>
+#include <neograph/graph/checkpoint.h>
 #include <neograph/graph/engine.h>
 #include <neograph/graph/loader.h>
 #include <neograph/graph/node.h>
 #include <neograph/llm/schema_provider.h>
 #include <neograph/tool.h>
+#include <neograph/tool_execution.h>
 
 #include "../src/core/host_timer.h"
+#include "../src/core/loop_handoff.h"
 #include "fixtures/manual_executor.h"
 
 #include <descriptor/descriptor.h>
 #include <runtime/host.h>
 
+#include <asio/co_spawn.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
@@ -31,10 +35,17 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 
 using namespace neograph;
 using namespace std::chrono_literals;
@@ -1129,3 +1140,1171 @@ TEST(HostLoop, WorkPostedFromAFrameThatTheLoopsCloseDestroysIsDroppedWithoutATur
     EXPECT_FALSE(ran);
     EXPECT_FALSE(completed);
 }
+
+// ---- Work on the process's pools that outlives the loop (#605) -------------------------------------------------------
+//
+// A blocking tool and a process tool run on a pool of the process, and complete by posting to the executor of the run
+// that awaits them. The host cannot join that pool, so it can destroy the loop while such a tool still runs. The loop
+// takes over the coroutine that awaits it, destroys it on the host's thread, and the late result is dropped: nothing
+// of the loop is touched from the pool after that.
+
+namespace {
+
+// What the frame of a coroutine that awaits pool work reports when it is destroyed.
+struct FrameProbe {
+    std::atomic<int> destroyed{0};
+    std::atomic<int> destroyed_on_host{0};
+    std::atomic<int> started{0};
+    std::thread::id host = std::this_thread::get_id();
+};
+
+struct FrameSentinel {
+    FrameProbe* probe;
+    explicit FrameSentinel(FrameProbe* p) : probe(p) { ++probe->started; }
+    ~FrameSentinel() {
+        ++probe->destroyed;
+        if (std::this_thread::get_id() == probe->host) ++probe->destroyed_on_host;
+    }
+};
+
+// A pool tool that waits for the test to let it go, and says when it is done with its own object: after `finished`
+// the pool thread does not touch the tool again, so the test may destroy it.
+class GatedTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return ChatTool{"gated", "waits on the pool", json{{"type", "object"}}}; }
+    std::string execute(const json&) override {
+        entered = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (!release.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        finished = true;
+        return "late";
+    }
+    std::string get_name() const override { return "gated"; }
+    std::atomic<bool> entered{false}, release{false}, finished{false};
+};
+
+// Lets a gated tool go and waits for it before the tool is destroyed, whether or not the test body got that far.
+class ReleaseOnExit {
+public:
+    explicit ReleaseOnExit(GatedTool& tool) : tool_(tool) {}
+    ~ReleaseOnExit() {
+        tool_.release = true;
+        if (!armed_) return;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (!tool_.finished.load() && std::chrono::steady_clock::now() < limit) std::this_thread::sleep_for(100us);
+    }
+    void arm() { armed_ = true; }
+
+private:
+    GatedTool& tool_;
+    bool armed_ = false;
+};
+
+// Returns once every pool task that opened a LoopHandoff has finished `handoff->finish()` and released its handoff.
+void let_the_pool_thread_post() {
+    const auto limit = std::chrono::steady_clock::now() + 30s;
+    while (async::detail::LoopHandoff::active_count() != 0 && std::chrono::steady_clock::now() < limit) {
+        std::this_thread::yield();
+    }
+}
+
+asio::awaitable<void> await_a_pool_tool(Tool* tool, FrameProbe* probe, std::string* result = nullptr) {
+    FrameSentinel sentinel(probe);
+    auto text = co_await tool->execute_async(json::object());
+    if (result) *result = std::move(text);
+}
+
+}  // namespace
+
+TEST(HostLoopPoolWork, ALoopDestroyedWhileABlockingToolRunsTakesItsCoroutineAndDropsTheLateResult) {
+    auto executor = std::make_shared<ManualExecutor>();
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe probe;
+    std::string result;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_pool_tool(&tool, &probe, &result), [&](std::exception_ptr) { completed = true; });
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+        EXPECT_EQ(probe.destroyed.load(), 0);
+    }
+    EXPECT_EQ(probe.destroyed.load(), 1) << "the destructor destroyed the coroutine that awaits the pool";
+    EXPECT_EQ(probe.destroyed_on_host.load(), 1) << "on the host's thread";
+    const auto queued = executor->pending();
+    tool.release = true;
+    ASSERT_TRUE(executor->run_until([&] { return tool.finished.load(); }));
+    let_the_pool_thread_post();
+    EXPECT_FALSE(completed) << "the run's completion is never called once its loop is gone";
+    EXPECT_TRUE(result.empty()) << "the late result went nowhere";
+    EXPECT_EQ(probe.destroyed.load(), 1);
+    EXPECT_EQ(executor->pending(), queued) << "the late completion scheduled no turn of the dead loop";
+    while (executor->step()) {}
+    EXPECT_FALSE(completed);
+}
+
+TEST(HostLoopPoolWork, ABlockingToolThatFinishesBeforeTheLoopIsDestroyedIsDelivered) {
+    auto executor = std::make_shared<ManualExecutor>();
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe probe;
+    std::string result;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_pool_tool(&tool, &probe, &result), [&](std::exception_ptr error) { completed = !error; });
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+        tool.release = true;
+        ASSERT_TRUE(executor->run_until([&] { return completed; }));
+        let_the_pool_thread_post();
+    }
+    EXPECT_EQ(result, "late");
+    EXPECT_EQ(probe.destroyed.load(), 1);
+}
+
+TEST(HostLoopPoolWork, ARunOnAStrandOfTheLoopIsTakenOverToo) {
+    auto executor = std::make_shared<ManualExecutor>();
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe probe;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        asio::co_spawn(asio::make_strand(loop.executor()), await_a_pool_tool(&tool, &probe),
+                       [&](std::exception_ptr) { completed = true; });
+        loop.wake();
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+    }
+    EXPECT_EQ(probe.destroyed.load(), 1);
+    tool.release = true;
+    ASSERT_TRUE(executor->run_until([&] { return tool.finished.load(); }));
+    let_the_pool_thread_post();
+    EXPECT_FALSE(completed);
+    while (executor->step()) {}
+}
+
+TEST(HostLoopPoolWork, ARunOnOneLoopIsUntouchedWhenAnotherLoopIsDestroyed) {
+    // Two runs await the pool; one of two loops is destroyed. The run of the loop that stays gets its result.
+    auto kept_host = std::make_shared<ManualExecutor>();
+    auto dropped_host = std::make_shared<ManualExecutor>();
+    GatedTool kept_tool, dropped_tool;
+    ReleaseOnExit release_kept(kept_tool), release_dropped(dropped_tool);
+    FrameProbe kept_probe, dropped_probe;
+    std::string kept_result;
+    bool kept_done = false, dropped_done = false;
+    async::HostLoop kept(kept_host);
+    {
+        async::HostLoop dropped(dropped_host);
+        kept.spawn(await_a_pool_tool(&kept_tool, &kept_probe, &kept_result),
+                   [&](std::exception_ptr error) { kept_done = !error; });
+        dropped.spawn(await_a_pool_tool(&dropped_tool, &dropped_probe), [&](std::exception_ptr) { dropped_done = true; });
+        release_kept.arm();
+        release_dropped.arm();
+        ASSERT_TRUE(kept_host->run_until([&] { return kept_tool.entered.load(); }));
+        ASSERT_TRUE(dropped_host->run_until([&] { return dropped_tool.entered.load(); }));
+    }
+    EXPECT_EQ(dropped_probe.destroyed.load(), 1);
+    EXPECT_EQ(kept_probe.destroyed.load(), 0);
+    dropped_tool.release = true;
+    kept_tool.release = true;
+    ASSERT_TRUE(kept_host->run_until([&] { return kept_done; }));
+    EXPECT_EQ(kept_result, "late");
+    EXPECT_FALSE(dropped_done);
+    let_the_pool_thread_post();
+}
+
+TEST(HostLoopPoolWork, ALoopDestroyedAsPoolToolsFinishTakesOrDeliversEachOfThem) {
+    // Deterministically exercise both outcomes on one loop: `first` finishes and is delivered when the host steps the
+    // executor before destroying the loop, while `second` is taken by the destructor.
+    {
+        auto executor = std::make_shared<ManualExecutor>();
+        GatedTool first, second;
+        ReleaseOnExit release_first(first), release_second(second);
+        FrameProbe probe;
+        std::string first_result, second_result;
+        bool first_done = false, second_done = false;
+        {
+            async::HostLoop loop(executor);
+            loop.spawn(await_a_pool_tool(&first, &probe, &first_result),
+                       [&](std::exception_ptr error) { first_done = !error; });
+            loop.spawn(await_a_pool_tool(&second, &probe, &second_result),
+                       [&](std::exception_ptr error) { second_done = !error; });
+            release_first.arm();
+            release_second.arm();
+            ASSERT_TRUE(executor->run_until([&] { return first.entered.load() && second.entered.load(); }));
+            first.release = true;
+            ASSERT_TRUE(executor->run_until([&] { return first_done; }));
+            second.release = true;
+        }
+        EXPECT_TRUE(first_done);
+        EXPECT_EQ(first_result, "late");
+        EXPECT_FALSE(second_done);
+        EXPECT_TRUE(second_result.empty());
+        EXPECT_EQ(probe.destroyed.load(), 2);
+        EXPECT_EQ(probe.destroyed_on_host.load(), 2);
+        ASSERT_TRUE(executor->run_until([&] { return second.finished.load(); }));
+        let_the_pool_thread_post();
+        while (executor->step()) {}
+    }
+
+    // Two tools are let go and the loop is stepped or destroyed at once, a little earlier or later each round, so that
+    // the pool threads post, or find the coroutine taken, around the moment the destructor takes the gate.
+    for (unsigned round = 0; round < 150; ++round) {
+        auto executor = std::make_shared<ManualExecutor>();
+        GatedTool first, second;
+        ReleaseOnExit release_first(first), release_second(second);
+        FrameProbe probe;
+        {
+            async::HostLoop loop(executor);
+            loop.spawn(await_a_pool_tool(&first, &probe), [](std::exception_ptr) {});
+            loop.spawn(await_a_pool_tool(&second, &probe), [](std::exception_ptr) {});
+            release_first.arm();
+            release_second.arm();
+            ASSERT_TRUE(executor->run_until([&] { return first.entered.load() && second.entered.load(); }));
+            first.release = true;
+            second.release = true;
+            for (volatile unsigned spin = 0; spin < (round % 60) * 40; spin = spin + 1) {}
+            if (round % 2 == 0) (void)executor->step();
+        }
+        EXPECT_EQ(probe.destroyed.load(), 2) << "round " << round;
+        EXPECT_EQ(probe.destroyed_on_host.load(), 2) << "round " << round;
+        ASSERT_TRUE(executor->run_until([&] { return first.finished.load() && second.finished.load(); }));
+        let_the_pool_thread_post();
+        while (executor->step()) {}
+    }
+}
+
+TEST(HostLoopPoolWork, ThePoolThreadAsksTheHostForTheTurnWithNoLockOfTheLoopHeld) {
+    // The pool thread has posted the result and is inside the host executor's `post`. The host destroys the loop
+    // meanwhile. If the pool thread asked the host with `handoff_mutex_` held, `close()` would block at `take_handoffs`
+    // before `io_.reset()` and `probe.destroyed` would never reach 1 while `post` waits for it; once `io_.reset()` has
+    // destroyed the coroutine, `post` returns and `~HostLoop()` finishes waiting for the in-progress wake.
+    auto executor = std::make_shared<ManualExecutor>();
+    const auto host_thread = std::this_thread::get_id();
+    FrameProbe probe;
+    std::atomic<bool> in_post{false}, post_finished{false};
+    executor->before_post = [&]() -> bool {
+        if (std::this_thread::get_id() == host_thread) return false;
+        in_post = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (probe.destroyed.load() == 0 && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        post_finished = true;
+        return false;
+    };
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_pool_tool(&tool, &probe), [&](std::exception_ptr) { completed = true; });
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+        tool.release = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (!in_post.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        ASSERT_TRUE(in_post.load()) << "the pool thread never asked the host for a turn";
+    }
+    EXPECT_TRUE(post_finished.load()) << "the destructor waited for the in-progress pool wake before returning";
+    EXPECT_EQ(probe.destroyed.load(), 1) << "the queued continuation went with the loop";
+    EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+    ASSERT_TRUE(executor->run_until([&] { return tool.finished.load(); }));
+    let_the_pool_thread_post();
+    EXPECT_FALSE(completed);
+    while (executor->step()) {}
+    EXPECT_FALSE(completed) << "the turn the pool thread asked for finds the loop closed";
+    executor->before_post = nullptr;
+}
+
+TEST(HostLoopPoolWork, NoPoolWakeCallsTheHostExecutorAfterTheLoopDestructorReturns) {
+    // While `waking_tool` is inside `host->post` (with `relied_` set so a refused post would re-ask) and `running_tool`
+    // is still executing on the pool, the host destroys the loop. `~HostLoop()` must not wait for `running_tool`, must
+    // wait for the in-progress `host->post` of `waking_tool` to finish, and must prevent any further `host->post` call
+    // after `~HostLoop()` returns.
+    auto executor = std::make_shared<ManualExecutor>();
+    const auto host_thread = std::this_thread::get_id();
+    FrameProbe probe;
+    std::atomic<bool> in_post{false}, wake_returned{false}, destructor_returned{false};
+    std::atomic<int> posts_after_destroy{0};
+    executor->before_post = [&]() -> bool {
+        if (destructor_returned.load()) {
+            ++posts_after_destroy;
+            return true;
+        }
+        if (std::this_thread::get_id() == host_thread) return false;
+        in_post = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (probe.destroyed.load() < 2 && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        std::this_thread::sleep_for(5ms);
+        wake_returned = true;
+        return true;  // refuse: without a closed_ check before re-asking, relied_ would trigger another post
+    };
+    GatedTool waking_tool, running_tool;
+    ReleaseOnExit release_waking(waking_tool), release_running(running_tool);
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_pool_tool(&waking_tool, &probe), [](std::exception_ptr) {});
+        loop.spawn(await_a_pool_tool(&running_tool, &probe), [](std::exception_ptr) {});
+        release_waking.arm();
+        release_running.arm();
+        ASSERT_TRUE(executor->run_until([&] { return waking_tool.entered.load() && running_tool.entered.load(); }));
+        waking_tool.release = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (!in_post.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        ASSERT_TRUE(in_post.load());
+        // Set `relied_` while `scheduled_` is held by the in-flight pool wake.
+        loop.wake();
+    }
+    destructor_returned = true;
+    EXPECT_TRUE(wake_returned.load()) << "~HostLoop() returned only after the in-progress pool wake finished";
+    EXPECT_FALSE(running_tool.finished.load()) << "~HostLoop() did not wait for the still-running pool tool";
+    EXPECT_EQ(probe.destroyed.load(), 2);
+    EXPECT_EQ(probe.destroyed_on_host.load(), 2);
+    running_tool.release = true;
+    let_the_pool_thread_post();
+    EXPECT_EQ(posts_after_destroy.load(), 0) << "no pool thread called host->post after ~HostLoop() returned";
+    executor->before_post = nullptr;
+    while (executor->step()) {}
+}
+
+TEST(HostLoopPoolWork, APoolToolFinishingOnAnAlreadyQueuedStrandStillWakesTheLoopAfterARefusedWake) {
+    // An earlier handler is posted to a strand while the host refuses `post`, leaving the strand locked in `io_` with
+    // no turn scheduled on the host. When a pool tool bound to the same strand finishes after the host accepts posts
+    // again, `asio::post` to the already-locked strand queues inside the strand without calling
+    // `PumpedExecutor::execute`; `post_handoff` must still wake the loop so both handlers run.
+    auto executor = std::make_shared<ManualExecutor>();
+    std::atomic<bool> refuse{false};
+    std::atomic<int> refused{0};
+    executor->before_post = [&]() -> bool {
+        if (!refuse.load()) return false;
+        ++refused;
+        return true;
+    };
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe probe;
+    std::string result;
+    bool earlier_ran = false, completed = false;
+    {
+        async::HostLoop loop(executor);
+        auto strand = asio::make_strand(loop.executor());
+        asio::co_spawn(strand, await_a_pool_tool(&tool, &probe, &result),
+                       [&](std::exception_ptr error) { completed = !error; });
+        loop.wake();
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+        ASSERT_EQ(executor->pending(), 0u);
+
+        refuse = true;
+        asio::post(strand, [&] { earlier_ran = true; });
+        EXPECT_GE(refused.load(), 1);
+        EXPECT_EQ(executor->pending(), 0u) << "the wake for the strand's first handler was refused";
+
+        refuse = false;
+        tool.release = true;
+        let_the_pool_thread_post();
+        EXPECT_GT(executor->pending(), 0u) << "post_handoff scheduled a turn even though the strand was already queued";
+        ASSERT_TRUE(executor->run_until([&] { return completed; }));
+        EXPECT_TRUE(earlier_ran);
+        EXPECT_EQ(result, "late");
+    }
+    executor->before_post = nullptr;
+}
+
+TEST(HostLoopPoolWork, ARefusedPostOfThePoolThreadAsksAFewTimesAndTheNextWakeDeliversTheResult) {
+    // The host refuses every post that the pool thread makes. The wake that follows the pool thread's post asks as often
+    // as any wake does and then gives up, and the result stays queued in the loop until the next wake, which delivers it.
+    auto executor = std::make_shared<ManualExecutor>();
+    const auto host_thread = std::this_thread::get_id();
+    std::atomic<bool> refuse{true};
+    std::atomic<int> refused{0};
+    executor->before_post = [&]() -> bool {
+        if (std::this_thread::get_id() == host_thread || !refuse.load()) return false;
+        ++refused;
+        return true;
+    };
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe probe;
+    std::string result;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_pool_tool(&tool, &probe, &result), [&](std::exception_ptr error) { completed = !error; });
+        release.arm();
+        ASSERT_TRUE(executor->run_until([&] { return tool.entered.load(); }));
+        tool.release = true;
+        ASSERT_TRUE(executor->run_until([&] { return tool.finished.load() && refused.load() > 0; }));
+        let_the_pool_thread_post();
+        EXPECT_EQ(executor->pending(), 0u) << "the host took nothing";
+        EXPECT_GE(refused.load(), 1);
+        EXPECT_LE(refused.load(), 3) << "a wake asks the host a few times at most";
+        EXPECT_FALSE(completed);
+        refuse = false;
+        loop.wake();
+        ASSERT_TRUE(executor->run_until([&] { return completed; }));
+        EXPECT_EQ(result, "late");
+    }
+    executor->before_post = nullptr;
+}
+
+namespace {
+// A synchronous checkpoint store whose save waits for the test: the engine's async form of it runs on the pool.
+class GatedStore final : public graph::CheckpointStore {
+public:
+    void save(const graph::Checkpoint&) override {
+        entered = true;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (!release.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        finished = true;
+    }
+    std::atomic<bool> entered{false}, release{false}, finished{false};
+};
+
+asio::awaitable<void> save_a_checkpoint(GatedStore* store, FrameProbe* probe) {
+    FrameSentinel sentinel(probe);
+    co_await store->save_async(graph::Checkpoint{});
+}
+}  // namespace
+
+TEST(HostLoopPoolWork, ALoopDestroyedWhileASynchronousCheckpointStoreSavesTakesItsCoroutine) {
+    auto executor = std::make_shared<ManualExecutor>();
+    GatedStore store;
+    FrameProbe probe;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(save_a_checkpoint(&store, &probe), [&](std::exception_ptr) { completed = true; });
+        ASSERT_TRUE(executor->run_until([&] { return store.entered.load(); }));
+    }
+    EXPECT_EQ(probe.destroyed.load(), 1);
+    EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+    const auto queued = executor->pending();
+    store.release = true;
+    ASSERT_TRUE(executor->run_until([&] { return store.finished.load(); }));
+    let_the_pool_thread_post();
+    EXPECT_FALSE(completed);
+    EXPECT_EQ(executor->pending(), queued);
+    while (executor->step()) {}
+}
+
+TEST(HostLoopPoolWork, ASynchronousCheckpointStoreThatSavesBeforeTheLoopIsDestroyedIsDelivered) {
+    auto executor = std::make_shared<ManualExecutor>();
+    GatedStore store;
+    FrameProbe probe;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(save_a_checkpoint(&store, &probe), [&](std::exception_ptr error) { completed = !error; });
+        ASSERT_TRUE(executor->run_until([&] { return store.entered.load(); }));
+        store.release = true;
+        ASSERT_TRUE(executor->run_until([&] { return completed; }));
+        let_the_pool_thread_post();
+    }
+    EXPECT_TRUE(completed);
+}
+
+namespace {
+// A tool that finishes at once, or after a short random spin, on the pool.
+class QuickTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return ChatTool{"quick", "finishes soon", json{{"type", "object"}}}; }
+    std::string execute(const json&) override {
+        const unsigned spin = ++seed_ * 2654435761u >> 24;  // 0..255
+        const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spin);
+        while (std::chrono::steady_clock::now() < until) {}
+        ++finished;
+        return "quick";
+    }
+    std::string get_name() const override { return "quick"; }
+    std::atomic<int> finished{0};
+
+private:
+    std::atomic<unsigned> seed_{1};
+};
+
+asio::awaitable<void> call_quick_tools(Tool* tool, FrameProbe* probe, int calls, std::atomic<int>* submitted,
+                                       std::atomic<int>* delivered) {
+    FrameSentinel sentinel(probe);
+    for (int i = 0; i < calls; ++i) {
+        ++*submitted;
+        co_await tool->execute_async(json::object());
+        ++*delivered;
+    }
+}
+}  // namespace
+
+TEST(HostLoopPoolWork, LoopsDestroyedWhilePoolToolsCompleteLeaveNothingBehind) {
+    QuickTool tool;
+    const unsigned rounds = 80;
+    std::atomic<int> submitted_total{0}, delivered_total{0};
+    int frames_made = 0, frames_destroyed = 0;
+    for (unsigned round = 0; round < rounds; ++round) {
+        auto executor = std::make_shared<ManualExecutor>();
+        FrameProbe probe;
+        std::atomic<int> submitted{0}, delivered{0};
+        int pumped_steps = static_cast<int>(round % 9);
+        {
+            async::HostLoop loop(executor);
+            for (int run = 0; run < 4; ++run)
+                loop.spawn(call_quick_tools(&tool, &probe, 3, &submitted, &delivered), [](std::exception_ptr) {});
+            for (int step = 0; step < pumped_steps; ++step) {
+                if (!executor->step()) std::this_thread::sleep_for(20us);
+            }
+        }
+        // Every call that was handed to the pool has run to its end: its result was delivered or dropped.
+        const int handed = submitted.load();
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (tool.finished.load() < submitted_total.load() + handed && std::chrono::steady_clock::now() < limit)
+            std::this_thread::sleep_for(100us);
+        submitted_total += handed;
+        delivered_total += delivered.load();
+        frames_made += probe.started.load();
+        frames_destroyed += probe.destroyed.load();
+        EXPECT_EQ(probe.destroyed.load(), probe.started.load()) << "round " << round << ": a frame was left behind";
+        EXPECT_EQ(probe.destroyed_on_host.load(), probe.destroyed.load()) << "round " << round;
+        while (executor->step()) {}
+    }
+    let_the_pool_thread_post();
+    EXPECT_EQ(tool.finished.load(), submitted_total.load());
+    EXPECT_EQ(frames_destroyed, frames_made);
+    EXPECT_LT(delivered_total.load(), submitted_total.load()) << "some results were dropped with their loops";
+}
+
+namespace {
+class SequencedGatedTool final : public Tool {
+public:
+    ChatTool get_definition() const override { return ChatTool{"gated", "two calls", json{{"type", "object"}}}; }
+    std::string execute(const json&) override {
+        const int call = ++calls;
+        const int active = ++in_flight;
+        int prev_max = max_in_flight.load();
+        while (active > prev_max && !max_in_flight.compare_exchange_weak(prev_max, active)) {}
+        if (call == 1) {
+            first_entered = true;
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (!release_first.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+            --in_flight;
+            first_finished = true;
+            return "first";
+        }
+        second_entered = true;
+        --in_flight;
+        second_finished = true;
+        return "second";
+    }
+    std::string get_name() const override { return "gated"; }
+
+    std::atomic<int> calls{0}, in_flight{0}, max_in_flight{0};
+    std::atomic<bool> first_entered{false}, release_first{false}, first_finished{false};
+    std::atomic<bool> second_entered{false}, second_finished{false};
+};
+
+asio::awaitable<void> execute_via_controller(ToolExecutionController* controller, Tool* tool, FrameProbe* probe,
+                                             ToolExecutionResult* out) {
+    FrameSentinel sentinel(probe);
+    *out = co_await controller->execute_result_async(*tool, json::object(), ToolExecutionContext{});
+}
+}  // namespace
+
+TEST(HostLoopPoolWork, AnAbandonedExclusivePoolToolKeepsItsLeaseUntilThePoolWorkFinishes) {
+    // When a HostLoop is destroyed while a non-reentrant pool tool is still running, the awaiting coroutine frame dies
+    // on the host thread, but its ResourceLease (and HostResourceLease) stays with the pool task until the tool itself
+    // returns, so a second loop cannot enter the tool concurrently.
+    HostResourceProfileData profile_data;
+    profile_data.profile_id = "test-profile";
+    profile_data.capacity.cpu_millis = 1000;
+    profile_data.evidence.source = "test";
+    HostAdmissionControllerConfig admission_config;
+    admission_config.profile = HostResourceProfile::create(std::move(profile_data));
+    ToolExecutionControllerConfig config;
+    config.host_admission = std::make_shared<HostAdmissionController>(std::move(admission_config));
+    ToolExecutionController controller(std::move(config));
+
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::Exclusive;
+    policy.capacity = 1;
+    policy.host_resources.cpu_millis = 1000;
+    controller.policies()->upsert("gated", policy);
+
+    SequencedGatedTool tool;
+    struct ReleaseFirstOnExit {
+        SequencedGatedTool& tool;
+        ~ReleaseFirstOnExit() {
+            tool.release_first = true;
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (tool.in_flight.load() != 0 && std::chrono::steady_clock::now() < limit)
+                std::this_thread::sleep_for(100us);
+            let_the_pool_thread_post();
+        }
+    } release_first_on_exit{tool};
+    auto first_host = std::make_shared<ManualExecutor>();
+    auto second_host = std::make_shared<ManualExecutor>();
+    FrameProbe first_probe, second_probe;
+    ToolExecutionResult first_result, second_result;
+    bool first_done = false, second_done = false;
+    {
+        async::HostLoop first_loop(first_host);
+        first_loop.spawn(execute_via_controller(&controller, &tool, &first_probe, &first_result),
+                         [&](std::exception_ptr) { first_done = true; });
+        ASSERT_TRUE(first_host->run_until([&] { return tool.first_entered.load(); }));
+    }
+    EXPECT_EQ(first_probe.destroyed.load(), 1);
+    EXPECT_FALSE(first_done);
+
+    async::HostLoop second_loop(second_host);
+    second_loop.spawn(execute_via_controller(&controller, &tool, &second_probe, &second_result),
+                      [&](std::exception_ptr error) { second_done = !error; });
+    for (int i = 0; i < 5; ++i) {
+        if (!second_host->step()) std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_FALSE(tool.second_entered.load()) << "the second call must wait while the abandoned pool call still runs";
+    EXPECT_EQ(tool.max_in_flight.load(), 1);
+
+    tool.release_first = true;
+    ASSERT_TRUE(second_host->run_until([&] { return tool.first_finished.load(); }));
+    let_the_pool_thread_post();
+    ASSERT_TRUE(second_host->run_until([&] { return second_done; }));
+    EXPECT_EQ(second_result.status, ToolTerminalStatus::Succeeded);
+    EXPECT_EQ(second_result.output, "second");
+    EXPECT_EQ(tool.max_in_flight.load(), 1);
+}
+
+TEST(HostLoopPoolWork, AnAbandonedSingleFlightLeaderPublishesAFailureToItsFollowers) {
+    // Destroying the HostLoop of a SingleFlight leader while the pool tool still runs destroys the leader's coroutine
+    // frame on the host thread, which publishes an ordinary failure to waiting followers instead of leaving them
+    // waiting until queue_timeout.
+    ToolExecutionController controller;
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::BlockingThread;
+    policy.concurrency = ToolConcurrency::SingleFlight;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.queue_timeout = 30s;
+    controller.policies()->upsert("gated", policy);
+
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    auto leader_host = std::make_shared<ManualExecutor>();
+    auto follower_host = std::make_shared<ManualExecutor>();
+    FrameProbe leader_probe, same_loop_follower_probe, follower_probe;
+    ToolExecutionResult leader_result, same_loop_follower_result, follower_result;
+    bool same_loop_follower_done = false, follower_done = false;
+
+    async::HostLoop follower_loop(follower_host);
+    {
+        async::HostLoop leader_loop(leader_host);
+        leader_loop.spawn(execute_via_controller(&controller, &tool, &leader_probe, &leader_result),
+                          [](std::exception_ptr) {});
+        release.arm();
+        ASSERT_TRUE(leader_host->run_until([&] { return tool.entered.load(); }));
+
+        leader_loop.spawn(
+            execute_via_controller(&controller, &tool, &same_loop_follower_probe, &same_loop_follower_result),
+            [&](std::exception_ptr) { same_loop_follower_done = true; });
+        ASSERT_TRUE(leader_host->step());
+        EXPECT_FALSE(same_loop_follower_done);
+
+        follower_loop.spawn(execute_via_controller(&controller, &tool, &follower_probe, &follower_result),
+                            [&](std::exception_ptr error) { follower_done = !error; });
+        ASSERT_TRUE(follower_host->step());
+        EXPECT_FALSE(follower_done);
+    }
+    EXPECT_EQ(leader_probe.destroyed.load(), 1);
+    EXPECT_EQ(same_loop_follower_probe.destroyed.load(), 1);
+    EXPECT_FALSE(same_loop_follower_done);
+    ASSERT_TRUE(follower_host->run_until([&] { return follower_done; }));
+    EXPECT_EQ(follower_result.status, ToolTerminalStatus::Failed);
+    EXPECT_NE(follower_result.error.find("abandoned"), std::string::npos);
+    EXPECT_FALSE(tool.finished.load()) << "the follower received the failure while the abandoned leader still ran";
+    tool.release = true;
+    let_the_pool_thread_post();
+}
+
+TEST(HostLoopPoolWork, NativeExecutorsDoNotUseLoopHandoff) {
+    // Non-HostLoop executors must not open a LoopHandoff or add extra work guards around pool hops: a pool-held work
+    // guard or handoff that retains a copy of an asio::strand can destroy that strand on the pool thread after the
+    // caller's io_context has returned from run() and been destroyed on the caller thread (that post-asio::post
+    // scheduling race is non-deterministic without an Asio hook, so this test checks directly that LoopHandoff::open
+    // rejects native executors and that active_count() stays 0 across native pool hops).
+    asio::io_context io;
+    auto strand = asio::make_strand(io.get_executor());
+    EXPECT_FALSE(async::is_host_pumped(asio::any_io_executor(io.get_executor())));
+    EXPECT_FALSE(async::is_host_pumped(asio::any_io_executor(strand)));
+    EXPECT_THROW(async::detail::LoopHandoff::open(asio::any_io_executor(io.get_executor()), [] {}), std::logic_error);
+    EXPECT_THROW(async::detail::LoopHandoff::open(asio::any_io_executor(strand), [] {}), std::logic_error);
+
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    FrameProbe tool_probe;
+    std::string tool_result;
+    bool tool_done = false;
+    asio::co_spawn(strand, await_a_pool_tool(&tool, &tool_probe, &tool_result),
+                   [&](std::exception_ptr error) { tool_done = !error; });
+    release.arm();
+    while (!tool.entered.load()) {
+        io.poll_one();
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(async::detail::LoopHandoff::active_count(), 0u);
+    tool.release = true;
+    io.run();
+    EXPECT_TRUE(tool_done);
+    EXPECT_EQ(tool_result, "late");
+
+    io.restart();
+    GatedStore store;
+    FrameProbe store_probe;
+    bool store_done = false;
+    asio::co_spawn(strand, save_a_checkpoint(&store, &store_probe),
+                   [&](std::exception_ptr error) { store_done = !error; });
+    while (!store.entered.load()) {
+        io.poll_one();
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(async::detail::LoopHandoff::active_count(), 0u);
+    store.release = true;
+    io.run();
+    EXPECT_TRUE(store_done);
+}
+
+TEST(HostLoopPoolWork, ADiscardedHandoffDestroysItsContinuationOnTheHostThread) {
+    auto executor = std::make_shared<ManualExecutor>();
+    FrameProbe probe;
+    {
+        async::HostLoop loop(executor);
+        auto sentinel = std::make_shared<FrameSentinel>(&probe);
+        auto handoff = async::detail::LoopHandoff::open(loop.executor(), [sentinel = std::move(sentinel)] {});
+        std::thread([handoff = std::move(handoff)]() mutable { handoff.reset(); }).join();
+        EXPECT_EQ(probe.destroyed.load(), 0) << "the pool thread must not destroy an unfinished continuation";
+    }
+    EXPECT_EQ(probe.destroyed.load(), 1);
+    EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+}
+
+namespace {
+
+class DiscardedHandoffTool final : public Tool {
+public:
+    ChatTool get_definition() const override {
+        return ChatTool{"discarded", "drops its first handoff", json{{"type", "object"}}};
+    }
+    std::string execute(const json&) override { return "unused"; }
+    asio::awaitable<std::string> execute_async(const json&) override {
+        if (++calls == 1) {
+            const auto caller_executor = co_await asio::this_coro::executor;
+            co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+                [this, caller_executor](auto handler) mutable {
+                    handoff = async::detail::LoopHandoff::open(
+                        caller_executor, [handler = std::move(handler)]() mutable { handler(); });
+                    first_entered = true;
+                },
+                asio::use_awaitable);
+            co_return "first";
+        }
+        second_entered = true;
+        co_return "second";
+    }
+    std::string get_name() const override { return "discarded"; }
+
+    std::shared_ptr<async::detail::LoopHandoff> handoff;
+    std::atomic<int> calls{0};
+    std::atomic<bool> first_entered{false}, second_entered{false};
+};
+
+template <typename Executor>
+class ThrowingExecutor {
+public:
+    ThrowingExecutor(Executor executor, std::shared_ptr<std::atomic<bool>> throw_on_execute) noexcept
+        : executor_(std::move(executor)), throw_on_execute_(std::move(throw_on_execute)) {}
+
+    template <typename Function>
+    void execute(Function&& function) const {
+        if (throw_on_execute_ && throw_on_execute_->load()) throw std::bad_alloc();
+        executor_.execute(std::forward<Function>(function));
+    }
+
+    template <typename Property>
+    auto query(const Property& property) const
+        noexcept(noexcept(asio::query(std::declval<const Executor&>(), property)))
+        -> decltype(asio::query(std::declval<const Executor&>(), property)) {
+        return asio::query(executor_, property);
+    }
+
+    template <typename Property>
+        requires asio::can_require<const Executor&, const Property&>::value
+    auto require(const Property& property) const
+        -> ThrowingExecutor<std::decay_t<asio::require_result_t<const Executor&, const Property&>>> {
+        return {asio::require(executor_, property), throw_on_execute_};
+    }
+
+    template <typename Property>
+        requires asio::can_prefer<const Executor&, const Property&>::value
+    auto prefer(const Property& property) const
+        -> ThrowingExecutor<std::decay_t<asio::prefer_result_t<const Executor&, const Property&>>> {
+        return {asio::prefer(executor_, property), throw_on_execute_};
+    }
+
+    friend bool operator==(const ThrowingExecutor& left, const ThrowingExecutor& right) noexcept {
+        return left.throw_on_execute_ == right.throw_on_execute_ && left.executor_ == right.executor_;
+    }
+    friend bool operator!=(const ThrowingExecutor& left, const ThrowingExecutor& right) noexcept {
+        return !(left == right);
+    }
+
+private:
+    Executor executor_;
+    std::shared_ptr<std::atomic<bool>> throw_on_execute_;
+};
+
+}  // namespace
+
+TEST(HostLoopPoolWork, ADiscardedHandoffOnAnIdleLoopSchedulesATurnThatDestroysTheFrameAndReleasesItsLease) {
+    HostResourceProfileData profile_data;
+    profile_data.profile_id = "test-profile";
+    profile_data.capacity.cpu_millis = 1000;
+    profile_data.evidence.source = "test";
+    HostAdmissionControllerConfig admission_config;
+    admission_config.profile = HostResourceProfile::create(std::move(profile_data));
+    ToolExecutionControllerConfig config;
+    config.host_admission = std::make_shared<HostAdmissionController>(std::move(admission_config));
+    ToolExecutionController controller(std::move(config));
+
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::NativeAsync;
+    policy.concurrency = ToolConcurrency::Exclusive;
+    policy.capacity = 1;
+    policy.host_resources.cpu_millis = 1000;
+    controller.policies()->upsert("discarded", policy);
+
+    DiscardedHandoffTool tool;
+    auto first_host = std::make_shared<ManualExecutor>();
+    auto second_host = std::make_shared<ManualExecutor>();
+    FrameProbe first_probe, second_probe;
+    ToolExecutionResult first_result, second_result;
+    bool first_done = false, second_done = false;
+
+    async::HostLoop first_loop(first_host);
+    first_loop.spawn(execute_via_controller(&controller, &tool, &first_probe, &first_result),
+                     [&](std::exception_ptr) { first_done = true; });
+    ASSERT_TRUE(first_host->run_until([&] { return tool.first_entered.load(); }));
+    EXPECT_TRUE(first_loop.idle());
+    EXPECT_EQ(first_host->pending(), 0u);
+
+    async::HostLoop second_loop(second_host);
+    second_loop.spawn(execute_via_controller(&controller, &tool, &second_probe, &second_result),
+                      [&](std::exception_ptr error) { second_done = !error; });
+    for (int i = 0; i < 5; ++i) {
+        if (!second_host->step()) std::this_thread::sleep_for(1ms);
+    }
+    EXPECT_FALSE(tool.second_entered.load());
+
+    std::thread([handoff = std::move(tool.handoff)]() mutable { handoff.reset(); }).join();
+    EXPECT_EQ(first_probe.destroyed.load(), 0) << "the worker thread must not destroy the continuation";
+    EXPECT_EQ(first_host->pending(), 1u) << "dropping an unfinished handoff schedules a turn on the idle loop";
+    EXPECT_FALSE(first_loop.idle());
+
+    while (first_host->step()) {}
+    EXPECT_EQ(first_probe.destroyed.load(), 1);
+    EXPECT_EQ(first_probe.destroyed_on_host.load(), 1);
+    EXPECT_FALSE(first_done);
+
+    ASSERT_TRUE(second_host->run_until([&] { return second_done; }, 200ms));
+    EXPECT_EQ(second_result.status, ToolTerminalStatus::Succeeded);
+    EXPECT_EQ(second_result.output, "second");
+}
+
+TEST(HostLoopPoolWork, ADiscardedHandoffOfASingleFlightLeaderOnAnIdleLoopPublishesAFailureToItsFollowers) {
+    ToolExecutionController controller;
+    ToolExecutionPolicy policy;
+    policy.implementation = ToolExecutionImplementation::NativeAsync;
+    policy.concurrency = ToolConcurrency::SingleFlight;
+    policy.idempotency = ToolIdempotency::Idempotent;
+    policy.effect = ToolEffectClass::ReadOnly;
+    policy.queue_timeout = 30s;
+    controller.policies()->upsert("discarded", policy);
+
+    DiscardedHandoffTool tool;
+    auto leader_host = std::make_shared<ManualExecutor>();
+    auto follower_host = std::make_shared<ManualExecutor>();
+    FrameProbe leader_probe, follower_probe;
+    ToolExecutionResult leader_result, follower_result;
+    bool leader_done = false, follower_done = false;
+
+    async::HostLoop leader_loop(leader_host);
+    async::HostLoop follower_loop(follower_host);
+    leader_loop.spawn(execute_via_controller(&controller, &tool, &leader_probe, &leader_result),
+                      [&](std::exception_ptr) { leader_done = true; });
+    ASSERT_TRUE(leader_host->run_until([&] { return tool.first_entered.load(); }));
+    EXPECT_TRUE(leader_loop.idle());
+    EXPECT_EQ(leader_host->pending(), 0u);
+
+    follower_loop.spawn(execute_via_controller(&controller, &tool, &follower_probe, &follower_result),
+                        [&](std::exception_ptr error) { follower_done = !error; });
+    ASSERT_TRUE(follower_host->step());
+    EXPECT_FALSE(follower_done);
+
+    std::thread([handoff = std::move(tool.handoff)]() mutable { handoff.reset(); }).join();
+    EXPECT_EQ(leader_probe.destroyed.load(), 0);
+    EXPECT_EQ(leader_host->pending(), 1u) << "dropping the leader's handoff schedules a turn on the idle loop";
+
+    while (leader_host->step()) {}
+    EXPECT_EQ(leader_probe.destroyed.load(), 1);
+    EXPECT_EQ(leader_probe.destroyed_on_host.load(), 1);
+    EXPECT_FALSE(leader_done);
+
+    ASSERT_TRUE(follower_host->run_until([&] { return follower_done; }, 200ms));
+    EXPECT_EQ(follower_result.status, ToolTerminalStatus::Failed);
+    EXPECT_NE(follower_result.error.find("abandoned"), std::string::npos);
+}
+
+TEST(HostLoopPoolWork, AFailedHandoffPostAndADiscardedHandoffWakeTheLoopAndWaitOnClose) {
+    {
+        auto executor = std::make_shared<ManualExecutor>();
+        async::HostLoop loop(executor);
+        FrameProbe probe;
+        auto throw_on_execute = std::make_shared<std::atomic<bool>>(true);
+        asio::any_io_executor throwing(ThrowingExecutor(loop.executor(), throw_on_execute));
+        auto sentinel = std::make_shared<FrameSentinel>(&probe);
+        auto handoff = async::detail::LoopHandoff::open(throwing, [sentinel = std::move(sentinel)] {});
+        EXPECT_TRUE(loop.idle());
+        EXPECT_EQ(executor->pending(), 0u);
+
+        std::thread([handoff = std::move(handoff)]() mutable {
+            handoff->finish();
+            handoff.reset();
+        }).join();
+        EXPECT_EQ(probe.destroyed.load(), 0) << "a failed post must not destroy the continuation on the pool thread";
+        EXPECT_EQ(executor->pending(), 1u) << "a failed post schedules a turn to destroy the abandoned continuation";
+        while (executor->step()) {}
+        EXPECT_EQ(probe.destroyed.load(), 1);
+        EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+    }
+
+    {
+        auto executor = std::make_shared<ManualExecutor>();
+        const auto host_thread = std::this_thread::get_id();
+        FrameProbe probe;
+        std::atomic<bool> in_post{false}, reset_returned{false}, wake_returned{false}, destructor_returned{false};
+        std::atomic<int> posts_after_destroy{0};
+        executor->before_post = [&]() -> bool {
+            if (destructor_returned.load()) {
+                ++posts_after_destroy;
+                return true;
+            }
+            if (std::this_thread::get_id() == host_thread) return false;
+            in_post = true;
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (probe.destroyed.load() < 1 && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+            std::this_thread::sleep_for(5ms);
+            wake_returned = true;
+            return true;
+        };
+        std::thread dropper;
+        {
+            async::HostLoop loop(executor);
+            auto sentinel = std::make_shared<FrameSentinel>(&probe);
+            auto handoff = async::detail::LoopHandoff::open(loop.executor(), [sentinel = std::move(sentinel)] {});
+            dropper = std::thread([handoff = std::move(handoff), &reset_returned]() mutable {
+                handoff.reset();
+                reset_returned = true;
+            });
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (!in_post.load() && !reset_returned.load() && std::chrono::steady_clock::now() < limit) {
+                std::this_thread::yield();
+            }
+            EXPECT_TRUE(in_post.load());
+            if (in_post.load()) loop.wake();
+        }
+        destructor_returned = true;
+        dropper.join();
+        EXPECT_TRUE(wake_returned.load()) << "~HostLoop() waited for the discarded handoff's in-progress wake";
+        EXPECT_EQ(probe.destroyed.load(), 1);
+        EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+        EXPECT_EQ(posts_after_destroy.load(), 0);
+        executor->before_post = nullptr;
+        while (executor->step()) {}
+    }
+}
+
+namespace {
+
+// Forwards every sp::runtime::Executor call to `inner` and records which thread ran the destructor.
+class DestructionTrackingExecutor final : public sp::runtime::Executor {
+public:
+    DestructionTrackingExecutor(ManualExecutor* inner, FrameProbe* probe) noexcept : inner_(inner), probe_(probe) {
+        ++probe_->started;
+    }
+
+    ~DestructionTrackingExecutor() override {
+        ++probe_->destroyed;
+        if (std::this_thread::get_id() == probe_->host) ++probe_->destroyed_on_host;
+    }
+
+    void post(Task task) override { inner_->post(std::move(task)); }
+    Timer schedule(sp::runtime::SteadyTime at, Task task) override { return inner_->schedule(at, std::move(task)); }
+    void cancel(Timer timer) noexcept override { inner_->cancel(timer); }
+    sp::runtime::SteadyTime now() const noexcept override { return inner_->now(); }
+    sp::runtime::WallTime wall_now() const noexcept override { return inner_->wall_now(); }
+    bool in_thread() const noexcept override { return inner_->in_thread(); }
+    bool host_pumped() const noexcept override { return inner_->host_pumped(); }
+    void shutdown() noexcept override { inner_->shutdown(); }
+
+private:
+    ManualExecutor* inner_;
+    FrameProbe* probe_;
+};
+
+}  // namespace
+
+TEST(HostLoopPoolWork, TheHostExecutorIsDestroyedOnTheHostThreadWhenTheLoopIsDestroyedWhileABlockingToolRuns) {
+    ManualExecutor driver;
+    FrameProbe executor_probe, on_error_probe, frame_probe;
+    GatedTool tool;
+    ReleaseOnExit release(tool);
+    {
+        auto executor = std::make_shared<DestructionTrackingExecutor>(&driver, &executor_probe);
+        auto on_error_sentinel = std::make_shared<FrameSentinel>(&on_error_probe);
+        async::HostLoop::Options options;
+        options.on_error = [on_error_sentinel = std::move(on_error_sentinel)](std::exception_ptr) {};
+        async::HostLoop loop(std::move(executor), std::move(options));
+        loop.spawn(await_a_pool_tool(&tool, &frame_probe), [](std::exception_ptr) {});
+        release.arm();
+        ASSERT_TRUE(driver.run_until([&] { return tool.entered.load(); }));
+        EXPECT_EQ(executor_probe.destroyed.load(), 0);
+        EXPECT_EQ(on_error_probe.destroyed.load(), 0);
+    }
+    const int destroyed_by_loop = executor_probe.destroyed.load();
+    const int on_error_destroyed_by_loop = on_error_probe.destroyed.load();
+    tool.release = true;
+    ASSERT_TRUE(driver.run_until([&] { return tool.finished.load(); }));
+    let_the_pool_thread_post();
+    EXPECT_EQ(destroyed_by_loop, 1) << "~HostLoop() released the host executor before returning";
+    EXPECT_EQ(on_error_destroyed_by_loop, 1) << "~HostLoop() released Options::on_error before returning";
+    EXPECT_EQ(executor_probe.destroyed.load(), 1);
+    EXPECT_EQ(executor_probe.destroyed_on_host.load(), 1)
+        << "the host executor was destroyed on the host thread, never on the pool thread";
+    EXPECT_EQ(on_error_probe.destroyed.load(), 1);
+    EXPECT_EQ(on_error_probe.destroyed_on_host.load(), 1);
+    EXPECT_EQ(frame_probe.destroyed.load(), 1);
+    EXPECT_EQ(frame_probe.destroyed_on_host.load(), 1);
+    while (driver.step()) {}
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace {
+// Removes the files that synchronize the process tool, on every exit from the test.
+struct FlagFile {
+    std::string path;
+    std::string ready_path;
+    FlagFile() {
+        char name[] = "/tmp/neograph-pool-flag-XXXXXX";
+        const int fd = ::mkstemp(name);
+        if (fd >= 0) ::close(fd);
+        path = name;
+        ready_path = path + ".ready";
+        std::remove(path.c_str());  // the process waits for it to exist
+        std::remove(ready_path.c_str());
+    }
+    void create() const { std::ofstream(path) << "go"; }
+    bool is_ready() const { return std::ifstream(ready_path).good(); }
+    ~FlagFile() {
+        create();  // a process still waiting ends
+        let_the_pool_thread_post();
+        std::remove(path.c_str());
+        std::remove(ready_path.c_str());
+    }
+};
+
+// A process tool that signals `ready_path` once the child shell is running and waits until `path` exists.
+class WaitsForAFileTool final : public Tool, public ProcessTool {
+public:
+    explicit WaitsForAFileTool(const FlagFile& flag) : path_(flag.path), ready_path_(flag.ready_path) {}
+    ChatTool get_definition() const override { return ChatTool{"waits", "waits for a file", json{{"type", "object"}}}; }
+    std::string execute(const json&) override { return "sync-not-used"; }
+    std::string get_name() const override { return "waits"; }
+    ToolProcessSpec prepare_process(const json&, const ToolExecutionContext&) const override {
+        started = true;
+        ToolProcessSpec spec;
+        spec.argv = {"/bin/sh", "-c",
+                     ": > \"$2\"; while [ ! -e \"$1\" ]; do sleep 0.01; done; printf late",
+                     "sh", path_, ready_path_};
+        return spec;
+    }
+    mutable std::atomic<bool> started{false};
+
+private:
+    std::string path_;
+    std::string ready_path_;
+};
+
+asio::awaitable<void> await_a_process_tool(WaitsForAFileTool* tool, FrameProbe* probe, std::string* result) {
+    FrameSentinel sentinel(probe);
+    *result = co_await detail::execute_process_tool_async(*tool, json::object(), ToolExecutionContext{}, 4096, 30s);
+}
+}  // namespace
+
+TEST(HostLoopPoolWork, ALoopDestroyedWhileAProcessToolRunsTakesItsCoroutineAndDropsTheLateResult) {
+    auto executor = std::make_shared<ManualExecutor>();
+    FlagFile flag;
+    WaitsForAFileTool tool(flag);
+    FrameProbe probe;
+    std::string result;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_process_tool(&tool, &probe, &result), [&](std::exception_ptr) { completed = true; });
+        ASSERT_TRUE(executor->run_until([&] { return flag.is_ready(); }));
+    }
+    EXPECT_EQ(probe.destroyed.load(), 1);
+    EXPECT_EQ(probe.destroyed_on_host.load(), 1);
+    const auto queued = executor->pending();
+    flag.create();
+    let_the_pool_thread_post();  // the process ends and its pool thread finishes LoopHandoff::finish()
+    EXPECT_FALSE(completed);
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(executor->pending(), queued);
+    while (executor->step()) {}
+    EXPECT_FALSE(completed);
+}
+
+TEST(HostLoopPoolWork, AProcessToolThatEndsBeforeTheLoopIsDestroyedIsDelivered) {
+    auto executor = std::make_shared<ManualExecutor>();
+    FlagFile flag;
+    WaitsForAFileTool tool(flag);
+    FrameProbe probe;
+    std::string result;
+    bool completed = false;
+    {
+        async::HostLoop loop(executor);
+        loop.spawn(await_a_process_tool(&tool, &probe, &result), [&](std::exception_ptr error) { completed = !error; });
+        ASSERT_TRUE(executor->run_until([&] { return flag.is_ready(); }));
+        flag.create();
+        ASSERT_TRUE(executor->run_until([&] { return completed; }));
+        let_the_pool_thread_post();
+    }
+    EXPECT_NE(result.find("late"), std::string::npos);
+
+    asio::io_context io;
+    auto strand = asio::make_strand(io.get_executor());
+    FlagFile native_flag;
+    WaitsForAFileTool native_tool(native_flag);
+    FrameProbe native_probe;
+    std::string native_result;
+    bool native_done = false;
+    asio::co_spawn(strand, await_a_process_tool(&native_tool, &native_probe, &native_result),
+                   [&](std::exception_ptr error) { native_done = !error; });
+    while (!native_flag.is_ready()) {
+        io.poll_one();
+        std::this_thread::yield();
+    }
+    EXPECT_EQ(async::detail::LoopHandoff::active_count(), 0u);
+    native_flag.create();
+    io.run();
+    EXPECT_TRUE(native_done);
+    EXPECT_NE(native_result.find("late"), std::string::npos);
+}
+#endif
