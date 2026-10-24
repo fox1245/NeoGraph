@@ -4558,6 +4558,36 @@ TEST(ProgramRuntimeTest, RuntimeRefusesAJavaScriptStackBeyondTheMemoryLimit) {
     EXPECT_THROW((void)fixture.make_runtime(), std::invalid_argument);
 }
 
+TEST(ProgramRuntimeTest, RuntimeRefusesAJavaScriptStackBelowTheMinimum) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    // A count of KiB given as bytes, and one byte short of the floor, are mistakes; the floor itself is accepted.
+    for (const std::size_t bytes : {std::size_t{1}, std::size_t{512}, JavaScriptCompileLimits::kMinStackBytes - 1}) {
+        fixture.javascript_stack_bytes = bytes;
+        EXPECT_THROW((void)fixture.make_runtime(), std::invalid_argument) << bytes;
+    }
+    fixture.javascript_stack_bytes = JavaScriptCompileLimits::kMinStackBytes;
+    EXPECT_NO_THROW((void)fixture.make_runtime());
+}
+
+// A stack that the floor accepts but the build cannot start the source in is a failed run whose witness says which
+// stack it was, whichever diagnostic the engine's own failure takes: the run does not end in a code without a cause.
+TEST(ProgramRuntimeTest, JavaScriptStackTooSmallToStartTheSourceNamesTheStack) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(kRecursingMain);
+    fixture.javascript_stack_bytes = JavaScriptCompileLimits::kMinStackBytes;
+    fixture.runtime                = fixture.make_runtime();
+    const auto result              = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json{{"depth", 100}}, grant(), "trace-javascript-stack-floor", {}});
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_TRUE(result.failure()->code == "P_JS_RESOURCE_LIMIT" || result.failure()->code == "P_JS_RUNTIME")
+        << result.failure()->code << ": " << result.failure()->message;
+    ASSERT_TRUE(result.failure()->witness.contains("max_stack_bytes")) << result.failure()->witness.dump();
+    EXPECT_EQ(result.failure()->witness.at("max_stack_bytes").get<std::size_t>(), JavaScriptCompileLimits::kMinStackBytes);
+}
+
 // The stack is not part of the identity of a version: a resume runs main() again from its start, answering from the
 // journal what the paused run asked, under the stack of the runtime that resumes it. A runtime whose stack is smaller than
 // what the paused run used ends the resumed run with the diagnostic of the limit; one whose stack suffices completes it.

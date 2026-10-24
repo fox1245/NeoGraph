@@ -5116,6 +5116,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                                                 : config.javascript_stack_bytes;
         if (executors->javascript_stack_bytes > javascript_defaults.memory_limit_bytes)
             throw std::invalid_argument("RuntimeConfig::javascript_stack_bytes exceeds the JavaScript memory limit");
+        if (executors->javascript_stack_bytes < JavaScriptCompileLimits::kMinStackBytes)
+            throw std::invalid_argument("RuntimeConfig::javascript_stack_bytes is below the minimum of " +
+                                        std::to_string(JavaScriptCompileLimits::kMinStackBytes) + " bytes");
         scheduler = std::move(executors);
         // #543: a fork may send a call its source journaled and the journal cannot adopt only when the host says so.
         if (config.fork_may_resend_provider_calls && config.core_provider_call_resolver) {

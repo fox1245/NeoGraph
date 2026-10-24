@@ -3091,6 +3091,10 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
     if (limits.max_stack_bytes > limits.memory_limit_bytes) {
         throw std::invalid_argument("JavaScript compiler stack limit exceeds memory limit");
     }
+    if (limits.max_stack_bytes < JavaScriptCompileLimits::kMinStackBytes) {
+        throw std::invalid_argument("JavaScript compiler stack limit is below the minimum of " +
+                                    std::to_string(JavaScriptCompileLimits::kMinStackBytes) + " bytes");
+    }
 }
 
 ProgramCompiler::ProgramCompiler(ProgramCompiler&&) noexcept            = default;

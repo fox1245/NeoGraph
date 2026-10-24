@@ -242,7 +242,9 @@ struct ProgramExecutorIdentity {
        * source is compiled is ProgramCompilerConfig::javascript.max_stack_bytes. 0, the default, is
        * JavaScriptCompileLimits::kDefaultStackBytes: 512 KiB in a native build and 48 KiB in a WebAssembly build. There
        * the limit counts the module's own stack, honoured as far as that stack holds, and what the host's call stack
-       * carries is the embedder's to judge (wasm/README.md). Must not exceed JavaScriptCompileLimits::memory_limit_bytes.
+       * carries is the embedder's to judge (wasm/README.md). Must be at least JavaScriptCompileLimits::kMinStackBytes
+       * and must not exceed JavaScriptCompileLimits::memory_limit_bytes; the runtime refuses any other value when it
+       * is made.
        * The stack is not part of the identity of a version: a resume runs `main()` again from its start, answering from the
        * journal what the paused run asked, under the stack of the runtime that resumes it, so a runtime with a smaller
        * stack than the one that paused the run can end the resumed run with P_JS_RESOURCE_LIMIT.
