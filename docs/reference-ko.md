@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=1a32d1d2528f4213882c9f61c0659e6727985a4bfcdd7ede43c45384476fc457 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2444,7 +2444,7 @@ public:
 | `list(thread_id, limit)` / `_async` | List checkpoints for a thread, newest first, up to `limit`. |
 | `delete_thread(thread_id)` / `_async` | Delete all checkpoints for a thread. |
 | `put_writes(thread_id, parent_cp, write)` / `_async` | Record a successful node execution mid-super-step. Engine calls this immediately after a node returns and *before* its writes apply to GraphState. Default no-op. |
-| `get_writes(thread_id, parent_cp)` / `_async` | Load pending writes attached to a parent checkpoint. Engine calls this on resume to skip already-completed tasks. Default empty. |
+| `get_writes(thread_id, parent_cp)` / `_async` | 부모 체크포인트에 붙은 대기 중인 쓰기를 삽입 순서대로 읽어 옵니다. 엔진은 재개할 때 이를 호출해 이미 끝난 작업을 건너뛰며, 한 task id에 행이 여럿이면 재개는 가장 나중 행을 재생합니다. 기본값은 빈 결과입니다. |
 | `clear_writes(thread_id, parent_cp)` / `_async` | Discard pending writes after the successor super-step's checkpoint has been durably saved. Default no-op. |
 
 ### InMemoryCheckpointStore

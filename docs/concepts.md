@@ -498,7 +498,10 @@ returns a `RunResult` interrupted at the throwing node — same
 resume API. This holds for a node of the ready batch and for a `Send` target
 alike, on every sync, async and streaming entry point. The siblings that
 finished in the paused step replay on resume instead of running again, also
-in a step that no checkpoint precedes.
+in a step that no checkpoint precedes. If the step ran more than once from the
+same checkpoint (an earlier attempt failed or was cancelled before it saved its
+pause), a resume replays the result recorded last for each task id, which is the
+one of the attempt that paused (#604).
 
 Several interrupts of one step are answered one at a time (#388). When several nodes or Sends of one super-step raise `NodeInterrupt`, the run pauses on all of them: `RunResult.interrupts` lists each as `{id, node, value}`, where the id is the paused invocation's task id (`s3:review`, or `s3:send[1]:worker:<hash>` for a Send), and `interrupt_node`, `interrupt_value` and `interrupt_id` report the first. A resume answers the interrupt that `interrupt_id=` names (C++ `RunMetadata::resume_interrupt_id`), or the first one; every other paused node or Send of that step runs again without the value and asks its own question again, and the next resume answers it. Naming an interrupt that is not pending raises `ValueError` (C++ `std::invalid_argument`) before anything runs. A checkpoint that paused on several interrupts lists them in its metadata (`_neograph.interrupts`); one that paused on one is unchanged. The value reaches only the answered invocation of the paused step (#393): every node of a later step of the resumed run sees no `ctx.resume_value`, so a node or a tool gate that asks there pauses the run again instead of taking an answer to another question. A subgraph resumed through its parent receives its answer through the parent's answered node. A graph with a `messages` channel still receives the value there as a user message, unless an assistant turn's tool calls have no results yet: a message there would come between the calls and their results and the next model call would be refused, so the answer reaches only the gate or node that asked (#544). JavaScript joins and plan-level `parallel` and `quorum` follow the same rule: one paused member is answered per resume, and the others ask again.
 

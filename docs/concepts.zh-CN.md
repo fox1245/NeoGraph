@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=zh-CN source_sha256=92f92feeb9b5ec0d95a58303a3acbaa324cb1ce09d751ad0921218e540bd9282 -->
 # NeoGraph 核心概念导读
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -431,7 +431,7 @@ result = await engine.resume_from_async(config, checkpoint_id, {"approved": True
 
 ### 通过 `NodeInterrupt` 动态中断
 
-在节点函数体内抛出即可（Python：`raise ng.NodeInterrupt(reason)`；C++：`throw NodeInterrupt(...)`）。引擎会捕获它、持久化状态，并返回一个在抛出处的节点中断的 `RunResult`，恢复用的是同一套 API。不论是就绪批次里的节点还是 `Send` 的目标节点，也不论走同步、异步还是流式入口，都是如此。暂停的那一步中已经完成的兄弟节点，恢复时是重放，不会再运行一次；即使这一步之前没有检查点，也一样。
+在节点函数体内抛出即可（Python：`raise ng.NodeInterrupt(reason)`；C++：`throw NodeInterrupt(...)`）。引擎会捕获它、持久化状态，并返回一个在抛出处的节点中断的 `RunResult`，恢复用的是同一套 API。不论是就绪批次里的节点还是 `Send` 的目标节点，也不论走同步、异步还是流式入口，都是如此。暂停的那一步中已经完成的兄弟节点，恢复时是重放，不会再运行一次；即使这一步之前没有检查点，也一样。如果这一步从同一个检查点运行了多次（之前的尝试在保存暂停之前失败或被取消），恢复会重放每个 task id 最后记录的结果，也就是发生暂停的那次尝试的结果（#604）。
 
 同一步里的多个中断要逐个回应（#388）。一个超步中有多个节点或 Send 抛出 `NodeInterrupt` 时，运行会在这些中断上全部暂停：`RunResult.interrupts` 以 `{id, node, value}` 的形式列出每一个，其中 id 是被暂停的那次调用的 task id（节点形如 `s3:review`，Send 形如 `s3:send[1]:worker:<hash>`），`interrupt_node`、`interrupt_value` 和 `interrupt_id` 报告的是第一个。一次恢复回应的是 `interrupt_id=` 指定的那个中断（C++ 中是 `RunMetadata::resume_interrupt_id`），未指定则回应第一个；这一步里其余被暂停的节点或 Send 会在没有该值的情况下重新运行，再次提出各自的问题，由下一次恢复来回应。指定一个并不处于等待状态的中断，会在任何节点运行之前抛出 `ValueError`（C++ 中是 `std::invalid_argument`）。在多个中断上暂停的检查点，会在元数据（`_neograph.interrupts`）中列出它们；只在一个中断上暂停的检查点，格式不变。恢复值只送达这个暂停步骤中被回应的那次调用（#393）：恢复后的运行中，后续各步的节点都看不到 `ctx.resume_value`，所以在那里提问的节点或工具闸门会再次暂停运行，而不会把别的问题的答案拿去用。通过父图恢复的子图，经由父图中被回应的节点拿到它的答案。带有 `messages` 通道的图，仍会在该通道里以用户消息的形式收到这个值；但当助手轮次的工具调用还没有结果时不会：那里的消息会插在调用与其结果之间，下一次模型调用将被拒绝，因此回答只会到达提出问题的门或节点 (#544)。JavaScript 的 join 以及计划级的 `parallel` 和 `quorum` 遵循同样的规则：每次恢复回应一个暂停的成员，其余成员重新提问。
 

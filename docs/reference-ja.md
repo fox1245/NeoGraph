@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=1a32d1d2528f4213882c9f61c0659e6727985a4bfcdd7ede43c45384476fc457 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2173,7 +2173,7 @@ public:
 | `list(thread_id, limit)` / `_async` | スレッドのチェックポイントを新しい順に最大 `limit` 件列挙します。 |
 | `delete_thread(thread_id)` / `_async` | スレッドのすべてのチェックポイントを削除します。 |
 | `put_writes(thread_id, parent_cp, write)` / `_async` | スーパーステップ途中で成功したノード実行を記録します。エンジンはノードが戻った直後、かつその書き込みを GraphState に適用する *前* にこれを呼び出します。デフォルトは no-op です。 |
-| `get_writes(thread_id, parent_cp)` / `_async` | 親チェックポイントに紐づく保留中の書き込みを読み込みます。エンジンは resume 時にこれを呼び出し、完了済みタスクをスキップします。デフォルトは空です。 |
+| `get_writes(thread_id, parent_cp)` / `_async` | 親チェックポイントに紐づく保留中の書き込みを挿入順に読み込みます。エンジンは resume 時にこれを呼び出し、完了済みタスクをスキップします。1つの task id に複数の行があるときは、resume は最も新しい行をリプレイします。デフォルトは空です。 |
 | `clear_writes(thread_id, parent_cp)` / `_async` | 後続スーパーステップのチェックポイントが永続保存された後、保留中の書き込みを破棄します。デフォルトは no-op です。 |
 ### InMemoryCheckpointStore
 テストや単一プロセスのアプリケーションに適した、スレッドセーフなインメモリ実装です。

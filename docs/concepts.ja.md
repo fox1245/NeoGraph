@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=035d0ad394a7c18340d5b240fa1728cb5eab0760598adaafb86de62ea228c983 -->
+<!-- neograph-i18n: source=docs/concepts.md locale=ja source_sha256=92f92feeb9b5ec0d95a58303a3acbaa324cb1ce09d751ad0921218e540bd9282 -->
 # NeoGraphのコアコンセプト — 解説ガイド
 
 **Languages:** [English](concepts.md) | [한국어](concepts.ko.md) | [日本語](concepts.ja.md) | [简体中文](concepts.zh-CN.md)
@@ -431,7 +431,7 @@ result = await engine.resume_from_async(config, checkpoint_id, {"approved": True
 
 ### `NodeInterrupt` による動的な割り込み
 
-ノード本体の中から送出します（Python：`raise ng.NodeInterrupt(reason)`、C++：`throw NodeInterrupt(...)`）。エンジンはこれを捕捉して状態を永続化し、送出したノードで中断した `RunResult` を返します。再開のAPIは同じです。実行可能バッチのノードでも `Send` のターゲットでも、同期・非同期・ストリーミングのどの入口からでも、同じように動作します。一時停止したステップで終了済みの並列ノードは、再開時に再実行されず、記録済みの結果がリプレイされます。ステップより前にチェックポイントがない場合も同じです。
+ノード本体の中から送出します（Python：`raise ng.NodeInterrupt(reason)`、C++：`throw NodeInterrupt(...)`）。エンジンはこれを捕捉して状態を永続化し、送出したノードで中断した `RunResult` を返します。再開のAPIは同じです。実行可能バッチのノードでも `Send` のターゲットでも、同期・非同期・ストリーミングのどの入口からでも、同じように動作します。一時停止したステップで終了済みの並列ノードは、再開時に再実行されず、記録済みの結果がリプレイされます。ステップより前にチェックポイントがない場合も同じです。同じチェックポイントからそのステップが複数回実行された場合（先の試行が一時停止を保存する前に失敗またはキャンセルされたとき）、再開は task id ごとに最後に記録された結果、つまり一時停止した試行の結果をリプレイします（#604）。
 
 1つのステップで複数の割り込みが起きた場合は、1つずつ答えます（#388）。1つのスーパーステップの中で複数のノードや Send が `NodeInterrupt` を送出すると、実行はそのすべてで一時停止します。`RunResult.interrupts` には、それぞれが `{id, node, value}` として並びます。id は、一時停止した呼び出しのタスクIDです（`s3:review`。Send の場合は `s3:send[1]:worker:<hash>`）。`interrupt_node`、`interrupt_value`、`interrupt_id` には、最初の割り込みが入ります。
 
