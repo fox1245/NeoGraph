@@ -309,21 +309,25 @@ private:
     std::string name_;
 };
 
+// Counts the effects that sequenced EffectInterruptNodes asked for; the ids of each are its own.
+std::atomic<unsigned> sequenced_effects{0};
+
 class EffectInterruptNode final : public GraphNode {
 public:
-    explicit EffectInterruptNode(std::string name, bool non_idempotent = false)
-        : name_(std::move(name)), non_idempotent_(non_idempotent) {}
+    explicit EffectInterruptNode(std::string name, bool non_idempotent = false, bool sequenced = false)
+        : name_(std::move(name)), non_idempotent_(non_idempotent), sequenced_(sequenced) {}
 
     asio::awaitable<NodeOutput> run(NodeInput input) override {
         ++interrupt_calls;
         if (!input.ctx.resume_value) {
+            const auto ordinal = sequenced_ ? std::to_string(++sequenced_effects) : std::string("1");
             throw NodeInterrupt(
                 "capability result required",
                 json{{"__neograph_program_pending_kind", "effect"},
-                     {"call_id", "call-effect-1"},
+                     {"call_id", "call-effect-" + ordinal},
                      {"result_schema", json{{"type", "object"}}},
                      {"effect",
-                      json{{"effect_id", "effect-search-1"},
+                      json{{"effect_id", "effect-search-" + ordinal},
                            {"idempotency", non_idempotent_ ? "non_idempotent" : "supported"},
                            {"tool", "search"},
                            {"arguments", json{{"query", "neo"}}}}},
@@ -339,6 +343,7 @@ public:
 private:
     std::string name_;
     bool        non_idempotent_ = false;
+    bool        sequenced_      = false;
 };
 
 // #364: counts its calls and fails the way it was asked to.
@@ -1138,6 +1143,12 @@ RegistrySnapshot runtime_registry(
         manifest(ExecutableKind::Node, "runtime-effect-nonidempotent", 'c'),
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<EffectInterruptNode>(name, true);
+        },
+        json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-effect-sequenced", 'b'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<EffectInterruptNode>(name, true, true);
         },
         json{{"type", "object"}}, json::object());
     builder.add_node(
@@ -8139,6 +8150,237 @@ TEST(ProgramRuntimeTest, AReconciledJavaScriptCallCoreWhoseHandlerThrowsAtItsSta
         const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
         EXPECT_EQ(found.status(), ProgramTerminalStatus::Failed) << failure_detail(found);
         EXPECT_EQ(interrupt_calls.load(), 1U);
+    }
+}
+
+namespace {
+
+// What a journal record holds of a run's budget: the amounts that remain plus the amounts reserved for the command in
+// flight. An attempt that continues a command is granted this much.
+RunBudget budget_held_by(const ProgramJournalRecord& record) {
+    RunBudget total = record.remaining_budget;
+    total.wall_time_ms += record.inflight_reservation.wall_time_ms;
+    total.model_tokens += record.inflight_reservation.model_tokens;
+    total.monetary_microunits += record.inflight_reservation.monetary_microunits;
+    total.max_core_steps += record.inflight_reservation.max_core_steps;
+    return total;
+}
+
+// A grant whose tokens and money differ from each other, so a reservation that mixes them up is seen.
+RunBudget priced_javascript_budget() {
+    auto budget                = javascript_budget(1);
+    budget.model_tokens        = 777;
+    budget.monetary_microunits = 333;
+    return budget;
+}
+
+// A reconciliation, with the budget its attempt is granted and the journal as it is when the reconciliation is announced.
+struct ReconciledAttempt {
+    std::optional<ProgramResult>        result;
+    std::optional<ProgramJournalRecord> held;
+    std::optional<RunBudget>            granted;
+};
+
+ReconciledAttempt reconcile_and_wait(AdmittedRuntime& fixture, const std::string& run_id, ProgramEffectResolution resolution) {
+    ReconciledAttempt attempt;
+    auto              sink = std::make_shared<CallbackSink>();
+    sink->set_callback([&](const ProgramEvent& event) {
+        if (event.kind != ProgramEventKind::Started) return;
+        attempt.held    = fixture.journal->latest("tenant:runtime", run_id);
+        attempt.granted = std::get<ProgramStartedEvent>(event.payload).budget;
+    });
+    resolution.events = sink;
+    attempt.result    = fixture.runtime->reconcile("tenant:runtime", run_id, std::move(resolution)).wait();
+    return attempt;
+}
+
+}  // namespace
+
+// #613: a reconciliation that completes a paused JavaScript callCore continues main() with the result it was given. The
+// run released the reservation of the call when it paused, so the reconciliation reserves it again, as a resume does:
+// the attempt that continues the call holds one, and is granted what the journal holds.
+TEST(ProgramRuntimeTest, AReconciledJavaScriptCallCoreContinuesMainWithTheReconciledResult) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-effect-nonidempotent", R"JS(
+    const output = yield ng.callCore("main", {}, "reconcile:continues");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), priced_javascript_budget(), "trace-js-reconcile-continues", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+        ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_effect);
+        const auto pending = *interrupted.interrupt()->pending_effect;
+        const auto paused  = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(paused.has_value());
+        EXPECT_EQ(paused->inflight_reservation, RunBudget{}) << "a paused call holds no reservation";
+        EXPECT_EQ(paused->remaining_budget.model_tokens, 777U);
+        EXPECT_EQ(paused->remaining_budget.monetary_microunits, 333U);
+
+        ASSERT_EQ(fixture.runtime
+                      ->reconcile("tenant:runtime", interrupted.run_id(),
+                                  ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Unknown,
+                                                          std::nullopt, "trace-js-reconcile-continues-unknown", {}})
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+
+        const auto reconciled = reconcile_and_wait(
+            fixture, interrupted.run_id(),
+            ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Completed,
+                                    json{{"result", "reconciled"}}, "trace-js-reconcile-continues-completed", {}});
+        ASSERT_TRUE(reconciled.result && reconciled.held && reconciled.granted);
+        EXPECT_EQ(reconciled.result->status(), ProgramTerminalStatus::Completed) << failure_detail(*reconciled.result);
+        EXPECT_EQ(reconciled.result->output(), (json{{"value", "reconciled"}}));
+        EXPECT_EQ(interrupt_calls.load(), 2U) << "the call ran again with the reconciled result";
+
+        EXPECT_EQ(reconciled.held->continuation.state, ContinuationState::Running);
+        EXPECT_NE(reconciled.held->inflight_reservation, RunBudget{}) << "the reconciliation reserves the call";
+        EXPECT_EQ(reconciled.held->remaining_budget.model_tokens, 0U);
+        EXPECT_EQ(reconciled.held->remaining_budget.monetary_microunits, 0U);
+        EXPECT_EQ(reconciled.held->inflight_reservation.model_tokens, 777U);
+        EXPECT_EQ(reconciled.held->inflight_reservation.monetary_microunits, 333U);
+        EXPECT_EQ(*reconciled.granted, budget_held_by(*reconciled.held))
+            << "the attempt is granted what the journal holds, no more";
+
+        const auto latest = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->continuation.state, ContinuationState::Completed);
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{}) << "the call settled its reservation";
+        EXPECT_EQ(latest->remaining_budget.model_tokens, 777U) << "nothing was spent, so nothing is lost";
+        EXPECT_EQ(latest->remaining_budget.monetary_microunits, 333U);
+        EXPECT_EQ(reconciled.result->remaining_budget().model_tokens, 777U);
+        EXPECT_EQ(reconciled.result->remaining_budget().monetary_microunits, 333U);
+
+        auto       fresh = fixture.make_runtime();
+        const auto found = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        EXPECT_EQ(found.status(), ProgramTerminalStatus::Completed) << failure_detail(found);
+        EXPECT_EQ(found.output(), (json{{"value", "reconciled"}}));
+    }
+}
+
+// The call that follows a reconciled one starts from what the reconciliation left, and pauses and is reconciled in its
+// turn: the budget held at each reconciliation is what the journal holds, and the run ends with the whole of its
+// tokens and money, as nothing used any.
+TEST(ProgramRuntimeTest, AJavaScriptCallCoreAfterAReconciledOneIsReconciledInItsTurn) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        interrupt_calls.store(0);
+        sequenced_effects.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-effect-sequenced", R"JS(
+    const first = yield ng.callCore("main", {}, "reconcile:first");
+    const second = yield ng.callCore("main", {}, "reconcile:second");
+    return {first: first.value, second: second.value};
+)JS"));
+        const auto first_pause = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), priced_javascript_budget(), "trace-js-reconcile-twice", {}});
+        ASSERT_EQ(first_pause.status(), ProgramTerminalStatus::Interrupted) << failure_detail(first_pause);
+        ASSERT_TRUE(first_pause.interrupt() && first_pause.interrupt()->pending_effect);
+        const auto run_id  = first_pause.run_id();
+        auto       pending = *first_pause.interrupt()->pending_effect;
+        auto       unknown_for = [&](const std::string& call_id, const std::string& trace) {
+            return ProgramEffectResolution{call_id, ProgramEffectReconciliation::Unknown, std::nullopt, trace, {}};
+        };
+        auto       completed_for = [&](const std::string& call_id, const std::string& answer, const std::string& trace) {
+            return ProgramEffectResolution{call_id, ProgramEffectReconciliation::Completed, json{{"result", answer}},
+                                           trace, {}};
+        };
+
+        ASSERT_EQ(fixture.runtime
+                      ->reconcile("tenant:runtime", run_id, unknown_for(pending.call_id(), "trace-js-twice-unknown-1"))
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+        const auto first = reconcile_and_wait(fixture, run_id,
+                                              completed_for(pending.call_id(), "one", "trace-js-twice-completed-1"));
+        ASSERT_TRUE(first.result && first.held && first.granted);
+        ASSERT_EQ(first.result->status(), ProgramTerminalStatus::Interrupted) << failure_detail(*first.result);
+        EXPECT_EQ(*first.granted, budget_held_by(*first.held));
+        ASSERT_TRUE(first.result->interrupt() && first.result->interrupt()->pending_effect)
+            << "the second call pauses for its own result";
+        pending = *first.result->interrupt()->pending_effect;
+
+        const auto second_pause = fixture.journal->latest("tenant:runtime", run_id);
+        ASSERT_TRUE(second_pause.has_value());
+        EXPECT_EQ(second_pause->inflight_reservation, RunBudget{}) << "a paused call holds no reservation";
+        EXPECT_EQ(second_pause->remaining_budget.model_tokens, 777U);
+        EXPECT_EQ(second_pause->remaining_budget.monetary_microunits, 333U);
+
+        ASSERT_EQ(fixture.runtime
+                      ->reconcile("tenant:runtime", run_id, unknown_for(pending.call_id(), "trace-js-twice-unknown-2"))
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+        const auto second = reconcile_and_wait(fixture, run_id,
+                                               completed_for(pending.call_id(), "two", "trace-js-twice-completed-2"));
+        ASSERT_TRUE(second.result && second.held && second.granted);
+        EXPECT_EQ(second.result->status(), ProgramTerminalStatus::Completed) << failure_detail(*second.result);
+        EXPECT_EQ(second.result->output(), (json{{"first", "one"}, {"second", "two"}}));
+        EXPECT_EQ(*second.granted, budget_held_by(*second.held));
+        EXPECT_EQ(second.held->inflight_reservation.model_tokens, 777U);
+        EXPECT_EQ(second.held->inflight_reservation.monetary_microunits, 333U);
+        EXPECT_EQ(second.result->remaining_budget().model_tokens, 777U);
+        EXPECT_EQ(second.result->remaining_budget().monetary_microunits, 333U);
+        const auto latest = fixture.journal->latest("tenant:runtime", run_id);
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->inflight_reservation, RunBudget{});
+    }
+}
+
+// A process that stops inside the node of a reconciled JavaScript callCore leaves a run that a restarted process
+// recovers: the journal holds the reservation of the call, and the attempt continues it with the reconciled result.
+TEST(ProgramRuntimeTest, ARecoveredReconciledJavaScriptCallCoreContinuesWithTheReconciledResult) {
+    for (const bool durable : join_test_store_kinds()) {
+        SCOPED_TRACE(durable ? "SQLite stores" : "in-memory stores");
+        interrupt_calls.store(0);
+        JoinTestStores  stores(durable);
+        AdmittedRuntime fixture(1, stores.checkpoints, stores.transitions, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      version =
+            fixture.admit_javascript(javascript_runtime_source("runtime-resume-hook-effect", R"JS(
+    const output = yield ng.callCore("main", {}, "reconcile:recovered");
+    return {value: output.value};
+)JS"));
+        const auto interrupted = fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), priced_javascript_budget(), "trace-js-reconcile-recovered", {}});
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+        ASSERT_TRUE(interrupted.interrupt() && interrupted.interrupt()->pending_effect);
+        const auto pending = *interrupted.interrupt()->pending_effect;
+        ASSERT_EQ(fixture.runtime
+                      ->reconcile("tenant:runtime", interrupted.run_id(),
+                                  ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Unknown,
+                                                          std::nullopt, "trace-js-recovered-unknown", {}})
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+
+        HeldResumedAttempt held;
+        auto               original = fixture.runtime->reconcile(
+            "tenant:runtime", interrupted.run_id(),
+            ProgramEffectResolution{pending.call_id(), ProgramEffectReconciliation::Completed,
+                                    json{{"result", "reconciled"}}, "trace-js-recovered-completed", {}});
+        ASSERT_TRUE(held.entered()) << "the reconciled call is inside its node";
+        const auto inside = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+        ASSERT_TRUE(inside.has_value());
+        EXPECT_NE(inside->inflight_reservation, RunBudget{}) << "the journal holds the reservation of the call";
+
+        auto       fresh     = fixture.make_runtime();
+        const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+        EXPECT_EQ(recovered.output(), (json{{"value", json{{"result", "reconciled"}}.dump()}}));
+        EXPECT_EQ(recovered.remaining_budget().model_tokens, 777U);
+        EXPECT_EQ(recovered.remaining_budget().monetary_microunits, 333U);
+        held.release();
+        (void)original.wait();
     }
 }
 
