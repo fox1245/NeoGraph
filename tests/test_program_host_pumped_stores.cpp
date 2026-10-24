@@ -1838,6 +1838,55 @@ TEST(ProgramHostPumpedStores, AnAcceptedCancelWhoseTaskNeverRunsLeavesTheRunInte
     EXPECT_EQ(stored->continuation().state, ContinuationState::Interrupted);
 }
 
+// The host refuses the post that asks for a turn of the loop (HostLoop allows that for an executor that is stopping).
+// The task of the accepted cancel() is queued on the loop all the same, together with its claim: it waits for the next
+// wake, keeps the claim meanwhile, and records the state and releases the claim when it runs.
+TEST(ProgramHostPumpedStores, AnAcceptedCancelWhoseTurnTheHostRefusedWaitsForTheNextWakeAndThenClearsItsClaim) {
+    HostPumpedProgramHost host(HostPumpedProgramHost::Transitions);
+    host.grant_tool("sync-cancel-refused-turn", host.review);
+    auto run = pause_review(host, "sync-cancel-refused-turn");
+    ASSERT_TRUE(run.handle && run.paused);
+    ASSERT_EQ(run.paused->status(), ProgramTerminalStatus::Interrupted) << failure_text(*run.paused);
+    host.stores.transitions->set_pumped(true);
+
+    host.hosted.host->refuse_posts(true);
+    EXPECT_TRUE(run.handle->cancel()) << "the task is queued on the loop whether or not the host took a turn";
+    EXPECT_EQ(host.hosted.host->pending(), 0u) << "the host took no turn";
+    EXPECT_FALSE(run.handle->cancel()) << "the claim stands although no turn was taken";
+
+    // The host takes posts again, but nothing has woken the loop: nothing runs and the run is as it was.
+    host.hosted.host->refuse_posts(false);
+    EXPECT_FALSE(host.hosted.host->step()) << "no turn is queued: the task waits for a wake";
+    EXPECT_EQ(stored_state(host, "sync-cancel-refused-turn"), ContinuationState::Interrupted);
+
+    // The next wake (here the start of a resume on the loop) runs the queued task first. It holds the claim, so the
+    // resume is refused for it; once the state is written the claim is released and the resume is refused for the state.
+    std::string                  refusal;
+    std::optional<ProgramHandle> resumed;
+    auto resume = [&]() -> asio::awaitable<int> {
+        try {
+            auto answer = answer_for(*run.paused, json{{"decision", "approved"}}, "trace-resume-refused-turn");
+            resumed     = co_await host.runtime->resume_handle_async(kOwner, "sync-cancel-refused-turn", std::move(answer));
+        } catch (const ProgramDiagnosticError& error) {
+            refusal = error.diagnostic().code;
+        }
+        co_return 0;
+    };
+    host.run(resume());
+    EXPECT_FALSE(resumed) << "a run was resumed after its cancellation was accepted";
+    EXPECT_EQ(refusal, "P_RESUME_CONFLICT");
+    ASSERT_TRUE(pump_until_cancelled(host, *run.handle));
+    EXPECT_EQ(stored_state(host, "sync-cancel-refused-turn"), ContinuationState::Cancelled);
+    EXPECT_EQ(cancelled_terminals(host, "sync-cancel-refused-turn"), 1U);
+    refusal.clear();
+    host.run(resume());
+    EXPECT_FALSE(resumed);
+    EXPECT_EQ(refusal, "P_RESUME_STATE") << "the claim was released when the task ended";
+    EXPECT_TRUE(run.handle->notices().empty());
+    EXPECT_EQ(model_calls.load(), 0);
+    EXPECT_EQ(tool_runs.load(), 0);
+}
+
 // ---- A handle of an earlier attempt, and reconcile ----
 //
 // A handle holds the result of the attempt it came from. After the run was resumed through another handle, the first
