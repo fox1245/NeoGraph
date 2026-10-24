@@ -824,8 +824,11 @@ TEST(ProgramCommandRecovery, ACancelBeforeAResumedAttemptStartsEndsCancelled) {
     const auto call_id = paused.interrupt()->pending_effect->call_id();
 
     auto&      runtime = stopped.recovered->runtime();
+    // core_definition() has one entry node ("work"), so execute_single_async emits NodeStarted on the
+    // scheduler->attempts thread itself instead of fanning out to the GraphEngine worker pool and suspending the
+    // attempt coroutine.
     const auto holding =
-        stopped.recovered->admit(ProgramSource::from_javascript("holding.js", javascript_program(kOkThenOk)));
+        stopped.recovered->admit(ProgramSource::from_cpp_builder("holding", 2, plan_program(json{{"op", "call_core"}})));
     auto gate = std::make_shared<Gate>();
     std::vector<ProgramHandle> holders;
     struct ReleaseOnExit {
@@ -837,8 +840,8 @@ TEST(ProgramCommandRecovery, ACancelBeforeAResumedAttemptStartsEndsCancelled) {
         }
     } release_on_exit{gate, holders};
     for (int i = 0; i < 2; ++i) {
-        ProgramInvocation invocation{json::object(), Host::budget(), "trace-hold", std::make_shared<HoldSink>(gate),
-                                     stopped.world.run_id("hold" + std::to_string(i))};
+        ProgramInvocation invocation{json{{"value", "ok:hold"}}, Host::budget(), "trace-hold",
+                                     std::make_shared<HoldSink>(gate), stopped.world.run_id("hold" + std::to_string(i))};
         holders.push_back(runtime.start(kOwner, holding, std::move(invocation)));
     }
     for (int i = 0; i < 3000 && gate->entered.load() < 2; ++i)
@@ -849,6 +852,8 @@ TEST(ProgramCommandRecovery, ACancelBeforeAResumedAttemptStartsEndsCancelled) {
     auto        sink   = std::make_shared<StartedGrant>(journal, run_id);
     auto        handle = runtime.resume(kOwner, run_id,
                                         ProgramResume{json{{"out", "reconciled"}}, "trace-resume", sink, call_id});
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(handle.try_result().has_value()) << "the resumed attempt ran while both scheduler threads were held";
     EXPECT_TRUE(handle.cancel());
     gate->release();
 
