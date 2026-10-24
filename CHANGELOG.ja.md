@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=034d4be5b281ffec810542a2e53cecceb7863e53e8f8597f22dc0142e7e37a41 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=b90fd568959f2dc1274da5546bb82e3c1fb7b497d3976d87ee65cdcc10ba5482 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -188,6 +188,9 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
 - **C++ 利用者は再ビルドしてください: `StdioClientConfig` にメンバーが追加されました。** `mcp::StdioClientConfig` に `max_stdout_text_lines` と `max_stdout_text_bytes` が追加されました。NeoGraph、C++ 利用者、Python 拡張をあわせて再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
 
 ### 修正
+- **複数の呼び出しを同時に待つ JavaScript の `main()` が、起動した子が発行している間に `P_JS_COMMAND_JOURNAL` で失敗しなくなりました (#614)。** タイムアウト付きの `ng.await` は開始をコマンドジャーナルに記録し、`ng.spawn` は子ごとに run のレコードへ記録します。どちらも run のヘッドに対する compare で、子が接続・ディスパッチ・join されるたびにそのヘッドが動きます。コマンドの発行はヘッドを読み直して再試行しましたが、3 回だけで、子のレコードは 5 回だけでした。スレッド実行器を使う Release ビルドでは、生成した子 4 つを待つ `main()` が 10 回に 1 回ほど `Failed` と `P_JS_COMMAND_JOURNAL`("Could not durably record the start of a JavaScript await")で終わり、1000 回に数回は `P_CHILD_CONFLICT`("Parent-child dispatch lost its transition CAS")で終わりました。Program と子には何の落ち度もありませんでした。
+  - **負けた compare は最大 64 回まで再試行します。** compare に負けるのは、ヘッドを読んでから書くまでの間に同じ run の別の発行が書き込まれたときだけなので、再試行のたびにより新しいヘッドを読みます。JavaScript コマンドの発行(保留中のエントリ、await の開始、join で確定したメンバー、コマンドの結果)と子のレコードの発行(接続、ディスパッチ、完了)が同じ上限を共有し、食い違ったヘッドの読み取りも読み直して同じ上限に数えます。上限を使い切ると、run はこれまでどおり(`P_JS_COMMAND_JOURNAL`、子のレコードでは `P_CHILD_CONFLICT` で)失敗しますが、3 回や 5 回ではなく最大 64 回の試行の後になります。
+  - `tests/test_program_runtime.cpp` は、ストアのラッパーで 1 メンバーの await 開始レコードの compare を 10 回連続で拒否し(続いてそのメンバーの開始が記録され、4 つの開始がすべて記録されて run が完了します)、永久に拒否し(そのレコードの 64 回の compare がすべて拒否された後に run が `P_JS_COMMAND_JOURNAL` で失敗します)、子 4 つの場合を 4 スレッドの実行器で 40 回実行します。
 - **クロックが数えられない JavaScript のウォールクロック制限は、過去の期限ではなく制限なしです。** `JavaScriptCompileLimits::max_wall_time_ms` は `std::chrono::milliseconds(limit)` を steady clock に足して期限になっていました。クロックのナノ秒は符号付き 64 ビットでは約 292 年（9.2 兆ミリ秒）であふれ、`2^63` ミリ秒はミリ秒の値にそもそも収まらないため、約 9.2e12 を超える制限は、ホストが「無制限」として渡しうる `UINT64_MAX` も含めて、`define()` と `main()` をすぐに `P_JS_TIMEOUT` で終わらせていました（加算がオーバーフローしていました）。期限は今は最も遅い時刻で止まります。JavaScript モジュールは影響を受けませんでした。`defineTimeMs` は 3,600,000 ミリ秒までに制限されています。
 
 - **中断された JavaScript の `ng.callCore` を `Completed` で `reconcile()` すると、`P_JS_COMMAND_JOURNAL_MISMATCH` で失敗せず `main()` が続きます (#613)。** Core ノードの効果（effect）で中断された JavaScript の `main()` を持つ実行は、その呼び出しのウォールクロック時間、モデルトークン、金額、Core ステップの予約を持ちません。中断が予約を解放するためです。再開（resume）は呼び出しを続けるときに予約を取り直します。呼び出しを完了として扱う reconcile は取り直しませんでした。その試行はジャーナルに予約を見つけられず、実行は `P_JS_COMMAND_JOURNAL_MISMATCH`（"Exact Core resume has no durable command resource reservation"）で `failed` になり、ホストが渡した結果は使われませんでした。
