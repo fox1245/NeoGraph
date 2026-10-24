@@ -4213,6 +4213,33 @@ TEST(ProgramRuntimeTest, JavaScriptGeneratorProducesSealedTypedCommandEnvelope) 
     EXPECT_EQ(step.value, step.command->to_json());
 }
 
+// The same for the generator of a run: its deadline is the time it opens plus the limit, and a limit beyond what the
+// steady clock counts is no limit, not a deadline in the past.
+TEST(ProgramRuntimeTest, JavaScriptGeneratorWallTimeLimitBeyondTheClockIsNotAnImmediateTimeout) {
+    const auto source = ProgramSource::from_javascript("test:huge-wall-time.js",
+                                                       R"JS(
+            export function* main() {
+                yield ng.callCore("main", {requested: "draft"}, "main:12");
+                return {};
+            }
+        )JS");
+    for (const std::uint64_t limit : {std::uint64_t{9'300'000'000'000}, std::uint64_t{10'000'000'000'000},
+                                      std::uint64_t{1} << 63, (std::uint64_t{1} << 63) + 1,
+                                      std::numeric_limits<std::uint64_t>::max()}) {
+        JavaScriptCompileLimits limits;
+        limits.max_wall_time_ms = limit;
+        auto generator = neograph::program::detail::JavaScriptGenerator::open(source, json::object(), limits);
+        ASSERT_TRUE(generator.has_value()) << limit;
+        try {
+            const auto step = generator->next();
+            EXPECT_FALSE(step.done) << limit;
+            EXPECT_TRUE(step.command.has_value()) << limit;
+        } catch (const neograph::program::detail::JavaScriptCompileError& error) {
+            ADD_FAILURE() << "a wall-time limit of " << limit << " ms ended the step: " << error.code();
+        }
+    }
+}
+
 TEST(ProgramRuntimeTest, JavaScriptRetainedCommandsShareTheQuickJsMemoryCeiling) {
     const auto              source = ProgramSource::from_javascript("test:native-live-commands.js",
                                                                     R"JS(
