@@ -1,7 +1,7 @@
 """16 — Multi-turn chat + research dispatch (typed Responses API + Gradio).
 
 A small chat UI with a research-mode trigger. Type a normal question
-and you get a normal LLM reply. Say "조사해줘 / research / investigate"
+and you get a normal LLM reply. Say "research", "investigate", or "deep dive" (or the Korean triggers in RESEARCH_TRIGGER_PATTERN)
 and the engine fans out parallel sub-question researchers via `Send`,
 then synthesizes a markdown report.
 

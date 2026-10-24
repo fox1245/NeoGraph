@@ -1,19 +1,19 @@
 // jarvis/specialists/coder/server.cpp
 //
-// 자비스 위임용 코더 전문가 — A2A 서버로 노출.
+// Coder specialist for JARVIS delegation — exposed as an A2A server.
 //
-// 자비스 라우터가 mode="delegate", delegate_to="coder" 를 결정하면
-// A2AClient 가 이 서버(기본 port 8210)에 user_text 를 통째로 던진다.
-// PersonaNode 하나짜리 그래프가 LLM 응답을 만들고, 그 뒤
-// SummaryEnforcerNode 가 마지막 줄에 [SUMMARY] 한 줄을 강제 삽입한다.
-// 자비스 본체의 response_synth 는 그 [SUMMARY] 줄만 음성으로 읽는다.
+// When the JARVIS router chooses mode="delegate", delegate_to="coder",
+// A2AClient forwards user_text to this server (default port 8210).
+// A graph with a single PersonaNode generates the LLM reply, followed by
+// SummaryEnforcerNode which ensures a [SUMMARY] marker is present (appending a trailing line if missing).
+// JARVIS's response_synth reads only that [SUMMARY] line aloud via TTS.
 //
-// 사용:
-//   ./cookbook_jarvis_specialist_coder [port]    (기본값 8210)
+// Usage:
+//   ./cookbook_jarvis_specialist_coder [port]    (default 8210)
 //
-// .env 또는 환경변수에 OPENROUTER_API_KEY 가 없으면 MockProvider 로 대체.
+// Falls back to MockProvider when OPENROUTER_API_KEY is not set in .env or the environment.
 //
-// ai-assembly/member_server.cpp 와 동일한 패턴으로 구성.
+// Structured after the same pattern as ai-assembly/member_server.cpp.
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
@@ -52,17 +52,17 @@ std::atomic<bool> g_shutdown{false};
 void on_signal(int) { g_shutdown.store(true, std::memory_order_release); }
 
 // ──────────────────────────────────────────────────────────────────────────
-// API 키 없을 때 쓰는 간단한 Mock Provider
+// Simple Mock Provider used when no API key is configured
 // ──────────────────────────────────────────────────────────────────────────
 using MockProvider = jarvis::providers::MockProvider;
 
 // ──────────────────────────────────────────────────────────────────────────
-// persona.txt 에서 ===<section>=== 블록을 꺼내는 함수
+// Extract an ===<section>=== block from persona.txt
 // ──────────────────────────────────────────────────────────────────────────
 std::string extract_persona_section(const std::string& file_path,
                                     const std::string& section_name) {
     std::ifstream f(file_path);
-    if (!f) return "";          // 파일 없으면 빈 문자열 — 에러로 죽이지 않음
+    if (!f) return "";          // return empty string if missing — do not fail hard
 
     const std::string marker = "===" + section_name + "===";
     std::string line;
@@ -74,7 +74,7 @@ std::string extract_persona_section(const std::string& file_path,
             if (line == marker) { in_section = true; }
             continue;
         }
-        // 다음 === 헤더를 만나면 종료
+        // Stop at the next === header
         if (line.size() >= 3 && line[0] == '=' && line[1] == '=' && line[2] == '=')
             break;
         buf << line << '\n';
@@ -83,8 +83,8 @@ std::string extract_persona_section(const std::string& file_path,
 }
 
 // ──────────────────────────────────────────────────────────────────────────
-// PersonaNode — LLM 에 system prompt(코더 페르소나) 를 입히고
-//               user prompt(= "prompt" 채널 값) 를 던져 응답을 받음
+// PersonaNode — applies the coder persona system prompt and sends the
+//               user prompt (from the "prompt" channel) to the LLM
 // ──────────────────────────────────────────────────────────────────────────
 class PersonaNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
@@ -124,9 +124,9 @@ private:
 };
 
 // ──────────────────────────────────────────────────────────────────────────
-// SummaryEnforcerNode — LLM 응답 끝에 [SUMMARY] 줄이 없으면 강제 삽입
-//   - 있으면: 그대로 통과
-//   - 없으면: 응답 본문의 앞 25 단어를 요약으로 붙임
+// SummaryEnforcerNode — ensures the LLM reply contains [SUMMARY] (appending a trailing line if missing)
+//   - If present: pass through unchanged
+//   - If missing: append the first 25 words of the body as the summary line
 // ──────────────────────────────────────────────────────────────────────────
 class SummaryEnforcerNode : public GraphNode {
 public:
@@ -137,9 +137,9 @@ public:
         auto raw = in.state.get("response");
         std::string text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
-        // 마지막 줄이 [SUMMARY] 로 시작하는지 확인
+        // Check whether [SUMMARY] is present
         if (text.find("[SUMMARY]") == std::string::npos) {
-            // 앞 25 단어 뽑아서 요약 줄로 붙임
+            // Take the first 25 words and append them as the summary line
             std::istringstream iss(text);
             std::string word;
             std::vector<std::string> words;
@@ -151,7 +151,7 @@ public:
                 if (i) summary += ' ';
                 summary += words[i];
             }
-            // 마침표로 끝나지 않으면 추가
+            // Append a trailing period if not already present
             if (!summary.empty() && summary.back() != '.')
                 summary += '.';
 
@@ -175,22 +175,22 @@ private:
 // main
 // ──────────────────────────────────────────────────────────────────────────
 int main(int argc, char** argv) {
-    // .env 로드 (OPENROUTER_API_KEY 등)
+    // Load .env (OPENROUTER_API_KEY, etc.)
     cppdotenv::auto_load_dotenv();
 
     int port = (argc >= 2) ? std::atoi(argv[1]) : 8210;
 
-    // persona.txt 에서 코더 전문가 시스템 프롬프트 꺼내기
-    // 실행 파일 옆 ../../config/persona.txt 를 기본 경로로 시도
+    // Load the coder specialist system prompt from persona.txt.
+    // Try ../../config/persona.txt relative to the executable first.
     const std::string persona_file =
         std::string(argv[0]).substr(0, std::string(argv[0]).rfind('/') + 1)
         + "../../config/persona.txt";
 
     std::string system_prompt = extract_persona_section(persona_file, "specialist_coder");
     if (system_prompt.empty()) {
-        // 빌드 트리 위치와 다를 수 있으므로 소스 기준 경로도 시도.
-        // 환경변수 JARVIS_CONFIG_DIR 가 있으면 우선, 없으면 __FILE__ 기준으로
-        // 두 단계 위 config/ 를 찾는다 (researcher/server.cpp 와 동일 규약).
+        // The build tree layout may differ, so also try the source-relative path.
+        // Prefer JARVIS_CONFIG_DIR when set; otherwise look two levels up from
+        // __FILE__ under config/ (same convention as researcher/server.cpp).
         std::string config_dir;
         if (const char* env_dir = std::getenv("JARVIS_CONFIG_DIR")) {
             config_dir = env_dir;
@@ -212,7 +212,7 @@ int main(int argc, char** argv) {
             config_dir + "/persona.txt", "specialist_coder");
     }
     if (system_prompt.empty()) {
-        // 끝까지 못 읽으면 최소 fallback
+        // Minimal fallback if persona.txt still could not be read
         system_prompt =
             "You are the coder specialist behind JARVIS. "
             "End your reply with a [SUMMARY] line of ≤25 words.";
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
         provider = std::make_shared<MockProvider>(jarvis::providers::Fixture::Coder);
     }
 
-    // 노드 타입 등록 — PersonaNode
+    // Register node type — PersonaNode
     NodeFactory::instance().register_type(
         "coder_persona",
         [provider, system_prompt](
@@ -237,14 +237,14 @@ int main(int argc, char** argv) {
             return std::make_unique<PersonaNode>(n, provider, system_prompt);
         });
 
-    // 노드 타입 등록 — SummaryEnforcerNode
+    // Register node type — SummaryEnforcerNode
     NodeFactory::instance().register_type(
         "summary_enforcer",
         [](const std::string& n, const json&, const NodeContext&) {
             return std::make_unique<SummaryEnforcerNode>(n);
         });
 
-    // 그래프 정의: persona → summary_enforcer 2단계
+    // Graph definition: two stages (persona → summary_enforcer)
     json def = {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "coder-specialist"},
@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
         GraphEngine::build(def, neograph::graph::EngineConfig{.node_context = ctx});
     auto engine = std::shared_ptr<GraphEngine>(std::move(unique_engine));
 
-    // AgentCard — 자비스 라우터가 "coder" 이름으로 찾는다
+    // AgentCard — looked up by the JARVIS router under the name "coder"
     a2a::AgentCard card;
     card.name                = "coder";
     card.description         = "JARVIS coder specialist — code writing/review/debug delegation target";
@@ -288,7 +288,7 @@ int main(int argc, char** argv) {
 
     std::cout << "[coder-specialist] online @ 127.0.0.1:" << server.port() << "\n";
 
-    // SIGINT / SIGTERM 잡아서 graceful shutdown
+    // Catch SIGINT / SIGTERM for graceful shutdown
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 

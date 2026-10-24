@@ -1,15 +1,16 @@
-// AI 국회의원 server — exposes a single persona over A2A.
+// AI assembly member server — exposes a single persona over A2A.
 //
 // Each invocation runs one OpenRouter-backed DeepSeek persona on a configured
-// port. The persona reads the inbound bill text, returns its vote (찬성/반대/
-// 기권) plus reasoning. The Speaker reaches it via NeoGraph's A2AClient
+// port. The persona reads the inbound bill text and returns its vote in the
+// Korean token format expected by speaker.cpp (meaning yea, nay, or abstain)
+// plus reasoning. The Speaker reaches it via NeoGraph's A2AClient
 // over the standard /.well-known/agent-card.json discovery path.
 //
 // Usage:
 //   member_server <port> <name> <party> <system_prompt_file> [--mock]
 //
 // Example:
-//   member_server 8101 의원_김진보 진보당 prompts/jinbo.txt
+//   member_server 8101 member_jinbo jinbo_party prompts/jinbo.txt
 //
 // Live use needs OPENROUTER_API_KEY in the environment; --mock needs nothing. The model is
 // hard-coded to ~deepseek/deepseek-v4-flash-latest.
@@ -85,7 +86,7 @@ public:
 };
 
 // PersonaNode — a single LLM call that wears the persona of one
-// 국회의원. Reads `prompt` (the bill text + voting instructions from
+// assembly member. Reads `prompt` (the bill text + voting instructions from
 // the pinned OpenRouter DeepSeek route with the persona's system prompt,
 // writes the model's reply to `response` for the A2A server adapter
 // to surface as the agent's text response.

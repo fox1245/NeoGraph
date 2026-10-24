@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""벤치 결과 비교표 — driver.py 가 남긴 *.jsonl 들의 summary 를 모아 출력."""
+"""Benchmark comparison table — collects and prints summaries from driver.py *.jsonl outputs."""
 import json
 import sys
 
@@ -25,7 +25,7 @@ print("  ".join(c.ljust(widths[c]) for c in cols))
 for s in sorted(summaries, key=lambda x: x["label"]):
     print("  ".join(str(s.get(c, "")).ljust(widths[c]) for c in cols))
 
-# 짝(mock/openrouter × neograph/langgraph) 오버헤드 델타
+# Pairwise (mock/openrouter × neograph/langgraph) overhead delta
 by = {s["label"]: s for s in summaries}
 for suffix in ("mock", "openrouter"):
     a, b = by.get(f"neograph-{suffix}"), by.get(f"langgraph-{suffix}")

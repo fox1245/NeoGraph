@@ -1,20 +1,20 @@
 // jarvis/src/orchestrator/intent_router_node.cpp
 //
-// IntentRouterNode 구현 — 자비스의 두뇌.
-// 사용자 발화 + 메모리 컨텍스트를 받아 작은 LLM 한 번 호출로
-// route_decision 채널에 쓸 JSON 결정을 만든다.
+// IntentRouterNode implementation — the brain of JARVIS.
+// Takes the user utterance and memory context and makes a single small LLM call
+// to produce the JSON decision written to the route_decision channel.
 //
-// 출력 JSON 형태:
+// Output JSON shape:
 //   {
 //     "mode": "chat" | "direct" | "delegate" | "parallel",
 //     "tool_calls": [ { "tool": "<name>", "args": {...} } ],
 //     "delegate_to": "<agent_name>" | null,
 //     "skip_synthesis": bool,
-//     "reasoning_short": "<1문장 영어 로그>"
+//     "reasoning_short": "<1-sentence English log>"
 //   }
 //
-// "chat" = 도구/위임 없이 합성기가 자기 지식 + 대화 기억으로 직접 답하는 모드.
-// 파싱 후 결정 검증에서 카탈로그/레지스트리에 없는 대상은 chat 으로 강등된다.
+// "chat" = the synthesizer answers directly from its own knowledge + memory
+// without tools or delegation; unknown catalog/registry targets demote to chat.
 
 #include "intent_router_node.h"
 #include "mcp_catalog.h"
@@ -33,7 +33,7 @@
 namespace jarvis::orchestrator {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 생성자
+// Constructor
 // ─────────────────────────────────────────────────────────────────────────────
 
 IntentRouterNode::IntentRouterNode(std::string             name,
@@ -57,23 +57,23 @@ IntentRouterNode::IntentRouterNode(std::string             name,
 
 // ─────────────────────────────────────────────────────────────────────────────
 // compose_system_prompt()
-// persona.txt 의 ===<section>=== 섹션 추출 + 도구/에이전트 목록 붙이기
+// Extract the ===<section>=== block from persona.txt and append tool/agent lists
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::string IntentRouterNode::compose_system_prompt() const
 {
-    // ① persona.txt 전체 읽기
+    // ① Read persona.txt
     std::ifstream file(prompt_file_);
     if (!file.is_open()) {
-        // 파일 없어도 그래프는 죽이지 않는다 — 빈 문자열로 계속
-        // (LLM 이 schema-only 로 동작할 수 있도록)
+        // Keep the graph running even if the file is missing — continue with an
+        // empty string so the LLM can still operate from the schema alone.
     }
 
     std::string section_text;
     if (file.is_open()) {
-        // ② ===<section>=== 구분자 기준으로 원하는 섹션 추출
-        // 규칙: 라인 처음부터 ===<name>=== 이 단독으로 있는 줄이 섹션 시작.
-        // 다음 ===...=== 줄이 나오거나 EOF 가 되면 섹션 끝.
+        // ② Extract the requested section delimited by ===<section>===
+        // Rule: a line consisting solely of ===<name>=== starts the section;
+        // the next ===...=== line or EOF ends it.
         const std::string target_header = "===" + prompt_section_ + "===";
 
         std::string line;
@@ -81,20 +81,20 @@ std::string IntentRouterNode::compose_system_prompt() const
         std::ostringstream buf;
 
         while (std::getline(file, line)) {
-            // 빈 줄 포함 — 내용에 포함 여부는 섹션 상태로 판단
+            // Blank lines are included when inside the active section
             bool is_section_header = (line.size() >= 6 &&
                                       line.front() == '=' &&
                                       line.back()  == '=');
 
             if (is_section_header) {
                 if (in_section) {
-                    // 다른 섹션 시작 → 현재 섹션 끝
+                    // Start of another section → end of the current section
                     break;
                 }
                 if (line == target_header) {
                     in_section = true;
                 }
-                // 다른 섹션 헤더는 그냥 넘김
+                // Skip other section headers
                 continue;
             }
 
@@ -104,22 +104,22 @@ std::string IntentRouterNode::compose_system_prompt() const
         }
 
         section_text = buf.str();
-        // 끝의 불필요한 개행 정리
+        // Strip trailing newlines
         while (!section_text.empty() && section_text.back() == '\n') {
             section_text.pop_back();
         }
     }
 
-    // ③ MCP 도구 목록 추가
+    // ③ Append MCP tool list
     std::string tool_block = catalog_.render_for_router_prompt();
 
-    // ④ 전문가 에이전트 목록 추가
+    // ④ Append specialist agent list
     std::string agent_block = dispatcher_.render_for_router_prompt();
 
-    // ⑤ routing_hints 추가 (있으면)
+    // ⑤ Append routing_hints (if present)
     std::string hints = catalog_.routing_hints_text();
 
-    // ⑥ 전체 시스템 프롬프트 합치기
+    // ⑥ Assemble the full system prompt
     std::ostringstream out;
 
     if (!section_text.empty()) {
@@ -141,7 +141,7 @@ std::string IntentRouterNode::compose_system_prompt() const
             << hints << "\n\n";
     }
 
-    // JSON 만 내보내라는 강조 (persona.txt 에도 있지만 여기서 한 번 더)
+    // Reinforce JSON-only output (also stated in persona.txt)
     out << "IMPORTANT: respond with a single JSON object only. "
            "No markdown, no prose, no code fence.";
 
@@ -150,15 +150,15 @@ std::string IntentRouterNode::compose_system_prompt() const
 
 // ─────────────────────────────────────────────────────────────────────────────
 // safe_parse_or_fallback()
-// LLM 응답 텍스트를 JSON 으로 파싱. 실패하거나 필수 필드 없으면 안전 폴백 반환.
+// Parse the LLM reply as JSON; return a safe fallback if parsing fails or required fields are missing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) const
 {
-    // 안전 폴백 JSON — chat 모드로 강등해 합성기가 사용자 질문에 직접 답하게 한다.
-    // (예전엔 direct+skip_synthesis=true 로 폴백하고 라우터 raw 텍스트를
-    // salvage 해서 TTS 에 그대로 읽혔는데, 라우터가 흔들리는 순간 무필터
-    // 발화가 나가는 verbatim 통로였음. chat 강등이 구조적으로 안전.)
+    // Safe fallback JSON — demote to chat mode so the synthesizer answers directly.
+    // (Previously this fell back to direct+skip_synthesis=true and salvaged raw
+    // router text straight into TTS, which leaked unfiltered router output when
+    // parsing failed. Demoting to chat is structurally safe.)
     auto fallback = []() -> neograph::json {
         return {
             {"mode",             "chat"},
@@ -172,27 +172,27 @@ neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) 
 
     if (raw.empty()) return fallback();
 
-    // ① 마크다운 코드 펜스 제거 (```json ... ``` 또는 ``` ... ```)
+    // ① Strip markdown code fences (```json ... ``` or ``` ... ```)
     std::string text = raw;
     {
-        // 앞뒤 공백 제거
+        // Trim leading and trailing whitespace
         auto ltrim = text.find_first_not_of(" \t\r\n");
         if (ltrim != std::string::npos) text = text.substr(ltrim);
         auto rtrim = text.find_last_not_of(" \t\r\n");
         if (rtrim != std::string::npos) text = text.substr(0, rtrim + 1);
 
-        // ```json 또는 ``` 로 시작하면 첫 줄과 마지막 ``` 제거
+        // If it starts with ```json or ```, strip the first line and the closing ```
         if (text.size() >= 3 && text.substr(0, 3) == "```") {
             auto first_newline = text.find('\n');
             if (first_newline != std::string::npos) {
                 text = text.substr(first_newline + 1);
             }
-            // 끝의 ``` 제거
+            // Strip trailing ```
             auto last_fence = text.rfind("```");
             if (last_fence != std::string::npos) {
                 text = text.substr(0, last_fence);
             }
-            // 다시 앞뒤 공백 정리
+            // Trim leading and trailing whitespace again
             ltrim = text.find_first_not_of(" \t\r\n");
             if (ltrim != std::string::npos) text = text.substr(ltrim);
             rtrim = text.find_last_not_of(" \t\r\n");
@@ -200,7 +200,7 @@ neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) 
         }
     }
 
-    // ② JSON 파싱 시도
+    // ② Attempt JSON parsing
     neograph::json parsed;
     try {
         parsed = neograph::json::parse(text);
@@ -208,19 +208,19 @@ neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) 
         return fallback();
     }
 
-    // ③ 필수 필드 "mode" 확인
+    // ③ Check required field "mode"
     if (!parsed.contains("mode") || !parsed["mode"].is_string()) {
         return fallback();
     }
 
-    // ④ mode 값이 허용된 셋 안에 있는지 확인
+    // ④ Check that mode is in the allowed set
     const std::string mode = parsed["mode"].get<std::string>();
     if (mode != "chat" && mode != "direct" && mode != "delegate" &&
         mode != "parallel") {
         return fallback();
     }
 
-    // ⑤ 누락된 선택 필드는 기본값으로 채워서 반환 (견고성)
+    // ⑤ Fill missing optional fields with defaults
     if (!parsed.contains("tool_calls") || !parsed["tool_calls"].is_array()) {
         parsed["tool_calls"] = neograph::json::array();
     }
@@ -238,14 +238,14 @@ neograph::json IntentRouterNode::safe_parse_or_fallback(const std::string& raw) 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// run() — 코루틴 진입점. NodeInput 받아 route_decision 채널에 결정을 쓴다.
+// run() — coroutine entry point. Reads NodeInput and writes the decision to route_decision.
 // ─────────────────────────────────────────────────────────────────────────────
 
 asio::awaitable<neograph::graph::NodeOutput>
 IntentRouterNode::run(neograph::graph::NodeInput in)
 {
-    // ① 상태에서 입력값 읽기
-    // state.get() 은 neograph::json 반환. null 이거나 문자열이 아니면 기본값 사용.
+    // ① Read inputs from state
+    // state.get() returns neograph::json; use fallback if null or not a string.
     const auto& state = in.state;
 
     auto json_to_str = [](const neograph::json& j,
@@ -257,9 +257,9 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
     const std::string user_text = json_to_str(state.get("user_text"), "");
     const std::string user_lang = json_to_str(state.get("user_lang"), "en");
 
-    // memory_context 는 MemoryLookupNode 가 객체({recent_turns, prefs,
-    // last_topic})로 쓴다 — 문자열만 받으면 항상 "" 가 되어 라우터가
-    // 이전 대화를 전혀 못 보는 버그가 있었음. 객체면 dump 로 직렬화.
+    // MemoryLookupNode writes memory_context as an object ({recent_turns, prefs,
+    // last_topic}) — accepting strings only would always yield "" and hide prior
+    // turns from the router. Serialize non-null objects with dump().
     std::string memory_context;
     {
         const auto& mc = state.get("memory_context");
@@ -267,11 +267,11 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         else if (!mc.is_null()) memory_context = mc.dump();
     }
 
-    // ①.5 빈 턴 가드 — EOF 직전 셧다운 사이클이나 빈 입력은 LLM 호출 없이
-    //     no-op 라우팅으로 종료. 이게 없으면 종료할 때마다 유령 턴이
-    //     라우터+합성+TTS 한 바퀴를 돌며 "your message was empty" 를 말한다.
-    //     (tool_dispatch 가 빈 user_text 를 echo → final_text "" → TTS 는
-    //      빈 텍스트를 건너뛰므로 이 경로는 완전히 무음이다.)
+    // ①.5 Empty-turn guard — on a pre-EOF shutdown cycle or empty input, exit via
+    //     no-op routing without calling the LLM. Otherwise shutdown would run a
+    //     phantom turn through router + synth + TTS saying "your message was empty".
+    //     (tool_dispatch echoes empty user_text → final_text "" → TTS skips empty
+    //      text, so this path is completely silent.)
     {
         const auto& sd = state.get("__shutdown__");
         const bool shutting_down = sd.is_boolean() && sd.get<bool>();
@@ -289,12 +289,12 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         }
     }
 
-    // ② 시스템 프롬프트 합성 (파일 I/O + 도구 목록 렌더링)
-    // 헤더에 캐시 멤버가 없으므로 매 호출마다 생성.
-    // 도구 목록이 런타임에 바뀔 수 있어 오히려 바람직함.
+    // ② Compose system prompt (file I/O + tool list rendering)
+    // Built on each call since the header keeps no cached prompt member and
+    // the tool list may change at runtime.
     const std::string system_prompt = compose_system_prompt();
-    // [DEBUG] JARVIS_DEBUG=1 일 때만 — 라우터가 도구 카탈로그를 실제로
-    //         받고 있는지 확인용.
+    // [DEBUG] Only when JARVIS_DEBUG=1 — verify that the router actually
+    //         receives the tool catalog.
     static const bool debug_on = [] {
         const char* v = std::getenv("JARVIS_DEBUG");
         return v && v[0] && v[0] != '0';
@@ -307,16 +307,16 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
                   << "\n--------\n";
     }
 
-    // ③ 사용자 메시지 구성
+    // ③ Build user message
     std::string user_msg =
         "User said: " + user_text +
         "\nLanguage: " + user_lang +
         "\nMemory: " + memory_context;
 
     // ④ Actual typed request; routing consumes a text projection only.
-    // 라우터 JSON 도 추론 모델에서는 한도를 숨은 추론과 나눠 쓴다 — 추론 여유분을
-    // 더하고, 가시 텍스트 없는 MaxTokens 는 한도를 두 배로 1회 재요청한다.
-    // 빈 완료 응답이나 제공자 실패를 chat 성공으로 강등하지 않는다.
+    // Reasoning models share the output budget between hidden reasoning and the
+    // router JSON — add reasoning headroom and re-ask once at double the budget
+    // on an empty MaxTokens reply. Do not demote empty completions or provider failures to chat.
     auto completion = co_await jarvis::providers::complete_with_visible_text(in.ctx,
         [&](unsigned attempt) {
             std::vector<sp::Message> messages;
@@ -334,7 +334,7 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         });
     jarvis::providers::require_completed_router_output(completion);
 
-    // ⑥ 응답 텍스트 추출 → JSON 검증
+    // ⑥ Extract response text → validate JSON
     const std::string raw_content = neograph::outcome_text(*completion);
     if (debug_on) {
         std::cerr << "[router][debug] raw="
@@ -342,11 +342,11 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
     }
     neograph::json decision = safe_parse_or_fallback(raw_content);
 
-    // ⑥.5 결정 검증 — 스키마만이 아니라 "대상이 실재하는가"를 대조한다.
-    //     LLM 이 발명한 에이전트("null" 문자열 포함)나 없는 도구명은 여기서
-    //     걸러지고, 갈 곳 없는 결정은 chat 으로 강등 — 합성기가 자기 지식과
-    //     대화 기억으로 직접 답한다. (앵무새 사건의 방아쇠였던
-    //     delegate_to:"null" → 오류 문자열 컨텍스트 오염을 원천 차단.)
+    // ⑥.5 Validate decision targets — check not only schema but whether the target
+    //     exists. Hallucinated agents (including the literal string "null") or
+    //     unknown tool names are filtered out here, and a decision with no valid
+    //     target is demoted to chat so the synthesizer answers directly from
+    //     knowledge and memory (preventing delegate_to:"null" error strings from polluting context).
     {
         const std::string mode = decision.value("mode", "chat");
 
@@ -374,7 +374,7 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
                         std::cerr << "[router] 도구 호출 제거 — '" << t
                                   << "' 은 카탈로그에 없음\n";
                     }
-                    // direct 는 정확히 1개만
+                    // direct takes at most 1 call
                     if (mode == "direct" && !valid_calls.empty()) break;
                 }
             }
@@ -386,7 +386,7 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
             decision["tool_calls"] = valid_calls;
         }
 
-        // chat 정규화 — 도구/위임/합성 우회 없음
+        // Normalize chat — no tools, delegation, or synthesis bypass
         if (decision["mode"] == "chat") {
             decision["tool_calls"]    = neograph::json::array();
             decision["delegate_to"]   = nullptr;
@@ -394,11 +394,11 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         }
     }
 
-    // skip_synthesis 강제 규칙 — 카탈로그가 skip_synthesis_hint=false 로
-    // 선언한 도구는 LLM 결정과 무관하게 합성을 거친다. raw 도구 출력
-    // (ISO 날짜/숫자 나열)이 그대로 TTS 로 가면 비발화 문자열이 읽히는
-    // 문제 방지. 힌트는 프롬프트에도 들어가지만 LLM 이 무시할 수 있어
-    // 여기서 결정론적으로 덮어쓴다.
+    // Enforce skip_synthesis rule — tools declared with skip_synthesis_hint=false
+    // in the catalog always go through synthesis regardless of the LLM decision.
+    // Prevents raw tool output (ISO dates/numbers) from being spoken directly by
+    // TTS; the hint is also in the prompt, but is enforced deterministically
+    // here in case the LLM ignores it.
     if (decision.value("skip_synthesis", false) &&
         decision.contains("tool_calls") && decision["tool_calls"].is_array()) {
         for (const auto& call : decision["tool_calls"]) {
@@ -416,9 +416,9 @@ IntentRouterNode::run(neograph::graph::NodeInput in)
         std::cerr << "[router][debug] parsed=" << decision.dump() << "\n";
     }
 
-    // ⑦ NodeOutput 에 결과 쓰기
-    // (구 Fix E salvage — 파서 폴백 시 라우터 raw 를 tool_results 로 밀어
-    //  TTS 에 verbatim 직행시키던 경로 — 는 chat 폴백으로 대체되어 제거.)
+    // ⑦ Write result to NodeOutput
+    // (The old Fix E salvage path — pushing raw router text into tool_results for
+    //  verbatim TTS on parser fallback — was replaced by the chat fallback.)
     neograph::graph::NodeOutput out;
     out.writes.push_back({output_channel_, decision});
 

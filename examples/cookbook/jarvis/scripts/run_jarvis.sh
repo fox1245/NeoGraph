@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# 자비스 cookbook 실행 wrapper.
+# Wrapper script to launch the JARVIS cookbook binary.
 #
-# 왜 wrapper 가 필요한가:
-#   third_party/whisper_install/lib/libwhisper.so 가 같은 디렉토리의
-#   libggml*.so 들을 link-time 의존하지만 RUNPATH 가 비어 있어 (whisper.cpp
-#   기본 빌드 옵션) DT_RUNPATH 가 transitive 적용되지 않는다. cookbook_jarvis
-#   의 RUNPATH 만으로는 libwhisper 가 ggml 못 찾음.
-#   LD_LIBRARY_PATH 한 줄 export 로 우회.
+# Why a wrapper is needed:
+#   third_party/whisper_install/lib/libwhisper.so depends at link time on
+#   libggml*.so in the same directory, but the default whisper.cpp build leaves
+#   its RUNPATH empty so DT_RUNPATH is not applied transitively. The RUNPATH on
+#   cookbook_jarvis alone is not enough for libwhisper to locate ggml.
+#   Exporting LD_LIBRARY_PATH works around this.
 #
-# 사용:
-#   bash scripts/run_jarvis.sh                          # 기본 config (real-tools)
-#   bash scripts/run_jarvis.sh config-demo/mock         # 다른 config 디렉토리
-#   bash scripts/run_jarvis.sh /절대/경로/config        # 임의 config 도 OK
+# Usage:
+#   bash scripts/run_jarvis.sh                          # default config (real-tools)
+#   bash scripts/run_jarvis.sh config-demo/mock         # alternate config directory
+#   bash scripts/run_jarvis.sh path-to-config           # any config directory
 #
 # Build directory may be either the NeoGraph root build or a standalone
 # Jarvis build against installed neograph and SchemaProvider packages.
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # = examples/cookbook/jarvis
-NEOGRAPH_ROOT="$(cd "$ROOT/../../.." && pwd)"             # = NeoGraph 루트
+NEOGRAPH_ROOT="$(cd "$ROOT/../../.." && pwd)"             # = NeoGraph root
 TP="$ROOT/third_party"
 BUILD_DIR="${NEOGRAPH_BUILD_DIR:-$NEOGRAPH_ROOT/build-jarvis}"
 CONFIG_SUFFIX="${JARVIS_BUILD_CONFIG:+/$JARVIS_BUILD_CONFIG}"
@@ -27,7 +27,7 @@ if [[ ! -x "$BIN" && -x "$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis" ]]; then
     BIN="$BUILD_DIR$CONFIG_SUFFIX/cookbook_jarvis"
 fi
 
-# CFG: 첫 인자 그대로 받되, 상대경로면 cookbook 디렉토리 기준으로 해석.
+# CFG: take the first argument, resolving relative paths against the cookbook directory.
 CFG_ARG="${1:-config-demo/real-tools}"
 case "$CFG_ARG" in
     /*) CFG="$CFG_ARG" ;;
@@ -45,18 +45,18 @@ if [[ ! -d "$CFG" ]]; then
     exit 1
 fi
 
-# whisper.cpp 가 GGML_HIP(ROCm) 로 빌드됐으면 ROCm 런타임(libamdhip64/rocblas/
-# hipblas)과 WSL dxg 브리지가 있어야 GPU 를 쓴다. ROCM_PATH 존재 시 자동 추가.
+# If whisper.cpp is built with GGML_HIP (ROCm), the ROCm runtime (libamdhip64/rocblas/
+# hipblas) and WSL dxg bridge are required for GPU execution. Added automatically when ROCM_PATH exists.
 ROCM_LIB=""
 for r in /opt/rocm-7.2.1/lib /opt/rocm/lib; do
     [ -f "$r/libamdhip64.so" ] && { ROCM_LIB="$r"; break; }
 done
 if [[ -n "$ROCM_LIB" ]]; then
     export LD_LIBRARY_PATH="$TP/whisper_install/lib:$ROCM_LIB:/usr/lib/wsl/lib:$TP/onnxruntime/lib:${LD_LIBRARY_PATH:-}"
-    export HSA_ENABLE_DXG_DETECTION=1     # WSL2 /dev/dxg 로 GPU 감지
+    export HSA_ENABLE_DXG_DETECTION=1     # detect GPU on WSL2
 else
     export LD_LIBRARY_PATH="$TP/onnxruntime/lib:$TP/whisper_install/lib:${LD_LIBRARY_PATH:-}"
 fi
-# 모델 path 가 cwd 상대 (assets/...) 이므로 cookbook 디렉토리로 이동 후 실행.
+# Model paths are relative to cwd (assets/...), so cd into the cookbook directory before exec.
 cd "$ROOT"
 exec "$BIN" "$CFG"

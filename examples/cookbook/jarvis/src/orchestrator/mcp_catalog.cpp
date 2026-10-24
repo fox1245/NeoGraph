@@ -1,8 +1,8 @@
 // jarvis/src/orchestrator/mcp_catalog.cpp
 //
-// McpCatalog 구현 — JSON 카탈로그 파일을 읽어 MCP 클라이언트를 만들고,
-// 각 서버에서 도구 목록을 받아와 캐시한다.
-// 라우터 LLM 시스템 프롬프트에 주입할 텍스트 생성도 담당.
+// McpCatalog implementation — reads a JSON catalog file, creates MCP clients,
+// and caches the tool list from each server.
+// Also renders the text block injected into the router LLM system prompt.
 
 #include "mcp_catalog.h"
 
@@ -17,10 +17,10 @@
 namespace jarvis::orchestrator {
 
 // ---------------------------------------------------------------------------
-// load() — JSON 파일 파싱 + MCP 클라이언트 연결 + 도구 캐시
+// load() — parse JSON file + connect MCP clients + cache tools
 // ---------------------------------------------------------------------------
 McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
-    // JSON 파일 읽기
+    // Read JSON file
     std::ifstream ifs(catalog_json_path);
     if (!ifs.is_open()) {
         throw std::runtime_error(
@@ -38,15 +38,15 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
     McpCatalog result;
 
     // ---------------------------------------------------------------------------
-    // "tools" 배열 처리 — enabled=true 항목만
+    // Process the "tools" array — enabled=true entries only
     // ---------------------------------------------------------------------------
     if (!catalog.contains("tools") || !catalog["tools"].is_array()) {
-        // tools 키가 없으면 빈 카탈로그로 반환 (오류는 아님)
+        // Return an empty catalog if the tools key is absent (not an error)
         return result;
     }
 
     for (const auto& item : catalog["tools"]) {
-        // enabled 필드가 false 면 건너뜀
+        // Skip entries with enabled=false
         bool enabled = item.value("enabled", true);
         if (!enabled) {
             continue;
@@ -56,7 +56,7 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
         const std::string transport   = item.value("transport", "http");
         const std::string description = item.value("description", "");
 
-        // tags 배열 수집
+        // Collect tags array
         std::vector<std::string> tags;
         if (item.contains("tags") && item["tags"].is_array()) {
             for (const auto& tag : item["tags"]) {
@@ -73,12 +73,12 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
         entry.skip_synthesis_hint = skip_synthesis;
 
         // ---------------------------------------------------------------------------
-        // 트랜스포트 종류에 따라 MCPClient 생성 + 도구 목록 수집
-        // 실패하면 로그만 남기고 이 항목은 건너뜀 (다른 항목은 계속 처리)
+        // Create MCPClient by transport type and fetch its tool list.
+        // On failure, log and skip this entry while continuing with the rest.
         // ---------------------------------------------------------------------------
         try {
             if (transport == "stdio") {
-                // command 배열 필수 (예: ["python3", "server.py"])
+                // Requires a "command" array (e.g. ["python3", "server.py"])
                 if (!item.contains("command") || !item["command"].is_array()) {
                     std::cerr << "[McpCatalog] '" << name
                               << "': stdio 트랜스포트에 'command' 배열이 없습니다. 건너뜀.\n";
@@ -99,7 +99,7 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
                     std::make_unique<neograph::mcp::MCPClient>(std::move(cmd));
 
             } else {
-                // 기본값 = HTTP 트랜스포트
+                // Default = HTTP transport
                 const std::string url = item.value("url", "");
                 if (url.empty()) {
                     std::cerr << "[McpCatalog] '" << name
@@ -114,7 +114,7 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
                     std::make_unique<neograph::mcp::MCPClient>(url);
             }
 
-            // 도구 목록 받아서 캐시
+            // Fetch and cache the tool list
             entry.tools = entry.client->get_tools();
 
             std::cerr << "[McpCatalog] '" << name << "' 도구 "
@@ -130,13 +130,13 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
     }
 
     // ---------------------------------------------------------------------------
-    // "routing_hints" 섹션 — 있으면 텍스트로 조립해서 저장
+    // "routing_hints" section — format and store as text when present
     // ---------------------------------------------------------------------------
     if (catalog.contains("routing_hints") && catalog["routing_hints"].is_object()) {
         const auto& hints = catalog["routing_hints"];
         std::ostringstream oss;
 
-        // 각 힌트 키를 순회하며 목록 형태로 문자열 조립
+        // Format each hint key as a bulleted list
         auto append_hint_list = [&](const std::string& key, const std::string& label) {
             if (!hints.contains(key)) return;
             const auto& arr = hints[key];
@@ -158,9 +158,9 @@ McpCatalog McpCatalog::load(const std::string& catalog_json_path) {
 }
 
 // ---------------------------------------------------------------------------
-// render_for_router_prompt() — 라우터 LLM 시스템 프롬프트에 넣을 텍스트 생성
+// render_for_router_prompt() — render text for the router LLM system prompt
 //
-// 형식:
+// Format:
 //   ## Available MCP tools
 //
 //   ### {catalog_name}  [{tags}] (skip_synthesis ok)
@@ -178,7 +178,7 @@ std::string McpCatalog::render_for_router_prompt() const {
     for (const auto& entry : entries_) {
         oss << "\n### " << entry.name;
 
-        // 태그 표시
+        // Render tags
         if (!entry.tags.empty()) {
             oss << "  [";
             for (size_t i = 0; i < entry.tags.size(); ++i) {
@@ -193,15 +193,15 @@ std::string McpCatalog::render_for_router_prompt() const {
         }
         oss << "\n";
 
-        // 서버 단위 설명
+        // Server-level description
         if (!entry.description.empty()) {
             oss << entry.description << "\n";
         }
 
-        // 개별 도구 목록 — 이름은 "catalog_name.tool_name" 완전 수식 형식.
-        // ⚠️ 파라미터 스키마(def.parameters)를 반드시 렌더링한다 — 이게 없으면
-        //    LLM 이 args 를 어떻게 채워야 할지 몰라 빈 args({})로 호출하고
-        //    서버가 "missing required argument" 로 거부한다.
+        // Individual tools — fully qualified as "catalog_name.tool_name".
+        // Always render the parameter schema (def.parameters): without it, the
+        // LLM does not know how to populate args, calls with empty args ({}),
+        // and the server rejects the call with "missing required argument".
         for (const auto& tool : entry.tools) {
             const auto def = tool->get_definition();
             oss << "  - " << entry.name << "." << def.name;
@@ -216,8 +216,8 @@ std::string McpCatalog::render_for_router_prompt() const {
                 if (p.contains("required") && p["required"].is_array())
                     for (const auto& r : p["required"])
                         if (r.is_string()) req.push_back(r.get<std::string>());
-                // OpenAPI 수준: 이름·타입·required·설명 전부 노출해 LLM 이
-                // args 를 정확히 채우도록.
+                // Expose name, type, required flag, and description so the LLM
+                // populates args accurately.
                 for (auto it = p["properties"].begin();
                      it != p["properties"].end(); ++it) {
                     oss << "\n      · " << it.key();
@@ -236,7 +236,7 @@ std::string McpCatalog::render_for_router_prompt() const {
         }
     }
 
-    // routing_hints 섹션이 있으면 뒤에 덧붙임
+    // Append routing_hints section when present
     if (!routing_hints_.empty()) {
         oss << "\n## Routing hints\n\n" << routing_hints_;
     }
@@ -245,14 +245,14 @@ std::string McpCatalog::render_for_router_prompt() const {
 }
 
 // ---------------------------------------------------------------------------
-// find_tool() — "catalog_name.tool_name" 형식으로 도구 포인터 조회
-// 못 찾으면 nullptr 반환
+// find_tool() — look up a Tool* by "catalog_name.tool_name"
+// Returns nullptr if not found
 // ---------------------------------------------------------------------------
 neograph::Tool* McpCatalog::find_tool(const std::string& fully_qualified_name) const {
-    // '.' 기준으로 앞부분 = catalog_name, 뒷부분 = tool_name
+    // Split on '.' into catalog_name and tool_name
     const auto dot_pos = fully_qualified_name.find('.');
     if (dot_pos == std::string::npos) {
-        // 점이 없으면 완전 수식 이름이 아님 — nullptr
+        // Not a fully qualified name without a dot — return nullptr
         return nullptr;
     }
 
@@ -262,13 +262,13 @@ neograph::Tool* McpCatalog::find_tool(const std::string& fully_qualified_name) c
     for (const auto& entry : entries_) {
         if (entry.name != catalog_name) continue;
 
-        // 해당 catalog entry 안에서 tool_name 검색
+        // Search for tool_name within the matching catalog entry
         for (const auto& tool : entry.tools) {
             if (tool->get_name() == tool_name) {
                 return tool.get();
             }
         }
-        // catalog_name 은 일치했지만 도구가 없음 — 더 볼 필요 없음
+        // catalog_name matched, but the tool was not found — stop searching
         break;
     }
 
@@ -276,21 +276,21 @@ neograph::Tool* McpCatalog::find_tool(const std::string& fully_qualified_name) c
 }
 
 // ---------------------------------------------------------------------------
-// allows_skip_synthesis() — 도구가 속한 엔트리의 skip_synthesis_hint 조회
+// allows_skip_synthesis() — query skip_synthesis_hint for the tool's entry
 // ---------------------------------------------------------------------------
 bool McpCatalog::allows_skip_synthesis(const std::string& fully_qualified_name) const {
     const auto dot_pos = fully_qualified_name.find('.');
-    if (dot_pos == std::string::npos) return true;  // 형식 불명 — LLM 결정 존중
+    if (dot_pos == std::string::npos) return true;  // unknown format — respect LLM decision
 
     const std::string catalog_name = fully_qualified_name.substr(0, dot_pos);
     for (const auto& entry : entries_) {
         if (entry.name == catalog_name) return entry.skip_synthesis_hint;
     }
-    return true;  // 미등록 엔트리 — LLM 결정 존중
+    return true;  // unregistered entry — respect LLM decision
 }
 
 // ---------------------------------------------------------------------------
-// routing_hints_text() — 저장된 routing hints 문자열 그대로 반환
+// routing_hints_text() — return the stored routing hints string as-is
 // ---------------------------------------------------------------------------
 std::string McpCatalog::routing_hints_text() const {
     return routing_hints_;

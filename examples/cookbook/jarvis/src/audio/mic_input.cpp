@@ -1,19 +1,19 @@
 // jarvis/src/audio/mic_input.cpp
 //
-// MicInputNode 구현 — 텍스트 모드(기존 mock 유지) + wav 파일 입력 모드(신규).
+// MicInputNode implementation — text mode (mock) + wav file input mode.
 //
-// stdin 한 줄의 형태에 따라 두 경로로 분기한다:
+// Branches into two paths depending on the shape of each stdin line:
 //
-//   "wav:/path/to/file.wav"  → wav 파일 로드 → 16kHz mono PCM 으로 디코딩
-//                              → voice_in 채널에 { "pcm": [...], "sample_rate": 16000 }
+//   "wav:/path/to/file.wav"  → load wav file → decode to 16kHz mono PCM
+//                              → push { "pcm": [...], "sample_rate": 16000 } to voice_in
 //
-//   그 외 텍스트              → 기존 mock 경로 유지
-//                              → voice_in 채널에 { "pcm": [], "sample_rate": ..., "mock_text": "..." }
+//   Any other text           → mock path
+//                              → push { "pcm": [], "sample_rate": ..., "mock_text": "..." } to voice_in
 //
-//   EOF                       → __shutdown__ 신호 전송
+//   EOF                      → emit __shutdown__ signal
 //
-// wav 로딩은 miniaudio 의 ma_decoder API 를 사용한다.
-// MA_NO_DEVICE_IO 로 오디오 장치 부분을 제외하고 디코더만 활성화.
+// WAV loading uses miniaudio's ma_decoder API.
+// MA_NO_DEVICE_IO disables audio device I/O when only the decoder is needed.
 
 #include "mic_input.h"
 
@@ -24,13 +24,13 @@
 #ifdef JARVIS_HAVE_MINIAUDIO
 #  include <vector>
 #  include <stdexcept>
-// miniaudio 구현은 miniaudio_impl.cpp 단일 TU 에 있음 (디바이스 I/O 포함
-// — TTS 재생이 사용). 여기서는 디코더 API 선언만 필요.
+// The miniaudio implementation lives in the single TU miniaudio_impl.cpp
+// (including device I/O used by TTS playback). Only decoder declarations are needed here.
 #  include "miniaudio.h"
 #endif
 
-// 라이브 마이크 캡처 + Silero VAD 는 miniaudio(디바이스) + ONNX Runtime(VAD)
-// 둘 다 있을 때만.
+// Live microphone capture + Silero VAD requires both miniaudio (device) and
+// ONNX Runtime (VAD).
 #if defined(JARVIS_HAVE_MINIAUDIO) && defined(JARVIS_HAVE_ONNXRUNTIME)
 #  define JARVIS_LIVE_MIC 1
 #  include <onnxruntime_cxx_api.h>
@@ -49,12 +49,12 @@ namespace jarvis::audio {
 
 #ifdef JARVIS_LIVE_MIC
 // ─────────────────────────────────────────────────────────────────────────────
-// MicCapture — miniaudio 캡처 디바이스 + Silero VAD 워커 스레드.
+// MicCapture — miniaudio capture device + Silero VAD worker thread.
 //
-// 캡처 콜백(오디오 스레드): 입력 프레임을 mutex 버퍼에 append (VAD 를 콜백에서
-//   돌리면 dropout — 버퍼링만).
-// 워커 스레드: 512샘플(32ms) 윈도우로 VAD → speech prob → 발화 경계 상태기계.
-//   발화 완성 시 발화 큐에 push + notify. run() 이 큐에서 pop.
+// Capture callback (audio thread): appends input frames to a mutex-guarded buffer
+//   (running VAD inside the callback would cause dropouts — buffer only).
+// Worker thread: 512-sample (32ms) windows → VAD → speech prob → utterance boundary FSM.
+//   Pushes completed utterances to the queue and notifies; run() pops from the queue.
 // ─────────────────────────────────────────────────────────────────────────────
 class MicCapture {
   public:
@@ -62,7 +62,7 @@ class MicCapture {
         : vad_path_(std::move(vad_path))
         , threshold_(threshold)
         , max_samples_(max_seconds * 16000) {
-        // env 오버라이드: JARVIS_VAD_THRESHOLD(민감도 튜닝), JARVIS_MIC_DEBUG(관찰)
+        // Env overrides: JARVIS_VAD_THRESHOLD (sensitivity tuning), JARVIS_MIC_DEBUG (diagnostics)
         if (const char* t = std::getenv("JARVIS_VAD_THRESHOLD"); t && t[0])
             threshold_ = std::atof(t);
         if (const char* d = std::getenv("JARVIS_MIC_DEBUG"); d && d[0] && d[0] != '0')
@@ -71,9 +71,9 @@ class MicCapture {
 
     ~MicCapture() { stop(); }
 
-    // 디바이스 + VAD + 워커 기동. 실패(디바이스 없음/VAD 로드 실패) 시 false.
+    // Start device + VAD + worker. Returns false on failure (no device or VAD load error).
     bool start() {
-        // Silero VAD 세션
+        // Silero VAD session
         try {
             env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "jarvis_vad");
             mem_ = std::make_unique<Ort::MemoryInfo>(
@@ -88,7 +88,7 @@ class MicCapture {
         state_.assign(2 * 1 * 128, 0.0f);
         context_.assign(64, 0.0f);
 
-        // 캡처 디바이스 (16kHz mono f32)
+        // Capture device (16kHz mono f32)
         ma_device_config cfg = ma_device_config_init(ma_device_type_capture);
         cfg.capture.format   = ma_format_f32;
         cfg.capture.channels = 1;
@@ -119,13 +119,13 @@ class MicCapture {
         if (device_ok_) { ma_device_uninit(&device_); device_ok_ = false; }
     }
 
-    // 발화 하나를 기다림 — 완성된 PCM 반환, 종료 신호면 nullopt.
+    // Wait for one utterance — returns completed PCM, or nullopt on shutdown.
     //
-    // 백프레셔: 호출 시점에 이전 턴 처리(STT/LLM/TTS) 동안 쌓인 오디오·발화를
-    // 전부 폐기하고 "새로" 듣기 시작한다. 이렇게 하면 (1) 시작 중 로딩 노이즈,
-    // (2) 스테일 발화(자비스가 뒤처지며 옛 음성 처리), (3) TTS 재생음이 마이크로
-    // 되먹임되는 에코 — 셋 다 막힌다. 발화 하나를 얻으면 listening_ 을 내려
-    // 처리 구간 동안 워커가 아무것도 큐잉하지 않게 한다(다음 호출에서 재개).
+    // Backpressure: on entry, discard any audio or utterances accumulated during
+    // the previous turn (STT/LLM/TTS) and start listening fresh. This prevents
+    // (1) startup noise, (2) stale utterances queued while JARVIS was busy, and
+    // (3) TTS playback echo feeding back into the mic. Once an utterance is popped,
+    // clear listening_ so the worker queues nothing while the turn runs.
     std::optional<std::vector<float>> next_utterance() {
         { std::lock_guard<std::mutex> bl(buf_mtx_); buf_.clear(); }
         { std::lock_guard<std::mutex> ql(q_mtx_);
@@ -137,7 +137,7 @@ class MicCapture {
         if (utt_q_.empty()) { listening_.store(false); return std::nullopt; }
         auto u = std::move(utt_q_.front());
         utt_q_.pop();
-        listening_.store(false);   // 처리 시작 — 이후 캡처는 폐기
+        listening_.store(false);   // turn started — discard subsequent capture until next call
         return u;
     }
 
@@ -152,9 +152,9 @@ class MicCapture {
     }
 
     float run_vad(const float* chunk /*512*/) {
-        // Silero v5 계약: 입력 = context(64) ++ chunk(512) = 576 샘플.
-        // context 는 직전 입력의 마지막 64 (첫 호출은 0). 이걸 안 붙이고 512 만
-        // 넣으면 모델이 무의미한 ~0.0006 을 뱉는다(실측 — 이게 원래 버그였음).
+        // Silero v5 contract: input = context(64) ++ chunk(512) = 576 samples.
+        // context is the last 64 samples of the previous input (zeros on first call).
+        // Passing 512 samples without the 64-sample context produces ~0.0006 output.
         constexpr int CTX = 64;
         std::array<int64_t, 2> in_shape{1, CTX + 512};
         std::array<int64_t, 3> st_shape{2, 1, 128};
@@ -177,16 +177,16 @@ class MicCapture {
         float prob = outs[0].GetTensorData<float>()[0];
         const float* ns = outs[1].GetTensorData<float>();
         std::copy(ns, ns + state_.size(), state_.begin());
-        // context = 이번 입력의 마지막 64 (다음 호출에 선행)
+        // context = last 64 samples of this input (prepended to the next call)
         std::copy(in_buf.end() - CTX, in_buf.end(), context_.begin());
         return prob;
     }
 
     void worker() {
-        constexpr int WIN = 512;                  // Silero v5 16kHz 필수 청크
-        constexpr int PREROLL = 16000 / 5;        // 200ms 프리롤(말 시작 안 잘리게)
-        const int min_silence = 16000 / 2;        // 500ms 무음 → 발화 끝
-        const int min_speech  = 16000 / 4;        // 250ms 미만은 잡음 무시
+        constexpr int WIN = 512;                  // Silero v5 required chunk size at 16kHz
+        constexpr int PREROLL = 16000 / 5;        // 200ms preroll (avoids clipping speech onset)
+        const int min_silence = 16000 / 2;        // 500ms silence → end of utterance
+        const int min_speech  = 16000 / 4;        // ignore bursts shorter than 250ms as noise
         std::vector<float> win(WIN);
         std::deque<float> preroll;
         std::vector<float> utt;
@@ -194,7 +194,7 @@ class MicCapture {
         int silence = 0;
 
         while (running_.load()) {
-            // 버퍼에서 512 확보
+            // Pull 512 samples from the buffer
             bool have = false;
             {
                 std::lock_guard<std::mutex> lk(buf_mtx_);
@@ -209,9 +209,9 @@ class MicCapture {
                 continue;
             }
 
-            // 처리 중(listening_==false)이면 이 창을 버린다 — 발화 누적/큐잉 X.
-            // TTS 재생음 되먹임(에코)·스테일 발화 방지. 로컬 상태도 리셋해
-            // 다음 듣기 시작이 깨끗하게. (VAD state 는 다음 몇 창에 재-warm.)
+            // While a turn is being processed (listening_==false), drop this window —
+            // do not accumulate or queue utterances. Prevents TTS playback echo and
+            // stale utterances, and resets local state for the next listening window.
             if (!listening_.load()) {
                 if (triggered) { triggered = false; utt.clear(); silence = 0; }
                 preroll.clear();
@@ -220,8 +220,8 @@ class MicCapture {
 
             float prob = run_vad(win.data());
 
-            // 진단 로깅 — 오디오가 흐르는지 + VAD 가 반응하는지 관찰.
-            // JARVIS_MIC_DEBUG=1 이면 ~0.5초마다 RMS(신호 세기)+prob 출력.
+            // Diagnostic logging — observe audio signal level and VAD probability.
+            // When JARVIS_MIC_DEBUG=1, print RMS and prob roughly every 0.5s.
             if (debug_) {
                 double sum = 0.0;
                 for (int i = 0; i < WIN; ++i) sum += win[i] * win[i];
@@ -236,12 +236,12 @@ class MicCapture {
             if (prob >= threshold_) {
                 if (!triggered) {
                     triggered = true;
-                    utt.assign(preroll.begin(), preroll.end());  // 프리롤 선행
+                    utt.assign(preroll.begin(), preroll.end());  // prepend preroll
                 }
                 utt.insert(utt.end(), win.begin(), win.end());
                 silence = 0;
             } else if (triggered) {
-                utt.insert(utt.end(), win.begin(), win.end());   // 트레일링 유지
+                utt.insert(utt.end(), win.begin(), win.end());   // keep trailing audio
                 silence += WIN;
                 if (silence >= min_silence) {
                     if (static_cast<int>(utt.size()) >= min_speech) {
@@ -254,12 +254,12 @@ class MicCapture {
                     std::fill(context_.begin(), context_.end(), 0.0f);
                 }
             } else {
-                // 유휴 — 프리롤 롤링 유지
+                // Idle — maintain rolling preroll window
                 preroll.insert(preroll.end(), win.begin(), win.end());
                 while (static_cast<int>(preroll.size()) > PREROLL)
                     preroll.pop_front();
             }
-            // 최대 발화 길이 가드
+            // Maximum utterance length guard
             if (triggered && static_cast<int>(utt.size()) >= max_samples_) {
                 std::lock_guard<std::mutex> lk(q_mtx_);
                 utt_q_.push(std::move(utt));
@@ -281,7 +281,7 @@ class MicCapture {
     std::unique_ptr<Ort::MemoryInfo> mem_;
     std::unique_ptr<Ort::Session>    vad_;
     std::vector<float>               state_;
-    std::vector<float>               context_;  // Silero 64샘플 선행 컨텍스트
+    std::vector<float>               context_;  // Silero 64-sample leading context
 
     ma_device device_{};
     bool      device_ok_ = false;
@@ -293,7 +293,7 @@ class MicCapture {
     std::condition_variable           cv_;
     std::queue<std::vector<float>>    utt_q_;
     std::atomic<bool>                 running_{false};
-    std::atomic<bool>                 listening_{false};  // 듣는 중에만 발화 큐잉
+    std::atomic<bool>                 listening_{false};  // queue utterances only while listening
     std::thread                       worker_;
 };
 #else
@@ -303,7 +303,7 @@ class MicCapture {};
 #endif  // JARVIS_LIVE_MIC
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 생성자
+// Constructor
 // ─────────────────────────────────────────────────────────────────────────────
 
 MicInputNode::MicInputNode(std::string name, const neograph::json& cfg)
@@ -312,7 +312,7 @@ MicInputNode::MicInputNode(std::string name, const neograph::json& cfg)
     , vad_threshold_(cfg.value("vad_threshold", 0.5f))
     , max_utterance_seconds_(cfg.value("max_utterance_seconds", 30))
 {
-    // 라이브 마이크 모드: cfg "use_microphone":true 또는 env JARVIS_MIC=1
+    // Live microphone mode: cfg "use_microphone":true or env JARVIS_MIC=1
     const char* env = std::getenv("JARVIS_MIC");
     use_mic_ = cfg.value("use_microphone", false)
                || (env && env[0] && env[0] != '0');
@@ -324,7 +324,7 @@ MicInputNode::MicInputNode(std::string name, const neograph::json& cfg)
                                                 max_utterance_seconds_);
         if (!capture_->start()) {
             capture_.reset();
-            use_mic_ = false;   // 디바이스 실패 → stdin 폴백
+            use_mic_ = false;   // device failure → fall back to stdin
         }
     }
 #else
@@ -337,24 +337,24 @@ MicInputNode::MicInputNode(std::string name, const neograph::json& cfg)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 소멸자
+// Destructor
 // ─────────────────────────────────────────────────────────────────────────────
 
 MicInputNode::~MicInputNode() = default;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// wav 파일을 읽어 16kHz mono float PCM 벡터로 반환하는 내부 함수
-// miniaudio ma_decoder 가 자동으로 리샘플링 + 채널 변환 수행
+// Internal helper that reads a WAV file into a 16kHz mono float PCM vector;
+// miniaudio's ma_decoder handles resampling and channel conversion automatically.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #ifdef JARVIS_HAVE_MINIAUDIO
 static std::vector<float> load_wav_as_16k_mono(const std::string& path)
 {
-    // 출력 포맷을 16kHz mono float32 로 고정 — ma_decoder 가 자동 변환
+    // Pin output format to 16kHz mono float32 — ma_decoder converts automatically
     ma_decoder_config cfg = ma_decoder_config_init(
-        ma_format_f32,  // 출력 샘플 형식: 32비트 부동소수점
-        1,              // 출력 채널 수: mono
-        16000           // 출력 샘플레이트: 16kHz
+        ma_format_f32,  // output sample format: 32-bit float
+        1,              // output channels: mono
+        16000           // output sample rate: 16kHz
     );
 
     ma_decoder decoder;
@@ -364,7 +364,7 @@ static std::vector<float> load_wav_as_16k_mono(const std::string& path)
             + " (ma_result=" + std::to_string(result) + ")");
     }
 
-    // 전체 프레임 수 미리 파악 (실패해도 계속 — 동적으로 읽기)
+    // Query total frame count up front (continue dynamically if unavailable)
     ma_uint64 total_frames = 0;
     ma_decoder_get_length_in_pcm_frames(&decoder, &total_frames);
 
@@ -373,7 +373,7 @@ static std::vector<float> load_wav_as_16k_mono(const std::string& path)
         pcm.reserve(static_cast<size_t>(total_frames));
     }
 
-    // 청크 단위로 읽기 — 4096 프레임씩
+    // Read in chunks of 4096 frames
     constexpr ma_uint64 CHUNK = 4096;
     std::vector<float> chunk(CHUNK);
     ma_uint64 frames_read = 0;
@@ -395,7 +395,7 @@ static std::vector<float> load_wav_as_16k_mono(const std::string& path)
 #endif  // JARVIS_HAVE_MINIAUDIO
 
 // ─────────────────────────────────────────────────────────────────────────────
-// run() — stdin 한 줄 읽기 → 모드 분기 → voice_in 채널 push
+// run() — read one line from stdin → branch by mode → push to voice_in channel
 // ─────────────────────────────────────────────────────────────────────────────
 
 asio::awaitable<neograph::graph::NodeOutput>
@@ -404,10 +404,10 @@ MicInputNode::run(neograph::graph::NodeInput /*in*/)
     neograph::graph::NodeOutput out;
 
 #ifdef JARVIS_LIVE_MIC
-    // ── 라이브 마이크 모드 — 발화 하나를 기다렸다가 voice_in 에 PCM push ──
+    // ── Live microphone mode — wait for one utterance and push PCM to voice_in ──
     if (use_mic_ && capture_) {
         auto utt = capture_->next_utterance();
-        if (!utt) {  // 종료 신호
+        if (!utt) {  // shutdown signal
             out.writes.push_back({"__shutdown__", true});
             co_return out;
         }
@@ -423,13 +423,13 @@ MicInputNode::run(neograph::graph::NodeInput /*in*/)
 
     std::string line;
     if (!std::getline(std::cin, line)) {
-        // EOF — __shutdown__ 신호 전송
+        // EOF — emit __shutdown__ signal
         std::cerr << "[MicInputNode] stdin EOF — __shutdown__ 신호 전송\n";
         out.writes.push_back({"__shutdown__", true});
         co_return out;
     }
 
-    // ── wav 모드: "wav:/path/to/file.wav" 형식 ──────────────────────────────
+    // ── WAV mode: "wav:/path/to/file.wav" format ─────────────────────────────
     constexpr std::string_view WAV_PREFIX = "wav:";
     if (line.size() > WAV_PREFIX.size()
         && line.substr(0, WAV_PREFIX.size()) == WAV_PREFIX)
@@ -444,7 +444,7 @@ MicInputNode::run(neograph::graph::NodeInput /*in*/)
                       << wav_path << " → "
                       << pcm.size() << " 샘플 (16kHz mono)\n";
 
-            // PCM 벡터를 JSON 배열로 변환
+            // Convert PCM vector to JSON array
             neograph::json pcm_json = neograph::json::array();
             for (float s : pcm) {
                 pcm_json.push_back(s);
@@ -453,7 +453,7 @@ MicInputNode::run(neograph::graph::NodeInput /*in*/)
             neograph::json voice_packet = {
                 {"pcm",         std::move(pcm_json)},
                 {"sample_rate", 16000},
-                {"mock_text",   std::string{}}  // wav 모드에서는 비워 둠
+                {"mock_text",   std::string{}}  // left empty in wav mode
             };
             out.writes.push_back({"voice_in", voice_packet});
             co_return out;
@@ -461,18 +461,18 @@ MicInputNode::run(neograph::graph::NodeInput /*in*/)
         } catch (const std::exception& e) {
             std::cerr << "[MicInputNode] wav 읽기 실패 — 텍스트 모드로 폴백: "
                       << e.what() << "\n";
-            // 아래 텍스트 mock 으로 이어서 처리
+            // Fall through to text mock below
             line = "(wav 읽기 실패: " + wav_path + ")";
         }
 #else
-        // miniaudio 없으면 경고 후 텍스트 처리
+        // Without miniaudio, warn and handle as text mock
         std::cerr << "[MicInputNode] miniaudio 없음 — wav 모드 비활성. "
                   << "텍스트 mock 으로 처리: " << wav_path << "\n";
         line = "(wav 모드 비활성: " + wav_path + ")";
 #endif
     }
 
-    // ── 텍스트 모드 (기존 mock 동작 그대로) ─────────────────────────────────
+    // ── Text mode (mock behavior) ────────────────────────────────────────────
     neograph::json voice_packet = {
         {"pcm",         neograph::json::array()},
         {"sample_rate", sample_rate_},

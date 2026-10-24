@@ -1,31 +1,31 @@
 // jarvis/src/stt/whisper_node.h
 //
-// "whisper_stt" 그래프 노드: voice_in PCM → (text, lang) → user_text + user_lang.
+// "whisper_stt" graph node: voice_in PCM → (text, lang) → user_text + user_lang.
 //
-// 구현 의존: whisper.cpp 의 libwhisper. ggerganov/whisper.cpp 의 examples/whisper.cpp
-// 사용법 거의 그대로 — whisper_init_from_file → whisper_full → token 디코드.
+// Dependency: libwhisper from whisper.cpp. Follows the standard whisper.cpp flow:
+// whisper_init_from_file_with_params → whisper_full → segment text decoding.
 //
-// language="auto" 가 핵심: 첫 30초 mel 로 99개 언어 토큰 확률 계산 후 가장 높은
-// 코드를 ISO 형식(ko/en/ja/...) 으로 출력. 이게 user_lang 채널 값이 되어 TTS 까지
-// 전파됨 — 토니가 한국어로 말하면 자비스가 한국어로 답하는 메커니즘.
+// language="auto" computes language token probabilities from the first 30s mel
+// spectrogram across 99 languages and outputs the top ISO code (ko/en/ja/...).
+// That code is written to the user_lang channel and propagated through to TTS.
 //
-// 등록 (main.cpp):
+// Registration (main.cpp):
 //   NodeFactory::register_type("whisper_stt", ...);
 //
-// JSON 설정:
+// JSON configuration:
 //   { "type": "whisper_stt",
 //     "model_path": "assets/whisper-small.bin",
 //     "language": "auto",
 //     "translate_to_en": false }
 //
-// 입력 채널: voice_in (pcm + sample_rate)
-// 출력 채널: user_text (string), user_lang (string, ISO 2자리)
+// Input channel: voice_in (pcm + sample_rate)
+// Output channels: user_text (string), user_lang (string, 2-letter ISO code)
 //
-// TODO(impl):
-//   - whisper_init_from_file 1회
-//   - whisper_full_params 구성 — language="auto", strategy=greedy 면 충분
-//   - whisper_full_lang_id() 로 감지된 언어 코드 추출
-//   - 빈 발화 / 잡음 처리 (text 비어있으면 그래프 조기 종료)
+// Implementation notes:
+//   - Load model once via whisper_init_from_file_with_params
+//   - Configure whisper_full_params with language="auto" and greedy decoding
+//   - Extract detected language code via whisper_full_lang_id()
+//   - Return empty text on silent/noisy clips so downstream nodes short-circuit
 #pragma once
 
 #include <neograph/neograph.h>
@@ -47,7 +47,7 @@ class WhisperSttNode : public neograph::graph::GraphNode {
     std::string model_path_;
     std::string language_;  // "auto" or ISO code
     bool translate_to_en_;
-    // TODO: whisper_context*
+    // whisper_context* is associated via a file-static map in whisper_node.cpp
 };
 
 }  // namespace jarvis::stt

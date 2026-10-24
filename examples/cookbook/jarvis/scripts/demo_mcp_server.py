@@ -1,13 +1,14 @@
-"""자비스 cookbook 데모용 MCP 서버.
+"""Demo MCP server for the JARVIS cookbook.
 
-NeoGraph 의 examples/demo_mcp_server.py 와 동일한 도구 셋(시간/날씨/계산)을 노출하되
-port 를 CLI 인자로 받아 자비스 시연 시 충돌(보통 port 8000 점유) 회피.
+Exposes the same tool set (time/weather/calculator) as NeoGraph's
+examples/demo_mcp_server.py, but accepts the port as a CLI argument to avoid
+conflicts (typically on port 8000) during JARVIS demos.
 
-사용:
-    python3 demo_mcp_server.py            # 기본 port 8888
-    python3 demo_mcp_server.py 8000       # 다른 port 지정
+Usage:
+    python3 demo_mcp_server.py            # default port 8888
+    python3 demo_mcp_server.py 8000       # custom port
 
-pip install fastmcp 필요. 자비스 cookbook README 참고.
+Requires `pip install fastmcp`. See the JARVIS cookbook README.
 """
 
 import sys
@@ -50,6 +51,6 @@ def get_weather(city: str) -> str:
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) >= 2 else 8888
-    host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"  # 컨테이너에선 0.0.0.0
+    host = sys.argv[2] if len(sys.argv) >= 3 else "127.0.0.1"  # 0.0.0.0 inside a container
     print(f"[demo_mcp_server] starting on port {port}", file=sys.stderr)
     mcp.run(transport="streamable-http", host=host, port=port)

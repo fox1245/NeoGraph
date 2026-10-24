@@ -3,10 +3,10 @@
 // server.cpp's Mock nodes are replaced with LLMCallNode (NG built-in). The
 // same scenario (6 customers × 3 topologies) runs through OpenRouter.
 //
-// 핵심 검증:
-//   1) NG 엔진이 100 동시 실제 LLM 호출을 들고 있을 수 있나
-//   2) 메모리 / wall time / RPS 가 어떻게 변하나 (Mock 대비)
-//   3) compile cache + thread_id 격리는 그대로 유효한가
+// Key checks:
+//   1) Whether the NG engine can sustain 100 concurrent live LLM calls
+//   2) How memory, wall time, and RPS change compared to the mock version
+//   3) Whether the compile cache and thread_id isolation still hold
 //
 // Cost depends on the OpenRouter model pricing and request usage.
 //
@@ -51,9 +51,9 @@ using namespace neograph;
 using namespace neograph::graph;
 using clk = std::chrono::steady_clock;
 
-// ── (1) 3 customer topology — Mock 버전과 *shape 동일*, 노드 타입만
-// "style" 대신 NG built-in "llm_call" 로 교체. 같은 graph 구조가
-// Mock/Real 양쪽 다 동작한다는 게 시연 포인트. ──────────────────────
+// ── (1) 3 customer topologies — *same shapes* as the mock version, with
+// node type "style" replaced by the built-in "llm_call". Demonstrates that
+// the same graph structure runs unchanged on both mock and live nodes. ──
 
 static json topology_simple() {
     return {
@@ -71,7 +71,7 @@ static json topology_simple() {
 }
 
 static json topology_reflexive() {
-    // draft → critique → final. 진짜 LLM 이라 3 API call/요청.
+    // draft → critique → final. 3 live LLM API calls per request.
     return {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "reflexive"},
@@ -91,8 +91,8 @@ static json topology_reflexive() {
 }
 
 static json topology_fanout() {
-    // 3 perspective 병렬 — 진짜 LLM 이라 3 동시 API call/요청.
-    // merge 는 mock 그대로 (deterministic, LLM 불필요).
+    // 3 perspectives in parallel — 3 concurrent live LLM API calls per request.
+    // merge stays as in the mock version (deterministic, no LLM needed).
     return {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "fanout"},
@@ -115,7 +115,7 @@ static json topology_fanout() {
     };
 }
 
-// Merge 노드 — fanout 의 join. 결정적 (LLM 안 부름).
+// Merge node — fanout join. Deterministic (does not call the LLM).
 class MergeNode : public GraphNode {
     std::string name_;
 public:
@@ -191,7 +191,7 @@ struct CustomerRecord {
     std::string id;
     std::string topology_name;
     json        topology_def;
-    std::string system_prompt;   // customer 별로 다른 페르소나
+    std::string system_prompt;   // distinct persona per customer
 };
 
 static std::unordered_map<std::string, CustomerRecord> make_customer_db() {
@@ -231,10 +231,10 @@ int main() try {
         return 1;
     }
 
-    // OpenRouter provider — 모든 customer 가 공유.
+    // OpenRouter provider — shared across all customers.
     std::shared_ptr<Provider> provider = examples::make_openrouter_provider(api_key, "chat", std::chrono::seconds(180));
 
-    // MergeNode 만 직접 등록 (llm_call 은 built-in).
+    // Register only MergeNode manually (llm_call is built in).
     NodeFactory::instance().register_type("merge",
         [](const std::string& name, const json&, const NodeContext&) {
             return std::make_unique<MergeNode>(name);
@@ -243,11 +243,11 @@ int main() try {
     auto customers = make_customer_db();
     CompileCache cache;
 
-    // 1000 동시 LIVE LLM stress test by default; each request makes 1-3 model calls.
+    // 1000 concurrent LIVE LLM stress test by default; each request makes 1-3 model calls.
     const int N_REQUESTS = static_cast<int>(
         examples::env_count("NG_MULTI_TENANT_REQUESTS", 1000, 1, 1000));
-    const int N_SESSIONS = std::min(200, N_REQUESTS);  // 평균 5 turn/session
-    // I/O bound — 동시 in-flight 늘리려 worker 증가
+    const int N_SESSIONS = std::min(200, N_REQUESTS);  // average 5 turns/session
+    // I/O bound — more workers to keep more requests in flight concurrently
     const int N_WORKERS  = static_cast<int>(
         examples::env_count("NG_MULTI_TENANT_WORKERS", 32, 1, 256));
 
@@ -263,7 +263,7 @@ int main() try {
     auto all_done_fut = all_done.get_future();
     auto reported_usage = std::make_shared<UsageAccumulator>();
 
-    // Sample one response per topology — 진짜 LLM 응답 받아오는지 확인.
+    // Sample one response per topology — verify that live LLM responses arrive.
     std::mutex sample_mu;
     std::unordered_map<std::string, std::string> samples;
 
@@ -295,7 +295,7 @@ int main() try {
                 })}};
                 auto result = engine->run(rcfg);
 
-                // Sample 저장 — topology 마다 1개씩
+                // Save one sample per topology
                 {
                     std::lock_guard lk(sample_mu);
                     if (samples.find(rec.topology_name) == samples.end()) {

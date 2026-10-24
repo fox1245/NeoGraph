@@ -1,21 +1,21 @@
-// Self-evolving multi-tenant chatbot — graph topology 가 사용자 행동을
-// 보고 *자기 자신을* 진화시킴.
+// Self-evolving multi-tenant chatbot — the graph topology observes user
+// behavior and evolves *itself*.
 //
-// 시나리오: alice 의 chatbot harness 가 처음엔 'simple' topology 로 시작.
-// 매 turn 끝나면 LLM judge 가 conversation history + 현재 topology 를
-// 보고 "이 사용자에게 더 적합한 topology" 를 판단. 다르면 즉시 in-place
-// 로 customer_db 의 graph_def 를 업데이트 → 다음 turn 부터 새 topology
-// 로 처리.
+// Scenario: alice's chatbot harness starts on the 'simple' topology.
+// At the end of each turn, an LLM judge reads the conversation history and
+// the current topology to pick the best-fit topology for this user. If it
+// differs, customer_db's graph_def is updated in place so the next turn
+// runs on the new topology.
 //
-// 이게 multi_tenant_chatbot cookbook 의 자연스러운 확장. 그쪽은 customer
-// 별 harness 가 *고정* — 이쪽은 *진화*. LangGraph 로는 StateGraph 가
-// Python 객체라 runtime 에 자기 자신을 reshape 하는 게 사실상 불가능,
-// NG 의 graph-as-JSON 모델만 가능한 카테고리.
+// This extends the multi_tenant_chatbot cookbook: there each customer's
+// harness is *fixed*, whereas here it *evolves*. In LangGraph, StateGraph is
+// a Python object that cannot practically reshape itself at runtime; NeoGraph's
+// graph-as-JSON model makes this possible.
 //
 // Cost estimate: 5 turns × (main LLM call ~2.3 + judge LLM call 1) = ~16
 // pinned DeepSeek via OpenRouter calls.
 //
-// 빌드/실행:
+// Build/run:
 //   cmake --build build --target cookbook_self_evolving_chatbot
 //   ./build/cookbook_self_evolving_chatbot
 //
@@ -41,7 +41,7 @@
 using namespace neograph;
 using namespace neograph::graph;
 
-// ── (1) 3 후보 topology — multi_tenant_chatbot 과 동일 shape ────────
+// ── (1) 3 candidate topologies — same shapes as multi_tenant_chatbot ─
 
 static json topology_simple() {
     return {
@@ -132,7 +132,7 @@ make_topology_registry() {
     };
 }
 
-// ── (2) Compile cache (multi_tenant_chatbot 그대로) ─────────────────
+// ── (2) Compile cache (same as multi_tenant_chatbot) ─────────────────
 
 class CompileCache {
     std::shared_mutex mu_;
@@ -156,12 +156,12 @@ public:
     std::size_t size() { std::shared_lock lk(mu_); return cache_.size(); }
 };
 
-// ── (3) LLM judge — history + 현재 topology → 다음 topology ─────────
+// ── (3) LLM judge — history + current topology → next topology ───────
 //
-// 진짜 self-evolution 의 핵심. ~deepseek/deepseek-v4-flash-latest 이 사용자
-// 대화 스타일을 보고 'simple / reflexive / fanout' 중 best fit 을 한 단어로
-// 응답.
-// Production 이면 judgment prompt + few-shot + 더 풍부한 metric (응답
+// Core of self-evolution. ~deepseek/deepseek-v4-flash-latest reads the user's
+// conversation style and replies with one word: 'simple', 'reflexive', or
+// 'fanout'.
+// In production, use a richer judgment prompt, few-shot examples, and metrics.
 
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
@@ -205,7 +205,7 @@ static std::string llm_judge_topology(
     usage.add(outcome_usage(*result));
     result = outcome_or_throw(std::move(result));
     std::string raw = outcome_text(*result);
-    // 소문자 + 첫 단어 추출
+    // Lowercase and extract the first word
     std::string word;
     for (char c : raw) {
         if (std::isalpha(static_cast<unsigned char>(c))) {
@@ -215,7 +215,7 @@ static std::string llm_judge_topology(
         }
     }
     if (word == "simple" || word == "reflexive" || word == "fanout") return word;
-    return current_topology;   // judge 결과 unparseable → 그대로 유지
+    return current_topology;   // unparseable judge reply → keep current topology
 }
 
 // ── (4) Customer record + DB ────────────────────────────────────────
@@ -245,7 +245,7 @@ static long peak_rss_kb() {
     return 0;
 }
 
-// ── (5) main — 5-turn 시뮬레이션, 매 turn 끝에 judge → evolve ────────
+// ── (5) main — 5-turn simulation, judge → evolve at the end of each turn ──
 
 static int run_demo() {
     cppdotenv::auto_load_dotenv();
@@ -265,7 +265,7 @@ static int run_demo() {
     auto topo_registry = make_topology_registry();
     CompileCache cache;
 
-    // Alice — 처음엔 'simple' topology 로 시작. 사용자 행동 보고 진화.
+    // Alice — starts on the 'simple' topology and evolves with user behavior.
     CustomerRecord alice;
     alice.id = "alice";
     alice.topology_name = "simple";
@@ -273,7 +273,7 @@ static int run_demo() {
     alice.system_prompt =
         "You are a helpful assistant. Respond in 1-2 short sentences max.";
 
-    // 5-turn 사용자 발화 — 점점 다중 관점/심층 분석 요구가 늘어남.
+    // 5-turn user utterances — progressively demanding multiple angles and deeper analysis.
     std::vector<std::string> user_messages = {
         "What is a cloud?",
         "What is HTTP?",
@@ -296,7 +296,7 @@ static int run_demo() {
                   << " [topology=" << alice.topology_name << "] ──\n";
         std::cout << "User: " << umsg << "\n";
 
-        // (a) 현재 topology 로 응답.
+        // (a) Respond using the current topology.
         NodeContext ctx;
         ctx.provider = provider;
         ctx.model = "~deepseek/deepseek-v4-flash-latest";
@@ -314,7 +314,7 @@ static int run_demo() {
         auto result = engine->run(rcfg);
         auto out_msgs = result.output["channels"]["messages"]["value"];
 
-        // 마지막 assistant 응답 추출.
+        // Extract the last assistant reply.
         std::string final_reply;
         if (out_msgs.is_array()) {
             for (const auto& m : out_msgs)
@@ -329,24 +329,24 @@ static int run_demo() {
                                   ? final_reply.substr(0, 200) + "..."
                                   : final_reply) << "\n";
 
-        // history 업데이트 (user + last assistant).
+        // Update history (user + last assistant).
         alice.history.push_back({{"role", "user"}, {"content", umsg}});
         alice.history.push_back({{"role", "assistant"}, {"content", final_reply}});
 
-        // topology 별 LLM call 수 누적 (시연용 카운트).
+        // Accumulate LLM call count per topology (for demo reporting).
         if (alice.topology_name == "simple") main_llm_calls += 1;
         else                                  main_llm_calls += 3;
 
-        // (b) LLM judge — 다음 turn 의 topology 결정.
+        // (b) LLM judge — choose the topology for the next turn.
         std::cout << "[Evaluating harness fit...] ";
         std::string suggested = llm_judge_topology(
             provider, alice.history, alice.topology_name, *reported_usage);
         judge_llm_calls += 1;
         std::cout << "judge → " << suggested << "\n";
 
-        // (c) 다르면 in-place evolve. customer_db UPDATE 한 줄 = NG 의 진짜
-        //     hot-swap. cache 는 새 hash 라 다음 turn 에서 자동으로 새
-        //     engine 컴파일 후 영구 캐시.
+        // (c) If different, evolve in place. A single customer_db UPDATE is
+        //     NeoGraph's hot-swap; the new hash misses the cache on the next
+        //     turn, compiling and caching the new engine automatically.
         if (suggested != alice.topology_name) {
             std::cout << "  ⟹ EVOLVE: " << alice.topology_name
                       << " → " << suggested << " (in-place, deploy 0)\n";

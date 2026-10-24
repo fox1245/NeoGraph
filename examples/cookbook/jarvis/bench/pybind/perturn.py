@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""per-turn 오케스트레이션 오버헤드 — 동일 no-op 그래프를 N회 run.
-노드는 파이썬 콜러블(양쪽 동일). C++ BSP 루프 + pybind 경계 + GIL vs 순수 파이썬 Pregel.
+"""Per-turn orchestration overhead — runs an identical no-op graph N times.
+Nodes are Python callables (identical on both sides). Compares the C++ BSP loop + pybind boundary + GIL against pure-Python Pregel.
 argv[1] = neograph | langgraph ; argv[2] = N
 """
 import sys, time, statistics as st
@@ -11,7 +11,7 @@ N = int(sys.argv[2]) if len(sys.argv) > 2 else 5000
 if which == "neograph":
     import neograph_engine as ng
 
-    # 5개 파이썬 노드 체인 (각 노드가 파이썬 콜러블 = GIL 경계 왕복)
+    # 5-node Python chain (each node is a Python callable = GIL boundary round-trip)
     class PyNode(ng.GraphNode):
         def __init__(self, name, ch):
             super().__init__(); self._n = name; self._ch = ch
@@ -33,7 +33,7 @@ if which == "neograph":
                   + [{"from": "s4", "to": "__end__"}]),
     }
     engine = ng.GraphEngine.compile(graph, ng.NodeContext())
-    # 웜업
+    # Warm-up
     for _ in range(50):
         engine.run(ng.RunConfig(thread_id="w", input={"v": 0}))
     samples = []

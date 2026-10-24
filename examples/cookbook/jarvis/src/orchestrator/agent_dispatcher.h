@@ -1,15 +1,15 @@
 // jarvis/src/orchestrator/agent_dispatcher.h
 //
-// config/agent_registry.json 을 읽고:
-//   1) 각 A2A 서브에이전트의 AgentCard 조회 (fetch_card_on_start=true 만)
-//   2) 자비스 자신의 A2A 서버 (self 섹션) 띄움
-//   3) "a2a_delegate" 그래프 노드 등록
+// Reads config/agent_registry.json and:
+//   1) Fetches each A2A sub-agent's AgentCard (only when fetch_card_on_start=true)
+//   2) Starts JARVIS's own A2A server (from the self section)
+//   3) Registers the "a2a_delegate" graph node
 //
-// 라우터가 delegate_to="coder" 같은 이름을 주면, 이 모듈이 url 을 찾아서
-// A2AClient::send_message 로 user_text 통째 전송, 응답을 delegated_reply 채널에 씀.
+// When the router selects e.g. delegate_to="coder", this module looks up its URL,
+// forwards user_text via A2AClient::send_message, and writes the reply to delegated_reply.
 //
-// 자비스의 A2A 서버는 jarvis_graph 와 같은 엔진 인스턴스를 그대로 노출 —
-// 외부 호출이 들어오면 STT 단계 건너뛰고 text_in 채널로 주입됨.
+// JARVIS's A2A server exposes the same compiled jarvis_graph engine instance —
+// external requests bypass the STT stage and enter directly on the text_in channel.
 #pragma once
 
 #include <neograph/neograph.h>
@@ -31,20 +31,20 @@ struct AgentEntry {
     std::vector<std::string> delegate_keywords;
     std::chrono::seconds timeout{60};
     std::shared_ptr<neograph::a2a::A2AClient> client;
-    std::optional<neograph::a2a::AgentCard> card;  // fetch 실패하면 nullopt
+    std::optional<neograph::a2a::AgentCard> card;  // nullopt if card fetch fails
 };
 
 class AgentDispatcher {
   public:
     static AgentDispatcher load(const std::string& registry_json_path);
 
-    // 라우터 LLM 에 주입할 텍스트 — 각 에이전트 이름 + expertise + keywords.
+    // Text injected into the router LLM prompt — agent name + expertise + keywords.
     std::string render_for_router_prompt() const;
 
     AgentEntry* find(const std::string& name);
     const AgentEntry* find(const std::string& name) const;
 
-    // 자비스 자신을 외부에 노출 (self 섹션). engine 은 jarvis_graph 컴파일 결과.
+    // Expose JARVIS itself externally (self section). `engine` is the compiled jarvis_graph.
     std::unique_ptr<neograph::a2a::A2AServer>
     start_self_server(std::shared_ptr<neograph::graph::GraphEngine> engine) const;
 

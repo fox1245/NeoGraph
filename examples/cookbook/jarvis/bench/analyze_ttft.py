@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""TTFT 분석 — 스트리밍 라운드용.
+"""TTFT analysis — for streaming benchmark rounds.
 
-두 지표를 낸다:
-  1. 체감 TTFT (client-observed): 드라이버가 잰 turn-send → 첫 합성 토큰.
-     사용자가 답을 "듣기 시작"하는 시점. 응답 길이와 무관(생성 시간 미포함)
-     하므로 원시값 비교도 total 보다 공정.
-  2. 프레임워크-잔차 TTFT: 체감 TTFT − (라우터 상류 전체 + 합성 상류 첫바이트).
-     = 그래프 + 클라이언트 직렬화 + 로컬 홉. 공급자 prefill/큐까지 소거.
+Reports two metrics:
+  1. Client-observed TTFT: driver-measured turn-send → first synthesized token.
+     The moment the user starts hearing the answer. Independent of reply length
+     (excludes generation duration), making raw comparisons fairer than total time.
+  2. Framework-residual TTFT: client TTFT − (full router upstream + synth upstream first byte).
+     = graph + client serialization + local hops, canceling provider prefill/queue variance.
 
-프록시 로그 필드: $msec $request_time $connect $header_time $response_time $status
-콜 쌍 = [라우터(비스트리밍: header≈response), 합성(스트리밍: header=첫바이트)].
+Proxy log fields: $msec $request_time $connect $header_time $response_time $status
+Call pair = [router (non-streaming: header≈response), synth (streaming: header=first byte)].
 
-사용: python3 analyze_ttft.py <label:jsonl:log> [<label:jsonl:log> ...]
-      (라운드마다 독립 로그 — 라운드 분할 불요)
+Usage: python3 analyze_ttft.py <label:jsonl:log> [<label:jsonl:log> ...]
+       (separate log per round — no round splitting needed)
 """
 import json
 import statistics as st
@@ -56,11 +56,11 @@ def main():
             resid = []
             for k, t in enumerate(turns):
                 pair = cluster[2 * k: 2 * k + 2]
-                # 페어 내 라우터/합성 판별은 완료순서(msec)가 아니라 응답시간
-                # 크기로 — 라우터(8b, 짧은 JSON) < 합성(70b, 긴 답변). 스트리밍
-                # 시 로그 완료순서가 뒤집혀도 안전.
+                # Distinguish router vs. synth within the pair by response time
+                # rather than completion timestamp (msec) — router (short JSON) <
+                # synth (longer streamed reply). Safe even if log completion order flips.
                 router, synth = sorted(pair, key=lambda c: c[2])
-                # TTFT 상류 성분 = 라우터 전체(비스트리밍) + 합성 첫바이트(header)
+                # Upstream TTFT component = full router call (non-streaming) + synth first byte (header)
                 resid.append(t["ttft_ms"] - (router[2] + synth[1]) * 1000.0)
         else:
             print(f"[{label}] 콜 {len(cluster)} ≠ 2×{len(turns)}턴 "

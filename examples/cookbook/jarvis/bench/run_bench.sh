@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# NeoGraph vs LangGraph — 자비스 오케스트레이션 코어 벤치.
+# NeoGraph vs LangGraph — JARVIS orchestration core benchmark.
 #
-# 동일 제약(--cpus=2 --memory=2g)의 컨테이너 2종에서 동일 토폴로지를 구동:
-#   mock 라운드 : LLM 0ms 스텁 → 순수 프레임워크 오버헤드 (200턴)
-#   OpenRouter 라운드 : 고정 DeepSeek 추론 (20턴, OPENROUTER_API_KEY 필요)
+# Runs the identical topology in two containers under identical limits (--cpus=2 --memory=2g):
+#   mock round : 0ms LLM stub → pure framework overhead (200 turns)
+#   OpenRouter round : pinned DeepSeek inference (20 turns, requires OPENROUTER_API_KEY)
 #
-# 사용:  OPENROUTER_API_KEY=... bash bench/run_bench.sh
-# 결과:  $BENCH_OUT(기본 /tmp/jarvis-bench-out)/*.jsonl + 비교표 stdout
+# Usage: OPENROUTER_API_KEY=... bash bench/run_bench.sh
+# Output: $BENCH_OUT (default /tmp/jarvis-bench-out)/*.jsonl + comparison table on stdout
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"   # NeoGraph 루트
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"   # NeoGraph root
 OUT="${BENCH_OUT:-/tmp/jarvis-bench-out}"
 mkdir -p "$OUT"
 LIMITS=(--cpus=2 --memory=2g)
@@ -19,7 +19,7 @@ docker build -q -f "$ROOT/examples/cookbook/jarvis/bench/Dockerfile.neograph" \
 docker build -q -f "$ROOT/examples/cookbook/jarvis/bench/Dockerfile.langgraph" \
     -t jarvis-bench-langgraph "$ROOT"
 
-run_c() {  # run_c <추가 docker 인자...> <이미지> <driver 인자...>
+run_c() {  # run_c <extra docker args...> <image> <driver args...>
     docker run --rm "${LIMITS[@]}" -v "$OUT":/out \
         -e JARVIS_MEMORY_FILE=/tmp/mem.json "$@"
 }

@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""경계 계측 잔차 분석 — 프록시 로그의 콜별 상류(OpenRouter) 시간을 턴에서 차감.
+"""Boundary-instrumented residual analysis — subtracts per-call upstream (OpenRouter)
+latency in the proxy log from each turn's round-trip time.
 
-  잔차 = 턴 왕복시간 − 그 턴에 대응하는 두 콜의 upstream_response_time 합
+  residual = turn round-trip − sum of upstream_response_time for that turn's two calls
 
-각 라운드에 독립 프록시 로그를 지정한다. 완료시각 순으로 정렬한 콜을
-턴마다 두 개씩 대응시키므로, 콜 수가 정확히 턴 수의 두 배인 입력만
-잔차를 계산한다. 재시도나 추가 호출이 있는 실행은 이 가정을 확인해야 한다.
+Each round receives its own proxy log. Calls sorted by completion timestamp are
+paired two per turn, so residuals are computed only when the call count equals
+exactly twice the turn count. Runs with retries or extra calls should verify this assumption.
 
-사용:
+Usage:
   python3 analyze_proxy.py <label1>:<jsonl1>:<log1> [<label2>:<jsonl2>:<log2> ...]
 """
 import json
@@ -24,7 +25,7 @@ def parse_log(path):
         try:
             ts = float(parts[0])
             upstream = parts[4]
-            # 재시도 시 "0.1, 0.2" 형태 — 합산
+            # Sum comma-separated values on upstream retries (e.g. "0.1, 0.2")
             up = sum(float(x) for x in upstream.replace(",", " ").split()
                      if x not in ("-",))
             calls.append((ts, up, parts[5]))
@@ -34,8 +35,8 @@ def parse_log(path):
 
 
 def main():
-    # 라운드마다 독립 로그(label:jsonl:log) — 라운드 분할·크로스컨테이너
-    # 시간창 매칭 불요. 콜이 정확히 2×턴수면 순서 기반, 아니면 residual 생략.
+    # Each round has an independent log (label:jsonl:log) — no round splitting or
+    # cross-container time-window matching needed. Pair in order when calls == 2 * turns.
     specs = [s.split(":") for s in sys.argv[1:]]
 
     rows = []

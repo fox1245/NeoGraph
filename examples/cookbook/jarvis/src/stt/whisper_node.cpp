@@ -1,18 +1,18 @@
 // jarvis/src/stt/whisper_node.cpp
 //
-// WhisperSttNode 구현.
+// WhisperSttNode implementation.
 //
-// JARVIS_HAVE_WHISPER=1 이면 진짜 whisper.cpp 호출,
-// 없으면 mock(텍스트 그대로 패스스루 + 한글 코드포인트 휴리스틱) 으로 동작.
+// Calls whisper.cpp when JARVIS_HAVE_WHISPER=1; otherwise runs in mock mode
+// (text passthrough + Hangul codepoint language heuristic).
 //
-// 두 가지 입력 모드 (voice_in 채널):
-//   텍스트 모드: {"mock_text": "...", "pcm": [], "sample_rate": 0}
-//               — STT 건너뛰고 mock_text 를 user_text 에 그대로 씀
-//   wav 모드   : {"mock_text": "", "pcm": [float...], "sample_rate": 16000}
-//               — whisper.cpp 로 실제 음성 인식 수행
+// Two input modes (voice_in channel):
+//   Text mode: {"mock_text": "...", "pcm": [], "sample_rate": 0}
+//              — skips STT and copies mock_text directly to user_text
+//   WAV mode : {"mock_text": "", "pcm": [float...], "sample_rate": 16000}
+//              — runs speech recognition via whisper.cpp
 //
-// 헤더(whisper_node.h)를 수정하지 않으므로 whisper_context* 는
-// 파일 정적 맵으로 노드 인스턴스와 연결한다.
+// To avoid exposing whisper_context* in whisper_node.h, a file-static map
+// associates each node instance with its whisper_context*.
 
 #include "whisper_node.h"
 
@@ -22,7 +22,7 @@
 #include <vector>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// whisper.cpp 연동 — JARVIS_HAVE_WHISPER 가드
+// whisper.cpp integration — guarded by JARVIS_HAVE_WHISPER
 // ─────────────────────────────────────────────────────────────────────────────
 
 #ifdef JARVIS_HAVE_WHISPER
@@ -32,10 +32,10 @@
 namespace jarvis::stt {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 파일 정적 맵: 노드 인스턴스 → whisper_context*
+// File-static map: node instance → whisper_context*
 //
-// 헤더를 수정하지 않고 whisper_context* 를 보관하는 유일한 방법.
-// 노드가 소멸할 때 해당 항목을 지워야 한다.
+// Keeps whisper_context* out of the public header; entries are erased when the
+// node is destroyed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #ifdef JARVIS_HAVE_WHISPER
@@ -45,7 +45,7 @@ std::unordered_map<WhisperSttNode*, whisper_context*> g_ctx_map;
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 생성자 — cfg 설정값 저장 + 모델 1회 로드
+// Constructor — store cfg settings and load the model once
 // ─────────────────────────────────────────────────────────────────────────────
 
 WhisperSttNode::WhisperSttNode(std::string name, const neograph::json& cfg)
@@ -55,7 +55,7 @@ WhisperSttNode::WhisperSttNode(std::string name, const neograph::json& cfg)
     , translate_to_en_(cfg.value("translate_to_en", false))
 {
 #ifdef JARVIS_HAVE_WHISPER
-    // 모델 로드 (1회) — 무거운 작업이므로 생성자에서 미리 처리
+    // Load the model once in the constructor (expensive initialization)
     whisper_context_params cparams = whisper_context_default_params();
     whisper_context* ctx = whisper_init_from_file_with_params(model_path_.c_str(), cparams);
     if (ctx) {
@@ -64,13 +64,13 @@ WhisperSttNode::WhisperSttNode(std::string name, const neograph::json& cfg)
     } else {
         std::cerr << "[whisper] 모델 로드 실패: " << model_path_
                   << " — mock 모드로 동작\n";
-        // ctx == nullptr → g_ctx_map 에 등록 안 함 → run() 에서 mock 경로로 처리
+        // ctx == nullptr → not registered in g_ctx_map → run() falls back to mock path
     }
 #endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 소멸자 — whisper_context 해제 + 맵 정리
+// Destructor — free whisper_context and remove from map
 // ─────────────────────────────────────────────────────────────────────────────
 
 WhisperSttNode::~WhisperSttNode() {
@@ -84,8 +84,8 @@ WhisperSttNode::~WhisperSttNode() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 언어 감지 휴리스틱 (mock 전용) — 한글 코드포인트(가-힣, U+AC00–U+D7A3) 있으면 "ko"
-// whisper 가 있을 때는 whisper_full_lang_id() 가 대신함.
+// Language detection heuristic (mock only) — returns "ko" if Hangul syllables
+// (U+AC00–U+D7A3) are present; whisper_full_lang_id() is used when whisper is active.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
@@ -93,24 +93,24 @@ namespace {
 std::string detect_language_heuristic(const std::string& text) {
     if (text.empty()) return "en";
 
-    // UTF-8 한글 범위: 0xEA 0xB0 0x80 (가) ~ 0xED 0x9E 0xA3 (힣)
-    // 3바이트 시퀀스. 첫 바이트가 0xEA~0xED 인 케이스를 빠르게 걸러냄.
+    // UTF-8 Hangul syllable range: 0xEA 0xB0 0x80 (U+AC00) .. 0xED 0x9E 0xA3 (U+D7A3),
+    // 3-byte sequences whose lead byte is in 0xEA..0xED.
     for (size_t i = 0; i + 2 < text.size(); ) {
         unsigned char b0 = static_cast<unsigned char>(text[i]);
         if (b0 >= 0xEA && b0 <= 0xED) {
             unsigned char b1 = static_cast<unsigned char>(text[i + 1]);
             unsigned char b2 = static_cast<unsigned char>(text[i + 2]);
-            // 가 = EA B0 80, 힣 = ED 9E A3
+            // U+AC00 = EA B0 80, U+D7A3 = ED 9E A3
             uint32_t cp = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
             if (cp >= 0xAC00 && cp <= 0xD7A3) {
                 return "ko";
             }
             i += 3;
         } else if (b0 < 0x80) {
-            // ASCII — 1바이트
+            // ASCII — 1 byte
             ++i;
         } else if (b0 < 0xC0) {
-            // UTF-8 연속 바이트 — 다음 위치로
+            // UTF-8 continuation byte — advance to next byte
             ++i;
         } else if (b0 < 0xE0) {
             i += 2;
@@ -126,12 +126,12 @@ std::string detect_language_heuristic(const std::string& text) {
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// run() — voice_in 패킷 읽어 user_text + user_lang 채널에 쓰기
+// run() — read voice_in packet and write user_text + user_lang channels
 //
-// 분기:
-//   1) PCM 데이터 있음 + JARVIS_HAVE_WHISPER → 진짜 whisper 호출 (wav 모드)
-//   2) PCM 없고 mock_text 있음               → 텍스트 그대로 패스 (텍스트 모드)
-//   3) 둘 다 비어있음                         → 빈 user_text + "en" 패스 (EOF 호환)
+// Branches:
+//   1) Non-empty PCM + JARVIS_HAVE_WHISPER → run whisper.cpp (WAV mode)
+//   2) Empty PCM + mock_text present       → pass text through (text mode)
+//   3) Both empty                          → pass empty user_text + "en" (EOF)
 // ─────────────────────────────────────────────────────────────────────────────
 
 asio::awaitable<neograph::graph::NodeOutput>
@@ -139,10 +139,10 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
 {
     neograph::graph::NodeOutput out;
 
-    // voice_in 채널에서 패킷 읽기
+    // Read packet from the voice_in channel
     const auto& voice_packet = in.state.get("voice_in");
 
-    // ── PCM 데이터 추출 ────────────────────────────────────────────────────
+    // ── Extract PCM data ───────────────────────────────────────────────────
     std::vector<float> pcm;
     int sample_rate = 0;
 
@@ -159,7 +159,7 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
         }
     }
 
-    // ── 분기 처리 ──────────────────────────────────────────────────────────
+    // ── Dispatch by input mode ─────────────────────────────────────────────
 
     std::string text;
     std::string lang;
@@ -169,20 +169,20 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
     whisper_context* ctx = (ctx_it != g_ctx_map.end()) ? ctx_it->second : nullptr;
 
     if (!pcm.empty() && ctx) {
-        // ── wav 모드: 진짜 whisper.cpp 음성 인식 ──────────────────────────
+        // ── WAV mode: whisper.cpp speech recognition ──────────────────────
 
         std::cout << "[whisper] STT 시작 (PCM " << pcm.size()
                   << " samples, lang=" << language_ << ")\n";
 
-        // 음성 인식 파라미터 설정 — greedy 방식으로 빠르게
+        // Configure recognition parameters — greedy decoding for low latency
         whisper_full_params wparams =
             whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
 
-        // 언어 설정: "auto" 면 자동 감지, 아니면 ISO 코드 고정.
-        // ⚠️ detect_language=true 는 whisper.cpp 에서 "언어만 감지하고 전사
-        //    없이 종료" 모드 — 이걸 켜면 user_lang 은 나오는데 user_text 가
-        //    항상 빈 문자열이 된다(실측: jfk.wav 도 ''). auto 감지 + 전사를
-        //    둘 다 하려면 language="auto" + detect_language=false.
+        // Language setting: auto-detect when "auto", otherwise pin ISO code.
+        // Note: in whisper.cpp, detect_language=true means "detect language only
+        // and exit without transcribing", which leaves user_text empty. To both
+        // auto-detect language and transcribe, set language="auto" and
+        // detect_language=false.
         if (language_ == "auto") {
             wparams.language        = "auto";
             wparams.detect_language = false;
@@ -191,22 +191,22 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
             wparams.detect_language = false;
         }
 
-        // 영어 번역 여부
+        // Whether to translate into English
         wparams.translate = translate_to_en_;
 
-        // 진행 상황 콘솔 출력 끄기 — [whisper] 로그만 남긴다
+        // Suppress whisper console progress — keep only [whisper] logs
         wparams.print_progress  = false;
         wparams.print_realtime  = false;
         wparams.print_timestamps = false;
 
-        // 음성 인식 실행
+        // Run speech recognition
         int ret = whisper_full(ctx, wparams, pcm.data(), static_cast<int>(pcm.size()));
         if (ret != 0) {
             std::cerr << "[whisper] whisper_full 실패 (code=" << ret << ") — 빈 결과 반환\n";
-            // 실패 시 빈 text + "en" 으로 처리
+            // On failure, return empty text + "en"
             lang = "en";
         } else {
-            // 모든 세그먼트(구간) 텍스트 이어 붙이기
+            // Concatenate text across all segments
             int n_seg = whisper_full_n_segments(ctx);
             for (int i = 0; i < n_seg; ++i) {
                 const char* seg_text = whisper_full_get_segment_text(ctx, i);
@@ -215,7 +215,7 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
                 }
             }
 
-            // 감지된 언어 코드 추출 — int id → ISO 문자열 ("ko", "en", ...)
+            // Extract detected language code — int id → ISO string ("ko", "en", ...)
             int lang_id = whisper_full_lang_id(ctx);
             const char* lang_str = (lang_id >= 0) ? whisper_lang_str(lang_id) : nullptr;
             lang = (lang_str && lang_str[0] != '\0') ? lang_str : "en";
@@ -224,15 +224,15 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
                       << "\" (감지된 언어: " << lang << ")\n";
         }
     } else if (ctx == nullptr && !pcm.empty()) {
-        // whisper 컨텍스트(context) 없는데 PCM 들어온 경우 — 모델 로드 실패 상황
-        // mock 텍스트가 있으면 그걸 쓰고, 없으면 빈 결과
+        // PCM arrived without a whisper_context (model failed to load) —
+        // fall back to mock_text if present, otherwise empty text
         if (voice_packet.is_object() && voice_packet.contains("mock_text")) {
             const auto& mt = voice_packet["mock_text"];
             if (mt.is_string()) text = mt.get<std::string>();
         }
         lang = detect_language_heuristic(text);
     } else {
-        // PCM 없음 → 텍스트 모드 또는 EOF
+        // No PCM → text mode or EOF
         if (voice_packet.is_object() && voice_packet.contains("mock_text")) {
             const auto& mt = voice_packet["mock_text"];
             if (mt.is_string()) text = mt.get<std::string>();
@@ -240,8 +240,8 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
         lang = detect_language_heuristic(text);
     }
 #else
-    // ── JARVIS_HAVE_WHISPER 없을 때 mock 동작 ─────────────────────────────
-    // mock_text 필드 꺼내기 — 텍스트 모드와 동일하게 동작
+    // ── Mock behavior when built without JARVIS_HAVE_WHISPER ──────────────
+    // Extract mock_text field — same behavior as text mode
     if (voice_packet.is_object() && voice_packet.contains("mock_text")) {
         const auto& mt = voice_packet["mock_text"];
         if (mt.is_string()) {
@@ -251,18 +251,18 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
     lang = detect_language_heuristic(text);
 #endif
 
-    // ── 언어 관성(hysteresis) — 추정 네이티브 언어를 고수 ──────────────────
-    // whisper 는 매 발화 언어를 새로 감지하는데, 짧거나 잡음 섞인 발화가
-    // 외국어로 오인식되면 응답·TTS 언어가 홱 바뀐다. store.prefs 에 native_lang
-    // 과 연속 streak 을 유지해: 감지언어==네이티브면 streak↑(고수), 다르면
-    // streak↓ 하고 0 이 될 때만 전환. 한두 번의 오인식은 무시하고 진짜로
-    // 언어를 바꾸면(연속 감지) 따라간다. 빈 텍스트 턴은 관성에 영향 X.
+    // ── Language hysteresis — stick to the inferred native language ─────────
+    // Whisper detects language per utterance, so a short or noisy clip can be
+    // misclassified and flip the reply/TTS language. Track native_lang and a
+    // consecutive streak in store.prefs: increment streak on a match, decrement
+    // on a mismatch, and switch only when streak reaches 0. Single misdetections
+    // are ignored; sustained switches follow the new language. Empty turns are ignored.
     auto trim = [](const std::string& s) {
         auto b = s.find_first_not_of(" \t\r\n");
         return b == std::string::npos ? std::string() : s.substr(b);
     };
     if (in.ctx.store && !trim(text).empty()) {
-        constexpr int kStreakCap = 4;   // 전환 관성 강도
+        constexpr int kStreakCap = 4;   // hysteresis inertia cap
         neograph::graph::Namespace ns{"jarvis", "tony"};
         auto& store = *in.ctx.store;
         auto item = store.get(ns, "prefs");
@@ -277,7 +277,7 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
             streak = std::min(streak + 1, kStreakCap); effective = native;
         } else {
             if (--streak <= 0) { native = lang; streak = 1; effective = lang; }
-            else               { effective = native; }  // 오인식 무시, 고수
+            else               { effective = native; }  // ignore single misdetection, keep native
         }
         if (effective != lang) {
             std::cerr << "[whisper] 언어 관성 — 감지='" << lang
@@ -290,7 +290,7 @@ WhisperSttNode::run(neograph::graph::NodeInput in)
         lang = effective;
     }
 
-    // ── user_text + user_lang 채널에 쓰기 ─────────────────────────────────
+    // ── Write user_text + user_lang channels ───────────────────────────────
     out.writes.push_back({"user_text", text});
     out.writes.push_back({"user_lang", lang});
 

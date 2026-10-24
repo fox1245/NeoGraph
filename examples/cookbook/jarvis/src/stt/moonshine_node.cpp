@@ -1,11 +1,11 @@
-// jarvis/src/stt/moonshine_node.cpp — Moonshine-tiny(-ko) ONNX STT 구현.
+// jarvis/src/stt/moonshine_node.cpp — Moonshine-tiny(-ko) ONNX STT implementation.
 //
-// 파이프라인 (moonshine_ref.py 골든과 1:1 — optimum 표준구현과 일치 검증됨):
+// Pipeline (1:1 with moonshine_ref.py golden — verified against the optimum reference):
 //   encoder(input_values 16k raw) → last_hidden_state [1, T, 288]
 //   decoder(input_ids=[BOS], encoder_hidden_states) → logits + present KV(dec+enc)
 //   decoder_with_past(input_ids=[tok], past dec+enc KV) → logits + present dec KV
-//     (enc KV 는 첫 패스에서 얻어 매 스텝 상수 재사용)
-//   argmax 반복 → EOS(2) 또는 max_length. tokenizer decode → user_text.
+//     (enc KV is computed on the first pass and reused as a constant every step)
+//   repeat argmax → EOS(2) or max_length. tokenizer decode → user_text.
 
 #include "moonshine_node.h"
 
@@ -25,7 +25,7 @@ constexpr int   N_HEADS  = 8;
 constexpr int   HEAD_DIM = 36;
 constexpr int64_t BOS = 1, EOS = 2;
 
-// PCM 을 16kHz 로 선형 리샘플 (이미 16k 면 그대로)
+// Linearly resample PCM to 16kHz (no-op if already 16kHz)
 std::vector<float> resample_to_16k(const std::vector<float>& in, int sr) {
     if (sr == 16000 || in.empty() || sr <= 0) return in;
     const double ratio = 16000.0 / sr;
@@ -44,7 +44,7 @@ std::vector<float> resample_to_16k(const std::vector<float>& in, int sr) {
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 생성자 — ONNX 세션 3개 + 토크나이저 vocab 로드
+// Constructor — load 3 ONNX sessions + tokenizer vocab
 // ─────────────────────────────────────────────────────────────────────────────
 MoonshineSttNode::MoonshineSttNode(std::string name, const neograph::json& cfg)
     : name_(std::move(name)) {
@@ -57,7 +57,7 @@ MoonshineSttNode::MoonshineSttNode(std::string name, const neograph::json& cfg)
         return dir + "/" + cfg.value(key, std::string(dflt));
     };
 
-    // ── 토크나이저 (tokenizer.json 의 model.vocab → id_to_piece_) ──
+    // ── Tokenizer (tokenizer.json model.vocab → id_to_piece_) ──
     try {
         std::ifstream tf(path("tokenizer", "tokenizer.json"));
         if (tf) {
@@ -120,8 +120,8 @@ MoonshineSttNode::MoonshineSttNode(std::string name, const neograph::json& cfg)
 MoonshineSttNode::~MoonshineSttNode() = default;
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 토크나이저 디코드 — HF decoder Sequence:
-//   Replace(▁→space) → ByteFallback(<0xHH>→byte) → Fuse(byte 연결) → Strip(앞 1)
+// Tokenizer decode — HF decoder Sequence:
+//   Replace(▁→space) → ByteFallback(<0xHH>→byte) → Fuse(join bytes) → Strip(1 leading space)
 // ─────────────────────────────────────────────────────────────────────────────
 std::string MoonshineSttNode::decode_tokens(const std::vector<int64_t>& ids) const {
     static const std::string kMeta = "\xe2\x96\x81";  // ▁ U+2581
@@ -140,7 +140,7 @@ std::string MoonshineSttNode::decode_tokens(const std::vector<int64_t>& ids) con
             out.push_back(static_cast<char>(hex(p[3]) * 16 + hex(p[4])));
             continue;
         }
-        // Replace ▁ → space (나머지는 그대로 — 이미 UTF-8)
+        // Replace ▁ → space (leave the rest as-is — already UTF-8)
         std::size_t pos = 0, prev = 0;
         while ((pos = p.find(kMeta, prev)) != std::string::npos) {
             out.append(p, prev, pos - prev);
@@ -149,15 +149,15 @@ std::string MoonshineSttNode::decode_tokens(const std::vector<int64_t>& ids) con
         }
         out.append(p, prev, std::string::npos);
     }
-    // Strip 앞쪽 공백 1개
+    // Strip 1 leading space
     if (!out.empty() && out.front() == ' ') out.erase(out.begin());
     return out;
 }
 
 #ifdef JARVIS_HAVE_ONNXRUNTIME
 namespace {
-// 소유 버퍼 기반 KV 텐서 — Ort::Value 는 버퍼를 복사 안 하므로 buffer 를 소유해
-// Run 수명 동안 살려둔다.
+// Owning-buffer KV tensor — Ort::Value does not copy its buffer, so this struct
+// owns the backing vector for the lifetime of each Run call.
 struct Tensor {
     std::vector<float>   data;
     std::vector<int64_t> shape;
@@ -182,7 +182,7 @@ asio::awaitable<neograph::graph::NodeOutput>
 MoonshineSttNode::run(neograph::graph::NodeInput in) {
     neograph::graph::NodeOutput out;
 
-    // voice_in 에서 PCM + sample_rate 추출 (텍스트 모드면 mock_text 패스)
+    // Extract PCM + sample_rate from voice_in (or mock_text in text mode)
     const auto& vp = in.state.get("voice_in");
     std::vector<float> pcm;
     int sr = 0;
@@ -198,7 +198,7 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
         }
     }
 
-    // 텍스트 모드(mock) 또는 미준비 → mock_text 패스스루 (whisper_node 와 동일 계약)
+    // Text mode (mock) or not ready → pass mock_text through (same contract as whisper_node)
     if (!ready_ || pcm.empty()) {
         out.writes.push_back({"user_text", mock_text});
         out.writes.push_back({"user_lang",
@@ -210,7 +210,7 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
     try {
         pcm = resample_to_16k(pcm, sr ? sr : 16000);
 
-        // ── 인코더 ──
+        // ── Encoder ──
         std::array<int64_t, 2> iv_shape{1, static_cast<int64_t>(pcm.size())};
         Ort::Value iv = Ort::Value::CreateTensor<float>(
             *mem_, pcm.data(), pcm.size(), iv_shape.data(), iv_shape.size());
@@ -223,7 +223,7 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
         const int64_t enc_seq = enc_shape[1], enc_hid = enc_shape[2];
         std::vector<float> enc_hidden(enc_ptr, enc_ptr + (enc_seq * enc_hid));
 
-        // ── 첫 패스: decoder_model ──
+        // ── First pass: decoder_model ──
         int64_t cur = BOS;
         std::array<int64_t, 2> id_shape{1, 1};
         std::vector<Ort::Value> d0_vals;
@@ -248,7 +248,7 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
         auto d0_logits_shape = d0[0].GetTensorTypeAndShapeInfo().GetShape();
         cur = argmax_last_row(d0[0].GetTensorData<float>(), d0_logits_shape[1], vocab);
 
-        // present KV → 소유 버퍼 (dec: 갱신, enc: 상수)
+        // Copy present KV into owned buffers (dec: updated each step, enc: constant)
         auto grab = [&](std::vector<Ort::Value>& r, const std::vector<std::string>& names,
                         const std::string& key) -> Tensor {
             size_t idx = out_index(names, key);
@@ -268,11 +268,11 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
         std::vector<int64_t> tokens;
         if (cur != EOS) tokens.push_back(cur);
 
-        // ── 반복: decoder_with_past ──
+        // ── Autoregressive loop: decoder_with_past ──
         std::vector<const char*> dp_in;  for (auto& n : decp_in_)  dp_in.push_back(n.c_str());
         std::vector<const char*> dp_out; for (auto& n : decp_out_) dp_out.push_back(n.c_str());
         for (int step = 1; step < max_length_ && cur != EOS; ++step) {
-            // 입력 조립: decp_in_ 순서대로 (input_ids, past.L.dec/enc.k/v ...)
+            // Assemble inputs in decp_in_ order (input_ids, past.L.dec/enc.k/v ...)
             std::vector<Ort::Value> vals;
             int64_t idbuf = cur;
             for (const auto& nm : decp_in_) {
@@ -294,7 +294,7 @@ MoonshineSttNode::run(neograph::graph::NodeInput in) {
             cur = argmax_last_row(dp[0].GetTensorData<float>(), ls[1], ls.back());
             if (cur == EOS) break;
             tokens.push_back(cur);
-            // dec KV 갱신 (enc KV 는 그대로)
+            // Update decoder KV cache (encoder KV cache stays constant)
             std::vector<Tensor> nd(N_LAYERS * 2);
             for (int L = 0; L < N_LAYERS; ++L) {
                 nd[L*2+0] = grab(dp, decp_out_, "present." + std::to_string(L) + ".decoder.key");

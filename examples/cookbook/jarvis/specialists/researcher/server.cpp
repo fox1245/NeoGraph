@@ -1,24 +1,24 @@
 // jarvis/specialists/researcher/server.cpp
 //
-// 자비스 위임용 연구자 전문가 — A2A 서버로 노출.
-// 자비스 본체의 라우터가 mode="delegate", delegate_to="researcher" 를 결정하면
-// 이 서버 (기본 포트 8211) 가 받아서 답한다.
+// Researcher specialist for JARVIS delegation — exposed as an A2A server.
+// When the JARVIS router chooses mode="delegate", delegate_to="researcher",
+// this server (default port 8211) receives the request and replies.
 //
-// 사용 (run_session.sh 가 자동 띄움):
+// Usage (launched automatically by run_session.sh):
 //   ./cookbook_jarvis_specialist_researcher [port]
 //
-// 자비스의 agent_registry.json 에 url=http://127.0.0.1:8211 으로 등록되어
-// 있어야 라우터가 "delegate_to=researcher" 를 고를 수 있음.
+// Must be registered in JARVIS's agent_registry.json with url=http://127.0.0.1:8211
+// so the router can select "delegate_to=researcher".
 //
-// 응답 끝에 [SUMMARY] <≤25 words> 한 줄 — persona.txt 의 specialist 규약.
-// 자비스 본체의 response_synth 가 그 한 줄만 추출해서 음성으로 읽음.
+// Ends the reply with a single "[SUMMARY] <≤25 words>" line per the specialist
+// contract in persona.txt; JARVIS's response_synth extracts only that line for TTS.
 //
-// 그래프 구성 — 두 단계:
-//   1. ResearchNode   : persona.txt [specialist_researcher] 프롬프트로 LLM 호출
-//   2. SummaryEnforcer: 응답 끝에 [SUMMARY] 가 없으면 추가 LLM 호출로 강제
+// Graph structure — two stages:
+//   1. ResearchNode   : calls the LLM with the persona.txt [specialist_researcher] prompt
+//   2. SummaryEnforcer: makes a follow-up LLM call if the reply lacks [SUMMARY]
 //
-// 실제 웹 검색 도구(Tavily / Brave / SerpAPI) 는 // TODO 로 두고 mock 진행.
-// 외부 API 키 추가 부담 없이 A2A 규약만 검증할 수 있도록.
+// External web search tools (Tavily / Brave / SerpAPI) are omitted here
+// so the A2A contract can be verified without extra external API keys.
 
 #include <neograph/neograph.h>
 #include <neograph/a2a/server.h>
@@ -50,14 +50,14 @@ using neograph::graph::NodeOutput;
 namespace {
 
 // ---------------------------------------------------------------------------
-// 전역 종료 신호 — SIGINT / SIGTERM 잡아서 메인 루프 탈출
+// Global shutdown signal — catch SIGINT / SIGTERM to exit the main loop
 // ---------------------------------------------------------------------------
 std::atomic<bool> g_shutdown{false};
 
 void on_signal(int) { g_shutdown.store(true, std::memory_order_release); }
 
 // ---------------------------------------------------------------------------
-// 파일 전체 읽기 — persona.txt 파싱에 쓰임
+// Read an entire file — used to parse persona.txt
 // ---------------------------------------------------------------------------
 std::string slurp_file(const std::string& path) {
     std::ifstream f(path);
@@ -68,8 +68,8 @@ std::string slurp_file(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
-// persona.txt 에서 특정 섹션 추출.
-// "===<section>==="  라인 다음 줄부터 다음 "===" 헤더 또는 EOF 까지 반환.
+// Extract a named section from persona.txt.
+// Returns the text from the line after "===<section>===" up to the next "===" header or EOF.
 // ---------------------------------------------------------------------------
 std::string extract_section(const std::string& text, const std::string& section) {
     std::string header = "===" + section + "===";
@@ -77,7 +77,7 @@ std::string extract_section(const std::string& text, const std::string& section)
     if (start == std::string::npos) return "";
     start = text.find('\n', start);
     if (start == std::string::npos) return "";
-    ++start; // 헤더 다음 줄 시작
+    ++start; // start of the line after the header
 
     auto end = text.find("\n===", start);
     if (end == std::string::npos) end = text.size();
@@ -86,14 +86,14 @@ std::string extract_section(const std::string& text, const std::string& section)
 }
 
 // ---------------------------------------------------------------------------
-// MockProvider — OPENROUTER_API_KEY 없을 때 사용.
-// 연구 응답 + [SUMMARY] 규약을 흉내낸다.
+// MockProvider — used when OPENROUTER_API_KEY is not set.
+// Simulates a research reply plus the [SUMMARY] contract.
 // ---------------------------------------------------------------------------
 using MockProvider = jarvis::providers::MockProvider;
 
 // ---------------------------------------------------------------------------
-// ResearchNode — LLM 한 번 호출. 연구 결과를 `response` 채널에 기록.
-// 실제 웹 검색 도구는 TODO 로 비워 둠 (외부 API 키 없이도 동작하도록).
+// ResearchNode — single LLM call; writes the research result to the `response` channel.
+// External web search tools are omitted so this runs without extra API keys.
 // ---------------------------------------------------------------------------
 class ResearchNode : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
@@ -108,11 +108,11 @@ public:
         auto raw = in.state.get("prompt");
         std::string user_text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
-        // TODO: 웹 검색 도구 (Tavily / Brave / SerpAPI) 호출 후 결과를
-        //       user_text 에 덧붙여 컨텍스트 보강.
-        //   예시:
+        // Extension point: invoke a web search tool (Tavily / Brave / SerpAPI)
+        // and append the result to user_text to enrich the context.
+        //   Example:
         //   auto search_result = web_search_tool_->execute({{"query", user_text}});
-        //   user_text += "\n\n[검색 결과]\n" + search_result;
+        //   user_text += "\n\n[Search results]\n" + search_result;
 
         std::vector<sp::Message> messages;
         messages.push_back(examples::message(sp::Role::System, system_prompt_));
@@ -143,8 +143,8 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// SummaryEnforcer — `response` 를 읽어서 [SUMMARY] 가 없으면 LLM 을 한 번 더
-// 불러 추가한다. 있으면 그냥 통과.
+// SummaryEnforcer — reads `response` and makes one more LLM call to append
+// [SUMMARY] if missing; passes through unchanged when already present.
 // ---------------------------------------------------------------------------
 class SummaryEnforcer : public GraphNode, public neograph::RuntimeInterpositionConsumer {
 public:
@@ -157,7 +157,7 @@ public:
         auto raw = in.state.get("response");
         std::string text = raw.is_string() ? raw.get<std::string>() : raw.dump();
 
-        // [SUMMARY] 가 이미 있으면 그대로
+        // Pass through unchanged if [SUMMARY] is already present
         if (text.find("[SUMMARY]") != std::string::npos) {
             NodeOutput out;
             out.writes.push_back(ChannelWrite{"response", json(text)});
@@ -183,7 +183,7 @@ public:
         const auto& generated = neograph::outcome_messages(*reply);
         messages.insert(messages.end(), generated.begin(), generated.end());
 
-        // mock 이 [SUMMARY] 를 또 안 붙였을 때를 대비한 최후 방어
+        // Last-resort fallback in case the mock still omitted [SUMMARY]
         if (enforced.find("[SUMMARY]") == std::string::npos) {
             enforced += "\n[SUMMARY] research complete";
         }
@@ -203,11 +203,11 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// 그래프 조립 — research → summary_enforcer → __end__
+// Assemble graph — research → summary_enforcer → __end__
 // ---------------------------------------------------------------------------
 std::shared_ptr<GraphEngine> build_engine(std::shared_ptr<Provider> provider,
                                           const std::string&         system_prompt) {
-    // research 노드 등록
+    // Register research node
     NodeFactory::instance().register_type(
         "research",
         [provider, system_prompt](
@@ -215,7 +215,7 @@ std::shared_ptr<GraphEngine> build_engine(std::shared_ptr<Provider> provider,
             return std::make_unique<ResearchNode>(n, provider, system_prompt);
         });
 
-    // summary_enforcer 노드 등록
+    // Register summary_enforcer node
     NodeFactory::instance().register_type(
         "summary_enforcer",
         [provider](const std::string& n, const json&, const NodeContext&) {
@@ -257,15 +257,15 @@ int main(int argc, char** argv) {
 
     int port = (argc >= 2) ? std::stoi(argv[1]) : 8211;
 
-    // persona.txt 경로 — 실행 파일 기준 상대 경로 대신 __FILE__ 기반으로 잡음.
-    // 빌드 후 바이너리 위치가 달라져도 소스 옆에 있는 config 를 찾게 됨.
-    // 실제 배포 환경에서는 환경변수 JARVIS_CONFIG_DIR 로 덮을 수 있게 해 둠.
+    // Resolve persona.txt relative to __FILE__ rather than the executable path
+    // so the config next to the source tree is found regardless of build directory.
+    // Can be overridden via the JARVIS_CONFIG_DIR environment variable.
     std::string config_dir;
     if (const char* env_dir = std::getenv("JARVIS_CONFIG_DIR")) {
         config_dir = env_dir;
     } else {
         // __FILE__ = .../specialists/researcher/server.cpp
-        // config 는 두 단계 위 config/ 아래
+        // config lives two directories up under config/
         std::string src_path = __FILE__;
         auto slash = src_path.rfind('/');
         slash = (slash != std::string::npos)
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
     }
     std::string persona_path = config_dir + "/persona.txt";
 
-    // persona.txt 읽기 — 없으면 기본 프롬프트로 대체 (서버 시작은 계속)
+    // Read persona.txt — fall back to a default prompt if missing (keep server startup going)
     std::string system_prompt;
     try {
         std::string full_text = slurp_file(persona_path);
@@ -311,10 +311,10 @@ int main(int argc, char** argv) {
         std::cout << "[researcher-specialist] OPENROUTER_API_KEY 없음 — mock provider 사용\n";
     }
 
-    // 그래프 조립
+    // Assemble graph
     auto engine = build_engine(provider, system_prompt);
 
-    // AgentCard — A2A 클라이언트가 /.well-known/agent-card.json 으로 발견
+    // AgentCard — discovered by A2A clients at /.well-known/agent-card.json
     a2a::AgentCard card;
     card.name                = "researcher";
     card.description         = "JARVIS researcher specialist — web search + summary delegation target";
@@ -326,7 +326,7 @@ int main(int argc, char** argv) {
     card.default_output_modes = {"text/plain"};
     card.skill_names = {"research", "summarize", "compare", "analyze"};
 
-    // A2AServer 시작
+    // Start A2AServer
     a2a::A2AServer server(engine, card);
     if (!server.start_async("127.0.0.1", port)) {
         std::cerr << "[researcher-specialist] 포트 바인드 실패: 127.0.0.1:" << port << "\n";
@@ -335,11 +335,11 @@ int main(int argc, char** argv) {
 
     std::cout << "[researcher-specialist] online @ 127.0.0.1:" << server.port() << "\n";
 
-    // 종료 신호 등록
+    // Register shutdown signal handlers
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
 
-    // 신호 올 때까지 대기
+    // Wait until a signal arrives
     while (!g_shutdown.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }

@@ -1,10 +1,10 @@
 // jarvis/src/orchestrator/agent_dispatcher.cpp
 //
-// AgentDispatcher 구현 —
-//   - agent_registry.json 파싱 → 에이전트별 A2AClient 생성
-//   - fetch_card_on_start=true 인 항목에 대해 AgentCard 조회 (실패해도 진행)
-//   - 라우터 LLM 에 주입할 전문가 목록 텍스트 생성
-//   - 자비스 자신을 A2AServer 로 노출
+// AgentDispatcher implementation —
+//   - Parses agent_registry.json → creates an A2AClient per specialist agent
+//   - Fetches AgentCard at startup when fetch_card_on_start=true (continues on failure)
+//   - Renders the specialist list text injected into the router LLM prompt
+//   - Exposes JARVIS itself as an A2AServer
 
 #include "agent_dispatcher.h"
 
@@ -17,12 +17,12 @@
 namespace jarvis::orchestrator {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 내부 헬퍼
+// Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
 
-/// JSON 파일을 통째로 읽어 neograph::json 으로 돌려준다.
+/// Read an entire JSON file and return it as neograph::json.
 neograph::json load_json_file(const std::string& path) {
     std::ifstream f(path);
     if (!f) {
@@ -33,8 +33,8 @@ neograph::json load_json_file(const std::string& path) {
     return neograph::json::parse(ss.str());
 }
 
-/// JSON 배열(문자열)을 std::vector<std::string> 으로 변환.
-/// 해당 키가 없거나 배열이 아니면 빈 벡터 반환.
+/// Convert a JSON string array into std::vector<std::string>.
+/// Returns an empty vector if the key is missing or not an array.
 std::vector<std::string> to_string_vec(const neograph::json& j,
                                        const std::string&    key) {
     std::vector<std::string> result;
@@ -48,7 +48,7 @@ std::vector<std::string> to_string_vec(const neograph::json& j,
 }  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AgentDispatcher::load  — 정적 팩토리 함수
+// AgentDispatcher::load  — static factory function
 // ─────────────────────────────────────────────────────────────────────────────
 
 AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
@@ -56,10 +56,10 @@ AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
 
     neograph::json registry = load_json_file(registry_json_path);
 
-    // ── 1) "agents" 배열 처리 ──────────────────────────────────────────────
+    // ── 1) Process the "agents" array ──────────────────────────────────────
     if (registry.contains("agents") && registry["agents"].is_array()) {
         for (const auto& item : registry["agents"]) {
-            // enabled=false 인 항목은 건너뜀
+            // Skip entries with enabled=false
             if (item.contains("enabled") && !item["enabled"].get<bool>()) {
                 continue;
             }
@@ -74,11 +74,11 @@ AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
             int timeout_sec = item.value("timeout_seconds", 60);
             entry.timeout = std::chrono::seconds(timeout_sec);
 
-            // A2AClient 인스턴스 생성 + timeout 설정
+            // Create A2AClient instance and configure timeout
             entry.client = std::make_shared<neograph::a2a::A2AClient>(entry.url);
             entry.client->set_timeout(entry.timeout);
 
-            // fetch_card_on_start=true 이면 AgentCard 조회 시도 (실패해도 계속)
+            // Attempt AgentCard fetch when fetch_card_on_start=true (continue on failure)
             bool fetch_card = item.value("fetch_card_on_start", false);
             if (fetch_card) {
                 try {
@@ -87,7 +87,7 @@ AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
                     std::cerr << "[AgentDispatcher] AgentCard 조회 성공: "
                               << entry.name << " (" << entry.url << ")\n";
                 } catch (const std::exception& e) {
-                    // 카드 조회 실패 — entry.card 는 nullopt 그대로
+                    // Card fetch failed — leave entry.card as nullopt
                     std::cerr << "[AgentDispatcher] AgentCard 조회 실패 ("
                               << entry.name << "): " << e.what()
                               << " — 계속 진행\n";
@@ -98,7 +98,7 @@ AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
         }
     }
 
-    // ── 2) "self" 섹션 보관 (start_self_server 에서 사용) ─────────────────
+    // ── 2) Store the "self" section (used by start_self_server) ────────────
     if (registry.contains("self")) {
         dispatcher.self_config_ = registry["self"];
     }
@@ -107,7 +107,7 @@ AgentDispatcher AgentDispatcher::load(const std::string& registry_json_path) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// render_for_router_prompt  — 라우터 LLM 시스템 프롬프트용 텍스트
+// render_for_router_prompt  — text for the router LLM system prompt
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::string AgentDispatcher::render_for_router_prompt() const {
@@ -124,7 +124,7 @@ std::string AgentDispatcher::render_for_router_prompt() const {
         out << "- URL: " << entry.url << "\n";
         out << "- Expertise: " << entry.expertise << "\n";
 
-        // 위임 판단 키워드 목록
+        // Delegation trigger keywords
         if (!entry.delegate_keywords.empty()) {
             out << "- Delegate when user says: ";
             for (std::size_t i = 0; i < entry.delegate_keywords.size(); ++i) {
@@ -134,7 +134,7 @@ std::string AgentDispatcher::render_for_router_prompt() const {
             out << "\n";
         }
 
-        // AgentCard fetch 에 성공한 경우 → 카드의 skills 목록도 표시
+        // If AgentCard fetch succeeded, also list the card's skills
         if (entry.card.has_value()) {
             auto& card = entry.card.value();
             if (!card.skill_names.empty()) {
@@ -157,7 +157,7 @@ std::string AgentDispatcher::render_for_router_prompt() const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// find  — 이름으로 AgentEntry 찾기
+// find  — look up AgentEntry by name
 // ─────────────────────────────────────────────────────────────────────────────
 
 AgentEntry* AgentDispatcher::find(const std::string& name) {
@@ -175,22 +175,22 @@ const AgentEntry* AgentDispatcher::find(const std::string& name) const {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// start_self_server  — 자비스 자신을 A2A 서버로 노출
+// start_self_server  — expose JARVIS itself as an A2A server
 // ─────────────────────────────────────────────────────────────────────────────
 
 std::unique_ptr<neograph::a2a::A2AServer>
 AgentDispatcher::start_self_server(
     std::shared_ptr<neograph::graph::GraphEngine> engine) const {
 
-    // self 섹션이 없거나 enabled=false 이면 서버 안 띄움
+    // Do not start the server if the self section is missing or enabled=false
     if (self_config_.is_null()) return nullptr;
     if (!self_config_.value("enabled", false)) return nullptr;
 
-    // bind 주소 + 포트
+    // Bind host + port
     std::string bind_host = self_config_.value("bind_host", "127.0.0.1");
     int         bind_port = self_config_.value("bind_port", 8200);
 
-    // AgentCard 구성 — self_config_.agent_card 필드에서 읽음
+    // Populate AgentCard from self_config_.agent_card
     neograph::a2a::AgentCard card;
     if (self_config_.contains("agent_card") &&
         self_config_["agent_card"].is_object()) {
@@ -205,10 +205,10 @@ AgentDispatcher::start_self_server(
         card.default_input_modes  = {"text/plain"};
         card.default_output_modes = {"text/plain"};
 
-        // skills 배열 (문자열 목록)
+        // skills array (string list)
         card.skill_names = to_string_vec(ac, "skills");
     } else {
-        // agent_card 섹션이 아예 없는 경우 — 기본값으로 채움
+        // Fill in defaults when the agent_card section is absent
         card.name             = "jarvis";
         card.description      = "Jarvis personal meta-orchestrator.";
         card.url              = "http://" + bind_host + ":" +
@@ -218,7 +218,7 @@ AgentDispatcher::start_self_server(
         card.preferred_transport = "JSONRPC";
     }
 
-    // A2AServer 생성 + 비동기 listen 시작 (38_a2a_server.cpp 패턴)
+    // Create A2AServer and start async listener (same pattern as 38_a2a_server.cpp)
     auto server = std::make_unique<neograph::a2a::A2AServer>(engine, card);
     if (!server->start_async(bind_host, bind_port)) {
         std::cerr << "[AgentDispatcher] A2A self-server 바인딩 실패: "

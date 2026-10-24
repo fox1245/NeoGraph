@@ -1,6 +1,7 @@
 // jarvis/src/orchestrator/intent_router_node.h
 //
-// 자비스의 두뇌. 작은/빠른 LLM 한 번으로 다음 JSON 을 만들어 route_decision 채널에 씀.
+// The brain of JARVIS. Makes a single small/fast LLM call to produce the
+// following JSON and writes it to the route_decision channel:
 //
 //   {
 //     "mode": "direct" | "delegate" | "parallel",
@@ -9,14 +10,13 @@
 //     "skip_synthesis": bool
 //   }
 //
-// 기존 IntentClassifier 와 다른 점:
-//   - 단순 라벨 출력이 아니라 구조화 JSON 출력
-//   - 시스템 프롬프트가 런타임에 합성됨 (McpCatalog + AgentDispatcher 의 render*)
-//   - JSON 파싱 실패 시 "direct, skip_synthesis=true, tool_calls=[]" 로 안전 폴백
-//     → 빈 응답 합성 단계로 흘러가서 자비스가 "Sir, 다시 말씀해 주시겠습니까?" 같은
-//        템플릿 답변. 무한루프 방지.
+// Differences from a plain IntentClassifier:
+//   - Outputs structured JSON rather than a single label
+//   - Composes the system prompt at runtime (from McpCatalog + AgentDispatcher render*)
+//   - Safely falls back on JSON parse failure so the turn still completes cleanly
+//     through the synthesizer without entering an infinite loop.
 //
-// 등록 (main.cpp):
+// Registration (main.cpp):
 //   NodeFactory::register_type("intent_classifier", [&](...) {
 //       return std::make_unique<IntentRouterNode>(name, cfg, catalog_ref, dispatcher_ref);
 //   });
