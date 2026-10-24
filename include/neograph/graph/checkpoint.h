@@ -235,7 +235,8 @@ NEOGRAPH_API void restore_checkpoint_storage_shape(Checkpoint& checkpoint, const
  * On resume, the engine loads all pending writes attached to the parent
  * checkpoint, replays them into GraphState, and skips any task whose
  * deterministic `task_id` is already present — so partial fan-out failures
- * only cost the failed node's re-execution, not its successful siblings.
+ * only cost the failed node's re-execution, not its successful siblings. When
+ * a task id has several rows, the newest one is replayed.
  *
  * @see CheckpointStore::put_writes, CheckpointStore::get_writes
  */
@@ -489,6 +490,13 @@ public:
      *
      * Called by the engine on resume to skip already-completed tasks.
      * Default implementation returns an empty vector.
+     *
+     * A step that is started again from the same checkpoint (an earlier
+     * attempt failed or was cancelled before it saved its pause) records its
+     * rows under that checkpoint beside those of the earlier attempt, with the
+     * same task ids. A resume replays the newest row of a task id, which is
+     * the row of the attempt being resumed. A store that keeps one row per
+     * task id must keep the newest.
      *
      * @param thread_id Thread identifier.
      * @param parent_checkpoint_id Checkpoint whose pending writes to load.
