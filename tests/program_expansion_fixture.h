@@ -443,7 +443,8 @@ LinkedChildAdmission link_child_versions(
 template <class Fixture>
 void link_children(Fixture& fixture, const ProgramVersion& parent_version,
                    const std::vector<std::pair<std::string, ProgramVersion>>& children,
-                   BudgetLimits child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1}) {
+                   BudgetLimits child_budget = BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
+                   ExecutionGuarantee accepted_guarantee = ExecutionGuarantee::Strict) {
     ProgramModuleData module_data;
     module_data.owner_scope    = "tenant:runtime";
     module_data.coordinate     = ModuleCoordinate{"runtime", "parent", "1.0.0", ""};
@@ -461,7 +462,7 @@ void link_children(Fixture& fixture, const ProgramVersion& parent_version,
                                    bundle->capability_effect_closure().capabilities,
                                    bundle->capability_effect_closure().effects,
                                    child_budget,
-                                   ExecutionGuarantee::Strict});
+                                   accepted_guarantee});
         for (const auto& capability : bundle->capability_effect_closure().capabilities)
             if (std::find(module_data.allowed_capabilities.begin(),
                           module_data.allowed_capabilities.end(),

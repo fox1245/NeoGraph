@@ -7312,6 +7312,211 @@ TEST(ProgramRuntimeTest, JavaScriptJoinMemberAwaitKeepsItsDeadlineAcrossAResume)
     EXPECT_TRUE(recorded_await_starts(fixture, paused).contains("root.javascript.1/member/0"));
 }
 
+namespace {
+
+// A transition store that refuses the compare of a command record that carries one member's await-start record, the way
+// a publication of the same run that wins every compare between the read of the head and the write does: a child's join,
+// another member's command record (#614). It refuses the first `limit` compares of `target_operation_id`'s start record
+// in a row and lets that record's next compare through, along with every other publication.
+class RefuseAwaitStartJournal final : public SyncProgramTransitionStore {
+public:
+    explicit RefuseAwaitStartJournal(
+        std::size_t limit,
+        std::string target_operation_id = "root.javascript.1/member/0")
+        : limit_(limit), target_operation_id_(std::move(target_operation_id)) {}
+
+    std::optional<ProgramRunPublicationHead> load_run_publication_head_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_run_publication_head_sync(owner, run_id);
+    }
+    std::optional<ProgramCommandPublicationHead> load_command_publication_head_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_command_publication_head_sync(owner, run_id);
+    }
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner,
+                                              std::string_view run_id) const override {
+        return inner_.load_sync(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
+                                                    std::string_view run_id) const override {
+        return inner_.latest_sync(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
+                                               std::uint64_t sequence) const override {
+        return inner_.load_events_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner,
+                                                            std::string_view run_id,
+                                                            std::uint64_t    sequence) const override {
+        return inner_.load_effects_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                       std::string_view lineage_id) const override {
+        return inner_.load_lineage_sync(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                           std::string_view run_id) const override {
+        return inner_.load_run_lineage_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head_sync(
+        std::string_view owner, std::string_view lineage_id, std::string_view head_id) const override {
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation_sync(
+        std::string_view owner, std::string_view lineage_id, std::uint64_t generation) const override {
+        return inner_.load_generation_sync(owner, lineage_id, generation);
+    }
+    std::optional<GraphMigrationCapsule> load_graph_migration_capsule_sync(
+        std::string_view owner, std::string_view source_run_id,
+        std::string_view source_lineage_head_id) const override {
+        return inner_.load_graph_migration_capsule_sync(owner, source_run_id, source_lineage_head_id);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_execution_lease_sync(owner, run_id);
+    }
+    ProgramTransitionPublishResult compare_publish_sync(
+        std::string_view owner, std::string_view expected,
+        ProgramTransitionPublication publication) override {
+        std::unique_lock lock(mutex_);
+        if (refuses_locked(lock, publication)) return ProgramTransitionPublishResult::Conflict;
+        const bool carries_target = carries_target_start(publication);
+        const auto result = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        if (carries_target && !recorded_ && result == ProgramTransitionPublishResult::Published) {
+            recorded_ = true;
+            cv_.notify_all();
+        }
+        return result;
+    }
+    ProgramTransitionPublishResult compare_publish_execution_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        std::unique_lock lock(mutex_);
+        if (refuses_locked(lock, publication)) return ProgramTransitionPublishResult::Conflict;
+        const bool carries_target = carries_target_start(publication);
+        const auto result = inner_.compare_publish_execution_sync(
+            owner, expected, std::move(publication), expected_lease, next_lease);
+        if (carries_target && !recorded_ && result == ProgramTransitionPublishResult::Published) {
+            recorded_ = true;
+            cv_.notify_all();
+        }
+        return result;
+    }
+
+    std::size_t refused() const noexcept {
+        std::lock_guard lock(mutex_);
+        return refused_;
+    }
+    bool recorded_after_refusals() const noexcept {
+        std::lock_guard lock(mutex_);
+        return recorded_;
+    }
+
+private:
+    bool carries_target_start(const ProgramTransitionPublication& publication) const {
+        return std::any_of(
+            publication.commands.begin(), publication.commands.end(), [this](const auto& entry) {
+                return !entry.completed() && entry.await_started_at().has_value() &&
+                       entry.await_started_at()->contains(target_operation_id_);
+            });
+    }
+
+    bool refuses_locked(std::unique_lock<std::mutex>&       lock,
+                        const ProgramTransitionPublication& publication) {
+        if (recorded_) return false;
+        if (!carries_target_start(publication)) {
+            cv_.wait(lock, [this] { return recorded_ || refused_ != limit_; });
+            return false;
+        }
+        if (refused_ < limit_) {
+            ++refused_;
+            return true;
+        }
+        return false;
+    }
+
+    InMemoryProgramTransitionStore inner_;
+    std::size_t                    limit_;
+    std::string                    target_operation_id_;
+    mutable std::mutex             mutex_;
+    std::condition_variable        cv_;
+    std::size_t                    refused_  = 0;
+    bool                           recorded_ = false;
+};
+
+// main() waits on four Core calls at once, each under a timeout, so every member records the start of its await.
+std::string four_awaits_source() {
+    return javascript_runtime_source("runtime-completed", R"JS(
+    const replies = yield ng.all([
+        ng.await(ng.callCore("main", {value: "a"}, "member:a"), 30000, "await:a"),
+        ng.await(ng.callCore("main", {value: "b"}, "member:b"), 30000, "await:b"),
+        ng.await(ng.callCore("main", {value: "c"}, "member:c"), 30000, "await:c"),
+        ng.await(ng.callCore("main", {value: "d"}, "member:d"), 30000, "await:d")
+    ], {max_in_flight: 4}, "all");
+    return {count: replies.length};
+)JS");
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitStartIsRecordedAfterTheCompareLostSeveralTimes) {
+    // #614: the compare of one member's await-start record loses to other publications of the run more times in a
+    // row than the old three-attempt limit allowed. That member's start record is refused ten times in a row, then
+    // recorded on the next compare, and the run completes with every member's start recorded.
+    constexpr std::size_t      refusals = 10;
+    constexpr std::string_view target   = "root.javascript.1/member/0";
+    auto                       journal  = std::make_shared<RefuseAwaitStartJournal>(refusals, std::string(target));
+    AdmittedRuntime            fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto                 version = fixture.admit_javascript(four_awaits_source());
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(4), "trace-js-await-start-conflicts", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(result.output(), (json{{"count", 4}}));
+    EXPECT_EQ(journal->refused(), refusals);
+    EXPECT_TRUE(journal->recorded_after_refusals());
+    const auto starts = recorded_await_starts(fixture, result);
+    EXPECT_TRUE(starts.contains(std::string(target))) << starts.dump();
+    for (int member = 0; member < 4; ++member)
+        EXPECT_TRUE(starts.contains("root.javascript.1/member/" + std::to_string(member)))
+            << "member " << member << " has no recorded start: " << starts.dump();
+}
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitStartThatCanNeverBeRecordedFailsTheRun) {
+    // #614: a start record that stays unpublishable still ends the run; the retry of a lost compare stops after
+    // kRunPublicationAttempts refused compares of that record.
+    auto journal = std::make_shared<RefuseAwaitStartJournal>(
+        std::numeric_limits<std::size_t>::max(), "root.javascript.1/member/0");
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(four_awaits_source());
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(4), "trace-js-await-start-refused", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed) << failure_detail(result);
+    ASSERT_TRUE(result.failure().has_value());
+    EXPECT_EQ(result.failure()->code, "P_JS_COMMAND_JOURNAL");
+    EXPECT_EQ(journal->refused(),
+              static_cast<std::size_t>(neograph::program::detail::kRunPublicationAttempts));
+    EXPECT_FALSE(journal->recorded_after_refusals());
+}
+
 TEST(ProgramRuntimeTest, ProgramPathKeepsLintAndFanOutNoticesOffStderr) {
     // Program admission reports lint through diagnostics, and Program hosts
     // cannot change EngineConfig::worker_count, so neither belongs on stderr.
@@ -7463,6 +7668,57 @@ TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
     const auto children = parent.snapshot().children();
     EXPECT_LE(children.size(), 1U);
     for (const auto& child : children) EXPECT_EQ(child.state, ProgramChildState::Cancelled);
+}
+
+namespace {
+
+// Admits a JavaScript Program whose invocation budget is at most `ceiling`, so that a parent can reserve the budgets of
+// several children out of its own.
+ProgramVersion admit_javascript_within(AdmittedRuntime& fixture, std::string name, std::string source,
+                                       RunBudget ceiling) {
+    ProgramCompiler compiler(fixture.registry, {"program-runtime-test/v1"});
+    auto            bundle = compiler.compile(ProgramSource::from_javascript(std::move(name), std::move(source)),
+                                              ProgramBudgetBounds{RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0}, ceiling});
+    return fixture.catalog->admit(bundle,
+                                  ProgramAdmission{"tenant:runtime", fixture.profile, fixture.policy, {}});
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptParallelSpawnAwaitsRecordTheirStartsWhileChildrenPublish) {
+    // #614: main() waits on four spawned children at once, each under a timeout. While one await records its start,
+    // the other children are attached, dispatched and joined, and each of those publications moves the head of the
+    // run. On a threaded executor this ended about one run in ten in P_JS_COMMAND_JOURNAL before the publications
+    // were retried more than a few times.
+    const RunBudget child_budget{1000, 0, 0, 1, 2, 4, 0, 0, 0};
+    const RunBudget parent_budget{20000, 0, 0, 4, 32, 20, 0, 1, 4};
+    for (int iteration = 0; iteration < 40; ++iteration) {
+        SCOPED_TRACE("iteration " + std::to_string(iteration));
+        AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      child = admit_javascript_within(
+            fixture, "await-child.js",
+            javascript_runtime_source("runtime-completed",
+                                      "    return yield ng.callCore(\"main\", {}, \"child:work\");"),
+            child_budget);
+        const auto parent = admit_javascript_within(fixture, "await-parent.js",
+                                                    javascript_runtime_source("runtime-completed", R"JS(
+    const commands = [0, 1, 2, 3].map((index) =>
+        ng.await(ng.spawn("child_" + index, {index}, "spawn:" + index), 30000, "await:" + index));
+    const results = yield ng.all(commands, {max_in_flight: 4}, "all");
+    return {count: results.length};
+)JS"),
+                                                    parent_budget);
+        link_children(fixture, parent,
+                      {{"child_0", child}, {"child_1", child}, {"child_2", child}, {"child_3", child}},
+                      BudgetLimits{1000, 0, 0, 1, 2, 4, 0, 0, 0}, ExecutionGuarantee::Unmanaged);
+
+        const auto result = fixture.runtime->run(
+            "tenant:runtime", parent,
+            ProgramInvocation{json::object(), parent_budget, "trace-js-parallel-spawn-awaits", {}});
+
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+        EXPECT_EQ(result.output(), (json{{"count", 4}}));
+    }
 }
 
 TEST(ProgramRuntimeTest, JavaScriptInterruptedCallCoreResumesItsExactPendingCoordinate) {
