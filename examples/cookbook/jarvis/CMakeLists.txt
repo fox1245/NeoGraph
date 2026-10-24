@@ -1,13 +1,13 @@
 # examples/cookbook/jarvis/CMakeLists.txt
 #
-# mock-first 빌드 전략:
-#   - whisper / onnxruntime / miniaudio 를 찾지 못해도 빌드는 계속 진행.
-#   - 각 의존성이 없으면 JARVIS_HAVE_WHISPER / JARVIS_HAVE_ONNXRUNTIME /
-#     JARVIS_HAVE_MINIAUDIO 를 OFF 로 설정하고, 실제 호출 코드는
-#     #ifdef 가드로 보호하는 방식.
-#   - 골격(skeleton) 단계는 mock 구현만 사용하므로 외부 의존 없어도 컴파일 가능.
+# Mock-first build strategy:
+#   - Continue building even if whisper / onnxruntime / miniaudio are not found.
+#   - When a dependency is missing, set JARVIS_HAVE_WHISPER / JARVIS_HAVE_ONNXRUNTIME /
+#     JARVIS_HAVE_MINIAUDIO to OFF and guard the actual call sites with
+#     #ifdef blocks.
+#   - The skeleton stage uses mock implementations only, so it compiles without external dependencies.
 #
-# NeoGraph 본체 CMakeLists.txt 에서 포함하는 방법:
+# How to include from the main NeoGraph CMakeLists.txt:
 #   option(NEOGRAPH_BUILD_COOKBOOK_JARVIS "Build the JARVIS voice cookbook" OFF)
 #   if(NEOGRAPH_BUILD_COOKBOOK_JARVIS)
 #       add_subdirectory(examples/cookbook/jarvis)
@@ -15,11 +15,11 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-# 단독(standalone) 빌드 시에도 동작하도록
+# Support standalone builds as well
 if(NOT TARGET neograph::core)
     project(jarvis_cookbook CXX)
-    # C++20 — NeoGraph 본체가 이미 C++20 이라 링크 시 전파됨;
-    # 안전을 위해 여기서도 명시.
+    # C++20 — the main NeoGraph target already requires C++20 and propagates it on link;
+    # set it explicitly here as well for safety.
     set(CMAKE_CXX_STANDARD 20)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     message(STATUS "[jarvis] standalone build — looking for installed neograph package")
@@ -38,7 +38,7 @@ else()
     message(FATAL_ERROR "[jarvis] installed neograph package must export cppdotenv")
 endif()
 
-# NeoGraph 필수 타깃 확인 — 없으면 건너뜀
+# Check required NeoGraph targets — skip if any are missing
 set(_jarvis_required_targets
     neograph::core
     neograph::llm
@@ -54,22 +54,22 @@ foreach(tgt ${_jarvis_required_targets})
     endif()
 endforeach()
 
-# ── 외부 의존 — 없어도 빌드 계속 (mock-first 전략) ──────────────────────────
+# ── External dependencies — continue building if missing (mock-first strategy) ──
 
 option(NEOGRAPH_JARVIS_FORCE_MOCK
     "Build JARVIS without optional voice dependencies" OFF)
 
-# 프로젝트 로컬 third_party 경로 (시스템 의존 0 — 모두 cookbook 안)
+# Project-local third_party path (zero system dependencies — all inside the cookbook)
 set(_jarvis_local_tp "${CMAKE_CURRENT_LIST_DIR}/third_party")
 
-# onnxruntime — 없으면 JARVIS_HAVE_ONNXRUNTIME=OFF, 빌드는 계속
+# onnxruntime — if missing, set JARVIS_HAVE_ONNXRUNTIME=OFF and continue building
 set(JARVIS_HAVE_ONNXRUNTIME OFF)
 if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
     find_package(onnxruntime QUIET CONFIG)
     if(onnxruntime_FOUND)
         set(JARVIS_HAVE_ONNXRUNTIME ON)
     else()
-        # third_party/onnxruntime 우선, 없으면 시스템 경로
+        # Prefer third_party/onnxruntime, fall back to system paths
         find_path(ONNXRUNTIME_INCLUDE_DIR
             NAMES onnxruntime_cxx_api.h
             HINTS ${_jarvis_local_tp}/onnxruntime/include
@@ -88,14 +88,14 @@ else()
     message(STATUS "[jarvis] onnxruntime OK — ${ONNXRUNTIME_LIB}")
 endif()
 
-# whisper.cpp — 없으면 JARVIS_HAVE_WHISPER=OFF, 빌드는 계속
+# whisper.cpp — if missing, set JARVIS_HAVE_WHISPER=OFF and continue building
 set(JARVIS_HAVE_WHISPER OFF)
 if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
     find_package(whisper QUIET CONFIG)
     if(whisper_FOUND)
         set(JARVIS_HAVE_WHISPER ON)
     else()
-        # third_party/whisper_install 우선
+        # Prefer third_party/whisper_install
         find_path(WHISPER_INCLUDE_DIR NAMES whisper.h
             HINTS ${_jarvis_local_tp}/whisper_install/include)
         find_library(WHISPER_LIB NAMES whisper
@@ -111,7 +111,7 @@ else()
     message(STATUS "[jarvis] whisper.cpp OK — ${WHISPER_LIB}")
 endif()
 
-# supertonic helper.cpp — assets/download.sh 가 third_party/supertonic/ 에 받음
+# supertonic helper.cpp — downloaded into third_party/supertonic/ by assets/download.sh
 set(_jarvis_supertonic_helper "${_jarvis_local_tp}/supertonic/helper.cpp")
 set(JARVIS_HAVE_SUPERTONIC OFF)
 if(NOT NEOGRAPH_JARVIS_FORCE_MOCK AND EXISTS "${_jarvis_supertonic_helper}")
@@ -119,7 +119,7 @@ if(NOT NEOGRAPH_JARVIS_FORCE_MOCK AND EXISTS "${_jarvis_supertonic_helper}")
     message(STATUS "[jarvis] supertonic helper OK — ${_jarvis_supertonic_helper}")
 endif()
 
-# miniaudio — 헤더 하나. 없으면 stub 헤더 생성 후 계속 진행.
+# miniaudio — single header. If missing, generate a stub header and continue.
 set(JARVIS_HAVE_MINIAUDIO OFF)
 if(NOT NEOGRAPH_JARVIS_FORCE_MOCK)
     find_path(MINIAUDIO_INCLUDE_DIR NAMES miniaudio.h
@@ -129,8 +129,8 @@ endif()
 if(MINIAUDIO_INCLUDE_DIR AND NOT NEOGRAPH_JARVIS_FORCE_MOCK)
     set(JARVIS_HAVE_MINIAUDIO ON)
 else()
-    # stub 헤더 생성 — mic_input.cpp / tts_output.cpp 가 #ifdef 없이
-    # include 해도 컴파일이 끊기지 않게 빈 파일을 하나 만들어 둔다.
+    # Generate a stub header — create an empty file so mic_input.cpp / tts_output.cpp
+    # compile without #ifdef guards around the #include.
     set(MINIAUDIO_STUB_DIR "${CMAKE_CURRENT_BINARY_DIR}/miniaudio_stub")
     file(MAKE_DIRECTORY "${MINIAUDIO_STUB_DIR}")
     if(NOT EXISTS "${MINIAUDIO_STUB_DIR}/miniaudio.h")
@@ -143,7 +143,7 @@ else()
     message(STATUS "[jarvis] miniaudio.h not found — stub 헤더 생성, mock 빌드 계속")
 endif()
 
-# ── 자비스 본체 실행파일 ────────────────────────────────────────────────────
+# ── Main JARVIS executable ──────────────────────────────────────────────────
 
 set(_jarvis_sources
     src/main.cpp
@@ -160,11 +160,11 @@ set(_jarvis_sources
     src/memory/json_file_store.cpp
 )
 if(JARVIS_HAVE_SUPERTONIC AND JARVIS_HAVE_ONNXRUNTIME)
-    # supertonic helper.cpp 가 ONNX Runtime 헤더 의존. 둘 다 있을 때만 빌드.
+    # supertonic helper.cpp depends on ONNX Runtime headers. Build only when both are present.
     list(APPEND _jarvis_sources "${_jarvis_supertonic_helper}")
-    # helper.cpp 가 C++17 시절 u8"..." 리터럴(const char*) 가정.
-    # GCC 13 + C++20 에선 u8"" 가 const char8_t* 라 std::string/const char* 와
-    # 충돌. -fpermissive 로 양방향 변환 허용.
+    # helper.cpp assumes C++17 u8"..." literals (const char*).
+    # Under GCC 13 + C++20, u8"" is const char8_t*, which conflicts with std::string/const char*.
+    # Allow conversions with -fpermissive.
     set_source_files_properties("${_jarvis_supertonic_helper}" PROPERTIES
         COMPILE_OPTIONS "-fno-char8_t;-fpermissive;-Wno-narrowing")
 endif()
@@ -177,7 +177,7 @@ target_include_directories(cookbook_jarvis PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/supertonic
 )
 
-# 의존성별 조건부 연결 / 정의 추가
+# Conditional linking and compile definitions per dependency
 if(JARVIS_HAVE_ONNXRUNTIME)
     if(onnxruntime_FOUND)
         target_link_libraries(cookbook_jarvis PRIVATE onnxruntime::onnxruntime)
@@ -202,8 +202,8 @@ if(JARVIS_HAVE_SUPERTONIC)
     target_compile_definitions(cookbook_jarvis PRIVATE JARVIS_HAVE_SUPERTONIC=1)
 endif()
 
-# ── RPATH — third_party 의 .so 들을 실행 시 찾을 수 있게 박아둔다.
-#         (시스템 /usr/local 에 안 깔리므로 LD_LIBRARY_PATH 의존 없이 동작)
+# ── RPATH — embed paths so third_party .so files are found at runtime.
+#         (Runs without LD_LIBRARY_PATH since nothing is installed into /usr/local)
 set_target_properties(cookbook_jarvis PROPERTIES
     BUILD_RPATH
         "${_jarvis_local_tp}/onnxruntime/lib;${_jarvis_local_tp}/whisper_install/lib"
@@ -217,7 +217,7 @@ if(JARVIS_HAVE_MINIAUDIO)
     target_compile_definitions(cookbook_jarvis PRIVATE JARVIS_HAVE_MINIAUDIO=1)
 endif()
 
-# NeoGraph 타깃 + cppdotenv 는 항상 필요
+# NeoGraph targets + cppdotenv are always required
 target_link_libraries(cookbook_jarvis PRIVATE
     neograph::core
     neograph::llm
@@ -228,9 +228,9 @@ target_link_libraries(cookbook_jarvis PRIVATE
     ${_jarvis_dotenv_target}
 )
 
-# ── specialists (별도 A2A 서버 프로세스들) ──────────────────────────────────
-# 자비스가 mode="delegate" 결정 시 A2A 로 위임하는 전문가들.
-# 각자 별도 실행 파일 — run_session.sh 가 백그라운드로 띄움.
+# ── Specialists (separate A2A server processes) ─────────────────────────────
+# Specialists to which JARVIS delegates over A2A when it selects mode="delegate".
+# Each is a separate executable launched in the background by run_session.sh.
 
 add_executable(cookbook_jarvis_specialist_coder
     specialists/coder/server.cpp)
@@ -242,8 +242,8 @@ add_executable(cookbook_jarvis_specialist_researcher
 target_link_libraries(cookbook_jarvis_specialist_researcher PRIVATE
     neograph::core neograph::llm neograph::a2a neograph::async SchemaProvider::runtime ${_jarvis_dotenv_target})
 
-# ── 설치 (assets 경로 보존) ─────────────────────────────────────────────────
+# ── Install (preserving assets path) ────────────────────────────────────────
 
 install(TARGETS cookbook_jarvis DESTINATION bin)
 install(DIRECTORY config DESTINATION share/jarvis)
-# assets/ 는 빌드 시점에 모델 다운로드 스크립트가 채움 — 설치는 사용자 선택.
+# assets/ is populated at build time by the model download script — installing it is optional.

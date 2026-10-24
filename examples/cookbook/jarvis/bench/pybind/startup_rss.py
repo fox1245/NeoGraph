@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""기동 + RSS 측정. 각 측정은 새 프로세스에서 실행한다.
-neograph는 import + 심볼 로드, langgraph는 import + 최소 그래프 compile을 측정한다.
-측정 범위가 다르므로 두 결과를 동일 작업의 compile 비용으로 비교하지 않는다.
+"""Startup latency + RSS measurement. Run each target in a fresh process.
+neograph measures import + symbol loading; langgraph measures import + minimal graph compile.
+Because the scopes differ, do not compare the two as identical graph-compilation costs.
 argv[1] = neograph | langgraph | langgraph_openai
 """
 import os, resource, sys, time
@@ -25,7 +25,7 @@ elif which == "langgraph":
     app = g.compile()
 
 elif which == "langgraph_openai":
-    # 현실적 LangGraph 챗봇 스택 (벤치 쌍둥이가 실제 import 하는 것)
+    # Realistic LangGraph chatbot stack (what the benchmark twin actually imports)
     from langgraph.graph import StateGraph, START, END
     from langchain_openai import ChatOpenAI
     from typing import TypedDict

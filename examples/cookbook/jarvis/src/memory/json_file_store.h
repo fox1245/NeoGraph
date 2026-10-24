@@ -1,14 +1,14 @@
 // jarvis/src/memory/json_file_store.h
 //
-// 파일 영속 Store — InMemoryStore 를 감싸고 변이(put/delete)마다 JSON
-// 파일로 flush, 시작 시 파일에서 복원한다.
+// File-backed persistent Store — wraps InMemoryStore, flushes to a JSON file on
+// every mutation (put/delete), and restores from disk on startup.
 //
-// 왜 필요한가: 자비스의 대화 기억(turns/prefs)은 long-term Store 에
-// 사는데, InMemoryStore 는 프로세스와 함께 죽는다. 재시작하면 "아까
-// 뭐 물어봤지?" 가 통하지 않는 재시작 기억상실이 생김. 쿡북 규모에선
-// SQLite 까지 갈 것 없이 JSON 파일 전체 덤프로 충분하다.
+// Rationale: JARVIS stores conversation memory (turns/prefs) in a long-term
+// Store, and InMemoryStore is lost when the process exits. Without persistence,
+// restarting the process loses prior-turn context; at cookbook scale, a full
+// JSON file dump is sufficient without introducing SQLite.
 //
-// 쓰기는 임시파일 + rename 으로 원자적 — 도중에 죽어도 파일이 깨지지 않음.
+// Writes use a temporary file + atomic rename so an interrupted write never corrupts the file.
 
 #pragma once
 
@@ -21,7 +21,7 @@ namespace jarvis::memory {
 
 class JsonFileStore : public neograph::graph::Store {
   public:
-    /// @param path 영속 파일 경로. 존재하면 시작 시 복원, 없으면 새로 만든다.
+    /// @param path Persistent file path. Restored on startup if present, or created on first write.
     explicit JsonFileStore(std::string path);
 
     void put(const neograph::graph::Namespace& ns, const std::string& key,
@@ -41,7 +41,7 @@ class JsonFileStore : public neograph::graph::Store {
 
     std::string                     path_;
     neograph::graph::InMemoryStore  inner_;
-    mutable std::mutex              io_mutex_;  // 파일 I/O 직렬화
+    mutable std::mutex              io_mutex_;  // serializes file I/O
 };
 
 }  // namespace jarvis::memory

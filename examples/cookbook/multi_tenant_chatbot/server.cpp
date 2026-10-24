@@ -1,13 +1,13 @@
-// Multi-tenant chatbot server demo — 한 process 가 N customer 의
-// N 다른 graph topology 를 동시 서빙.
+// Multi-tenant chatbot server demo — one process concurrently serves N
+// different graph topologies for N customers.
 //
-// 핵심 시연:
+// Key points demonstrated:
 //   1) Compile cache (graph_def hash → shared_ptr<GraphEngine>) —
-//      같은 토폴로지를 쓰는 customer 끼리 engine 인스턴스 공유.
-//   2) Per-customer topology — 같은 backend 가 ReAct-shape /
-//      reflexive-shape / fanout-shape 셋을 동시 처리.
-//   3) Per-session isolation — thread_id 격리 + history 누적.
-//   4) 메모리 / 시간 측정 — 1000 동시 요청.
+//      customers with the same topology share an engine instance.
+//   2) Per-customer topology — one backend serves ReAct-shaped,
+//      reflexive-shaped, and fanout-shaped topologies concurrently.
+//   3) Per-session isolation — thread_id isolation + history accumulation.
+//   4) Memory and latency measurement — 1000 concurrent requests.
 //
 // Build and run from the repository root:
 //   cmake -S . -B build-cookbook \
@@ -43,11 +43,11 @@ using namespace neograph;
 using namespace neograph::graph;
 using clk = std::chrono::steady_clock;
 
-// ── (1) Mock-LLM nodes — 실제 Provider 호출 없이 결정적 응답 ─────────
+// ── (1) Mock-LLM nodes — deterministic replies without Provider calls ─
 //
-// 진짜 multi-tenant 서버라면 LLMCallNode + typed SchemaProvider
-// 를 쓰겠지만, 데모는 외부 의존성 0 으로 토폴로지 차이만 보여줌.
-// 응답은 prompt 내용 기반 결정적 — 같은 입력 → 같은 출력 (검증 가능).
+// A real multi-tenant server would use LLMCallNode + typed SchemaProvider,
+// but this demo has zero external dependencies to isolate topology differences.
+// Replies are deterministic from the prompt — same input → same output (verifiable).
 
 class StyleNode : public GraphNode {
     std::string style_, name_;
@@ -59,8 +59,8 @@ public:
         auto msgs = in.state.get("messages");
         std::string last_user;
         if (msgs.is_array()) {
-            // neograph::json (yyjson) 은 reverse iterator 없음 — 순방향
-            // iteration 으로 마지막 user 메시지 추적.
+            // neograph::json (yyjson) has no reverse iterator — track the
+            // last user message via forward iteration.
             for (const auto& m : msgs) {
                 if (m.value("role", "") == "user")
                     last_user = m.value("content", "");
@@ -86,12 +86,12 @@ class MergeNode : public GraphNode {
 public:
     explicit MergeNode(std::string n) : name_(std::move(n)) {}
     asio::awaitable<NodeOutput> run(NodeInput in) override {
-        // fanout 토폴로지의 join — 마지막 N개의 assistant 메시지를
-        // 한 메시지로 합쳐 사용자에게 다양한 관점 제공.
+        // Join of the fanout topology — merge the last N assistant messages
+        // into one message to present multiple perspectives to the user.
         auto msgs = in.state.get("messages");
         std::vector<std::string> recent;
         if (msgs.is_array()) {
-            // 순방향으로 모은 후 마지막 3개를 추출 (reverse iter 없음).
+            // Collect in forward order and take the last 3 (no reverse iterator).
             std::vector<std::string> all_assistant;
             for (const auto& m : msgs) {
                 if (m.value("role", "") == "assistant")
@@ -112,7 +112,7 @@ public:
     std::string get_name() const override { return name_; }
 };
 
-// ── (2) 3 customer topology JSON — shape 이 진짜로 다름 ─────────────
+// ── (2) 3 customer topology JSONs — genuinely different shapes ───────
 
 static json topology_simple() {
     return {
@@ -130,7 +130,7 @@ static json topology_simple() {
 }
 
 static json topology_reflexive() {
-    // 응답 → 자기 점검 → 재응답
+    // response → self-check → revised response
     return {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "reflexive"},
@@ -150,7 +150,7 @@ static json topology_reflexive() {
 }
 
 static json topology_fanout() {
-    // 3 perspective 병렬 → merge
+    // 3 perspectives in parallel → merge
     return {
         {"schema_version", neograph::graph::TOPOLOGY_SCHEMA_VERSION},
         {"name", "fanout"},
@@ -175,9 +175,9 @@ static json topology_fanout() {
 
 // ── (3) Compile cache — graph_def hash → shared_ptr<GraphEngine> ─────
 //
-// 진짜 multi-tenant 서버의 핵심. 같은 토폴로지 쓰는 customer 끼리
-// engine 공유. 메모리 사용량이 customer 수가 아니라 *distinct topology
-// 수* 에 비례하게 만듦.
+// Core of a multi-tenant server. Customers using the same topology share
+// an engine, so memory scales with the number of *distinct topologies*
+// rather than the number of customers.
 
 class CompileCache {
     std::shared_mutex mu_;
@@ -195,7 +195,7 @@ public:
                 return it->second;
             }
         }
-        // Miss — compile (lock 밖에서, 다른 customer 차단 안 함).
+        // Miss — compile outside the lock so other customers are not blocked.
         auto raw = GraphEngine::build(def, EngineConfig{.node_context = ctx});
         std::shared_ptr<GraphEngine> engine(raw.release());
         {
@@ -203,7 +203,7 @@ public:
             auto [it, inserted] = cache_.emplace(key, engine);
             if (!inserted) {
                 hits_.fetch_add(1, std::memory_order_relaxed);
-                return it->second;  // race — 다른 thread 가 먼저 넣음
+                return it->second;  // race — another thread inserted first
             }
         }
         misses_.fetch_add(1, std::memory_order_relaxed);
@@ -214,10 +214,10 @@ public:
     std::size_t size()   { std::shared_lock lk(mu_); return cache_.size(); }
 };
 
-// ── (4) Customer DB 시뮬레이션 ──────────────────────────────────────
+// ── (4) Simulated customer DB ────────────────────────────────────────
 //
-// 진짜 서버라면 Postgres `customer_graphs` table 한 row 씩 lookup.
-// 데모는 in-memory map. 핵심은 customer_id 마다 "어떤 토폴로지" 가 매핑.
+// A real server would look up rows in a Postgres `customer_graphs` table.
+// This demo uses an in-memory map mapping each customer_id to a topology.
 
 struct CustomerRecord {
     std::string id;
@@ -227,17 +227,17 @@ struct CustomerRecord {
 
 static std::unordered_map<std::string, CustomerRecord> make_customer_db() {
     std::unordered_map<std::string, CustomerRecord> db;
-    // 6 customer, 3 distinct topology
+    // 6 customers, 3 distinct topologies
     db["alice"]   = {"alice",   "simple",    topology_simple()};
-    db["bob"]     = {"bob",     "simple",    topology_simple()};      // alice 와 동일 토폴로지
+    db["bob"]     = {"bob",     "simple",    topology_simple()};      // same topology as alice
     db["charlie"] = {"charlie", "reflexive", topology_reflexive()};
-    db["david"]   = {"david",   "reflexive", topology_reflexive()};   // charlie 와 동일
+    db["david"]   = {"david",   "reflexive", topology_reflexive()};   // same as charlie
     db["eve"]     = {"eve",     "fanout",    topology_fanout()};
     db["frank"]   = {"frank",   "fanout",    topology_fanout()};
     return db;
 }
 
-// ── (5) RSS 측정 ────────────────────────────────────────────────────
+// ── (5) RSS measurement ──────────────────────────────────────────────
 static long peak_rss_kb() {
     std::ifstream f("/proc/self/status");
     std::string line;
@@ -251,9 +251,9 @@ static long peak_rss_kb() {
     return 0;
 }
 
-// ── (6) main — 1000 동시 요청 시뮬레이션 ────────────────────────────
+// ── (6) main — simulate 1000 concurrent requests ─────────────────────
 int main() {
-    // 노드 type 등록 (서버 시작 시 1회).
+    // Register node types once at server startup.
     NodeFactory::instance().register_type("style",
         [](const std::string& name, const json& def, const NodeContext&) {
             std::string style = def.value("style", "default");
@@ -269,14 +269,14 @@ int main() {
     NodeContext ctx;
 
     const int N_REQUESTS    = 1000;
-    const int N_SESSIONS    = 100;   // 평균 10 turn / session
+    const int N_SESSIONS    = 100;   // average 10 turns / session
     const int N_WORKERS     = 8;
 
     asio::thread_pool pool(N_WORKERS);
     std::atomic<int> ok{0}, errors{0};
     std::atomic<long> latency_sum_us{0}, latency_max_us{0};
 
-    // 시뮬레이션: 각 요청은 (customer, session, message) 셋.
+    // Simulation: each request is a (customer, session, message) tuple.
     std::vector<std::string> customer_ids = {"alice","bob","charlie","david","eve","frank"};
 
     auto t_start = clk::now();
@@ -295,7 +295,7 @@ int main() {
                 const auto& rec = customers[cust];
                 auto engine = cache.get_or_compile(rec.topology_def, ctx);
                 RunConfig cfg;
-                cfg.thread_id = cust + "__" + sess;   // session 격리 키
+                cfg.thread_id = cust + "__" + sess;   // session isolation key
                 cfg.input = {{"messages", json::array({
                     json{{"role", "user"}, {"content", msg}}
                 })}};
@@ -348,13 +348,13 @@ int main() {
               << (100.0 * cache.hits() / (cache.hits() + cache.misses()))
               << "%\n";
 
-    // ── (7) Hot-swap 시연 — alice 의 토폴로지를 simple → fanout 으로 변경 ──
+    // ── (7) Hot-swap demo — change alice's topology from simple to fanout ──
     std::cout << "\n--- Hot-swap demo ---\n";
     std::cout << "alice 의 토폴로지를 'simple' → 'fanout' 으로 변경 (deploy/restart 없이)\n";
     customers["alice"].topology_def = topology_fanout();
     customers["alice"].topology_name = "fanout";
 
-    // 같은 process 에서 alice 의 다음 요청은 새 토폴로지로 처리.
+    // In the same process, alice's next request runs on the new topology.
     auto engine_new = cache.get_or_compile(customers["alice"].topology_def, ctx);
     RunConfig cfg;
     cfg.thread_id = "alice__hotswap_test";

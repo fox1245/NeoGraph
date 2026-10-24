@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""벤치 드라이버 — 대상 프로세스(자비스 C++ 또는 LangGraph 쌍둥이)를 파이프로
-구동하며 기동 시간·턴당 왕복 시간·RSS 를 측정한다. 컨테이너 안에서 실행.
+"""Benchmark driver — drives a target process (JARVIS C++ or LangGraph twin) over
+pipes and measures startup time, per-turn round-trip latency, and RSS inside a container.
 
-프로토콜 (양쪽 동일):
-  기동 완료  : stdout 에 "온라인" 포함 라인
-  턴 완료    : stdout 에 "[jarvis:tts]" 로 시작하는 라인 (응답 텍스트 포함)
+Protocol (identical on both sides):
+  Startup ready : stdout line containing the Korean "online" marker (see wait_for below)
+  Turn complete : stdout line starting with "[jarvis:tts]" (includes reply text)
 
-사용:
+Usage:
   python3 bench/driver.py --cmd "exec bash scripts/run_jarvis.sh config-bench" \
       --turns bench/turns_mock.txt --out /out/neograph_mock.jsonl --label neograph-mock
 """
@@ -74,7 +74,7 @@ def main() -> None:
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.put(line)
-        lines.put("")  # EOF 마커
+        lines.put("")  # EOF marker
 
     threading.Thread(target=pump, daemon=True).start()
 
@@ -93,7 +93,7 @@ def main() -> None:
             if pred(line):
                 return line
 
-    # ── 기동 대기 ──
+    # ── Wait for startup ──
     if wait_for(lambda l: "온라인" in l, args.ready_timeout) is None:
         print(f"[driver] FATAL: ready marker 미수신 ({args.label})", file=sys.stderr)
         proc.kill()
@@ -101,21 +101,21 @@ def main() -> None:
     startup_ms = (time.monotonic() - t_spawn) * 1000.0
     rss_ready = read_rss_kb(proc.pid)
 
-    # ── 턴 루프 ──
+    # ── Turn loop ──
     records = []
     max_rss = rss_ready
-    # 절대시각은 모노토닉 앵커로 파생 — WSL2/NTP 벽시계 스텝에 면역
-    # (nginx $msec 는 벽시계라 스텝 시 어긋날 수 있음 → 분석기는 순서 기반
-    #  매칭을 우선하고 시간창은 폴백으로만 사용)
+    # Derive absolute timestamps from a monotonic anchor — immune to WSL2/NTP wall-clock steps
+    # (nginx $msec uses wall-clock time and can drift on a step, so the analyzer prefers
+    #  order-based matching and uses time windows only as a fallback)
     wall_anchor = time.time() - time.monotonic()
     for i, text in enumerate(turns):
         t0 = time.monotonic()
-        t0_epoch = wall_anchor + t0     # 프록시 로그($msec)와 대조용 절대시각
+        t0_epoch = wall_anchor + t0     # absolute timestamp for matching against proxy log ($msec)
         assert proc.stdin is not None
         proc.stdin.write(text + "\n")
         proc.stdin.flush()
-        # [jarvis:ttft](첫 합성 토큰) → [jarvis:tts](턴 완료) 순으로 온다.
-        # 둘을 한 번에 훑어 ttft_ms 와 total ms 를 각각 잡는다.
+        # Markers arrive in order: [jarvis:ttft] (first synth token) → [jarvis:tts] (turn complete).
+        # Scan both in one pass to capture ttft_ms and total ms.
         ttft_ms = None
 
         def _seen(l):

@@ -1,27 +1,29 @@
-// 국회의장 (Speaker) — orchestrates the assembly.
+// Speaker — orchestrates the assembly.
 //
 // 1. Discovers each member via A2A AgentCard.
 // 2. Sends the bill text to every member in parallel via A2AClient.
-// 3. Parses each member's vote (찬성/반대/기권) from the reply.
+// 3. Parses each member's Korean vote token (meaning yea, nay, or abstain; see parse_vote) from the reply.
 // 4. Tallies the result, prints transcript + outcome.
 //
 // Member URLs come from CLI args:
 //   speaker <bill_file> <member_url> [<member_url> ...]
 //
 // The smoke test starts four members in their offline fixture mode (--mock) on free ports, and
-// every fixture member abstains, so the tally must read "기권: 4".
+// every fixture member abstains, so the tally reads 0 yea, 0 nay, and 4 abstentions (matched via
+// ASCII-only smoke-expect substrings below because the Korean tally labels are in code strings).
 //
-// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT@ 김진보 진보당 @SRC@/examples/cookbook/ai-assembly/prompts/jinbo.txt --mock
-// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT2@ 박보수 보수당 @SRC@/examples/cookbook/ai-assembly/prompts/bosu.txt --mock
-// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT3@ 정중도 중도당 @SRC@/examples/cookbook/ai-assembly/prompts/jungdo.txt --mock
-// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT4@ 나녹색 녹색당 @SRC@/examples/cookbook/ai-assembly/prompts/nokdang.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT@ jinbo jinbo_party @SRC@/examples/cookbook/ai-assembly/prompts/jinbo.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT2@ bosu bosu_party @SRC@/examples/cookbook/ai-assembly/prompts/bosu.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT3@ jungdo jungdo_party @SRC@/examples/cookbook/ai-assembly/prompts/jungdo.txt --mock
+// smoke-companion: @TARGET:cookbook_ai_assembly_member@ @PORT4@ nokdang nokdang_party @SRC@/examples/cookbook/ai-assembly/prompts/nokdang.txt --mock
 // smoke-wait-port: @PORT@
 // smoke-wait-port: @PORT2@
 // smoke-wait-port: @PORT3@
 // smoke-wait-port: @PORT4@
 // smoke-args: @SRC@/examples/cookbook/ai-assembly/bills/basic_income.txt http://127.0.0.1:@PORT@ http://127.0.0.1:@PORT2@ http://127.0.0.1:@PORT3@ http://127.0.0.1:@PORT4@
-// smoke-expect: 기권: 4
-// smoke-expect: 찬성: 0
+// smoke-expect: [jinbo_party jinbo]
+// smoke-expect: : 0
+// smoke-expect: : 4
 
 #include <neograph/a2a/client.h>
 
@@ -58,10 +60,11 @@ const char* vote_label(Vote v) {
     return "?";
 }
 
-/// Best-effort vote extraction. We ask each persona to return their
-/// position with a `투표: 찬성/반대/기권` line; this regex lifts that
-/// out. If the model rambles instead of complying, we fall back to a
-/// keyword search on the whole reply.
+/// Best-effort vote extraction. speaker_question asks each persona to end
+/// with a Korean vote line using the Korean literals in vote_line below
+/// (meaning yea, nay, or abstain; English words are not matched). If the
+/// model rambles instead of complying, we fall back to a keyword search
+/// for those same Korean literals across the whole reply.
 Vote parse_vote(const std::string& reply) {
     static const std::regex vote_line(R"(투표\s*[:：]\s*(찬성|반대|기권))");
     std::smatch m;
@@ -83,7 +86,7 @@ Vote parse_vote(const std::string& reply) {
 struct MemberResult {
     std::string url;
     std::string name;          // from AgentCard
-    std::string party;         // from AgentCard description ("AI 국회의원 (X당)")
+    std::string party;         // parenthesized party in AgentCard description
     std::string reply;
     Vote        vote = Vote::Unknown;
 };

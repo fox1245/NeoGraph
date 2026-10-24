@@ -1,21 +1,21 @@
-// Multi-customer self-evolving chatbot — 5 customer 가 각자 다른 발화
-// 패턴을 보이고, 각자 별도 evolution timeline 으로 진화. emergent
-// cluster discovery 시연.
+// Multi-customer self-evolving chatbot — 5 customers exhibit distinct
+// utterance patterns and evolve along independent timelines, demonstrating
+// emergent cluster discovery.
 //
-// server.cpp 는 alice 한 명 시연. 이쪽은 그걸 multi-tenant 로 확장.
-// 핵심 관찰:
-//   1) 각 customer 가 자기 history 기반으로 *독립적* 으로 evolve.
-//   2) compile cache key 에 customer 와 그 instructions 가 포함되므로
-//      같은 shape 으로 수렴한 customer 끼리도 engine 을 공유하지 않음 —
-//      engine 수는 customer 별로 사용한 topology 수의 합.
-//   3) 사용자 행동 패턴 (factual / accuracy-seeking / multi-perspective
-//      / oscillation) 이 자연스럽게 topology distribution 으로 분류됨
-//      — graph_def 가 customer behavior 의 본질적 cluster 발견 메커니즘.
+// server.cpp demonstrates a single customer (alice); this extends it to multi-tenant.
+// Key observations:
+//   1) Each customer evolves *independently* from their own history.
+//   2) Because the compile cache key includes the customer and their
+//      instructions, customers converging on the same shape do not share
+//      an engine — total engines equal the sum of topologies used per customer.
+//   3) User behavior patterns (factual / accuracy-seeking / multi-perspective
+//      / oscillation) naturally partition into the topology distribution —
+//      graph_def acts as an intrinsic cluster discovery mechanism.
 //
 // Cost estimate: 5 customers × 5 turns × (~2.3 main + 1 judge) ≈ 82 LLM calls
 // through the pinned DeepSeek via OpenRouter.
 //
-// 빌드/실행:
+// Build/run:
 //   cmake --build build --target cookbook_self_evolving_chatbot_multi
 //   ./build/cookbook_self_evolving_chatbot_multi
 //
@@ -41,7 +41,7 @@
 using namespace neograph;
 using namespace neograph::graph;
 
-// ── 3 topology shape (server.cpp 와 동일) ────────────────────────────
+// ── 3 topology shapes (same as server.cpp) ───────────────────────────
 
 static json topology_simple() {
     return {
@@ -133,7 +133,7 @@ make_topology_registry() {
     };
 }
 
-// ── CompileCache (server.cpp 와 동일) ────────────────────────────────
+// ── CompileCache (same as server.cpp) ────────────────────────────────
 
 class CompileCache {
     std::shared_mutex mu_;
@@ -216,7 +216,7 @@ static void print_failure_evidence(std::exception_ptr error) {
     }
 }
 
-// ── LLM judge (server.cpp 와 동일 prompt) ────────────────────────────
+// ── LLM judge (same prompt as server.cpp) ────────────────────────────
 
 static std::string llm_judge_topology(
     const std::shared_ptr<neograph::Provider>& provider,
@@ -382,7 +382,7 @@ static long peak_rss_kb() {
     return 0;
 }
 
-// ── main — 5 customer × 5 turn, 각자 별도 evolution timeline ─────────
+// ── main — 5 customers × 5 turns, each with its own evolution timeline ──
 
 static int run_demo() {
     cppdotenv::auto_load_dotenv();
@@ -406,7 +406,7 @@ static int run_demo() {
     CompileCache cache;
     auto reported_usage = std::make_shared<UsageAccumulator>();
 
-    // 5 customer 초기화 — 모두 simple topology 로 시작.
+    // Initialize 5 customers — all starting on the simple topology.
     auto patterns = make_patterns();
     const auto customer_count = examples::env_count("NG_MULTI_CUSTOMERS", 5, 1, 5);
     const auto turns = examples::env_count("NG_MULTI_TURNS", 5, 1, 5);
@@ -432,7 +432,7 @@ static int run_demo() {
 
     auto t_start = std::chrono::steady_clock::now();
 
-    // 각 customer 시퀀셜 처리 (병렬도 가능하지만 demo 출력 명확성).
+    // Process customers sequentially (parallel is possible, kept sequential for clear output).
     for (size_t ci = 0; ci < customers.size(); ++ci) {
         auto& cust = customers[ci];
         const auto& pat = patterns[ci];
@@ -534,7 +534,7 @@ static int run_demo() {
     long total_s = std::chrono::duration_cast<std::chrono::seconds>(
         t_end - t_start).count();
 
-    // ── 종합 stats ──────────────────────────────────────────────────
+    // ── Aggregate stats ─────────────────────────────────────────────
     std::cout << "════════════════════════════════════════════════════\n";
     std::cout << "=== Aggregate stats ===\n";
     int total_main = 0, total_judge = 0;

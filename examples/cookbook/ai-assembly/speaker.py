@@ -1,7 +1,8 @@
-"""국회의장 — Python equivalent of speaker.cpp.
+"""Speaker — Python equivalent of speaker.cpp.
 
 Same pattern: discover each member via AgentCard, broadcast the bill
-in parallel via A2AClient, parse `투표: 찬성/반대/기권` out of each
+in parallel via A2AClient, parse the Korean vote literal matched by VOTE_LINE
+(meaning yea, nay, or abstain; English words are not matched) out of each
 reply, tally and announce. Uses neograph_engine.a2a.A2AClient.
 
 Usage:

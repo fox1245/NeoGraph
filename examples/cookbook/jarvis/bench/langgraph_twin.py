@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""jarvis 오케스트레이션 코어의 LangGraph 쌍둥이 — 프레임워크 오버헤드 벤치용.
+"""LangGraph twin of the JARVIS orchestration core — for framework overhead benchmarks.
 
-NeoGraph cookbook_jarvis(mock 빌드, 텍스트 모드)와 **동일 토폴로지**를 LangGraph 로
-미러링한다. 노드 구성, 라우터/합성 프롬프트, 결정 검증(chat 강등), 메모리 저장
-포맷(JsonFileStore), 복창 가드, stdout 마커까지 전부 동일 — 다른 것은 그래프
-프레임워크와 언어뿐이다.
+Mirrors the **exact topology** of NeoGraph cookbook_jarvis (mock build, text mode)
+in LangGraph. Node layout, router/synthesizer prompts, decision validation (chat
+demotion), memory storage format (JsonFileStore), repetition guard, and stdout
+markers are all identical — only the graph framework and language differ.
 
-  mic_capture → stt(한글 휴리스틱 언어감지) → text_or_voice → memory_lookup
+  mic_capture → stt(Hangul heuristic language detection) → text_or_voice → memory_lookup
   → router(LLM) → [chat|direct|parallel|delegate] → response_synth(LLM)/synth_skip
-  → memory_commit → tts(콘솔 마커)
+  → memory_commit → tts(console marker)
 
-모드 (env BENCH_MODE):
-  mock — LLM 0ms 스텁 (C++ MockProvider 와 동일 응답) → 순수 프레임워크 오버헤드
-  api  — OpenRouter의 DeepSeek API (OPENROUTER_API_KEY) → 실제 네트워크 경로
+Modes (env BENCH_MODE):
+  mock — 0ms LLM stub (same responses as C++ MockProvider) → pure framework overhead
+  api  — DeepSeek API via OpenRouter (OPENROUTER_API_KEY) → live network path
 
 
-프로토콜: stdin 한 줄 = 한 턴. 기동 완료 시 "[jarvis] 온라인." 라인,
-턴 완료 시 "[jarvis:tts][<lang>] <final_text>" 라인 출력 (C++ 와 동일 마커).
+Protocol: one stdin line = one turn. Prints the "[jarvis]" Korean "online" ready banner (see main()) and
+"[jarvis:tts][<lang>] <final_text>" when a turn completes (same markers as C++).
 """
 import json
 import operator
@@ -36,7 +36,7 @@ MAX_KEEP = 24
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# persona 섹션 로더 — C++ load_prompt_section 과 동일 규칙
+# Persona section loader — same rules as C++ load_prompt_section
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_prompt_section(path: str, section: str) -> str:
@@ -61,7 +61,7 @@ def load_prompt_section(path: str, section: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# JsonFileStore 호환 파일 스토어 — [{ns, key, value}] 포맷 동일
+# JsonFileStore-compatible file store — same [{ns, key, value}] format
 # ─────────────────────────────────────────────────────────────────────────────
 
 def store_load() -> list:
@@ -92,7 +92,7 @@ def store_put(key: str, value) -> None:
         json.dump(data, f, ensure_ascii=False)
 
 
-# LLM 어댑터 — mock(0ms 스텁, C++ MockProvider 동일) / api(OpenRouter)
+# LLM adapter — mock (0ms stub, same as C++ MockProvider) / api (OpenRouter)
 
 MOCK_ROUTER_JSON = ('{"mode":"direct","tool_calls":[],"delegate_to":null,'
                     '"skip_synthesis":true,"reasoning_short":"mock router"}')
@@ -129,7 +129,7 @@ if BENCH_MODE == "api":
         return ROUTER_LLM.invoke([("system", system), ("human", user)]).content
 
     def call_synth(messages: list) -> str:
-        # 스트리밍 — 첫 청크 도착 시 [jarvis:ttft] 마커. C++ 합성 노드와 동일.
+        # Streaming — emit [jarvis:ttft] marker on the first chunk, matching the C++ synthesizer.
         role_map = {"system": "system", "user": "human", "assistant": "ai"}
         lc = [(role_map[r], c) for r, c in messages]
         parts, emitted = [], False
@@ -142,11 +142,11 @@ if BENCH_MODE == "api":
         return "".join(parts)
 else:
     def call_router(system: str, user: str) -> str:  # noqa: ARG001
-        # C++ MockProvider: 라우터 호출이면 mock 라우팅 JSON
+        # C++ MockProvider: return mock routing JSON for router calls
         return MOCK_ROUTER_JSON
 
     def call_synth(messages: list) -> str:
-        # C++ MockProvider: 마지막 user 메시지 echo. 스트리밍 흉내 — 즉시 마커.
+        # C++ MockProvider: echo the last user message. Simulates streaming — immediate marker.
         print("[jarvis:ttft]", flush=True)
         user_text = ""
         for role, content in messages:
@@ -156,15 +156,15 @@ else:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MCP 클라이언트 (E2E 벤치) — env MCP_URL 설정 시 공식 mcp SDK 로 영구 세션.
-# C++ McpCatalog 과 동일: 시작 시 도구 목록 수집 → 라우터 프롬프트에 주입,
-# direct/parallel 분기가 실호출. 카탈로그 메타(이름/설명/태그/힌트)는
-# JARVIS_MCP_CATALOG(json) 에서 — C++ 이 읽는 것과 같은 파일.
+# MCP client (E2E bench) — persistent session via the official mcp SDK when MCP_URL is set.
+# Same as C++ McpCatalog: collects the tool list at startup → injects into the router prompt;
+# direct/parallel branches invoke live tools. Catalog metadata (name/description/tags/hints)
+# comes from JARVIS_MCP_CATALOG (JSON) — the same file read by C++.
 # ─────────────────────────────────────────────────────────────────────────────
 
 MCP_URL = os.environ.get("MCP_URL", "")
 MCP_TOOLS: dict = {}      # "demo.get_weather" -> description
-MCP_ENTRY: dict = {}      # 카탈로그 entry (name/description/tags/hints)
+MCP_ENTRY: dict = {}      # catalog entry (name/description/tags/hints)
 _mcp_loop = None
 _mcp_session = None
 
@@ -188,7 +188,7 @@ if MCP_URL:
                 _mcp_tools_resp = await session.list_tools()
                 _mcp_session = session
                 _mcp_ready.set()
-                await asyncio.Event().wait()      # 프로세스 수명 동안 유지
+                await asyncio.Event().wait()      # keep alive for the lifetime of the process
 
     def _mcp_thread():
         asyncio.set_event_loop(_mcp_loop)
@@ -214,7 +214,7 @@ if MCP_URL:
 
 
 def mcp_call_async(tool_fq: str, args: dict):
-    """도구 호출을 이벤트루프에 제출하고 Future 반환 (parallel 은 동시 제출)."""
+    """Submit a tool call to the event loop and return a Future (submitted concurrently in parallel mode)."""
     import asyncio
     name = tool_fq.split(".", 1)[1] if "." in tool_fq else tool_fq
     return asyncio.run_coroutine_threadsafe(
@@ -231,7 +231,7 @@ def mcp_result_text(fut) -> str:
 
 
 def render_tool_block() -> tuple:
-    """C++ McpCatalog::render_for_router_prompt / routing_hints_text 미러."""
+    """Mirror of C++ McpCatalog::render_for_router_prompt / routing_hints_text."""
     if not MCP_TOOLS:
         return "## Available MCP tools\n", ""
     s = "## Available MCP tools\n\n### " + MCP_ENTRY.get("name", "demo")
@@ -257,7 +257,7 @@ def render_tool_block() -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 그래프 상태 — jarvis_graph.json 의 채널 미러 (tool_results 만 append)
+# Graph state — mirrors channels in jarvis_graph.json (only tool_results uses append)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class State(TypedDict, total=False):
@@ -274,14 +274,14 @@ class State(TypedDict, total=False):
 
 
 def detect_lang(text: str) -> str:
-    # C++ detect_language_heuristic 동일: 한글 음절(U+AC00–D7A3) 있으면 ko
+    # Same as C++ detect_language_heuristic: returns "ko" if Hangul syllables (U+AC00–D7A3) are present
     return "ko" if any("가" <= ch <= "힣" for ch in text) else "en"
 
 
-# ── 노드들 ───────────────────────────────────────────────────────────────────
+# ── Nodes ────────────────────────────────────────────────────────────────────
 
 def mic_capture(state: State) -> dict:
-    # C++ MicInputNode 텍스트 모드와 동일 — 입력을 voice_in 패킷으로 유지
+    # Same as C++ MicInputNode text mode — keeps input as a voice_in packet
     return {}
 
 
@@ -292,7 +292,7 @@ def stt(state: State) -> dict:
 
 
 def text_or_voice(state: State) -> dict:
-    # channel_merge: user_text 우선, 없으면 text_in
+    # channel_merge: prefer user_text, fall back to text_in
     for v in (state.get("user_text"), state.get("text_in")):
         if v:
             return {"user_text": v}
@@ -338,7 +338,7 @@ def router(state: State) -> dict:
 
     raw = call_router(system, user)
 
-    # safe_parse_or_fallback 포팅
+    # Port of safe_parse_or_fallback
     decision = None
     text = raw.strip()
     if text.startswith("```"):
@@ -361,17 +361,17 @@ def router(state: State) -> dict:
                     "skip_synthesis": False,
                     "reasoning_short": "router parse failed, fallback to chat"}
 
-    # 결정 검증 — C++ 과 동일: 실재하지 않는 대상은 chat 강등
+    # Decision validation — same as C++: demote non-existent targets to chat
     mode = decision["mode"]
     if mode == "delegate":
-        decision["mode"] = "chat"                     # 벤치: 레지스트리 비어있음
+        decision["mode"] = "chat"                     # bench: registry is empty
     elif mode in ("direct", "parallel"):
         valid = []
         for c in decision.get("tool_calls") or []:
             if isinstance(c, dict) and c.get("tool") in MCP_TOOLS:
                 valid.append(c)
                 if mode == "direct":
-                    break                             # direct 는 정확히 1개
+                    break                             # direct takes at most 1 call
         decision["tool_calls"] = valid
         if not valid:
             decision["mode"] = "chat"
@@ -379,7 +379,7 @@ def router(state: State) -> dict:
         decision["tool_calls"] = []
         decision["delegate_to"] = None
         decision["skip_synthesis"] = False
-    # skip_synthesis 강제 규칙 — 카탈로그 hint=false 도구는 합성 필수 (C++ 동일)
+    # skip_synthesis enforcement rule — tools with catalog hint=false require synthesis (same as C++)
     if decision.get("skip_synthesis") and decision.get("tool_calls") \
             and not MCP_ENTRY.get("skip_synthesis_hint", False):
         decision["skip_synthesis"] = False
@@ -411,7 +411,7 @@ def parallel_branch(state: State) -> dict:
     calls = rd.get("tool_calls") or []
     if not calls:
         return {"tool_results": []}
-    # 동시 제출 후 순서대로 수확 — C++ make_parallel_group 동일 의미
+    # Submit concurrently and collect in order — same semantics as C++ make_parallel_group
     futs = [(c, mcp_call_async(c.get("tool", ""), c.get("args") or {}))
             for c in calls]
     results = []
@@ -480,7 +480,7 @@ def response_synth(state: State) -> dict:
 
     final_text = call_synth(messages)
 
-    # 복창 가드 — C++ 과 동일: 과거 답변과 verbatim 일치 시 1회 재생성
+    # Repetition guard — same as C++: regenerate once if the reply matches an earlier answer verbatim
     trimmed = final_text.strip()
     if trimmed and any(a.strip() == trimmed for _, a in history if a):
         print("[synth] 복창 감지 — 과거 답변과 verbatim 일치, 1회 재생성",
@@ -538,7 +538,7 @@ def tts(state: State) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 그래프 배선 — jarvis_graph.json edges 미러
+# Graph wiring — mirrors edges in jarvis_graph.json
 # ─────────────────────────────────────────────────────────────────────────────
 
 def route_by_mode(state: State) -> str:

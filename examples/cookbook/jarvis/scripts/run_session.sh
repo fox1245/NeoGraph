@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# jarvis 전체 시연 실행:
-#   1) 전문가 서브에이전트 두 개 (coder, researcher) 백그라운드 띄움
-#   2) MCP 데모 서버 띄움 (time/weather/calculator)
-#   3) 자비스 본체 띄움 (음성 대기)
-#   4) Ctrl-C 시 전부 깔끔하게 종료
+# Launch the full JARVIS demo session:
+#   1) Start the two specialist sub-agents (coder, researcher) in the background
+#   2) Start the MCP demo server (time/weather/calculator)
+#   3) Start the main JARVIS process (listening for input)
+#   4) Shut down all background processes cleanly on Ctrl-C
 #
-# .env 에 OPENROUTER_API_KEY 가 있어야 풀 시연. 없으면 라우터/합성기가 MockProvider
-# 로 동작 (도구 호출 흐름은 그대로 검증 가능, 응답 품질만 떨어짐).
+# Set OPENROUTER_API_KEY in .env for the live LLM demo. Without it, the router and
+# synthesizer fall back to MockProvider (still exercising tool-calling and delegation paths).
 
 set -euo pipefail
 
@@ -45,7 +45,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- 1. 전문가들 ---
+# --- 1. Specialists ---
 echo "[run_session] coder specialist → 127.0.0.1:8210"
 "$JARVIS_BIN_DIR/cookbook_jarvis_specialist_coder" 8210 &
 PIDS+=($!)
@@ -54,17 +54,17 @@ echo "[run_session] researcher specialist → 127.0.0.1:8211"
 "$JARVIS_BIN_DIR/cookbook_jarvis_specialist_researcher" 8211 &
 PIDS+=($!)
 
-# --- 2. MCP 데모 서버 ---
+# --- 2. MCP demo server ---
 if [[ -f "$ROOT/examples/mcp_demo_server.py" ]]; then
     echo "[run_session] MCP HTTP demo → 127.0.0.1:8000"
     python3 "$ROOT/examples/mcp_demo_server.py" --http 8000 --tools get_current_time,calculate,get_weather &
     PIDS+=($!)
 fi
 
-# 서비스 깨어나길 잠깐 기다림
+# Wait briefly for background services to come up
 sleep 2
 
-# --- 3. 자비스 본체 ---
+# --- 3. Main JARVIS process ---
 echo "[run_session] jarvis 본체 기동"
 echo "[run_session] 말해보세요. Ctrl-C 로 종료."
 "$JARVIS_BIN_DIR/cookbook_jarvis" "$ROOT/examples/cookbook/jarvis/config"

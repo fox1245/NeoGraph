@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# 경계 계측 벤치 — OpenRouter 앞에 nginx 프록시를 세워 콜별 상류 시간을
-# 로깅하고, 턴 왕복에서 차감한 "잔차"로 공정 비교.
+# Boundary-instrumented benchmark — places an nginx proxy in front of OpenRouter
+# to log per-call upstream latency and compare the residual (turn round-trip minus upstream).
 #
-# Jarvis 는 API 키를 평문 http 로 보내지 않는다(키 동봉 엔드포인트는 TLS 필수).
-# 그래서 프록시는 TLS(8443)로 받고, 이 스크립트가 실행마다 만드는 일회용 CA 를
-# 두 클라이언트에 신뢰 앵커로 준다: Jarvis 는 OPENROUTER_CA_FILE(libcurl
-# CAINFO), LangGraph 쌍둥이는 SSL_CERT_FILE(httpx). CA/키는 임시 디렉토리에만
-# 있고 종료 시 삭제된다.
+# Jarvis refuses to send API keys over plaintext HTTP (key-bearing endpoints require TLS).
+# The proxy therefore listens on TLS (8443), and this script generates a throw-away CA
+# per run as the trust anchor for both clients: OPENROUTER_CA_FILE (libcurl CAINFO) for
+# Jarvis and SSL_CERT_FILE (httpx) for the LangGraph twin. The CA and keys live in a
+# temporary directory and are cleaned up on exit.
 #
-# 사용:  OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
+# Usage:  OPENROUTER_API_KEY=... bash bench/run_bench_proxy.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 JARVIS="$ROOT/examples/cookbook/jarvis"
@@ -46,8 +46,8 @@ docker run -d --rm --name jarvis-mcp-demo   --network "$NET" jarvis-bench-mcp
 docker run -d --rm --name jarvis-openrouter-proxy --network "$NET" \
     -v "$OUT/proxylogs":/logs -v "$CERTS/proxy":/certs:ro jarvis-bench-proxy
 
-# 프록시는 일회용 CA 로 신뢰 체인·호스트명까지 검증해서 대기 — 인증서 문제를
-# 첫 턴의 늦은 TLS 오류로 만나지 않게 한다.
+# Wait for the proxy by verifying the full trust chain and hostname with the throw-away CA
+# so certificate issues fail immediately rather than surfacing as a late TLS error on turn 1.
 echo "[proxy-bench] MCP/프록시 대기..."
 for i in $(seq 1 30); do
     docker run --rm --network "$NET" -v "$CERTS/ca.pem":/certs/ca.pem:ro jarvis-bench-mcp python3 -c \
@@ -65,14 +65,14 @@ OPENROUTER_ENV=(-e OPENROUTER_API_KEY="$OPENROUTER_API_KEY"
                 -e JARVIS_DEBUG=1
                 -e JARVIS_MEMORY_FILE=/tmp/mem.json)
 
-# 라운드마다 프록시 로그를 분리 — 라운드 분할 추측(스모크 오염·스로틀 갭에
-# 취약)을 제거. mv + nginx reopen 으로 프레임워크별 독립 로그.
-rotate_log() {  # $1 = 대상 파일명
+# Rotate the proxy log after each round to avoid heuristic round splitting (which is
+# fragile under smoke noise or throttle gaps). mv + nginx reopen produces a separate log per framework.
+rotate_log() {  # $1 = target filename
     docker exec jarvis-openrouter-proxy sh -c \
         "mv /logs/openrouter.log /logs/$1 && nginx -s reopen"
     sleep 1
 }
-# 시작 전 잔여 로그 비우기 (이전 스모크/런 오염 차단)
+# Truncate any leftover log before starting (prevents contamination from prior runs)
 docker exec jarvis-openrouter-proxy sh -c ': > /logs/openrouter.log && nginx -s reopen'
 
 echo "[proxy-bench] NeoGraph 라운드..."

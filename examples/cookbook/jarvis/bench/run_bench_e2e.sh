@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# E2E 벤치 — 실제 MCP 도구 왕복 포함 전 경로 (direct/parallel/chat/회상) × OpenRouter.
+# E2E benchmark — full paths including live MCP tool round-trips (direct/parallel/chat/recall) × OpenRouter.
 #
-# 구성: 공유 데모 MCP 서버 컨테이너(jarvis-mcp-demo) + 벤치 컨테이너 2종이
-# 같은 docker 네트워크에서 순차 실행. 동일 제약(--cpus=2 --memory=2g).
+# Setup: shared demo MCP server container (jarvis-mcp-demo) + two benchmark
+# containers run sequentially on the same docker network under identical limits (--cpus=2 --memory=2g).
 #
-# 사용:  OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
+# Usage: OPENROUTER_API_KEY=... bash bench/run_bench_e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 JARVIS="$ROOT/examples/cookbook/jarvis"
