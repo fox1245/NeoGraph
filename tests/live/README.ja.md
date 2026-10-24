@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=d070bdadf35ee78dc34c18c461907a2517aa6657ecf3e800a66831be19bb35fc -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=1e2a8175a45682b2b8acd37bcef658f4993750cc0e379fd7e983364261e38e83 -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -39,6 +39,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 ```
 
 - **キー。** env ファイルには `OPENAI_API_KEY`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENROUTER_API_KEY` を入れます。スクリプトはこれらをテストプロセスにだけ渡します。表示も保存もせず、失敗メッセージにキーの値が現れれば別の文字列に置き換えます。
+- **モデル。** `tests/live/manifest.json` の `models` セクションは、各モデルロール（`openai.chat`、`anthropic.messages`、`anthropic.messages.adaptive` など）を既定のモデル ID にマッピングし、Python スイートは `live_support.live_model(role)` でそれを解決します。環境変数または env ファイルで `NG_LIVE_MODEL_<ROLE>`（`.` と `-` を `_` に置き換えて大文字にした名前、たとえば `NG_LIVE_MODEL_OPENAI_CHAT`）を設定すると、コードを変更せずにそのロールのモデルを上書きできます。
 - **クリーンなツリー。** レポートはコミットを指すので、`run` はコミットしていない変更がある作業ツリーを拒否します。
 - **バージョン。** `run` はツリーのバージョンと異なる `neograph_engine` を拒否します。
 - **出力。** `tests/live/report.json` を書きます。コミット、ツリーのハッシュ、NeoGraph のバージョン、SchemaProvider の固定コミット、そしてすべてのケースとその結果が入ります。

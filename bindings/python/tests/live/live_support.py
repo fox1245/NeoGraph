@@ -4,8 +4,10 @@ Keys come from the environment only; nothing here prints or stores them.
 """
 
 import base64
+from collections.abc import Mapping
 import json
 import os
+from pathlib import Path
 import struct
 import zlib
 
@@ -16,6 +18,37 @@ from neograph_engine.llm import SchemaProvider
 
 LIVE = os.environ.get("NEOGRAPH_E2E_LIVE") == "1"
 KEY_VARIABLES = ("OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENROUTER_API_KEY")
+MANIFEST_PATH = Path(__file__).resolve().parents[4] / "tests" / "live" / "manifest.json"
+
+
+def model_env_var(role):
+    """Return the environment variable name that overrides the model for `role`."""
+    return f"NG_LIVE_MODEL_{role.upper().replace('.', '_').replace('-', '_')}"
+
+
+def live_model(role):
+    """Return the configured model id for `role`, or its environment variable override."""
+    models = json.loads(MANIFEST_PATH.read_text(encoding="utf-8")).get("models")
+    if not isinstance(models, dict) or role not in models or not isinstance(models[role], str) or not models[role].strip():
+        raise KeyError(f"missing live model role {role!r} in {MANIFEST_PATH}")
+    variable = model_env_var(role)
+    if variable in os.environ:
+        override = os.environ[variable].strip()
+        if not override:
+            raise ValueError(f"blank live model override {variable} for role {role!r}")
+        return override
+    return models[role].strip()
+
+
+def case_model_id(role, strip_date=False):
+    """Return the pytest case id for `role`, preserving overrides without hiding the model."""
+    model = live_model(role)
+    if strip_date and model_env_var(role) not in os.environ:
+        head, sep, tail = model.rpartition("-")
+        if sep and len(tail) == 8 and tail.isdigit():
+            return head
+    return model
+
 
 GOOGLE = "https://generativelanguage.googleapis.com"
 # preset -> (family, origin, buffered path, streaming path, key variable)
@@ -37,18 +70,32 @@ ROUTES = {
     "openrouter.messages": ("anthropic.messages", "https://openrouter.ai", "/api/v1/messages", "/api/v1/messages",
                             "OPENROUTER_API_KEY"),
 }
-# The cheapest model of each preset that answers text, and the controls it needs. A model that reasons gets a
-# larger cap so that its reasoning does not use up the answer.
-TEXT_MODELS = {
-    "openai.chat": ("gpt-6-luna", {"reasoning_effort": "low", "max_output_tokens": 600}),
-    "openai.responses": ("gpt-6-luna", {"reasoning_effort": "low", "max_output_tokens": 600}),
-    "anthropic.messages": ("claude-haiku-4-5-20251001", {"max_output_tokens": 64}),
-    "google.generate": ("gemini-3.1-flash-lite", {"max_output_tokens": 64}),
-    "google.interactions": ("gemini-3.1-flash-lite", {"max_output_tokens": 64}),
-    "openrouter.chat": ("openai/gpt-oss-20b", {"reasoning_effort": "low", "max_output_tokens": 600}),
-    "openrouter.responses": ("openai/gpt-oss-20b", {"reasoning_effort": "low", "max_output_tokens": 600}),
-    "openrouter.messages": ("anthropic/claude-haiku-4.5", {"max_output_tokens": 64}),
+# The cheapest model role of each preset that answers text, and the controls it needs. A role whose model reasons
+# gets a larger cap so that its reasoning does not use up the answer.
+TEXT_CONTROLS = {
+    "openai.chat": {"reasoning_effort": "low", "max_output_tokens": 600},
+    "openai.responses": {"reasoning_effort": "low", "max_output_tokens": 600},
+    "anthropic.messages": {"max_output_tokens": 64},
+    "google.generate": {"max_output_tokens": 64},
+    "google.interactions": {"max_output_tokens": 64},
+    "openrouter.chat": {"reasoning_effort": "low", "max_output_tokens": 600},
+    "openrouter.responses": {"reasoning_effort": "low", "max_output_tokens": 600},
+    "openrouter.messages": {"max_output_tokens": 64},
 }
+
+
+class _TextModels(Mapping):
+    def __getitem__(self, preset):
+        return live_model(preset), dict(TEXT_CONTROLS[preset])
+
+    def __iter__(self):
+        return iter(TEXT_CONTROLS)
+
+    def __len__(self):
+        return len(TEXT_CONTROLS)
+
+
+TEXT_MODELS = _TextModels()
 
 
 def needs(*variables):

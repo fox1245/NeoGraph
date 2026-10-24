@@ -1,5 +1,24 @@
 {
  "format": "neograph.live-e2e-manifest/v1",
+ "models": {
+  "anthropic.messages": "claude-haiku-4-5-20251001",
+  "anthropic.messages.adaptive": "claude-haiku-5-5",
+  "anthropic.messages.sonnet": "claude-sonnet-5-5",
+  "google.generate": "gemini-3.1-flash-lite",
+  "google.generate.audio": "lyria-3-clip-preview",
+  "google.generate.image": "gemini-3.1-flash-lite-image",
+  "google.generate.tts": "gemini-3.8-flash-lite-tts",
+  "google.interactions": "gemini-3.1-flash-lite",
+  "openai.chat": "gpt-6-luna",
+  "openai.embeddings": "text-embedding-3-small",
+  "openai.moderation": "omni-moderation-latest",
+  "openai.responses": "gpt-6-luna",
+  "openrouter.chat": "openai/gpt-oss-20b",
+  "openrouter.chat.image": "google/gemini-3.1-flash-lite-image",
+  "openrouter.embeddings": "openai/text-embedding-3-small",
+  "openrouter.messages": "anthropic/claude-haiku-4.5",
+  "openrouter.responses": "openai/gpt-oss-20b"
+ },
  "known_gaps": {},
  "cases": [
   "cpp:LiveCatalogue.RefreshFromEveryListing",
