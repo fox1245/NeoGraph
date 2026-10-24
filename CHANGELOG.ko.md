@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=b90fd568959f2dc1274da5546bb82e3c1fb7b497d3976d87ee65cdcc10ba5482 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=e62e74335dad073ea7848821bc3fae0ccaec2c004123a47a829e134e4e332ec5 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -14,6 +14,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 ## [Unreleased]
 
 ### 추가됨
+- **쿡북 `examples/cookbook/program-coding-swarm/`: Program API 기반 계층적 다중 모듈 코딩 워크플로의 실험적 개념 증명(experimental proof of concept).** 루트 Program이 `orchestrator` 모델 역할로 토이 모듈 분할을 계획하고 병합 결과를 검토하며, JavaScript `main()`이 모듈마다 자식 Harness를 병렬(`ng.all`, 또는 `--sequential` / `--concurrency <n>`)로 생성합니다. 중요도에 따라 분할되는 비갱신 예산, `demo-models.json` 또는 `live-models.json`에서 해석되는 개별 모델 역할(`implementer-cheap`, `implementer-strong`, `reviewer`, `second-opinion`), 호스트 소유 검증 및 리뷰 판정 게이트, 중요 모듈을 위한 손자 2차 의견 Harness, `SqliteProgramStore`에서의 실행 중 세대 교체와 롤백, `ProgramSynthesisGateway`를 통한 `--synthesis=central` 대 `--synthesis=delegated` 비교(`--report <file.json>`, `--runs <k>`, `--max-cost-usd`, `--max-cost-usd-other`)를 보여 줍니다.
 - **WebAssembly 모듈에서 개발자가 제어 소스의 스택과 `define()` 시간을 정합니다: `neograph.programs({ javascript: { stackBytes, defineTimeMs } })`.** 모듈은 `JavaScriptCompileLimits::max_stack_bytes`가 얼마를 요구하든 제어 소스에 자신의 스택 최대 48 KiB만 적용했고, `define()`에는 고정된 5초를 주었으며, JavaScript API에는 둘 중 어느 것도 바꿀 방법이 없었습니다. 이제 48 KiB와 5초는 기본값이고, 개발자가 직접 정합니다.
   - **`stackBytes`.** 16384부터 모듈 자신의 스택이 담을 수 있는 크기(`wasm/`이 빌드하는 모듈에서는 983,040)까지의 정수이며, `define()`과 `main()`에 똑같이 적용됩니다. 더 큰 값, 정수가 아닌 값, 존재하지 않는 멤버는 `programs()`를 호출할 때 한계를 밝히는 오류와 함께 거부됩니다. 모듈이 강제하는 것은 그뿐입니다. 엔진은 선형 메모리의 자기 스택 안에 머물고, 호스트의 호출 스택이 얼마나 견디는지는 개발자가 판단합니다. `P_JS_RESOURCE_LIMIT` 진단 witness의 `max_stack_bytes`는 적용 중인 크기를 보고합니다.
   - **`defineTimeMs`.** 소스를 승인할 때 `define()`이 실행될 수 있는 시간으로, 1밀리초부터 3,600,000밀리초까지이며 기본값은 그대로 5,000입니다.

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=27262697cc4b4af544b9c921e9374be1f6e401c80b9b45124fb4fe5c7b906ae4 -->
+<!-- neograph-i18n: source=examples/README.md locale=ko source_sha256=d3155f01f10377484a3a7e1107f4c84adb87543e48a273c9532581b532414a86 -->
 # C++ API 예제
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -224,6 +224,7 @@ Program은 Core 그래프를 수명 주기로 감쌉니다. 이 수명 주기에
 | [`cookbook/multi_tenant_chatbot/`](cookbook/multi_tenant_chatbot/) | yes | 컴파일 캐시를 거쳐 한 프로세스가 여러 고객의 토폴로지를 서비스한다. mock 바이너리는 아무것도 필요 없고, live 바이너리는 키가 필요하다. |
 | [`cookbook/self_evolving_chatbot/`](cookbook/self_evolving_chatbot/) | key | 고객마다 토폴로지를 고르고 진화시키는 채팅 서버. ProgramChat에는 `--mock` 모드가 있고, Core 서버는 키가 필요하다. |
 | [`cookbook/topology-retrieval/`](cookbook/topology-retrieval/) | yes | 예제 64로 이어지는 후보 선택(dense, BM25, 순위 결합, 재순위). `--mock`은 `pip install faiss-cpu numpy`가 필요하다. |
+| [`cookbook/program-coding-swarm/`](cookbook/program-coding-swarm/) | yes | Program API 위에서 계층적 다중 모듈 코딩 워크플로를 실행하는 실험적 개념 증명: 병렬 자식 하네스, 모듈별 예산과 모델 역할, 호스트 소유 검증 및 리뷰 판정 게이트, 손자 2차 의견 하네스, SQLite 세대 교체와 롤백, `central` 대 `delegated` 합성 모드 비교(기본 `--mock`, JSON 리포트를 출력하는 `--live`). |
 | [`cookbook/byo-openai/`](cookbook/byo-openai/)와 [`cookbook/openrouter-provider/`](cookbook/openrouter-provider/) | service | Python provider 레시피: 노드 안에서 자체 OpenAI 클라이언트를 쓰는 방법과 타입 기반 OpenRouter 요청. Chat 엔드포인트(키, 또는 `bindings/python/examples/_scripted.py`의 스크립트 모델 같은 로컬 peer)가 필요하다. |
 
 이 표에서 `yes`는 프로젝트의 기본 실행에 키가 필요 없다는 뜻입니다. 스모크 테스트를 거치는 바이너리는 `ctest -L examples-offline`에 `cookbook.*`으로 나타납니다.

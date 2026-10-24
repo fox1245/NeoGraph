@@ -62,6 +62,7 @@ not provide a standalone build.
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | One process serving many customers' topologies through a compile cache. The mock binary needs nothing; the live one needs a key. |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | Chat servers that choose and evolve topologies per customer. ProgramChat has a `--mock` mode; the Core servers need a key. |
 | [`topology-retrieval/`](topology-retrieval/) | Candidate selection (dense, BM25, rank fusion, rerank) feeding example 64. `--mock` needs `pip install faiss-cpu numpy`. |
+| [`program-coding-swarm/`](program-coding-swarm/) | Experimental proof of concept for a hierarchical multi-module coding workflow on the Program API: parallel child harnesses (`ng.all`), per-module budget carving and model roles, a host-owned verify and review-verdict gate, a grandchild second-opinion harness, SQLite generation replacement and rollback, and `central` vs `delegated` synthesis modes (`--mock` by default, `--live` with JSON report). |
 
 Each cookbook also documents the friction it surfaced — useful for
 finding the rough edges of the public API.
@@ -79,6 +80,7 @@ finding the rough edges of the public API.
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | Actual browser tenant isolation/generation replacement, six SQLite and six PostgreSQL black-box scenarios; explicit host model policy; no vendor inference |
 | [`the-beast/`](the-beast/) | Typed C++ migration; actual strict Core compilation/evolution/checkpoint rollback exercised; not a pass claim for all live variants |
 | [`topology-retrieval/`](topology-retrieval/) | Mock Python ranking/index reuse plus actual C++ registry admission/migration and unknown-key rejection; external pointer is not authority |
+| [`program-coding-swarm/`](program-coding-swarm/) | Experimental proof of concept; offline scripted providers exercise parallel child harnesses, non-renewable budget carving, host verify/verdict gate, grandchild second-opinion harness, SQLite generation replacement/rollback and central/delegated synthesis; live mode requires `ANTHROPIC_API_KEY` and `OPENROUTER_API_KEY` |
 
 Python MCP servers, Jarvis CLI/REPL drivers and retrieval HTTP clients remain protocol clients; they do not implement provider bindings. The Assembly Python speaker uses the A2A binding; Jarvis pybind benchmarks use the migrated native bindings. Their execution evidence is separate from the preserved C++ runs above. Live multitenant 1,000/32 is not a smoke run. Current SDK runtime qualification is Linux/POSIX; these recipes do not establish macOS or Windows transport qualification.
 

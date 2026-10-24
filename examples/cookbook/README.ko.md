@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=09508fa650f13a6172729a396ae7f833b3b77ffb9eaacce83827c4ed19ac7b29 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ko source_sha256=2b1edd2874749ce5d0bc9d01ffd13e06e8bb22a499b2572cca9079e67bbc2272 -->
 # NeoGraph 쿡북
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -51,6 +51,7 @@ vendor inference, 음성, 모든 Beast live 변형이나 전용 live multitenant
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | 컴파일 캐시를 거쳐 한 프로세스가 여러 고객의 토폴로지를 서비스한다. mock 바이너리는 아무것도 필요 없고, live 바이너리는 키가 필요하다. |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 고객마다 토폴로지를 고르고 진화시키는 채팅 서버. ProgramChat에는 `--mock` 모드가 있고, Core 서버는 키가 필요하다. |
 | [`topology-retrieval/`](topology-retrieval/) | 예제 64로 이어지는 후보 선택(dense, BM25, 순위 결합, 재순위). `--mock`은 `pip install faiss-cpu numpy`가 필요하다. |
+| [`program-coding-swarm/`](program-coding-swarm/) | Program API 위에서 계층적 다중 모듈 코딩 워크플로를 실행하는 실험적 개념 증명(experimental proof of concept): 병렬 자식 하네스(`ng.all`), 모듈별 예산 분할과 모델 역할, 호스트 소유 검증 및 리뷰 판정 게이트, 손자 2차 의견 하네스, SQLite 세대 교체와 롤백, `central` 대 `delegated` 합성 모드 비교(기본 `--mock`, JSON 리포트를 출력하는 `--live`). |
 
 각 쿡북은 작업 중 부딪힌 마찰점도 문서로 남기며, 공개 API의 거친 부분을 찾는 데 도움이 됩니다.
 
@@ -67,6 +68,7 @@ vendor inference, 음성, 모든 Beast live 변형이나 전용 live multitenant
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 실제 브라우저 tenant 격리·generation 교체, SQLite 6개·PostgreSQL 6개 black-box 및 명시 host model policy 검증; vendor inference 없음 |
 | [`the-beast/`](the-beast/) | 타입 C++ 전환; 실제 strict Core 컴파일·진화·checkpoint 롤백 검증; 모든 live 변형의 통과 주장이 아님 |
 | [`topology-retrieval/`](topology-retrieval/) | mock Python ranking/index 재사용 및 실제 C++ registry admission/migration·unknown-key 거부 검증; 외부 pointer는 권한이 아님 |
+| [`program-coding-swarm/`](program-coding-swarm/) | 실험적 개념 증명(experimental proof of concept); 오프라인 스크립트 provider로 병렬 자식 하네스, 비갱신 예산 분할, 호스트 검증/판정 게이트, 손자 2차 의견 하네스, SQLite 세대 교체/롤백, central/delegated 합성 검증; live 모드는 `ANTHROPIC_API_KEY`와 `OPENROUTER_API_KEY` 필요 |
 
 Python MCP server, Jarvis CLI/REPL driver, retrieval HTTP client는 protocol client이며 provider binding 구현이 아닙니다. Assembly Python speaker는 A2A binding을, Jarvis pybind benchmark는 전환된 native binding을 사용합니다. 이들의 실행 증거는 위 C++ 실행과 별개입니다. SDK runtime은 현재 Linux/POSIX에서 검증되었으며 macOS/Windows transport 검증을 주장하지 않습니다. live multitenant 1,000/32는 smoke가 아닙니다.
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=09508fa650f13a6172729a396ae7f833b3b77ffb9eaacce83827c4ed19ac7b29 -->
+<!-- neograph-i18n: source=examples/cookbook/README.md locale=ja source_sha256=2b1edd2874749ce5d0bc9d01ffd13e06e8bb22a499b2572cca9079e67bbc2272 -->
 # NeoGraph Cookbooks
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -51,6 +51,7 @@ native archive は認証された owner-private custody であり、暗号化や
 | [`multi_tenant_chatbot/`](multi_tenant_chatbot/) | コンパイルキャッシュを通して、1 つのプロセスが多数の顧客のトポロジーを処理する。モックのバイナリには何も要らず、ライブ版にはキーが必要。 |
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 顧客ごとにトポロジーを選び、進化させるチャットサーバー。ProgramChat には `--mock` モードがあり、Core のサーバーにはキーが必要。 |
 | [`topology-retrieval/`](topology-retrieval/) | サンプル 64 に入力を渡す候補の選択(dense、BM25、順位融合、再ランキング)。`--mock` には `pip install faiss-cpu numpy` が必要。 |
+| [`program-coding-swarm/`](program-coding-swarm/) | Program API 上で階層型マルチモジュール・コーディングワークフローを実行する実験的な概念実証（experimental proof of concept）: 並列子ハーネス（`ng.all`）、モジュールごとの予算配分とモデルロール、ホスト所有の検証・レビュー判定ゲート、孫セカンドオピニオンハーネス、SQLite 世代置換とロールバック、`central` と `delegated` の合成モード比較（既定は `--mock`、JSON レポート付きの `--live`）。 |
 
 各クックブックには、作業中に見つかった引っかかりも記録してあります。公開 API の粗い部分を探すのに役立ちます。
 
@@ -67,6 +68,7 @@ native archive は認証された owner-private custody であり、暗号化や
 | [`self_evolving_chatbot/`](self_evolving_chatbot/) | 実ブラウザー tenant 分離・generation 置換、SQLite六件・PostgreSQL六件 black-box と明示 host model policy を検証; vendor inference なし |
 | [`the-beast/`](the-beast/) | 型付き C++ 移行; 実際の strict Core コンパイル・進化・チェックポイント rollback を実行; 全 live 変種の pass 主張ではない |
 | [`topology-retrieval/`](topology-retrieval/) | mock Python ranking/index 再使用と実 C++ registry admission/migration・unknown-key拒否を検証; 外部 pointer は権限ではない |
+| [`program-coding-swarm/`](program-coding-swarm/) | 実験的な概念実証（experimental proof of concept）; オフラインのスクリプトプロバイダーで並列子ハーネス、非更新型の予算配分、ホスト検証・判定ゲート、孫セカンドオピニオンハーネス、SQLite 世代置換・ロールバック、central/delegated 合成を検証; live モードには `ANTHROPIC_API_KEY` と `OPENROUTER_API_KEY` が必要 |
 
 Python MCP server、Jarvis CLI/REPL driver、retrieval HTTP client は protocol client で provider binding 実装ではありません。Assembly Python speaker は A2A binding、Jarvis pybind benchmark は移行済み native binding を使います。その実行証拠は上の C++ 実行とは別です。SDK runtime の現在の検証対象は Linux/POSIX であり、macOS/Windows transport の検証は主張しません。live multitenant 1,000/32 は smoke ではありません。
 
