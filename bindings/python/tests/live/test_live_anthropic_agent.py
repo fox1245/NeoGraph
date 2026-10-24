@@ -18,12 +18,12 @@ import pytest
 
 import neograph_engine as ng
 
-from live_support import TEXT_MODELS, Run, case, controls, provider, user, weather_tool
+from live_support import TEXT_MODELS, Run, case, case_model_id, controls, live_model, provider, user, weather_tool
 
 TM = ng.MessagesThinkingMode
 ANTHROPIC, OPENROUTER = "anthropic.messages", "openrouter.messages"
+ADAPTIVE = "anthropic.messages.adaptive"
 KEYS = {ANTHROPIC: "ANTHROPIC_API_KEY", OPENROUTER: "OPENROUTER_API_KEY"}
-CLAUDE_55 = "claude-haiku-5-5"
 MODES = (("collect", False), ("stream", True))
 STR, INT = {"type": "string"}, {"type": "integer"}
 # Manual thinking needs a budget of at least 1024 tokens and an output cap above it.
@@ -525,8 +525,16 @@ def _count(value):
     return 0 if value is None else value.value
 
 
-@pytest.mark.parametrize("model", [case(_model(ANTHROPIC), keys=[KEYS[ANTHROPIC]], id="claude-haiku-4-5"),
-                                   case(CLAUDE_55, keys=[KEYS[ANTHROPIC]], id=CLAUDE_55)])
+def _cache_cases():
+    roles = ((ANTHROPIC, True), (ADAPTIVE, False))
+    models = [live_model(role) for role, _strip in roles]
+    ids = [case_model_id(role, strip_date=strip) for role, strip in roles]
+    if ids[0] == ids[1]:
+        ids = [f"{role}:{cid}" for (role, _strip), cid in zip(roles, ids)]
+    return [case(model, keys=[KEYS[ANTHROPIC]], id=cid) for model, cid in zip(models, ids)]
+
+
+@pytest.mark.parametrize("model", _cache_cases())
 def test_prompt_cache_grows_over_a_conversation(model):
     cache = ng.MessagesCacheControl()
     cache.ttl = ng.MessagesCacheTtl.FiveMinutes
@@ -548,7 +556,7 @@ def test_claude_5_5_adaptive_thinking_with_tools(stream):
     tool = log.make("read_node", "Read a node of a linked list: its integer value and the id of the next node, "
                     "null at the end of the list.", {"node_id": STR},
                     lambda a: json.dumps(dict(zip(("value", "next"), links.get(a["node_id"], (None, None))))))
-    engine = _agent(ANTHROPIC, CLAUDE_55, [tool], max_output_tokens=1500, thinking_mode=TM.Adaptive)
+    engine = _agent(ANTHROPIC, live_model(ADAPTIVE), [tool], max_output_tokens=1500, thinking_mode=TM.Adaptive)
     turn = Turn(engine, _thread(), "The linked list starts at node n1. Follow it to the end and tell me the sum "
                 "of all the node values. Answer with the number only.", stream=stream)
     assert [a["node_id"] for a in log.arguments("read_node")] == ["n1", "n4", "n2"]

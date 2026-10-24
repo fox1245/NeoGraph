@@ -9,7 +9,7 @@ import pytest
 
 import neograph_engine as ng
 
-from live_support import case, provider
+from live_support import case, live_model, provider
 
 
 def _failure_text(outcome):
@@ -30,14 +30,14 @@ def _expect_two_vectors(outcome):
     assert outcome.usage.input_total is not None and outcome.usage.input_total.value > 0
 
 
-@pytest.mark.parametrize("model", [case("text-embedding-3-small", keys=["OPENAI_API_KEY"],
-                                        id="text-embedding-3-small")])
+@pytest.mark.parametrize("model", [case(live_model("openai.embeddings"), keys=["OPENAI_API_KEY"],
+                                        id=live_model("openai.embeddings"))])
 def test_openai_embeddings(model):
     _expect_two_vectors(provider("openai.chat", model).complete_endpoint(_embedding_request(model)))
 
 
-@pytest.mark.parametrize("model", [case("openai/text-embedding-3-small", keys=["OPENROUTER_API_KEY"],
-                                        id="openai/text-embedding-3-small")])
+@pytest.mark.parametrize("model", [case(live_model("openrouter.embeddings"), keys=["OPENROUTER_API_KEY"],
+                                        id=live_model("openrouter.embeddings"))])
 def test_openrouter_embeddings_async(model):
     router = provider("openrouter.chat", model)
 
@@ -47,8 +47,8 @@ def test_openrouter_embeddings_async(model):
     _expect_two_vectors(asyncio.run(embed()))
 
 
-@pytest.mark.parametrize("model", [case("omni-moderation-latest", keys=["OPENAI_API_KEY"],
-                                        id="omni-moderation-latest")])
+@pytest.mark.parametrize("model", [case(live_model("openai.moderation"), keys=["OPENAI_API_KEY"],
+                                        id=live_model("openai.moderation"))])
 def test_openai_moderation(model):
     openai = provider("openai.chat", model)
     prepared = openai.prepare_endpoint(

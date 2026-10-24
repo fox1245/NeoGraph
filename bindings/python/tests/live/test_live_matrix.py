@@ -9,7 +9,7 @@ import pytest
 
 import neograph_engine as ng
 
-from live_support import ROUTES, TEXT_MODELS, Run, case, provider, red_png, user, weather_tool
+from live_support import ROUTES, TEXT_MODELS, Run, case, live_model, model_env_var, provider, red_png, user, weather_tool
 
 MODES = (("collect", False), ("stream", True))
 
@@ -33,8 +33,16 @@ def test_text(preset, stream):
         assert run.streamed_text() == run.text()
 
 
-CLAUDE_55 = [case(model, stream, keys=["ANTHROPIC_API_KEY"], id=f"{model}-{name}")
-             for model in ("claude-haiku-5-5", "claude-sonnet-5-5") for name, stream in MODES]
+def _claude_55_cases():
+    roles = ("anthropic.messages.adaptive", "anthropic.messages.sonnet")
+    models = [live_model(role) for role in roles]
+    same = len(set(models)) < len(models)
+    return [case(model, stream, keys=["ANTHROPIC_API_KEY"],
+                 id=f"{role}:{model}-{name}" if same else f"{model}-{name}")
+            for role, model in zip(roles, models) for name, stream in MODES]
+
+
+CLAUDE_55 = _claude_55_cases()
 
 
 @pytest.mark.parametrize("model, stream", CLAUDE_55)
@@ -81,7 +89,7 @@ def _images(run):
 
 @pytest.mark.parametrize("stream", [case(s, keys=["OPENROUTER_API_KEY"], id=n) for n, s in MODES])
 def test_openrouter_chat_keeps_generated_images(stream):
-    model = "google/gemini-3.1-flash-lite-image"
+    model = live_model("openrouter.chat.image")
     run = Run(provider("openrouter.chat", model), model, [user("A tiny flat red circle icon on white.")],
               stream=stream)
     images = _images(run)
@@ -96,7 +104,7 @@ def _inline_bytes(run):
 
 @pytest.mark.parametrize("stream", [case(s, keys=["GEMINI_API_KEY"], id=n) for n, s in MODES])
 def test_gemini_generate_image_output(stream):
-    model = "gemini-3.1-flash-lite-image"
+    model = live_model("google.generate.image")
     run = Run(provider("google.generate", model), model,
               [user("A detailed watercolor painting of a harbour town at dawn, with boats, gulls and reflections.")],
               stream=stream)
@@ -122,15 +130,17 @@ def _audio(run):
 # reach the wire from Python (#512).
 @pytest.mark.parametrize("stream", [case(s, keys=["GEMINI_API_KEY"], id=n) for n, s in MODES])
 def test_gemini_tts(stream):
-    model = "gemini-3.8-flash-lite-tts"
+    model = live_model("google.generate.tts")
     run = Run(provider("google.generate", model), model, [user("Say: hello.")], stream=stream,
               generate=_generate(ng.GeminiResponseModality.Audio, voice="Kore"))
     audio = _audio(run)
     assert audio and audio[0].mime.startswith("audio/") and audio[0].data
 
 
-# A Lyria clip on Generate, which needs its audio response modality.
-@pytest.mark.parametrize("model", [case("lyria-3-clip-preview", keys=["GEMINI_API_KEY"], id="lyria-clip")])
+# A music clip on Generate (google.generate.audio), which needs its audio response modality.
+@pytest.mark.parametrize("model", [case(
+    live_model("google.generate.audio"), keys=["GEMINI_API_KEY"],
+    id=live_model("google.generate.audio") if model_env_var("google.generate.audio") in __import__("os").environ else "lyria-clip")])
 def test_lyria_clip(model):
     run = Run(provider("google.generate", model), model,
               [user("A short bright chiptune loop. Instrumental only.")],

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=d070bdadf35ee78dc34c18c461907a2517aa6657ecf3e800a66831be19bb35fc -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=1e2a8175a45682b2b8acd37bcef658f4993750cc0e379fd7e983364261e38e83 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -39,6 +39,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 ```
 
 - **키.** env 파일에는 `OPENAI_API_KEY`, `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`가 들어갑니다. 스크립트는 이 값을 테스트 프로세스에만 넘깁니다. 출력하거나 저장하지 않으며, 실패 메시지에 키 값이 나타나면 다른 문자열로 바꿉니다.
+- **모델.** `tests/live/manifest.json`의 `models` 섹션은 각 모델 역할(`openai.chat`, `anthropic.messages`, `anthropic.messages.adaptive` 등)을 기본 모델 ID에 매핑하며, Python 스위트는 `live_support.live_model(role)`로 이를 조회합니다. 환경 변수나 env 파일에 `NG_LIVE_MODEL_<ROLE>`(`.`과 `-`를 `_`로 바꾸고 대문자로 쓴 이름, 예: `NG_LIVE_MODEL_OPENAI_CHAT`)을 설정하면 코드를 바꾸지 않고 해당 역할의 모델을 덮어쓸 수 있습니다.
 - **깨끗한 트리.** 리포트는 커밋을 가리키므로, `run`은 커밋되지 않은 변경이 있는 작업 트리를 거부합니다.
 - **버전.** `run`은 트리의 버전과 다른 `neograph_engine`을 거부합니다.
 - **출력.** `tests/live/report.json`을 씁니다. 커밋, 트리 해시, NeoGraph 버전, SchemaProvider 고정 커밋, 그리고 모든 케이스와 그 결과가 담깁니다.
