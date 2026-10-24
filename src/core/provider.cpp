@@ -294,6 +294,9 @@ bool PreparedProviderRequest::requires_native_custody() const noexcept {
 const sp::descriptor::ValidatedDescriptor* PreparedProviderRequest::admitted_descriptor() const noexcept {
     return impl_ ? impl_->prepared.descriptor() : nullptr;
 }
+bool PreparedProviderRequest::is_endpoint() const noexcept {
+    return impl_ && !impl_->prepared.endpoint().empty();
+}
 bool PreparedProviderRequest::is_endpoint_read() const noexcept {
     return impl_ && !impl_->prepared.endpoint().empty() && impl_->prepared.method() == "GET";
 }
@@ -1284,7 +1287,17 @@ ProviderBudgetClaim reserve_provider_dispatch(const PreparedProviderRequest& req
             throw ProviderFailure(failure(local_error(sp::ErrorKind::InvalidConfig,
                 "Standalone provider currency requires its original bounded durable lease")));
     }
-    if (budget.model_token_budget == 0) return {};
+    if (!budget.model_tokens_enforced()) return {};
+    if (budget.model_token_budget == 0) {
+        // A grant of 0 allows nothing: no call is sent. The refusal is checked first, so that a call whose
+        // token bound is unknown ends the run exhausted, like every call that does not fit its budget.
+        // A SchemaProvider endpoint call has no token bound to hold (a ceiling above 0 refuses it for that
+        // reason), so this ceiling does not hold it either; the run's post-call check still counts what it reports.
+        if (request.is_endpoint()) return {};
+        if (budget.budget_exhausted) budget.budget_exhausted->store(true, std::memory_order_release);
+        if (budget.budget_cancel_token) budget.budget_cancel_token->cancel();
+        throw ProviderFailure(failure(local_error(sp::ErrorKind::QuotaExhausted, "Provider token budget exhausted")));
+    }
     if (!budget.usage)
         throw ProviderFailure(failure(local_error(sp::ErrorKind::InvalidConfig, "Bounded provider dispatch requires a usage authority")));
     const auto amount = Provider::conservative_token_upper_bound(request);

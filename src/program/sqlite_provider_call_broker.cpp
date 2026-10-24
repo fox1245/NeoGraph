@@ -891,9 +891,10 @@ private:
             // does not fit, is refused here, before any marker or transport.
             if (auto refused = hold.preflight()) co_return refused;
             try {
-                claim = reserve_provider_dispatch(prepared, ProviderDispatchBudget{
-                    identity.usage, identity.model_token_budget,
-                    identity.budget_exhausted, identity.budget_cancel_token});
+                ProviderDispatchBudget budget{identity.usage, identity.model_token_budget,
+                                              identity.budget_exhausted, identity.budget_cancel_token};
+                budget.model_token_budget_bounded = identity.model_token_budget_bounded;
+                claim = reserve_provider_dispatch(prepared, std::move(budget));
             } catch (const ProviderFailure& error) {
                 hold.release();
                 co_return error.outcome();

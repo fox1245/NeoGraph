@@ -266,6 +266,8 @@ struct Script {
     // The node interrupts for approval after (or before) its call until resumed.
     std::atomic<bool> interrupt_after_call{false};
     std::atomic<bool> interrupt_before_call{false};
+    // The node asks the host to settle an effect before its call, until the host reconciles it.
+    std::atomic<bool> effect_before_call{false};
     std::atomic<int>  node_runs{0};
     // Run by every "after" node with its name.
     std::function<void(const std::string&)> after;
@@ -304,6 +306,17 @@ public:
         const int run = ++script_->node_runs;
         if (script_->interrupt_before_call.load() && !in.ctx.resume_value)
             throw graph::NodeInterrupt("approve the model call", json{{"request", "approve"}});
+        if (script_->effect_before_call.load() && !in.ctx.resume_value)
+            throw graph::NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-before-model"},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect", json{{"effect_id", "effect-before-model"},
+                                     {"idempotency", "non_idempotent"},
+                                     {"tool", "search"},
+                                     {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 4102444800000ULL}});
         std::vector<sp::Message> messages;
         if (!script_->system.empty()) messages.push_back(neograph::test::message(script_->system, sp::Role::System));
         messages.push_back(neograph::test::message(script_->prompt, sp::Role::User));
@@ -1737,16 +1750,117 @@ TEST_P(Priced, AZeroMonetaryBudgetRefusesEveryPricedCall) {
     EXPECT_EQ(result.usage().monetary_microunits, 0U);
 }
 
-TEST(ProgramProviderBinding, ModelTokensZeroAlreadyMeantNoneForACompletedRun) {
-    // The meaning monetary_microunits = 0 keeps: a completed run that used
-    // model tokens against a zero grant is reported BudgetExhausted.
-    auto        peer = std::make_shared<Peer>();
+ProgramResume resume_after(const ProgramResult& interrupted, std::string trace);
+
+namespace {
+
+// How a host binds its provider calls: in memory, or in the SQLite journal that prices its calls or does not.
+struct BindingKind {
+    const char* name;
+    bool        durable;
+    bool        priced;
+};
+constexpr BindingKind kBindingKinds[] = {
+    {"in memory, priced", false, true}, {"journal, priced", true, true}, {"journal, unpriced", true, false}};
+
+// A run granted no model tokens ends as a run whose next call does not fit its budget does: BudgetExhausted,
+// with the code of the failure classifier's budget class and no token used.
+void expect_refused_for_want_of_tokens(const ProgramResult& result) {
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code,
+              neograph::graph::node_failure_code(neograph::graph::NodeFailureClass::BudgetExhausted));
+    EXPECT_EQ(result.failure()->witness["model_tokens"], (json{{"granted", 0}, {"used", 0}, {"over_by", 0}}));
+    EXPECT_EQ(result.usage().model_tokens, 0U);
+    EXPECT_EQ(result.usage().monetary_microunits, 0U);
+}
+
+HostOptions no_tokens_options(const BindingKind& kind) {
     HostOptions options;
     options.model_tokens = 0;
-    Host       h(peer, options);
-    const auto result = h.run(Shape::Llm);
-    EXPECT_EQ(result.status(), ProgramTerminalStatus::BudgetExhausted) << failure_text(result);
-    EXPECT_EQ(result.usage().model_tokens, 24U);
+    options.priced       = kind.priced;
+    return options;
+}
+
+}  // namespace
+
+TEST(ProgramProviderBinding, ARunGrantedNoModelTokensSendsNoModelCall) {
+    // Like every RunBudget amount, model_tokens = 0 grants nothing. The call is refused before it is sent, as a
+    // call that does not fit a positive budget is, not sent and then found over budget.
+    for (const auto& kind : kBindingKinds) {
+        for (const auto shape : {Shape::Llm, Shape::Brokered, Shape::LlmThenAfter}) {
+            SCOPED_TRACE(std::string(kind.name) + (shape == Shape::Brokered ? ", host node" : ", llm node"));
+            TempDir     files("no-tokens");
+            auto        peer = std::make_shared<Peer>();
+            Host        h(peer, no_tokens_options(kind), kind.durable ? &files : nullptr);
+            const auto result = h.run(shape);
+            expect_refused_for_want_of_tokens(result);
+            EXPECT_EQ(peer->transport.load(), 0);
+            if (kind.durable) EXPECT_TRUE(journal_states(files.provider_db()).empty());
+        }
+    }
+}
+
+TEST(ProgramProviderBinding, ARunGrantedNoModelTokensThatCallsNoModelCompletes) {
+    // The grant limits what a run spends, not what it may do: a run that sends no model call completes.
+    Host       h(std::make_shared<Peer>(), no_tokens_options(kBindingKinds[0]));
+    const auto result = h.run(Shape::AfterOnly);
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(result.usage().model_tokens, 0U);
+}
+
+TEST(ProgramProviderBinding, AResumedRunGrantedNoModelTokensSendsNoModelCall) {
+    // The run asks for approval before its call and costs nothing; the resume reaches the call.
+    for (const auto& kind : kBindingKinds) {
+        SCOPED_TRACE(kind.name);
+        TempDir     files("no-tokens-resume");
+        auto        peer = std::make_shared<Peer>();
+        Host        h(peer, no_tokens_options(kind), kind.durable ? &files : nullptr);
+        h.script().interrupt_before_call = true;
+        const auto first = h.run(Shape::Brokered, "no-tokens-resume");
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_text(first);
+        ASSERT_EQ(peer->transport.load(), 0);
+
+        const auto second =
+            h.runtime().resume(kOwner, "no-tokens-resume", resume_after(first, "trace-no-tokens-resume")).wait();
+        expect_refused_for_want_of_tokens(second);
+        EXPECT_EQ(peer->transport.load(), 0);
+        if (kind.durable) EXPECT_TRUE(journal_states(files.provider_db()).empty());
+    }
+}
+
+TEST(ProgramProviderBinding, AReconciledRunGrantedNoModelTokensSendsNoModelCall) {
+    // The run waits for the host to settle an effect before its call; the reconciliation reaches the call.
+    for (const auto& kind : kBindingKinds) {
+        SCOPED_TRACE(kind.name);
+        TempDir     files("no-tokens-reconcile");
+        auto        peer = std::make_shared<Peer>();
+        Host        h(peer, no_tokens_options(kind), kind.durable ? &files : nullptr);
+        h.script().effect_before_call = true;
+        const auto first = h.run(Shape::Brokered, "no-tokens-reconcile");
+        ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted) << failure_text(first);
+        ASSERT_TRUE(first.interrupt() && first.interrupt()->pending_effect);
+        ASSERT_EQ(peer->transport.load(), 0);
+
+        const auto call_id = first.interrupt()->pending_effect->call_id();
+        ASSERT_EQ(h.runtime()
+                      .reconcile(kOwner, "no-tokens-reconcile",
+                                 ProgramEffectResolution{call_id, ProgramEffectReconciliation::Unknown, std::nullopt,
+                                                         "trace-no-tokens-unknown", {}})
+                      .wait()
+                      .status(),
+                  ProgramTerminalStatus::AmbiguousEffect);
+        const auto second = h.runtime()
+                                .reconcile(kOwner, "no-tokens-reconcile",
+                                           ProgramEffectResolution{call_id,
+                                                                   ProgramEffectReconciliation::Completed,
+                                                                   json{{"result", "reconciled"}},
+                                                                   "trace-no-tokens-reconcile", {}})
+                                .wait();
+        expect_refused_for_want_of_tokens(second);
+        EXPECT_EQ(peer->transport.load(), 0);
+        if (kind.durable) EXPECT_TRUE(journal_states(files.provider_db()).empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

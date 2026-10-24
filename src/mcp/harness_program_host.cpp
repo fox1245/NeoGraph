@@ -203,6 +203,18 @@ public:
         : config_(std::move(config)), provider_(std::move(provider)) {}
     std::string get_name() const override { return config_.at("worker_id").get<std::string>(); }
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+        // A run granted no model tokens may send no model call: the worker is not started, and the run ends
+        // with its model-token budget exhausted, as it does when a call does not fit.
+        if (in.ctx.model_tokens_enforced() && in.ctx.model_token_budget == 0) {
+            if (in.ctx.budget_exhausted) in.ctx.budget_exhausted->store(true, std::memory_order_release);
+            if (in.ctx.budget_cancel_token) in.ctx.budget_cancel_token->cancel();
+            co_return graph::NodeOutput{{graph::ChannelWrite{
+                "worker_results",
+                json{{"worker_id", config_.at("worker_id")},
+                     {"status", "failed"},
+                     {"error", "Program model-token budget exhausted before the worker started"},
+                     {std::string(RECORDED_CALLS_FIELD), json::array()}}}}};
+        }
         HarnessWorkerCall call;
         call.task   = in.state.get("task");
         call.worker = config_;

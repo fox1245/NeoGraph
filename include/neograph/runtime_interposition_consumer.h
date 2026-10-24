@@ -47,7 +47,7 @@ protected:
                 std::move(request), std::move(host_instructions),
                 std::move(trusted_supplemental), std::move(identity));
         }
-        if (identity.model_token_budget == 0 && !identity.managed_budget_lease) {
+        if (!identity.model_tokens_enforced() && !identity.managed_budget_lease) {
             return provider->invoke_async(std::move(request));
         }
         return [](std::shared_ptr<Provider> provider, ProviderRequest request,
@@ -62,7 +62,8 @@ protected:
                 claim = reserve_provider_dispatch(prepared,
                     ProviderDispatchBudget{identity.usage, identity.model_token_budget,
                         identity.budget_exhausted, identity.budget_cancel_token,
-                        identity.managed_budget_lease, identity.managed_budget_store});
+                        identity.managed_budget_lease, identity.managed_budget_store, {},
+                        identity.model_token_budget_bounded});
             } catch (const ProviderFailure& failure) {
                 co_return failure.outcome();
             }

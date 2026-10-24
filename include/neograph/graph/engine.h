@@ -257,6 +257,9 @@ struct RunConfig {
 
     /// Optional hard model-token ceiling enforced by budget-aware nodes.
     std::uint64_t model_token_budget = 0;
+    /// Enforce `model_token_budget` even when it is 0, so that a run granted no tokens sends no model call. Left
+    /// false, 0 means no ceiling, as for every generic Core run. A Program run sets it to its grant's meaning.
+    bool model_token_budget_bounded = false;
     /// Set by a node that crossed model_token_budget so the enclosing runtime can classify it.
     std::shared_ptr<std::atomic_bool> budget_exhausted;
 

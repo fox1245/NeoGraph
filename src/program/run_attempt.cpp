@@ -2277,6 +2277,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 config.usage              = usage;
                 config.model_token_budget = control->recorded_replay
                     ? control->invocation.budget.model_tokens : control->granted_budget.model_tokens;
+                // A grant is an amount, and 0 grants nothing: Core holds every model call against the ceiling,
+                // 0 included, and sends none under it. A recorded replay sends none, so its ceiling is only read.
+                config.model_token_budget_bounded = !control->recorded_replay;
                 config.budget_exhausted   = control->budget_exhausted;
                 config.native_history_archive = control->native_history_archive;
 

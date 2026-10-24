@@ -26,6 +26,18 @@ class ManagedBudgetEffectReceipt;
 
 namespace neograph {
 
+/**
+ * Whether a model-token ceiling is enforced. Generic Core runs give their plain
+ * `model_token_budget` number one meaning: a non-zero value is a ceiling and 0
+ * is no ceiling. A Program run is granted an amount of tokens, and an amount of
+ * 0 grants nothing, so it also sets `bounded`: the ceiling is then enforced at
+ * any value, 0 included. Every place that holds or checks a dispatch against a
+ * model-token ceiling asks this function instead of comparing the number with 0.
+ */
+constexpr bool model_token_ceiling_enforced(std::uint64_t tokens, bool bounded) noexcept {
+    return bounded || tokens != 0;
+}
+
 struct ProviderDispatchBudget {
     std::shared_ptr<UsageAccumulator> usage;
     std::uint64_t model_token_budget = 0;
@@ -34,6 +46,11 @@ struct ProviderDispatchBudget {
     std::shared_ptr<graph::OwnedManagedBudgetLease> managed_budget_lease;
     std::shared_ptr<graph::CheckpointStore> managed_budget_store;
     std::string managed_effect_id;
+    /// The ceiling is enforced even when `model_token_budget` is 0 (see model_token_ceiling_enforced()).
+    bool model_token_budget_bounded = false;
+    bool model_tokens_enforced() const noexcept {
+        return model_token_ceiling_enforced(model_token_budget, model_token_budget_bounded);
+    }
 };
 
 enum class ProviderMode : std::uint8_t { Collect, Stream };
@@ -261,6 +278,8 @@ public:
     /// or batch lookup. The provider never charges one, and it can be sent again,
     /// so a journaling broker sends it each time instead of replaying it.
     bool is_endpoint_read() const noexcept;
+    /// Whether this is a SchemaProvider endpoint call (images, embeddings, files, ...) rather than a chat request.
+    bool is_endpoint() const noexcept;
     /// An endpoint call that opens a chunked upload's session (`files::Start`, #541). Starting a session charges
     /// nothing and sends no file bytes, so a journal that cannot give the session back to a resumed Program sends
     /// the call again (see SQLiteProgramProviderCallJournal).

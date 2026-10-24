@@ -31,10 +31,15 @@ struct ProviderCallIdentity {
     std::uint64_t call_ordinal = 0;
     std::shared_ptr<UsageAccumulator> usage;
     std::uint64_t model_token_budget = 0;
+    /// `model_token_budget` is enforced even at 0 (see model_token_ceiling_enforced()).
+    bool model_token_budget_bounded = false;
     std::shared_ptr<std::atomic_bool> budget_exhausted;
     std::shared_ptr<CancelToken> budget_cancel_token;
     std::shared_ptr<OwnedManagedBudgetLease> managed_budget_lease;
     std::shared_ptr<CheckpointStore> managed_budget_store;
+    bool model_tokens_enforced() const noexcept {
+        return model_token_ceiling_enforced(model_token_budget, model_token_budget_bounded);
+    }
 };
 
 /// Stable original-bank task slot; preparation binding is stored separately.
