@@ -10,6 +10,7 @@
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "catalog_access.h"
+#include "javascript.h"
 #include "monetary.h"
 #include "lock_audit.h"
 #include "operation_lock.h"
@@ -2232,7 +2233,7 @@ RunControl::RunControl(std::string                                owner,
       invocation(std::move(invocation_value)),
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
-      deadline(started_at + std::chrono::milliseconds(granted_budget.wall_time_ms)),
+      deadline(deadline_after(started_at, granted_budget.wall_time_ms)),
       scheduler(std::move(scheduler_value)),
       deadline_executor(scheduler->deadlines),
       waiter_strand(asio::make_strand(scheduler->waiters)),
@@ -2287,7 +2288,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
       invocation(record.invocation()),
       granted_budget(persisted_invocation.granted_budget),
       started_at(std::chrono::steady_clock::now()),
-      deadline(started_at + std::chrono::milliseconds(record.remaining_budget().wall_time_ms)),
+      deadline(deadline_after(started_at, record.remaining_budget().wall_time_ms)),
       scheduler(std::move(scheduler_value)),
       deadline_executor(scheduler->deadlines),
       waiter_strand(asio::make_strand(scheduler->waiters)),
@@ -2576,11 +2577,11 @@ void RunControl::emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
               {"program_event_id", event.id},
               {"program_event_sequence", event.sequence}};
     if (status) data["terminal_status"] = std::string(to_string(*status));
-    const auto remaining = deadline > std::chrono::steady_clock::now()
-        ? deadline - std::chrono::steady_clock::now()
+    const auto now       = std::chrono::steady_clock::now();
+    const auto remaining = deadline > now
+        ? deadline - now
         : std::chrono::steady_clock::duration::zero();
-    const auto parent_deadline = std::chrono::system_clock::now() +
-        std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
+    const auto parent_deadline = deadline_after(std::chrono::system_clock::now(), remaining);
     async::run_sync(runtime->emit_async(
         phase, "program_lifecycle", owner_scope, run_id, std::move(data),
         observe_cancellation ? cancel_token : std::shared_ptr<graph::CancelToken>{},

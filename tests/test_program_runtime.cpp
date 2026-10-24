@@ -9826,6 +9826,328 @@ TEST(ProgramRuntimeTest, RejectsWallTimeBudgetThatCannotFitTimerDuration) {
     EXPECT_EQ(completed_calls.load(), 0U);
 }
 
+TEST(ProgramRuntimeTest, ARunGrantedUint64MaxWallTimeDoesNotTimeOutAtOnce) {
+    completed_calls.store(0);
+    AdmittedRuntime       fixture;
+    const auto            maximum = std::numeric_limits<std::uint64_t>::max();
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("runtime-policy-uint64-max-wall")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:runtime")
+        .admission_profile(fixture.profile)
+        .budget_ceiling(BudgetLimits{maximum, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    fixture.policy                                         = std::move(policy_builder).build();
+    auto document                                          = program_document("runtime-completed");
+    document["declared_budget_requirements"][0]["maximum"] = maximum;
+    const auto version = fixture.admit_document(std::move(document));
+
+    auto handle = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-uint64-max-seed", {}});
+    const auto seeded = handle.wait();
+    ASSERT_EQ(seeded.status(), ProgramTerminalStatus::Completed);
+
+    const auto existing = fixture.journal->load("tenant:runtime", handle.run_id());
+    ASSERT_TRUE(existing.has_value());
+
+    auto unbounded_budget         = existing->invocation().budget;
+    unbounded_budget.wall_time_ms = maximum;
+
+    auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
+    scheduler->attempts  = asio::system_executor{};
+    scheduler->deadlines = asio::system_executor{};
+    scheduler->waiters   = asio::system_executor{};
+
+    const auto materialized =
+        neograph::program::detail::CatalogRuntimeAccess::pin(*fixture.catalog, version);
+    auto run_invocation           = existing->invocation();
+    run_invocation.run_id         = "run-uint64-max-direct";
+    run_invocation.budget         = unbounded_budget;
+    run_invocation.correlation_id = "trace-uint64-max-direct";
+    ProgramPersistedInvocation persisted{
+        json::object(), unbounded_budget, "trace-uint64-max-direct", "", 0};
+    auto direct_control = std::make_shared<neograph::program::detail::RunControl>(
+        "tenant:runtime", "run-uint64-max-direct", 1, materialized,
+        existing->binding_fingerprint(), persisted, run_invocation,
+        "program:run-uint64-max-direct:root", 0, nullptr, scheduler, fixture.checkpoints,
+        nullptr, fixture.journal);
+    EXPECT_EQ(direct_control->deadline, std::chrono::steady_clock::time_point::max());
+
+    const auto started = direct_control->stage_event(
+        ProgramEventKind::Started, ProgramStartedEvent{unbounded_budget});
+    auto running_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+        "", "run-uint64-max-direct", version.id(), existing->bundle_id(), 1,
+        ProgramContinuation{"root", ContinuationState::Running, 1}, unbounded_budget,
+        RunBudget{}, std::nullopt, started.timestamp_ms});
+
+    ProgramRunRecordData record_data;
+    record_data.owner_scope         = "tenant:runtime";
+    record_data.run_id              = "run-uint64-max-direct";
+    record_data.logical_run_id      = "run-uint64-max-direct";
+    record_data.program_version_id  = version.id();
+    record_data.bundle_id           = existing->bundle_id();
+    record_data.binding_fingerprint = existing->binding_fingerprint();
+    record_data.invocation          = run_invocation;
+    record_data.continuation        = running_journal.continuation;
+    record_data.remaining_budget    = unbounded_budget;
+    record_data.journal_head        = running_journal.id;
+    record_data.event_sequence      = started.sequence;
+    record_data.created_at_ms       = running_journal.timestamp_ms;
+    record_data.updated_at_ms       = running_journal.timestamp_ms;
+    auto running_record             = ProgramRunRecord::create(std::move(record_data));
+
+    const auto lineage_id = program_run_lineage_id("tenant:runtime", "run-uint64-max-direct");
+    auto       generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        "tenant:runtime", lineage_id, 1, "run-uint64-max-direct", version.id(),
+        existing->bundle_id(), running_record.id(), running_journal.id, std::nullopt,
+        running_record.created_at_ms(), 0});
+    auto       lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        "tenant:runtime", lineage_id, "run-uint64-max-direct", 1, generation.id(),
+        running_record.id(), running_journal.id, unbounded_budget, RunBudget{}, std::nullopt,
+        running_record.created_at_ms(), running_record.updated_at_ms(), RunBudget{}});
+
+    ProgramTransitionPublication publication{running_record, running_journal, {started}, {}};
+    publication.run_generation = generation;
+    publication.run_lineage    = lineage;
+    ASSERT_EQ(fixture.journal->compare_publish("tenant:runtime", "", std::move(publication)),
+              ProgramTransitionPublishResult::Published);
+
+    neograph::program::detail::RunControl record_control(
+        running_record, {started}, fixture.journal, nullptr, scheduler);
+    EXPECT_EQ(record_control.deadline, std::chrono::steady_clock::time_point::max());
+
+    completed_calls.store(0);
+    neograph::async::run_sync(neograph::program::detail::execute_run_attempt(
+        direct_control, json::object(), std::nullopt));
+    const auto result = direct_control->wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ARunGrantedMoreWallTimeThanATimePointHoldsDoesNotTimeOutAtOnce) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      now     = std::chrono::steady_clock::now();
+    const auto      room_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::time_point::max() - now)
+            .count());
+    const auto just_above_overflow = room_ms + 60'000U;
+    const auto ceiling             = just_above_overflow + 60'000U;
+    EXPECT_EQ(neograph::program::detail::deadline_after(now, just_above_overflow),
+              std::chrono::steady_clock::time_point::max());
+    const auto near_max = std::chrono::steady_clock::time_point::max() - std::chrono::microseconds(500);
+    EXPECT_EQ(neograph::program::detail::deadline_after(near_max, 0), near_max);
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("runtime-policy-above-timepoint")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:runtime")
+        .admission_profile(fixture.profile)
+        .budget_ceiling(BudgetLimits{ceiling, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    fixture.policy                                         = std::move(policy_builder).build();
+    auto document                                          = program_document("runtime-completed");
+    document["declared_budget_requirements"][0]["maximum"] = ceiling;
+    const auto version = fixture.admit_document(std::move(document));
+
+    auto budget         = grant();
+    budget.wall_time_ms = just_above_overflow;
+    const auto result   = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-above-timepoint", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, ARunGrantedWallTimeJustBelowWhatATimePointHoldsCompletes) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      now     = std::chrono::steady_clock::now();
+    const auto      room_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::time_point::max() - now)
+            .count());
+    constexpr std::uint64_t twenty_four_hours_ms = 24ULL * 60ULL * 60ULL * 1000ULL;
+    const auto              just_below_overflow  = room_ms - 60'000U;
+    EXPECT_EQ(neograph::program::detail::deadline_after(now, twenty_four_hours_ms),
+              now + std::chrono::milliseconds(static_cast<std::int64_t>(twenty_four_hours_ms)));
+    EXPECT_LT(neograph::program::detail::deadline_after(now, twenty_four_hours_ms),
+              std::chrono::steady_clock::time_point::max());
+    EXPECT_EQ(neograph::program::detail::deadline_after(now, just_below_overflow),
+              now + std::chrono::milliseconds(static_cast<std::int64_t>(just_below_overflow)));
+    EXPECT_EQ(neograph::program::detail::deadline_after(now, room_ms),
+              now + std::chrono::milliseconds(static_cast<std::int64_t>(room_ms)));
+    EXPECT_LT(neograph::program::detail::deadline_after(now, room_ms),
+              std::chrono::steady_clock::time_point::max());
+    EXPECT_EQ(neograph::program::detail::deadline_after(now, room_ms + 1U),
+              std::chrono::steady_clock::time_point::max());
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("runtime-policy-below-timepoint")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:runtime")
+        .admission_profile(fixture.profile)
+        .budget_ceiling(BudgetLimits{room_ms, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    fixture.policy                                         = std::move(policy_builder).build();
+    auto document                                          = program_document("runtime-completed");
+    document["declared_budget_requirements"][0]["maximum"] = room_ms;
+    const auto version = fixture.admit_document(std::move(document));
+
+    auto budget         = grant();
+    budget.wall_time_ms = just_below_overflow;
+    const auto result   = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-below-timepoint", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+
+    const auto existing = fixture.journal->load("tenant:runtime", result.run_id());
+    ASSERT_TRUE(existing.has_value());
+    auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
+    scheduler->attempts  = asio::system_executor{};
+    scheduler->deadlines = asio::system_executor{};
+    scheduler->waiters   = asio::system_executor{};
+    neograph::program::detail::RunControl below_overflow_control(
+        *existing, fixture.journal->load_events("tenant:runtime", result.run_id()),
+        fixture.journal, nullptr, scheduler);
+    EXPECT_GT(below_overflow_control.deadline, below_overflow_control.started_at);
+    EXPECT_LT(below_overflow_control.deadline, std::chrono::steady_clock::time_point::max());
+}
+
+TEST(ProgramRuntimeTest, AResumedRecordWithMoreRemainingWallTimeThanATimePointHoldsContinues) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      now     = std::chrono::steady_clock::now();
+    const auto      room_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::time_point::max() - now)
+            .count());
+    const auto huge_wall_ms = room_ms + 120'000U;
+    const auto maximum      = std::numeric_limits<std::uint64_t>::max();
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("runtime-policy-resume-huge-wall")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:runtime")
+        .admission_profile(fixture.profile)
+        .budget_ceiling(BudgetLimits{maximum, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    fixture.policy                                         = std::move(policy_builder).build();
+    auto document                                          = program_document("runtime-interrupt");
+    document["declared_budget_requirements"][0]["maximum"] = maximum;
+    const auto version = fixture.admit_document(std::move(document));
+
+    auto budget         = grant();
+    budget.wall_time_ms = huge_wall_ms;
+    const auto paused   = fixture.runtime
+                            ->start("tenant:runtime", version,
+                                    ProgramInvocation{json::object(), budget, "trace-resume-huge-wall", {}})
+                            .wait();
+    ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_GT(paused.remaining_budget().wall_time_ms, room_ms);
+
+    const auto existing = fixture.journal->load("tenant:runtime", paused.run_id());
+    ASSERT_TRUE(existing.has_value());
+    EXPECT_GT(existing->remaining_budget().wall_time_ms, room_ms);
+
+    auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
+    scheduler->attempts  = asio::system_executor{};
+    scheduler->deadlines = asio::system_executor{};
+    scheduler->waiters   = asio::system_executor{};
+    neograph::program::detail::RunControl continued_control(
+        *existing, fixture.journal->load_events("tenant:runtime", paused.run_id()),
+        fixture.journal, nullptr, scheduler);
+    EXPECT_EQ(continued_control.deadline, std::chrono::steady_clock::time_point::max());
+
+    const auto completed =
+        fixture.runtime
+            ->resume("tenant:runtime", paused.run_id(),
+                     ProgramResume{json{{"decision", "approved"}}, "trace-resume-huge-wall-2", {},
+                                   pending_call_id(paused)})
+            .wait();
+    EXPECT_EQ(completed.status(), ProgramTerminalStatus::Completed);
+}
+
+TEST(ProgramRuntimeTest, LifecycleHookParentDeadlineBeforeEpochDoesNotOverflowToMax) {
+    using system_clock = std::chrono::system_clock;
+    using steady_clock = std::chrono::steady_clock;
+
+    constexpr auto epoch        = system_clock::time_point{};
+    const auto     before_epoch = epoch - std::chrono::hours(24);
+    const auto     remaining    = std::chrono::seconds(30);
+    const auto     expected     =
+        before_epoch + std::chrono::duration_cast<system_clock::duration>(remaining);
+
+    EXPECT_EQ(neograph::program::detail::deadline_after(before_epoch, remaining), expected);
+    EXPECT_LT(neograph::program::detail::deadline_after(before_epoch, remaining),
+              system_clock::time_point::max());
+    EXPECT_EQ(neograph::program::detail::deadline_after(before_epoch, steady_clock::duration::zero()),
+              before_epoch);
+    EXPECT_EQ(neograph::program::detail::deadline_after(
+                  before_epoch, steady_clock::duration::max()),
+              before_epoch +
+                  std::chrono::duration_cast<system_clock::duration>(steady_clock::duration::max()));
+    EXPECT_LT(neograph::program::detail::deadline_after(
+                  before_epoch, steady_clock::duration::max()),
+              system_clock::time_point::max());
+    EXPECT_EQ(neograph::program::detail::deadline_after(
+                  system_clock::time_point::min(), remaining),
+              system_clock::time_point::min() +
+                  std::chrono::duration_cast<system_clock::duration>(remaining));
+    EXPECT_EQ(neograph::program::detail::deadline_after(
+                  system_clock::time_point::max() - std::chrono::hours(24),
+                  std::chrono::hours(48)),
+              system_clock::time_point::max());
+
+    AdmittedRuntime fixture;
+    const auto      room_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            steady_clock::time_point::max() - steady_clock::now())
+            .count());
+    const auto            huge_wall_ms = room_ms + 120'000U;
+    const auto            maximum      = std::numeric_limits<std::uint64_t>::max();
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("runtime-policy-hook-huge-wall")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:runtime")
+        .admission_profile(fixture.profile)
+        .budget_ceiling(BudgetLimits{maximum, 1000, 1000, 1, 1, 20, 1, 1, 1});
+    fixture.policy                                         = std::move(policy_builder).build();
+    auto document                                          = program_document("runtime-completed");
+    document["declared_budget_requirements"][0]["maximum"] = maximum;
+    const auto version = fixture.admit_document(std::move(document));
+
+    LifecycleHookTool admitted("admitted");
+    LifecycleHookTool before_terminal("before-terminal");
+    LifecycleHookTool failed("failed");
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    config.hook_runtime = lifecycle_hooks(admitted, before_terminal, failed);
+    fixture.runtime     = std::make_unique<ProgramRuntime>(std::move(config));
+
+    auto budget         = grant();
+    budget.wall_time_ms = huge_wall_ms;
+    const auto result   = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-hook-huge-wall", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(admitted.calls.load(), 1U);
+    EXPECT_EQ(before_terminal.calls.load(), 1U);
+    EXPECT_EQ(failed.calls.load(), 0U);
+}
+
+TEST(ProgramRuntimeTest, ARunGrantedAShortWallTimeBudgetStillTimesOut) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture;
+    const auto      version = fixture.admit("runtime-blocking");
+    auto            budget  = grant();
+    budget.wall_time_ms     = 50;
+    const auto result       = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), budget, "trace-short-wall-timeout", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut);
+    EXPECT_EQ(followup_calls.load(), 0U);
+}
+
 TEST(ProgramRuntimeTest, WallTimeBudgetCancelsCoreAndSkipsLaterNodes) {
     blocking_calls.store(0);
     followup_calls.store(0);

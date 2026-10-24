@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6f8fe4bb89dcb6d8f47b9dcb20bdb2f55bfb8e56338d55c13748cce6a4e3ddc1 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=3e31640c5d5ca08de506044c9e534e70fa6fa1a3507ed0381f06386410b84b8f -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -193,6 +193,8 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **同时等待多个调用的 JavaScript `main()` 在它启动的子 run 发布期间不再以 `P_JS_COMMAND_JOURNAL` 失败 (#614)。** 带超时的 `ng.await` 把开始记录在命令日志里，`ng.spawn` 为每个子 run 在 run 记录中写一条。两者都是针对 run 头部的 compare，而每个子 run 被挂接、分派或 join 时都会移动这个头部。命令发布会重新读取头部并重试，但只试三次，子记录只试五次。在使用线程执行器的 Release 构建上，等待四个 spawn 出来的子 run 的 `main()` 大约每十次运行就有一次以 `Failed` 和 `P_JS_COMMAND_JOURNAL`（"Could not durably record the start of a JavaScript await"）结束，每一千次中有几次以 `P_CHILD_CONFLICT`（"Parent-child dispatch lost its transition CAS"）结束，而 Program 和它的子 run 并没有任何问题。
   - **输掉的 compare 最多重试 64 次。** 只有在读取头部之后、写入之前，同一 run 的另一次发布已经写入时，compare 才会输，所以每次重试读到的都是更新的头部。JavaScript 命令发布（待决条目、await 的开始、join 中已确定的成员、命令的结果）和子记录发布（挂接、分派与完成）共用这个上限，前后不一致的头部读取也会重新读取并计入同一上限。当上限耗尽时，run 仍照旧失败（`P_JS_COMMAND_JOURNAL`，子记录则为 `P_CHILD_CONFLICT`），只是现在最多尝试 64 次，而不是 3 次或 5 次。
   - `tests/test_program_runtime.cpp` 用存储包装器把同一成员的 await 开始记录的 compare 连续拒绝十次（随后该成员的开始被记录，四个开始都被记录且 run 完成）、永远拒绝（该记录的 64 次 compare 全部被拒绝后 run 以 `P_JS_COMMAND_JOURNAL` 失败），并在四线程执行器上把四个子 run 的场景运行 40 次。
+- **时钟数不了的 Program 墙钟时间预算或 await 超时是没有限制，而不是已经过去的截止时间 (#617)。** `RunControl` 在新尝试的构造函数和延续已保存记录的构造函数中，通过把 `std::chrono::milliseconds(wall_time_ms)` 加到 steady clock 上来计算 run 的截止时间，`run_attempt` 对 `await` 超时也做了同样的计算。由于 `std::chrono::steady_clock` 以有符号 64 位纳秒计数，超过约 9.2e12 毫秒（约 292 年）的预算或剩余预算（包括 `UINT64_MAX`）会让时间点加法溢出到过去，使 run 立刻以 `TimedOut` 结束。现在 run 截止时间、`await` 截止时间、生命周期钩子父级截止时间以及 JavaScript 控制的剩余墙钟时间计算都通过共用的 `deadline_after()` 辅助函数饱和在最晚时间点。
+  - 当系统时钟早于 1970 年纪元时，生命周期钩子的父级截止时间是 `system_now + remaining`，而不会饱和到最晚时间点。
 - **时钟数不了的 JavaScript 墙钟时间限制是没有限制，而不是已经过去的截止时间。** `JavaScriptCompileLimits::max_wall_time_ms` 是把 `std::chrono::milliseconds(limit)` 加到 steady clock 上得到截止时间的。时钟的纳秒数在有符号 64 位下约 292 年（9.2 万亿毫秒）就会溢出，`2^63` 毫秒更是根本放不进毫秒计数，所以大于约 9.2e12 的限制，包括宿主可能用来表示"无限制"的 `UINT64_MAX`，会让 `define()` 和 `main()` 立刻以 `P_JS_TIMEOUT` 结束（加法发生了溢出）。现在截止时间饱和在最晚的时间点。JavaScript 模块不受影响：`defineTimeMs` 的上限是 3,600,000 毫秒。
 
 - **对被中断的 JavaScript `ng.callCore` 以 `Completed` 调用 `reconcile()` 时，`main()` 会继续，而不是以 `P_JS_COMMAND_JOURNAL_MISMATCH` 失败 (#613)。** 在 Core 节点的 effect 处被中断、且带有 JavaScript `main()` 的运行，不持有该调用的墙钟时间、模型 token、金额和 Core 步骤的预留，因为中断会释放它们。恢复（resume）继续该调用时会重新预留。把该调用按完成处理的 reconcile 却没有。它的尝试在日志中找不到预留，运行以 `P_JS_COMMAND_JOURNAL_MISMATCH`（"Exact Core resume has no durable command resource reservation"）结束为 `failed`，宿主给出的结果从未被使用。

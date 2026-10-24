@@ -2883,19 +2883,6 @@ const char* interrupt_reason_name(InterruptReason reason) noexcept {
     return "none";
 }
 
-// The deadline `limit_ms` milliseconds after `from`. A limit that the steady clock cannot count (its nanoseconds
-// overflow a signed 64-bit count at about 292 years, and 2^63 ms overflow the millisecond count itself) is no limit in
-// practice, so it saturates to the latest time point instead of becoming a deadline in the past.
-std::chrono::steady_clock::time_point deadline_after(std::chrono::steady_clock::time_point from,
-                                                     std::uint64_t                         limit_ms) noexcept {
-    using clock               = std::chrono::steady_clock;
-    const auto latest         = clock::time_point::max();
-    if (from >= latest) return latest;
-    const auto room_ms = std::chrono::duration_cast<std::chrono::milliseconds>(latest - from).count();
-    if (limit_ms >= static_cast<std::uint64_t>(room_ms)) return latest;
-    return from + std::chrono::milliseconds(static_cast<std::int64_t>(limit_ms));
-}
-
 std::size_t applied_stack_bytes(JSContext* context, const JavaScriptCompileLimits& limits) noexcept {
     return stack_in_force(JS_GetRuntime(context), limits);
 }
