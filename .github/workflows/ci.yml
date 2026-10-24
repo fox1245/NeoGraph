@@ -104,10 +104,27 @@ jobs:
       - name: Install build dependencies
         run: |
           brew update
-          brew install cmake libpq openssl@3 sqlite curl
+          brew install cmake libpq openssl@3 sqlite curl ccache
           echo "CMAKE_PREFIX_PATH=$(brew --prefix libpq):$(brew --prefix sqlite):$(brew --prefix openssl@3):$(brew --prefix curl)" >> $GITHUB_ENV
+      # The compiler is most of this lane (about 20 of 24 minutes): a restored cache makes a pull
+      # request recompile only what it changed. Same scheme as the Linux lane above.
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+      - name: Configure ccache
+        run: |
+          echo "CCACHE_DIR=$HOME/.ccache" >> $GITHUB_ENV
+          ccache --max-size=500M
+          ccache --zero-stats
       - name: Verify macOS all-backend build (PG build-only)
-        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs auto
+        run: python scripts/verify_ci.py native-posix --work-dir build-native --jobs auto --ccache
+      - name: ccache stats
+        if: always()
+        run: ccache --show-stats
       - name: Upload test logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
