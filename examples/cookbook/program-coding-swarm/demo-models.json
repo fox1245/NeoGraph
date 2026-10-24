@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "id": "demo-orchestrator-v1",
+      "origins": [
+        "https://api.anthropic.com"
+      ],
+      "context_window": 32768,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.000002",
+        "output": "0.00001"
+      }
+    },
+    {
+      "id": "demo-coder-cheap-v1",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 32768,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.00000015",
+        "output": "0.0000006",
+        "ceiling_input": "0.0000003",
+        "ceiling_output": "0.0000012"
+      }
+    },
+    {
+      "id": "demo-coder-strong-v1",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 32768,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.0000004",
+        "output": "0.0000016",
+        "ceiling_input": "0.0000008",
+        "ceiling_output": "0.0000032"
+      }
+    },
+    {
+      "id": "demo-reviewer-v1",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 32768,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.00000025",
+        "output": "0.000001",
+        "ceiling_input": "0.0000005",
+        "ceiling_output": "0.000002"
+      }
+    },
+    {
+      "id": "demo-second-opinion-v1",
+      "origins": [
+        "https://openrouter.ai"
+      ],
+      "context_window": 32768,
+      "input_limit": 8192,
+      "output_limit": 4096,
+      "pricing": {
+        "input": "0.0000003",
+        "output": "0.0000012",
+        "ceiling_input": "0.0000006",
+        "ceiling_output": "0.0000024"
+      }
+    }
+  ],
+  "providers": {
+    "anthropic": {
+      "id": "coding-swarm-anthropic",
+      "family": "anthropic.messages",
+      "base_url": "https://api.anthropic.com",
+      "path": "/v1/messages",
+      "env_key": "ANTHROPIC_API_KEY"
+    },
+    "openrouter": {
+      "id": "coding-swarm-openrouter",
+      "family": "openai.chat",
+      "base_url": "https://openrouter.ai",
+      "path": "/api/v1/chat/completions",
+      "env_key": "OPENROUTER_API_KEY"
+    }
+  },
+  "roles": {
+    "orchestrator": {
+      "backend": "anthropic",
+      "model": "demo-orchestrator-v1",
+      "max_output_tokens": 512
+    },
+    "implementer": {
+      "backend": "openrouter",
+      "model": "demo-coder-cheap-v1",
+      "max_output_tokens": 512,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "implementer-cheap": {
+      "backend": "openrouter",
+      "model": "demo-coder-cheap-v1",
+      "max_output_tokens": 512,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "implementer-strong": {
+      "backend": "openrouter",
+      "model": "demo-coder-strong-v1",
+      "max_output_tokens": 512,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "reviewer": {
+      "backend": "openrouter",
+      "model": "demo-reviewer-v1",
+      "max_output_tokens": 384,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    },
+    "second-opinion": {
+      "backend": "openrouter",
+      "model": "demo-second-opinion-v1",
+      "max_output_tokens": 384,
+      "provider": {
+        "sort": "price",
+        "allow_fallbacks": true,
+        "data_collection": "allow"
+      }
+    }
+  }
+}

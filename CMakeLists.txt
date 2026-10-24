@@ -1805,6 +1805,24 @@ if(NEOGRAPH_BUILD_EXAMPLES)
                     target_link_libraries(cookbook_program_chatbot PRIVATE
                         neograph::program_postgres neograph::postgres PostgreSQL::PostgreSQL)
                 endif()
+
+                if(NEOGRAPH_BUILD_SQLITE)
+                    add_executable(cookbook_program_coding_swarm
+                        examples/cookbook/program-coding-swarm/program_coding_swarm.cpp)
+                    target_include_directories(cookbook_program_coding_swarm PRIVATE
+                        "${CMAKE_CURRENT_SOURCE_DIR}/examples")
+                    configure_file(
+                        "${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/program-coding-swarm/demo-models.json"
+                        "${CMAKE_CURRENT_BINARY_DIR}/examples/cookbook/program-coding-swarm/demo-models.json"
+                        COPYONLY)
+                    configure_file(
+                        "${CMAKE_CURRENT_SOURCE_DIR}/examples/cookbook/program-coding-swarm/live-models.json"
+                        "${CMAKE_CURRENT_BINARY_DIR}/examples/cookbook/program-coding-swarm/live-models.json"
+                        COPYONLY)
+                    target_link_libraries(cookbook_program_coding_swarm PRIVATE
+                        neograph::program neograph::llm neograph::program_sqlite
+                        neograph::sqlite SQLite::SQLite3 OpenSSL::Crypto cppdotenv)
+                endif()
             endif()
 
             # "The Beast" — a self-evolving agent that WRITES its own
