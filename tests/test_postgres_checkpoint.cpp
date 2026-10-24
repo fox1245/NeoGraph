@@ -35,7 +35,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -261,6 +263,15 @@ Checkpoint make_state_cp(const std::string& thread_id,
     cv["global_version"] = static_cast<uint64_t>(channels.size());
     cp.channel_values = cv;
     return cp;
+}
+
+// The value of one channel of a checkpoint built by make_state_cp(), or null when it has none.
+json channel_val(const Checkpoint& cp, const std::string& name) {
+    if (!cp.channel_values.contains("channels")) return json();
+    const auto& channels = cp.channel_values.at("channels");
+    if (!channels.contains(name)) return json();
+    const auto& channel = channels.at(name);
+    return channel.contains("value") ? channel.at("value") : json();
 }
 
 class PostgresCheckpointTest : public ::testing::Test {
@@ -1836,4 +1847,178 @@ TEST_F(PostgresCheckpointTest, SaveOrderMigratesThePreviousSchemaOnAnAsyncReconn
     const auto latest = latest_async_now(*pool, "t");
     ASSERT_TRUE(latest);
     EXPECT_EQ(latest->id, fresh.id);
+}
+
+TEST_F(PostgresCheckpointTest, FourStoresInterleavePutsAndGetsWithinTimeout) {
+    auto task = std::async(std::launch::async, [] {
+        constexpr size_t kStorePoolSize = 2;
+        PostgresCheckpointStore s1(pg_url(), kStorePoolSize);
+        PostgresCheckpointStore s2(pg_url(), kStorePoolSize);
+        PostgresCheckpointStore s3(pg_url(), kStorePoolSize);
+        PostgresCheckpointStore s4(pg_url(), kStorePoolSize);
+
+        std::array<PostgresCheckpointStore*, 4> stores = {&s1, &s2, &s3, &s4};
+        std::vector<std::future<void>> workers;
+        workers.reserve(stores.size());
+
+        for (size_t worker_idx = 0; worker_idx < stores.size(); ++worker_idx) {
+            workers.push_back(std::async(std::launch::async, [&stores, worker_idx] {
+                for (int round = 0; round < 3; ++round) {
+                    const std::string tid =
+                        "multi-store-t-" + std::to_string(worker_idx) + "-" + std::to_string(round);
+                    const int old_step = round * 20 + static_cast<int>(worker_idx) * 2 + 1;
+                    const int new_step = old_step + 1;
+
+                    auto cp_old = make_state_cp(
+                        tid, old_step, {{"v", {old_step, static_cast<uint64_t>(round * 2 + 1)}}});
+                    auto cp_new = make_state_cp(
+                        tid, new_step, {{"v", {new_step, static_cast<uint64_t>(round * 2 + 2)}}});
+                    cp_new.parent_id = cp_old.id;
+
+                    auto& old_saver  = *stores[(worker_idx + static_cast<size_t>(round)) % stores.size()];
+                    auto& old_writer = *stores[(worker_idx + static_cast<size_t>(round) + 1) % stores.size()];
+                    auto& new_saver  = *stores[(worker_idx + static_cast<size_t>(round) + 2) % stores.size()];
+                    auto& new_writer = *stores[(worker_idx + static_cast<size_t>(round) + 3) % stores.size()];
+
+                    old_saver.save(cp_old);
+
+                    PendingWrite pw_old;
+                    pw_old.task_id   = "task-old-" + std::to_string(worker_idx) + "-" + std::to_string(round);
+                    pw_old.task_path = "s0:executor_old";
+                    pw_old.node_name = "executor";
+                    pw_old.writes    = json::array({json{{"channel", "ch"}, {"value", old_step}}});
+                    pw_old.command   = json();
+                    pw_old.sends     = json::array();
+                    pw_old.step      = old_step;
+                    pw_old.timestamp = old_step;
+                    old_writer.put_writes(tid, cp_old.id, pw_old);
+
+                    new_saver.save(cp_new);
+
+                    PendingWrite pw_new;
+                    pw_new.task_id   = "task-new-" + std::to_string(worker_idx) + "-" + std::to_string(round);
+                    pw_new.task_path = "s0:executor_new";
+                    pw_new.node_name = "executor";
+                    pw_new.writes    = json::array({json{{"channel", "ch"}, {"value", new_step}}});
+                    pw_new.command   = json();
+                    pw_new.sends     = json::array();
+                    pw_new.step      = new_step;
+                    pw_new.timestamp = new_step;
+                    new_writer.put_writes(tid, cp_new.id, pw_new);
+
+                    auto latest = old_writer.load_latest(tid);
+                    if (!latest || latest->id != cp_new.id || latest->step != new_step ||
+                        channel_val(*latest, "v") != json(new_step)) {
+                        throw std::runtime_error("load_latest did not return the newest checkpoint");
+                    }
+
+                    // Read the older checkpoint by ID after the newer checkpoint was saved.
+                    auto by_old = new_writer.load_by_id(cp_old.id);
+                    if (!by_old || by_old->id != cp_old.id || by_old->step != old_step ||
+                        channel_val(*by_old, "v") != json(old_step)) {
+                        throw std::runtime_error("load_by_id did not preserve the older checkpoint");
+                    }
+
+                    auto by_new = old_saver.load_by_id(cp_new.id);
+                    if (!by_new || by_new->id != cp_new.id || by_new->step != new_step ||
+                        channel_val(*by_new, "v") != json(new_step)) {
+                        throw std::runtime_error("load_by_id did not return the newer checkpoint");
+                    }
+
+                    auto writes_old = new_saver.get_writes(tid, cp_old.id);
+                    if (writes_old.size() != 1 || writes_old[0].task_id != pw_old.task_id ||
+                        writes_old[0].step != old_step ||
+                        writes_old[0].writes[0]["value"] != json(old_step)) {
+                        throw std::runtime_error("get_writes did not isolate the older checkpoint writes");
+                    }
+
+                    auto writes_new = old_saver.get_writes(tid, cp_new.id);
+                    if (writes_new.size() != 1 || writes_new[0].task_id != pw_new.task_id ||
+                        writes_new[0].step != new_step ||
+                        writes_new[0].writes[0]["value"] != json(new_step)) {
+                        throw std::runtime_error("get_writes did not isolate the newer checkpoint writes");
+                    }
+                }
+            }));
+        }
+
+        for (auto& worker : workers) {
+            worker.get();
+        }
+    });
+
+    ASSERT_EQ(task.wait_for(std::chrono::seconds(15)), std::future_status::ready)
+        << "Four stores concurrent put/get interleaving timed out";
+    EXPECT_NO_THROW(task.get());
+}
+
+TEST_F(PostgresCheckpointTest, ThirdStoreConstructionDoesNotBlockOnActiveTableLocks) {
+    PostgresCheckpointStore s1(pg_url(), 2);
+    PostgresCheckpointStore s2(pg_url(), 2);
+
+    auto seed = make_state_cp("lock-check-t", 1, {{"v", {10, 1}}});
+    s1.save(seed);
+
+    PendingWrite seed_write;
+    seed_write.task_id   = "seed-task";
+    seed_write.task_path = "s0:seed";
+    seed_write.node_name = "seed";
+    seed_write.writes    = json::array({json{{"channel", "v"}, {"value", 10}}});
+    seed_write.command   = json();
+    seed_write.sends     = json::array();
+    seed_write.step      = 1;
+    seed_write.timestamp = 1;
+    s2.put_writes("lock-check-t", seed.id, seed_write);
+
+    // Hold AccessShareLock on neograph_checkpoints and neograph_checkpoint_blobs
+    // in two open transactions while constructing stores 3 and 4. Unconditional
+    // ALTER TABLE in ensure_schema() would request AccessExclusiveLock and hang.
+    TestPgConn holder_one{PQconnectdb(pg_url())};
+    TestPgConn holder_two{PQconnectdb(pg_url())};
+    ASSERT_EQ(PQstatus(holder_one.raw), CONNECTION_OK) << PQerrorMessage(holder_one.raw);
+    ASSERT_EQ(PQstatus(holder_two.raw), CONNECTION_OK) << PQerrorMessage(holder_two.raw);
+    ASSERT_EQ(exec_ok(holder_one.raw,
+                      "BEGIN; SELECT COUNT(*) FROM neograph_checkpoints"),
+              "");
+    ASSERT_EQ(exec_ok(holder_two.raw,
+                      "BEGIN; SELECT COUNT(*) FROM neograph_checkpoint_blobs"),
+              "");
+
+    auto task = std::async(std::launch::async, [&s1, &s2, &seed] {
+        PostgresCheckpointStore s3(pg_url(), 2);
+        PostgresCheckpointStore s4(pg_url(), 2);
+
+        auto next_cp = make_state_cp("lock-check-t", 2, {{"v", {20, 2}}});
+        next_cp.parent_id = seed.id;
+        s3.save(next_cp);
+
+        auto latest = s4.load_latest("lock-check-t");
+        if (!latest || latest->id != next_cp.id || channel_val(*latest, "v") != json(20)) {
+            throw std::runtime_error("store 4 failed to read latest checkpoint saved by store 3");
+        }
+
+        auto original = s3.load_by_id(seed.id);
+        if (!original || original->id != seed.id || channel_val(*original, "v") != json(10)) {
+            throw std::runtime_error("store 3 failed to read seed checkpoint by ID");
+        }
+
+        auto writes = s4.get_writes("lock-check-t", seed.id);
+        if (writes.size() != 1 || writes[0].task_id != "seed-task") {
+            throw std::runtime_error("store 4 failed to read seed writes");
+        }
+
+        auto s1_latest = s1.load_latest("lock-check-t");
+        auto s2_latest = s2.load_latest("lock-check-t");
+        if (!s1_latest || !s2_latest || s1_latest->id != next_cp.id || s2_latest->id != next_cp.id) {
+            throw std::runtime_error("stores 1 and 2 did not observe checkpoint saved by store 3");
+        }
+    });
+
+    const auto status = task.wait_for(std::chrono::seconds(10));
+    (void)exec_ok(holder_one.raw, "ROLLBACK");
+    (void)exec_ok(holder_two.raw, "ROLLBACK");
+
+    ASSERT_EQ(status, std::future_status::ready)
+        << "Constructing a third and fourth store hung behind active table locks";
+    EXPECT_NO_THROW(task.get());
 }
