@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=1e2a8175a45682b2b8acd37bcef658f4993750cc0e379fd7e983364261e38e83 -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ja source_sha256=35dc6382d17b6c83ead0c106b60b92a35350a6139b38d9fa91a5019009e8872c -->
 # ライブ・エンドツーエンド・スイート
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -12,7 +12,7 @@
   - Claude 5.5 モデル。
   - 画像入力。
   - すべてのプリセットでの強制ツール呼び出しと、ツールの往復全体。
-  - OpenRouter Chat と Gemini Generate が生成した画像の保持。
+  - Gemini Generate が生成した画像の保持。
   - Generate の応答モダリティと音声設定を使う Gemini の音声合成（バッファとストリーム）と Lyria のクリップ。
   - OpenAI Responses の hosted ウェブ検索（バッファとストリーム）。
   - Anthropic Messages の制御：thinking モードと effort、tool choice、temperature の規則、プロンプトキャッシュ、そして OpenRouter 経由の同じ制御。
@@ -39,7 +39,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 ```
 
 - **キー。** env ファイルには `OPENAI_API_KEY`、`GEMINI_API_KEY`、`ANTHROPIC_API_KEY`、`OPENROUTER_API_KEY` を入れます。スクリプトはこれらをテストプロセスにだけ渡します。表示も保存もせず、失敗メッセージにキーの値が現れれば別の文字列に置き換えます。
-- **モデル。** `tests/live/manifest.json` の `models` セクションは、各モデルロール（`openai.chat`、`anthropic.messages`、`anthropic.messages.adaptive` など）を既定のモデル ID にマッピングし、Python スイートは `live_support.live_model(role)` でそれを解決します。環境変数または env ファイルで `NG_LIVE_MODEL_<ROLE>`（`.` と `-` を `_` に置き換えて大文字にした名前、たとえば `NG_LIVE_MODEL_OPENAI_CHAT`）を設定すると、コードを変更せずにそのロールのモデルを上書きできます。
+- **モデル。** `tests/live/manifest.json` の `models` セクションは、各モデルロール（`openai.chat`、`anthropic.messages`、`anthropic.messages.adaptive` など）を既定のモデル ID にマッピングし、Python スイートは `live_support.live_model(role)` でそれを解決します。Google モデルは OpenRouter を経由せず、`GEMINI_API_KEY`（`google.generate` と `google.interactions` のロール）で直接呼び出します。環境変数または env ファイルで `NG_LIVE_MODEL_<ROLE>`（`.` と `-` を `_` に置き換えて大文字にした名前、たとえば `NG_LIVE_MODEL_OPENAI_CHAT`）を設定すると、コードを変更せずにそのロールのモデルを上書きできます。
 - **クリーンなツリー。** レポートはコミットを指すので、`run` はコミットしていない変更がある作業ツリーを拒否します。
 - **バージョン。** `run` はツリーのバージョンと異なる `neograph_engine` を拒否します。
 - **出力。** `tests/live/report.json` を書きます。コミット、ツリーのハッシュ、NeoGraph のバージョン、SchemaProvider の固定コミット、そしてすべてのケースとその結果が入ります。

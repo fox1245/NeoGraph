@@ -14,7 +14,6 @@
   "openai.moderation": "omni-moderation-latest",
   "openai.responses": "gpt-6-luna",
   "openrouter.chat": "openai/gpt-oss-20b",
-  "openrouter.chat.image": "google/gemini-3.1-flash-lite-image",
   "openrouter.embeddings": "openai/text-embedding-3-small",
   "openrouter.messages": "anthropic/claude-haiku-4.5",
   "openrouter.responses": "openai/gpt-oss-20b"
@@ -85,8 +84,6 @@
   "py:test_live_matrix::test_gemini_tts[collect]",
   "py:test_live_matrix::test_gemini_tts[stream]",
   "py:test_live_matrix::test_lyria_clip[lyria-clip]",
-  "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[collect]",
-  "py:test_live_matrix::test_openrouter_chat_keeps_generated_images[stream]",
   "py:test_live_matrix::test_responses_hosted_web_search[collect]",
   "py:test_live_matrix::test_responses_hosted_web_search[stream]",
   "py:test_live_matrix::test_text[anthropic.messages-collect]",
