@@ -110,7 +110,9 @@ public:
                 // The host took nothing.
             }
             scheduled_.store(false);
-            if (!relied_.exchange(false) || ++asked == max_asks) return;
+            // A wake that has asked its last time returns without taking the note: another wake that counted on a
+            // re-ask may still be in flight, and the note is the only thing that makes its refusal ask again.
+            if (++asked == max_asks || !relied_.exchange(false)) return;
         }
     }
 
