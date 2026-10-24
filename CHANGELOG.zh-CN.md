@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=2670ae9069e740b16b4c205ba4acfe6338d12ff723b86b7ee3303d2528e448f4 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=7738e1b03a713f084b1e334808b58bab8d54b6829f74bf8d04ae1d29407ceffe -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -195,6 +195,11 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **其他检查保持不变。** 环、缺失的父节点、属于其他线程或其他 schema 的父节点，以及父节点是更晚步骤的暂停的暂停，仍和以前一样被拒绝；阻塞式遍历（`fork`、`resume_pending_writes`）和 awaitable 遍历（`resume`）都是如此，两者现在共用这些检查。**行为变更：**父节点是更晚步骤的暂停的暂停，其拒绝信息现在是 `NodeInterrupt ancestry runs backwards across super-steps`，`NodeInterrupt ancestry crosses super-step boundaries` 不再被抛出。
   - `tests/test_abandoned_pause.cpp` 在内存存储和 SQLite 存储上覆盖：无人回答的暂停之后的第二个、第三个暂停和 fan-out 暂停，其两侧同一步骤的多个暂停，两者之间的状态更新，从相同步骤号重新开始的 run，`fork`，按检查点 ID 恢复，持久子图，以及上述拒绝。按存储参数化的 39 个用例中有 33 个在旧引擎上失败；其余六个在两边都通过，用来固定修复不应改变的情形（暂停之间有步骤完成，以及不带 `resume_if_exists` 从头开始的 run）。
 - **Python：取消 `resume_async` 的 Future 会停止被恢复的运行。** 这个调用没有创建取消令牌，所以取消它的 Future 只会结束等待，运行仍在继续，它的节点里 `input.ctx.cancel_token` 是 `None`。现在它像 `run_async` 一样，把 Future 与运行的取消令牌关联起来。**行为变更：** 被取消的 `resume_async` 现在会停止它的运行。
+- **恢复会重放 task id 最新的待处理写入，重试的步骤不再重放失败的那次尝试 (#604)。** 如果之前的尝试在保存暂停之前失败或被取消，宿主又把这一轮重新运行了一遍，同一步就会从同一个检查点运行多次：每次尝试的待处理写入都留在该检查点之下，而且每次尝试给任务起的 id 相同（`s3:calm`）。恢复以前重放的是某个 task id 最旧的一行，所以恢复重试那一步的暂停时，用的是兄弟节点在失败的那次尝试里产生的结果，被恢复的那次尝试的结果反而被丢掉。现在恢复会按从新到旧读取每个检查点的行，对每个 task id 保留最先遇到的一行。`resume`、`resume_async`、`resume_from` 和 `resume_from_async` 通过可等待的遍历读取这些行，`fork`、`resume_pending_writes` 和 `CheckpointCoordinator::load_for_resume` 通过阻塞式的遍历读取，两者使用同一套选择规则。
+  - **不变的部分。** 遍历仍然从被恢复的检查点出发，按由近到远的顺序走向同一步的祖先，所以较近检查点下的行，先于祖先下更新的行起决定作用。task id 不同的行全部保留。存储没有改动：`get_writes` 仍按插入顺序返回各行，已经存储的行也按新的方式读取。标记重试调用开始的空行（`s3:act#a1`）只看是否存在，因此不受影响。
+  - **行为变化。** 两次尝试各留下一行的 task id，会从最后记录的那次尝试重放；即使被恢复的是这两次尝试共同起点的检查点本身（按 ID 恢复），也是如此。
+  - **仍未解决的部分。** 存储对每个 `(thread, channel, version)` 只保留一个通道值，所以重用线程中另一条分支所用版本号的检查点，会读到那条分支的值。这是 #604 的另一半。
+  - `tests/test_linear_history.cpp` 在内存存储和 SQLite 上运行：第一次尝试无法保存暂停、之后重新运行的步骤，分别用 `resume`、`resume_from` 和 `fork` 回答；只有重试记录过的 task id；以及祖先、暂停和 Completed 检查点下的行，经过恢复的每一种读取路径。通道值相关的用例仍被跳过，除非设置 `NEOGRAPH_TEST_LINEAR_HISTORY=1`。
 - **Python：流式回调抛出的异常会被报告。** `run_stream` 的文档说这类异常会打印到 stderr 且不会中止运行。运行确实继续了，但什么也没有打印：pybind11 已经清除了错误，`PyErr_Print` 没有可打印的错误。现在异常交给 `sys.unraisablehook`，默认打印到 stderr；不使用 `PyErr_Print`，因为它遇到 `SystemExit` 会退出进程。**行为变更：** 抛出异常的回调不再无声无息。`resume` 和 `resume_from` 的回调走同一条路径。
 - **Python 绑定公开 `ContextArtifactKind.UntrustedSupplemental`，制品 schema 列出所有种类和放置位置 (#329)。** 该种类在 C++ 中存在但未被绑定，所以 Python 宿主无法创建或比较这个种类。`schemas/context-artifact-v1.schema.json` 只列出两种放置位置和五种种类，会拒绝代码写出的已存储制品。
 - **Python 绑定公开 `ContextPlacement.AfterHistory` 和 `ContextPlacement.BeforeHistory` (#329)。** 该枚举只绑定了 `BeforeLatestUser` 和 `AfterLatestUser`，因此尽管 C++ 组装器会排列全部四种位置，Python 宿主仍无法创建放在历史之前或之后的上下文制品。`test_every_context_placement_is_bound_and_assembles_in_its_documented_place` 为每种位置通过控制器组装一个制品，并检查提供方收到的顺序。
