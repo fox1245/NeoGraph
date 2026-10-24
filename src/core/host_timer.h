@@ -39,7 +39,7 @@ public:
     void arm_at(std::chrono::steady_clock::time_point at) {
         forget();
         timer_.expires_at(at);
-        note(at);
+        if (at < (std::chrono::steady_clock::time_point::max)()) note(at);
     }
 
     /// A timer that never expires: a signal that `cancel()` or a later `arm_*` wakes. It has no deadline, so the loop

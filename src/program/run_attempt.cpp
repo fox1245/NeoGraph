@@ -1931,16 +1931,20 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     if (std::chrono::steady_clock::now() >= deadline) (void)co_await control->cancel_async(CancellationCause::Timeout);
 
     auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
-    timer->arm_at(deadline);
-    asio::co_spawn(
-        control->deadline_executor,
-        [control, timer]() -> asio::awaitable<void> {
-            asio::error_code error;
-            co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
-            if (!error) (void)co_await control->cancel_async(CancellationCause::Timeout);
-            co_return;
-        },
-        asio::detached);
+    if (deadline < std::chrono::steady_clock::time_point::max()) {
+        timer->arm_at(deadline);
+        asio::co_spawn(
+            control->deadline_executor,
+            [control, timer]() -> asio::awaitable<void> {
+                asio::error_code error;
+                co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+                if (!error) (void)co_await control->cancel_async(CancellationCause::Timeout);
+                co_return;
+            },
+            asio::detached);
+    } else {
+        timer->arm_never();
+    }
 
     std::optional<CoreCheckpointIdentity> resume_checkpoint;
     std::optional<std::string>            resume_checkpoint_content_id;
@@ -4513,9 +4517,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return plan_result_from_child(co_await child->wait_async());
                     }
 
-                    const auto executor = co_await asio::this_coro::executor;
-                    auto timeout        = std::make_shared<async::HostTimer>(executor);
-                    timeout->arm_after(std::chrono::milliseconds(*operation.timeout_ms()));
+                    const auto executor       = co_await asio::this_coro::executor;
+                    auto       timeout        = std::make_shared<async::HostTimer>(executor);
+                    const auto await_deadline =
+                        deadline_after(std::chrono::steady_clock::now(), *operation.timeout_ms());
+                    if (await_deadline < std::chrono::steady_clock::time_point::max()) {
+                        timeout->arm_at(await_deadline);
+                    } else {
+                        timeout->arm_never();
+                    }
                     auto timeout_operation = [timeout]() -> asio::awaitable<void> {
                         asio::error_code error;
                         co_await         timeout->async_wait(
@@ -4558,9 +4568,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (remaining == 0)
                     co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                            "Program await operation timed out", operation_id);
-                const auto executor = co_await asio::this_coro::executor;
-                auto timeout        = std::make_shared<async::HostTimer>(executor);
-                timeout->arm_after(std::chrono::milliseconds(remaining));
+                const auto executor       = co_await asio::this_coro::executor;
+                auto       timeout        = std::make_shared<async::HostTimer>(executor);
+                const auto await_deadline = deadline_after(std::chrono::steady_clock::now(), remaining);
+                if (await_deadline < std::chrono::steady_clock::time_point::max()) {
+                    timeout->arm_at(await_deadline);
+                } else {
+                    timeout->arm_never();
+                }
                 auto child_token       = operation_token->fork();
                 auto timeout_expired   = std::make_shared<std::atomic<bool>>(false);
                 auto timeout_operation = cancel_after_timer(timeout, child_token, timeout_expired);
@@ -5072,8 +5087,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     await_state->timer =
                         std::make_shared<async::HostTimer>(completion_executor);
                     await_state->deadline =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining);
-                    await_state->timer->arm_at(await_state->deadline);
+                        deadline_after(std::chrono::steady_clock::now(), remaining);
+                    if (await_state->deadline < std::chrono::steady_clock::time_point::max()) {
+                        await_state->timer->arm_at(await_state->deadline);
+                    } else {
+                        await_state->timer->arm_never();
+                    }
                     await_state->completion =
                         std::make_shared<asio::experimental::channel<void(asio::error_code, int)>>(
                             completion_executor, 1);
@@ -6387,8 +6406,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             try {
                 JavaScriptCompileLimits javascript_limits;
                 javascript_limits.max_stack_bytes = control->scheduler->javascript_stack_bytes;
-                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    deadline - std::chrono::steady_clock::now());
+                const auto now                    = std::chrono::steady_clock::now();
+                const auto remaining              = deadline > now
+                    ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                    : std::chrono::milliseconds::zero();
                 javascript_limits.max_wall_time_ms =
                     remaining.count() > 0 ? static_cast<std::uint64_t>(remaining.count()) : 1;
                 auto session = JavaScriptGenerator::open(

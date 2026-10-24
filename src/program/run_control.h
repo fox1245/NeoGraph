@@ -53,6 +53,20 @@ inline std::uint64_t remaining_attempt_wall_time(
     return spent >= grant ? 0 : grant - spent;
 }
 
+// The system-clock deadline `remaining` after `system_now`. Subtracting a `system_now` before 1970 (a negative count)
+// from `max()` overflows a signed 64-bit count, whereas adding a non-negative `system_clock::duration` to a time point
+// at or before the epoch cannot overflow `max()`.
+inline std::chrono::system_clock::time_point deadline_after(std::chrono::system_clock::time_point system_now,
+                                                            std::chrono::steady_clock::duration   remaining) noexcept {
+    using clock       = std::chrono::system_clock;
+    const auto latest = clock::time_point::max();
+    if (system_now >= latest) return latest;
+    if (remaining <= std::chrono::steady_clock::duration::zero()) return system_now;
+    const auto remaining_system = std::chrono::duration_cast<clock::duration>(remaining);
+    if (system_now > clock::time_point{} && remaining_system >= latest - system_now) return latest;
+    return system_now + remaining_system;
+}
+
 enum class CancellationCause : std::uint8_t {
     None,
     User,

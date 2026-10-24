@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <stdexcept>
@@ -17,6 +18,20 @@ struct JavaScriptCompileLimits;
 }
 
 namespace neograph::program::detail {
+
+// The deadline `limit_ms` milliseconds after `from`. A limit that the steady clock cannot count (its nanoseconds
+// overflow a signed 64-bit count at about 292 years, and 2^63 ms overflow the millisecond count itself) is no limit in
+// practice, so it saturates to the latest time point instead of becoming a deadline in the past.
+inline std::chrono::steady_clock::time_point deadline_after(std::chrono::steady_clock::time_point from,
+                                                            std::uint64_t                         limit_ms) noexcept {
+    using clock               = std::chrono::steady_clock;
+    const auto latest         = clock::time_point::max();
+    if (from >= latest) return latest;
+    if (limit_ms == 0) return from;
+    const auto room_ms = std::chrono::duration_cast<std::chrono::milliseconds>(latest - from).count();
+    if (limit_ms > static_cast<std::uint64_t>(room_ms)) return latest;
+    return from + std::chrono::milliseconds(static_cast<std::int64_t>(limit_ms));
+}
 
 class JavaScriptCompileError final : public std::runtime_error {
 public:
