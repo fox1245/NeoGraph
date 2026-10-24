@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=88db004868214b62019b5cb7931a4c96be04202092fe2f4a899267951323ffe5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=11dd3e6073a7d3366b277c7cc146949ec7492ceddd784dbbffef8b2c117809fb -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -192,6 +192,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 - **对被中断的 JavaScript `ng.callCore` 以 `Completed` 调用 `reconcile()` 时，`main()` 会继续，而不是以 `P_JS_COMMAND_JOURNAL_MISMATCH` 失败 (#613)。** 在 Core 节点的 effect 处被中断、且带有 JavaScript `main()` 的运行，不持有该调用的墙钟时间、模型 token、金额和 Core 步骤的预留，因为中断会释放它们。恢复（resume）继续该调用时会重新预留。把该调用按完成处理的 reconcile 却没有。它的尝试在日志中找不到预留，运行以 `P_JS_COMMAND_JOURNAL_MISMATCH`（"Exact Core resume has no durable command resource reservation"）结束为 `failed`，宿主给出的结果从未被使用。
   - **现在** reconcile 与恢复一样为该调用预留资源。继续该调用的尝试持有预留，并获得日志所持有的量；调用按这笔预留结算，`main()` 以 reconcile 的结果继续，运行结束时保留未花费的 token 和金额。若进程在已 reconcile 的调用内部停止，重启后的进程所恢复的尝试能在日志中找到预留。
+  - **行为变更：** 在开始之前就结束的已 reconcile 的调用（被取消、超过期限、宿主拒绝其容量，或处理器在第一个事件 `Started` 处抛出）与恢复一样 (#557)，以 reconcile 留给它的剩余预算结束；为该调用预留的墙钟时间、模型 token、金额和 Core 步骤不会退还，因为没有任何东西度量过它们的使用。此前，这样的运行会退还全部预算。
   - **不变。** 以 `Unknown` 或 `Failed` 结束的 reconcile、把非 Core 调用的 JavaScript 命令按完成处理的 reconcile，以及没有 JavaScript `main()` 的运行的 reconcile，走的路径与之前相同。
   - **测试。** `ProgramRuntimeTest`（内存与 SQLite）和 `ProgramHostPumpedStores` 完成一个被 reconcile 的 `ng.callCore`，把其尝试获得的预算与日志比较，在第一个调用之后 reconcile 第二个调用，并恢复在调用内部停止的、已 reconcile 的尝试。在之前的引擎上，它们都没能越过 reconcile，运行以上述代码结束为 `failed`。
 - **无人回答的暂停之后出现的暂停可以恢复了 (#600)。** 宿主没有恢复某个 `NodeInterrupt`，而是在同一线程上用 `resume_if_exists` 再次启动 run（被取消的任务、已关闭的会话、下一条消息）时，第一个暂停仍是新 run 所保存检查点的父节点；若新 run 的第一个超步也暂停，恢复这第二个暂停会在任何节点运行之前以 `NodeInterrupt ancestry crosses super-step boundaries` 失败。对它做 `fork`、以及处于同一状态的持久子图的子图，也是如此。如果两个暂停之间新 run 有一个步骤已经完成，该步骤会保存一个 Completed 检查点，第二个暂停挂在它下面，因此不受影响。现在恢复所重放的 pending write 属于该暂停自己的超步：沿祖先的遍历读取该步骤的各个暂停以及该步骤开始时所在的检查点，到了更早步骤的暂停处，读取记录在其下、属于本步骤的 write（新 run 该步骤中已完成的兄弟节点），然后停止。

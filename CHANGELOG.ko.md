@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=88db004868214b62019b5cb7931a4c96be04202092fe2f4a899267951323ffe5 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=11dd3e6073a7d3366b277c7cc146949ec7492ceddd784dbbffef8b2c117809fb -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -192,6 +192,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 - **중단된 JavaScript `ng.callCore`를 `Completed`로 `reconcile()`하면 `P_JS_COMMAND_JOURNAL_MISMATCH`로 실패하지 않고 `main()`이 계속됩니다 (#613).** Core 노드의 효과(effect)에서 중단된 JavaScript `main()` 실행은 그 호출의 벽시계 시간, 모델 토큰, 금액, Core 스텝에 대한 예약을 갖고 있지 않습니다. 중단이 예약을 풀기 때문입니다. 재개(resume)는 호출을 이어 갈 때 예약을 다시 잡습니다. 호출을 완료로 처리하는 reconcile은 그러지 않았습니다. 그 시도는 저널에서 예약을 찾지 못했고, 실행은 `P_JS_COMMAND_JOURNAL_MISMATCH`("Exact Core resume has no durable command resource reservation")와 함께 `failed`로 끝났으며, 호스트가 준 결과는 쓰이지 않았습니다.
   - **이제** reconcile이 재개와 같이 호출의 자원을 예약합니다. 호출을 이어 가는 시도는 예약을 갖고 저널이 가진 만큼을 부여받으며, 호출은 그 예약으로 정산하고, `main()`은 reconcile된 결과로 계속되며, 실행은 쓰지 않은 토큰과 금액을 남긴 채 끝납니다. reconcile된 호출 안에서 멈춘 뒤 재시작한 프로세스가 복구한 시도는 저널에서 예약을 찾습니다.
+  - **동작 변경:** 시작되기 전에 끝나는 reconcile된 호출(취소되거나, 마감이 지나거나, 호스트가 용량을 거부하거나, 첫 이벤트 `Started`에서 핸들러가 던지는 경우)은 재개와 같이 (#557) reconcile이 남겨 준 남은 예산으로 끝납니다. 그 호출을 위해 예약한 벽시계 시간, 모델 토큰, 금액, Core 스텝은 사용량을 잰 것이 없으므로 돌려주지 않습니다. 이전에는 이런 실행이 예산 전부를 돌려받았습니다.
   - **그대로인 것.** `Unknown` 또는 `Failed`로 끝나는 reconcile, Core 호출이 아닌 JavaScript 명령을 완료로 처리하는 reconcile, JavaScript `main()`이 없는 실행의 reconcile은 전과 같은 경로를 탑니다.
   - **테스트.** `ProgramRuntimeTest`(인메모리와 SQLite)와 `ProgramHostPumpedStores`가 reconcile된 `ng.callCore`를 완료시키고, 시도가 부여받은 예산을 저널과 비교하고, 첫 호출 뒤의 두 번째 호출을 reconcile하고, 호출 안에서 멈춘 reconcile된 시도를 복구합니다. 이전 엔진에서는 어느 것도 reconcile을 넘지 못했고, 실행은 위 코드와 함께 `failed`로 끝났습니다.
 - **응답이 없던 일시 정지 뒤에 온 일시 정지를 재개할 수 있습니다 (#600).** `NodeInterrupt`를 재개하지 않고 같은 스레드에서 `resume_if_exists`로 다시 run을 시작한 호스트(취소된 태스크, 닫힌 세션, 다음 메시지)에서는 첫 번째 일시 정지가 새 run이 저장하는 체크포인트의 부모로 남았고, 새 run의 첫 슈퍼스텝도 일시 정지하면 그 두 번째 일시 정지를 재개할 때 노드가 하나도 실행되기 전에 `NodeInterrupt ancestry crosses super-step boundaries`로 실패했습니다. 그 일시 정지의 `fork`와, 같은 상태에 있는 영속 서브그래프의 자식도 마찬가지였습니다. 두 일시 정지 사이에 새 run의 스텝이 하나라도 완료되었다면 그 스텝이 Completed 체크포인트를 저장해 두 번째 일시 정지가 거기에 달렸으므로 영향을 받지 않았습니다. 이제 재개가 재생하는 pending write는 그 일시 정지 자신의 슈퍼스텝의 것입니다. 조상을 따라가는 탐색은 그 스텝의 일시 정지들과 그 스텝이 시작된 체크포인트를 읽고, 더 이른 스텝의 일시 정지에서는 그 아래에 이 스텝 몫으로 기록된 write(새 run의 스텝에서 끝난 형제들)를 읽은 뒤 멈춥니다.
