@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=525f458c89beba4734a3f3e1f9510e59a02842cb220f8d089ba2d828a3fbcf2c -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -374,12 +374,12 @@ Pythonでは、Python専用のスケジューラーを別に用意するので�
 | リトライとノードキャッシュのポリシー | `RetryPolicy`、`CacheScope` | グラフ／ノードのセッターとキャッシュスコープ | 同じランタイムポリシー |
 | チェックポイント、HITL、タイムトラベル | チェックポイントストアと再開のAPI | resume、`resume_from` の正確な指定、フォーク、状態の履歴／更新 | 同じチェックポイントの契約 |
 | A2A または ACP でエージェントを提供する | `A2AServer`、`ACPServer` | `ProtocolHostAdapter` の背後の公式 SDK サーバー | セッション、キャンセル、トークンのストリーミング、グラフのインタラプト(`input-required`、権限リクエスト)。コラボレーションエンベロープ、Program ベースのタスク、テナント分離はなし |
-| Programの作成とローカル実行 | コンパイラー、Catalog、`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、ハンドル／結果 | ネイティブの、オーナー単位の簡易ホスト |
+| Programの作成とローカル実行 | コンパイラー、Catalog、`ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`（`admit`、`start`/`resume`/`fork`、`replace`、`migrate_graph`、`register_synthesis_validator`、`prepare_child_synthesis`）、ハンドル／結果 | ネイティブの、オーナー単位の簡易ホスト |
 | 必須のライフサイクルHook | レジストリ、ランナー、`HookRuntime` | 定義と `create_hook_runtime` のコールバック | 同じフェイルクローズのライフサイクル境界 |
 | ランタイムコンテキストとstrictディスパッチ | コンテキストストア、レシート、インターポジション | 対応する不変の値、ストア、`StrictRuntimeProfile` | 同じネイティブのコントローラー |
 | wheelのデフォルトの永続化 | SQLiteのCore／コンテキスト／ディスパッチのストア | `_HAVE_SQLITE` のエクスポート | PyPIのwheelで有効 |
 
-生の `ProgramCatalog`、遷移ストア、置き換え／マイグレーションのコントローラー、合成ゲートウェイ、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。権限を持つこれらの経路の一部だけを公開すると、必須の `proposal -> compile -> admit -> publish -> migrate/spawn` のプロトコルを迂回できてしまいます。`_HAVE_PROGRAM` は、生のコントロールプレーンの管理までC++と同等であることを示すものではありません。
+生の `ProgramCatalog`、遷移ストア、Hookのジャーナル、RPCエグゼキューターは、これまでどおり、ホストが組み立てるためのAPIです。`LocalProgramHost` はオーナー単位のランタイム上で、`register_synthesis_validator` と `proposal -> compile -> admit -> publish` の子合成ゲートウェイ、ハンドオフに基づく `replace` / `replace_async`、および `migrate_graph` / `migrate_graph_async` を公開し、バインディング独自のポリシーは追加しません。`_HAVE_PROGRAM` は、生のマルチテナントコントロールプレーンの管理までC++と同等であることを示すものではありません。
 
 `GraphEngine::run_until_safe_point_async` と `resume_from_until_safe_point_async` には、Pythonでの対応メソッドがありません。セーフポイントのリクエストは正確に1つの `GraphGenerationIdentity` を指し、エンジンは、その世代（generation）にリンクされている場合にだけリクエストを受け付けます。Programカタログは、実体化するエンジンに対してこのリンクを行います。`GraphEngine.compile` は世代を持たないエンジンを作るので、すべてのリクエストを拒否します。セーフポイントの取得は、上に挙げた置き換え／マイグレーションのコントローラーが担います。
 
@@ -553,7 +553,7 @@ Pythonで発生するProgramのエラーは型付きで、診断を保持して�
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile`、`compile_admit` | `RuntimeError` |
 | `ng.ProgramAdmissionError` | `LocalProgramHost.admit` と `compile_admit`（例：`P_ADMIT_POLICY`、`P_ADMIT_PROVIDER`） | `RuntimeError` |
-| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`（例：`P_START_BUDGET`、`P_RUN_NOT_FOUND`） | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`、`fork`、`replace`、`migrate_graph`、`prepare_child_synthesis`（例：`P_START_BUDGET`、`P_RUN_NOT_FOUND`、`P_REPLACEMENT_AUTHORITY`） | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer`、`add_registered_condition` | `ValueError`、`RuntimeError` |
 
 最初の3つの例外のメッセージは、`Program compilation failed`、`Program admission failed`、`Program operation failed` のいずれかで始まります。その後ろに、診断1件につき1行が続きます。内容は、コード、JSON pointer、メッセージで、ソース上の位置がある場合は `(source:line:col)` も付きます。`.diagnostics` は、`code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span`、`witness` を持つ辞書のリストです。
@@ -622,9 +622,41 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 モデルを呼び出すPythonノードは、プロバイダーを自分で持ちます。そのような呼び出しは、Programの予算には反映されません。
 
-### 子Program
+### 子Program、世代置換、およびグラフマイグレーション
 
-`ng.spawn` には、子のバインディングを解決するリゾルバー（child-binding resolver）が必要ですが、`LocalProgramHost` はこれを設定しません。そのため、Pythonからの `ng.spawn` は、すべて `P_CHILD_BINDING`（"Program spawn has no configured child binding resolver"）で実行が失敗します。子Programを使うには、`RuntimeConfig::child_binding_resolver` を設定するC++のホストが必要です。このリゾルバーは、バインディング名ごとに、`link_module_child` が返す `ModuleLinkReceipt` と、admission済みの子の `ProgramVersion` を対応付けます。子のライフサイクルについては、[再帰的なエージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
+`LocalProgramHost` は、静的な子のリンク、子合成ゲートウェイ、保持された `ng.checkpoint` での世代置換、およびライブルート Core グラフマイグレーションを、同期版と `_async` 版の両方で公開します。バインディングは C++ ランタイムへ転送し、独自のポリシーは追加しません。
+
+| 操作 | Python シグネチャ | 結果 / 拒否コード |
+|---|---|---|
+| 静的な子のバインド | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`；未リンクの `ng.spawn` は `P_CHILD_BINDING` で失敗 |
+| 子の開始・復旧 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`、`host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 合成バリデーターの登録 | `host.register_synthesis_validator(validate)`（`validate(proposal, bundle, reservation)` は `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` を返す） | 合成前に必須；登録済みのバリデーターがない場合はすべての合成が拒否される |
+| 子の合成 | `ProgramSynthesisProposal(...)`、`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`、`host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`、`host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`、`host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`、`host.synthesize(proposal)` | `ProgramChildSynthesisRecord`（`Bound`、または `P_CHILD_SYNTHESIS_SEMANTICS` を伴う `Failed`）；権限超過は `P_CHILD_SYNTHESIS_AUTHORITY` |
+| チェックポイントの保持 | `handle.next_handoff()` / `next_handoff_async()`、`handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` リース；`.wait()` / `.wait_async()` は `ExactProgramHandoff` を返す |
+| 世代の置換 | `host.replace(source, target, input, budget, replacement_run_id=None, trace_id="python-program-replace")` / `replace_async(...)` | 新世代の `ProgramHandle`；拒否コードは `P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF` |
+| ライブ Core グラフマイグレーション | `host.migrate_graph(source, target, semantic_adapter=None, requested_run_id=None)` / `migrate_graph_async(...)` | 承認済み互換バージョンの新世代の `ProgramHandle`；非互換グラフは `P_GRAPH_MIGRATION_INCOMPATIBLE` |
+| 系譜とレコードの参照 | `host.run_record(run_id)`、`host.run_lineage(logical_run_id)`、`host.run_generation(logical_run_id, generation)`、`host.child_syntheses(parent_run_id)` | `ProgramRunRecord`、`ProgramRunLineage`、`ProgramRunGeneration`、`list[ProgramChildSynthesisRecord]` |
+
+`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)` では、`template_identity`、`semantic_validator_identity`、`semantic_contract_identity` の 3 つが必須の `sha256` ID（`sha256:` に続く 64 文字の小文字 16 進数）であり、任意のキーワード引数で `allowed_capabilities`、`allowed_effects`、`lineage_id`、`parent_policy_fingerprint`、`minimum_execution_guarantee`、`max_source_bytes`、`max_sealed_modules` を設定します。`ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` は最初の 3 つの引数（`validator_identity`、`contract_identity`、`accepted`）にデフォルト値を持ちません。`LocalProgramHost.register_synthesis_validator(validate)` は `ProgramSynthesisSemanticDecision` を返すコールバック `validate(proposal, bundle, reservation)` を登録します。登録済みのバリデーターがない場合、すべての合成は拒否されます。ゲートウェイは、決定が grant のバリデーターと契約（`semantic_validator_identity` と `semantic_contract_identity`）を指定している場合にのみそれを受け入れ、永続的な子合成（`prepare_child_synthesis`）の決定が別のバリデーターまたは契約を指定した場合は `P_CHILD_SYNTHESIS_SEMANTICS` で `Failed` となります。
+
+```python
+# The host's reviewed identities ("sha256:" + 64 lowercase hex), from its own registry.
+TEMPLATE_ID, VALIDATOR_ID, CONTRACT_ID = reviewed_identities("child-worker")
+
+def validate_synthesis(proposal, bundle, reservation):
+    # The host's own check of the compiled child; here: it asks for no capability.
+    accepted = not proposal.requested_capabilities
+    return ng.ProgramSynthesisSemanticDecision(
+        VALIDATOR_ID,
+        CONTRACT_ID,
+        accepted,
+        evidence={"bundle_id": bundle.id, "checked": "no capabilities"},
+    )
+
+host.register_synthesis_validator(validate_synthesis)
+```
+
+置換対象の権限は元の権限の減衰範囲内でなければならず（`P_REPLACEMENT_AUTHORITY`）、`budget` は元の系譜の権威ある `remaining_budget` と一致し（`P_REPLACEMENT_BUDGET`）、対象は JavaScript 制御を持ち（`P_REPLACEMENT_TARGET`）、`input` は `previous_run_id` と `handoff` を束縛し（`P_REPLACEMENT_INPUT`）、ハンドオフ参照は有効なチェックポイント先頭と一致する必要があります（`P_REPLACEMENT_HANDOFF`）。置換が拒否された場合、元の実行は現在の世代にとどまり、保持中の `ProgramHandoff` リースも消費されません。既存の子は新世代へ引き継がれ、一致する `ng.spawn` バインディングで再結合されます。`migrate_graph` は、ライブルート Core グラフの実行をスーパーステップ境界で承認済みの互換バージョンの新世代へ移行し、`ProgramGraphMigrationTarget` の `MigrationPlan` と任意の `GraphSemanticMigrationAdapter` を適用します。ライフサイクルの詳細は[再帰的なエージェント](PROGRAM_RECURSIVE_HARNESSES.md)を参照してください。
 
 ### 予算
 

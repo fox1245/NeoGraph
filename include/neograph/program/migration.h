@@ -125,7 +125,7 @@ struct MigrationDiagnostic {
     json               source = json::object();
     json               target = json::object();
 
-    bool operator==(const MigrationDiagnostic&) const;
+    NEOGRAPH_PROGRAM_API bool operator==(const MigrationDiagnostic&) const;
 };
 
 /** Narrow, explicit mapping retained for a compatible migration dimension. */
@@ -135,7 +135,7 @@ struct MigrationMapping {
     json               source = json::object();
     json               target = json::object();
 
-    bool operator==(const MigrationMapping&) const;
+    NEOGRAPH_PROGRAM_API bool operator==(const MigrationMapping&) const;
 };
 
 using MigrationCompatibilityDiagnostic = MigrationDiagnostic;

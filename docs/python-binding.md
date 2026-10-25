@@ -380,12 +380,12 @@ Python exposes the C++ execution abilities rather than a separate Python schedul
 | Retry and node-cache policy | `RetryPolicy`, `CacheScope` | graph/node setters and cache scopes | Same runtime policy |
 | Checkpoint, HITL and time travel | checkpoint stores and resume APIs | resume, exact `resume_from`, fork, state history/update | Same checkpoint contract |
 | Serving an agent over A2A or ACP | `A2AServer`, `ACPServer` | official SDK servers behind `ProtocolHostAdapter` | Sessions, cancellation, token streaming and graph interrupts (`input-required`, permission request); no collaboration envelope, Program-backed tasks or tenant isolation |
-| Program authoring and local execution | compiler, Catalog and `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost`, handles/results | Native owner-scoped convenience host |
+| Program authoring and local execution | compiler, Catalog and `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost` (`admit`, `start`/`resume`/`fork`, `replace`, `migrate_graph`, `register_synthesis_validator`, `prepare_child_synthesis`), handles/results | Native owner-scoped convenience host |
 | Mandatory lifecycle Hooks | registry, runner and `HookRuntime` | definitions plus `create_hook_runtime` callbacks | Same fail-closed lifecycle boundary |
 | Runtime context and strict dispatch | context stores, receipts and interposition | matching immutable values, stores and `StrictRuntimeProfile` | Same native controller |
 | Durable wheel defaults | SQLite Core/context/dispatch stores | `_HAVE_SQLITE` exports | Enabled in the PyPI wheel |
 
-Raw `ProgramCatalog`, transition stores, replacement/migration controllers, synthesis gateways, Hook journals and RPC executors remain host-composition APIs. Exposing only fragments of those authority-bearing paths would bypass the required `proposal -> compile -> admit -> publish -> migrate/spawn` protocol. `_HAVE_PROGRAM` does not claim raw control-plane administration parity.
+Raw `ProgramCatalog`, transition stores, Hook journals and RPC executors remain host-composition APIs. `LocalProgramHost` exposes `register_synthesis_validator` and the bounded `proposal -> compile -> admit -> publish` child synthesis gateway, handoff-bound `replace` / `replace_async`, and `migrate_graph` / `migrate_graph_async` on its owner-scoped runtime, adding no policy of its own; `_HAVE_PROGRAM` does not claim raw multi-tenant control-plane administration parity.
 
 `GraphEngine::run_until_safe_point_async` and `resume_from_until_safe_point_async` have no Python peer. A safe-point request names one exact `GraphGenerationIdentity`, and an engine accepts it only when it was linked to that generation, which the Program catalog does for the engines it materializes. `GraphEngine.compile` builds an engine that has no generation, so it rejects every request. Capturing a safe point belongs to the replacement and migration controllers above.
 
@@ -553,7 +553,7 @@ Program errors raised in Python are typed and keep their diagnostics:
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`, `LocalProgramHost.compile` and `compile_admit` | `RuntimeError` |
 | `ng.ProgramAdmissionError` | `LocalProgramHost.admit` and `compile_admit`, for example `P_ADMIT_POLICY` or `P_ADMIT_PROVIDER` | `RuntimeError` |
-| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active` and `resume`, for example `P_START_BUDGET` or `P_RUN_NOT_FOUND` | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active`, `resume`, `fork`, `replace`, `migrate_graph` and `prepare_child_synthesis`, for example `P_START_BUDGET`, `P_RUN_NOT_FOUND` or `P_REPLACEMENT_AUTHORITY` | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer` and `add_registered_condition` | `ValueError`, `RuntimeError` |
 
 The message of the first three starts with `Program compilation failed`, `Program admission failed` or `Program operation failed`, followed by one line per diagnostic: its code, JSON pointer and message, and `(source:line:col)` when it has a source site. `.diagnostics` is a list of dicts with `code`, `severity`, `phase`, `message`, `source_id`, `json_pointer`, `span` and `witness`.
@@ -621,9 +621,41 @@ Each call is priced against the run's `monetary_microunits` from the model catal
 
 A Python node that calls a model owns its provider itself; the Program budgets do not see such a call.
 
-### Child Programs
+### Child Programs, replacement, and graph migration
 
-`ng.spawn` needs a child-binding resolver, and `LocalProgramHost` configures none. Every `ng.spawn` from Python therefore fails the run with `P_CHILD_BINDING` ("Program spawn has no configured child binding resolver"). Child Programs need a C++ host that sets `RuntimeConfig::child_binding_resolver`, which maps each binding name to the `ModuleLinkReceipt` from `link_module_child` and the admitted child `ProgramVersion`. See [recursive agents](PROGRAM_RECURSIVE_HARNESSES.md) for the child lifecycle.
+`LocalProgramHost` exposes static child linking, the child synthesis gateway, generation replacement at a held `ng.checkpoint`, and live root-Core graph migration, with synchronous and `_async` variants. The binding forwards to the C++ runtime and adds no policy of its own:
+
+| Operation | Python signature | Result / refusal codes |
+|---|---|---|
+| Bind a static child | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`; unlinked `ng.spawn` fails with `P_CHILD_BINDING` |
+| Start or recover children | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`, `host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| Register a synthesis validator | `host.register_synthesis_validator(validate)` where `validate(proposal, bundle, reservation)` returns `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` | Required before synthesis; without a registered validator every synthesis is refused |
+| Synthesize a child | `ProgramSynthesisProposal(...)`, `ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`, `host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`, `host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`, `host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`, `host.synthesize(proposal)` | `ProgramChildSynthesisRecord` (`Bound`, or `Failed` with `P_CHILD_SYNTHESIS_SEMANTICS`); excess authority raises `P_CHILD_SYNTHESIS_AUTHORITY` |
+| Hold a checkpoint | `handle.next_handoff()` / `next_handoff_async()`, `handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` lease; `.wait()` / `.wait_async()` returns `ExactProgramHandoff` |
+| Replace a generation | `host.replace(source, target, input, budget, replacement_run_id=None, trace_id="python-program-replace")` / `replace_async(...)` | `ProgramHandle` for the new generation; refuses with `P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`, `P_REPLACEMENT_HANDOFF` |
+| Migrate a live Core graph | `host.migrate_graph(source, target, semantic_adapter=None, requested_run_id=None)` / `migrate_graph_async(...)` | `ProgramHandle` for the new generation of an admitted compatible version; refuses incompatible graphs with `P_GRAPH_MIGRATION_INCOMPATIBLE` |
+| Inspect lineage and records | `host.run_record(run_id)`, `host.run_lineage(logical_run_id)`, `host.run_generation(logical_run_id, generation)`, `host.child_syntheses(parent_run_id)` | `ProgramRunRecord`, `ProgramRunLineage`, `ProgramRunGeneration`, `list[ProgramChildSynthesisRecord]` |
+
+`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)` requires `template_identity`, `semantic_validator_identity` and `semantic_contract_identity` as `sha256` identities (`sha256:` followed by 64 lowercase hex digits); optional keyword arguments configure `allowed_capabilities`, `allowed_effects`, `lineage_id`, `parent_policy_fingerprint`, `minimum_execution_guarantee`, `max_source_bytes` and `max_sealed_modules`. `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` has no defaults for `validator_identity`, `contract_identity` or `accepted`. `LocalProgramHost.register_synthesis_validator(validate)` registers a callback `validate(proposal, bundle, reservation)` that returns a `ProgramSynthesisSemanticDecision`. Without a registered validator every synthesis is refused. The gateway accepts a decision only when it names the grant's validator and contract (`semantic_validator_identity` and `semantic_contract_identity`); a durable child synthesis (`prepare_child_synthesis`) whose decision names another validator or contract ends `Failed` with `P_CHILD_SYNTHESIS_SEMANTICS`.
+
+```python
+# The host's reviewed identities ("sha256:" + 64 lowercase hex), from its own registry.
+TEMPLATE_ID, VALIDATOR_ID, CONTRACT_ID = reviewed_identities("child-worker")
+
+def validate_synthesis(proposal, bundle, reservation):
+    # The host's own check of the compiled child; here: it asks for no capability.
+    accepted = not proposal.requested_capabilities
+    return ng.ProgramSynthesisSemanticDecision(
+        VALIDATOR_ID,
+        CONTRACT_ID,
+        accepted,
+        evidence={"bundle_id": bundle.id, "checked": "no capabilities"},
+    )
+
+host.register_synthesis_validator(validate_synthesis)
+```
+
+A replacement target's authority must be an attenuation of the source's (`P_REPLACEMENT_AUTHORITY`), `budget` must equal the source lineage's authoritative `remaining_budget` (`P_REPLACEMENT_BUDGET`), the target must declare JavaScript control (`P_REPLACEMENT_TARGET`), `input` must bind `previous_run_id` and `handoff` (`P_REPLACEMENT_INPUT`), and the handoff reference must match the active checkpoint head (`P_REPLACEMENT_HANDOFF`). When a replacement is refused, the source run stays on its current generation and its held `ProgramHandoff` lease remains unconsumed. Existing children are carried over to the new generation and rejoined through matching `ng.spawn` bindings. `migrate_graph` moves a live root Core graph run to a new generation of an admitted compatible version at a super-step boundary, applying the `MigrationPlan` and optional `GraphSemanticMigrationAdapter` of its `ProgramGraphMigrationTarget`. See [recursive agents](PROGRAM_RECURSIVE_HARNESSES.md) for the lifecycle.
 
 ### Budgets
 

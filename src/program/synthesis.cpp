@@ -967,6 +967,13 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramSynthesisGateway::continue_c
         co_await save(State::Validating, record.data().artifacts);
         auto       bundle   = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
         auto       semantic = config_.validate_semantics(request, bundle, reserved);
+        // As synthesize_child(): a decision is the grant's only when it names the grant's validator and contract.
+        const auto& grant_data = record.data().grant.data();
+        if (semantic.validator_identity != grant_data.semantic_validator_identity ||
+            semantic.contract_identity != grant_data.semantic_contract_identity) {
+            co_await save(State::Failed, record.data().artifacts, "P_CHILD_SYNTHESIS_SEMANTICS");
+            co_return record;
+        }
         const auto evidence = decode(semantic.evidence);
         if (evidence.size() > config_.max_semantic_evidence_bytes)
             throw std::runtime_error("Program synthesis semantic evidence exceeds host byte limit");

@@ -16533,6 +16533,25 @@ TEST_P(ProgramChildSynthesisPersistence, SemanticRejectionPersistsEvidenceWithou
     EXPECT_EQ(test.semantic_calls, 1U);
     EXPECT_TRUE(test.handle->snapshot().children().empty());
 }
+TEST_P(ProgramChildSynthesisPersistence, ADecisionOfAnotherValidatorOrContractFailsWithoutAdmission) {
+    for (const bool validator : {false, true}) {
+        ChildSynthesisFixture test(backend(), true);
+        if (validator)
+            test.semantic_validator = digest('e');
+        else
+            test.semantic_contract = digest('e');
+        const auto proposal = ProgramSynthesisProposal::create(test.proposal_data());
+        auto       failed   = test.fixture.runtime->prepare_child_synthesis(
+            "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+            "generated-child");
+        EXPECT_EQ(failed.data().state, ProgramChildSynthesisState::Failed);
+        EXPECT_EQ(failed.data().error_code, "P_CHILD_SYNTHESIS_SEMANTICS");
+        EXPECT_FALSE(failed.data().artifacts.contains("validation"));
+        EXPECT_EQ(test.admissions, 0U);
+        EXPECT_EQ(test.semantic_calls, 1U);
+        EXPECT_TRUE(test.handle->snapshot().children().empty());
+    }
+}
 TEST_P(ProgramChildSynthesisPersistence, ConcurrentRetriesHaveOneReservationAndOneSemanticCall) {
     ChildSynthesisFixture test(backend(), true);
     const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
