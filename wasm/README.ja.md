@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=8e30105731bb1ac98766f4394fa60e0e4f62118a6fc7b7636239550b62b97b13 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=dd949ff30b9730747c8a2ff1e975d2cc92aff7cc1ebbd49f36ca991a53444138 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -180,18 +180,50 @@ programs.release();
 - **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** は、1 つのプロバイダーと 1 組のストアの上の `Programs` オブジェクトを作ります。プロバイダーが不正なとき、
   またはモジュールが Program 対応なしでビルドされているときは `NeoGraphError` を投げます。`provider` は `compile` と同じで、1 つ加わります。`catalogue` は SDK のモデルカタログ
   （`{ version: 1, models: [...] }`）で、組み込みのカタログの上に重ねられます。`owner` はオブジェクトの Program と実行のスコープを決めます。`stores` はホスト自身のストアです
-  （[JavaScript の Program ストア](#program-stores-in-javascript)）。省いたストアはメモリ上にあります。`limits` は承認される Program に与えられる最大値、`budget` は予算を指定しない実行の予算で、
+  （[JavaScript の Program ストア](#program-stores-in-javascript)）。省いたストアはメモリ上にあります。`limits` はホストの上限で、承認される Program に与えられる最大値（既定値は実行あたり動的コンパイル 1 回、子の深さ 4、子 4 個（`maxDynamicCompiles: 1`、`maxChildDepth: 4`、`maxTotalChildren: 4`）を許し、子を合成したりより深い階層を作ったりするホストはここで `maxDynamicCompiles`、`maxChildDepth`、`maxTotalChildren` を引き上げます）、`budget` は予算を指定しない実行の予算で、
   どちらも下のように書きます。`javascript` は `{ stackBytes, defineTimeMs }` で、制御ソースが使えるスタックと `define()` が実行できる時間です。予算のあとで説明します。
-- **`programs.admit(source)`** は Program をコンパイルして承認し、`{ id, bundleId, name }` で解決します。`source` は JavaScript 制御ソースのテキスト、`{ javascript, name }`、
-  またはすでにドキュメント形式の Program のための `{ document, name }` です。コンパイラーや承認ポリシーが拒否したソースは、`compile` または `admission` タイプの `NeoGraphError` で拒否され、
-  `diagnostics` に `{ code, message, pointer, witness }` が並びます。同じソースをもう一度承認すると、同じバージョンになります。
+- **`programs.admit(source)`** は Program をコンパイルして承認し、`{ id, bundleId, name }` で解決します。`source` は JavaScript 制御ソースのテキスト、`{ javascript, name, budget }` または `{ javascript, name, budgetBounds: { minimum, maximum } }`（両方がある場合は `budgetBounds` が優先されます）、
+  またはすでにドキュメント形式の Program のための `{ document, name }` です。`budget` はこのバージョンの実行に付与される正確な予算、`budgetBounds` は付与が取り得る範囲で、置き換えられるバージョンに必要です（置き換えは最初の付与より少ない元の残りの予算を引き継ぐためです）。省いたメンバーはホストの既定の予算（`budget` と `budgetBounds.maximum`）またはなし（`budgetBounds.minimum` では `0` のため、`minimum` には構造上の下限メンバーを指定する必要があります）のままです。最小値は Program の構造上の下限（同時試行、Program 操作、Core ステップがそれぞれ少なくとも 1 つ、また Program が子をディスパッチするときは深さ（段数）と子がそれぞれ少なくとも 1 つ）を満たさなければならず、満たさないものはコンパイラーが拒否します。どちらもない場合はソース自身の宣言が適用されます。コンパイラーや承認ポリシーが拒否したソースは、`compile` または `admission` タイプの `NeoGraphError` で拒否され、
+  `diagnostics` に `{ code, message, pointer, witness }` が並びます。同じソースと同じ予算範囲をもう一度承認すると同じバージョンになり、異なる `budget` または `budgetBounds` を指定すると別のバンドルとバージョンにコンパイルされます。
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** は `ProgramRun` をすぐに返します。**`programs.run(version, options)`** は `start(...).result` です。
-- **`ProgramRun`** には `id`、`versionId`、`result`、`resume(value, options)`、`fork(value, options)`、`cancel()` があります。`result` は実行が終わるか答えを待つときに解決されます。
+- **`ProgramRun`** には `id`、`versionId`、`result`、`resume(value, options)`、`fork(value, options)`、`handoff()`、`releaseHandoff()`、`replace(version, options)`、`migrateGraph(version, options)`、`synthesizeChild(binding, source, options)`、`cancel()` があります（`programs.handoff(run?)`、`programs.releaseHandoff(run)`、`programs.replace(run, version, options)`、`programs.migrateGraph(run, version, options)`、`programs.synthesizeChild(run, binding, source, options)` または `programs.synthesizeChild(run, options)` は代わりに run id または `{ id }` を受け取り、実行を指定しない `programs.handoff()` はこのオブジェクトのどの実行であれ次のチェックポイント handoff を待ちます）。`result` は実行が終わるか答えを待つときに解決されます。
   失敗した実行や取り消された実行はその状態で解決され、呼び出し自体ができなかったときだけ拒否されます（不明なバージョン、バージョンが承認する範囲を超える予算、すでに使った run id）。
   `resume` は実行が待っている割り込みに答え、同じ id の `ProgramRun` を返します。`fork` は同じ一時停止を、別の答えとともに新しい実行（`options.runId` で名前を付けます）として続け、
   一時停止中の実行が残した予算の半分（または `options.budget` が求めた分で、一時停止中の実行にウォールクロック時間と Core ステップが少しは残らなければなりません）を受け取り、一時停止中の実行は引き続き再開できます。終わったノードは再実行されません。1 つの一時停止の fork はまとめて作ってもかまいません。fork は順番を守り、各 fork は先の fork が一時停止中の実行に残したものを読んで、その半分を受け取ります。一時停止中の実行に残っているウォールクロック時間または Core ステップをすべて受け取ろうとする fork は拒否され（`P_FORK_SOURCE_BUDGET`）、残りより多くを求める fork も拒否され（`P_FORK_BUDGET`）、どちらも競合ではありません。同じ `runId` で作り直した fork はその fork であり、最初に受け取った量のままです。送った後、順番を待っている間に取り消された fork も、自分の順番に自分の取り分を受け取ってから、取り消しで終わります。
   `cancel()` は、この呼び出しが実行を取り消したかどうかで解決されます。まだ送っていない resume や fork（続きとなる実行の結果を待っているもの）は、`cancel()` や中断された `signal` が代わりに
   取り下げ、その `result` は `cancelled` エラーで拒否されます。すでに中断された `signal` なら、呼び出しは行われません。
+- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph`、`synthesizeChild`。** `handoff()` は、実行が `ng.checkpoint(value)` のセーフポイントに到達するまで待ってそこに保持し、`{ runId, journalHead, coordinateId, entryId, value }` で解決します（`releaseHandoff()` は保持を解いて実行を置き換えずにそのまま続行させ、真偽値で解決します）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` は、チェックポイント handoff に保持された実行を承認済みの別の `version` に置き換え（元の系譜の残りの予算から始め、`options.budget` で指定されたフィールドを上書きし、`journalHead`、`coordinateId`、`entryId` で handoff 参照フィールドを上書きします。`input` がオブジェクトか省略された場合、元の実行の初期 `input` はコピーせず `{}` から始め、`input.handoff` はチェックポイントの `value`、`input.previous_run_id` は元の `runId` が既定値になります）、元の実行の子を保って置き換え世代がそこに接続できるようにし、置き換えの `ProgramRun` を返します。`replace` は C++ のコード（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）で拒否し、その `code` と `witness` を持つ `NeoGraphError` で拒否され、元の実行とその保持（hold）を元のままにします。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` は、インメモリ遷移ストア上のライブルート Core グラフ実行をマイグレーションしてマイグレーション後の `ProgramRun` を返します。セマンティックマイグレーションアダプターは `semanticAdapter: true` のときだけ付与され、それがない場合は対象がその実行自身の承認済みバージョンか互換なバージョンでなければなりません（拒否時は `P_GRAPH_MIGRATION_*`。後述のとおり JavaScript 遷移ストアは `"conflict"` を返します）。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })`（または `binding` と `source` を含む単一のオプションオブジェクト）は、親実行がチェックポイント handoff に保持されている間に子バージョンを準備し、`{ id, binding, state, versionId, bundleId, proposalId, grantId }` で解決します。子の `budget` とホストの `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`）および `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）が必要で、これらがない場合は拒否されます。モジュールは子の要求からどちらも作らず、ゲートウェイは決定が grant の validator と contract を指定しているときだけその決定を受け入れます（要求された権限が親実行または grant の範囲を超える場合は `P_CHILD_SYNTHESIS_AUTHORITY`）。`synthesizeChild` が実行の保持された handoff を使っている間は、戻るまでその実行の `releaseHandoff`、`replace`、`cancel` は拒否され、同じ hold に対する 2 回目の `synthesizeChild` も拒否されます。実行は各モデル呼び出しの前にその上限を予約するため、`modelTokens` はモデル呼び出しの入力上限と出力上限をまかなえなければなりません。
+
+  ```js
+  // ホストは grant の識別子（"sha256:" + 64 桁の小文字 16 進数）を計算または保存します。
+  const TEMPLATE_ID = await hostIdentity('child template');
+  const VALIDATOR_ID = await hostIdentity('semantic validator');
+  const CONTRACT_ID = await hostIdentity('semantic contract');
+  const hold = await parentRun.handoff();
+  const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
+    budget: {
+      wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+      maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+      maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+    },
+    grant: {
+      templateIdentity: TEMPLATE_ID,
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      childBudget: {
+        wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+        maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+        maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+      },
+    },
+    semanticDecision: {
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      accepted: true,
+    },
+  });
+  await parentRun.releaseHandoff();
+  ```
 - **`programs.result(runId)`** は、ストアが実行について持っているものを読みます。最新の結果（待っている実行の一時停止も結果です）で、まだ結果がなければ `{ runId, status: 'running' }`、ストアがその実行を知らなければ `null` です。**`programs.release()`** は実行中の run を取り消して
   オブジェクトを解放し、すでに行った呼び出しは先に終わります。割り込みで待っている実行は、ストアにあるままになります。
 - **結果**は `{ runId, versionId, status, output, trace, usage, remainingBudget, checkpointId?, interrupt?, failure? }` です。`status` は `completed`、`interrupted`、`cancelled`、
@@ -299,7 +331,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 
 モジュールは C API をエクスポートし、`neograph.mjs` がそれを包みます。JSON 文字列を使う C API にはバインディング
 ライブラリが要りません。Embind はライブラリとすべての型の登録を足すことになりますが、表面は数個の関数だけです。グラフには `ng_compile`、`ng_run`、
-`ng_cancel`、`ng_release`、`ng_error`、Program には `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、`ng_programs_resume`、`ng_programs_fork`、`ng_programs_cancel`、
+`ng_cancel`、`ng_release`、`ng_error`、Program には `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_cancel`、
 `ng_programs_result`、`ng_programs_release` があります。結果は、ホストのイベントループの後のターンから呼ばれるコールバックで返ります。グラフは `Module.ngOnEvent` と
 `Module.ngOnDone`、Program は `Module.ngProgramEvent` と `Module.ngProgramDone` です。キーは `compile` に渡すプロバイダー記述の一部で、そのグラフの
 SDK クライアントが保持します。バイナリにも、どの結果にも、エラーメッセージにも入りません。
@@ -535,6 +567,7 @@ CI はモジュールをビルドし、Node 22 と 24 で、ネットワーク�
   拒否された呼び出し、投げられたエラー、値でない値は、ストアのメッセージとメソッド名つきで fail closed し、モデルは呼び出されません。必須メソッドのないオブジェクトは拒否されます。
   変わったことをログに書くラッパーのおかげで、ログから再生したストアの上の 2 つ目のオブジェクトが、終わった実行を読み戻し、止まった実行がまだ止まっていることを確かめ、最初のオブジェクトの Program を始めます。
   ストアがまだ答えている間に取り消された fork は取り消しで終わり、まとめて作った fork は順番に取り分を受け取り、綴りを間違えたメンバーと足りない系譜の読み取りメソッドは拒否され、オブジェクトを解放すると、実行中の run は取り消され、待っている run はそのまま残ります。
+- `test/program_replacement_test.mjs`: チェックポイント handoff（`handoff`、`releaseHandoff`）、チェックポイントに保持された実行の承認済み第 2 バージョンへの `replace`（残りの予算の引き継ぎ、子の保持）、5 つの置き換え拒否（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）とその `witness` およびその後も元の実行とその保持（hold）が元のままであること、実行自身の承認済みバージョンへの `migrateGraph` とそのガード拒否（同じ run id、非互換な対象）、ホストの grant と決定を伴う `synthesizeChild` と grant なしの拒否および `P_CHILD_SYNTHESIS_AUTHORITY`、実行中に子が置き換えられる `root -> child -> grandchild` 階層、さらに非同期の JavaScript `stores` オブジェクト上でのチェックポイント handoff、`replace`、`synthesizeChild` とその階層置き換えを確かめます。
 - `test/workers_test.mjs`: Workers の例がエクスポートする `fetch` ハンドラーを、同じサーバーに対して `Request` を渡して
   呼び出します。バッファ済みとストリーミングの両方です。ハンドラーのロジックとプラットフォーム API の使い方を示すもので、
   workerd での実行ではありません。

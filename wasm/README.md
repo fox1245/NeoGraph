@@ -184,17 +184,32 @@ programs.release();
   support. `provider` is as for `compile`, with one addition: `catalogue`, the SDK's model catalogue (`{ version: 1,
   models: [...] }`), which is laid over the embedded one. `owner` scopes the Programs and runs of the object.
   `stores` are the host's own stores ([Program stores in JavaScript](#program-stores-in-javascript)); a store that is left
-  out is in memory. `limits` is the most any admitted Program may be given and `budget` the budget of a run that gives
-  none, both written as below. `javascript` is `{ stackBytes, defineTimeMs }`, the stack that a control source may use
-  and the time that `define()` may run, described after the budgets.
+  out is in memory. `limits` is the host's ceiling, the most any admitted Program may be given (its defaults allow one
+  dynamic compile, a child depth of four, and four children per run: `maxDynamicCompiles: 1`, `maxChildDepth: 4`,
+  `maxTotalChildren: 4`; a host that synthesizes children or builds deeper hierarchies raises `maxDynamicCompiles`,
+  `maxChildDepth` and `maxTotalChildren` there), and `budget` is the budget of a run that gives none, both written as
+  below. `javascript` is `{ stackBytes, defineTimeMs }`, the stack that a control source may use and the time that
+  `define()` may run, described after the budgets.
 - **`programs.admit(source)`** compiles a Program and admits it, and resolves with `{ id, bundleId, name }`. `source` is
-  the text of a JavaScript control source, `{ javascript, name }`, or `{ document, name }` for a Program already in the
-  document form. A source the compiler or the admission policy refuses rejects with a `NeoGraphError` of type `compile`
-  or `admission`, whose `diagnostics` list `{ code, message, pointer, witness }`. Admitting the same source again gives
-  the same version.
+  the text of a JavaScript control source, `{ javascript, name, budget }` or `{ javascript, name, budgetBounds: {
+  minimum, maximum } }` (`budgetBounds` takes precedence if both are present), or `{ document, name }` for a Program
+  already in the document form. `budget` is the exact budget runs of this version are granted; `budgetBounds` is the
+  range a grant may take, which a version that will be replaced needs, because a replacement carries the source's
+  remaining budget, below the first grant. Members left out keep the host's default budget (`budget` and
+  `budgetBounds.maximum`) or nothing (`0`, in `budgetBounds.minimum`, so `minimum` must set the structural floor
+  members). The minimum must meet the Program's structural floor (at least one concurrent attempt, Program operation and
+  Core step; at least one level and one child when the Program dispatches children), and the compiler refuses one that
+  does not. Without either, the source's own declaration applies. A source the compiler or the admission policy refuses
+  rejects with a `NeoGraphError` of type `compile` or `admission`, whose `diagnostics` list `{ code, message, pointer,
+  witness }`. Admitting the same source and budget bounds again gives the same version; a different `budget` or
+  `budgetBounds` compiles a distinct bundle and version.
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** returns a `ProgramRun` at once.
   **`programs.run(version, options)`** is `start(...).result`.
-- **`ProgramRun`** has `id`, `versionId`, `result`, `resume(value, options)`, `fork(value, options)` and `cancel()`.
+- **`ProgramRun`** has `id`, `versionId`, `result`, `resume(value, options)`, `fork(value, options)`, `handoff()`,
+  `releaseHandoff()`, `replace(version, options)`, `migrateGraph(version, options)`, `synthesizeChild(binding, source, options)` and
+  `cancel()` (`programs.handoff(run?)`, `programs.releaseHandoff(run)`, `programs.replace(run, version, options)`,
+  `programs.migrateGraph(run, version, options)` and `programs.synthesizeChild(run, binding, source, options)` or `programs.synthesizeChild(run, options)` take a run id or
+  `{ id }` instead, and `programs.handoff()` with no run waits for the next checkpoint handoff of any run on the object).
   `result` resolves when the run ends or waits for an answer; a run that fails or is cancelled resolves with that
   status, and it rejects only when the call itself could not be made (an unknown version, a budget outside what the
   version admits, a run id that was used before). `resume` answers the interrupt the run waits at and returns a `ProgramRun` with
@@ -206,6 +221,64 @@ programs.release();
   the run. A resume or a fork that has not been sent yet, because it waits for the run it continues, is withdrawn by
   `cancel()` or an aborted `signal` instead, and its `result` rejects with a `cancelled` error; a `signal` that is
   aborted already means the call is not made.
+- **`handoff`, `releaseHandoff`, `replace`, `migrateGraph` and `synthesizeChild`.** `handoff()` waits until the run
+  reaches an `ng.checkpoint(value)` safe point, holds it there, and resolves with `{ runId, journalHead, coordinateId,
+  entryId, value }` (`releaseHandoff()` releases the hold so the run continues without replacing it, resolving with a
+  boolean). `replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })`
+  replaces a run held at a checkpoint handoff with another admitted `version` (starting from the source lineage's
+  remaining budget, with `options.budget` overriding specified fields and `journalHead`, `coordinateId` and `entryId`
+  overriding the handoff reference fields; when `input` is an object or omitted, starting from `{}` without copying the
+  source run's initial `input`, `input.handoff` defaults to the checkpoint `value` and `input.previous_run_id` defaults
+  to the source `runId`), keeps the source run's children so the replacement generation can attach to them, and returns
+  the replacement `ProgramRun`. `replace` refuses with the C++
+  codes (`P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`,
+  `P_REPLACEMENT_HANDOFF`), rejecting with a `NeoGraphError` carrying that `code` and `witness`, and leaves the source
+  run and its hold as they were. `migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` migrates a live
+  root Core graph run on the in-memory transition store and returns the migrated `ProgramRun`; it attaches a semantic
+  migration adapter only when `semanticAdapter: true`, and without one, the target must be the run's own admitted
+  version or a compatible one (`P_GRAPH_MIGRATION_*` on refusal; a JavaScript transition store answers `"conflict"`, as
+  noted below). `synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })` (or a
+  single options object with `binding` and `source`) prepares a child version while the parent run is held at a
+  checkpoint handoff and resolves with `{ id, binding, state, versionId, bundleId, proposalId, grantId }`. It needs the
+  child's `budget` and the host's `grant` (`{ templateIdentity, validatorIdentity, contractIdentity,
+  allowedCapabilities?, allowedEffects?, childBudget }`) and `semanticDecision` (`{ validatorIdentity, contractIdentity,
+  accepted, evidence? }`); without them it is refused; the module makes neither from the child's request; the gateway
+  accepts the decision only when it names the grant's validator and contract (`P_CHILD_SYNTHESIS_AUTHORITY` when the
+  requested authority exceeds the parent run's or grant's envelope). While `synthesizeChild` uses a run's held handoff,
+  `releaseHandoff`, `replace` and `cancel` of that run are refused until it returns, and a second `synthesizeChild` on
+  the same hold is refused. `modelTokens` must cover a model call's input and
+  output ceilings, because the run reserves that bound before each call.
+
+  ```js
+  // The host computes or stores the grant's identities ("sha256:" + 64 lowercase hex).
+  const TEMPLATE_ID = await hostIdentity('child template');
+  const VALIDATOR_ID = await hostIdentity('semantic validator');
+  const CONTRACT_ID = await hostIdentity('semantic contract');
+  const hold = await parentRun.handoff();
+  const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
+    budget: {
+      wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+      maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+      maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+    },
+    grant: {
+      templateIdentity: TEMPLATE_ID,
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      childBudget: {
+        wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+        maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+        maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+      },
+    },
+    semanticDecision: {
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      accepted: true,
+    },
+  });
+  await parentRun.releaseHandoff();
+  ```
 - **`programs.result(runId)`** reads what the stores hold of a run: its latest result (the pause of a run that waits is
   one), `{ runId, status: 'running' }` while it has none, or `null` when they know no such run. **`programs.release()`** cancels the runs that are executing and frees the object, and calls already made finish
   first. A run that waits at an interrupt stays as it is in the stores.
@@ -367,8 +440,9 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 The module exports a C API and `neograph.mjs` wraps it. A C API with JSON strings needs no binding library; Embind
 would add one and a registration of every type, for a surface of a few functions: `ng_compile`, `ng_run`, `ng_cancel`,
 `ng_release` and `ng_error` for graphs, and `ng_programs_create`, `ng_programs_admit`, `ng_programs_start`,
-`ng_programs_resume`, `ng_programs_fork`, `ng_programs_cancel`, `ng_programs_result` and `ng_programs_release` for
-Programs. Results come back through callbacks, `Module.ngOnEvent` and `Module.ngOnDone` for a graph and
+`ng_programs_resume`, `ng_programs_fork`, `ng_programs_handoff`, `ng_programs_release_handoff`, `ng_programs_replace`,
+`ng_programs_migrate_graph`, `ng_programs_synthesize_child`, `ng_programs_cancel`, `ng_programs_result` and
+`ng_programs_release` for Programs. Results come back through callbacks, `Module.ngOnEvent` and `Module.ngOnDone` for a graph and
 `Module.ngProgramEvent` and `Module.ngProgramDone` for a Program, called from a later turn of the host's event loop. The key is part of the provider description that `compile` is given and is
 held by the SDK client of that graph; it is not in the binary, not in any result, and not in an error message.
 
@@ -636,6 +710,14 @@ CI builds the module and runs, under Node 22 and 24, with no network and no key:
   store replayed from the log, read back a finished run, see that a paused one is still paused and start the first object's
   Program; a fork cancelled while the stores are still answering ends cancelled, and forks made together take their shares in turn; a misspelt member and a missing lineage
   reader are refused; releasing an object cancels a run that is executing and leaves one that waits as it is.
+- `test/program_replacement_test.mjs`: checkpoint handoff (`handoff`, `releaseHandoff`), `replace` of a run held at a
+  checkpoint with an admitted second version (remaining budget carried over, children kept), the five replacement refusals
+  (`P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`, `P_REPLACEMENT_HANDOFF`)
+  with their `witness` and the source run and its hold left as they were, `migrateGraph` to the run's own admitted version
+  and its guard refusals (same run id, an incompatible target), `synthesizeChild` with the host's grant and decision, its
+  refusal without a grant, and `P_CHILD_SYNTHESIS_AUTHORITY`, a `root -> child -> grandchild` hierarchy whose child is
+  replaced while it runs, and checkpoint handoff, `replace`, `synthesizeChild` and that hierarchy replacement over an
+  asynchronous JavaScript `stores` object.
 - `test/workers_test.mjs`: the Workers example's exported `fetch` handler is called with a `Request` against the same
   server, buffered and streamed. It shows the handler's logic and its use of the platform APIs; it is not a run on
   workerd.

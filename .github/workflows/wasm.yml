@@ -124,6 +124,8 @@ jobs:
           tail -n 1 workers.out | grep -q '^all checks passed$'
           node wasm/test/program_test.mjs build-wasm/wasm | tee program.out
           tail -n 1 program.out | grep -q '^all checks passed$'
+          node wasm/test/program_replacement_test.mjs build-wasm/wasm | tee program-replacement.out
+          tail -n 1 program-replacement.out | grep -q '^all checks passed$'
           node wasm/test/program_stores_test.mjs build-wasm/wasm | tee program-stores.out
           tail -n 1 program-stores.out | grep -q '^all checks passed$'
           node wasm/test/store_conformance_test.mjs build-wasm/wasm | tee conformance.out
@@ -147,6 +149,8 @@ jobs:
           tail -n 1 workers.out | grep -q '^all checks passed$'
           node wasm/test/program_test.mjs build-wasm/wasm | tee program.out
           tail -n 1 program.out | grep -q '^all checks passed$'
+          node wasm/test/program_replacement_test.mjs build-wasm/wasm | tee program-replacement.out
+          tail -n 1 program-replacement.out | grep -q '^all checks passed$'
           node wasm/test/program_stores_test.mjs build-wasm/wasm | tee program-stores.out
           tail -n 1 program-stores.out | grep -q '^all checks passed$'
           node wasm/test/store_conformance_test.mjs build-wasm/wasm | tee conformance.out

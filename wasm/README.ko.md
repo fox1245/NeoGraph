@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=8e30105731bb1ac98766f4394fa60e0e4f62118a6fc7b7636239550b62b97b13 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=dd949ff30b9730747c8a2ff1e975d2cc92aff7cc1ebbd49f36ca991a53444138 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -183,15 +183,15 @@ programs.release();
   공급자가 잘못되었거나 모듈이 Program 지원 없이 빌드되었으면 `NeoGraphError`를 던집니다. `provider`는 `compile`과 같고 하나가
   더해집니다. `catalogue`는 SDK의 모델 카탈로그(`{ version: 1, models: [...] }`)이며, 내장 카탈로그 위에 덧씌워집니다.
   `owner`는 객체의 Program과 실행의 범위를 정합니다. `stores`는 호스트 자신의 저장소입니다([JavaScript의 Program 저장소](#program-stores-in-javascript)).
-  생략한 저장소는 메모리에 있습니다. `limits`는 승인되는 Program에 줄 수 있는 최대치이고, `budget`은 예산을 주지 않은 실행의 예산이며,
+  생략한 저장소는 메모리에 있습니다. `limits`는 호스트의 상한선으로 승인되는 Program에 줄 수 있는 최대치이고(기본값은 실행당 동적 컴파일 1회, 자식 깊이 4, 자식 4개를 허용합니다: `maxDynamicCompiles: 1`, `maxChildDepth: 4`, `maxTotalChildren: 4`. 자식을 합성하거나 더 깊은 계층을 만드는 호스트는 여기서 `maxDynamicCompiles`, `maxChildDepth`, `maxTotalChildren`을 높입니다), `budget`은 예산을 주지 않은 실행의 예산이며,
   둘 다 아래처럼 씁니다. `javascript`는 `{ stackBytes, defineTimeMs }`로, 제어 소스가 쓸 수 있는 스택과 `define()`이 실행될 수 있는 시간이며 예산 뒤에서 설명합니다.
 - **`programs.admit(source)`**는 Program을 컴파일하고 승인한 뒤 `{ id, bundleId, name }`으로 결정됩니다. `source`는 JavaScript 제어
-  소스의 텍스트, `{ javascript, name }`, 또는 이미 문서 형태인 Program을 위한 `{ document, name }`입니다. 컴파일러나 승인 정책이
+  소스의 텍스트, `{ javascript, name, budget }` 또는 `{ javascript, name, budgetBounds: { minimum, maximum } }`(둘 다 있으면 `budgetBounds`가 우선합니다), 또는 이미 문서 형태인 Program을 위한 `{ document, name }`입니다. `budget`은 이 버전의 실행에 부여되는 정확한 예산이고, `budgetBounds`는 부여할 수 있는 예산의 범위로, 교체될 버전이 필요로 합니다(교체는 첫 부여량보다 적은 원본의 남은 예산을 이어받기 때문입니다). 생략한 멤버는 호스트의 기본 예산(`budget`과 `budgetBounds.maximum`) 또는 없음(`budgetBounds.minimum`에서는 `0`이므로 `minimum`은 구조적 하한 멤버들을 지정해야 합니다)을 유지합니다. 최솟값은 Program의 구조적 하한(동시 시도, Program 연산, Core 스텝 각 최소 1개, 그리고 Program이 자식을 디스패치할 때는 깊이와 자식 각 최소 1개)을 충족해야 하며, 그렇지 않으면 컴파일러가 거부합니다. 둘 다 없으면 소스 자체의 선언이 적용됩니다. 컴파일러나 승인 정책이
   거부한 소스는 `compile` 또는 `admission` 타입의 `NeoGraphError`로 거부되며, `diagnostics`에 `{ code, message, pointer, witness }`가
-  나열됩니다. 같은 소스를 다시 승인하면 같은 버전이 나옵니다.
+  나열됩니다. 같은 소스와 예산 범위를 다시 승인하면 같은 버전이 나오며, 다른 `budget`이나 `budgetBounds`는 별도의 번들과 버전으로 컴파일됩니다.
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`**는 `ProgramRun`을 즉시 돌려줍니다.
   **`programs.run(version, options)`**은 `start(...).result`입니다.
-- **`ProgramRun`**에는 `id`, `versionId`, `result`, `resume(value, options)`, `fork(value, options)`, `cancel()`이 있습니다.
+- **`ProgramRun`**에는 `id`, `versionId`, `result`, `resume(value, options)`, `fork(value, options)`, `handoff()`, `releaseHandoff()`, `replace(version, options)`, `migrateGraph(version, options)`, `synthesizeChild(binding, source, options)`, `cancel()`이 있습니다(`programs.handoff(run?)`, `programs.releaseHandoff(run)`, `programs.replace(run, version, options)`, `programs.migrateGraph(run, version, options)`, 그리고 `programs.synthesizeChild(run, binding, source, options)` 또는 `programs.synthesizeChild(run, options)`는 대신 run id나 `{ id }`를 받으며, 실행을 주지 않은 `programs.handoff()`는 이 객체의 어떤 실행이든 다음 체크포인트 handoff를 기다립니다).
   `result`는 실행이 끝나거나 답을 기다릴 때 결정됩니다. 실패하거나 취소된 실행은 그 상태로 결정되고, 호출 자체를 할 수 없을 때만
   거부됩니다(알 수 없는 버전, 버전이 승인하는 범위를 벗어난 예산, 이미 쓴 run id). `resume`은 실행이 기다리는 인터럽트에 답하고
   같은 id의 `ProgramRun`을 돌려줍니다. `fork`는 같은 일시 정지를 새 실행(`options.runId`가 이름을 정합니다)으로, 자기만의 답과
@@ -199,6 +199,38 @@ programs.release();
   일시 정지한 실행은 계속 재개할 수 있게 둡니다. 끝난 노드는 다시 실행되지 않습니다. 한 일시 정지의 fork는 함께 만들어도 됩니다. fork들은 차례를 지키며, 각 fork는 앞선 fork들이 일시 정지한 실행에 남긴 것을 읽어 그 절반을 가져갑니다. 일시 정지한 실행에 남은 벽시계 시간이나 Core 스텝을 전부 가져가려는 fork는 거부되고(`P_FORK_SOURCE_BUDGET`), 남은 것보다 많이 요구하는 fork도 거부되며(`P_FORK_BUDGET`), 둘 다 충돌이 아닙니다. 같은 `runId`로 다시 만든 fork는 그 fork이며, 처음 받은 양을 그대로 가집니다. 보낸 뒤 차례를 기다리는 동안 취소된 fork도 자기 차례에 자기 몫을 가져간 다음 취소로 끝납니다. `cancel()`은 이 호출이 실행을 취소했는지로 결정됩니다.
   아직 보내지 않은 resume이나 fork(이어 갈 실행의 결과를 기다리는 중인 것)는 `cancel()`이나 중단된 `signal`이 대신 철회하며, 그 `result`는
   `cancelled` 오류로 거부됩니다. 이미 중단된 `signal`이면 호출은 이루어지지 않습니다.
+- **`handoff`, `releaseHandoff`, `replace`, `migrateGraph`, `synthesizeChild`.** `handoff()`는 실행이 `ng.checkpoint(value)` 안전 지점에 도달할 때까지 기다려 그 지점에 붙잡아 두고 `{ runId, journalHead, coordinateId, entryId, value }`로 결정됩니다(`releaseHandoff()`는 붙잡아 둔 것을 풀어 실행이 교체 없이 계속 진행하게 하며 불리언으로 결정됩니다). `replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })`는 체크포인트 handoff에 붙잡힌 실행을 승인된 다른 `version`으로 교체하고(원본 계보의 남은 예산에서 출발하되 `options.budget`이 지정한 필드를 덮어쓰고, `journalHead`, `coordinateId`, `entryId`는 handoff 참조 필드를 덮어쓰며, `input`이 객체이거나 생략되면 원본 실행의 초기 `input`을 복사하지 않고 `{}`에서 출발해 `input.handoff`는 체크포인트 `value`를, `input.previous_run_id`는 원본 `runId`를 기본값으로 씁니다), 원본 실행의 자식을 유지해 교체 세대가 거기에 붙을 수 있게 하며, 교체 `ProgramRun`을 돌려줍니다. `replace`는 C++ 코드(`P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`, `P_REPLACEMENT_HANDOFF`)로 거부하며 해당 `code`와 `witness`를 담은 `NeoGraphError`로 거부되고, 원본 실행과 그 붙잡힌 상태(hold)를 있던 그대로 둡니다. `migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })`는 인메모리 전이 저장소에서 라이브 루트 Core 그래프 실행을 마이그레이션하고 마이그레이션된 `ProgramRun`을 돌려줍니다. 시맨틱 마이그레이션 어댑터는 `semanticAdapter: true`일 때만 붙이며, 어댑터가 없으면 대상은 그 실행 자신이 승인받은 버전이거나 호환되는 버전이어야 합니다(거부 시 `P_GRAPH_MIGRATION_*`; 아래 설명대로 JavaScript 전이 저장소는 `"conflict"`로 답합니다). `synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })`(또는 `binding`과 `source`를 담은 단일 옵션 객체)는 부모 실행이 체크포인트 handoff에 붙잡혀 있는 동안 자식 버전을 준비하고 `{ id, binding, state, versionId, bundleId, proposalId, grantId }`로 결정됩니다. 자식의 `budget`과 호스트의 `grant`(`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`) 및 `semanticDecision`(`{ validatorIdentity, contractIdentity, accepted, evidence? }`)이 필요하며, 이것들이 없으면 거부됩니다. 모듈은 자식의 요청으로부터 둘 중 어느 것도 만들지 않으며, 게이트웨이는 결정이 grant의 validator와 contract를 가리킬 때만 그 결정을 받아들입니다(요청한 권한이 부모 실행이나 grant의 범위를 넘으면 `P_CHILD_SYNTHESIS_AUTHORITY`). `synthesizeChild`가 실행의 붙잡힌 handoff를 쓰는 동안에는 반환될 때까지 그 실행의 `releaseHandoff`, `replace`, `cancel`이 거부되며, 같은 hold에서의 두 번째 `synthesizeChild`도 거부됩니다. 실행은 매 모델 호출 전에 상한을 예약하므로 `modelTokens`는 모델 호출의 입력·출력 상한을 감당할 수 있어야 합니다.
+
+  ```js
+  // 호스트는 grant의 식별자("sha256:" + 64자리 소문자 16진수)를 계산하거나 저장해 둡니다.
+  const TEMPLATE_ID = await hostIdentity('child template');
+  const VALIDATOR_ID = await hostIdentity('semantic validator');
+  const CONTRACT_ID = await hostIdentity('semantic contract');
+  const hold = await parentRun.handoff();
+  const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
+    budget: {
+      wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+      maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+      maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+    },
+    grant: {
+      templateIdentity: TEMPLATE_ID,
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      childBudget: {
+        wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+        maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+        maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+      },
+    },
+    semanticDecision: {
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      accepted: true,
+    },
+  });
+  await parentRun.releaseHandoff();
+  ```
 - **`programs.result(runId)`**는 저장소가 실행에 대해 가진 것을 읽습니다. 가장 최근의 결과(기다리는 실행의 일시 정지도 결과입니다)이며, 아직 결과가 없으면 `{ runId, status: 'running' }`, 저장소가 그런 실행을 모르면 `null`입니다.
   **`programs.release()`**는 실행 중인 run을 취소하고 객체를 해제하며, 이미 한 호출은 먼저 끝납니다. 인터럽트에서 기다리는 실행은
   저장소에 있던 그대로 남습니다.
@@ -311,7 +343,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 
 모듈은 C API를 내보내고 `neograph.mjs`가 이를 감쌉니다. JSON 문자열을 쓰는 C API는 바인딩 라이브러리가 필요 없습니다.
 Embind는 라이브러리와 모든 타입의 등록을 더하게 되는데, 표면은 몇 개의 함수뿐입니다. 그래프에는 `ng_compile`, `ng_run`, `ng_cancel`, `ng_release`, `ng_error`,
-Program에는 `ng_programs_create`, `ng_programs_admit`, `ng_programs_start`, `ng_programs_resume`, `ng_programs_fork`, `ng_programs_cancel`,
+Program에는 `ng_programs_create`, `ng_programs_admit`, `ng_programs_start`, `ng_programs_resume`, `ng_programs_fork`, `ng_programs_handoff`, `ng_programs_release_handoff`, `ng_programs_replace`, `ng_programs_migrate_graph`, `ng_programs_synthesize_child`, `ng_programs_cancel`,
 `ng_programs_result`, `ng_programs_release`가 있습니다. 결과는 호스트 이벤트 루프의 이후 턴에서 호출되는 콜백으로 돌아옵니다. 그래프는 `Module.ngOnEvent`와
 `Module.ngOnDone`, Program은 `Module.ngProgramEvent`와 `Module.ngProgramDone`입니다. 키는 `compile`에 넘기는 공급자 설명의 일부로, 그 그래프의 SDK 클라이언트가 보관합니다. 바이너리에도, 어떤
 결과에도, 오류 메시지에도 들어 있지 않습니다.
@@ -553,6 +585,7 @@ CI는 모듈을 빌드해 Node 22와 24에서, 네트워크도 키도 없이 다
   거부된 호출, 던져진 오류, 값이 아닌 값은 저장소의 메시지와 메서드 이름과 함께 fail closed하고 모델은 호출되지 않습니다. 필수 메서드가 없는 객체는 거부됩니다.
   바뀐 것을 로그에 쓰는 래퍼 덕분에, 로그에서 재생한 저장소 위의 두 번째 객체가 끝난 실행을 다시 읽고, 멈춘 실행이 여전히 멈춰 있음을 보고, 첫 객체의 Program을 시작합니다.
   저장소가 아직 답하는 동안 취소된 fork는 취소로 끝나고, 함께 만든 fork들은 차례로 자기 몫을 가져가며, 오타 난 멤버와 빠진 계보 읽기 메서드는 거부되며, 객체를 해제하면 실행 중인 run은 취소되고 기다리는 run은 그대로 남습니다.
+- `test/program_replacement_test.mjs`: 체크포인트 handoff(`handoff`, `releaseHandoff`), 체크포인트에 붙잡힌 실행을 승인된 두 번째 버전으로 `replace`(남은 예산 이어받기, 자식 유지), 다섯 가지 교체 거부(`P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`, `P_REPLACEMENT_HANDOFF`)와 그 `witness` 및 이후에도 원본 실행과 그 붙잡힌 상태(hold)가 있던 그대로 남는지, 실행 자신이 승인받은 버전으로의 `migrateGraph`와 그 가드 거부(같은 run id, 호환되지 않는 대상), 호스트의 grant와 결정을 갖춘 `synthesizeChild`와 grant가 없을 때의 거부 및 `P_CHILD_SYNTHESIS_AUTHORITY`, 실행 중에 자식이 교체되는 `root -> child -> grandchild` 계층, 그리고 비동기 JavaScript `stores` 객체 위에서의 체크포인트 handoff, `replace`, `synthesizeChild`와 그 계층 교체를 확인합니다.
 - `test/workers_test.mjs`: Workers 예제가 내보내는 `fetch` 핸들러를 같은 서버를 상대로 `Request`와 함께 호출합니다.
   버퍼링과 스트리밍 모두입니다. 핸들러의 로직과 플랫폼 API 사용을 보여 줄 뿐, workerd에서 실행하는 것은 아닙니다.
 - `checks.cpp`(아래)는 호스트 펌프 공급자에 대한 동기 실행을 돌려 거부되는지, 아무것도 보내지 않았는지 확인합니다.
