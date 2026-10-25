@@ -25,16 +25,22 @@
 #include <asio/cancellation_signal.hpp>
 #include <asio/cancellation_state.hpp>
 #include <asio/detached.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/io_context.hpp>
 #include <asio/ip/tcp.hpp>
+#include <asio/post.hpp>
+#include <asio/read.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/this_coro.hpp>
+#include <asio/write.hpp>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <future>
 #include <map>
 #include <mutex>
@@ -167,29 +173,45 @@ struct TestPgResult {
 };
 
 struct StalledTcpServer {
+    using AcceptCallback =
+        std::function<void(const std::shared_ptr<asio::ip::tcp::socket>&,
+                           const asio::error_code&)>;
+
     asio::io_context io;
+    asio::executor_work_guard<asio::io_context::executor_type> work_guard{
+        asio::make_work_guard(io)};
     asio::ip::tcp::acceptor acceptor{io};
     std::shared_ptr<asio::ip::tcp::socket> client;
     std::thread worker;
     unsigned short port = 0;
 
-    StalledTcpServer() {
+    explicit StalledTcpServer(AcceptCallback on_accept = {}) {
         acceptor.open(asio::ip::tcp::v4());
         acceptor.set_option(asio::ip::tcp::acceptor::reuse_address(true));
         acceptor.bind({asio::ip::tcp::v4(), 0});
         acceptor.listen();
         port = acceptor.local_endpoint().port();
         auto pending = std::make_shared<asio::ip::tcp::socket>(io);
-        acceptor.async_accept(*pending, [this, pending](const asio::error_code& ec) {
-            if (!ec) client = pending;
-        });
+        acceptor.async_accept(*pending,
+            [this, pending, on_accept = std::move(on_accept)](
+                const asio::error_code& ec) mutable {
+                if (!ec) client = pending;
+                if (on_accept && ec != asio::error::operation_aborted) {
+                    on_accept(pending, ec);
+                }
+            });
         worker = std::thread([this] { io.run(); });
     }
 
-    ~StalledTcpServer() {
+    void stop() {
+        work_guard.reset();
         io.stop();
         if (worker.joinable()) worker.join();
         client.reset();
+    }
+
+    ~StalledTcpServer() {
+        stop();
     }
 };
 
@@ -452,40 +474,179 @@ TEST(PostgresCheckpointPoolTest, MixedWaitersKeepArrivalOrder) {
 }
 
 TEST(PostgresCheckpointAsyncIoTest, ReconnectPollDoesNotBlockIoContext) {
-    StalledTcpServer server;
+    std::vector<std::string> events;
+    std::exception_ptr rebuild_error;
+    std::atomic<bool> timed_out{false};
+    asio::cancellation_signal cancel;
+    asio::io_context io;
+    asio::steady_timer probe_timer(io);
+    auto packet = std::make_shared<std::vector<unsigned char>>();
+
+    auto fail_from_server = [&](const asio::error_code& ec) {
+        if (ec == asio::error::operation_aborted) return;
+        asio::post(io, [&] {
+            events.push_back("server_error");
+            cancel.emit(asio::cancellation_type::all);
+        });
+    };
+
+    std::function<void(const std::shared_ptr<asio::ip::tcp::socket>&)> read_startup_packet;
+    read_startup_packet = [&](const std::shared_ptr<asio::ip::tcp::socket>& sock) {
+        packet->assign(4, 0);
+        asio::async_read(*sock, asio::buffer(*packet),
+            [&, sock](const asio::error_code& hdr_ec, std::size_t) {
+                if (hdr_ec) {
+                    fail_from_server(hdr_ec);
+                    return;
+                }
+                const std::uint32_t len =
+                    (static_cast<std::uint32_t>((*packet)[0]) << 24) |
+                    (static_cast<std::uint32_t>((*packet)[1]) << 16) |
+                    (static_cast<std::uint32_t>((*packet)[2]) << 8) |
+                    static_cast<std::uint32_t>((*packet)[3]);
+                if (len < 8 || len > 4096) {
+                    fail_from_server(asio::error::invalid_argument);
+                    return;
+                }
+                packet->assign(len - 4, 0);
+                asio::async_read(*sock, asio::buffer(*packet),
+                    [&, sock, len](const asio::error_code& body_ec, std::size_t) {
+                        if (body_ec) {
+                            fail_from_server(body_ec);
+                            return;
+                        }
+                        if (len == 8) {
+                            static constexpr char kDeclineEncryption = 'N';
+                            asio::async_write(*sock, asio::buffer(&kDeclineEncryption, 1),
+                                [&, sock](const asio::error_code& write_ec, std::size_t) {
+                                    if (write_ec) {
+                                        fail_from_server(write_ec);
+                                        return;
+                                    }
+                                    read_startup_packet(sock);
+                                });
+                            return;
+                        }
+                        // poll_connection_off_executor polls its worker future on a 2ms
+                        // steady_timer on `io`. Scheduling the probe on `io` after 10ms
+                        // orders it after that 2ms timer in `io`'s timer heap so
+                        // `open_conn_async` has entered `wait_pg_socket_until(raw, true, ...)`
+                        // with an empty receive buffer before the server replies.
+                        asio::post(io, [&, sock] {
+                            probe_timer.expires_after(std::chrono::milliseconds(10));
+                            probe_timer.async_wait([&, sock](const asio::error_code& timer_ec) {
+                                if (timer_ec) return;
+                                events.push_back("work_before_auth");
+                                asio::post(sock->get_executor(), [&, sock] {
+                                    static constexpr std::array<unsigned char, 9> kAuthCleartext = {
+                                        'R', 0, 0, 0, 8, 0, 0, 0, 3
+                                    };
+                                    asio::async_write(*sock, asio::buffer(kAuthCleartext),
+                                        [&, sock](const asio::error_code& auth_ec, std::size_t) {
+                                            if (auth_ec) {
+                                                fail_from_server(auth_ec);
+                                                return;
+                                            }
+                                            packet->assign(5, 0);
+                                            asio::async_read(*sock, asio::buffer(*packet),
+                                                [&, sock](const asio::error_code& pw_hdr_ec, std::size_t) {
+                                                    if (pw_hdr_ec || (*packet)[0] != 'p') {
+                                                        fail_from_server(pw_hdr_ec
+                                                            ? pw_hdr_ec
+                                                            : asio::error::invalid_argument);
+                                                        return;
+                                                    }
+                                                    const std::uint32_t pw_len =
+                                                        (static_cast<std::uint32_t>((*packet)[1]) << 24) |
+                                                        (static_cast<std::uint32_t>((*packet)[2]) << 16) |
+                                                        (static_cast<std::uint32_t>((*packet)[3]) << 8) |
+                                                        static_cast<std::uint32_t>((*packet)[4]);
+                                                    if (pw_len < 5 || pw_len > 4096) {
+                                                        fail_from_server(asio::error::invalid_argument);
+                                                        return;
+                                                    }
+                                                    packet->assign(pw_len - 4, 0);
+                                                    asio::async_read(*sock, asio::buffer(*packet),
+                                                        [&](const asio::error_code& pw_body_ec, std::size_t) {
+                                                            if (pw_body_ec) {
+                                                                fail_from_server(pw_body_ec);
+                                                                return;
+                                                            }
+                                                            asio::post(io, [&] {
+                                                                probe_timer.expires_after(
+                                                                    std::chrono::milliseconds(10));
+                                                                probe_timer.async_wait(
+                                                                    [&](const asio::error_code& cancel_timer_ec) {
+                                                                        if (cancel_timer_ec) return;
+                                                                        events.push_back("work_after_auth");
+                                                                        cancel.emit(
+                                                                            asio::cancellation_type::all);
+                                                                    });
+                                                            });
+                                                        });
+                                                });
+                                        });
+                                });
+                            });
+                        });
+                    });
+            });
+    };
+
+    StalledTcpServer server(
+        [&](const std::shared_ptr<asio::ip::tcp::socket>& sock,
+            const asio::error_code& accept_ec) {
+            if (accept_ec) {
+                fail_from_server(accept_ec);
+                return;
+            }
+            read_startup_packet(sock);
+        });
+    auto hang_guard = std::make_shared<asio::steady_timer>(
+        server.io, std::chrono::seconds(10));
+    asio::post(server.io, [&, hang_guard] {
+        hang_guard->async_wait([&, hang_guard](const asio::error_code& ec) {
+            if (ec) return;
+            timed_out.store(true, std::memory_order_relaxed);
+            asio::error_code ignored;
+            server.acceptor.close(ignored);
+            if (server.client) {
+                server.client->shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
+                server.client->close(ignored);
+            }
+            asio::post(io, [&] {
+                cancel.emit(asio::cancellation_type::all);
+                io.stop();
+            });
+            io.stop();
+        });
+    });
+
     auto store = PoolTestAccess::make_pool(/*pool_size=*/1);
     PoolTestAccess::set_conn_str(*store,
         "hostaddr=127.0.0.1 port=" + std::to_string(server.port)
-        + " user=stall dbname=stall sslmode=disable");
+        + " user=stall password=stall dbname=stall sslmode=disable");
 
-    asio::io_context io;
-    asio::cancellation_signal cancel;
-    std::optional<std::chrono::milliseconds> heartbeat_elapsed;
-    std::exception_ptr rebuild_error;
-    auto started = std::chrono::steady_clock::now();
-
-    asio::steady_timer heartbeat(io, std::chrono::milliseconds(20));
-    heartbeat.async_wait([&](const asio::error_code& ec) {
-        if (!ec) {
-            heartbeat_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started);
-        }
-    });
-    asio::steady_timer cancel_timer(io, std::chrono::milliseconds(100));
-    cancel_timer.async_wait([&](const asio::error_code& ec) {
-        if (!ec) cancel.emit(asio::cancellation_type::all);
-    });
     asio::co_spawn(io,
         [&]() -> asio::awaitable<void> {
+            events.push_back("poll_started");
             co_await PoolTestAccess::rebuild_async(*store, 0);
         },
         asio::bind_cancellation_slot(cancel.slot(),
-            [&](std::exception_ptr error) { rebuild_error = error; }));
+            [&, hang_guard](std::exception_ptr error) {
+                events.push_back("poll_completed");
+                rebuild_error = error;
+                probe_timer.cancel();
+                asio::post(server.io, [hang_guard] { hang_guard->cancel(); });
+            }));
 
     io.run();
+    server.stop();
 
-    ASSERT_TRUE(heartbeat_elapsed.has_value());
-    EXPECT_LT(*heartbeat_elapsed, std::chrono::milliseconds(60));
+    EXPECT_FALSE(timed_out.load(std::memory_order_relaxed));
+    EXPECT_EQ(events,
+        (std::vector<std::string>{
+            "poll_started", "work_before_auth", "work_after_auth", "poll_completed"}));
     ASSERT_NE(rebuild_error, nullptr);
     try {
         std::rethrow_exception(rebuild_error);
