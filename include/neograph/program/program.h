@@ -20,6 +20,7 @@
 #include <neograph/program/diagnostic.h>
 #include <neograph/program/event.h>
 #include <neograph/program/fork.h>
+#include <neograph/program/gate.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/handle.h>
 #include <neograph/program/journal.h>

@@ -735,6 +735,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         src/program/command.cpp
         src/program/command_journal.cpp
         src/program/contract.cpp
+        src/program/gate.cpp
         src/program/bundle.cpp
         src/program/diagnostic.cpp
     src/program/source.cpp

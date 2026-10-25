@@ -1,4 +1,5 @@
 #include "javascript.h"
+#include "javascript_pure.h"
 
 #include <neograph/program/compiler.h>
 
@@ -3526,4 +3527,707 @@ JavaScriptGeneratorStep JavaScriptGenerator::next(std::optional<json> response) 
     return step;
 #endif
 }
+
+namespace {
+
+[[noreturn]] void throw_gate_sandbox_diagnostic(std::string_view          source_id,
+                                                std::string               code,
+                                                std::string               message,
+                                                json                      witness = json::object(),
+                                                std::optional<SourceSpan> span    = std::nullopt) {
+    Diagnostic diagnostic;
+    diagnostic.phase                = CompilePhase::Source;
+    diagnostic.code                 = std::move(code);
+    diagnostic.severity             = DiagnosticSeverity::Error;
+    diagnostic.primary.source_id    = source_id.empty() ? std::string("<gate>") : std::string(source_id);
+    diagnostic.primary.json_pointer = "";
+    diagnostic.primary.span         = std::move(span);
+    diagnostic.message              = std::move(message);
+    diagnostic.witness              = std::move(witness);
+    throw ProgramDiagnosticError(std::move(diagnostic));
+}
+
+#if defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+
+JavaScriptCompileLimits to_scope_limits(const GateSandboxLimits& limits) {
+    if (limits.case_wall_time_ms == 0 || limits.case_interrupt_polls == 0 ||
+        limits.case_memory_limit_bytes == 0 || limits.case_max_stack_bytes == 0) {
+        throw std::invalid_argument("Gate sandbox limits must all be positive");
+    }
+    JavaScriptCompileLimits scope_limits{};
+    scope_limits.memory_limit_bytes          = limits.case_memory_limit_bytes;
+    scope_limits.max_stack_bytes             = limits.case_max_stack_bytes;
+    scope_limits.max_interrupt_polls         = limits.case_interrupt_polls;
+    scope_limits.max_wall_time_ms            = limits.case_wall_time_ms;
+    scope_limits.max_generated_document_bytes = limits.case_memory_limit_bytes;
+    return scope_limits;
+}
+
+std::optional<SourceSpan> find_gate_import_span(std::string_view source) {
+    auto span = source_span_for_token(source, "import");
+    if (span) return span;
+    std::size_t search = 0;
+    while (const auto exported = find_javascript_token(source, "export", search)) {
+        const auto statement_end = source.find(';', *exported);
+        const auto from          = find_javascript_token(source, "from", *exported + 6);
+        if (from && (statement_end == std::string_view::npos || *from < statement_end)) {
+            auto specifier = *from + 4;
+            while (specifier < source.size() &&
+                   std::isspace(static_cast<unsigned char>(source[specifier])) != 0) {
+                ++specifier;
+            }
+            if (specifier < source.size() &&
+                (source[specifier] == '\'' || source[specifier] == '"')) {
+                return source_span_at(source, *exported, specifier - *exported + 1);
+            }
+        }
+        search = *exported + 6;
+    }
+    return std::nullopt;
+}
+
+char* gate_deny_module_normalize(JSContext* context,
+                                 const char*,
+                                 const char*,
+                                 void* opaque) {
+    if (auto* denied = static_cast<bool*>(opaque)) {
+        *denied = true;
+    }
+    JS_ThrowReferenceError(context, "Program gate sandbox denies module imports");
+    return nullptr;
+}
+
+JSModuleDef* gate_deny_module_loader(JSContext* context,
+                                     const char*,
+                                     void* opaque) {
+    if (auto* denied = static_cast<bool*>(opaque)) {
+        *denied = true;
+    }
+    JS_ThrowReferenceError(context, "Program gate sandbox denies module imports");
+    return nullptr;
+}
+
+void discard_pending_exception(JSContext* context) noexcept {
+    if (JS_HasException(context)) {
+        JSValue exception = JS_GetException(context);
+        JS_FreeValue(context, exception);
+    }
+}
+
+bool deep_freeze(JSContext* context, JSValueConst value, std::size_t depth = 0) {
+    if (depth > kMaxGraphValueDepth) return false;
+    if (!JS_IsObject(value)) return true;
+
+    JSValue global = JS_GetGlobalObject(context);
+    if (JS_IsException(global)) {
+        discard_pending_exception(context);
+        return false;
+    }
+    JSValue object_ctor = JS_GetPropertyStr(context, global, "Object");
+    JS_FreeValue(context, global);
+    if (JS_IsException(object_ctor)) {
+        discard_pending_exception(context);
+        return false;
+    }
+    JSValue freeze_fn = JS_GetPropertyStr(context, object_ctor, "freeze");
+    JS_FreeValue(context, object_ctor);
+    if (JS_IsException(freeze_fn)) {
+        discard_pending_exception(context);
+        return false;
+    }
+    JSValue dup_val = JS_DupValue(context, value);
+    JSValue frozen  = JS_Call(context, freeze_fn, JS_UNDEFINED, 1, &dup_val);
+    JS_FreeValue(context, dup_val);
+    JS_FreeValue(context, freeze_fn);
+    if (JS_IsException(frozen)) {
+        discard_pending_exception(context);
+        return false;
+    }
+    JS_FreeValue(context, frozen);
+
+    if (JS_IsArray(context, value)) {
+        JSValue length_value = JS_GetPropertyStr(context, value, "length");
+        if (JS_IsException(length_value)) {
+            discard_pending_exception(context);
+            return false;
+        }
+        std::uint64_t length = 0;
+        const int     status = JS_ToIndex(context, &length, length_value);
+        JS_FreeValue(context, length_value);
+        if (status < 0) {
+            discard_pending_exception(context);
+            return false;
+        }
+        for (std::uint32_t index = 0; index < static_cast<std::uint32_t>(length); ++index) {
+            JSValue element = JS_GetPropertyUint32(context, value, index);
+            if (JS_IsException(element)) {
+                discard_pending_exception(context);
+                return false;
+            }
+            const bool ok = deep_freeze(context, element, depth + 1);
+            JS_FreeValue(context, element);
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    JSPropertyEnum* properties     = nullptr;
+    std::uint32_t   property_count = 0;
+    if (JS_GetOwnPropertyNames(context, &properties, &property_count, value,
+                               JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0) {
+        discard_pending_exception(context);
+        return false;
+    }
+    for (std::uint32_t index = 0; index < property_count; ++index) {
+        JSValue prop = JS_GetProperty(context, value, properties[index].atom);
+        if (JS_IsException(prop)) {
+            discard_pending_exception(context);
+            JS_FreePropertyEnum(context, properties, property_count);
+            return false;
+        }
+        const bool ok = deep_freeze(context, prop, depth + 1);
+        JS_FreeValue(context, prop);
+        if (!ok) {
+            JS_FreePropertyEnum(context, properties, property_count);
+            return false;
+        }
+    }
+    JS_FreePropertyEnum(context, properties, property_count);
+    return true;
+}
+
+GateFailureCategory classify_gate_sandbox_failure(const QuickJsScope& scope,
+                                                  InterruptBudget&    budget,
+                                                  GateFailureCategory fallback) noexcept {
+    refresh_external_interrupt(budget);
+    if (budget.reason == InterruptReason::WallTime ||
+        budget.reason == InterruptReason::PollLimit) {
+        return GateFailureCategory::Timeout;
+    }
+    if (scope.accounting().limit_denied_count != 0) {
+        return GateFailureCategory::MemoryLimit;
+    }
+    return fallback;
+}
+
+#endif
+
+}  // namespace
+
+void validate_gate_javascript_module_no_imports(std::string_view         source_id,
+                                                std::string_view         script,
+                                                const GateSandboxLimits& limits) {
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)script;
+    (void)limits;
+    throw_gate_sandbox_diagnostic(
+        source_id, "P_JS_UNAVAILABLE",
+        "Program gate evaluation requires NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    if (auto span = find_gate_import_span(script)) {
+        throw_gate_sandbox_diagnostic(
+            source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+            "Program gate sandbox denies JavaScript module imports",
+            json{{"engine", "quickjs"}, {"facility", "import"}}, std::move(span));
+    }
+    const auto   scope_limits = to_scope_limits(limits);
+    const auto   started_at   = std::chrono::steady_clock::now();
+    QuickJsScope scope(scope_limits);
+    bool         import_denied = false;
+    JS_SetModuleLoaderFunc(scope.runtime(), gate_deny_module_normalize, gate_deny_module_loader,
+                           &import_denied);
+    if (!install_strict_intrinsics(scope.context())) {
+        throw_gate_sandbox_diagnostic(source_id, "P_JS_RUNTIME",
+                                      "QuickJS strict intrinsics initialization failed");
+    }
+    InterruptBudget budget;
+    budget.limit    = scope_limits.max_interrupt_polls;
+    budget.deadline = deadline_after(started_at, scope_limits.max_wall_time_ms);
+    JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
+
+    JSValue compiled = JS_Eval(scope.context(), script.data(), script.size(), "<gate-check>",
+                               JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+    if (JS_IsException(compiled)) {
+        discard_pending_exception(scope.context());
+        if (import_denied) {
+            throw_gate_sandbox_diagnostic(
+                source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+                "Program gate sandbox denies JavaScript module imports",
+                json{{"engine", "quickjs"}, {"facility", "import"}});
+        }
+        return;
+    }
+    if (JS_ResolveModule(scope.context(), compiled) < 0) {
+        discard_pending_exception(scope.context());
+        JS_FreeValue(scope.context(), compiled);
+        if (import_denied) {
+            throw_gate_sandbox_diagnostic(
+                source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+                "Program gate sandbox denies JavaScript module imports",
+                json{{"engine", "quickjs"}, {"facility", "import"}});
+        }
+        return;
+    }
+    JS_FreeValue(scope.context(), compiled);
+#endif
+}
+
+GateCaseSandboxResult evaluate_gate_candidate_case(std::string_view         source_id,
+                                                   std::string_view         candidate_script,
+                                                   const json&              input,
+                                                   const GateSandboxLimits& limits) {
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)candidate_script;
+    (void)input;
+    (void)limits;
+    throw_gate_sandbox_diagnostic(
+        source_id, "P_JS_UNAVAILABLE",
+        "Program gate evaluation requires NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    validate_gate_javascript_module_no_imports(source_id, candidate_script, limits);
+    const auto scope_limits = to_scope_limits(limits);
+    const auto started_at   = std::chrono::steady_clock::now();
+
+    try {
+        QuickJsScope scope(scope_limits);
+        bool         import_denied = false;
+        JS_SetModuleLoaderFunc(scope.runtime(), gate_deny_module_normalize, gate_deny_module_loader,
+                               &import_denied);
+        if (!install_strict_intrinsics(scope.context())) {
+            return GateCaseSandboxResult{
+                false,
+                scope.accounting().limit_denied_count != 0 ? GateFailureCategory::MemoryLimit
+                                                           : GateFailureCategory::RuntimeException,
+                std::nullopt};
+        }
+
+        InterruptBudget budget;
+        budget.limit    = scope_limits.max_interrupt_polls;
+        budget.deadline = deadline_after(started_at, scope_limits.max_wall_time_ms);
+        JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
+
+        JSValue compiled =
+            JS_Eval(scope.context(), candidate_script.data(), candidate_script.size(),
+                    "<gate-candidate>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if (JS_IsException(compiled)) {
+            discard_pending_exception(scope.context());
+            if (import_denied) {
+                throw_gate_sandbox_diagnostic(
+                    source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+                    "Program gate sandbox denies JavaScript module imports",
+                    json{{"engine", "quickjs"}, {"facility", "import"}});
+            }
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
+        JSValue module_result = JS_EvalFunction(scope.context(), compiled);
+        if (JS_IsException(module_result)) {
+            discard_pending_exception(scope.context());
+            if (import_denied) {
+                throw_gate_sandbox_diagnostic(
+                    source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+                    "Program gate sandbox denies JavaScript module imports",
+                    json{{"engine", "quickjs"}, {"facility", "import"}});
+            }
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        const auto module_state = JS_PromiseState(scope.context(), module_result);
+        if (module_state == JS_PROMISE_PENDING) {
+            JS_FreeValue(scope.context(), module_result);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+        if (module_state == JS_PROMISE_REJECTED) {
+            JS_FreeValue(scope.context(), module_result);
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        JS_FreeValue(scope.context(), module_result);
+        if (module_state != JS_PROMISE_FULFILLED) {
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        JSValue module_namespace = JS_GetModuleNamespace(scope.context(), module);
+        if (JS_IsException(module_namespace)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        JSValue evaluate_fn = JS_GetPropertyStr(scope.context(), module_namespace, "evaluate");
+        JS_FreeValue(scope.context(), module_namespace);
+        if (JS_IsException(evaluate_fn)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        if (!JS_IsFunction(scope.context(), evaluate_fn)) {
+            JS_FreeValue(scope.context(), evaluate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+
+        JSValue input_value = json_to_js_value(scope.context(), input, scope_limits);
+        if (JS_IsException(input_value)) {
+            discard_pending_exception(scope.context());
+            JS_FreeValue(scope.context(), evaluate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::MemoryLimit),
+                std::nullopt};
+        }
+        if (!deep_freeze(scope.context(), input_value)) {
+            JS_FreeValue(scope.context(), input_value);
+            JS_FreeValue(scope.context(), evaluate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        JSValue result = JS_Call(scope.context(), evaluate_fn, JS_UNDEFINED, 1, &input_value);
+        JS_FreeValue(scope.context(), input_value);
+        JS_FreeValue(scope.context(), evaluate_fn);
+        if (JS_IsException(result)) {
+            discard_pending_exception(scope.context());
+            if (import_denied) {
+                throw_gate_sandbox_diagnostic(
+                    source_id, "P_GATE_SANDBOX_IMPORT_DENIED",
+                    "Program gate sandbox denies JavaScript module imports",
+                    json{{"engine", "quickjs"}, {"facility", "import"}});
+            }
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        if (JS_IsUndefined(result)) {
+            JS_FreeValue(scope.context(), result);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+
+        json           actual;
+        JsonConversion conversion;
+        conversion.byte_limit = scope_limits.max_generated_document_bytes;
+        const bool ok         = js_to_json(scope.context(), result, actual, conversion, 0);
+        JS_FreeValue(scope.context(), result);
+        if (!ok) {
+            const bool had_exception = JS_HasException(scope.context());
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget,
+                                              had_exception ? GateFailureCategory::RuntimeException
+                                                            : GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+        return GateCaseSandboxResult{true, std::nullopt, std::move(actual)};
+    } catch (const ProgramDiagnosticError&) {
+        throw;
+    } catch (const JavaScriptCompileError&) {
+        return GateCaseSandboxResult{false, GateFailureCategory::MemoryLimit, std::nullopt};
+    }
+#endif
+}
+
+GateCaseSandboxResult evaluate_gate_property_case(std::string_view         source_id,
+                                                  std::string_view         property_script,
+                                                  std::string_view         entrypoint,
+                                                  const json&              input,
+                                                  const json&              actual,
+                                                  const GateSandboxLimits& limits) {
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)property_script;
+    (void)entrypoint;
+    (void)input;
+    (void)actual;
+    (void)limits;
+    throw_gate_sandbox_diagnostic(
+        source_id, "P_JS_UNAVAILABLE",
+        "Program gate evaluation requires NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    validate_gate_javascript_module_no_imports(source_id, property_script, limits);
+    const auto scope_limits = to_scope_limits(limits);
+    const auto started_at   = std::chrono::steady_clock::now();
+
+    try {
+        QuickJsScope scope(scope_limits);
+        bool         import_denied = false;
+        JS_SetModuleLoaderFunc(scope.runtime(), gate_deny_module_normalize, gate_deny_module_loader,
+                               &import_denied);
+        if (!install_strict_intrinsics(scope.context())) {
+            return GateCaseSandboxResult{
+                false,
+                scope.accounting().limit_denied_count != 0 ? GateFailureCategory::MemoryLimit
+                                                           : GateFailureCategory::AssertionFailed,
+                std::nullopt};
+        }
+
+        InterruptBudget budget;
+        budget.limit    = scope_limits.max_interrupt_polls;
+        budget.deadline = deadline_after(started_at, scope_limits.max_wall_time_ms);
+        JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
+
+        JSValue compiled =
+            JS_Eval(scope.context(), property_script.data(), property_script.size(),
+                    "<gate-property>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if (JS_IsException(compiled)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+        auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
+        JSValue module_result = JS_EvalFunction(scope.context(), compiled);
+        if (JS_IsException(module_result)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+        const auto module_state = JS_PromiseState(scope.context(), module_result);
+        JS_FreeValue(scope.context(), module_result);
+        if (module_state != JS_PROMISE_FULFILLED) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+
+        JSValue module_namespace = JS_GetModuleNamespace(scope.context(), module);
+        if (JS_IsException(module_namespace)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+        const std::string entrypoint_name(entrypoint);
+        JSValue           predicate_fn =
+            JS_GetPropertyStr(scope.context(), module_namespace, entrypoint_name.c_str());
+        JS_FreeValue(scope.context(), module_namespace);
+        if (JS_IsException(predicate_fn) || !JS_IsFunction(scope.context(), predicate_fn)) {
+            if (!JS_IsException(predicate_fn)) JS_FreeValue(scope.context(), predicate_fn);
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+
+        JSValue input_value = json_to_js_value(scope.context(), input, scope_limits);
+        if (JS_IsException(input_value) || !deep_freeze(scope.context(), input_value)) {
+            if (!JS_IsException(input_value)) JS_FreeValue(scope.context(), input_value);
+            discard_pending_exception(scope.context());
+            JS_FreeValue(scope.context(), predicate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+        JSValue actual_value = json_to_js_value(scope.context(), actual, scope_limits);
+        if (JS_IsException(actual_value) || !deep_freeze(scope.context(), actual_value)) {
+            if (!JS_IsException(actual_value)) JS_FreeValue(scope.context(), actual_value);
+            discard_pending_exception(scope.context());
+            JS_FreeValue(scope.context(), input_value);
+            JS_FreeValue(scope.context(), predicate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+
+        JSValueConst args[2] = {input_value, actual_value};
+        JSValue      result  = JS_Call(scope.context(), predicate_fn, JS_UNDEFINED, 2, args);
+        JS_FreeValue(scope.context(), input_value);
+        JS_FreeValue(scope.context(), actual_value);
+        JS_FreeValue(scope.context(), predicate_fn);
+        if (JS_IsException(result)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::AssertionFailed),
+                std::nullopt};
+        }
+
+        const bool passed = JS_IsBool(result) && JS_ToBool(scope.context(), result) == 1;
+        JS_FreeValue(scope.context(), result);
+        if (!passed) {
+            return GateCaseSandboxResult{false, GateFailureCategory::AssertionFailed, std::nullopt};
+        }
+        return GateCaseSandboxResult{true, std::nullopt, json(true)};
+    } catch (const ProgramDiagnosticError&) {
+        throw;
+    } catch (const JavaScriptCompileError&) {
+        return GateCaseSandboxResult{false, GateFailureCategory::MemoryLimit, std::nullopt};
+    }
+#endif
+}
+
+GateCaseSandboxResult generate_gate_case_input(std::string_view         source_id,
+                                               std::string_view         generator_script,
+                                               std::string_view         seed_hex,
+                                               std::uint64_t            case_index,
+                                               const GateSandboxLimits& limits) {
+#if !defined(NEOGRAPH_PROGRAM_HAS_QUICKJS)
+    (void)generator_script;
+    (void)seed_hex;
+    (void)case_index;
+    (void)limits;
+    throw_gate_sandbox_diagnostic(
+        source_id, "P_JS_UNAVAILABLE",
+        "Program gate evaluation requires NEOGRAPH_BUILD_QUICKJS_CONTROL=ON");
+#else
+    validate_gate_javascript_module_no_imports(source_id, generator_script, limits);
+    const auto scope_limits = to_scope_limits(limits);
+    const auto started_at   = std::chrono::steady_clock::now();
+
+    try {
+        QuickJsScope scope(scope_limits);
+        bool         import_denied = false;
+        JS_SetModuleLoaderFunc(scope.runtime(), gate_deny_module_normalize, gate_deny_module_loader,
+                               &import_denied);
+        if (!install_strict_intrinsics(scope.context())) {
+            return GateCaseSandboxResult{
+                false,
+                scope.accounting().limit_denied_count != 0 ? GateFailureCategory::MemoryLimit
+                                                           : GateFailureCategory::RuntimeException,
+                std::nullopt};
+        }
+
+        InterruptBudget budget;
+        budget.limit    = scope_limits.max_interrupt_polls;
+        budget.deadline = deadline_after(started_at, scope_limits.max_wall_time_ms);
+        JS_SetInterruptHandler(scope.runtime(), interrupt_after_budget, &budget);
+
+        JSValue compiled =
+            JS_Eval(scope.context(), generator_script.data(), generator_script.size(),
+                    "<gate-generator>", JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+        if (JS_IsException(compiled)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        auto*   module        = static_cast<JSModuleDef*>(JS_VALUE_GET_PTR(compiled));
+        JSValue module_result = JS_EvalFunction(scope.context(), compiled);
+        if (JS_IsException(module_result)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        const auto module_state = JS_PromiseState(scope.context(), module_result);
+        JS_FreeValue(scope.context(), module_result);
+        if (module_state != JS_PROMISE_FULFILLED) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+
+        JSValue module_namespace = JS_GetModuleNamespace(scope.context(), module);
+        if (JS_IsException(module_namespace)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        JSValue generate_fn = JS_GetPropertyStr(scope.context(), module_namespace, "generate");
+        JS_FreeValue(scope.context(), module_namespace);
+        if (JS_IsException(generate_fn) || !JS_IsFunction(scope.context(), generate_fn)) {
+            if (!JS_IsException(generate_fn)) JS_FreeValue(scope.context(), generate_fn);
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+
+        JSValue seed_arg = JS_NewStringLen(scope.context(), seed_hex.data(), seed_hex.size());
+        if (JS_IsException(seed_arg)) {
+            discard_pending_exception(scope.context());
+            JS_FreeValue(scope.context(), generate_fn);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::MemoryLimit),
+                std::nullopt};
+        }
+        JSValue      index_arg = JS_NewFloat64(scope.context(), static_cast<double>(case_index));
+        JSValueConst args[2]   = {seed_arg, index_arg};
+        JSValue      generated = JS_Call(scope.context(), generate_fn, JS_UNDEFINED, 2, args);
+        JS_FreeValue(scope.context(), seed_arg);
+        JS_FreeValue(scope.context(), index_arg);
+        JS_FreeValue(scope.context(), generate_fn);
+        if (JS_IsException(generated)) {
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::RuntimeException),
+                std::nullopt};
+        }
+        if (JS_IsUndefined(generated)) {
+            JS_FreeValue(scope.context(), generated);
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget, GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+
+        json           converted;
+        JsonConversion conversion;
+        conversion.byte_limit = scope_limits.max_generated_document_bytes;
+        const bool ok         = js_to_json(scope.context(), generated, converted, conversion, 0);
+        JS_FreeValue(scope.context(), generated);
+        if (!ok) {
+            const bool had_exception = JS_HasException(scope.context());
+            discard_pending_exception(scope.context());
+            return GateCaseSandboxResult{
+                false,
+                classify_gate_sandbox_failure(scope, budget,
+                                              had_exception ? GateFailureCategory::RuntimeException
+                                                            : GateFailureCategory::SchemaMismatch),
+                std::nullopt};
+        }
+        return GateCaseSandboxResult{true, std::nullopt, std::move(converted)};
+    } catch (const ProgramDiagnosticError&) {
+        throw;
+    } catch (const JavaScriptCompileError&) {
+        return GateCaseSandboxResult{false, GateFailureCategory::MemoryLimit, std::nullopt};
+    }
+#endif
+}
+
 }  // namespace neograph::program::detail
