@@ -544,6 +544,75 @@ std::optional<Member> member_of(int handle, const char* name, std::span<const Op
     return Member(handle, name, std::move(methods), lease);
 }
 
+program::ProgramSynthesisSemanticDecision decode_semantic_decision(const json& value) {
+    if (!value.is_object()) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            "JavaScript synthesis validator must return an object {validatorIdentity, contractIdentity, accepted, evidence?}");
+    }
+    for (const auto& [key, _] : value.items()) {
+        if (key != "validatorIdentity" && key != "contractIdentity" && key != "accepted" && key != "evidence") {
+            throw program::ProgramChildSynthesisError(
+                "P_CHILD_SYNTHESIS_SEMANTICS",
+                "JavaScript synthesis validator returned unknown field: " + key);
+        }
+    }
+    if (!value.contains("validatorIdentity") || !value.at("validatorIdentity").is_string() ||
+        value.at("validatorIdentity").get<std::string>().empty()) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            "JavaScript synthesis validator decision.validatorIdentity must be a non-empty string");
+    }
+    if (!value.contains("contractIdentity") || !value.at("contractIdentity").is_string() ||
+        value.at("contractIdentity").get<std::string>().empty()) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            "JavaScript synthesis validator decision.contractIdentity must be a non-empty string");
+    }
+    if (!value.contains("accepted") || !value.at("accepted").is_boolean()) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            "JavaScript synthesis validator decision.accepted must be a boolean");
+    }
+    json evidence = json::object();
+    if (value.contains("evidence")) {
+        if (!value.at("evidence").is_object()) {
+            throw program::ProgramChildSynthesisError(
+                "P_CHILD_SYNTHESIS_SEMANTICS",
+                "JavaScript synthesis validator decision.evidence must be an object");
+        }
+        evidence = value.at("evidence");
+    }
+    return program::ProgramSynthesisSemanticDecision{
+        value.at("validatorIdentity").get<std::string>(),
+        value.at("contractIdentity").get<std::string>(),
+        value.at("accepted").get<bool>(),
+        std::move(evidence)};
+}
+
+asio::awaitable<program::ProgramSynthesisSemanticDecision> invoke_js_synthesis_validator(
+    int handle, std::shared_ptr<const void> lease, std::string arguments) {
+    const auto keep_alive = std::move(lease);
+    (void)keep_alive;
+    std::string text;
+    try {
+        text = co_await exchange(handle, "synthesis", "validate", std::move(arguments));
+    } catch (const std::exception& error) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            std::string("JavaScript synthesis validator failed: ") + error.what());
+    }
+    json parsed;
+    try {
+        parsed = program::detail::parse_json_strict(text);
+    } catch (const std::exception& error) {
+        throw program::ProgramChildSynthesisError(
+            "P_CHILD_SYNTHESIS_SEMANTICS",
+            std::string("JavaScript synthesis validator returned invalid JSON: ") + error.what());
+    }
+    co_return decode_semantic_decision(parsed);
+}
+
 }  // namespace
 
 JsStoreSet adapt_js_stores(int handle, std::shared_ptr<const void> lease) {
@@ -559,6 +628,29 @@ JsStoreSet adapt_js_stores(int handle, std::shared_ptr<const void> lease) {
     if (auto member = member_of(handle, "modules", module_ops::all, lease))
         set.modules = std::make_shared<JsModuleStore>(std::move(*member));
     return set;
+}
+
+program::ProgramSynthesisAsyncSemanticValidator adapt_js_synthesis_validator(
+    int handle, std::shared_ptr<const void> lease) {
+    const int has = ng_js_store_has(handle, "synthesis", "validate");
+    if (has == -3)
+        throw std::invalid_argument("the JavaScript store bridge is not installed (installStoreBridge)");
+    if (has == -2)
+        throw std::invalid_argument("no synthesis validator is registered under handle " + std::to_string(handle));
+    if (has != 2)
+        throw std::invalid_argument("synthesis validator must be a function");
+    return [handle, lease = std::move(lease)](
+               const program::ProgramSynthesisProposal&    proposal,
+               const program::ProgramBundle&               bundle,
+               const program::ProgramSynthesisReservation& reservation)
+               -> asio::awaitable<program::ProgramSynthesisSemanticDecision> {
+        std::string arguments =
+            json::array({program::detail::parse_json_strict(proposal.serialize_canonical()),
+                         program::detail::parse_json_strict(bundle.serialize_canonical()),
+                         program::detail::parse_json_strict(reservation.serialize_canonical())})
+                .dump();
+        return invoke_js_synthesis_validator(handle, lease, std::move(arguments));
+    };
 }
 
 void set_js_store_executor(asio::any_io_executor executor) { bridge().executor = std::move(executor); }

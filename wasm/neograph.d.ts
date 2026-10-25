@@ -237,13 +237,27 @@ export interface SynthesisSemanticDecision {
   evidence?: object;
 }
 
-/** The child's request (budget, capabilities, effects) and the host's authority (grant, semanticDecision). */
+/**
+ * The host's semantic validator for a compiled child Program bundle (`programs.registerSynthesisValidator(validate)`).
+ * Receives the canonical JSON of the proposal, the compiled bundle, and the compile reservation, and returns (or resolves
+ * to) `{ validatorIdentity, contractIdentity, accepted, evidence? }`.
+ */
+export type SynthesisValidator = (
+  proposal: Record<string, unknown>,
+  bundle: Record<string, unknown>,
+  reservation: Record<string, unknown>,
+) => SynthesisSemanticDecision | Promise<SynthesisSemanticDecision>;
+
+/**
+ * The child's request (budget, capabilities, effects) and the host's authority (grant, and either semanticDecision in
+ * the call or a validator registered on the Programs instance with `registerSynthesisValidator`).
+ */
 export interface SynthesizeChildAuthority {
   budget: RunBudget;
   capabilities?: string[];
   effects?: string[];
   grant: ChildSynthesisGrant;
-  semanticDecision: SynthesisSemanticDecision;
+  semanticDecision?: SynthesisSemanticDecision;
 }
 
 export interface SynthesizeChildOptions extends SynthesizeChildAuthority {
@@ -373,6 +387,11 @@ export interface Programs {
     source?: ProgramSource,
     options?: SynthesizeChildAuthority,
   ): Promise<SynthesizedChild>;
+  /**
+   * Registers the host's semantic validator for compiled child Program bundles when `synthesizeChild` is called without
+   * a per-call `semanticDecision`.
+   */
+  registerSynthesisValidator(validate: SynthesisValidator): void;
   /** What the stores hold of a run: its latest result, `{ runId, status: 'running' }` while it has none, or null. */
   result(runId: string): Promise<ProgramResult | ProgramRunning | null>;
   /** Cancels the runs that are executing and frees the object. A run that waits at an interrupt stays as it is. */

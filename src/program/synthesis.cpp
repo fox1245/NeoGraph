@@ -772,7 +772,8 @@ void validate_program_child_synthesis_reservation(
 ProgramSynthesisGateway::ProgramSynthesisGateway(ProgramSynthesisGatewayConfig config)
     : config_(std::move(config)) {
     if (!config_.compiler || !config_.catalog || !config_.admission || !config_.max_source_bytes ||
-        !config_.validate_semantics || !config_.max_semantic_evidence_bytes) {
+        (!config_.validate_semantics && !config_.validate_semantics_async) ||
+        !config_.max_semantic_evidence_bytes) {
         throw std::invalid_argument(
             "Program synthesis gateway requires compiler, Catalog, semantic validation, admission, "
             "and limits");
@@ -802,6 +803,11 @@ ProgramChildSynthesisResult ProgramSynthesisGateway::synthesize_child(
 ProgramSynthesisResult ProgramSynthesisGateway::synthesize_impl(
     const ProgramSynthesisProposal&           proposal,
     const ProgramChildSynthesisAuthorization* child_authorization) const {
+    if (!config_.validate_semantics) {
+        throw std::invalid_argument(
+            "Synchronous Program synthesis requires validate_semantics; use continue_child_async "
+            "when only validate_semantics_async is configured");
+    }
     if (proposal.source().serialize_canonical().size() > config_.max_source_bytes) {
         throw std::invalid_argument("Program synthesis source exceeds host byte limit");
     }
@@ -965,8 +971,11 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramSynthesisGateway::continue_c
     }
     if (record.data().state == State::Compiled) {
         co_await save(State::Validating, record.data().artifacts);
-        auto       bundle   = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
-        auto       semantic = config_.validate_semantics(request, bundle, reserved);
+        auto       bundle         = ProgramBundle::parse(decode(record.data().artifacts.at("bundle")));
+        const auto validate_async = config_.validate_semantics_async;
+        auto       semantic       = validate_async
+                                        ? co_await validate_async(request, bundle, reserved)
+                                        : config_.validate_semantics(request, bundle, reserved);
         // As synthesize_child(): a decision is the grant's only when it names the grant's validator and contract.
         const auto& grant_data = record.data().grant.data();
         if (semantic.validator_identity != grant_data.semantic_validator_identity ||

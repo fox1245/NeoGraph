@@ -147,6 +147,18 @@ export function registerStores(module, stores) {
   return handle;
 }
 
+/**
+ * Registers a synthesis validator `validate(proposal, bundle, reservation)` under the store bridge and returns its
+ * handle (`adapt_js_synthesis_validator(handle)`).
+ */
+export function registerSynthesisValidator(module, validate) {
+  const state = stateOf(module);
+  if (typeof validate !== 'function') throw new TypeError('the synthesis validator must be a function');
+  const handle = ++state.last;
+  state.stores.set(handle, { synthesis: { validate } });
+  return handle;
+}
+
 /** Forgets a stores object. A call that is still pending completes; a call made afterwards fails. */
 export function releaseStores(module, handle) {
   stateOf(module).stores.delete(handle);
