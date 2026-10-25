@@ -422,6 +422,16 @@ public:
     /// Answers, for a control, whether a later attempt of the same run executes in this process; set when the control
     /// is registered. A handle of an attempt that the run has left has nothing to cancel while that attempt executes.
     void              set_executing_attempt_check(std::function<bool(const RunControl*)> check);
+    /// Ends the children that a paused parent published and never dispatched (#655). cancel_async awaits it with the
+    /// parent's record as it was before the cancellation, once the parent's Cancelled state is durable. It returns a
+    /// notice for each child that it could not end, and none for a child that it ended or that another path ended.
+    /// Set when the control is registered or read back from the stores.
+    using UnstartedChildrenEnder = std::function<asio::awaitable<std::vector<ProgramNotice>>(ProgramRunRecord)>;
+    void              set_unstarted_children_ender(UnstartedChildrenEnder ender);
+    /// The terminal publication of this control compares against the run record with this journal head and publishes
+    /// nothing when the run has moved on from it. Set by a path that decided from a record it loaded.
+    void              set_expected_terminal_head(std::string journal_head);
+    std::optional<std::string> expected_terminal_head() const;
     bool              superseded_by_executing_attempt() const noexcept;
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
@@ -590,6 +600,8 @@ private:
     std::shared_ptr<ReentrantOperationLock>   handoff_coordination_mutex_;
     std::shared_ptr<PendingCancellations>     pending_cancellations_;
     std::function<bool(const RunControl*)>    executing_attempt_check_;
+    UnstartedChildrenEnder                    unstarted_children_ender_;
+    std::optional<std::string>                expected_terminal_head_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;
     std::uint64_t                            handoff_request_id_ = 0;

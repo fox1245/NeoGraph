@@ -1780,20 +1780,32 @@ void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
         });
 }
 
+// Whether `record` is a child run that was published and never dispatched: its Started transition, and nothing after.
 asio::awaitable<bool> is_unstarted_child_dispatch(std::shared_ptr<ProgramTransitionStore> transitions,
                                                   std::string                             owner_scope,
-                                                  std::string                             child_run_id) {
-    const auto record = co_await transitions->load(owner_scope, child_run_id);
-    if (!record || record->continuation().state != ContinuationState::Running ||
-        record->continuation().attempt != 1 || record->event_sequence() != 1 ||
-        record->effect_sequence() != 0 || record->exact_checkpoint() || record->pending_input() ||
-        record->pending_effect() || record->terminal_result())
+                                                  ProgramRunRecord                        record) {
+    const auto child_run_id = record.run_id();
+    if (record.continuation().state != ContinuationState::Running ||
+        record.continuation().attempt != 1 || record.event_sequence() != 1 ||
+        record.effect_sequence() != 0 || record.exact_checkpoint() || record.pending_input() ||
+        record.pending_effect() || record.terminal_result())
         co_return false;
     const auto journal = co_await transitions->latest(owner_scope, child_run_id);
-    if (!journal || journal->sequence != 1 || journal->previous_id != "") co_return false;
+    if (!journal || journal->sequence != 1 || journal->previous_id != "" ||
+        journal->id != record.journal_head())
+        co_return false;
     const auto events = co_await transitions->load_events(owner_scope, child_run_id);
     co_return events.size() == 1 && events.front().sequence == 1 &&
            events.front().kind == ProgramEventKind::Started;
+}
+
+asio::awaitable<bool> is_unstarted_child_dispatch(std::shared_ptr<ProgramTransitionStore> transitions,
+                                                  std::string                             owner_scope,
+                                                  std::string                             child_run_id) {
+    auto record = co_await transitions->load(owner_scope, child_run_id);
+    if (!record) co_return false;
+    co_return co_await is_unstarted_child_dispatch(std::move(transitions), std::move(owner_scope),
+                                                   std::move(*record));
 }
 ProgramJournalRecord initial_record(
     const detail::RunControl&             control,
@@ -1970,6 +1982,10 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             previous->continuation().attempt != control.attempt) {
             co_return TerminalPublicationResult::TransitionConflict;
         }
+        // A control that decided from a record it loaded ends only that record, not a run that has moved on from it.
+        if (const auto expected = control.expected_terminal_head();
+            expected && *expected != previous->journal_head())
+            co_return TerminalPublicationResult::TransitionConflict;
 
         std::optional<ProgramJournalRecord> loaded_previous_journal;
         const ProgramJournalRecord* previous_journal = head ? &head->journal_record : nullptr;
@@ -2908,6 +2924,24 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
                 abort_handoff();
                 co_await abort_graph_migration_async();
                 co_await cancel_children_async(cause, held_here);
+                // #655: a child that the parent published and never dispatched is attached to no control.
+                UnstartedChildrenEnder ender;
+                {
+                    std::lock_guard lock(mutex_);
+                    ender = unstarted_children_ender_;
+                }
+                if (ender) {
+                    std::vector<ProgramNotice> not_ended;
+                    try {
+                        not_ended = co_await ender(*previous);
+                    } catch (...) {
+                        not_ended.push_back(ProgramNotice{
+                            "P_CHILD_NOT_ENDED",
+                            "The children that the cancelled parent published and never dispatched were not ended",
+                            json{{"run_id", run_id}, {"reason", "unexpected_failure"}}});
+                    }
+                    for (auto& notice : not_ended) add_notice(std::move(notice));
+                }
                 if (callback) {
                     try {
                         co_await callback(callback_result);
@@ -2996,6 +3030,21 @@ bool RunControl::superseded_by_executing_attempt() const noexcept {
 void RunControl::set_executing_attempt_check(std::function<bool(const RunControl*)> check) {
     std::lock_guard lock(mutex_);
     executing_attempt_check_ = std::move(check);
+}
+
+void RunControl::set_unstarted_children_ender(UnstartedChildrenEnder ender) {
+    std::lock_guard lock(mutex_);
+    unstarted_children_ender_ = std::move(ender);
+}
+
+void RunControl::set_expected_terminal_head(std::string journal_head) {
+    std::lock_guard lock(mutex_);
+    expected_terminal_head_ = std::move(journal_head);
+}
+
+std::optional<std::string> RunControl::expected_terminal_head() const {
+    std::lock_guard lock(mutex_);
+    return expected_terminal_head_;
 }
 
 // Schedules the Cancelled state of an interrupted run as a task of the executor, and returns whether it did. The claim
@@ -5173,7 +5222,132 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         // either.
         control->set_pending_cancellations(process_state->pending_cancellations);
         control->set_executing_attempt_check(executing_attempt_check());
+        control->set_unstarted_children_ender(unstarted_children_ender());
         co_return control;
+    }
+
+    // #655: the children that a paused parent published and never dispatched. The parent's record holds each as
+    // Publishing, and the child run is a Started transition and a Running record with no attempt, which the parent
+    // would dispatch when it runs again. A parent that is cancelled dispatches nothing, and its own Cancelled record
+    // closes the relation without a result, so each such child is ended Cancelled here, durably, as start_child_core
+    // ends a child whose parent ended during its dispatch. The children are found in the stores: the process that
+    // cancels the parent may never have held a control of one, and a dispatched child is attached to the parent's
+    // control and cancelled with it. `paused_parent` is the parent's record before its cancellation. The result has a
+    // notice for every child that was not ended, and none for a child that this call or another path ended.
+    asio::awaitable<std::vector<ProgramNotice>> end_unstarted_children(std::string      owner_scope,
+                                                                       ProgramRunRecord paused_parent) {
+        std::vector<ProgramNotice> not_ended;
+        const auto notice = [&](const std::string& child_run_id, std::string reason, std::string code = {}) {
+            json witness{{"child_run_id", child_run_id}, {"parent_run_id", paused_parent.run_id()},
+                         {"reason", std::move(reason)}};
+            if (!code.empty()) witness["diagnostic_code"] = std::move(code);
+            not_ended.push_back(ProgramNotice{"P_CHILD_NOT_ENDED",
+                                              "A child run that its cancelled parent published and never dispatched "
+                                              "was not ended",
+                                              std::move(witness)});
+        };
+        for (const auto& relation : paused_parent.children()) {
+            if (relation.state != ProgramChildState::Publishing) continue;
+            try {
+                if ((co_await end_unstarted_child(owner_scope, relation.child_run_id)) ==
+                    UnstartedChildEnding::NotUnstarted)
+                    notice(relation.child_run_id, "child_started");
+            } catch (const ProgramDiagnosticError& error) {
+                notice(relation.child_run_id, "diagnostic", error.diagnostic().code);
+            } catch (const std::exception&) {
+                notice(relation.child_run_id, "store_error");
+            } catch (...) {
+                notice(relation.child_run_id, "non_standard_exception");
+            }
+        }
+        co_return not_ended;
+    }
+
+    enum class UnstartedChildEnding : std::uint8_t {
+        Ended,           // this call published the child's Cancelled state
+        EndedElsewhere,  // the child had a terminal state already, or another path published one first
+        NotUnstarted,    // the child has an attempt, or is not a published, never-dispatched run
+    };
+
+    // Ends one published, never-dispatched child run Cancelled, from the stores. It decides from the record it loads
+    // and publishes against that record's journal head, so a child that has moved on since (a dispatch, an attempt,
+    // another terminal state) is left as it is. Throws when the child is not ended and no other path ended it.
+    // The control it builds is the minimum that complete_async needs for a stored run: reconnect_core builds one too,
+    // but it also reserves the run's child budget and spawns an attempt, which this must not do.
+    asio::awaitable<UnstartedChildEnding> end_unstarted_child(const std::string& owner_scope,
+                                                              const std::string& child_run_id) {
+        const auto record = co_await transitions->load(owner_scope, child_run_id);
+        if (!record)
+            throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Undispatched child run was not found",
+                                     json{{"child_run_id", child_run_id}});
+        if (record->terminal_result()) co_return UnstartedChildEnding::EndedElsewhere;
+        if (!(co_await is_unstarted_child_dispatch(transitions, owner_scope, *record)))
+            co_return UnstartedChildEnding::NotUnstarted;
+        const auto version = co_await config.catalog->resolve_version_async(owner_scope, record->program_version_id());
+        if (!version)
+            throw_runtime_diagnostic("P_VERSION_NOT_FOUND",
+                                     "Program version required to end an undispatched child was not found",
+                                     json{{"child_run_id", child_run_id}});
+        auto pinned = co_await detail::CatalogRuntimeAccess::pin_async(*config.catalog, *version);
+        if (pinned->bundle.id() != record->bundle_id())
+            throw_runtime_diagnostic("P_RUN_RECOVERY_IDENTITY", "Undispatched child identity is incompatible",
+                                     json{{"child_run_id", child_run_id}});
+        const auto core_thread_id = core_thread_identity(child_run_id, pinned->root->compiled_plan_identity);
+        ProgramPersistedInvocation persisted{record->invocation().input, record->remaining_budget(),
+                                             record->invocation().correlation_id,
+                                             record->invocation().parent_run_id, record->child_depth()};
+        auto control = std::make_shared<detail::RunControl>(
+            owner_scope, child_run_id, record->continuation().attempt, std::move(pinned),
+            record->binding_fingerprint(), std::move(persisted), record->invocation(), core_thread_id,
+            record->event_sequence(), std::shared_ptr<ProgramEventSink>{}, scheduler, config.checkpoints,
+            config.state_store, transitions);
+        control->set_hook_runtime(config.hook_runtime);
+        control->set_expected_terminal_head(record->journal_head());
+        detail::RunOutcome cancelled;
+        cancelled.status           = ProgramTerminalStatus::Cancelled;
+        cancelled.remaining_budget = record->remaining_budget();
+        cancelled.failure          = ProgramFailure{
+            "P_RUNTIME_CANCELLED", "Parent Program was cancelled before the child was dispatched",
+            control->operation_id, "", 0, json::object()};
+        co_await control->complete_async(std::move(cancelled));
+        // complete_async reports a terminal publication that did not happen on the control, not by throwing: its
+        // result is Cancelled only when this call published it.
+        if (const auto result = control->try_result(); result && result->status() == ProgramTerminalStatus::Cancelled)
+            co_return UnstartedChildEnding::Ended;
+        const auto now = co_await transitions->load(owner_scope, child_run_id);
+        if (now && now->terminal_result()) co_return UnstartedChildEnding::EndedElsewhere;
+        throw_runtime_diagnostic("P_CHILD_NOT_ENDED", "Undispatched child could not be ended",
+                                 json{{"child_run_id", child_run_id}});
+    }
+
+    // Whether the durable record of the parent of `child` has closed its relation with it: the parent was cancelled
+    // or ended, so it will never dispatch the child. A parent that is running or paused holds the relation open.
+    asio::awaitable<bool> parent_closed_child_relation(const std::string& owner_scope, const ProgramRunRecord& child) {
+        const auto parent_run_id = child.invocation().parent_run_id;
+        if (parent_run_id.empty()) co_return false;
+        const auto parent = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
+        const auto relation = parent ? find_child(*parent, child.run_id()) : std::optional<ProgramChildRecord>{};
+        co_return relation && relation->state != ProgramChildState::Publishing &&
+            relation->state != ProgramChildState::Dispatched;
+    }
+
+    detail::RunControl::UnstartedChildrenEnder unstarted_children_ender() {
+        return [weak = weak_from_this()](ProgramRunRecord paused_parent) -> asio::awaitable<std::vector<ProgramNotice>> {
+            const auto impl = weak.lock();
+            if (!impl) {
+                std::vector<ProgramNotice> not_ended;
+                for (const auto& relation : paused_parent.children())
+                    if (relation.state == ProgramChildState::Publishing)
+                        not_ended.push_back(ProgramNotice{
+                            "P_CHILD_NOT_ENDED",
+                            "A child run that its cancelled parent published and never dispatched was not ended",
+                            json{{"child_run_id", relation.child_run_id}, {"parent_run_id", paused_parent.run_id()},
+                                 {"reason", "runtime_stopped"}}});
+                co_return not_ended;
+            }
+            auto owner_scope = paused_parent.owner_scope();
+            co_return co_await impl->end_unstarted_children(std::move(owner_scope), std::move(paused_parent));
+        };
     }
 
     // Whether a later attempt of the run executes in this process: a control of the same run, with a higher attempt, that
@@ -5804,6 +5978,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         control->set_pending_cancellations(process_state->pending_cancellations);
         const auto weak_process_state = std::weak_ptr<ProcessRuntimeState>(process_state);
         control->set_executing_attempt_check(executing_attempt_check());
+        control->set_unstarted_children_ender(unstarted_children_ender());
         control->set_handoff_coordination_mutex(
             process_state->transition_mutex,
             [weak_process_state](const detail::RunControl* requester) {
@@ -8989,6 +9164,20 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
     }
     const auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
+        // #655, #636: a child that was published and never dispatched, whose parent has closed its relation with it,
+        // has no parent to dispatch it. Recovering it would run a child of a cancelled parent, so it is ended
+        // Cancelled, which is the heal for a cancellation that failed or stopped before it ended the child.
+        if (!record->terminal_result()) {
+            const bool closed = co_await impl_->parent_closed_child_relation(owner_scope, *record);
+            if (closed) {
+                const auto ending = co_await impl_->end_unstarted_child(owner_scope, run_id);
+                if (ending != Impl::UnstartedChildEnding::NotUnstarted) {
+                    // The lock stays held (by this call, or by the caller that passed it in): the lock is not
+                    // reentrant for a coroutine, so the retry does not take it again.
+                    co_return (co_await reconnect_core(owner_scope, run_id, true));
+                }
+            }
+        }
         const auto active_lineage =
             (co_await load_active_run_lineage_async(*impl_->transitions, *record));
         if (!active_lineage) {
