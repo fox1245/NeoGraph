@@ -1090,6 +1090,38 @@ private:
     std::string name_;
 };
 
+std::mutex recorded_messages_mutex;
+json       recorded_messages = json::array();
+
+void reset_recorded_messages() {
+    std::lock_guard lock(recorded_messages_mutex);
+    recorded_messages = json::array();
+}
+
+json last_recorded_messages() {
+    std::lock_guard lock(recorded_messages_mutex);
+    return recorded_messages;
+}
+
+class RecordMessagesNode final : public GraphNode {
+public:
+    explicit RecordMessagesNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        ++followup_calls;
+        {
+            std::lock_guard lock(recorded_messages_mutex);
+            recorded_messages = input.state.get("messages");
+        }
+        co_return NodeOutput{};
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 RegistrySnapshot runtime_registry(
     ExecutionGuarantee completed_guarantee = ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
@@ -1290,6 +1322,23 @@ RegistrySnapshot runtime_registry(
             return std::make_unique<FollowupNode>(name);
         },
         json{{"type", "object"}}, json::object());
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-record-messages", 'c'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<RecordMessagesNode>(name);
+        },
+        json{{"type", "object"}},
+        json{{"reads", json::array({"messages"})}});
+    builder.add_reducer(manifest(ExecutableKind::Reducer, "append", 'a'),
+                        [](const json& current, const json& incoming) {
+                            json out = current.is_array() ? current : json::array();
+                            if (incoming.is_array()) {
+                                for (const auto& item : incoming) out.push_back(item);
+                            } else {
+                                out.push_back(incoming);
+                            }
+                            return out;
+                        });
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-overwrite", '3'),
                         [](const json&, const json& incoming) { return json(incoming); });
     builder.add_reducer(manifest(ExecutableKind::Reducer, "runtime-alternate", '9'),
@@ -3600,7 +3649,7 @@ TEST(ProgramRuntimeTest, ActiveRunGraphForkDropsSourceActivationButRetainsLineag
     EXPECT_EQ(lineage->active_generation(), 2U);
     EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", request.run_id).wait().id(),
               result.id());
-    (void)source.handle.wait();
+    EXPECT_EQ(source.handle.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(blocking_calls.load(), 1U);
     EXPECT_EQ(followup_calls.load(), 1U);
 }
@@ -4819,6 +4868,61 @@ TEST(ProgramRuntimeTest, GraphMigrationFencesSourceAndExactResumesGenerationTwo)
     EXPECT_EQ(retried.run_id(), target.run_id());
     (void)source.wait();
     EXPECT_EQ(followup_calls.load(), 1U);
+}
+
+TEST(ProgramRuntimeTest, GraphMigratedSourceEndsCancelledWithoutTransitionConflict) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    AdmittedRuntime fixture(1);
+    const auto version = fixture.admit("runtime-short-blocking");
+
+    auto source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-graph-migration-source-cancelled", {}});
+    auto target = fixture.runtime->migrate_graph(
+        source, ProgramGraphMigrationTarget{version.id(), "graph-migration-target-cancelled", {}});
+    ASSERT_EQ(target.wait().status(), ProgramTerminalStatus::Completed);
+
+    const auto source_result = source.wait();
+    EXPECT_EQ(source_result.status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_FALSE(source_result.failure().has_value());
+}
+
+TEST(ProgramRuntimeTest, GraphMigrationContinuesFromSourceMessagesStateWithoutSerializingRunInput) {
+    blocking_calls.store(0);
+    followup_calls.store(0);
+    reset_recorded_messages();
+    AdmittedRuntime fixture(1);
+    auto            document   = program_document("runtime-short-blocking");
+    auto            definition = document["root"]["definition"];
+    definition["channels"] =
+        json{{"messages", json{{"reducer", "append"}, {"initial", json::array()}}}};
+    definition["nodes"] =
+        json{{"tool_dispatch", json{{"type", "runtime-short-blocking"}}},
+             {"llm_call", json{{"type", "runtime-record-messages"}}}};
+    definition["edges"] = json::array({
+        json{{"from", "__start__"}, {"to", "tool_dispatch"}},
+        json{{"from", "tool_dispatch"}, {"to", "llm_call"}},
+        json{{"from", "llm_call"}, {"to", "__end__"}},
+    });
+    document["root"]["definition"] = std::move(definition);
+    const auto version             = fixture.admit_document(std::move(document));
+
+    const json input{{"messages", json::array({json{{"role", "user"}, {"content", "Migrate graph"}}})}};
+    auto       source = fixture.runtime->start(
+        "tenant:runtime", version,
+        ProgramInvocation{input, grant(), "trace-graph-migration-messages-source", {}});
+    auto target = fixture.runtime->migrate_graph(
+        source, ProgramGraphMigrationTarget{version.id(), "graph-migration-messages-target", {}});
+    const auto result = target.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                             : "no failure detail");
+    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
+    EXPECT_EQ(blocking_calls.load(), 1U);
+    EXPECT_EQ(followup_calls.load(), 1U);
+    EXPECT_EQ(last_recorded_messages(),
+              json::array({json{{"role", "user"}, {"content", "Migrate graph"}}}));
 }
 
 TEST(ProgramRuntimeTest, GraphSemanticMigrationAdapterAdmitsShapePreservingSuccessor) {

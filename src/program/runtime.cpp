@@ -8329,8 +8329,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
 
     const auto fence_source = [&]() -> asio::awaitable<void> {
         source_guard.consumed = true;
-        co_await impl_->cancel_process_controls(owner_scope, capsule.source_run_id(),
-                                                impl_->process_state->transition_mutex);
+        auto live = impl_->find_process_control(owner_scope, capsule.source_run_id());
+        if (live && control)
+            co_await live->retire_to(control, impl_->process_state->transition_mutex);
+        else
+            co_await impl_->cancel_process_controls(owner_scope, capsule.source_run_id(),
+                                                    impl_->process_state->transition_mutex);
     };
     ProgramTransitionPublishResult published = ProgramTransitionPublishResult::Conflict;
     std::exception_ptr             publish_failure;
@@ -8407,7 +8411,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
         (co_await control->complete_async(std::move(failed)));
         co_return ProgramHandle(std::move(control));
     }
-    spawn_run_attempt(impl_->scheduler, impl_, control, target_invocation.input,
+    spawn_run_attempt(impl_->scheduler, impl_, control, json(),
                       target_checkpoint.checkpoint_id,
                       impl_->config.host_admission,
                       impl_->config.host_admission_resolver);
@@ -9345,8 +9349,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                      attempt_resume->checkpoint_id == *resume_checkpoint_id;
         const bool  control_source = control->materialized->bundle.control_source().has_value();
         spawn_run_attempt(impl_->scheduler, impl_, control,
-                          resumed_attempt && !control_source ? attempt_resume->value
-                                                             : record->invocation().input,
+                          !resume_checkpoint_id || control_source
+                              ? record->invocation().input
+                              : (resumed_attempt ? attempt_resume->value : json()),
                           std::move(resume_checkpoint_id), impl_->config.host_admission,
                           impl_->config.host_admission_resolver,
                           resumed_attempt && control_source

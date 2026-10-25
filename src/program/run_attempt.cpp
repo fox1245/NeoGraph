@@ -3355,7 +3355,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         // that checkpoint's Core thread, with the value the run
                         // was resumed with; the plan keeps its own state.
                         if (resume_checkpoint) thread_id = resume_checkpoint->core_thread_id;
-                        if (resume_answer) state = detail::owned_json_copy(*resume_answer);
+                        state = resume_answer ? detail::owned_json_copy(*resume_answer) : json();
                     } else if (!control->recorded_replay) {
                         if (operation_count >= control->granted_budget.max_program_operations)
                             co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
@@ -6444,8 +6444,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             // the call it answers, and what the paused run finished replays.
             auto plan_input = std::move(input);
             if (checkpoint_id) {
-                resume_answer = std::move(plan_input);
-                plan_input    = detail::owned_json_copy(control->persisted_invocation.input);
+                if (!plan_input.is_null()) resume_answer = std::move(plan_input);
+                plan_input = detail::owned_json_copy(control->persisted_invocation.input);
             }
             plan_result = co_await execute(
                 root_id, std::move(plan_input),
