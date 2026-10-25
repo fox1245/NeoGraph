@@ -571,6 +571,10 @@ def test_migrate_graph_happy_path_and_guard_refusal():
     assert result.program_version_id == core_v1.id
     assert s.trace_channel(result) == ["step1", "step2"]
 
+    # The source is retired to the migrated run, so its own handle ends Cancelled.
+    source_result = handle.wait()
+    assert source_result.status == ng.ProgramTerminalStatus.Cancelled, s.describe(source_result)
+
     lineage = host.run_lineage(handle.logical_run_id)
     assert lineage.active_generation == 2
     gen2 = host.run_generation(handle.logical_run_id, 2)
