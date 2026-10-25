@@ -766,6 +766,31 @@ if(NEOGRAPH_BUILD_SQLITE)
     endif()
 endif()
 
+if(NEOGRAPH_BUILD_SQLITE)
+    # Data written by a released version still opens, reads and resumes with
+    # the current stores (#609). Each test copies the committed file first.
+    add_executable(neograph_released_data_compat_tests test_released_data_compat.cpp)
+    target_compile_definitions(neograph_released_data_compat_tests PRIVATE
+        NEOGRAPH_RELEASED_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/released")
+    target_link_libraries(neograph_released_data_compat_tests PRIVATE
+        neograph::core
+        neograph::sqlite
+        SQLite::SQLite3
+        GTest::gtest_main
+    )
+    if(TARGET neograph_program AND TARGET neograph_program_sqlite)
+        target_compile_definitions(neograph_released_data_compat_tests PRIVATE
+            NEOGRAPH_RELEASED_COMPAT_HAVE_PROGRAM)
+        target_include_directories(neograph_released_data_compat_tests PRIVATE
+            ${PROJECT_SOURCE_DIR}/src/program)
+        target_link_libraries(neograph_released_data_compat_tests PRIVATE
+            neograph::program
+            neograph::program_sqlite
+        )
+    endif()
+    neograph_discover_tests(neograph_released_data_compat_tests PROPERTIES LABELS "released-data;model-free")
+endif()
+
 add_executable(neograph_runtime_turn_tests
     test_runtime_turn_assembler.cpp
     test_controlled_provider.cpp
