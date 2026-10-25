@@ -110,6 +110,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          # The newest patch release, not the one cached on the runner image.
+          check-latest: true
       - name: Run the smoke program, the checks, the module tests and the Program store tests on Node 22
         run: |
           node --version
@@ -135,6 +137,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          # The newest patch release, not the one cached on the runner image.
+          check-latest: true
       - name: Run the smoke program, the checks, the module tests and the Program store tests on Node 24
         run: |
           node --version
@@ -207,6 +211,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          # The newest patch release, not the one cached on the runner image.
+          check-latest: true
       - name: Run the smoke program on Node 24
         run: |
           node --version

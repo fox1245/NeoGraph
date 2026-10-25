@@ -4,7 +4,7 @@ set -euo pipefail
 # LLVM 20.1.8 has an arm64 Sonoma bottle and stable C++20 stop-token support.
 # Keep its headers and runtime together; the wheel repair checks every copied
 # dylib against macOS 14.0 rather than retagging a newer-runtime dependency.
-brew install llvm@20 libpq sqlite openssl@3 curl
+brew install llvm@20 libpq sqlite openssl@3 libnghttp2
 
 : "${CXX:?The macOS build must select llvm@20 clang++}"
 : "${CXXFLAGS:?The macOS build must select the matching libc++ headers}"
@@ -65,3 +65,29 @@ if len(runtimes) != 1 or runtimes[0].startswith(("/usr/lib/", "/System/")):
 PY
 "$work/stop-token"
 echo "LLVM 20 libc++ stop-token compile, link and execution probe passed (arm64, macOS 14.0 target)"
+
+# The published binaries bundle the curl of cmake/wheel-curl.sh, built here against
+# Homebrew's OpenSSL and nghttp2, rather than Homebrew's curl formula, which pulls in
+# libraries NeoGraph does not use (content-encoding decoders, SSH, QUIC, Kerberos).
+source "$(dirname "${BASH_SOURCE[0]}")/wheel-curl.sh"
+prefix=${NEOGRAPH_WHEEL_DEPS:-$HOME/neograph-wheel-deps}
+curl_work=$(mktemp -d)
+trap 'rm -rf "$work" "$curl_work"' EXIT
+curl --fail --location \
+    "https://curl.se/download/curl-${wheel_curl_version}.tar.xz" \
+    --output "$curl_work/curl.tar.xz"
+printf '%s  %s\n' "$wheel_curl_sha256" "$curl_work/curl.tar.xz" | shasum -a 256 --check --strict
+tar -xf "$curl_work/curl.tar.xz" -C "$curl_work"
+(
+    cd "$curl_work/curl-${wheel_curl_version}"
+    # curl is C: Apple clang with the release deployment target, not the LLVM 20
+    # C++ runtime flags of the NeoGraph build.
+    env -u CXX -u CXXFLAGS -u LDFLAGS CC=clang CFLAGS="-arch arm64 -mmacosx-version-min=14.0" \
+        ./configure --prefix="$prefix" --libdir="$prefix/lib" \
+        --with-openssl="$(brew --prefix openssl@3)" \
+        "${wheel_curl_configure_args[@]/--with-nghttp2/--with-nghttp2=$(brew --prefix libnghttp2)}"
+    make -j3
+    make install
+)
+"$prefix/bin/curl-config" --version
+wheel_curl_check_features "$prefix"

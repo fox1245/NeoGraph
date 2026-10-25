@@ -9,8 +9,9 @@ set -euo pipefail
 dnf install -y openssl-devel libpq-devel sqlite-devel libnghttp2-devel zlib-devel \
     gcc make binutils glibc-devel kernel-headers patch autoconf automake libtool \
     pkgconf-pkg-config perl-core openssl
-version=8.22.0
-sha256=f7ef3ae8a22e521f289803fe93543eb64c329b58aa73a9e224dfd915a2a5f4f7
+source "$(dirname "${BASH_SOURCE[0]}")/wheel-curl.sh"
+version=$wheel_curl_version
+sha256=$wheel_curl_sha256
 prefix=/opt/neograph-wheel-deps
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -20,12 +21,9 @@ curl --fail --location \
 printf '%s  %s\n' "$sha256" "$work/curl.tar.xz" | sha256sum --check --strict
 tar -xf "$work/curl.tar.xz" -C "$work"
 cd "$work/curl-${version}"
-./configure --prefix="$prefix" --libdir="$prefix/lib" \
-    --disable-static --with-openssl --with-nghttp2 \
-    --without-libpsl --without-libidn2 --without-librtmp \
-    --without-brotli --without-zstd \
-    --without-ca-bundle --without-ca-path
+./configure --prefix="$prefix" --libdir="$prefix/lib" --with-openssl \
+    "${wheel_curl_configure_args[@]}"
 make -j2
 make install
 "$prefix/bin/curl-config" --version
-"$prefix/bin/curl-config" --features
+wheel_curl_check_features "$prefix"
