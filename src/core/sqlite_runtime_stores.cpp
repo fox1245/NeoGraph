@@ -32,8 +32,12 @@ void open(sqlite3*& db, const std::string& path) {
         exec(db, "PRAGMA foreign_keys=ON");
         Tx tx(db);
         exec(db, "CREATE TABLE IF NOT EXISTS ng_runtime_store_schema(version INTEGER NOT NULL)");
-        Stmt v(db, "SELECT version FROM ng_runtime_store_schema");
-        const auto version = v.row() ? sqlite3_column_int(v.get(), 0) : 0;
+        // The statement ends before the migration: SQLite refuses to drop a table
+        // while a statement of the connection is still open.
+        const auto version = [&] {
+            Stmt v(db, "SELECT version FROM ng_runtime_store_schema");
+            return v.row() ? sqlite3_column_int(v.get(), 0) : 0;
+        }();
         if (version > 3) {
             throw std::runtime_error("SQLite runtime store schema is newer than this library");
         }
