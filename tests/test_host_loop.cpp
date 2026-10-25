@@ -1612,6 +1612,12 @@ class QuickTool final : public Tool {
 public:
     ChatTool get_definition() const override { return ChatTool{"quick", "finishes soon", json{{"type", "object"}}}; }
     std::string execute(const json&) override {
+        if (hold.load()) {
+            // Held: the call stays on the pool thread until the test releases it.
+            holding = true;
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (hold.load() && std::chrono::steady_clock::now() < limit) std::this_thread::yield();
+        }
         const unsigned spin = ++seed_ * 2654435761u >> 24;  // 0..255
         const auto until = std::chrono::steady_clock::now() + std::chrono::microseconds(spin);
         while (std::chrono::steady_clock::now() < until) {}
@@ -1620,6 +1626,7 @@ public:
     }
     std::string get_name() const override { return "quick"; }
     std::atomic<int> finished{0};
+    std::atomic<bool> hold{false}, holding{false};
 
 private:
     std::atomic<unsigned> seed_{1};
@@ -1666,6 +1673,41 @@ TEST(HostLoopPoolWork, LoopsDestroyedWhilePoolToolsCompleteLeaveNothingBehind) {
         EXPECT_EQ(probe.destroyed.load(), probe.started.load()) << "round " << round << ": a frame was left behind";
         EXPECT_EQ(probe.destroyed_on_host.load(), probe.destroyed.load()) << "round " << round;
         while (executor->step()) {}
+    }
+    // Whether a round above drops a result depends on how far the pumping got when its loop died. In this last
+    // round the call is still running on the pool when the loop is destroyed, so its result is always dropped.
+    {
+        auto executor = std::make_shared<ManualExecutor>();
+        FrameProbe probe;
+        std::atomic<int> submitted{0}, delivered{0};
+        // No call of an earlier round may still be on its way to the pool when the gate closes.
+        ASSERT_EQ(tool.finished.load(), submitted_total.load());
+        let_the_pool_thread_post();
+        tool.hold = true;
+        {
+            async::HostLoop loop(executor);
+            loop.spawn(call_quick_tools(&tool, &probe, 1, &submitted, &delivered), [](std::exception_ptr) {});
+            const auto limit = std::chrono::steady_clock::now() + 30s;
+            while (!tool.holding.load() && std::chrono::steady_clock::now() < limit) {
+                if (!executor->step()) std::this_thread::sleep_for(20us);
+            }
+            ASSERT_TRUE(tool.holding.load()) << "the held call did not reach the pool";
+        }
+        tool.hold = false;
+        const auto limit = std::chrono::steady_clock::now() + 30s;
+        while (tool.finished.load() < submitted_total.load() + submitted.load() &&
+               std::chrono::steady_clock::now() < limit)
+            std::this_thread::sleep_for(100us);
+        let_the_pool_thread_post();
+        while (executor->step()) {}
+        EXPECT_EQ(submitted.load(), 1);
+        EXPECT_EQ(delivered.load(), 0) << "the loop died before the held call finished";
+        EXPECT_EQ(probe.destroyed.load(), probe.started.load()) << "the held call's frame was left behind";
+        EXPECT_EQ(probe.destroyed_on_host.load(), probe.destroyed.load());
+        submitted_total += submitted.load();
+        delivered_total += delivered.load();
+        frames_made += probe.started.load();
+        frames_destroyed += probe.destroyed.load();
     }
     let_the_pool_thread_post();
     EXPECT_EQ(tool.finished.load(), submitted_total.load());
