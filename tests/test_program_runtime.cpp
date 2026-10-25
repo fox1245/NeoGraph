@@ -14889,6 +14889,207 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
+// #636: a parent that ends while its child is being dispatched, after the child's first publication and before
+// the Dispatched record of the parent. The child run is published and has no attempt, so nothing stops it but the
+// dispatch itself: it must end Cancelled and durable, not stay Running.
+struct ParentEndsDuringDispatch {
+    struct Publication {
+        std::string                      run_id;
+        ContinuationState                state;
+        std::optional<ProgramChildState> last_child;
+    };
+    std::string                child_id;
+    std::optional<std::string> failure_code;
+    std::vector<Publication>   publications;
+
+    static ProgramInvocation child_invocation() {
+        return ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+                                 "trace-child-never-started", {}};
+    }
+
+    // Starts a child of `parent`, holds the child's first publication until `end_parent` has returned, and
+    // records every publication the store saw.
+    void run(AdmittedRuntime&                       fixture,
+             BlockAfterJavaScriptResultJournal&     journal,
+             const LinkedChildAdmission&            linked,
+             ProgramHandle&                         parent,
+             const std::function<void()>&           end_parent) {
+        std::mutex              mutex;
+        std::condition_variable condition;
+        bool                    parent_ended = false;
+        journal.before_publication = [&](const ProgramTransitionPublication& value) {
+            const auto&      record = value.run_record;
+            std::unique_lock lock(mutex);
+            publications.push_back({record.run_id(), record.continuation().state,
+                                    record.children().empty()
+                                        ? std::nullopt
+                                        : std::optional(record.children().back().state)});
+            if (record.invocation().parent_run_id != parent.run_id() || !child_id.empty()) return;
+            child_id = record.run_id();
+            condition.notify_all();
+            condition.wait_for(lock, std::chrono::seconds(20), [&] { return parent_ended; });
+        };
+        std::thread starter([&] {
+            try {
+                (void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
+                                                   linked.child_version, child_invocation());
+            } catch (const ProgramDiagnosticError& error) {
+                failure_code = error.diagnostic().code;
+            }
+        });
+        bool held = false;
+        {
+            std::unique_lock lock(mutex);
+            held = condition.wait_for(lock, std::chrono::seconds(20), [&] { return !child_id.empty(); });
+        }
+        if (held) end_parent();
+        {
+            std::lock_guard lock(mutex);
+            parent_ended = true;
+        }
+        condition.notify_all();
+        starter.join();
+        journal.before_publication = {};
+        EXPECT_TRUE(held) << "the child's first publication was never reached";
+    }
+
+    std::optional<std::size_t> first_publication_of(std::string_view run, ContinuationState state) const {
+        for (std::size_t index = 0; index < publications.size(); ++index)
+            if (publications[index].run_id == run && publications[index].state == state) return index;
+        return std::nullopt;
+    }
+};
+
+// A parent that waits at a gate, then pauses for an answer, and keeps running after the answer.
+LinkedChildAdmission make_gated_interrupting_parent(AdmittedRuntime& fixture) {
+    auto parent_document                      = program_document("runtime-typed-parent-gate");
+    parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
+    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][7]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][7]["maximum"] = 1;
+    parent_document["declared_budget_requirements"][8]["minimum"] = 1;
+    parent_document["declared_budget_requirements"][8]["maximum"] = 1;
+    parent_document["root"]["definition"]["nodes"]["ask"]  = json{{"type", "runtime-interrupt"}};
+    parent_document["root"]["definition"]["nodes"]["hold"] = json{{"type", "runtime-blocking"}};
+    parent_document["root"]["definition"]["edges"] =
+        json::array({json{{"from", "__start__"}, {"to", "work"}}, json{{"from", "work"}, {"to", "ask"}},
+                     json{{"from", "ask"}, {"to", "hold"}}, json{{"from", "hold"}, {"to", "__end__"}}});
+    return link_child_versions(fixture, fixture.admit_document(std::move(parent_document)),
+                               fixture.admit("runtime-completed"));
+}
+
+void expect_child_ended_cancelled(BlockAfterJavaScriptResultJournal& journal, const std::string& child_id) {
+    const auto stored_child = journal.load_sync("tenant:runtime", child_id);
+    ASSERT_TRUE(stored_child.has_value());
+    EXPECT_EQ(stored_child->continuation().state, ContinuationState::Cancelled);
+    ASSERT_TRUE(stored_child->terminal_result().has_value());
+    EXPECT_EQ(stored_child->terminal_result()->status(), ProgramTerminalStatus::Cancelled);
+    const auto events = journal.load_events_sync("tenant:runtime", child_id, 0);
+    ASSERT_FALSE(events.empty());
+    EXPECT_EQ(events.front().kind, ProgramEventKind::Started);
+    EXPECT_EQ(events.back().kind, ProgramEventKind::Terminal);
+}
+
+TEST(ProgramRuntimeTest, ChildNeverStartedBecauseItsParentWasCancelledEndsCancelledDurably) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime fixture(3, {}, journal);
+    const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-cancelled-during-dispatch",
+                                                 {}});
+    ParentEndsDuringDispatch race;
+    race.run(fixture, *journal, linked, parent, [&] {
+        EXPECT_TRUE(parent.cancel());
+        EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+    });
+
+    ASSERT_FALSE(race.child_id.empty());
+    ASSERT_TRUE(race.failure_code.has_value());
+    EXPECT_EQ(*race.failure_code, "P_CHILD_CONFLICT");
+    // The parent's own terminal record closed the relation of the child it never dispatched.
+    const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(stored_parent.has_value());
+    EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Cancelled);
+    ASSERT_EQ(stored_parent->children().size(), 1U);
+    EXPECT_EQ(stored_parent->children().front().state, ProgramChildState::Cancelled);
+    expect_child_ended_cancelled(*journal, race.child_id);
+    const auto stored_child = journal->load_sync("tenant:runtime", race.child_id);
+    ASSERT_TRUE(stored_child.has_value() && stored_child->terminal_result().has_value());
+    ASSERT_TRUE(stored_child->terminal_result()->failure().has_value());
+    EXPECT_EQ(stored_child->terminal_result()->failure()->code, "P_RUNTIME_CANCELLED");
+    auto reconnected = fixture.runtime->reconnect("tenant:runtime", race.child_id);
+    EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Cancelled);
+
+    // The child's Cancelled record came after the parent's, and the parent never published a Dispatched one.
+    const auto parent_cancelled = race.first_publication_of(parent.run_id(), ContinuationState::Cancelled);
+    const auto child_cancelled  = race.first_publication_of(race.child_id, ContinuationState::Cancelled);
+    ASSERT_TRUE(parent_cancelled && child_cancelled);
+    EXPECT_LT(*parent_cancelled, *child_cancelled);
+    for (const auto& entry : race.publications)
+        if (entry.run_id == parent.run_id())
+            EXPECT_NE(entry.last_child, std::optional(ProgramChildState::Dispatched));
+}
+
+// A parent that pauses for an answer keeps the child it did not dispatch as Publishing, so the child is not
+// ended: once the parent runs again, starting the same child dispatches the run that was published.
+TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhenTheParentRunsAgain) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime fixture(4, {}, journal);
+    TypedParentGate gate;
+    const auto      linked = make_gated_interrupting_parent(fixture);
+    auto            parent =
+        fixture.runtime->start("tenant:runtime", linked.parent_version,
+                               ProgramInvocation{json::object(),
+                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
+                                                 "trace-parent-interrupted-during-dispatch",
+                                                 {}});
+    ParentEndsDuringDispatch     race;
+    std::optional<ProgramResult> paused;
+    race.run(fixture, *journal, linked, parent, [&] {
+        gate.open();
+        paused = parent.wait();
+    });
+
+    ASSERT_FALSE(race.child_id.empty());
+    ASSERT_TRUE(paused.has_value());
+    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(race.failure_code.has_value());
+    EXPECT_EQ(*race.failure_code, "P_CHILD_CONFLICT");
+    const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(stored_parent.has_value());
+    EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Interrupted);
+    ASSERT_EQ(stored_parent->children().size(), 1U);
+    EXPECT_EQ(stored_parent->children().front().state, ProgramChildState::Publishing);
+    const auto published_child = journal->load_sync("tenant:runtime", race.child_id);
+    ASSERT_TRUE(published_child.has_value());
+    EXPECT_EQ(published_child->continuation().state, ContinuationState::Running);
+    EXPECT_FALSE(published_child->terminal_result().has_value());
+    // The parent never published a Dispatched record, and nothing ended the child.
+    EXPECT_TRUE(race.first_publication_of(parent.run_id(), ContinuationState::Interrupted).has_value());
+    EXPECT_FALSE(race.first_publication_of(race.child_id, ContinuationState::Cancelled).has_value());
+    for (const auto& entry : race.publications)
+        if (entry.run_id == parent.run_id())
+            EXPECT_NE(entry.last_child, std::optional(ProgramChildState::Dispatched));
+
+    auto resumed = fixture.runtime->resume("tenant:runtime", parent.run_id(),
+                                           resume_for(*paused, json{{"decision", "approved"}},
+                                                      "trace-parent-resumed-after-dispatch"));
+    auto recovered = fixture.runtime->start_child("tenant:runtime", resumed, linked.receipt,
+                                                  linked.child_version,
+                                                  ParentEndsDuringDispatch::child_invocation());
+    EXPECT_EQ(recovered.run_id(), race.child_id);
+    EXPECT_EQ(recovered.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(resumed.cancel());
+    EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResult) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2);

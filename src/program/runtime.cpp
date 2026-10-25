@@ -6758,13 +6758,23 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
 
         // The durable relation is already present; this transition only records that
         // dispatch crossed the publication boundary.
-        const auto dispatched = (co_await publish_child_record(
-            parent.control_,
-            child_record_for(run_id, link, invocation, ProgramChildState::Dispatched)));
+        // A parent that has ended is not always seen as a lost compare: its own terminal record closes the
+        // relation of a child it never dispatched, and publishing the Dispatched state over that record throws.
+        std::exception_ptr     dispatch_failure;
+        ChildRecordPublication dispatched;
+        try {
+            dispatched = (co_await publish_child_record(
+                parent.control_,
+                child_record_for(run_id, link, invocation, ProgramChildState::Dispatched)));
+        } catch (...) {
+            dispatch_failure = std::current_exception();
+        }
         const auto dispatched_record = dispatched.record ? find_child(*dispatched.record, run_id)
                                                          : std::optional<ProgramChildRecord>{};
-        if (!dispatched_record || dispatched_record->state != ProgramChildState::Dispatched) {
-            if (dispatched_record && dispatched_record->state != ProgramChildState::Publishing) {
+        if (dispatch_failure || !dispatched_record ||
+            dispatched_record->state != ProgramChildState::Dispatched) {
+            if (!dispatch_failure && dispatched_record &&
+                dispatched_record->state != ProgramChildState::Publishing) {
                 auto reconnected = (co_await reconnect_core(owner_scope, run_id));
                 impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope,
                                                       parent_run_id, run_id);
@@ -6779,6 +6789,22 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             if (current_parent &&
                 current_parent->continuation().state != ContinuationState::Running)
                 (void)co_await control->cancel_async(detail::CancellationCause::ParentTerminal);
+            // A parent that paused keeps the child it did not dispatch as Publishing, and recovers it when it
+            // runs again. A parent that ended closed the relation in its own terminal record and will never
+            // dispatch the child: the child run is published but no attempt was spawned for it, so end it
+            // durably, as the event-sink failure below does.
+            const auto current_child = current_parent ? find_child(*current_parent, run_id)
+                                                      : std::optional<ProgramChildRecord>{};
+            if (current_child && current_child->state == ProgramChildState::Cancelled) {
+                detail::RunOutcome cancelled;
+                cancelled.status           = ProgramTerminalStatus::Cancelled;
+                cancelled.remaining_budget = invocation.budget;
+                cancelled.failure          = ProgramFailure{
+                    "P_RUNTIME_CANCELLED", "Parent Program ended before the child was dispatched",
+                    "root", "", 0, json::object()};
+                (co_await control->complete_async(std::move(cancelled)));
+            }
+            if (dispatch_failure) std::rethrow_exception(dispatch_failure);
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Parent-child dispatch lost its transition CAS",
                                      json{{"child_run_id", run_id}});
