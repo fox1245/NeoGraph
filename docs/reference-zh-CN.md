@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=zh-CN source_sha256=ea7bd7d795c0c89726c25c8477b01a8e4523b5ce127265d2a9e2623b2ef94756 -->
 # NeoGraph API — 叙述式导览
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2298,9 +2298,10 @@ struct Checkpoint {
 };
 
 // Wire-stable schema version. Bump on layout-incompatible changes.
-// v2 added `barrier_state`; v3 records pending-write mode support.
+// v2 added `barrier_state`; v3 records pending-write mode support;
+// v4 lets a child checkpoint carry its subgraph write journal.
 // Typed `uint32_t`: schema versions are non-negative wire values.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 ```
 
 | 字段 | 类型 | 描述 |
@@ -2317,7 +2318,9 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | 任意的用户定义数据 |
 | `step` | `int64_t` | 超级步骤计数 |
 | `timestamp` | `int64_t` | 创建时间，Unix 纪元毫秒 |
-| `schema_version` | `std::uint32_t` | 线路布局版本（见 `CHECKPOINT_SCHEMA_VERSION`，当前为 `3`）。它是定宽无符号类型，因为 schema version 非负，并且要持久化到磁盘、通过 JSON 往返。持久的 `CheckpointStore` 实现应序列化它，并将反序列化 blob 上的 `0` 视为"pre-versioned"（例如字段缺失 — 迁移是调用者的责任） |
+| `schema_version` | `std::uint32_t` | 线路布局版本（见 `CHECKPOINT_SCHEMA_VERSION`，当前为 `4`）。它是定宽无符号类型，因为 schema version 非负，并且要持久化到磁盘、通过 JSON 往返。持久的 `CheckpointStore` 实现应序列化它，并将反序列化 blob 上的 `0` 视为"pre-versioned"（例如字段缺失 — 迁移是调用者的责任） |
+
+**版本与恢复。** `Checkpoint::schema_version` 是写入该检查点一方的布局版本。存储可以保存、加载和列出任何版本的检查点，旧写入方不认识的字段取默认值。恢复是精确的：引擎只恢复版本为当前 `CHECKPOINT_SCHEMA_VERSION` 的检查点，唯一的例外是从 `Completed`、`Before`、`After`、`Updated` 阶段的最新检查点继续的普通 `resume()`，此时不检查版本号。精确检查点恢复（`resume_from()`）、`NodeInterrupt` 检查点的恢复（检查点本身，以及为重放待写入而回溯的每个检查点，都必须是当前版本）、图安全点，以及 Program 的分叉、图迁移、恢复和对账路径，都会以错误拒绝其他版本。没有任何环节转换其他版本的检查点，因此提高该常量会使这些路径上所有旧版本的已存检查点无法恢复。每个发布版本写出的数据作为测试夹具（`tests/fixtures/released/`）保存，`tests/test_released_data_compat.cpp` 会打开并恢复它们，常量的改动一旦破坏这些数据，测试就会失败。SQLite 运行时存储遵循另一条规则：它们有自己的 schema 编号，打开编号较旧的文件时在一个事务中迁移（版本 1 的回执获得空的所有者范围，并创建结果表），编号较新的文件则被拒绝且不被修改。
 
 ### CheckpointStore
 
