@@ -144,6 +144,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_catalog.cpp
         test_program_module.cpp
         test_program_contract.cpp
+        test_program_gate.cpp
         test_program_journal.cpp
         test_program_lineage.cpp
         test_program_pending.cpp
