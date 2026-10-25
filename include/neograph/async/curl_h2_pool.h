@@ -5,8 +5,9 @@
  * Replaces the per-call connect+TLS pattern of `async_post` and the
  * single-stream `async_post_h2` PoC with libcurl's mature HTTP/2
  * implementation: connection pool, stream multiplexing, redirect
- * handling, gzip/brotli decoding, and ALPN-driven version pick all
- * come for free. Cloudflare and other anti-bot WAFs trust the curl
+ * handling and ALPN-driven version pick all come for free. The pool
+ * requests no content encoding (no CURLOPT_ACCEPT_ENCODING), so libcurl
+ * decodes none and a response body arrives as the server sent it. Cloudflare and other anti-bot WAFs trust the curl
  * fingerprint, so no signature-massaging is needed.
  *
  * Threading: each `CurlH2Pool` owns one worker thread that drives

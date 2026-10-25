@@ -49,6 +49,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          # The newest patch release, not the one cached on the runner image.
+          check-latest: true
       - name: Install build dependencies
         run: |
           bash scripts/ci_apt_install.sh cmake ninja-build build-essential libssl-dev \
