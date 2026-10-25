@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=35dc6382d17b6c83ead0c106b60b92a35350a6139b38d9fa91a5019009e8872c -->
+<!-- neograph-i18n: source=tests/live/README.md locale=zh-CN source_sha256=e4078dd29bd6c94b923cc66dd887a79a6779916925c173c1f43712a839ac2190 -->
 # 实时端到端测试套件
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -59,7 +59,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 
 ## 在 master 上
 
-每次推送到 master 后，`Live e2e report` 工作流还会用真实密钥运行整个套件。这样，提供方的变化或回归会在合入当天暴露，而不是等到下一次发布。运行会把 `report.json` 作为构建产物上传。它不会提交报告，也不会批准发布。
+当 master 有变更时每天一次（18:00 UTC 夜间定时任务），以及按需手动触发时，`Live e2e report` 工作流还会用真实密钥运行整个套件（如果自上次成功运行以来 master 没有变更，则跳过定时运行）。这样，master 上的回归会在下一次定时运行时暴露，而不必等到下一次发布；master 未变更时提供方的变化也可以随时通过按需运行来检查。运行会把 `report.json` 作为构建产物上传。它不会提交报告，也不会批准发布；如上所述，发布仍然需要它自己的报告。
 
 - **密钥。** 四个密钥是 GitHub 环境 `live-e2e` 的机密，只有 master 可以使用该环境。GitHub 不向任何人显示机密的值，会在日志中遮盖它，也不会把它交给拉取请求的工作流。作业把密钥写入只有运行器用户可读的文件，并在作业结束时删除该文件。
-- **一次一个。** master 上的运行不会中途取消。运行期间到达的推送会等待，等待中的推送只有最新的那一个会接着运行。
+- **一次一个。** master 上的运行不会中途取消。运行期间触发的后续运行会等待，等待中的运行只有最新的那一个会接着运行。

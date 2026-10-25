@@ -58,7 +58,7 @@ When cases are added or removed, `python scripts/live_e2e.py manifest --python â
 
 ## On master
 
-After every push to master, the `Live e2e report` workflow also runs the whole suite with real keys. A provider change or a regression then shows up on the day it lands, not at the next release. The run uploads `report.json` as a build artifact. It does not commit the report, and it does not approve a release.
+Once a night (18:00 UTC) when master has changed, and on demand, the `Live e2e report` workflow also runs the whole suite with real keys (if master has not changed since the last successful run, the scheduled run is skipped). A regression on master then shows up on the next scheduled run rather than at the next release, and an on-demand run checks provider behaviour even when master has not changed. The run uploads `report.json` as a build artifact. It does not commit the report, and it does not approve a release; a release still requires its own report as described above.
 
 - **Keys.** The four keys are secrets of the `live-e2e` GitHub environment, which only master may use. GitHub shows a secret's value to no one, masks it in logs, and gives it to no pull request workflow. The job writes the keys to a file that only the runner's user can read, and deletes the file when the job ends.
-- **One run at a time.** A run on master is never cancelled midway. A push that arrives during a run waits, and only the newest waiting push runs next.
+- **One run at a time.** A run on master is never cancelled midway. A run triggered during another run waits, and only the newest waiting run runs next.

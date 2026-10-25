@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=35dc6382d17b6c83ead0c106b60b92a35350a6139b38d9fa91a5019009e8872c -->
+<!-- neograph-i18n: source=tests/live/README.md locale=ko source_sha256=e4078dd29bd6c94b923cc66dd887a79a6779916925c173c1f43712a839ac2190 -->
 # 라이브 엔드투엔드 스위트
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -59,7 +59,7 @@ python scripts/live_e2e.py run --env-file path/to/keys.env \
 
 ## master에서
 
-`Live e2e report` 워크플로는 master에 푸시가 들어올 때마다 실제 키로 스위트 전체도 실행합니다. 그래서 공급자 쪽 변화나 회귀가 다음 릴리스가 아니라 들어온 그날 드러납니다. 실행 결과 `report.json`은 빌드 아티팩트로 올라갑니다. 리포트를 커밋하지 않으며, 릴리스를 승인하지도 않습니다.
+`Live e2e report` 워크플로는 master가 바뀌었을 때 하루 한 번(18:00 UTC, 야간 스케줄), 그리고 수동 요청 시 실제 키로 스위트 전체도 실행합니다(마지막으로 성공한 실행 이후 master가 바뀌지 않았으면 예정된 실행은 건너뜁니다). 그래서 master의 회귀는 다음 릴리스까지 기다리지 않고 다음 예정 실행에서 드러나며, master가 바뀌지 않았을 때의 공급자 쪽 변화도 수동 실행으로 언제든 확인할 수 있습니다. 실행 결과 `report.json`은 빌드 아티팩트로 올라갑니다. 리포트를 커밋하지 않으며, 릴리스를 승인하지도 않습니다. 위에서 설명한 대로 릴리스에는 여전히 자체 리포트가 필요합니다.
 
 - **키.** 네 키는 master만 쓸 수 있는 GitHub 환경 `live-e2e`의 시크릿입니다. GitHub은 시크릿 값을 누구에게도 보여 주지 않고, 로그에서 가리며, 풀 리퀘스트 워크플로에는 넘기지 않습니다. 잡은 러너 사용자만 읽을 수 있는 파일에 키를 쓰고, 잡이 끝나면 그 파일을 지웁니다.
-- **한 번에 하나.** master의 실행은 중간에 취소되지 않습니다. 실행 중에 들어온 푸시는 기다리며, 기다리는 푸시 가운데 가장 새것만 다음에 실행됩니다.
+- **한 번에 하나.** master의 실행은 중간에 취소되지 않습니다. 실행 중에 들어온 다음 실행은 기다리며, 기다리는 실행 가운데 가장 새것만 다음에 실행됩니다.
