@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ea7bd7d795c0c89726c25c8477b01a8e4523b5ce127265d2a9e2623b2ef94756 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2071,9 +2071,10 @@ struct Checkpoint {
 };
 
 // Wire-stable schema version. Bump on layout-incompatible changes.
-// v2 added `barrier_state`; v3 records pending-write mode support.
+// v2 added `barrier_state`; v3 records pending-write mode support;
+// v4 lets a child checkpoint carry its subgraph write journal.
 // Typed `uint32_t`: schema versions are non-negative wire values.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 ```
 
 | フィールド | 型 | 説明 |
@@ -2090,7 +2091,10 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | 任意のユーザー定義データ |
 | `step` | `int64_t` | スーパーステップカウンター |
 | `timestamp` | `int64_t` | Unix epoch ミリ秒での作成時刻 |
-| `schema_version` | `std::uint32_t` | wire 上のレイアウトバージョン (`CHECKPOINT_SCHEMA_VERSION`、現在は `3` を参照)。固定幅の unsigned 型です。schema version は非負で、ディスクへ永続化して JSON 経由で往復する値だからです。永続化する `CheckpointStore` 実装はこれをシリアライズし、デシリアライズした blob の `0` は「バージョン付け前」(例: フィールドが存在しなかった。移行は呼び出し側の責任) と扱うべきです |
+| `schema_version` | `std::uint32_t` | wire 上のレイアウトバージョン (`CHECKPOINT_SCHEMA_VERSION`、現在は `4` を参照)。固定幅の unsigned 型です。schema version は非負で、ディスクへ永続化して JSON 経由で往復する値だからです。永続化する `CheckpointStore` 実装はこれをシリアライズし、デシリアライズした blob の `0` は「バージョン付け前」(例: フィールドが存在しなかった。移行は呼び出し側の責任) と扱うべきです |
+
+**バージョンと再開。** `Checkpoint::schema_version` は、そのチェックポイントを書いた側のレイアウトバージョンです。ストアは、どのバージョンのチェックポイントも保存・読み込み・一覧でき、古い書き手が知らなかったフィールドは既定値を取ります。再開は厳密です。エンジンが再開するのは現在の `CHECKPOINT_SCHEMA_VERSION` のチェックポイントだけで、例外は `Completed`、`Before`、`After`、`Updated` フェーズの最新チェックポイントから続ける通常の `resume()` のみです。この場合は番号を見ません。厳密なチェックポイント再開 (`resume_from()`)、`NodeInterrupt` チェックポイントの再開 (チェックポイント自身と、保留中の書き込みを再生するためにたどる全チェックポイントが現在のバージョンである必要があります)、グラフのセーフポイント、Program のフォーク・グラフ移行・復旧・照合の経路は、他のバージョンをエラーで拒否します。別バージョンのチェックポイントを変換する処理はないため、定数を上げると、これらの経路では以前のバージョンの保存済みチェックポイントがすべて再開できなくなります。各リリースが書いたデータはフィクスチャ (`tests/fixtures/released/`) として保管され、`tests/test_released_data_compat.cpp` がそれを開いて再開します。定数の変更でそのデータが壊れるとテストが失敗します。SQLite ランタイムストアは別の規則に従います。独自のスキーマ番号を持ち、古い番号のファイルは 1 つのトランザクションで移行して開き (バージョン 1 のレシートは空のオーナースコープを取り、結果テーブルが作られます)、新しい番号のファイルは変更せずに拒否します。
+
 ### CheckpointStore
 チェックポイント永続化の抽象インターフェースです。データベース、ファイルシステム、その他のバックエンドに保存するには実装します。
 データベース、ファイルシステム、その他のバックエンドにチェックポイントを保存するためのインターフェースです。

@@ -2386,9 +2386,10 @@ struct Checkpoint {
 };
 
 // Wire-stable schema version. Bump on layout-incompatible changes.
-// v2 added `barrier_state`; v3 records pending-write mode support.
+// v2 added `barrier_state`; v3 records pending-write mode support;
+// v4 lets a child checkpoint carry its subgraph write journal.
 // Typed `uint32_t`: schema versions are non-negative wire values.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 ```
 
 | Field | Type | Description |
@@ -2405,7 +2406,9 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). It is a fixed-width unsigned type because a schema version is non-negative and is persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `4`). It is a fixed-width unsigned type because a schema version is non-negative and is persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+
+**Versions and resume.** `Checkpoint::schema_version` is the layout version of the writer of a checkpoint. A store saves, loads and lists a checkpoint of any version, and a field an older writer did not know takes its default. A resume is exact: the engine resumes a checkpoint only when it has the current `CHECKPOINT_SCHEMA_VERSION`, except that a plain `resume()` continues from the latest checkpoint of the `Completed`, `Before`, `After` and `Updated` phases without looking at the number. An exact-checkpoint resume (`resume_from()`), a resume of a `NodeInterrupt` checkpoint (the checkpoint itself and every checkpoint of the walk that replays its pending writes must have the current version), a graph safe point, and the Program fork, graph migration, recovery and reconciliation paths refuse any other version with an error. Nothing converts a checkpoint of another version, so raising the constant makes every stored checkpoint of the earlier versions unresumable on those paths. The data each release wrote is kept as a fixture (`tests/fixtures/released/`), which `tests/test_released_data_compat.cpp` opens and resumes; the test fails when a change of the constant breaks it. The SQLite runtime stores follow another rule: they carry their own schema number, open a file of an older number by migrating it in one transaction (version 1 receipts take the empty owner scope, and the outcome table is created), and refuse a file of a newer number without changing it.
 
 ### CheckpointStore
 

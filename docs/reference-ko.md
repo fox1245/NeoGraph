@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=318695063a8309dbd9ef2382d87fe8a4fec004369ef84069d3e411fd52184da2 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ko source_sha256=ea7bd7d795c0c89726c25c8477b01a8e4523b5ce127265d2a9e2623b2ef94756 -->
 # NeoGraph API — 내러티브 투어
 
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
@@ -2340,9 +2340,10 @@ struct Checkpoint {
 };
 
 // Wire-stable schema version. Bump on layout-incompatible changes.
-// v2 added `barrier_state`; v3 records pending-write mode support.
+// v2 added `barrier_state`; v3 records pending-write mode support;
+// v4 lets a child checkpoint carry its subgraph write journal.
 // Typed `uint32_t`: schema versions are non-negative wire values.
-constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
+constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 ```
 
 | Field | Type | Description |
@@ -2359,7 +2360,9 @@ constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 3;
 | `metadata` | `json` | Arbitrary user-defined data |
 | `step` | `int64_t` | Super-step counter |
 | `timestamp` | `int64_t` | Creation time in Unix epoch milliseconds |
-| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `3`). It is a fixed-width unsigned type because a schema version is non-negative and is persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+| `schema_version` | `std::uint32_t` | On-wire layout version (see `CHECKPOINT_SCHEMA_VERSION`, currently `4`). It is a fixed-width unsigned type because a schema version is non-negative and is persisted to disk and round-tripped through JSON. Persistent `CheckpointStore` implementations should serialize it and treat `0` on a deserialized blob as "pre-versioned" (e.g. the field was absent — migration is the caller's responsibility) |
+
+**버전과 재개.** `Checkpoint::schema_version`은 체크포인트를 쓴 쪽의 레이아웃 버전입니다. 저장소는 어떤 버전의 체크포인트든 저장, 로드, 나열하며, 이전 작성자가 몰랐던 필드는 기본값을 갖습니다. 재개는 정확한 버전만 받습니다. 엔진은 현재 `CHECKPOINT_SCHEMA_VERSION`인 체크포인트만 재개하며, 예외는 `Completed`, `Before`, `After`, `Updated` 단계의 최신 체크포인트에서 이어 가는 일반 `resume()`뿐이고 이 경우에는 번호를 보지 않습니다. 정확한 체크포인트 재개(`resume_from()`), `NodeInterrupt` 체크포인트의 재개(체크포인트 자신과, 보류 중인 쓰기를 재생하려고 거슬러 올라가는 모든 체크포인트가 현재 버전이어야 합니다), 그래프 세이프 포인트, Program의 포크, 그래프 마이그레이션, 복구, 조정 경로는 다른 버전을 오류로 거부합니다. 다른 버전의 체크포인트를 변환하는 곳은 없으므로, 상수를 올리면 이 경로에서 이전 버전의 저장된 체크포인트는 모두 재개할 수 없게 됩니다. 각 릴리스가 쓴 데이터는 픽스처(`tests/fixtures/released/`)로 보관되고 `tests/test_released_data_compat.cpp`가 이를 열어 재개하며, 상수를 바꿔 이 데이터가 깨지면 테스트가 실패합니다. SQLite 런타임 저장소는 다른 규칙을 따릅니다. 자체 스키마 번호를 갖고, 더 낮은 번호의 파일은 한 트랜잭션으로 마이그레이션해서 열며(버전 1의 영수증은 빈 소유자 범위를 받고 결과 테이블이 만들어집니다), 더 높은 번호의 파일은 바꾸지 않고 거부합니다.
 
 ### CheckpointStore
 

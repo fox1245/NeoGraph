@@ -126,12 +126,26 @@ private:
 // to a `-1` sentinel value that wasn't documented anywhere.
 // v3 (#91): pending-write records may carry a "mode" field ("overwrite").
 // Absent means Reduce, so a v2 blob loads unchanged — same tolerant shape as the
-// v1 -> v2 barrier_state addition. Nothing rejects an older version on read; the
-// number records what the writer was capable of.
+// v1 -> v2 barrier_state addition.
 // v4 (#235): child checkpoints may carry the cumulative subgraph write journal
 // in metadata. Standalone checkpoints remain readable as before; resuming a
 // captured subgraph from an older checkpoint fails explicitly because an
 // arbitrary custom reducer cannot reconstruct its historical deltas.
+//
+// Reading is tolerant; resuming is exact. A store saves, loads and lists a
+// checkpoint of any version, and a field an older writer did not know takes
+// its default (above). The engine resumes a checkpoint of another version only
+// where nothing looks at the number: a resume of the latest checkpoint of the
+// Completed, Before, After or Updated phase. It refuses the number where a
+// resume depends on the exact layout: an exact-checkpoint resume (resume_from),
+// a resume of a NodeInterrupt checkpoint when the checkpoint itself, or any
+// checkpoint of the walk that replays its pending writes, has another version,
+// a graph safe point, and the Program fork, graph migration, recovery and
+// reconciliation paths that pin a Core checkpoint. Raising the constant therefore makes the
+// checkpoints of every earlier version unresumable on those paths, and nothing
+// migrates them. tests/test_released_data_compat.cpp resumes the checkpoints
+// that released versions wrote and fails when a change of the constant breaks
+// one.
 constexpr std::uint32_t CHECKPOINT_SCHEMA_VERSION = 4;
 
 /// Phase at which a Checkpoint was produced. Drives resume semantics —
