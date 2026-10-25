@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=94f15c962e302613b7b3cebc4eeebf616ff3985acd7d8cffca8e9ccf31e05a25 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=917fc6e3e312241614a5340a59b269d0ca0f67e652e2b6b463b1794b138a7647 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -282,6 +282,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
 
 ### 보안
 
+- **macOS 휠과 macOS 포터블 아카이브는 NeoGraph가 호출하지 않는 콘텐츠 인코딩 디코더를 더 이상 번들하지 않습니다.** 둘은 Homebrew의 curl 포뮬러에 링크되어 있었고, 그 때문에 Brotli 1.2.0([CVE-2026-111497](https://www.cve.org/CVERecord?id=CVE-2026-111497)의 영향 버전), zstd, libssh2, ngtcp2/nghttp3, libpsl이 번들에 들어갔습니다. NeoGraph의 HTTP/2 풀과 SchemaProvider 전송은 콘텐츠 인코딩을 요청하지 않으므로 libcurl이 이 디코더를 실행한 적은 없습니다. 이제 macOS 빌드는 Linux 휠이 빌드하는 curl 8.22.0(`cmake/wheel-curl.sh`)을 번들하며, 이 curl은 OpenSSL, nghttp2, 시스템 zlib에만 링크됩니다. 모든 휠 빌드는 curl이 Brotli나 zstd를 보고하면 실패합니다. CI는 Node.js 22와 24의 최신 패치 릴리스를 사용합니다.
 - **Python 패키지가 certifi 2026.10.19 이상을 요구합니다 ([GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)).** `neograph_engine`은 import할 때 `SSL_CERT_FILE`도 `NEOGRAPH_SKIP_CERT_AUTOFIX`도 설정되어 있지 않으면 `SSL_CERT_FILE`을 certifi의 CA 번들로 지정하므로, 네이티브 전송 계층이 기본적으로 그 번들을 신뢰합니다. 권고에 따르면 certifi 번들에 들어 있던 `emSign ECC Root CA - G3` 루트로 이어지는 eMudhra 중간 CA 인증서 8개의 개인 키가 유출되었습니다. 권고는 2019.03.09 이상 2026.10.19 미만의 certifi를 영향받는 범위로, 2026.10.19를 첫 수정 릴리스로 명시합니다. 2026.10.18은 emSign 루트를 모두 제거했고, 2026.10.19는 영향받지 않은 루트를 다시 넣었습니다. 이제 `pyproject.toml`은 `certifi>=2026.10.19`를 선언하므로 `neograph-engine`을 설치하면 오래된 certifi가 업그레이드되고, MCP 상호운용 테스트 요구사항은 2026.10.19로 고정됩니다. `SSL_CERT_FILE`을 직접 설정하는 호스트는 자신의 번들을 그대로 쓰므로 그 번들을 직접 점검해야 합니다.
 
 ## [0.16.0] - 2026-10-20

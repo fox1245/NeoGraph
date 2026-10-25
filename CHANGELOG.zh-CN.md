@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=94f15c962e302613b7b3cebc4eeebf616ff3985acd7d8cffca8e9ccf31e05a25 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=917fc6e3e312241614a5340a59b269d0ca0f67e652e2b6b463b1794b138a7647 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -282,6 +282,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 安全
 
+- **macOS wheel 和 macOS 便携归档不再捆绑 NeoGraph 从不调用的内容编码解码器。** 二者此前链接 Homebrew 的 curl formula，因而把 Brotli 1.2.0（受 [CVE-2026-111497](https://www.cve.org/CVERecord?id=CVE-2026-111497) 影响的版本）、zstd、libssh2、ngtcp2/nghttp3 和 libpsl 带进了捆绑包。NeoGraph 的 HTTP/2 池和 SchemaProvider 传输不请求任何内容编码，所以 libcurl 从未运行这些解码器；macOS 构建现在捆绑 Linux wheel 所构建的 curl 8.22.0（`cmake/wheel-curl.sh`），它只链接 OpenSSL、nghttp2 和系统 zlib，任何 wheel 构建只要其 curl 报告 Brotli 或 zstd 就会失败。CI 使用 Node.js 22 和 24 的最新补丁版本。
 - **Python 包要求 certifi 2026.10.19 或更高版本（[GHSA-6q48-6c7w-9gw2](https://github.com/advisories/GHSA-6q48-6c7w-9gw2)）。** 导入时，如果既没有设置 `SSL_CERT_FILE`，也没有设置 `NEOGRAPH_SKIP_CERT_AUTOFIX`，`neograph_engine` 会把 `SSL_CERT_FILE` 指向 certifi 的 CA 包，因此原生传输层默认信任该包。公告指出，链到 certifi 包中所含 `emSign ECC Root CA - G3` 根证书的 8 个 eMudhra 中间 CA 证书，其私钥已泄露。公告把 2019.03.09 起、早于 2026.10.19 的 certifi 列为受影响范围，并将 2026.10.19 列为第一个修复版本；2026.10.18 移除了所有 emSign 根，2026.10.19 恢复了未受影响的根。`pyproject.toml` 现在声明 `certifi>=2026.10.19`，因此安装 `neograph-engine` 会升级旧的 certifi；MCP 互操作测试的依赖固定为 2026.10.19。自行设置 `SSL_CERT_FILE` 的宿主继续使用自己的包，应自行检查该包。
 
 ## [0.16.0] - 2026-10-20
