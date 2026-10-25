@@ -29,7 +29,7 @@
 // Its stores are in memory unless `stores` gives the five stores of the host (see README.md).
 
 import createModule from './neograph_module.mjs';
-import { installStoreBridge, registerStores, releaseStores, memoryStores } from './stores.mjs';
+import { installStoreBridge, registerStores, registerSynthesisValidator, releaseStores, memoryStores } from './stores.mjs';
 
 /** A failed run or an invalid graph or provider. */
 export class NeoGraphError extends Error {
@@ -149,7 +149,7 @@ export async function load(options = {}) {
   // A module with Program support also has the bridge to the host's stores (wasm/stores.mjs). The registration of a stores
   // object ends when the module has dropped the last store made from it.
   const hasStores = typeof module._ng_store_alloc === 'function';
-  if (hasStores) {
+  if (hasStores || typeof module._ng_programs_set_synthesis_validator === 'function') {
     installStoreBridge(module);
     module.ngProgramsStoresFree = (handle) => releaseStores(module, handle);
   }
@@ -555,6 +555,33 @@ export async function load(options = {}) {
         };
       }
       return sendJson(this.#host, module._ng_programs_synthesize_child, payload);
+    }
+
+    /**
+     * Registers the host's semantic validator for child Programs synthesized on this object when `synthesizeChild` does
+     * not pass `semanticDecision` as a value. `validate(proposal, bundle, reservation)` returns (or resolves to)
+     * `{ validatorIdentity, contractIdentity, accepted, evidence? }`.
+     *
+     * @param {(proposal: object, bundle: object, reservation: object) => object | Promise<object>} validate
+     */
+    registerSynthesisValidator(validate) {
+      if (this.#host.released) throw new NeoGraphError({ message: 'the Programs object is released' });
+      if (typeof module._ng_programs_set_synthesis_validator !== 'function') {
+        throw new NeoGraphError({ message: 'this build of the module has no support for a synthesis validator of the host' });
+      }
+      if (typeof validate !== 'function') {
+        throw new NeoGraphError({ message: 'registerSynthesisValidator() needs a function' });
+      }
+      let validatorHandle = 0;
+      try {
+        validatorHandle = registerSynthesisValidator(module, validate);
+      } catch (error) {
+        throw new NeoGraphError({ message: error.message });
+      }
+      if (module._ng_programs_set_synthesis_validator(this.#host.handle, validatorHandle) !== 0) {
+        releaseStores(module, validatorHandle);
+        throw new NeoGraphError({ message: lastError() });
+      }
     }
 
     /**

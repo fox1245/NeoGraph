@@ -237,14 +237,20 @@ programs.release();
   root Core graph run on the in-memory transition store and returns the migrated `ProgramRun`; it attaches a semantic
   migration adapter only when `semanticAdapter: true`, and without one, the target must be the run's own admitted
   version or a compatible one (`P_GRAPH_MIGRATION_*` on refusal; a JavaScript transition store answers `"conflict"`, as
-  noted below). `synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })` (or a
+  noted below). `programs.registerSynthesisValidator(validate)` registers the host's semantic validator `validate(proposal,
+  bundle, reservation)` on the `Programs` instance, which is reached through the asynchronous JavaScript bridge after the
+  child bundle is compiled and returns (or resolves to) `{ validatorIdentity, contractIdentity, accepted, evidence? }`.
+  `synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision? })` (or a
   single options object with `binding` and `source`) prepares a child version while the parent run is held at a
   checkpoint handoff and resolves with `{ id, binding, state, versionId, bundleId, proposalId, grantId }`. It needs the
-  child's `budget` and the host's `grant` (`{ templateIdentity, validatorIdentity, contractIdentity,
-  allowedCapabilities?, allowedEffects?, childBudget }`) and `semanticDecision` (`{ validatorIdentity, contractIdentity,
-  accepted, evidence? }`); without them it is refused; the module makes neither from the child's request; the gateway
-  accepts the decision only when it names the grant's validator and contract (`P_CHILD_SYNTHESIS_AUTHORITY` when the
-  requested authority exceeds the parent run's or grant's envelope). While `synthesizeChild` uses a run's held handoff,
+  child's `budget`, the host's `grant` (`{ templateIdentity, validatorIdentity, contractIdentity,
+  allowedCapabilities?, allowedEffects?, childBudget }`), and either `semanticDecision` (`{ validatorIdentity,
+  contractIdentity, accepted, evidence? }`) in the call or a validator registered with `registerSynthesisValidator`;
+  without them it is refused; the module makes neither from the child's request; the gateway accepts the decision only
+  when it names the grant's validator and contract (`P_CHILD_SYNTHESIS_AUTHORITY` when the requested authority exceeds
+  the parent run's or grant's envelope, `P_CHILD_SYNTHESIS_SEMANTICS` when the decision names another validator or
+  contract, when the validator throws or rejects, or when its return value has the wrong shape, and
+  `P_CHILD_SYNTHESIS_REJECTED` when `accepted` is `false`). While `synthesizeChild` uses a run's held handoff,
   `releaseHandoff`, `replace` and `cancel` of that run are refused until it returns, and a second `synthesizeChild` on
   the same hold is refused. `modelTokens` must cover a model call's input and
   output ceilings, because the run reserves that bound before each call.
@@ -254,6 +260,12 @@ programs.release();
   const TEMPLATE_ID = await hostIdentity('child template');
   const VALIDATOR_ID = await hostIdentity('semantic validator');
   const CONTRACT_ID = await hostIdentity('semantic contract');
+  programs.registerSynthesisValidator(async (proposal, bundle, reservation) => ({
+    validatorIdentity: VALIDATOR_ID,
+    contractIdentity: CONTRACT_ID,
+    accepted: Array.isArray(bundle.sealed_core_definitions) && bundle.sealed_core_definitions.length > 0,
+    evidence: { bundleId: bundle.id, reservationId: reservation.id },
+  }));
   const hold = await parentRun.handoff();
   const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
     budget: {
@@ -271,11 +283,8 @@ programs.release();
         maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
       },
     },
-    semanticDecision: {
-      validatorIdentity: VALIDATOR_ID,
-      contractIdentity: CONTRACT_ID,
-      accepted: true,
-    },
+    // Or pass `semanticDecision: { validatorIdentity: VALIDATOR_ID, contractIdentity: CONTRACT_ID, accepted: true }`
+    // per call when the host decides up front.
   });
   await parentRun.releaseHandoff();
   ```
@@ -441,8 +450,8 @@ The module exports a C API and `neograph.mjs` wraps it. A C API with JSON string
 would add one and a registration of every type, for a surface of a few functions: `ng_compile`, `ng_run`, `ng_cancel`,
 `ng_release` and `ng_error` for graphs, and `ng_programs_create`, `ng_programs_admit`, `ng_programs_start`,
 `ng_programs_resume`, `ng_programs_fork`, `ng_programs_handoff`, `ng_programs_release_handoff`, `ng_programs_replace`,
-`ng_programs_migrate_graph`, `ng_programs_synthesize_child`, `ng_programs_cancel`, `ng_programs_result` and
-`ng_programs_release` for Programs. Results come back through callbacks, `Module.ngOnEvent` and `Module.ngOnDone` for a graph and
+`ng_programs_migrate_graph`, `ng_programs_synthesize_child`, `ng_programs_set_synthesis_validator`, `ng_programs_cancel`,
+`ng_programs_result` and `ng_programs_release` for Programs. Results come back through callbacks, `Module.ngOnEvent` and `Module.ngOnDone` for a graph and
 `Module.ngProgramEvent` and `Module.ngProgramDone` for a Program, called from a later turn of the host's event loop. The key is part of the provider description that `compile` is given and is
 held by the SDK client of that graph; it is not in the binary, not in any result, and not in an error message.
 

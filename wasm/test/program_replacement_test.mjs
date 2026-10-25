@@ -586,6 +586,201 @@ await check('child synthesis compiles, admits and publishes a child and refuses 
   }
 });
 
+await check('registerSynthesisValidator validates compiled bundles asynchronously and enforces refusal and identity checks', async () => {
+  const programs = neograph.programs({
+    limits: LIMITS,
+    provider: provider(),
+    budget: { maxDynamicCompiles: 12, maxChildDepth: 2, maxTotalChildren: 4 },
+  });
+  const grantOnly = (childBudget, allowedCapabilities = []) => ({
+    grant: {
+      templateIdentity: TEMPLATE_ID,
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      allowedCapabilities,
+      allowedEffects: [],
+      childBudget,
+    },
+  });
+  try {
+    assert.throws(
+      () => programs.registerSynthesisValidator('not-a-function'),
+      (error) => error instanceof NeoGraphError && /needs a function/.test(error.message),
+    );
+
+    const parentVersion = await programs.admit({ javascript: PARENT_SYNTHESIS_SOURCE, budget: {} });
+    const parentRun = programs.start(parentVersion, { input: ask('Async validator child') });
+    const held = await parentRun.handoff();
+    assert.deepEqual(held.value, { wantChild: 'helper' });
+
+    // Before a validator is registered, omitting semanticDecision is refused.
+    await assert.rejects(
+      parentRun.synthesizeChild('missing-decision-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) => error instanceof NeoGraphError && /semanticDecision|registerSynthesisValidator/.test(error.message),
+    );
+
+    // 1. Validator that rejects / throws refuses the synthesis with NeoGraphError carrying the C++ code.
+    programs.registerSynthesisValidator(async () => {
+      await sleep(10);
+      throw new Error('validator transport failure');
+    });
+    await assert.rejects(
+      parentRun.synthesizeChild('thrown-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) =>
+        error instanceof NeoGraphError &&
+        error.type === 'program' &&
+        error.code === 'P_CHILD_SYNTHESIS_SEMANTICS' &&
+        /validator transport failure/.test(error.message),
+    );
+
+    // 2. Validator result with the wrong shape (or non-object evidence) is refused.
+    programs.registerSynthesisValidator(async () => {
+      await sleep(5);
+      return { validatorIdentity: VALIDATOR_ID, contractIdentity: CONTRACT_ID, accepted: 'yes' };
+    });
+    await assert.rejects(
+      parentRun.synthesizeChild('bad-shape-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) =>
+        error instanceof NeoGraphError &&
+        error.type === 'program' &&
+        error.code === 'P_CHILD_SYNTHESIS_SEMANTICS',
+    );
+    programs.registerSynthesisValidator(async () => {
+      await sleep(5);
+      return { validatorIdentity: VALIDATOR_ID, contractIdentity: CONTRACT_ID, accepted: true, evidence: null };
+    });
+    await assert.rejects(
+      parentRun.synthesizeChild('bad-evidence-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) =>
+        error instanceof NeoGraphError &&
+        error.type === 'program' &&
+        error.code === 'P_CHILD_SYNTHESIS_SEMANTICS',
+    );
+
+    // 3. Validator whose decision names another validator identity is refused with P_CHILD_SYNTHESIS_SEMANTICS.
+    const OTHER_VALIDATOR_ID = fixtureIdentity('another semantic validator');
+    programs.registerSynthesisValidator(async (proposal, bundle, reservation) => {
+      await sleep(10);
+      assert.match(proposal.id, /^sha256:[0-9a-f]{64}$/);
+      assert.match(bundle.id, /^sha256:[0-9a-f]{64}$/);
+      assert.equal(reservation.proposal_id, proposal.id);
+      return {
+        validatorIdentity: OTHER_VALIDATOR_ID,
+        contractIdentity: CONTRACT_ID,
+        accepted: true,
+        evidence: { bundleId: bundle.id },
+      };
+    });
+    await assert.rejects(
+      parentRun.synthesizeChild('wrong-validator-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) =>
+        error instanceof NeoGraphError &&
+        error.type === 'program' &&
+        error.code === 'P_CHILD_SYNTHESIS_SEMANTICS' &&
+        error.witness !== undefined,
+    );
+
+    // 4. Validator that refuses (accepted: false) is refused with P_CHILD_SYNTHESIS_REJECTED.
+    programs.registerSynthesisValidator(async (proposal, bundle) => {
+      await sleep(10);
+      return {
+        validatorIdentity: VALIDATOR_ID,
+        contractIdentity: CONTRACT_ID,
+        accepted: false,
+        evidence: { rejectedBundleId: bundle.id, reason: 'policy check failed' },
+      };
+    });
+    await assert.rejects(
+      parentRun.synthesizeChild('refused-helper', CHILD_SOURCE, {
+        budget: HELPER_BUDGET,
+        ...grantOnly(HELPER_BUDGET),
+      }),
+      (error) =>
+        error instanceof NeoGraphError &&
+        error.type === 'program' &&
+        error.code === 'P_CHILD_SYNTHESIS_REJECTED' &&
+        error.witness?.evidence?.reason === 'policy check failed',
+    );
+
+    // 5. Value form (`semanticDecision`) still works even when a refusing validator is registered.
+    let validatorCalledForValueForm = false;
+    programs.registerSynthesisValidator(async () => {
+      validatorCalledForValueForm = true;
+      return {
+        validatorIdentity: VALIDATOR_ID,
+        contractIdentity: CONTRACT_ID,
+        accepted: false,
+      };
+    });
+    const valueBound = await parentRun.synthesizeChild('value-helper', CHILD_SOURCE, {
+      budget: HELPER_BUDGET,
+      ...hostAuthority(HELPER_BUDGET),
+    });
+    assert.equal(valueBound.binding, 'value-helper');
+    assert.equal(valueBound.state, 'bound');
+    assert.equal(validatorCalledForValueForm, false);
+
+    // 6. Async validator that awaits a timer, survives re-registration while in flight, inspects the compiled bundle, and accepts.
+    let inspected = null;
+    programs.registerSynthesisValidator(async (proposal, bundle, reservation) => {
+      programs.registerSynthesisValidator(async () => ({
+        validatorIdentity: VALIDATOR_ID,
+        contractIdentity: CONTRACT_ID,
+        accepted: false,
+      }));
+      await sleep(15);
+      inspected = {
+        proposalId: proposal.id,
+        bundleId: bundle.id,
+        reservationProposalId: reservation.proposal_id,
+        coreNames: (bundle.sealed_core_definitions ?? []).map((entry) => entry.name),
+        hasControlSource: typeof bundle.control_source?.document?.source === 'string',
+      };
+      return {
+        validatorIdentity: VALIDATOR_ID,
+        contractIdentity: CONTRACT_ID,
+        accepted: inspected.coreNames.includes('child-graph') && inspected.hasControlSource,
+        evidence: { bundleId: bundle.id, coreNames: inspected.coreNames },
+      };
+    });
+    const synthesized = await parentRun.synthesizeChild('helper', CHILD_SOURCE, {
+      budget: HELPER_BUDGET,
+      ...grantOnly(HELPER_BUDGET),
+    });
+    assert.equal(synthesized.binding, 'helper');
+    assert.equal(synthesized.state, 'bound');
+    assert.ok(inspected !== null);
+    assert.equal(inspected.proposalId, synthesized.proposalId);
+    assert.equal(inspected.bundleId, synthesized.bundleId);
+    assert.equal(inspected.reservationProposalId, synthesized.proposalId);
+    assert.deepEqual(inspected.coreNames, ['child-graph']);
+    assert.equal(inspected.hasControlSource, true);
+
+    assert.equal(await parentRun.releaseHandoff(), true);
+    const done = await parentRun.result;
+    assert.equal(done.status, 'completed');
+    assert.equal(done.output.fromChild.childRan, true);
+    assert.deepEqual(replies(done.output.fromChild.messages), [replyTo('Async validator child')]);
+  } finally {
+    programs.release();
+  }
+});
+
 async function verifyHierarchyAndReplacement(programs) {
   const rootBudget = {
     wallTimeMs: 60000, modelTokens: 30000, monetaryMicrounits: 20000,

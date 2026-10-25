@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=dd949ff30b9730747c8a2ff1e975d2cc92aff7cc1ebbd49f36ca991a53444138 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=5dd93993031705ff41dfa2c2514b098ea5fc64f6692cdff91177ec049cdf18f0 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -179,13 +179,19 @@ programs.release();
   只有调用本身无法发出时才被拒绝（未知的版本、超出该版本准入范围的预算、已经用过的 run id）。`resume` 回答运行所等待的中断，并返回 id 相同的 `ProgramRun`。`fork` 把同一次暂停作为新的运行
   （`options.runId` 为它命名）继续下去，带着它自己的回答，拿走暂停的运行所剩预算的一半（或 `options.budget` 所要求的数量，它必须给暂停的运行留下一些墙钟时间和 Core 步骤），并让暂停的运行仍可恢复；已经完成的节点不会再次运行。同一次暂停的多个分叉可以一起创建：它们依次轮流，每个分叉读取前面的分叉给暂停的运行留下的数量，并拿走其中的一半。要拿走暂停的运行所剩的全部墙钟时间或 Core 步骤的分叉会被拒绝（`P_FORK_SOURCE_BUDGET`），要求超过剩余数量的分叉也会被拒绝（`P_FORK_BUDGET`），两者都不是冲突。以同一个 `runId` 再次创建的分叉就是那个分叉，保有它最初得到的数量。已发出、在等待轮到自己时被取消的分叉，仍会在轮到它时拿走自己的份额，然后以取消结束。`cancel()` 以“这次调用是否取消了该运行”完成。
   尚未发出的 resume 或 fork（它在等待所继续的运行的结果）会被 `cancel()` 或已中止的 `signal` 撤回，其 `result` 以 `cancelled` 错误被拒绝；`signal` 一开始就已中止，则不会发出调用。
-- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph` 和 `synthesizeChild`。** `handoff()` 等待运行到达 `ng.checkpoint(value)` 安全点并将其保持在那里，以 `{ runId, journalHead, coordinateId, entryId, value }` 完成（`releaseHandoff()` 释放保持状态让运行不经替换继续下去，并以布尔值完成）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` 把保持在检查点 handoff 处的运行替换为另一个已准入的 `version`（从源谱系的剩余预算出发，由 `options.budget` 覆盖指定字段，由 `journalHead`、`coordinateId` 和 `entryId` 覆盖 handoff 引用字段；当 `input` 为对象或省略时，不复制源运行的初始 `input` 而从 `{}` 开始，`input.handoff` 默认为检查点 `value`，`input.previous_run_id` 默认为源 `runId`），保留源运行的子运行以便替换代可以附着到它们之上，并返回替换后的 `ProgramRun`。`replace` 以 C++ 代码（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）拒绝，以带有该 `code` 和 `witness` 的 `NeoGraphError` 被拒绝，并使源运行及其保持状态（hold）维持原样。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` 在内存转换存储上迁移在线根 Core 图运行并返回迁移后的 `ProgramRun`；仅当 `semanticAdapter: true` 时才附着语义迁移适配器，没有适配器时目标必须是该运行自身已准入的版本或兼容版本（拒绝时为 `P_GRAPH_MIGRATION_*`；如下文所述，JavaScript 转换存储回答 `"conflict"`）。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })`（或包含 `binding` 与 `source` 的单个选项对象）在父运行保持于检查点 handoff 期间准备子版本，并以 `{ id, binding, state, versionId, bundleId, proposalId, grantId }` 完成。它需要子运行的 `budget` 以及宿主的 `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`）和 `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）；缺少它们即被拒绝；模块不会根据子运行的请求生成这两者中的任何一个；网关仅在决定指明 grant 的 validator 和 contract 时才接受该决定（请求的权限超出父运行或 grant 的范围时为 `P_CHILD_SYNTHESIS_AUTHORITY`）。在 `synthesizeChild` 使用某次运行被保持的 handoff 期间，直到它返回为止，对该运行的 `releaseHandoff`、`replace` 和 `cancel` 都会被拒绝，且在同一个保持状态（hold）上的第二次 `synthesizeChild` 也会被拒绝。运行会在每次模型调用之前预留这一上界，因此 `modelTokens` 必须足以覆盖模型调用的输入与输出上限。
+- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph` 和 `synthesizeChild`。** `handoff()` 等待运行到达 `ng.checkpoint(value)` 安全点并将其保持在那里，以 `{ runId, journalHead, coordinateId, entryId, value }` 完成（`releaseHandoff()` 释放保持状态让运行不经替换继续下去，并以布尔值完成）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` 把保持在检查点 handoff 处的运行替换为另一个已准入的 `version`（从源谱系的剩余预算出发，由 `options.budget` 覆盖指定字段，由 `journalHead`、`coordinateId` 和 `entryId` 覆盖 handoff 引用字段；当 `input` 为对象或省略时，不复制源运行的初始 `input` 而从 `{}` 开始，`input.handoff` 默认为检查点 `value`，`input.previous_run_id` 默认为源 `runId`），保留源运行的子运行以便替换代可以附着到它们之上，并返回替换后的 `ProgramRun`。`replace` 以 C++ 代码（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）拒绝，以带有该 `code` 和 `witness` 的 `NeoGraphError` 被拒绝，并使源运行及其保持状态（hold）维持原样。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` 在内存转换存储上迁移在线根 Core 图运行并返回迁移后的 `ProgramRun`；仅当 `semanticAdapter: true` 时才附着语义迁移适配器，没有适配器时目标必须是该运行自身已准入的版本或兼容版本（拒绝时为 `P_GRAPH_MIGRATION_*`；如下文所述，JavaScript 转换存储回答 `"conflict"`）。`programs.registerSynthesisValidator(validate)` 在 `Programs` 实例上注册宿主的语义验证器 `validate(proposal, bundle, reservation)`；该验证器在子包编译后通过异步 JavaScript 桥接被调用，返回（或解析为）`{ validatorIdentity, contractIdentity, accepted, evidence? }`。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision? })`（或包含 `binding` 与 `source` 的单个选项对象）在父运行保持于检查点 handoff 期间准备子版本，并以 `{ id, binding, state, versionId, bundleId, proposalId, grantId }` 完成。它需要子运行的 `budget`、宿主的 `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`），以及调用时传入的 `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）或通过 `registerSynthesisValidator` 注册的验证器；缺少它们即被拒绝；模块不会根据子运行的请求生成这两者中的任何一个；网关仅在决定指明 grant 的 validator 和 contract 时才接受该决定（请求的权限超出父运行或 grant 的范围时为 `P_CHILD_SYNTHESIS_AUTHORITY`，决定指明其他 validator 或 contract、验证器抛出异常或拒绝、或返回值形状不符时为 `P_CHILD_SYNTHESIS_SEMANTICS`，`accepted` 为 `false` 时为 `P_CHILD_SYNTHESIS_REJECTED`）。在 `synthesizeChild` 使用某次运行被保持的 handoff 期间，直到它返回为止，对该运行的 `releaseHandoff`、`replace` 和 `cancel` 都会被拒绝，且在同一个保持状态（hold）上的第二次 `synthesizeChild` 也会被拒绝。运行会在每次模型调用之前预留这一上界，因此 `modelTokens` 必须足以覆盖模型调用的输入与输出上限。
 
   ```js
   // 宿主计算或存储 grant 的标识（"sha256:" + 64 位小写十六进制）。
   const TEMPLATE_ID = await hostIdentity('child template');
   const VALIDATOR_ID = await hostIdentity('semantic validator');
   const CONTRACT_ID = await hostIdentity('semantic contract');
+  programs.registerSynthesisValidator(async (proposal, bundle, reservation) => ({
+    validatorIdentity: VALIDATOR_ID,
+    contractIdentity: CONTRACT_ID,
+    accepted: Array.isArray(bundle.sealed_core_definitions) && bundle.sealed_core_definitions.length > 0,
+    evidence: { bundleId: bundle.id, reservationId: reservation.id },
+  }));
   const hold = await parentRun.handoff();
   const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
     budget: {
@@ -203,11 +209,8 @@ programs.release();
         maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
       },
     },
-    semanticDecision: {
-      validatorIdentity: VALIDATOR_ID,
-      contractIdentity: CONTRACT_ID,
-      accepted: true,
-    },
+    // 若宿主预先作出决定，也可在每次调用时传入 `semanticDecision: { validatorIdentity: VALIDATOR_ID,
+    // contractIdentity: CONTRACT_ID, accepted: true }`。
   });
   await parentRun.releaseHandoff();
   ```
@@ -305,7 +308,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 
 模块导出 C API，`neograph.mjs` 对其进行封装。使用 JSON 字符串的 C API 不需要绑定库；Embind 会多出一个库和每个类型的注册，
 而接口只有几个函数：图用 `ng_compile`、`ng_run`、`ng_cancel`、`ng_release` 和 `ng_error`，Program 用 `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、
-`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_cancel`、`ng_programs_result` 和 `ng_programs_release`。结果通过回调返回，它们在宿主事件循环之后的回合中被调用：
+`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_set_synthesis_validator`、`ng_programs_cancel`、`ng_programs_result` 和 `ng_programs_release`。结果通过回调返回，它们在宿主事件循环之后的回合中被调用：
 图用 `Module.ngOnEvent` 和 `Module.ngOnDone`，Program 用 `Module.ngProgramEvent` 和 `Module.ngProgramDone`。密钥是交给 `compile` 的提供方描述的一部分，由该图的 SDK
 客户端持有；它不在二进制文件中，不在任何结果中，也不在错误消息中。
 

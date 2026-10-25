@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=dd949ff30b9730747c8a2ff1e975d2cc92aff7cc1ebbd49f36ca991a53444138 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=5dd93993031705ff41dfa2c2514b098ea5fc64f6692cdff91177ec049cdf18f0 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -192,13 +192,19 @@ programs.release();
   一時停止中の実行が残した予算の半分（または `options.budget` が求めた分で、一時停止中の実行にウォールクロック時間と Core ステップが少しは残らなければなりません）を受け取り、一時停止中の実行は引き続き再開できます。終わったノードは再実行されません。1 つの一時停止の fork はまとめて作ってもかまいません。fork は順番を守り、各 fork は先の fork が一時停止中の実行に残したものを読んで、その半分を受け取ります。一時停止中の実行に残っているウォールクロック時間または Core ステップをすべて受け取ろうとする fork は拒否され（`P_FORK_SOURCE_BUDGET`）、残りより多くを求める fork も拒否され（`P_FORK_BUDGET`）、どちらも競合ではありません。同じ `runId` で作り直した fork はその fork であり、最初に受け取った量のままです。送った後、順番を待っている間に取り消された fork も、自分の順番に自分の取り分を受け取ってから、取り消しで終わります。
   `cancel()` は、この呼び出しが実行を取り消したかどうかで解決されます。まだ送っていない resume や fork（続きとなる実行の結果を待っているもの）は、`cancel()` や中断された `signal` が代わりに
   取り下げ、その `result` は `cancelled` エラーで拒否されます。すでに中断された `signal` なら、呼び出しは行われません。
-- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph`、`synthesizeChild`。** `handoff()` は、実行が `ng.checkpoint(value)` のセーフポイントに到達するまで待ってそこに保持し、`{ runId, journalHead, coordinateId, entryId, value }` で解決します（`releaseHandoff()` は保持を解いて実行を置き換えずにそのまま続行させ、真偽値で解決します）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` は、チェックポイント handoff に保持された実行を承認済みの別の `version` に置き換え（元の系譜の残りの予算から始め、`options.budget` で指定されたフィールドを上書きし、`journalHead`、`coordinateId`、`entryId` で handoff 参照フィールドを上書きします。`input` がオブジェクトか省略された場合、元の実行の初期 `input` はコピーせず `{}` から始め、`input.handoff` はチェックポイントの `value`、`input.previous_run_id` は元の `runId` が既定値になります）、元の実行の子を保って置き換え世代がそこに接続できるようにし、置き換えの `ProgramRun` を返します。`replace` は C++ のコード（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）で拒否し、その `code` と `witness` を持つ `NeoGraphError` で拒否され、元の実行とその保持（hold）を元のままにします。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` は、インメモリ遷移ストア上のライブルート Core グラフ実行をマイグレーションしてマイグレーション後の `ProgramRun` を返します。セマンティックマイグレーションアダプターは `semanticAdapter: true` のときだけ付与され、それがない場合は対象がその実行自身の承認済みバージョンか互換なバージョンでなければなりません（拒否時は `P_GRAPH_MIGRATION_*`。後述のとおり JavaScript 遷移ストアは `"conflict"` を返します）。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })`（または `binding` と `source` を含む単一のオプションオブジェクト）は、親実行がチェックポイント handoff に保持されている間に子バージョンを準備し、`{ id, binding, state, versionId, bundleId, proposalId, grantId }` で解決します。子の `budget` とホストの `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`）および `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）が必要で、これらがない場合は拒否されます。モジュールは子の要求からどちらも作らず、ゲートウェイは決定が grant の validator と contract を指定しているときだけその決定を受け入れます（要求された権限が親実行または grant の範囲を超える場合は `P_CHILD_SYNTHESIS_AUTHORITY`）。`synthesizeChild` が実行の保持された handoff を使っている間は、戻るまでその実行の `releaseHandoff`、`replace`、`cancel` は拒否され、同じ hold に対する 2 回目の `synthesizeChild` も拒否されます。実行は各モデル呼び出しの前にその上限を予約するため、`modelTokens` はモデル呼び出しの入力上限と出力上限をまかなえなければなりません。
+- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph`、`synthesizeChild`。** `handoff()` は、実行が `ng.checkpoint(value)` のセーフポイントに到達するまで待ってそこに保持し、`{ runId, journalHead, coordinateId, entryId, value }` で解決します（`releaseHandoff()` は保持を解いて実行を置き換えずにそのまま続行させ、真偽値で解決します）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` は、チェックポイント handoff に保持された実行を承認済みの別の `version` に置き換え（元の系譜の残りの予算から始め、`options.budget` で指定されたフィールドを上書きし、`journalHead`、`coordinateId`、`entryId` で handoff 参照フィールドを上書きします。`input` がオブジェクトか省略された場合、元の実行の初期 `input` はコピーせず `{}` から始め、`input.handoff` はチェックポイントの `value`、`input.previous_run_id` は元の `runId` が既定値になります）、元の実行の子を保って置き換え世代がそこに接続できるようにし、置き換えの `ProgramRun` を返します。`replace` は C++ のコード（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）で拒否し、その `code` と `witness` を持つ `NeoGraphError` で拒否され、元の実行とその保持（hold）を元のままにします。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` は、インメモリ遷移ストア上のライブルート Core グラフ実行をマイグレーションしてマイグレーション後の `ProgramRun` を返します。セマンティックマイグレーションアダプターは `semanticAdapter: true` のときだけ付与され、それがない場合は対象がその実行自身の承認済みバージョンか互換なバージョンでなければなりません（拒否時は `P_GRAPH_MIGRATION_*`。後述のとおり JavaScript 遷移ストアは `"conflict"` を返します）。`programs.registerSynthesisValidator(validate)` は `Programs` インスタンスにホストのセマンティックバリデーター `validate(proposal, bundle, reservation)` を登録します。このバリデーターは子バンドルのコンパイル後に非同期 JavaScript ブリッジ経由で呼び出され、`{ validatorIdentity, contractIdentity, accepted, evidence? }` を返すかその値で解決します。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision? })`（または `binding` と `source` を含む単一のオプションオブジェクト）は、親実行がチェックポイント handoff に保持されている間に子バージョンを準備し、`{ id, binding, state, versionId, bundleId, proposalId, grantId }` で解決します。子の `budget`、ホストの `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`）、および呼び出し時の `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）または `registerSynthesisValidator` で登録されたバリデーターが必要で、これらがない場合は拒否されます。モジュールは子の要求からどちらも作らず、ゲートウェイは決定が grant の validator と contract を指定しているときだけその決定を受け入れます（要求された権限が親実行または grant の範囲を超える場合は `P_CHILD_SYNTHESIS_AUTHORITY`、決定が別の validator や contract を指定した場合、バリデーターが例外を投げたか拒否された場合、または戻り値の形が不正な場合は `P_CHILD_SYNTHESIS_SEMANTICS`、`accepted` が `false` の場合は `P_CHILD_SYNTHESIS_REJECTED`）。`synthesizeChild` が実行の保持された handoff を使っている間は、戻るまでその実行の `releaseHandoff`、`replace`、`cancel` は拒否され、同じ hold に対する 2 回目の `synthesizeChild` も拒否されます。実行は各モデル呼び出しの前にその上限を予約するため、`modelTokens` はモデル呼び出しの入力上限と出力上限をまかなえなければなりません。
 
   ```js
   // ホストは grant の識別子（"sha256:" + 64 桁の小文字 16 進数）を計算または保存します。
   const TEMPLATE_ID = await hostIdentity('child template');
   const VALIDATOR_ID = await hostIdentity('semantic validator');
   const CONTRACT_ID = await hostIdentity('semantic contract');
+  programs.registerSynthesisValidator(async (proposal, bundle, reservation) => ({
+    validatorIdentity: VALIDATOR_ID,
+    contractIdentity: CONTRACT_ID,
+    accepted: Array.isArray(bundle.sealed_core_definitions) && bundle.sealed_core_definitions.length > 0,
+    evidence: { bundleId: bundle.id, reservationId: reservation.id },
+  }));
   const hold = await parentRun.handoff();
   const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
     budget: {
@@ -216,11 +222,8 @@ programs.release();
         maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
       },
     },
-    semanticDecision: {
-      validatorIdentity: VALIDATOR_ID,
-      contractIdentity: CONTRACT_ID,
-      accepted: true,
-    },
+    // ホストが事前に決定する場合は、呼び出しごとに `semanticDecision: { validatorIdentity: VALIDATOR_ID,
+    // contractIdentity: CONTRACT_ID, accepted: true }` を渡すこともできます。
   });
   await parentRun.releaseHandoff();
   ```
@@ -331,7 +334,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 
 モジュールは C API をエクスポートし、`neograph.mjs` がそれを包みます。JSON 文字列を使う C API にはバインディング
 ライブラリが要りません。Embind はライブラリとすべての型の登録を足すことになりますが、表面は数個の関数だけです。グラフには `ng_compile`、`ng_run`、
-`ng_cancel`、`ng_release`、`ng_error`、Program には `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_cancel`、
+`ng_cancel`、`ng_release`、`ng_error`、Program には `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_set_synthesis_validator`、`ng_programs_cancel`、
 `ng_programs_result`、`ng_programs_release` があります。結果は、ホストのイベントループの後のターンから呼ばれるコールバックで返ります。グラフは `Module.ngOnEvent` と
 `Module.ngOnDone`、Program は `Module.ngProgramEvent` と `Module.ngProgramDone` です。キーは `compile` に渡すプロバイダー記述の一部で、そのグラフの
 SDK クライアントが保持します。バイナリにも、どの結果にも、エラーメッセージにも入りません。

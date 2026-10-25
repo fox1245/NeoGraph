@@ -14,6 +14,7 @@
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/module.h>
 #include <neograph/program/store.h>
+#include <neograph/program/synthesis.h>
 #include <neograph/program/task_graph_fragment.h>
 #include <neograph/program/transition_store.h>
 
@@ -46,6 +47,15 @@ struct JsStoreSet {
 /// the object for this set alone (the module's Programs object does) ends the registration from the lease's deleter, so
 /// that it lasts as long as a run, or a task that a run left behind, can still make a call.
 JsStoreSet adapt_js_stores(int handle, std::shared_ptr<const void> lease = {});
+
+/// Adapts a JavaScript synthesis validator that `registerSynthesisValidator` (wasm/stores.mjs) returned `handle` for.
+/// Each call crosses through the same bridge (`ngStoreCall`, settled immediately or from a Promise via `ng_store_resolve`
+/// / `ng_store_reject`) and decodes `{ validatorIdentity, contractIdentity, accepted, evidence? }` into a
+/// `ProgramSynthesisSemanticDecision`. A thrown or rejected validator, or a return value with the wrong shape, fails
+/// with `ProgramChildSynthesisError("P_CHILD_SYNTHESIS_SEMANTICS", ...)`. `lease` is held for the lifetime of the
+/// validator and any in-flight call.
+program::ProgramSynthesisAsyncSemanticValidator adapt_js_synthesis_validator(
+    int handle, std::shared_ptr<const void> lease = {});
 
 /// The executor that a pending call is completed on. A completion posts to it, which schedules a turn when it is the
 /// executor of an async::HostLoop. Unset (the default), a completion is posted to the executor that the awaiting

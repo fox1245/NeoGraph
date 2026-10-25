@@ -394,6 +394,7 @@ struct Host {
     std::map<std::string, std::vector<std::function<void()>>> handoff_waiters;
     std::map<std::string, ProgramChildSynthesisGrant> synthesis_grants;
     std::map<std::string, ProgramSynthesisSemanticDecision> synthesis_decisions;
+    ProgramSynthesisAsyncSemanticValidator synthesis_validator;
     // Runs whose held handoff a synthesis is using: releasing, replacing or cancelling them waits for it to finish.
     std::set<std::string> handoffs_in_use;
     bool closed = false;
@@ -468,16 +469,16 @@ struct Host {
         catalog                          = std::make_shared<ProgramCatalog>(std::move(catalog_config));
 
         ProgramSynthesisGatewayConfig synthesis_config;
-        synthesis_config.compiler                    = compiler;
-        synthesis_config.catalog                     = catalog;
-        // The decision is the host's own (synthesizeChild's `semanticDecision`); the module decides nothing itself. The
-        // gateway accepts it only when it names the validator and contract of the host's grant.
-        synthesis_config.validate_semantics = [this](const ProgramSynthesisProposal& proposal, const ProgramBundle&,
-                                                     const ProgramSynthesisReservation&) {
-            const auto found = synthesis_decisions.find(proposal.id());
-            if (found == synthesis_decisions.end())
-                throw std::invalid_argument("synthesizeChild() needs the host's semanticDecision for the proposal");
-            return found->second;
+        synthesis_config.compiler = compiler;
+        synthesis_config.catalog  = catalog;
+        // The decision is the host's own (synthesizeChild's `semanticDecision` or the validator registered with
+        // `registerSynthesisValidator`); the module decides nothing itself. The gateway accepts it only when it names
+        // the validator and contract of the host's grant.
+        synthesis_config.validate_semantics_async =
+            [this](const ProgramSynthesisProposal&    proposal,
+                   const ProgramBundle&               bundle,
+                   const ProgramSynthesisReservation& reservation) {
+            return validate_synthesis(proposal, bundle, reservation);
         };
         synthesis_config.admission = [this](const ProgramSynthesisProposal&, const ProgramBundle&,
                                             const ProgramSynthesisReservation&) {
@@ -511,6 +512,21 @@ struct Host {
             wake_waiters(handoff_waiters, "");
         };
         runtime = std::make_unique<ProgramRuntime>(std::move(runtime_config));
+    }
+
+    asio::awaitable<ProgramSynthesisSemanticDecision> validate_synthesis(
+        const ProgramSynthesisProposal&    proposal,
+        const ProgramBundle&               bundle,
+        const ProgramSynthesisReservation& reservation) {
+        if (const auto found = synthesis_decisions.find(proposal.id()); found != synthesis_decisions.end()) {
+            co_return found->second;
+        }
+        const auto validator = synthesis_validator;
+        if (!validator) {
+            throw std::invalid_argument(
+                "synthesizeChild() needs the host's semanticDecision or registerSynthesisValidator()");
+        }
+        co_return co_await validator(proposal, bundle, reservation);
     }
 
     RunInvocation invocation(const json& options, const std::string& version_id, const std::string& run_id,
@@ -926,12 +942,14 @@ struct Host {
 
         if (!options.contains("grant") || !options.at("grant").is_object())
             throw std::invalid_argument("synthesizeChild() needs the host's grant");
-        if (!options.contains("semanticDecision") || !options.at("semanticDecision").is_object())
-            throw std::invalid_argument("synthesizeChild() needs the host's semanticDecision");
-        const auto& granted  = options.at("grant");
-        const auto& decision = options.at("semanticDecision");
-        const auto  text     = [](const json& container, const char* key, const char* what) {
-            if (!container.contains(key) || !container.at(key).is_string())
+        const bool has_decision = options.contains("semanticDecision") && !options.at("semanticDecision").is_null();
+        if (!has_decision && !synthesis_validator)
+            throw std::invalid_argument(
+                "synthesizeChild() needs the host's semanticDecision or registerSynthesisValidator()");
+        const auto& granted = options.at("grant");
+        const auto  text    = [](const json& container, const char* key, const char* what) {
+            if (!container.contains(key) || !container.at(key).is_string() ||
+                container.at(key).get<std::string>().empty())
                 throw std::invalid_argument(std::string(what) + "." + key + " must be a string");
             return container.at(key).get<std::string>();
         };
@@ -954,14 +972,22 @@ struct Host {
         grant_data.minimum_execution_guarantee = parent_version->execution_guarantee();
         const auto grant = ProgramChildSynthesisGrant::create(std::move(grant_data));
         synthesis_grants.insert_or_assign(grant.id(), grant);
-        if (!decision.contains("accepted") || !decision.at("accepted").is_boolean())
-            throw std::invalid_argument("semanticDecision.accepted must be a boolean");
-        synthesis_decisions.insert_or_assign(
-            proposal.id(),
-            ProgramSynthesisSemanticDecision{text(decision, "validatorIdentity", "semanticDecision"),
-                                             text(decision, "contractIdentity", "semanticDecision"),
-                                             decision.at("accepted").get<bool>(),
-                                             decision.value("evidence", json::object())});
+        if (has_decision) {
+            const auto& decision = options.at("semanticDecision");
+            if (!decision.is_object())
+                throw std::invalid_argument("synthesizeChild() semanticDecision must be an object");
+            if (!decision.contains("accepted") || !decision.at("accepted").is_boolean())
+                throw std::invalid_argument("semanticDecision.accepted must be a boolean");
+            json evidence = json::object();
+            if (decision.contains("evidence") && !decision.at("evidence").is_null())
+                evidence = decision.at("evidence");
+            synthesis_decisions.insert_or_assign(
+                proposal.id(),
+                ProgramSynthesisSemanticDecision{text(decision, "validatorIdentity", "semanticDecision"),
+                                                 text(decision, "contractIdentity", "semanticDecision"),
+                                                 decision.at("accepted").get<bool>(),
+                                                 std::move(evidence)});
+        }
 
         struct DecisionUsed {
             std::map<std::string, ProgramSynthesisSemanticDecision>& decisions;
@@ -970,6 +996,25 @@ struct Host {
         } decision_used{synthesis_decisions, proposal.id()};
         const auto record = co_await runtime->prepare_child_synthesis_async(
             owner, parent_handle, *lease, proposal, grant, binding_name);
+        if (record.data().state != ProgramChildSynthesisState::Bound) {
+            const std::string code =
+                record.data().error_code.empty() ? "P_CHILD_SYNTHESIS_FAILED" : record.data().error_code;
+            json witness = json{{"state", std::string(child_synthesis_state_name(record.data().state))},
+                                {"record_id", record.id()},
+                                {"proposal_id", proposal.id()},
+                                {"grant_id", grant.id()}};
+            if (record.data().artifacts.contains("evidence"))
+                witness["evidence"] = record.data().artifacts.at("evidence");
+            throw ProgramDiagnosticError(Diagnostic{
+                CompilePhase::Seal,
+                code,
+                DiagnosticSeverity::Error,
+                SourceCoordinate{"child_synthesis", "", std::nullopt},
+                "Child synthesis did not bind an admitted child version: " + code,
+                std::move(witness),
+                {},
+                std::nullopt});
+        }
         const auto& artifacts = record.data().artifacts;
         std::string version_id;
         std::string bundle_id;
@@ -1178,6 +1223,34 @@ extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_synthesize_child(int handle, int
     });
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_set_synthesis_validator(int handle, int validator_handle) {
+    try {
+        const auto found = hosts.find(handle);
+        if (found == hosts.end() || found->second->closed) throw std::invalid_argument("no such Programs object");
+#ifdef NEOGRAPH_JS_STORES
+        if (validator_handle == 0) {
+            found->second->synthesis_validator = {};
+            return 0;
+        }
+        std::shared_ptr<const void> lease(new int(validator_handle), [](const void* held) {
+            ng_js_stores_free(*static_cast<const int*>(held));
+            delete static_cast<const int*>(held);
+        });
+        found->second->synthesis_validator =
+            neograph::wasm::adapt_js_synthesis_validator(validator_handle, std::move(lease));
+        return 0;
+#else
+        (void)validator_handle;
+        throw std::invalid_argument("this module was built without JavaScript stores");
+#endif
+    } catch (const std::exception& error) {
+        neograph::wasm::set_error(error.what());
+    } catch (...) {
+        neograph::wasm::set_error("unknown failure");
+    }
+    return -1;
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_cancel(int handle, int call, const char* run_id) {
     return begin(handle, call, [run = std::string(run_id)](std::shared_ptr<Host> host) {
         return cancel_op(std::move(host), run);
@@ -1197,6 +1270,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void ng_programs_release(int handle) {
     auto host    = found->second;
     host->closed = true;
     hosts.erase(found);
+    host->synthesis_validator = {};
     host->held_handoffs.clear();
     for (const auto& id : host->starting) host->cancel_requested.insert(id);
     // A run that is executing is cancelled. One that waits at an interrupt stays as it is in the stores.

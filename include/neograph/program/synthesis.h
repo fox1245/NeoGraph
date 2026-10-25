@@ -161,6 +161,16 @@ using ProgramSynthesisSemanticValidator =
     std::function<ProgramSynthesisSemanticDecision(const ProgramSynthesisProposal&,
                                                    const ProgramBundle&,
                                                    const ProgramSynthesisReservation&)>;
+/**
+ * Asynchronous semantic validator for host-pumped or coroutine callers (#638).
+ * Awaited by continue_child_async when set; synchronous synthesize/synthesize_child
+ * entry points require validate_semantics and refuse when only this form is set.
+ */
+using ProgramSynthesisAsyncSemanticValidator =
+    std::function<asio::awaitable<ProgramSynthesisSemanticDecision>(
+        const ProgramSynthesisProposal&,
+        const ProgramBundle&,
+        const ProgramSynthesisReservation&)>;
 
 class ProgramChildSynthesisAuthorization;
 /** Atomically debit against authorization.data().source_lineage_head_id, or fail. */
@@ -173,11 +183,20 @@ struct ProgramSynthesisGatewayConfig {
     ProgramSynthesisReservationResolver reserve;
     ProgramSynthesisAdmissionResolver admission;
     std::size_t max_source_bytes = 1024 * 1024;
-    /** Mandatory host-owned gate between compilation and Catalog admission. */
+    /**
+     * Mandatory host-owned gate between compilation and Catalog admission.
+     * At least one of validate_semantics or validate_semantics_async must be set.
+     */
     ProgramSynthesisSemanticValidator validate_semantics;
     std::size_t max_semantic_evidence_bytes = 1024 * 1024;
     /** Required by synthesize_child; never falls back to the successor resolver. */
     ProgramChildSynthesisReservationResolver reserve_child;
+    /**
+     * Asynchronous host-owned semantic validator (#638). When set, continue_child_async
+     * awaits it instead of calling validate_semantics. Synchronous synthesize and
+     * synthesize_child require validate_semantics and refuse when only this is set.
+     */
+    ProgramSynthesisAsyncSemanticValidator validate_semantics_async;
 };
 
 struct ProgramSynthesisResult {

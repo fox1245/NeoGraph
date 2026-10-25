@@ -16729,6 +16729,154 @@ TEST(ProgramSynthesisGateway, SemanticRejectionConsumesReservationAndPreventsAdm
                   error.receipt().id());
     }
 }
+
+namespace {
+struct AsyncSemanticValidatorProbe {
+    std::string validator_identity;
+    std::string contract_identity;
+    bool        accepted       = true;
+    json        evidence       = json{{"async_validated", true}};
+    std::size_t calls          = 0;
+    std::string last_bundle_id;
+    std::string last_proposal_id;
+    std::string last_reservation_id;
+
+    asio::awaitable<ProgramSynthesisSemanticDecision> validate(
+        const ProgramSynthesisProposal&    proposal,
+        const ProgramBundle&               bundle,
+        const ProgramSynthesisReservation& reservation) {
+        ++calls;
+        co_await asio::post(asio::use_awaitable);
+        last_proposal_id    = proposal.id();
+        last_bundle_id      = bundle.id();
+        last_reservation_id = reservation.id();
+        const auto definitions = bundle.sealed_core_definitions();
+        json out_evidence      = evidence;
+        if (out_evidence.is_object()) {
+            out_evidence["core_count"] = definitions.size();
+        }
+        co_return ProgramSynthesisSemanticDecision{
+            validator_identity,
+            contract_identity,
+            accepted && !definitions.empty(),
+            std::move(out_evidence)};
+    }
+};
+}  // namespace
+
+TEST(ProgramSynthesisGateway, AsyncSemanticValidatorAcceptsRefusesChecksIdentitiesAndRefusesSyncEntryPoints) {
+    auto run_case = [](bool accept, bool wrong_validator, bool wrong_contract,
+                       bool oversize_evidence = false) {
+        auto                  storage = std::make_shared<InMemoryProgramTransitionStore>();
+        ChildSynthesisFixture test(storage, false);
+        const auto            grant_spec = test.grant_data();
+        AsyncSemanticValidatorProbe probe{
+            wrong_validator ? digest('e') : grant_spec.semantic_validator_identity,
+            wrong_contract ? digest('e') : grant_spec.semantic_contract_identity,
+            accept};
+        if (oversize_evidence) {
+            probe.evidence = json{{"blob", std::string(2048, 'x')}};
+        }
+
+        bool sync_reserved = false;
+        ProgramSynthesisGatewayConfig config;
+        config.compiler = test.compiler;
+        config.catalog  = test.fixture.catalog;
+        config.reserve  = [&](const ProgramSynthesisProposal&) -> ProgramSynthesisReservation {
+            sync_reserved = true;
+            throw std::logic_error("synchronous reserve must not run when only async validator is set");
+        };
+        config.reserve_child = [&](const ProgramSynthesisProposal&,
+                                   const ProgramChildSynthesisAuthorization&) -> ProgramSynthesisReservation {
+            sync_reserved = true;
+            throw std::logic_error("synchronous reserve_child must not run when only async validator is set");
+        };
+        config.admission = [&](const ProgramSynthesisProposal&, const ProgramBundle&,
+                               const ProgramSynthesisReservation&) {
+            ++test.admissions;
+            return ProgramAdmission{"tenant:runtime", test.fixture.profile, test.fixture.policy, {}};
+        };
+        config.max_semantic_evidence_bytes = 512;
+        config.validate_semantics_async =
+            [&probe](const ProgramSynthesisProposal&    proposal,
+                     const ProgramBundle&               bundle,
+                     const ProgramSynthesisReservation& reservation) {
+                return probe.validate(proposal, bundle, reservation);
+            };
+
+        auto gateway = std::make_shared<ProgramSynthesisGateway>( std::move(config));
+        const auto proposal = ProgramSynthesisProposal::create(test.proposal_data());
+        const auto grant    = ProgramChildSynthesisGrant::create(grant_spec);
+
+        EXPECT_THROW((void)gateway->synthesize(proposal), std::invalid_argument);
+        EXPECT_THROW((void)gateway->synthesize_child(proposal, grant, *test.parent),
+                     std::invalid_argument);
+        EXPECT_FALSE(sync_reserved);
+        EXPECT_EQ(probe.calls, 0U);
+
+        test.trusted_grant = grant;
+        RuntimeConfig rt_config{test.fixture.catalog, test.fixture.checkpoints, {}, test.journal, 2};
+        rt_config.child_synthesis_gateway = gateway;
+        rt_config.child_synthesis_grant_resolver =
+            [&test](std::string_view owner, std::string_view run,
+                    std::string_view id) -> std::optional<ProgramChildSynthesisGrant> {
+            if (test.trusted_grant && owner == test.trusted_grant->data().owner_scope &&
+                run == test.trusted_grant->data().parent_run_id && id == test.trusted_grant->id())
+                return test.trusted_grant;
+            return std::nullopt;
+        };
+        ProgramRuntime async_runtime(std::move(rt_config));
+        auto active = async_runtime.reconnect("tenant:runtime", test.handle->run_id());
+
+        if (oversize_evidence) {
+            bool threw_oversize = false;
+            try {
+                (void)async_runtime.prepare_child_synthesis(
+                    "tenant:runtime", active, *test.hold, proposal, grant, "generated-child");
+            } catch (const std::runtime_error& error) {
+                threw_oversize = std::string(error.what()).find(
+                                     "Program synthesis semantic evidence exceeds host byte limit") !=
+                                 std::string::npos;
+            }
+            EXPECT_TRUE(threw_oversize);
+            EXPECT_EQ(probe.calls, 1U);
+            EXPECT_EQ(test.admissions, 0U);
+            return;
+        }
+
+        const auto record = async_runtime.prepare_child_synthesis(
+            "tenant:runtime", active, *test.hold, proposal, grant, "generated-child");
+        EXPECT_EQ(probe.calls, 1U);
+        EXPECT_EQ(probe.last_proposal_id, proposal.id());
+        EXPECT_FALSE(probe.last_bundle_id.empty());
+        EXPECT_EQ(probe.last_reservation_id, record.data().reservation.id());
+
+        if (wrong_validator || wrong_contract) {
+            EXPECT_EQ(record.data().state, ProgramChildSynthesisState::Failed);
+            EXPECT_EQ(record.data().error_code, "P_CHILD_SYNTHESIS_SEMANTICS");
+            EXPECT_EQ(test.admissions, 0U);
+        } else if (!accept) {
+            EXPECT_EQ(record.data().state, ProgramChildSynthesisState::Failed);
+            EXPECT_EQ(record.data().error_code, "P_CHILD_SYNTHESIS_REJECTED");
+            EXPECT_EQ(test.admissions, 0U);
+            ASSERT_TRUE(record.data().artifacts.contains("evidence"));
+            EXPECT_EQ(record.data().artifacts.at("evidence").at("core_count"), 1);
+        } else {
+            EXPECT_EQ(record.data().state, ProgramChildSynthesisState::Bound);
+            EXPECT_TRUE(record.data().error_code.empty());
+            EXPECT_EQ(test.admissions, 1U);
+            ASSERT_TRUE(record.data().artifacts.contains("bundle"));
+            EXPECT_EQ(record.data().artifacts.at("bundle").at("id"), probe.last_bundle_id);
+        }
+    };
+
+    run_case(/*accept=*/true, /*wrong_validator=*/false, /*wrong_contract=*/false);
+    run_case(/*accept=*/false, /*wrong_validator=*/false, /*wrong_contract=*/false);
+    run_case(/*accept=*/true, /*wrong_validator=*/true, /*wrong_contract=*/false);
+    run_case(/*accept=*/true, /*wrong_validator=*/false, /*wrong_contract=*/true);
+    run_case(/*accept=*/true, /*wrong_validator=*/false, /*wrong_contract=*/false,
+             /*oversize_evidence=*/true);
+}
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 namespace {
