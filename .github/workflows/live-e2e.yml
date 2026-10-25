@@ -4,23 +4,23 @@ name: Live e2e report
 # the release pull request; the `report` job only checks that report, so it needs no key and
 # calls no provider. The same check runs on the release tag in wheels.yml before PyPI publishing.
 #
-# The `live` job runs the whole live suite with real keys on every push to master (and on demand).
-# Its keys are secrets of the `live-e2e` environment, which only master may use, so neither a pull
-# request (from a fork or not) nor another branch receives them. Keys go to the test processes
-# only; scripts/live_e2e.py never prints them and scrubs them from failure messages.
+# The `live` job runs the whole live suite with real keys once a night when master has changed,
+# and on demand. Its keys are secrets of the `live-e2e` environment, which only master may use, so
+# neither a pull request (from a fork or not) nor another branch receives them. Keys go to the test
+# processes only; scripts/live_e2e.py never prints them and scrubs them from failure messages.
 
 on:
-  push:
-    branches: [master]
   pull_request:
     branches: [master]
+  schedule:
+    - cron: '0 18 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer pull request push cancels the older check. On master a run with keys is never cancelled
-# midway: the next push waits, and only the newest waiting push runs after it.
+# A newer pull request push cancels the older check. On master a scheduled or manual run with keys
+# is never cancelled midway: the next run waits, and only the newest waiting run runs after it.
 concurrency:
   group: live-e2e-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -28,7 +28,7 @@ concurrency:
 jobs:
   script:
     name: Report checker self-test
-    if: github.event_name != 'push'
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -53,9 +53,38 @@ jobs:
           python-version: '3.12'
       - run: python scripts/live_e2e.py verify
 
+  changed:
+    name: Whether master changed since the last successful live run
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last_sha=$(
+            gh api "/repos/${{ github.repository }}/actions/workflows/live-e2e.yml/runs?branch=master&status=success&per_page=100" \
+              | jq -r '[.workflow_runs[] | select(.head_branch == "master" and (.event == "schedule" or .event == "workflow_dispatch"))][0].head_sha // empty'
+          )
+          if [ "$last_sha" = "${{ github.sha }}" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
   live:
     name: Live suite with real keys
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: changed
+    if: needs.changed.outputs.run == 'true'
     runs-on: ubuntu-24.04
     environment: live-e2e
     timeout-minutes: 90
