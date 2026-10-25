@@ -1,0 +1,211 @@
+{
+  "checkpoints": {
+    "checkpoint_count": 2,
+    "checkpoint_ids": [
+      "714fe18d-c361-4e02-a931-2ba7f8f71e2e",
+      "8cba9d1e-7b3a-4c88-a1c4-5db7a71b9007"
+    ],
+    "checkpoints_newest_first": [
+      {
+        "channel_values": {
+          "channels": {
+            "answer": {
+              "value": null,
+              "version": 0
+            },
+            "note": {
+              "value": "prepared:fixture",
+              "version": 2
+            },
+            "result": {
+              "value": null,
+              "version": 0
+            },
+            "seed": {
+              "value": "fixture",
+              "version": 1
+            },
+            "trace": {
+              "value": [
+                "prep"
+              ],
+              "version": 3
+            }
+          },
+          "global_version": 3
+        },
+        "current_node": "approve",
+        "id": "714fe18d-c361-4e02-a931-2ba7f8f71e2e",
+        "interrupt_phase": "NodeInterrupt",
+        "next_nodes": [
+          "approve"
+        ],
+        "parent_id": "8cba9d1e-7b3a-4c88-a1c4-5db7a71b9007",
+        "schema_version": 4,
+        "step": 1
+      },
+      {
+        "channel_values": {
+          "channels": {
+            "answer": {
+              "value": null,
+              "version": 0
+            },
+            "note": {
+              "value": "prepared:fixture",
+              "version": 2
+            },
+            "result": {
+              "value": null,
+              "version": 0
+            },
+            "seed": {
+              "value": "fixture",
+              "version": 1
+            },
+            "trace": {
+              "value": [
+                "prep"
+              ],
+              "version": 3
+            }
+          },
+          "global_version": 3
+        },
+        "current_node": "prep",
+        "id": "8cba9d1e-7b3a-4c88-a1c4-5db7a71b9007",
+        "interrupt_phase": "Completed",
+        "next_nodes": [
+          "approve"
+        ],
+        "parent_id": "",
+        "schema_version": 4,
+        "step": 0
+      }
+    ],
+    "graph": {
+      "channels": {
+        "answer": {
+          "reducer": "overwrite"
+        },
+        "note": {
+          "reducer": "overwrite"
+        },
+        "result": {
+          "reducer": "overwrite"
+        },
+        "seed": {
+          "reducer": "overwrite"
+        },
+        "trace": {
+          "reducer": "append"
+        }
+      },
+      "edges": [
+        {
+          "from": "__start__",
+          "to": "prep"
+        },
+        {
+          "from": "prep",
+          "to": "approve"
+        },
+        {
+          "from": "approve",
+          "to": "finish"
+        },
+        {
+          "from": "finish",
+          "to": "__end__"
+        }
+      ],
+      "name": "released_fixture",
+      "nodes": {
+        "approve": {
+          "type": "released_approve"
+        },
+        "finish": {
+          "type": "released_finish"
+        },
+        "prep": {
+          "type": "released_prep"
+        }
+      }
+    },
+    "interrupt_node": "approve",
+    "interrupt_value": {
+      "reason": "needs approval",
+      "type": "NodeInterrupt",
+      "value": {
+        "question": "ship it?"
+      }
+    },
+    "latest_checkpoint_id": "714fe18d-c361-4e02-a931-2ba7f8f71e2e",
+    "latest_schema_version": 4,
+    "thread_id": "released-0-16-0"
+  },
+  "program": {
+    "checkpoint_id": "bd6bd707-ef78-420b-8dac-97c5d3a8e111",
+    "compiler_build_id": "released-fixture/v1",
+    "core_node": "confirm",
+    "execution_trace": [
+      "draft"
+    ],
+    "owner_scope": "tenant:released",
+    "pending_call_id": "run-fbc837333fc9485d17a1ee21678fbe42:root:1",
+    "registry": {
+      "node": {
+        "digest": "sha256:cf7991b392fcdae070f310f7f04efaa196dc2a2de36f6b649e273a925653dc96",
+        "name": "released.step",
+        "version": "1.0.0"
+      },
+      "reducers": [
+        {
+          "digest": "sha256:191514b265561ba9d2b6f6ca0f47c09385c32f3e5c421000b628302ae6e60124",
+          "name": "append",
+          "version": "1.0.0"
+        },
+        {
+          "digest": "sha256:cf7bd89463b3e817f23edf236d9a82d110127f4c96bdc50ca4b21ade6d1bdc23",
+          "name": "overwrite",
+          "version": "1.0.0"
+        }
+      ]
+    },
+    "run_id": "run-fbc837333fc9485d17a1ee21678fbe42"
+  },
+  "release": "0.16.0",
+  "runtime_stores": {
+    "artifact_canonical": "{\"content\":{\"text\":\"Always run the verifier.\"},\"content_digest\":\"sha256:5acde33b071457153e7f106bf5ca9fa811b6bef55d9f7b21c174154cb591caae\",\"covers_from_sequence\":0,\"covers_through_sequence\":0,\"format\":\"neograph-context-artifact\",\"id\":\"sha256:9ff2ac2529ceeda2a0654b7ef5fbde1c611a32f745f17511ce7099e33b9e966f\",\"kind\":\"required_skill\",\"media_type\":\"text/markdown\",\"placement\":\"before_latest_user\",\"priority\":0,\"producer_id\":\"released-skill-loader\",\"required\":true,\"source_digest\":\"sha256:7f9527ef97cc38b5f67fe1e1b7b90cae50378f725e9cd923d96bdf4d7d7f3b48\",\"source_feed_id\":\"\",\"storage_schema_version\":1}",
+    "artifact_content": {
+      "text": "Always run the verifier."
+    },
+    "artifact_id": "sha256:9ff2ac2529ceeda2a0654b7ef5fbde1c611a32f745f17511ce7099e33b9e966f",
+    "feed_id": "released-feed",
+    "history_message_ids": [
+      "released-message-1",
+      "released-message-2"
+    ],
+    "history_record_ids": [
+      "sha256:c6ae62abcf422e82e0d80e5872ac6743b5b80644133f83ede3cc2b74d28dfe66",
+      "sha256:2ee48861606db20707afa4800228781f040ef6de4ae8e3e0bc76f99f64fd1a5a"
+    ],
+    "history_records_canonical": [
+      "{\"feed_id\":\"released-feed\",\"format\":\"neograph-runtime-history-record\",\"id\":\"sha256:c6ae62abcf422e82e0d80e5872ac6743b5b80644133f83ede3cc2b74d28dfe66\",\"message\":{\"id\":\"\",\"native\":false,\"parts\":[{\"citations\":[],\"type\":\"text\",\"value\":\"hello-1\"}],\"role\":2,\"schema\":\"neograph.provider-message/v3\",\"wire_output\":null},\"message_id\":\"released-message-1\",\"sequence\":1,\"storage_schema_version\":3,\"trust\":\"untrusted_input\"}",
+      "{\"feed_id\":\"released-feed\",\"format\":\"neograph-runtime-history-record\",\"id\":\"sha256:2ee48861606db20707afa4800228781f040ef6de4ae8e3e0bc76f99f64fd1a5a\",\"message\":{\"id\":\"\",\"native\":false,\"parts\":[{\"citations\":[],\"type\":\"text\",\"value\":\"hello-2\"}],\"role\":2,\"schema\":\"neograph.provider-message/v3\",\"wire_output\":null},\"message_id\":\"released-message-2\",\"predecessor_id\":\"sha256:c6ae62abcf422e82e0d80e5872ac6743b5b80644133f83ede3cc2b74d28dfe66\",\"sequence\":2,\"storage_schema_version\":3,\"trust\":\"untrusted_input\"}"
+    ],
+    "history_texts": [
+      "hello-1",
+      "hello-2"
+    ],
+    "hook_outbox_rows": 0,
+    "outcome_canonical": "{\"dispatch_id\":\"released-dispatch-settled\",\"dispatch_receipt_id\":\"sha256:f714ba35e0c2067fd7e04f76c0895836f551f452c8ac7f9e4a3dca6eeb7d60a4\",\"error\":\"\",\"format\":\"neograph-provider-dispatch-outcome-receipt\",\"id\":\"sha256:9e590904b6a0516049e49032f4ddd20db3a40cae83e4bc1530c1ca062714502c\",\"response_digest\":\"sha256:a9f4b3d22a523fdada41c85c175425bcd15b32b4cd0f54d9433accd52d7195a1\",\"state\":\"succeeded\",\"storage_schema_version\":1}",
+    "outcome_id": "sha256:9e590904b6a0516049e49032f4ddd20db3a40cae83e4bc1530c1ca062714502c",
+    "owner_id": "released-owner",
+    "pending_dispatch_id": "released-dispatch-pending",
+    "pending_receipt_canonical": "{\"assembly_receipt_id\":\"sha256:232188e327ad6f1d4bc8c0b6d6ac9c07c60b7ca62c1d70ad44c26552767e3953\",\"dispatch_id\":\"released-dispatch-pending\",\"format\":\"neograph-provider-dispatch-receipt\",\"id\":\"sha256:cfacc181b302c37295580dbe17f57a1f513584cfde8cc95d5efe9b0950878737\",\"mode\":\"collect\",\"model\":\"released-model\",\"normalized_request_digest\":\"sha256:6d9af26dbef0c78a8311d72e0e3b336e7508aa52105c391e88341d1462395f60\",\"provider_binding_identity\":\"sha256:80f70afeef3caa57646fd20afb95be9c3f2c03d38e091906de31838813dcc22e\",\"storage_schema_version\":1}",
+    "settled_dispatch_id": "released-dispatch-settled",
+    "settled_receipt_canonical": "{\"assembly_receipt_id\":\"sha256:d1be83bcd4b8509553b6d85f624c7d4f045ea7e42d282358028ae716565cfd91\",\"dispatch_id\":\"released-dispatch-settled\",\"format\":\"neograph-provider-dispatch-receipt\",\"id\":\"sha256:f714ba35e0c2067fd7e04f76c0895836f551f452c8ac7f9e4a3dca6eeb7d60a4\",\"mode\":\"collect\",\"model\":\"released-model\",\"normalized_request_digest\":\"sha256:bc1646bd58d49d96e39220dc1669624b68b42f5dc4c12b4f4f0cd06a23470ea9\",\"provider_binding_identity\":\"sha256:80f70afeef3caa57646fd20afb95be9c3f2c03d38e091906de31838813dcc22e\",\"storage_schema_version\":1}",
+    "settled_receipt_id": "sha256:f714ba35e0c2067fd7e04f76c0895836f551f452c8ac7f9e4a3dca6eeb7d60a4"
+  }
+}
