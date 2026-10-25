@@ -525,13 +525,16 @@ await check('migrateGraph migrates a live root Core graph run and refuses guard 
     assert.equal(migrated.versionId, v1.id);
 
     const [sourceEnd, migratedEnd] = await Promise.all([original.result, migrated.result]);
-    // The source run does not finish its own graph: the migrated run does.
-    assert.notEqual(sourceEnd.status, 'completed');
+    // The source run does not finish its own graph: it is retired to the migrated run, which does.
+    assert.equal(sourceEnd.status, 'cancelled');
     assert.equal(migratedEnd.status, 'completed');
     assert.equal(migratedEnd.runId, 'run-migrated-graph');
     assert.equal(migratedEnd.versionId, v1.id);
     assert.ok(migratedEnd.trace.includes('second'), `expected second node in trace: ${JSON.stringify(migratedEnd.trace)}`);
-    assert.equal(replies(migratedEnd.output.channels.messages.value).length, 1);
+    // The migrated run resumes without the run input as a new message, so the one reply answers the original ask.
+    const migratedMessages = migratedEnd.output.channels.messages.value;
+    assert.deepEqual(migratedMessages.filter((m) => m.role === 'user').map((m) => m.content), ['Migrate graph']);
+    assert.deepEqual(replies(migratedMessages), [replyTo('Migrate graph')]);
   } finally {
     programs.release();
   }
