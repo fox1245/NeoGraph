@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=525f458c89beba4734a3f3e1f9510e59a02842cb220f8d089ba2d828a3fbcf2c -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -373,12 +373,12 @@ Python은 별도의 Python 스케줄러를 두지 않고 C++의 실행 기능을
 | 재시도 및 노드 캐시 정책 | `RetryPolicy`, `CacheScope` | 그래프/노드 setter와 캐시 범위 | 같은 런타임 정책 |
 | 체크포인트, HITL, 시간 여행 | 체크포인트 저장소와 resume API | resume, 정확한 `resume_from`, fork, 상태 이력/갱신 | 같은 체크포인트 계약 |
 | A2A 또는 ACP로 에이전트 서비스하기 | `A2AServer`, `ACPServer` | `ProtocolHostAdapter` 뒤의 공식 SDK 서버 | 세션, 취소, 토큰 스트리밍, 그래프 인터럽트(`input-required`, 권한 요청). 협업 봉투, Program 기반 태스크, 테넌트 격리는 없음 |
-| Program 작성과 로컬 실행 | 컴파일러, Catalog, `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost`, 핸들/결과 | 네이티브 소유자 범위의 편의용 호스트 |
+| Program 작성과 로컬 실행 | 컴파일러, Catalog, `ProgramRuntime` | `ProgramCompiler`, `LocalProgramHost` (`admit`, `start`/`resume`/`fork`, `replace`, `migrate_graph`, `register_synthesis_validator`, `prepare_child_synthesis`), 핸들/결과 | 네이티브 소유자 범위의 편의용 호스트 |
 | 필수 수명 주기 Hook | 레지스트리, 러너, `HookRuntime` | 정의와 `create_hook_runtime` 콜백 | 같은 실패 시 차단 수명 주기 경계 |
 | 런타임 컨텍스트와 strict dispatch | 컨텍스트 저장소, receipt, 인터포지션 | 대응하는 불변 값, 저장소, `StrictRuntimeProfile` | 같은 네이티브 컨트롤러 |
 | wheel의 영속 기본값 | SQLite Core/컨텍스트/디스패치 저장소 | `_HAVE_SQLITE` export | PyPI wheel에서 활성화 |
 
-원시 `ProgramCatalog`, 전환 저장소, 교체/마이그레이션 컨트롤러, 합성 게이트웨이, Hook 저널, RPC executor는 호스트를 구성할 때 쓰는 API로 남아 있습니다. 권한을 가진 이 경로들의 일부만 노출하면 `proposal -> compile -> admit -> publish -> migrate/spawn`이라는 필수 프로토콜을 우회하게 됩니다. `_HAVE_PROGRAM`은 원시 컨트롤 플레인 관리 기능의 동등성까지 보장하지 않습니다.
+원시 `ProgramCatalog`, 전환 저장소, Hook 저널, RPC executor는 호스트를 구성할 때 쓰는 API로 남아 있습니다. `LocalProgramHost`는 소유자 범위 런타임 위에서 `register_synthesis_validator`와 `proposal -> compile -> admit -> publish` 자식 합성 게이트웨이, 핸드오프 기반 `replace` / `replace_async`, `migrate_graph` / `migrate_graph_async`를 노출하며 바인딩 자체의 별도 정책은 추가하지 않습니다. `_HAVE_PROGRAM`은 원시 멀티테넌트 컨트롤 플레인 관리 기능의 동등성까지 보장하지 않습니다.
 
 `GraphEngine::run_until_safe_point_async`와 `resume_from_until_safe_point_async`에는 Python 대응 메서드가 없습니다. 세이프 포인트 요청은 정확히 하나의 `GraphGenerationIdentity`를 가리키며, 엔진은 그 세대(generation)에 연결(link)된 경우에만 요청을 받아들입니다. Program 카탈로그는 자신이 구체화하는 엔진에 대해 이 연결을 수행합니다. `GraphEngine.compile`은 세대가 없는 엔진을 만들므로 모든 요청을 거부합니다. 세이프 포인트 캡처는 위에 나열한 교체·마이그레이션 컨트롤러의 몫입니다.
 
@@ -546,7 +546,7 @@ Python에서 발생하는 Program 오류는 타입이 있고 진단 정보를 �
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`, `LocalProgramHost.compile`, `compile_admit` | `RuntimeError` |
 | `ng.ProgramAdmissionError` | `LocalProgramHost.admit`와 `compile_admit` (예: `P_ADMIT_POLICY`, `P_ADMIT_PROVIDER`) | `RuntimeError` |
-| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active`, `resume` (예: `P_START_BUDGET`, `P_RUN_NOT_FOUND`) | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`, `start`, `start_active`, `resume`, `fork`, `replace`, `migrate_graph`, `prepare_child_synthesis` (예: `P_START_BUDGET`, `P_RUN_NOT_FOUND`, `P_REPLACEMENT_AUTHORITY`) | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`, `add_registered_reducer`, `add_registered_condition` | `ValueError`, `RuntimeError` |
 
 앞의 세 예외의 메시지는 `Program compilation failed`, `Program admission failed`, `Program operation failed` 중 하나로 시작하고, 이어서 진단마다 한 줄이 붙습니다. 각 줄에는 코드, JSON 포인터, 메시지가 있고, 소스 위치가 있으면 `(source:line:col)`도 붙습니다. `.diagnostics`는 `code`, `severity`, `phase`, `message`, `source_id`, `json_pointer`, `span`, `witness`를 가진 dict의 리스트입니다.
@@ -615,9 +615,41 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 모델을 호출하는 Python 노드는 자기 provider를 직접 소유하며, Program 예산에는 이런 호출이 잡히지 않습니다.
 
-### 자식 Program
+### 자식 Program, 세대 교체, 그래프 마이그레이션
 
-`ng.spawn`에는 자식 바인딩 resolver가 필요한데 `LocalProgramHost`는 resolver를 설정하지 않습니다. 따라서 Python에서 `ng.spawn`을 호출하면 항상 실행이 `P_CHILD_BINDING`("Program spawn has no configured child binding resolver")으로 실패합니다. 자식 Program을 쓰려면 `RuntimeConfig::child_binding_resolver`를 설정하는 C++ 호스트가 필요합니다. 이 resolver는 바인딩 이름마다 `link_module_child`가 만든 `ModuleLinkReceipt`와, 승인(admission)된 자식 `ProgramVersion`을 대응시킵니다. 자식의 수명 주기는 [재귀적 에이전트](PROGRAM_RECURSIVE_HARNESSES.md)를 참고하세요.
+`LocalProgramHost`는 정적 자식 링킹, 자식 합성 게이트웨이, 유지된 `ng.checkpoint`에서의 세대 교체, 라이브 루트 Core 그래프 마이그레이션을 동기 및 `_async` 메서드로 노출합니다. 바인딩은 C++ 런타임으로 전달하며 자체 정책을 추가하지 않습니다.
+
+| 연산 | Python 시그니처 | 결과 / 거부 코드 |
+|---|---|---|
+| 정적 자식 바인딩 | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`; 바인딩되지 않은 `ng.spawn`은 `P_CHILD_BINDING`으로 실패 |
+| 자식 시작 및 복구 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`, `host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 합성 검증기 등록 | `host.register_synthesis_validator(validate)` (`validate(proposal, bundle, reservation)`는 `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` 반환) | 합성 전에 필요; 등록된 검증기가 없으면 모든 합성이 거부됨 |
+| 자식 합성 | `ProgramSynthesisProposal(...)`, `ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`, `host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`, `host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`, `host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`, `host.synthesize(proposal)` | `ProgramChildSynthesisRecord` (`Bound`, 또는 `P_CHILD_SYNTHESIS_SEMANTICS`와 함께 `Failed`); 초과 권한 요청은 `P_CHILD_SYNTHESIS_AUTHORITY` 발생 |
+| 체크포인트 리스 획득 | `handle.next_handoff()` / `next_handoff_async()`, `handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` 리스; `.wait()` / `.wait_async()`는 `ExactProgramHandoff` 반환 |
+| 세대 교체 | `host.replace(source, target, input, budget, replacement_run_id=None, trace_id="python-program-replace")` / `replace_async(...)` | 새 세대의 `ProgramHandle`; 거부 코드 `P_REPLACEMENT_AUTHORITY`, `P_REPLACEMENT_BUDGET`, `P_REPLACEMENT_TARGET`, `P_REPLACEMENT_INPUT`, `P_REPLACEMENT_HANDOFF` |
+| 라이브 Core 그래프 마이그레이션 | `host.migrate_graph(source, target, semantic_adapter=None, requested_run_id=None)` / `migrate_graph_async(...)` | 승인된 호환 버전의 새 세대에 대한 `ProgramHandle`; 비호환 그래프는 `P_GRAPH_MIGRATION_INCOMPATIBLE`로 거부 |
+| 계보 및 레코드 조회 | `host.run_record(run_id)`, `host.run_lineage(logical_run_id)`, `host.run_generation(logical_run_id, generation)`, `host.child_syntheses(parent_run_id)` | `ProgramRunRecord`, `ProgramRunLineage`, `ProgramRunGeneration`, `list[ProgramChildSynthesisRecord]` |
+
+`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`에서 `template_identity`, `semantic_validator_identity`, `semantic_contract_identity` 세 가지는 필수 `sha256` 식별자(`sha256:` 뒤에 소문자 16진수 64자)이며, 선택 키워드 인자로 `allowed_capabilities`, `allowed_effects`, `lineage_id`, `parent_policy_fingerprint`, `minimum_execution_guarantee`, `max_source_bytes`, `max_sealed_modules`를 설정합니다. `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)`은 앞의 세 인자(`validator_identity`, `contract_identity`, `accepted`)에 기본값이 없습니다. `LocalProgramHost.register_synthesis_validator(validate)`는 `ProgramSynthesisSemanticDecision`을 반환하는 `validate(proposal, bundle, reservation)` 콜백을 등록합니다. 등록된 검증기가 없으면 모든 합성이 거부됩니다. 게이트웨이는 판정이 grant의 검증기와 계약(`semantic_validator_identity`와 `semantic_contract_identity`)을 지정할 때만 받아들이며, 영속 자식 합성(`prepare_child_synthesis`)의 판정이 다른 검증기나 계약을 지정하면 `P_CHILD_SYNTHESIS_SEMANTICS`와 함께 `Failed`로 끝납니다.
+
+```python
+# The host's reviewed identities ("sha256:" + 64 lowercase hex), from its own registry.
+TEMPLATE_ID, VALIDATOR_ID, CONTRACT_ID = reviewed_identities("child-worker")
+
+def validate_synthesis(proposal, bundle, reservation):
+    # The host's own check of the compiled child; here: it asks for no capability.
+    accepted = not proposal.requested_capabilities
+    return ng.ProgramSynthesisSemanticDecision(
+        VALIDATOR_ID,
+        CONTRACT_ID,
+        accepted,
+        evidence={"bundle_id": bundle.id, "checked": "no capabilities"},
+    )
+
+host.register_synthesis_validator(validate_synthesis)
+```
+
+교체 대상의 권한은 원본 권한의 감쇠 범위 안에 있어야 하고(`P_REPLACEMENT_AUTHORITY`), `budget`은 원본 계보의 권위 있는 `remaining_budget`과 일치해야 하며(`P_REPLACEMENT_BUDGET`), 대상은 JavaScript 제어를 선언해야 하고(`P_REPLACEMENT_TARGET`), `input`은 `previous_run_id`와 `handoff`를 바인딩해야 하며(`P_REPLACEMENT_INPUT`), 핸드오프 참조는 활성 체크포인트 헤드와 일치해야 합니다(`P_REPLACEMENT_HANDOFF`). 교체가 거부되면 원본 실행은 현재 세대에 그대로 남고 보유 중인 `ProgramHandoff` 리스도 소비되지 않습니다. 기존 자식은 새 세대로 승계되며 일치하는 `ng.spawn` 바인딩으로 다시 합류합니다. `migrate_graph`는 라이브 루트 Core 그래프 실행을 슈퍼스텝 경계에서 승인된 호환 버전의 새 세대로 옮기며, `ProgramGraphMigrationTarget`의 `MigrationPlan`과 선택적 `GraphSemanticMigrationAdapter`를 적용합니다. 수명 주기는 [재귀적 에이전트](PROGRAM_RECURSIVE_HARNESSES.md)를 참고하세요.
 
 ### 예산
 

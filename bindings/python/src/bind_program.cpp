@@ -1,7 +1,9 @@
+#include "async_runtime.h"
 #include "failure_text_redactor.h"
 #include "json_bridge.h"
 #include "provider_bridge.h"
 
+#include <asio/co_spawn.hpp>
 #include <neograph/graph/loader.h>
 #include <neograph/program/program.h>
 #include <neograph/program/store.h>
@@ -14,6 +16,7 @@
 
 #include "program/provider_binding.h"
 
+#include <pybind11/functional.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -22,10 +25,12 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -37,6 +42,23 @@ namespace {
 
 using namespace neograph::graph;
 using namespace neograph::program;
+
+template <typename Outcome>
+py::object spawn_program_async(asio::awaitable<Outcome> call) {
+    py::object loop = py::module_::import("asyncio").attr("get_running_loop")();
+    py::object future = loop.attr("create_future")();
+    auto fut_h = hold_py(future);
+    auto loop_h = hold_py(std::move(loop));
+    asio::co_spawn(
+        AsyncRuntime::executor(),
+        [](asio::awaitable<Outcome> inner) -> asio::awaitable<std::optional<Outcome>> {
+            co_return std::optional<Outcome>(co_await std::move(inner));
+        }(std::move(call)),
+        [fut_h, loop_h](std::exception_ptr error, std::optional<Outcome> outcome) {
+            resolve_future_async(fut_h, loop_h, error, std::move(outcome));
+        });
+    return future;
+}
 
 ExecutableManifest registered_manifest(ExecutableKind kind,
                                        const std::string& name,
@@ -102,7 +124,14 @@ void set_program_error(const char*                    type_name,
     const auto type = py::module_::import("neograph_engine._neograph").attr(type_name);
     auto exception           = type(message);
     exception.attr("diagnostics") = std::move(diagnostics);
-    PyErr_SetObject(type.ptr(), exception.ptr());
+    if (!program_diagnostics.empty()) {
+        exception.attr("code") = program_diagnostics.front().code;
+        exception.attr("witness") = json_to_py(program_diagnostics.front().witness);
+    } else {
+        exception.attr("code") = "";
+        exception.attr("witness") = py::none();
+    }
+    PyErr_SetObject(exception.get_type().ptr(), exception.ptr());
 }
 
 // Compile, admission and runtime diagnostic errors all reach Python as typed
@@ -119,6 +148,41 @@ void translate_program_errors(std::exception_ptr error) {
     } catch (const ProgramDiagnosticError& failure) {
         set_program_error("ProgramDiagnosticError", "Program operation failed",
                           {failure.diagnostic()});
+    } catch (const ProgramSynthesisValidationError& failure) {
+        std::string code = "P_SYNTHESIS_SEMANTIC_REJECTED";
+        if (failure.evidence().is_object() && failure.evidence().contains("code") &&
+            failure.evidence().at("code").is_string()) {
+            code = failure.evidence().at("code").get<std::string>();
+        }
+        Diagnostic diagnostic{
+            CompilePhase::Resolve,
+            std::move(code),
+            DiagnosticSeverity::Error,
+            SourceCoordinate{"synthesis_validation", "/", std::nullopt},
+            failure.what(),
+            json{{"validation_receipt_id", failure.receipt().id()},
+                 {"proposal_id", failure.receipt().data().proposal_id},
+                 {"reservation_id", failure.receipt().data().reservation_id},
+                 {"bundle_id", failure.receipt().data().bundle_id},
+                 {"validator_identity", failure.receipt().data().validator_identity},
+                 {"contract_identity", failure.receipt().data().contract_identity},
+                 {"evidence", failure.evidence()}},
+            {},
+            std::nullopt};
+        set_program_error("ProgramDiagnosticError", "Program operation failed",
+                          {std::move(diagnostic)});
+    } catch (const ProgramChildSynthesisError& failure) {
+        Diagnostic diagnostic{
+            CompilePhase::Resolve,
+            failure.code(),
+            DiagnosticSeverity::Error,
+            SourceCoordinate{"child_synthesis", "/", std::nullopt},
+            failure.what(),
+            json{{"code", failure.code()}},
+            {},
+            std::nullopt};
+        set_program_error("ProgramDiagnosticError", "Program operation failed",
+                          {std::move(diagnostic)});
     }
 }
 
@@ -317,6 +381,7 @@ AdmissionProfile local_profile(const RegistrySnapshot& registry) {
         .max_program_schema_version(LATEST_PROGRAM_SCHEMA_VERSION)
         .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged)
         .allow_source_kind(SourceKind::JavaScript)
+        .allow_source_kind(SourceKind::CppBuilder)
         .allow_effect_mode(EffectMode::Brokered);
     for (const auto& identity : registry.identities()) builder.allow_executable(identity);
     return std::move(builder).build();
@@ -350,6 +415,55 @@ PolicySnapshot local_policy(const RegistrySnapshot& registry,
     for (auto& capability : capabilities) builder.allow_capability(std::move(capability));
     for (auto& effect : effects) builder.allow_effect(std::move(effect));
     return std::move(builder).build();
+}
+
+// The policy a synthesized child is admitted under: the host's budget ceiling, as for every Program it admits, and
+// only the capabilities, effects and modules of the compiled child.
+PolicySnapshot synthesis_policy(const AdmissionProfile& profile,
+                                const std::string& owner_scope,
+                                const BudgetLimits& ceiling,
+                                const std::vector<std::string>& capabilities,
+                                const std::vector<std::string>& effects,
+                                const ProgramSource& source,
+                                ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Unmanaged) {
+    PolicySnapshotBuilder builder;
+    builder.id("python-local-program-synthesis-policy")
+        .semantic_version("1.0.0")
+        .owner_scope(owner_scope)
+        .admission_profile(profile)
+        .budget_ceiling(ceiling)
+        .minimum_execution_guarantee(minimum_guarantee);
+    for (const auto& capability : capabilities) builder.allow_capability(capability);
+    for (const auto& effect : effects) builder.allow_effect(effect);
+    for (const auto& imp : source.imports()) builder.allow_module_digest(imp.content_identity);
+    return std::move(builder).build();
+}
+
+ModuleLinkReceipt create_module_link_receipt(const std::string& owner_scope,
+                                             const ProgramVersion& parent,
+                                             const std::string& binding_name,
+                                             const ProgramBundle& child_bundle,
+                                             const ProgramVersion& child,
+                                             const RunBudget& max_budget) {
+    const auto parent_policy         = parent.policy_snapshot();
+    const auto child_policy          = child.policy_snapshot();
+    ProgramModuleData module_data;
+    module_data.owner_scope          = owner_scope;
+    module_data.coordinate           = {"local", "parent", "1.0.0", ""};
+    module_data.attestation_id       = parent.id();
+    module_data.allowed_capabilities = parent_policy.allowed_capabilities();
+    module_data.declared_effects     = parent_policy.allowed_effects();
+    module_data.children.push_back({binding_name,
+                                    child.id(),
+                                    {{"input", child_bundle.input_contract()}},
+                                    {{"output", child_bundle.output_contract()}},
+                                    child_policy.allowed_capabilities(),
+                                    child_policy.allowed_effects(),
+                                    budget_limits(max_budget),
+                                    child.execution_guarantee()});
+    auto             module = ProgramModule::create(std::move(module_data));
+    ModuleResolution resolution{module.coordinate(), {module}, {}};
+    return link_module_child(resolution, module, binding_name, child_bundle, child);
 }
 
 ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
@@ -402,6 +516,108 @@ HostStores host_stores(const std::optional<std::string>& directory,
 #endif
 }
 
+class PyProgramHandoff {
+public:
+    explicit PyProgramHandoff(std::shared_ptr<ProgramHandoff> handoff = nullptr)
+        : handoff_(std::move(handoff)) {}
+
+    explicit operator bool() const noexcept {
+        return handoff_ && static_cast<bool>(*handoff_);
+    }
+
+    ExactProgramHandoff wait() const {
+        if (!handoff_ || !*handoff_) {
+            throw py::value_error("ProgramHandoff is empty or already released");
+        }
+        // A copy taken with the GIL held: release() on another thread cannot free it while the GIL is released.
+        const auto held = handoff_;
+        py::gil_scoped_release release;
+        return ExactProgramHandoff{held->reference(), held->value()};
+    }
+
+    py::object wait_async() const {
+        if (!handoff_ || !*handoff_) {
+            throw py::value_error("ProgramHandoff is empty or already released");
+        }
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramHandoff> held) -> asio::awaitable<ExactProgramHandoff> {
+                co_return co_await held->wait_async();
+            }(handoff_));
+    }
+
+    ExactProgramHandoffReference reference() const {
+        if (!handoff_ || !*handoff_) {
+            throw py::value_error("ProgramHandoff is empty or already released");
+        }
+        const auto held = handoff_;
+        py::gil_scoped_release release;
+        return held->reference();
+    }
+
+    py::object value() const {
+        if (!handoff_ || !*handoff_) {
+            throw py::value_error("ProgramHandoff is empty or already released");
+        }
+        const auto held = handoff_;
+        const auto raw  = [&] {
+            py::gil_scoped_release release;
+            return held->value();
+        }();
+        return json_to_py(raw);
+    }
+
+    void release() noexcept {
+        if (!handoff_) return;
+        // Taken out with the GIL held, so no other Python thread reads the member while it changes; the hold is
+        // released (which can wait for the runtime) without the GIL.
+        auto dropped = std::move(handoff_);
+        if (PyGILState_Check()) {
+            py::gil_scoped_release release;
+            dropped.reset();
+        } else {
+            dropped.reset();
+        }
+    }
+
+    ProgramHandoff* get() const noexcept { return handoff_.get(); }
+    const std::shared_ptr<ProgramHandoff>& shared() const noexcept { return handoff_; }
+
+private:
+    std::shared_ptr<ProgramHandoff> handoff_;
+};
+
+struct HostRuntimeBindings {
+    mutable std::mutex mutex;
+    std::map<std::tuple<std::string, std::string, std::string>, ProgramRuntimeChildBinding>
+        child_bindings;
+    std::map<std::tuple<std::string, std::string, std::string>, ProgramChildSynthesisGrant>
+        child_synthesis_grants;
+    std::map<std::string, ProgramSynthesisReservation> reservations;
+    // The host's semantic validator (register_synthesis_validator): a Python callable taking (proposal, bundle,
+    // reservation) and returning a ProgramSynthesisSemanticDecision. Without one, every synthesis is refused.
+    std::shared_ptr<py::object> semantic_validator;
+};
+
+ProgramGraphMigrationTarget build_migration_target(
+    py::object target,
+    std::optional<GraphSemanticMigrationAdapter> semantic_adapter,
+    std::optional<std::string> requested_run_id) {
+    ProgramGraphMigrationTarget resolved;
+    if (py::isinstance<ProgramGraphMigrationTarget>(target)) {
+        resolved = target.cast<ProgramGraphMigrationTarget>();
+    } else if (py::isinstance<ProgramVersion>(target)) {
+        resolved.target_program_version_id = target.cast<const ProgramVersion&>().id();
+    } else if (py::isinstance<py::str>(target)) {
+        resolved.target_program_version_id = target.cast<std::string>();
+    } else {
+        throw py::type_error(
+            "migrate_graph() target must be ProgramGraphMigrationTarget, ProgramVersion, or str");
+    }
+    if (semantic_adapter) resolved.semantic_adapter = std::move(*semantic_adapter);
+    if (requested_run_id) resolved.requested_run_id = std::move(*requested_run_id);
+    return resolved;
+}
+
 class LocalProgramHost {
 public:
     LocalProgramHost(RegistrySnapshot registry,
@@ -428,7 +644,8 @@ public:
           compiler_(std::make_shared<ProgramCompiler>(
               registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic,
                                          false, soundness_check, soundness_state_cap))),
-          stores_(host_stores(sqlite_directory, native_history_archive)) {
+          stores_(host_stores(sqlite_directory, native_history_archive)),
+          runtime_bindings_(std::make_shared<HostRuntimeBindings>()) {
         std::optional<NodeContext> node_context;
         if (!node_context_object.is_none()) {
             // Python tools live on the wrapper, outside the C++ context.
@@ -462,6 +679,75 @@ public:
             neograph::pybind::python_failure_text_redactor(std::move(failure_text_redactor));
         catalog_ = std::make_shared<ProgramCatalog>(std::move(catalog));
 
+        ProgramSynthesisGatewayConfig gateway_config;
+        gateway_config.compiler = compiler_;
+        gateway_config.catalog  = catalog_;
+        gateway_config.reserve  = [bindings = runtime_bindings_](
+                                     const ProgramSynthesisProposal& proposal)
+            -> ProgramSynthesisReservation {
+            std::lock_guard<std::mutex> lock(bindings->mutex);
+            const auto it = bindings->reservations.find(proposal.id());
+            if (it == bindings->reservations.end()) {
+                throw std::invalid_argument(
+                    "Synthesis proposal has no active reservation on this host; call "
+                    "reserve_synthesis() first");
+            }
+            return it->second;
+        };
+        gateway_config.reserve_child =
+            [bindings = runtime_bindings_](
+                const ProgramSynthesisProposal& proposal,
+                const ProgramChildSynthesisAuthorization&) -> ProgramSynthesisReservation {
+            std::lock_guard<std::mutex> lock(bindings->mutex);
+            const auto it = bindings->reservations.find(proposal.id());
+            if (it == bindings->reservations.end()) {
+                throw std::invalid_argument(
+                    "Child synthesis proposal has no active reservation on this host");
+            }
+            return it->second;
+        };
+        gateway_config.admission = [profile = profile_, ceiling = policy_.budget_ceiling()](
+                                       const ProgramSynthesisProposal& proposal,
+                                       const ProgramBundle& bundle,
+                                       const ProgramSynthesisReservation&) -> ProgramAdmission {
+            return ProgramAdmission{
+                proposal.data().owner_scope,
+                profile,
+                synthesis_policy(profile, proposal.data().owner_scope, ceiling,
+                                 bundle.capability_effect_closure().capabilities,
+                                 bundle.capability_effect_closure().effects, proposal.source(),
+                                 bundle.execution_guarantee()),
+                {}};
+        };
+        gateway_config.validate_semantics =
+            [bindings = runtime_bindings_](
+                const ProgramSynthesisProposal&    proposal,
+                const ProgramBundle&               bundle,
+                const ProgramSynthesisReservation& reservation)
+            -> ProgramSynthesisSemanticDecision {
+            std::shared_ptr<py::object> validator;
+            {
+                std::lock_guard<std::mutex> lock(bindings->mutex);
+                validator = bindings->semantic_validator;
+            }
+            if (!validator) {
+                throw std::invalid_argument(
+                    "Program synthesis needs the host's semantic validator; call "
+                    "register_synthesis_validator() first");
+            }
+            py::gil_scoped_acquire gil;
+            try {
+                return (*validator)(proposal, bundle, reservation).cast<ProgramSynthesisSemanticDecision>();
+            } catch (const py::error_already_set& error) {
+                throw std::runtime_error(std::string("Program synthesis semantic validator failed: ") +
+                                         error.what());
+            } catch (const py::cast_error&) {
+                throw std::invalid_argument(
+                    "Program synthesis semantic validator must return a ProgramSynthesisSemanticDecision");
+            }
+        };
+        synthesis_gateway_ = std::make_shared<ProgramSynthesisGateway>(std::move(gateway_config));
+
         RuntimeConfig config;
         config.catalog = catalog_;
         config.checkpoints = stores_.checkpoints;
@@ -469,6 +755,30 @@ public:
         config.scheduler_threads = scheduler_threads;
         config.native_history_archive = std::move(native_history_archive);
         config.fork_may_resend_provider_calls = fork_may_resend_provider_calls;
+        config.child_binding_resolver =
+            [bindings = runtime_bindings_](std::string_view owner_scope,
+                                           std::string_view parent_program_version_id,
+                                           std::string_view binding_name)
+            -> std::optional<ProgramRuntimeChildBinding> {
+            std::lock_guard<std::mutex> lock(bindings->mutex);
+            const auto it = bindings->child_bindings.find(
+                {std::string(owner_scope), std::string(parent_program_version_id),
+                 std::string(binding_name)});
+            if (it == bindings->child_bindings.end()) return std::nullopt;
+            return it->second;
+        };
+        config.child_synthesis_gateway = synthesis_gateway_;
+        config.child_synthesis_grant_resolver =
+            [bindings = runtime_bindings_](std::string_view owner_scope,
+                                           std::string_view parent_run_id,
+                                           std::string_view grant_id)
+            -> std::optional<ProgramChildSynthesisGrant> {
+            std::lock_guard<std::mutex> lock(bindings->mutex);
+            const auto it = bindings->child_synthesis_grants.find(
+                {std::string(owner_scope), std::string(parent_run_id), std::string(grant_id)});
+            if (it == bindings->child_synthesis_grants.end()) return std::nullopt;
+            return it->second;
+        };
         if (node_context) {
             // Every built-in provider call goes through a pricing broker: the
             // SQLite journal when the host is durable, in process otherwise.
@@ -492,7 +802,7 @@ public:
                 };
             }
         }
-        runtime_ = std::make_unique<ProgramRuntime>(std::move(config));
+        runtime_ = std::make_shared<ProgramRuntime>(std::move(config));
     }
 
     ~LocalProgramHost() {
@@ -507,8 +817,11 @@ public:
         }
     }
 
-    ProgramBundle compile(const ProgramSource& source, const RunBudget& budget) const {
-        return compiler_->compile(source, budget);
+    ProgramBundle compile(const ProgramSource& source, py::object budget) const {
+        if (py::isinstance<ProgramBudgetBounds>(budget)) {
+            return compiler_->compile(source, budget.cast<const ProgramBudgetBounds&>());
+        }
+        return compiler_->compile(source, budget.cast<const RunBudget&>());
     }
 
     ProgramVersion admit(const ProgramBundle& bundle) {
@@ -516,8 +829,8 @@ public:
             bundle, ProgramAdmission{owner_scope_, profile_, policy_, {}});
     }
 
-    ProgramVersion compile_admit(const ProgramSource& source, const RunBudget& budget) {
-        return admit(compile(source, budget));
+    ProgramVersion compile_admit(const ProgramSource& source, py::object budget) {
+        return admit(compile(source, std::move(budget)));
     }
     ProgramActivationResult activate(const ProgramVersion& version,
                                      std::uint64_t expected_generation) {
@@ -638,6 +951,446 @@ public:
                                             std::move(exact_id)});
     }
 
+    py::object run_async(const ProgramVersion& version,
+                         py::object input,
+                         const RunBudget& budget,
+                         std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               ProgramVersion ver, ProgramInvocation inv) -> asio::awaitable<ProgramResult> {
+                co_return co_await runtime->run_async(
+                    std::move(owner_scope), std::move(ver), std::move(inv));
+            }(runtime_, owner_scope_, version,
+              ProgramInvocation{std::move(owned_input), budget, std::move(trace_id), {}}));
+    }
+
+    py::object start_async(const ProgramVersion& version,
+                           py::object input,
+                           const RunBudget& budget,
+                           std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               ProgramVersion ver, ProgramInvocation inv) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->start_async(
+                    std::move(owner_scope), std::move(ver), std::move(inv));
+            }(runtime_, owner_scope_, version,
+              ProgramInvocation{std::move(owned_input), budget, std::move(trace_id), {}}));
+    }
+
+    py::object reconnect_async(std::string run_id) {
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               std::string id) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->reconnect_async(
+                    std::move(owner_scope), std::move(id));
+            }(runtime_, owner_scope_, std::move(run_id)));
+    }
+
+    py::object resume_async(std::string run_id,
+                            py::object value,
+                            std::optional<std::string> pending_id,
+                            std::string trace_id) {
+        auto owned_value = py_to_json(value);
+        auto exact_id    = pending_id ? std::move(*pending_id) : awaiting_pending_id(run_id);
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               std::string id, ProgramResume res) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->resume_handle_async(
+                    std::move(owner_scope), std::move(id), std::move(res));
+            }(runtime_, owner_scope_, std::move(run_id),
+              ProgramResume{std::move(owned_value), std::move(trace_id), {},
+                            std::move(exact_id)}));
+    }
+
+    ModuleLinkReceipt bind_child(const ProgramVersion& parent,
+                                 const std::string& binding_name,
+                                 const ProgramVersion& child,
+                                 const RunBudget& max_budget) {
+        if (parent.ownership_scope() != owner_scope_ || child.ownership_scope() != owner_scope_) {
+            throw py::value_error("bind_child() versions must belong to this host's owner_scope");
+        }
+        const auto child_bundle = [&] {
+            py::gil_scoped_release release;
+            return BlockingProgramStore(stores_.program).get_bundle(owner_scope_, child.bundle_id());
+        }();
+        if (!child_bundle) {
+            throw py::value_error("bind_child() child bundle was not found in this host");
+        }
+        auto receipt = create_module_link_receipt(
+            owner_scope_, parent, binding_name, *child_bundle, child, max_budget);
+        {
+            std::lock_guard<std::mutex> lock(runtime_bindings_->mutex);
+            runtime_bindings_->child_bindings.insert_or_assign(
+                std::make_tuple(owner_scope_, parent.id(), binding_name),
+                ProgramRuntimeChildBinding{receipt, child});
+        }
+        return receipt;
+    }
+
+    ProgramHandle start_child(const ProgramHandle& parent,
+                              const ModuleLinkReceipt& link,
+                              const ProgramVersion& version,
+                              py::object input,
+                              const RunBudget& budget,
+                              std::optional<std::string> child_run_id,
+                              std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        ProgramInvocation invocation{
+            std::move(owned_input), budget, std::move(trace_id), {}};
+        invocation.parent_run_id = parent.run_id();
+        if (child_run_id) invocation.requested_run_id = std::move(*child_run_id);
+        py::gil_scoped_release release;
+        return runtime_->start_child(owner_scope_, parent, link, version, std::move(invocation));
+    }
+
+    py::object start_child_async(const ProgramHandle& parent,
+                                 const ModuleLinkReceipt& link,
+                                 const ProgramVersion& version,
+                                 py::object input,
+                                 const RunBudget& budget,
+                                 std::optional<std::string> child_run_id,
+                                 std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        ProgramInvocation invocation{
+            std::move(owned_input), budget, std::move(trace_id), {}};
+        invocation.parent_run_id = parent.run_id();
+        if (child_run_id) invocation.requested_run_id = std::move(*child_run_id);
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               ProgramHandle par, ModuleLinkReceipt lnk, ProgramVersion ver,
+               ProgramInvocation inv) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->start_child_async(
+                    std::move(owner_scope), std::move(par), std::move(lnk),
+                    std::move(ver), std::move(inv));
+            }(runtime_, owner_scope_, parent, link, version, std::move(invocation)));
+    }
+
+    ProgramHandle replace(py::object source,
+                          const ProgramVersion& target,
+                          py::object input,
+                          const RunBudget& budget,
+                          std::optional<std::string> replacement_run_id,
+                          std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        ProgramInvocation invocation{std::move(owned_input), budget, std::move(trace_id), {}};
+        if (replacement_run_id) invocation.requested_run_id = std::move(*replacement_run_id);
+        if (py::isinstance<PyProgramHandoff>(source)) {
+            auto& handoff = source.cast<PyProgramHandoff&>();
+            if (!handoff.get()) {
+                throw py::value_error("replace() received an empty ProgramHandoff");
+            }
+            py::gil_scoped_release release;
+            return runtime_->replace(owner_scope_, std::move(*handoff.get()), target,
+                                     std::move(invocation));
+        }
+        ExactProgramHandoffReference reference;
+        if (py::isinstance<ExactProgramHandoffReference>(source)) {
+            reference = source.cast<ExactProgramHandoffReference>();
+        } else if (py::isinstance<ExactProgramHandoff>(source)) {
+            reference = source.cast<const ExactProgramHandoff&>().reference;
+        } else {
+            throw py::type_error(
+                "replace() source must be ProgramHandoff, ExactProgramHandoff, or "
+                "ExactProgramHandoffReference");
+        }
+        py::gil_scoped_release release;
+        return runtime_->replace(owner_scope_, std::move(reference), target,
+                                 std::move(invocation));
+    }
+
+    py::object replace_async(py::object source,
+                             const ProgramVersion& target,
+                             py::object input,
+                             const RunBudget& budget,
+                             std::optional<std::string> replacement_run_id,
+                             std::string trace_id) {
+        auto owned_input = py_to_json(input);
+        ProgramInvocation invocation{std::move(owned_input), budget, std::move(trace_id), {}};
+        if (replacement_run_id) invocation.requested_run_id = std::move(*replacement_run_id);
+        if (py::isinstance<PyProgramHandoff>(source)) {
+            auto handoff = source.cast<PyProgramHandoff>().shared();
+            if (!handoff) {
+                throw py::value_error("replace_async() received an empty ProgramHandoff");
+            }
+            return spawn_program_async(
+                [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+                   std::shared_ptr<ProgramHandoff> held, ProgramVersion ver,
+                   ProgramInvocation inv) -> asio::awaitable<ProgramHandle> {
+                    // The exact reference, awaited on the runtime's executor: a refused replacement leaves the source
+                    // run and this hold as they were.
+                    const auto exact = co_await held->wait_async();
+                    co_return co_await runtime->replace_async(std::move(owner_scope), exact.reference,
+                                                              std::move(ver), std::move(inv));
+                }(runtime_, owner_scope_, std::move(handoff), target, std::move(invocation)));
+        }
+        ExactProgramHandoffReference reference;
+        if (py::isinstance<ExactProgramHandoffReference>(source)) {
+            reference = source.cast<ExactProgramHandoffReference>();
+        } else if (py::isinstance<ExactProgramHandoff>(source)) {
+            reference = source.cast<const ExactProgramHandoff&>().reference;
+        } else {
+            throw py::type_error(
+                "replace_async() source must be ProgramHandoff, ExactProgramHandoff, or "
+                "ExactProgramHandoffReference");
+        }
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               ExactProgramHandoffReference ref, ProgramVersion ver,
+               ProgramInvocation inv) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->replace_async(
+                    std::move(owner_scope), std::move(ref), std::move(ver), std::move(inv));
+            }(runtime_, owner_scope_, std::move(reference), target, std::move(invocation)));
+    }
+
+    ProgramHandle migrate_graph(
+        const ProgramHandle& source,
+        py::object target,
+        std::optional<GraphSemanticMigrationAdapter> semantic_adapter,
+        std::optional<std::string> requested_run_id) {
+        auto resolved = build_migration_target(
+            std::move(target), std::move(semantic_adapter), std::move(requested_run_id));
+        py::gil_scoped_release release;
+        return runtime_->migrate_graph(source, std::move(resolved));
+    }
+
+    py::object migrate_graph_async(
+        const ProgramHandle& source,
+        py::object target,
+        std::optional<GraphSemanticMigrationAdapter> semantic_adapter,
+        std::optional<std::string> requested_run_id) {
+        auto resolved = build_migration_target(
+            std::move(target), std::move(semantic_adapter), std::move(requested_run_id));
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, ProgramHandle src,
+               ProgramGraphMigrationTarget tgt) -> asio::awaitable<ProgramHandle> {
+                co_return co_await runtime->migrate_graph_async(
+                    std::move(src), std::move(tgt));
+            }(runtime_, source, std::move(resolved)));
+    }
+
+    std::shared_ptr<ProgramSynthesisGateway> synthesis_gateway() const noexcept {
+        return synthesis_gateway_;
+    }
+
+    ProgramSynthesisReservation reserve_synthesis(
+        const ProgramHandle& source,
+        PyProgramHandoff& handoff,
+        const ProgramSynthesisProposal& proposal,
+        std::optional<std::string> expected_lineage_head) {
+        if (!handoff.get()) {
+            throw py::value_error("reserve_synthesis() received an empty ProgramHandoff");
+        }
+        std::string head = expected_lineage_head ? *expected_lineage_head : std::string{};
+        if (head.empty()) {
+            const auto lineage = run_lineage(source.logical_run_id());
+            if (lineage) head = lineage->id();
+        }
+        auto reservation = [&] {
+            py::gil_scoped_release release;
+            return runtime_->reserve_synthesis(
+                owner_scope_, source, *handoff.get(), proposal, head);
+        }();
+        {
+            std::lock_guard<std::mutex> lock(runtime_bindings_->mutex);
+            runtime_bindings_->reservations.insert_or_assign(proposal.id(), reservation);
+        }
+        return reservation;
+    }
+
+    py::object reserve_synthesis_async(
+        const ProgramHandle& source,
+        PyProgramHandoff& handoff,
+        const ProgramSynthesisProposal& proposal,
+        std::optional<std::string> expected_lineage_head) {
+        auto held = handoff.shared();
+        if (!held) {
+            throw py::value_error("reserve_synthesis_async() received an empty ProgramHandoff");
+        }
+        std::string head = expected_lineage_head ? *expected_lineage_head : std::string{};
+        if (head.empty()) {
+            const auto lineage = run_lineage(source.logical_run_id());
+            if (lineage) head = lineage->id();
+        }
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime,
+               std::shared_ptr<HostRuntimeBindings> bindings,
+               std::string owner_scope, ProgramHandle src,
+               std::shared_ptr<ProgramHandoff> h,
+               ProgramSynthesisProposal prop, std::string expected_head)
+            -> asio::awaitable<ProgramSynthesisReservation> {
+                auto reservation = co_await runtime->reserve_synthesis_async(
+                    std::move(owner_scope), std::move(src), *h, prop, std::move(expected_head));
+                {
+                    std::lock_guard<std::mutex> lock(bindings->mutex);
+                    bindings->reservations.insert_or_assign(prop.id(), reservation);
+                }
+                co_return reservation;
+            }(runtime_, runtime_bindings_, owner_scope_, source, std::move(held),
+              proposal, std::move(head)));
+    }
+
+    ProgramSynthesisResult synthesize(const ProgramSynthesisProposal& proposal) {
+        py::gil_scoped_release release;
+        return synthesis_gateway_->synthesize(proposal);
+    }
+
+    void register_synthesis_validator(py::object validate) {
+        if (!PyCallable_Check(validate.ptr()))
+            throw py::type_error("register_synthesis_validator() needs a callable");
+        auto held = std::shared_ptr<py::object>(new py::object(std::move(validate)),
+                                                &neograph::pybind::delete_with_gil<py::object>);
+        std::lock_guard<std::mutex> lock(runtime_bindings_->mutex);
+        runtime_bindings_->semantic_validator = std::move(held);
+    }
+
+    // Refused before anything is reserved or recorded: without the host's validator no synthesis can be accepted.
+    void require_synthesis_validator() const {
+        std::lock_guard<std::mutex> lock(runtime_bindings_->mutex);
+        if (!runtime_bindings_->semantic_validator)
+            throw py::value_error(
+                "Program synthesis needs the host's semantic validator; call register_synthesis_validator() first");
+    }
+
+    void authorize_child_synthesis_grant(const ProgramChildSynthesisGrant& grant) {
+        if (grant.data().owner_scope != owner_scope_) {
+            Diagnostic diagnostic{
+                CompilePhase::Resolve,
+                "P_CHILD_SYNTHESIS_OWNER",
+                DiagnosticSeverity::Error,
+                SourceCoordinate{"child_synthesis_grant", "/owner_scope", std::nullopt},
+                "Child synthesis grant owner_scope does not match LocalProgramHost owner_scope",
+                json{{"expected_owner_scope", owner_scope_},
+                     {"grant_owner_scope", grant.data().owner_scope}},
+                {},
+                std::nullopt};
+            throw ProgramDiagnosticError(std::move(diagnostic));
+        }
+        std::lock_guard<std::mutex> lock(runtime_bindings_->mutex);
+        runtime_bindings_->child_synthesis_grants.insert_or_assign(
+            std::make_tuple(owner_scope_, grant.data().parent_run_id, grant.id()), grant);
+    }
+
+    ProgramChildSynthesisRecord prepare_child_synthesis(
+        const ProgramHandle& parent,
+        const PyProgramHandoff& handoff,
+        const ProgramSynthesisProposal& proposal,
+        const ProgramChildSynthesisGrant& grant,
+        std::string binding_name) {
+        if (!handoff.get()) {
+            throw py::value_error("prepare_child_synthesis() received an empty ProgramHandoff");
+        }
+        require_synthesis_validator();
+        authorize_child_synthesis_grant(grant);
+        py::gil_scoped_release release;
+        return runtime_->prepare_child_synthesis(
+            owner_scope_, parent, *handoff.get(), proposal, grant, std::move(binding_name));
+    }
+
+    py::object prepare_child_synthesis_async(
+        const ProgramHandle& parent,
+        const PyProgramHandoff& handoff,
+        const ProgramSynthesisProposal& proposal,
+        const ProgramChildSynthesisGrant& grant,
+        std::string binding_name) {
+        auto held = handoff.shared();
+        if (!held) {
+            throw py::value_error(
+                "prepare_child_synthesis_async() received an empty ProgramHandoff");
+        }
+        require_synthesis_validator();
+        authorize_child_synthesis_grant(grant);
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               ProgramHandle par, std::shared_ptr<ProgramHandoff> h,
+               ProgramSynthesisProposal prop, ProgramChildSynthesisGrant gr,
+               std::string name) -> asio::awaitable<ProgramChildSynthesisRecord> {
+                co_return co_await runtime->prepare_child_synthesis_async(
+                    std::move(owner_scope), std::move(par), *h, std::move(prop),
+                    std::move(gr), std::move(name));
+            }(runtime_, owner_scope_, parent, std::move(held), proposal, grant,
+              std::move(binding_name)));
+    }
+
+    ProgramChildSynthesisRecord recover_child_synthesis(
+        const std::string& parent_run_id,
+        const std::string& proposal_id) {
+        py::gil_scoped_release release;
+        return runtime_->recover_child_synthesis(owner_scope_, parent_run_id, proposal_id);
+    }
+
+    py::object recover_child_synthesis_async(std::string parent_run_id,
+                                             std::string proposal_id) {
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               std::string par_id, std::string prop_id)
+            -> asio::awaitable<ProgramChildSynthesisRecord> {
+                co_return co_await runtime->recover_child_synthesis_async(
+                    std::move(owner_scope), std::move(par_id), std::move(prop_id));
+            }(runtime_, owner_scope_, std::move(parent_run_id), std::move(proposal_id)));
+    }
+
+    std::vector<ProgramHandle> recover_children(const std::string& parent_run_id) {
+        py::gil_scoped_release release;
+        return runtime_->recover_children(owner_scope_, parent_run_id);
+    }
+
+    py::object recover_children_async(std::string parent_run_id) {
+        return spawn_program_async(
+            [](std::shared_ptr<ProgramRuntime> runtime, std::string owner_scope,
+               std::string par_id) -> asio::awaitable<std::vector<ProgramHandle>> {
+                co_return co_await runtime->recover_children_async(
+                    std::move(owner_scope), std::move(par_id));
+            }(runtime_, owner_scope_, std::move(parent_run_id)));
+    }
+
+    std::vector<ProgramChildSynthesisRecord> child_syntheses(
+        const std::string& parent_run_id) const {
+        py::gil_scoped_release release;
+        return BlockingProgramTransitionStore(stores_.transitions)
+            .load_child_syntheses(owner_scope_, parent_run_id);
+    }
+
+    std::optional<ProgramRunRecord> run_record(const std::string& run_id) const {
+        py::gil_scoped_release release;
+        return BlockingProgramTransitionStore(stores_.transitions).load(owner_scope_, run_id);
+    }
+
+    std::optional<ProgramBundle> bundle(const std::string& bundle_id) const {
+        py::gil_scoped_release release;
+        return BlockingProgramStore(stores_.program).get_bundle(owner_scope_, bundle_id);
+    }
+
+    std::optional<ProgramVersion> version(const std::string& version_id) const {
+        py::gil_scoped_release release;
+        return catalog_->resolve_version(owner_scope_, version_id);
+    }
+
+    std::optional<ProgramRunLineage> run_lineage(const std::string& logical_run_id) const {
+        py::gil_scoped_release release;
+        BlockingProgramTransitionStore transitions(stores_.transitions);
+        auto found = transitions.load_lineage(
+            owner_scope_, program_run_lineage_id(owner_scope_, logical_run_id));
+        if (!found) {
+            found = transitions.load_lineage(owner_scope_, logical_run_id);
+        }
+        return found;
+    }
+
+    std::optional<ProgramRunGeneration> run_generation(
+        const std::string& logical_run_id,
+        std::uint64_t generation) const {
+        py::gil_scoped_release release;
+        BlockingProgramTransitionStore transitions(stores_.transitions);
+        auto found = transitions.load_generation(
+            owner_scope_, program_run_lineage_id(owner_scope_, logical_run_id), generation);
+        if (!found) {
+            found = transitions.load_generation(owner_scope_, logical_run_id, generation);
+        }
+        return found;
+    }
+
     const std::string& owner_scope() const noexcept { return owner_scope_; }
 
 private:
@@ -671,8 +1424,10 @@ private:
     std::shared_ptr<ProgramCompiler> compiler_;
     HostStores stores_;
     bool durable_ = stores_.program && !std::dynamic_pointer_cast<InMemoryProgramStore>(stores_.program);
+    std::shared_ptr<HostRuntimeBindings> runtime_bindings_;
     std::shared_ptr<ProgramCatalog> catalog_;
-    std::unique_ptr<ProgramRuntime> runtime_;
+    std::shared_ptr<ProgramSynthesisGateway> synthesis_gateway_;
+    std::shared_ptr<ProgramRuntime> runtime_;
 };
 
 template <typename T>
@@ -708,6 +1463,28 @@ void init_program(py::module_& m) {
         .value("AmbiguousEffect", ProgramTerminalStatus::AmbiguousEffect)
         .value("CheckpointIncompatible", ProgramTerminalStatus::CheckpointIncompatible);
 
+    py::enum_<ExecutableKind>(m, "ProgramExecutableKind")
+        .value("Node", ExecutableKind::Node)
+        .value("Reducer", ExecutableKind::Reducer)
+        .value("Condition", ExecutableKind::Condition)
+        .value("Provider", ExecutableKind::Provider)
+        .value("Tool", ExecutableKind::Tool)
+        .value("Imported", ExecutableKind::Imported);
+
+    py::class_<ExecutableIdentity>(m, "ProgramExecutableIdentity")
+        .def(py::init<ExecutableKind, std::string, std::string, std::string>(),
+             py::arg("kind") = ExecutableKind::Node,
+             py::arg("name") = "",
+             py::arg("semantic_version") = "",
+             py::arg("implementation_digest") = "")
+        .def_readwrite("kind", &ExecutableIdentity::kind)
+        .def_readwrite("name", &ExecutableIdentity::name)
+        .def_readwrite("semantic_version", &ExecutableIdentity::semantic_version)
+        .def_readwrite("implementation_digest", &ExecutableIdentity::implementation_digest)
+        .def("__eq__", [](const ExecutableIdentity& left, const ExecutableIdentity& right) {
+            return left == right;
+        }, py::is_operator());
+
     py::class_<RunBudget>(m, "ProgramRunBudget")
         .def(py::init<>())
         .def_readwrite("wall_time_ms", &RunBudget::wall_time_ms)
@@ -720,7 +1497,34 @@ void init_program(py::module_& m) {
         .def_readwrite("max_child_depth", &RunBudget::max_child_depth)
         .def_readwrite("max_total_children", &RunBudget::max_total_children)
         .def_readwrite("max_node_retries", &RunBudget::max_node_retries,
-                       "Run-level ceiling on node retries (#364); None means none.");
+                       "Run-level ceiling on node retries (#364); None means none.")
+        .def("__eq__", [](const RunBudget& left, const RunBudget& right) {
+            return left == right;
+        }, py::is_operator());
+
+    py::class_<ProgramBudgetBounds>(m, "ProgramBudgetBounds")
+        .def(py::init<RunBudget, RunBudget>(),
+             py::arg("minimum") = RunBudget{},
+             py::arg("maximum") = RunBudget{})
+        .def_readwrite("minimum", &ProgramBudgetBounds::minimum)
+        .def_readwrite("maximum", &ProgramBudgetBounds::maximum)
+        .def("__eq__", [](const ProgramBudgetBounds& left, const ProgramBudgetBounds& right) {
+            return left == right;
+        }, py::is_operator());
+
+    py::class_<BudgetLimits>(m, "ProgramBudgetLimits")
+        .def_readonly("wall_time_ms", &BudgetLimits::wall_time_ms)
+        .def_readonly("model_tokens", &BudgetLimits::model_tokens)
+        .def_readonly("monetary_microunits", &BudgetLimits::monetary_microunits)
+        .def_readonly("max_concurrency", &BudgetLimits::max_concurrency)
+        .def_readonly("max_program_operations", &BudgetLimits::max_program_operations)
+        .def_readonly("max_core_steps", &BudgetLimits::max_core_steps)
+        .def_readonly("max_dynamic_compiles", &BudgetLimits::max_dynamic_compiles)
+        .def_readonly("max_child_depth", &BudgetLimits::max_child_depth)
+        .def_readonly("max_total_children", &BudgetLimits::max_total_children)
+        .def("__eq__", [](const BudgetLimits& left, const BudgetLimits& right) {
+            return left == right;
+        }, py::is_operator());
 
     py::class_<ProgramUsage>(m, "ProgramUsage")
         .def_readonly("wall_time_ms", &ProgramUsage::wall_time_ms)
@@ -773,6 +1577,13 @@ void init_program(py::module_& m) {
                               std::move(source_id), std::move(source_text));
                       },
                       py::arg("source_id"), py::arg("source_text"))
+        .def_static("from_cpp_builder",
+                    [](std::string source_id, py::object document, std::uint32_t schema_version) {
+                        return ProgramSource::from_cpp_builder(
+                            std::move(source_id), schema_version, py_to_json(document));
+                    },
+                    py::arg("source_id"), py::arg("document"),
+                    py::arg("schema_version") = LATEST_PROGRAM_SCHEMA_VERSION)
         .def_static("parse", &ProgramSource::parse)
         .def_property_readonly("kind", &ProgramSource::kind)
         .def_property_readonly("source_id", &ProgramSource::source_id)
@@ -784,6 +1595,7 @@ void init_program(py::module_& m) {
 
     py::class_<RegistrySnapshot> registry(m, "ProgramRegistrySnapshot");
     registry.def_property_readonly("fingerprint", &RegistrySnapshot::fingerprint)
+        .def_property_readonly("identities", &RegistrySnapshot::identities)
         .def_property_readonly("manifest", [](const RegistrySnapshot& value) {
             return json_to_py(value.manifest());
         })
@@ -821,6 +1633,14 @@ void init_program(py::module_& m) {
         .def_property_readonly("source_kind", &ProgramBundle::source_kind)
         .def_property_readonly("source_hash", &ProgramBundle::source_hash)
         .def_property_readonly("execution_guarantee", &ProgramBundle::execution_guarantee)
+        .def_property_readonly("executable_registry_identities",
+                               &ProgramBundle::executable_registry_identities)
+        .def_property_readonly("required_capabilities", [](const ProgramBundle& value) {
+            return value.capability_effect_closure().capabilities;
+        })
+        .def_property_readonly("declared_effects", [](const ProgramBundle& value) {
+            return value.capability_effect_closure().effects;
+        })
         .def_property_readonly("sealed_core_definitions", [](const ProgramBundle& value) {
             py::list result;
             for (const auto& definition : value.sealed_core_definitions()) {
@@ -860,6 +1680,8 @@ void init_program(py::module_& m) {
     py::exception<ProgramCompileError>(m, "ProgramCompileError", PyExc_RuntimeError);
     py::exception<ProgramAdmissionError>(m, "ProgramAdmissionError", PyExc_RuntimeError);
     py::exception<ProgramDiagnosticError>(m, "ProgramDiagnosticError", PyExc_RuntimeError);
+    m.attr("ProgramChildSynthesisError") = m.attr("ProgramDiagnosticError");
+    m.attr("ProgramSynthesisValidationError") = m.attr("ProgramDiagnosticError");
     py::register_exception_translator(&translate_program_errors);
     {
         // Raised by raise_registry_miss for node, reducer and condition misses
@@ -896,8 +1718,11 @@ void init_program(py::module_& m) {
             "is the same either way.")
         .def("compile", [](const ProgramCompiler& self, const ProgramSource& source,
                             py::object budget) {
-            return budget.is_none() ? self.compile(source)
-                                    : self.compile(source, budget.cast<RunBudget>());
+            if (budget.is_none()) return self.compile(source);
+            if (py::isinstance<ProgramBudgetBounds>(budget)) {
+                return self.compile(source, budget.cast<const ProgramBudgetBounds&>());
+            }
+            return self.compile(source, budget.cast<const RunBudget&>());
         }, py::arg("source"), py::arg("budget") = py::none());
 
     py::class_<ProgramVersion> version(m, "ProgramVersion");
@@ -906,6 +1731,9 @@ void init_program(py::module_& m) {
         .def_property_readonly("bundle_id", &ProgramVersion::bundle_id)
         .def_property_readonly("owner_scope", &ProgramVersion::ownership_scope)
         .def_property_readonly("execution_guarantee", &ProgramVersion::execution_guarantee)
+        .def_property_readonly("policy_snapshot_fingerprint", [](const ProgramVersion& value) {
+            return value.policy_snapshot().fingerprint();
+        })
         .def("serialize_canonical", &ProgramVersion::serialize_canonical);
 
     py::class_<ProgramFailure>(m, "ProgramFailure")
@@ -994,8 +1822,984 @@ void init_program(py::module_& m) {
         .def_property_readonly("witness", [](const ProgramNotice& value) { return json_to_py(value.witness); })
         .def("__eq__", [](const ProgramNotice& left, const ProgramNotice& right) { return left == right; }, py::is_operator());
 
+    py::class_<ExactProgramHandoffReference>(m, "ExactProgramHandoffReference")
+        .def(py::init<std::string, std::string, std::string, std::string>(),
+             py::arg("source_run_id") = "",
+             py::arg("source_journal_head") = "",
+             py::arg("command_coordinate_id") = "",
+             py::arg("command_entry_id") = "")
+        .def_readwrite("source_run_id", &ExactProgramHandoffReference::source_run_id)
+        .def_readwrite("source_journal_head", &ExactProgramHandoffReference::source_journal_head)
+        .def_readwrite("command_coordinate_id",
+                       &ExactProgramHandoffReference::command_coordinate_id)
+        .def_readwrite("command_entry_id", &ExactProgramHandoffReference::command_entry_id)
+        .def("__eq__",
+             [](const ExactProgramHandoffReference& left,
+                const ExactProgramHandoffReference& right) { return left == right; },
+             py::is_operator());
+
+    py::class_<ExactProgramHandoff>(m, "ExactProgramHandoff")
+        .def(py::init([](ExactProgramHandoffReference reference, py::object value) {
+            return ExactProgramHandoff{std::move(reference), py_to_json(value)};
+        }),
+             py::arg("reference") = ExactProgramHandoffReference{},
+             py::arg("value") = py::dict())
+        .def_readwrite("reference", &ExactProgramHandoff::reference)
+        .def_property(
+            "value",
+            [](const ExactProgramHandoff& value) { return json_to_py(value.value); },
+            [](ExactProgramHandoff& self, py::object value) { self.value = py_to_json(value); })
+        .def("__eq__",
+             [](const ExactProgramHandoff& left, const ExactProgramHandoff& right) {
+                 return left.reference == right.reference && left.value == right.value;
+             },
+             py::is_operator());
+
+    py::class_<PyProgramHandoff>(m, "ProgramHandoff")
+        .def("__bool__", &PyProgramHandoff::operator bool)
+        .def("wait", &PyProgramHandoff::wait)
+        .def("wait_async", &PyProgramHandoff::wait_async)
+        .def("release", &PyProgramHandoff::release)
+        .def_property_readonly("reference", &PyProgramHandoff::reference)
+        .def_property_readonly("value", &PyProgramHandoff::value);
+
+    py::class_<ProgramReplacementReceipt>(m, "ProgramReplacementReceipt")
+        .def_static("parse", &ProgramReplacementReceipt::parse)
+        .def_property_readonly("id", &ProgramReplacementReceipt::id)
+        .def_property_readonly("owner_scope", &ProgramReplacementReceipt::owner_scope)
+        .def_property_readonly("lineage_id", &ProgramReplacementReceipt::lineage_id)
+        .def_property_readonly("source_generation", &ProgramReplacementReceipt::source_generation)
+        .def_property_readonly("source_generation_id",
+                               &ProgramReplacementReceipt::source_generation_id)
+        .def_property_readonly("source_lineage_head_id",
+                               &ProgramReplacementReceipt::source_lineage_head_id)
+        .def_property_readonly("source_run_id", &ProgramReplacementReceipt::source_run_id)
+        .def_property_readonly("source_run_record_id",
+                               &ProgramReplacementReceipt::source_run_record_id)
+        .def_property_readonly("source_journal_head",
+                               &ProgramReplacementReceipt::source_journal_head)
+        .def_property_readonly("source_program_version_id",
+                               &ProgramReplacementReceipt::source_program_version_id)
+        .def_property_readonly("source_bundle_id", &ProgramReplacementReceipt::source_bundle_id)
+        .def_property_readonly("checkpoint_coordinate_id",
+                               &ProgramReplacementReceipt::checkpoint_coordinate_id)
+        .def_property_readonly("checkpoint_entry_id",
+                               &ProgramReplacementReceipt::checkpoint_entry_id)
+        .def_property_readonly("handoff_value_identity",
+                               &ProgramReplacementReceipt::handoff_value_identity)
+        .def_property_readonly("target_generation", &ProgramReplacementReceipt::target_generation)
+        .def_property_readonly("target_run_id", &ProgramReplacementReceipt::target_run_id)
+        .def_property_readonly("target_program_version_id",
+                               &ProgramReplacementReceipt::target_program_version_id)
+        .def_property_readonly("target_bundle_id", &ProgramReplacementReceipt::target_bundle_id)
+        .def_property_readonly("target_input_identity",
+                               &ProgramReplacementReceipt::target_input_identity)
+        .def_property_readonly("target_invocation_id",
+                               &ProgramReplacementReceipt::target_invocation_id)
+        .def_property_readonly("target_binding_fingerprint",
+                               &ProgramReplacementReceipt::target_binding_fingerprint)
+        .def_property_readonly("target_initial_run_record_id",
+                               &ProgramReplacementReceipt::target_initial_run_record_id)
+        .def_property_readonly("target_initial_journal_head",
+                               &ProgramReplacementReceipt::target_initial_journal_head)
+        .def("matches_handoff",
+             [](const ProgramReplacementReceipt& self, py::object handoff_value) {
+                 return self.matches_handoff(py_to_json(handoff_value));
+             },
+             py::arg("handoff_value"))
+        .def("matches_target_input",
+             [](const ProgramReplacementReceipt& self, py::object target_input) {
+                 return self.matches_target_input(py_to_json(target_input));
+             },
+             py::arg("target_input"))
+        .def("serialize_canonical", &ProgramReplacementReceipt::serialize_canonical);
+
+    py::class_<ModuleLinkReceipt>(m, "ProgramModuleLinkReceipt")
+        .def_static("parse", &ModuleLinkReceipt::parse)
+        .def_property_readonly("id", &ModuleLinkReceipt::id)
+        .def_property_readonly("owner_scope", &ModuleLinkReceipt::owner_scope)
+        .def_property_readonly("parent_module_id", &ModuleLinkReceipt::parent_module_id)
+        .def_property_readonly("dependency_merkle_root",
+                               &ModuleLinkReceipt::dependency_merkle_root)
+        .def_property_readonly("child_name", &ModuleLinkReceipt::child_name)
+        .def_property_readonly("binding_name", &ModuleLinkReceipt::child_name)
+        .def_property_readonly("child_program_version_id",
+                               &ModuleLinkReceipt::child_program_version_id)
+        .def_property_readonly("child_bundle_id", &ModuleLinkReceipt::child_bundle_id)
+        .def_property_readonly("child_input_contract_fingerprint",
+                               &ModuleLinkReceipt::child_input_contract_fingerprint)
+        .def_property_readonly("child_output_contract_fingerprint",
+                               &ModuleLinkReceipt::child_output_contract_fingerprint)
+        .def_property_readonly("granted_capabilities",
+                               &ModuleLinkReceipt::granted_capabilities)
+        .def_property_readonly("granted_effects", &ModuleLinkReceipt::granted_effects)
+        .def_property_readonly("budget", &ModuleLinkReceipt::budget)
+        .def_property_readonly("max_budget", &ModuleLinkReceipt::budget)
+        .def_property_readonly("minimum_execution_guarantee",
+                               &ModuleLinkReceipt::minimum_execution_guarantee)
+        .def("serialize_canonical", &ModuleLinkReceipt::serialize_canonical);
+    m.attr("ModuleLinkReceipt") = m.attr("ProgramModuleLinkReceipt");
+
+    py::enum_<ProgramChildState>(m, "ProgramChildState")
+        .value("Publishing", ProgramChildState::Publishing)
+        .value("Dispatched", ProgramChildState::Dispatched)
+        .value("Completed", ProgramChildState::Completed)
+        .value("Cancelled", ProgramChildState::Cancelled)
+        .value("Failed", ProgramChildState::Failed);
+
+    py::class_<ProgramPersistedInvocation>(m, "ProgramPersistedInvocation")
+        .def_property_readonly("input",
+                               [](const ProgramPersistedInvocation& self) {
+                                   return json_to_py(self.input);
+                               })
+        .def_readonly("granted_budget", &ProgramPersistedInvocation::granted_budget)
+        .def_readonly("trace_id", &ProgramPersistedInvocation::trace_id)
+        .def_readonly("parent_run_id", &ProgramPersistedInvocation::parent_run_id)
+        .def_readonly("child_depth", &ProgramPersistedInvocation::child_depth);
+
+    py::class_<ProgramChildRecord>(m, "ProgramChildRecord")
+        .def_readonly("child_run_id", &ProgramChildRecord::child_run_id)
+        .def_readonly("link_id", &ProgramChildRecord::link_id)
+        .def_readonly("module_link_receipt_id", &ProgramChildRecord::link_id)
+        .def_readonly("link_receipt", &ProgramChildRecord::link_receipt)
+        .def_readonly("invocation", &ProgramChildRecord::invocation)
+        .def_readonly("state", &ProgramChildRecord::state)
+        .def_readonly("terminal_result", &ProgramChildRecord::terminal_result)
+        .def_readonly("result", &ProgramChildRecord::terminal_result)
+        .def_readonly("terminal_generation", &ProgramChildRecord::terminal_generation)
+        .def_property_readonly("binding_name",
+                               [](const ProgramChildRecord& self) {
+                                   return ModuleLinkReceipt::parse(self.link_receipt).child_name();
+                               })
+        .def_property_readonly("program_version_id",
+                               [](const ProgramChildRecord& self) {
+                                   return ModuleLinkReceipt::parse(self.link_receipt)
+                                       .child_program_version_id();
+                               })
+        .def_property_readonly("bundle_id",
+                               [](const ProgramChildRecord& self) {
+                                   return ModuleLinkReceipt::parse(self.link_receipt)
+                                       .child_bundle_id();
+                               })
+        .def_property_readonly("reserved_budget",
+                               [](const ProgramChildRecord& self) {
+                                   return self.invocation.granted_budget;
+                               })
+        .def("__eq__",
+             [](const ProgramChildRecord& left, const ProgramChildRecord& right) {
+                 return left == right;
+             },
+             py::is_operator());
+
+    py::class_<ProgramRunRecord>(m, "ProgramRunRecord")
+        .def_static("parse", &ProgramRunRecord::parse)
+        .def_property_readonly("id", &ProgramRunRecord::id)
+        .def_property_readonly("owner_scope", &ProgramRunRecord::owner_scope)
+        .def_property_readonly("run_id", &ProgramRunRecord::run_id)
+        .def_property_readonly("logical_run_id", &ProgramRunRecord::logical_run_id)
+        .def_property_readonly("program_version_id", &ProgramRunRecord::program_version_id)
+        .def_property_readonly("bundle_id", &ProgramRunRecord::bundle_id)
+        .def_property_readonly("binding_fingerprint", &ProgramRunRecord::binding_fingerprint)
+        .def_property_readonly("child_depth", &ProgramRunRecord::child_depth)
+        .def_property_readonly("children", &ProgramRunRecord::children)
+        .def_property_readonly("invocation_budget",
+                               [](const ProgramRunRecord& self) {
+                                   return self.invocation().budget;
+                               })
+        .def_property_readonly("remaining_budget", &ProgramRunRecord::remaining_budget)
+        .def_property_readonly("exact_checkpoint", &ProgramRunRecord::exact_checkpoint)
+        .def_property_readonly("pending_input", &ProgramRunRecord::pending_input)
+        .def_property_readonly("pending_effect", &ProgramRunRecord::pending_effect)
+        .def_property_readonly("terminal_result", &ProgramRunRecord::terminal_result)
+        .def_property_readonly("journal_head", &ProgramRunRecord::journal_head)
+        .def_property_readonly("event_sequence", &ProgramRunRecord::event_sequence)
+        .def_property_readonly("effect_sequence", &ProgramRunRecord::effect_sequence)
+        .def_property_readonly("created_at_ms", &ProgramRunRecord::created_at_ms)
+        .def_property_readonly("updated_at_ms", &ProgramRunRecord::updated_at_ms)
+        .def("serialize_canonical", &ProgramRunRecord::serialize_canonical);
+
+    py::class_<ProgramRunLineage>(m, "ProgramRunLineage")
+        .def_static("parse", &ProgramRunLineage::parse)
+        .def_property_readonly("id", &ProgramRunLineage::id)
+        .def_property_readonly("owner_scope", &ProgramRunLineage::owner_scope)
+        .def_property_readonly("lineage_id", &ProgramRunLineage::lineage_id)
+        .def_property_readonly("root_run_id", &ProgramRunLineage::root_run_id)
+        .def_property_readonly("logical_run_id", &ProgramRunLineage::root_run_id)
+        .def_property_readonly("active_generation", &ProgramRunLineage::active_generation)
+        .def_property_readonly("active_generation_id", &ProgramRunLineage::active_generation_id)
+        .def_property_readonly("active_run_record_id", &ProgramRunLineage::active_run_record_id)
+        .def_property_readonly("active_journal_head", &ProgramRunLineage::active_journal_head)
+        .def_property_readonly("remaining_budget", &ProgramRunLineage::remaining_budget)
+        .def_property_readonly("inflight_reservation", &ProgramRunLineage::inflight_reservation)
+        .def_property_readonly("predecessor_head_id", &ProgramRunLineage::predecessor_head_id)
+        .def_property_readonly("created_at_ms", &ProgramRunLineage::created_at_ms)
+        .def_property_readonly("updated_at_ms", &ProgramRunLineage::updated_at_ms)
+        .def_property_readonly("committed_descendant_budget",
+                               &ProgramRunLineage::committed_descendant_budget)
+        .def("serialize_canonical", &ProgramRunLineage::serialize_canonical);
+
+    py::class_<ProgramRunGeneration>(m, "ProgramRunGeneration")
+        .def_static("parse", &ProgramRunGeneration::parse)
+        .def_property_readonly("id", &ProgramRunGeneration::id)
+        .def_property_readonly("owner_scope", &ProgramRunGeneration::owner_scope)
+        .def_property_readonly("lineage_id", &ProgramRunGeneration::lineage_id)
+        .def_property_readonly("generation", &ProgramRunGeneration::generation)
+        .def_property_readonly("run_id", &ProgramRunGeneration::run_id)
+        .def_property_readonly("program_version_id", &ProgramRunGeneration::program_version_id)
+        .def_property_readonly("bundle_id", &ProgramRunGeneration::bundle_id)
+        .def_property_readonly("initial_run_record_id",
+                               &ProgramRunGeneration::initial_run_record_id)
+        .def_property_readonly("initial_journal_head",
+                               &ProgramRunGeneration::initial_journal_head)
+        .def_property_readonly("predecessor_generation_id",
+                               &ProgramRunGeneration::predecessor_generation_id)
+        .def_property_readonly("created_at_ms", &ProgramRunGeneration::created_at_ms)
+        .def_property_readonly("child_depth", &ProgramRunGeneration::child_depth)
+        .def_property_readonly("replacement_receipt",
+                               &ProgramRunGeneration::replacement_receipt)
+        .def_property_readonly("graph_migration_receipt",
+                               &ProgramRunGeneration::graph_migration_receipt)
+        .def("serialize_canonical", &ProgramRunGeneration::serialize_canonical);
+
+    m.def("program_run_lineage_id", &program_run_lineage_id,
+          py::arg("owner_scope"), py::arg("root_run_id"));
+
+    py::enum_<MigrationCompatibility>(m, "MigrationCompatibility")
+        .value("NewRunsOnly", MigrationCompatibility::NewRunsOnly)
+        .value("ForkCompatible", MigrationCompatibility::ForkCompatible)
+        .value("DrainOnly", MigrationCompatibility::DrainOnly)
+        .value("OperatorReconciliation", MigrationCompatibility::OperatorReconciliation)
+        .value("Blocked", MigrationCompatibility::Blocked)
+        .value("Compatible", MigrationCompatibility::Compatible);
+    m.attr("GraphMigrationCompatibility") = m.attr("MigrationCompatibility");
+
+    py::class_<MigrationDiagnostic>(m, "MigrationDiagnostic")
+        .def_readonly("code", &MigrationDiagnostic::code)
+        .def_readonly("message", &MigrationDiagnostic::message)
+        .def_property_readonly("dimension", [](const MigrationDiagnostic& self) {
+            return std::string(to_string(self.dimension));
+        })
+        .def_property_readonly("source", [](const MigrationDiagnostic& self) {
+            return json_to_py(self.source);
+        })
+        .def_property_readonly("target", [](const MigrationDiagnostic& self) {
+            return json_to_py(self.target);
+        })
+        .def("__eq__",
+             [](const MigrationDiagnostic& left, const MigrationDiagnostic& right) {
+                 return left == right;
+             },
+             py::is_operator());
+    m.attr("MigrationBlocker") = m.attr("MigrationDiagnostic");
+
+    py::class_<MigrationPlan>(m, "MigrationPlan")
+        .def_static("between",
+                    [](const ProgramVersion& source,
+                       std::optional<ProgramBundle> source_bundle,
+                       const ProgramVersion& target,
+                       std::optional<ProgramBundle> target_bundle) {
+                        if (source_bundle && target_bundle) {
+                            return MigrationPlan::between(source, *source_bundle, target,
+                                                          *target_bundle);
+                        }
+                        return MigrationPlan::between(source, target);
+                    },
+                    py::arg("source"),
+                    py::arg("source_bundle") = py::none(),
+                    py::arg("target"),
+                    py::arg("target_bundle") = py::none())
+        .def_static("parse", &MigrationPlan::parse)
+        .def_property_readonly("id", &MigrationPlan::id)
+        .def_property_readonly("source_version_id", &MigrationPlan::source_version_id)
+        .def_property_readonly("target_version_id", &MigrationPlan::target_version_id)
+        .def_property_readonly("owner_scope", &MigrationPlan::owner_scope)
+        .def_property_readonly("compatibility", &MigrationPlan::compatibility)
+        .def_property_readonly("blockers", &MigrationPlan::blockers)
+        .def_property_readonly("diagnostics", &MigrationPlan::diagnostics)
+        .def("is_compatible", &MigrationPlan::is_compatible)
+        .def("compatible", &MigrationPlan::is_compatible)
+        .def("serialize_canonical", &MigrationPlan::serialize_canonical);
+    m.attr("GraphMigrationPlan") = m.attr("MigrationPlan");
+
+    py::class_<GraphMetadataChange>(m, "GraphMetadataChange")
+        .def(py::init<std::string, std::string>(),
+             py::arg("kind") = "",
+             py::arg("json_pointer") = "")
+        .def_readwrite("kind", &GraphMetadataChange::kind)
+        .def_readwrite("json_pointer", &GraphMetadataChange::json_pointer)
+        .def("__eq__",
+             [](const GraphMetadataChange& left, const GraphMetadataChange& right) {
+                 return left == right;
+             },
+             py::is_operator());
+
+    py::class_<GraphSemanticMigrationAdapter>(m, "GraphSemanticMigrationAdapter")
+        .def(py::init(&GraphSemanticMigrationAdapter::prepare),
+             py::arg("source_version"),
+             py::arg("source_bundle"),
+             py::arg("target_version"),
+             py::arg("target_bundle"))
+        .def_static("prepare", &GraphSemanticMigrationAdapter::prepare,
+                    py::arg("source_version"),
+                    py::arg("source_bundle"),
+                    py::arg("target_version"),
+                    py::arg("target_bundle"))
+        .def_static("parse", &GraphSemanticMigrationAdapter::parse)
+        .def_property_readonly("id", &GraphSemanticMigrationAdapter::id)
+        .def_property_readonly("owner_scope", &GraphSemanticMigrationAdapter::owner_scope)
+        .def_property_readonly("source_program_version_id",
+                               &GraphSemanticMigrationAdapter::source_program_version_id)
+        .def_property_readonly("source_bundle_id",
+                               &GraphSemanticMigrationAdapter::source_bundle_id)
+        .def_property_readonly("target_program_version_id",
+                               &GraphSemanticMigrationAdapter::target_program_version_id)
+        .def_property_readonly("target_bundle_id",
+                               &GraphSemanticMigrationAdapter::target_bundle_id)
+        .def_property_readonly("source_core_name",
+                               &GraphSemanticMigrationAdapter::source_core_name)
+        .def_property_readonly("target_core_name",
+                               &GraphSemanticMigrationAdapter::target_core_name)
+        .def_property_readonly("source_core_generation_id",
+                               &GraphSemanticMigrationAdapter::source_core_generation_id)
+        .def_property_readonly("target_core_generation_id",
+                               &GraphSemanticMigrationAdapter::target_core_generation_id)
+        .def_property_readonly("topology_shape_id",
+                               &GraphSemanticMigrationAdapter::topology_shape_id)
+        .def_property_readonly("metadata_changes",
+                               &GraphSemanticMigrationAdapter::metadata_changes)
+        .def("binds", &GraphSemanticMigrationAdapter::binds,
+             py::arg("source_version"), py::arg("source_bundle"),
+             py::arg("target_version"), py::arg("target_bundle"))
+        .def("migration_plan", &GraphSemanticMigrationAdapter::migration_plan,
+             py::arg("source_version"), py::arg("source_bundle"),
+             py::arg("target_version"), py::arg("target_bundle"))
+        .def("serialize_canonical", &GraphSemanticMigrationAdapter::serialize_canonical);
+
+    py::class_<GraphMigrationCapsule>(m, "GraphMigrationCapsule")
+        .def_static("parse", &GraphMigrationCapsule::parse)
+        .def_property_readonly("id", &GraphMigrationCapsule::id)
+        .def_property_readonly("owner_scope", &GraphMigrationCapsule::owner_scope)
+        .def_property_readonly("lineage_id", &GraphMigrationCapsule::lineage_id)
+        .def_property_readonly("source_generation", &GraphMigrationCapsule::source_generation)
+        .def_property_readonly("source_generation_id", &GraphMigrationCapsule::source_generation_id)
+        .def_property_readonly("source_lineage_head_id",
+                               &GraphMigrationCapsule::source_lineage_head_id)
+        .def_property_readonly("source_run_id", &GraphMigrationCapsule::source_run_id)
+        .def_property_readonly("source_program_version_id",
+                               &GraphMigrationCapsule::source_program_version_id)
+        .def_property_readonly("source_bundle_id", &GraphMigrationCapsule::source_bundle_id)
+        .def_property_readonly("core_checkpoint", &GraphMigrationCapsule::core_checkpoint)
+        .def("serialize_canonical", &GraphMigrationCapsule::serialize_canonical);
+
+    py::class_<ProgramGraphMigrationReceipt>(m, "ProgramGraphMigrationReceipt")
+        .def_static("parse", &ProgramGraphMigrationReceipt::parse)
+        .def_property_readonly("id", &ProgramGraphMigrationReceipt::id)
+        .def_property_readonly("capsule", &ProgramGraphMigrationReceipt::capsule)
+        .def_property_readonly("source_bundle", &ProgramGraphMigrationReceipt::source_bundle)
+        .def_property_readonly("source_version", &ProgramGraphMigrationReceipt::source_version)
+        .def_property_readonly("target_bundle", &ProgramGraphMigrationReceipt::target_bundle)
+        .def_property_readonly("target_version", &ProgramGraphMigrationReceipt::target_version)
+        .def_property_readonly("semantic_adapter", &ProgramGraphMigrationReceipt::semantic_adapter)
+        .def_property_readonly("migration_plan_id",
+                               &ProgramGraphMigrationReceipt::migration_plan_id)
+        .def_property_readonly("target_generation",
+                               &ProgramGraphMigrationReceipt::target_generation)
+        .def_property_readonly("target_run_id", &ProgramGraphMigrationReceipt::target_run_id)
+        .def_property_readonly("target_program_version_id",
+                               &ProgramGraphMigrationReceipt::target_program_version_id)
+        .def_property_readonly("target_bundle_id", &ProgramGraphMigrationReceipt::target_bundle_id)
+        .def_property_readonly("target_invocation_id",
+                               &ProgramGraphMigrationReceipt::target_invocation_id)
+        .def_property_readonly("target_binding_fingerprint",
+                               &ProgramGraphMigrationReceipt::target_binding_fingerprint)
+        .def_property_readonly("target_initial_run_record_id",
+                               &ProgramGraphMigrationReceipt::target_initial_run_record_id)
+        .def_property_readonly("target_initial_journal_head",
+                               &ProgramGraphMigrationReceipt::target_initial_journal_head)
+        .def_property_readonly("target_core_checkpoint",
+                               &ProgramGraphMigrationReceipt::target_core_checkpoint)
+        .def("serialize_canonical", &ProgramGraphMigrationReceipt::serialize_canonical);
+
+    py::class_<ProgramGraphMigrationTarget>(m, "ProgramGraphMigrationTarget")
+        .def(py::init([](py::object target_program_version_id,
+                         std::optional<GraphSemanticMigrationAdapter> semantic_adapter,
+                         std::string requested_run_id) {
+            ProgramGraphMigrationTarget target;
+            if (py::isinstance<ProgramVersion>(target_program_version_id)) {
+                target.target_program_version_id =
+                    target_program_version_id.cast<const ProgramVersion&>().id();
+            } else {
+                target.target_program_version_id =
+                    target_program_version_id.cast<std::string>();
+            }
+            target.semantic_adapter = std::move(semantic_adapter);
+            target.requested_run_id = std::move(requested_run_id);
+            return target;
+        }),
+             py::arg("target_program_version_id") = "",
+             py::arg("semantic_adapter") = py::none(),
+             py::arg("requested_run_id") = "")
+        .def_readwrite("target_program_version_id",
+                       &ProgramGraphMigrationTarget::target_program_version_id)
+        .def_readwrite("semantic_adapter", &ProgramGraphMigrationTarget::semantic_adapter)
+        .def_readwrite("requested_run_id", &ProgramGraphMigrationTarget::requested_run_id);
+
+    m.def("program_synthesis_source_identity", &program_synthesis_source_identity,
+          py::arg("source"));
+
+    const auto make_synthesis_proposal = [](std::string owner_scope,
+                                            std::string parent_run_id,
+                                            ProgramSource source,
+                                            const RunBudget& requested_budget,
+                                            std::optional<std::string> lineage_id,
+                                            std::vector<std::string> requested_capabilities,
+                                            std::vector<std::string> requested_effects,
+                                            std::optional<std::string> instruction_id,
+                                            std::int64_t created_at_ms) {
+        std::string resolved_lineage =
+            (lineage_id && !lineage_id->empty())
+                ? std::move(*lineage_id)
+                : program_run_lineage_id(owner_scope, parent_run_id);
+        return ProgramSynthesisProposal::create(ProgramSynthesisProposalData{
+            std::move(owner_scope),
+            std::move(resolved_lineage),
+            std::move(parent_run_id),
+            std::move(instruction_id),
+            std::move(source),
+            std::move(requested_capabilities),
+            std::move(requested_effects),
+            requested_budget,
+            created_at_ms});
+    };
+
+    py::class_<ProgramSynthesisProposal>(m, "ProgramSynthesisProposal")
+        .def(py::init(make_synthesis_proposal),
+             py::arg("owner_scope"),
+             py::arg("parent_run_id"),
+             py::arg("source"),
+             py::arg("requested_budget"),
+             py::arg("lineage_id") = py::none(),
+             py::arg("requested_capabilities") = std::vector<std::string>{},
+             py::arg("requested_effects") = std::vector<std::string>{},
+             py::arg("instruction_id") = py::none(),
+             py::arg("created_at_ms") = 0)
+        .def_static("create", make_synthesis_proposal,
+                    py::arg("owner_scope"),
+                    py::arg("parent_run_id"),
+                    py::arg("source"),
+                    py::arg("requested_budget"),
+                    py::arg("lineage_id") = py::none(),
+                    py::arg("requested_capabilities") = std::vector<std::string>{},
+                    py::arg("requested_effects") = std::vector<std::string>{},
+                    py::arg("instruction_id") = py::none(),
+                    py::arg("created_at_ms") = 0)
+        .def_static("parse", &ProgramSynthesisProposal::parse)
+        .def_property_readonly("id", &ProgramSynthesisProposal::id)
+        .def_property_readonly("proposal_id", &ProgramSynthesisProposal::id)
+        .def_property_readonly("owner_scope",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().owner_scope;
+                               })
+        .def_property_readonly("lineage_id",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().lineage_id;
+                               })
+        .def_property_readonly("parent_run_id",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().parent_run_id;
+                               })
+        .def_property_readonly("instruction_id",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().instruction_id;
+                               })
+        .def_property_readonly("source", &ProgramSynthesisProposal::source)
+        .def_property_readonly("candidate_source", &ProgramSynthesisProposal::source)
+        .def_property_readonly("requested_capabilities",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().requested_capabilities;
+                               })
+        .def_property_readonly("requested_effects",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().requested_effects;
+                               })
+        .def_property_readonly("requested_budget",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().requested_budget;
+                               })
+        .def_property_readonly("created_at_ms",
+                               [](const ProgramSynthesisProposal& self) {
+                                   return self.data().created_at_ms;
+                               })
+        .def("serialize_canonical", &ProgramSynthesisProposal::serialize_canonical);
+
+    py::class_<ProgramSynthesisReservation>(m, "ProgramSynthesisReservation")
+        .def_static("parse", &ProgramSynthesisReservation::parse)
+        .def_property_readonly("id", &ProgramSynthesisReservation::id)
+        .def_property_readonly("proposal_id",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().proposal_id;
+                               })
+        .def_property_readonly("lineage_id",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().lineage_id;
+                               })
+        .def_property_readonly("source_lineage_head_id",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().source_lineage_head_id;
+                               })
+        .def_property_readonly("reserved_lineage_head_id",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().reserved_lineage_head_id;
+                               })
+        .def_property_readonly("source_remaining",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().source_remaining;
+                               })
+        .def_property_readonly("remaining_after_reservation",
+                               [](const ProgramSynthesisReservation& self) {
+                                   return self.data().remaining_after_reservation;
+                               })
+        .def("serialize_canonical", &ProgramSynthesisReservation::serialize_canonical);
+
+    py::class_<ProgramSynthesisSemanticDecision>(m, "ProgramSynthesisSemanticDecision")
+        .def(py::init([](std::string validator_identity,
+                         std::string contract_identity,
+                         bool accepted,
+                         py::object evidence) {
+            return ProgramSynthesisSemanticDecision{
+                std::move(validator_identity),
+                std::move(contract_identity),
+                accepted,
+                evidence.is_none() ? json::object() : py_to_json(evidence)};
+        }),
+             py::arg("validator_identity"),
+             py::arg("contract_identity"),
+             py::arg("accepted"),
+             py::arg("evidence") = py::none())
+        .def_readwrite("validator_identity", &ProgramSynthesisSemanticDecision::validator_identity)
+        .def_readwrite("contract_identity", &ProgramSynthesisSemanticDecision::contract_identity)
+        .def_readwrite("accepted", &ProgramSynthesisSemanticDecision::accepted)
+        .def_property(
+            "evidence",
+            [](const ProgramSynthesisSemanticDecision& self) { return json_to_py(self.evidence); },
+            [](ProgramSynthesisSemanticDecision& self, py::object val) {
+                self.evidence = py_to_json(val);
+            });
+
+    py::class_<ProgramSynthesisValidationReceipt>(m, "ProgramSynthesisValidationReceipt")
+        .def_static("parse", &ProgramSynthesisValidationReceipt::parse)
+        .def_property_readonly("id", &ProgramSynthesisValidationReceipt::id)
+        .def_property_readonly("proposal_id",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().proposal_id;
+                               })
+        .def_property_readonly("reservation_id",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().reservation_id;
+                               })
+        .def_property_readonly("bundle_id",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().bundle_id;
+                               })
+        .def_property_readonly("validator_identity",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().validator_identity;
+                               })
+        .def_property_readonly("contract_identity",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().contract_identity;
+                               })
+        .def_property_readonly("accepted",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().accepted;
+                               })
+        .def_property_readonly("evidence_digest",
+                               [](const ProgramSynthesisValidationReceipt& self) {
+                                   return self.data().evidence_digest;
+                               })
+        .def("serialize_canonical", &ProgramSynthesisValidationReceipt::serialize_canonical);
+
+    py::class_<ProgramSynthesisReceipt>(m, "ProgramSynthesisReceipt")
+        .def_static("parse", &ProgramSynthesisReceipt::parse)
+        .def_property_readonly("id", &ProgramSynthesisReceipt::id)
+        .def_property_readonly("proposal_id",
+                               [](const ProgramSynthesisReceipt& self) {
+                                   return self.data().proposal_id;
+                               })
+        .def_property_readonly("reservation_id",
+                               [](const ProgramSynthesisReceipt& self) {
+                                   return self.data().reservation_id;
+                               })
+        .def_property_readonly("bundle_id",
+                               [](const ProgramSynthesisReceipt& self) {
+                                   return self.data().bundle_id;
+                               })
+        .def_property_readonly("program_version_id",
+                               [](const ProgramSynthesisReceipt& self) {
+                                   return self.data().program_version_id;
+                               })
+        .def_property_readonly("policy_snapshot_fingerprint",
+                               [](const ProgramSynthesisReceipt& self) {
+                                   return self.data().policy_snapshot_fingerprint;
+                               })
+        .def("serialize_canonical", &ProgramSynthesisReceipt::serialize_canonical);
+
+    py::class_<ProgramSynthesisResult>(m, "ProgramSynthesisResult")
+        .def_readonly("reservation", &ProgramSynthesisResult::reservation)
+        .def_readonly("bundle", &ProgramSynthesisResult::bundle)
+        .def_readonly("validation", &ProgramSynthesisResult::validation)
+        .def_property_readonly("validation_evidence",
+                               [](const ProgramSynthesisResult& self) {
+                                   return json_to_py(self.validation_evidence);
+                               })
+        .def_readonly("version", &ProgramSynthesisResult::version)
+        .def_readonly("receipt", &ProgramSynthesisResult::receipt);
+
+    const auto make_child_synthesis_grant =
+        [](std::string owner_scope,
+           std::string parent_run_id,
+           py::object parent_version,
+           std::string expected_lineage_head_id,
+           py::object reviewed_source,
+           const RunBudget& child_budget_ceiling,
+           std::string template_identity,
+           std::string semantic_validator_identity,
+           std::string semantic_contract_identity,
+           std::vector<std::string> allowed_capabilities,
+           std::vector<std::string> allowed_effects,
+           std::optional<std::string> lineage_id,
+           std::optional<std::string> parent_policy_fingerprint,
+           std::optional<ExecutionGuarantee> minimum_execution_guarantee,
+           std::size_t max_source_bytes,
+           std::size_t max_sealed_modules) {
+            std::string parent_version_id;
+            std::string policy_fp =
+                parent_policy_fingerprint ? *parent_policy_fingerprint : std::string{};
+            ExecutionGuarantee resolved_guarantee =
+                minimum_execution_guarantee.value_or(ExecutionGuarantee::Strict);
+            if (py::isinstance<ProgramVersion>(parent_version)) {
+                const auto& ver = parent_version.cast<const ProgramVersion&>();
+                parent_version_id = ver.id();
+                if (policy_fp.empty()) policy_fp = ver.policy_snapshot().fingerprint();
+                if (!minimum_execution_guarantee) {
+                    resolved_guarantee = ver.execution_guarantee();
+                }
+            } else {
+                parent_version_id = parent_version.cast<std::string>();
+            }
+            std::string reviewed_id;
+            if (py::isinstance<ProgramSource>(reviewed_source)) {
+                reviewed_id = program_synthesis_source_identity(
+                    reviewed_source.cast<const ProgramSource&>());
+            } else {
+                reviewed_id = reviewed_source.cast<std::string>();
+            }
+            std::string resolved_lineage =
+                (lineage_id && !lineage_id->empty())
+                    ? std::move(*lineage_id)
+                    : program_run_lineage_id(owner_scope, parent_run_id);
+            ProgramChildSynthesisGrantData data;
+            data.owner_scope                 = std::move(owner_scope);
+            data.parent_run_id               = std::move(parent_run_id);
+            data.parent_program_version_id   = std::move(parent_version_id);
+            data.parent_policy_fingerprint   = std::move(policy_fp);
+            data.lineage_id                  = std::move(resolved_lineage);
+            data.expected_lineage_head_id    = std::move(expected_lineage_head_id);
+            data.template_identity           = std::move(template_identity);
+            data.reviewed_source_identity    = std::move(reviewed_id);
+            data.semantic_validator_identity = std::move(semantic_validator_identity);
+            data.semantic_contract_identity  = std::move(semantic_contract_identity);
+            data.allowed_capabilities        = std::move(allowed_capabilities);
+            data.allowed_effects             = std::move(allowed_effects);
+            data.child_budget_ceiling        = child_budget_ceiling;
+            data.minimum_execution_guarantee = resolved_guarantee;
+            data.max_source_bytes            = max_source_bytes;
+            data.max_sealed_modules          = max_sealed_modules;
+            return ProgramChildSynthesisGrant::create(std::move(data));
+        };
+
+    py::class_<ProgramChildSynthesisGrant>(m, "ProgramChildSynthesisGrant")
+        .def(py::init(make_child_synthesis_grant),
+             py::arg("owner_scope"),
+             py::arg("parent_run_id"),
+             py::arg("parent_version"),
+             py::arg("expected_lineage_head_id"),
+             py::arg("reviewed_source"),
+             py::arg("child_budget_ceiling"),
+             py::arg("template_identity"),
+             py::arg("semantic_validator_identity"),
+             py::arg("semantic_contract_identity"),
+             py::arg("allowed_capabilities") = std::vector<std::string>{},
+             py::arg("allowed_effects") = std::vector<std::string>{},
+             py::arg("lineage_id") = py::none(),
+             py::arg("parent_policy_fingerprint") = py::none(),
+             py::arg("minimum_execution_guarantee") = py::none(),
+             py::arg("max_source_bytes") = ProgramChildSynthesisGrantData{}.max_source_bytes,
+             py::arg("max_sealed_modules") = ProgramChildSynthesisGrantData{}.max_sealed_modules)
+        .def_static("create", make_child_synthesis_grant,
+                    py::arg("owner_scope"),
+                    py::arg("parent_run_id"),
+                    py::arg("parent_version"),
+                    py::arg("expected_lineage_head_id"),
+                    py::arg("reviewed_source"),
+                    py::arg("child_budget_ceiling"),
+                    py::arg("template_identity"),
+                    py::arg("semantic_validator_identity"),
+                    py::arg("semantic_contract_identity"),
+                    py::arg("allowed_capabilities") = std::vector<std::string>{},
+                    py::arg("allowed_effects") = std::vector<std::string>{},
+                    py::arg("lineage_id") = py::none(),
+                    py::arg("parent_policy_fingerprint") = py::none(),
+                    py::arg("minimum_execution_guarantee") = py::none(),
+                    py::arg("max_source_bytes") = ProgramChildSynthesisGrantData{}.max_source_bytes,
+                    py::arg("max_sealed_modules") = ProgramChildSynthesisGrantData{}.max_sealed_modules)
+        .def_static("parse", &ProgramChildSynthesisGrant::parse)
+        .def_property_readonly("id", &ProgramChildSynthesisGrant::id)
+        .def_property_readonly("grant_id", &ProgramChildSynthesisGrant::id)
+        .def_property_readonly("owner_scope",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().owner_scope;
+                               })
+        .def_property_readonly("parent_run_id",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().parent_run_id;
+                               })
+        .def_property_readonly("parent_program_version_id",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().parent_program_version_id;
+                               })
+        .def_property_readonly("parent_policy_fingerprint",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().parent_policy_fingerprint;
+                               })
+        .def_property_readonly("lineage_id",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().lineage_id;
+                               })
+        .def_property_readonly("expected_lineage_head_id",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().expected_lineage_head_id;
+                               })
+        .def_property_readonly("template_identity",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().template_identity;
+                               })
+        .def_property_readonly("reviewed_source_identity",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().reviewed_source_identity;
+                               })
+        .def_property_readonly("semantic_validator_identity",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().semantic_validator_identity;
+                               })
+        .def_property_readonly("semantic_contract_identity",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().semantic_contract_identity;
+                               })
+        .def_property_readonly("allowed_capabilities",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().allowed_capabilities;
+                               })
+        .def_property_readonly("allowed_effects",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().allowed_effects;
+                               })
+        .def_property_readonly("child_budget_ceiling",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().child_budget_ceiling;
+                               })
+        .def_property_readonly("minimum_execution_guarantee",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().minimum_execution_guarantee;
+                               })
+        .def_property_readonly("max_source_bytes",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().max_source_bytes;
+                               })
+        .def_property_readonly("max_sealed_modules",
+                               [](const ProgramChildSynthesisGrant& self) {
+                                   return self.data().max_sealed_modules;
+                               })
+        .def("serialize_canonical", &ProgramChildSynthesisGrant::serialize_canonical);
+
+    py::class_<ProgramChildSynthesisParent>(m, "ProgramChildSynthesisParent")
+        .def(py::init<ProgramVersion, ProgramRunRecord, ProgramRunLineage, ProgramRunGeneration>(),
+             py::arg("version"),
+             py::arg("run"),
+             py::arg("lineage"),
+             py::arg("generation"))
+        .def_readonly("version", &ProgramChildSynthesisParent::version)
+        .def_readonly("run", &ProgramChildSynthesisParent::run)
+        .def_readonly("lineage", &ProgramChildSynthesisParent::lineage)
+        .def_readonly("generation", &ProgramChildSynthesisParent::generation);
+
+    py::class_<ProgramChildSynthesisAuthorization>(m, "ProgramChildSynthesisAuthorization")
+        .def_property_readonly("id", &ProgramChildSynthesisAuthorization::id)
+        .def_property_readonly("proposal_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().proposal_id;
+                               })
+        .def_property_readonly("grant_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().grant_id;
+                               })
+        .def_property_readonly("parent_run_record_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().parent_run_record_id;
+                               })
+        .def_property_readonly("parent_generation_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().parent_generation_id;
+                               })
+        .def_property_readonly("registry_fingerprint",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().registry_fingerprint;
+                               })
+        .def_property_readonly("semantic_validator_identity",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().semantic_validator_identity;
+                               })
+        .def_property_readonly("semantic_contract_identity",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().semantic_contract_identity;
+                               })
+        .def_property_readonly("lineage_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().lineage_id;
+                               })
+        .def_property_readonly("source_lineage_head_id",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().source_lineage_head_id;
+                               })
+        .def_property_readonly("parent_remaining",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().parent_remaining;
+                               })
+        .def_property_readonly("child_budget",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().child_budget;
+                               })
+        .def_property_readonly("minimum_execution_guarantee",
+                               [](const ProgramChildSynthesisAuthorization& self) {
+                                   return self.data().minimum_execution_guarantee;
+                               })
+        .def("serialize_canonical", &ProgramChildSynthesisAuthorization::serialize_canonical);
+
+    m.def("authorize_program_child_synthesis", &authorize_program_child_synthesis,
+          py::arg("proposal"), py::arg("grant"), py::arg("parent"));
+
+    py::class_<ProgramChildSynthesisResult>(m, "ProgramChildSynthesisResult")
+        .def_readonly("authorization", &ProgramChildSynthesisResult::authorization)
+        .def_readonly("synthesis", &ProgramChildSynthesisResult::synthesis);
+
+    py::enum_<ProgramChildSynthesisState>(m, "ProgramChildSynthesisState")
+        .value("Reserved", ProgramChildSynthesisState::Reserved)
+        .value("Compiling", ProgramChildSynthesisState::Compiling)
+        .value("Compiled", ProgramChildSynthesisState::Compiled)
+        .value("Validating", ProgramChildSynthesisState::Validating)
+        .value("Validated", ProgramChildSynthesisState::Validated)
+        .value("Admitting", ProgramChildSynthesisState::Admitting)
+        .value("Admitted", ProgramChildSynthesisState::Admitted)
+        .value("Bound", ProgramChildSynthesisState::Bound)
+        .value("Dispatching", ProgramChildSynthesisState::Dispatching)
+        .value("Spawned", ProgramChildSynthesisState::Spawned)
+        .value("Failed", ProgramChildSynthesisState::Failed)
+        .value("ReconciliationRequired", ProgramChildSynthesisState::ReconciliationRequired);
+
+    py::class_<ProgramChildSynthesisRecord>(m, "ProgramChildSynthesisRecord")
+        .def_static("parse", &ProgramChildSynthesisRecord::parse)
+        .def_property_readonly("id", &ProgramChildSynthesisRecord::id)
+        .def_property_readonly("proposal",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().proposal;
+                               })
+        .def_property_readonly("grant",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().grant;
+                               })
+        .def_property_readonly("parent",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().parent;
+                               })
+        .def_property_readonly("reservation",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().reservation;
+                               })
+        .def_property_readonly("binding_name",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().binding_name;
+                               })
+        .def_property_readonly("state",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().state;
+                               })
+        .def_property_readonly("revision",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().revision;
+                               })
+        .def_property_readonly("previous_id",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().previous_id;
+                               })
+        .def_property_readonly("artifacts",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return json_to_py(self.data().artifacts);
+                               })
+        .def_property_readonly("error_code",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().error_code;
+                               })
+        .def_property_readonly("proposal_id",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().proposal.id();
+                               })
+        .def_property_readonly("grant_id",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().grant.id();
+                               })
+        .def_property_readonly("owner_scope",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().proposal.data().owner_scope;
+                               })
+        .def_property_readonly("parent_run_id",
+                               [](const ProgramChildSynthesisRecord& self) {
+                                   return self.data().proposal.data().parent_run_id;
+                               })
+        .def_property_readonly("bundle",
+                               [](const ProgramChildSynthesisRecord& self)
+                                   -> std::optional<ProgramBundle> {
+                                   const auto& a = self.data().artifacts;
+                                   if (!a.is_object() || !a.contains("bundle")) return std::nullopt;
+                                   return ProgramBundle::parse(a.at("bundle").dump());
+                               })
+        .def_property_readonly("version",
+                               [](const ProgramChildSynthesisRecord& self)
+                                   -> std::optional<ProgramVersion> {
+                                   const auto& a = self.data().artifacts;
+                                   if (!a.is_object() || !a.contains("version")) return std::nullopt;
+                                   return ProgramVersion::parse(a.at("version").dump());
+                               })
+        .def_property_readonly("link_receipt",
+                               [](const ProgramChildSynthesisRecord& self)
+                                   -> std::optional<ModuleLinkReceipt> {
+                                   const auto& a = self.data().artifacts;
+                                   if (!a.is_object() || !a.contains("link")) return std::nullopt;
+                                   return ModuleLinkReceipt::parse(a.at("link").dump());
+                               })
+        .def("serialize_canonical", &ProgramChildSynthesisRecord::serialize_canonical);
+
+    py::class_<ProgramSynthesisGateway, std::shared_ptr<ProgramSynthesisGateway>>(
+        m, "ProgramSynthesisGateway")
+        .def("synthesize", &ProgramSynthesisGateway::synthesize,
+             py::arg("proposal"),
+             py::call_guard<py::gil_scoped_release>())
+        .def("synthesize_child", &ProgramSynthesisGateway::synthesize_child,
+             py::arg("proposal"), py::arg("grant"), py::arg("parent"),
+             py::call_guard<py::gil_scoped_release>());
+
     py::class_<ProgramHandle>(m, "ProgramHandle")
         .def_property_readonly("run_id", &ProgramHandle::run_id)
+        .def_property_readonly("logical_run_id", &ProgramHandle::logical_run_id)
         .def_property_readonly("program_version_id", &ProgramHandle::program_version_id)
         .def_property_readonly("attempt", &ProgramHandle::attempt)
         .def_property_readonly("notices", &ProgramHandle::notices,
@@ -1013,8 +2817,51 @@ void init_program(py::module_& m) {
             "one; the call is charged as reported and the run's status and budgets are as they "
             "would be without the notice. Read them after wait() to see every one.")
         .def("cancel", &ProgramHandle::cancel)
+        .def("cancel_async", [](ProgramHandle& self) {
+            return spawn_program_async(
+                [](ProgramHandle handle) -> asio::awaitable<bool> {
+                    co_return co_await handle.cancel_async();
+                }(self));
+        })
         .def("wait", &ProgramHandle::wait, py::call_guard<py::gil_scoped_release>())
-        .def("try_result", &ProgramHandle::try_result);
+        .def("wait_async", [](const ProgramHandle& self) {
+            return spawn_program_async(
+                [](ProgramHandle handle) -> asio::awaitable<ProgramResult> {
+                    co_return co_await handle.wait_async();
+                }(self));
+        })
+        .def("try_result", &ProgramHandle::try_result)
+        .def("latest_checkpoint", &ProgramHandle::latest_checkpoint)
+        .def("latest_handoff", &ProgramHandle::latest_handoff,
+             py::call_guard<py::gil_scoped_release>())
+        .def("latest_handoff_async", [](const ProgramHandle& self) {
+            return spawn_program_async(
+                [](ProgramHandle handle) -> asio::awaitable<std::optional<ExactProgramHandoff>> {
+                    co_return co_await handle.latest_handoff_async();
+                }(self));
+        })
+        .def("next_handoff", [](const ProgramHandle& self) {
+            auto handoff = [&] {
+                py::gil_scoped_release release;
+                return self.next_handoff();
+            }();
+            return PyProgramHandoff(std::make_shared<ProgramHandoff>(std::move(handoff)));
+        })
+        .def("next_handoff_async", [](const ProgramHandle& self) {
+            return spawn_program_async(
+                [](ProgramHandle handle) -> asio::awaitable<PyProgramHandoff> {
+                    auto handoff = co_await handle.next_handoff_async();
+                    co_return PyProgramHandoff(
+                        std::make_shared<ProgramHandoff>(std::move(handoff)));
+                }(self));
+        })
+        .def("snapshot", &ProgramHandle::snapshot, py::call_guard<py::gil_scoped_release>())
+        .def("snapshot_async", [](const ProgramHandle& self) {
+            return spawn_program_async(
+                [](ProgramHandle handle) -> asio::awaitable<ProgramRunRecord> {
+                    co_return co_await handle.snapshot_async();
+                }(self));
+        });
 
     py::enum_<ProgramActivationResult>(m, "ProgramActivationResult")
         .value("Activated", ProgramActivationResult::Activated)
@@ -1069,12 +2916,16 @@ void init_program(py::module_& m) {
              py::arg("failure_text_redactor") = py::none(),
              py::arg("fork_may_resend_provider_calls") = false)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
+        .def_property_readonly("synthesis_gateway", &LocalProgramHost::synthesis_gateway)
         .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
              "Continue a run that a stopped process left running, from this host's "
              "sqlite_directory. A journaled provider call is not sent again.")
-        .def("compile", &LocalProgramHost::compile)
-        .def("admit", &LocalProgramHost::admit)
-        .def("compile_admit", &LocalProgramHost::compile_admit)
+        .def("reconnect_async", &LocalProgramHost::reconnect_async, py::arg("run_id"))
+        .def("compile", &LocalProgramHost::compile,
+             py::arg("source"), py::arg("budget"))
+        .def("admit", &LocalProgramHost::admit, py::arg("bundle"))
+        .def("compile_admit", &LocalProgramHost::compile_admit,
+             py::arg("source"), py::arg("budget"))
         .def("activate", &LocalProgramHost::activate,
              py::arg("version"), py::arg("expected_generation"))
         .def("rollback", &LocalProgramHost::rollback,
@@ -1086,7 +2937,13 @@ void init_program(py::module_& m) {
         .def("run", &LocalProgramHost::run,
              py::arg("version"), py::arg("input"), py::arg("budget"),
              py::arg("trace_id") = "python-program")
+        .def("run_async", &LocalProgramHost::run_async,
+             py::arg("version"), py::arg("input"), py::arg("budget"),
+             py::arg("trace_id") = "python-program")
         .def("start", &LocalProgramHost::start,
+             py::arg("version"), py::arg("input"), py::arg("budget"),
+             py::arg("trace_id") = "python-program")
+        .def("start_async", &LocalProgramHost::start_async,
              py::arg("version"), py::arg("input"), py::arg("budget"),
              py::arg("trace_id") = "python-program")
         .def("resume", &LocalProgramHost::resume,
@@ -1095,6 +2952,9 @@ void init_program(py::module_& m) {
              "Resume an interrupted run. Without pending_id, the run's single awaiting "
              "pending call is addressed; pass result.interrupt.pending_input.call_id "
              "to name it exactly.")
+        .def("resume_async", &LocalProgramHost::resume_async,
+             py::arg("run_id"), py::arg("value"), py::arg("pending_id") = py::none(),
+             py::arg("trace_id") = "python-program-resume")
         .def("fork", &LocalProgramHost::fork,
              py::arg("run_id"), py::arg("value"), py::arg("version"), py::arg("budget"),
              py::arg("input") = py::none(), py::arg("checkpoint_id") = py::none(),
@@ -1114,7 +2974,93 @@ void init_program(py::module_& m) {
              "replays the provider calls it made before it asked only from a durable "
              "provider-call journal, which a host has when it has sqlite_directory; without "
              "one it sends and charges them again, and the returned handle's notices name "
-             "the calls the paused attempt recorded (P_FORK_PROVIDER_CALLS_NOT_JOURNALED).");
+             "the calls the paused attempt recorded (P_FORK_PROVIDER_CALLS_NOT_JOURNALED).")
+        .def("bind_child", &LocalProgramHost::bind_child,
+             py::arg("parent"), py::arg("binding_name"), py::arg("child"), py::arg("max_budget"),
+             "Link an admitted child ProgramVersion to a parent ProgramVersion under binding_name "
+             "and register the binding on this host for ng.spawn_child and start_child.")
+        .def("link_child", &LocalProgramHost::bind_child,
+             py::arg("parent"), py::arg("binding_name"), py::arg("child"), py::arg("max_budget"))
+        .def("start_child", &LocalProgramHost::start_child,
+             py::arg("parent"), py::arg("link"), py::arg("version"),
+             py::arg("input"), py::arg("budget"),
+             py::arg("child_run_id") = py::none(),
+             py::arg("trace_id") = "python-program-child")
+        .def("start_child_async", &LocalProgramHost::start_child_async,
+             py::arg("parent"), py::arg("link"), py::arg("version"),
+             py::arg("input"), py::arg("budget"),
+             py::arg("child_run_id") = py::none(),
+             py::arg("trace_id") = "python-program-child")
+        .def("replace", &LocalProgramHost::replace,
+             py::arg("source"), py::arg("target"), py::arg("input"), py::arg("budget"),
+             py::arg("replacement_run_id") = py::none(),
+             py::arg("trace_id") = "python-program-replace",
+             "Replace a handed-off Program run with an admitted target version. "
+             "Target authority must be attenuated within the source version, budget must equal "
+             "the source run's remaining budget, and active children of the source run are kept.")
+        .def("replace_async", &LocalProgramHost::replace_async,
+             py::arg("source"), py::arg("target"), py::arg("input"), py::arg("budget"),
+             py::arg("replacement_run_id") = py::none(),
+             py::arg("trace_id") = "python-program-replace")
+        .def("migrate_graph", &LocalProgramHost::migrate_graph,
+             py::arg("source"), py::arg("target"),
+             py::arg("semantic_adapter") = py::none(),
+             py::arg("requested_run_id") = py::none(),
+             "Migrate a live root Core Program run to an admitted target version at a super-step "
+             "boundary.")
+        .def("migrate_graph_async", &LocalProgramHost::migrate_graph_async,
+             py::arg("source"), py::arg("target"),
+             py::arg("semantic_adapter") = py::none(),
+             py::arg("requested_run_id") = py::none())
+        .def("reserve_synthesis", &LocalProgramHost::reserve_synthesis,
+             py::arg("source"), py::arg("handoff"), py::arg("proposal"),
+             py::arg("expected_lineage_head") = py::none())
+        .def("reserve_synthesis_async", &LocalProgramHost::reserve_synthesis_async,
+             py::arg("source"), py::arg("handoff"), py::arg("proposal"),
+             py::arg("expected_lineage_head") = py::none())
+        .def("synthesize", &LocalProgramHost::synthesize,
+             py::arg("proposal"),
+             "Run the synthesis gateway (proposal -> compile -> semantic verify -> admit) "
+             "under attenuated authority and reserved budget.")
+        .def("register_synthesis_validator", &LocalProgramHost::register_synthesis_validator,
+             py::arg("validate"),
+             "Register the host's semantic validator: validate(proposal, bundle, reservation) returns a "
+             "ProgramSynthesisSemanticDecision. The gateway accepts a decision only when its validator and "
+             "contract identities are the ones the child synthesis grant names. Without a validator every "
+             "synthesis is refused. The callable runs with the GIL held, on the thread that synthesizes.")
+        .def("authorize_child_synthesis_grant",
+             &LocalProgramHost::authorize_child_synthesis_grant,
+             py::arg("grant"),
+             "Register a ProgramChildSynthesisGrant on this host for ng.spawn_synthesized_child "
+             "and prepare_child_synthesis.")
+        .def("prepare_child_synthesis", &LocalProgramHost::prepare_child_synthesis,
+             py::arg("parent"), py::arg("handoff"), py::arg("proposal"),
+             py::arg("grant"), py::arg("binding_name"),
+             "Compile, admit, link, and publish a synthesized child Program on a handed-off "
+             "parent run.")
+        .def("prepare_child_synthesis_async", &LocalProgramHost::prepare_child_synthesis_async,
+             py::arg("parent"), py::arg("handoff"), py::arg("proposal"),
+             py::arg("grant"), py::arg("binding_name"))
+        .def("recover_child_synthesis", &LocalProgramHost::recover_child_synthesis,
+             py::arg("parent_run_id"), py::arg("proposal_id"))
+        .def("recover_child_synthesis_async", &LocalProgramHost::recover_child_synthesis_async,
+             py::arg("parent_run_id"), py::arg("proposal_id"))
+        .def("recover_children", &LocalProgramHost::recover_children,
+             py::arg("parent_run_id"))
+        .def("recover_children_async", &LocalProgramHost::recover_children_async,
+             py::arg("parent_run_id"))
+        .def("child_syntheses", &LocalProgramHost::child_syntheses,
+             py::arg("parent_run_id"))
+        .def("run_record", &LocalProgramHost::run_record,
+             py::arg("run_id"))
+        .def("bundle", &LocalProgramHost::bundle,
+             py::arg("bundle_id"))
+        .def("version", &LocalProgramHost::version,
+             py::arg("version_id"))
+        .def("run_lineage", &LocalProgramHost::run_lineage,
+             py::arg("logical_run_id"))
+        .def("run_generation", &LocalProgramHost::run_generation,
+             py::arg("logical_run_id"), py::arg("generation"));
 }
 
 }  // namespace neograph::pybind

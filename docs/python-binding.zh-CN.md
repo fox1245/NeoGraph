@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=5b4bd7ec4def14989d6893305365b359fea3db7c51787715f347790c413d0103 -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=525f458c89beba4734a3f3e1f9510e59a02842cb220f8d089ba2d828a3fbcf2c -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -374,12 +374,12 @@ Python 暴露的是 C++ 的执行能力，而不是另外一套 Python 调度器
 | 重试与节点缓存策略 | `RetryPolicy`、`CacheScope` | 图/节点的 setter 和缓存作用域 | 运行时策略相同 |
 | 检查点、HITL 与时间旅行 | 检查点存储和 resume API | resume、精确的 `resume_from`、fork、状态历史/更新 | 检查点契约相同 |
 | 通过 A2A 或 ACP 提供智能体 | `A2AServer`、`ACPServer` | `ProtocolHostAdapter` 背后的官方 SDK 服务器 | 会话、取消、token 流式输出和图中断（`input-required`、权限请求）；没有协作信封、基于 Program 的任务和租户隔离 |
-| Program 的编写与本地执行 | 编译器、Catalog 和 `ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`、句柄/结果 | 原生的、按 owner 划分作用域的便捷宿主 |
+| Program 的编写与本地执行 | 编译器、Catalog 和 `ProgramRuntime` | `ProgramCompiler`、`LocalProgramHost`（`admit`、`start`/`resume`/`fork`、`replace`、`migrate_graph`、`register_synthesis_validator`、`prepare_child_synthesis`）、句柄/结果 | 原生的、按 owner 划分作用域的便捷宿主 |
 | 强制的生命周期 Hook | 注册表、runner 和 `HookRuntime` | 定义，加上 `create_hook_runtime` 回调 | 生命周期边界相同，均为失败时关闭 |
 | 运行时上下文与严格分发 | 上下文存储、回执（receipt）和拦截 | 对应的不可变值、存储和 `StrictRuntimeProfile` | 同一个原生控制器 |
 | wheel 默认的持久化 | SQLite 的 Core/上下文/分发存储 | `_HAVE_SQLITE` 导出项 | PyPI wheel 中已启用 |
 
-原始的 `ProgramCatalog`、转换存储（transition store）、替换/迁移控制器、synthesis 网关、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。只暴露这些带权限路径的片段，会绕过必需的 `proposal -> compile -> admit -> publish -> migrate/spawn` 协议。`_HAVE_PROGRAM` 并不声称与原始控制面的管理能力对等。
+原始的 `ProgramCatalog`、转换存储（transition store）、Hook journal 和 RPC 执行器，仍然是供宿主自行组合的 API。`LocalProgramHost` 在按 owner 划分作用域的运行时上公开 `register_synthesis_validator` 与 `proposal -> compile -> admit -> publish` 子程序合成网关、绑定交接的 `replace` / `replace_async` 以及 `migrate_graph` / `migrate_graph_async`，绑定本身不额外添加任何策略；`_HAVE_PROGRAM` 并不声称与原始多租户控制面的管理能力对等。
 
 `GraphEngine::run_until_safe_point_async` 和 `resume_from_until_safe_point_async` 没有对应的 Python 方法。安全点请求指向唯一一个 `GraphGenerationIdentity`，引擎只有在已链接到该代（generation）时才接受请求，Program 目录会为它所实例化的引擎做这件事。`GraphEngine.compile` 构建的引擎没有代，因此会拒绝每一个请求。捕获安全点属于上面列出的替换与迁移控制器。
 
@@ -547,7 +547,7 @@ JavaScript Program 必须导出 `define()`，它返回一个图构建器。这�
 |---|---|---|
 | `ng.ProgramCompileError` | `ProgramCompiler.compile`、`LocalProgramHost.compile` 和 `compile_admit` | `RuntimeError` |
 | `ng.ProgramAdmissionError` | `LocalProgramHost.admit` 和 `compile_admit`，例如 `P_ADMIT_POLICY` 或 `P_ADMIT_PROVIDER` | `RuntimeError` |
-| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active` 和 `resume`，例如 `P_START_BUDGET` 或 `P_RUN_NOT_FOUND` | `RuntimeError` |
+| `ng.ProgramDiagnosticError` | `run`、`start`、`start_active`、`resume`、`fork`、`replace`、`migrate_graph` 和 `prepare_child_synthesis`，例如 `P_START_BUDGET`、`P_RUN_NOT_FOUND` 或 `P_REPLACEMENT_AUTHORITY` | `RuntimeError` |
 | `ng.ProgramRegistryError` | `ProgramRegistryBuilder.add_registered_node`、`add_registered_reducer` 和 `add_registered_condition` | `ValueError`、`RuntimeError` |
 
 前三个异常的消息分别以 `Program compilation failed`、`Program admission failed` 或 `Program operation failed` 开头，后面每条诊断占一行：包含它的错误码、JSON pointer 和消息；有源码位置时，还带上 `(source:line:col)`。`.diagnostics` 是字典的列表，每个字典有 `code`、`severity`、`phase`、`message`、`source_id`、`json_pointer`、`span` 和 `witness`。
@@ -616,9 +616,41 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 
 调用模型的 Python 节点自己持有 provider；Program 的预算看不到这样的调用。
 
-### 子 Program
+### 子 Program、代际替换与图迁移
 
-`ng.spawn` 需要子绑定解析器（child-binding resolver），而 `LocalProgramHost` 没有配置。因此从 Python 调用的每个 `ng.spawn` 都会让运行以 `P_CHILD_BINDING`（“Program spawn has no configured child binding resolver”）失败。使用子 Program，需要一个设置了 `RuntimeConfig::child_binding_resolver` 的 C++ 宿主，它把每个绑定名映射到 `link_module_child` 产生的 `ModuleLinkReceipt`，以及已准入的子 `ProgramVersion`。子 Program 的生命周期见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
+`LocalProgramHost` 以同步和 `_async` 方法公开静态子链接、子程序合成网关、在持有的 `ng.checkpoint` 处进行代际替换以及实时根 Core 图迁移。绑定将调用转发至 C++ 运行时，本身不额外添加任何策略：
+
+| 操作 | Python 签名 | 结果 / 拒绝错误码 |
+|---|---|---|
+| 绑定静态子程序 | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`；未绑定的 `ng.spawn` 以 `P_CHILD_BINDING` 失败 |
+| 启动或恢复子程序 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`、`host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 注册合成验证器 | `host.register_synthesis_validator(validate)`，其中 `validate(proposal, bundle, reservation)` 返回 `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` | 合成前必须注册；未注册验证器时拒绝所有合成 |
+| 合成子程序 | `ProgramSynthesisProposal(...)`、`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`、`host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`、`host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`、`host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`、`host.synthesize(proposal)` | `ProgramChildSynthesisRecord`（`Bound`，或带 `P_CHILD_SYNTHESIS_SEMANTICS` 的 `Failed`）；超出权限抛出 `P_CHILD_SYNTHESIS_AUTHORITY` |
+| 持有检查点 | `handle.next_handoff()` / `next_handoff_async()`、`handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` 租约；`.wait()` / `.wait_async()` 返回 `ExactProgramHandoff` |
+| 替换运行代际 | `host.replace(source, target, input, budget, replacement_run_id=None, trace_id="python-program-replace")` / `replace_async(...)` | 新代际的 `ProgramHandle`；拒绝错误码为 `P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF` |
+| 迁移实时 Core 图 | `host.migrate_graph(source, target, semantic_adapter=None, requested_run_id=None)` / `migrate_graph_async(...)` | 已准入兼容版本的新代际 `ProgramHandle`；不兼容图以 `P_GRAPH_MIGRATION_INCOMPATIBLE` 拒绝 |
+| 查询谱系与记录 | `host.run_record(run_id)`、`host.run_lineage(logical_run_id)`、`host.run_generation(logical_run_id, generation)`、`host.child_syntheses(parent_run_id)` | `ProgramRunRecord`、`ProgramRunLineage`、`ProgramRunGeneration`、`list[ProgramChildSynthesisRecord]` |
+
+`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)` 要求 `template_identity`、`semantic_validator_identity` 和 `semantic_contract_identity` 这三个身份均为必填的 `sha256` 身份标识（`sha256:` 后跟 64 位小写十六进制字符）；可选关键字参数用于配置 `allowed_capabilities`、`allowed_effects`、`lineage_id`、`parent_policy_fingerprint`、`minimum_execution_guarantee`、`max_source_bytes` 与 `max_sealed_modules`。`ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` 的前三个参数（`validator_identity`、`contract_identity`、`accepted`）没有默认值。`LocalProgramHost.register_synthesis_validator(validate)` 注册回调 `validate(proposal, bundle, reservation)`，该回调返回 `ProgramSynthesisSemanticDecision`。未注册验证器时，每一次合成都会被拒绝。网关仅在判定结果指明授权中的验证器与契约（`semantic_validator_identity` 和 `semantic_contract_identity`）时才予以接受；持久化子程序合成（`prepare_child_synthesis`）的判定结果若指明其他验证器或契约，则以 `Failed` 结束并带错误码 `P_CHILD_SYNTHESIS_SEMANTICS`。
+
+```python
+# The host's reviewed identities ("sha256:" + 64 lowercase hex), from its own registry.
+TEMPLATE_ID, VALIDATOR_ID, CONTRACT_ID = reviewed_identities("child-worker")
+
+def validate_synthesis(proposal, bundle, reservation):
+    # The host's own check of the compiled child; here: it asks for no capability.
+    accepted = not proposal.requested_capabilities
+    return ng.ProgramSynthesisSemanticDecision(
+        VALIDATOR_ID,
+        CONTRACT_ID,
+        accepted,
+        evidence={"bundle_id": bundle.id, "checked": "no capabilities"},
+    )
+
+host.register_synthesis_validator(validate_synthesis)
+```
+
+替换目标的权限必须是源运行权限的衰减子集（`P_REPLACEMENT_AUTHORITY`），`budget` 必须等于源谱系的权威 `remaining_budget`（`P_REPLACEMENT_BUDGET`），目标必须声明 JavaScript 控制（`P_REPLACEMENT_TARGET`），`input` 必须绑定 `previous_run_id` 与 `handoff`（`P_REPLACEMENT_INPUT`），且交接引用必须匹配当前活动的检查点头部（`P_REPLACEMENT_HANDOFF`）。替换被拒绝时，源运行保持在当前代际，持有的 `ProgramHandoff` 租约也不会被消耗。已有的子运行会结转到新代际，并通过匹配的 `ng.spawn` 绑定重新汇合。`migrate_graph` 在超步边界将实时根 Core 图运行迁移到已准入兼容版本的新代际，并应用 `ProgramGraphMigrationTarget` 的 `MigrationPlan` 及可选的 `GraphSemanticMigrationAdapter`。生命周期详见[递归智能体](PROGRAM_RECURSIVE_HARNESSES.md)。
 
 ### 预算
 
