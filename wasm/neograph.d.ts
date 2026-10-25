@@ -87,7 +87,12 @@ export interface Graph {
 /** A source for `Programs.admit`: the text of a JavaScript control source, or an object naming it. */
 export type ProgramSource =
   | string
-  | { javascript: string; name?: string }
+  /**
+   * `budget`: the exact budget runs of this version are granted. `budgetBounds`: the range a grant may take (a replacement
+   * carries the remaining budget, below the first grant). Members left out keep the host's default budget (maximum) or
+   * nothing (minimum).
+   */
+  | { javascript: string; name?: string; budget?: RunBudget; budgetBounds?: { minimum?: RunBudget; maximum?: RunBudget } }
   | { document: object; name?: string };
 
 /** An admitted version of a Program. Pass it, or its `id`, to `Programs.start`. */
@@ -189,6 +194,76 @@ export interface ForkOptions extends ProgramRunOptions {
   runId?: string;
 }
 
+export interface ProgramHandoff {
+  runId: string;
+  journalHead: string;
+  coordinateId: string;
+  entryId: string;
+  value: any;
+}
+
+export interface ReplaceOptions extends ProgramRunOptions {
+  input?: object;
+  budget?: RunBudget;
+  runId?: string;
+  journalHead?: string;
+  coordinateId?: string;
+  entryId?: string;
+  traceId?: string;
+}
+
+export interface MigrateGraphOptions extends ProgramRunOptions {
+  runId?: string;
+  semanticAdapter?: boolean;
+}
+
+/** What the host allows a synthesized child: never made from the child's request. */
+export interface ChildSynthesisGrant {
+  /** sha256 identities of the host's reviewed template, semantic validator and semantic contract. */
+  templateIdentity: string;
+  validatorIdentity: string;
+  contractIdentity: string;
+  allowedCapabilities?: string[];
+  allowedEffects?: string[];
+  /** The most the child may be granted. */
+  childBudget: RunBudget;
+}
+
+/** The host's semantic decision on the proposal; accepted only when it names the grant's validator and contract. */
+export interface SynthesisSemanticDecision {
+  validatorIdentity: string;
+  contractIdentity: string;
+  accepted: boolean;
+  evidence?: object;
+}
+
+/** The child's request (budget, capabilities, effects) and the host's authority (grant, semanticDecision). */
+export interface SynthesizeChildAuthority {
+  budget: RunBudget;
+  capabilities?: string[];
+  effects?: string[];
+  grant: ChildSynthesisGrant;
+  semanticDecision: SynthesisSemanticDecision;
+}
+
+export interface SynthesizeChildOptions extends SynthesizeChildAuthority {
+  binding?: string;
+  bindingName?: string;
+  source?: ProgramSource;
+  javascript?: string;
+  document?: object;
+}
+
+export interface SynthesizedChild {
+  id: string;
+  binding: string;
+  state: string;
+  versionId: string;
+  bundleId: string;
+  proposalId: string;
+  grantId: string;
+}
+
 export interface ProgramRun {
   /** The run's identity. A resumed run keeps it; a fork has its own. */
   readonly id: string;
@@ -202,6 +277,20 @@ export interface ProgramRun {
    * of one pause may be made together; each takes half of what the paused run has left after the forks before it.
    */
   fork(value?: unknown, options?: ForkOptions): ProgramRun;
+  /** Waits for the run to reach a held `ng.checkpoint(value)` handoff. */
+  handoff(): Promise<ProgramHandoff>;
+  /** Releases a held checkpoint handoff so the run continues past `ng.checkpoint(...)`. */
+  releaseHandoff(): Promise<boolean>;
+  /** Replaces the run at its held checkpoint handoff with another admitted `version`. */
+  replace(version: string | { id: string }, options?: ReplaceOptions): ProgramRun;
+  /** Migrates a live root Core graph run at a safe point to another compatible admitted `version`. */
+  migrateGraph(version: string | { id: string }, options?: MigrateGraphOptions): ProgramRun;
+  /** Compiles, admits, and binds a synthesized child Program under `binding` at a held parent checkpoint handoff. */
+  synthesizeChild(
+    bindingOrOptions: string | SynthesizeChildOptions,
+    source?: ProgramSource,
+    options?: SynthesizeChildAuthority,
+  ): Promise<SynthesizedChild>;
   /**
    * Resolves with whether this call cancelled the run (false when it had already ended). A resume or a fork that has not
    * been sent yet, because it waits for the run it continues, is withdrawn instead: its `result` rejects with a
@@ -269,6 +358,21 @@ export interface Programs {
   start(version: string | { id: string }, options?: StartOptions): ProgramRun;
   /** Starts a run and resolves with its result. */
   run(version: string | { id: string }, options?: StartOptions): Promise<ProgramResult>;
+  /** Waits for `run` (or the next run with a held checkpoint when omitted) to reach a held `ng.checkpoint(value)` handoff. */
+  handoff(run?: string | { id: string }): Promise<ProgramHandoff>;
+  /** Releases a held checkpoint handoff on `run` so that execution continues. */
+  releaseHandoff(run: string | { id: string }): Promise<boolean>;
+  /** Replaces `run` at its held checkpoint handoff with another admitted `version`. */
+  replace(run: string | { id: string }, version: string | { id: string }, options?: ReplaceOptions): ProgramRun;
+  /** Migrates a live root Core graph `run` at a safe point to another compatible admitted `version`. */
+  migrateGraph(run: string | { id: string }, version: string | { id: string }, options?: MigrateGraphOptions): ProgramRun;
+  /** Compiles, admits, and binds a synthesized child Program for `run` while held at a checkpoint handoff. */
+  synthesizeChild(
+    run: string | { id: string },
+    bindingOrOptions: string | SynthesizeChildOptions,
+    source?: ProgramSource,
+    options?: SynthesizeChildAuthority,
+  ): Promise<SynthesizedChild>;
   /** What the stores hold of a run: its latest result, `{ runId, status: 'running' }` while it has none, or null. */
   result(runId: string): Promise<ProgramResult | ProgramRunning | null>;
   /** Cancels the runs that are executing and frees the object. A run that waits at an interrupt stays as it is. */

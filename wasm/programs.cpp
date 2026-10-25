@@ -2,13 +2,18 @@
 // its events, resume an interrupt, fork a paused run, read a result, cancel. wasm/neograph.mjs is its JavaScript side; this
 // file is the C API it calls.
 //
-//   ng_programs_create(config, stores)   -> handle (0 on failure; ng_error() says why)
-//   ng_programs_admit(handle, call, source)      compile and admit a Program
-//   ng_programs_start(handle, call, options)     start a run
-//   ng_programs_resume(handle, call, options)    resume an interrupted run
-//   ng_programs_fork(handle, call, options)      fork an interrupted run at its checkpoint
-//   ng_programs_cancel(handle, call, run)        cancel a run
-//   ng_programs_result(handle, call, run)        read what a run left in the transition store
+//   ng_programs_create(config, stores)            -> handle (0 on failure; ng_error() says why)
+//   ng_programs_admit(handle, call, source)               compile and admit a Program
+//   ng_programs_start(handle, call, options)              start a run
+//   ng_programs_resume(handle, call, options)             resume an interrupted run
+//   ng_programs_fork(handle, call, options)               fork an interrupted run at its checkpoint
+//   ng_programs_handoff(handle, call, options)            wait for and read a held checkpoint handoff
+//   ng_programs_release_handoff(handle, call, run)        release a held checkpoint handoff so the run continues
+//   ng_programs_replace(handle, call, options)            replace a handed-off run with another admitted version
+//   ng_programs_migrate_graph(handle, call, options)      migrate a live root Core graph run at a safe point
+//   ng_programs_synthesize_child(handle, call, options)   compile, admit and publish a proposed child Program
+//   ng_programs_cancel(handle, call, run)                 cancel a run
+//   ng_programs_result(handle, call, run)                 read what a run left in the transition store
 //   ng_programs_release(handle)
 //
 // Every call but create and release returns at once. Its outcome arrives through Module.ngProgramDone(call, text), a JSON
@@ -21,8 +26,19 @@
 #include <neograph/async/host_loop.h>
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/checkpoint.h>
+#include <neograph/program/child_synthesis.h>
+#include <neograph/program/graph_migration.h>
 #include <neograph/program/program.h>
+#include <neograph/program/replacement.h>
 #include <neograph/program/store_call.h>
+#include <neograph/program/synthesis.h>
+
+#include <asio/async_result.hpp>
+#include <asio/bind_executor.hpp>
+#include <asio/post.hpp>
+#include <asio/redirect_error.hpp>
+#include <asio/this_coro.hpp>
+#include <asio/use_awaitable.hpp>
 
 #include <emscripten.h>
 
@@ -33,6 +49,7 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -75,6 +92,7 @@ RegistrySnapshot make_registry() {
     builder.add_provider(manifest(kProviderIdentity), ProviderMetadata{json::object(), json::object()});
     builder.add_core_llm_call(manifest({ExecutableKind::Node, "llm_call", "1.0.0", digest('2')}, {kProviderIdentity}),
                               {});
+    builder.add_core_tool_dispatch(manifest({ExecutableKind::Node, "tool_dispatch", "1.0.0", digest('5')}), {});
     builder.add_reducer(manifest({ExecutableKind::Reducer, "overwrite", "1.0.0", digest('3')}),
                         [](const json&, const json& incoming) { return incoming; });
     builder.add_reducer(manifest({ExecutableKind::Reducer, "append", "1.0.0", digest('4')}),
@@ -298,6 +316,11 @@ json failure_json(const std::exception_ptr& error) {
         detail["message"] = std::string(failure.what());
         detail["code"]    = failure.diagnostic().code;
         detail["witness"] = failure.diagnostic().witness;
+    } catch (const ProgramChildSynthesisError& failure) {
+        detail["type"]    = "program";
+        detail["message"] = std::string(failure.what());
+        detail["code"]    = failure.code();
+        detail["witness"] = json{{"code", failure.code()}};
     } catch (const ProgramBlockingCallRefused& failure) {
         detail["type"]    = "refused";
         detail["message"] = std::string(failure.what());
@@ -325,6 +348,24 @@ private:
     int call_;
 };
 
+std::string_view child_synthesis_state_name(ProgramChildSynthesisState state) {
+    switch (state) {
+        case ProgramChildSynthesisState::Reserved: return "reserved";
+        case ProgramChildSynthesisState::Compiling: return "compiling";
+        case ProgramChildSynthesisState::Compiled: return "compiled";
+        case ProgramChildSynthesisState::Validating: return "validating";
+        case ProgramChildSynthesisState::Validated: return "validated";
+        case ProgramChildSynthesisState::Admitting: return "admitting";
+        case ProgramChildSynthesisState::Admitted: return "admitted";
+        case ProgramChildSynthesisState::Bound: return "bound";
+        case ProgramChildSynthesisState::Dispatching: return "dispatching";
+        case ProgramChildSynthesisState::Spawned: return "spawned";
+        case ProgramChildSynthesisState::Failed: return "failed";
+        case ProgramChildSynthesisState::ReconciliationRequired: return "reconciliation_required";
+    }
+    return "";
+}
+
 // One Programs object of JavaScript: the stores, the catalog that admits Programs into them, and the runtime that runs them.
 struct Host {
     std::string owner;
@@ -333,8 +374,10 @@ struct Host {
     std::optional<PolicySnapshot> policy;
     std::shared_ptr<ProgramCompiler> compiler;
     RunBudget default_budget;
+    std::shared_ptr<ProgramStore>           programs;
     std::shared_ptr<ProgramTransitionStore> transitions;
     std::shared_ptr<ProgramCatalog>         catalog;
+    std::shared_ptr<ProgramSynthesisGateway> synthesis_gateway;
     std::unique_ptr<ProgramRuntime>         runtime;
     // The handles of the runs this object started, by run id, for cancel. A run that reached its end is forgotten.
     std::map<std::string, ProgramHandle> live;
@@ -345,7 +388,35 @@ struct Host {
     // The forks of one paused run take their turns (see fork_handle), one lock per paused run. A lock lives while a fork holds
     // or awaits it, and its entry is dropped by the next fork that finds it expired.
     std::map<std::string, std::weak_ptr<neograph::program::detail::OperationLock>> fork_turns;
+    std::map<std::string, std::weak_ptr<neograph::program::detail::OperationLock>> handoff_turns;
+    std::map<std::string, ProgramHandoff> held_handoffs;
+    std::map<std::string, std::vector<std::function<void()>>> start_waiters;
+    std::map<std::string, std::vector<std::function<void()>>> handoff_waiters;
+    std::map<std::string, ProgramChildSynthesisGrant> synthesis_grants;
+    std::map<std::string, ProgramSynthesisSemanticDecision> synthesis_decisions;
+    // Runs whose held handoff a synthesis is using: releasing, replacing or cancelling them waits for it to finish.
+    std::set<std::string> handoffs_in_use;
     bool closed = false;
+
+    static void wake_waiters(std::map<std::string, std::vector<std::function<void()>>>& map,
+                             const std::string& run_id) {
+        const auto found = map.find(run_id);
+        if (found == map.end()) return;
+        auto waiters = std::move(found->second);
+        map.erase(found);
+        for (auto& wake : waiters)
+            if (wake) asio::post(loop().executor(), std::move(wake));
+    }
+
+    static asio::awaitable<void> wait_on(std::map<std::string, std::vector<std::function<void()>>>& map,
+                                         const std::string& run_id) {
+        co_await asio::async_initiate<const asio::use_awaitable_t<>, void()>(
+            [&map, run_id](auto handler) {
+                auto shared = std::make_shared<std::decay_t<decltype(handler)>>(std::move(handler));
+                map[run_id].push_back([shared]() mutable { (*shared)(); });
+            },
+            asio::use_awaitable);
+    }
 
     Host(const json& config, int stores_handle) {
         owner = config.value("owner", "js:programs");
@@ -356,7 +427,6 @@ struct Host {
         const auto javascript = javascript_options_from(config.value("javascript", json()));
         policy.emplace(make_policy(profile, owner, limits_of(ceiling)));
 
-        std::shared_ptr<ProgramStore>           programs;
         std::shared_ptr<const ModuleStore>      modules;
         std::shared_ptr<TaskGraphFragmentStore> fragments;
 #ifdef NEOGRAPH_JS_STORES
@@ -397,6 +467,24 @@ struct Host {
         catalog_config.module_store      = modules;
         catalog                          = std::make_shared<ProgramCatalog>(std::move(catalog_config));
 
+        ProgramSynthesisGatewayConfig synthesis_config;
+        synthesis_config.compiler                    = compiler;
+        synthesis_config.catalog                     = catalog;
+        // The decision is the host's own (synthesizeChild's `semanticDecision`); the module decides nothing itself. The
+        // gateway accepts it only when it names the validator and contract of the host's grant.
+        synthesis_config.validate_semantics = [this](const ProgramSynthesisProposal& proposal, const ProgramBundle&,
+                                                     const ProgramSynthesisReservation&) {
+            const auto found = synthesis_decisions.find(proposal.id());
+            if (found == synthesis_decisions.end())
+                throw std::invalid_argument("synthesizeChild() needs the host's semanticDecision for the proposal");
+            return found->second;
+        };
+        synthesis_config.admission = [this](const ProgramSynthesisProposal&, const ProgramBundle&,
+                                            const ProgramSynthesisReservation&) {
+            return ProgramAdmission{owner, profile, *policy, {}};
+        };
+        synthesis_gateway = std::make_shared<ProgramSynthesisGateway>(std::move(synthesis_config));
+
         RuntimeConfig runtime_config;
         runtime_config.catalog             = catalog;
         runtime_config.checkpoints         = std::make_shared<graph::InMemoryCheckpointStore>();
@@ -404,6 +492,24 @@ struct Host {
         runtime_config.task_graph_fragments = fragments;
         runtime_config.executor            = loop().executor();
         runtime_config.javascript_stack_bytes = javascript.stack_bytes;
+        runtime_config.child_synthesis_gateway = synthesis_gateway;
+        runtime_config.child_synthesis_grant_resolver =
+            [this](std::string_view scope, std::string_view parent_run, std::string_view grant_id)
+                -> std::optional<ProgramChildSynthesisGrant> {
+            if (scope != owner) return std::nullopt;
+            const auto found = synthesis_grants.find(std::string(grant_id));
+            if (found == synthesis_grants.end() || found->second.data().parent_run_id != parent_run) return std::nullopt;
+            return found->second;
+        };
+        runtime_config.checkpoint_handler = [this](ProgramHandle handle, ProgramHandoff lease) {
+            if (closed) return;
+            const auto run_id = handle.run_id();
+            live.insert_or_assign(run_id, handle);
+            held_handoffs.insert_or_assign(run_id, std::move(lease));
+            wake_waiters(start_waiters, run_id);
+            wake_waiters(handoff_waiters, run_id);
+            wake_waiters(handoff_waiters, "");
+        };
         runtime = std::make_unique<ProgramRuntime>(std::move(runtime_config));
     }
 
@@ -433,6 +539,7 @@ struct Host {
         const auto run_id = handle.run_id();
         live.insert_or_assign(run_id, handle);
         starting.erase(run_id);
+        wake_waiters(start_waiters, run_id);
         if (cancel_requested.erase(run_id) != 0) {
             auto copy = handle;
             (void)co_await copy.cancel_async();
@@ -441,26 +548,54 @@ struct Host {
     void abandoned(const std::string& run_id) {
         starting.erase(run_id);
         cancel_requested.erase(run_id);
+        wake_waiters(start_waiters, run_id);
+        wake_waiters(handoff_waiters, run_id);
     }
     void settle(const ProgramResult& result) {
         // An interrupted run waits for its answer: its handle stays. Any other end forgets it.
-        if (result.status() != ProgramTerminalStatus::Interrupted) live.erase(result.run_id());
+        if (result.status() != ProgramTerminalStatus::Interrupted) {
+            live.erase(result.run_id());
+            held_handoffs.erase(result.run_id());
+        }
+        wake_waiters(handoff_waiters, result.run_id());
+        wake_waiters(handoff_waiters, "");
+    }
+
+    static ProgramSource source_from(const json& source, const std::string& fallback_name = "js:program") {
+        if (source.is_string()) return ProgramSource::from_javascript(fallback_name, source.get<std::string>());
+        if (!source.is_object()) throw std::invalid_argument("a Program source is {javascript: text} or {document: object}");
+        const std::string name = source.value("name", fallback_name);
+        if (source.contains("javascript"))
+            return ProgramSource::from_javascript(name, source.at("javascript").get<std::string>());
+        if (source.contains("document")) {
+            const auto& document = source.at("document");
+            return ProgramSource::from_cpp_builder(
+                name, document.value("program_schema_version", PROGRAM_SCHEMA_VERSION_V1), document);
+        }
+        throw std::invalid_argument("a Program source is {javascript: text} or {document: object}");
     }
 
     asio::awaitable<json> admit(json source) {
-        std::optional<ProgramSource> program;
-        const std::string name = source.value("name", "js:program");
-        if (source.contains("javascript"))
-            program.emplace(ProgramSource::from_javascript(name, source.at("javascript").get<std::string>()));
-        else if (source.contains("document")) {
-            const auto& document = source.at("document");
-            program.emplace(ProgramSource::from_cpp_builder(
-                name, document.value("program_schema_version", PROGRAM_SCHEMA_VERSION_V1), document));
+        const std::string name    = source.is_object() ? source.value("name", "js:program") : "js:program";
+        const auto        program = source_from(source, name);
+        // The host's budget for runs of this version: `budget` is the exact grant, `budgetBounds` ({minimum, maximum})
+        // the range a grant may take (a replacement carries the remaining budget, which is below the first grant).
+        // Members either leaves out keep the host's default budget (maximum) or nothing (minimum). Without them the
+        // source's own declaration applies, as before.
+        std::optional<ProgramBundle> bundle;
+        const bool javascript_source = source.is_object() && program.kind() == SourceKind::JavaScript;
+        if (javascript_source && source.contains("budgetBounds")) {
+            const auto& bounds = source.at("budgetBounds");
+            if (!bounds.is_object()) throw std::invalid_argument("budgetBounds is {minimum, maximum}");
+            bundle.emplace(compiler->compile(
+                program, ProgramBudgetBounds{budget_from(bounds.value("minimum", json::object()), RunBudget{}),
+                                             budget_from(bounds.value("maximum", json::object()), default_budget)}));
+        } else if (javascript_source && source.contains("budget")) {
+            bundle.emplace(compiler->compile(program, budget_from(source.at("budget"), default_budget)));
         } else {
-            throw std::invalid_argument("a Program source is {javascript: text} or {document: object}");
+            bundle.emplace(compiler->compile(program));
         }
-        const auto bundle = compiler->compile(*program);
-        auto version = co_await catalog->admit_async(bundle, ProgramAdmission{owner, profile, *policy, {}});
+        auto version = co_await catalog->admit_async(*bundle, ProgramAdmission{owner, profile, *policy, {}});
         co_return json{{"id", version.id()}, {"bundleId", version.bundle_id()}, {"name", name}};
     }
 
@@ -533,6 +668,324 @@ struct Host {
         return made;
     }
 
+    std::shared_ptr<neograph::program::detail::OperationLock> handoff_turns_of(const std::string& run_id) {
+        auto& slot = handoff_turns[run_id];
+        if (auto held = slot.lock()) return held;
+        auto made = std::make_shared<neograph::program::detail::OperationLock>();
+        slot      = made;
+        std::erase_if(handoff_turns, [](const auto& entry) { return entry.second.expired(); });
+        return made;
+    }
+
+    asio::awaitable<ProgramHandle> wait_for_handle(const std::string& run_id) {
+        while (starting.contains(run_id) && !live.contains(run_id)) {
+            co_await wait_on(start_waiters, run_id);
+        }
+        if (const auto found = live.find(run_id); found != live.end()) co_return found->second;
+        auto reconnected = co_await runtime->reconnect_async(owner, run_id);
+        live.insert_or_assign(run_id, reconnected);
+        co_return reconnected;
+    }
+
+    asio::awaitable<ProgramHandoff*> acquire_handoff(const std::string& run_id) {
+        const auto turns = handoff_turns_of(run_id);
+        const auto turn  = co_await turns->lock_async();
+        if (run_id.empty()) {
+            while (!closed) {
+                for (auto& [_, lease] : held_handoffs)
+                    if (lease) {
+                        (void)co_await lease.wait_async();
+                        co_return &lease;
+                    }
+                if (live.empty() && starting.empty()) break;
+                co_await wait_on(handoff_waiters, "");
+            }
+            throw std::invalid_argument("no active run with a held checkpoint handoff");
+        }
+        if (const auto found = held_handoffs.find(run_id); found != held_handoffs.end() && found->second) {
+            (void)co_await found->second.wait_async();
+            co_return &found->second;
+        }
+        auto handle = co_await wait_for_handle(run_id);
+        while (!closed) {
+            if (const auto found = held_handoffs.find(run_id); found != held_handoffs.end() && found->second) {
+                (void)co_await found->second.wait_async();
+                co_return &found->second;
+            }
+            if (handle.try_result().has_value()) break;
+            if (const auto record = co_await transitions->load(owner, run_id);
+                record && record->terminal_result().has_value()) {
+                break;
+            }
+            co_await wait_on(handoff_waiters, run_id);
+        }
+        throw std::invalid_argument("no active run with a held checkpoint handoff");
+    }
+
+    static json handoff_json(const ExactProgramHandoffReference& ref, const json& value) {
+        return json{{"runId", ref.source_run_id},
+                    {"journalHead", ref.source_journal_head},
+                    {"coordinateId", ref.command_coordinate_id},
+                    {"entryId", ref.command_entry_id},
+                    {"value", value}};
+    }
+
+    asio::awaitable<json> handoff(json options) {
+        const auto run_id = options.is_string()
+                                ? options.get<std::string>()
+                                : (options.is_object() && options.contains("runId") && options.at("runId").is_string()
+                                       ? options.at("runId").get<std::string>()
+                                       : std::string{});
+        const auto* lease = co_await acquire_handoff(run_id);
+        co_return handoff_json(lease->reference(), lease->value());
+    }
+
+    asio::awaitable<json> release_handoff(std::string run_id) {
+        if (handoffs_in_use.contains(run_id))
+            throw std::invalid_argument("run " + run_id + " has a synthesis in progress on its handoff");
+        const auto found = held_handoffs.find(run_id);
+        if (found == held_handoffs.end() || !found->second) co_return json(false);
+        held_handoffs.erase(found);
+        co_return json(true);
+    }
+
+    asio::awaitable<ExactProgramHandoff> resolve_handoff_for_replace(const std::string& source_run) {
+        if (held_handoffs.contains(source_run) || live.contains(source_run) || starting.contains(source_run)) {
+            const auto* lease = co_await acquire_handoff(source_run);
+            co_return ExactProgramHandoff{lease->reference(), lease->value()};
+        }
+        const auto record   = co_await transitions->load(owner, source_run);
+        const auto commands = co_await transitions->load_javascript_commands(owner, source_run);
+        if (!record || commands.empty() || !commands.back().completed() ||
+            commands.back().command().kind() != JavaScriptCommandKind::Checkpoint) {
+            throw std::invalid_argument("no checkpoint handoff for run " + source_run);
+        }
+        const auto& checkpoint = commands.back();
+        co_return ExactProgramHandoff{
+            ExactProgramHandoffReference{source_run, record->journal_head(), checkpoint.coordinate_id(), checkpoint.id()},
+            checkpoint.command().arguments().value("value", json())};
+    }
+
+    asio::awaitable<json> replace(json options, int call) {
+        const auto source_run = options.at("runId").get<std::string>();
+        const auto new_run    = options.at("newRunId").get<std::string>();
+        const auto version    = options.at("version").get<std::string>();
+        begin_run(new_run);
+        std::optional<ProgramHandle> handle;
+        try {
+            handle.emplace(co_await replace_handle(std::move(options), call, source_run, new_run, version));
+        } catch (...) {
+            abandoned(new_run);
+            throw;
+        }
+        co_await arrived(*handle);
+        auto result = co_await handle->wait_async();
+        settle(result);
+        co_return result_json(result);
+    }
+
+    asio::awaitable<ProgramHandle> replace_handle(json options, int call, std::string source_run,
+                                                  std::string new_run, std::string version) {
+        std::shared_ptr<ProgramEventSink> sink;
+        if (options.value("stream", false)) sink = std::make_shared<JsEventSink>(call);
+        auto resolved = co_await resolve_handoff_for_replace(source_run);
+        if (options.contains("journalHead"))
+            resolved.reference.source_journal_head = options.at("journalHead").get<std::string>();
+        if (options.contains("coordinateId"))
+            resolved.reference.command_coordinate_id = options.at("coordinateId").get<std::string>();
+        if (options.contains("entryId"))
+            resolved.reference.command_entry_id = options.at("entryId").get<std::string>();
+
+        const auto made = co_await transitions->load(owner, new_run);
+        RunBudget base_budget = default_budget;
+        if (made) {
+            base_budget = made->invocation().budget;
+        } else if (const auto lineage = co_await transitions->load_run_lineage(owner, source_run)) {
+            base_budget = lineage->remaining_budget();
+        }
+        json input = options.value("input", json::object());
+        if (input.is_object()) {
+            if (!input.contains("handoff")) input["handoff"] = resolved.value;
+            if (!input.contains("previous_run_id")) input["previous_run_id"] = source_run;
+        }
+        auto request = invocation(options, version, new_run,
+                                  budget_from(options.value("budget", json::object()), base_budget),
+                                  std::move(input));
+        request.idempotency_key = "js-replace:" + new_run;
+        request.validate();
+        // The exact reference: a refused replacement leaves the source run, and the hold on it, as they were.
+        if (handoffs_in_use.contains(source_run))
+            throw std::invalid_argument("run " + source_run + " has a synthesis in progress on its handoff");
+        auto handle = co_await runtime->replace_async(std::move(resolved.reference), std::move(request), std::move(sink));
+        held_handoffs.erase(source_run);
+        co_return handle;
+    }
+
+    asio::awaitable<json> migrate_graph(json options, int call) {
+        const auto source_run = options.at("runId").get<std::string>();
+        const auto new_run    = options.at("newRunId").get<std::string>();
+        const auto version    = options.at("version").get<std::string>();
+        begin_run(new_run);
+        std::optional<ProgramHandle> handle;
+        try {
+            handle.emplace(co_await migrate_graph_handle(std::move(options), call, source_run, new_run, version));
+        } catch (...) {
+            abandoned(new_run);
+            throw;
+        }
+        co_await arrived(*handle);
+        auto result = co_await handle->wait_async();
+        settle(result);
+        co_return result_json(result);
+    }
+
+    asio::awaitable<ProgramHandle> migrate_graph_handle(json options, int call, std::string source_run,
+                                                        std::string new_run, std::string version) {
+        std::shared_ptr<ProgramEventSink> sink;
+        if (options.value("stream", false)) sink = std::make_shared<JsEventSink>(call);
+        auto source = co_await wait_for_handle(source_run);
+        std::optional<GraphSemanticMigrationAdapter> adapter;
+        // A semantic adapter only when the host asks for one, as in the C++ API.
+        if (options.value("semanticAdapter", false)) {
+            if (const auto record = co_await transitions->load(owner, source_run)) {
+                const auto source_ver = co_await catalog->resolve_version_async(owner, record->program_version_id());
+                const auto target_ver = co_await catalog->resolve_version_async(owner, version);
+                if (source_ver && target_ver && source_ver->id() != target_ver->id()) {
+                    const auto source_bundle = co_await programs->get_bundle(source_ver->bundle_id());
+                    const auto target_bundle = co_await programs->get_bundle(target_ver->bundle_id());
+                    if (source_bundle && target_bundle) {
+                        adapter.emplace(GraphSemanticMigrationAdapter::prepare(
+                            *source_ver, *source_bundle, *target_ver, *target_bundle));
+                    }
+                }
+            }
+        }
+        ProgramGraphMigrationTarget target{version, new_run, std::move(sink), std::move(adapter)};
+        co_return co_await runtime->migrate_graph_async(source, std::move(target));
+    }
+
+    asio::awaitable<json> synthesize_child(json options) {
+        const auto parent_run   = options.at("runId").get<std::string>();
+        const auto binding_name = options.contains("binding") ? options.at("binding").get<std::string>()
+                                                              : options.at("bindingName").get<std::string>();
+        const json source_spec  = options.contains("source") ? options.at("source") : options;
+        const auto child_source = source_from(source_spec, "js:child:" + binding_name);
+
+        auto parent_handle = co_await wait_for_handle(parent_run);
+        auto* lease        = co_await acquire_handoff(parent_run);
+        // The hold stays this synthesis's until it returns: no release, replacement or cancellation frees it meanwhile.
+        if (!handoffs_in_use.insert(parent_run).second)
+            throw std::invalid_argument("run " + parent_run + " has a synthesis in progress on its handoff");
+        struct InUse {
+            std::set<std::string>& runs;
+            std::string            run;
+            ~InUse() { runs.erase(run); }
+        } in_use{handoffs_in_use, parent_run};
+        const auto parent_record  = co_await transitions->load(owner, parent_run);
+        const auto parent_lineage = co_await transitions->load_run_lineage(owner, parent_run);
+        if (!parent_record || !parent_lineage) throw std::invalid_argument("no active run " + parent_run);
+        const auto parent_version = co_await catalog->resolve_version_async(owner, parent_record->program_version_id());
+        if (!parent_version) throw std::invalid_argument("no parent version for run " + parent_run);
+
+        // What the child asks for (`budget`, `requestedCapabilities`, `requestedEffects`) and what the host allows it
+        // (`grant`) are separate: the host's grant and semantic decision are never made from the request.
+        if (!options.contains("budget"))
+            throw std::invalid_argument("synthesizeChild() needs the child's budget");
+        const auto child_budget = budget_from(options.at("budget"), RunBudget{});
+        std::vector<std::string> requested_capabilities;
+        std::vector<std::string> requested_effects;
+        const auto read_tokens = [](const json& container, std::string_view key, std::vector<std::string>& out) {
+            if (!container.is_object() || !container.contains(std::string(key))) return;
+            const auto& arr = container.at(std::string(key));
+            if (!arr.is_array()) throw std::invalid_argument(std::string(key) + " must be an array of strings");
+            out.clear();
+            for (const auto& item : arr) {
+                if (!item.is_string()) throw std::invalid_argument(std::string(key) + " must be an array of strings");
+                out.push_back(item.get<std::string>());
+            }
+        };
+        read_tokens(source_spec, "capabilities", requested_capabilities);
+        read_tokens(source_spec, "requestedCapabilities", requested_capabilities);
+        read_tokens(options, "capabilities", requested_capabilities);
+        read_tokens(options, "requestedCapabilities", requested_capabilities);
+        read_tokens(source_spec, "effects", requested_effects);
+        read_tokens(source_spec, "requestedEffects", requested_effects);
+        read_tokens(options, "effects", requested_effects);
+        read_tokens(options, "requestedEffects", requested_effects);
+
+        ProgramSynthesisProposalData proposal_data;
+        proposal_data.owner_scope            = owner;
+        proposal_data.lineage_id             = parent_lineage->lineage_id();
+        proposal_data.parent_run_id          = parent_run;
+        proposal_data.source                 = child_source;
+        proposal_data.requested_capabilities = requested_capabilities;
+        proposal_data.requested_effects      = requested_effects;
+        proposal_data.requested_budget       = child_budget;
+        proposal_data.created_at_ms          = std::max<std::int64_t>(0, parent_record->updated_at_ms());
+        const auto proposal = ProgramSynthesisProposal::create(std::move(proposal_data));
+
+        if (!options.contains("grant") || !options.at("grant").is_object())
+            throw std::invalid_argument("synthesizeChild() needs the host's grant");
+        if (!options.contains("semanticDecision") || !options.at("semanticDecision").is_object())
+            throw std::invalid_argument("synthesizeChild() needs the host's semanticDecision");
+        const auto& granted  = options.at("grant");
+        const auto& decision = options.at("semanticDecision");
+        const auto  text     = [](const json& container, const char* key, const char* what) {
+            if (!container.contains(key) || !container.at(key).is_string())
+                throw std::invalid_argument(std::string(what) + "." + key + " must be a string");
+            return container.at(key).get<std::string>();
+        };
+        ProgramChildSynthesisGrantData grant_data;
+        grant_data.owner_scope                 = owner;
+        grant_data.parent_run_id               = parent_run;
+        grant_data.parent_program_version_id   = parent_version->id();
+        grant_data.parent_policy_fingerprint   = parent_version->policy_snapshot().fingerprint();
+        grant_data.lineage_id                  = parent_lineage->lineage_id();
+        grant_data.expected_lineage_head_id    = parent_lineage->id();
+        grant_data.template_identity           = text(granted, "templateIdentity", "grant");
+        grant_data.reviewed_source_identity    = program_synthesis_source_identity(child_source);
+        grant_data.semantic_validator_identity = text(granted, "validatorIdentity", "grant");
+        grant_data.semantic_contract_identity  = text(granted, "contractIdentity", "grant");
+        read_tokens(granted, "allowedCapabilities", grant_data.allowed_capabilities);
+        read_tokens(granted, "allowedEffects", grant_data.allowed_effects);
+        if (!granted.contains("childBudget"))
+            throw std::invalid_argument("grant.childBudget must be a budget");
+        grant_data.child_budget_ceiling        = budget_from(granted.at("childBudget"), RunBudget{});
+        grant_data.minimum_execution_guarantee = parent_version->execution_guarantee();
+        const auto grant = ProgramChildSynthesisGrant::create(std::move(grant_data));
+        synthesis_grants.insert_or_assign(grant.id(), grant);
+        if (!decision.contains("accepted") || !decision.at("accepted").is_boolean())
+            throw std::invalid_argument("semanticDecision.accepted must be a boolean");
+        synthesis_decisions.insert_or_assign(
+            proposal.id(),
+            ProgramSynthesisSemanticDecision{text(decision, "validatorIdentity", "semanticDecision"),
+                                             text(decision, "contractIdentity", "semanticDecision"),
+                                             decision.at("accepted").get<bool>(),
+                                             decision.value("evidence", json::object())});
+
+        struct DecisionUsed {
+            std::map<std::string, ProgramSynthesisSemanticDecision>& decisions;
+            std::string                                               proposal_id;
+            ~DecisionUsed() { decisions.erase(proposal_id); }
+        } decision_used{synthesis_decisions, proposal.id()};
+        const auto record = co_await runtime->prepare_child_synthesis_async(
+            owner, parent_handle, *lease, proposal, grant, binding_name);
+        const auto& artifacts = record.data().artifacts;
+        std::string version_id;
+        std::string bundle_id;
+        if (artifacts.contains("version") && artifacts.at("version").contains("id"))
+            version_id = artifacts.at("version").at("id").get<std::string>();
+        if (artifacts.contains("bundle") && artifacts.at("bundle").contains("id"))
+            bundle_id = artifacts.at("bundle").at("id").get<std::string>();
+        co_return json{{"id", record.id()},
+                       {"binding", binding_name},
+                       {"state", std::string(child_synthesis_state_name(record.data().state))},
+                       {"versionId", version_id},
+                       {"bundleId", bundle_id},
+                       {"proposalId", proposal.id()},
+                       {"grantId", grant.id()}};
+    }
+
     // What a fork of `source_run` that runs as `new_run` is given unless its options say otherwise. A fork that was made
     // before has the amounts its record holds, which are what the runtime compares a repeated request with: the same fork
     // again is the same fork, and the share is not taken a second time from what the forks since then left. Otherwise it is
@@ -568,6 +1021,9 @@ struct Host {
     }
 
     asio::awaitable<json> cancel(std::string run_id) {
+        if (handoffs_in_use.contains(run_id))
+            throw std::invalid_argument("run " + run_id + " has a synthesis in progress on its handoff");
+        held_handoffs.erase(run_id);
         const auto found = live.find(run_id);
         if (starting.contains(run_id)) {
             // A call is starting for this run. When an earlier attempt of the run is still executing, that is the run to
@@ -615,6 +1071,21 @@ asio::awaitable<json> resume_op(std::shared_ptr<Host> host, json options, int ca
 }
 asio::awaitable<json> fork_op(std::shared_ptr<Host> host, json options, int call) {
     co_return co_await host->fork(std::move(options), call);
+}
+asio::awaitable<json> handoff_op(std::shared_ptr<Host> host, json options) {
+    co_return co_await host->handoff(std::move(options));
+}
+asio::awaitable<json> release_handoff_op(std::shared_ptr<Host> host, std::string run) {
+    co_return co_await host->release_handoff(std::move(run));
+}
+asio::awaitable<json> replace_op(std::shared_ptr<Host> host, json options, int call) {
+    co_return co_await host->replace(std::move(options), call);
+}
+asio::awaitable<json> migrate_graph_op(std::shared_ptr<Host> host, json options, int call) {
+    co_return co_await host->migrate_graph(std::move(options), call);
+}
+asio::awaitable<json> synthesize_child_op(std::shared_ptr<Host> host, json options) {
+    co_return co_await host->synthesize_child(std::move(options));
 }
 asio::awaitable<json> cancel_op(std::shared_ptr<Host> host, std::string run) { co_return co_await host->cancel(std::move(run)); }
 asio::awaitable<json> result_op(std::shared_ptr<Host> host, std::string run) { co_return co_await host->result(std::move(run)); }
@@ -677,6 +1148,36 @@ extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_fork(int handle, int call, const
     });
 }
 
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_handoff(int handle, int call, const char* options_json) {
+    return begin(handle, call, [options = std::string(options_json)](std::shared_ptr<Host> host) {
+        return handoff_op(std::move(host), json::parse(options));
+    });
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_release_handoff(int handle, int call, const char* run_id) {
+    return begin(handle, call, [run = std::string(run_id)](std::shared_ptr<Host> host) {
+        return release_handoff_op(std::move(host), run);
+    });
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_replace(int handle, int call, const char* options_json) {
+    return begin(handle, call, [options = std::string(options_json), call](std::shared_ptr<Host> host) {
+        return replace_op(std::move(host), json::parse(options), call);
+    });
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_migrate_graph(int handle, int call, const char* options_json) {
+    return begin(handle, call, [options = std::string(options_json), call](std::shared_ptr<Host> host) {
+        return migrate_graph_op(std::move(host), json::parse(options), call);
+    });
+}
+
+extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_synthesize_child(int handle, int call, const char* options_json) {
+    return begin(handle, call, [options = std::string(options_json)](std::shared_ptr<Host> host) {
+        return synthesize_child_op(std::move(host), json::parse(options));
+    });
+}
+
 extern "C" EMSCRIPTEN_KEEPALIVE int ng_programs_cancel(int handle, int call, const char* run_id) {
     return begin(handle, call, [run = std::string(run_id)](std::shared_ptr<Host> host) {
         return cancel_op(std::move(host), run);
@@ -696,6 +1197,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void ng_programs_release(int handle) {
     auto host    = found->second;
     host->closed = true;
     hosts.erase(found);
+    host->held_handoffs.clear();
     for (const auto& id : host->starting) host->cancel_requested.insert(id);
     // A run that is executing is cancelled. One that waits at an interrupt stays as it is in the stores.
     for (auto& [id, run] : host->live)

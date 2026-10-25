@@ -353,6 +353,88 @@ export async function load(options = {}) {
     }
 
     /**
+     * Waits for the run to reach a held `ng.checkpoint(value)` handoff and resolves with
+     * `{ runId, journalHead, coordinateId, entryId, value }`.
+     */
+    handoff() {
+      return sendJson(this.#host, module._ng_programs_handoff, { runId: this.#id });
+    }
+
+    /**
+     * Releases the held checkpoint handoff on this run so that execution continues past `ng.checkpoint(...)`.
+     * Resolves with whether a held handoff was released.
+     */
+    releaseHandoff() {
+      return invoke(this.#host, (callId) =>
+        withString(this.#id, (text) => module._ng_programs_release_handoff(this.#host.handle, callId, text)));
+    }
+
+    /**
+     * Replaces this run at its held checkpoint handoff with another admitted `version`, transferring its lineage and
+     * remaining budget. Returns the replacement `ProgramRun`.
+     * @param {string | {id: string}} version
+     * @param {{input?: object, budget?: object, runId?: string, journalHead?: string, coordinateId?: string, entryId?: string, traceId?: string, onEvent?: (event: object) => void, signal?: AbortSignal}} [options]
+     */
+    replace(version, options = {}) {
+      const { input, budget, runId = newRunId(), journalHead, coordinateId, entryId, traceId } = options;
+      const versionId = typeof version === 'string' ? version : version?.id;
+      if (typeof versionId !== 'string' || versionId === '') {
+        throw new NeoGraphError({ message: 'replace() needs a version: what admit() resolved with, or its id' });
+      }
+      const source = this.#id;
+      return new ProgramRun(this.#host, runId, versionId, (send) => send(module._ng_programs_replace, {
+        runId: source, newRunId: runId, version: versionId,
+        ...(input !== undefined && { input }), ...(budget !== undefined && { budget }),
+        ...(journalHead !== undefined && { journalHead }),
+        ...(coordinateId !== undefined && { coordinateId }),
+        ...(entryId !== undefined && { entryId }),
+        ...(traceId !== undefined && { traceId }),
+      }), { onEvent: options.onEvent, signal: options.signal, what: 'replace' });
+    }
+
+    /**
+     * Migrates a live root Core graph run at a safe point to another compatible admitted `version`. Returns the migrated
+     * `ProgramRun`.
+     * @param {string | {id: string}} version
+     * @param {{runId?: string, semanticAdapter?: boolean, onEvent?: (event: object) => void, signal?: AbortSignal}} [options]
+     */
+    migrateGraph(version, options = {}) {
+      const { runId = newRunId(), semanticAdapter } = options;
+      const versionId = typeof version === 'string' ? version : version?.id;
+      if (typeof versionId !== 'string' || versionId === '') {
+        throw new NeoGraphError({ message: 'migrateGraph() needs a version: what admit() resolved with, or its id' });
+      }
+      const source = this.#id;
+      return new ProgramRun(this.#host, runId, versionId, (send) => send(module._ng_programs_migrate_graph, {
+        runId: source, newRunId: runId, version: versionId,
+        ...(semanticAdapter !== undefined && { semanticAdapter }),
+      }), { onEvent: options.onEvent, signal: options.signal, what: 'migrateGraph' });
+    }
+
+    /**
+     * Compiles, admits and binds a synthesized child Program under `binding` while this parent run is held at a
+     * checkpoint handoff.
+     * @param {string | {binding?: string, bindingName?: string, source?: string | object, javascript?: string, document?: object, budget?: object}} bindingOrOptions
+     * @param {string | object} [maybeSource]
+     * @param {{budget?: object}} [maybeOptions]
+     */
+    synthesizeChild(bindingOrOptions, maybeSource, maybeOptions = {}) {
+      let payload;
+      if (typeof bindingOrOptions === 'string') {
+        const source = typeof maybeSource === 'string' ? { javascript: maybeSource } : maybeSource;
+        payload = { ...maybeOptions, runId: this.#id, binding: bindingOrOptions, source };
+      } else {
+        const { source, ...rest } = bindingOrOptions ?? {};
+        payload = {
+          ...rest,
+          runId: this.#id,
+          ...(source !== undefined && { source: typeof source === 'string' ? { javascript: source } : source }),
+        };
+      }
+      return sendJson(this.#host, module._ng_programs_synthesize_child, payload);
+    }
+
+    /**
      * Cancels the run. Resolves with whether this call cancelled it (false when it had already ended). A resume or a fork
      * that has not been sent yet (it waits for the run it continues) is withdrawn instead, and its `result` rejects.
      */
@@ -410,6 +492,69 @@ export async function load(options = {}) {
     /** Starts a run and resolves with its result: `start(version, options).result`. */
     run(version, options) {
       return this.start(version, options).result;
+    }
+
+    /** Waits for `run` to reach a held checkpoint handoff and resolves with `{ runId, journalHead, coordinateId, entryId, value }`. */
+    handoff(run) {
+      const runId = typeof run === 'string' ? run : run?.id;
+      return sendJson(this.#host, module._ng_programs_handoff, { runId });
+    }
+
+    /** Releases a held checkpoint handoff on `run` so that execution continues. */
+    releaseHandoff(run) {
+      const runId = typeof run === 'string' ? run : run?.id;
+      return invoke(this.#host, (callId) =>
+        withString(runId, (text) => module._ng_programs_release_handoff(this.#host.handle, callId, text)));
+    }
+
+    /** Replaces `run` at its held checkpoint handoff with another admitted `version`. */
+    replace(run, version, options = {}) {
+      const source = typeof run === 'string' ? run : run?.id;
+      const { input, budget, runId = newRunId(), journalHead, coordinateId, entryId, traceId } = options;
+      const versionId = typeof version === 'string' ? version : version?.id;
+      if (typeof versionId !== 'string' || versionId === '') {
+        throw new NeoGraphError({ message: 'replace() needs a version: what admit() resolved with, or its id' });
+      }
+      return new ProgramRun(this.#host, runId, versionId, (send) => send(module._ng_programs_replace, {
+        runId: source, newRunId: runId, version: versionId,
+        ...(input !== undefined && { input }), ...(budget !== undefined && { budget }),
+        ...(journalHead !== undefined && { journalHead }),
+        ...(coordinateId !== undefined && { coordinateId }),
+        ...(entryId !== undefined && { entryId }),
+        ...(traceId !== undefined && { traceId }),
+      }), { onEvent: options.onEvent, signal: options.signal, what: 'replace' });
+    }
+
+    /** Migrates a live root Core graph `run` at a safe point to another compatible admitted `version`. */
+    migrateGraph(run, version, options = {}) {
+      const source = typeof run === 'string' ? run : run?.id;
+      const { runId = newRunId(), semanticAdapter } = options;
+      const versionId = typeof version === 'string' ? version : version?.id;
+      if (typeof versionId !== 'string' || versionId === '') {
+        throw new NeoGraphError({ message: 'migrateGraph() needs a version: what admit() resolved with, or its id' });
+      }
+      return new ProgramRun(this.#host, runId, versionId, (send) => send(module._ng_programs_migrate_graph, {
+        runId: source, newRunId: runId, version: versionId,
+        ...(semanticAdapter !== undefined && { semanticAdapter }),
+      }), { onEvent: options.onEvent, signal: options.signal, what: 'migrateGraph' });
+    }
+
+    /** Compiles, admits and binds a synthesized child Program while `run` is held at a checkpoint handoff. */
+    synthesizeChild(run, bindingOrOptions, maybeSource, maybeOptions = {}) {
+      const runId = typeof run === 'string' ? run : run?.id;
+      let payload;
+      if (typeof bindingOrOptions === 'string') {
+        const source = typeof maybeSource === 'string' ? { javascript: maybeSource } : maybeSource;
+        payload = { ...maybeOptions, runId, binding: bindingOrOptions, source };
+      } else {
+        const { source, ...rest } = bindingOrOptions ?? {};
+        payload = {
+          ...rest,
+          runId,
+          ...(source !== undefined && { source: typeof source === 'string' ? { javascript: source } : source }),
+        };
+      }
+      return sendJson(this.#host, module._ng_programs_synthesize_child, payload);
     }
 
     /**

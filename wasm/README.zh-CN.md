@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=8e30105731bb1ac98766f4394fa60e0e4f62118a6fc7b7636239550b62b97b13 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=dd949ff30b9730747c8a2ff1e975d2cc92aff7cc1ebbd49f36ca991a53444138 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -170,15 +170,47 @@ programs.release();
 
 - **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** 创建一个基于一个提供方和一套存储的 `Programs` 对象；提供方无效，或模块构建时不带 Program 支持，
   就抛出 `NeoGraphError`。`provider` 与 `compile` 相同，只多一项：`catalogue`，即 SDK 的模型目录（`{ version: 1, models: [...] }`），它叠加在内置目录之上。`owner` 为该对象的
-  Program 和运行划定范围。`stores` 是宿主自己的存储（[JavaScript 中的 Program 存储](#program-stores-in-javascript)）；省略的存储放在内存中。`limits` 是任何被准入的 Program 可获得的上限，
+  Program 和运行划定范围。`stores` 是宿主自己的存储（[JavaScript 中的 Program 存储](#program-stores-in-javascript)）；省略的存储放在内存中。`limits` 是宿主的上限，即任何被准入的 Program 可获得的上限（其默认值允许每次运行进行一次动态编译、子深度为四和四个子运行，即 `maxDynamicCompiles: 1`、`maxChildDepth: 4`、`maxTotalChildren: 4`；合成子运行或构建更深层级的宿主在此处调高 `maxDynamicCompiles`、`maxChildDepth` 和 `maxTotalChildren`），
   `budget` 是没有给出预算的运行所用的预算，二者的写法见下。`javascript` 是 `{ stackBytes, defineTimeMs }`，即控制源码可以使用的栈，以及 `define()` 可以运行的时间，在预算之后说明。
-- **`programs.admit(source)`** 编译并准入 Program，以 `{ id, bundleId, name }` 完成。`source` 是 JavaScript 控制源码的文本、`{ javascript, name }`，或者给已经是文档形式的 Program 用的
-  `{ document, name }`。被编译器或准入策略拒绝的源码，会以 `compile` 或 `admission` 类型的 `NeoGraphError` 被拒绝，其 `diagnostics` 列出 `{ code, message, pointer, witness }`。再次准入同一份源码，得到同一个版本。
+- **`programs.admit(source)`** 编译并准入 Program，以 `{ id, bundleId, name }` 完成。`source` 是 JavaScript 控制源码的文本、`{ javascript, name, budget }` 或 `{ javascript, name, budgetBounds: { minimum, maximum } }`（两者都存在时以 `budgetBounds` 为准），或者给已经是文档形式的 Program 用的
+  `{ document, name }`。`budget` 是授予该版本运行的精确预算；`budgetBounds` 是授权可取的范围，将被替换的版本需要它，因为替换会结转源运行的剩余预算，低于首次授权。省略的成员保持宿主的默认预算（`budget` 和 `budgetBounds.maximum`）或无（在 `budgetBounds.minimum` 中为 `0`，因此 `minimum` 必须设置结构下限成员）。最小值必须满足 Program 的结构下限（至少一次并发尝试、一个 Program 操作和一个 Core 步骤；当 Program 派发子运行时，至少一层深度和一个子运行），不满足的会被编译器拒绝。两者都未给出时，适用源码自身的声明。被编译器或准入策略拒绝的源码，会以 `compile` 或 `admission` 类型的 `NeoGraphError` 被拒绝，其 `diagnostics` 列出 `{ code, message, pointer, witness }`。再次准入相同的源码与预算范围会得到同一个版本；不同的 `budget` 或 `budgetBounds` 会编译出不同的包和版本。
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** 立即返回一个 `ProgramRun`。**`programs.run(version, options)`** 就是 `start(...).result`。
-- **`ProgramRun`** 有 `id`、`versionId`、`result`、`resume(value, options)`、`fork(value, options)` 和 `cancel()`。`result` 在运行结束或等待回答时完成；失败或被取消的运行以该状态完成，
+- **`ProgramRun`** 有 `id`、`versionId`、`result`、`resume(value, options)`、`fork(value, options)`、`handoff()`、`releaseHandoff()`、`replace(version, options)`、`migrateGraph(version, options)`、`synthesizeChild(binding, source, options)` 和 `cancel()`（`programs.handoff(run?)`、`programs.releaseHandoff(run)`、`programs.replace(run, version, options)`、`programs.migrateGraph(run, version, options)` 以及 `programs.synthesizeChild(run, binding, source, options)` 或 `programs.synthesizeChild(run, options)` 改为接受 run id 或 `{ id }`，不传运行的 `programs.handoff()` 则等待该对象上任意运行的下一次检查点 handoff）。`result` 在运行结束或等待回答时完成；失败或被取消的运行以该状态完成，
   只有调用本身无法发出时才被拒绝（未知的版本、超出该版本准入范围的预算、已经用过的 run id）。`resume` 回答运行所等待的中断，并返回 id 相同的 `ProgramRun`。`fork` 把同一次暂停作为新的运行
   （`options.runId` 为它命名）继续下去，带着它自己的回答，拿走暂停的运行所剩预算的一半（或 `options.budget` 所要求的数量，它必须给暂停的运行留下一些墙钟时间和 Core 步骤），并让暂停的运行仍可恢复；已经完成的节点不会再次运行。同一次暂停的多个分叉可以一起创建：它们依次轮流，每个分叉读取前面的分叉给暂停的运行留下的数量，并拿走其中的一半。要拿走暂停的运行所剩的全部墙钟时间或 Core 步骤的分叉会被拒绝（`P_FORK_SOURCE_BUDGET`），要求超过剩余数量的分叉也会被拒绝（`P_FORK_BUDGET`），两者都不是冲突。以同一个 `runId` 再次创建的分叉就是那个分叉，保有它最初得到的数量。已发出、在等待轮到自己时被取消的分叉，仍会在轮到它时拿走自己的份额，然后以取消结束。`cancel()` 以“这次调用是否取消了该运行”完成。
   尚未发出的 resume 或 fork（它在等待所继续的运行的结果）会被 `cancel()` 或已中止的 `signal` 撤回，其 `result` 以 `cancelled` 错误被拒绝；`signal` 一开始就已中止，则不会发出调用。
+- **`handoff`、`releaseHandoff`、`replace`、`migrateGraph` 和 `synthesizeChild`。** `handoff()` 等待运行到达 `ng.checkpoint(value)` 安全点并将其保持在那里，以 `{ runId, journalHead, coordinateId, entryId, value }` 完成（`releaseHandoff()` 释放保持状态让运行不经替换继续下去，并以布尔值完成）。`replace(version, { input, budget, runId, journalHead, coordinateId, entryId, traceId, onEvent, signal })` 把保持在检查点 handoff 处的运行替换为另一个已准入的 `version`（从源谱系的剩余预算出发，由 `options.budget` 覆盖指定字段，由 `journalHead`、`coordinateId` 和 `entryId` 覆盖 handoff 引用字段；当 `input` 为对象或省略时，不复制源运行的初始 `input` 而从 `{}` 开始，`input.handoff` 默认为检查点 `value`，`input.previous_run_id` 默认为源 `runId`），保留源运行的子运行以便替换代可以附着到它们之上，并返回替换后的 `ProgramRun`。`replace` 以 C++ 代码（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）拒绝，以带有该 `code` 和 `witness` 的 `NeoGraphError` 被拒绝，并使源运行及其保持状态（hold）维持原样。`migrateGraph(version, { runId, semanticAdapter?, onEvent, signal })` 在内存转换存储上迁移在线根 Core 图运行并返回迁移后的 `ProgramRun`；仅当 `semanticAdapter: true` 时才附着语义迁移适配器，没有适配器时目标必须是该运行自身已准入的版本或兼容版本（拒绝时为 `P_GRAPH_MIGRATION_*`；如下文所述，JavaScript 转换存储回答 `"conflict"`）。`synthesizeChild(binding, source, { budget, capabilities?, effects?, grant, semanticDecision })`（或包含 `binding` 与 `source` 的单个选项对象）在父运行保持于检查点 handoff 期间准备子版本，并以 `{ id, binding, state, versionId, bundleId, proposalId, grantId }` 完成。它需要子运行的 `budget` 以及宿主的 `grant`（`{ templateIdentity, validatorIdentity, contractIdentity, allowedCapabilities?, allowedEffects?, childBudget }`）和 `semanticDecision`（`{ validatorIdentity, contractIdentity, accepted, evidence? }`）；缺少它们即被拒绝；模块不会根据子运行的请求生成这两者中的任何一个；网关仅在决定指明 grant 的 validator 和 contract 时才接受该决定（请求的权限超出父运行或 grant 的范围时为 `P_CHILD_SYNTHESIS_AUTHORITY`）。在 `synthesizeChild` 使用某次运行被保持的 handoff 期间，直到它返回为止，对该运行的 `releaseHandoff`、`replace` 和 `cancel` 都会被拒绝，且在同一个保持状态（hold）上的第二次 `synthesizeChild` 也会被拒绝。运行会在每次模型调用之前预留这一上界，因此 `modelTokens` 必须足以覆盖模型调用的输入与输出上限。
+
+  ```js
+  // 宿主计算或存储 grant 的标识（"sha256:" + 64 位小写十六进制）。
+  const TEMPLATE_ID = await hostIdentity('child template');
+  const VALIDATOR_ID = await hostIdentity('semantic validator');
+  const CONTRACT_ID = await hostIdentity('semantic contract');
+  const hold = await parentRun.handoff();
+  const child = await parentRun.synthesizeChild('worker', CHILD_SOURCE, {
+    budget: {
+      wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+      maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+      maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+    },
+    grant: {
+      templateIdentity: TEMPLATE_ID,
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      childBudget: {
+        wallTimeMs: 20000, modelTokens: 5000, monetaryMicrounits: 1000,
+        maxConcurrency: 1, maxProgramOperations: 8, maxCoreSteps: 20,
+        maxDynamicCompiles: 0, maxChildDepth: 0, maxTotalChildren: 0,
+      },
+    },
+    semanticDecision: {
+      validatorIdentity: VALIDATOR_ID,
+      contractIdentity: CONTRACT_ID,
+      accepted: true,
+    },
+  });
+  await parentRun.releaseHandoff();
+  ```
 - **`programs.result(runId)`** 读取存储中关于某次运行的内容：它最新的结果（等待中的运行的暂停也算结果），还没有结果时为 `{ runId, status: 'running' }`，存储不认识该运行时为 `null`。**`programs.release()`** 取消正在执行的运行并释放对象，已经发出的调用先完成。
   在中断处等待的运行在存储中保持原样。
 - **结果**是 `{ runId, versionId, status, output, trace, usage, remainingBudget, checkpointId?, interrupt?, failure? }`。`status` 是 `completed`、`interrupted`、`cancelled`、`budget_exhausted`、
@@ -273,7 +305,7 @@ auto provider  = neograph::llm::SchemaProvider::create(descriptor, sp::runtime::
 
 模块导出 C API，`neograph.mjs` 对其进行封装。使用 JSON 字符串的 C API 不需要绑定库；Embind 会多出一个库和每个类型的注册，
 而接口只有几个函数：图用 `ng_compile`、`ng_run`、`ng_cancel`、`ng_release` 和 `ng_error`，Program 用 `ng_programs_create`、`ng_programs_admit`、`ng_programs_start`、
-`ng_programs_resume`、`ng_programs_fork`、`ng_programs_cancel`、`ng_programs_result` 和 `ng_programs_release`。结果通过回调返回，它们在宿主事件循环之后的回合中被调用：
+`ng_programs_resume`、`ng_programs_fork`、`ng_programs_handoff`、`ng_programs_release_handoff`、`ng_programs_replace`、`ng_programs_migrate_graph`、`ng_programs_synthesize_child`、`ng_programs_cancel`、`ng_programs_result` 和 `ng_programs_release`。结果通过回调返回，它们在宿主事件循环之后的回合中被调用：
 图用 `Module.ngOnEvent` 和 `Module.ngOnDone`，Program 用 `Module.ngProgramEvent` 和 `Module.ngProgramDone`。密钥是交给 `compile` 的提供方描述的一部分，由该图的 SDK
 客户端持有；它不在二进制文件中，不在任何结果中，也不在错误消息中。
 
@@ -494,6 +526,7 @@ CI 构建该模块，并在 Node 22 和 24 下运行以下测试，不需要网�
 - `test/program_stores_test.mjs`：模块的 `stores` 选项。参考存储原样、以及包装成在后续任务中应答，都能服务完整的生命周期（调用之间宿主的定时器继续运行）；被拒绝的调用、抛出的错误和不是值的值，
   都带着存储的消息和方法名 fail closed，且不调用模型；缺少必需方法的对象被拒绝；一个把变化写入日志的包装层，让第二个对象在由日志重放得到的存储之上读回已完成的运行，看到暂停的运行仍在暂停，
   并启动第一个对象的 Program；存储仍在应答时被取消的 fork 以取消结束，一起创建的 fork 依次拿走各自的份额；拼错的成员和缺少的谱系读取方法会被拒绝；释放对象会取消正在执行的运行，让等待的运行保持原样。
+- `test/program_replacement_test.mjs`：检查点 handoff（`handoff`、`releaseHandoff`），把保持在检查点处的运行 `replace` 为已准入的第二个版本（剩余预算结转、保留子运行），五种替换拒绝（`P_REPLACEMENT_AUTHORITY`、`P_REPLACEMENT_BUDGET`、`P_REPLACEMENT_TARGET`、`P_REPLACEMENT_INPUT`、`P_REPLACEMENT_HANDOFF`）及其 `witness` 与之后源运行及其保持状态（hold）维持原样，向运行自身已准入版本的 `migrateGraph` 及其守卫拒绝（相同 run id、不兼容的目标），带宿主 grant 与决定的 `synthesizeChild`、无 grant 时的拒绝以及 `P_CHILD_SYNTHESIS_AUTHORITY`，子运行在运行期间被替换的 `root -> child -> grandchild` 层级，以及在异步 JavaScript `stores` 对象上的检查点 handoff、`replace`、`synthesizeChild` 和该层级替换。
 - `test/workers_test.mjs`：以 `Request` 调用 Workers 示例导出的 `fetch` 处理程序，对着同一个服务器，分别缓冲和流式。它展示的是
   处理程序的逻辑及其对平台 API 的使用，并不是在 workerd 上运行。
 - `checks.cpp`（见下文）对宿主驱动的提供方运行一次同步运行，检查它被拒绝且没有发送任何东西。
