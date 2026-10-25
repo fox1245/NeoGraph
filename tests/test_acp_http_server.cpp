@@ -1293,6 +1293,7 @@ TEST(ACPHttpServer, EveryRouteNeedsTheAuthenticatorWhenOneIsSet) {
 
 TEST(ACPHttpServer, TheFactoryGetsThePrincipal) {
     std::mutex               mutex;
+    std::condition_variable  called;
     std::vector<std::string> principals;
     auto                     engine = build_engine(std::make_shared<Probe>(), std::make_shared<ACPClient>());
     ACPHttpConfig            config = test_config();
@@ -1306,6 +1307,7 @@ TEST(ACPHttpServer, TheFactoryGetsThePrincipal) {
                 std::lock_guard lock(mutex);
                 principals.emplace_back(principal);
             }
+            called.notify_all();
             ACPHttpConnection connection;
             connection.server = std::make_unique<ACPServer>(engine, json{{"name", "x"}});
             return connection;
@@ -1318,7 +1320,9 @@ TEST(ACPHttpServer, TheFactoryGetsThePrincipal) {
     WsAgent socket(server.port(), {{"Authorization", "Bearer dave"}});
     EXPECT_TRUE(socket.connect());
     {
-        std::lock_guard lock(mutex);
+        // The handshake answer goes out before the WebSocket handler asks the factory for the connection.
+        std::unique_lock lock(mutex);
+        called.wait_for(lock, kWait, [&] { return principals.size() >= 2; });
         ASSERT_EQ(principals.size(), 2u);
         EXPECT_EQ(principals[0], "carol");
         EXPECT_EQ(principals[1], "dave");
