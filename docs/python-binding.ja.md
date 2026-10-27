@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=c7e44f8d5761953d3ea6c22c6a7aec8ca992120ecabaab1015cd859bed8e1e2d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ja source_sha256=d7f6680b32da6e5a31a58b794fc2564ef606c41aa1e8fa0461fdd5a4be109fb5 -->
 # Pythonバインディング
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -630,6 +630,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 |---|---|---|
 | 静的な子のバインド | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`；未リンクの `ng.spawn` は `P_CHILD_BINDING` で失敗 |
 | 子の開始・復旧 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`、`host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 中断された子への応答 | `host.resume(child_run_id, value)`。id は `host.run_record(parent_run_id).children[i].child_run_id` から得ます。子を await する親は自動的に継続し、親のレコードが終了した後に `host.reconnect(parent_run_id)` で結果を読みます | 子の `ProgramHandle`。子で停止した親を `host.resume(parent_run_id, ...)` で再開したり reconcile したりすると `P_CHILD_INTERRUPTED` で拒否されます（witness `child_run_ids`） |
 | 合成バリデーターの登録 | `host.register_synthesis_validator(validate)`（`validate(proposal, bundle, reservation)` は `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` を返す） | 合成前に必須；登録済みのバリデーターがない場合はすべての合成が拒否される |
 | 子の合成 | `ProgramSynthesisProposal(...)`、`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`、`host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`、`host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`、`host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`、`host.synthesize(proposal)` | `ProgramChildSynthesisRecord`（`Bound`、または `P_CHILD_SYNTHESIS_SEMANTICS` を伴う `Failed`）；権限超過は `P_CHILD_SYNTHESIS_AUTHORITY` |
 | チェックポイントの保持 | `handle.next_handoff()` / `next_handoff_async()`、`handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` リース；`.wait()` / `.wait_async()` は `ExactProgramHandoff` を返す |

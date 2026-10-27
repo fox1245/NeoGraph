@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ko source_sha256=55c01792ac8d617b92805e217bf7b0ebd4cb94a2cbbf8a6080b6fab01110dc13 -->
+<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ko source_sha256=5d1cc97f588ff33d80a58bcc32293e4f8f8a566cc239fd48c9be9f17ce504d14 -->
 # 독립된 Harness 세대를 가진 재귀 에이전트
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
@@ -62,6 +62,18 @@ config.recover_existing_child_commands = true; // default: false
 결과를 알 수 없는 다른 효과는 여전히 조정(reconciliation)을 위해 에이전트 계열을 일시 중지합니다. 중단된 자식은 dispatch된 채 재개할 수 있는 관계로 남고, 부모는 관계를 취소하거나 그 예약을 두 번 돌려주지 않고 진행 중인 명령 예약을 그대로 유지합니다.
 
 저장소는 정상인데 결과 게시에 실패하면, dispatch된 명령의 결과와 pending effect를 모두 `Ambiguous`로 게시합니다. 취소해도 이 불확실성은 지워지지 않습니다. 낙관적(optimistic) 명령 head 읽기에서 충돌이 나면 재시도하며, 부모 head가 바뀌지 않았는데도 영구적으로 거부되는 경우가 자식 완료 알림을 무기한 막지는 못합니다.
+
+## 중단된 자식에 응답하기
+
+인터럽트로 멈춘 자식 Harness(Core 그래프의 노드가 `NodeInterrupt`를 던지거나 그래프가 `interruptBefore`를 선언한 경우)는 그 자체로 재개할 수 있는 독립된 run입니다. 응답하는 방법은 하나입니다. 자식의 run id로 자식을 재개합니다. `ProgramRuntime::resume(owner, child_run_id, ...)`이며 Python에서는 `host.resume(child_run_id, value)`입니다. id는 부모의 영속 관계인 `ProgramRunRecord::children()`(Python `host.run_record(parent_run_id).children`)에 있습니다. 멈춘 자식은 거기서 `Dispatched` 상태이고 `Interrupted` 결과를 가집니다. 이는 호스트가 `start_child`로 시작한 자식, `main()`이 spawn만 하고 await하지 않는 자식, `main()`이 await하는 자식 모두에 같습니다.
+
+`main()`이 자식을 await하는 부모(`ng.await(ng.spawn(...))`)는 `Failed`가 아니라 `Interrupted`로 끝납니다. 결과에는 자식의 질문이 보이고, 관계는 `Dispatched`로 남으며, await의 진행 중 예약은 부모가 그대로 유지합니다. run이 대기 중인 명령의 예약을 풀어 주는 것은 그 명령의 Core 호출 안에서, 그 호출이 쓴 체크포인트에서 멈출 때뿐입니다. 자식을 await하는 명령은 자식의 run을 기다리는 것이므로 예약을 유지합니다. 질문은 자식의 것이므로 부모를 재개(`resume`)하거나 조정(`reconcile`)하면 `P_CHILD_INTERRUPTED`로 거부됩니다. witness의 `child_run_ids`가 대신 재개할 자식을 알려 주며, 아무것도 소비되지 않습니다.
+
+자식이 응답을 받고 끝나면 런타임이 부모를 이어서 실행합니다. 새 시도(attempt)가 명령 저널에서 `main()`을 재생하고, 이미 dispatch한 자식에 다시 합류하며(관계는 `Completed`가 됩니다), await는 멈춘 적이 없는 것처럼 자식의 결과를 받습니다. 이 시도는 `recover_existing_child_commands`가 있든 없든, 이 프로세스에서든 재시작 뒤에든 자식에 합류합니다. 멈춘 자식의 결과는 이미 부모의 관계에 있고, 이미 실행된 자식에 다시 합류하는 것은 아무것도 dispatch하지 않기 때문입니다. 그 플래그는 dispatch가 기록되지 않은 자식을 위한 opt-in으로 남습니다. 이어서 실행할 때는 저널이 run에 대해 가진 것, 즉 남은 예산과 유지된 예약만 쓰며 새 예산을 받지 않습니다. 이는 트리를 따라 올라갑니다. 손자의 응답은 자식을 이어 가고, 자식이 끝나면 루트를 이어 갑니다. 이어 가기는 비동기입니다. 부모의 결과가 필요한 호출자는 부모의 레코드가 끝날 때까지 기다린 뒤 `reconnect`로 읽습니다. 호스트가 재시작했을 때 자식은 끝났는데 이어 가는 프로세스가 없었던 부모를 발견하면 `reconnect(parent_run_id)`(또는 자식의 핸들도 돌려주며 자식을 다시 dispatch하지 않는 `recover_children(parent_run_id)`)로 이어 가기를 시작합니다. 이어 가기는 한 번만 발행됩니다. 자식의 종료, `reconnect`, 다른 프로세스가 모두 멈춘 부모에 닿을 수 있지만 발행 하나가 결정하고 나머지는 run을 그쪽에 맡깁니다. 시작할 수 없는 이어 가기(저장소가 발행을 거부하거나 한도가 소진된 경우)는 부모를 `Interrupted`로 남깁니다. 부모의 핸들을 쥔 프로세스에서는 그 핸들에 `P_CHILD_CONTINUATION_FAILED` 알림이 붙고, 부모를 `reconnect`하면 원인이 보고됩니다. 응답 후 다시 멈춘 자식도 같은 방식으로 계속 재개할 수 있습니다.
+
+await의 기한(`timeout_ms`)은 복구되는 모든 await와 마찬가지로 await가 처음 시작된 시점부터의 절대 시각입니다. 기한 뒤에 도착한 응답은 부모를 `P_AWAIT_TIMEOUT`과 함께 `TimedOut`으로 끝내므로, 사람을 기다리는 await에는 그 대기를 덮는 타임아웃을 주십시오. 자식이 기다리는 동안 부모나 어느 조상을 취소하면 그 자식과 자손이 영속적으로 취소됩니다. 이 프로세스가 실행하는 자손은 살아 있는 control로, 아니면 레코드로 취소합니다. 다른 프로세스가 재개해 아직 실행 중인 자손은 `Cancelled` 레코드로 끝나며, 그 프로세스는 자신의 발행이 거부된 것을 발견합니다.
+
+합류(rejoin)되는 것은 `ng.await(ng.spawn(...))`(또는 await된 spawn 단독)뿐입니다. join(`ng.all`, `ng.race`, `ng.quorum`)의 구성원으로 await된 자식은 합류되지 않습니다. 응답 후 부모는 대기 중인 `javascript` 명령을 조정할 효과로 가진 채 `Interrupted`로 끝나며, 자식 바인딩을 쓸 수 없을 때와 같습니다. 타입이 있는 플랜(typed plan)의 `spawn`에 대한 `await`도 같은 방식으로 이어서 실행됩니다. 플랜은 이어 갈 때 자신의 연산을 다시 재생하며 그 연산은 Program 연산 예산에서 다시 차감되므로, 그만큼의 여유를 선언하십시오.
 
 ## JSON 산출물과 회계
 

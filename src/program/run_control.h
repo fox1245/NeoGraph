@@ -234,6 +234,11 @@ using ChildRecoveryCallback =
     std::function<asio::awaitable<ChildRecoveryMode>(std::string, json, std::string)>;
 using ExistingChildReconnectCallback =
     std::function<asio::awaitable<std::shared_ptr<RunControl>>(std::string, json, std::string)>;
+/// Ends the run (owner scope, run id), a descendant of a run being cancelled (#658): through its live control if
+/// this process executes it, else from its record. A paused parent holds no control of a child that was resumed
+/// since it paused, in this process or another.
+using DescendantCancelCallback = std::function<asio::awaitable<bool>(
+    std::string, std::string, CancellationCause, std::shared_ptr<ReentrantOperationLock>)>;
 
 struct AsyncWaiter {
     std::weak_ptr<async::HostTimer> timer;
@@ -282,8 +287,10 @@ public:
 
     /// Awaited by complete_async after the terminal state is published.
     using CompletionCallback = std::function<asio::awaitable<void>(ProgramResult)>;
+    using InterruptedPublishedCallback = std::function<asio::awaitable<void>()>;
     using TerminalCleanup = std::function<void()>;
     void set_completion_callback(CompletionCallback callback) noexcept;
+    void set_interrupted_published_callback(InterruptedPublishedCallback callback) noexcept;
     void set_child_launch_callback(ChildLaunchCallback callback) noexcept;
     /**
      * Registers per-attempt cleanup that runs before the terminal transition
@@ -311,6 +318,7 @@ public:
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
     void set_child_recovery_callback(ChildRecoveryCallback callback) noexcept;
     void set_existing_child_reconnect_callback(ExistingChildReconnectCallback callback) noexcept;
+    void set_descendant_cancel_callback(DescendantCancelCallback callback) noexcept;
     asio::awaitable<std::shared_ptr<RunControl>> reconnect_existing_child(std::string binding,
                                                                           json        input,
                                                                           std::string operation) const;
@@ -376,6 +384,13 @@ public:
     /// reconciliation of the plan operation that may have started, as a
     /// JavaScript callCore without a checkpoint is.
     bool recover_plan_without_checkpoint = false;
+    /// #658: cancel() of this control may end a Running run from its record. Set on the synthetic control that
+    /// the cancellation of a paused parent makes for a descendant that no process of the host executes.
+    bool cancel_running_record_durably = false;
+    /// #658: set on the attempt that continues a run paused on a child that has since been answered. Its
+    /// pending await or spawn command rejoins the child it already dispatched, with or without
+    /// RuntimeConfig::recover_existing_child_commands (which is for a run that a lost process left running).
+    bool rejoin_paused_children = false;
     /// #405: on the attempt a fork starts with, the source run whose provider
     /// calls the fork's operations repeat, so that a journaling broker replays
     /// them (ProgramCoreProviderCallContext::replay_source).
@@ -560,6 +575,8 @@ public:
                                 ProgramEventKind kind,
                                 ProgramEventPayload payload) const;
     void adopt_published_event(ProgramEvent event);
+    void adopt_cancelled_terminal(CancellationCause cause, const ProgramResult& cancelled_result,
+                                  const std::optional<ProgramEvent>& terminal_event);
 
 private:
     mutable PureMutex                     mutex_;
@@ -572,6 +589,7 @@ private:
     std::optional<json>                    settled_branches_;
     std::shared_ptr<ProgramEventSink>      sink_;
     CompletionCallback                     completion_callback_;
+    InterruptedPublishedCallback           interrupted_published_callback_;
     mutable std::vector<AsyncWaiter>       waiters_;
     std::vector<TerminalCleanup>           terminal_cleanups_;
     std::vector<TerminalCleanup>                  logical_cleanups_;
@@ -580,6 +598,7 @@ private:
     ChildLaunchCallback                     child_launch_callback_;
     ChildRecoveryCallback                         child_recovery_callback_;
     ExistingChildReconnectCallback                existing_child_reconnect_callback_;
+    DescendantCancelCallback                         descendant_cancel_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
     std::shared_ptr<HookRuntime>               hook_runtime_;
     ProgramCoreToolGrantResolver                core_tool_grant_resolver_;
@@ -595,6 +614,7 @@ private:
     CancellationCause                        cancellation_cause_ = CancellationCause::None;
     bool                                     terminal_decided_ = false;
     bool                                     completion_claimed_ = false;
+    bool                                     children_cancelled_ = false;
     std::vector<std::weak_ptr<RunControl>> children_;
     mutable PureConditionVariable             handoff_cv_;
     std::shared_ptr<ReentrantOperationLock>   handoff_coordination_mutex_;

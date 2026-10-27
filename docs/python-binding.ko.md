@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=c7e44f8d5761953d3ea6c22c6a7aec8ca992120ecabaab1015cd859bed8e1e2d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=ko source_sha256=d7f6680b32da6e5a31a58b794fc2564ef606c41aa1e8fa0461fdd5a4be109fb5 -->
 # Python 바인딩
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -623,6 +623,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 |---|---|---|
 | 정적 자식 바인딩 | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`; 바인딩되지 않은 `ng.spawn`은 `P_CHILD_BINDING`으로 실패 |
 | 자식 시작 및 복구 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`, `host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 중단된 자식에 응답 | `host.resume(child_run_id, value)`. id는 `host.run_record(parent_run_id).children[i].child_run_id`에서 얻습니다. 자식을 await하는 부모는 스스로 이어서 실행되며, 부모의 레코드가 끝난 뒤 `host.reconnect(parent_run_id)`로 결과를 읽습니다 | 자식의 `ProgramHandle`. 자식에서 멈춘 부모를 `host.resume(parent_run_id, ...)`로 재개하거나 reconcile하면 `P_CHILD_INTERRUPTED`로 거부됩니다(witness `child_run_ids`) |
 | 합성 검증기 등록 | `host.register_synthesis_validator(validate)` (`validate(proposal, bundle, reservation)`는 `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` 반환) | 합성 전에 필요; 등록된 검증기가 없으면 모든 합성이 거부됨 |
 | 자식 합성 | `ProgramSynthesisProposal(...)`, `ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`, `host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`, `host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`, `host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`, `host.synthesize(proposal)` | `ProgramChildSynthesisRecord` (`Bound`, 또는 `P_CHILD_SYNTHESIS_SEMANTICS`와 함께 `Failed`); 초과 권한 요청은 `P_CHILD_SYNTHESIS_AUTHORITY` 발생 |
 | 체크포인트 리스 획득 | `handle.next_handoff()` / `next_handoff_async()`, `handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` 리스; `.wait()` / `.wait_async()`는 `ExactProgramHandoff` 반환 |

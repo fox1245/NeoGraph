@@ -534,7 +534,14 @@ private:
     /// reconnecting to the run it publishes), which is not recursive for a coroutine.
     asio::awaitable<ProgramHandle> reconnect_core(std::string owner_scope, std::string run_id,
                                                   bool transition_lock_held = false);
-    asio::awaitable<ProgramHandle> resume_core(std::string owner_scope, std::string run_id, ProgramResume resume);
+    /// `child_answered`: the continuation of a run paused on a child that has since been answered (#658). It
+    /// submits no value: the run's pending await or spawn command rejoins the child.
+    asio::awaitable<ProgramHandle> resume_core(std::string owner_scope, std::string run_id, ProgramResume resume,
+                                               bool child_answered = false);
+    /// #658: continues `parent_run_id` when it is paused on a child that has since ended, and does nothing
+    /// (an empty result) when it is not paused on one or the child still waits for its answer.
+    asio::awaitable<std::optional<ProgramHandle>> wake_paused_parent(std::string owner_scope,
+                                                                     std::string parent_run_id);
     asio::awaitable<ProgramHandle> reconcile_core(std::string owner_scope, std::string run_id,
                                                   ProgramEffectResolution resolution);
 

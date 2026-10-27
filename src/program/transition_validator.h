@@ -443,11 +443,12 @@ inline bool checkpoint_event_matches(const std::vector<ProgramEvent>&           
     });
 }
 
-inline bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&                     run,
-                                                    const ProgramJavaScriptCommandJournalEntry& pending,
-                                                    const CoreCheckpointIdentity& checkpoint) {
+/// Whether `command` (the command at `ordinal`) is a Core call, or holds one, whose Core thread is the one of
+/// `checkpoint`.
+inline bool command_holds_core_call_at(std::string_view run_id, const JavaScriptCommand& command,
+                                       std::uint64_t ordinal, const CoreCheckpointIdentity& checkpoint) {
     const auto thread_for = [&](std::string_view operation_id) {
-        std::string identity(run.run_id());
+        std::string identity(run_id);
         identity.push_back('\0');
         identity.append(operation_id);
         identity.push_back('\0');
@@ -455,20 +456,20 @@ inline bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&     
         return detail::sha256_identity("program-core-thread/v1", identity);
     };
     std::function<bool(const JavaScriptCommand&, std::string, std::size_t)> matches;
-    matches = [&](const JavaScriptCommand& command, std::string operation_id, std::size_t depth) {
+    matches = [&](const JavaScriptCommand& node, std::string operation_id, std::size_t depth) {
         if (depth > 32) return false;
-        if (command.kind() == JavaScriptCommandKind::CallCore) {
-            const auto arguments = command.arguments();
+        if (node.kind() == JavaScriptCommandKind::CallCore) {
+            const auto arguments = node.arguments();
             return arguments.contains("name") && arguments.at("name").is_string() &&
                    arguments.at("name").get<std::string>() == checkpoint.core_name &&
                    thread_for(operation_id) == checkpoint.core_thread_id;
         }
-        const auto arguments = command.arguments();
-        if (command.kind() == JavaScriptCommandKind::Await) {
+        const auto arguments = node.arguments();
+        if (node.kind() == JavaScriptCommandKind::Await) {
             return matches(JavaScriptCommand::from_json(arguments.at("command")),
                            operation_id + "/await", depth + 1);
         }
-        if (command.kind() == JavaScriptCommandKind::Join) {
+        if (node.kind() == JavaScriptCommandKind::Join) {
             const auto& members = arguments.at("members");
             for (std::size_t index = 0; index < members.size(); ++index)
                 if (matches(JavaScriptCommand::from_json(members.at(index)),
@@ -477,8 +478,41 @@ inline bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&     
         }
         return false;
     };
-    return matches(pending.command(),
-                   "root.javascript." + std::to_string(pending.command_ordinal()), 0);
+    return matches(command, "root.javascript." + std::to_string(ordinal), 0);
+}
+
+inline bool javascript_call_core_checkpoint_matches(std::string_view                            run_id,
+                                                    const ProgramJavaScriptCommandJournalEntry& pending,
+                                                    const CoreCheckpointIdentity& checkpoint) {
+    return command_holds_core_call_at(run_id, pending.command(), pending.command_ordinal(), checkpoint);
+}
+
+inline bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&                     run,
+                                                    const ProgramJavaScriptCommandJournalEntry& pending,
+                                                    const CoreCheckpointIdentity& checkpoint) {
+    return javascript_call_core_checkpoint_matches(run.run_id(), pending, checkpoint);
+}
+
+/**
+ * The one rule for whether an Interrupted outcome releases the resources that the run's pending
+ * JavaScript command reserved (#658). The attempt, the terminal publisher and the transition
+ * validator all ask it, each with the same facts about the same checkpoint value, the one that the
+ * Interrupted record carries as `exact_checkpoint`:
+ *   - `checkpoint` is that checkpoint, `previous_checkpoint` the one of the journal head it follows;
+ *   - `checkpoint_event_published`: a CheckpointPublished event for `checkpoint` is part of the outcome;
+ *   - `command_holds_core_call_here`: whether the pending command is a Core call (or holds one) whose
+ *     Core thread is the checkpoint's; empty when no JavaScript command is pending.
+ * The run released its reservation only if it stopped in a Core call at a checkpoint that this outcome
+ * wrote. A command that waits on a child's run (an await of a spawn) writes none, so it keeps it.
+ */
+inline bool interrupt_releases_command_reservation(
+    const std::optional<CoreCheckpointIdentity>& previous_checkpoint,
+    const std::optional<CoreCheckpointIdentity>& checkpoint,
+    bool                                         checkpoint_event_published,
+    std::optional<bool>                          command_holds_core_call_here) {
+    if (!checkpoint || !checkpoint_event_published) return false;
+    if (previous_checkpoint && *previous_checkpoint == *checkpoint) return false;
+    return !command_holds_core_call_here || *command_holds_core_call_here;
 }
 
 inline bool valid_command_reservation_transition(
@@ -531,12 +565,12 @@ inline bool valid_command_reservation_transition(
         publication.run_record.continuation().state != ContinuationState::Interrupted ||
         !publication.run_record.terminal_result() ||
         publication.run_record.terminal_result()->status() != ProgramTerminalStatus::Interrupted ||
-        !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
         !publication.run_record.exact_checkpoint() ||
-        !javascript_call_core_checkpoint_matches(publication.run_record, *last_command,
-                                                 *publication.run_record.exact_checkpoint()) ||
-        (previous_journal.core_checkpoint &&
-         previous_journal.core_checkpoint == next_journal.core_checkpoint)) {
+        !interrupt_releases_command_reservation(
+            previous_journal.core_checkpoint, publication.run_record.exact_checkpoint(),
+            checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()),
+            javascript_call_core_checkpoint_matches(publication.run_record, *last_command,
+                                                    *publication.run_record.exact_checkpoint()))) {
         return false;
     }
     auto usage               = publication.run_record.terminal_result()->usage();
