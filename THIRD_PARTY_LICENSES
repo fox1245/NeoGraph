@@ -9652,11 +9652,16 @@ CI resolves different versions. Preserve all existing notices above.
 libpsl enables built-in Public Suffix List data. The 0.23.3 source tag's list
 submodule is e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20:
 https://github.com/publicsuffix/list/tree/e1b8015c3b2f0f4f8c18659c2480fc1a22c07b20
-This is public source provenance, not proof of the data used in a bottle.
-Before distributing embedded MPL-covered data, verify the binary's built-in
-list digest/date against its source, provide the matching Source Code Form
-(including modifications), and inform recipients how to obtain it, as MPL
-2.0 section 3.2 requires. A current, different list is not matching source.
+The macOS wheels of releases 0.13.1 through 0.16.0 bundle libpsl 0.23.3
+with this built-in list. The list digest that the bundled library reports
+(SHA-1 ecd73e513368ee32a1d0c8b3efac6c838fa02540) equals the SHA-1 of the
+unmodified file list/public_suffix_list.dat in the libpsl 0.23.3 release
+archive. Source Code Form of this MPL 2.0 data (MPL 2.0 section 3.2): the
+file list/public_suffix_list.dat in
+https://github.com/rockdaboot/libpsl/releases/download/0.23.3/libpsl-0.23.3.tar.gz
+(SHA-256 93941f85a1e7bd593fa94f299233cb5dfc91cd144fd9a78a6ceb75001c5b03be).
+Later wheels build curl without libpsl and contain no Public Suffix List
+data.
 
 LGPL/GPL source and linking obligations described in Section 19 still apply
 when its components, or additional copyleft components, are distributed.
