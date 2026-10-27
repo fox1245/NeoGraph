@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "command_publication_head.h"
+#include "run_record_cache.h"
 #include "transition_validator.h"
 
 #include <libpq-fe.h>
@@ -156,8 +157,23 @@ struct StoredHead {
     std::string last_publication_bytes;
 };
 
-std::optional<StoredHead> load_head(PGconn* connection, std::string_view owner_scope,
-                                    std::string_view run_id, bool lock = false) {
+ProgramRunRecord parse_run_record(detail::RunRecordCache* cache,
+                                  std::string_view        owner_scope,
+                                  std::string_view        run_id,
+                                  std::string_view        stored_bytes) {
+    if (cache) return cache->parse(owner_scope, run_id, stored_bytes);
+    auto parsed = ProgramRunRecord::parse(stored_bytes);
+    if (parsed.owner_scope() != owner_scope || parsed.run_id() != run_id) {
+        throw std::invalid_argument("Stored Program run record key binding is corrupt");
+    }
+    return parsed;
+}
+
+std::optional<StoredHead> load_head(PGconn*                 connection,
+                                    std::string_view        owner_scope,
+                                    std::string_view        run_id,
+                                    bool                    lock  = false,
+                                    detail::RunRecordCache* cache = nullptr) {
     auto result = exec_params(
         connection,
         std::string("SELECT run_record_bytes, journal_record_bytes, migration_plan_bytes, "
@@ -165,12 +181,15 @@ std::optional<StoredHead> load_head(PGconn* connection, std::string_view owner_s
                     "WHERE owner_scope = $1 AND run_id = $2") +
             (lock ? " FOR UPDATE" : ""),
         {std::string(owner_scope), std::string(run_id)});
-    if (PQntuples(result.get()) == 0) return std::nullopt;
+    if (PQntuples(result.get()) == 0) {
+        if (cache) cache->erase(owner_scope, run_id);
+        return std::nullopt;
+    }
     if (PQntuples(result.get()) != 1 || PQnfields(result.get()) != 4)
         throw std::invalid_argument("Stored PostgreSQL Program transition head shape is invalid");
     auto migration = row_optional_text(result, 0, 2);
     return StoredHead{
-        ProgramRunRecord::parse(row_text(result, 0, 0)),
+        parse_run_record(cache, owner_scope, run_id, row_text(result, 0, 0)),
         ProgramJournalRecord::parse(row_text(result, 0, 1)),
         migration ? std::optional<MigrationPlan>(MigrationPlan::parse(*migration)) : std::nullopt,
         row_text(result, 0, 3)};
@@ -354,8 +373,9 @@ ProgramContextPublication parse_context_publication_bytes(std::string_view bytes
 }
 
 std::vector<ProgramContextPublication> load_context_publication_history(
-    PGconn* connection, std::string_view owner_scope, std::string_view run_id) {
-    const auto head = load_head(connection, owner_scope, run_id);
+    PGconn* connection, std::string_view owner_scope, std::string_view run_id,
+    detail::RunRecordCache* cache = nullptr) {
+    const auto head = load_head(connection, owner_scope, run_id, false, cache);
     if (!head) return {};
     auto rows = exec_params(
         connection,
@@ -437,7 +457,8 @@ std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(PGconn*          c
 }
 
 std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
-    PGconn* connection, std::string_view owner_scope, std::string_view run_id) {
+    PGconn* connection, std::string_view owner_scope, std::string_view run_id,
+    detail::RunRecordCache* cache = nullptr) {
     auto rows = exec_params(
         connection,
         "SELECT sequence, coordinate_id, canonical_bytes FROM "
@@ -453,7 +474,7 @@ std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
         result.push_back(std::move(entry));
     }
     if (!result.empty()) {
-        const auto head = load_head(connection, owner_scope, run_id);
+        const auto head = load_head(connection, owner_scope, run_id, false, cache);
         if (!head ||
             !detail::transition::valid_command_history_append(head->run_record, {}, result))
             throw std::invalid_argument("Stored PostgreSQL JavaScript command history is corrupt");
@@ -466,8 +487,8 @@ std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
 // Lock::Update is a FOR UPDATE read.
 class PostgresReads final : public detail::transition::TransitionReads {
 public:
-    PostgresReads(PGconn* connection, std::string_view owner_scope)
-        : connection_(connection), owner_scope_(owner_scope) {}
+    PostgresReads(PGconn* connection, std::string_view owner_scope, detail::RunRecordCache* cache)
+        : connection_(connection), owner_scope_(owner_scope), cache_(cache) {}
 
     std::optional<GraphMigrationCapsule> graph_migration_capsule(
         std::string_view run_id, std::string_view lineage_head_id) override {
@@ -485,14 +506,14 @@ public:
     Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) override {
         return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(
-            load_all_javascript_commands(connection_, owner_scope_, run_id));
+            load_all_javascript_commands(connection_, owner_scope_, run_id, cache_));
     }
     std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(
         std::string_view run_id) override {
         return load_latest_javascript_command(connection_, owner_scope_, run_id);
     }
     std::optional<ProgramRunRecord> run_record(std::string_view run_id, Lock lock) override {
-        auto head = load_head(connection_, owner_scope_, run_id, lock == Lock::Update);
+        auto head = load_head(connection_, owner_scope_, run_id, lock == Lock::Update, cache_);
         if (!head) return std::nullopt;
         return std::move(head->run_record);
     }
@@ -511,7 +532,7 @@ public:
     Borrowed<std::vector<ProgramContextPublication>> context_history(
         std::string_view run_id) override {
         return Borrowed<std::vector<ProgramContextPublication>>(
-            load_context_publication_history(connection_, owner_scope_, run_id));
+            load_context_publication_history(connection_, owner_scope_, run_id, cache_));
     }
     bool context_history_is_intact(const std::vector<ProgramContextPublication>& history) override {
         return valid_context_history(history);
@@ -528,8 +549,9 @@ public:
     }
 
 private:
-    PGconn*          connection_;
-    std::string_view owner_scope_;
+    PGconn*                 connection_;
+    std::string_view        owner_scope_;
+    detail::RunRecordCache* cache_;
 };
 
 
@@ -623,16 +645,16 @@ void delete_execution_lease(PGconn* connection, const ProgramExecutionLease& lea
 }
 
 void insert_head(PGconn* connection, std::string_view owner_scope,
-                 const ProgramRunRecord& run_record,
+                 std::string_view run_id_view,
+                 const std::string& run_bytes,
                  const ProgramJournalRecord& journal_record,
                  const std::optional<MigrationPlan>& migration_plan,
                  std::string_view last_publication_bytes) {
-    const auto run_bytes = run_record.serialize_canonical();
     const auto journal_bytes = journal_record.serialize_canonical();
     const auto migration_bytes = migration_plan
         ? std::optional<std::string>(migration_plan->serialize_canonical()) : std::nullopt;
     const std::string owner(owner_scope);
-    const std::string run_id(run_record.run_id());
+    const std::string run_id(run_id_view);
     const std::string publication(last_publication_bytes);
     const char* params[] = {owner.c_str(), run_id.c_str(), run_bytes.c_str(), journal_bytes.c_str(),
                             migration_bytes ? migration_bytes->c_str() : nullptr,
@@ -647,16 +669,16 @@ void insert_head(PGconn* connection, std::string_view owner_scope,
 }
 
 void update_head(PGconn* connection, std::string_view owner_scope,
-                 const ProgramRunRecord& run_record,
+                 std::string_view run_id_view,
+                 const std::string& run_bytes,
                  const ProgramJournalRecord& journal_record,
                  const std::optional<MigrationPlan>& migration_plan,
                  std::string_view last_publication_bytes) {
-    const auto run_bytes = run_record.serialize_canonical();
     const auto journal_bytes = journal_record.serialize_canonical();
     const auto migration_bytes = migration_plan
         ? std::optional<std::string>(migration_plan->serialize_canonical()) : std::nullopt;
     const std::string owner(owner_scope);
-    const std::string run_id(run_record.run_id());
+    const std::string run_id(run_id_view);
     const std::string publication(last_publication_bytes);
     const char* params[] = {run_bytes.c_str(), journal_bytes.c_str(),
                             migration_bytes ? migration_bytes->c_str() : nullptr,
@@ -847,18 +869,25 @@ CREATE TABLE IF NOT EXISTS neograph_program_execution_leases_v1 (
 }  // namespace
 
 struct PostgreSQLProgramTransitionStore::Impl {
-    explicit Impl(std::string value) : connection_string(std::move(value)) {}
+    Impl(std::string value, Options options)
+        : connection_string(std::move(value)),
+          run_record_cache(options.run_record_cache_capacity) {}
     ~Impl() {
         if (connection) PQfinish(connection);
     }
-    std::string connection_string;
-    std::string coordination_key;
-    PGconn* connection = nullptr;
-    mutable std::mutex mutex;
+    std::string                    connection_string;
+    std::string                    coordination_key;
+    PGconn*                        connection = nullptr;
+    mutable detail::RunRecordCache run_record_cache;
+    mutable std::mutex             mutex;
 };
 
 PostgreSQLProgramTransitionStore::PostgreSQLProgramTransitionStore(std::string connection_string)
-    : impl_(std::make_unique<Impl>(std::move(connection_string))) {
+    : PostgreSQLProgramTransitionStore(std::move(connection_string), Options{}) {}
+
+PostgreSQLProgramTransitionStore::PostgreSQLProgramTransitionStore(std::string connection_string,
+                                                                   Options     options)
+    : impl_(std::make_unique<Impl>(std::move(connection_string), options)) {
     if (impl_->connection_string.empty())
         throw std::invalid_argument("PostgreSQL Program transition connection string is empty");
     impl_->coordination_key = "postgres-transition:" +
@@ -900,11 +929,14 @@ PostgreSQLProgramTransitionStore::load_run_publication_head_sync(std::string_vie
     auto rows = exec_params(impl_->connection,
         "SELECT run_record_bytes, journal_record_bytes FROM neograph_program_transition_run_heads_v2 "
         "WHERE owner_scope = $1 AND run_id = $2", {std::string(owner), std::string(run_id)});
-    if (PQntuples(rows.get()) == 0) return std::nullopt;
+    if (PQntuples(rows.get()) == 0) {
+        impl_->run_record_cache.erase(owner, run_id);
+        return std::nullopt;
+    }
     if (PQntuples(rows.get()) != 1 || PQnfields(rows.get()) != 2)
         throw std::invalid_argument("Stored PostgreSQL run publication head shape is invalid");
     ProgramRunPublicationHead head{
-        ProgramRunRecord::parse(row_text(rows, 0, 0)),
+        impl_->run_record_cache.parse(owner, run_id, row_text(rows, 0, 0)),
         ProgramJournalRecord::parse(row_text(rows, 0, 1))};
     detail::validate_run_publication_head(head.run_record, head.journal_record, owner, run_id);
     return head;
@@ -923,11 +955,14 @@ PostgreSQLProgramTransitionStore::load_command_publication_head_sync(std::string
         "(SELECT MAX(t.sequence) FROM neograph_program_transition_javascript_command_log_v2 t "
         "WHERE t.owner_scope = h.owner_scope AND t.run_id = h.run_id) "
         "WHERE h.owner_scope = $1 AND h.run_id = $2", {std::string(owner), std::string(run_id)});
-    if (PQntuples(rows.get()) == 0) return std::nullopt;
+    if (PQntuples(rows.get()) == 0) {
+        impl_->run_record_cache.erase(owner, run_id);
+        return std::nullopt;
+    }
     if (PQntuples(rows.get()) != 1 || PQnfields(rows.get()) != 5)
         throw std::invalid_argument("Stored PostgreSQL command publication head shape is invalid");
     ProgramCommandPublicationHead head{
-        ProgramRunRecord::parse(row_text(rows, 0, 0)),
+        impl_->run_record_cache.parse(owner, run_id, row_text(rows, 0, 0)),
         ProgramJournalRecord::parse(row_text(rows, 0, 1)), std::nullopt};
     if (!PQgetisnull(rows.get(), 0, 2)) {
         head.latest_command = ProgramJavaScriptCommandJournalEntry::parse(row_text(rows, 0, 4));
@@ -943,14 +978,14 @@ PostgreSQLProgramTransitionStore::load_command_publication_head_sync(std::string
 std::optional<ProgramRunRecord> PostgreSQLProgramTransitionStore::load_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->connection, owner_scope, run_id);
+    const auto head = load_head(impl_->connection, owner_scope, run_id, false, &impl_->run_record_cache);
     return head ? std::optional<ProgramRunRecord>(head->run_record) : std::nullopt;
 }
 
 std::optional<ProgramJournalRecord> PostgreSQLProgramTransitionStore::latest_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->connection, owner_scope, run_id);
+    const auto head = load_head(impl_->connection, owner_scope, run_id, false, &impl_->run_record_cache);
     return head ? std::optional<ProgramJournalRecord>(head->journal_record) : std::nullopt;
 }
 
@@ -986,7 +1021,7 @@ std::vector<ProgramJavaScriptCommandJournalEntry>
 PostgreSQLProgramTransitionStore::load_javascript_commands_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
-    const auto all = load_all_javascript_commands(impl_->connection, owner_scope, run_id);
+    const auto all = load_all_javascript_commands(impl_->connection, owner_scope, run_id, &impl_->run_record_cache);
     std::vector<ProgramJavaScriptCommandJournalEntry> result;
     for (const auto& entry : all) {
         if (entry.sequence() > after_sequence) result.push_back(entry);
@@ -999,7 +1034,7 @@ PostgreSQLProgramTransitionStore::load_context_publications_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
-    const auto all = load_context_publication_history(impl_->connection, owner_scope, run_id);
+    const auto all = load_context_publication_history(impl_->connection, owner_scope, run_id, &impl_->run_record_cache);
     if (!valid_context_history(all))
         throw std::invalid_argument("Stored PostgreSQL context history is not contiguous");
     std::vector<ProgramContextPublication> result;
@@ -1012,7 +1047,7 @@ PostgreSQLProgramTransitionStore::load_context_publications_sync(
 std::vector<ProgramChildSynthesisRecord> PostgreSQLProgramTransitionStore::load_child_syntheses_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    if (!load_head(impl_->connection, owner_scope, run_id)) return {};
+    if (!load_head(impl_->connection, owner_scope, run_id, false, &impl_->run_record_cache)) return {};
     return load_synthesis_heads(impl_->connection, owner_scope, run_id);
 }
 
@@ -1020,7 +1055,7 @@ std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->connection, owner_scope, run_id);
+    const auto head = load_head(impl_->connection, owner_scope, run_id, false, &impl_->run_record_cache);
     if (!head) return {};
     auto result = load_hook_outbox_heads(impl_->connection, owner_scope, run_id, head->run_record);
     if (!is_valid_program_hook_history_append({}, result, head->run_record))
@@ -1031,7 +1066,7 @@ std::vector<HookOutboxEntry> PostgreSQLProgramTransitionStore::load_hook_outbox_
 std::optional<MigrationPlan> PostgreSQLProgramTransitionStore::load_migration_plan_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->connection, owner_scope, run_id);
+    const auto head = load_head(impl_->connection, owner_scope, run_id, false, &impl_->run_record_cache);
     return head ? head->migration_plan : std::nullopt;
 }
 
@@ -1139,7 +1174,7 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->connection);
     lock_owner(impl_->connection, owner_scope);
-    const auto current = load_head(impl_->connection, owner_scope, run_id, true);
+    const auto current = load_head(impl_->connection, owner_scope, run_id, true, &impl_->run_record_cache);
     const auto current_lease = load_execution_lease_record(
         impl_->connection, owner_scope, run_id, true);
 
@@ -1148,7 +1183,7 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
         head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
                                                      current->migration_plan,
                                                      current->last_publication_bytes});
-    PostgresReads                      reads(impl_->connection, owner_scope);
+    PostgresReads                      reads(impl_->connection, owner_scope, &impl_->run_record_cache);
     detail::transition::TransitionPlan plan;
     switch (detail::transition::validate_transition(
         {owner_scope, expected_journal_head, publication, *publication_bytes, safe_point_evidence,
@@ -1164,12 +1199,13 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
         break;
     }
 
-    const auto& migration_plan = current ? current->migration_plan : publication.migration_plan;
+    const auto  run_record_bytes = publication.run_record.serialize_canonical();
+    const auto& migration_plan   = current ? current->migration_plan : publication.migration_plan;
     if (current)
-        update_head(impl_->connection, owner_scope, publication.run_record,
+        update_head(impl_->connection, owner_scope, run_id, run_record_bytes,
                     publication.journal_record, migration_plan, *publication_bytes);
     else
-        insert_head(impl_->connection, owner_scope, publication.run_record,
+        insert_head(impl_->connection, owner_scope, run_id, run_record_bytes,
                     publication.journal_record, migration_plan, *publication_bytes);
     append_events(impl_->connection, owner_scope, run_id, publication.events);
     append_effects(impl_->connection, owner_scope, run_id, publication.effects);
@@ -1209,6 +1245,9 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::compare_publish
     else if (expected_lease)
         delete_execution_lease(impl_->connection, *expected_lease);
     transaction.commit();
+    // The published record object may carry state that its bytes do not (a live provider cause): drop the
+    // entry, and let the next read cache what the stored bytes parse to.
+    impl_->run_record_cache.erase(owner_scope, run_id);
     return ProgramTransitionPublishResult::Published;
 }
 
