@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=zh-CN source_sha256=55c01792ac8d617b92805e217bf7b0ebd4cb94a2cbbf8a6080b6fab01110dc13 -->
+<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=zh-CN source_sha256=5d1cc97f588ff33d80a58bcc32293e4f8f8a566cc239fd48c9be9f17ce504d14 -->
 # 递归智能体：各自独立的 Harness generation
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
@@ -99,6 +99,18 @@ provider、工具、native 或其他外部副作用。
 如果在存储仍然可用时，结果发布失败，已分发命令的 outcome 和待处理的副作用，
 会同时发布为 `Ambiguous`；取消无法抹去这种不确定性。乐观的命令 head 读取冲突会被重试，
 而针对未变化的父 head 的永久拒绝，不会无限期地阻塞子智能体的完成通知。
+
+## 回答被中断的子程序
+
+因中断而暂停的子 Harness（其 Core 图的某个节点抛出 `NodeInterrupt`，或图声明了 `interruptBefore`）本身就是一个可恢复的 run。回答它只有一种方式：用子的 run id 恢复子。即 `ProgramRuntime::resume(owner, child_run_id, ...)`，在 Python 中是 `host.resume(child_run_id, value)`。该 id 在父的持久关系 `ProgramRunRecord::children()`（Python 中为 `host.run_record(parent_run_id).children`）里，暂停的子在那里处于 `Dispatched` 状态，并带有它的 `Interrupted` 结果。这对由宿主用 `start_child` 启动的子、由 `main()` spawn 但不 await 的子，以及由 `main()` await 的子都适用。
+
+`main()` await 子的父（`ng.await(ng.spawn(...))`）以 `Interrupted` 结束，绝不会是 `Failed`：它的结果显示子的问题，关系保持 `Dispatched`，await 在途的预留仍由父保留。只有当 run 停在待处理命令自己的 Core 调用中、且停在该调用写下的检查点时，才会释放该命令的预留；await 子的命令是在等待子的 run，所以保留预留。问题属于子，因此恢复父（`resume`）或对账（`reconcile`）都会被 `P_CHILD_INTERRUPTED` 拒绝；witness 中的 `child_run_ids` 指出应改为恢复哪些子，且不会消耗任何东西。
+
+子在得到回答并结束后，运行时会继续父。新的尝试（attempt）从命令日志重放 `main()`，重新加入已经 dispatch 的子（关系变为 `Completed`），await 就像从未暂停过一样拿到子的结果。无论是否设置 `recover_existing_child_commands`，也无论是在本进程还是重启之后，该尝试都会重新加入子：暂停过的子的结果已经在父的关系里，而重新加入一个已经运行过的子不会 dispatch 任何东西。这个标志仍然是针对 dispatch 未被记录的子的 opt-in。继续时只使用日志为该 run 保存的内容，即剩余预算和保留的预留，绝不会获得新的预算。这会沿树向上重复：孙的回答继续子，子的结束继续根。继续是异步的；需要父结果的调用方应等到父的记录结束，再用 `reconnect` 读取。宿主重启后，如果发现某个父的子已经结束而没有进程继续它，调用 `reconnect(parent_run_id)`（或同时返回子的句柄、且不会再次 dispatch 子的 `recover_children(parent_run_id)`）即可启动继续。继续只会发布一次：子的结束、`reconnect` 和另一个进程都可能到达暂停的父，一次发布决定结果，其余的把这个 run 留给它。无法启动的继续（存储拒绝该发布，或某个限额已用尽）会让父保持 `Interrupted`：持有父句柄的进程里，该句柄带有通知 `P_CHILD_CONTINUATION_FAILED`，对父 `reconnect` 会报告原因。回答后再次暂停的子，同样可以继续恢复。
+
+await 的截止时间（`timeout_ms`）与所有被恢复的 await 一样，是从该 await 首次开始起算的绝对时间：截止后才到达的回答会使父以 `P_AWAIT_TIMEOUT` 结束为 `TimedOut`，所以等待人的 await 应设置足以覆盖等待的超时。子在等待期间，取消父或任一祖先，会持久地取消该子及其后代：本进程执行的后代通过其活动的 control 取消，否则根据其记录取消。由另一个进程恢复且仍在运行的后代会被一条 `Cancelled` 记录结束，该进程会发现自己的发布被拒绝。
+
+只有 `ng.await(ng.spawn(...))`（或单独被 await 的 spawn）会被重新加入。作为 join（`ng.all`、`ng.race`、`ng.quorum`）成员被 await 的子不会：回答之后，父以 `Interrupted` 结束，并把待处理的 `javascript` 命令作为需要对账的效果，这与子绑定不可用时相同。类型化计划（typed plan）中对 `spawn` 的 `await` 以同样方式继续；计划在继续时会重放自己的操作，这些操作会再次计入 Program 操作预算，所以请为此声明足够的余量。
 
 ## JSON 制品与核算
 

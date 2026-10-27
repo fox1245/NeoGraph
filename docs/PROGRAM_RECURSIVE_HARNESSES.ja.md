@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ja source_sha256=55c01792ac8d617b92805e217bf7b0ebd4cb94a2cbbf8a6080b6fab01110dc13 -->
+<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ja source_sha256=5d1cc97f588ff33d80a58bcc32293e4f8f8a566cc239fd48c9be9f17ce504d14 -->
 # 独立したHarnessの世代を持つ再帰的なエージェント
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
@@ -61,6 +61,18 @@ config.recover_existing_child_commands = true; // default: false
 このフラグとは別に、実行中の試行をリプレイすると、未完了のシール済みの `ng.checkpoint` が、ジャーナルに記録された正確な値と、元のコマンドの予約から完了します。外部へのディスパッチは行いません。それ以外の未確定の効果があると、引き続き、照合のためにfamilyが一時停止します。割り込まれた子は、ディスパッチ済みで再開可能な関係のままです。その親は、関係をキャンセルしたり、その予約を二重に返却したりせず、実行中のコマンドの予約を保持します。
 
 ストレージが利用できる状態で、結果の公開が失敗した場合は、ディスパッチ済みのコマンドの結果と保留中の効果が、どちらも `Ambiguous` として公開されます。キャンセルしても、この不確かさは消えません。楽観的なコマンドヘッドの読み取りの衝突は、リトライされます。変わっていない親のヘッドに対する恒久的な拒否が、子の完了通知を、いつまでもブロックすることはありません。
+
+## 中断された子への応答
+
+割り込みで一時停止した子 Harness（Core グラフのノードが `NodeInterrupt` を送出した場合や、グラフが `interruptBefore` を宣言した場合）は、それ自体が再開できる独立した run です。応答する方法は一つです。子の run id で子を再開します。`ProgramRuntime::resume(owner, child_run_id, ...)` で、Python では `host.resume(child_run_id, value)` です。id は親の永続的な関係 `ProgramRunRecord::children()`（Python では `host.run_record(parent_run_id).children`）にあります。停止した子はそこで `Dispatched` 状態で、`Interrupted` の結果を持ちます。これは、ホストが `start_child` で開始した子、`main()` が spawn しただけで await しない子、`main()` が await する子のどれにも当てはまります。
+
+`main()` が子を await する親（`ng.await(ng.spawn(...))`）は `Failed` ではなく `Interrupted` で終わります。結果には子の質問が示され、関係は `Dispatched` のままで、await の実行中の予約は親が保持します。run が待機中のコマンドの予約を解放するのは、そのコマンドの Core 呼び出しの中で、その呼び出しが書いたチェックポイントで停止したときだけです。子を await するコマンドは子の run を待つので、予約を保持します。質問は子のものなので、親の再開（`resume`）や調整（`reconcile`）は `P_CHILD_INTERRUPTED` で拒否されます。witness の `child_run_ids` が代わりに再開すべき子を示し、何も消費されません。
+
+子が応答を受けて終了すると、ランタイムが親を継続します。新しい試行（attempt）がコマンドジャーナルから `main()` を再生し、すでに dispatch 済みの子に再び合流し（関係は `Completed` になります）、await は一度も停止しなかったかのように子の結果を受け取ります。この試行は `recover_existing_child_commands` の有無にかかわらず、このプロセスでも再起動後でも子に合流します。停止した子の結果はすでに親の関係にあり、実行済みの子に再び合流しても何も dispatch しないからです。そのフラグは、dispatch が記録されなかった子のための opt-in として残ります。継続ではジャーナルがその run に対して保持しているもの、つまり残りの予算と保持された予約だけを使い、新しい予算は付与されません。これはツリーをさかのぼって繰り返されます。孫への応答が子を継続し、子の終了がルートを継続します。継続は非同期です。親の結果が必要な呼び出し側は、親のレコードが終了するまで待ってから `reconnect` で読みます。ホストが再起動し、子は終了したのに継続するプロセスがなかった親を見つけたときは、`reconnect(parent_run_id)`（または、子のハンドルも返し、子を再び dispatch しない `recover_children(parent_run_id)`）を呼ぶと継続が始まります。継続は一度だけ発行されます。子の終了、`reconnect`、別のプロセスのいずれも停止中の親に届き得ますが、発行が一つだけ決まり、ほかは run をそれに任せます。開始できない継続（ストアが発行を拒否した、上限を使い切った場合）は親を `Interrupted` のままにします。親のハンドルを保持しているプロセスではそのハンドルに通知 `P_CHILD_CONTINUATION_FAILED` が付き、親を `reconnect` すると原因が報告されます。応答後に再び停止した子も、同じ方法で再開できます。
+
+await の期限（`timeout_ms`）は、復旧されるすべての await と同じく、await が最初に開始された時点からの絶対時刻です。期限後に届いた応答は親を `P_AWAIT_TIMEOUT` とともに `TimedOut` で終了させるので、人を待つ await には、その待ち時間を含むタイムアウトを指定してください。子が待っている間に親または任意の祖先をキャンセルすると、その子と子孫が永続的にキャンセルされます。このプロセスが実行している子孫は生きている control を通じて、そうでなければレコードから終了させます。別のプロセスが再開してまだ実行している子孫は `Cancelled` レコードで終了し、そのプロセスは自分の発行が拒否されたことを知ります。
+
+再合流されるのは `ng.await(ng.spawn(...))`（または await された spawn 単体）だけです。join（`ng.all`、`ng.race`、`ng.quorum`）のメンバーとして await された子は再合流されません。応答後、親は保留中の `javascript` コマンドを調整すべき効果として持ったまま `Interrupted` で終わります。これは、子のバインディングが使えない場合と同じです。型付きプラン（typed plan）の `spawn` に対する `await` も同じ方法で継続されます。プランは継続するときに自分の操作を再生し、それらは Program 操作の予算から再び差し引かれるので、その分の余裕を宣言してください。
 
 ## JSONアーティファクトと会計
 

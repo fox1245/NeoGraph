@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=c7e44f8d5761953d3ea6c22c6a7aec8ca992120ecabaab1015cd859bed8e1e2d -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=d7f6680b32da6e5a31a58b794fc2564ef606c41aa1e8fa0461fdd5a4be109fb5 -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -624,6 +624,7 @@ print(result.usage.monetary_microunits, [r.evidence for r in result.monetary_rec
 |---|---|---|
 | 绑定静态子程序 | `host.bind_child(parent, binding_name, child, max_budget)` | `ModuleLinkReceipt`；未绑定的 `ng.spawn` 以 `P_CHILD_BINDING` 失败 |
 | 启动或恢复子程序 | `host.start_child(parent, link, version, input, budget, child_run_id=None, trace_id="python-program-child")` / `start_child_async(...)`、`host.recover_children(parent_run_id)` / `recover_children_async(...)` | `ProgramHandle` / `list[ProgramHandle]` |
+| 回答被中断的子程序 | `host.resume(child_run_id, value)`，id 取自 `host.run_record(parent_run_id).children[i].child_run_id`；await 该子的父会自行继续，父的记录结束后用 `host.reconnect(parent_run_id)` 读取其结果 | 子的 `ProgramHandle`；对暂停在子上的父调用 `host.resume(parent_run_id, ...)` 或对账会被 `P_CHILD_INTERRUPTED` 拒绝（witness `child_run_ids`） |
 | 注册合成验证器 | `host.register_synthesis_validator(validate)`，其中 `validate(proposal, bundle, reservation)` 返回 `ProgramSynthesisSemanticDecision(validator_identity, contract_identity, accepted, evidence=None)` | 合成前必须注册；未注册验证器时拒绝所有合成 |
 | 合成子程序 | `ProgramSynthesisProposal(...)`、`ProgramChildSynthesisGrant(owner_scope, parent_run_id, parent_version, expected_lineage_head_id, reviewed_source, child_budget_ceiling, template_identity, semantic_validator_identity, semantic_contract_identity, ...)`、`host.prepare_child_synthesis(parent, handoff, proposal, grant, binding_name)` / `prepare_child_synthesis_async(...)`、`host.recover_child_synthesis(parent_run_id, proposal_id)` / `recover_child_synthesis_async(...)`、`host.reserve_synthesis(source, handoff, proposal, expected_lineage_head=None)` / `reserve_synthesis_async(...)`、`host.synthesize(proposal)` | `ProgramChildSynthesisRecord`（`Bound`，或带 `P_CHILD_SYNTHESIS_SEMANTICS` 的 `Failed`）；超出权限抛出 `P_CHILD_SYNTHESIS_AUTHORITY` |
 | 持有检查点 | `handle.next_handoff()` / `next_handoff_async()`、`handle.latest_handoff()` / `latest_handoff_async()` | `ProgramHandoff` 租约；`.wait()` / `.wait_async()` 返回 `ExactProgramHandoff` |

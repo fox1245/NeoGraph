@@ -8,6 +8,8 @@
 #include <neograph/provider.h>
 
 #include "canonical_json.h"
+#include "child_pause.h"
+#include "transition_validator.h"
 #include "node_retry_budget.h"
 #include "catalog_access.h"
 #include "javascript.h"
@@ -38,6 +40,7 @@
 #include <limits>
 #include <mutex>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <type_traits>
@@ -1725,7 +1728,9 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                                                std::string                             owner_scope,
                                                std::string                             parent_run_id,
                                                std::string                             child_run_id,
-                                               ProgramResult                           result) {
+                                               ProgramResult                           result,
+                                               bool*                                   parent_interrupted = nullptr) {
+    if (parent_interrupted) *parent_interrupted = false;
     try {
         auto lock =
             co_await child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_async();
@@ -1747,6 +1752,11 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
             if (existing->state == state && existing->terminal_result &&
                 existing->terminal_result->serialize_canonical() == result.serialize_canonical())
                 co_return true;
+            if (record->continuation().state != ContinuationState::Running) {
+                if (parent_interrupted)
+                    *parent_interrupted = record->continuation().state == ContinuationState::Interrupted;
+                co_return false;
+            }
             const auto publication = co_await publish_child_record_unlocked(
                 owner_scope, parent_run_id, transitions,
                 ProgramChildRecord{existing->child_run_id, existing->link_id,
@@ -1759,8 +1769,12 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
             // A remote writer may advance this CAS chain.  Keep retrying while
             // the parent can still accept the child's terminal transition.
             const auto current = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
-            if (!current || current->continuation().state != ContinuationState::Running)
+            if (!current || current->continuation().state != ContinuationState::Running) {
+                if (parent_interrupted)
+                    *parent_interrupted =
+                        current && current->continuation().state == ContinuationState::Interrupted;
                 co_return false;
+            }
             // A rejection against an unchanged head is a validation/storage
             // failure, not competing publication. Do not strand completion
             // waiters in an infinite retry loop for a permanent rejection.
@@ -1769,6 +1783,7 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
             co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
         }
     } catch (...) {
+        if (parent_interrupted) *parent_interrupted = false;
         co_return false;
     }
 }
@@ -1961,10 +1976,7 @@ enum class TerminalPublicationResult : std::uint8_t {
 asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail::RunControl& control,
                                                                   const ProgramResult&      result,
                                                                   std::exception_ptr&       cause) {
-    auto lock = co_await child_relation_publication_mutex(*control.transitions, control.owner_scope,
-                                                          control.logical_run_id)
-                    .lock_async();
-    for (int retry = 0; retry < 3; ++retry) {
+    for (std::size_t retry = 0; retry < detail::kRunPublicationAttempts; ++retry) {
         std::optional<ProgramRunPublicationHead> head;
         std::optional<ProgramRunRecord> loaded_previous;
         const ProgramRunRecord* previous = nullptr;
@@ -2045,8 +2057,20 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
                     result.interrupt() && result.interrupt()->pending_effect &&
                     !result.interrupt()->pending_input &&
                     result.interrupt()->pending_effect->core_node() == "javascript";
+                // The reservation is released only when the run stopped in the Core call of its pending
+                // command; a command that waits on a child's run (an await of a spawn) keeps it (#658).
+                const auto pending_commands =
+                    co_await control.transitions->load_javascript_commands(control.owner_scope,
+                                                                          control.run_id);
                 if (result.status() == ProgramTerminalStatus::Interrupted && stored_checkpoint &&
-                    !synthetic_terminal_checkpoint && !javascript_reconciliation) {
+                    !synthetic_terminal_checkpoint && !javascript_reconciliation &&
+                    detail::transition::interrupt_releases_command_reservation(
+                        previous_journal->core_checkpoint, result.checkpoint(),
+                        detail::transition::checkpoint_event_matches(events, result.checkpoint()),
+                        pending_commands.empty() || !pending_commands.back().pending() || !result.checkpoint()
+                            ? std::nullopt
+                            : std::optional<bool>{detail::transition::javascript_call_core_checkpoint_matches(
+                                  control.run_id, pending_commands.back(), *result.checkpoint())})) {
                     terminal_reservation = RunBudget{};
                 }
             }
@@ -2077,7 +2101,8 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             }
             data.pending_input       = previous->pending_input();
             data.pending_effect      = previous->pending_effect();
-            if (const auto interrupt = result.interrupt()) {
+            const auto interrupt     = result.interrupt();
+            if (interrupt) {
                 data.pending_input  = interrupt->pending_input;
                 data.pending_effect = interrupt->pending_effect;
             }
@@ -2096,7 +2121,7 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
                 events.empty() ? previous->event_sequence() : events.back().sequence;
             std::vector<ProgramEffectOutboxEntry> effects;
             data.effect_sequence = previous->effect_sequence();
-            if (const auto interrupt = result.interrupt(); interrupt && interrupt->pending_effect) {
+            if (interrupt && interrupt->pending_effect) {
                 ++data.effect_sequence;
                 effects.emplace_back(data.effect_sequence, *interrupt->pending_effect);
             }
@@ -2331,7 +2356,9 @@ RunControl::RunControl(ProgramRunRecord                        record,
       latest_checkpoint_(record.exact_checkpoint()),
       next_sequence_(record.event_sequence() + 1),
       terminal_decided_(result_.has_value()),
-      completion_claimed_(result_.has_value()) {
+      completion_claimed_(result_.has_value()),
+      children_cancelled_(result_.has_value() &&
+                          result_->status() != ProgramTerminalStatus::Interrupted) {
     native_history_archive = std::move(archive);
     if (result_) result_ = result_->restore_provider_failure(owner_scope, native_history_archive);
 }
@@ -2343,6 +2370,11 @@ void RunControl::set_completion_callback(CompletionCallback callback) noexcept {
         if (!next) completion_callback_ = std::move(callback);
     }
     if (next) next->set_completion_callback(std::move(callback));
+}
+
+void RunControl::set_interrupted_published_callback(InterruptedPublishedCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    interrupted_published_callback_ = std::move(callback);
 }
 
 void RunControl::add_logical_cleanup(TerminalCleanup cleanup) {
@@ -2432,6 +2464,10 @@ asio::awaitable<ChildRecoveryMode> RunControl::can_recover_child(std::string bin
     }
     if (!callback) co_return ChildRecoveryMode::None;
     co_return co_await callback(std::move(binding), std::move(input), std::move(operation));
+}
+void RunControl::set_descendant_cancel_callback(DescendantCancelCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    descendant_cancel_callback_ = std::move(callback);
 }
 void RunControl::set_existing_child_reconnect_callback(
     ExistingChildReconnectCallback callback) noexcept {
@@ -2693,6 +2729,7 @@ void RunControl::cancel_children(CancellationCause cause) noexcept {
     std::vector<std::shared_ptr<RunControl>> children;
     {
         std::lock_guard lock(mutex_);
+        children_cancelled_ = true;
         std::erase_if(children_, [](const auto& weak) { return weak.expired(); });
         children.reserve(children_.size());
         for (const auto& weak : children_)
@@ -2722,6 +2759,7 @@ asio::awaitable<void> RunControl::cancel_children_async(CancellationCause cause,
     std::vector<std::shared_ptr<RunControl>> children;
     {
         std::lock_guard lock(mutex_);
+        children_cancelled_ = true;
         std::erase_if(children_, [](const auto& weak) { return weak.expired(); });
         children.reserve(children_.size());
         for (const auto& weak : children_)
@@ -2739,8 +2777,12 @@ asio::awaitable<void> RunControl::attach_child(std::shared_ptr<RunControl> child
     {
         std::lock_guard lock(mutex_);
         std::erase_if(children_, [](const auto& weak) { return weak.expired(); });
-        cancel_now = terminal_decided_ || cancellation_cause_ != CancellationCause::None ||
-                     result_.has_value();
+        // A run whose attempt ended Interrupted is paused, not over: a child of it that is resumed (or that a
+        // continuation of the run rejoins) attaches to the paused control instead of being cancelled by it (#658).
+        const bool paused = result_.has_value() && result_->status() == ProgramTerminalStatus::Interrupted &&
+                            cancellation_cause_ == CancellationCause::None;
+        cancel_now = !paused && (children_cancelled_ || cancellation_cause_ != CancellationCause::None ||
+                                 result_.has_value());
         if (!cancel_now) {
             children_.push_back(child);
             co_return;
@@ -2883,7 +2925,13 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
         }
         const auto held_here = coordination_mutex ? coordination_mutex : held;
         auto previous = co_await transitions->load(owner_scope, run_id);
-        if (previous && previous->continuation().state == ContinuationState::Interrupted) {
+        for (int cancel_attempt = 0;
+             previous &&
+             (previous->continuation().state == ContinuationState::Interrupted ||
+              (cancel_running_record_durably &&
+               previous->continuation().state == ContinuationState::Running)) &&
+             cancel_attempt < detail::kRunPublicationAttempts;
+             ++cancel_attempt, previous = co_await transitions->load(owner_scope, run_id)) {
             auto                      pending_input  = previous->pending_input();
             auto                      pending_effect = previous->pending_effect();
             ProgramPendingDisposition disposition    = ProgramPendingDisposition::NotAwaiting;
@@ -2896,81 +2944,124 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
                 disposition       = update.disposition;
                 pending_effect    = update.value;
             }
+            if (previous->continuation().state == ContinuationState::Running)
+                disposition = ProgramPendingDisposition::Applied;
             if (disposition == ProgramPendingDisposition::Duplicate) co_return false;
-            if (disposition == ProgramPendingDisposition::Applied) {
-                const auto previous_journal = (co_await transitions->latest(owner_scope, run_id));
-                if (!previous_journal || previous_journal->id != previous->journal_head()) {
-                    co_return false;
-                }
-                auto built = build_interrupted_cancellation(*this, *previous, *previous_journal,
-                                                            std::move(pending_input), std::move(pending_effect));
-                auto&       terminal         = built.terminal;
-                auto&       cancelled_result = built.result;
-                const auto published = (co_await compare_publish_with_lineage_async(
-                    *transitions, owner_scope, previous->journal_head(), std::move(built.publication)));
-                if (published != ProgramTransitionPublishResult::Published) {
-                    co_return false;
-                }
-                try {
-                    if (cancelled_result.status() == ProgramTerminalStatus::Failed) {
-                        emit_lifecycle_hook(HookPhase::RunFailed, terminal,
-                                            ProgramTerminalStatus::Failed, false);
-                    } else {
-                        emit_lifecycle_hook(HookPhase::RunCancelled, terminal,
-                                            ProgramTerminalStatus::Cancelled, false);
-                    }
-                } catch (...) {}
-                ProgramResult            callback_result = cancelled_result;
-                CompletionCallback       callback;
-                std::vector<AsyncWaiter> waiters;
-                {
-                    std::lock_guard lock(mutex_);
-                    cancellation_cause_ = cause;
-                    terminal_decided_   = true;
-                    completion_claimed_ = true;
-                    events_.push_back(std::move(terminal));
-                    callback = completion_callback_;
-                }
-                cancel_token->cancel();
-                abort_handoff();
-                co_await abort_graph_migration_async();
-                co_await cancel_children_async(cause, held_here);
-                // #655: a child that the parent published and never dispatched is attached to no control.
-                UnstartedChildrenEnder ender;
-                {
-                    std::lock_guard lock(mutex_);
-                    ender = unstarted_children_ender_;
-                }
-                if (ender) {
-                    std::vector<ProgramNotice> not_ended;
-                    try {
-                        not_ended = co_await ender(*previous);
-                    } catch (...) {
-                        not_ended.push_back(ProgramNotice{
-                            "P_CHILD_NOT_ENDED",
-                            "The children that the cancelled parent published and never dispatched were not ended",
-                            json{{"run_id", run_id}, {"reason", "unexpected_failure"}}});
-                    }
-                    for (auto& notice : not_ended) add_notice(std::move(notice));
-                }
-                if (callback) {
-                    try {
-                        co_await callback(callback_result);
-                    } catch (...) {}
-                }
-                {
-                    std::lock_guard lock(mutex_);
-                    result_ = std::move(cancelled_result);
-                    waiters.swap(waiters_);
-                    cv_.notify_all();
-                }
-                asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-                    for (const auto& waiter : waiters) {
-                        if (auto timer = waiter.timer.lock()) timer->cancel();
-                    }
-                });
-                co_return true;
+            if (disposition != ProgramPendingDisposition::Applied) break;
+            const auto previous_journal = (co_await transitions->latest(owner_scope, run_id));
+            if (!previous_journal || previous_journal->id != previous->journal_head()) {
+                continue;
             }
+            auto built = build_interrupted_cancellation(*this, *previous, *previous_journal,
+                                                        std::move(pending_input), std::move(pending_effect));
+            auto& terminal         = built.terminal;
+            auto& cancelled_result = built.result;
+            auto  attached         = co_await attach_run_lineage_async(*transitions, std::move(built.publication));
+            const auto lease       = co_await transitions->load_execution_lease(owner_scope, run_id);
+            const auto published   = lease ? (co_await transitions->compare_publish_execution(
+                                                 owner_scope, previous->journal_head(), std::move(attached), lease,
+                                                 std::nullopt))
+                                           : (co_await transitions->compare_publish(
+                                                 owner_scope, previous->journal_head(), std::move(attached)));
+            if (published != ProgramTransitionPublishResult::Published) {
+                continue;
+            }
+            try {
+                if (cancelled_result.status() == ProgramTerminalStatus::Failed) {
+                    emit_lifecycle_hook(HookPhase::RunFailed, terminal,
+                                        ProgramTerminalStatus::Failed, false);
+                } else {
+                    emit_lifecycle_hook(HookPhase::RunCancelled, terminal,
+                                        ProgramTerminalStatus::Cancelled, false);
+                }
+            } catch (...) {}
+            ProgramResult                callback_result = cancelled_result;
+            CompletionCallback           callback;
+            std::vector<TerminalCleanup> terminal_cleanups;
+            std::vector<AsyncWaiter>     waiters;
+            {
+                std::lock_guard lock(mutex_);
+                cancellation_cause_ = cause;
+                terminal_decided_   = true;
+                completion_claimed_ = true;
+                children_cancelled_ = true;
+                terminal_cleanups.swap(terminal_cleanups_);
+                terminal_cleanups.insert(terminal_cleanups.end(),
+                                         std::make_move_iterator(logical_cleanups_.begin()),
+                                         std::make_move_iterator(logical_cleanups_.end()));
+                logical_cleanups_.clear();
+                events_.push_back(std::move(terminal));
+                callback = completion_callback_;
+            }
+            cancel_token->cancel();
+            abort_handoff();
+            co_await abort_graph_migration_async();
+            for (auto& cleanup : terminal_cleanups) {
+                if (cleanup) cleanup();
+            }
+            co_await cancel_children_async(cause, held_here);
+            // The children the run dispatched and that are still open end with it, whichever control or process
+            // holds them: the callback finds the live control, or ends the run from its record (#658). This runs
+            // after the cancellation of this run was published, so a continuation that won the head cannot be
+            // followed by it.
+            DescendantCancelCallback cancel_descendant;
+            {
+                std::lock_guard lock(mutex_);
+                cancel_descendant = descendant_cancel_callback_;
+            }
+            if (cancel_descendant) {
+                for (const auto& relation : previous->children()) {
+                    if (relation.state != ProgramChildState::Dispatched) continue;
+                    const bool child_cancelled =
+                        co_await cancel_descendant(owner_scope, relation.child_run_id, cause, held_here);
+                    if (!child_cancelled) {
+                        const auto child_record =
+                            co_await transitions->load(owner_scope, relation.child_run_id);
+                        if (!child_record ||
+                            !detail::transition::is_final(child_record->continuation().state)) {
+                            add_notice(ProgramNotice{
+                                "P_CHILD_CANCEL_FAILED",
+                                "Descendant run could not be cancelled when its parent was cancelled",
+                                json{{"child_run_id", relation.child_run_id}}});
+                        }
+                    }
+                }
+            }
+            // #655: a child that the parent published and never dispatched is attached to no control.
+            UnstartedChildrenEnder ender;
+            {
+                std::lock_guard lock(mutex_);
+                ender = unstarted_children_ender_;
+            }
+            if (ender) {
+                std::vector<ProgramNotice> not_ended;
+                try {
+                    not_ended = co_await ender(*previous);
+                } catch (...) {
+                    not_ended.push_back(ProgramNotice{
+                        "P_CHILD_NOT_ENDED",
+                        "The children that the cancelled parent published and never dispatched were not ended",
+                        json{{"run_id", run_id}, {"reason", "unexpected_failure"}}});
+                }
+                for (auto& notice : not_ended) add_notice(std::move(notice));
+            }
+            if (callback) {
+                try {
+                    co_await callback(callback_result);
+                } catch (...) {}
+            }
+            {
+                std::lock_guard lock(mutex_);
+                result_ = std::move(cancelled_result);
+                waiters.swap(waiters_);
+                cv_.notify_all();
+            }
+            asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+                for (const auto& waiter : waiters) {
+                    if (auto timer = waiter.timer.lock()) timer->cancel();
+                }
+            });
+            co_return true;
         }
         {
             std::lock_guard lock(mutex_);
@@ -2982,6 +3073,31 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
         abort_handoff();
         co_await abort_graph_migration_async();
         co_await cancel_children_async(cause, held_here);
+        if (previous) {
+            DescendantCancelCallback cancel_descendant;
+            {
+                std::lock_guard lock(mutex_);
+                cancel_descendant = descendant_cancel_callback_;
+            }
+            if (cancel_descendant) {
+                for (const auto& relation : previous->children()) {
+                    if (relation.state != ProgramChildState::Dispatched) continue;
+                    const bool child_cancelled =
+                        co_await cancel_descendant(owner_scope, relation.child_run_id, cause, held_here);
+                    if (!child_cancelled) {
+                        const auto child_record =
+                            co_await transitions->load(owner_scope, relation.child_run_id);
+                        if (!child_record ||
+                            !detail::transition::is_final(child_record->continuation().state)) {
+                            add_notice(ProgramNotice{
+                                "P_CHILD_CANCEL_FAILED",
+                                "Descendant run could not be cancelled when its parent was cancelled",
+                                json{{"child_run_id", relation.child_run_id}}});
+                        }
+                    }
+                }
+            }
+        }
         co_return true;
     } catch (...) {
         if (failure) *failure = std::current_exception();
@@ -3216,6 +3332,30 @@ void RunControl::adopt_published_event(ProgramEvent event) {
     ++next_sequence_;
 }
 
+void RunControl::adopt_cancelled_terminal(CancellationCause cause, const ProgramResult& cancelled_result,
+                                          const std::optional<ProgramEvent>& terminal_event) {
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (result_ && result_->status() != ProgramTerminalStatus::Interrupted) return;
+        cancellation_cause_ = cause;
+        terminal_decided_   = true;
+        completion_claimed_ = true;
+        if (terminal_event && (events_.empty() || events_.back().sequence < terminal_event->sequence)) {
+            events_.push_back(*terminal_event);
+            next_sequence_ = std::max(next_sequence_, terminal_event->sequence + 1);
+        }
+        result_ = cancelled_result;
+        waiters.swap(waiters_);
+        cv_.notify_all();
+    }
+    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
+        for (const auto& waiter : waiters) {
+            if (auto timer = waiter.timer.lock()) timer->cancel();
+        }
+    });
+}
+
 ProgramEvent RunControl::stage_event(ProgramEventKind kind, ProgramEventPayload payload) {
     return stage_event(operation_id, kind, std::move(payload));
 }
@@ -3320,6 +3460,11 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             if (completion_claimed_) co_return;
             completion_claimed_ = true;
             terminal_decided_   = true;
+            if (cancellation_cause_ != CancellationCause::None ||
+                (outcome.status != ProgramTerminalStatus::Interrupted &&
+                 outcome.status != ProgramTerminalStatus::AmbiguousEffect)) {
+                children_cancelled_ = true;
+            }
             terminal_cleanups.swap(terminal_cleanups_);
             terminal_cleanups.insert(terminal_cleanups.end(),
                                      std::make_move_iterator(logical_cleanups_.begin()),
@@ -3438,6 +3583,8 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
         const auto publication = co_await publish_terminal_record(*this, result, publication_cause);
         const bool is_published = publication == TerminalPublicationResult::Published;
         if (!is_published) {
+            if (retained_children)
+                co_await cancel_children_async(CancellationCause::ParentTerminal);
             const auto first_unpublished_sequence = terminal_events.front().sequence;
             {
                 std::lock_guard lock(mutex_);
@@ -3514,12 +3661,15 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             sink_.reset();
         }
 
-        ProgramResult            callback_result = result;
-        CompletionCallback       callback;
-        std::vector<AsyncWaiter> waiters;
+        ProgramResult                callback_result = result;
+        CompletionCallback           callback;
+        InterruptedPublishedCallback interrupted_published;
+        std::vector<AsyncWaiter>     waiters;
         {
             std::lock_guard lock(mutex_);
             callback = completion_callback_;
+            if (is_published && callback_result.status() == ProgramTerminalStatus::Interrupted)
+                interrupted_published = interrupted_published_callback_;
         }
         if (callback) {
             try {
@@ -3528,7 +3678,11 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
         }
         {
             std::lock_guard lock(mutex_);
-            result_ = std::move(result);
+            if (!result_) {
+                result_ = std::move(result);
+            } else {
+                interrupted_published = {};
+            }
             waiters.swap(waiters_);
             cv_.notify_all();
         }
@@ -3537,6 +3691,11 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
                 if (auto timer = waiter.timer.lock()) timer->cancel();
             }
         });
+        if (interrupted_published) {
+            try {
+                co_await interrupted_published();
+            } catch (...) {}
+        }
     } catch (...) {
         fail_closed(std::current_exception());
     }
@@ -4947,6 +5106,16 @@ struct ProcessRuntimeState {
         std::make_shared<detail::ReentrantOperationLock>();
     detail::PureMutex         controls_mutex;
     std::vector<ControlEntry> controls;
+    // Every control that is still held by a handle, finished or not (it holds weakly): where a notice about a paused
+    // run goes when nothing else in this process can say why the run was not continued (#658).
+    std::vector<ControlEntry> held_controls;
+    // Notices for runs that had no held control in memory when an asynchronous continuation or descendant action
+    // failed: delivered to the next control created for that run (#658).
+    std::map<std::pair<std::string, std::string>, std::vector<ProgramNotice>> pending_notices;
+    // The paused runs (owner scope, run id) whose continuation after an answered child is entering a publication in
+    // this process: one entry decides, and another caller leaves the run to it (#658).
+    detail::PureMutex                                 continuations_mutex;
+    std::set<std::pair<std::string, std::string>>     continuations;
     // The cancellations of interrupted runs that a task of an executor has yet to record.
     std::shared_ptr<detail::PendingCancellations> pending_cancellations =
         std::make_shared<detail::PendingCancellations>();
@@ -5238,7 +5407,80 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         control->set_pending_cancellations(process_state->pending_cancellations);
         control->set_executing_attempt_check(executing_attempt_check());
         control->set_unstarted_children_ender(unstarted_children_ender());
+        control->set_descendant_cancel_callback(descendant_canceller());
+        {
+            std::lock_guard process_lock(process_state->controls_mutex);
+            std::erase_if(process_state->held_controls, [](const auto& entry) { return entry.control.expired(); });
+            process_state->held_controls.push_back({control->owner_scope, control->run_id, control});
+            const auto found = process_state->pending_notices.find({control->owner_scope, control->run_id});
+            if (found != process_state->pending_notices.end()) {
+                for (auto& notice : found->second) control->add_notice(std::move(notice));
+                process_state->pending_notices.erase(found);
+            }
+        }
         co_return control;
+    }
+
+    // Ends the run `run_id`, a descendant of a run that is being cancelled: through its live control when this process
+    // executes it, else from its record when it is Interrupted or Running (a run that another process resumed is ended
+    // by its Cancelled record; that process finds its terminal publication refused). False when it is over already.
+    asio::awaitable<bool> cancel_descendant(std::string owner, std::string run_id, detail::CancellationCause cause,
+                                            std::shared_ptr<detail::ReentrantOperationLock> held) {
+        std::vector<std::shared_ptr<detail::RunControl>> held_matches;
+        {
+            std::lock_guard process_lock(process_state->controls_mutex);
+            std::erase_if(process_state->held_controls, [](const auto& entry) { return entry.control.expired(); });
+            for (const auto& entry : process_state->held_controls) {
+                if (entry.owner_scope != owner || entry.run_id != run_id) continue;
+                if (auto control = entry.control.lock()) held_matches.push_back(std::move(control));
+            }
+        }
+        std::shared_ptr<detail::RunControl> primary;
+        if (const auto live = find_process_control(owner, run_id)) {
+            if (!live->try_result()) primary = live;
+        }
+        if (!primary) {
+            for (const auto& candidate : held_matches) {
+                const auto existing_result = candidate->try_result();
+                if (!existing_result || existing_result->status() == ProgramTerminalStatus::Interrupted) {
+                    if (!primary || candidate->attempt >= primary->attempt) primary = candidate;
+                }
+            }
+        }
+        if (!primary) {
+            const auto record = co_await transitions->load(owner, run_id);
+            if (!record) co_return false;
+            const auto state = record->continuation().state;
+            if (state != ContinuationState::Interrupted && state != ContinuationState::Running) co_return false;
+            primary = co_await make_record_control(*record);
+        }
+        primary->cancel_running_record_durably = true;
+        const bool cancelled = co_await primary->cancel_async(cause, held);
+        if (cancelled) {
+            const auto cancelled_result = primary->try_result();
+            std::optional<ProgramEvent> terminal_event;
+            const auto events = primary->events_after(0);
+            if (!events.empty() && events.back().kind == ProgramEventKind::Terminal)
+                terminal_event = events.back();
+            if (cancelled_result) {
+                for (const auto& other : held_matches) {
+                    if (other == primary || other->attempt != primary->attempt) continue;
+                    other->adopt_cancelled_terminal(cause, *cancelled_result, terminal_event);
+                    co_await other->cancel_children_async(cause, held);
+                }
+            }
+        }
+        co_return cancelled;
+    }
+
+    detail::DescendantCancelCallback descendant_canceller() {
+        return [weak_impl = weak_from_this()](std::string owner, std::string run_id, detail::CancellationCause cause,
+                                              std::shared_ptr<detail::ReentrantOperationLock> held)
+                   -> asio::awaitable<bool> {
+            const auto keep = weak_impl.lock();
+            if (!keep) co_return false;
+            co_return co_await keep->cancel_descendant(std::move(owner), std::move(run_id), cause, std::move(held));
+        };
     }
 
     // #655: the children that a paused parent published and never dispatched. The parent's record holds each as
@@ -5621,9 +5863,11 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                    : std::nullopt;
     }
 
+    // `host_opt_in`: RuntimeConfig::recover_existing_child_commands. Without it only a child whose result the parent's
+    // relation already holds is rejoined: it ran, and rejoining it dispatches nothing (#658).
     asio::awaitable<std::optional<ProgramChildRecord>> recoverable_existing_child(
         std::shared_ptr<detail::RunControl> parent, std::string binding, json input,
-        std::string operation) const {
+        std::string operation, bool host_opt_in) const {
         const auto run = (co_await parent->snapshot_async());
         if (run.owner_scope() != parent->owner_scope ||
             run.logical_run_id() != parent->logical_run_id ||
@@ -5654,6 +5898,14 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                          {"operation_id", std::string(operation)},
                          {"execution_key", std::string(operation)}}));
             child = find_child(run, expected_id);
+            if (!child) {
+                for (const auto& candidate : run.children()) {
+                    if (detail::child_matches_spawn_operation(run, candidate, operation)) {
+                        child = candidate;
+                        break;
+                    }
+                }
+            }
         }
         if (!child || child->link_id != link.id() ||
             child->link_receipt != link.serialize_canonical() ||
@@ -5676,6 +5928,16 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         if (persisted->invocation() != bind_runtime_invocation(
                 invocation, parent->owner_scope, resolved->version.id(), child->child_run_id))
             co_return std::nullopt;
+        const bool relation_has_result =
+            child->terminal_result.has_value() &&
+            child->terminal_result->status() != ProgramTerminalStatus::Interrupted;
+        const bool paused_child_finished =
+            parent->rejoin_paused_children &&
+            child->terminal_result.has_value() &&
+            detail::transition::is_final(persisted->continuation().state) &&
+            persisted->terminal_result().has_value();
+        if (!host_opt_in && !relation_has_result && !paused_child_finished)
+            co_return std::nullopt;
         co_return child;
     }
 
@@ -5684,14 +5946,14 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         // executor: each one keeps this state alive while it runs, and finds it gone only after shutdown.
         const std::weak_ptr<Impl> weak_impl = weak_from_this();
         if (!config.child_binding_resolver && !config.child_synthesis_gateway &&
-            !config.recover_existing_child_commands) {
+            !config.recover_existing_child_commands && !control->rejoin_paused_children) {
             if (config.task_graph_fragments && config.task_graph_policy_resolver)
                 control->set_task_graph_expansion_context(config.task_graph_fragments,
                                                           config.task_graph_policy_resolver);
             return;
         }
         const auto weak_control = std::weak_ptr<detail::RunControl>(control);
-        if (config.recover_existing_child_commands) {
+        {
             control->set_existing_child_reconnect_callback(
                 [this, weak_impl, weak_control](std::string binding, json input, std::string operation)
                     -> asio::awaitable<std::shared_ptr<detail::RunControl>> {
@@ -5699,12 +5961,71 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     if (!keep) throw std::runtime_error("ProgramRuntime has been destroyed");
                     const auto parent = weak_control.lock();
                     const auto child = parent
-                                           ? (co_await recoverable_existing_child(parent, binding, input,
-                                                                         operation))
+                                           ? (co_await recoverable_existing_child(
+                                                 parent, binding, input, operation,
+                                                 config.recover_existing_child_commands))
                                            : std::nullopt;
                     if (!child)
                         throw_runtime_diagnostic("P_CHILD_RECOVERY",
                                                  "Existing child recovery binding changed");
+                    std::optional<ProgramChildSynthesisRecord> synthesis;
+                    if (parent->invocation.budget.max_dynamic_compiles && parent->materialized &&
+                        parent->materialized->bundle.control_source()) {
+                        for (const auto& record : (co_await transitions->load_child_syntheses(
+                                 parent->owner_scope, parent->run_id))) {
+                            const auto& artifacts      = record.data().artifacts;
+                            const bool  matches_child  = artifacts.contains("child_run_id") &&
+                                                        artifacts.at("child_run_id") == child->child_run_id;
+                            const bool matches_binding = record.data().binding_name == binding;
+                            if (!matches_child && !matches_binding) continue;
+                            co_await verify_synthesis_grant(record);
+                            const bool valid_state =
+                                record.data().state == ProgramChildSynthesisState::Dispatching ||
+                                record.data().state == ProgramChildSynthesisState::Spawned;
+                            if (synthesis || !matches_child || !matches_binding || !valid_state ||
+                                !artifacts.contains("child_input") ||
+                                detail::canonical_json_bytes(artifacts.at("child_input")) !=
+                                    detail::canonical_json_bytes(input) ||
+                                !artifacts.contains("link") ||
+                                ModuleLinkReceipt::parse(
+                                    detail::canonical_json_bytes(artifacts.at("link")))
+                                        .id() != child->link_id) {
+                                throw_runtime_diagnostic(
+                                    "P_CHILD_SYNTHESIS_CONFLICT",
+                                    "One synthesis grant cannot spawn another child invocation");
+                            }
+                            synthesis = record;
+                        }
+                    }
+                    // The child run exists, so its synthesis is Spawned whatever the reconnect below does: publish that
+                    // first, so a failed publication cannot strand a reconnected child, and accept a Spawned head that
+                    // another recovery published from the same Dispatching record.
+                    if (synthesis &&
+                        synthesis->data().state == ProgramChildSynthesisState::Dispatching) {
+                        auto data        = synthesis->data();
+                        data.previous_id = synthesis->id();
+                        ++data.revision;
+                        data.state = ProgramChildSynthesisState::Spawned;
+                        std::exception_ptr synthesis_failure;
+                        try {
+                            (co_await publish_synthesis(
+                                ProgramChildSynthesisRecord::create(std::move(data)), parent));
+                        } catch (...) {
+                            synthesis_failure = std::current_exception();
+                        }
+                        if (synthesis_failure) {
+                            bool spawned_elsewhere = false;
+                            for (const auto& record : (co_await transitions->load_child_syntheses(
+                                     parent->owner_scope, parent->run_id))) {
+                                const auto& artifacts = record.data().artifacts;
+                                if (artifacts.contains("child_run_id") &&
+                                    artifacts.at("child_run_id") == child->child_run_id &&
+                                    record.data().state == ProgramChildSynthesisState::Spawned)
+                                    spawned_elsewhere = true;
+                            }
+                            if (!spawned_elsewhere) std::rethrow_exception(synthesis_failure);
+                        }
+                    }
                     // Reconnect cannot create a missing run. Do not fall through
                     // to start_child if publication disappears after validation.
                     // (A handler cannot suspend: the failure is noted, and classified after the try.)
@@ -5736,7 +6057,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     co_return reconnected->control_;
                 });
         }
-        if (config.child_synthesis_gateway || config.recover_existing_child_commands) {
+        {
             control->set_child_recovery_callback([this, weak_impl, weak_control](std::string binding,
                                                                                  json        input,
                                                                                  std::string operation)
@@ -5745,8 +6066,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 const auto parent = weak_control.lock();
                 using Mode = detail::ChildRecoveryMode;
                 if (!keep || !parent) co_return Mode::None;
-                if (config.recover_existing_child_commands &&
-                    (co_await recoverable_existing_child(parent, binding, input, operation)))
+                if (co_await recoverable_existing_child(
+                        parent, binding, input, operation,
+                        config.recover_existing_child_commands))
                     co_return Mode::Existing;
                 if (!config.child_synthesis_gateway) co_return Mode::None;
                 if (const auto child = (co_await inherited_child(parent, binding)))
@@ -5940,6 +6262,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     asio::awaitable<ControlRegistration> register_control(std::shared_ptr<detail::RunControl> control,
                                                           bool process_unique = false) {
         control->native_history_archive = config.native_history_archive;
+        control->set_descendant_cancel_callback(descendant_canceller());
         if (!control->recorded_replay) {
             control->set_hook_runtime(config.hook_runtime);
             control->set_core_tool_grant_resolver(config.core_tool_grant_resolver);
@@ -6016,6 +6339,23 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 }
                 return true;
             });
+        if (!control->recorded_replay) {
+            control->set_interrupted_published_callback(
+                [weak_impl = weak_from_this(), owner = control->owner_scope,
+                 run_id = control->run_id]() -> asio::awaitable<void> {
+                    const auto keep = weak_impl.lock();
+                    if (!keep || keep->is_stopping()) co_return;
+                    asio::co_spawn(
+                        keep->scheduler->attempts,
+                        [weak_impl, owner, run_id]() -> asio::awaitable<void> {
+                            const auto keep = weak_impl.lock();
+                            if (!keep || keep->is_stopping()) co_return;
+                            co_await keep->wake_paused_parent_handling_failure(owner, run_id);
+                        },
+                        asio::detached);
+                    co_return;
+                });
+        }
         std::lock_guard lock(mutex);
         if (stopping) throw std::runtime_error("ProgramRuntime is stopping");
         {
@@ -6034,8 +6374,16 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     }
                 }
             }
+            const auto pending = process_state->pending_notices.find(
+                {control->owner_scope, control->run_id});
+            if (pending != process_state->pending_notices.end()) {
+                for (auto& notice : pending->second) control->add_notice(std::move(notice));
+                process_state->pending_notices.erase(pending);
+            }
             process_state->controls.push_back(
                 {control->owner_scope, control->run_id, control});
+            std::erase_if(process_state->held_controls, [](const auto& entry) { return entry.control.expired(); });
+            process_state->held_controls.push_back({control->owner_scope, control->run_id, control});
         }
         std::erase_if(controls, [](const std::weak_ptr<detail::RunControl>& weak) {
             const auto live = weak.lock();
@@ -6215,6 +6563,49 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             state.used.max_concurrency >= released ? state.used.max_concurrency - released : 0;
     }
 
+    void record_parent_continuation_failure(std::string_view owner, std::string_view parent,
+                                            std::string_view failure_code,
+                                            std::string_view failure_message) {
+        if (failure_code.empty()) return;
+        // The parent stays Interrupted. The handle of its attempt in this process, if one is held,
+        // says why it was not continued; a later reconnect meets the same cause and reports it.
+        ProgramNotice notice{
+            "P_CHILD_CONTINUATION_FAILED",
+            "The parent was not continued after its child ended: " + std::string(failure_message),
+            json{{"cause", std::string(failure_code)}}};
+        std::shared_ptr<detail::RunControl> latest;
+        {
+            std::lock_guard lock(process_state->controls_mutex);
+            for (const auto& held : process_state->held_controls) {
+                const auto control = held.control.lock();
+                if (control && held.owner_scope == owner && held.run_id == parent &&
+                    (!latest || control->attempt > latest->attempt))
+                    latest = control;
+            }
+            if (!latest)
+                process_state->pending_notices[{std::string(owner), std::string(parent)}].push_back(
+                    notice);
+        }
+        if (latest) latest->add_notice(std::move(notice));
+    }
+
+    asio::awaitable<void> wake_paused_parent_handling_failure(std::string owner,
+                                                              std::string parent) {
+        std::string failure_code;
+        std::string failure_message;
+        try {
+            (void)co_await ProgramRuntime(shared_from_this(), ProgramRuntime::Borrowed{})
+                .wake_paused_parent(owner, parent);
+        } catch (const ProgramDiagnosticError& error) {
+            failure_code    = error.diagnostic().code;
+            failure_message = error.diagnostic().message;
+        } catch (const std::exception& error) {
+            failure_code    = "P_CHILD_CONTINUATION";
+            failure_message = error.what();
+        }
+        record_parent_continuation_failure(owner, parent, failure_code, failure_message);
+    }
+
     void bind_budgeted_child_completion(const std::shared_ptr<detail::RunControl>& child,
                                         std::string_view                           owner_scope,
                                         std::string_view                           parent_run_id,
@@ -6229,7 +6620,35 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             if (const auto live = weak_impl.lock())
                 live->release_child_concurrency(parent, child_id, concurrency);
         });
-        ::neograph::program::bind_child_completion(child, owner_scope, parent, child_id);
+        // The child's end is published into its parent's relation while the parent runs. A parent that is
+        // paused on this child is not running: the end continues it instead (#658). The continuation is a
+        // task of its own, because the child's result is not delivered until this callback returns, and
+        // the continuation joins that result.
+        child->set_completion_callback(
+            [weak_impl = weak_from_this(), weak_child = std::weak_ptr<detail::RunControl>(child),
+             transitions = child->transitions, owner = std::string(owner_scope), parent,
+             child_id](ProgramResult result) -> asio::awaitable<void> {
+                const auto status             = result.status();
+                bool       parent_interrupted = false;
+                const bool published = co_await publish_child_completion(
+                    transitions, owner, parent, child_id, std::move(result), &parent_interrupted);
+                if (published || !parent_interrupted || status == ProgramTerminalStatus::Interrupted)
+                    co_return;
+                const auto keep = weak_impl.lock();
+                if (!keep || keep->is_stopping()) co_return;
+                asio::co_spawn(
+                    keep->scheduler->attempts,
+                    [weak_impl, weak_child, owner, parent]() -> asio::awaitable<void> {
+                        const auto keep = weak_impl.lock();
+                        if (!keep || keep->is_stopping()) co_return;
+                        // The continuation rejoins the child and reads its result, which is delivered after
+                        // the callback returns: start it once the child has delivered it.
+                        if (const auto ended = weak_child.lock()) (void)co_await ended->wait_async();
+                        if (keep->is_stopping()) co_return;
+                        co_await keep->wake_paused_parent_handling_failure(owner, parent);
+                    },
+                    asio::detached);
+            });
     }
 
     bool activate_child_concurrency(std::string_view parent_run_id,
@@ -6340,6 +6759,30 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             admitted_wall += wall;
         }
 
+        std::set<std::string> settled_dispatched_children;
+        {
+            std::vector<std::string> unhydrated_dispatched;
+            {
+                std::lock_guard lock(mutex);
+                const auto      found = child_reservations.find(parent.logical_run_id());
+                for (const auto& child : children) {
+                    // A relation still Dispatched whose concurrency is not held now (never hydrated, or released when
+                    // the child paused or ended) is checked against the child's run before it is counted in flight.
+                    if (child.state == ProgramChildState::Dispatched && !child.terminal_result &&
+                        (found == child_reservations.end() ||
+                         !found->second.active_concurrency.contains(child.child_run_id))) {
+                        unhydrated_dispatched.push_back(child.child_run_id);
+                    }
+                }
+            }
+            for (const auto& child_id : unhydrated_dispatched) {
+                const auto child_run =
+                    (co_await load_active_agent_run(transitions, parent.owner_scope(), child_id));
+                if (child_run && child_run->continuation().state != ContinuationState::Running)
+                    settled_dispatched_children.insert(child_id);
+            }
+        }
+
         auto reservation_capacity = available;
         std::unique_lock lock(mutex);
         if (admitted_wall > available.wall_time_ms) {
@@ -6388,7 +6831,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         auto&           state = child_reservations[parent.logical_run_id()];
         for (const auto& child : children) {
             const auto permanent = permanent_child_reservation(child.invocation.granted_budget);
-            const bool in_flight = child_execution_active(child);
+            const bool in_flight = child_execution_active(child) &&
+                                   !settled_dispatched_children.contains(child.child_run_id);
             const auto existing  = state.permanent_by_child.find(child.child_run_id);
             if (existing == state.permanent_by_child.end()) {
                 auto additional = permanent;
@@ -6455,6 +6899,10 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         }
         const auto available = (co_await hydrate_child_reservations(*parent, head->journal_record));
         co_return ParentChildBudget{available, child->invocation.granted_budget};
+    }
+    bool is_stopping() {
+        std::lock_guard lock(mutex);
+        return stopping;
     }
     void shutdown() noexcept {
         try {
@@ -8656,6 +9104,12 @@ asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_cor
         (co_await load_active_agent_run(impl_->transitions, owner_scope, parent_run_id));
     if (!parent_record)
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program parent run was not found");
+    const auto parent_commands =
+        (co_await impl_->transitions->load_javascript_commands(owner_scope, parent_record->run_id()));
+    const auto parent_journal =
+        (co_await impl_->transitions->latest(owner_scope, parent_record->run_id()));
+    const auto waited_on =
+        detail::children_paused_on(*parent_record, parent_commands, parent_journal);
     auto parent = (co_await reconnect_core(owner_scope, parent_run_id));
 
     std::vector<ProgramHandle> recovered;
@@ -8675,6 +9129,16 @@ asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_cor
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Durable child receipt does not preserve parent lineage",
                                      json{{"child_run_id", persisted.child_run_id}});
+        }
+
+        // A child that the parent waits on, paused or answered since: the parent continues from the child's end
+        // (reconnect above or wake below), and the child is not dispatched again (#658).
+        if (std::any_of(waited_on.begin(), waited_on.end(), [&](const auto& waited) {
+                return waited.child_run_id == persisted.child_run_id;
+            })) {
+            auto child = (co_await reconnect_core(owner_scope, persisted.child_run_id));
+            recovered.push_back(std::move(child));
+            continue;
         }
 
         if (persisted.state == ProgramChildState::Completed ||
@@ -8703,6 +9167,7 @@ asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_cor
         auto child = (co_await start_child_core(owner_scope, parent, link, *version, std::move(invocation)));
         recovered.push_back(std::move(child));
     }
+    if (!waited_on.empty()) co_await impl_->wake_paused_parent_handling_failure(owner_scope, parent_run_id);
     co_return recovered;
 }
 asio::awaitable<ProgramSynthesisReservation> ProgramRuntime::reserve_synthesis_core(
@@ -8927,6 +9392,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                                               bool transition_lock_held) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
+    // A run paused on a child that was answered, whose continuation a lost process never started (#658).
+    if (!transition_lock_held) {
+        // A continuation that cannot start leaves the run as it was and reconnect reports why; it does not
+        // return a paused run as if nothing had happened.
+        if (auto continued = (co_await wake_paused_parent(owner_scope, run_id))) co_return std::move(*continued);
+    }
     detail::ReentrantOperationLock::Guard reconnect_lock;
     if (!transition_lock_held) {
         auto held      = co_await impl_->process_state->transition_mutex->lock_async();
@@ -9047,6 +9518,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
     }
     if (existing_control) {
         auto control = std::move(existing_control);
+        if (record->continuation().state != ContinuationState::Running && !control->try_result())
+            (void)co_await control->wait_async();
         co_return ProgramHandle(std::move(control));
     }
     if (record->has_children()) {
@@ -9578,6 +10051,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
             impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
             std::nullopt, record->logical_run_id());
         control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
+        control->rejoin_paused_children =
+            record->continuation().attempt > 1 && !record->attempt_resume() &&
+            !record->pending_input() && !record->pending_effect() &&
+            !record->children().empty();
         control->fork_provider_replay =
             (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *record));
         impl_->commit_active_child(control, global_quota);
@@ -9597,10 +10074,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                      attempt_resume->checkpoint_id == *resume_checkpoint_id;
         const bool  control_source = control->materialized->bundle.control_source().has_value();
         spawn_run_attempt(impl_->scheduler, impl_, control,
-                          !resume_checkpoint_id || control_source
+                          !resume_checkpoint_id || control_source || control->rejoin_paused_children
                               ? record->invocation().input
                               : (resumed_attempt ? attempt_resume->value : json()),
-                          std::move(resume_checkpoint_id), impl_->config.host_admission,
+                          control->rejoin_paused_children && !control_source
+                              ? std::nullopt
+                              : std::move(resume_checkpoint_id),
+                          impl_->config.host_admission,
                           impl_->config.host_admission_resolver,
                           resumed_attempt && control_source
                               ? std::optional<json>{attempt_resume->value}
@@ -9627,7 +10107,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
 
 asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_scope,
                                                            std::string   run_id,
-                                                           ProgramResume resume_value) {
+                                                           ProgramResume resume_value,
+                                                           bool          child_answered) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program resume run_id must not be empty");
     // A cancellation that ProgramHandle::cancel accepted and a task has yet to record: the resume would compete with it
@@ -9652,6 +10133,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     auto pending_effect = previous->pending_effect();
     if (previous->continuation().state != ContinuationState::Interrupted ||
         !previous->exact_checkpoint()) {
+        if (child_answered) {
+            throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program continuation lost the transition CAS",
+                                     json{{"taken", true}});
+        }
         const bool duplicate_input = pending_input &&
                                      pending_input->state() == ProgramPendingState::Consumed &&
                                      pending_input->call_id() == resume_value.pending_id &&
@@ -9664,6 +10149,50 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
                                       *pending_effect->reconciled_result() == resume_value.value;
         if (duplicate_input || duplicate_effect) co_return (co_await reconnect_core(owner_scope, run_id));
         throw_runtime_diagnostic("P_RESUME_STATE", "Only an interrupted Program run may resume");
+    }
+    // A run that waits on children that paused holds no question of its own: the question is the child's, and
+    // the child is the run to resume (#658).
+    const auto paused_commands =
+        (co_await impl_->transitions->load_javascript_commands(owner_scope, run_id));
+    const auto paused_journal = (co_await impl_->transitions->latest(owner_scope, run_id));
+    const auto paused_on =
+        detail::children_paused_on(*previous, paused_commands, paused_journal);
+    if (!paused_on.empty() && !child_answered) {
+        json children = json::array();
+        for (const auto& child : paused_on) {
+            const auto stored =
+                (co_await load_active_agent_run(impl_->transitions, owner_scope, child.child_run_id));
+            if (!stored || !detail::transition::is_final(stored->continuation().state))
+                children.push_back(child.child_run_id);
+        }
+        if (children.empty()) {
+            for (const auto& child : paused_on) children.push_back(child.child_run_id);
+        }
+        throw_runtime_diagnostic(
+            "P_CHILD_INTERRUPTED",
+            "Program run is paused on an interrupted child; resume the child run instead",
+            json{{"child_run_ids", std::move(children)}});
+    }
+    // The question was the child's, and the child answered it: the run keeps no pending value of its own.
+    if (child_answered) {
+        bool ready =
+            paused_journal && paused_journal->id == previous->journal_head() && !paused_on.empty();
+        for (const auto& child : paused_on) {
+            if (!ready) break;
+            const auto stored =
+                (co_await load_active_agent_run(impl_->transitions, owner_scope, child.child_run_id));
+            if (!stored || !detail::transition::is_final(stored->continuation().state)) ready = false;
+        }
+        if (!ready) {
+            const auto head = (co_await impl_->transitions->load(owner_scope, run_id));
+            const bool taken =
+                paused_journal.has_value() ||
+                (head && head->journal_head() != previous->journal_head());
+            throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program continuation lost the transition CAS",
+                                     json{{"taken", taken}});
+        }
+        pending_input.reset();
+        pending_effect.reset();
     }
     const auto                transition_time     = static_cast<std::uint64_t>(now_ms());
     ProgramPendingDisposition pending_disposition = ProgramPendingDisposition::Applied;
@@ -9768,9 +10297,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
             published != ProgramTransitionPublishResult::AlreadyPresent) {
             throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
         }
-        if (!previous->invocation().parent_run_id.empty())
+        if (!previous->invocation().parent_run_id.empty()) {
             (co_await publish_child_completion(impl_->transitions, owner_scope,
                                      previous->invocation().parent_run_id, run_id, terminal_result));
+            co_await impl_->wake_paused_parent_handling_failure(
+                owner_scope, previous->invocation().parent_run_id);
+        }
         throw_runtime_diagnostic(pending_code, pending_message);
     }
     if (pending_disposition != ProgramPendingDisposition::Applied) {
@@ -9785,7 +10317,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     const auto javascript_commands =
         (co_await impl_->transitions->load_javascript_commands(owner_scope, run_id));
     std::optional<JavaScriptPendingCommand> javascript_pending;
-    if (const auto previous_effect = previous->pending_effect()) {
+    // The continuation of a run paused on a child resumes no Core call: its pending command is the await.
+    if (const auto previous_effect = child_answered ? std::nullopt : previous->pending_effect()) {
         javascript_pending = javascript_pending_command(*previous_effect);
         if (javascript_pending && javascript_pending->bundle_id != previous->bundle_id()) {
             throw_runtime_diagnostic(
@@ -9793,7 +10326,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
                 "JavaScript pending effect bundle does not match the durable run bundle");
         }
     }
-    if (!javascript_pending && previous->pending_input() && !javascript_commands.empty() &&
+    if (!child_answered && !javascript_pending && !javascript_commands.empty() &&
         javascript_commands.back().pending()) {
         const auto& pending_command = javascript_commands.back();
         if (pending_command.bundle_id() != previous->bundle_id() ||
@@ -9858,6 +10391,14 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
 
     const auto previous_journal = (co_await impl_->transitions->latest(owner_scope, run_id));
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
+        if (child_answered) {
+            const auto head = (co_await impl_->transitions->load(owner_scope, run_id));
+            const bool taken =
+                (previous_journal && previous_journal->id != previous->journal_head()) ||
+                (head && head->journal_head() != previous->journal_head());
+            throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program continuation lost the transition CAS",
+                                     json{{"taken", taken}});
+        }
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
     }
     std::shared_ptr<ChildQuotaReservation> global_quota;
@@ -9885,8 +10426,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         stored_resume_checkpoint->metadata.value("neograph_program", std::string{}) == "terminal";
     const bool reconcile_javascript_command =
         javascript_pending &&
-        (previous->pending_effect().has_value() || !javascript_pending->core_resume_operation_id ||
-         synthetic_terminal_checkpoint);
+        (!javascript_pending->core_resume_operation_id || synthetic_terminal_checkpoint);
     // The attempt is granted what the journal holds for it, as reconcile_core
     // does for the same command. The host's answer to a stopped JavaScript
     // command does not say what the command spent, so the provider currency it
@@ -9926,14 +10466,20 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         std::nullopt, previous->logical_run_id());
     control->fork_provider_replay =
         (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *previous));
-    impl_->commit_active_child(control, global_quota);
-    if (!previous->invocation().parent_run_id.empty())
-        impl_->bind_budgeted_child_completion(control, owner_scope,
-                                              previous->invocation().parent_run_id, run_id);
-    if (!previous->invocation().parent_run_id.empty()) {
-        if (auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id))
-            co_await parent->attach_child(control);
-    }
+    control->rejoin_paused_children = child_answered;
+    // The control joins its parent's bookkeeping before the publication, except for the continuation of a paused
+    // run: that one may lose the publication to another caller, and then leaves nothing of itself behind.
+    auto link_into_parent = [&]() -> asio::awaitable<void> {
+        impl_->commit_active_child(control, global_quota);
+        if (!previous->invocation().parent_run_id.empty())
+            impl_->bind_budgeted_child_completion(control, owner_scope,
+                                                  previous->invocation().parent_run_id, run_id);
+        if (!previous->invocation().parent_run_id.empty()) {
+            if (auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id))
+                co_await parent->attach_child(control);
+        }
+    };
+    if (!child_answered) co_await link_into_parent();
     auto journal =
         resumed_record(*control, *previous_journal, resumed_remaining, resumed_reservation);
     const auto started =
@@ -9962,9 +10508,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     data.settled_branches                 = previous->settled_branches();
     // The value this attempt resumes its checkpoint with, durable before the
     // attempt starts, so that recovery continues the same attempt (#377).
-    if (javascript_commands.empty() ||
-        (javascript_pending && javascript_pending->core_resume_operation_id &&
-         !reconcile_javascript_command)) {
+    if (!child_answered &&
+        (javascript_commands.empty() ||
+         (javascript_pending && javascript_pending->core_resume_operation_id &&
+          !reconcile_javascript_command))) {
         data.attempt_resume = ProgramAttemptResume{checkpoint.checkpoint_id, resume_value.value};
     }
     data.fork_receipt                     = previous->fork_receipt();
@@ -10006,6 +10553,16 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         published = (co_await impl_->transitions->compare_publish(
               owner_scope, previous->journal_head(), std::move(publication)));
     if (published != ProgramTransitionPublishResult::Published) {
+        if (child_answered) {
+            // Nothing of this continuation is registered anywhere. Another caller that moved the head took the
+            // continuation: it is theirs and this one does nothing. A head that did not move means that the store
+            // refused the publication, which a retry would meet again: the caller sees the conflict.
+            if (global_quota) global_quota->release();
+            const auto head = (co_await impl_->transitions->load(owner_scope, run_id));
+            const bool taken = head && head->journal_head() != previous->journal_head();
+            throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program continuation lost the transition CAS",
+                                     json{{"taken", taken}});
+        }
         const auto                winner = (co_await impl_->transitions->load(owner_scope, run_id));
         ProgramPendingDisposition disposition = ProgramPendingDisposition::Conflict;
         if (winner && winner->pending_input()) {
@@ -10026,6 +10583,31 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     }
     child_concurrency.commit();
     if (execution_lease) control->set_execution_lease(*execution_lease);
+    if (child_answered) {
+        std::exception_ptr link_failure;
+        std::string        link_failure_code    = "P_CHILD_CONTINUATION";
+        std::string        link_failure_message = "Failed to link resumed continuation into parent";
+        try {
+            co_await link_into_parent();
+        } catch (const ProgramDiagnosticError& error) {
+            link_failure         = std::current_exception();
+            link_failure_code    = error.diagnostic().code;
+            link_failure_message = error.diagnostic().message;
+        } catch (const std::exception& error) {
+            link_failure         = std::current_exception();
+            link_failure_message = error.what();
+        }
+        if (link_failure) {
+            detail::RunOutcome failed;
+            failed.status           = ProgramTerminalStatus::Failed;
+            failed.remaining_budget = resumed_remaining;
+            failed.checkpoint       = checkpoint;
+            failed.failure          = ProgramFailure{link_failure_code, link_failure_message, "root",
+                                            checkpoint.core_name, 0, json::object()};
+            (co_await control->complete_async(std::move(failed)));
+            std::rethrow_exception(link_failure);
+        }
+    }
 
     (co_await impl_->register_control(control));
     std::optional<std::string> sink_error;
@@ -10041,15 +10623,79 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     }
 
     auto attempt_input =
-        !javascript_commands.empty() ? previous->invocation().input : std::move(resume_value.value);
+        !javascript_commands.empty() || child_answered
+            ? previous->invocation().input
+            : std::move(resume_value.value);
     auto core_resume_value = javascript_pending && javascript_pending->core_resume_operation_id &&
                                      !reconcile_javascript_command
                                  ? std::optional<json>{std::move(resume_value.value)}
                                  : std::nullopt;
-    spawn_run_attempt(impl_->scheduler, impl_, control, std::move(attempt_input), checkpoint.checkpoint_id,
+    spawn_run_attempt(impl_->scheduler, impl_, control, std::move(attempt_input),
+                      child_answered && javascript_commands.empty()
+                          ? std::nullopt
+                          : std::optional<std::string>{checkpoint.checkpoint_id},
                       impl_->config.host_admission, impl_->config.host_admission_resolver,
                       std::move(core_resume_value));
     co_return ProgramHandle(std::move(control));
+}
+
+asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent(std::string owner_scope,
+                                                                                 std::string parent_run_id) {
+    const auto record = (co_await load_active_agent_run(impl_->transitions, owner_scope, parent_run_id));
+    if (!record || record->continuation().state != ContinuationState::Interrupted ||
+        !record->exact_checkpoint())
+        co_return std::nullopt;
+    const auto commands =
+        (co_await impl_->transitions->load_javascript_commands(owner_scope, record->run_id()));
+    const auto latest_journal = (co_await impl_->transitions->latest(owner_scope, record->run_id()));
+    const auto paused_on = detail::children_paused_on(*record, commands, latest_journal);
+    if (paused_on.empty()) co_return std::nullopt;
+    for (const auto& child : paused_on) {
+        const auto stored =
+            (co_await load_active_agent_run(impl_->transitions, owner_scope, child.child_run_id));
+        if (!stored || !detail::transition::is_final(stored->continuation().state))
+            co_return std::nullopt;
+        if (const auto live = impl_->find_control(owner_scope, child.child_run_id);
+            live && !live->try_result())
+            (void)co_await live->wait_async();
+        else if (const auto proc = impl_->find_process_control(owner_scope, child.child_run_id);
+                 proc && !proc->try_result())
+            (void)co_await proc->wait_async();
+    }
+    // One caller of this process enters the publication; the others leave the run to it. Across processes the
+    // publication decides, and the caller that loses it does nothing (resume_core says so with `taken`).
+    struct Entry {
+        std::shared_ptr<ProcessRuntimeState> state;
+        std::pair<std::string, std::string>  key;
+        ~Entry() {
+            if (!state) return;
+            std::lock_guard lock(state->continuations_mutex);
+            state->continuations.erase(key);
+        }
+    } entry;
+    {
+        std::lock_guard lock(impl_->process_state->continuations_mutex);
+        if (!impl_->process_state->continuations.insert({owner_scope, record->run_id()}).second) co_return std::nullopt;
+        entry.state = impl_->process_state;
+        entry.key   = {owner_scope, record->run_id()};
+    }
+    std::optional<ProgramHandle> continued;
+    bool                         taken = false;
+    std::exception_ptr           failure;
+    try {
+        continued.emplace(co_await resume_core(owner_scope, record->run_id(), ProgramResume{}, true));
+    } catch (const ProgramDiagnosticError& error) {
+        if (error.diagnostic().code == "P_RESUME_CONFLICT" && error.diagnostic().witness.is_object() &&
+            error.diagnostic().witness.value("taken", false))
+            taken = true;
+        else
+            failure = std::current_exception();
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    if (failure) std::rethrow_exception(failure);
+    if (taken) co_return std::nullopt;
+    co_return continued;
 }
 
 asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string             owner_scope,
@@ -10070,6 +10716,30 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
     const auto available_budget = active_lineage ? active_lineage->lineage.remaining_budget()
                                                  : previous->remaining_budget();
     auto pending = previous->pending_effect();
+    {
+        const auto reconcile_commands =
+            (co_await impl_->transitions->load_javascript_commands(owner_scope, run_id));
+        const auto reconcile_journal =
+            (co_await impl_->transitions->latest(owner_scope, run_id));
+        const auto paused_on =
+            detail::children_paused_on(*previous, reconcile_commands, reconcile_journal);
+        if (!paused_on.empty()) {
+            json children = json::array();
+            for (const auto& child : paused_on) {
+                const auto stored = (co_await load_active_agent_run(
+                    impl_->transitions, owner_scope, child.child_run_id));
+                if (!stored || !detail::transition::is_final(stored->continuation().state))
+                    children.push_back(child.child_run_id);
+            }
+            if (children.empty()) {
+                for (const auto& child : paused_on) children.push_back(child.child_run_id);
+            }
+            throw_runtime_diagnostic(
+                "P_CHILD_INTERRUPTED",
+                "Program run is paused on an interrupted child; resume the child run instead",
+                json{{"child_run_ids", std::move(children)}});
+        }
+    }
     if (!pending || !previous->exact_checkpoint()) {
         throw_runtime_diagnostic("P_EFFECT_NOT_AMBIGUOUS",
                                  "Program run has no pending effect to reconcile");
@@ -10423,9 +11093,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
                                                   reconciled->invocation().parent_run_id, run_id);
         auto reconnected = ProgramHandle(std::move(control));
         if (const auto result = reconnected.try_result()) {
-            if (!previous->invocation().parent_run_id.empty())
+            if (!previous->invocation().parent_run_id.empty()) {
                 (co_await publish_child_completion(impl_->transitions, owner_scope,
                                          previous->invocation().parent_run_id, run_id, *result));
+                co_await impl_->wake_paused_parent_handling_failure(
+                    owner_scope, previous->invocation().parent_run_id);
+            }
         }
         co_return reconnected;
     }

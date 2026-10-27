@@ -72,6 +72,7 @@ extern char** environ;
 #include <utility>
 #include <vector>
 #include "fixtures/store_handle.h"
+#include "transition_validator.h"
 
 using neograph::program::test_support::FragmentStoreHandle;
 using neograph::program::test_support::GrantStoreHandle;
@@ -543,9 +544,11 @@ class HeldResumedAttempt {
 public:
     HeldResumedAttempt() {
         std::lock_guard lock(resumed_value_hook_mutex);
-        resumed_value_hook = [this] {
-            entered_.set_value();
-            released_.wait();
+        // The hook owns its share of the state: a cancelled run's handle can return while the node is still
+        // inside the hook, and the node must not then wait on this object's members.
+        resumed_value_hook = [entered = entered_, released = released_] {
+            entered->set_value();
+            released.wait();
         };
     }
     ~HeldResumedAttempt() {
@@ -561,8 +564,8 @@ public:
     }
 
 private:
-    std::promise<void>       entered_;
-    std::future<void>        entered_future_ = entered_.get_future();
+    std::shared_ptr<std::promise<void>> entered_ = std::make_shared<std::promise<void>>();
+    std::future<void>        entered_future_ = entered_->get_future();
     std::promise<void>       release_;
     std::shared_future<void> released_ = release_.get_future().share();
     std::atomic<bool>        released_flag_{false};
@@ -1563,12 +1566,13 @@ LinkedChildAdmission make_durable_spawn_child(
     std::string                  parent_node_type   = "runtime-completed",
     std::string                  child_node_type    = "runtime-completed",
     std::optional<std::uint64_t> timeout_ms         = std::nullopt,
-    ExecutionGuarantee           accepted_guarantee = ExecutionGuarantee::Strict) {
+    ExecutionGuarantee           accepted_guarantee = ExecutionGuarantee::Strict,
+    std::uint64_t                program_operations = 2) {
     json await = json{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
     if (timeout_ms) await["timeout_ms"] = *timeout_ms;
     auto parent_document = orchestration_document(std::move(await), std::move(parent_node_type));
-    parent_document["declared_budget_requirements"][4]["minimum"] = 2;
-    parent_document["declared_budget_requirements"][4]["maximum"] = 2;
+    parent_document["declared_budget_requirements"][4]["minimum"] = program_operations;
+    parent_document["declared_budget_requirements"][4]["maximum"] = program_operations;
     parent_document["declared_budget_requirements"][7]["minimum"] = 1;
     parent_document["declared_budget_requirements"][7]["maximum"] = 1;
     parent_document["declared_budget_requirements"][8]["minimum"] = 1;
@@ -7788,6 +7792,1565 @@ ProgramVersion admit_javascript_within(AdmittedRuntime& fixture, std::string nam
 }
 
 }  // namespace
+
+// The one rule for whether an Interrupted outcome releases the reservation of the pending command (#658). The attempt,
+// the terminal publisher and the validator ask it with the same facts about the same checkpoint value.
+TEST(ProgramRuntimeTest, InterruptReleasesTheCommandReservationOnlyForANewCheckpointOfItsOwnCoreCall) {
+    using neograph::program::detail::transition::interrupt_releases_command_reservation;
+    CoreCheckpointIdentity before{"main", "generation", "thread-before", "checkpoint-before", 1};
+    CoreCheckpointIdentity moved{"main", "generation", "thread-now", "checkpoint-now", 1};
+    const std::optional<CoreCheckpointIdentity> none;
+    // No checkpoint, or no event that published it: nothing was written, nothing is released.
+    EXPECT_FALSE(interrupt_releases_command_reservation(before, none, true, true));
+    EXPECT_FALSE(interrupt_releases_command_reservation(before, moved, false, true));
+    // An await that finished or paused without moving the checkpoint keeps what it reserved.
+    EXPECT_FALSE(interrupt_releases_command_reservation(before, before, true, true));
+    // The checkpoint moved, but the pending command holds no Core call of that thread (an await of a spawn).
+    EXPECT_FALSE(interrupt_releases_command_reservation(before, moved, true, false));
+    // A Core call of the pending command wrote the new checkpoint; with no pending command the rule is the same.
+    EXPECT_TRUE(interrupt_releases_command_reservation(before, moved, true, true));
+    EXPECT_TRUE(interrupt_releases_command_reservation(none, moved, true, std::nullopt));
+    EXPECT_FALSE(interrupt_releases_command_reservation(moved, moved, true, std::nullopt));
+}
+
+// A child that pauses while its parent awaits it (#658): the parent ends Interrupted (never Failed) and keeps the relation
+// Dispatched and the reservation of its await. Resuming the child by its run id continues the parent, which gets the
+// child's result. Resuming the parent is refused with a diagnostic that names the child.
+namespace {
+
+struct AwaitedInterruptingChild {
+    LinkedChildAdmission linked;
+    ProgramHandle        parent;
+};
+
+// The parent's own budget must leave a full child allocation unspent after its Core call.
+const RunBudget kAwaitingParentBudget{30000, 2000, 2000, 2, 32, 60, 0, 1, 1};
+
+AwaitedInterruptingChild start_parent_awaiting_interrupting_child(AdmittedRuntime&   fixture,
+                                                                  const std::string& body,
+                                                                  const std::string& trace) {
+    const auto parent_version = admit_javascript_within(
+        fixture, "awaited-interrupting-child-parent.js",
+        javascript_runtime_source("runtime-completed", body), kAwaitingParentBudget);
+    const auto child_version = fixture.admit("runtime-interrupt");
+    auto       linked        = link_child_versions(fixture, parent_version, child_version,
+                                                   BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+    auto       parent        = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), kAwaitingParentBudget, trace, {}});
+    return AwaitedInterruptingChild{std::move(linked), std::move(parent)};
+}
+
+const char* const kAwaitFirst = R"JS(
+    const child = yield ng.await(ng.spawn("child", {}, "spawn"), 20000, "await");
+    const post = yield ng.callCore("main", {}, "core:post");
+    return {child: child, post: post};
+)JS";
+
+const char* const kAwaitAfterCoreCall = R"JS(
+    const pre = yield ng.callCore("main", {}, "core:pre");
+    const child = yield ng.await(ng.spawn("child", {}, "spawn"), 20000, "await");
+    return {pre: pre, child: child};
+)JS";
+
+// The one child relation of `parent_run_id`, as the journal holds it.
+ProgramChildRecord only_child_of(AdmittedRuntime& fixture, const std::string& parent_run_id) {
+    const auto stored = fixture.journal->load("tenant:runtime", parent_run_id);
+    EXPECT_TRUE(stored.has_value());
+    EXPECT_EQ(stored->children().size(), 1U);
+    return stored->children().front();
+}
+
+// The result of `run_id` once its record is no longer Interrupted: the continuation of a paused parent runs on its own,
+// ancestor by ancestor, after its child is answered.
+ProgramResult wait_until_run_ends(AdmittedRuntime& fixture, const std::string& run_id) {
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+        const auto stored = fixture.journal->load("tenant:runtime", run_id);
+        if (stored && stored->continuation().state != ContinuationState::Interrupted &&
+            stored->continuation().state != ContinuationState::Running)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return fixture.runtime->reconnect("tenant:runtime", run_id).wait();
+}
+
+// Resumes the paused `child` through its own run id.
+ProgramResult answer_paused_child(AdmittedRuntime& fixture, const ProgramChildRecord& child, const std::string& trace) {
+    EXPECT_TRUE(child.terminal_result.has_value());
+    auto resumed = fixture.runtime->resume(
+        "tenant:runtime", child.child_run_id,
+        resume_for(*child.terminal_result, json{{"decision", "approved"}}, trace));
+    return resumed.wait();
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptAwaitOfAChildThatInterruptsAfterACoreCallPausesTheParent) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitAfterCoreCall,
+                                                                       "trace-js-await-interrupted-child-after-core");
+    const auto result = started.parent.wait();
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Interrupted)
+        << (result.failure() ? result.failure()->code + ": " + result.failure()->message : "no failure detail");
+    const auto child = only_child_of(fixture, started.parent.run_id());
+    EXPECT_EQ(child.state, ProgramChildState::Dispatched);
+    // The await keeps the reservation it holds while it waits for the child.
+    const auto journal = fixture.journal->latest("tenant:runtime", started.parent.run_id());
+    ASSERT_TRUE(journal.has_value());
+    EXPECT_NE(journal->inflight_reservation, RunBudget{});
+    EXPECT_TRUE(started.parent.cancel());
+}
+
+TEST(ProgramRuntimeTest, JavaScriptParentThatAwaitedAnInterruptedChildIsNotResumedThroughItself) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst,
+                                                                       "trace-js-await-interrupted-child-refused");
+    const auto interrupted = started.parent.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    const auto child = only_child_of(fixture, started.parent.run_id());
+
+    try {
+        (void)fixture.runtime->resume(
+            "tenant:runtime", started.parent.run_id(),
+            resume_for(interrupted, json{{"decision", "approved"}}, "trace-js-await-parent-resumed"));
+        ADD_FAILURE() << "resuming the parent of a paused child must be refused";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_INTERRUPTED");
+        EXPECT_EQ(error.diagnostic().witness.at("child_run_ids"), json::array({child.child_run_id}));
+    }
+    // The refusal consumed nothing: the child still answers.
+    EXPECT_EQ(answer_paused_child(fixture, child, "trace-js-await-child-after-refusal").status(),
+              ProgramTerminalStatus::Completed);
+}
+
+// The test keeps the handle of the Interrupted parent while it answers the child. The control behind that handle used to
+// cancel a child that attached to it, so resuming the child ended in "Program resume lost the transition CAS".
+TEST(ProgramRuntimeTest, JavaScriptAnsweringAnAwaitedChildContinuesTheParentToCompletion) {
+    for (const auto* body : {kAwaitFirst, kAwaitAfterCoreCall}) {
+        SCOPED_TRACE(body);
+        interrupt_calls.store(0);
+        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        auto            started = start_parent_awaiting_interrupting_child(fixture, body, "trace-js-await-answer");
+        const auto      interrupted = started.parent.wait();
+        ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+        const auto child = only_child_of(fixture, started.parent.run_id());
+
+        const auto answered = answer_paused_child(fixture, child, "trace-js-await-child-answered");
+        ASSERT_EQ(answered.status(), ProgramTerminalStatus::Completed);
+
+        const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+        ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+            << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+        EXPECT_EQ(final.output().at("child").at("channels").at("value").at("value"), "approved");
+        EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+    }
+}
+
+namespace {
+
+// A root that awaits a middle Program, which awaits a grandchild that pauses. `after_grandchild` runs in the middle
+// Program once the grandchild's result is in (a Core call, say).
+struct ThreeLevels {
+    ProgramVersion root_version;
+    RunBudget      root_budget;
+};
+
+ThreeLevels admit_three_levels(AdmittedRuntime& fixture, const std::string& middle_node_type = "runtime-completed",
+                               const std::string& after_grandchild = {}) {
+    const BudgetLimits middle_limits{25000, 3000, 3000, 2, 16, 40, 0, 1, 1};
+    const RunBudget    middle_ceiling{25000, 3000, 3000, 2, 16, 40, 0, 1, 1};
+    const RunBudget    root_budget{55000, 8000, 8000, 3, 32, 100, 0, 2, 2};
+    const auto         middle_version = admit_javascript_within(
+        fixture, "middle.js",
+        javascript_runtime_source(middle_node_type,
+                                  "    const grandchild = yield ng.await(ng.spawn(\"child\", {}, \"spawn:g\"), 15000, "
+                                  "\"await:g\");\n" +
+                                      after_grandchild + "    return {grandchild: grandchild};\n"),
+        middle_ceiling);
+    const auto root_version = admit_javascript_within(
+        fixture, "root.js",
+        javascript_runtime_source("runtime-completed", R"JS(
+    const middle = yield ng.await(ng.spawn("child", {}, "spawn:m"), 40000, "await:m");
+    return {middle: middle};
+)JS"),
+        root_budget);
+    const auto grandchild_version = fixture.admit("runtime-interrupt");
+    (void)link_child_versions(fixture, middle_version, grandchild_version);
+    const auto linked = link_child_versions(fixture, root_version, middle_version, middle_limits,
+                                            ExecutionGuarantee::Unmanaged);
+    return ThreeLevels{linked.parent_version, root_budget};
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptAGrandchildThatPausesIsAnsweredAndBothAncestorsComplete) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      levels = admit_three_levels(fixture);
+    auto            root   = fixture.runtime->start("tenant:runtime", levels.root_version,
+                                       ProgramInvocation{json::object(), levels.root_budget, "trace-three-levels", {}});
+    const auto interrupted = root.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure() ? interrupted.failure()->code + ": " + interrupted.failure()->message
+                                  : "no failure detail");
+    const auto middle     = only_child_of(fixture, root.run_id());
+    const auto grandchild = only_child_of(fixture, middle.child_run_id);
+    EXPECT_EQ(middle.state, ProgramChildState::Dispatched);
+    EXPECT_EQ(grandchild.state, ProgramChildState::Dispatched);
+
+    const auto answered = answer_paused_child(fixture, grandchild, "trace-grandchild-answered");
+    ASSERT_EQ(answered.status(), ProgramTerminalStatus::Completed);
+
+    const auto final = wait_until_run_ends(fixture, root.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(final.output().at("middle").at("grandchild").at("channels").at("value").at("value"), "approved");
+    EXPECT_EQ(only_child_of(fixture, root.run_id()).state, ProgramChildState::Completed);
+    EXPECT_EQ(only_child_of(fixture, middle.child_run_id).state, ProgramChildState::Completed);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptCancellingTheRootWhileAGrandchildWaitsCancelsEveryRun) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      levels = admit_three_levels(fixture);
+    auto            root   = fixture.runtime->start("tenant:runtime", levels.root_version,
+                                       ProgramInvocation{json::object(), levels.root_budget, "trace-three-levels-cancel", {}});
+    ASSERT_EQ(root.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto middle     = only_child_of(fixture, root.run_id());
+    const auto grandchild = only_child_of(fixture, middle.child_run_id);
+
+    EXPECT_TRUE(root.cancel());
+    EXPECT_EQ(root.wait().status(), ProgramTerminalStatus::Cancelled);
+    for (const auto& run_id : {root.run_id(), middle.child_run_id, grandchild.child_run_id}) {
+        SCOPED_TRACE(run_id);
+        const auto stored = fixture.journal->load("tenant:runtime", run_id);
+        ASSERT_TRUE(stored.has_value());
+        EXPECT_EQ(stored->continuation().state, ContinuationState::Cancelled);
+    }
+    EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", grandchild.child_run_id).wait().status(),
+              ProgramTerminalStatus::Cancelled);
+}
+
+// The middle Program was resumed by its grandchild's answer and runs again when the root is cancelled through a handle
+// that read the root back from the stores: that handle holds no control of the middle Program, and the cancellation
+// still reaches it.
+TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootCancelsAResumedDescendantThatIsRunning) {
+    interrupt_calls.store(0);
+    blocking_calls.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      levels = admit_three_levels(fixture, "runtime-blocking",
+                                                "    yield ng.callCore(\"main\", {}, \"core:after\");\n");
+    std::optional<ProgramChildRecord> middle;
+    std::optional<ProgramChildRecord> grandchild;
+    std::string                       root_run_id;
+    {
+        auto root = fixture.runtime->start("tenant:runtime", levels.root_version,
+                                           ProgramInvocation{json::object(), levels.root_budget,
+                                                             "trace-three-levels-running", {}});
+        ASSERT_EQ(root.wait().status(), ProgramTerminalStatus::Interrupted);
+        root_run_id = root.run_id();
+        middle      = only_child_of(fixture, root_run_id);
+        grandchild  = only_child_of(fixture, middle->child_run_id);
+    }
+    ASSERT_EQ(answer_paused_child(fixture, *grandchild, "trace-grandchild-answered-running").status(),
+              ProgramTerminalStatus::Completed);
+    for (int attempt = 0; attempt < 1000 && blocking_calls.load() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_GT(blocking_calls.load(), 0U);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state,
+              ContinuationState::Running);
+
+    auto fresh = fixture.runtime->reconnect("tenant:runtime", root_run_id);
+    EXPECT_TRUE(fresh.cancel());
+    for (int attempt = 0; attempt < 1000; ++attempt) {
+        if (fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state !=
+            ContinuationState::Running)
+            break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", root_run_id)->continuation().state,
+              ContinuationState::Cancelled);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state,
+              ContinuationState::Cancelled);
+}
+
+// A typed plan awaits a spawned child the same way a JavaScript main() does.
+TEST(ProgramRuntimeTest, TypedAwaitOfAChildThatInterruptsPausesTheParentAndTheChildsAnswerCompletesIt) {
+    interrupt_calls.store(0);
+    AdmittedRuntime fixture(3);
+    // The plan replays its operations when it continues, and they count again: it needs more than the two it uses once.
+    const auto      linked = make_durable_spawn_child(fixture, "runtime-completed", "runtime-interrupt",
+                                                      std::nullopt, ExecutionGuarantee::Strict, 12);
+    auto            parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+                                         ProgramInvocation{json::object(),
+                                                           RunBudget{10000, 1000, 1000, 1, 12, 20, 0, 1, 1},
+                                                           "trace-typed-await-interrupted-child", {}});
+    const auto interrupted = parent.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << (interrupted.failure() ? interrupted.failure()->code + ": " + interrupted.failure()->message
+                                  : "no failure detail");
+    const auto child = only_child_of(fixture, parent.run_id());
+    EXPECT_EQ(child.state, ProgramChildState::Dispatched);
+
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-typed-child-answered").status(),
+              ProgramTerminalStatus::Completed);
+    const auto final = wait_until_run_ends(fixture, parent.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    const auto relation = only_child_of(fixture, parent.run_id());
+    EXPECT_EQ(relation.state, ProgramChildState::Completed);
+    EXPECT_EQ(relation.child_run_id, child.child_run_id);
+}
+
+namespace {
+
+// A store that interferes with the publication that continues a paused parent (an Interrupted record that becomes
+// Running again, with children), so that a test drives each interleaving by hand: it refuses it, holds it at a gate,
+// or lets it through and then freezes the run, which ends the attempt the way the loss of its process does. It counts
+// what it saw.
+class ContinuationInterferenceJournal final : public SyncProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
+        return inner_.load_sync(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run_id) const override {
+        return inner_.latest_sync(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
+                                               std::uint64_t sequence) const override {
+        return inner_.load_events_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run_id,
+                                                            std::uint64_t sequence) const override {
+        return inner_.load_effects_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
+                                                                         std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                       std::string_view lineage_id) const override {
+        return inner_.load_lineage_sync(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                           std::string_view run_id) const override {
+        return inner_.load_run_lineage_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage_id,
+                                                            std::string_view head_id) const override {
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage_id,
+                                                             std::uint64_t generation) const override {
+        return inner_.load_generation_sync(owner, lineage_id, generation);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
+                                                                   std::string_view run_id) const override {
+        return inner_.load_execution_lease_sync(owner, run_id);
+    }
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        ProgramTransitionPublication publication) override {
+        const auto kind = intercept(owner, publication);
+        if (kind.refused) return ProgramTransitionPublishResult::Conflict;
+        const auto run    = publication.run_record.run_id();
+        const auto result = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        accepted(kind, run, result);
+        return result;
+    }
+    ProgramTransitionPublishResult compare_publish_execution_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        const auto kind = intercept(owner, publication);
+        if (kind.refused) return ProgramTransitionPublishResult::Conflict;
+        const auto run    = publication.run_record.run_id();
+        const auto result = inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+                                                                  std::move(expected_lease), std::move(next_lease));
+        accepted(kind, run, result);
+        return result;
+    }
+
+    // Refuse every continuation while armed.
+    void          arm() noexcept { refuse_.store(true); }
+    void          disarm() noexcept { refuse_.store(false); }
+    std::uint64_t refusals() const noexcept { return refusals_.load(); }
+    // Hold the next continuation at the gate until it is released.
+    void arm_gate() noexcept { gate_armed_.store(true); }
+    bool wait_gate_entered() {
+        std::unique_lock lock(gate_mutex_);
+        return gate_cv_.wait_for(lock, std::chrono::seconds(10), [this] { return gate_entered_; });
+    }
+    void release_gate() {
+        std::lock_guard lock(gate_mutex_);
+        gate_released_ = true;
+        gate_cv_.notify_all();
+    }
+    // Let the next continuation through, then refuse every later publication of that run until thawed: the attempt
+    // it starts cannot write anything, as if its process had been lost right after the continuation was recorded.
+    void freeze_after_continuation() noexcept { freeze_armed_.store(true); }
+    void freeze_all() noexcept { freeze_all_.store(true); }
+    void thaw() {
+        std::lock_guard lock(gate_mutex_);
+        frozen_run_.clear();
+        freeze_armed_.store(false);
+        freeze_all_.store(false);
+    }
+    std::uint64_t continuations() const noexcept { return continuations_.load(); }
+    bool wait_frozen_attempt_stopped() {
+        std::unique_lock lock(gate_mutex_);
+        return gate_cv_.wait_for(lock, std::chrono::seconds(10), [this] {
+            return continuations_.load() >= 1 && refusals_.load() >= 1;
+        });
+    }
+
+private:
+    struct Kind {
+        bool refused      = false;
+        bool continuation = false;
+    };
+    Kind intercept(std::string_view owner, const ProgramTransitionPublication& publication) {
+        Kind        kind;
+        const auto& record = publication.run_record;
+        {
+            std::lock_guard lock(gate_mutex_);
+            if (freeze_all_.load() || (!frozen_run_.empty() && frozen_run_ == record.run_id())) {
+                ++refusals_;
+                gate_cv_.notify_all();
+                kind.refused = true;
+                return kind;
+            }
+        }
+        if (record.continuation().state != ContinuationState::Running || record.children().empty()) return kind;
+        const auto stored = inner_.load_sync(owner, record.run_id());
+        if (!stored || stored->continuation().state != ContinuationState::Interrupted) return kind;
+        kind.continuation = true;
+        if (refuse_.load()) {
+            ++refusals_;
+            gate_cv_.notify_all();
+            kind.refused = true;
+            return kind;
+        }
+        if (gate_armed_.exchange(false)) {
+            std::unique_lock lock(gate_mutex_);
+            gate_entered_ = true;
+            gate_cv_.notify_all();
+            gate_cv_.wait_for(lock, std::chrono::seconds(20), [this] { return gate_released_; });
+        }
+        return kind;
+    }
+    void accepted(const Kind& kind, const std::string& run, ProgramTransitionPublishResult result) {
+        if (!kind.continuation || result != ProgramTransitionPublishResult::Published) return;
+        ++continuations_;
+        if (freeze_armed_.exchange(false)) {
+            std::lock_guard lock(gate_mutex_);
+            frozen_run_ = run;
+        }
+        gate_cv_.notify_all();
+    }
+
+    InMemoryProgramTransitionStore inner_;
+    std::atomic<bool>              refuse_{false};
+    std::atomic<std::uint64_t>     refusals_{0};
+    std::atomic<std::uint64_t>     continuations_{0};
+    std::atomic<bool>              gate_armed_{false};
+    std::atomic<bool>              freeze_armed_{false};
+    std::atomic<bool>              freeze_all_{false};
+    std::mutex                     gate_mutex_;
+    std::condition_variable        gate_cv_;
+    bool                           gate_entered_ = false;
+    bool                           gate_released_ = false;
+    std::string                    frozen_run_;
+};
+
+}  // namespace
+
+// The continuation of a paused parent is refused by the store: it fails once and leaves the parent Interrupted, it
+// does not retry itself, and the host sees why: the held handle of the parent carries a notice, and `reconnect` of the
+// parent reports the conflict instead of returning the paused parent as if nothing had happened. Once the store accepts
+// the continuation, `reconnect` completes the parent (the child ended while nobody continued the parent).
+TEST(ProgramRuntimeTest, JavaScriptAContinuationTheStoreRefusesFailsOnceAndReconnectCompletesTheParent) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-refused-continuation");
+    ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto child = only_child_of(fixture, started.parent.run_id());
+
+    journal->arm();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-refused-continuation-answer").status(),
+              ProgramTerminalStatus::Completed);
+    for (int attempt = 0; attempt < 500 && journal->refusals() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_EQ(journal->refusals(), 1U) << "the refused continuation must not retry itself";
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().state,
+              ContinuationState::Interrupted);
+    const auto notices = started.parent.notices();
+    ASSERT_FALSE(notices.empty());
+    EXPECT_EQ(notices.back().code, "P_CHILD_CONTINUATION_FAILED");
+    try {
+        (void)fixture.runtime->reconnect("tenant:runtime", started.parent.run_id());
+        ADD_FAILURE() << "reconnect must report why the paused parent is not continued";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_RESUME_CONFLICT");
+    }
+
+    journal->disarm();
+    const auto final = fixture.runtime->reconnect("tenant:runtime", started.parent.run_id()).wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+}
+
+// The automatic continuation, a reconnect and a second caller can all reach a paused parent whose child ended. One of
+// them publishes the continuation and the others leave the run to it: the store sees one publication, the parent runs
+// one second attempt, and the caller that arrives while the first is in its publication gets the paused parent back
+// without publishing anything. The interleaving is held at the store by a gate, not by timing.
+TEST(ProgramRuntimeTest, JavaScriptTheContinuationOfAPausedParentIsPublishedOnce) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-continue-once");
+    ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto child = only_child_of(fixture, started.parent.run_id());
+
+    journal->arm_gate();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-continue-once-answer").status(),
+              ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(journal->wait_gate_entered());
+    // The automatic continuation is inside its publication. A second entry does not publish.
+    EXPECT_EQ(fixture.runtime->reconnect("tenant:runtime", started.parent.run_id()).wait().status(),
+              ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(journal->continuations(), 0U);
+    journal->release_gate();
+
+    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(journal->continuations(), 1U);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().attempt, 2U);
+}
+
+// The process is lost right after the continuation was recorded: the parent is Running with no attempt. A runtime that
+// starts afterwards, without the host's opt-in to recover existing children, recovers it and the await rejoins the child
+// it dispatched, because the parent's relation holds that child's result. Nothing but the stored records says so.
+TEST(ProgramRuntimeTest, JavaScriptARestartedRuntimeRejoinsTheChildOfAContinuationThatWasLost) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-lost-continuation");
+    ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_id = started.parent.run_id();
+    const auto child     = only_child_of(fixture, parent_id);
+
+    journal->freeze_after_continuation();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-lost-continuation-answer").status(),
+              ProgramTerminalStatus::Completed);
+    for (int attempt = 0; attempt < 500 && journal->continuations() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(journal->continuations(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ASSERT_EQ(fixture.journal->load("tenant:runtime", parent_id)->continuation().state, ContinuationState::Running)
+        << "the lost process left the continuation Running";
+
+    journal->thaw();
+    auto restarted = fixture.make_runtime_with_transitions(journal);
+    const auto final = restarted->reconnect("tenant:runtime", parent_id).wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(only_child_of(fixture, parent_id).state, ProgramChildState::Completed);
+}
+
+// The middle Program was resumed by its grandchild's answer and its process was lost: it is Running in the stores and
+// no control of this process executes it. Cancelling the root ends it from its record, and the run that would have been
+// executing it finds its publications refused.
+TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootEndsADescendantThatNoControlOfThisProcessExecutes) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      levels = admit_three_levels(fixture);
+    auto            root   = fixture.runtime->start("tenant:runtime", levels.root_version,
+                                       ProgramInvocation{json::object(), levels.root_budget, "trace-lost-descendant", {}});
+    ASSERT_EQ(root.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto root_id    = root.run_id();
+    const auto middle     = only_child_of(fixture, root_id);
+    const auto grandchild = only_child_of(fixture, middle.child_run_id);
+
+    journal->freeze_after_continuation();
+    ASSERT_EQ(answer_paused_child(fixture, grandchild, "trace-lost-descendant-answer").status(),
+              ProgramTerminalStatus::Completed);
+    for (int attempt = 0; attempt < 500 && journal->continuations() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(journal->continuations(), 1U);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ASSERT_EQ(fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().state,
+              ContinuationState::Running);
+    journal->thaw();
+
+    auto fresh = fixture.runtime->reconnect("tenant:runtime", root_id);
+    EXPECT_TRUE(fresh.cancel());
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", root_id)->continuation().state, ContinuationState::Cancelled);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().state,
+              ContinuationState::Cancelled);
+}
+
+// recover_children on a parent that waits on a child: while the child waits it returns the child and dispatches
+// nothing again; once the child ended and nobody continued the parent, it continues the parent.
+TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturnsTheChildAndContinuesAnAnsweredParent) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-recover-children");
+    ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto child = only_child_of(fixture, started.parent.run_id());
+
+    const auto waiting = fixture.runtime->recover_children("tenant:runtime", started.parent.run_id());
+    ASSERT_EQ(waiting.size(), 1U);
+    EXPECT_EQ(waiting.front().run_id(), child.child_run_id);
+    EXPECT_EQ(waiting.front().wait().status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().state,
+              ContinuationState::Interrupted);
+
+    journal->arm();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-recover-children-answer").status(),
+              ProgramTerminalStatus::Completed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    journal->disarm();
+    const auto answered = fixture.runtime->recover_children("tenant:runtime", started.parent.run_id());
+    ASSERT_EQ(answered.size(), 1U);
+    EXPECT_EQ(answered.front().wait().status(), ProgramTerminalStatus::Completed);
+    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    EXPECT_EQ(final.status(), ProgramTerminalStatus::Completed);
+}
+
+namespace {
+
+// Holds the parent's Interrupted terminal publication at a gate so a test can finish or pause a child while the
+// parent is still Running in the store, then release the parent's Interrupted publication.
+class ParentInterruptGateJournal final : public SyncProgramTransitionStore {
+public:
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
+        const auto record = inner_.load_sync(owner, run_id);
+        {
+            std::lock_guard lock(mutex_);
+            if (!watched_child_id_.empty() && run_id == watched_child_id_ && parent_interrupted_published_) {
+                child_loaded_after_parent_interrupted_ = true;
+                cv_.notify_all();
+            }
+        }
+        return record;
+    }
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run_id) const override {
+        return inner_.latest_sync(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
+                                               std::uint64_t sequence) const override {
+        return inner_.load_events_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run_id,
+                                                            std::uint64_t sequence) const override {
+        return inner_.load_effects_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
+                                                                         std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                       std::string_view lineage_id) const override {
+        return inner_.load_lineage_sync(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                           std::string_view run_id) const override {
+        return inner_.load_run_lineage_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage_id,
+                                                            std::string_view head_id) const override {
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage_id,
+                                                             std::uint64_t generation) const override {
+        return inner_.load_generation_sync(owner, lineage_id, generation);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
+                                                                   std::string_view run_id) const override {
+        return inner_.load_execution_lease_sync(owner, run_id);
+    }
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        ProgramTransitionPublication publication) override {
+        const bool is_parent_interrupt =
+            publication.run_record.child_depth() == 0 &&
+            publication.run_record.continuation().state == ContinuationState::Interrupted;
+        if (is_parent_interrupt && hold_parent_interrupt_.exchange(false)) {
+            std::unique_lock lock(mutex_);
+            entered_ = true;
+            cv_.notify_all();
+            cv_.wait_for(lock, std::chrono::seconds(20), [this] { return released_; });
+        }
+        const auto published_run_id = publication.run_record.run_id();
+        const auto published_depth  = publication.run_record.child_depth();
+        const auto result           = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        if (result == ProgramTransitionPublishResult::Published && published_depth == 0) {
+            const auto stored = inner_.load_sync(owner, published_run_id);
+            std::lock_guard lock(mutex_);
+            if (is_parent_interrupt) parent_interrupted_published_ = true;
+            if (stored && !stored->children().empty() &&
+                stored->children().front().terminal_result.has_value()) {
+                child_recorded_ = true;
+            }
+            cv_.notify_all();
+        }
+        return result;
+    }
+    ProgramTransitionPublishResult compare_publish_execution_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        return inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+                                                     std::move(expected_lease), std::move(next_lease));
+    }
+
+    void arm_parent_interrupt_gate() noexcept { hold_parent_interrupt_.store(true); }
+    void watch_child_load_after_parent_interrupt(std::string child_id) {
+        std::lock_guard lock(mutex_);
+        watched_child_id_ = std::move(child_id);
+    }
+    bool wait_entered() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10), [this] { return entered_; });
+    }
+    bool wait_child_recorded() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10), [this] { return child_recorded_; });
+    }
+    bool wait_child_loaded_after_parent_interrupted() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10),
+                            [this] { return child_loaded_after_parent_interrupted_; });
+    }
+    void release() {
+        std::lock_guard lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    InMemoryProgramTransitionStore inner_;
+    std::atomic<bool>              hold_parent_interrupt_{false};
+    mutable std::mutex             mutex_;
+    mutable std::condition_variable cv_;
+    bool                           entered_                               = false;
+    bool                           child_recorded_                        = false;
+    bool                           released_                              = false;
+    bool                           parent_interrupted_published_          = false;
+    mutable bool                   child_loaded_after_parent_interrupted_ = false;
+    std::string                    watched_child_id_;
+};
+
+}  // namespace
+
+// A parent whose own interrupt has the same pending value as a child's is not mistaken for waiting on that child:
+// resuming the parent answers the parent's own question.
+TEST(ProgramRuntimeTest, JavaScriptParentWhoseOwnInterruptMatchesAChildsPayloadIsResumedDirectly) {
+    interrupt_calls.store(0);
+    sequenced_effects.store(0);
+    auto            journal = std::make_shared<ParentInterruptGateJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget child_budget{10000, 1000, 1000, 1, 8, 20, 0, 0, 0};
+    const RunBudget parent_budget{30000, 2000, 2000, 2, 16, 40, 0, 1, 1};
+    const auto      child_version = admit_javascript_within(
+        fixture, "same-payload-child.js",
+        javascript_runtime_source("runtime-effect-interrupt", R"JS(
+    yield ng.emit({event: "child.started"}, "emit:child");
+    return yield ng.callCore("main", {}, "core:same");
+)JS"),
+        child_budget);
+    const auto parent_version = admit_javascript_within(
+        fixture, "same-payload-parent.js",
+        javascript_runtime_source("runtime-effect-interrupt", R"JS(
+    const spawned = yield ng.spawn("child", {}, "spawn:bg");
+    const own = yield ng.callCore("main", {}, "core:same");
+    return {spawned: spawned.child_run_id, own: own};
+)JS"),
+        parent_budget);
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 8, 20, 0, 0, 0},
+                                            ExecutionGuarantee::Unmanaged);
+    journal->arm_parent_interrupt_gate();
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), parent_budget, "trace-same-payload-own-interrupt", {}});
+    ASSERT_TRUE(journal->wait_entered());
+    ASSERT_TRUE(journal->wait_child_recorded());
+    journal->release();
+    const auto parent_interrupted = parent.wait();
+    ASSERT_EQ(parent_interrupted.status(), ProgramTerminalStatus::Interrupted);
+
+    const auto child = only_child_of(fixture, parent.run_id());
+    ASSERT_TRUE(child.terminal_result.has_value());
+    ASSERT_EQ(child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
+
+    auto resumed_parent = fixture.runtime->resume(
+        "tenant:runtime", parent.run_id(),
+        resume_for(parent_interrupted, json{{"result", "parent-approved"}}, "trace-same-payload-parent-resume"));
+    const auto final = resumed_parent.wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(final.output().at("own").at("channels").at("value").at("value"), "parent-approved");
+}
+
+// With two awaited children in a join that both pause on interrupts, answering one does not continue the parent while
+// the other still waits; answering the second continues the parent once and rejoins both results.
+TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBothFinish) {
+    interrupt_calls.store(0);
+    sequenced_effects.store(0);
+    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget parent_budget{40000, 4000, 4000, 2, 32, 80, 0, 1, 2};
+    const auto      child_a = fixture.admit("runtime-interrupt");
+    const auto      child_b = fixture.admit("runtime-effect-interrupt");
+    const auto      parent_version = admit_javascript_within(
+        fixture, "join-two-paused-children.js",
+        javascript_runtime_source("runtime-completed", R"JS(
+    const both = yield ng.all([
+        ng.await(ng.spawn("child_a", {}, "spawn:a"), 25000, "await:a"),
+        ng.await(ng.spawn("child_b", {}, "spawn:b"), 25000, "await:b")
+    ], {max_in_flight: 2}, "join:both");
+    return {a: both[0], b: both[1]};
+)JS"),
+        parent_budget);
+    link_children(fixture, parent_version, {{"child_a", child_a}, {"child_b", child_b}},
+                  BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, ExecutionGuarantee::Unmanaged);
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", parent_version,
+        ProgramInvocation{json::object(), parent_budget, "trace-join-two-paused-children", {}});
+    const auto interrupted = parent.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+
+    const auto stored_parent = fixture.journal->load("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(stored_parent.has_value());
+    ASSERT_EQ(stored_parent->children().size(), 2U);
+    const auto& children     = stored_parent->children();
+    const auto  first_child  = children[0].invocation.trace_id.find("member/0") != std::string::npos
+                                   ? children[0]
+                                   : children[1];
+    const auto  second_child = children[0].invocation.trace_id.find("member/1") != std::string::npos
+                                   ? children[0]
+                                   : children[1];
+    ASSERT_TRUE(first_child.terminal_result.has_value());
+    ASSERT_TRUE(second_child.terminal_result.has_value());
+
+    // Answer only the first child: the parent still waits on the second and must not continue yet.
+    const auto first_payload = first_child.terminal_result->interrupt()->pending_input
+                                   ? json{{"decision", "first-ok"}}
+                                   : json{{"result", "first-ok"}};
+    ASSERT_EQ(fixture.runtime
+                  ->resume("tenant:runtime", first_child.child_run_id,
+                           resume_for(*first_child.terminal_result, first_payload, "trace-join-first-answer"))
+                  .wait()
+                  .status(),
+              ProgramTerminalStatus::Completed);
+    EXPECT_EQ(journal->continuations(), 0U);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", parent.run_id())->continuation().state,
+              ContinuationState::Interrupted);
+
+    // Answer the second child: now all awaited children are final, so the parent continues once and completes.
+    const auto second_payload = second_child.terminal_result->interrupt()->pending_input
+                                    ? json{{"decision", "second-ok"}}
+                                    : json{{"result", "second-ok"}};
+    ASSERT_EQ(fixture.runtime
+                  ->resume("tenant:runtime", second_child.child_run_id,
+                           resume_for(*second_child.terminal_result, second_payload, "trace-join-second-answer"))
+                  .wait()
+                  .status(),
+              ProgramTerminalStatus::Completed);
+
+    const auto final = wait_until_run_ends(fixture, parent.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(journal->continuations(), 1U);
+    EXPECT_EQ(final.output().at("a").at("channels").at("value").at("value"), "first-ok");
+    EXPECT_EQ(final.output().at("b").at("channels").at("value").at("value"), "second-ok");
+}
+
+// The child finishes before the parent's Interrupted terminal publication commits: the parent's child relation is
+// updated while the parent is still Running, and once the parent's Interrupted record is published, the parent is
+// continued once and completes instead of staying Interrupted.
+TEST(ProgramRuntimeTest, JavaScriptChildCompletingBeforeParentPublishesInterruptedStillContinuesTheParent) {
+    interrupt_calls.store(0);
+    auto            journal = std::make_shared<ParentInterruptGateJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    journal->arm_parent_interrupt_gate();
+    auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-child-finishes-before-parent-pause");
+    ASSERT_TRUE(journal->wait_entered());
+
+    const auto child = only_child_of(fixture, started.parent.run_id());
+    ASSERT_TRUE(child.terminal_result.has_value());
+    ASSERT_EQ(child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
+    // Answer the child while the parent is still Running and held before its Interrupted CAS.
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-child-finishes-while-parent-running").status(),
+              ProgramTerminalStatus::Completed);
+    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+
+    journal->release();
+    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(final.output().at("child").at("channels").at("value").at("value"), "approved");
+}
+
+// When no caller holds a handle to the paused parent and the automatic continuation fails, the notice is retained for
+// the next handle that reconnects the parent once the store recovers.
+TEST(ProgramRuntimeTest, JavaScriptRefusedContinuationWithoutHeldParentHandlePreservesNoticeOnReconnect) {
+    interrupt_calls.store(0);
+    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    std::string     parent_id;
+    ProgramChildRecord child;
+    {
+        auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-unheld-parent-notice");
+        ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        parent_id = started.parent.run_id();
+        child     = only_child_of(fixture, parent_id);
+    }
+
+    journal->arm();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-unheld-parent-notice-answer").status(),
+              ProgramTerminalStatus::Completed);
+    for (int attempt = 0; attempt < 500 && journal->refusals() == 0; ++attempt)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_EQ(journal->refusals(), 1U);
+
+    journal->disarm();
+    auto reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
+    const auto final = reconnected.wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed);
+    const auto notices = reconnected.notices();
+    ASSERT_FALSE(notices.empty());
+    EXPECT_EQ(notices.front().code, "P_CHILD_CONTINUATION_FAILED");
+}
+
+namespace {
+
+// Coordinates two callers racing through wake_paused_parent and resume_core on the same paused parent:
+// - Stage::PreContinuations: holds the first caller in wake_paused_parent's child load (before entering the in-process
+//   continuations set) while another caller on the same runtime publishes and completes the continuation, then releases
+//   the first caller into resume_core after the head has already advanced.
+// - Stage::BeforePausedJournal / Stage::BeforePreCasJournal: holds the automatic continuation at compare_publish_sync
+//   until a second caller (through a distinct transition store wrapper so it does not short-circuit on the in-process
+//   continuations set) has loaded the Interrupted parent record in resume_core and reached load_javascript_commands_sync
+//   or the pre-CAS latest_sync check, then lets the automatic continuation publish and finish before the second caller
+//   continues.
+class ContinuationRaceJournal final : public SyncProgramTransitionStore,
+                                      public std::enable_shared_from_this<ContinuationRaceJournal> {
+public:
+    enum class Stage {
+        None,
+        PreContinuations,
+        BeforePausedJournal,
+        BeforePreCasJournal,
+    };
+
+    class PeerView final : public SyncProgramTransitionStore {
+    public:
+        explicit PeerView(std::shared_ptr<ContinuationRaceJournal> parent) : parent_(std::move(parent)) {}
+
+        std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
+            return parent_->peer_load_sync(owner, run_id);
+        }
+        std::optional<ProgramJournalRecord> latest_sync(std::string_view owner,
+                                                        std::string_view run_id) const override {
+            return parent_->peer_latest_sync(owner, run_id);
+        }
+        std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
+                                                   std::uint64_t sequence) const override {
+            return parent_->load_events_sync(owner, run_id, sequence);
+        }
+        std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run_id,
+                                                                std::uint64_t sequence) const override {
+            return parent_->load_effects_sync(owner, run_id, sequence);
+        }
+        std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+            std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+            return parent_->peer_load_javascript_commands_sync(owner, run_id, sequence);
+        }
+        std::vector<ProgramContextPublication> load_context_publications_sync(
+            std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+            return parent_->load_context_publications_sync(owner, run_id, sequence);
+        }
+        std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
+                                                                             std::string_view run_id) const override {
+            return parent_->load_hook_outbox_entries_sync(owner, run_id);
+        }
+        std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                           std::string_view lineage_id) const override {
+            return parent_->load_lineage_sync(owner, lineage_id);
+        }
+        std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                               std::string_view run_id) const override {
+            return parent_->load_run_lineage_sync(owner, run_id);
+        }
+        std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage_id,
+                                                                std::string_view head_id) const override {
+            return parent_->load_lineage_head_sync(owner, lineage_id, head_id);
+        }
+        std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage_id,
+                                                                 std::uint64_t generation) const override {
+            return parent_->load_generation_sync(owner, lineage_id, generation);
+        }
+        std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
+                                                                       std::string_view run_id) const override {
+            return parent_->load_execution_lease_sync(owner, run_id);
+        }
+        ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                            ProgramTransitionPublication publication) override {
+            return parent_->compare_publish_sync(owner, expected, std::move(publication));
+        }
+        ProgramTransitionPublishResult compare_publish_execution_sync(
+            std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+            std::optional<ProgramExecutionLease> expected_lease,
+            std::optional<ProgramExecutionLease> next_lease) override {
+            return parent_->compare_publish_execution_sync(owner, expected, std::move(publication),
+                                                           std::move(expected_lease), std::move(next_lease));
+        }
+
+    private:
+        std::shared_ptr<ContinuationRaceJournal> parent_;
+    };
+
+    std::shared_ptr<SyncProgramTransitionStore> peer_view() {
+        return std::make_shared<PeerView>(shared_from_this());
+    }
+
+    void arm(Stage stage, std::string parent_id, std::string child_id) {
+        std::lock_guard lock(mutex_);
+        stage_                  = stage;
+        parent_id_              = std::move(parent_id);
+        child_id_               = std::move(child_id);
+        child_completed_        = false;
+        held_entered_           = false;
+        held_released_          = false;
+        peer_parent_loads_      = 0;
+        peer_latest_loads_      = 0;
+        parent_completed_       = false;
+    }
+
+    bool wait_held_entered() {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, std::chrono::seconds(10), [this] { return held_entered_; });
+    }
+
+    void release_held() {
+        std::lock_guard lock(mutex_);
+        held_released_ = true;
+        cv_.notify_all();
+    }
+
+    std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
+        {
+            std::unique_lock lock(mutex_);
+            if (stage_ == Stage::PreContinuations && child_completed_ && run_id == child_id_ && !held_entered_) {
+                held_entered_ = true;
+                cv_.notify_all();
+                cv_.wait_for(lock, std::chrono::seconds(10), [this] { return held_released_; });
+            }
+        }
+        return inner_.load_sync(owner, run_id);
+    }
+    std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run_id) const override {
+        return inner_.latest_sync(owner, run_id);
+    }
+    std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
+                                               std::uint64_t sequence) const override {
+        return inner_.load_events_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run_id,
+                                                            std::uint64_t sequence) const override {
+        return inner_.load_effects_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+    }
+    std::vector<ProgramContextPublication> load_context_publications_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
+        return inner_.load_context_publications_sync(owner, run_id, sequence);
+    }
+    std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
+                                                                         std::string_view run_id) const override {
+        return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
+                                                       std::string_view lineage_id) const override {
+        return inner_.load_lineage_sync(owner, lineage_id);
+    }
+    std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
+                                                           std::string_view run_id) const override {
+        return inner_.load_run_lineage_sync(owner, run_id);
+    }
+    std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage_id,
+                                                            std::string_view head_id) const override {
+        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
+    }
+    std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage_id,
+                                                             std::uint64_t generation) const override {
+        return inner_.load_generation_sync(owner, lineage_id, generation);
+    }
+    std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
+                                                                   std::string_view run_id) const override {
+        return inner_.load_execution_lease_sync(owner, run_id);
+    }
+    ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        ProgramTransitionPublication publication) override {
+        {
+            std::unique_lock lock(mutex_);
+            if ((stage_ == Stage::BeforePausedJournal || stage_ == Stage::BeforePreCasJournal) &&
+                publication.run_record.run_id() == parent_id_ &&
+                publication.run_record.continuation().state == ContinuationState::Running &&
+                publication.run_record.continuation().attempt > 1 && !held_entered_) {
+                held_entered_ = true;
+                cv_.notify_all();
+                cv_.wait_for(lock, std::chrono::seconds(10), [this] { return held_released_; });
+            }
+        }
+        const auto published_run_id = publication.run_record.run_id();
+        const auto published_state  = publication.run_record.continuation().state;
+        const auto result           = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        if (result == ProgramTransitionPublishResult::Published) {
+            std::lock_guard lock(mutex_);
+            if (published_run_id == child_id_ && published_state == ContinuationState::Completed) {
+                child_completed_ = true;
+                cv_.notify_all();
+            }
+            if (published_run_id == parent_id_ && published_state == ContinuationState::Completed) {
+                parent_completed_ = true;
+                cv_.notify_all();
+            }
+        }
+        return result;
+    }
+    ProgramTransitionPublishResult compare_publish_execution_sync(
+        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::optional<ProgramExecutionLease> expected_lease,
+        std::optional<ProgramExecutionLease> next_lease) override {
+        return inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+                                                     std::move(expected_lease), std::move(next_lease));
+    }
+
+private:
+    std::optional<ProgramRunRecord> peer_load_sync(std::string_view owner, std::string_view run_id) const {
+        if (run_id == parent_id_) {
+            std::lock_guard lock(mutex_);
+            ++peer_parent_loads_;
+        }
+        return inner_.load_sync(owner, run_id);
+    }
+
+    std::vector<ProgramJavaScriptCommandJournalEntry> peer_load_javascript_commands_sync(
+        std::string_view owner, std::string_view run_id, std::uint64_t sequence) const {
+        {
+            std::unique_lock lock(mutex_);
+            // On the second load of parent's commands (the first was in wake_paused_parent, the second is inside
+            // resume_core after loading `previous`), let the automatic continuation publish and finish first.
+            if (stage_ == Stage::BeforePausedJournal && run_id == parent_id_ && peer_parent_loads_ >= 2 &&
+                !held_released_) {
+                held_released_ = true;
+                cv_.notify_all();
+                cv_.wait_for(lock, std::chrono::seconds(10), [this] { return parent_completed_; });
+            }
+        }
+        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+    }
+
+    std::optional<ProgramJournalRecord> peer_latest_sync(std::string_view owner, std::string_view run_id) const {
+        {
+            std::unique_lock lock(mutex_);
+            if (run_id == parent_id_) {
+                ++peer_latest_loads_;
+                // 1st latest_sync is in wake_paused_parent, 2nd is paused_journal in resume_core, 3rd is the pre-CAS
+                // previous_journal check in resume_core.
+                if (stage_ == Stage::BeforePreCasJournal && peer_latest_loads_ == 3 && !held_released_) {
+                    held_released_ = true;
+                    cv_.notify_all();
+                    cv_.wait_for(lock, std::chrono::seconds(10), [this] { return parent_completed_; });
+                }
+            }
+        }
+        return inner_.latest_sync(owner, run_id);
+    }
+
+    InMemoryProgramTransitionStore  inner_;
+    mutable std::mutex              mutex_;
+    mutable std::condition_variable cv_;
+    Stage                           stage_             = Stage::None;
+    std::string                     parent_id_;
+    std::string                     child_id_;
+    bool                            child_completed_   = false;
+    mutable bool                    held_entered_      = false;
+    mutable bool                    held_released_     = false;
+    mutable std::uint64_t           peer_parent_loads_ = 0;
+    mutable std::uint64_t           peer_latest_loads_ = 0;
+    bool                            parent_completed_  = false;
+};
+
+}  // namespace
+
+// When two callers race to wake a paused parent and the winning caller publishes the continuation before the second
+// caller's resume_core loads `previous`, `paused_journal`, or `previous_journal`, the losing caller treats the head
+// advancement as a taken continuation rather than throwing P_RESUME_STATE / witness-less P_RESUME_CONFLICT or
+// attaching a false P_CHILD_CONTINUATION_FAILED notice to the running continuation.
+TEST(ProgramRuntimeTest, JavaScriptPausedParentContinuationAfterFirstCallerPublishesDoesNotFailOrRecordNotice) {
+    // Subcase 1: automatic continuation is held in wake_paused_parent before entering `continuations`; `reconnect`
+    // publishes and finishes attempt 2; releasing the automatic continuation into resume_core after attempt 2 is
+    // already published must not record P_CHILD_CONTINUATION_FAILED on the parent handle.
+    {
+        interrupt_calls.store(0);
+        auto            journal = std::make_shared<ContinuationRaceJournal>();
+        AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+        auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-race-pre-continuations");
+        ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto parent_id = started.parent.run_id();
+        const auto child     = only_child_of(fixture, parent_id);
+
+        journal->arm(ContinuationRaceJournal::Stage::PreContinuations, parent_id, child.child_run_id);
+        ASSERT_EQ(answer_paused_child(fixture, child, "trace-race-pre-continuations-answer").status(),
+                  ProgramTerminalStatus::Completed);
+        ASSERT_TRUE(journal->wait_held_entered());
+
+        auto reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
+        const auto final = reconnected.wait();
+        ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed);
+
+        journal->release_held();
+        fixture.runtime.reset();
+        EXPECT_TRUE(started.parent.notices().empty());
+        EXPECT_TRUE(reconnected.notices().empty());
+    }
+
+    // Subcase 2 & 3: a second caller enters resume_core while the parent is still Interrupted, and the winning
+    // continuation publishes and completes before the second caller loads paused_commands/paused_journal (Subcase 2)
+    // or before the pre-CAS previous_journal check (Subcase 3).
+    for (const auto stage : {ContinuationRaceJournal::Stage::BeforePausedJournal,
+                             ContinuationRaceJournal::Stage::BeforePreCasJournal}) {
+        interrupt_calls.store(0);
+        auto            journal = std::make_shared<ContinuationRaceJournal>();
+        AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+        auto            peer    = fixture.make_runtime_with_transitions(journal->peer_view());
+        auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-race-in-resume-core");
+        ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto parent_id = started.parent.run_id();
+        const auto child     = only_child_of(fixture, parent_id);
+
+        journal->arm(stage, parent_id, child.child_run_id);
+        ASSERT_EQ(answer_paused_child(fixture, child, "trace-race-in-resume-core-answer").status(),
+                  ProgramTerminalStatus::Completed);
+        ASSERT_TRUE(journal->wait_held_entered());
+
+        const auto children = peer->recover_children("tenant:runtime", parent_id);
+        ASSERT_EQ(children.size(), 1U);
+        EXPECT_EQ(children.front().wait().status(), ProgramTerminalStatus::Completed);
+        auto reconnected = peer->reconnect("tenant:runtime", parent_id);
+        EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Completed);
+        EXPECT_TRUE(started.parent.notices().empty());
+        EXPECT_TRUE(reconnected.notices().empty());
+    }
+}
+
+// Rejoining a completed paused child on a recovered continuation does not bypass
+// RuntimeConfig::recover_existing_child_commands == false for a second child that is still Running,
+// while a completed child whose result is already in the parent's relation is rejoined without opt-in.
+TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompletedSecondChildWithoutOptIn) {
+    interrupt_calls.store(0);
+    std::promise<void> second_child_started;
+    auto               second_child_started_future = second_child_started.get_future();
+    std::atomic<bool>  second_child_notified{false};
+    reset_plan_steps([&](std::size_t, const NodeInput&) -> json {
+        if (!second_child_notified.exchange(true)) second_child_started.set_value();
+        return json{{"block", true}};
+    });
+    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget parent_budget{40000, 4000, 4000, 2, 32, 80, 0, 1, 2};
+    const auto      child_a = fixture.admit("runtime-interrupt");
+    const auto      child_b = fixture.admit("runtime-plan-step");
+    const auto      parent_version = admit_javascript_within(
+        fixture, "sequential-two-children-opt-in.js",
+        javascript_runtime_source("runtime-completed", R"JS(
+    const first = yield ng.await(ng.spawn("child_a", {}, "spawn:a"), 20000, "await:a");
+    const second = yield ng.await(ng.spawn("child_b", {}, "spawn:b"), 20000, "await:b");
+    return {first: first, second: second};
+)JS"),
+        parent_budget);
+    link_children(fixture, parent_version, {{"child_a", child_a}, {"child_b", child_b}},
+                  BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, ExecutionGuarantee::Unmanaged);
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", parent_version,
+        ProgramInvocation{json::object(), parent_budget, "trace-sequential-opt-in", {}});
+    ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_id   = parent.run_id();
+    const auto first_child = only_child_of(fixture, parent_id);
+
+    ASSERT_EQ(answer_paused_child(fixture, first_child, "trace-sequential-opt-in-answer-a").status(),
+              ProgramTerminalStatus::Completed);
+    ASSERT_EQ(second_child_started_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    const auto stored_parent = fixture.journal->load("tenant:runtime", parent_id);
+    ASSERT_TRUE(stored_parent.has_value());
+    ASSERT_EQ(stored_parent->children().size(), 2U);
+
+    // Freeze the store while child_b is still Running so runtime teardown does not overwrite the Running records,
+    // then recover on a runtime with recover_existing_child_commands == false (the default of make_runtime_with_transitions).
+    journal->freeze_all();
+    fixture.runtime.reset();
+    journal->thaw();
+    auto restarted = fixture.make_runtime_with_transitions(journal);
+    const auto recovered = restarted->reconnect("tenant:runtime", parent_id).wait();
+    EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Interrupted)
+        << "without recover_existing_child_commands opt-in, the uncompleted second child must require reconciliation";
+    ASSERT_TRUE(recovered.interrupt().has_value());
+    ASSERT_TRUE(recovered.interrupt()->pending_effect.has_value());
+}
+
+// Cancelling a paused parent updates held in-process handles of an Interrupted child, preserves
+// Cancelled when cancel races with complete_async(Interrupted), and durably records Cancelled on a Running descendant.
+TEST(ProgramRuntimeTest, JavaScriptCancellingPausedParentUpdatesHeldChildAndDurablyCancelsRunningDescendant) {
+    // Subcase A: an in-memory handle held to the Interrupted child sees Cancelled and its Terminal event.
+    {
+        interrupt_calls.store(0);
+        AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-cancel-held-child");
+        ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto child        = only_child_of(fixture, started.parent.run_id());
+        auto       child_handle = fixture.runtime->reconnect("tenant:runtime", child.child_run_id);
+        ASSERT_TRUE(child_handle.try_result().has_value());
+        ASSERT_EQ(child_handle.try_result()->status(), ProgramTerminalStatus::Interrupted);
+
+        ASSERT_TRUE(started.parent.cancel());
+        ASSERT_TRUE(child_handle.try_result().has_value());
+        EXPECT_EQ(child_handle.try_result()->status(), ProgramTerminalStatus::Cancelled);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Cancelled);
+        const auto child_events = child_handle.events_after(0);
+        ASSERT_FALSE(child_events.empty());
+        EXPECT_EQ(child_events.back().kind, ProgramEventKind::Terminal);
+        EXPECT_EQ(std::get<ProgramTerminalEvent>(child_events.back().payload).status,
+                  ProgramTerminalStatus::Cancelled);
+    }
+
+    // Subcase C: when the descendant is Running in this process, cancelling the paused ancestor durably publishes
+    // Cancelled to the store before cancel() returns, even while the descendant's node is still blocked on a gate.
+    {
+        interrupt_calls.store(0);
+        AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      parent_version = admit_javascript_within(
+            fixture, "cancel-running-child-parent.js",
+            javascript_runtime_source("runtime-completed", kAwaitFirst), kAwaitingParentBudget);
+        const auto child_version = fixture.admit("runtime-resume-hook");
+        auto       linked        = link_child_versions(fixture, parent_version, child_version,
+                                                       BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+        HeldResumedAttempt held_child;
+        auto               parent = fixture.runtime->start(
+            "tenant:runtime", linked.parent_version,
+            ProgramInvocation{json::object(), kAwaitingParentBudget, "trace-cancel-running-descendant", {}});
+        ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto child = only_child_of(fixture, parent.run_id());
+
+        auto resumed_child = fixture.runtime->resume(
+            "tenant:runtime", child.child_run_id,
+            resume_for(*child.terminal_result, json{{"decision", "approved"}},
+                       "trace-cancel-running-descendant-resume"));
+        ASSERT_TRUE(held_child.entered());
+        ASSERT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().state,
+                  ContinuationState::Running);
+
+        ASSERT_TRUE(parent.cancel());
+        // Before releasing the blocked node, the store record and live handle must already be Cancelled.
+        EXPECT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().state,
+                  ContinuationState::Cancelled);
+        ASSERT_TRUE(resumed_child.try_result().has_value());
+        EXPECT_EQ(resumed_child.try_result()->status(), ProgramTerminalStatus::Cancelled);
+        held_child.release();
+        EXPECT_EQ(resumed_child.wait().status(), ProgramTerminalStatus::Cancelled);
+    }
+}
+
+// When a child ends Failed via expired pending input in resume() or Failed resolution in reconcile(),
+// a failure in wake_paused_parent does not overwrite the child's diagnostic/result and records P_CHILD_CONTINUATION_FAILED.
+TEST(ProgramRuntimeTest, JavaScriptChildExpirationOrReconcileFailurePreservesChildOutcomeWhenParentWakeFails) {
+    // Subcase A: expired pending effect in resume_core throws P_PENDING_EXPIRED and attaches P_CHILD_CONTINUATION_FAILED.
+    {
+        reset_plan_steps([](std::size_t, const NodeInput&) -> json {
+            throw NodeInterrupt(
+                "capability result required",
+                json{{"__neograph_program_pending_kind", "effect"},
+                     {"call_id", "call-expired-child"},
+                     {"result_schema", json{{"type", "object"}}},
+                     {"effect", json{{"effect_id", "effect-expired-child"},
+                                     {"idempotency", "supported"},
+                                     {"tool", "search"},
+                                     {"arguments", json{{"query", "neo"}}}}},
+                     {"expires_at_unix_ms", 1ULL}});
+        });
+        auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+        AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      parent_version = admit_javascript_within(
+            fixture, "expired-child-parent.js",
+            javascript_runtime_source("runtime-completed", kAwaitFirst), kAwaitingParentBudget);
+        const auto child_version = fixture.admit("runtime-plan-step");
+        auto       linked        = link_child_versions(fixture, parent_version, child_version,
+                                                       BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+        auto       parent        = fixture.runtime->start(
+            "tenant:runtime", linked.parent_version,
+            ProgramInvocation{json::object(), kAwaitingParentBudget, "trace-expired-child-parent", {}});
+        ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto child = only_child_of(fixture, parent.run_id());
+
+        journal->arm();
+        try {
+            (void)fixture.runtime->resume(
+                "tenant:runtime", child.child_run_id,
+                ProgramResume{json{{"result", "late"}}, "trace-expired-child-resume", {}, "call-expired-child"});
+            ADD_FAILURE() << "expired pending effect must throw P_PENDING_EXPIRED";
+        } catch (const ProgramDiagnosticError& error) {
+            EXPECT_EQ(error.diagnostic().code, "P_PENDING_EXPIRED");
+        }
+        const auto notices = parent.notices();
+        ASSERT_FALSE(notices.empty());
+        EXPECT_EQ(notices.back().code, "P_CHILD_CONTINUATION_FAILED");
+    }
+
+    // Subcase B: reconcile_core with ProgramEffectReconciliation::Failed returns the Failed child handle and
+    // attaches P_CHILD_CONTINUATION_FAILED to the parent when wake_paused_parent fails.
+    {
+        interrupt_calls.store(0);
+        auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+        AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      parent_version = admit_javascript_within(
+            fixture, "reconcile-failed-child-parent.js",
+            javascript_runtime_source("runtime-completed", kAwaitFirst), kAwaitingParentBudget);
+        const auto child_version = fixture.admit("runtime-effect-nonidempotent");
+        auto       linked        = link_child_versions(fixture, parent_version, child_version,
+                                                       BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 1, 1});
+        auto       parent        = fixture.runtime->start(
+            "tenant:runtime", linked.parent_version,
+            ProgramInvocation{json::object(), kAwaitingParentBudget, "trace-reconcile-failed-child-parent", {}});
+        ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
+        const auto child = only_child_of(fixture, parent.run_id());
+        ASSERT_TRUE(child.terminal_result.has_value());
+
+        auto ambiguous = fixture.runtime->reconcile(
+            "tenant:runtime", child.child_run_id,
+            ProgramEffectResolution{pending_call_id(*child.terminal_result),
+                                    ProgramEffectReconciliation::Unknown, std::nullopt,
+                                    "trace-reconcile-unknown-child", {}});
+        ASSERT_EQ(ambiguous.wait().status(), ProgramTerminalStatus::AmbiguousEffect);
+
+        journal->arm();
+        auto reconciled = fixture.runtime->reconcile(
+            "tenant:runtime", child.child_run_id,
+            ProgramEffectResolution{pending_call_id(*child.terminal_result),
+                                    ProgramEffectReconciliation::Failed, std::nullopt,
+                                    "trace-reconcile-failed-child", {}});
+        EXPECT_EQ(reconciled.wait().status(), ProgramTerminalStatus::Failed);
+        const auto notices = parent.notices();
+        ASSERT_FALSE(notices.empty());
+        EXPECT_EQ(notices.back().code, "P_CHILD_CONTINUATION_FAILED");
+    }
+}
+
+// When the parent finishes publishing Interrupted while the child has published Completed to the store
+// but has not yet finished complete_async (before setting child->result_), wake_paused_parent and reconnect_core
+// wait for the child's in-memory result delivery so the parent's child relation and continuation complete cleanly.
+TEST(ProgramRuntimeTest, JavaScriptParentWokenWhileChildCompletesWaitsForChildResultDelivery) {
+    interrupt_calls.store(0);
+    auto            journal = std::make_shared<ParentInterruptGateJournal>();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    journal->arm_parent_interrupt_gate();
+    auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-wake-while-child-completing");
+    ASSERT_TRUE(journal->wait_entered());
+    ASSERT_TRUE(journal->wait_child_recorded());
+
+    const auto child = only_child_of(fixture, started.parent.run_id());
+    ASSERT_TRUE(child.terminal_result.has_value());
+    journal->watch_child_load_after_parent_interrupt(child.child_run_id);
+
+    auto sink = std::make_shared<CallbackSink>();
+    std::promise<void> child_terminal_event_entered;
+    auto               child_terminal_event_future = child_terminal_event_entered.get_future();
+    sink->set_callback([&](const ProgramEvent& event) {
+        if (event.kind != ProgramEventKind::Terminal) return;
+        // At this point inside RunControl::complete_async, the child's Completed record is in the store,
+        // but completion_callback_ has not run and result_ is still nullopt. Release the parent's Interrupted
+        // publication now so interrupted_published_callback_ -> wake_paused_parent runs while result_ is nullopt.
+        journal->release();
+        child_terminal_event_entered.set_value();
+        EXPECT_TRUE(journal->wait_child_loaded_after_parent_interrupted());
+    });
+
+    auto resumed_child = fixture.runtime->resume(
+        "tenant:runtime", child.child_run_id,
+        resume_for(*child.terminal_result, json{{"decision", "approved"}}, "trace-wake-while-child-completing-answer",
+                   sink));
+    ASSERT_EQ(child_terminal_event_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    ASSERT_EQ(resumed_child.wait().status(), ProgramTerminalStatus::Completed);
+
+    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+}
+
+// A JavaScript parent that completed a Core call before pausing on a child preserves its Core checkpoint
+// when its continuation is recovered via reconnect().
+TEST(ProgramRuntimeTest, JavaScriptRestartedContinuationPreservesPriorCoreCheckpoint) {
+    interrupt_calls.store(0);
+    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitAfterCoreCall,
+                                                            "trace-js-restarted-continuation-checkpoint");
+    const auto interrupted = started.parent.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_id      = started.parent.run_id();
+    const auto pre_checkpoint = interrupted.checkpoint();
+    ASSERT_TRUE(pre_checkpoint.has_value());
+    const auto child = only_child_of(fixture, parent_id);
+
+    journal->freeze_after_continuation();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-restarted-continuation-checkpoint-answer").status(),
+              ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(journal->wait_frozen_attempt_stopped());
+
+    fixture.runtime.reset();
+    journal->thaw();
+    auto       restarted = fixture.make_runtime_with_transitions(journal);
+    const auto final     = restarted->reconnect("tenant:runtime", parent_id).wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(final.checkpoint(), pre_checkpoint);
+    const auto stored = fixture.journal->load("tenant:runtime", parent_id);
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ(stored->exact_checkpoint(), pre_checkpoint);
+}
+
+
 
 TEST(ProgramRuntimeTest, JavaScriptParallelSpawnAwaitsRecordTheirStartsWhileChildrenPublish) {
     // #614: main() waits on four spawned children at once, each under a timeout. While one await records its start,
@@ -14439,6 +16002,136 @@ TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedis
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
+TEST(ProgramRuntimeTest,
+     TypedChildFallbackRetriesSiblingPublicationWhenHydrationSeesDispatchedSibling) {
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->javascript_reads_unavailable = true;
+    journal->release_result();
+    AdmittedRuntime fixture(2, {}, journal);
+    TypedParentGate gate;
+    auto document = program_document("runtime-typed-parent-gate");
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][4]["minimum"] = 2;
+    document["declared_budget_requirements"][4]["maximum"] = 2;
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = 2;
+    document["declared_budget_requirements"][8]["maximum"] = 2;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)), fixture.admit("runtime-completed"));
+    const std::string parent_id = "typed-fallback-stale-hydration-parent";
+    auto armed = std::make_shared<std::atomic<bool>>(false);
+    auto sibling_completion = std::make_shared<std::optional<ProgramResult>>();
+    auto allow_completion = std::make_shared<std::atomic<bool>>(false);
+    journal->before_publication =
+        [parent_id, allow_completion](const ProgramTransitionPublication& value) {
+            if (value.run_record.run_id() != parent_id || allow_completion->load()) return;
+            for (const auto& child : value.run_record.children())
+                if (child.terminal_result)
+                    throw std::runtime_error("defer sibling completion until acquisition");
+        };
+    const RunBudget child_budget{3333, 333, 333, 1, 1, 6, 0, 0, 0};
+    auto parent_reads_after_arm = std::make_shared<std::atomic<unsigned>>(0);
+    auto advances = std::make_shared<std::atomic<unsigned>>(0);
+    const auto weak_journal = std::weak_ptr<BlockAfterJavaScriptResultJournal>(journal);
+    // Let load_run_publication_head observe a coherent parent snapshot where the
+    // completed sibling is still Dispatched (as happens when a concurrent reader
+    // races the one-shot hook), then publish the sibling completion before the new
+    // child's relation publication CAS.
+    journal->filter_run_read =
+        [parent_id, sibling_completion, allow_completion, armed, parent_reads_after_arm, advances,
+         weak_journal](std::string_view id, std::optional<ProgramRunRecord> record) {
+            if (id != parent_id || !record || !armed->load()) return record;
+            if (parent_reads_after_arm->fetch_add(1) < 2 || advances->exchange(1) != 0)
+                return record;
+            const auto store = weak_journal.lock();
+            const auto previous_journal = store->latest_sync("tenant:runtime", parent_id);
+            const auto lineage = store->load_run_lineage_sync("tenant:runtime", parent_id);
+            if (!previous_journal || !lineage)
+                throw std::runtime_error("Sibling publication has no durable parent head");
+            auto next_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
+                record->journal_head(), parent_id, record->program_version_id(), record->bundle_id(),
+                previous_journal->sequence + 1, record->continuation(), record->remaining_budget(),
+                previous_journal->inflight_reservation, record->exact_checkpoint(),
+                record->updated_at_ms()});
+            ProgramRunRecordData data;
+            data.owner_scope = record->owner_scope();
+            data.run_id = record->run_id();
+            data.logical_run_id = record->logical_run_id();
+            data.program_version_id = record->program_version_id();
+            data.bundle_id = record->bundle_id();
+            data.binding_fingerprint = record->binding_fingerprint();
+            data.invocation = record->invocation();
+            data.child_depth = record->child_depth();
+            data.continuation = record->continuation();
+            data.remaining_budget = record->remaining_budget();
+            data.exact_checkpoint = record->exact_checkpoint();
+            data.exact_checkpoint_content_id = record->exact_checkpoint_content_id();
+            data.pending_input = record->pending_input();
+            data.pending_effect = record->pending_effect();
+            data.terminal_result = record->terminal_result();
+            data.fork_receipt = record->fork_receipt();
+            data.children = record->children();
+            data.children.front().state = ProgramChildState::Completed;
+            data.children.front().terminal_result = **sibling_completion;
+            data.journal_head = next_journal.id;
+            data.fork_source_run_id = record->fork_source_run_id();
+            data.fork_source_program_version_id = record->fork_source_program_version_id();
+            data.fork_source_checkpoint_id = record->fork_source_checkpoint_id();
+            data.recorded_binding_set_fingerprint = record->recorded_binding_set_fingerprint();
+            data.event_sequence = record->event_sequence();
+            data.effect_sequence = record->effect_sequence();
+            data.created_at_ms = record->created_at_ms();
+            data.updated_at_ms = record->updated_at_ms();
+            auto next_run = ProgramRunRecord::create(std::move(data));
+            auto next_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+                lineage->owner_scope(), lineage->lineage_id(), lineage->root_run_id(),
+                lineage->active_generation(), lineage->active_generation_id(), next_run.id(),
+                next_run.journal_head(), lineage->remaining_budget(),
+                lineage->inflight_reservation(), lineage->id(), lineage->created_at_ms(),
+                next_run.updated_at_ms(), lineage->committed_descendant_budget()});
+            ProgramTransitionPublication publication{next_run, std::move(next_journal), {}, {}};
+            publication.run_lineage = std::move(next_lineage);
+            allow_completion->store(true);
+            if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
+                                            std::move(publication)) !=
+                ProgramTransitionPublishResult::Published)
+                throw std::runtime_error("Sibling completion publication was rejected");
+            return std::optional<ProgramRunRecord>{next_run};
+        };
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 2},
+                          "typed-fallback-stale-hydration-parent", {}, parent_id});
+    auto sibling = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), child_budget, "typed-fallback-sibling", {}});
+    const auto sibling_result = sibling.wait();
+    ASSERT_EQ(sibling_result.status(), ProgramTerminalStatus::Completed)
+        << sibling_result.serialize_canonical();
+    ASSERT_EQ(parent.snapshot().children().front().state, ProgramChildState::Dispatched);
+    *sibling_completion = sibling_result;
+    armed->store(true);
+    auto child = fixture.runtime->start_child(
+        "tenant:runtime", parent, linked.receipt, linked.child_version,
+        ProgramInvocation{json::object(), child_budget, "typed-fallback-new-child", {}});
+    const auto result = child.wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(advances->load(), 1U);
+    EXPECT_EQ(completed_calls.load(), 2U);
+    EXPECT_EQ(journal->javascript_read_attempts.load(), 0U);
+    const auto children = parent.snapshot().children();
+    ASSERT_EQ(children.size(), 2U);
+    ASSERT_TRUE(children.front().terminal_result);
+    ASSERT_TRUE(children.back().terminal_result);
+    EXPECT_EQ(children.front().terminal_result->id(), sibling_result.id());
+    EXPECT_EQ(children.back().terminal_result->id(), result.id());
+    EXPECT_TRUE(parent.cancel());
+    gate.open();
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
 TEST(ProgramRuntimeTest, PlannerCannotOverrideResolvedChildBudget) {
     AdmittedRuntime fixture(2);
     const auto      linked = make_linked_child(fixture);
@@ -17559,8 +19252,8 @@ std::vector<std::string> synthesis_crash_boundaries() {
         for (const auto* boundary :
              {"Reserved", "Compiling", "Compiled", "Validating", "Validated", "Admitting",
               "Admitted", "Bound", "Dispatching", "Spawned", "ChildPublishing", "ChildDispatched",
-              "ChildTerminal", "ChildResult", "CommandResult", "ParentTerminal",
-              "ConcurrentRecovery"})
+              "ChildTerminal", "ChildResult", "ChildResultBeforeSpawned", "CommandResult",
+              "ParentTerminal", "ConcurrentRecovery"})
             result.push_back(backend + "_" + boundary);
     }
     return result;
@@ -17591,6 +19284,18 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
                 const std::vector<std::string> states{
                     "Reserved",  "Compiling", "Compiled", "Validating",  "Validated",
                     "Admitting", "Admitted",  "Bound",    "Dispatching", "Spawned"};
+                std::mutex              spawned_mutex;
+                std::condition_variable spawned_cv;
+                bool                    allow_spawned = boundary() != "ChildResultBeforeSpawned";
+                child.journal->before_publication =
+                    [&](const ProgramTransitionPublication& publication) {
+                        if (!publication.child_synthesis_records.empty() &&
+                            publication.child_synthesis_records.front().data().state ==
+                                ProgramChildSynthesisState::Spawned) {
+                            std::unique_lock lock(spawned_mutex);
+                            spawned_cv.wait(lock, [&] { return allow_spawned; });
+                        }
+                    };
                 child.journal->after_publication =
                     [&](const ProgramTransitionPublication& publication) {
                         bool stop = false;
@@ -17619,7 +19324,9 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
                                 if (boundary() == "ChildDispatched" &&
                                     relation.state == ProgramChildState::Dispatched)
                                     stop = true;
-                                if (boundary() == "ChildResult" && relation.terminal_result)
+                                if ((boundary() == "ChildResult" ||
+                                     boundary() == "ChildResultBeforeSpawned") &&
+                                    relation.terminal_result)
                                     stop = true;
                             }
                         }
@@ -17812,7 +19519,8 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
     EXPECT_EQ(head.data().state, State::Spawned);
     EXPECT_EQ(head.data().artifacts.at("child_run_id"), snapshot.children().front().child_run_id);
     if (boundary() == "ChildTerminal" || boundary() == "ChildResult" ||
-        boundary() == "CommandResult" || boundary() == "ParentTerminal") {
+        boundary() == "ChildResultBeforeSpawned" || boundary() == "CommandResult" ||
+        boundary() == "ParentTerminal") {
         std::ifstream executions(database + ".executions");
         std::string   line;
         unsigned      count = 0;

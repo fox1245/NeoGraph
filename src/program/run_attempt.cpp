@@ -11,6 +11,7 @@
 #include "javascript.h"
 #include "monetary.h"
 #include "run_control.h"
+#include "transition_validator.h"
 #include "provider_failure.h"
 #include "strand_join_signal.h"
 #include "task_graph_scheduler.h"
@@ -2017,11 +2018,14 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         json                       replay_records = json::object();
         std::set<std::string>      replayed_records;
         if (!checkpoint_id && !control_source && !control->recorded_replay) {
-            // #404: a plan operation reconciled as completed replays its result.
+            // #404, #658: a plan operation reconciled as completed or continued after an awaited
+            // child finishes replays what the paused run recorded and keeps its root checkpoint.
             const auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
-            if (durable && durable->pending_effect() &&
-                durable->pending_effect()->core_node() == "plan") {
+            if (durable && ((durable->pending_effect() &&
+                             durable->pending_effect()->core_node() == "plan") ||
+                            control->rejoin_paused_children)) {
                 if (const auto settled = durable->settled_branches()) replay_records = *settled;
+                if (durable->exact_checkpoint()) last_root_checkpoint = durable->exact_checkpoint();
             }
         }
         if (checkpoint_id && !control_source && !control->recorded_replay) {
@@ -4474,8 +4478,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto      ordinal = spawn_occurrences[base]++;
                     execution_key           = base + ":" + std::to_string(ordinal);
                 }
-                auto child = (co_await control->launch_child(*operation.child_binding(), std::move(state),
-                                                   operation_id, execution_key, std::nullopt));
+                const bool reconnect_existing =
+                    (co_await control->can_recover_child(*operation.child_binding(), state,
+                                                         operation_id)) ==
+                        ChildRecoveryMode::Existing;
+                auto child = reconnect_existing
+                                 ? (co_await control->reconnect_existing_child(
+                                       *operation.child_binding(), std::move(state), operation_id))
+                                 : (co_await control->launch_child(
+                                       *operation.child_binding(), std::move(state), operation_id,
+                                       execution_key, std::nullopt));
                 PlanExecution result;
                 result.output        = json{{"child_run_id", child->run_id},
                                             {"program_version_id", child->program_version_id}};
@@ -4513,8 +4525,15 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                operation_id);
                     }
                     auto child = std::move(launched.spawned_child);
+                    const auto with_child_reentry = [&](PlanExecution awaited) {
+                        if (awaited.status == ProgramTerminalStatus::Interrupted) {
+                            awaited.reentry = json{{"child_run_id", child->run_id}};
+                        }
+                        return awaited;
+                    };
                     if (!operation.timeout_ms()) {
-                        co_return plan_result_from_child(co_await child->wait_async());
+                        co_return with_child_reentry(
+                            plan_result_from_child(co_await child->wait_async()));
                     }
 
                     const auto executor       = co_await asio::this_coro::executor;
@@ -4542,11 +4561,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             .async_wait(asio::experimental::wait_for_one(), asio::use_awaitable);
                     if (order[0] == 0) {
                         if (child_error) std::rethrow_exception(child_error);
-                        co_return plan_result_from_child(child_result);
+                        co_return with_child_reentry(plan_result_from_child(child_result));
                     }
                     (void)timeout_error;
                     if (const auto terminal = child->try_result())
-                        co_return plan_result_from_child(*terminal);
+                        co_return with_child_reentry(plan_result_from_child(*terminal));
                     (void)child->cancel(CancellationCause::ParentTerminal);
                     co_return plan_failure(ProgramTerminalStatus::TimedOut, "P_AWAIT_TIMEOUT",
                                            "Program await operation timed out", operation_id);
@@ -4996,7 +5015,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
 
                 if (command.kind() == JavaScriptCommandKind::Spawn) {
                     const auto binding = arguments.at("child_binding").get<std::string>();
-                    auto child = reconnect_child_only
+                    const bool reconnect_existing =
+                        reconnect_child_only ||
+                        (co_await control->can_recover_child(
+                            binding, arguments.at("input"), operation_id)) ==
+                            ChildRecoveryMode::Existing;
+                    auto child = reconnect_existing
                                      ? (co_await control->reconnect_existing_child(
                                            binding, arguments.at("input"), operation_id))
                                      : (co_await control->launch_child(binding, arguments.at("input"),
@@ -5384,7 +5408,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             : execute_command(members[index],
                                               operation_id + "/member/" + std::to_string(index),
                                               state->tokens[index], state->scopes[index],
-                                              scope_depth + 1, false, false),
+                                              scope_depth + 1, false, reconnect_child_only),
                         asio::bind_executor(
                             completion_executor,
                             [state, index, launch_member, &members, mode, collect, required, cap,
@@ -5874,26 +5898,56 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     ? control->recorded_replay->commands : durable_prior_commands;
                 bool       child_resume_authorized      = false;
                 auto       child_recovery_mode = ChildRecoveryMode::None;
-                const auto can_resume_child = [&]() -> asio::awaitable<ChildRecoveryMode> {
-                    auto        candidate       = command_value;
-                    auto        child_operation = operation_id;
-                    std::size_t depth           = 0;
-                    while (candidate.kind() == JavaScriptCommandKind::Await) {
-                        if (++depth > kMaxJavaScriptStructuredScopeDepth)
-                            co_return ChildRecoveryMode::None;
-                        candidate =
-                            JavaScriptCommand::from_json(candidate.arguments().at("command"));
-                        child_operation += "/await";
-                    }
-                    if (candidate.kind() != JavaScriptCommandKind::Spawn)
-                        co_return ChildRecoveryMode::None;
-                    const auto args = candidate.arguments();
-                    co_return (co_await control->can_recover_child(args.at("child_binding").get<std::string>(),
-                                                      args.at("input"), child_operation));
-                };
                 const auto prior = std::find_if(
                     prior_commands.rbegin(), prior_commands.rend(),
                     [&](const auto& entry) { return entry.command_ordinal() == ordinal; });
+                std::function<asio::awaitable<ChildRecoveryMode>(
+                    const JavaScriptCommand&, std::string, std::size_t)>
+                    can_resume_command_child;
+                can_resume_command_child =
+                    [&](const JavaScriptCommand& candidate, std::string child_operation,
+                        std::size_t depth) -> asio::awaitable<ChildRecoveryMode> {
+                    if (depth > kMaxJavaScriptStructuredScopeDepth)
+                        co_return ChildRecoveryMode::None;
+                    if (candidate.kind() == JavaScriptCommandKind::Spawn) {
+                        const auto args = candidate.arguments();
+                        co_return (co_await control->can_recover_child(
+                            args.at("child_binding").get<std::string>(),
+                            args.at("input"), child_operation));
+                    }
+                    if (candidate.kind() == JavaScriptCommandKind::Await) {
+                        co_return (co_await can_resume_command_child(
+                            JavaScriptCommand::from_json(candidate.arguments().at("command")),
+                            child_operation + "/await", depth + 1));
+                    }
+                    if (candidate.kind() == JavaScriptCommandKind::Join) {
+                        const auto& members = candidate.arguments().at("members");
+                        const auto settled_members =
+                            prior != prior_commands.rend() ? prior->settled_members()
+                                                           : std::optional<json>{};
+                        auto combined = ChildRecoveryMode::None;
+                        for (std::size_t index = 0; index < members.size(); ++index) {
+                            const auto member_op =
+                                child_operation + "/member/" + std::to_string(index);
+                            if (settled_members && settled_members->is_object() &&
+                                settled_members->contains(member_op))
+                                continue;
+                            const auto mode = co_await can_resume_command_child(
+                                JavaScriptCommand::from_json(members.at(index)), member_op,
+                                depth + 1);
+                            if (mode == ChildRecoveryMode::None)
+                                co_return ChildRecoveryMode::None;
+                            if (combined == ChildRecoveryMode::None ||
+                                mode == ChildRecoveryMode::Synthesis)
+                                combined = mode;
+                        }
+                        co_return combined;
+                    }
+                    co_return ChildRecoveryMode::None;
+                };
+                const auto can_resume_child = [&]() -> asio::awaitable<ChildRecoveryMode> {
+                    co_return (co_await can_resume_command_child(command_value, operation_id, 0));
+                };
                 if (control->recorded_replay) {
                     if (prior == prior_commands.rend() || !prior->completed() ||
                         !prior->effect_identity())
@@ -6046,7 +6100,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 (co_await validate_javascript_command(command_value, operation_id, 0)))
                             co_return std::move(*failure);
                         child_resume_authorized = true;
-                    } else if (checkpoint_id && resume_checkpoint &&
+                        if (const auto settled = prior->settled_members()) {
+                            const auto member_prefix = operation_id + "/member/";
+                            for (const auto& [member, record] : settled->items()) {
+                                if (!member.starts_with(member_prefix))
+                                    throw_runtime_diagnostic(
+                                        "P_JS_COMMAND_JOURNAL_MISMATCH",
+                                        "Recorded join members do not match the paused join",
+                                        json{{"command_ordinal", ordinal}, {"member", member}});
+                            }
+                            resumed_join_members = *settled;
+                        }
+                    } else if (checkpoint_id && resume_checkpoint && !control->rejoin_paused_children &&
                                !checkpoint_of_a_completed_command(
                                    *control, prior_commands, ordinal,
                                    resume_checkpoint->core_thread_id)) {
@@ -6215,6 +6280,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         ActiveJavaScriptCommand{ordinal, command_value, effect_id};
                 }
 
+                const auto    checkpoint_before_command = root_checkpoint();
                 const auto    model_before       = model_tokens(usage);
                 const auto    money_before       = monetary_used();
                 const auto    steps_before       = core_progress->steps();
@@ -6337,7 +6403,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
                         }
                     }
-                    if (root_checkpoint()) {
+                    // The command's reservation is released only when it paused in a Core call of its own, at a
+                    // checkpoint it wrote. A command that waits on a child (an await of a spawn) pauses at the
+                    // checkpoint of an earlier call and keeps it (#658); the terminal record asks the same.
+                    const auto checkpoint_now = root_checkpoint();
+                    if (detail::transition::interrupt_releases_command_reservation(
+                            checkpoint_before_command, checkpoint_now,
+                            // A checkpoint that moved during the command was published with its event.
+                            checkpoint_now && !(checkpoint_before_command && *checkpoint_before_command == *checkpoint_now),
+                            checkpoint_now
+                                ? std::optional<bool>{detail::transition::command_holds_core_call_at(
+                                      control->run_id, command_value, ordinal, *checkpoint_now)}
+                                : std::nullopt)) {
                         unreconciled_javascript_remaining.reset();
                     }
                     co_return command_result;
