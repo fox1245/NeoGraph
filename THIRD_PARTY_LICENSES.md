@@ -16,13 +16,13 @@ and `LICENSE` when redistributing the engine or Python wheels.
 | moodycamel::ConcurrentQueue | [`deps/concurrentqueue.h`](deps/concurrentqueue.h) | BSD 2-Clause, also offered under Boost 1.0 | Vendored queue; BSD notice reproduced in the full notices |
 | QuickJS | [`deps/quickjs/LICENSE`](deps/quickjs/LICENSE), source-file headers | MIT | Vendored engine for the optional JavaScript Program control runtime; includes per-file attributions |
 | Unicode data | [Unicode License V3](https://www.unicode.org/license.txt) | Unicode-3.0 | Generated Unicode tables in QuickJS |
-| pybind11 | [Upstream LICENSE](https://github.com/pybind/pybind11/blob/v2.13.6/LICENSE) | BSD 3-Clause | Header code compiled into the Python extension; release Python build dependency pinned to 2.13.6, matching the direct-CMake fallback; selected headers in rebuilt artifacts must be verified |
+| pybind11 | [Upstream LICENSE](https://github.com/pybind/pybind11/blob/v3.1.0/LICENSE) | BSD 3-Clause | Header code compiled into the Python extension; release Python build dependency pinned to 3.1.0, matching the direct-CMake fallback; selected headers in rebuilt artifacts must be verified |
 | SHA-Intrinsics adaptation | [Pinned source notice](https://github.com/noloader/SHA-Intrinsics/blob/d03795497f3e4576083fc2cd8fe0b924f24d0bb2/sha256-x86.c) | Public domain | SHA intrinsic register layout in `src/core/sha256.cpp`; attribution to Jeffrey Walton, Intel and Sean Gulley / miTLS |
 | cppdotenv | [`deps/cppdotenv/LICENSE`](deps/cppdotenv/LICENSE) | MIT | Vendored example `.env` reader |
 | Clay | License at the end of [`deps/clay.h`](deps/clay.h) | zlib | Vendored optional example UI and `deps/clay_renderer_raylib.c` glue |
 | raylib | [Upstream LICENSE](https://github.com/raysan5/raylib/blob/5.5/LICENSE) | zlib | Fetched for the optional Clay example, not a wheel build dependency |
 
-The pybind11 2.13.6 license was checked against the primary tagged upstream
+The pybind11 3.1.0 license was checked against the primary tagged upstream
 text. The previously inspected Linux candidates did not expose their selected
 header version; the release pin is not proof of those past builds. Qualify
 the final rebuilt wheels using their actual selected header distribution.

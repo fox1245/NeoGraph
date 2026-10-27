@@ -131,7 +131,7 @@ void set_program_error(const char*                    type_name,
         exception.attr("code") = "";
         exception.attr("witness") = py::none();
     }
-    PyErr_SetObject(exception.get_type().ptr(), exception.ptr());
+    PyErr_SetObject(py::type::handle_of(exception).ptr(), exception.ptr());
 }
 
 // Compile, admission and runtime diagnostic errors all reach Python as typed

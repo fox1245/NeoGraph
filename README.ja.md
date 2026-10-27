@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=b47665c0105adc41193273cb836de3da5dcad51b41719a7ac493a1aa96a9f476 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=bc2c054e4a2a64763a1b615f8cb288538aea813fab7bc720cbaa4a4cc4fccf9a -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -399,8 +399,8 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux で、有効と無効のビルドを揃えて比較。不変の来歴情報のため、実際のソースルートの Git チェックアウトが必要。上限は CI の hosted x86-64 ランナー基準のため、より遅いハードウェアでは回帰がなくても `javascript_wrapped_core` が失敗することがある。`--base <ref>` を指定すると、そのコミットもビルドし、同じマシンでケースごとに比較する。 |
 | `fuzz` | Linux の Clang/libFuzzer による60秒のカナリア。コーパスは自分が所有する出力にコピーします。 |
 | `install` | 隔離したエクスポート先で ABI・シンボル・C++・C11・衝突・再配置を検査するコンシューマー。Git/Bash は不要。任意の `--shared`、`--core-only`、`--program`。`--quickjs` には `--program` と ELF/Mach-O の検査が必要で、Windows の行にはありません。 |
-| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10 が必要。任意の `--release-tag v0.16.0`。 |
-| `wheel` | 修復を経たインストール済みホイール。cibuildwheel==2.23.0 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
+| `sdist` | ソースアーカイブと Twine。build/twine/scikit-build-core>=1.0/pybind11==3.1.0/ninja>=1.10 が必要。任意の `--release-tag v0.16.0`。 |
+| `wheel` | 修復を経たインストール済みホイール。cibuildwheel==4.3.4 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 
 ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。Linux ARM64 はホスト型ランナーではなくプロジェクト自前の ARM サーバーでビルドとテストを行い(`ci-extended.yml` のホスト型 ARM ジョブは無効です)、aarch64 ホイールはリリースタグでのみビルドします。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.13 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。

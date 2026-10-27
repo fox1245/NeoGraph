@@ -408,8 +408,8 @@ cibuildwheel's declared bootstrap/repair still apply.
 | `quickjs-performance` | Linux matched enabled/disabled builds; actual source-root Git checkout required for immutable provenance. Ceilings are calibrated on CI's hosted x86-64 runners: on slower hardware `javascript_wrapped_core` can fail without a regression. `--base <ref>` also builds that commit and compares each case with it on the same machine. |
 | `fuzz` | Linux Clang/libFuzzer 60-second canary; corpus copied into owned output. |
 | `install` | Isolated exported-prefix ABI/symbol/C++/C11/collision/relocation consumers; no Git/Bash. Optional `--shared`, `--core-only` or `--program`; `--quickjs` requires `--program` and ELF/Mach-O inspection (Windows rows omit it). |
-| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10; optional `--release-tag v0.16.0`. |
-| `wheel` | Repaired installed wheels; provision cibuildwheel==2.23.0 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
+| `sdist` | Source archive and Twine; provision build/twine/scikit-build-core>=1.0/pybind11==3.1.0/ninja>=1.10; optional `--release-tag v0.16.0`. |
+| `wheel` | Repaired installed wheels; provision cibuildwheel==4.3.4 and native/container provider; required `--arch x86_64\|aarch64\|arm64\|AMD64`; optional `--python cp312` builds one CPython instead of all. |
 | `runtime-archive` | Shared SDK native-archive portability target/CTest; Ninja and platform runtime dependencies. |
 
 Local Windows/WSL results do not replace native ARM/macOS or VS2026 sanitizer

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=fe8bc612f11ccbd98292232531b99fc8d9ca795febe89fdd2212ea4e3ad95e54 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ko source_sha256=5e5de6b45a057338afcd3a21c2a859df15433f020c78fe5c65cce67a62349b49 -->
 # 변경 로그
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -133,6 +133,7 @@ NeoGraph에 대한 모든 주요 변경 사항은 이 파일에 기록됩니다.
   - `ServeOptions`가 커졌으므로 이를 만드는 코드는 라이브러리와 함께 다시 빌드해야 합니다. 인증 인터셉터와 한 포트의 여러 서비스는 여전히 `make_graph_service()`, `make_tool_service()`, `make_checkpoint_service()`를 직접 만든 `grpc::ServerBuilder`에 등록해 사용합니다.
 
 ### 변경됨
+- **Python 바인딩은 `pybind11` 3.1.0으로, 휠은 `cibuildwheel` 4.3.4로 빌드됩니다 (#611).** 기존에는 바인딩을 `pybind11` 2.13.6으로, 휠을 `cibuildwheel` 2.23.0으로 빌드했습니다. 배포 플랫폼과 CPython 버전은 바뀌지 않습니다. 바인딩의 타입에 링크하는 Python 확장은 NeoGraph와 함께 다시 빌드하세요([`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) 참조).
 - **루프백 A2A 서버는 루프백 `Host` 이름과 자기 출처에만 응답하고, 4 MiB를 넘는 본문은 읽지 않습니다.** `A2AServer`는 `Host`도 `Origin`도 확인하지 않았고 HTTP 라이브러리의 본문 한도 100 MiB를 그대로 썼습니다. 다른 출처의 페이지는 자기 호스트 이름을 이 머신으로 다시 가리키게 하면(DNS 리바인딩) 루프백 주소에 바인드한 서버에 닿았고, 어떤 클라이언트든 100 MiB 본문을 보낼 수 있었습니다. `start()` 전에 호출하는 `A2AServer::set_http_config(A2AHttpConfig)`는 MCP HTTP 서버와 같은 필드를 같은 의미로 받습니다. `allowed_hosts`, `allowed_origins`, `max_payload_bytes`입니다.
   - **Host.** 루프백 바인드(`127.0.0.1`, `::1`, `localhost`)에서는 포트와 관계없이 `localhost`, `127.0.0.1`, `[::1]`과 `allowed_hosts`의 이름에만 응답하고, 그 밖의 `Host`는 `Origin`이 있든 없든 `403`으로 거절합니다. `Host`가 없거나 `host[:port]` 형태가 아니면 `400`입니다. 항목은 포트 없는 호스트 이름, 대괄호로 감싼 IPv6 주소, 또는 모든 `Host`를 뜻하는 `*`이고 대소문자를 구분하지 않고 비교합니다. 루프백이 아닌 바인드에서는 목록이 비어 있으면 예전처럼 아무것도 확인하지 않고, 비어 있지 않으면 나열한 이름만 받아들입니다.
   - **Origin.** `Origin`이 있는 요청은 `allowed_origins`에 있거나, 루프백 바인드에서 서버 자신의 출처이면 받아들이고 아니면 `403`입니다. 서버 자신의 출처는 바인드한 포트의 `http://localhost:<port>`, `http://127.0.0.1:<port>`, `http://[::1]:<port>`이며, 각각 처음 받아들일 때 stderr에 한 번 알립니다. `Origin`이 없는 요청은 확인하지 않습니다. 루프백이 아닌 바인드는 목록에 있는 출처만 받아들입니다.

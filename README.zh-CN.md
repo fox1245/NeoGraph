@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=b47665c0105adc41193273cb836de3da5dcad51b41719a7ac493a1aa96a9f476 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=bc2c054e4a2a64763a1b615f8cb288538aea813fab7bc720cbaa4a4cc4fccf9a -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -399,8 +399,8 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `quickjs-performance` | Linux 上对比开启与关闭的两个匹配构建；为得到不可变的来源信息，需要真实的源码根目录 Git 检出。上限以 CI 的托管 x86-64 运行器为基准，在更慢的硬件上即使没有回归，`javascript_wrapped_core` 也可能失败。指定 `--base <ref>` 时，还会构建该提交并在同一台机器上逐个用例进行比较。 |
 | `fuzz` | Linux Clang/libFuzzer 的 60 秒金丝雀测试；语料会复制到你拥有的输出目录。 |
 | `install` | 在隔离的导出前缀中检查 ABI、符号、C++、C11、冲突和重定位的使用方；不需要 Git/Bash。可选 `--shared`、`--core-only` 或 `--program`；`--quickjs` 需要 `--program` 以及 ELF/Mach-O 检查，Windows 行没有它。 |
-| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==2.13.6/ninja>=1.10；可选 `--release-tag v0.16.0`。 |
-| `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==2.23.0 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
+| `sdist` | 源码压缩包和 Twine。需要 build/twine/scikit-build-core>=1.0/pybind11==3.1.0/ninja>=1.10；可选 `--release-tag v0.16.0`。 |
+| `wheel` | 修复后的已安装 wheel。需要 cibuildwheel==4.3.4 和原生/容器 provider；`--arch x86_64\|aarch64\|arm64\|AMD64` 为必填；可选 `--python cp312`，只构建一个 CPython 而不是全部。 |
 | `runtime-archive` | 共享 SDK 原生归档的可移植性目标/CTest。需要 Ninja 和平台运行时依赖。 |
 
 本地 Windows/WSL 的结果不能替代原生 ARM/macOS 或 VS2026 sanitizer 行。每次 push 和 pull request 都会运行 `ci.yml`：在 Linux、macOS 和 Windows 上运行完整的原生测试，再加两行已安装使用方的检查；仅修改文档时会跳过。`ci-extended.yml` 每晚运行，也可以按需运行：sanitizer、模糊测试金丝雀、性能关卡、gRPC、Visual Studio 生成器，以及其余八行已安装使用方的检查。Linux ARM64 在项目自己的 ARM 服务器上构建和测试，而不是托管运行器（`ci-extended.yml` 的托管 ARM 作业已关闭）；aarch64 wheel 只在发布标签上构建。发布候选版本在打标签之前请运行它。`wheels.yml` 在打包相关变更时为每个平台构建一个 CPython 3.12 的 wheel。在发布标签上，它为 Linux（x86_64 和 aarch64）、macOS（arm64）和 Windows（AMD64）构建 CPython 3.9–3.13 的 wheel，最低平台版本为 glibc 2.34 和 macOS 14。
