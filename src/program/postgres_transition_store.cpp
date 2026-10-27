@@ -307,13 +307,16 @@ std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_comma
     PGconn* connection, std::string_view owner_scope, std::string_view run_id) {
     auto result = exec_params(
         connection,
-        "SELECT coordinate_id, canonical_bytes FROM "
+        "SELECT sequence, coordinate_id, canonical_bytes FROM "
         "neograph_program_transition_javascript_command_log_v2 "
         "WHERE owner_scope = $1 AND run_id = $2 ORDER BY sequence DESC LIMIT 1",
         {std::string(owner_scope), std::string(run_id)});
     if (PQntuples(result.get()) == 0) return std::nullopt;
-    auto entry = ProgramJavaScriptCommandJournalEntry::parse(row_text(result, 0, 1));
-    if (entry.coordinate_id() != row_text(result, 0, 0))
+    if (PQntuples(result.get()) != 1 || PQnfields(result.get()) != 3)
+        throw std::invalid_argument("Stored PostgreSQL JavaScript command shape is invalid");
+    const auto sequence = parse_u64(row_text(result, 0, 0), "command sequence");
+    auto entry = ProgramJavaScriptCommandJournalEntry::parse(row_text(result, 0, 2));
+    if (entry.sequence() != sequence || entry.coordinate_id() != row_text(result, 0, 1))
         throw std::invalid_argument("Stored PostgreSQL JavaScript command is corrupt");
     return entry;
 }
@@ -437,16 +440,23 @@ std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
     PGconn* connection, std::string_view owner_scope, std::string_view run_id) {
     auto rows = exec_params(
         connection,
-        "SELECT coordinate_id, canonical_bytes FROM "
+        "SELECT sequence, coordinate_id, canonical_bytes FROM "
         "neograph_program_transition_javascript_command_log_v2 "
         "WHERE owner_scope = $1 AND run_id = $2 ORDER BY sequence ASC",
         {std::string(owner_scope), std::string(run_id)});
     std::vector<ProgramJavaScriptCommandJournalEntry> result;
     for (int row = 0; row < PQntuples(rows.get()); ++row) {
-        auto entry = ProgramJavaScriptCommandJournalEntry::parse(row_text(rows, row, 1));
-        if (entry.coordinate_id() != row_text(rows, row, 0))
+        const auto sequence = parse_u64(row_text(rows, row, 0), "command sequence");
+        auto entry = ProgramJavaScriptCommandJournalEntry::parse(row_text(rows, row, 2));
+        if (entry.sequence() != sequence || entry.coordinate_id() != row_text(rows, row, 1))
             throw std::invalid_argument("Stored PostgreSQL JavaScript command is corrupt");
         result.push_back(std::move(entry));
+    }
+    if (!result.empty()) {
+        const auto head = load_head(connection, owner_scope, run_id);
+        if (!head ||
+            !detail::transition::valid_command_history_append(head->run_record, {}, result))
+            throw std::invalid_argument("Stored PostgreSQL JavaScript command history is corrupt");
     }
     return result;
 }
@@ -976,18 +986,10 @@ std::vector<ProgramJavaScriptCommandJournalEntry>
 PostgreSQLProgramTransitionStore::load_javascript_commands_sync(
     std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const {
     std::lock_guard lock(impl_->mutex);
-    auto rows = exec_params(
-        impl_->connection,
-        "SELECT coordinate_id, canonical_bytes FROM "
-        "neograph_program_transition_javascript_command_log_v2 "
-        "WHERE owner_scope = $1 AND run_id = $2 AND sequence > $3 ORDER BY sequence ASC",
-        {std::string(owner_scope), std::string(run_id), std::to_string(after_sequence)});
+    const auto all = load_all_javascript_commands(impl_->connection, owner_scope, run_id);
     std::vector<ProgramJavaScriptCommandJournalEntry> result;
-    for (int row = 0; row < PQntuples(rows.get()); ++row) {
-        auto entry = ProgramJavaScriptCommandJournalEntry::parse(row_text(rows, row, 1));
-        if (entry.coordinate_id() != row_text(rows, row, 0))
-            throw std::invalid_argument("Stored PostgreSQL JavaScript command is corrupt");
-        result.push_back(std::move(entry));
+    for (const auto& entry : all) {
+        if (entry.sequence() > after_sequence) result.push_back(entry);
     }
     return result;
 }

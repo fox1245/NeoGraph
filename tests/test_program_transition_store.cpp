@@ -3547,7 +3547,14 @@ TEST(ProgramTransitionStoreTest, SQLiteCommandPublicationHeadReadsOnlyTailAndRej
         ASSERT_TRUE(head && head->latest_command);
         EXPECT_EQ(head->latest_command->sequence(), 4U);
         EXPECT_THROW((void)store.load_javascript_commands("owner-a", "run-1"), std::exception);
-        db.execute("UPDATE program_transition_javascript_command_log_v2 SET coordinate_id = 'broken' WHERE sequence = 4");
+        db.execute("UPDATE program_transition_javascript_command_log_v2 SET sequence = 5 WHERE sequence = 4");
+        EXPECT_THROW((void)store.load_command_publication_head("owner-a", "run-1"), std::invalid_argument);
+        const ProgramTransitionPublication current{head->run_record, head->journal_record, {}, {}};
+        EXPECT_THROW((void)store.compare_publish(
+                         "owner-a", head->journal_record.id,
+                         javascript_command_publication(current, javascript_command_entry(5, false, 3), 70)),
+                     std::invalid_argument);
+        db.execute("UPDATE program_transition_javascript_command_log_v2 SET sequence = 4, coordinate_id = 'broken' WHERE sequence = 5");
         EXPECT_THROW((void)store.load_command_publication_head("owner-a", "run-1"), std::invalid_argument);
     }
     std::filesystem::remove(path);
@@ -3834,6 +3841,21 @@ TEST(ProgramTransitionStoreTest, SQLiteMigratesLegacySnapshotToDeltaLog) {
         EXPECT_EQ(store.load_events("owner-a", "run-1", 2).size(), 1U);
         EXPECT_EQ(store.load_effects("owner-a", "run-1").size(), 1U);
     }
+    std::filesystem::remove(path);
+    {
+        ProgramTransitionPublication bad_legacy = legacy;
+        bad_legacy.commands = {javascript_command_entry(1, false, 1),
+                               javascript_command_entry(2, true, 2)};
+        TestSqliteDatabase database(path);
+        database.execute(
+            "CREATE TABLE program_transition_runs ("
+            "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, "
+            "canonical_bytes BLOB NOT NULL, last_publication_bytes BLOB NOT NULL, "
+            "PRIMARY KEY(owner_scope, run_id))");
+        database.insert_legacy("owner-a", "run-1", bad_legacy.serialize_canonical(),
+                               legacy_retry_bytes);
+    }
+    EXPECT_THROW((void)SQLiteProgramTransitionStore(path), std::invalid_argument);
     std::filesystem::remove(path);
 }
 
@@ -5372,7 +5394,8 @@ TEST_P(ProgramTransitionStoreConformance, ErrorsAreConflictsOrRuntimeErrors) {
 namespace {
 class CountingTransitionReads final : public neograph::program::detail::transition::TransitionReads {
 public:
-    std::size_t                                               command_log_reads = 0;
+    std::size_t                                               command_log_reads    = 0;
+    std::size_t                                               latest_command_reads = 0;
     std::vector<ProgramJavaScriptCommandJournalEntry>         commands;
     std::vector<ProgramContextPublication>                    contexts;
     std::vector<ProgramChildSynthesisRecord>                  syntheses;
@@ -5393,6 +5416,7 @@ public:
             std::vector<ProgramJavaScriptCommandJournalEntry>>(commands);
     }
     std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(std::string_view) override {
+        ++latest_command_reads;
         if (commands.empty()) return std::nullopt;
         return commands.back();
     }
@@ -5443,26 +5467,30 @@ TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
     const auto child_pub = child_metadata_publication(start, ProgramChildState::Publishing, 20);
     EXPECT_TRUE(check_increment(start, child_pub));
     EXPECT_EQ(reads.command_log_reads, 0U);
+    EXPECT_EQ(reads.latest_command_reads, 0U);
 
     const auto dispatched_pub =
         child_metadata_publication(child_pub, ProgramChildState::Dispatched, 25);
     EXPECT_TRUE(check_increment(child_pub, dispatched_pub));
     EXPECT_EQ(reads.command_log_reads, 0U);
+    EXPECT_EQ(reads.latest_command_reads, 0U);
 
     const auto terminal_pub =
         terminal_publication(start, ProgramTerminalStatus::Completed, ContinuationState::Completed, 30);
     EXPECT_TRUE(check_increment(start, terminal_pub));
     EXPECT_EQ(reads.command_log_reads, 0U);
+    EXPECT_EQ(reads.latest_command_reads, 0U);
 
-    // A publication that carries a command reads the command log.
+    // A publication that carries a command reads latest_command once and command_log zero times.
     const auto pending_entry = javascript_command_entry(1, false, 1);
     const auto pending_pub   = javascript_command_publication(start, pending_entry, 20);
     EXPECT_TRUE(check_increment(start, pending_pub));
-    EXPECT_EQ(reads.command_log_reads, 1U);
+    EXPECT_EQ(reads.latest_command_reads, 1U);
+    EXPECT_EQ(reads.command_log_reads, 0U);
 
     reads.commands.push_back(pending_entry);
 
-    // A publication without commands that raises the remaining budget reads the command log
+    // A publication without commands that raises the remaining budget reads latest_command
     // and is rejected because no command completed to settle an in-flight reservation.
     auto raised_budget = start.journal_record.remaining_budget;
     ++raised_budget.wall_time_ms;
@@ -5483,7 +5511,8 @@ TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
     const ProgramTransitionPublication raised_pub{
         ProgramRunRecord::create(std::move(raised_data)), std::move(raised_journal), {}, {}};
     EXPECT_FALSE(check_increment(pending_pub, raised_pub));
-    EXPECT_EQ(reads.command_log_reads, 2U);
+    EXPECT_EQ(reads.latest_command_reads, 2U);
+    EXPECT_EQ(reads.command_log_reads, 0U);
 
     // Reject cases on the command log and child transitions remain rejected.
     const auto conflicting_payload_entry = ProgramJavaScriptCommandJournalEntry(
@@ -5515,6 +5544,334 @@ TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
     const auto stale_ordinal_pub =
         javascript_command_publication(completed_pub, javascript_command_entry(3, false, 1), 40);
     EXPECT_FALSE(check_increment(completed_pub, stale_ordinal_pub));
+    EXPECT_EQ(reads.command_log_reads, 0U);
+
+    // Reservation settlement (with command completion) and interrupted CallCore reservation
+    // release (without commands, raising remaining_budget) both validate from latest_command.
+    auto available                   = budget();
+    available.wall_time_ms           = 800;
+    available.max_program_operations = 0;
+    RunBudget reservation;
+    reservation.wall_time_ms = 200;
+    const auto reserved_pending_entry = javascript_command_entry(3, false, 2);
+    const auto reserved_pending_pub   = javascript_command_publication(
+        completed_pub, reserved_pending_entry, 45, available, reservation);
+    EXPECT_TRUE(check_increment(completed_pub, reserved_pending_pub));
+    reads.commands.push_back(reserved_pending_entry);
+
+    auto call_core_checkpoint = checkpoint();
+    {
+        std::string identity = "run-1";
+        identity.push_back('\0');
+        identity.append("root.javascript.2");
+        identity.push_back('\0');
+        identity.append(digest('4'));
+        call_core_checkpoint.core_thread_id =
+            detail::sha256_identity("program-core-thread/v1", identity);
+    }
+    call_core_checkpoint.checkpoint_id = "checkpoint-2";
+    auto settled                       = available;
+    settled.wall_time_ms               = 950;
+    const ProgramUsage usage{50, 0, 0, 0, 0, 0};
+    auto               release_journal = ProgramJournalRecord::create(
+        {reserved_pending_pub.journal_record.id,
+         "run-1",
+         digest('1'),
+         digest('2'),
+         reserved_pending_pub.journal_record.sequence + 1,
+         {"root", ContinuationState::Interrupted, 1},
+         settled,
+         {},
+         call_core_checkpoint,
+         50});
+    ProgramPendingInputData pending_data;
+    pending_data.operation_id         = "root.javascript.2";
+    pending_data.call_id              = "call-1";
+    pending_data.kind                 = ProgramPendingInputKind::Input;
+    pending_data.result_schema        = json::object();
+    pending_data.payload              = json::object();
+    pending_data.core_node            = "main";
+    pending_data.core_interrupt_value = json::object();
+    auto              pending_input   = ProgramPendingInput(std::move(pending_data));
+    ProgramResultData result_data;
+    result_data.status             = ProgramTerminalStatus::Interrupted;
+    result_data.run_id             = "run-1";
+    result_data.program_version_id = digest('1');
+    result_data.bundle_id          = digest('2');
+    result_data.attempt            = 1;
+    result_data.usage              = usage;
+    result_data.remaining_budget   = settled;
+    result_data.checkpoint         = call_core_checkpoint;
+    result_data.interrupt =
+        ProgramInterrupt{"main", json::object(), pending_input, std::nullopt};
+    auto release_data             = copy_run_record_data(reserved_pending_pub.run_record);
+    release_data.continuation     = release_journal.continuation;
+    release_data.remaining_budget = settled;
+    release_data.exact_checkpoint = call_core_checkpoint;
+    release_data.pending_input    = pending_input;
+    release_data.terminal_result  = ProgramResult::create(std::move(result_data));
+    release_data.journal_head     = release_journal.id;
+    release_data.event_sequence   = reserved_pending_pub.run_record.event_sequence() + 2;
+    release_data.updated_at_ms    = 50;
+    const ProgramTransitionPublication release_pub{
+        ProgramRunRecord::create(std::move(release_data)),
+        std::move(release_journal),
+        {event(reserved_pending_pub.run_record.event_sequence() + 1,
+               ProgramEventKind::CheckpointPublished,
+               ProgramCheckpointEvent{call_core_checkpoint}, 50),
+         event(reserved_pending_pub.run_record.event_sequence() + 2, ProgramEventKind::Terminal,
+               ProgramTerminalEvent{ProgramTerminalStatus::Interrupted}, 50)},
+        {}};
+    const auto reads_before_release = reads.latest_command_reads;
+    EXPECT_TRUE(check_increment(reserved_pending_pub, release_pub));
+    EXPECT_EQ(reads.latest_command_reads, reads_before_release + 1U);
+    EXPECT_EQ(reads.command_log_reads, 0U);
+
+    const auto settled_command_entry = ProgramJavaScriptCommandJournalEntry(
+        ProgramJavaScriptCommandJournalEntryData{
+            4, digest('2'), 2,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}),
+            digest('8'),
+            json{{"status", "completed"},
+                 {"usage", json{{"wall_time_ms", 50U},
+                                {"model_tokens", 0U},
+                                {"monetary_microunits", 0U},
+                                {"program_operations", 1U},
+                                {"core_steps", 0U},
+                                {"peak_concurrency", 0U}}}}});
+    auto over_refund         = settled;
+    over_refund.wall_time_ms = 951;
+    EXPECT_FALSE(check_increment(
+        reserved_pending_pub,
+        javascript_command_publication(reserved_pending_pub, settled_command_entry, 50,
+                                       over_refund, RunBudget{})));
+    const auto reads_before_settle = reads.latest_command_reads;
+    EXPECT_TRUE(check_increment(
+        reserved_pending_pub,
+        javascript_command_publication(reserved_pending_pub, settled_command_entry, 50, settled,
+                                       RunBudget{})));
+    EXPECT_EQ(reads.latest_command_reads, reads_before_settle + 1U);
+    EXPECT_EQ(reads.command_log_reads, 0U);
+}
+
+TEST(ProgramTransitionStoreTest, ValidCommandHistoryAppendAfterEquivalence) {
+    namespace transition = neograph::program::detail::transition;
+
+    const auto start = start_publication();
+    const auto& run  = start.run_record;
+
+    const auto expect_same = [&](
+                                 const std::vector<ProgramJavaScriptCommandJournalEntry>& log,
+                                 const std::vector<ProgramJavaScriptCommandJournalEntry>& appended,
+                                 bool expected) {
+        const auto last =
+            log.empty() ? std::nullopt
+                        : std::optional<ProgramJavaScriptCommandJournalEntry>(log.back());
+        const bool full = transition::valid_command_history_append(run, log, appended);
+        const bool tail = transition::valid_command_history_append_after(run, last, appended);
+        EXPECT_EQ(full, expected);
+        EXPECT_EQ(tail, full);
+    };
+
+    const auto append_accepted =
+        [&](std::vector<ProgramJavaScriptCommandJournalEntry>        log,
+            const std::vector<ProgramJavaScriptCommandJournalEntry>& appended) {
+            const auto last =
+                log.empty() ? std::nullopt
+                            : std::optional<ProgramJavaScriptCommandJournalEntry>(log.back());
+            EXPECT_TRUE(transition::valid_command_history_append(run, log, appended));
+            EXPECT_TRUE(transition::valid_command_history_append_after(run, last, appended));
+            log.insert(log.end(), appended.begin(), appended.end());
+            return log;
+        };
+
+    const auto join_cmd = JavaScriptCommand::join(
+        "journal:join", "all",
+        {JavaScriptCommand::call_core("journal:m0", "main", json{{"input", 1}}),
+         JavaScriptCommand::call_core("journal:m1", "main", json{{"input", 2}})});
+    const auto await_cmd = JavaScriptCommand::await(
+        "journal:await",
+        JavaScriptCommand::call_core("journal:inner", "main", json{{"input", 1}}), 500);
+
+    // 1. Empty log.
+    const std::vector<ProgramJavaScriptCommandJournalEntry> empty_log;
+    expect_same(empty_log, {}, true);
+    expect_same(empty_log, {javascript_command_entry(1, false, 1)}, true);
+    expect_same(empty_log, {javascript_command_entry(1, true, 1)}, false);
+    expect_same(empty_log, {javascript_command_entry(1, false, 2)}, false);
+    expect_same(empty_log, {javascript_command_entry(2, false, 1)}, false);
+
+    // 2. Pending last entry, and 3. Completed last entry (built only via accepted appends).
+    const auto pending_log   = append_accepted(empty_log, {javascript_command_entry(1, false, 1)});
+    const auto completed_log = append_accepted(pending_log, {javascript_command_entry(2, true, 1)});
+    const auto two_ordinals_pending_log =
+        append_accepted(completed_log, {javascript_command_entry(3, false, 2)});
+    const auto two_ordinals_completed_log =
+        append_accepted(two_ordinals_pending_log, {javascript_command_entry(4, true, 2)});
+    const auto three_ordinals_pending_log =
+        append_accepted(two_ordinals_completed_log, {javascript_command_entry(5, false, 3)});
+
+    // 4. New ordinal = highest + 1.
+    expect_same(completed_log, {javascript_command_entry(3, false, 2)}, true);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, false, 3)}, true);
+    expect_same(three_ordinals_pending_log, {javascript_command_entry(6, true, 3)}, true);
+    expect_same(pending_log, {javascript_command_entry(2, false, 2)}, false);
+    expect_same(three_ordinals_pending_log, {javascript_command_entry(6, false, 4)}, false);
+
+    // 5. New ordinal skipping one.
+    expect_same(empty_log, {javascript_command_entry(1, false, 2)}, false);
+    expect_same(completed_log, {javascript_command_entry(3, false, 3)}, false);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, false, 4)}, false);
+
+    // 6. Repeated old ordinal whose coordinate is completed.
+    expect_same(completed_log, {javascript_command_entry(3, false, 1)}, false);
+    expect_same(completed_log, {javascript_command_entry(3, true, 1)}, false);
+    expect_same(two_ordinals_pending_log, {javascript_command_entry(4, false, 1)}, false);
+    expect_same(two_ordinals_pending_log, {javascript_command_entry(4, true, 1)}, false);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, false, 1)}, false);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, true, 1)}, false);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, false, 2)}, false);
+    expect_same(three_ordinals_pending_log, {javascript_command_entry(6, true, 1)}, false);
+    expect_same(three_ordinals_pending_log, {javascript_command_entry(6, true, 2)}, false);
+
+    // 7. Settled members on a pending join.
+    const ProgramJavaScriptCommandJournalEntry join_pending(
+        ProgramJavaScriptCommandJournalEntryData{3, digest('2'), 2, join_cmd, digest('8'),
+                                                 std::nullopt});
+    const ProgramJavaScriptCommandJournalEntry join_settled_initial(
+        ProgramJavaScriptCommandJournalEntryData{
+            3, digest('2'), 2, join_cmd, digest('8'), std::nullopt,
+            json{{"root.javascript.2/member/0", json{{"status", "completed"}}}}});
+    expect_same(completed_log, {join_settled_initial}, false);
+    const auto join_pending_log = append_accepted(completed_log, {join_pending});
+    const ProgramJavaScriptCommandJournalEntry join_settled(
+        ProgramJavaScriptCommandJournalEntryData{
+            4, digest('2'), 2, join_cmd, digest('8'), std::nullopt,
+            json{{"root.javascript.2/member/0", json{{"status", "completed"}}}}});
+    expect_same(join_pending_log, {join_settled}, true);
+    const auto join_settled_log = append_accepted(join_pending_log, {join_settled});
+    const ProgramJavaScriptCommandJournalEntry join_completed(
+        ProgramJavaScriptCommandJournalEntryData{
+            5, digest('2'), 2, join_cmd, digest('8'), json{{"status", "completed"}}});
+    expect_same(join_settled_log, {join_completed}, true);
+
+    // 8. An await start.
+    const ProgramJavaScriptCommandJournalEntry await_pending(
+        ProgramJavaScriptCommandJournalEntryData{3, digest('2'), 2, await_cmd, digest('8'),
+                                                 std::nullopt});
+    const ProgramJavaScriptCommandJournalEntry await_start_initial(
+        ProgramJavaScriptCommandJournalEntryData{
+            3, digest('2'), 2, await_cmd, digest('8'), std::nullopt, std::nullopt,
+            json{{"root.javascript.2/await", 1000}}});
+    expect_same(completed_log, {await_start_initial}, false);
+    const auto await_pending_log = append_accepted(completed_log, {await_pending});
+    const ProgramJavaScriptCommandJournalEntry await_started(
+        ProgramJavaScriptCommandJournalEntryData{
+            4, digest('2'), 2, await_cmd, digest('8'), std::nullopt, std::nullopt,
+            json{{"root.javascript.2/await", 1000}}});
+    expect_same(await_pending_log, {await_started}, true);
+    const auto await_started_log = append_accepted(await_pending_log, {await_started});
+    const ProgramJavaScriptCommandJournalEntry await_completed(
+        ProgramJavaScriptCommandJournalEntryData{
+            5, digest('2'), 2, await_cmd, digest('8'), json{{"status", "completed"}}});
+    expect_same(await_started_log, {await_completed}, true);
+    const ProgramJavaScriptCommandJournalEntry await_ord1_pending(
+        ProgramJavaScriptCommandJournalEntryData{1, digest('2'), 1, await_cmd, digest('8'),
+                                                 std::nullopt});
+    const ProgramJavaScriptCommandJournalEntry await_ord1_started(
+        ProgramJavaScriptCommandJournalEntryData{
+            2, digest('2'), 1, await_cmd, digest('8'), std::nullopt, std::nullopt,
+            json{{"root.javascript.1/await", 1000}}});
+    const ProgramJavaScriptCommandJournalEntry await_ord1_completed(
+        ProgramJavaScriptCommandJournalEntryData{
+            3, digest('2'), 1, await_cmd, digest('8'), json{{"status", "completed"}}});
+    const auto await_ord1_pending_log = append_accepted(empty_log, {await_ord1_pending});
+    const auto await_ord1_started_log =
+        append_accepted(await_ord1_pending_log, {await_ord1_started});
+    expect_same(await_ord1_started_log, {await_ord1_completed}, true);
+
+    // 9. A second completion.
+    expect_same(completed_log, {javascript_command_entry(3, true, 1)}, false);
+    expect_same(two_ordinals_completed_log, {javascript_command_entry(5, true, 2)}, false);
+
+    // 10. A conflicting payload for the same ordinal.
+    const ProgramJavaScriptCommandJournalEntry conflicting_payload(
+        ProgramJavaScriptCommandJournalEntryData{
+            2, digest('2'), 1,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 99}}),
+            digest('8'), json{{"status", "completed"}}});
+    expect_same(pending_log, {conflicting_payload}, false);
+
+    // 11. A sequence gap in the new entries.
+    expect_same(empty_log, {javascript_command_entry(2, false, 1)}, false);
+    expect_same(pending_log, {javascript_command_entry(3, true, 1)}, false);
+    expect_same(completed_log,
+                {javascript_command_entry(3, false, 2), javascript_command_entry(5, true, 2)},
+                false);
+
+    // 12. A wrong bundle id.
+    const ProgramJavaScriptCommandJournalEntry wrong_bundle_initial(
+        ProgramJavaScriptCommandJournalEntryData{
+            1, digest('9'), 1,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}),
+            digest('8'), std::nullopt});
+    const ProgramJavaScriptCommandJournalEntry wrong_bundle_complete(
+        ProgramJavaScriptCommandJournalEntryData{
+            2, digest('9'), 1,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}),
+            digest('8'), json{{"status", "completed"}}});
+    expect_same(empty_log, {wrong_bundle_initial}, false);
+    expect_same(pending_log, {wrong_bundle_complete}, false);
+
+    // 13. Two (and three) new entries in one publication.
+    expect_same(empty_log,
+                {javascript_command_entry(1, false, 1), javascript_command_entry(2, true, 1)},
+                true);
+    expect_same(pending_log,
+                {javascript_command_entry(2, true, 1), javascript_command_entry(3, false, 2)},
+                true);
+    expect_same(completed_log,
+                {javascript_command_entry(3, false, 2), javascript_command_entry(4, true, 2)},
+                true);
+    expect_same(completed_log, {join_pending, join_settled, join_completed}, true);
+    expect_same(completed_log, {await_pending, await_started, await_completed}, true);
+    expect_same(empty_log,
+                {javascript_command_entry(1, false, 1), javascript_command_entry(2, true, 1),
+                 javascript_command_entry(3, true, 1)},
+                false);
+    expect_same(completed_log,
+                {javascript_command_entry(3, false, 2), javascript_command_entry(4, false, 3)},
+                false);
+    expect_same(completed_log,
+                {javascript_command_entry(3, false, 2), javascript_command_entry(4, true, 1)},
+                false);
+
+    // Call-counting TransitionReads verification on a publication with commands, plus
+    // disagreement / nullopt checks on latest_command and valid_command_reservation_transition.
+    EXPECT_FALSE(transition::valid_command_history_append_after(
+        run, std::nullopt, {javascript_command_entry(3, false, 2)}));
+    EXPECT_FALSE(transition::valid_command_history_append_after(
+        run, pending_log.front(), {javascript_command_entry(3, false, 2)}));
+    const auto ordinary_child_pub = child_metadata_publication(start);
+    EXPECT_TRUE(transition::valid_command_reservation_transition(
+        start.run_record, start.journal_record, ordinary_child_pub.journal_record, std::nullopt,
+        ordinary_child_pub, nullptr, nullptr, nullptr));
+
+    CountingTransitionReads reads;
+    reads.commands = completed_log;
+    const auto second_Completed_pub = javascript_command_publication(
+        javascript_command_publication(start, pending_log.front(), 20), completed_log.back(), 30);
+    const auto third_pending_pub = javascript_command_publication(
+        second_Completed_pub, javascript_command_entry(3, false, 2), 40);
+    const transition::CurrentHead head{second_Completed_pub.run_record,
+                                       second_Completed_pub.journal_record,
+                                       second_Completed_pub.migration_plan,
+                                       {}};
+    EXPECT_TRUE(transition::valid_increment(reads, head, third_pending_pub,
+                                            second_Completed_pub.journal_record.id, nullptr,
+                                            nullptr, nullptr));
+    EXPECT_EQ(reads.latest_command_reads, 1U);
+    EXPECT_EQ(reads.command_log_reads, 0U);
 }
 
 TEST(ProgramTransitionStoreTest, ChildIndexPreservesValidationAndRejectsDuplicateChildRunIds) {
