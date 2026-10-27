@@ -2,6 +2,7 @@
 #include <neograph/program/replay.h>
 
 #include "canonical_json.h"
+#include "transition_validator.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
 
@@ -4921,6 +4922,50 @@ const std::vector<GoldenRow>& golden_rows() {
                      javascript_command_publication(completed, javascript_command_entry(3, true), 40));
              });
          }},
+        {"command completed with a conflicting payload", "Conflict",
+         [](auto& store) {
+             const auto start   = published_start(store);
+             const auto pending = published(
+                 store, javascript_command_publication(start, javascript_command_entry(1, false), 20),
+                 start.journal_record.id);
+             const auto conflicting = ProgramJavaScriptCommandJournalEntry(
+                 ProgramJavaScriptCommandJournalEntryData{
+                     2, digest('2'), 1,
+                     JavaScriptCommand::call_core("journal:store", "main", json{{"input", 2}}),
+                     digest('8'), json{{"status", "completed"}}});
+             return verdict_of_call([&] {
+                 return store.compare_publish(
+                     "owner-a", pending.journal_record.id,
+                     javascript_command_publication(pending, conflicting, 30));
+             });
+         }},
+        {"command with a sequence gap", "Conflict",
+         [](auto& store) {
+             const auto start   = published_start(store);
+             const auto pending = published(
+                 store, javascript_command_publication(start, javascript_command_entry(1, false), 20),
+                 start.journal_record.id);
+             return verdict_of_call([&] {
+                 return store.compare_publish(
+                     "owner-a", pending.journal_record.id,
+                     javascript_command_publication(pending, javascript_command_entry(3, true), 30));
+             });
+         }},
+        {"command with a stale ordinal", "Conflict",
+         [](auto& store) {
+             const auto start   = published_start(store);
+             const auto pending = published(
+                 store, javascript_command_publication(start, javascript_command_entry(1, false), 20),
+                 start.journal_record.id);
+             const auto completed = published(
+                 store, javascript_command_publication(pending, javascript_command_entry(2, true), 30),
+                 pending.journal_record.id);
+             return verdict_of_call([&] {
+                 return store.compare_publish(
+                     "owner-a", completed.journal_record.id,
+                     javascript_command_publication(completed, javascript_command_entry(3, false, 1), 40));
+             });
+         }},
         {"ordinary publication under a live lease", "Conflict",
          [](auto& store) {
              auto start = start_publication();
@@ -5112,6 +5157,29 @@ const std::vector<GoldenRow>& golden_rows() {
                                                 "different-child-trace"));
              });
          }},
+        {"child removed from the record", "Conflict",
+         [](auto& store) {
+             const auto start = published_start(store);
+             const auto child = published(store, child_metadata_publication(start), start.journal_record.id);
+             return verdict_of_call([&] {
+                 return store.compare_publish(
+                     "owner-a", child.journal_record.id,
+                     terminal_publication(child, ProgramTerminalStatus::Completed,
+                                          ContinuationState::Completed, 30));
+             });
+         }},
+        {"child with an illegal state transition", "Conflict",
+         [](auto& store) {
+             const auto start      = published_start(store);
+             const auto dispatched = published(
+                 store, child_metadata_publication(start, ProgramChildState::Dispatched),
+                 start.journal_record.id);
+             return verdict_of_call([&] {
+                 return store.compare_publish(
+                     "owner-a", dispatched.journal_record.id,
+                     child_metadata_publication(dispatched, ProgramChildState::Publishing, 30));
+             });
+         }},
         {"replacement at the exact checkpoint", "Published",
          [](auto& store) {
              const auto boundary = publish_replacement_boundary(store);
@@ -5299,4 +5367,253 @@ TEST_P(ProgramTransitionStoreConformance, ErrorsAreConflictsOrRuntimeErrors) {
               "Conflict");
     EXPECT_EQ(verdict_of_call([&] { return store->compare_publish("owner-a", "not-a-head", start); }),
               "Conflict");
+}
+
+namespace {
+class CountingTransitionReads final : public neograph::program::detail::transition::TransitionReads {
+public:
+    std::size_t                                               command_log_reads = 0;
+    std::vector<ProgramJavaScriptCommandJournalEntry>         commands;
+    std::vector<ProgramContextPublication>                    contexts;
+    std::vector<ProgramChildSynthesisRecord>                  syntheses;
+    std::vector<neograph::HookOutboxEntry>                    hooks;
+
+    std::optional<GraphMigrationCapsule> graph_migration_capsule(std::string_view,
+                                                                 std::string_view) override {
+        return std::nullopt;
+    }
+    bool effect_id_published(std::string_view, std::string_view) override {
+        return false;
+    }
+    neograph::program::detail::transition::Borrowed<
+        std::vector<ProgramJavaScriptCommandJournalEntry>>
+    command_log(std::string_view) override {
+        ++command_log_reads;
+        return neograph::program::detail::transition::Borrowed<
+            std::vector<ProgramJavaScriptCommandJournalEntry>>(commands);
+    }
+    std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(std::string_view) override {
+        if (commands.empty()) return std::nullopt;
+        return commands.back();
+    }
+    std::optional<ProgramRunRecord> run_record(std::string_view, Lock) override {
+        return std::nullopt;
+    }
+    std::optional<ProgramRunLineage> lineage_head(std::string_view, Lock) override {
+        return std::nullopt;
+    }
+    std::optional<ProgramRunGeneration> generation(std::string_view, std::uint64_t) override {
+        return std::nullopt;
+    }
+    std::optional<std::string> run_lineage_id(std::string_view) override {
+        return std::nullopt;
+    }
+    neograph::program::detail::transition::Borrowed<std::vector<ProgramContextPublication>>
+    context_history(std::string_view) override {
+        return neograph::program::detail::transition::Borrowed<
+            std::vector<ProgramContextPublication>>(contexts);
+    }
+    neograph::program::detail::transition::Borrowed<std::vector<ProgramChildSynthesisRecord>>
+    synthesis_heads(std::string_view) override {
+        return neograph::program::detail::transition::Borrowed<
+            std::vector<ProgramChildSynthesisRecord>>(syntheses);
+    }
+    neograph::program::detail::transition::Borrowed<std::vector<neograph::HookOutboxEntry>>
+    hook_heads(std::string_view, const ProgramRunRecord&) override {
+        return neograph::program::detail::transition::Borrowed<
+            std::vector<neograph::HookOutboxEntry>>(hooks);
+    }
+};
+}  // namespace
+
+TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
+    namespace transition = neograph::program::detail::transition;
+
+    CountingTransitionReads reads;
+    const auto              start = start_publication();
+    const auto check_increment    = [&](const ProgramTransitionPublication& old_pub,
+                                        const ProgramTransitionPublication& next_pub) {
+        const transition::CurrentHead old_head{
+            old_pub.run_record, old_pub.journal_record, old_pub.migration_plan, {}};
+        return transition::valid_increment(reads, old_head, next_pub, old_pub.journal_record.id,
+                                           nullptr, nullptr, nullptr);
+    };
+
+    // A publication without commands and without a budget increase does not read the command log.
+    const auto child_pub = child_metadata_publication(start, ProgramChildState::Publishing, 20);
+    EXPECT_TRUE(check_increment(start, child_pub));
+    EXPECT_EQ(reads.command_log_reads, 0U);
+
+    const auto dispatched_pub =
+        child_metadata_publication(child_pub, ProgramChildState::Dispatched, 25);
+    EXPECT_TRUE(check_increment(child_pub, dispatched_pub));
+    EXPECT_EQ(reads.command_log_reads, 0U);
+
+    const auto terminal_pub =
+        terminal_publication(start, ProgramTerminalStatus::Completed, ContinuationState::Completed, 30);
+    EXPECT_TRUE(check_increment(start, terminal_pub));
+    EXPECT_EQ(reads.command_log_reads, 0U);
+
+    // A publication that carries a command reads the command log.
+    const auto pending_entry = javascript_command_entry(1, false, 1);
+    const auto pending_pub   = javascript_command_publication(start, pending_entry, 20);
+    EXPECT_TRUE(check_increment(start, pending_pub));
+    EXPECT_EQ(reads.command_log_reads, 1U);
+
+    reads.commands.push_back(pending_entry);
+
+    // A publication without commands that raises the remaining budget reads the command log
+    // and is rejected because no command completed to settle an in-flight reservation.
+    auto raised_budget = start.journal_record.remaining_budget;
+    ++raised_budget.wall_time_ms;
+    auto raised_journal = ProgramJournalRecord::create({pending_pub.journal_record.id,
+                                                        "run-1",
+                                                        digest('1'),
+                                                        digest('2'),
+                                                        pending_pub.journal_record.sequence + 1,
+                                                        {"root", ContinuationState::Running, 1},
+                                                        raised_budget,
+                                                        {},
+                                                        std::nullopt,
+                                                        25});
+    auto raised_data             = copy_run_record_data(pending_pub.run_record);
+    raised_data.remaining_budget = raised_budget;
+    raised_data.journal_head     = raised_journal.id;
+    raised_data.updated_at_ms    = 25;
+    const ProgramTransitionPublication raised_pub{
+        ProgramRunRecord::create(std::move(raised_data)), std::move(raised_journal), {}, {}};
+    EXPECT_FALSE(check_increment(pending_pub, raised_pub));
+    EXPECT_EQ(reads.command_log_reads, 2U);
+
+    // Reject cases on the command log and child transitions remain rejected.
+    const auto conflicting_payload_entry = ProgramJavaScriptCommandJournalEntry(
+        ProgramJavaScriptCommandJournalEntryData{
+            2, digest('2'), 1,
+            JavaScriptCommand::call_core("journal:store", "main", json{{"input", 2}}),
+            digest('8'), json{{"status", "completed"}}});
+    const auto conflicting_payload_pub =
+        javascript_command_publication(pending_pub, conflicting_payload_entry, 30);
+    EXPECT_FALSE(check_increment(pending_pub, conflicting_payload_pub));
+
+    const auto new_ordinal_while_pending_pub =
+        javascript_command_publication(pending_pub, javascript_command_entry(2, false, 2), 30);
+    EXPECT_FALSE(check_increment(pending_pub, new_ordinal_while_pending_pub));
+
+    const auto sequence_gap_pub =
+        javascript_command_publication(pending_pub, javascript_command_entry(3, true, 1), 30);
+    EXPECT_FALSE(check_increment(pending_pub, sequence_gap_pub));
+
+    const auto completed_entry = javascript_command_entry(2, true, 1);
+    const auto completed_pub   = javascript_command_publication(pending_pub, completed_entry, 30);
+    EXPECT_TRUE(check_increment(pending_pub, completed_pub));
+    reads.commands.push_back(completed_entry);
+
+    const auto second_completion_pub =
+        javascript_command_publication(completed_pub, javascript_command_entry(3, true, 1), 40);
+    EXPECT_FALSE(check_increment(completed_pub, second_completion_pub));
+
+    const auto stale_ordinal_pub =
+        javascript_command_publication(completed_pub, javascript_command_entry(3, false, 1), 40);
+    EXPECT_FALSE(check_increment(completed_pub, stale_ordinal_pub));
+}
+
+TEST(ProgramTransitionStoreTest, ChildIndexPreservesValidationAndRejectsDuplicateChildRunIds) {
+    namespace transition = neograph::program::detail::transition;
+
+    const auto start = start_publication();
+    const auto make_child = [](std::string id, ProgramChildState state) {
+        return ProgramChildRecord{
+            std::move(id), digest('7'), "link-receipt",
+            ProgramPersistedInvocation{{{"child", true}}, budget(), "child-trace", "run-1", 1},
+            state};
+    };
+
+    // ProgramRunRecord::create rejects duplicate child_run_id entries.
+    {
+        auto duplicate_data     = copy_run_record_data(start.run_record);
+        duplicate_data.children = {make_child("child-run-1", ProgramChildState::Publishing),
+                                   make_child("child-run-1", ProgramChildState::Dispatched)};
+        EXPECT_THROW((void)ProgramRunRecord::create(std::move(duplicate_data)),
+                     std::invalid_argument);
+    }
+
+    // Multiple children validate state transitions, removal rejection, and result binding via the index.
+    const auto with_children = [&](const ProgramTransitionPublication& previous,
+                                   std::vector<ProgramChildRecord>     children,
+                                   std::int64_t                        time) {
+        auto journal = ProgramJournalRecord::create({previous.journal_record.id,
+                                                     "run-1",
+                                                     digest('1'),
+                                                     digest('2'),
+                                                     previous.journal_record.sequence + 1,
+                                                     {"root", ContinuationState::Running, 1},
+                                                     budget(),
+                                                     {},
+                                                     std::nullopt,
+                                                     time});
+        auto data             = copy_run_record_data(previous.run_record);
+        data.children         = std::move(children);
+        data.continuation     = journal.continuation;
+        data.remaining_budget = journal.remaining_budget;
+        data.journal_head     = journal.id;
+        data.updated_at_ms    = time;
+        return ProgramTransitionPublication{
+            ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
+    };
+
+    CountingTransitionReads reads;
+    const auto check_increment = [&](const ProgramTransitionPublication& old_pub,
+                                     const ProgramTransitionPublication& next_pub) {
+        const transition::CurrentHead old_head{
+            old_pub.run_record, old_pub.journal_record, old_pub.migration_plan, {}};
+        return transition::valid_increment(reads, old_head, next_pub, old_pub.journal_record.id,
+                                           nullptr, nullptr, nullptr);
+    };
+
+    const auto pub_two = with_children(
+        start,
+        {make_child("child-run-1", ProgramChildState::Publishing),
+         make_child("child-run-2", ProgramChildState::Dispatched)},
+        20);
+    EXPECT_TRUE(check_increment(start, pub_two));
+    const transition::CurrentHead start_head{
+        start.run_record, start.journal_record, start.migration_plan, {}};
+    EXPECT_TRUE(transition::child_results_bind(reads, "owner-a", &start_head, pub_two));
+
+    // Removing a child is rejected.
+    const auto removed_second = with_children(
+        pub_two, {make_child("child-run-1", ProgramChildState::Dispatched)}, 30);
+    EXPECT_FALSE(check_increment(pub_two, removed_second));
+
+    // Illegal state transition (Dispatched -> Publishing) on the second child is rejected.
+    const auto illegal_second = with_children(
+        pub_two,
+        {make_child("child-run-1", ProgramChildState::Dispatched),
+         make_child("child-run-2", ProgramChildState::Publishing)},
+        30);
+    EXPECT_FALSE(check_increment(pub_two, illegal_second));
+
+    // Completing the second child while advancing the first to Dispatched is accepted.
+    auto completed_child_2 = make_child("child-run-2", ProgramChildState::Completed);
+    ProgramResultData child_2_result;
+    child_2_result.status             = ProgramTerminalStatus::Completed;
+    child_2_result.run_id             = "child-run-2";
+    child_2_result.program_version_id = digest('1');
+    child_2_result.bundle_id          = digest('2');
+    child_2_result.operation_id       = "root";
+    child_2_result.attempt            = 1;
+    child_2_result.output             = json{{"child", 2}};
+    child_2_result.remaining_budget   = budget();
+    child_2_result.checkpoint         = checkpoint();
+    completed_child_2.terminal_result = ProgramResult::create(std::move(child_2_result));
+
+    const auto progressed = with_children(
+        pub_two,
+        {make_child("child-run-1", ProgramChildState::Dispatched), std::move(completed_child_2)},
+        30);
+    EXPECT_TRUE(check_increment(pub_two, progressed));
+    const transition::CurrentHead pub_two_head{
+        pub_two.run_record, pub_two.journal_record, pub_two.migration_plan, {}};
+    EXPECT_TRUE(transition::child_results_bind(reads, "owner-a", &pub_two_head, progressed));
+    EXPECT_EQ(reads.command_log_reads, 0U);
 }

@@ -40,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <variant>
 #include <vector>
 
@@ -74,15 +75,17 @@ inline bool valid_child_state_transition(ProgramChildState previous, ProgramChil
 
 inline bool valid_children_transition(const ProgramRunRecord& previous,
                                       const ProgramRunRecord& next) {
-    const auto previous_children = previous.children();
-    const auto next_children     = next.children();
+    const auto& previous_children = previous.children();
+    const auto& next_children     = next.children();
+    std::unordered_map<std::string_view, const ProgramChildRecord*> next_by_id;
+    next_by_id.reserve(next_children.size());
+    for (const auto& child : next_children) {
+        next_by_id.emplace(child.child_run_id, &child);
+    }
     for (const auto& child : previous_children) {
-        const auto found = std::find_if(next_children.begin(), next_children.end(),
-                                        [&](const auto& value) {
-                                            return value.child_run_id == child.child_run_id;
-                                        });
-        if (found == next_children.end() || !same_child_metadata(child, *found) ||
-            !valid_child_state_transition(child.state, found->state))
+        const auto found = next_by_id.find(child.child_run_id);
+        if (found == next_by_id.end() || !same_child_metadata(child, *found->second) ||
+            !valid_child_state_transition(child.state, found->second->state))
             return false;
     }
     return true;
@@ -645,7 +648,15 @@ inline bool valid_increment(TransitionReads&                     reads,
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
         return false;
     if (!effect_ids_are_new(reads, old_run.run_id(), next_publication.effects)) return false;
-    const auto old_commands = reads.command_log(old_run.run_id());
+    // Read the command log only when the publication appends commands or raises the remaining
+    // budget: valid_command_history_append returns at once when commands is empty, and
+    // valid_command_reservation_transition reads old_commands only when the budget increased.
+    const std::vector<ProgramJavaScriptCommandJournalEntry> empty_commands;
+    const auto old_commands =
+        (!next_publication.commands.empty() ||
+         budget_increased(next_journal.remaining_budget, old_journal.remaining_budget))
+            ? reads.command_log(old_run.run_id())
+            : Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(empty_commands);
     if (!valid_command_history_append(old_run, old_commands.get(), next_publication.commands) ||
         !valid_command_reservation_transition(old_run, old_journal, next_journal,
                                               old_commands.get(), next_publication,
@@ -664,18 +675,26 @@ inline bool child_results_bind(TransitionReads&                    reads,
                                std::string_view                    owner_scope,
                                const CurrentHead*                  current,
                                const ProgramTransitionPublication& publication) {
+    // Every old record per id: a result is unchanged when any of them matches it, as a full scan would find.
+    std::unordered_multimap<std::string_view, const ProgramChildRecord*> old_by_id;
+    if (current) {
+        const auto& old_children = current->run_record.children();
+        old_by_id.reserve(old_children.size());
+        for (const auto& old : old_children) {
+            old_by_id.emplace(old.child_run_id, &old);
+        }
+    }
     for (const auto& child : publication.run_record.children()) {
         if (!child.terminal_generation ||
             (publication.run_generation && publication.run_generation->replacement_receipt()))
             continue;
         bool unchanged = false;
-        if (current)
-            for (const auto& old : current->run_record.children())
-                if (old.child_run_id == child.child_run_id &&
-                    old.terminal_generation == child.terminal_generation && old.terminal_result &&
-                    child.terminal_result &&
-                    old.terminal_result->id() == child.terminal_result->id())
-                    unchanged = true;
+        for (auto [it, end] = old_by_id.equal_range(child.child_run_id); it != end; ++it) {
+            const auto& old = *it->second;
+            if (old.terminal_generation == child.terminal_generation && old.terminal_result &&
+                child.terminal_result && old.terminal_result->id() == child.terminal_result->id())
+                unchanged = true;
+        }
         if (unchanged) continue;
         const auto lineage_id = program_run_lineage_id(owner_scope, child.child_run_id);
         const auto lineage    = reads.lineage_head(lineage_id, TransitionReads::Lock::None);

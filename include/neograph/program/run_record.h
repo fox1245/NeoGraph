@@ -143,7 +143,10 @@ public:
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;
     bool has_children() const noexcept;
-    std::vector<ProgramChildRecord> children() const;
+    /** The child relations. A record that outlives the call lends them; a temporary record
+     *  returns its own copy, so a range-for over a temporary's children never dangles. */
+    const std::vector<ProgramChildRecord>& children() const&;
+    std::vector<ProgramChildRecord> children() const&&;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;
     std::uint64_t event_sequence() const noexcept;

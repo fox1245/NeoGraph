@@ -2001,7 +2001,8 @@ void init_program(py::module_& m) {
         .def_property_readonly("bundle_id", &ProgramRunRecord::bundle_id)
         .def_property_readonly("binding_fingerprint", &ProgramRunRecord::binding_fingerprint)
         .def_property_readonly("child_depth", &ProgramRunRecord::child_depth)
-        .def_property_readonly("children", &ProgramRunRecord::children)
+        .def_property_readonly("children",
+                               [](const ProgramRunRecord& self) { return self.children(); })
         .def_property_readonly("invocation_budget",
                                [](const ProgramRunRecord& self) {
                                    return self.invocation().budget;

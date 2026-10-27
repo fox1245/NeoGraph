@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=79c1f15211168eb58ef4b86b17da2cb6697cf0086ad955a356b59e20b508ef4a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=586256fb0bba7d2b1168ef0c0fde912793e6fbea01aeffba7f63c99ea8cdfbcd -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -196,8 +196,10 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - Python 的 `A2AClient.set_timeout(seconds)` 不变：它截断为整数秒，因此小于 1 的值现在表示对交换没有限制，而以前表示完全没有限制。Python 没有 `set_connect_timeout`。
 - **请重新构建 C++ 使用方：`A2AClient` 增加了成员和参数。** `A2AClient` 增加了 `set_connect_timeout` 和一个数据成员，两个 `send_message_sync` 重载的末尾还增加了 `graph::CancelToken*` 参数，`a2a::make_harness_capability_executor` 增加了 `call_timeout` 参数。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **请重新构建 C++ 使用方：`StdioClientConfig` 增加了成员。** `mcp::StdioClientConfig` 增加了 `max_stdout_text_lines` 和 `max_stdout_text_bytes`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **面向 C++ 使用方的源码与 ABI 变更：在比调用活得更久的记录上，`ProgramRunRecord::children()` 返回 `const` 引用 (#661)。** 对左值记录，它返回 `const std::vector<ProgramChildRecord>&` 而不是副本；对临时记录（例如 `handle.snapshot().children()`）仍返回自己的副本，因此遍历临时记录子运行的 range-for 不会悬空。此前将返回值绑定到非 `const` 引用、或从左值记录的子运行中移动的调用方需显式复制；请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
+- **Program：子运行多的父运行发布更快 (#661)。** 校验运行记录的发布时，过去每次都读取并解析运行的整个 JavaScript 命令日志，并为每个子运行复制和扫描父运行的子运行列表。现在只有追加命令或提高日志剩余预算的发布才读取命令日志，子运行按 id 查找。发布被接受或拒绝的条件不变。在 SQLite 存储上 spawn 并 await 64 个脚本子运行的父运行，在同一台机器上从 61.5 秒降到 17.6 秒；成本仍比子运行数量增长得快。
 - **在 QuickJS 记录错误的栈时内存耗尽的 JavaScript 源码，现在以内存上限失败，而不是让进程崩溃。** QuickJS 2026-06-04 在记录待处理错误的栈时没有持有该错误，这一步中再次发生内存耗尽时，错误会先被释放，这一步随后使用了已释放的内存（上游 issue bellard/quickjs#533）。vendored 的 `quickjs.c` 现在在这一步中持有该错误，形式与仍未合并的上游修复 bellard/quickjs#565 相同；`deps/quickjs/NEOGRAPH_PROVENANCE` 记录了该补丁，以及归档中的 `quickjs.c` 与 vendored `quickjs.c` 的摘要。JavaScript 运行时标识（`ProgramSource::JAVASCRIPT_QUICKJS_BUILD_OPTIONS`）不变，所以已存储的源码和 bundle 仍可加载。最初是在 Windows 上门禁的内存上限测试出现访问冲突时发现的。
 - **Program：在派发子运行的过程中父运行被取消或已结束的子 run，现在以 `Cancelled` 结束，而不是一直保持 `Running` (#636)。** `ProgramRuntime::start_child()` 会先发布子 run（`Started` 转换和 `Running` 记录），再把 `Dispatched` 状态记录到父记录中。若父运行在这段间隙内结束，父运行自己的终止记录已经关闭了它未派发的子运行的关系，于是 `start_child()` 抛出 `P_CHILD_CONFLICT`，并让该子 run 保持 `Running`；既没有尝试去运行它，也没有父运行再去派发它。现在 `start_child()` 会在抛出异常之前，将该子运行持久化地作为 `Cancelled`（`failure.code` 为 `P_RUNTIME_CANCELLED`）结束。父运行仍处于 `Running` 时，与以往一样让子运行保持 `Publishing` 以便重试；暂停等待回答的父运行同样如此：父运行再次运行后启动同一个子运行，会派发已发布的那个 run。
 - **检查点 schema 规则只写一处，并由测试用各发布版本写出的数据来保证 (#609)。** `CHECKPOINT_SCHEMA_VERSION` 上方的注释曾说没有任何环节拒绝旧版本，但精确检查点恢复、`NodeInterrupt` 检查点的恢复、图安全点，以及 Program 的分叉、图迁移、恢复和对账路径会拒绝所有其他版本。现在注释和参考文档（`docs/reference-en.md` 的 "Versions and resume"）说明了哪些版本会恢复、哪些被拒绝，以及 SQLite 运行时存储的迁移做什么。引擎行为不变。`tests/fixtures/released/0.16.0/` 保存了已发布的 0.16.0 Python wheel 写出的存储：带有已暂停运行和更早检查点的检查点存储、SQLite 的历史、制品、provider 回执和结果存储，以及带有已暂停 Program 运行的 Program 存储（该 wheel 无法写入 hook outbox 行）。`tests/test_released_data_compat.cpp` 用当前代码打开它们的副本，恢复已暂停的图运行和 Program 运行，并迁移 schema 版本 1 和 2 的运行时存储。对 `CHECKPOINT_SCHEMA_VERSION` 的改动一旦使已发布的检查点无法恢复，这些测试就会失败。

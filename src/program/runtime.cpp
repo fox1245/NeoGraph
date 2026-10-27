@@ -1485,8 +1485,8 @@ ProgramChildRecord child_record_for(std::string_view         child_run_id,
 
 std::optional<ProgramChildRecord> find_child(const ProgramRunRecord& record,
                                              std::string_view        child_run_id) {
-    const auto children = record.children();
-    const auto found    = std::find_if(children.begin(), children.end(), [&](const auto& child) {
+    const auto& children = record.children();
+    const auto  found    = std::find_if(children.begin(), children.end(), [&](const auto& child) {
         return child.child_run_id == child_run_id;
     });
     if (found == children.end()) return std::nullopt;
@@ -6303,7 +6303,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         if (journal.id != parent.journal_head())
             throw_runtime_diagnostic("P_CHILD_CONFLICT",
                                      "Child reservation recovery lost its parent journal");
-        const auto children = parent.children();
+        const auto& children = parent.children();
         auto available = parent.remaining_budget();
         if (!children.empty()) {
             // A pending structured command owns the parent's spendable allocation.
@@ -8786,7 +8786,8 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
                 co_await impl_->publish_synthesis(next, parent.control_);
             });
     }
-    for (const auto& child : (co_await parent.snapshot_async()).children()) {
+    const auto initial_run = (co_await parent.snapshot_async());
+    for (const auto& child : initial_run.children()) {
         if (ModuleLinkReceipt::parse(child.link_receipt).child_name() == binding_name)
             throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
                                      "Synthesis name already belongs to an attached child");
