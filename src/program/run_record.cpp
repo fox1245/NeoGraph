@@ -762,7 +762,10 @@ std::uint64_t ProgramRunRecord::effect_sequence() const noexcept {
 bool ProgramRunRecord::has_children() const noexcept {
     return !impl_->data.children.empty();
 }
-std::vector<ProgramChildRecord> ProgramRunRecord::children() const {
+const std::vector<ProgramChildRecord>& ProgramRunRecord::children() const& {
+    return impl_->data.children;
+}
+std::vector<ProgramChildRecord> ProgramRunRecord::children() const&& {
     return impl_->data.children;
 }
 std::int64_t ProgramRunRecord::created_at_ms() const noexcept {
