@@ -329,6 +329,32 @@ public:
         return std::make_shared<BlockingProgramTransitionStore>(transition_store(), form_policy(form_));
     }
 
+    std::shared_ptr<ProgramTransitionStore> transition_store_with_run_record_cache_capacity(
+        std::size_t capacity) const {
+        if (backend_ == StoreBackend::InMemory) return memory_transitions_;
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
+        if (backend_ == StoreBackend::JavaScript)
+            return wasm::adapt_js_stores(reference_->handle()).transitions;
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+        if (backend_ == StoreBackend::Sqlite)
+            return std::make_shared<SQLiteProgramTransitionStore>(
+                database_, SQLiteProgramTransitionStore::Options{capacity});
+#endif
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+        if (backend_ == StoreBackend::PostgreSql)
+            return std::make_shared<PostgreSQLProgramTransitionStore>(
+                url_, PostgreSQLProgramTransitionStore::Options{capacity});
+#endif
+        throw std::logic_error("backend is not built");
+    }
+
+    std::shared_ptr<BlockingProgramTransitionStore>
+    blocking_transition_store_with_run_record_cache_capacity(std::size_t capacity) const {
+        return std::make_shared<BlockingProgramTransitionStore>(
+            transition_store_with_run_record_cache_capacity(capacity), form_policy(form_));
+    }
+
     std::shared_ptr<BlockingProgramStore> blocking_program_store() const {
         return std::make_shared<BlockingProgramStore>(program_store(), form_policy(form_));
     }
@@ -396,6 +422,21 @@ public:
         execute("UPDATE " + std::string(table) + " SET run_record_bytes = 'broken' WHERE " +
                 "owner_scope = " + detail::quote_literal(owner_scope) +
                 " AND run_id = " + detail::quote_literal(run_id));
+    }
+
+    // Replaces the stored run_record_bytes of one run with those of another run in the same
+    // owner scope.
+    void replace_run_record_bytes(std::string_view owner_scope,
+                                  std::string_view from_run_id,
+                                  std::string_view into_run_id) {
+        const auto table =
+            std::string(detail::transition_stage_table(backend_, WriteStage::Run).table);
+        const auto owner = detail::quote_literal(owner_scope);
+        const auto from  = detail::quote_literal(from_run_id);
+        const auto into  = detail::quote_literal(into_run_id);
+        execute("UPDATE " + table + " SET run_record_bytes = (SELECT run_record_bytes FROM " +
+                table + " WHERE owner_scope = " + owner + " AND run_id = " + from +
+                ") WHERE owner_scope = " + owner + " AND run_id = " + into);
     }
 
     // Gives a stored generation row an identity column that its record's bytes do not carry.

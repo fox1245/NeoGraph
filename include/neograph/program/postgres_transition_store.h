@@ -6,6 +6,7 @@
 
 #include <neograph/program/transition_store.h>
 
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -23,7 +24,18 @@ namespace neograph::program {
 class NEOGRAPH_PROGRAM_API PostgreSQLProgramTransitionStore final
     : public SyncProgramTransitionStore {
 public:
+    /** Store-level configuration options. */
+    struct Options {
+        /**
+         * Maximum number of runs whose last parsed ProgramRunRecord is kept in
+         * memory while its stored bytes are unchanged. Least-recently-used
+         * entries are evicted when the cache is full; 0 disables the cache.
+         */
+        std::size_t run_record_cache_capacity = 256;
+    };
+
     explicit PostgreSQLProgramTransitionStore(std::string connection_string);
+    PostgreSQLProgramTransitionStore(std::string connection_string, Options options);
     PostgreSQLProgramTransitionStore(PostgreSQLProgramTransitionStore&&) noexcept;
     PostgreSQLProgramTransitionStore& operator=(PostgreSQLProgramTransitionStore&&) noexcept;
     PostgreSQLProgramTransitionStore(const PostgreSQLProgramTransitionStore&) = delete;

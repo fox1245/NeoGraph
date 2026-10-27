@@ -2,6 +2,7 @@
 #include <neograph/program/replay.h>
 
 #include "canonical_json.h"
+#include "run_record_cache.h"
 #include "transition_validator.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
@@ -4526,16 +4527,27 @@ TEST_P(ProgramTransitionStoreConformance, TamperedStoredRunRecordFailsClosed) {
     const auto start = start_publication();
     ASSERT_EQ(primary_store().compare_publish("owner-a", {}, start),
               ProgramTransitionPublishResult::Published);
+    const auto loaded_before_tamper = primary_store().load("owner-a", "run-1");
+    ASSERT_TRUE(loaded_before_tamper.has_value());
+    EXPECT_EQ(loaded_before_tamper->id(), start.run_record.id());
+    EXPECT_EQ(loaded_before_tamper->serialize_canonical(),
+              start.run_record.serialize_canonical());
+    ASSERT_TRUE(primary_store().load_run_publication_head("owner-a", "run-1"));
+    ASSERT_TRUE(primary_store().load_command_publication_head("owner-a", "run-1"));
     deployment().corrupt_run_record("owner-a", "run-1");
-    restart_store();
-    auto& store = primary_store();
-    EXPECT_THROW((void)store.load("owner-a", "run-1"), std::exception);
-    EXPECT_THROW((void)store.load_run_publication_head("owner-a", "run-1"), std::exception);
     const auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
                                                ContinuationState::Completed);
-    EXPECT_THROW((void)store.compare_publish("owner-a", start.journal_record.id, terminal),
-                 std::exception);
-    EXPECT_FALSE(store.load("owner-b", "run-1"));
+    for (const bool after_restart : {false, true}) {
+        if (after_restart) restart_store();
+        auto& store = primary_store();
+        EXPECT_THROW((void)store.load("owner-a", "run-1"), std::exception);
+        EXPECT_THROW((void)store.load_run_publication_head("owner-a", "run-1"), std::exception);
+        EXPECT_THROW((void)store.load_command_publication_head("owner-a", "run-1"),
+                     std::exception);
+        EXPECT_THROW((void)store.compare_publish("owner-a", start.journal_record.id, terminal),
+                     std::exception);
+        EXPECT_FALSE(store.load("owner-b", "run-1"));
+    }
 }
 
 // Fail closed and tamper detection, key binding: a stored row whose identity column disagrees
@@ -5973,4 +5985,202 @@ TEST(ProgramTransitionStoreTest, ChildIndexPreservesValidationAndRejectsDuplicat
         pub_two.run_record, pub_two.journal_record, pub_two.migration_plan, {}};
     EXPECT_TRUE(transition::child_results_bind(reads, "owner-a", &pub_two_head, progressed));
     EXPECT_EQ(reads.command_log_reads, 0U);
+}
+
+TEST_P(ProgramTransitionStoreConformance,
+       RunRecordCachePreservesReadsPublicationsTamperDetectionZeroCapacityAndEviction) {
+    if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
+
+    const auto expect_same_record = [](const ProgramRunRecord& actual,
+                                       const ProgramRunRecord& expected) {
+        EXPECT_EQ(actual.id(), expected.id());
+        EXPECT_EQ(actual.serialize_canonical(), expected.serialize_canonical());
+    };
+    const auto expect_loaded_record = [&](const std::optional<ProgramRunRecord>& actual,
+                                          const ProgramRunRecord&                expected) {
+        ASSERT_TRUE(actual.has_value());
+        expect_same_record(*actual, expected);
+    };
+
+    auto verify_with_capacity = [&](std::size_t capacity) {
+        auto store =
+            deployment().blocking_transition_store_with_run_record_cache_capacity(capacity);
+        const std::string owner    = "owner-a";
+        const std::string prefix   = "cap-" + std::to_string(capacity) + "-";
+        const std::string run_1_id = prefix + "run-1";
+
+        // (a) Reading the same unchanged run twice returns equal records across all head readers.
+        const auto start_1 =
+            start_publication_for(run_1_id, digest('1'), digest('2'), budget(), 10);
+        ASSERT_EQ(store->compare_publish(owner, {}, start_1),
+                  ProgramTransitionPublishResult::Published);
+        const auto first_read  = store->load(owner, run_1_id);
+        const auto second_read = store->load(owner, run_1_id);
+        expect_loaded_record(first_read, start_1.run_record);
+        expect_loaded_record(second_read, *first_read);
+        // A read returns what the stored bytes parse to, never the published object (which can carry state its
+        // bytes do not); the second read of unchanged bytes reuses the first parse.
+        EXPECT_NE(&first_read->id(), &start_1.run_record.id());
+        if (capacity > 0) {
+            EXPECT_EQ(&first_read->id(), &second_read->id());
+        } else {
+            EXPECT_NE(&first_read->id(), &second_read->id());
+        }
+
+        const auto run_head_1 = store->load_run_publication_head(owner, run_1_id);
+        const auto run_head_2 = store->load_run_publication_head(owner, run_1_id);
+        ASSERT_TRUE(run_head_1.has_value());
+        ASSERT_TRUE(run_head_2.has_value());
+        expect_same_record(run_head_1->run_record, start_1.run_record);
+        expect_same_record(run_head_2->run_record, run_head_1->run_record);
+        if (capacity > 0) {
+            EXPECT_EQ(&run_head_1->run_record.id(), &run_head_2->run_record.id());
+        } else {
+            EXPECT_NE(&run_head_1->run_record.id(), &run_head_2->run_record.id());
+        }
+
+        const auto cmd_head_1 = store->load_command_publication_head(owner, run_1_id);
+        const auto cmd_head_2 = store->load_command_publication_head(owner, run_1_id);
+        ASSERT_TRUE(cmd_head_1.has_value());
+        ASSERT_TRUE(cmd_head_2.has_value());
+        expect_same_record(cmd_head_1->run_record, start_1.run_record);
+        expect_same_record(cmd_head_2->run_record, cmd_head_1->run_record);
+        if (capacity > 0) {
+            EXPECT_EQ(&cmd_head_1->run_record.id(), &cmd_head_2->run_record.id());
+        } else {
+            EXPECT_NE(&cmd_head_1->run_record.id(), &cmd_head_2->run_record.id());
+        }
+
+        // (b) After a publication (both on the same store instance and from a second writer),
+        // the next read returns the new record.
+        const auto progressed_1 =
+            javascript_command_publication(start_1, javascript_command_entry(1, false), 20);
+        ASSERT_EQ(store->compare_publish(owner, start_1.journal_record.id, progressed_1),
+                  ProgramTransitionPublishResult::Published);
+        expect_loaded_record(store->load(owner, run_1_id), progressed_1.run_record);
+        const auto progressed_run_head = store->load_run_publication_head(owner, run_1_id);
+        ASSERT_TRUE(progressed_run_head.has_value());
+        expect_same_record(progressed_run_head->run_record, progressed_1.run_record);
+        const auto progressed_cmd_head = store->load_command_publication_head(owner, run_1_id);
+        ASSERT_TRUE(progressed_cmd_head.has_value());
+        expect_same_record(progressed_cmd_head->run_record, progressed_1.run_record);
+
+        auto peer = deployment().blocking_transition_store();
+        const auto completed_1 =
+            javascript_command_publication(progressed_1, javascript_command_entry(2, true), 30);
+        ASSERT_EQ(peer->compare_publish(owner, progressed_1.journal_record.id, completed_1),
+                  ProgramTransitionPublishResult::Published);
+        expect_loaded_record(store->load(owner, run_1_id), completed_1.run_record);
+        const auto completed_run_head = store->load_run_publication_head(owner, run_1_id);
+        ASSERT_TRUE(completed_run_head.has_value());
+        expect_same_record(completed_run_head->run_record, completed_1.run_record);
+
+        // (e) Eviction keeps reads correct when more runs than the capacity are read in turn.
+        std::vector<ProgramTransitionPublication> runs;
+        for (int index = 2; index <= 6; ++index) {
+            auto pub = start_publication_for(
+                prefix + "run-" + std::to_string(index), digest('1'), digest('2'), budget(),
+                20 + index);
+            ASSERT_EQ(store->compare_publish(owner, {}, pub),
+                      ProgramTransitionPublishResult::Published);
+            runs.push_back(std::move(pub));
+        }
+        const auto run_2_id = runs[0].run_record.run_id();
+        const auto run_3_id = runs[1].run_record.run_id();
+        const auto run_4_id = runs[2].run_record.run_id();
+        if (capacity == 2) {
+            const auto cached_2 = store->load(owner, run_2_id);
+            const auto cached_3 = store->load(owner, run_3_id);
+            const auto touch_2  = store->load(owner, run_2_id);
+            ASSERT_TRUE(cached_2 && cached_3 && touch_2);
+            EXPECT_EQ(&cached_2->id(), &touch_2->id());
+            // Loading run-4 evicts LRU (run-3) while keeping MRU (run-2).
+            expect_loaded_record(store->load(owner, run_4_id), runs[2].run_record);
+            const auto after_2 = store->load(owner, run_2_id);
+            const auto after_3 = store->load(owner, run_3_id);
+            ASSERT_TRUE(after_2 && after_3);
+            EXPECT_EQ(&after_2->id(), &cached_2->id());
+            EXPECT_NE(&after_3->id(), &cached_3->id());
+        }
+        for (int pass = 0; pass < 3; ++pass) {
+            expect_loaded_record(store->load(owner, run_1_id), completed_1.run_record);
+            for (const auto& pub : runs) {
+                expect_loaded_record(store->load(owner, pub.run_record.run_id()), pub.run_record);
+                const auto head = store->load_run_publication_head(owner, pub.run_record.run_id());
+                ASSERT_TRUE(head.has_value());
+                expect_same_record(head->run_record, pub.run_record);
+            }
+        }
+
+        // (c) Changing the stored bytes outside the store while the old value is cached still
+        // fails closed on the next read.
+        expect_loaded_record(store->load(owner, run_2_id), runs[0].run_record);
+        deployment().replace_run_record_bytes(owner, run_3_id, run_2_id);
+        EXPECT_THROW((void)store->load(owner, run_2_id), std::invalid_argument);
+        EXPECT_THROW((void)store->load_run_publication_head(owner, run_2_id),
+                     std::invalid_argument);
+        EXPECT_THROW((void)store->load_command_publication_head(owner, run_2_id),
+                     std::invalid_argument);
+
+        expect_loaded_record(store->load(owner, run_3_id), runs[1].run_record);
+        deployment().corrupt_run_record(owner, run_3_id);
+        EXPECT_THROW((void)store->load(owner, run_3_id), std::exception);
+        EXPECT_THROW((void)store->load_run_publication_head(owner, run_3_id), std::exception);
+        EXPECT_THROW((void)store->load_command_publication_head(owner, run_3_id), std::exception);
+        const auto next_3 =
+            javascript_command_publication(runs[1], javascript_command_entry(1, false), 40);
+        EXPECT_THROW((void)store->compare_publish(owner, runs[1].journal_record.id, next_3),
+                     std::exception);
+    };
+
+    // (d) Capacity 0 disables caching and behaves identically; small capacity (2) exercises LRU
+    // eviction across 6 runs.
+    verify_with_capacity(0);
+    verify_with_capacity(2);
+}
+
+TEST(ProgramTransitionStoreTest, RunRecordCacheLruAndFailClosed) {
+    const auto expect_same_record = [](const ProgramRunRecord& actual,
+                                       const ProgramRunRecord& expected) {
+        EXPECT_EQ(actual.id(), expected.id());
+        EXPECT_EQ(actual.serialize_canonical(), expected.serialize_canonical());
+    };
+    const auto pub_1 = start_publication_for("run-1", digest('1'), digest('2'), budget(), 10);
+    const auto pub_2 = start_publication_for("run-2", digest('1'), digest('2'), budget(), 20);
+    const auto pub_3 = start_publication_for("run-3", digest('1'), digest('2'), budget(), 30);
+    const auto bytes_1 = pub_1.run_record.serialize_canonical();
+    const auto bytes_2 = pub_2.run_record.serialize_canonical();
+    const auto bytes_3 = pub_3.run_record.serialize_canonical();
+
+    neograph::program::detail::RunRecordCache cache(2);
+    EXPECT_EQ(cache.capacity(), 2U);
+    // Seed unparseable sentinel bytes so a cache hit returns the seeded record whereas an
+    // unexpected miss or wrong eviction re-parses the sentinel and throws.
+    cache.put("owner-a", "run-1", "unparseable-sentinel-1", pub_1.run_record);
+    cache.put("owner-a", "run-2", "unparseable-sentinel-2", pub_2.run_record);
+    // Touch run-1 so run-1 is MRU and run-2 is LRU, then insert run-3.
+    expect_same_record(cache.parse("owner-a", "run-1", "unparseable-sentinel-1"),
+                       pub_1.run_record);
+    expect_same_record(cache.parse("owner-a", "run-3", bytes_3), pub_3.run_record);
+    // run-1 must still be cached; run-2 must have been evicted.
+    expect_same_record(cache.parse("owner-a", "run-1", "unparseable-sentinel-1"),
+                       pub_1.run_record);
+    EXPECT_THROW((void)cache.parse("owner-a", "run-2", "unparseable-sentinel-2"), std::exception);
+    expect_same_record(cache.parse("owner-a", "run-2", bytes_2), pub_2.run_record);
+
+    // Cross-run key mismatch is rejected before entering the cache.
+    EXPECT_THROW((void)cache.parse("owner-a", "run-1", bytes_2), std::invalid_argument);
+
+    // Corrupt bytes for a cached run fail closed and evict the old entry.
+    EXPECT_THROW((void)cache.parse("owner-a", "run-1", "broken"), std::exception);
+    EXPECT_THROW((void)cache.parse("owner-a", "run-1", "broken"), std::exception);
+    expect_same_record(cache.parse("owner-a", "run-1", bytes_1), pub_1.run_record);
+
+    neograph::program::detail::RunRecordCache disabled(0);
+    EXPECT_EQ(disabled.capacity(), 0U);
+    disabled.put("owner-a", "run-1", "unparseable-sentinel-1", pub_1.run_record);
+    EXPECT_THROW((void)disabled.parse("owner-a", "run-1", "unparseable-sentinel-1"),
+                 std::exception);
+    expect_same_record(disabled.parse("owner-a", "run-1", bytes_1), pub_1.run_record);
+    EXPECT_THROW((void)disabled.parse("owner-a", "run-1", "broken"), std::exception);
 }
