@@ -211,10 +211,18 @@ four platform rows, including static incorporation (the macOS wheel of run
 40192544754, the Windows wheel of run 37459723655 and the Linux wheels have been
 inspected; the portable archives have not). Record actual versions,
 formula/port/package revisions, source checksums, patches and copied libraries;
-retain matching notices for any version not represented here. For bundled
-libpsl's built-in list, verify the actual list digest/date against its build
-source. Make that matching MPL-covered source, including modifications,
-available and tell recipients where to obtain it (MPL 2.0 section 3.2).
+retain matching notices for any version not represented here.
+
+The libpsl 0.23.3 in the macOS wheels of releases 0.13.1 through 0.16.0
+carries the Public Suffix List (MPL 2.0) as built-in data. The list digest
+that the bundled library reports (SHA-1
+`ecd73e513368ee32a1d0c8b3efac6c838fa02540`) equals the SHA-1 of the unmodified
+`list/public_suffix_list.dat` in the
+[libpsl 0.23.3 release archive](https://github.com/rockdaboot/libpsl/releases/download/0.23.3/libpsl-0.23.3.tar.gz)
+(SHA-256 `93941f85a1e7bd593fa94f299233cb5dfc91cd144fd9a78a6ceb75001c5b03be`),
+which is the Source Code Form of that data (MPL 2.0 section 3.2). Later wheels
+build curl without libpsl; before a publication, confirm that no macOS wheel
+contains `libpsl`.
 The pinned public source above is not proof that an uninspected binary uses it.
 
 ## Artifact-observed Windows closure (vcpkg)
