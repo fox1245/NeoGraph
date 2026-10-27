@@ -179,6 +179,109 @@ inline bool valid_command_history_append(
     return true;
 }
 
+// Command-log append invariants and tail validation:
+// - Store write paths: InMemoryProgramTransitionStore::compare_publish_impl
+//   (src/program/transition_store.cpp) writes Stored::commands;
+//   SQLiteProgramTransitionStore::compare_publish_impl and migrate_legacy_schema
+//   (src/program/sqlite_transition_store.cpp) call append_javascript_commands (the sole
+//   INSERT INTO program_transition_javascript_command_log_v2; normalize_legacy_snapshot
+//   validates publication.commands with valid_command_history_append before
+//   migrate_legacy_schema appends them); and
+//   PostgreSQLProgramTransitionStore::compare_publish_impl
+//   (src/program/postgres_transition_store.cpp) calls append_javascript_commands (the sole
+//   INSERT INTO neograph_program_transition_javascript_command_log_v2). WebAssembly
+//   JsTransitionStore::compare_publish and compare_publish_execution (wasm/js_stores.cpp)
+//   run prepare_transition and forward to the host store (wasm/stores.mjs and
+//   wasm/memory_stores.cpp delegate to InMemoryProgramTransitionStore), and
+//   HostPumpedTransitionStore (tests/fixtures/host_pumped_stores.h) delegates to its inner
+//   ProgramTransitionStore. Every store write is gated by validate_transition (or
+//   normalize_legacy_snapshot's valid_command_history_append check), which runs
+//   valid_initial_publication (calling valid_command_history_append) when !current and
+//   valid_increment when current.
+// - Callers building ProgramTransitionPublication::commands:
+//   RunControl::publish_javascript_command (src/program/runtime.cpp, called from
+//   execute_run_attempt in src/program/run_attempt.cpp), ProgramRuntime::resume_core, and
+//   ProgramRuntime::reconcile_core (src/program/runtime.cpp) append one entry through
+//   compare_publish / compare_publish_execution (valid_increment). ProgramRuntime::fork_core
+//   (src/program/runtime.cpp) copies the source log rebound to target_bundle_id onto a new
+//   run_id (expected_journal_head empty, checked by valid_initial_publication and full-log
+//   valid_command_history_append). ProgramRuntime::replace_core, migrate_graph_core,
+//   RunControl::hold_graph_migration, and ProgramRuntime::reconnect_core
+//   (src/program/runtime.cpp) leave publication.commands empty.
+// - Bundle immutability for a run_id: prepare_transition (via
+//   ProgramTransitionPublication::serialize_canonical in src/program/transition_store.cpp)
+//   requires run_record.bundle_id() == journal_record.bundle_id, and every journal step in
+//   valid_command_reservation_transition (is_valid_program_journal_transition,
+//   is_valid_program_journal_reservation_settlement, and
+//   is_valid_program_journal_reservation_release in src/program/journal.cpp, and
+//   is_valid_program_graph_safe_point_transition in src/program/graph_migration.cpp) requires
+//   next_journal.bundle_id == previous_journal.bundle_id. Replacement
+//   (is_valid_program_replacement_transition in src/program/replacement.cpp), graph migration
+//   (is_valid_program_graph_migration_transition in src/program/graph_migration.cpp), and
+//   fork (fork_binds_predecessor in src/program/transition_validator.h) require
+//   target.run_id() != source.run_id() and are admitted only on initial publication, while
+//   legacy lineage adoption (lineage_binds in src/program/transition_validator.h) is an
+//   increment on the same run_id and keeps bundle_id() unchanged.
+// - Because every stored entry passed this check when appended, ordinals in sequence order
+//   never decrease and no coordinate older than the last entry's ordinal is pending. Moreover,
+//   each of the (command_ordinal - 1) completed earlier ordinals occupies at least 2 entries
+//   (initial pending plus completion) and any non-initial entry for the current ordinal
+//   (completed, settled_members, or await_started_at) has at least 1 prior entry of the same
+//   ordinal, so sequence - command_ordinal >= command_ordinal - (requires_prior_same_ordinal ? 0 : 1).
+//   The publish path now parses only the last stored entry (via TransitionReads::latest_command);
+//   a stored log that is corrupt in earlier entries is still detected when the whole log is
+//   read (load_javascript_commands, recovery/replay via load_javascript_commands, and
+//   TransitionReads::command_log).
+inline bool valid_command_history_append_after(
+    const ProgramRunRecord&                                     run,
+    const std::optional<ProgramJavaScriptCommandJournalEntry>& last_command,
+    const std::vector<ProgramJavaScriptCommandJournalEntry>&    new_commands) {
+    if (new_commands.empty()) return true;
+    if (last_command) {
+        const bool requires_prior_same_ordinal =
+            !last_command->pending() || last_command->settled_members() ||
+            last_command->await_started_at();
+        if (last_command->bundle_id() != run.bundle_id() ||
+            last_command->command_ordinal() > last_command->sequence() ||
+            last_command->sequence() - last_command->command_ordinal() <
+                last_command->command_ordinal() - (requires_prior_same_ordinal ? 0U : 1U) ||
+            (last_command->command_ordinal() == 1 && !requires_prior_same_ordinal &&
+             last_command->sequence() != 1)) {
+            return false;
+        }
+    }
+
+    auto          current_last      = last_command;
+    std::uint64_t expected_sequence = current_last ? current_last->sequence() : 0;
+    std::uint64_t highest_ordinal   = current_last ? current_last->command_ordinal() : 0;
+    for (const auto& entry : new_commands) {
+        if (entry.bundle_id() != run.bundle_id() ||
+            expected_sequence == std::numeric_limits<std::uint64_t>::max() ||
+            entry.sequence() != expected_sequence + 1) {
+            return false;
+        }
+        ++expected_sequence;
+
+        if (!current_last || entry.command_ordinal() != current_last->command_ordinal()) {
+            if (entry.command_ordinal() != highest_ordinal + 1 || !entry.pending() ||
+                entry.settled_members() || entry.await_started_at() ||
+                (current_last && current_last->pending())) {
+                return false;
+            }
+            highest_ordinal = entry.command_ordinal();
+            current_last    = entry;
+            continue;
+        }
+
+        if (!current_last->pending() || !same_command_coordinate(*current_last, entry) ||
+            (!entry.completed() && !entry.settled_members() && !entry.await_started_at())) {
+            return false;
+        }
+        current_last = entry;
+    }
+    return true;
+}
+
 inline bool budget_is_empty(const RunBudget& budget) noexcept {
     return budget == RunBudget{};
 }
@@ -379,14 +482,14 @@ inline bool javascript_call_core_checkpoint_matches(const ProgramRunRecord&     
 }
 
 inline bool valid_command_reservation_transition(
-    const ProgramRunRecord&                                  previous_run,
-    const ProgramJournalRecord&                              previous_journal,
-    const ProgramJournalRecord&                              next_journal,
-    const std::vector<ProgramJavaScriptCommandJournalEntry>& old_commands,
-    const ProgramTransitionPublication&                      publication,
-    const ProgramGraphSafePointEvidence*                     safe_point_evidence,
-    const GraphMigrationCapsule*                             safe_point_capsule,
-    const ProgramExecutionLease*                             execution_lease) {
+    const ProgramRunRecord&                                     previous_run,
+    const ProgramJournalRecord&                                 previous_journal,
+    const ProgramJournalRecord&                                 next_journal,
+    const std::optional<ProgramJavaScriptCommandJournalEntry>& last_command,
+    const ProgramTransitionPublication&                         publication,
+    const ProgramGraphSafePointEvidence*                        safe_point_evidence,
+    const GraphMigrationCapsule*                                safe_point_capsule,
+    const ProgramExecutionLease*                                execution_lease) {
     const bool increased =
         budget_increased(next_journal.remaining_budget, previous_journal.remaining_budget);
     const bool ordinary  = is_valid_program_journal_transition(previous_journal, next_journal);
@@ -409,6 +512,9 @@ inline bool valid_command_reservation_transition(
         return usage && is_valid_program_journal_reservation_settlement(previous_journal,
                                                                         next_journal, *usage);
     }
+    // Non-increasing budgets without a completed command return here before
+    // inspecting last_command; when increased is true, valid_increment always
+    // queries reads.latest_command(old_run.run_id()).
     if (!increased) {
         if (safe_point_evidence && safe_point_capsule && execution_lease) {
             return is_valid_program_graph_safe_point_transition(
@@ -421,13 +527,13 @@ inline bool valid_command_reservation_transition(
     // A safely interrupted CallCore keeps its command coordinate Pending but
     // may release verified unused capacity only when the exact newer
     // checkpoint and measured terminal usage are committed in this CAS.
-    if (!publication.commands.empty() || old_commands.empty() || !old_commands.back().pending() ||
+    if (!publication.commands.empty() || !last_command || !last_command->pending() ||
         publication.run_record.continuation().state != ContinuationState::Interrupted ||
         !publication.run_record.terminal_result() ||
         publication.run_record.terminal_result()->status() != ProgramTerminalStatus::Interrupted ||
         !checkpoint_event_matches(publication.events, publication.run_record.exact_checkpoint()) ||
         !publication.run_record.exact_checkpoint() ||
-        !javascript_call_core_checkpoint_matches(publication.run_record, old_commands.back(),
+        !javascript_call_core_checkpoint_matches(publication.run_record, *last_command,
                                                  *publication.run_record.exact_checkpoint()) ||
         (previous_journal.core_checkpoint &&
          previous_journal.core_checkpoint == next_journal.core_checkpoint)) {
@@ -648,18 +754,17 @@ inline bool valid_increment(TransitionReads&                     reads,
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
         return false;
     if (!effect_ids_are_new(reads, old_run.run_id(), next_publication.effects)) return false;
-    // Read the command log only when the publication appends commands or raises the remaining
-    // budget: valid_command_history_append returns at once when commands is empty, and
-    // valid_command_reservation_transition reads old_commands only when the budget increased.
-    const std::vector<ProgramJavaScriptCommandJournalEntry> empty_commands;
-    const auto old_commands =
+    // Read the last command only when the publication appends commands or raises the remaining
+    // budget: valid_command_history_append_after returns at once when commands is empty, and
+    // valid_command_reservation_transition reads last_command only when the budget increased.
+    const auto last_command =
         (!next_publication.commands.empty() ||
          budget_increased(next_journal.remaining_budget, old_journal.remaining_budget))
-            ? reads.command_log(old_run.run_id())
-            : Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(empty_commands);
-    if (!valid_command_history_append(old_run, old_commands.get(), next_publication.commands) ||
+            ? reads.latest_command(old_run.run_id())
+            : std::nullopt;
+    if (!valid_command_history_append_after(old_run, last_command, next_publication.commands) ||
         !valid_command_reservation_transition(old_run, old_journal, next_journal,
-                                              old_commands.get(), next_publication,
+                                              last_command, next_publication,
                                               safe_point_evidence, safe_point_capsule,
                                               execution_lease))
         return false;

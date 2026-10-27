@@ -301,18 +301,49 @@ std::optional<std::string> load_run_lineage_id(sqlite3* db,
 std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_command(
     sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
     Statement statement(
-        db, "SELECT coordinate_id, canonical_bytes FROM "
+        db, "SELECT sequence, coordinate_id, canonical_bytes FROM "
             "program_transition_javascript_command_log_v2 "
             "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence DESC LIMIT 1");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, run_id);
     if (!statement.step_row()) return std::nullopt;
-    auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 1));
-    if (column_text(statement.get(), 0) != entry.coordinate_id()) {
+    const auto sequence = sqlite3_column_int64(statement.get(), 0);
+    auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 2));
+    if (sequence <= 0 || entry.sequence() != static_cast<std::uint64_t>(sequence) ||
+        column_text(statement.get(), 1) != entry.coordinate_id()) {
         throw std::invalid_argument(
             "Stored JavaScript command journal coordinate column mismatch");
     }
     return entry;
+}
+
+std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
+    Statement statement(
+        db, "SELECT sequence, coordinate_id, canonical_bytes FROM "
+            "program_transition_javascript_command_log_v2 "
+            "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    std::vector<ProgramJavaScriptCommandJournalEntry> commands;
+    while (statement.step_row()) {
+        const auto sequence = sqlite3_column_int64(statement.get(), 0);
+        auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 2));
+        if (sequence <= 0 || entry.sequence() != static_cast<std::uint64_t>(sequence) ||
+            column_text(statement.get(), 1) != entry.coordinate_id()) {
+            throw std::invalid_argument(
+                "Stored JavaScript command journal coordinate column mismatch");
+        }
+        commands.push_back(std::move(entry));
+    }
+    if (!commands.empty()) {
+        const auto head = load_head(db, owner_scope, run_id);
+        if (!head ||
+            !detail::transition::valid_command_history_append(head->run_record, {}, commands)) {
+            throw std::invalid_argument("Stored JavaScript command journal history is corrupt");
+        }
+    }
+    return commands;
 }
 
 std::string context_publication_bytes(const ProgramContextPublication& context) {
@@ -461,23 +492,8 @@ public:
     }
     Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>> command_log(
         std::string_view run_id) override {
-        std::vector<ProgramJavaScriptCommandJournalEntry> commands;
-        Statement statement(
-            db_, "SELECT coordinate_id, canonical_bytes FROM "
-                 "program_transition_javascript_command_log_v2 "
-                 "WHERE owner_scope = ?1 AND run_id = ?2 ORDER BY sequence ASC");
-        statement.bind_text(1, owner_scope_);
-        statement.bind_text(2, run_id);
-        while (statement.step_row()) {
-            auto entry = ProgramJavaScriptCommandJournalEntry::parse(
-                column_blob(statement.get(), 1));
-            if (column_text(statement.get(), 0) != entry.coordinate_id()) {
-                throw std::invalid_argument(
-                    "Stored JavaScript command journal coordinate column mismatch");
-            }
-            commands.push_back(std::move(entry));
-        }
-        return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(std::move(commands));
+        return Borrowed<std::vector<ProgramJavaScriptCommandJournalEntry>>(
+            load_all_javascript_commands(db_, owner_scope_, run_id));
     }
     std::optional<ProgramJavaScriptCommandJournalEntry> latest_command(
         std::string_view run_id) override {
@@ -875,6 +891,9 @@ std::string normalize_legacy_snapshot(std::string_view                    owner_
             throw std::invalid_argument("Legacy Program transition effects are inconsistent");
     }
 
+    if (!detail::transition::valid_command_history_append(run, {}, publication.commands))
+        throw std::invalid_argument("Legacy Program transition commands are inconsistent");
+
     const auto last_publication = ProgramTransitionPublication::parse(last_publication_bytes);
     if (last_publication.run_record.owner_scope() != owner_scope ||
         last_publication.run_record.run_id() != run_id ||
@@ -1135,22 +1154,10 @@ SQLiteProgramTransitionStore::load_javascript_commands_sync(std::string_view own
                                                        std::string_view run_id,
                                                        std::uint64_t    after_sequence) const {
     std::lock_guard lock(impl_->mutex);
-    Statement statement(
-        impl_->db, "SELECT coordinate_id, canonical_bytes FROM "
-                   "program_transition_javascript_command_log_v2 "
-                   "WHERE owner_scope = ?1 AND run_id = ?2 AND sequence > ?3 "
-                   "ORDER BY sequence ASC");
-    statement.bind_text(1, owner_scope);
-    statement.bind_text(2, run_id);
-    statement.bind_uint64(3, after_sequence);
+    const auto all = load_all_javascript_commands(impl_->db, owner_scope, run_id);
     std::vector<ProgramJavaScriptCommandJournalEntry> result;
-    while (statement.step_row()) {
-        auto entry = ProgramJavaScriptCommandJournalEntry::parse(column_blob(statement.get(), 1));
-        if (column_text(statement.get(), 0) != entry.coordinate_id()) {
-            throw std::invalid_argument(
-                "Stored JavaScript command journal coordinate column mismatch");
-        }
-        result.push_back(std::move(entry));
+    for (const auto& entry : all) {
+        if (entry.sequence() > after_sequence) result.push_back(entry);
     }
     return result;
 }
