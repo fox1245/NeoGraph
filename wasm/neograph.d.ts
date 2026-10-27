@@ -361,6 +361,8 @@ export interface ProgramsConfig {
   limits?: RunBudget;
   /** The budget of a run that gives none. */
   budget?: RunBudget;
+  /** Host ceiling on `maxChildDepth` across compilation, admission and execution (8 by default; whole number from 1 to 4294967294). */
+  maxSupportedChildDepth?: number;
   /** The limits of the control source's runtime. */
   javascript?: JavaScriptOptions;
 }

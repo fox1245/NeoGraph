@@ -226,6 +226,7 @@ struct BasicAdmittedRuntime {
     bool                                            require_core_provider_call_broker = false;
     /// RuntimeConfig::javascript_stack_bytes of the next make_runtime(); 0 is the default.
     std::size_t                                     javascript_stack_bytes = 0;
+    std::uint32_t                                   max_supported_child_depth = MAX_SUPPORTED_CHILD_DEPTH;
     std::unique_ptr<ProgramRuntime>                 runtime;
 
     explicit BasicAdmittedRuntime(std::size_t                             scheduler_threads  = 1,
@@ -234,14 +235,14 @@ struct BasicAdmittedRuntime {
                               ProgramChildQuotaConfig                 quota              = {},
                               ExecutionGuarantee minimum_guarantee = ExecutionGuarantee::Strict,
                               bool               allow_javascript  = false,
-                              std::shared_ptr<HookRuntime> hooks = {})
+                              std::shared_ptr<HookRuntime> hooks = {},
+                              std::optional<std::uint32_t> depth_ceiling = std::nullopt)
         : registry(Registry(minimum_guarantee)),
-          profile(make_profile(registry, minimum_guarantee, allow_javascript)),
-          policy(make_policy(profile, minimum_guarantee, allow_javascript)),
+          profile(make_profile(registry, minimum_guarantee, allow_javascript, depth_ceiling)),
+          policy(make_policy(profile, minimum_guarantee, allow_javascript, depth_ceiling)),
           store(std::make_shared<InMemoryProgramStore>()),
           engines(std::make_shared<EngineGenerationCache>()),
-          catalog(std::make_shared<ProgramCatalog>(
-              CatalogConfig{store, registry, engines, "program-runtime-test/v1"})),
+          catalog(make_catalog(store, registry, engines)),
           checkpoints(checkpoint_backend ? std::move(checkpoint_backend)
                                          : std::make_shared<InMemoryCheckpointStore>()),
           journal(journal_backend ? std::move(journal_backend)
@@ -251,12 +252,23 @@ struct BasicAdmittedRuntime {
           child_quota(quota),
            scheduler_thread_count(scheduler_threads),
            hook_runtime(std::move(hooks)),
+           max_supported_child_depth(depth_ceiling.value_or(MAX_SUPPORTED_CHILD_DEPTH)),
            runtime(make_runtime()) {}
 
+    static std::shared_ptr<ProgramCatalog> make_catalog(
+        std::shared_ptr<ProgramStore>          store,
+        const RegistrySnapshot&                registry,
+        std::shared_ptr<EngineGenerationCache> engines) {
+        CatalogConfig config{std::move(store), registry, std::move(engines),
+                             "program-runtime-test/v1"};
+        return std::make_shared<ProgramCatalog>(std::move(config));
+    }
+
     static AdmissionProfile make_profile(
-        const RegistrySnapshot& registry,
-        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
-        bool                    allow_javascript  = false) {
+        const RegistrySnapshot&      registry,
+        ExecutionGuarantee           minimum_guarantee = ExecutionGuarantee::Strict,
+        bool                         allow_javascript  = false,
+        std::optional<std::uint32_t> depth_ceiling     = std::nullopt) {
         AdmissionProfileBuilder builder;
         builder.id("runtime-profile")
             .semantic_version("1.0.0")
@@ -266,6 +278,8 @@ struct BasicAdmittedRuntime {
             .minimum_execution_guarantee(minimum_guarantee)
             .allow_source_kind(SourceKind::CppBuilder)
             .allow_effect_mode(EffectMode::Brokered);
+        if (depth_ceiling)
+            builder.max_supported_child_depth(*depth_ceiling);
         if (allow_javascript) builder.allow_source_kind(SourceKind::JavaScript);
         for (const auto& identity : registry.identities())
             builder.allow_executable(identity);
@@ -273,12 +287,16 @@ struct BasicAdmittedRuntime {
     }
 
     static PolicySnapshot make_policy(
-        const AdmissionProfile& profile,
-        ExecutionGuarantee      minimum_guarantee = ExecutionGuarantee::Strict,
-        bool                    allow_javascript  = false) {
+        const AdmissionProfile&      profile,
+        ExecutionGuarantee           minimum_guarantee = ExecutionGuarantee::Strict,
+        bool                         allow_javascript  = false,
+        std::optional<std::uint32_t> depth_ceiling     = std::nullopt) {
+        const auto configured_depth = depth_ceiling.value_or(4u);
+        const auto configured_children =
+            std::max<std::uint32_t>(32u, configured_depth);
         const auto            budget_ceiling = allow_javascript
-                                                   ? BudgetLimits{60000, 10000, 1000000, 4, 32, 100, 4, 4, 32}
-                                                   : BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, 4, 32};
+                                                   ? BudgetLimits{60000, 10000, 1000000, 4, 32, 100, 4, configured_depth, configured_children}
+                                                   : BudgetLimits{10000, 1000, 1000, 4, 32, 20, 4, configured_depth, configured_children};
         PolicySnapshotBuilder builder;
         builder.id("runtime-policy")
             .semantic_version("1.0.0")
@@ -347,7 +365,9 @@ struct BasicAdmittedRuntime {
 
     ProgramVersion admit_source(ProgramSource                 source,
                                 std::optional<ContractRecord> output_contract = std::nullopt) {
-        ProgramCompiler              compiler(registry, {"program-runtime-test/v1"});
+        ProgramCompilerConfig compiler_config{"program-runtime-test/v1"};
+        compiler_config.max_supported_child_depth = max_supported_child_depth;
+        ProgramCompiler              compiler(registry, std::move(compiler_config));
         std::optional<ProgramBundle> bundle;
         try {
             if (output_contract) {
@@ -388,8 +408,7 @@ struct BasicAdmittedRuntime {
         runtime.reset();
         catalog.reset();
         engines = std::make_shared<EngineGenerationCache>();
-        catalog = std::make_shared<ProgramCatalog>(
-            CatalogConfig{store, registry, engines, "program-runtime-test/v1"});
+        catalog = make_catalog(store, registry, engines);
         runtime = make_runtime();
     }
 };

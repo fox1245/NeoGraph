@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=5dd93993031705ff41dfa2c2514b098ea5fc64f6692cdff91177ec049cdf18f0 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=42abbf35124835c1da4b1e5185db5ae192e6c83017aa1c19e54d5faa99de28ed -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -168,10 +168,10 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** 创建一个基于一个提供方和一套存储的 `Programs` 对象；提供方无效，或模块构建时不带 Program 支持，
+- **`neograph.programs({ provider, owner, limits, budget, maxSupportedChildDepth, stores, javascript })`** 创建一个基于一个提供方和一套存储的 `Programs` 对象；提供方无效，或模块构建时不带 Program 支持，
   就抛出 `NeoGraphError`。`provider` 与 `compile` 相同，只多一项：`catalogue`，即 SDK 的模型目录（`{ version: 1, models: [...] }`），它叠加在内置目录之上。`owner` 为该对象的
   Program 和运行划定范围。`stores` 是宿主自己的存储（[JavaScript 中的 Program 存储](#program-stores-in-javascript)）；省略的存储放在内存中。`limits` 是宿主的上限，即任何被准入的 Program 可获得的上限（其默认值允许每次运行进行一次动态编译、子深度为四和四个子运行，即 `maxDynamicCompiles: 1`、`maxChildDepth: 4`、`maxTotalChildren: 4`；合成子运行或构建更深层级的宿主在此处调高 `maxDynamicCompiles`、`maxChildDepth` 和 `maxTotalChildren`），
-  `budget` 是没有给出预算的运行所用的预算，二者的写法见下。`javascript` 是 `{ stackBytes, defineTimeMs }`，即控制源码可以使用的栈，以及 `define()` 可以运行的时间，在预算之后说明。
+  `budget` 是没有给出预算的运行所用的预算，二者的写法见下。`maxSupportedChildDepth` 是宿主的子层级深度上限（默认为 `8`，即 `MAX_SUPPORTED_CHILD_DEPTH`；必须是运行时可表示范围内的正整数，并在编译、准入和执行中约束 `maxChildDepth`；`null`、非整数或超出范围的值会抛出 `NeoGraphError`）。`javascript` 是 `{ stackBytes, defineTimeMs }`，即控制源码可以使用的栈，以及 `define()` 可以运行的时间，在预算之后说明。
 - **`programs.admit(source)`** 编译并准入 Program，以 `{ id, bundleId, name }` 完成。`source` 是 JavaScript 控制源码的文本、`{ javascript, name, budget }` 或 `{ javascript, name, budgetBounds: { minimum, maximum } }`（两者都存在时以 `budgetBounds` 为准），或者给已经是文档形式的 Program 用的
   `{ document, name }`。`budget` 是授予该版本运行的精确预算；`budgetBounds` 是授权可取的范围，将被替换的版本需要它，因为替换会结转源运行的剩余预算，低于首次授权。省略的成员保持宿主的默认预算（`budget` 和 `budgetBounds.maximum`）或无（在 `budgetBounds.minimum` 中为 `0`，因此 `minimum` 必须设置结构下限成员）。最小值必须满足 Program 的结构下限（至少一次并发尝试、一个 Program 操作和一个 Core 步骤；当 Program 派发子运行时，至少一层深度和一个子运行），不满足的会被编译器拒绝。两者都未给出时，适用源码自身的声明。被编译器或准入策略拒绝的源码，会以 `compile` 或 `admission` 类型的 `NeoGraphError` 被拒绝，其 `diagnostics` 列出 `{ code, message, pointer, witness }`。再次准入相同的源码与预算范围会得到同一个版本；不同的 `budget` 或 `budgetBounds` 会编译出不同的包和版本。
 - **`programs.start(version, { input, budget, runId, onEvent, signal })`** 立即返回一个 `ProgramRun`。**`programs.run(version, options)`** 就是 `start(...).result`。

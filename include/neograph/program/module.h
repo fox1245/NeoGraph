@@ -164,6 +164,11 @@ struct ProgramComposition {
 NEOGRAPH_PROGRAM_API void validate_program_composition(
     const ProgramBundle& parent_bundle, const ProgramComposition& composition);
 
+NEOGRAPH_PROGRAM_API void validate_program_composition(
+    const ProgramBundle&      parent_bundle,
+    const ProgramComposition& composition,
+    std::uint32_t             max_supported_child_depth);
+
 /** Validate a resolver-produced closure, including its pinned graph and receipts. */
 NEOGRAPH_PROGRAM_API void validate_module_resolution(const ModuleResolution& resolution);
 

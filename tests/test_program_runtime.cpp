@@ -14536,6 +14536,173 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
     EXPECT_EQ(leaf.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
+TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveChain) {
+    {
+        AdmittedRuntime base_fixture(2);
+        try {
+            (void)base_fixture.runtime->start(
+                "tenant:runtime", base_fixture.admit("runtime-plan-step"),
+                ProgramInvocation{json::object(),
+                                  RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 9, 9},
+                                  "trace-default-depth-9-rejected",
+                                  {}});
+            FAIL() << "Expected default runtime ceiling to reject max_child_depth 9";
+        } catch (const ProgramDiagnosticError& error) {
+            EXPECT_EQ(error.diagnostic().code, "P_START_BUDGET");
+            EXPECT_EQ(error.diagnostic().witness["hard_ceiling"], 8u);
+        }
+    }
+
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) {
+        return json{{"write", "step-" + std::to_string(ordinal)}};
+    });
+    AdmittedRuntime deep_fixture(
+        4, {}, {}, {}, ExecutionGuarantee::Strict, false, {}, 12);
+
+    auto make_spawn_stage_document = [](std::uint32_t remaining_depth) {
+        json stage_root = json{
+            {"op", "sequence"},
+            {"children",
+             json::array({json{{"op", "call_core"}},
+                          json{{"op", "await"},
+                               {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}}})}};
+        auto document = orchestration_document(std::move(stage_root), "runtime-plan-step");
+        document["declared_budget_requirements"][3]["maximum"] = 1;
+        document["declared_budget_requirements"][4]["minimum"] = 4;
+        document["declared_budget_requirements"][4]["maximum"] = 4;
+        document["declared_budget_requirements"][7]["minimum"] = 1;
+        document["declared_budget_requirements"][7]["maximum"] = remaining_depth;
+        document["declared_budget_requirements"][8]["minimum"] = 1;
+        document["declared_budget_requirements"][8]["maximum"] = remaining_depth;
+        return document;
+    };
+
+    {
+        EXPECT_EQ(deep_fixture.profile.max_supported_child_depth(), 12u);
+        EXPECT_EQ(deep_fixture.policy.max_supported_child_depth(), 12u);
+        ProgramCompiler default_compiler(deep_fixture.registry,
+                                         ProgramCompilerConfig{"program-runtime-test/v1"});
+        try {
+            (void)default_compiler.compile(ProgramSource::from_cpp_builder(
+                "test:runtime", PROGRAM_SCHEMA_VERSION_V2, make_spawn_stage_document(9)));
+            FAIL() << "Expected compiler ceiling 8 with profile ceiling 12 to refuse depth 9";
+        } catch (const ProgramCompileError& error) {
+            ASSERT_FALSE(error.diagnostics().empty());
+            EXPECT_EQ(error.diagnostics().front().code, "P_BUDGET_INVALID");
+            EXPECT_EQ(error.diagnostics().front().witness["hard_ceiling"], 8u);
+        }
+        deep_fixture.max_supported_child_depth = 8;
+        EXPECT_THROW((void)deep_fixture.admit_document(make_spawn_stage_document(9)),
+                     std::runtime_error);
+        deep_fixture.max_supported_child_depth = 12;
+    }
+
+    ProgramVersion current_version = deep_fixture.admit("runtime-plan-step");
+    for (std::uint32_t remaining_depth = 1; remaining_depth <= 12; ++remaining_depth) {
+        auto parent_version =
+            deep_fixture.admit_document(make_spawn_stage_document(remaining_depth));
+        const auto child_ops            = remaining_depth == 1u ? 1u : 4u;
+        const auto child_grant_depth    = remaining_depth - 1u;
+        const auto child_grant_children = remaining_depth - 1u;
+        auto linked = link_child_versions(
+            deep_fixture,
+            std::move(parent_version),
+            std::move(current_version),
+            BudgetLimits{10000, 1000, 1000, 1, child_ops, 20, 0, child_grant_depth,
+                         child_grant_children});
+        current_version = std::move(linked.parent_version);
+    }
+
+    const auto result = deep_fixture.runtime->run(
+        "tenant:runtime", current_version,
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 4, 20, 0, 12, 12},
+                          "trace-depth-12-chain",
+                          {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(plan_steps_counted(false), 13u);
+
+    std::string current_run_id = result.run_id();
+    for (std::uint32_t expected_depth = 1; expected_depth <= 12; ++expected_depth) {
+        const auto handle   = deep_fixture.runtime->reconnect("tenant:runtime", current_run_id);
+        const auto children = handle.snapshot().children();
+        ASSERT_EQ(children.size(), 1u);
+        EXPECT_EQ(children[0].invocation.child_depth, expected_depth);
+        EXPECT_EQ(children[0].state, ProgramChildState::Completed);
+        current_run_id = children[0].child_run_id;
+    }
+
+    try {
+        (void)deep_fixture.runtime->start(
+            "tenant:runtime", current_version,
+            ProgramInvocation{json::object(),
+                              RunBudget{10000, 1000, 1000, 1, 4, 20, 0, 13, 13},
+                              "trace-depth-13-start-rejected",
+                              {}});
+        FAIL() << "Expected configured ceiling 12 to reject start budget max_child_depth 13";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_START_BUDGET");
+        EXPECT_EQ(error.diagnostic().witness["hard_ceiling"], 12u);
+    }
+
+    blocking_calls.store(0);
+    auto recursive_parent_doc = program_document("runtime-blocking");
+    recursive_parent_doc["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V2;
+    recursive_parent_doc["declared_budget_requirements"][4]["minimum"] = 2;
+    recursive_parent_doc["declared_budget_requirements"][4]["maximum"] = 2;
+    recursive_parent_doc["declared_budget_requirements"][7]["minimum"] = 0;
+    recursive_parent_doc["declared_budget_requirements"][7]["maximum"] = 12;
+    recursive_parent_doc["declared_budget_requirements"][8]["minimum"] = 0;
+    recursive_parent_doc["declared_budget_requirements"][8]["maximum"] = 12;
+    auto recursive_child_doc                                           = recursive_parent_doc;
+    auto recursive_linked = link_child_versions(
+        deep_fixture,
+        deep_fixture.admit_document(std::move(recursive_parent_doc)),
+        deep_fixture.admit_document(std::move(recursive_child_doc)),
+        BudgetLimits{10000, 1000, 1000, 1, 2, 20, 0, 12, 12});
+    deep_fixture.bind_child(
+        recursive_linked.child_version, "child",
+        ProgramRuntimeChildBinding{recursive_linked.receipt, recursive_linked.child_version});
+
+    std::vector<ProgramHandle> active_chain;
+    active_chain.push_back(deep_fixture.runtime->start(
+        "tenant:runtime", recursive_linked.parent_version,
+        ProgramInvocation{json::object(),
+                          RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 12, 12},
+                          "trace-depth-12-active-0",
+                          {}}));
+    for (std::uint32_t depth = 1; depth <= 12; ++depth) {
+        const auto remaining = 12u - depth;
+        active_chain.push_back(deep_fixture.runtime->start_child(
+            "tenant:runtime", active_chain.back(), recursive_linked.receipt,
+            recursive_linked.child_version,
+            ProgramInvocation{json::object(),
+                              RunBudget{10000, 1000, 1000, 1, 2, 20, 0, remaining, remaining},
+                              "trace-depth-12-active-" + std::to_string(depth),
+                              {}}));
+        EXPECT_EQ(active_chain.back().snapshot().child_depth(), depth);
+    }
+
+    try {
+        (void)deep_fixture.runtime->start_child(
+            "tenant:runtime", active_chain.back(), recursive_linked.receipt,
+            recursive_linked.child_version,
+            ProgramInvocation{json::object(),
+                              RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 0, 0},
+                              "trace-depth-13-active-rejected",
+                              {}});
+        FAIL() << "Expected configured ceiling 12 to reject child_depth 13";
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_DEPTH");
+        EXPECT_EQ(error.diagnostic().witness["hard_ceiling"], 12u);
+    }
+
+    EXPECT_TRUE(active_chain.front().cancel());
+    for (auto& handle : active_chain) {
+        EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Cancelled);
+    }
+}
+
 TEST(ProgramRuntimeTest, GlobalChildQuotaRejectsFragmentationAndReleasesOnTerminal) {
     ProgramChildQuotaConfig quota;
     quota.max_active_children                  = 1;

@@ -1646,7 +1646,8 @@ bool contains_operation(const json& value, std::string_view wanted, std::size_t 
 void validate_budgets(const json&            document,
                       ParsedProgram&         output,
                       DiagnosticAccumulator& diagnostics,
-                      bool                   has_javascript_control) {
+                      bool                   has_javascript_control,
+                      std::uint32_t          max_supported_child_depth) {
     constexpr std::string_view pointer = "/declared_budget_requirements";
     if (!document.contains("declared_budget_requirements")) {
         diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
@@ -1750,12 +1751,12 @@ void validate_budgets(const json&            document,
                 json{{"resource", resource}, {"minimum", *minimum}, {"maximum", *maximum}});
             continue;
         }
-        if (resource == "max_child_depth" && *maximum > MAX_SUPPORTED_CHILD_DEPTH) {
+        if (resource == "max_child_depth" && *maximum > max_supported_child_depth) {
             diagnostics.add(CompilePhase::Normalize, "P_BUDGET_INVALID", DiagnosticSeverity::Error,
                             item_pointer, "Child depth exceeds the supported hard ceiling",
                             json{{"resource", resource},
                                  {"maximum", *maximum},
-                                 {"hard_ceiling", MAX_SUPPORTED_CHILD_DEPTH}});
+                                 {"hard_ceiling", max_supported_child_depth}});
             continue;
         }
         if (resource == "max_child_depth" || resource == "max_total_children")
@@ -1817,7 +1818,8 @@ void validate_static_budget_requirements(const ParsedProgram&                   
 ParsedProgram parse_program(const ProgramSource&   source,
                             const json&            document,
                             DiagnosticAccumulator& diagnostics,
-                            bool                   has_javascript_control) {
+                            bool                   has_javascript_control,
+                            std::uint32_t          max_supported_child_depth) {
     ParsedProgram result;
     if (!document.is_object()) {
         add_type(diagnostics, "", "object", document);
@@ -1830,7 +1832,8 @@ ParsedProgram parse_program(const ProgramSource&   source,
     validate_contract(document, "input_contract", result.input_contract, diagnostics);
     validate_contract(document, "output_contract", result.output_contract, diagnostics);
     validate_root(document, result, diagnostics);
-    validate_budgets(document, result, diagnostics, has_javascript_control);
+    validate_budgets(document, result, diagnostics, has_javascript_control,
+                     max_supported_child_depth);
     return result;
 }
 
@@ -2843,6 +2846,8 @@ struct ProgramCompiler::Impl {
                            const ContractRecord*           input_contract      = nullptr,
                            const ContractRecord*           output_contract     = nullptr) const {
         DiagnosticAccumulator diagnostics(source);
+        const auto max_supported_child_depth =
+            validate_max_supported_child_depth(config.max_supported_child_depth);
         if (source.kind() == SourceKind::CanonicalJson) {
             diagnostics.add(
                 CompilePhase::Source, "P_MIGRATION_PROGRAM_JSON", DiagnosticSeverity::Error, "",
@@ -2926,7 +2931,8 @@ struct ProgramCompiler::Impl {
                                 error.what(), error.witness(), error.source_span());
                 diagnostics.throw_error();
             }
-            auto parsed = parse_program(source, document, diagnostics, control_source.has_value());
+            auto parsed = parse_program(source, document, diagnostics, control_source.has_value(),
+                                        max_supported_child_depth);
             if (diagnostics.has_errors()) diagnostics.throw_error();
             if (source.kind() == SourceKind::JavaScript)
                 add_control_character_warnings(parsed.core_definition, "/root/definition",
@@ -3069,6 +3075,7 @@ ProgramCompiler::ProgramCompiler(RegistrySnapshot registry, ProgramCompilerConfi
     if (has_control_character(impl_->config.compiler_build_id))
         throw std::invalid_argument(
             "Program compiler_build_id must not contain control characters");
+    (void)validate_max_supported_child_depth(impl_->config.max_supported_child_depth);
     const auto& javascript_runtime = impl_->config;
     if (javascript_runtime.quickjs_release.empty() ||
         javascript_runtime.quickjs_build_options.empty() ||

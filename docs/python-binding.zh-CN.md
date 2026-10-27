@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=525f458c89beba4734a3f3e1f9510e59a02842cb220f8d089ba2d828a3fbcf2c -->
+<!-- neograph-i18n: source=docs/python-binding.md locale=zh-CN source_sha256=c7e44f8d5761953d3ea6c22c6a7aec8ca992120ecabaab1015cd859bed8e1e2d -->
 # Python 绑定
 
 **Languages:** [English](python-binding.md) | [한국어](python-binding.ko.md) | [日本語](python-binding.ja.md) | [简体中文](python-binding.zh-CN.md)
@@ -654,7 +654,7 @@ host.register_synthesis_validator(validate_synthesis)
 
 ### 预算
 
-传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入策略的上限。除了 `max_child_depth` 和 `max_total_children`，其余每个字段都必须为正数，包括 `model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles`，即使 Program 从不调用模型也是如此。否则构造函数会抛出 `ValueError`，并指出为零的字段。这两个与子 Program 相关的字段必须同为零，或同为正数。
+传给 `LocalProgramHost` 的 `budget_ceiling` 会成为准入策略的上限。除了 `max_child_depth` 和 `max_total_children`，其余每个字段都必须为正数，包括 `model_tokens`、`monetary_microunits` 和 `max_dynamic_compiles`，即使 Program 从不调用模型也是如此。否则构造函数会抛出 `ValueError`，并指出为零的字段。这两个与子 Program 相关的字段必须同为零，或同为正数。`LocalProgramHost(..., max_supported_child_depth=8)` 同时设置其内部编译器与准入配置文件（admission profile）的子深度上限（由 `PolicySnapshot`、模块解析与运行时继承），`ProgramCompiler(..., max_supported_child_depth=8)` 设置独立编译器的上限（默认为 `ng.MAX_SUPPORTED_CHILD_DEPTH = 8`，最高至 `ng.MAX_REPRESENTABLE_CHILD_DEPTH`；`0` 或高于 `ng.MAX_REPRESENTABLE_CHILD_DEPTH` 的值会抛出 `ValueError`）。编译器与准入配置文件各自强制执行其上限，因此当两者不一致时以较小者为准，且 `P_BUDGET_INVALID`、`P_START_BUDGET` 与 `P_CHILD_DEPTH` 会在 `witness["hard_ceiling"]` 中报告当前生效的上限。
 
 `compile_admit(source, budget)` 和 `compile(source, budget)` 会把 `budget` 封存进 bundle，作为每个字段的最小值，同时也是最大值；封存的预算超过上限的 bundle，准入时会被拒绝。针对该版本的每次 `run`、`start` 和 `start_active` 调用，都必须逐个字段传入相同的值。预算比封存值大或小，都会抛出带 `P_START_BUDGET` 的 `ng.ProgramDiagnosticError`，消息会指出第一个不一致的字段，例如 `Program invocation budget wall_time_ms=5000 is outside its admitted bounds [10000, 10000] (policy ceiling 10000)`。想用不同的预算，需要重新编译并准入，得到的是一个新的 `ProgramVersion`。运行预算要求 `wall_time_ms`、`max_concurrency`、`max_program_operations` 和 `max_core_steps` 为正数；`model_tokens` 和 `monetary_microunits` 可以为零。零表示什么都不授予：`model_tokens = 0` 时，用到模型 token 的运行会以 `BudgetExhausted` 结束；`monetary_microunits = 0` 时，每一次需要计价的 provider 调用都会在发出之前被拒绝（参见[调用模型的节点](#model-calling-nodes)）。模型 token 预算使运行停下时，无论是模型的响应超出了预算，还是下一次调用在发送前被拒绝，`status` 都是 `BudgetExhausted`，`failure.code` 都是 `NG.BudgetExhausted`；`failure.witness["model_tokens"]` 含有 `granted`、`used` 和 `over_by`。其他预算也以同样的形式结束运行，运行在超出额度后才结束时也一样：金额以 `P_MONEY_BUDGET` 和 `failure.witness["monetary"]` 结束，Core 步骤以 `P_CORE_STEP_BUDGET` 和 `failure.witness["core_steps"]` 结束，wall time 则以 `TimedOut`、`P_RUNTIME_TIMEOUT` 和 `failure.witness["wall_time_ms"]` 结束。超出多项预算的运行会把每一项都列在 witness 里，status 和错误码取自 wall time、模型 token、金额、Core 步骤中排在最前的那一项；参见 [Program 指南中的预算](program-guide.md#budgets)。
 

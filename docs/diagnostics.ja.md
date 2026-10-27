@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=05a405c99f388774993482b2cb175a7c22343d727442659756368bae50402791 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ja source_sha256=54d94cdc17136f83102c55b02f15d67af24a3a73cf003bd0ba68bf6e5f431716 -->
 # Programの診断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -63,9 +63,11 @@ Programをコンパイルすると、診断が返されます。失敗した場�
 | <a id="p_expand_source"></a>`P_EXPAND_SOURCE` | `proposal_source` には、インラインのオブジェクトか、入力のJSON Pointerが必要です。 |
 | <a id="p_expand_bound"></a>`P_EXPAND_BOUND` | `expand_task_graph` の上限が範囲外です。 |
 | <a id="p_expand_failure"></a>`P_EXPAND_FAILURE` | `failure_policy` は、`fail_fast` か `collect` にしてください。 |
-| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 予算のレコードが、不完全、重複、大小の逆転、または構造上の下限未満のいずれかです。9つのリソースをすべて、1回ずつ宣言してください。 |
+| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 予算のレコードが、不完全、重複、大小の逆転、構造上の下限未満、または `max_child_depth` が `max_supported_child_depth`（コンパイラーでは `ProgramCompilerConfig::max_supported_child_depth` で、承認プロファイルでは `PolicySnapshot`・モジュール解決・ランタイムが引き継ぐ `AdmissionProfileBuilder::max_supported_child_depth` で設定し、デフォルトは `8`、`MAX_SUPPORTED_CHILD_DEPTH`。コンパイラーとプロファイルの設定が異なる場合は小さい方が優先され、`witness.hard_ceiling` に報告されます）を超えている、のいずれかです。9つのリソースをすべて上限内で1回ずつ宣言してください。 |
 | <a id="p_budget_v1"></a>`P_BUDGET_V1` | Programスキーマ1では、`max_program_operations` は必ず1に固定されます。 |
 | <a id="p_budget_static"></a>`P_BUDGET_STATIC` | 宣言した最大値が、プランが必ず実行する操作をまかなえていません。最大値を上げてください。 |
+| <a id="p_start_budget"></a>`P_START_BUDGET` | 開始時の予算または呼び出しの深さが、ランタイムの下限を下回るか、バンドルの予算、親の上限、または承認プロファイルの `max_supported_child_depth`（`PolicySnapshot` とランタイムが引き継ぎます。デフォルトは `8`、`MAX_SUPPORTED_CHILD_DEPTH`。`witness.hard_ceiling` に報告されます）を超えています。 |
+| <a id="p_child_depth"></a>`P_CHILD_DEPTH` | 子Programのspawnまたはlinkが、`max_child_depth` または承認プロファイルの `max_supported_child_depth`（`PolicySnapshot`・モジュール解決・ランタイムが引き継ぎます。デフォルトは `8`、`MAX_SUPPORTED_CHILD_DEPTH`。`witness.hard_ceiling` に報告されます）を超えています。 |
 | <a id="p_migration_program_json"></a>`P_MIGRATION_PROGRAM_JSON` | ProgramのJSONによる操作ツリーは、受け付けなくなりました。JavaScriptか、信頼できるC++ビルダーで記述してください。 |
 | <a id="p_compiler_internal"></a>`P_COMPILER_INTERNAL` | コンパイラーが内部エラーでフェイルクローズしました。ソースを添えて報告してください。 |
 | <a id="p_diagnostics_truncated"></a>`P_DIAGNOSTICS_TRUNCATED` | 20件を超える診断が見つかりました。残りの件数は `witness.omitted` にあります。表示された診断を直してから、もう一度コンパイルしてください。 |

@@ -372,13 +372,15 @@ BudgetLimits budget_limits(const RunBudget& value) {
             value.max_total_children};
 }
 
-AdmissionProfile local_profile(const RegistrySnapshot& registry) {
+AdmissionProfile local_profile(const RegistrySnapshot& registry,
+                               std::uint32_t max_supported_child_depth) {
     AdmissionProfileBuilder builder;
     builder.id("python-local-program-profile")
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(LATEST_PROGRAM_SCHEMA_VERSION)
+        .max_supported_child_depth(max_supported_child_depth)
         .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged)
         .allow_source_kind(SourceKind::JavaScript)
         .allow_source_kind(SourceKind::CppBuilder)
@@ -461,6 +463,9 @@ ModuleLinkReceipt create_module_link_receipt(const std::string& owner_scope,
                                     child_policy.allowed_effects(),
                                     budget_limits(max_budget),
                                     child.execution_guarantee()});
+    if (max_budget.max_child_depth > parent_policy.max_supported_child_depth()) {
+        throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
+    }
     auto             module = ProgramModule::create(std::move(module_data));
     ModuleResolution resolution{module.coordinate(), {module}, {}};
     return link_module_child(resolution, module, binding_name, child_bundle, child);
@@ -469,14 +474,17 @@ ModuleLinkReceipt create_module_link_receipt(const std::string& owner_scope,
 ProgramCompilerConfig compiler_config(std::string             compiler_build_id,
                                       JavaScriptCompileLimits javascript_limits,
                                       bool                    require_acyclic,
-                                      bool                    echo_routes         = false,
-                                      bool                    soundness_check     = false,
-                                      std::size_t             soundness_state_cap = 100000) {
+                                      bool                    echo_routes,
+                                      bool                    soundness_check,
+                                      std::size_t             soundness_state_cap,
+                                      std::uint64_t           max_supported_child_depth) {
     ProgramCompilerConfig config{std::move(compiler_build_id), javascript_limits};
-    config.require_acyclic     = require_acyclic;
-    config.echo_routes         = echo_routes;
-    config.soundness_check     = soundness_check;
-    config.soundness_state_cap = soundness_state_cap;
+    config.require_acyclic           = require_acyclic;
+    config.echo_routes               = echo_routes;
+    config.soundness_check           = soundness_check;
+    config.soundness_state_cap       = soundness_state_cap;
+    config.max_supported_child_depth =
+        validate_max_supported_child_depth(max_supported_child_depth);
     return config;
 }
 
@@ -635,15 +643,18 @@ public:
                      bool soundness_check,
                      std::size_t soundness_state_cap,
                      py::object failure_text_redactor,
-                     bool fork_may_resend_provider_calls)
+                     bool fork_may_resend_provider_calls,
+                     std::uint64_t max_supported_child_depth = MAX_SUPPORTED_CHILD_DEPTH)
         : registry_(std::move(registry)),
           owner_scope_(std::move(owner_scope)),
           compiler_build_id_(std::move(compiler_build_id)),
-          profile_(local_profile(registry_)),
+          max_supported_child_depth_(validate_max_supported_child_depth(max_supported_child_depth)),
+          profile_(local_profile(registry_, max_supported_child_depth_)),
           policy_(local_policy(registry_, profile_, owner_scope_, budget_ceiling)),
           compiler_(std::make_shared<ProgramCompiler>(
               registry_, compiler_config(compiler_build_id_, javascript_limits, require_acyclic,
-                                         false, soundness_check, soundness_state_cap))),
+                                         false, soundness_check, soundness_state_cap,
+                                         max_supported_child_depth_))),
           stores_(host_stores(sqlite_directory, native_history_archive)),
           runtime_bindings_(std::make_shared<HostRuntimeBindings>()) {
         std::optional<NodeContext> node_context;
@@ -673,7 +684,7 @@ public:
                 "provider-call journal keeps every outcome under the archive's native custody");
         CatalogConfig catalog{stores_.program, registry_, std::make_shared<EngineGenerationCache>(),
                               compiler_build_id_};
-        catalog.worker_count      = worker_count;
+        catalog.worker_count = worker_count;
         catalog.capability_binder = neograph::program::detail::single_provider_binder(node_context, label);
         catalog.failure_text_redactor =
             neograph::pybind::python_failure_text_redactor(std::move(failure_text_redactor));
@@ -1392,6 +1403,9 @@ public:
     }
 
     const std::string& owner_scope() const noexcept { return owner_scope_; }
+    std::uint32_t max_supported_child_depth() const noexcept {
+        return max_supported_child_depth_;
+    }
 
 private:
     // The runtime accepts only the exact pending call id. Without one, address
@@ -1419,6 +1433,7 @@ private:
     RegistrySnapshot registry_;
     std::string owner_scope_;
     std::string compiler_build_id_;
+    std::uint32_t max_supported_child_depth_ = MAX_SUPPORTED_CHILD_DEPTH;
     AdmissionProfile profile_;
     PolicySnapshot policy_;
     std::shared_ptr<ProgramCompiler> compiler_;
@@ -1440,6 +1455,9 @@ void bind_program_identity(py::class_<T>& type) {
 
 void init_program(py::module_& m) {
     using namespace neograph::program;
+
+    m.attr("MAX_SUPPORTED_CHILD_DEPTH") = MAX_SUPPORTED_CHILD_DEPTH;
+    m.attr("MAX_REPRESENTABLE_CHILD_DEPTH") = MAX_REPRESENTABLE_CHILD_DEPTH;
 
     m.def("javascript_authoring_capability_manifest",
           [] { return json_to_py(neograph::program::javascript_authoring_capability_manifest()); },
@@ -1702,16 +1720,18 @@ void init_program(py::module_& m) {
     py::class_<ProgramCompiler>(m, "ProgramCompiler")
         .def(py::init([](RegistrySnapshot registry, std::string compiler_build_id,
                          JavaScriptCompileLimits javascript_limits, bool require_acyclic,
-                         bool echo_routes, bool soundness_check, std::size_t soundness_state_cap) {
+                         bool echo_routes, bool soundness_check, std::size_t soundness_state_cap,
+                         std::uint64_t max_supported_child_depth) {
             return std::make_unique<ProgramCompiler>(
                 std::move(registry),
                 compiler_config(std::move(compiler_build_id), javascript_limits,
                                 require_acyclic, echo_routes, soundness_check,
-                                soundness_state_cap));
+                                soundness_state_cap, max_supported_child_depth));
         }), py::arg("registry"), py::arg("compiler_build_id") = "neograph-python-program/v1",
             py::arg("javascript_limits") = JavaScriptCompileLimits{},
             py::arg("require_acyclic") = false, py::arg("echo_routes") = false,
             py::arg("soundness_check") = false, py::arg("soundness_state_cap") = 100000,
+            py::arg("max_supported_child_depth") = MAX_SUPPORTED_CHILD_DEPTH,
             "Compile Program sources against a registry snapshot. soundness_check=True "
             "also explores every run of the root Core and returns P_CORE_S1-P_CORE_S5 "
             "warnings and a P_CORE_SOUNDNESS summary in compile_diagnostics; the bundle "
@@ -2901,7 +2921,8 @@ void init_program(py::module_& m) {
         .def(py::init<RegistrySnapshot, std::string, RunBudget, std::string, std::size_t,
                       std::shared_ptr<sp::NativeArchive>, JavaScriptCompileLimits, bool,
                       std::size_t, py::object, std::optional<std::string>,
-                      std::optional<std::string>, bool, std::size_t, py::object, bool>(),
+                      std::optional<std::string>, bool, std::size_t, py::object, bool,
+                      std::uint64_t>(),
              py::arg("registry"), py::arg("owner_scope"), py::arg("budget_ceiling"),
              py::arg("compiler_build_id") = "neograph-python-program/v1",
              py::arg("scheduler_threads") = 1,
@@ -2915,8 +2936,11 @@ void init_program(py::module_& m) {
              py::arg("soundness_check") = false,
              py::arg("soundness_state_cap") = 100000,
              py::arg("failure_text_redactor") = py::none(),
-             py::arg("fork_may_resend_provider_calls") = false)
+             py::arg("fork_may_resend_provider_calls") = false,
+             py::arg("max_supported_child_depth") = MAX_SUPPORTED_CHILD_DEPTH)
         .def_property_readonly("owner_scope", &LocalProgramHost::owner_scope)
+        .def_property_readonly("max_supported_child_depth",
+                               &LocalProgramHost::max_supported_child_depth)
         .def_property_readonly("synthesis_gateway", &LocalProgramHost::synthesis_gateway)
         .def("reconnect", &LocalProgramHost::reconnect, py::arg("run_id"),
              "Continue a run that a stopped process left running, from this host's "

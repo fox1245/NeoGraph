@@ -131,7 +131,7 @@ ExecutableIdentity parse_identity(const json& value) {
     return result;
 }
 
-void validate_budget(const BudgetLimits& value) {
+void validate_budget(const BudgetLimits& value, std::uint32_t max_supported_child_depth) {
     // Name every zero field: a Program that never calls a model still needs
     // positive model_tokens, monetary_microunits and max_dynamic_compiles.
     const std::pair<std::string_view, std::uint64_t> required[] = {
@@ -158,7 +158,7 @@ void validate_budget(const BudgetLimits& value) {
         throw std::invalid_argument(
             "Policy child depth and total-child ceilings must be enabled together");
     }
-    if (value.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH) {
+    if (value.max_child_depth > max_supported_child_depth) {
         throw std::invalid_argument("Policy child depth exceeds the supported hard ceiling");
     }
 }
@@ -175,7 +175,7 @@ json encode_budget(const BudgetLimits& value) {
                 {"max_total_children", value.max_total_children}};
 }
 
-BudgetLimits parse_budget(const json& value) {
+BudgetLimits parse_budget(const json& value, std::uint32_t max_supported_child_depth) {
     require_object(value, "Policy budget_ceiling");
     detail::reject_unknown_fields(
         value, "Policy budget_ceiling",
@@ -192,19 +192,31 @@ BudgetLimits parse_budget(const json& value) {
     result.max_dynamic_compiles   = require_u32(value, "max_dynamic_compiles");
     result.max_child_depth        = require_u32(value, "max_child_depth");
     result.max_total_children     = require_u64(value, "max_total_children");
-    validate_budget(result);
+    validate_budget(result, max_supported_child_depth);
     return result;
 }
 
 }  // namespace
+
+std::uint32_t validate_max_supported_child_depth(std::uint64_t value) {
+    if (value == 0) {
+        throw std::invalid_argument("max_supported_child_depth must be positive");
+    }
+    if (value > MAX_REPRESENTABLE_CHILD_DEPTH) {
+        throw std::invalid_argument(
+            "max_supported_child_depth exceeds the maximum representable child depth");
+    }
+    return static_cast<std::uint32_t>(value);
+}
 
 struct AdmissionProfile::Impl {
     std::string                     id;
     std::string                     semantic_version;
     std::string                     fingerprint;
     std::string                     registry_fingerprint;
-    AdmissionMode                   mode                       = AdmissionMode::MultiTenant;
-    std::uint32_t                   max_program_schema_version = 1;
+    AdmissionMode                   mode                        = AdmissionMode::MultiTenant;
+    std::uint32_t                   max_program_schema_version  = 1;
+    std::uint32_t                   max_supported_child_depth   = MAX_SUPPORTED_CHILD_DEPTH;
     ExecutionGuarantee               minimum_execution_guarantee = ExecutionGuarantee::Strict;
     std::vector<SourceKind>         allowed_source_kinds;
     std::vector<ExecutableIdentity> allowed_executables;
@@ -217,8 +229,9 @@ struct AdmissionProfileBuilder::Impl {
     std::string                     semantic_version;
     std::string                     registry_fingerprint;
     std::optional<RegistrySnapshot> registry;
-    AdmissionMode                   mode                       = AdmissionMode::MultiTenant;
-    std::uint32_t                   max_program_schema_version = 1;
+    AdmissionMode                   mode                        = AdmissionMode::MultiTenant;
+    std::uint32_t                   max_program_schema_version  = 1;
+    std::uint32_t                   max_supported_child_depth   = MAX_SUPPORTED_CHILD_DEPTH;
     ExecutionGuarantee               minimum_execution_guarantee = ExecutionGuarantee::Strict;
     std::vector<SourceKind>         allowed_source_kinds;
     std::vector<ExecutableIdentity> allowed_executables;
@@ -236,6 +249,7 @@ struct PolicySnapshot::Impl {
     std::vector<std::string> allowed_effects;
     std::vector<std::string> allowed_module_digests;
     BudgetLimits             budget_ceiling;
+    std::uint32_t            max_supported_child_depth   = MAX_SUPPORTED_CHILD_DEPTH;
     ExecutionGuarantee       minimum_execution_guarantee = ExecutionGuarantee::Strict;
     json                     manifest;
 };
@@ -272,6 +286,9 @@ AdmissionMode AdmissionProfile::mode() const noexcept {
 }
 std::uint32_t AdmissionProfile::max_program_schema_version() const noexcept {
     return impl_->max_program_schema_version;
+}
+std::uint32_t AdmissionProfile::max_supported_child_depth() const noexcept {
+    return impl_->max_supported_child_depth;
 }
 ExecutionGuarantee AdmissionProfile::minimum_execution_guarantee() const noexcept {
     return impl_->minimum_execution_guarantee;
@@ -318,6 +335,10 @@ AdmissionProfileBuilder& AdmissionProfileBuilder::max_program_schema_version(std
     impl_->max_program_schema_version = value;
     return *this;
 }
+AdmissionProfileBuilder& AdmissionProfileBuilder::max_supported_child_depth(std::uint64_t value) {
+    impl_->max_supported_child_depth = validate_max_supported_child_depth(value);
+    return *this;
+}
 AdmissionProfileBuilder&
 AdmissionProfileBuilder::minimum_execution_guarantee(ExecutionGuarantee value) {
     impl_->minimum_execution_guarantee = value;
@@ -348,6 +369,8 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
     if (impl_->max_program_schema_version == 0) {
         throw std::invalid_argument("Admission max_program_schema_version must be positive");
     }
+    const auto child_depth_ceiling =
+        validate_max_supported_child_depth(impl_->max_supported_child_depth);
     if (to_string(impl_->mode) == "unknown") {
         throw std::invalid_argument("Admission mode is unsupported");
     }
@@ -422,6 +445,9 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
                     {"allowed_source_kinds", std::move(source_kinds)},
                     {"allowed_executables", std::move(executables)},
                     {"allowed_effect_modes", std::move(effect_modes)}};
+    if (child_depth_ceiling != MAX_SUPPORTED_CHILD_DEPTH) {
+        body["max_supported_child_depth"] = child_depth_ceiling;
+    }
     const auto fingerprint =
         detail::sha256_identity("admission-profile-v1", detail::canonical_json_bytes(body));
     body["fingerprint"] = fingerprint;
@@ -433,6 +459,7 @@ AdmissionProfile AdmissionProfileBuilder::build() && {
     result->registry_fingerprint       = std::move(impl_->registry_fingerprint);
     result->mode                       = impl_->mode;
     result->max_program_schema_version = impl_->max_program_schema_version;
+    result->max_supported_child_depth  = child_depth_ceiling;
     result->minimum_execution_guarantee = impl_->minimum_execution_guarantee;
     result->allowed_source_kinds       = std::move(impl_->allowed_source_kinds);
     result->allowed_executables        = std::move(impl_->allowed_executables);
@@ -449,8 +476,8 @@ AdmissionProfile AdmissionProfile::parse(std::string_view bytes) {
         value, "Stored AdmissionProfile",
         {"format", "storage_schema_version", "fingerprint", "id", "semantic_version",
          "registry_fingerprint", "mode", "max_program_schema_version",
-         "minimum_execution_guarantee", "allowed_source_kinds", "allowed_executables",
-         "allowed_effect_modes"});
+         "max_supported_child_depth", "minimum_execution_guarantee", "allowed_source_kinds",
+         "allowed_executables", "allowed_effect_modes"});
     if (require_string(value, "format") != "neograph-admission-profile") {
         throw std::invalid_argument("Stored AdmissionProfile has unknown format");
     }
@@ -467,6 +494,9 @@ AdmissionProfile AdmissionProfile::parse(std::string_view bytes) {
         .max_program_schema_version(require_u32(value, "max_program_schema_version"))
         .minimum_execution_guarantee(
             execution_guarantee_from_string(require_string(value, "minimum_execution_guarantee")));
+    if (value.contains("max_supported_child_depth")) {
+        builder.max_supported_child_depth(require_u64(value, "max_supported_child_depth"));
+    }
     builder.impl_->registry_fingerprint = require_string(value, "registry_fingerprint");
     require_array(value, "allowed_source_kinds");
     for (const auto& item : value["allowed_source_kinds"]) {
@@ -522,6 +552,9 @@ std::vector<std::string> PolicySnapshot::allowed_module_digests() const {
 }
 const BudgetLimits& PolicySnapshot::budget_ceiling() const noexcept {
     return impl_->budget_ceiling;
+}
+std::uint32_t PolicySnapshot::max_supported_child_depth() const noexcept {
+    return impl_->max_supported_child_depth;
 }
 ExecutionGuarantee PolicySnapshot::minimum_execution_guarantee() const noexcept {
     return impl_->minimum_execution_guarantee;
@@ -583,10 +616,12 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
     if (!impl_->admission_profile) {
         throw std::invalid_argument("Policy requires an AdmissionProfile");
     }
+    const auto child_depth_ceiling =
+        validate_max_supported_child_depth(impl_->admission_profile->max_supported_child_depth);
     normalize_strings(impl_->allowed_capabilities, "allowed_capabilities");
     normalize_strings(impl_->allowed_effects, "allowed_effects");
     normalize_strings(impl_->allowed_module_digests, "allowed_module_digests", true);
-    validate_budget(impl_->budget_ceiling);
+    validate_budget(impl_->budget_ceiling, child_depth_ceiling);
     if (execution_guarantee_rank(impl_->minimum_execution_guarantee) == 0) {
         throw std::invalid_argument("Policy minimum_execution_guarantee is unsupported");
     }
@@ -629,6 +664,9 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
                     {"budget_ceiling", encode_budget(impl_->budget_ceiling)},
                     {"minimum_execution_guarantee",
                      std::string(to_string(impl_->minimum_execution_guarantee))}};
+    if (child_depth_ceiling != MAX_SUPPORTED_CHILD_DEPTH) {
+        body["max_supported_child_depth"] = child_depth_ceiling;
+    }
     const auto fingerprint =
         detail::sha256_identity("policy-snapshot-v1", detail::canonical_json_bytes(body));
     body["fingerprint"] = fingerprint;
@@ -644,6 +682,7 @@ PolicySnapshot PolicySnapshotBuilder::build() && {
     result->allowed_effects               = std::move(impl_->allowed_effects);
     result->allowed_module_digests        = std::move(impl_->allowed_module_digests);
     result->budget_ceiling                = impl_->budget_ceiling;
+    result->max_supported_child_depth     = child_depth_ceiling;
     result->minimum_execution_guarantee     = impl_->minimum_execution_guarantee;
     result->manifest                      = detail::owned_json_copy(body);
     impl_.reset();
@@ -658,7 +697,7 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
         {"format", "storage_schema_version", "fingerprint", "id", "semantic_version", "owner_scope",
          "admission_profile_fingerprint", "registry_fingerprint", "allowed_capabilities",
          "allowed_effects", "allowed_module_digests", "budget_ceiling",
-         "minimum_execution_guarantee"});
+         "max_supported_child_depth", "minimum_execution_guarantee"});
     if (require_string(value, "format") != "neograph-policy-snapshot") {
         throw std::invalid_argument("Stored PolicySnapshot has unknown format");
     }
@@ -681,10 +720,15 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
     result->allowed_capabilities   = parse_strings(value, "allowed_capabilities");
     result->allowed_effects        = parse_strings(value, "allowed_effects");
     result->allowed_module_digests = parse_strings(value, "allowed_module_digests", true);
+    if (value.contains("max_supported_child_depth")) {
+        result->max_supported_child_depth =
+            validate_max_supported_child_depth(require_u64(value, "max_supported_child_depth"));
+    }
     if (!value.contains("budget_ceiling")) {
         throw std::invalid_argument("Policy budget_ceiling is required");
     }
-    result->budget_ceiling = parse_budget(value["budget_ceiling"]);
+    result->budget_ceiling =
+        parse_budget(value["budget_ceiling"], result->max_supported_child_depth);
     result->minimum_execution_guarantee =
         execution_guarantee_from_string(require_string(value, "minimum_execution_guarantee"));
 
@@ -701,6 +745,9 @@ PolicySnapshot PolicySnapshot::parse(std::string_view bytes) {
                     {"budget_ceiling", encode_budget(result->budget_ceiling)},
                     {"minimum_execution_guarantee",
                      std::string(to_string(result->minimum_execution_guarantee))}};
+    if (result->max_supported_child_depth != MAX_SUPPORTED_CHILD_DEPTH) {
+        body["max_supported_child_depth"] = result->max_supported_child_depth;
+    }
     const auto computed =
         detail::sha256_identity("policy-snapshot-v1", detail::canonical_json_bytes(body));
     if (computed != result->fingerprint) {

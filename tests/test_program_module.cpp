@@ -694,6 +694,105 @@ TEST(ProgramModuleTest, WholeCompositionAggregatesChildDepthByMaximum) {
     EXPECT_NO_THROW(validate_program_composition(fixture.parent_bundle, fixture.composition));
 }
 
+TEST(ProgramModuleTest, WholeCompositionEnforcesConfiguredChildDepthCeiling) {
+    auto depth_9_default = make_overflow_composition(
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, 8, 1},
+        BudgetLimits{10, 10, 10, 1, 10, 10, 1, 8, 1},
+        BudgetLimits{20, 20, 20, 2, 20, 20, 2, 9, 2});
+    EXPECT_THROW(
+        validate_program_composition(depth_9_default.parent_bundle, depth_9_default.composition),
+        std::invalid_argument);
+
+    const auto           module_root = ModuleResolution{}.dependency_merkle_root();
+    const ContractRecord contract{1, json{{"type", "object"}}};
+    const auto           registry = make_registry();
+    AdmissionProfileBuilder admission_builder;
+    admission_builder.id("module-deep-admission")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .mode(AdmissionMode::MultiTenant)
+        .max_program_schema_version(1)
+        .minimum_execution_guarantee(ExecutionGuarantee::Strict)
+        .max_supported_child_depth(12)
+        .allow_source_kind(SourceKind::CppBuilder)
+        .allow_effect_mode(EffectMode::Brokered);
+    const auto deep_admission = std::move(admission_builder).build();
+
+    const auto child_budget  = BudgetLimits{10, 10, 10, 1, 10, 10, 1, 12, 12};
+    const auto parent_budget = BudgetLimits{20, 20, 20, 2, 20, 20, 2, 12, 13};
+    const auto child_bundle  = make_bundle(
+        module_root, registry.fingerprint(), contract, contract, "child", 0,
+        child_budget.max_total_children, 1, child_budget.max_concurrency, 10,
+        child_budget.max_dynamic_compiles, ExecutionGuarantee::Strict, child_budget);
+    const auto parent_bundle = make_bundle(
+        module_root, registry.fingerprint(), contract, contract, "child", 0,
+        parent_budget.max_total_children, 1, parent_budget.max_concurrency, 20,
+        parent_budget.max_dynamic_compiles, ExecutionGuarantee::Strict, parent_budget);
+
+    PolicySnapshotBuilder policy_builder;
+    policy_builder.id("module-deep-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:module")
+        .admission_profile(deep_admission)
+        .allow_capability("read")
+        .allow_effect("tool")
+        .budget_ceiling(parent_budget)
+        .minimum_execution_guarantee(ExecutionGuarantee::Strict);
+    const auto deep_policy = std::move(policy_builder).build();
+
+    const ProgramVersion child_version(ProgramVersionData{
+        child_bundle.id(),
+        deep_admission,
+        deep_policy,
+        {},
+        "tenant:module",
+        CoreMaterializationReceipt{
+            "compiler:module", registry.fingerprint(), {CorePlanIdentity{"main", digest('c')}}},
+        ExecutionGuarantee::Strict});
+
+    ProgramModuleData parent_data;
+    parent_data.owner_scope          = "tenant:module";
+    parent_data.coordinate           = ModuleCoordinate{"test", "parent-deep", "1.0.0", ""};
+    parent_data.attestation_id       = "attestation:module";
+    parent_data.allowed_capabilities = {"read"};
+    parent_data.declared_effects     = {"tool"};
+    parent_data.children             = {ChildProgramDescriptor{
+        "child",
+        child_version.id(),
+        {ModulePort{"input", contract}},
+        {ModulePort{"output", contract}},
+        {"read"},
+        {"tool"},
+        child_budget,
+        ExecutionGuarantee::Strict}};
+    const auto parent_module = ProgramModule::create(std::move(parent_data));
+
+    ModuleResolution resolution;
+    resolution.root    = parent_module.coordinate();
+    resolution.modules = {parent_module};
+
+    const auto receipt =
+        link_module_child(resolution, parent_module, "child", child_bundle, child_version);
+    EXPECT_EQ(receipt.budget().max_child_depth, 12u);
+
+    const ProgramComposition valid_composition{
+        parent_module,
+        resolution,
+        {ChildProgramBinding{"child", child_bundle, child_version}}};
+    EXPECT_NO_THROW(validate_program_composition(parent_bundle, valid_composition));
+    EXPECT_NO_THROW(validate_program_composition(parent_bundle, valid_composition, 12));
+    EXPECT_THROW(validate_program_composition(parent_bundle, valid_composition, 8),
+                 std::invalid_argument);
+
+    const auto over_parent_budget = BudgetLimits{20, 20, 20, 2, 20, 20, 2, 13, 13};
+    const auto over_parent_bundle = make_bundle(
+        module_root, registry.fingerprint(), contract, contract, "child", 0,
+        over_parent_budget.max_total_children, 1, over_parent_budget.max_concurrency, 20,
+        over_parent_budget.max_dynamic_compiles, ExecutionGuarantee::Strict, over_parent_budget);
+    EXPECT_THROW(validate_program_composition(over_parent_bundle, valid_composition),
+                 std::invalid_argument);
+}
+
 TEST(ProgramModuleTest, WholeCompositionRejectsUndeclaredSpawnBinding) {
     auto fixture = make_fixture("tenant:module", "missing-child");
     const ProgramComposition composition{

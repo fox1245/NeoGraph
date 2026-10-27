@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=5dd93993031705ff41dfa2c2514b098ea5fc64f6692cdff91177ec049cdf18f0 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=42abbf35124835c1da4b1e5185db5ae192e6c83017aa1c19e54d5faa99de28ed -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -179,12 +179,12 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`**는 공급자 하나와 저장소 한 벌 위의 `Programs` 객체를 만들며,
+- **`neograph.programs({ provider, owner, limits, budget, maxSupportedChildDepth, stores, javascript })`**는 공급자 하나와 저장소 한 벌 위의 `Programs` 객체를 만들며,
   공급자가 잘못되었거나 모듈이 Program 지원 없이 빌드되었으면 `NeoGraphError`를 던집니다. `provider`는 `compile`과 같고 하나가
   더해집니다. `catalogue`는 SDK의 모델 카탈로그(`{ version: 1, models: [...] }`)이며, 내장 카탈로그 위에 덧씌워집니다.
   `owner`는 객체의 Program과 실행의 범위를 정합니다. `stores`는 호스트 자신의 저장소입니다([JavaScript의 Program 저장소](#program-stores-in-javascript)).
   생략한 저장소는 메모리에 있습니다. `limits`는 호스트의 상한선으로 승인되는 Program에 줄 수 있는 최대치이고(기본값은 실행당 동적 컴파일 1회, 자식 깊이 4, 자식 4개를 허용합니다: `maxDynamicCompiles: 1`, `maxChildDepth: 4`, `maxTotalChildren: 4`. 자식을 합성하거나 더 깊은 계층을 만드는 호스트는 여기서 `maxDynamicCompiles`, `maxChildDepth`, `maxTotalChildren`을 높입니다), `budget`은 예산을 주지 않은 실행의 예산이며,
-  둘 다 아래처럼 씁니다. `javascript`는 `{ stackBytes, defineTimeMs }`로, 제어 소스가 쓸 수 있는 스택과 `define()`이 실행될 수 있는 시간이며 예산 뒤에서 설명합니다.
+  둘 다 아래처럼 씁니다. `maxSupportedChildDepth`는 호스트의 자식 계층 깊이 상한입니다(기본값 `8`, `MAX_SUPPORTED_CHILD_DEPTH`; 런타임이 표현할 수 있는 범위 안의 양의 정수여야 하며 컴파일, 승인, 실행 전반에서 `maxChildDepth`를 제한하고, `null`이나 정수가 아닌 값 또는 범위를 벗어난 값은 `NeoGraphError`를 던집니다). `javascript`는 `{ stackBytes, defineTimeMs }`로, 제어 소스가 쓸 수 있는 스택과 `define()`이 실행될 수 있는 시간이며 예산 뒤에서 설명합니다.
 - **`programs.admit(source)`**는 Program을 컴파일하고 승인한 뒤 `{ id, bundleId, name }`으로 결정됩니다. `source`는 JavaScript 제어
   소스의 텍스트, `{ javascript, name, budget }` 또는 `{ javascript, name, budgetBounds: { minimum, maximum } }`(둘 다 있으면 `budgetBounds`가 우선합니다), 또는 이미 문서 형태인 Program을 위한 `{ document, name }`입니다. `budget`은 이 버전의 실행에 부여되는 정확한 예산이고, `budgetBounds`는 부여할 수 있는 예산의 범위로, 교체될 버전이 필요로 합니다(교체는 첫 부여량보다 적은 원본의 남은 예산을 이어받기 때문입니다). 생략한 멤버는 호스트의 기본 예산(`budget`과 `budgetBounds.maximum`) 또는 없음(`budgetBounds.minimum`에서는 `0`이므로 `minimum`은 구조적 하한 멤버들을 지정해야 합니다)을 유지합니다. 최솟값은 Program의 구조적 하한(동시 시도, Program 연산, Core 스텝 각 최소 1개, 그리고 Program이 자식을 디스패치할 때는 깊이와 자식 각 최소 1개)을 충족해야 하며, 그렇지 않으면 컴파일러가 거부합니다. 둘 다 없으면 소스 자체의 선언이 적용됩니다. 컴파일러나 승인 정책이
   거부한 소스는 `compile` 또는 `admission` 타입의 `NeoGraphError`로 거부되며, `diagnostics`에 `{ code, message, pointer, witness }`가

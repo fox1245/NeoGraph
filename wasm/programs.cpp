@@ -107,13 +107,15 @@ RegistrySnapshot make_registry() {
     return std::move(builder).build();
 }
 
-AdmissionProfile make_profile(const RegistrySnapshot& registry) {
+AdmissionProfile make_profile(const RegistrySnapshot& registry,
+                              std::uint32_t max_supported_child_depth) {
     AdmissionProfileBuilder builder;
     builder.id("js-module-profile")
         .semantic_version("1.0.0")
         .registry(registry)
         .mode(AdmissionMode::MultiTenant)
         .max_program_schema_version(LATEST_PROGRAM_SCHEMA_VERSION)
+        .max_supported_child_depth(max_supported_child_depth)
         .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged)
         .allow_source_kind(SourceKind::JavaScript)
         .allow_source_kind(SourceKind::CppBuilder)
@@ -122,7 +124,9 @@ AdmissionProfile make_profile(const RegistrySnapshot& registry) {
     return std::move(builder).build();
 }
 
-PolicySnapshot make_policy(const AdmissionProfile& profile, const std::string& owner, const BudgetLimits& ceiling) {
+PolicySnapshot make_policy(const AdmissionProfile& profile,
+                           const std::string& owner,
+                           const BudgetLimits& ceiling) {
     PolicySnapshotBuilder builder;
     builder.id("js-module-policy")
         .semantic_version("1.0.0")
@@ -131,6 +135,24 @@ PolicySnapshot make_policy(const AdmissionProfile& profile, const std::string& o
         .budget_ceiling(ceiling)
         .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
     return std::move(builder).build();
+}
+
+std::uint32_t child_depth_ceiling_from(const json& config) {
+    if (!config.is_object() || !config.contains("maxSupportedChildDepth")) {
+        return MAX_SUPPORTED_CHILD_DEPTH;
+    }
+    const auto& value = config.at("maxSupportedChildDepth");
+    if (!value.is_number()) {
+        throw std::invalid_argument("maxSupportedChildDepth must be a whole number from 1 to " +
+                                    std::to_string(MAX_REPRESENTABLE_CHILD_DEPTH));
+    }
+    const double amount = value.get<double>();
+    if (!(amount >= 1.0) || amount > static_cast<double>(MAX_REPRESENTABLE_CHILD_DEPTH) ||
+        amount != std::floor(amount)) {
+        throw std::invalid_argument("maxSupportedChildDepth must be a whole number from 1 to " +
+                                    std::to_string(MAX_REPRESENTABLE_CHILD_DEPTH));
+    }
+    return validate_max_supported_child_depth(static_cast<std::uint64_t>(amount));
 }
 
 // A budget written the way JavaScript writes it: `{wallTimeMs, modelTokens, ...}`; a member that is absent keeps `base`.
@@ -370,7 +392,7 @@ std::string_view child_synthesis_state_name(ProgramChildSynthesisState state) {
 struct Host {
     std::string owner;
     RegistrySnapshot registry = make_registry();
-    AdmissionProfile profile  = make_profile(registry);
+    AdmissionProfile profile  = make_profile(registry, MAX_SUPPORTED_CHILD_DEPTH);
     std::optional<PolicySnapshot> policy;
     std::shared_ptr<ProgramCompiler> compiler;
     RunBudget default_budget;
@@ -421,8 +443,14 @@ struct Host {
 
     Host(const json& config, int stores_handle) {
         owner = config.value("owner", "js:programs");
-        const auto ceiling = budget_from(config.value("limits", json::object()),
-                                         RunBudget{3'600'000, 100'000'000, 1'000'000'000, 16, 100'000, 100'000, 1, 4, 4});
+        const auto max_supported_child_depth = child_depth_ceiling_from(config);
+        profile = make_profile(registry, max_supported_child_depth);
+        const auto default_max_child_depth =
+            std::min<std::uint32_t>(4u, max_supported_child_depth);
+        const auto ceiling = budget_from(
+            config.value("limits", json::object()),
+            RunBudget{3'600'000, 100'000'000, 1'000'000'000, 16, 100'000, 100'000, 1,
+                      default_max_child_depth, 4});
         default_budget     = budget_from(config.value("budget", json::object()),
                                          RunBudget{60'000, 10'000, 1'000'000, 4, 32, 100, 0, 0, 0});
         const auto javascript = javascript_options_from(config.value("javascript", json()));
@@ -460,6 +488,7 @@ struct Host {
         javascript_limits.max_wall_time_ms = javascript.define_time_ms;
         javascript_limits.max_stack_bytes  = javascript.stack_bytes;
         ProgramCompilerConfig compiler_config{"js-module/1", javascript_limits};
+        compiler_config.max_supported_child_depth = max_supported_child_depth;
         compiler = std::make_shared<ProgramCompiler>(registry, std::move(compiler_config));
 
         CatalogConfig catalog_config{programs, registry, std::make_shared<EngineGenerationCache>(), "js-module/1"};

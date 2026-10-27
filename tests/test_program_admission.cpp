@@ -228,6 +228,112 @@ TEST(PolicySnapshotTest, AllowsLeafOnlyChildPolicyAndRejectsDepthAboveHardCeilin
     EXPECT_THROW((void)std::move(oversized).build(), std::invalid_argument);
 }
 
+TEST(PolicySnapshotTest, ConfiguresChildDepthCeilingAndRejectsInvalidValues) {
+    const auto registry = registry_snapshot();
+
+    AdmissionProfileBuilder zero_profile;
+    zero_profile.id("zero-depth-profile")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .allow_effect_mode(EffectMode::Brokered);
+    for (const auto& identity : registry.identities()) zero_profile.allow_executable(identity);
+    EXPECT_THROW(zero_profile.max_supported_child_depth(0), std::invalid_argument);
+
+    AdmissionProfileBuilder overflow_profile;
+    overflow_profile.id("overflow-depth-profile")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .allow_effect_mode(EffectMode::Brokered);
+    for (const auto& identity : registry.identities()) overflow_profile.allow_executable(identity);
+    EXPECT_THROW(
+        overflow_profile.max_supported_child_depth(
+            static_cast<std::uint64_t>(MAX_REPRESENTABLE_CHILD_DEPTH) + 1u),
+        std::invalid_argument);
+
+    const auto default_admission = admission_profile(registry);
+    AdmissionProfileBuilder explicit_default_builder;
+    explicit_default_builder.id("profile")
+        .semantic_version("1.2.3")
+        .registry(registry)
+        .mode(AdmissionMode::MultiTenant)
+        .max_program_schema_version(1)
+        .allow_source_kind(SourceKind::JavaScript)
+        .allow_source_kind(SourceKind::CppBuilder)
+        .allow_executable(registry.identities().front())
+        .allow_effect_mode(EffectMode::Brokered)
+        .max_supported_child_depth(MAX_SUPPORTED_CHILD_DEPTH);
+    const auto explicit_default_admission = std::move(explicit_default_builder).build();
+    EXPECT_EQ(explicit_default_admission.max_supported_child_depth(), MAX_SUPPORTED_CHILD_DEPTH);
+    EXPECT_EQ(explicit_default_admission.fingerprint(), default_admission.fingerprint());
+
+    auto default_json = json::parse(default_admission.serialize_canonical());
+    default_json["max_supported_child_depth"] = MAX_SUPPORTED_CHILD_DEPTH;
+    const auto parsed_explicit_default = AdmissionProfile::parse(default_json.dump());
+    EXPECT_EQ(parsed_explicit_default.max_supported_child_depth(), MAX_SUPPORTED_CHILD_DEPTH);
+    EXPECT_EQ(parsed_explicit_default.fingerprint(), default_admission.fingerprint());
+
+    default_json["max_supported_child_depth"] = 0;
+    EXPECT_THROW((void)AdmissionProfile::parse(default_json.dump()), std::invalid_argument);
+    default_json["max_supported_child_depth"] =
+        static_cast<std::uint64_t>(MAX_REPRESENTABLE_CHILD_DEPTH) + 1u;
+    EXPECT_THROW((void)AdmissionProfile::parse(default_json.dump()), std::invalid_argument);
+
+    AdmissionProfileBuilder deep_profile_builder;
+    deep_profile_builder.id("deep-profile")
+        .semantic_version("1.0.0")
+        .registry(registry)
+        .allow_effect_mode(EffectMode::Brokered)
+        .max_supported_child_depth(12);
+    for (const auto& identity : registry.identities())
+        deep_profile_builder.allow_executable(identity);
+    const auto deep_admission = std::move(deep_profile_builder).build();
+    EXPECT_EQ(deep_admission.max_supported_child_depth(), 12u);
+    const auto roundtrip_deep_admission =
+        AdmissionProfile::parse(deep_admission.serialize_canonical());
+    EXPECT_EQ(roundtrip_deep_admission.max_supported_child_depth(), 12u);
+    EXPECT_EQ(roundtrip_deep_admission.fingerprint(), deep_admission.fingerprint());
+
+    auto depth_12_budget               = finite_budget();
+    depth_12_budget.max_child_depth    = 12;
+    depth_12_budget.max_total_children = 12;
+    PolicySnapshotBuilder deep_policy_builder;
+    deep_policy_builder.id("deep-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:one")
+        .admission_profile(deep_admission)
+        .budget_ceiling(depth_12_budget);
+    const auto deep_policy = std::move(deep_policy_builder).build();
+    EXPECT_EQ(deep_policy.max_supported_child_depth(), 12u);
+    EXPECT_EQ(deep_policy.budget_ceiling().max_child_depth, 12u);
+    const auto roundtrip_deep_policy =
+        PolicySnapshot::parse(deep_policy.serialize_canonical());
+    EXPECT_EQ(roundtrip_deep_policy.max_supported_child_depth(), 12u);
+    EXPECT_EQ(roundtrip_deep_policy.fingerprint(), deep_policy.fingerprint());
+
+    PolicySnapshotBuilder default_policy_builder;
+    default_policy_builder.id("default-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:one")
+        .admission_profile(default_admission)
+        .budget_ceiling(finite_budget());
+    const auto default_policy = std::move(default_policy_builder).build();
+    const auto roundtrip_default_policy =
+        PolicySnapshot::parse(default_policy.serialize_canonical());
+    EXPECT_EQ(roundtrip_default_policy.max_supported_child_depth(), MAX_SUPPORTED_CHILD_DEPTH);
+    EXPECT_EQ(roundtrip_default_policy.fingerprint(), default_policy.fingerprint());
+
+    auto depth_13_budget               = depth_12_budget;
+    depth_13_budget.max_child_depth    = 13;
+    depth_13_budget.max_total_children = 13;
+    PolicySnapshotBuilder exceeded_policy;
+    exceeded_policy.id("exceeded-policy")
+        .semantic_version("1.0.0")
+        .owner_scope("tenant:one")
+        .admission_profile(deep_admission)
+        .budget_ceiling(depth_13_budget);
+    EXPECT_THROW((void)std::move(exceeded_policy).build(), std::invalid_argument);
+}
+
 TEST(PolicySnapshotTest, EnforcesTrustedNativeCapabilityAndFiniteBudgets) {
     const auto trusted = admission_profile(registry_snapshot(), AdmissionMode::TrustedEmbedding);
     PolicySnapshotBuilder missing_capability;
