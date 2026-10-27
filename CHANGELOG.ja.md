@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=fe8bc612f11ccbd98292232531b99fc8d9ca795febe89fdd2212ea4e3ad95e54 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=ja source_sha256=5e5de6b45a057338afcd3a21c2a859df15433f020c78fe5c65cce67a62349b49 -->
 # 変更履歴
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -133,6 +133,7 @@ NeoGraph に対するすべての重要な変更は、このファイルに記�
   - `ServeOptions` が大きくなったため、これを組み立てるコードはライブラリと一緒に再ビルドしてください。認証インターセプターや 1 つのポートでの複数サービスは、これまでどおり `make_graph_service()`、`make_tool_service()`、`make_checkpoint_service()` を独自の `grpc::ServerBuilder` に登録して使います。
 
 ### 変更
+- **Python バインディングは `pybind11` 3.1.0 で、wheel は `cibuildwheel` 4.3.4 でビルドされます (#611)。** 従来はバインディングを `pybind11` 2.13.6 で、wheel を `cibuildwheel` 2.23.0 でビルドしていました。公開するプラットフォームと CPython のバージョンは変わりません。バインディングの型にリンクする Python 拡張は NeoGraph と一緒に再ビルドしてください（[`docs/ABI_POLICY.md`](docs/ABI_POLICY.md) を参照）。
 - **ループバックの A2A サーバーは、ループバックの `Host` 名と自身のオリジンにだけ応答し、4 MiB を超える本文を読みません。** `A2AServer` は `Host` も `Origin` も確認せず、HTTP ライブラリの本文上限 100 MiB のままでした。別のオリジンのページは、自分のホスト名をこのマシンに向け直す (DNS リバインディング) と、ループバックアドレスにバインドしたサーバーに届き、どのクライアントも 100 MiB の本文を送れました。`start()` の前に呼ぶ `A2AServer::set_http_config(A2AHttpConfig)` は、MCP HTTP サーバーと同じフィールドを同じ意味で受け取ります。`allowed_hosts`、`allowed_origins`、`max_payload_bytes` です。
   - **Host。** ループバックへのバインド (`127.0.0.1`、`::1`、`localhost`) では、ポートを問わず `localhost`、`127.0.0.1`、`[::1]` と `allowed_hosts` の名前にだけ応答し、それ以外の `Host` は `Origin` の有無にかかわらず `403` で拒否します。`Host` がないか `host[:port]` の形式でなければ `400` です。項目はポートのないホスト名、角括弧付きの IPv6 アドレス、または任意の `Host` を表す `*` で、大文字小文字を区別せずに比較します。ループバック以外へのバインドでは、リストが空なら従来どおり何も確認せず、空でなければ列挙した名前だけを受け入れます。
   - **Origin。** `Origin` を持つリクエストは、`allowed_origins` にあるか、ループバックへのバインドでサーバー自身のオリジンであれば受け入れ、そうでなければ `403` です。サーバー自身のオリジンは、バインドしたポートの `http://localhost:<port>`、`http://127.0.0.1:<port>`、`http://[::1]:<port>` で、それぞれ初めて受け入れたときに stderr へ 1 度知らせます。`Origin` のないリクエストは確認しません。ループバック以外へのバインドは、列挙したオリジンだけを受け入れます。

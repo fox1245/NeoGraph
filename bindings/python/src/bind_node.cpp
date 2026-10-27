@@ -136,7 +136,7 @@ NodeResult coerce_to_node_result(py::handle obj) {
                 throw py::type_error(
                     "run(input) result list must contain "
                     "ChannelWrite / Send / Command instances; got " +
-                    std::string(py::str(item.get_type()).cast<std::string>()));
+                    std::string(py::str(py::type::handle_of(item)).cast<std::string>()));
             }
         }
         return r;
@@ -145,7 +145,7 @@ NodeResult coerce_to_node_result(py::handle obj) {
     throw py::type_error(
         "run(input) must return an iterable of "
         "ChannelWrite, a NodeResult, a Command, a Send, or None; got " +
-        std::string(py::str(obj.get_type()).cast<std::string>()));
+        std::string(py::str(py::type::handle_of(obj)).cast<std::string>()));
 }
 
 // Translate a Python `neograph_engine.NodeInterrupt` into the C++ exception

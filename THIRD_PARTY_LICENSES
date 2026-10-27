@@ -266,8 +266,8 @@ authorization of the copyright holder.
 
 8. pybind11
 ===========
-Source: https://raw.githubusercontent.com/pybind/pybind11/v2.13.6/LICENSE
-Release build selection: pybind11 2.13.6 (pinned Python build dependency and
+Source: https://raw.githubusercontent.com/pybind/pybind11/v3.1.0/LICENSE
+Release build selection: pybind11 3.1.0 (pinned Python build dependency and
 direct-CMake fallback). The previously inspected Linux candidate wheels did
 not expose their selected header version; this pin does not establish their
 past build provenance. Final rebuilt artifacts must verify the selected version.

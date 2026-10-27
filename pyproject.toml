@@ -1,6 +1,6 @@
 # CMake installs the Python package and its native libraries into one directory.
 [build-system]
-requires = ["scikit-build-core>=1.0", "pybind11==2.13.6", "ninja>=1.10"]
+requires = ["scikit-build-core>=1.0", "pybind11==3.1.0", "ninja>=1.10"]
 build-backend = "scikit_build_core.build"
 
 [project]

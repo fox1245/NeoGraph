@@ -5,12 +5,11 @@
 // Python integrations need, while a concrete C++ adapter remains responsible
 // for transport ownership and its executor lifetime.
 //
-// pybind11 v2.13.6 virtual-class docs: a Python-subclassable pure virtual
+// pybind11 v3.1.0 virtual-class docs: a Python-subclassable pure virtual
 // interface needs a trampoline for every virtual. ArtifactProvider's protected
 // async primitives have no safe synchronous Python override, so expose native
 // adapters only rather than publishing a callback path that blocks an executor.
-// Source: https://raw.githubusercontent.com/pybind/pybind11/v2.13.6/docs/advanced/classes.rst
-// Checked 2026-08-04.
+// Source: https://raw.githubusercontent.com/pybind/pybind11/v3.1.0/docs/advanced/classes.rst
 
 #include "json_bridge.h"
 

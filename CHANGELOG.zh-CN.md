@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=fe8bc612f11ccbd98292232531b99fc8d9ca795febe89fdd2212ea4e3ad95e54 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=5e5de6b45a057338afcd3a21c2a859df15433f020c78fe5c65cce67a62349b49 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -133,6 +133,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - `ServeOptions` 变大了，因此构造它的代码要随库一起重新构建。身份验证拦截器和在一个端口上提供多个服务，仍然是把 `make_graph_service()`、`make_tool_service()` 或 `make_checkpoint_service()` 注册到你自己的 `grpc::ServerBuilder`。
 
 ### 变更
+- **Python 绑定使用 `pybind11` 3.1.0 构建，wheel 使用 `cibuildwheel` 4.3.4 构建 (#611)。** 此前绑定使用 `pybind11` 2.13.6、wheel 使用 `cibuildwheel` 2.23.0 构建；发布的平台与 CPython 版本不变。链接该绑定类型的 Python 扩展请与 NeoGraph 一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **回环 A2A 服务器只应答回环的 `Host` 名称和它自己的来源，并且不读取超过 4 MiB 的请求体。** `A2AServer` 既不检查 `Host` 也不检查 `Origin`，并沿用 HTTP 库 100 MiB 的请求体上限。其他来源的网页只要把自己的主机名重新指向这台机器（DNS 重绑定），就能访问绑定在回环地址上的服务器，任何客户端也都能发送 100 MiB 的请求体。在 `start()` 之前调用的 `A2AServer::set_http_config(A2AHttpConfig)` 接受与 MCP HTTP 服务器相同的字段，含义也相同：`allowed_hosts`、`allowed_origins` 和 `max_payload_bytes`。
   - **Host。** 在回环绑定（`127.0.0.1`、`::1`、`localhost`）上，服务器应答 `localhost`、`127.0.0.1`、`[::1]`（不限端口）以及 `allowed_hosts` 中的名称，其他 `Host` 无论是否带 `Origin` 都返回 `403`。缺失或不是 `host[:port]` 形式的 `Host` 返回 `400`。条目是不带端口的主机名、带方括号的 IPv6 地址，或表示任意 `Host` 的 `*`，比较时忽略大小写。在非回环绑定上，列表为空时和以前一样不做检查，非空时只接受所列名称。
   - **Origin。** 带 `Origin` 的请求，如果 `allowed_origins` 列出了该来源，或在回环绑定上它是服务器自己的来源，就被接受，否则返回 `403`。服务器自己的来源是绑定端口上的 `http://localhost:<port>`、`http://127.0.0.1:<port>` 和 `http://[::1]:<port>`，每个来源第一次被接受时在 stderr 上报告一次。不带 `Origin` 的请求不检查。非回环绑定只接受已列出的来源。
