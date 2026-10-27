@@ -5,6 +5,7 @@
 #pragma once
 
 #include <neograph/graph/configuration_failure.h>
+#include <neograph/program/admission.h>
 #include <neograph/program/bundle.h>
 #include <neograph/program/module.h>
 #include <neograph/program/schema.h>
@@ -122,6 +123,13 @@ struct ProgramCompilerConfig {
     bool soundness_check = false;
     /// States the soundness check visits at most before it reports "not checked".
     std::size_t soundness_state_cap = 100000;
+    /**
+     * Maximum supported child Program hierarchy depth; defaults to
+     * MAX_SUPPORTED_CHILD_DEPTH (8). The compiler and the admission policy each
+     * enforce their own ceiling, so the effective ceiling is the smaller of the
+     * two: a disagreement only refuses more, never admits more.
+     */
+    std::uint32_t max_supported_child_depth = MAX_SUPPORTED_CHILD_DEPTH;
 };
 
 /// Also a graph::ConfigurationFailure (#364): inside a Core node it is

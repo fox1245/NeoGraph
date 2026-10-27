@@ -521,6 +521,10 @@ await check('an invalid provider is refused when the object is made', () => {
   assert.throws(() => neograph.programs({ provider: { model: 'm' } }), NeoGraphError);
   assert.throws(() => neograph.programs({ provider: provider(), limits: { maxDynamicCompiles: 0 } }), NeoGraphError);
   assert.throws(() => neograph.programs({ provider: { ...provider(), catalogue: { version: 2, models: [] } } }), NeoGraphError);
+  assert.throws(() => neograph.programs({ provider: provider(), maxSupportedChildDepth: null }), NeoGraphError);
+  assert.throws(() => neograph.programs({ provider: provider(), maxSupportedChildDepth: 0 }), NeoGraphError);
+  neograph.programs({ provider: provider(), maxSupportedChildDepth: 2 }).release();
+  neograph.programs({ provider: provider(), maxSupportedChildDepth: undefined }).release();
 });
 
 await check('a fork that is cancelled before it is sent is withdrawn and the paused run stays resumable', () => withProgram(async (programs, version) => {

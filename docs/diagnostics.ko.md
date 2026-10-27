@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=05a405c99f388774993482b2cb175a7c22343d727442659756368bae50402791 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=ko source_sha256=54d94cdc17136f83102c55b02f15d67af24a3a73cf003bd0ba68bf6e5f431716 -->
 # Program 진단
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -63,9 +63,11 @@ bundle에 봉인되는 진단에는 `help`가 없으므로 bundle id는 그 영�
 | <a id="p_expand_source"></a>`P_EXPAND_SOURCE` | `proposal_source`에는 인라인 객체나 입력 JSON Pointer가 필요하다. |
 | <a id="p_expand_bound"></a>`P_EXPAND_BOUND` | `expand_task_graph`의 한도가 범위를 벗어난다. |
 | <a id="p_expand_failure"></a>`P_EXPAND_FAILURE` | `failure_policy`는 `fail_fast` 또는 `collect`여야 한다. |
-| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 예산 레코드가 불완전하거나, 반복되거나, 최솟값과 최댓값이 뒤집혔거나, 구조상 필요한 최소치보다 낮다. 아홉 가지 리소스를 모두 한 번씩 선언한다. |
+| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 예산 레코드가 불완전하거나, 반복되거나, 최솟값과 최댓값이 뒤집혔거나, 구조상 필요한 최소치보다 낮거나, `max_child_depth`가 `max_supported_child_depth`(컴파일러에서는 `ProgramCompilerConfig::max_supported_child_depth`로, 승인 프로파일에서는 `PolicySnapshot`, 모듈 해석, 런타임이 이어받는 `AdmissionProfileBuilder::max_supported_child_depth`로 설정하며, 기본값은 `8`, `MAX_SUPPORTED_CHILD_DEPTH`이고 컴파일러와 프로파일 설정이 다르면 더 작은 값이 적용되며 `witness.hard_ceiling`에 보고됨)를 넘는다. 아홉 가지 리소스를 모두 상한 안에서 한 번씩 선언한다. |
 | <a id="p_budget_v1"></a>`P_BUDGET_V1` | Program 스키마 1에서는 `max_program_operations`가 정확히 1로 고정된다. |
 | <a id="p_budget_static"></a>`P_BUDGET_STATIC` | 선언한 최댓값이 plan이 항상 실행하는 연산을 감당하지 못한다. 최댓값을 올린다. |
+| <a id="p_start_budget"></a>`P_START_BUDGET` | 시작 예산이나 호출 깊이가 런타임 최소치를 밑돌거나, 번들 예산, 부모 상한, 승인 프로파일의 `max_supported_child_depth`(`PolicySnapshot`과 런타임이 이어받음, 기본값 `8`, `MAX_SUPPORTED_CHILD_DEPTH`, `witness.hard_ceiling`에 보고됨)를 넘는다. |
+| <a id="p_child_depth"></a>`P_CHILD_DEPTH` | 자식 Program 생성(spawn)이나 연결(link)이 `max_child_depth` 또는 승인 프로파일의 `max_supported_child_depth`(`PolicySnapshot`, 모듈 해석, 런타임이 이어받음, 기본값 `8`, `MAX_SUPPORTED_CHILD_DEPTH`, `witness.hard_ceiling`에 보고됨)를 넘는다. |
 | <a id="p_migration_program_json"></a>`P_MIGRATION_PROGRAM_JSON` | Program JSON 연산 트리는 더 이상 받지 않는다. JavaScript나 신뢰할 수 있는 C++ 빌더로 작성한다. |
 | <a id="p_compiler_internal"></a>`P_COMPILER_INTERNAL` | 컴파일러가 내부 오류로 실패 시 차단되었다. 소스와 함께 보고한다. |
 | <a id="p_diagnostics_truncated"></a>`P_DIAGNOSTICS_TRUNCATED` | 진단이 20개를 넘게 발견되었으며 나머지 개수는 `witness.omitted`에 있다. 표시된 진단을 고친 뒤 다시 컴파일한다. |

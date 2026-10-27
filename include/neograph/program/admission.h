@@ -8,9 +8,11 @@
 #include <neograph/program/source.h>
 
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace neograph::program {
@@ -18,8 +20,13 @@ namespace neograph::program {
 inline constexpr std::string_view TRUSTED_NATIVE_CAPABILITY = "neograph.native.trusted";
 /// Default grant for a caller that explicitly opts into bounded child execution.
 inline constexpr std::uint32_t DEFAULT_MAX_CHILD_DEPTH = 1;
-/// Hard upper bound for recursive child grants in one Program lineage.
+/// Default upper bound for recursive child grants in one Program lineage.
 inline constexpr std::uint32_t MAX_SUPPORTED_CHILD_DEPTH = 8;
+/// Largest child depth ceiling the runtime can represent safely without uint32 wraparound.
+inline constexpr std::uint32_t MAX_REPRESENTABLE_CHILD_DEPTH =
+    std::numeric_limits<std::uint32_t>::max() - 1u;
+
+NEOGRAPH_PROGRAM_API std::uint32_t validate_max_supported_child_depth(std::uint64_t value);
 
 enum class AdmissionMode : std::uint8_t {
     MultiTenant,
@@ -57,6 +64,7 @@ public:
     const std::string&              registry_fingerprint() const noexcept;
     AdmissionMode                   mode() const noexcept;
     std::uint32_t                   max_program_schema_version() const noexcept;
+    std::uint32_t                   max_supported_child_depth() const noexcept;
     /// Lowest execution guarantee this profile permits in an admitted closure.
     ExecutionGuarantee              minimum_execution_guarantee() const noexcept;
     /** New admissions may allow trusted C++ builders and JavaScript only. */
@@ -91,6 +99,7 @@ public:
     AdmissionProfileBuilder& registry(RegistrySnapshot snapshot);
     AdmissionProfileBuilder& mode(AdmissionMode value);
     AdmissionProfileBuilder& max_program_schema_version(std::uint32_t value);
+    AdmissionProfileBuilder& max_supported_child_depth(std::uint64_t value);
     AdmissionProfileBuilder& minimum_execution_guarantee(ExecutionGuarantee value);
     /** CanonicalJson is a retained legacy storage kind and is rejected here. */
     AdmissionProfileBuilder& allow_source_kind(SourceKind value);
@@ -123,6 +132,7 @@ public:
     std::vector<std::string> allowed_effects() const;
     std::vector<std::string> allowed_module_digests() const;
     const BudgetLimits&      budget_ceiling() const noexcept;
+    std::uint32_t            max_supported_child_depth() const noexcept;
     /// Explicit policy floor for the effective Program and composed child closure.
     ExecutionGuarantee       minimum_execution_guarantee() const noexcept;
     json                     manifest() const;

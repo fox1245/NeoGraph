@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=05a405c99f388774993482b2cb175a7c22343d727442659756368bae50402791 -->
+<!-- neograph-i18n: source=docs/diagnostics.md locale=zh-CN source_sha256=54d94cdc17136f83102c55b02f15d67af24a3a73cf003bd0ba68bf6e5f431716 -->
 # Program 诊断
 
 **Languages:** [English](diagnostics.md) | [한국어](diagnostics.ko.md) | [日本語](diagnostics.ja.md) | [简体中文](diagnostics.zh-CN.md)
@@ -63,9 +63,11 @@ Program 编译会返回诊断信息：编译失败时通过 `ProgramCompileError
 | <a id="p_expand_source"></a>`P_EXPAND_SOURCE` | `proposal_source` 必须是内联对象或输入的 JSON Pointer。 |
 | <a id="p_expand_bound"></a>`P_EXPAND_BOUND` | `expand_task_graph` 的某个上限超出范围。 |
 | <a id="p_expand_failure"></a>`P_EXPAND_FAILURE` | `failure_policy` 必须是 `fail_fast` 或 `collect`。 |
-| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 预算记录不完整、重复、上下限颠倒，或低于结构性下限。请把九项资源各声明一次。 |
+| <a id="p_budget_invalid"></a>`P_BUDGET_INVALID` | 预算记录不完整、重复、上下限颠倒、低于结构性下限，或者声明的 `max_child_depth` 超出了 `max_supported_child_depth`（在编译器上通过 `ProgramCompilerConfig::max_supported_child_depth` 设置，在准入 profile 上通过由 `PolicySnapshot`、模块解析和运行时继承的 `AdmissionProfileBuilder::max_supported_child_depth` 设置；默认为 `8`，即 `MAX_SUPPORTED_CHILD_DEPTH`，当编译器与 profile 设置不一致时以较小者为准；在 `witness.hard_ceiling` 中报告）。请在上限内把九项资源各声明一次。 |
 | <a id="p_budget_v1"></a>`P_BUDGET_V1` | Program schema 1 把 `max_program_operations` 固定为恰好 1。 |
 | <a id="p_budget_static"></a>`P_BUDGET_STATIC` | 声明的最大值不足以覆盖计划必然会执行的操作。请调高。 |
+| <a id="p_start_budget"></a>`P_START_BUDGET` | 启动预算或调用深度低于运行时下限，或超出了 bundle 预算、父级上限或准入 profile 的 `max_supported_child_depth`（由 `PolicySnapshot` 和运行时继承；默认为 `8`，即 `MAX_SUPPORTED_CHILD_DEPTH`；在 `witness.hard_ceiling` 中报告）。 |
+| <a id="p_child_depth"></a>`P_CHILD_DEPTH` | 生成（spawn）或链接（link）子 Program 超出了 `max_child_depth` 或准入 profile 的 `max_supported_child_depth`（由 `PolicySnapshot`、模块解析和运行时继承；默认为 `8`，即 `MAX_SUPPORTED_CHILD_DEPTH`；在 `witness.hard_ceiling` 中报告）。 |
 | <a id="p_migration_program_json"></a>`P_MIGRATION_PROGRAM_JSON` | 不再接受 Program JSON 操作树。请用 JavaScript 或受信任的 C++ 构建器来编写。 |
 | <a id="p_compiler_internal"></a>`P_COMPILER_INTERNAL` | 编译器遇到内部错误，已按失败时关闭处理。请连同源码一起报告。 |
 | <a id="p_diagnostics_truncated"></a>`P_DIAGNOSTICS_TRUNCATED` | 发现的诊断超过 20 条；`witness.omitted` 给出其余的数量。请先修复已显示的，再重新编译。 |

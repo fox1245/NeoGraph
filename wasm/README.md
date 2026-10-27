@@ -179,7 +179,7 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** makes a `Programs` object over one provider and
+- **`neograph.programs({ provider, owner, limits, budget, maxSupportedChildDepth, stores, javascript })`** makes a `Programs` object over one provider and
   one set of stores, and throws a `NeoGraphError` when the provider is invalid or the module was built without Program
   support. `provider` is as for `compile`, with one addition: `catalogue`, the SDK's model catalogue (`{ version: 1,
   models: [...] }`), which is laid over the embedded one. `owner` scopes the Programs and runs of the object.
@@ -188,7 +188,7 @@ programs.release();
   dynamic compile, a child depth of four, and four children per run: `maxDynamicCompiles: 1`, `maxChildDepth: 4`,
   `maxTotalChildren: 4`; a host that synthesizes children or builds deeper hierarchies raises `maxDynamicCompiles`,
   `maxChildDepth` and `maxTotalChildren` there), and `budget` is the budget of a run that gives none, both written as
-  below. `javascript` is `{ stackBytes, defineTimeMs }`, the stack that a control source may use and the time that
+  below. `maxSupportedChildDepth` is the host's child-hierarchy depth ceiling (default `8`, `MAX_SUPPORTED_CHILD_DEPTH`; must be a positive integer within the runtime's representable range, and bounds `maxChildDepth` across compilation, admission and execution; `null`, non-integers or out-of-range values throw `NeoGraphError`). `javascript` is `{ stackBytes, defineTimeMs }`, the stack that a control source may use and the time that
   `define()` may run, described after the budgets.
 - **`programs.admit(source)`** compiles a Program and admits it, and resolves with `{ id, bundleId, name }`. `source` is
   the text of a JavaScript control source, `{ javascript, name, budget }` or `{ javascript, name, budgetBounds: {

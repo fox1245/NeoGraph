@@ -97,6 +97,12 @@ void normalize_data(ProgramVersionData& data) {
         throw std::invalid_argument(
             "Program version policy and admission profile bind different registries");
     }
+    if (data.policy_snapshot.budget_ceiling().max_child_depth >
+        data.admission_profile.max_supported_child_depth()) {
+        throw std::invalid_argument(
+            "Program version policy budget_ceiling.max_child_depth exceeds admission profile "
+            "max_supported_child_depth");
+    }
     if (execution_guarantee_rank(data.execution_guarantee) == 0) {
         throw std::invalid_argument("Program version execution_guarantee is unsupported");
     }

@@ -88,22 +88,27 @@ json encode_budget(const BudgetLimits& budget) {
                 {"max_total_children", budget.max_total_children}};
 }
 
-BudgetLimits parse_budget(const json& value) {
+BudgetLimits parse_budget(const json& value, std::uint32_t max_supported_child_depth) {
     require_object(value, "child budget");
     detail::reject_unknown_fields(
         value, "child budget",
         {"wall_time_ms", "model_tokens", "monetary_microunits", "max_concurrency",
          "max_program_operations", "max_core_steps", "max_dynamic_compiles", "max_child_depth",
          "max_total_children"});
-    return BudgetLimits{required_u64(value, "wall_time_ms"),
-                        required_u64(value, "model_tokens"),
-                        required_u64(value, "monetary_microunits"),
-                        required_u32(value, "max_concurrency"),
-                        required_u64(value, "max_program_operations"),
-                        required_u64(value, "max_core_steps"),
-                        required_u32(value, "max_dynamic_compiles"),
-                        required_u32(value, "max_child_depth"),
-                        required_u64(value, "max_total_children")};
+    const BudgetLimits result{required_u64(value, "wall_time_ms"),
+                              required_u64(value, "model_tokens"),
+                              required_u64(value, "monetary_microunits"),
+                              required_u32(value, "max_concurrency"),
+                              required_u64(value, "max_program_operations"),
+                              required_u64(value, "max_core_steps"),
+                              required_u32(value, "max_dynamic_compiles"),
+                              required_u32(value, "max_child_depth"),
+                              required_u64(value, "max_total_children")};
+    if (result.max_concurrency == 0 || result.max_program_operations == 0 ||
+        result.max_core_steps == 0 || result.max_child_depth > max_supported_child_depth) {
+        throw std::invalid_argument("Child budget must contain positive finite limits");
+    }
+    return result;
 }
 
 json encode_coordinate_without_identity(const ModuleCoordinate& coordinate) {
@@ -190,7 +195,7 @@ ChildProgramDescriptor parse_child(const json& value) {
     result.required_capabilities = parse_strings(value.at("required_capabilities"),
                                                  "required_capabilities");
     result.required_effects = parse_strings(value.at("required_effects"), "required_effects");
-    result.budget = parse_budget(value.at("budget"));
+    result.budget = parse_budget(value.at("budget"), MAX_REPRESENTABLE_CHILD_DEPTH);
     result.minimum_execution_guarantee =
         execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     return result;
@@ -299,6 +304,11 @@ void validate_module_data(ProgramModuleData& data) {
         if (execution_guarantee_rank(child.minimum_execution_guarantee) == 0) {
             throw std::invalid_argument("Child minimum_execution_guarantee is unsupported");
         }
+        if (child.budget.max_concurrency == 0 || child.budget.max_program_operations == 0 ||
+            child.budget.max_core_steps == 0 ||
+            child.budget.max_child_depth > MAX_REPRESENTABLE_CHILD_DEPTH) {
+            throw std::invalid_argument("Child budget must contain positive finite limits");
+        }
     }
     if (std::adjacent_find(data.children.begin(), data.children.end(),
                            [](const auto& lhs, const auto& rhs) { return lhs.name == rhs.name; }) !=
@@ -368,13 +378,13 @@ bool budget_leq(const BudgetLimits& lhs, const BudgetLimits& rhs) {
            lhs.max_total_children <= rhs.max_total_children;
 }
 
-bool budget_positive(const BudgetLimits& budget) {
+bool budget_positive(const BudgetLimits& budget, std::uint32_t max_supported_child_depth) {
     // Zero is a valid attenuation for an unused resource (notably dynamic
     // compilation and nested children). Execution itself still needs a
     // positive operation, step, and concurrency allowance.
     return budget.max_concurrency != 0 && budget.max_program_operations != 0 &&
            budget.max_core_steps != 0 &&
-           budget.max_child_depth <= MAX_SUPPORTED_CHILD_DEPTH;
+           budget.max_child_depth <= max_supported_child_depth;
 }
 
 bool budget_covers_requirements(const BudgetLimits& budget,
@@ -442,7 +452,7 @@ void validate_link_data(ModuleLinkReceiptData& data) {
                    "Module link child_input_contract_fingerprint");
     require_digest(data.child_output_contract_fingerprint,
                    "Module link child_output_contract_fingerprint");
-    if (!budget_positive(data.budget))
+    if (!budget_positive(data.budget, MAX_REPRESENTABLE_CHILD_DEPTH))
         throw std::invalid_argument("Module link budget must contain positive finite limits");
     std::sort(data.granted_capabilities.begin(), data.granted_capabilities.end());
     std::sort(data.granted_effects.begin(), data.granted_effects.end());
@@ -920,10 +930,9 @@ private:
     }
 };
 
-}  // namespace
-
-void validate_program_composition(const ProgramBundle& parent_bundle,
-                                  const ProgramComposition& composition) {
+void validate_program_composition_impl(const ProgramBundle&                parent_bundle,
+                                       const ProgramComposition&           composition,
+                                       std::optional<std::uint32_t>        caller_depth_ceiling) {
     validate_module_resolution(composition.resolution);
     if (composition.parent.lifecycle() != ModuleLifecycle::Active)
         throw std::invalid_argument("Cannot compose a non-active parent module");
@@ -940,6 +949,8 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
         !contains_all(composition.parent.declared_effects(), parent_closure.effects))
         throw std::invalid_argument("Parent executable closure exceeds module authority");
 
+    std::optional<std::uint32_t> resolved_depth_ceiling = caller_depth_ceiling;
+
     std::map<std::string, const ChildProgramBinding*, std::less<>> by_name;
     std::set<std::string, std::less<>> bundle_ids;
     std::set<std::string, std::less<>> version_ids;
@@ -951,9 +962,22 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             throw std::invalid_argument("Composition contains a child identity collision");
         if (child.bundle.id() != child.version.bundle_id())
             throw std::invalid_argument("Composition child version is bound to another bundle");
-        (void)link_module_child(composition.resolution, composition.parent, child.child_name,
-                                child.bundle, child.version);
+        const auto child_policy  = child.version.policy_snapshot();
+        const auto child_ceiling = child_policy.max_supported_child_depth();
+        if (!caller_depth_ceiling) {
+            resolved_depth_ceiling = resolved_depth_ceiling
+                                         ? std::max(*resolved_depth_ceiling, child_ceiling)
+                                         : std::optional<std::uint32_t>{child_ceiling};
+        }
+        const auto receipt = link_module_child(
+            composition.resolution, composition.parent, child.child_name, child.bundle,
+            child.version);
+        if (resolved_depth_ceiling && receipt.budget().max_child_depth > *resolved_depth_ceiling) {
+            throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
+        }
     }
+    const auto effective_depth_ceiling =
+        resolved_depth_ceiling.value_or(MAX_SUPPORTED_CHILD_DEPTH);
     if (by_name.size() != composition.parent.children().size())
         throw std::invalid_argument("Composition does not bind every declared child");
 
@@ -968,6 +992,9 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             execution_guarantee_rank(descriptor.minimum_execution_guarantee)) {
             throw std::invalid_argument(
                 "Composition child guarantee falls below its explicitly accepted floor");
+        }
+        if (descriptor.budget.max_child_depth > effective_depth_ceiling) {
+            throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
         }
         descriptors.emplace(descriptor.name, &descriptor);
     }
@@ -991,7 +1018,7 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
         if (found == requirements.end())
             throw std::invalid_argument("Whole Program composition has an incomplete budget closure");
         if (resource == std::string_view("max_child_depth") &&
-            found->second->maximum > MAX_SUPPORTED_CHILD_DEPTH)
+            found->second->maximum > effective_depth_ceiling)
             throw std::invalid_argument("Child depth exceeds the supported hard ceiling");
         if (resource == std::string_view("max_child_depth")) {
             if (!referenced_children.empty() && found->second->maximum < 1)
@@ -1005,6 +1032,21 @@ void validate_program_composition(const ProgramBundle& parent_bundle,
             throw std::invalid_argument("Child budget exceeds the parent allocation");
         }
     }
+}
+
+}  // namespace
+
+void validate_program_composition(const ProgramBundle& parent_bundle,
+                                  const ProgramComposition& composition) {
+    validate_program_composition_impl(parent_bundle, composition, std::nullopt);
+}
+
+void validate_program_composition(const ProgramBundle&      parent_bundle,
+                                  const ProgramComposition& composition,
+                                  std::uint32_t             max_supported_child_depth) {
+    validate_program_composition_impl(
+        parent_bundle, composition,
+        validate_max_supported_child_depth(max_supported_child_depth));
 }
 
 
@@ -1054,7 +1096,7 @@ ModuleLinkReceipt ModuleLinkReceipt::parse(std::string_view stored_bytes) {
     data.granted_capabilities = parse_strings(value.at("granted_capabilities"),
                                                "granted_capabilities");
     data.granted_effects = parse_strings(value.at("granted_effects"), "granted_effects");
-    data.budget = parse_budget(value.at("budget"));
+    data.budget = parse_budget(value.at("budget"), MAX_REPRESENTABLE_CHILD_DEPTH);
     data.minimum_execution_guarantee =
         execution_guarantee_from_string(required_string(value, "minimum_execution_guarantee"));
     auto result = create(std::move(data));
@@ -1177,7 +1219,8 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
                 throw std::invalid_argument(
                     "Child policy does not pin its module dependency closure");
     }
-    if (!budget_leq(descriptor.budget, child_policy.budget_ceiling()) ||
+    if (!budget_positive(descriptor.budget, child_policy.max_supported_child_depth()) ||
+        !budget_leq(descriptor.budget, child_policy.budget_ceiling()) ||
         !budget_covers_requirements(descriptor.budget,
                                     child_bundle.declared_budget_requirements()))
         throw std::invalid_argument("Child budget exceeds policy or declared requirements");
@@ -1284,6 +1327,9 @@ asio::awaitable<void> visit_module(const ModuleWalk& walk, ModuleCoordinate coor
     for (const auto& effect : module->declared_effects())
         if (!contains(policy.allowed_effects(), effect))
             throw std::invalid_argument("Module effect exceeds the policy authority");
+    for (const auto& child : module->children())
+        if (!budget_positive(child.budget, policy.max_supported_child_depth()))
+            throw std::invalid_argument("Module child budget must contain positive finite limits");
     for (const auto& dependency : module->dependencies()) co_await visit_module(walk, dependency);
     walk.visiting->erase(coordinate.content_identity);
     walk.resolved->emplace(module->id(), *module);

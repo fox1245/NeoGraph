@@ -615,10 +615,12 @@ export async function load(options = {}) {
      * Programs over a provider and a set of stores.
      *
      * @param {{provider: object, owner?: string, stores?: object, limits?: object, budget?: object,
-     *   javascript?: {stackBytes?: number, defineTimeMs?: number}}} config
+     *   maxSupportedChildDepth?: number, javascript?: {stackBytes?: number, defineTimeMs?: number}}} config
      *   `provider` is as for `compile`. `stores` are the host's stores (any of `transitions`, `programs`, `grants`,
      *   `fragments`, `modules`); a store left out is in memory. `limits` is the budget ceiling of the admitted Programs and
      *   `budget` the default budget of a run (`wallTimeMs`, `modelTokens`, `maxConcurrency`, `maxProgramOperations`, ...).
+     *   `maxSupportedChildDepth` sets the host ceiling on `maxChildDepth` across compilation, admission and execution (8 by
+     *   default; a whole number from 1 to 4294967294).
      *   `javascript` sets the limits of the control source: `stackBytes`, the stack that `define()` and `main()` may use
      *   (49152, 48 KiB, by default; a whole number from 16384 up to what the module's own stack holds, which the error of
      *   a value above it states), and `defineTimeMs`, the time `define()` may run when a source is admitted (5000 by
@@ -632,7 +634,7 @@ export async function load(options = {}) {
       if (typeof module._ng_programs_create !== 'function') {
         throw new NeoGraphError({ message: 'this build of the module has no Program support' });
       }
-      const { provider, stores, owner, limits, budget, javascript } = config ?? {};
+      const { provider, stores, owner, limits, budget, javascript, maxSupportedChildDepth } = config ?? {};
       if (!provider) throw new NeoGraphError({ message: 'programs() needs a provider' });
       let text;
       try {
@@ -640,6 +642,7 @@ export async function load(options = {}) {
           provider: JSON.parse(providerJson(provider)),
           ...(owner !== undefined && { owner }), ...(limits !== undefined && { limits }),
           ...(budget !== undefined && { budget }), ...(javascript !== undefined && { javascript }),
+          ...(maxSupportedChildDepth !== undefined && { maxSupportedChildDepth }),
         });
       } catch (error) {
         throw error instanceof NeoGraphError ? error : new NeoGraphError({ message: String(error?.message ?? error) });

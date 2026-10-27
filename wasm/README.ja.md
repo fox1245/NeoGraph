@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=5dd93993031705ff41dfa2c2514b098ea5fc64f6692cdff91177ec049cdf18f0 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=42abbf35124835c1da4b1e5185db5ae192e6c83017aa1c19e54d5faa99de28ed -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -177,11 +177,11 @@ console.log(done.output.messages.at(-1).content);
 programs.release();
 ```
 
-- **`neograph.programs({ provider, owner, limits, budget, stores, javascript })`** は、1 つのプロバイダーと 1 組のストアの上の `Programs` オブジェクトを作ります。プロバイダーが不正なとき、
+- **`neograph.programs({ provider, owner, limits, budget, maxSupportedChildDepth, stores, javascript })`** は、1 つのプロバイダーと 1 組のストアの上の `Programs` オブジェクトを作ります。プロバイダーが不正なとき、
   またはモジュールが Program 対応なしでビルドされているときは `NeoGraphError` を投げます。`provider` は `compile` と同じで、1 つ加わります。`catalogue` は SDK のモデルカタログ
   （`{ version: 1, models: [...] }`）で、組み込みのカタログの上に重ねられます。`owner` はオブジェクトの Program と実行のスコープを決めます。`stores` はホスト自身のストアです
   （[JavaScript の Program ストア](#program-stores-in-javascript)）。省いたストアはメモリ上にあります。`limits` はホストの上限で、承認される Program に与えられる最大値（既定値は実行あたり動的コンパイル 1 回、子の深さ 4、子 4 個（`maxDynamicCompiles: 1`、`maxChildDepth: 4`、`maxTotalChildren: 4`）を許し、子を合成したりより深い階層を作ったりするホストはここで `maxDynamicCompiles`、`maxChildDepth`、`maxTotalChildren` を引き上げます）、`budget` は予算を指定しない実行の予算で、
-  どちらも下のように書きます。`javascript` は `{ stackBytes, defineTimeMs }` で、制御ソースが使えるスタックと `define()` が実行できる時間です。予算のあとで説明します。
+  どちらも下のように書きます。`maxSupportedChildDepth` はホストの子階層の深さ上限です（既定値は `8`、`MAX_SUPPORTED_CHILD_DEPTH`。ランタイムが表現できる範囲内の正の整数でなければならず、コンパイル、承認、実行全体で `maxChildDepth` を制限し、`null`、非整数、範囲外の値は `NeoGraphError` を投げます）。`javascript` は `{ stackBytes, defineTimeMs }` で、制御ソースが使えるスタックと `define()` が実行できる時間です。予算のあとで説明します。
 - **`programs.admit(source)`** は Program をコンパイルして承認し、`{ id, bundleId, name }` で解決します。`source` は JavaScript 制御ソースのテキスト、`{ javascript, name, budget }` または `{ javascript, name, budgetBounds: { minimum, maximum } }`（両方がある場合は `budgetBounds` が優先されます）、
   またはすでにドキュメント形式の Program のための `{ document, name }` です。`budget` はこのバージョンの実行に付与される正確な予算、`budgetBounds` は付与が取り得る範囲で、置き換えられるバージョンに必要です（置き換えは最初の付与より少ない元の残りの予算を引き継ぐためです）。省いたメンバーはホストの既定の予算（`budget` と `budgetBounds.maximum`）またはなし（`budgetBounds.minimum` では `0` のため、`minimum` には構造上の下限メンバーを指定する必要があります）のままです。最小値は Program の構造上の下限（同時試行、Program 操作、Core ステップがそれぞれ少なくとも 1 つ、また Program が子をディスパッチするときは深さ（段数）と子がそれぞれ少なくとも 1 つ）を満たさなければならず、満たさないものはコンパイラーが拒否します。どちらもない場合はソース自身の宣言が適用されます。コンパイラーや承認ポリシーが拒否したソースは、`compile` または `admission` タイプの `NeoGraphError` で拒否され、
   `diagnostics` に `{ code, message, pointer, witness }` が並びます。同じソースと同じ予算範囲をもう一度承認すると同じバージョンになり、異なる `budget` または `budgetBounds` を指定すると別のバンドルとバージョンにコンパイルされます。

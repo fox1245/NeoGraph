@@ -1849,6 +1849,57 @@ TEST(ProgramCompilerTest, AllowsExplicitChildCapacityForProgramRuntimeStartChild
                         .compile(source_from(document)));
 }
 
+TEST(ProgramCompilerTest, EnforcesConfiguredChildDepthCeilingAndReportsWitness) {
+    const auto snapshot = complete_snapshot();
+
+    ProgramCompilerConfig zero_config{"program-compiler-test/v1"};
+    zero_config.max_supported_child_depth = 0;
+    EXPECT_THROW((void)ProgramCompiler(snapshot, zero_config), std::invalid_argument);
+
+    ProgramCompilerConfig overflow_config{"program-compiler-test/v1"};
+    overflow_config.max_supported_child_depth =
+        static_cast<std::uint64_t>(MAX_REPRESENTABLE_CHILD_DEPTH) + 1u;
+    EXPECT_THROW((void)ProgramCompiler(snapshot, overflow_config), std::invalid_argument);
+
+    auto make_depth_document = [](std::uint32_t depth) {
+        auto document     = program_document();
+        auto requirements = document["declared_budget_requirements"];
+        for (std::size_t index = 0; index < requirements.size(); ++index) {
+            const auto resource = requirements[index]["resource"].get<std::string>();
+            if (resource == "max_child_depth" || resource == "max_total_children") {
+                requirements[index]["minimum"] = depth;
+                requirements[index]["maximum"] = depth;
+            }
+        }
+        document["declared_budget_requirements"] = std::move(requirements);
+        return document;
+    };
+
+    try {
+        (void)ProgramCompiler(snapshot, {"program-compiler-test/v1"})
+            .compile(source_from(make_depth_document(9)));
+        FAIL() << "Expected default compiler ceiling to reject max_child_depth 9";
+    } catch (const ProgramCompileError& error) {
+        ASSERT_EQ(error.diagnostics().size(), 1u);
+        EXPECT_EQ(error.diagnostics()[0].code, "P_BUDGET_INVALID");
+        EXPECT_EQ(error.diagnostics()[0].witness["hard_ceiling"], 8u);
+    }
+
+    ProgramCompilerConfig deep_config{"program-compiler-test/v1"};
+    deep_config.max_supported_child_depth = 12;
+    ProgramCompiler deep_compiler(snapshot, deep_config);
+    EXPECT_NO_THROW((void)deep_compiler.compile(source_from(make_depth_document(12))));
+
+    try {
+        (void)deep_compiler.compile(source_from(make_depth_document(13)));
+        FAIL() << "Expected configured compiler ceiling 12 to reject max_child_depth 13";
+    } catch (const ProgramCompileError& error) {
+        ASSERT_EQ(error.diagnostics().size(), 1u);
+        EXPECT_EQ(error.diagnostics()[0].code, "P_BUDGET_INVALID");
+        EXPECT_EQ(error.diagnostics()[0].witness["hard_ceiling"], 12u);
+    }
+}
+
 TEST(ProgramCompilerTest, LowersOnlyDirectlyJoinedVerifiedChildBindingSpawns) {
     const auto snapshot = complete_snapshot();
     auto document = operation_document();

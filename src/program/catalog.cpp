@@ -760,6 +760,7 @@ std::uint64_t policy_ceiling(std::string_view resource, const BudgetLimits& limi
 
 void validate_budgets(const ProgramBundle&  bundle,
                       const PolicySnapshot& policy,
+                      std::uint32_t         max_supported_child_depth,
                       AdmissionDiagnostics& diagnostics) {
     const auto&                                     budgets = bundle.declared_budget_requirements();
     std::map<std::string, const BudgetRequirement*> by_resource;
@@ -798,6 +799,13 @@ void validate_budgets(const ProgramBundle&  bundle,
                             json{{"resource", budget.resource},
                                  {"minimum", budget.minimum},
                                  {"maximum", budget.maximum}});
+        }
+        if (resource == "max_child_depth" && budget.maximum > max_supported_child_depth) {
+            diagnostics.add("P_BUDGET_INVALID", "/declared_budget_requirements",
+                            "Child depth exceeds the supported hard ceiling",
+                            json{{"resource", budget.resource},
+                                 {"maximum", budget.maximum},
+                                 {"hard_ceiling", max_supported_child_depth}});
         }
         const auto ceiling = policy_ceiling(resource, policy.budget_ceiling());
         if (budget.maximum > ceiling) {
@@ -1058,7 +1066,8 @@ asio::awaitable<ProgramVersion> ProgramCatalog::admit_composed_async(
         throw std::invalid_argument("Composed admission requires a configured ModuleStore");
     if (composition.parent.owner_scope() != admission.owner_scope)
         throw std::invalid_argument("Composed parent module owner differs from admission scope");
-    validate_program_composition(input_bundle, composition);
+    validate_program_composition(
+        input_bundle, composition, admission.policy.max_supported_child_depth());
     // Child identities are authority-bearing inputs. They must already be
     // present in the owner-qualified durable catalog; a caller cannot pass a
     // merely well-formed fabricated ProgramVersion into composition.
@@ -1318,7 +1327,15 @@ asio::awaitable<ProgramVersion> ProgramCatalog::materialize_async(
                         json{{"error", error.what()}});
     }
 
-    validate_budgets(bundle, admission.policy, diagnostics);
+    const auto effective_child_depth_ceiling = admission.policy.max_supported_child_depth();
+    if (admission.policy.budget_ceiling().max_child_depth > effective_child_depth_ceiling) {
+        diagnostics.add(
+            "P_ADMIT_POLICY", "/policy/budget_ceiling/max_child_depth",
+            "Policy budget_ceiling max_child_depth exceeds profile max_supported_child_depth",
+            json{{"policy_ceiling", admission.policy.budget_ceiling().max_child_depth},
+                 {"hard_ceiling", effective_child_depth_ceiling}});
+    }
+    validate_budgets(bundle, admission.policy, effective_child_depth_ceiling, diagnostics);
     const auto concurrency = std::find_if(
         bundle.declared_budget_requirements().begin(), bundle.declared_budget_requirements().end(),
         [](const auto& requirement) { return requirement.resource == "max_concurrency"; });

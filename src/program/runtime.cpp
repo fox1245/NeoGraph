@@ -1085,7 +1085,8 @@ std::uint64_t ceiling_value(const BudgetLimits& budget, std::string_view resourc
 }
 void validate_invocation(const detail::MaterializedProgram& materialized,
                          const ProgramInvocation&           invocation,
-                         bool                               allow_child_metadata = false) {
+                         bool                               allow_child_metadata,
+                         std::uint32_t                      max_supported_child_depth) {
     if (!allow_child_metadata && (!invocation.parent_run_id.empty() || invocation.child_depth != 0))
         throw_runtime_diagnostic("P_START_CHILD_METADATA",
                                  "Root Program invocation cannot carry child lineage metadata");
@@ -1111,6 +1112,7 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
         static_cast<std::uint64_t>(std::numeric_limits<std::chrono::milliseconds::rep>::max()) / 2;
     // Name the first rule the invocation budget breaks.
     std::string invalid;
+    bool        depth_ceiling_exceeded = false;
     if (budget.wall_time_ms == 0)
         invalid = "wall_time_ms must be positive";
     else if (budget.wall_time_ms > max_safe_wall_time_ms)
@@ -1130,13 +1132,19 @@ void validate_invocation(const detail::MaterializedProgram& materialized,
     else if (has_dynamic_expansion && budget.max_dynamic_compiles == 0)
         invalid = "max_dynamic_compiles must be positive for a Program that uses "
                   "expand_task_graph";
-    else if (budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH)
-        invalid = "max_child_depth exceeds " + std::to_string(MAX_SUPPORTED_CHILD_DEPTH);
-    else if ((budget.max_child_depth == 0) != (budget.max_total_children == 0))
+    else if (budget.max_child_depth > max_supported_child_depth) {
+        invalid                = "max_child_depth exceeds " + std::to_string(max_supported_child_depth);
+        depth_ceiling_exceeded = true;
+    } else if ((budget.max_child_depth == 0) != (budget.max_total_children == 0))
         invalid = "max_child_depth and max_total_children must be enabled together";
     if (!invalid.empty()) {
+        json witness{{"rule", invalid}};
+        if (depth_ceiling_exceeded) {
+            witness["hard_ceiling"] = max_supported_child_depth;
+            witness["requested"]    = budget.max_child_depth;
+        }
         throw_runtime_diagnostic("P_START_BUDGET", "Program invocation budget is invalid: " + invalid,
-                                 json{{"rule", invalid}});
+                                 std::move(witness));
     }
 
     const auto ceiling = materialized.version.policy_snapshot().budget_ceiling();
@@ -1290,7 +1298,8 @@ void validate_child_link(const detail::MaterializedProgram& materialized,
                          const ProgramVersion&              requested_version,
                          const ProgramInvocation&           invocation,
                          const RunBudget&                   parent_budget,
-                         const RunBudget&                   reserved_children) {
+                         const RunBudget&                   reserved_children,
+                         std::uint32_t                      max_supported_child_depth) {
     if (link.owner_scope() != requested_version.ownership_scope())
         throw_runtime_diagnostic("P_CHILD_OWNER", "Child link owner scope is not admitted");
     if (link.child_program_version_id() != requested_version.id() ||
@@ -1333,12 +1342,14 @@ void validate_child_link(const detail::MaterializedProgram& materialized,
         throw_runtime_diagnostic("P_CHILD_BUDGET",
                                  "Child invocation exceeds its immutable link budget");
     if (parent_budget.max_child_depth == 0)
-        throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth budget is exhausted");
+        throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth budget is exhausted",
+                                 json{{"hard_ceiling", max_supported_child_depth}});
     const auto remaining_depth = parent_budget.max_child_depth - 1;
     if (invocation.budget.max_child_depth >
         std::min(link.budget().max_child_depth, remaining_depth)) {
         throw_runtime_diagnostic("P_CHILD_DEPTH",
-                                 "Child invocation would retain an unbounded depth grant");
+                                 "Child invocation would retain an unbounded depth grant",
+                                 json{{"hard_ceiling", max_supported_child_depth}});
     }
     if (reserved_children.max_total_children >= parent_budget.max_total_children) {
         throw_runtime_diagnostic("P_CHILD_COUNT", "Parent child-count budget is exhausted");
@@ -5211,6 +5222,10 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         process_state      = process_runtime_state(*transitions);
     }
 
+    static std::uint32_t effective_child_depth_ceiling(const ProgramVersion& version) {
+        return version.policy_snapshot().max_supported_child_depth();
+    }
+
     // A control for a run read back from the store: the run's events are loaded first, which only a coroutine can await.
     asio::awaitable<std::shared_ptr<detail::RunControl>> make_record_control(ProgramRunRecord record) {
         auto events  = co_await transitions->load_events(record.owner_scope(), record.run_id(), 0);
@@ -6588,7 +6603,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_resolved_core(std::string  
             "Only an exact host-selected activation can bind a new run");
     }
     auto pinned = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, version));
-    validate_invocation(*pinned, invocation);
+    const auto max_supported_child_depth = impl_->effective_child_depth_ceiling(pinned->version);
+    validate_invocation(*pinned, invocation, false, max_supported_child_depth);
     const auto run_id =
         invocation.requested_run_id.empty() ? generate_run_id() : invocation.requested_run_id;
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
@@ -6708,9 +6724,18 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
     if (!resolved) throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     auto pinned = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, *resolved));
 
-    const auto parent_depth = parent.control_->persisted_invocation.child_depth;
+    const auto max_supported_child_depth = impl_->effective_child_depth_ceiling(*resolved);
+    const auto parent_depth              = parent.control_->persisted_invocation.child_depth;
     if (parent_depth == std::numeric_limits<std::uint32_t>::max())
-        throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth exceeds uint32 range");
+        throw_runtime_diagnostic("P_CHILD_DEPTH", "Child depth exceeds uint32 range",
+                                 json{{"hard_ceiling", max_supported_child_depth}});
+    if (parent_depth >= max_supported_child_depth) {
+        throw_runtime_diagnostic("P_CHILD_DEPTH",
+                                 "Child depth exceeds configured max_supported_child_depth",
+                                 json{{"hard_ceiling", max_supported_child_depth},
+                                      {"parent_depth", parent_depth},
+                                      {"requested", parent_depth + 1}});
+    }
     const std::string parent_run_id(parent.control_->logical_run_id);
     invocation.parent_run_id    = parent_run_id;
     invocation.child_depth      = parent_depth + 1;
@@ -6783,8 +6808,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
         parent_budget = restore_reserved_resources(parent_record.remaining_budget(),
                                                     parent_journal.inflight_reservation);
         const auto reserved = impl_->reserved_children(parent_run_id);
-        validate_child_link(*pinned, link, version, invocation, parent_budget, reserved);
-        validate_invocation(*pinned, invocation, true);
+        validate_child_link(*pinned, link, version, invocation, parent_budget, reserved,
+                            max_supported_child_depth);
+        validate_invocation(*pinned, invocation, true, max_supported_child_depth);
     }
 
     std::shared_ptr<ChildQuotaReservation> global_quota;
@@ -7052,7 +7078,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replay_recorded_core(
             "Unmanaged native execution cannot be admitted as recorded replay");
     auto projection = runtime_projection(invocation, events);
     // Validate immutable permissions, not the already-spent resource remainder.
-    validate_invocation(*pinned, projection);
+    validate_invocation(*pinned, projection, false, impl_->effective_child_depth_ceiling(*version));
     const auto binding = capability_binding_receipt_root(
         version->core_materialization_receipt().capability_bindings);
     if (binding != source->binding_fingerprint() || pinned->bundle.id() != source->bundle_id())
@@ -7957,7 +7983,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replace_core(std::string         
         *source_record, source_lineage->lineage, transition_time);
     invocation.budget = remaining;
     if (invocation.canonical_request) invocation.canonical_request->budget = remaining;
-    validate_invocation(*target_pinned, invocation, true);
+    validate_invocation(*target_pinned, invocation, true,
+                        impl_->effective_child_depth_ceiling(*resolved_target));
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, target.id(), run_id);
 
     const auto target_thread_id =
@@ -9313,15 +9340,20 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
             throw_runtime_diagnostic("P_VERSION_NOT_FOUND",
                                      "Program version required for recovery was not found");
         }
-        auto        pinned = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, *version));
-        const auto& recovery_budget = record->remaining_budget();
-        if (record->child_depth() > MAX_SUPPORTED_CHILD_DEPTH ||
-            recovery_budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH ||
+        auto        pinned                    = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, *version));
+        const auto  max_supported_child_depth = impl_->effective_child_depth_ceiling(*version);
+        const auto& recovery_budget           = record->remaining_budget();
+        const bool  recovery_depth_exceeded   =
+            record->child_depth() > max_supported_child_depth ||
+            recovery_budget.max_child_depth > max_supported_child_depth;
+        if (recovery_depth_exceeded ||
             (recovery_budget.max_child_depth == 0) != (recovery_budget.max_total_children == 0) ||
             !budget_leq(recovery_budget, pinned->version.policy_snapshot().budget_ceiling())) {
             throw_runtime_diagnostic(
                 "P_RUN_RECOVERY_BUDGET",
-                "Running Program recovery exceeds its admitted child budget boundary");
+                "Running Program recovery exceeds its admitted child budget boundary",
+                recovery_depth_exceeded ? json{{"hard_ceiling", max_supported_child_depth}}
+                                        : json::object());
         }
         const auto binding_fingerprint = capability_binding_receipt_root(
             version->core_materialization_receipt().capability_bindings);
@@ -9611,11 +9643,6 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         (co_await load_active_run_lineage_async(*impl_->transitions, *previous));
     const auto available_budget = active_lineage ? active_lineage->lineage.remaining_budget()
                                                  : previous->remaining_budget();
-    if (previous->child_depth() > MAX_SUPPORTED_CHILD_DEPTH ||
-        available_budget.max_child_depth > MAX_SUPPORTED_CHILD_DEPTH) {
-        throw_runtime_diagnostic("P_RESUME_BUDGET",
-                                 "Program resume exceeds the supported child depth boundary");
-    }
     if (previous->recorded_binding_set_fingerprint()) {
         throw_runtime_diagnostic(
             "P_REPLAY_EVIDENCE_REQUIRED",
@@ -9806,6 +9833,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         throw_runtime_diagnostic("P_VERSION_NOT_FOUND", "Program version was not found");
     }
     auto pinned = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, *version));
+    const auto max_supported_child_depth = impl_->effective_child_depth_ceiling(*version);
+    if (previous->child_depth() > max_supported_child_depth ||
+        available_budget.max_child_depth > max_supported_child_depth) {
+        throw_runtime_diagnostic("P_RESUME_BUDGET",
+                                 "Program resume exceeds the supported child depth boundary",
+                                 json{{"hard_ceiling", max_supported_child_depth}});
+    }
 
     const auto binding_fingerprint = capability_binding_receipt_root(
         version->core_materialization_receipt().capability_bindings);
