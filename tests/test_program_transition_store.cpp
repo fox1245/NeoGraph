@@ -6184,3 +6184,82 @@ TEST(ProgramTransitionStoreTest, RunRecordCacheLruAndFailClosed) {
     expect_same_record(disabled.parse("owner-a", "run-1", bytes_1), pub_1.run_record);
     EXPECT_THROW((void)disabled.parse("owner-a", "run-1", "broken"), std::exception);
 }
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
+namespace {
+
+std::string sqlite_journal_mode(const std::string& path) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+        sqlite3_close_v2(db);
+        throw std::runtime_error("cannot open the SQLite file");
+    }
+    sqlite3_stmt* statement = nullptr;
+    std::string   mode;
+    if (sqlite3_prepare_v2(db, "PRAGMA journal_mode", -1, &statement, nullptr) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW) {
+        if (const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(statement, 0)))
+            mode = text;
+    }
+    sqlite3_finalize(statement);
+    sqlite3_close_v2(db);
+    return mode;
+}
+
+// Publishes a start and two command entries, closes the store, and reads every one back from a reopened store.
+void expect_sqlite_journal_mode_keeps_every_publication(SQLiteProgramTransitionStore::JournalMode mode,
+                                                        const std::string&                        expected_mode) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-journal-mode-" + expected_mode + "-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    const auto remove_files = [&] {
+        for (const auto* suffix : {"", "-wal", "-shm", "-journal"}) std::filesystem::remove(path + suffix);
+    };
+    remove_files();
+    SQLiteProgramTransitionStore::Options options;
+    options.journal_mode = mode;
+
+    const auto start   = start_publication_for("run-1", digest('1'), digest('2'), budget(), 10);
+    const auto pending = javascript_command_publication(start, javascript_command_entry(1, false), 20);
+    const auto done    = javascript_command_publication(pending, javascript_command_entry(2, true), 30);
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path, options);
+        EXPECT_EQ(sqlite_journal_mode(path), expected_mode);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, start), ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, pending),
+                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.compare_publish("owner-a", pending.journal_record.id, done),
+                  ProgramTransitionPublishResult::Published);
+    }
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path, options);
+        EXPECT_EQ(sqlite_journal_mode(path), expected_mode);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        EXPECT_EQ(run->serialize_canonical(), done.run_record.serialize_canonical());
+        const auto latest = store.latest("owner-a", "run-1");
+        ASSERT_TRUE(latest.has_value());
+        EXPECT_EQ(latest->id, done.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(),
+                  start.events.size() + pending.events.size() + done.events.size());
+        const auto commands = store.load_javascript_commands("owner-a", "run-1", 0);
+        ASSERT_EQ(commands.size(), 2U);
+        EXPECT_EQ(commands[0].id(), pending.commands.front().id());
+        EXPECT_EQ(commands[1].id(), done.commands.front().id());
+    }
+    remove_files();
+}
+
+}  // namespace
+
+TEST(ProgramTransitionStoreTest, SQLiteWalModeReadsEveryCommittedPublicationAfterReopen) {
+    expect_sqlite_journal_mode_keeps_every_publication(SQLiteProgramTransitionStore::JournalMode::Wal, "wal");
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteRollbackJournalOptionWorksAcrossReopen) {
+    expect_sqlite_journal_mode_keeps_every_publication(SQLiteProgramTransitionStore::JournalMode::Rollback,
+                                                       "delete");
+}
+#endif

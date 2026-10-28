@@ -12,12 +12,14 @@
 #include <functional>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -40,16 +42,102 @@ void exec(sqlite3* db, std::string_view sql) {
     }
 }
 
+struct StatementCache {
+    std::map<std::string, std::vector<sqlite3_stmt*>, std::less<>> statements;
+
+    std::pair<sqlite3_stmt*, std::vector<sqlite3_stmt*>*> acquire(sqlite3*         db,
+                                                                  std::string_view sql) {
+        auto found = statements.find(sql);
+        if (found == statements.end()) {
+            found = statements.emplace(std::string(sql), std::vector<sqlite3_stmt*>{}).first;
+        }
+        auto& pool = found->second;
+        if (!pool.empty()) {
+            sqlite3_stmt* statement = pool.back();
+            pool.pop_back();
+            if (sqlite3_reset(statement) != SQLITE_OK) {
+                sqlite3_finalize(statement);
+                throw_sqlite(db, "SQLite reset");
+            }
+            if (sqlite3_clear_bindings(statement) != SQLITE_OK) {
+                sqlite3_finalize(statement);
+                throw_sqlite(db, "SQLite clear bindings");
+            }
+            return {statement, &pool};
+        }
+        sqlite3_stmt* statement = nullptr;
+        if (sqlite3_prepare_v2(db, sql.data(), static_cast<int>(sql.size()), &statement, nullptr) !=
+            SQLITE_OK) {
+            throw_sqlite(db, "SQLite prepare");
+        }
+        return {statement, &pool};
+    }
+
+    void clear() noexcept {
+        for (auto& [sql, pool] : statements) {
+            for (sqlite3_stmt* statement : pool) {
+                sqlite3_finalize(statement);
+            }
+        }
+        statements.clear();
+    }
+
+    ~StatementCache() { clear(); }
+};
+
+std::mutex& statement_cache_registry_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::unordered_map<sqlite3*, StatementCache*>& statement_cache_registry() {
+    static std::unordered_map<sqlite3*, StatementCache*> registry;
+    return registry;
+}
+
+void register_statement_cache(sqlite3* db, StatementCache* cache) {
+    std::lock_guard lock(statement_cache_registry_mutex());
+    statement_cache_registry()[db] = cache;
+}
+
+void unregister_statement_cache(sqlite3* db) noexcept {
+    std::lock_guard lock(statement_cache_registry_mutex());
+    statement_cache_registry().erase(db);
+}
+
+StatementCache* find_statement_cache(sqlite3* db) noexcept {
+    std::lock_guard lock(statement_cache_registry_mutex());
+    const auto found = statement_cache_registry().find(db);
+    return found == statement_cache_registry().end() ? nullptr : found->second;
+}
+
 class Statement final {
 public:
     Statement(sqlite3* db, std::string_view sql) : db_(db) {
+        if (auto* cache = find_statement_cache(db_)) {
+            const auto acquired = cache->acquire(db_, sql);
+            statement_          = acquired.first;
+            pool_               = acquired.second;
+            return;
+        }
         if (sqlite3_prepare_v2(db_, sql.data(), static_cast<int>(sql.size()), &statement_, nullptr) !=
             SQLITE_OK)
             throw_sqlite(db_, "SQLite prepare");
     }
     Statement(const Statement&) = delete;
     Statement& operator=(const Statement&) = delete;
-    ~Statement() { sqlite3_finalize(statement_); }
+    ~Statement() {
+        if (!statement_) return;
+        if (pool_) {
+            sqlite3_reset(statement_);
+            sqlite3_clear_bindings(statement_);
+            try {
+                pool_->push_back(statement_);
+                return;
+            } catch (...) {}
+        }
+        sqlite3_finalize(statement_);
+    }
 
     sqlite3_stmt* get() const noexcept { return statement_; }
 
@@ -95,8 +183,9 @@ public:
     }
 
 private:
-    sqlite3*      db_        = nullptr;
-    sqlite3_stmt* statement_ = nullptr;
+    sqlite3*                    db_        = nullptr;
+    sqlite3_stmt*               statement_ = nullptr;
+    std::vector<sqlite3_stmt*>* pool_      = nullptr;
 };
 
 class Transaction final {
@@ -1028,12 +1117,17 @@ struct SQLiteProgramTransitionStore::Impl {
     Impl(std::string value, Options options)
         : path(std::move(value)), run_record_cache(options.run_record_cache_capacity) {}
     ~Impl() {
-        if (db) sqlite3_close_v2(db);
+        if (db) {
+            unregister_statement_cache(db);
+            statement_cache.clear();
+            sqlite3_close_v2(db);
+        }
     }
 
     std::string                    path;
     std::string                    coordination_key;
     sqlite3*                       db = nullptr;
+    mutable StatementCache         statement_cache;
     mutable detail::RunRecordCache run_record_cache;
     mutable std::mutex             mutex;
 };
@@ -1067,8 +1161,26 @@ SQLiteProgramTransitionStore::SQLiteProgramTransitionStore(std::string database_
         if (sqlite3_busy_timeout(impl_->db, 5000) != SQLITE_OK)
             throw_sqlite(impl_->db, "SQLite configure busy timeout");
         exec(impl_->db, "PRAGMA foreign_keys = ON");
+        switch (options.journal_mode) {
+            case JournalMode::Wal:
+                exec(impl_->db, "PRAGMA journal_mode = WAL");
+                break;
+            case JournalMode::Rollback:
+                exec(impl_->db, "PRAGMA journal_mode = DELETE");
+                break;
+            default:
+                throw std::invalid_argument(
+                    "Unsupported SQLite ProgramTransitionStore journal mode");
+        }
+        // Keep PRAGMA synchronous = FULL in both WAL and rollback journal modes
+        // so every committed publication is synced to durable storage before
+        // commit returns.
+        exec(impl_->db, "PRAGMA synchronous = FULL");
         initialize_schema(impl_->db);
+        register_statement_cache(impl_->db, &impl_->statement_cache);
     } catch (...) {
+        unregister_statement_cache(impl_->db);
+        impl_->statement_cache.clear();
         sqlite3_close_v2(impl_->db);
         impl_->db = nullptr;
         throw;

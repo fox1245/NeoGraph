@@ -738,6 +738,25 @@ std::uint64_t await_remaining_ms(std::uint64_t started_at, std::uint64_t timeout
     return elapsed >= timeout_ms ? 0U : timeout_ms - elapsed;
 }
 
+void collect_launch_await_starts(const JavaScriptCommand&  command,
+                                 const std::string&        operation_id,
+                                 std::size_t               depth,
+                                 const json&               recorded_starts,
+                                 std::vector<std::string>& out) {
+    if (depth > kMaxJavaScriptStructuredScopeDepth) return;
+    if (command.protocol_version() != JavaScriptCommand::PROTOCOL_VERSION) return;
+    if (command.kind() != JavaScriptCommandKind::Await ||
+        command.import_slot() != JAVASCRIPT_IMPORT_SLOT_AWAIT)
+        return;
+    const auto arguments = command.arguments();
+    if (!arguments.is_object() || !arguments.contains("timeout_ms") ||
+        !arguments.at("timeout_ms").is_number_unsigned())
+        return;
+    if (!recorded_starts.is_object() || !recorded_starts.contains(operation_id)) {
+        out.push_back(operation_id);
+    }
+}
+
 PlanExecution plan_failure(ProgramTerminalStatus status,
                            std::string           code,
                            std::string           message,
@@ -4712,6 +4731,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         auto execute_javascript_control =
             [&](JavaScriptGenerator& session) -> asio::awaitable<PlanExecution> {
             const auto executor = co_await                     asio::this_coro::executor;
+            std::vector<ProgramJavaScriptCommandJournalEntry>  durable_commands;
+            if (!control->recorded_replay)
+                durable_commands = co_await control->async_transitions().load_javascript_commands(
+                    control->owner_scope, control->run_id);
+            auto* const attempt_commands =
+                control->recorded_replay ? nullptr : &durable_commands;
             std::optional<std::pair<std::string, std::string>> exact_core_resume;
             // The settled members of the paused join this attempt resumes (#380).
             json resumed_join_members = json::object();
@@ -4723,6 +4748,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             PureMutex     await_starts_mutex;
             OperationLock await_start_publication;
             json          await_starts = json::object();
+            struct PendingAwaitBatch {
+                std::vector<std::string> ids;
+                std::uint64_t            started_at = 0;
+                bool                     failed     = false;
+            };
+            std::map<std::string, std::shared_ptr<PendingAwaitBatch>>
+                pending_await_batches;
             bool supplied_core_resume_required = false;
             bool supplied_core_resume_consumed = false;
             // #402: the command a reconnect recovers continues each of its calls
@@ -5069,28 +5101,59 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         // that start together record their starts one after the other. The mutex
                         // guards the map only; the store is never reached while it is held.
                         const auto publication = co_await await_start_publication.lock_async();
-                        bool       recorded    = false;
+                        bool       recorded     = false;
+                        bool       batch_failed = false;
+                        std::shared_ptr<PendingAwaitBatch> batch;
                         {
                             std::lock_guard lock(await_starts_mutex);
                             if (await_starts.contains(operation_id)) {
                                 started_at = recorded_start_ms(await_starts[operation_id]);
                                 recorded   = true;
+                            } else if (const auto found = pending_await_batches.find(operation_id);
+                                       found != pending_await_batches.end()) {
+                                batch        = found->second;
+                                if (batch) started_at = batch->started_at;
+                                batch_failed = batch && batch->failed;
                             }
                         }
+                        if (batch_failed)
+                            co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
+                                           "Could not durably record the start of a "
+                                           "JavaScript await");
                         if (!recorded && !control->recorded_replay && active_javascript_command) {
+                            json starts_to_publish = json::object();
+                            {
+                                std::lock_guard lock(await_starts_mutex);
+                                if (batch) {
+                                    for (const auto& id : batch->ids) {
+                                        if (!await_starts.contains(id))
+                                            starts_to_publish[id] = started_at;
+                                    }
+                                } else {
+                                    starts_to_publish[operation_id] = started_at;
+                                }
+                            }
                             const auto& active    = *active_javascript_command;
                             auto publish_call_1 = control->publish_javascript_command(
                                 active.ordinal, active.command, active.effect_identity,
                                 std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-                                json{{operation_id, started_at}});
+                                starts_to_publish, attempt_commands);
                             const auto  published = co_await std::move(publish_call_1);
                             if (published != ProgramTransitionPublishResult::Published &&
-                                published != ProgramTransitionPublishResult::AlreadyPresent)
+                                published != ProgramTransitionPublishResult::AlreadyPresent) {
+                                if (batch) {
+                                    std::lock_guard lock(await_starts_mutex);
+                                    batch->failed = true;
+                                }
                                 co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
                                                "Could not durably record the start of a "
                                                "JavaScript await");
+                            }
                             std::lock_guard lock(await_starts_mutex);
-                            await_starts[operation_id] = started_at;
+                            for (const auto& [id, recorded_start] : starts_to_publish.items()) {
+                                await_starts[id] = recorded_start;
+                                pending_await_batches.erase(id);
+                            }
                         }
                     }
                     const auto remaining = await_remaining_ms(started_at, *timeout, now_unix);
@@ -5392,203 +5455,229 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // A member can complete before the initial launch loop finishes. Completion
                 // handlers therefore retain this dispatcher rather than a reference to a
                 // stack-local std::function.
-                auto launch_member = std::make_shared<std::function<void(std::size_t)>>();
-                *launch_member     = [&](std::size_t index) {
-                    if (const auto observer =
-                            join_member_launch_observer.load(std::memory_order_acquire))
-                        observer(index, replayed[index].has_value());
-                    {
-                        std::lock_guard lock(state->mutex);
-                        state->started[index] = true;
-                        ++state->active;
-                        state->tokens[index] = operation_token->fork();
-                        state->scopes[index] = std::make_shared<JavaScriptScopeState>();
+                auto launch_members =
+                    std::make_shared<std::function<void(const std::vector<std::size_t>&)>>();
+                *launch_members = [&](const std::vector<std::size_t>& batch) {
+                    if (batch.empty()) return;
+                    if (!operation_token->is_cancelled()) {
+                        const auto               now_unix = unix_time_ms();
+                        std::vector<std::string> batch_await_ids;
+                        {
+                            std::lock_guard lock(await_starts_mutex);
+                            for (const auto index : batch) {
+                                if (replayed[index]) continue;
+                                collect_launch_await_starts(
+                                    members[index],
+                                    operation_id + "/member/" + std::to_string(index),
+                                    scope_depth + 1, await_starts, batch_await_ids);
+                            }
+                            if (!batch_await_ids.empty()) {
+                                const auto shared_batch =
+                                    std::make_shared<PendingAwaitBatch>(PendingAwaitBatch{
+                                        std::move(batch_await_ids), now_unix, false});
+                                for (const auto& id : shared_batch->ids)
+                                    pending_await_batches[id] = shared_batch;
+                            }
+                        }
                     }
-                    asio::co_spawn(
-                        completion_executor,
-                        replayed[index]
-                            ? replay_settled_member(*replayed[index])
-                            : execute_command(members[index],
-                                              operation_id + "/member/" + std::to_string(index),
-                                              state->tokens[index], state->scopes[index],
-                                              scope_depth + 1, false, reconnect_child_only),
-                        asio::bind_executor(
+                    for (const auto index : batch) {
+                        if (const auto observer =
+                                join_member_launch_observer.load(std::memory_order_acquire))
+                            observer(index, replayed[index].has_value());
+                        {
+                            std::lock_guard lock(state->mutex);
+                            state->started[index] = true;
+                            ++state->active;
+                            state->tokens[index] = operation_token->fork();
+                            state->scopes[index] = std::make_shared<JavaScriptScopeState>();
+                        }
+                        asio::co_spawn(
                             completion_executor,
-                            [state, index, launch_member, &members, mode, collect, required, cap,
-                             operation_token, completion_executor, interrupted,
-                             settled](std::exception_ptr error, PlanExecution result) {
-                                bool                     post_selection = false;
-                                bool                     cancel_all     = false;
-                                std::vector<std::size_t> to_launch;
-                                bool                     signal_completion = false;
-                                {
-                                    std::lock_guard lock(state->mutex);
-                                    state->errors[index] = error;
-                                    if (!error) state->results[index] = std::move(result);
-                                    state->finished[index] = true;
-                                    state->finish_order.push_back(index);
-                                    ++state->completed;
-                                    if (state->active != 0) --state->active;
-
-                                    const bool paused =
-                                        interrupted(state->errors[index], state->results[index]);
-                                    const bool member_failed =
-                                        !paused && (error || state->results[index]->status !=
-                                                                 ProgramTerminalStatus::Completed);
-                                    if (paused) state->paused = true;
-                                    // #400: a replayed member settles at once. While the
-                                    // member this attempt answers runs, the decision it
-                                    // would take is held, so that member consumes the
-                                    // answer and settles its effect first. It is taken
-                                    // when the answered member finishes.
-                                    const bool answering =
-                                        state->answered && !state->finished[*state->answered];
-                                    const bool hold =
-                                        answering && (state->replayed[index] || state->held);
-                                    const bool release = state->held && state->answered &&
-                                                         index == *state->answered;
-                                    if (release) state->held = false;
-                                    if (operation_token->is_cancelled() && !state->terminal) {
-                                        state->terminal = true;
-                                        cancel_all      = true;
-                                    } else if (mode == "race" && (!paused || release) &&
-                                               !state->terminal) {
-                                        if (hold) {
-                                            state->held = true;
-                                        } else if (!state->selection_scheduled) {
-                                            state->selection_scheduled = true;
-                                            post_selection             = true;
-                                        }
-                                    } else if (mode == "all" && !collect &&
-                                               (member_failed || release) && !state->terminal) {
-                                        if (hold) {
-                                            state->held = true;
-                                        } else if (!state->selection_scheduled) {
-                                            state->selection_scheduled = true;
-                                            post_selection             = true;
-                                        }
-                                    } else if (mode == "quorum" && !state->terminal) {
-                                        std::size_t successes = 0;
-                                        std::size_t waiting   = 0;
-                                        for (std::size_t i = 0; i < state->results.size(); ++i) {
-                                            if (!state->finished[i]) continue;
-                                            if (interrupted(state->errors[i], state->results[i]))
-                                                ++waiting;
-                                            else if (state->results[i] &&
-                                                     state->results[i]->status ==
-                                                         ProgramTerminalStatus::Completed)
-                                                ++successes;
-                                        }
-                                        // A paused member may still succeed once it resumes.
-                                        const bool decided =
-                                            successes >= required ||
-                                            successes + waiting +
-                                                    (members.size() - state->completed) <
-                                                required;
-                                        if (decided && hold) {
-                                            state->held = true;
-                                        } else if (decided) {
-                                            if (successes >= required) {
-                                                for (std::size_t i = 0;
-                                                     i < state->results.size(); ++i)
-                                                    if (state->finished[i] && state->results[i] &&
-                                                        state->results[i]->status ==
-                                                            ProgramTerminalStatus::Completed)
-                                                        state->quorum_members.push_back(i);
-                                            }
-                                            state->terminal = true;
-                                            cancel_all      = true;
-                                        }
-                                    }
-
-                                    if (state->initial_launches_registered && !state->terminal &&
-                                        !state->paused && !state->selection_scheduled &&
-                                        !state->held &&
-                                        !post_selection && state->next < state->order.size()) {
-                                        // A member counts as active only once it launches, so the
-                                        // members chosen here count against the cap as well.
-                                        while (state->next < state->order.size() &&
-                                               state->active + to_launch.size() < cap)
-                                            to_launch.push_back(state->order[state->next++]);
-                                    }
-                                    signal_completion =
-                                        to_launch.empty() && settled(*state, members.size());
-                                }
-                                if (post_selection) {
-                                    asio::post(completion_executor, [state, mode, collect,
-                                                                     operation_token, interrupted,
-                                                                     settled,
-                                                                     member_count =
-                                                                         members.size()]() {
-                                        std::vector<std::size_t> to_cancel;
-                                        bool                     signal_completion = false;
-                                        {
-                                            std::lock_guard lock(state->mutex);
-                                            if (!state->terminal) {
-                                                // Settle on the first member to finish; a
-                                                // paused member has not finished.
-                                                std::optional<std::size_t> selected;
-                                                for (const auto i : state->finish_order) {
-                                                    if (interrupted(state->errors[i],
-                                                                    state->results[i]))
-                                                        continue;
-                                                    const bool failed =
-                                                        state->errors[i] || !state->results[i] ||
-                                                        state->results[i]->status !=
-                                                            ProgramTerminalStatus::Completed;
-                                                    if (mode == "race" || (!collect && failed)) {
-                                                        selected = i;
-                                                        break;
-                                                    }
-                                                }
-                                                if (selected) {
-                                                    state->winner   = selected;
-                                                    state->terminal = true;
-                                                    for (std::size_t i = 0;
-                                                         i < state->started.size(); ++i)
-                                                        if (state->started[i] && i != *selected)
-                                                            to_cancel.push_back(i);
-                                                } else {
-                                                    state->selection_scheduled = false;
-                                                }
-                                            }
-                                            signal_completion = settled(*state, member_count);
-                                        }
-                                        for (const auto index : to_cancel) {
-                                            if (state->scopes[index])
-                                                state->scopes[index]->cancel_children(
-                                                    CancellationCause::ParentTerminal);
-                                            if (state->tokens[index])
-                                                state->tokens[index]->cancel();
-                                        }
-                                        if (signal_completion)
-                                            state->completion->try_send(asio::error_code(), 1);
-                                    });
-                                }
-                                if (cancel_all) {
-                                    std::vector<std::size_t> to_cancel;
+                            replayed[index]
+                                ? replay_settled_member(*replayed[index])
+                                : execute_command(members[index],
+                                                  operation_id + "/member/" + std::to_string(index),
+                                                  state->tokens[index], state->scopes[index],
+                                                  scope_depth + 1, false, reconnect_child_only),
+                            asio::bind_executor(
+                                completion_executor,
+                                [state, index, launch_members, &members, mode, collect, required,
+                                 cap, operation_token, completion_executor, interrupted,
+                                 settled](std::exception_ptr error, PlanExecution result) {
+                                    bool                     post_selection = false;
+                                    bool                     cancel_all     = false;
+                                    std::vector<std::size_t> to_launch;
+                                    bool                     signal_completion = false;
                                     {
                                         std::lock_guard lock(state->mutex);
-                                        for (std::size_t i = 0; i < state->started.size(); ++i)
-                                            if (state->started[i]) to_cancel.push_back(i);
+                                        state->errors[index] = error;
+                                        if (!error) state->results[index] = std::move(result);
+                                        state->finished[index] = true;
+                                        state->finish_order.push_back(index);
+                                        ++state->completed;
+                                        if (state->active != 0) --state->active;
+
+                                        const bool paused =
+                                            interrupted(state->errors[index], state->results[index]);
+                                        const bool member_failed =
+                                            !paused && (error || state->results[index]->status !=
+                                                                     ProgramTerminalStatus::Completed);
+                                        if (paused) state->paused = true;
+                                        // #400: a replayed member settles at once. While the
+                                        // member this attempt answers runs, the decision it
+                                        // would take is held, so that member consumes the
+                                        // answer and settles its effect first. It is taken
+                                        // when the answered member finishes.
+                                        const bool answering =
+                                            state->answered && !state->finished[*state->answered];
+                                        const bool hold =
+                                            answering && (state->replayed[index] || state->held);
+                                        const bool release = state->held && state->answered &&
+                                                             index == *state->answered;
+                                        if (release) state->held = false;
+                                        if (operation_token->is_cancelled() && !state->terminal) {
+                                            state->terminal = true;
+                                            cancel_all      = true;
+                                        } else if (mode == "race" && (!paused || release) &&
+                                                   !state->terminal) {
+                                            if (hold) {
+                                                state->held = true;
+                                            } else if (!state->selection_scheduled) {
+                                                state->selection_scheduled = true;
+                                                post_selection             = true;
+                                            }
+                                        } else if (mode == "all" && !collect &&
+                                                   (member_failed || release) && !state->terminal) {
+                                            if (hold) {
+                                                state->held = true;
+                                            } else if (!state->selection_scheduled) {
+                                                state->selection_scheduled = true;
+                                                post_selection             = true;
+                                            }
+                                        } else if (mode == "quorum" && !state->terminal) {
+                                            std::size_t successes = 0;
+                                            std::size_t waiting   = 0;
+                                            for (std::size_t i = 0; i < state->results.size(); ++i) {
+                                                if (!state->finished[i]) continue;
+                                                if (interrupted(state->errors[i], state->results[i]))
+                                                    ++waiting;
+                                                else if (state->results[i] &&
+                                                         state->results[i]->status ==
+                                                             ProgramTerminalStatus::Completed)
+                                                    ++successes;
+                                            }
+                                            // A paused member may still succeed once it resumes.
+                                            const bool decided =
+                                                successes >= required ||
+                                                successes + waiting +
+                                                        (members.size() - state->completed) <
+                                                    required;
+                                            if (decided && hold) {
+                                                state->held = true;
+                                            } else if (decided) {
+                                                if (successes >= required) {
+                                                    for (std::size_t i = 0;
+                                                         i < state->results.size(); ++i)
+                                                        if (state->finished[i] && state->results[i] &&
+                                                            state->results[i]->status ==
+                                                                ProgramTerminalStatus::Completed)
+                                                            state->quorum_members.push_back(i);
+                                                }
+                                                state->terminal = true;
+                                                cancel_all      = true;
+                                            }
+                                        }
+
+                                        if (state->initial_launches_registered && !state->terminal &&
+                                            !state->paused && !state->selection_scheduled &&
+                                            !state->held &&
+                                            !post_selection && state->next < state->order.size()) {
+                                            // A member counts as active only once it launches, so the
+                                            // members chosen here count against the cap as well.
+                                            while (state->next < state->order.size() &&
+                                                   state->active + to_launch.size() < cap)
+                                                to_launch.push_back(state->order[state->next++]);
+                                        }
+                                        signal_completion =
+                                            to_launch.empty() && settled(*state, members.size());
                                     }
-                                    for (const auto member_index : to_cancel) {
-                                        if (state->scopes[member_index])
-                                            state->scopes[member_index]->cancel_children(
-                                                CancellationCause::ParentTerminal);
-                                        if (state->tokens[member_index])
-                                            state->tokens[member_index]->cancel();
+                                    if (post_selection) {
+                                        asio::post(completion_executor, [state, mode, collect,
+                                                                         operation_token, interrupted,
+                                                                         settled,
+                                                                         member_count =
+                                                                             members.size()]() {
+                                            std::vector<std::size_t> to_cancel;
+                                            bool                     signal_completion = false;
+                                            {
+                                                std::lock_guard lock(state->mutex);
+                                                if (!state->terminal) {
+                                                    // Settle on the first member to finish; a
+                                                    // paused member has not finished.
+                                                    std::optional<std::size_t> selected;
+                                                    for (const auto i : state->finish_order) {
+                                                        if (interrupted(state->errors[i],
+                                                                        state->results[i]))
+                                                            continue;
+                                                        const bool failed =
+                                                            state->errors[i] || !state->results[i] ||
+                                                            state->results[i]->status !=
+                                                                ProgramTerminalStatus::Completed;
+                                                        if (mode == "race" || (!collect && failed)) {
+                                                            selected = i;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (selected) {
+                                                        state->winner   = selected;
+                                                        state->terminal = true;
+                                                        for (std::size_t i = 0;
+                                                             i < state->started.size(); ++i)
+                                                            if (state->started[i] && i != *selected)
+                                                                to_cancel.push_back(i);
+                                                    } else {
+                                                        state->selection_scheduled = false;
+                                                    }
+                                                }
+                                                signal_completion = settled(*state, member_count);
+                                            }
+                                            for (const auto index : to_cancel) {
+                                                if (state->scopes[index])
+                                                    state->scopes[index]->cancel_children(
+                                                        CancellationCause::ParentTerminal);
+                                                if (state->tokens[index])
+                                                    state->tokens[index]->cancel();
+                                            }
+                                            if (signal_completion)
+                                                state->completion->try_send(asio::error_code(), 1);
+                                        });
                                     }
-                                }
-                                for (const auto index : to_launch)
-                                    (*launch_member)(index);
-                                if (signal_completion)
-                                    state->completion->try_send(asio::error_code(), 1);
-                            }));
+                                    if (cancel_all) {
+                                        std::vector<std::size_t> to_cancel;
+                                        {
+                                            std::lock_guard lock(state->mutex);
+                                            for (std::size_t i = 0; i < state->started.size(); ++i)
+                                                if (state->started[i]) to_cancel.push_back(i);
+                                        }
+                                        for (const auto member_index : to_cancel) {
+                                            if (state->scopes[member_index])
+                                                state->scopes[member_index]->cancel_children(
+                                                    CancellationCause::ParentTerminal);
+                                            if (state->tokens[member_index])
+                                                state->tokens[member_index]->cancel();
+                                        }
+                                    }
+                                    if (!to_launch.empty()) (*launch_members)(to_launch);
+                                    if (signal_completion)
+                                        state->completion->try_send(asio::error_code(), 1);
+                                }));
+                    }
                 };
                 state->next = first_launches;
-                for (std::size_t position = 0; position < first_launches; ++position)
-                    (*launch_member)(state->order[position]);
+                std::vector<std::size_t> initial_launches(
+                    state->order.begin(),
+                    state->order.begin() + static_cast<std::ptrdiff_t>(first_launches));
+                (*launch_members)(initial_launches);
                 std::vector<std::size_t> deferred_launches;
                 bool                     signal_completion = false;
                 {
@@ -5605,8 +5694,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     signal_completion =
                         deferred_launches.empty() && settled(*state, members.size());
                 }
-                for (const auto index : deferred_launches)
-                    (*launch_member)(index);
+                if (!deferred_launches.empty()) (*launch_members)(deferred_launches);
                 // Sent on the channel's strand, as every member's completion is:
                 // the channel is not thread-safe.
                 if (signal_completion)
@@ -5847,10 +5935,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             "P_JS_COMMAND_JOURNAL_MISMATCH",
                             "Exact Core resume checkpoint did not match its pending command");
                     }
-                    std::vector<ProgramJavaScriptCommandJournalEntry> durable_commands;
-                    if (!control->recorded_replay)
-                        durable_commands = co_await control->async_transitions().load_javascript_commands(
-                            control->owner_scope, control->run_id);
                     const auto& recorded_commands = control->recorded_replay
                         ? control->recorded_replay->commands : durable_commands;
                     for (std::size_t index = 0; index < recorded_commands.size(); ++index) {
@@ -5896,17 +5980,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto operation_id  = javascript_command_operation_id(ordinal);
                 auto effect_id =
                     javascript_command_effect_identity(*control, ordinal, command_value);
-                std::vector<ProgramJavaScriptCommandJournalEntry> durable_prior_commands;
-                if (!control->recorded_replay)
-                    durable_prior_commands = co_await control->async_transitions().load_javascript_commands(
-                        control->owner_scope, control->run_id);
                 const auto& prior_commands = control->recorded_replay
-                    ? control->recorded_replay->commands : durable_prior_commands;
+                    ? control->recorded_replay->commands : durable_commands;
                 bool       child_resume_authorized      = false;
                 auto       child_recovery_mode = ChildRecoveryMode::None;
-                const auto prior = std::find_if(
+                const auto found_prior = std::find_if(
                     prior_commands.rbegin(), prior_commands.rend(),
                     [&](const auto& entry) { return entry.command_ordinal() == ordinal; });
+                const std::optional<ProgramJavaScriptCommandJournalEntry> prior =
+                    found_prior != prior_commands.rend()
+                        ? std::optional<ProgramJavaScriptCommandJournalEntry>(*found_prior)
+                        : std::nullopt;
                 std::function<asio::awaitable<ChildRecoveryMode>(
                     const JavaScriptCommand&, std::string, std::size_t)>
                     can_resume_command_child;
@@ -5932,8 +6016,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (candidate.kind() == JavaScriptCommandKind::Join) {
                         const auto& members = candidate.arguments().at("members");
                         const auto settled_members =
-                            prior != prior_commands.rend() ? prior->settled_members()
-                                                           : std::optional<json>{};
+                            prior ? prior->settled_members() : std::optional<json>{};
                         auto combined = ChildRecoveryMode::None;
                         for (std::size_t index = 0; index < members.size(); ++index) {
                             const auto member_op =
@@ -5968,7 +6051,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                                     : mode;
                 };
                 if (control->recorded_replay) {
-                    if (prior == prior_commands.rend() || !prior->completed() ||
+                    if (!prior || !prior->completed() ||
                         !prior->effect_identity())
                         throw_runtime_diagnostic("P_REPLAY_EVIDENCE_REQUIRED",
                             "Recorded replay cannot dispatch an uncaptured command");
@@ -5978,7 +6061,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 bool      recovery_resume_authorized = false;
                 RunBudget resource_reservation;
 
-                if (prior != prior_commands.rend()) {
+                if (prior) {
                     if (prior->bundle_id() != control->bundle_id ||
                         detail::canonical_json_bytes(prior->command().to_json()) !=
                             detail::canonical_json_bytes(command_value.to_json()) ||
@@ -6017,7 +6100,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             reservation.remaining.max_core_steps = 0;
                             auto publish_call_2 = control->publish_javascript_command(
                                 ordinal, command_value, effect_id, std::nullopt,
-                                reservation.remaining, reservation.reservation);
+                                reservation.remaining, reservation.reservation, std::nullopt,
+                                std::nullopt, attempt_commands);
                             const auto pending = co_await std::move(publish_call_2);
                             if (pending != ProgramTransitionPublishResult::Published &&
                                 pending != ProgramTransitionPublishResult::AlreadyPresent)
@@ -6063,7 +6147,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             auto publish_call_3 = control->publish_javascript_command(
                                 ordinal, command_value, effect_id,
                                 javascript_command_terminal_result(replayed, to_string(replayed.status), command_work),
-                                remaining, RunBudget{});
+                                remaining, RunBudget{}, std::nullopt, std::nullopt,
+                                attempt_commands);
                             const auto completed = co_await std::move(publish_call_3);
                             if (completed != ProgramTransitionPublishResult::Published &&
                                 completed != ProgramTransitionPublishResult::AlreadyPresent)
@@ -6277,7 +6362,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto pending_remaining = reservation.remaining;
                     auto publish_call_4 = control->publish_javascript_command(
                         ordinal, command_value, effect_id, std::nullopt, pending_remaining,
-                        resource_reservation);
+                        resource_reservation, std::nullopt, std::nullopt, attempt_commands);
                     const auto pending_published = co_await std::move(publish_call_4);
                     if (pending_published == ProgramTransitionPublishResult::AlreadyPresent) {
                         unreconciled_javascript_remaining = pending_remaining;
@@ -6353,6 +6438,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 {
                     std::lock_guard lock(await_starts_mutex);
                     await_starts = json::object();
+                    pending_await_batches.clear();
                 }
                 if (recovery_active) {
                     const bool reconcile = recovery_reached_unsaved_call;
@@ -6413,7 +6499,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (!command_result.settled_members.empty() && !control->recorded_replay) {
                         auto publish_call_5 = control->publish_javascript_command(
                             ordinal, command_value, effect_id, std::nullopt, std::nullopt,
-                            std::nullopt, command_result.settled_members);
+                            std::nullopt, command_result.settled_members, std::nullopt,
+                            attempt_commands);
                         const auto recorded = co_await std::move(publish_call_5);
                         if (recorded != ProgramTransitionPublishResult::Published &&
                             recorded != ProgramTransitionPublishResult::AlreadyPresent) {
@@ -6473,7 +6560,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 ProgramTransitionPublishResult published;
                 try {
                     auto publish_call_6 = control->publish_javascript_command(
-                        ordinal, command_value, effect_id, terminal_result, remaining, RunBudget{});
+                        ordinal, command_value, effect_id, terminal_result, remaining, RunBudget{},
+                        std::nullopt, std::nullopt, attempt_commands);
                     published = co_await std::move(publish_call_6);
                 } catch (const EventSinkError&) {
                     unreconciled_javascript_remaining = remaining;
