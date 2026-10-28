@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=zh-CN source_sha256=5d1cc97f588ff33d80a58bcc32293e4f8f8a566cc239fd48c9be9f17ce504d14 -->
+<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=zh-CN source_sha256=a30893bc5d0c078e44d0a9ee17aa2ff0f9073ff07a9b176f210398d877ef9fb1 -->
 # 递归智能体：各自独立的 Harness generation
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
@@ -72,7 +72,7 @@ return {generation: 2, result};
 
 ## 进程丢失之后恢复预先准入的子智能体
 
-能够恢复已准入的子绑定的宿主，可以显式允许尚未完成的 JavaScript `spawn`/`await` 命令，
+能够恢复已准入的子绑定的宿主，可以显式允许尚未完成的 JavaScript `spawn`/`await` 命令（包括 `ng.all`、`ng.race`、`ng.quorum` 等 join 中的 `spawn`/`await` 成员），
 重新连接到已发布的子智能体：
 
 ```cpp
@@ -85,9 +85,8 @@ config.recover_existing_child_commands = true; // default: false
 保留 generation 创建发布内容中准入的那个 ID。历史上的 Program 版本和宿主授权必须仍然可用。
 已配置的宿主准入解析器，仍然照常为子智能体的这次尝试做准入。
 
-恢复使用专门的重连路径：检查之后才消失的子智能体，不会转而创建新的子智能体。
-缺失的运行、被改变的输入或不可用的绑定，会让已有的命令保持待处理状态，等待对账。
-命令的预留和后代的核算在恢复之后依然保留。这个开关并不授权重放状态未知的
+恢复对父运行中已记录的每一条子关系都使用专门的重连路径：已记录的子智能体在检查之后才消失，不会转而创建新的子智能体。在 join（`ng.all`、`ng.race`、`ng.quorum`）中，已记录在 `settled_members` 中的成员按其已记录的结果重放，父运行上已记录子关系的未决成员会重新连接而不会二次分发任何子智能体，而父运行从未记录过子关系的未决成员（例如受 `max_in_flight` 限制尚未启动、或在进程停止前尚未到达的成员）会在 join 的 `max_in_flight`、父运行的命令预留及其剩余预算之下，通过正常的 spawn 路径启动一次。已记录的子关系若其运行缺失、改变或不可用，或绑定不可用，仍会让该命令保持待处理状态以等待对账。
+命令的预留和后代的核算在恢复之后依然保留，取消已恢复的父运行会结束其未完成的子运行，包括在恢复期间启动的子运行。这个开关并不授权重放状态未知的
 provider、工具、native 或其他外部副作用。
 
 与这个开关无关，重放一次正在运行的尝试时，会根据其确切的 journal 值和原始的命令预留，
@@ -110,7 +109,7 @@ provider、工具、native 或其他外部副作用。
 
 await 的截止时间（`timeout_ms`）与所有被恢复的 await 一样，是从该 await 首次开始起算的绝对时间：截止后才到达的回答会使父以 `P_AWAIT_TIMEOUT` 结束为 `TimedOut`，所以等待人的 await 应设置足以覆盖等待的超时。子在等待期间，取消父或任一祖先，会持久地取消该子及其后代：本进程执行的后代通过其活动的 control 取消，否则根据其记录取消。由另一个进程恢复且仍在运行的后代会被一条 `Cancelled` 记录结束，该进程会发现自己的发布被拒绝。
 
-只有 `ng.await(ng.spawn(...))`（或单独被 await 的 spawn）会被重新加入。作为 join（`ng.all`、`ng.race`、`ng.quorum`）成员被 await 的子不会：回答之后，父以 `Interrupted` 结束，并把待处理的 `javascript` 命令作为需要对账的效果，这与子绑定不可用时相同。类型化计划（typed plan）中对 `spawn` 的 `await` 以同样方式继续；计划在继续时会重放自己的操作，这些操作会再次计入 Program 操作预算，所以请为此声明足够的余量。
+`ng.await(ng.spawn(...))`（或单独被 await 的 spawn）无论是顶层命令还是 join（`ng.all`、`ng.race`、`ng.quorum`）的成员，只要其子已经 dispatch 或启用了 `recover_existing_child_commands`，都会被重新加入。当 join 在某个因中断而暂停的成员子运行得到回答后继续时（或在恢复时），已记录在 `settled_members` 中的成员按其已记录的结果重放，已记录子关系的未决成员会被重新加入而不会再次 dispatch 任何子运行，而父运行从未记录过子关系的未决成员（例如在 `max_in_flight` 之下尚未被 dispatch 的成员）会在 join 的 `max_in_flight`、父运行保留的预留及其剩余预算之下，通过正常的 spawn 路径启动一次；已记录的子运行若缺失、改变或不可用，仍会让该命令保持待处理状态以等待对账。类型化计划（typed plan）中对 `spawn` 的 `await` 以同样方式继续；计划在继续时会重放自己的操作，这些操作会再次计入 Program 操作预算，所以请为此声明足够的余量。
 
 ## JSON 制品与核算
 

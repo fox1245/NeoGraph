@@ -20589,6 +20589,716 @@ TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryCompletesPendingChec
 TEST_P(ProgramChildSynthesisPersistence, StaticChildRecoveryPreservesUnknownDescendantEffect) {
     check_static_child_recovery(true, true, "unknown_effect");
 }
+
+namespace {
+struct JoinedStaticChildRecoveryFixture {
+    std::shared_ptr<BlockAfterJavaScriptResultJournal> journal;
+    AdmittedRuntime                                    host;
+    std::optional<ProgramVersion> root_version, child_0_version, child_1_version, grand_version;
+    std::optional<ProgramHandle>  root;
+    std::mutex                    mutex;
+    std::condition_variable       ready;
+    std::vector<ProgramHandoff>   holds;
+    RunBudget                     root_budget{60000, 1000, 1000, 4, 128, 100, 1, 3, 8};
+    RunBudget                     child_budget{20000, 300, 300, 1, 32, 20, 0, 2, 2};
+    RunBudget                     grand_budget{10000, 100, 100, 1, 16, 10, 0, 0, 0};
+    std::atomic<bool>             hold_checkpoints{true};
+
+    JoinedStaticChildRecoveryFixture(std::shared_ptr<ProgramTransitionStore> transitions,
+                                     std::shared_ptr<CheckpointStore>        checkpoints,
+                                     std::string                             mode,
+                                     bool                                    recover = true)
+        : journal(std::make_shared<BlockAfterJavaScriptResultJournal>(std::move(transitions))),
+          host(4, std::move(checkpoints), journal, {}, ExecutionGuarantee::Unmanaged, true) {
+        completed_calls.store(0);
+        journal->release_result();
+        PolicySnapshotBuilder policy;
+        policy.id("joined-static-recovery-policy")
+            .semantic_version("1.0.0")
+            .owner_scope("tenant:runtime")
+            .admission_profile(host.profile)
+            .budget_ceiling(BudgetLimits{60000, 10000, 1000000, 4, 256, 100, 4, 4, 32})
+            .minimum_execution_guarantee(ExecutionGuarantee::Unmanaged);
+        host.policy      = std::move(policy).build();
+        const auto admit = [&](unsigned nodes, std::string body, RunBudget budget) {
+            ProgramCompiler compiler(host.registry, {"program-runtime-test/v1"});
+            auto            bundle = compiler.compile(
+                ProgramSource::from_javascript(
+                    "joined-static-child-recovery.js",
+                    recursive_graph_source(nodes, std::move(body))),
+                ProgramBudgetBounds{RunBudget{1, 0, 0, 1, 1, 1, 0, 0, 0}, budget});
+            return host.catalog->admit(
+                bundle, ProgramAdmission{"tenant:runtime", host.profile, host.policy, {}});
+        };
+        const auto limits = [](const RunBudget& b) {
+            return BudgetLimits{b.wall_time_ms,
+                                b.model_tokens,
+                                b.monetary_microunits,
+                                b.max_concurrency,
+                                b.max_program_operations,
+                                b.max_core_steps,
+                                static_cast<std::uint32_t>(b.max_dynamic_compiles),
+                                b.max_child_depth,
+                                b.max_total_children};
+        };
+        grand_version = admit(
+            1,
+            "yield ng.checkpoint({path:input.path},'hold');"
+            "yield ng.callCore('main',{},'grand:work');"
+            "return {path:input.path};",
+            grand_budget);
+        if (mode == "chain") {
+            child_0_version = admit(
+                1,
+                "return yield ng.await(ng.spawn('child',{path:'r.0.0'},'s1'),600000,'a1');",
+                child_budget);
+            root_version = admit(
+                1,
+                "const rs=yield ng.all(["
+                "ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0')"
+                "],{max_in_flight:1},'all');"
+                "return {leaves:rs.length,leaf:rs[0].path};",
+                root_budget);
+            link_children(host, *root_version, {{"child_0", *child_0_version}},
+                          limits(child_budget), ExecutionGuarantee::Unmanaged);
+            link_child_versions(host, *child_0_version, *grand_version, limits(grand_budget),
+                                ExecutionGuarantee::Unmanaged);
+        } else if (mode == "interrupt_serial") {
+            auto interrupt_doc = program_document("runtime-interrupt");
+            interrupt_doc["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V4;
+            interrupt_doc["declared_budget_requirements"][0]["maximum"] = child_budget.wall_time_ms;
+            interrupt_doc["declared_budget_requirements"][1]["maximum"] = child_budget.model_tokens;
+            interrupt_doc["declared_budget_requirements"][2]["maximum"] =
+                child_budget.monetary_microunits;
+            interrupt_doc["declared_budget_requirements"][3]["maximum"] =
+                child_budget.max_concurrency;
+            interrupt_doc["declared_budget_requirements"][4]["maximum"] =
+                child_budget.max_program_operations;
+            interrupt_doc["declared_budget_requirements"][5]["maximum"] =
+                child_budget.max_core_steps;
+            interrupt_doc["declared_budget_requirements"][6]["maximum"] =
+                child_budget.max_dynamic_compiles;
+            interrupt_doc["declared_budget_requirements"][7]["maximum"] =
+                child_budget.max_child_depth;
+            interrupt_doc["declared_budget_requirements"][8]["maximum"] =
+                child_budget.max_total_children;
+            child_0_version = host.admit_document(std::move(interrupt_doc));
+            child_1_version = admit(
+                1,
+                "yield ng.checkpoint({path:input.path},'hold');"
+                "yield ng.callCore('main',{},'child1:work');"
+                "return {path:input.path};",
+                child_budget);
+            root_version = admit(
+                1,
+                "const rs=yield ng.all(["
+                "ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0'),"
+                "ng.await(ng.spawn('child_1',{path:'r.1'},'s1'),600000,'a1')"
+                "],{max_in_flight:1},'all');"
+                "return {leaves:rs.length,first:rs[0].channels.value.value,second:rs[1].path};",
+                root_budget);
+            link_children(
+                host, *root_version,
+                {{"child_0", *child_0_version}, {"child_1", *child_1_version}},
+                limits(child_budget), ExecutionGuarantee::Unmanaged);
+        } else {
+            child_0_version = admit(
+                1,
+                "yield ng.checkpoint({path:input.path},'hold');"
+                "yield ng.callCore('main',{},'child0:work');"
+                "return {path:input.path};",
+                child_budget);
+            child_1_version = admit(
+                1,
+                "yield ng.checkpoint({path:input.path},'hold');"
+                "yield ng.callCore('main',{},'child1:work');"
+                "return {path:input.path};",
+                child_budget);
+            std::string root_body;
+            if (mode == "single") {
+                root_body =
+                    "const r0=yield ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0');"
+                    "return {leaves:1,first:r0.path};";
+            } else if (mode == "sequential") {
+                root_body =
+                    "const r0=yield ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0');"
+                    "const r1=yield ng.await(ng.spawn('child_1',{path:'r.1'},'s1'),600000,'a1');"
+                    "return {leaves:2,first:r0.path,second:r1.path};";
+            } else if (mode == "serial") {
+                root_body =
+                    "const rs=yield ng.all(["
+                    "ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0'),"
+                    "ng.await(ng.spawn('child_1',{path:'r.1'},'s1'),600000,'a1')"
+                    "],{max_in_flight:1},'all');"
+                    "return {leaves:rs.length,first:rs[0].path,second:rs[1].path};";
+            } else {
+                root_body =
+                    "const rs=yield ng.all(["
+                    "ng.await(ng.spawn('child_0',{path:'r.0'},'s0'),600000,'a0'),"
+                    "ng.await(ng.spawn('child_1',{path:'r.1'},'s1'),600000,'a1')"
+                    "],{max_in_flight:2},'all');"
+                    "return {leaves:rs.length};";
+            }
+            root_version = admit(1, std::move(root_body), root_budget);
+            link_children(
+                host, *root_version,
+                {{"child_0", *child_0_version}, {"child_1", *child_1_version}},
+                limits(child_budget), ExecutionGuarantee::Unmanaged);
+        }
+        RuntimeConfig config{
+            host.catalog,
+            host.checkpoints,
+            {},
+            journal,
+            4,
+            [bindings = host.child_bindings](std::string_view owner, std::string_view version,
+                                             std::string_view name) {
+                return bindings->resolve(owner, version, name);
+            }};
+        config.recover_existing_child_commands = recover;
+        config.checkpoint_handler              = [this](ProgramHandle, ProgramHandoff point) {
+            if (!hold_checkpoints.load()) return;
+            std::lock_guard lock(mutex);
+            holds.push_back(std::move(point));
+            ready.notify_all();
+        };
+        host.runtime = std::make_unique<ProgramRuntime>(std::move(config));
+    }
+
+    ~JoinedStaticChildRecoveryFixture() {
+        journal->before_publication = {};
+        journal->after_publication  = {};
+        hold_checkpoints.store(false);
+        if (root) root->cancel();
+        release_holds();
+        host.runtime.reset();
+    }
+
+    void start(std::size_t expected_holds, std::string logical_run_id = "joined-static-family") {
+        root = host.runtime->start(
+            "tenant:runtime", *root_version,
+            ProgramInvocation{json::object(), root_budget, std::move(logical_run_id), {}});
+        std::unique_lock lock(mutex);
+        if (!ready.wait_for(lock, std::chrono::seconds(10),
+                            [&] { return holds.size() >= expected_holds; }))
+            throw std::runtime_error("Joined static family did not reach its held checkpoints");
+    }
+
+    std::size_t wait_for_holds_or_root_terminal(std::size_t expected_holds) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            {
+                std::lock_guard lock(mutex);
+                if (holds.size() >= expected_holds) return holds.size();
+            }
+            if (root && root->try_result().has_value()) {
+                std::lock_guard lock(mutex);
+                return holds.size();
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        std::lock_guard lock(mutex);
+        return holds.size();
+    }
+
+    void release_current_holds_keep_holding() {
+        std::vector<ProgramHandoff> local;
+        {
+            std::lock_guard lock(mutex);
+            local.swap(holds);
+        }
+        local.clear();
+    }
+
+    void release_holds() {
+        hold_checkpoints.store(false);
+        release_current_holds_keep_holding();
+    }
+};
+}  // namespace
+
+TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildFanOutRecoversAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_CHILD_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_CHILD_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "fanout", true);
+            test.start(2);
+            const auto active = test.root->snapshot();
+            json       children = json::array();
+            for (const auto& child : active.children()) children.push_back(child.child_run_id);
+            std::ofstream saved(database + ".joined-fanout");
+            saved << json{{"root", active.run_id()}, {"children", std::move(children)}}.dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_CHILD_DB");
+    std::ifstream saved_file(database + ".joined-fanout");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    ASSERT_EQ(saved.at("children").size(), 2U);
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "fanout", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(2), 2U);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(), (json{{"leaves", 2}}));
+    EXPECT_EQ(completed_calls.load(), 2U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto child_id = saved.at("children").at(i).get<std::string>();
+        EXPECT_EQ(active.children().at(i).child_run_id, child_id);
+        const auto child_handle = recovered.host.runtime->reconnect("tenant:runtime", child_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
+        const auto child_record = recovered.journal->load_sync("tenant:runtime", child_id);
+        ASSERT_TRUE(child_record);
+        EXPECT_EQ(child_record->continuation().state, ContinuationState::Completed);
+        EXPECT_EQ(
+            recovered.journal->load_javascript_commands_sync("tenant:runtime", child_id, 0).size(),
+            4U);
+    }
+    std::filesystem::remove(database + ".joined-fanout");
+}
+
+TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildSerialFanOutRecoversAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_SERIAL_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_SERIAL_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
+            test.start(1, "joined-static-serial:first-held");
+            const auto active = test.root->snapshot();
+            ASSERT_EQ(active.children().size(), 1U);
+            std::ofstream saved(database + ".joined-serial");
+            saved << json{{"root", active.run_id()},
+                          {"first_child", active.children().front().child_run_id}}
+                         .dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_SERIAL_DB");
+    std::ifstream saved_file(database + ".joined-serial");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "serial", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(),
+              (json{{"leaves", 2}, {"first", "r.0"}, {"second", "r.1"}}));
+    EXPECT_EQ(completed_calls.load(), 2U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_NE(active.children().at(1).child_run_id, active.children().at(0).child_run_id);
+    for (const auto& child : active.children()) {
+        EXPECT_EQ(child.state, ProgramChildState::Completed);
+        const auto child_handle =
+            recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
+        const auto child_record =
+            recovered.journal->load_sync("tenant:runtime", child.child_run_id);
+        ASSERT_TRUE(child_record);
+        EXPECT_EQ(child_record->continuation().state, ContinuationState::Completed);
+        EXPECT_EQ(
+            recovered.journal
+                ->load_javascript_commands_sync("tenant:runtime", child.child_run_id, 0)
+                .size(),
+            4U);
+    }
+    std::filesystem::remove(database + ".joined-serial");
+}
+
+TEST_P(ProgramChildSynthesisPersistence,
+       JoinedStaticChildAfterFirstMemberSettledRecoversAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_SETTLED_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_SETTLED_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
+            test.hold_checkpoints.store(false);
+            test.journal->before_publication =
+                [&](const ProgramTransitionPublication& publication) {
+                    if (publication.run_record.child_depth() == 0 &&
+                        publication.run_record.children().size() == 2) {
+                        std::ofstream saved(database + ".joined-serial-settled");
+                        saved << json{{"root", publication.run_record.run_id()},
+                                      {"first_child",
+                                       publication.run_record.children().front().child_run_id},
+                                      {"executed", completed_calls.load()}}
+                                     .dump();
+                        saved.close();
+                        std::_Exit(77);
+                    }
+                };
+            test.root = test.host.runtime->start(
+                "tenant:runtime", *test.root_version,
+                ProgramInvocation{
+                    json::object(), test.root_budget, "joined-static-serial:after-first", {}});
+            (void)test.root->wait();
+            std::_Exit(78);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_SETTLED_DB");
+    std::ifstream saved_file(database + ".joined-serial-settled");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    ASSERT_EQ(saved.at("executed").get<unsigned>(), 1U);
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "serial", true);
+    const auto before =
+        recovered.journal->load_sync("tenant:runtime", saved.at("root").get<std::string>());
+    ASSERT_TRUE(before);
+    ASSERT_EQ(before->children().size(), 1U);
+    EXPECT_EQ(before->children().front().state, ProgramChildState::Completed);
+
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(),
+              (json{{"leaves", 2}, {"first", "r.0"}, {"second", "r.1"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(saved.at("executed").get<unsigned>() + completed_calls.load(), 2U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_NE(active.children().at(1).child_run_id, active.children().at(0).child_run_id);
+    for (const auto& child : active.children()) {
+        EXPECT_EQ(child.state, ProgramChildState::Completed);
+        const auto child_handle =
+            recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
+        const auto child_record =
+            recovered.journal->load_sync("tenant:runtime", child.child_run_id);
+        ASSERT_TRUE(child_record);
+        EXPECT_EQ(child_record->continuation().state, ContinuationState::Completed);
+        EXPECT_EQ(
+            recovered.journal
+                ->load_javascript_commands_sync("tenant:runtime", child.child_run_id, 0)
+                .size(),
+            4U);
+    }
+    std::filesystem::remove(database + ".joined-serial-settled");
+}
+
+TEST_P(ProgramChildSynthesisPersistence,
+       CancelledRecoveredSerialJoinedParentEndsChildStartedDuringRecovery) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_SERIAL_CANCEL_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_SERIAL_CANCEL_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
+            test.start(1, "joined-static-serial:cancel");
+            const auto active = test.root->snapshot();
+            ASSERT_EQ(active.children().size(), 1U);
+            std::ofstream saved(database + ".joined-serial-cancel");
+            saved << json{{"root", active.run_id()},
+                          {"first_child", active.children().front().child_run_id}}
+                         .dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_SERIAL_CANCEL_DB");
+    std::ifstream saved_file(database + ".joined-serial-cancel");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "serial", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    ASSERT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    recovered.release_current_holds_keep_holding();
+    ASSERT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    EXPECT_TRUE(recovered.root->cancel());
+    recovered.release_holds();
+    EXPECT_EQ(recovered.root->wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_EQ(active.children().at(0).state, ProgramChildState::Completed);
+    const auto second_child_id = active.children().at(1).child_run_id;
+    EXPECT_NE(second_child_id, active.children().at(0).child_run_id);
+    EXPECT_EQ(active.children().at(1).state, ProgramChildState::Cancelled);
+    const auto second_handle =
+        recovered.host.runtime->reconnect("tenant:runtime", second_child_id);
+    EXPECT_EQ(second_handle.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto second_record = recovered.journal->load_sync("tenant:runtime", second_child_id);
+    ASSERT_TRUE(second_record);
+    EXPECT_EQ(second_record->continuation().state, ContinuationState::Cancelled);
+    std::filesystem::remove(database + ".joined-serial-cancel");
+}
+
+TEST_P(ProgramChildSynthesisPersistence,
+       JoinedStaticChildSerialInterruptContinuationStartsSecondMember) {
+    interrupt_calls.store(0);
+    JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "interrupt_serial",
+                                          false);
+    test.root = test.host.runtime->start(
+        "tenant:runtime", *test.root_version,
+        ProgramInvocation{json::object(), test.root_budget, "joined-static-serial:interrupt", {}});
+    const auto interrupted = test.root->wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
+        << interrupted.serialize_canonical();
+    const auto paused_parent = test.root->snapshot();
+    const auto root_run_id   = test.root->run_id();
+    test.root.reset();
+    ASSERT_EQ(paused_parent.children().size(), 1U);
+    const auto first_child = paused_parent.children().front();
+    EXPECT_EQ(first_child.state, ProgramChildState::Dispatched);
+    ASSERT_TRUE(first_child.terminal_result.has_value());
+    EXPECT_EQ(first_child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(completed_calls.load(), 0U);
+
+    const auto answered = test.host.runtime
+                              ->resume("tenant:runtime", first_child.child_run_id,
+                                       resume_for(*first_child.terminal_result,
+                                                  json{{"decision", "approved"}},
+                                                  "joined-static-serial:answer"))
+                              .wait();
+    ASSERT_EQ(answered.status(), ProgramTerminalStatus::Completed)
+        << answered.serialize_canonical();
+
+    ASSERT_EQ(test.wait_for_holds_or_root_terminal(1), 1U);
+    auto continued = test.host.runtime->reconnect("tenant:runtime", root_run_id);
+    test.release_holds();
+    const auto final = continued.wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed) << final.serialize_canonical();
+    EXPECT_EQ(final.output(),
+              (json{{"leaves", 2}, {"first", "approved"}, {"second", "r.1"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(interrupt_calls.load(), 2U);
+    const auto active = continued.snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    EXPECT_EQ(active.children().at(0).child_run_id, first_child.child_run_id);
+    EXPECT_EQ(active.children().at(0).state, ProgramChildState::Completed);
+    EXPECT_NE(active.children().at(1).child_run_id, first_child.child_run_id);
+    EXPECT_EQ(active.children().at(1).state, ProgramChildState::Completed);
+}
+
+TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildChainRecoversAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_CHAIN_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_CHAIN_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "chain", true);
+            test.start(1);
+            const auto active     = test.root->snapshot();
+            const auto child_id   = active.children().front().child_run_id;
+            const auto descendant = test.journal->load_sync("tenant:runtime", child_id);
+            std::ofstream saved(database + ".joined-chain");
+            saved << json{{"root", active.run_id()},
+                          {"child", child_id},
+                          {"grandchild", descendant->children().front().child_run_id}}
+                         .dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_CHAIN_DB");
+    std::ifstream saved_file(database + ".joined-chain");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    const auto child_id      = saved.at("child").get<std::string>();
+    const auto grandchild_id = saved.at("grandchild").get<std::string>();
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "chain", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    auto paused_child = recovered.host.runtime->reconnect("tenant:runtime", child_id);
+    EXPECT_FALSE(paused_child.try_result().has_value());
+    EXPECT_EQ(paused_child.snapshot().continuation().state, ContinuationState::Running);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output(), (json{{"leaves", 1}, {"leaf", "r.0.0"}}));
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 1U);
+    EXPECT_EQ(active.children().front().child_run_id, child_id);
+    EXPECT_EQ(paused_child.wait().status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(recovered.host.runtime->reconnect("tenant:runtime", child_id).wait().status(),
+              ProgramTerminalStatus::Completed);
+    EXPECT_EQ(recovered.host.runtime->reconnect("tenant:runtime", grandchild_id).wait().status(),
+              ProgramTerminalStatus::Completed);
+    const auto child_record = recovered.journal->load_sync("tenant:runtime", child_id);
+    ASSERT_TRUE(child_record);
+    ASSERT_EQ(child_record->children().size(), 1U);
+    EXPECT_EQ(child_record->children().front().child_run_id, grandchild_id);
+    EXPECT_EQ(
+        recovered.journal->load_javascript_commands_sync("tenant:runtime", grandchild_id, 0).size(),
+        4U);
+    std::filesystem::remove(database + ".joined-chain");
+}
+
+TEST_P(ProgramChildSynthesisPersistence, CancelledRecoveredJoinedParentEndsOpenChildren) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_JOINED_STATIC_CANCEL_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_JOINED_STATIC_CANCEL_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "fanout", true);
+            test.start(2);
+            const auto active   = test.root->snapshot();
+            json       children = json::array();
+            for (const auto& child : active.children()) children.push_back(child.child_run_id);
+            std::ofstream saved(database + ".joined-cancel");
+            saved << json{{"root", active.run_id()}, {"children", std::move(children)}}.dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_JOINED_STATIC_CANCEL_DB");
+    std::ifstream saved_file(database + ".joined-cancel");
+    const auto    saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    ASSERT_EQ(saved.at("children").size(), 2U);
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "fanout", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(2), 2U);
+    EXPECT_TRUE(recovered.root->cancel());
+    recovered.release_holds();
+    EXPECT_EQ(recovered.root->wait().status(), ProgramTerminalStatus::Cancelled);
+    for (const auto& item : saved.at("children")) {
+        const auto child_id     = item.get<std::string>();
+        const auto child_handle = recovered.host.runtime->reconnect("tenant:runtime", child_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Cancelled);
+        const auto child_record = recovered.journal->load_sync("tenant:runtime", child_id);
+        ASSERT_TRUE(child_record);
+        EXPECT_EQ(child_record->continuation().state, ContinuationState::Cancelled);
+    }
+    std::filesystem::remove(database + ".joined-cancel");
+}
+
+TEST_P(ProgramChildSynthesisPersistence, SingleStaticChildControlRecoversAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_SINGLE_STATIC_CONTROL_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_SINGLE_STATIC_CONTROL_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "single", true);
+            test.start(1, "joined-static-control:single");
+            const auto active = test.root->snapshot();
+            std::ofstream saved(database + ".single-static-control");
+            saved << json{{"root", active.run_id()},
+                          {"first_child", active.children().front().child_run_id}}
+                         .dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_SINGLE_STATIC_CONTROL_DB");
+    std::ifstream saved_file(database + ".single-static-control");
+    const auto saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "single", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output().at("leaves"), 1);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 1U);
+    EXPECT_EQ(active.children().front().child_run_id, saved.at("first_child").get<std::string>());
+    for (const auto& child : active.children()) {
+        const auto child_handle =
+            recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    std::filesystem::remove(database + ".single-static-control");
+}
+
+TEST_P(ProgramChildSynthesisPersistence, SequentialStaticChildControlsRecoverAfterProcessLoss) {
+    if (GetParam() == "Memory") GTEST_SKIP() << "Process recovery requires durable stores";
+    if (const auto* inherited = std::getenv("NEOGRAPH_SEQUENTIAL_STATIC_CONTROL_DB"))
+        database = inherited;
+    setenv("NEOGRAPH_SEQUENTIAL_STATIC_CONTROL_DB", database.c_str(), 1);
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    ASSERT_EXIT(
+        ([&] {
+            JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "sequential",
+                                                  true);
+            test.start(1, "joined-static-control:sequential");
+            test.release_current_holds_keep_holding();
+            ASSERT_EQ(test.wait_for_holds_or_root_terminal(1), 1U);
+            const auto active = test.root->snapshot();
+            ASSERT_EQ(active.children().size(), 2U);
+            std::ofstream saved(database + ".sequential-static-control");
+            saved << json{{"root", active.run_id()},
+                          {"first_child", active.children().at(0).child_run_id},
+                          {"second_child", active.children().at(1).child_run_id},
+                          {"executed", completed_calls.load()}}
+                         .dump();
+            saved.close();
+            std::_Exit(77);
+        }()),
+        ::testing::ExitedWithCode(77), "");
+    unsetenv("NEOGRAPH_SEQUENTIAL_STATIC_CONTROL_DB");
+    std::ifstream saved_file(database + ".sequential-static-control");
+    const auto saved = json::parse(std::string(std::istreambuf_iterator<char>(saved_file), {}));
+    saved_file.close();
+    ASSERT_EQ(saved.at("executed").get<unsigned>(), 1U);
+
+    JoinedStaticChildRecoveryFixture recovered(backend(), checkpoint_backend(), "sequential", true);
+    recovered.root =
+        recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
+    EXPECT_EQ(recovered.wait_for_holds_or_root_terminal(1), 1U);
+    recovered.release_holds();
+    const auto result = recovered.root->wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
+    EXPECT_EQ(result.output().at("leaves"), 2);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(saved.at("executed").get<unsigned>() + completed_calls.load(), 2U);
+    const auto active = recovered.root->snapshot();
+    ASSERT_EQ(active.children().size(), 2U);
+    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_EQ(active.children().at(1).child_run_id, saved.at("second_child").get<std::string>());
+    for (const auto& child : active.children()) {
+        const auto child_handle =
+            recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
+        EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    std::filesystem::remove(database + ".sequential-static-control");
+}
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 TEST_P(ProgramChildSynthesisPersistence, CommandResultRetriesAnOptimisticSnapshotMiss) {

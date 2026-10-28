@@ -5867,22 +5867,33 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     // relation already holds is rejoined: it ran, and rejoining it dispatches nothing (#658).
     asio::awaitable<std::optional<ProgramChildRecord>> recoverable_existing_child(
         std::shared_ptr<detail::RunControl> parent, std::string binding, json input,
-        std::string operation, bool host_opt_in) const {
+        std::string operation, bool host_opt_in, bool* relation_recorded = nullptr,
+        bool* binding_valid = nullptr) const {
+        if (relation_recorded) *relation_recorded = false;
+        if (binding_valid) *binding_valid = false;
         const auto run = (co_await parent->snapshot_async());
         if (run.owner_scope() != parent->owner_scope ||
             run.logical_run_id() != parent->logical_run_id ||
             run.continuation().state != ContinuationState::Running ||
             parent->cancellation_cause() != detail::CancellationCause::None)
             co_return std::nullopt;
+        for (const auto& candidate : run.children()) {
+            if (detail::child_matches_spawn_operation(run, candidate, operation)) {
+                if (relation_recorded) *relation_recorded = true;
+                break;
+            }
+        }
         const auto resolved = (co_await resolve_child_binding(parent, binding));
         if (!resolved) co_return std::nullopt;
         const auto& link = resolved->receipt;
         if (link.owner_scope() != parent->owner_scope || link.child_name() != binding ||
             link.child_program_version_id() != resolved->version.id())
             co_return std::nullopt;
+        if (binding_valid) *binding_valid = true;
 
         auto child = (co_await inherited_child(parent, binding));
         if (child) {
+            if (relation_recorded) *relation_recorded = true;
             const auto inherited = std::find_if(
                 parent->inherited_children.begin(), parent->inherited_children.end(),
                 [&](const auto& admitted) { return same_child_metadata(admitted, *child); });
@@ -5906,6 +5917,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     }
                 }
             }
+            if (child && relation_recorded) *relation_recorded = true;
         }
         if (!child || child->link_id != link.id() ||
             child->link_receipt != link.serialize_canonical() ||
@@ -6066,36 +6078,43 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 const auto parent = weak_control.lock();
                 using Mode = detail::ChildRecoveryMode;
                 if (!keep || !parent) co_return Mode::None;
+                bool relation_recorded = false;
+                bool binding_valid     = false;
                 if (co_await recoverable_existing_child(
                         parent, binding, input, operation,
-                        config.recover_existing_child_commands))
+                        config.recover_existing_child_commands, &relation_recorded, &binding_valid))
                     co_return Mode::Existing;
-                if (!config.child_synthesis_gateway) co_return Mode::None;
-                if (const auto child = (co_await inherited_child(parent, binding)))
-                    co_return !config.recover_existing_child_commands &&
-                                   detail::canonical_json_bytes(child->invocation.input) ==
-                                       detail::canonical_json_bytes(input)
-                               ? Mode::Synthesis : Mode::None;
-                const auto synthesis = (co_await synthesis_binding(parent, binding));
-                if (!synthesis) co_return Mode::None;
-                if (synthesis->data().state == ProgramChildSynthesisState::Bound)
-                    co_return Mode::Synthesis;
-                const auto& artifacts = synthesis->data().artifacts;
-                const auto  link =
-                    ModuleLinkReceipt::parse(detail::canonical_json_bytes(artifacts.at("link")));
-                const auto expected_id = detail::sha256_identity(
-                    "program-dsl-child/v1",
-                    detail::canonical_json_bytes(
-                        json{{"owner_scope", parent->owner_scope},
-                             {"parent_run_id", parent->run_id},
-                             {"parent_program_version_id", parent->program_version_id},
-                             {"link_id", link.id()},
-                             {"operation_id", std::string(operation)},
-                             {"execution_key", std::string(operation)}}));
-                co_return artifacts.at("child_run_id") == expected_id &&
-                               detail::canonical_json_bytes(artifacts.at("child_input")) ==
-                                   detail::canonical_json_bytes(input)
-                           ? Mode::Synthesis : Mode::None;
+                if (config.child_synthesis_gateway) {
+                    if (const auto child = (co_await inherited_child(parent, binding)))
+                        co_return !config.recover_existing_child_commands &&
+                                       detail::canonical_json_bytes(child->invocation.input) ==
+                                           detail::canonical_json_bytes(input)
+                                   ? Mode::Synthesis : Mode::None;
+                    if (const auto synthesis = (co_await synthesis_binding(parent, binding))) {
+                        if (synthesis->data().state == ProgramChildSynthesisState::Bound)
+                            co_return Mode::Synthesis;
+                        const auto& artifacts = synthesis->data().artifacts;
+                        const auto  link =
+                            ModuleLinkReceipt::parse(detail::canonical_json_bytes(artifacts.at("link")));
+                        const auto expected_id = detail::sha256_identity(
+                            "program-dsl-child/v1",
+                            detail::canonical_json_bytes(
+                                json{{"owner_scope", parent->owner_scope},
+                                     {"parent_run_id", parent->run_id},
+                                     {"parent_program_version_id", parent->program_version_id},
+                                     {"link_id", link.id()},
+                                     {"operation_id", std::string(operation)},
+                                     {"execution_key", std::string(operation)}}));
+                        co_return artifacts.at("child_run_id") == expected_id &&
+                                       detail::canonical_json_bytes(artifacts.at("child_input")) ==
+                                           detail::canonical_json_bytes(input)
+                                   ? Mode::Synthesis : Mode::None;
+                    }
+                }
+                if (!relation_recorded && binding_valid &&
+                    (config.recover_existing_child_commands || parent->rejoin_paused_children))
+                    co_return Mode::Unrecorded;
+                co_return Mode::None;
             });
         }
 
