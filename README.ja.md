@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=bc2c054e4a2a64763a1b615f8cb288538aea813fab7bc720cbaa4a4cc4fccf9a -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=6501b1fe6b364e9b65c3a8da15cce96536d407a7cd404a31cc09a32dc42f68a2 -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -403,7 +403,7 @@ python scripts/verify_ci.py quickjs-performance --work-dir build/local-quickjs-0
 | `wheel` | 修復を経たインストール済みホイール。cibuildwheel==4.3.4 とネイティブ/コンテナの provider が必要。`--arch x86_64\|aarch64\|arm64\|AMD64` は必須。任意の `--python cp312` を付けると、すべての CPython ではなく1つだけビルドします。 |
 | `runtime-archive` | 共有 SDK のネイティブアーカイブの移植性を見るターゲット/CTest。Ninja とプラットフォームのランタイム依存が必要。 |
 
-ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。Linux ARM64 はホスト型ランナーではなくプロジェクト自前の ARM サーバーでビルドとテストを行い(`ci-extended.yml` のホスト型 ARM ジョブは無効です)、aarch64 ホイールはリリースタグでのみビルドします。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.13 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。
+ローカルの Windows/WSL の結果は、ネイティブの ARM/macOS や VS2026 のサニタイザー行の代わりにはなりません。push と pull request のたびに `ci.yml` が実行されます。Linux、macOS、Windows の完全なネイティブテストに、インストール済みコンシューマーの行が2つ加わります。ドキュメントだけの変更では実行されません。`ci-extended.yml` は夜間と要求時に実行されます。サニタイザー、ファズのカナリア、性能ゲート、gRPC、Visual Studio ジェネレーター、残り8つのインストール済みコンシューマーの行を扱います。Linux ARM64 はホスト型ランナーではなくプロジェクト自前の ARM サーバーでビルドとテストを行い(`ci-extended.yml` のホスト型 ARM ジョブは無効です)、aarch64 ホイールはリリースタグでのみビルドします。リリース候補では、タグを付ける前に実行してください。`wheels.yml` は、パッケージングの変更ではプラットフォームごとに CPython 3.12 のホイールを1つビルドします。リリースタグでは、Linux（x86_64 と aarch64）、macOS（arm64）、Windows（AMD64）向けに CPython 3.9–3.14 のホイールをビルドし、最低のプラットフォームバージョンは glibc 2.34 と macOS 14 です。
 
 - [ドキュメント目次](docs/README.md)
 - [コンセプトとグラフの意味論](docs/concepts.md)

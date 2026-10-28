@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Post-repair, installed-wheel gate; append AFTER the unchanged full pytest run.
 
-CI invocation (the wheel's CPython interpreter, once per cp39--cp313 wheel):
+CI invocation (the wheel's CPython interpreter, once per cp39--cp314 wheel):
     python -I "{package}/cmake/test-macos-wheel-relocation.py"
 
 Requires an actual arm64 macOS 14 runner and /usr/bin/sandbox-exec. No build
@@ -70,8 +70,8 @@ def platform_gate():
     require(sys.platform == "darwin", "macOS runtime proof requires Darwin; no Linux soft pass")
     require(platform.mac_ver()[0].split(".")[0] == "14", "run this floor gate on macOS 14")
     require(platform.machine() == "arm64", "run this wheel gate natively on arm64")
-    require(sys.implementation.name == "cpython" and (3, 9) <= sys.version_info[:2] <= (3, 13),
-            "the release gate requires CPython 3.9 through 3.13")
+    require(sys.implementation.name == "cpython" and (3, 9) <= sys.version_info[:2] <= (3, 14),
+            "the release gate requires CPython 3.9 through 3.14")
 
 
 def images():

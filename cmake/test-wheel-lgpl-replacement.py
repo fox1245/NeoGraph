@@ -27,7 +27,7 @@ import tarfile
 import tempfile
 
 ASSET = 'neograph-0.13.0-linux-lgpl-library-only-source.tar.gz'
-DIGEST = 'af69f9448a3e14cd35a9814e96545fe4a13fd1fa5eebb3e3f9922c25f7e13c21'
+DIGEST = '13fb825d7aa46b35c49d2f4dd511298dbc530a30d88dfa27e5fcef0663e6b0c3'
 ROOT = ASSET[:-7]
 ENV = os.environ.copy()
 for _name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME', 'PYTHONOPTIMIZE', 'PYTEST_ADDOPTS'):
@@ -281,8 +281,8 @@ def main():
     parser.add_argument('--package', type=Path, required=True)
     args = parser.parse_args()
     package = args.package.resolve()
-    require(sys.implementation.name == 'cpython' and (3, 9) <= sys.version_info[:2] <= (3, 13),
-            'Qualification requires CPython 3.9–3.13')
+    require(sys.implementation.name == 'cpython' and (3, 9) <= sys.version_info[:2] <= (3, 14),
+            'Qualification requires CPython 3.9–3.14')
     arch = platform.machine()
     require(sys.platform == 'linux' and arch in ('x86_64', 'aarch64'), 'Native Linux x86_64/aarch64 required')
     require(os.confstr('CS_GNU_LIBC_VERSION') == 'glibc 2.34', 'Build inside native glibc 2.34 environment')
