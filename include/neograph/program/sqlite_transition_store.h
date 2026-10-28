@@ -25,14 +25,41 @@ namespace neograph::program {
 class NEOGRAPH_PROGRAM_API SQLiteProgramTransitionStore final
     : public SyncProgramTransitionStore {
 public:
+    /** SQLite journal mode configured when opening the transition store connection. */
+    enum class JournalMode {
+        /**
+         * Write-Ahead Logging (`PRAGMA journal_mode = WAL`). Default mode;
+         * paired with `PRAGMA synchronous = FULL` so every committed
+         * publication is durable.
+         */
+        Wal,
+        /**
+         * Classic rollback journal (`PRAGMA journal_mode = DELETE`), also
+         * paired with `PRAGMA synchronous = FULL` so every committed
+         * publication is durable.
+         */
+        Rollback,
+    };
+
     /** Store-level configuration options. */
     struct Options {
+        using JournalMode = SQLiteProgramTransitionStore::JournalMode;
+
         /**
          * Maximum number of runs whose last parsed ProgramRunRecord is kept in
          * memory while its stored bytes are unchanged. Least-recently-used
          * entries are evicted when the cache is full; 0 disables the cache.
          */
         std::size_t run_record_cache_capacity = 256;
+
+        /**
+         * SQLite journal mode applied when the connection opens. Defaults to
+         * `JournalMode::Wal` (`PRAGMA journal_mode = WAL`); set
+         * `JournalMode::Rollback` (`PRAGMA journal_mode = DELETE`) for the
+         * rollback journal. In both modes the store sets
+         * `PRAGMA synchronous = FULL` so every committed publication is durable.
+         */
+        JournalMode journal_mode = JournalMode::Wal;
     };
 
     explicit SQLiteProgramTransitionStore(std::string database_path);

@@ -4920,84 +4920,142 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
     std::optional<RunBudget>   remaining_budget,
     std::optional<RunBudget>   inflight_reservation,
     std::optional<json>        settled_members,
-    std::optional<json>        await_started_at) {
+    std::optional<json>        await_started_at,
+    std::vector<ProgramJavaScriptCommandJournalEntry>* attempt_commands) {
     if (remaining_budget)
         remaining_budget->max_dynamic_compiles = std::min<std::uint64_t>(
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
     if (!command_ordinal) co_return ProgramTransitionPublishResult::Conflict;
 
+    const bool serialize_with_child_relations =
+        invocation.budget.max_child_depth > 0 || invocation.budget.max_total_children > 0 ||
+        granted_budget.max_child_depth > 0 || granted_budget.max_total_children > 0 ||
+        !inherited_children.empty();
+    const auto reload_attempt_commands = [&]() -> asio::awaitable<void> {
+        if (attempt_commands) {
+            auto reloaded =
+                co_await async_transitions().load_javascript_commands(owner_scope, run_id);
+            std::lock_guard lock(mutex_);
+            *attempt_commands = std::move(reloaded);
+        }
+    };
+    const auto commands_match_latest =
+        [&](const std::optional<ProgramJavaScriptCommandJournalEntry>& latest) {
+            std::lock_guard lock(mutex_);
+            return latest ? (!attempt_commands->empty() &&
+                             attempt_commands->back().sequence() == latest->sequence() &&
+                             attempt_commands->back().id() == latest->id())
+                          : attempt_commands->empty();
+        };
+    const auto conflict_after_reload = [&]() -> asio::awaitable<ProgramTransitionPublishResult> {
+        co_await reload_attempt_commands();
+        co_return ProgramTransitionPublishResult::Conflict;
+    };
+
     for (int retry = 0; retry < kRunPublicationAttempts; ++retry) {
+        detail::OperationLock::Guard publication_lock;
+        if (serialize_with_child_relations) {
+            publication_lock =
+                co_await child_relation_publication_mutex(async_transitions(), owner_scope,
+                                                          logical_run_id)
+                    .lock_async();
+        }
         const auto head = co_await async_transitions().load_command_publication_head(owner_scope, run_id);
         // The default store implementation reads optimistically. A child join
         // can advance its head between reads; retry that miss before treating
         // a command-result publication as an unresolved external outcome.
         if (!head) continue;
+        if (attempt_commands && !commands_match_latest(head->latest_command)) {
+            co_await reload_attempt_commands();
+            if (!commands_match_latest(head->latest_command)) continue;
+        }
         const auto* previous = head ? &head->run_record : nullptr;
         const auto* previous_journal = head ? &head->journal_record : nullptr;
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt) {
-            co_return ProgramTransitionPublishResult::Conflict;
+            publication_lock.unlock();
+            co_return co_await conflict_after_reload();
         }
 
         auto found = head->latest_command;
         if (found && found->command_ordinal() > command_ordinal) {
             // Older-coordinate retries still inspect the complete immutable history.
             // Normal append/settlement needs only the newest command, not every row.
-            const auto existing = co_await async_transitions().load_javascript_commands(owner_scope, run_id);
-            const auto older = std::find_if(existing.rbegin(), existing.rend(), [&](const auto& entry) {
-                return entry.command_ordinal() == command_ordinal;
-            });
-            found = older == existing.rend() ? std::nullopt
-                                             : std::optional<ProgramJavaScriptCommandJournalEntry>(*older);
+            if (attempt_commands) {
+                std::lock_guard lock(mutex_);
+                const auto older = std::find_if(
+                    attempt_commands->rbegin(), attempt_commands->rend(),
+                    [&](const auto& entry) { return entry.command_ordinal() == command_ordinal; });
+                found = older == attempt_commands->rend()
+                            ? std::nullopt
+                            : std::optional<ProgramJavaScriptCommandJournalEntry>(*older);
+            } else {
+                const auto existing =
+                    co_await async_transitions().load_javascript_commands(owner_scope, run_id);
+                const auto older = std::find_if(
+                    existing.rbegin(), existing.rend(),
+                    [&](const auto& entry) { return entry.command_ordinal() == command_ordinal; });
+                found = older == existing.rend()
+                            ? std::nullopt
+                            : std::optional<ProgramJavaScriptCommandJournalEntry>(*older);
+            }
         } else if (found && found->command_ordinal() != command_ordinal) {
             found.reset();
         }
+        auto next_settled_members  = settled_members;
+        auto next_await_started_at = await_started_at;
         if (found) {
             if (found->bundle_id() != bundle_id ||
                 detail::canonical_json_bytes(found->command().to_json()) !=
                     detail::canonical_json_bytes(command.to_json()) ||
                 found->effect_identity() != effect_identity) {
-                co_return ProgramTransitionPublishResult::Conflict;
+                publication_lock.unlock();
+                co_return co_await conflict_after_reload();
             }
             if (found->completed()) {
-                co_return found->terminal_result() == terminal_result
-                           ? ProgramTransitionPublishResult::AlreadyPresent
-                           : ProgramTransitionPublishResult::Conflict;
+                if (found->terminal_result() == terminal_result)
+                    co_return ProgramTransitionPublishResult::AlreadyPresent;
+                publication_lock.unlock();
+                co_return co_await conflict_after_reload();
             }
             if (!terminal_result) {
                 // The pending entries of a coordinate are cumulative: a new
                 // one carries the settled members (#380) and the await starts
                 // (#391) of the latest one, so the attempt that resumes or
                 // recovers the command reads both from it.
-                auto members = settled_members ? settled_members : found->settled_members();
+                auto members = next_settled_members ? next_settled_members : found->settled_members();
                 auto starts  = found->await_started_at();
-                if (await_started_at) {
+                if (next_await_started_at) {
                     json merged = starts ? *starts : json::object();
-                    for (const auto& [operation_id, started_at] : await_started_at->items()) {
+                    for (const auto& [operation_id, started_at] : next_await_started_at->items()) {
                         // A recorded start never moves.
-                        if (merged.contains(operation_id) && merged[operation_id] != started_at)
-                            co_return ProgramTransitionPublishResult::Conflict;
+                        if (merged.contains(operation_id) && merged[operation_id] != started_at) {
+                            publication_lock.unlock();
+                            co_return co_await conflict_after_reload();
+                        }
                         merged[operation_id] = started_at;
                     }
                     starts = std::move(merged);
                 }
                 if (members == found->settled_members() && starts == found->await_started_at())
                     co_return ProgramTransitionPublishResult::AlreadyPresent;
-                settled_members  = std::move(members);
-                await_started_at = std::move(starts);
+                next_settled_members  = std::move(members);
+                next_await_started_at = std::move(starts);
             }
         }
         // Settled members and await starts belong to an existing pending
         // coordinate.
-        if ((settled_members || await_started_at) && (terminal_result || !found))
-            co_return ProgramTransitionPublishResult::Conflict;
+        if ((next_settled_members || next_await_started_at) && (terminal_result || !found)) {
+            publication_lock.unlock();
+            co_return co_await conflict_after_reload();
+        }
 
         const auto sequence = head->latest_command ? head->latest_command->sequence() + 1 : 1;
         ProgramJavaScriptCommandJournalEntryData entry_data{
             sequence, bundle_id, command_ordinal, command, effect_identity, terminal_result,
-            settled_members};
-        entry_data.await_started_at = await_started_at;
+            next_settled_members};
+        entry_data.await_started_at = next_await_started_at;
         ProgramJavaScriptCommandJournalEntry entry(std::move(entry_data));
         // A completed command becomes replayable as soon as its terminal
         // journal entry is durable. Publish every event staged by that command
@@ -5053,12 +5111,16 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         data.created_at_ms   = previous->created_at_ms();
         data.updated_at_ms   = journal.timestamp_ms;
 
+        auto published_commands =
+            attempt_commands
+                ? std::vector<ProgramJavaScriptCommandJournalEntry>{entry}
+                : std::vector<ProgramJavaScriptCommandJournalEntry>{std::move(entry)};
         auto publication = ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                                         std::move(journal),
                                                         std::move(events),
                                                         {},
                                                         std::nullopt,
-                                                        {std::move(entry)}};
+                                                        std::move(published_commands)};
         publication = co_await attach_run_lineage_async(async_transitions(), std::move(publication));
         const auto owned_lease = execution_lease();
         ProgramTransitionPublishResult published;
@@ -5070,6 +5132,23 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                 owner_scope, previous->journal_head(), std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
+            if (attempt_commands) {
+                bool needs_reload = false;
+                {
+                    std::lock_guard lock(mutex_);
+                    if (published == ProgramTransitionPublishResult::Published &&
+                        entry.sequence() == attempt_commands->size() + 1) {
+                        attempt_commands->push_back(std::move(entry));
+                    } else if (attempt_commands->empty() ||
+                               attempt_commands->back().id() != entry.id()) {
+                        needs_reload = true;
+                    }
+                }
+                if (needs_reload) {
+                    co_await reload_attempt_commands();
+                }
+            }
+            publication_lock.unlock();
             if (terminal_result && command.kind() == JavaScriptCommandKind::Checkpoint) {
                 co_await reach_latest_handoff_if_requested();
             }
@@ -5085,7 +5164,7 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         // command.  Otherwise, reload the head and let the exact coordinate
         // check above classify an already-published append.
     }
-    co_return ProgramTransitionPublishResult::Conflict;
+    co_return co_await conflict_after_reload();
 }
 
 }  // namespace detail

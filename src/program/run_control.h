@@ -497,7 +497,8 @@ public:
         std::optional<RunBudget>   remaining_budget     = std::nullopt,
         std::optional<RunBudget>   inflight_reservation = std::nullopt,
         std::optional<json>        settled_members      = std::nullopt,
-        std::optional<json>        await_started_at     = std::nullopt);
+        std::optional<json>        await_started_at     = std::nullopt,
+        std::vector<ProgramJavaScriptCommandJournalEntry>* attempt_commands = nullptr);
     /** Durably consumes one nonrenewable dynamic-compilation unit before dispatch. */
     asio::awaitable<bool> consume_dynamic_compile();
     std::atomic<std::uint64_t> dynamic_compile_ceiling{UINT64_MAX};

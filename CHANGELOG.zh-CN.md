@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ec6ca3572d934ccc80fab0f514430c162310c78d06c1535f3295a5e6f32af967 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=975de3cd2c4771436fa32c0e1fb9ce2ade1380188ca344ea698a77f455d8fd13 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -200,6 +200,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **请重新构建 C++ 使用方：`A2AClient` 增加了成员和参数。** `A2AClient` 增加了 `set_connect_timeout` 和一个数据成员，两个 `send_message_sync` 重载的末尾还增加了 `graph::CancelToken*` 参数，`a2a::make_harness_capability_executor` 增加了 `call_timeout` 参数。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **请重新构建 C++ 使用方：`StdioClientConfig` 增加了成员。** `mcp::StdioClientConfig` 增加了 `max_stdout_text_lines` 和 `max_stdout_text_bytes`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **面向 C++ 使用方的源码与 ABI 变更：在比调用活得更久的记录上，`ProgramRunRecord::children()` 返回 `const` 引用 (#661)。** 对左值记录，它返回 `const std::vector<ProgramChildRecord>&` 而不是副本；对临时记录（例如 `handle.snapshot().children()`）仍返回自己的副本，因此遍历临时记录子运行的 range-for 不会悬空。此前将返回值绑定到非 `const` 引用、或从左值记录的子运行中移动的调用方需显式复制；请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
+- **Program：降低持久子运行扇出开销，且 `SQLiteProgramTransitionStore` 默认启用 WAL (#661)。** 启动带超时 `ng.await` 成员的 JavaScript join（`ng.all`、`ng.race`、`ng.quorum`）现在会在一次命令日志发布中记录同一批启动的所有成员的 `await_started_at` 时间戳，而不再为每个成员单独发布一次；每个 await 的截止时间仍是从其记录的启动时间算起的绝对时间，且在 await 启动持久化之前绝不会启动子运行。在同一进程内，父运行的 JavaScript 命令发布与子关系发布现在通过同一个按父运行隔离的互斥锁串行化，不再在同一个日志头部的 compare-and-swap 上相互竞争。每次运行尝试在开始时读取一次 JavaScript 命令日志，追加自己成功发布的条目，并在 compare-and-swap 失败时从存储重新加载。`SQLiteProgramTransitionStore` 现在按连接缓存预处理语句（在查询之间重置并清除绑定，关闭时销毁），并新增 `SQLiteProgramTransitionStore::Options::journal_mode`（默认为 `SQLiteProgramTransitionStore::JournalMode::Wal`；`JournalMode::Rollback` 对应 `PRAGMA journal_mode = DELETE`），两种模式均配合 `PRAGMA synchronous = FULL` 以确保每次已提交的发布持久落盘。已存储的记录格式与 SQL 模式不变；由于 `SQLiteProgramTransitionStore::Options` 增加了 `journal_mode`，请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。实测效果（一个 JavaScript 父级在 SQLite 存储上 join F 个被 await 的子级 spawn，调度线程 4 个，变更前后各运行 2 次，变更前存储已在 WAL 模式下运行）：运行时间在 F=16 时从 0.81 秒降至 0.52 秒，F=64 时从 6.96 秒降至 3.18 秒，F=128 时从 24–32 秒降至 9.8 秒，F=256 时从 89 秒降至 35–43 秒；父级的命令日志只有 5 个条目而不是 F+4 个，F=256 时存储从 38.5 MB 缩小到 18.7 MB，且没有被拒绝的 compare-and-swap（此前为 270–420 次）。
 
 ### 修复
 - **Program：JavaScript join 在首批成员结束后仍遵守 `max_in_flight` (#676)。** `ng.all`、`ng.race` 或 `ng.quorum` 的某个成员结束时，join 会启动所有仍在等待的成员，而不是每个空位启动一个，因此上限只对首批启动有效（`max_in_flight: 2` 下的 5 个成员有 4 个同时运行）。现在只有在运行中的成员少于 `max_in_flight` 时，join 才会启动等待中的成员。

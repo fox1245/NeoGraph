@@ -20010,6 +20010,64 @@ struct RecursiveHarnessFixture {
     }
 };
 }  // namespace
+
+TEST(ProgramRuntimeTest, JavaScriptJoinOfAwaitedSpawnsPublishesOneAwaitStartEntryPerLaunch) {
+    // #661: a join of N awaited child spawns with timeout_ms records the await starts of the members it launches
+    // together in one command-journal entry. The join first launches max_in_flight members at once (one entry); after
+    // that a finishing member launches at most one more at a time, and members that finish together launch together.
+    // With the pending and the completed entry of the join that is at most 3 + (N - max_in_flight) entries, where one
+    // entry per member would be N + 2.
+    constexpr std::size_t kMembers = 6;
+    const RunBudget       child_budget{1000, 0, 0, 1, 2, 4, 0, 0, 0};
+    // The fixture's policy allows four concurrent operations and 32 Program operations, which bound the join to
+    // four members at once and six in all.
+    const RunBudget       parent_budget{20000, 0, 0, 4, 32, 40, 0, 1, kMembers};
+    for (const std::size_t max_in_flight : {std::size_t{4}, std::size_t{2}}) {
+        SCOPED_TRACE("max_in_flight " + std::to_string(max_in_flight));
+        AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        const auto      child = admit_javascript_within(
+            fixture, "await-batch-child.js",
+            javascript_runtime_source("runtime-completed",
+                                      "    return yield ng.callCore(\"main\", {}, \"child:work\");"),
+            child_budget);
+        const auto parent = admit_javascript_within(
+            fixture, "await-batch-parent.js",
+            javascript_runtime_source("runtime-completed",
+                                      "    const commands = [0, 1, 2, 3, 4, 5].map((index) =>\n"
+                                      "        ng.await(ng.spawn(\"child_\" + index, {index}, \"spawn:\" + index), "
+                                      "30000, \"await:\" + index));\n"
+                                      "    const results = yield ng.all(commands, {max_in_flight: " +
+                                          std::to_string(max_in_flight) +
+                                          "}, \"all\");\n"
+                                          "    return {count: results.length};"),
+            parent_budget);
+        std::vector<std::pair<std::string, ProgramVersion>> children;
+        for (std::size_t index = 0; index < kMembers; ++index)
+            children.emplace_back("child_" + std::to_string(index), child);
+        link_children(fixture, parent, children, BudgetLimits{1000, 0, 0, 1, 2, 4, 0, 0, 0},
+                      ExecutionGuarantee::Unmanaged);
+
+        const auto result = fixture.runtime->run(
+            "tenant:runtime", parent,
+            ProgramInvocation{json::object(), parent_budget, "trace-js-await-start-batch", {}});
+
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+        EXPECT_EQ(result.output(), (json{{"count", kMembers}}));
+        const auto commands = fixture.journal->load_javascript_commands("tenant:runtime", result.run_id());
+        std::string described;
+        for (const auto& entry : commands)
+            described += "[seq " + std::to_string(entry.sequence()) + " ord " + std::to_string(entry.command_ordinal()) +
+                         (entry.completed() ? " completed" : " pending") + " starts " +
+                         (entry.await_started_at() ? entry.await_started_at()->dump() : "none") + " settled " +
+                         (entry.settled_members() ? entry.settled_members()->dump() : "none") + "] ";
+        EXPECT_GE(commands.size(), 3U) << described;
+        EXPECT_LE(commands.size(), 3U + (kMembers - max_in_flight)) << described;
+        const auto starts = recorded_await_starts(fixture, result);
+        for (std::size_t member = 0; member < kMembers; ++member)
+            EXPECT_TRUE(starts.contains("root.javascript.1/member/" + std::to_string(member))) << starts.dump();
+    }
+}
+
 TEST_P(ProgramChildSynthesisPersistence,
        RecursiveDifferentTopologiesRetainGrandchildAcrossChildReplacement) {
     RecursiveHarnessFixture test(backend(), program_backend());
