@@ -5505,8 +5505,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         !state->paused && !state->selection_scheduled &&
                                         !state->held &&
                                         !post_selection && state->next < state->order.size()) {
+                                        // A member counts as active only once it launches, so the
+                                        // members chosen here count against the cap as well.
                                         while (state->next < state->order.size() &&
-                                               state->active < cap)
+                                               state->active + to_launch.size() < cap)
                                             to_launch.push_back(state->order[state->next++]);
                                     }
                                     signal_completion =
@@ -5596,7 +5598,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     state->initial_launches_registered = true;
                     if (!state->terminal && !state->paused && !state->selection_scheduled &&
                         !state->held && state->next < state->order.size()) {
-                        while (state->next < state->order.size() && state->active < cap)
+                        while (state->next < state->order.size() &&
+                               state->active + deferred_launches.size() < cap)
                             deferred_launches.push_back(state->order[state->next++]);
                     }
                     signal_completion =
