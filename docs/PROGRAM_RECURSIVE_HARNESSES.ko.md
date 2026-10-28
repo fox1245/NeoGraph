@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ko source_sha256=5d1cc97f588ff33d80a58bcc32293e4f8f8a566cc239fd48c9be9f17ce504d14 -->
+<!-- neograph-i18n: source=docs/PROGRAM_RECURSIVE_HARNESSES.md locale=ko source_sha256=a30893bc5d0c078e44d0a9ee17aa2ff0f9073ff07a9b176f210398d877ef9fb1 -->
 # 독립된 Harness 세대를 가진 재귀 에이전트
 
 **Languages:** [English](PROGRAM_RECURSIVE_HARNESSES.md) | [한국어](PROGRAM_RECURSIVE_HARNESSES.ko.md) | [日本語](PROGRAM_RECURSIVE_HARNESSES.ja.md) | [简体中文](PROGRAM_RECURSIVE_HARNESSES.zh-CN.md)
@@ -48,7 +48,7 @@ return {generation: 2, result};
 
 ## 프로세스 유실 후 미리 승인된 자식 복구
 
-승인(admission)된 자식 binding을 복원하는 호스트는, 끝나지 않은 JavaScript `spawn`/`await` 명령이 이미 게시된 자식에 다시 연결되도록 명시적으로 허용할 수 있습니다.
+승인(admission)된 자식 binding을 복원하는 호스트는, 끝나지 않은 JavaScript `spawn`/`await` 명령(join인 `ng.all`, `ng.race`, `ng.quorum`의 `spawn`/`await` 구성원 포함)이 이미 게시된 자식에 다시 연결되도록 명시적으로 허용할 수 있습니다.
 
 ```cpp
 config.recover_existing_child_commands = true; // default: false
@@ -56,7 +56,7 @@ config.recover_existing_child_commands = true; // default: false
 
 이 방식은 합성 게이트웨이 없이도 일반 정적 binding과 교체로 상속된 자식에 모두 동작합니다. 부모 관계, link receipt, 소유자, 정확한 invocation, 자식 깊이, 저장된 자식 run이 모두 일치해야 합니다. 정적 명령은 기록된 명령 좌표에서 같은 자식 ID를 계산해 내야 하고, 상속된 자식은 세대를 만들 때 게시된 데이터에서 승인(admission)된 ID를 그대로 유지합니다. 과거의 Program 버전과 호스트 grant도 계속 사용할 수 있어야 합니다. 호스트에 승인(admission) resolver가 설정되어 있으면, 그 resolver가 평소처럼 자식 시도를 승인(admission)합니다.
 
-복구는 전용 reconnect 경로를 사용합니다. 확인 직후 자식이 사라져도 새 자식을 만드는 경로로 빠지지 않습니다. run이 없거나 input이 바뀌었거나 binding을 쓸 수 없으면, 기존 명령은 조정(reconciliation)을 기다리는 pending 상태로 남습니다. 명령 예약과 자손 회계는 복구 후에도 유지됩니다. 이 플래그가 provider, 도구, 네이티브 등 결과를 알 수 없는 외부 효과의 재생(replay)까지 허용하는 것은 아닙니다.
+복구는 부모에 이미 기록된 모든 자식 관계에 전용 reconnect 경로를 사용합니다. 기록된 자식이 확인 직후 사라져도 새 자식을 만드는 경로로 빠지지 않습니다. join(`ng.all`, `ng.race`, `ng.quorum`)에서는 `settled_members`에 이미 기록된 구성원은 기록된 결과로 재생되고, 부모에 자식 관계가 기록된 미확정 구성원은 어떤 자식도 두 번 dispatch하지 않고 다시 연결되며, 부모에 자식 관계가 기록된 적 없는 미확정 구성원(예: `max_in_flight` 뒤에 대기 중이었거나 프로세스가 멈추기 전에 아직 도달하지 못한 구성원)은 join의 `max_in_flight`, 부모의 명령 예약, 남은 예산 아래에서 일반 spawn 경로로 한 번 시작됩니다. 기록된 자식 관계의 run이 없거나, 바뀌었거나, 사용할 수 없거나, binding을 쓸 수 없으면 기존 명령은 여전히 조정(reconciliation)을 기다리는 pending 상태로 남습니다. 명령 예약과 자손 회계는 복구 후에도 유지되며, 복구된 부모를 취소하면 복구 중 시작된 자식을 포함해 열려 있는 모든 자식이 끝납니다. 이 플래그가 provider, 도구, 네이티브 등 결과를 알 수 없는 외부 효과의 재생(replay)까지 허용하는 것은 아닙니다.
 
 이 플래그와 별개로, 실행 중이던 시도를 재생(replay)할 때는 끝나지 않은 봉인된(sealed) `ng.checkpoint`를 저널에 기록된 정확한 값과 원래의 명령 예약으로 마무리합니다. 이때 외부 dispatch는 하지 않습니다.
 결과를 알 수 없는 다른 효과는 여전히 조정(reconciliation)을 위해 에이전트 계열을 일시 중지합니다. 중단된 자식은 dispatch된 채 재개할 수 있는 관계로 남고, 부모는 관계를 취소하거나 그 예약을 두 번 돌려주지 않고 진행 중인 명령 예약을 그대로 유지합니다.
@@ -73,7 +73,7 @@ config.recover_existing_child_commands = true; // default: false
 
 await의 기한(`timeout_ms`)은 복구되는 모든 await와 마찬가지로 await가 처음 시작된 시점부터의 절대 시각입니다. 기한 뒤에 도착한 응답은 부모를 `P_AWAIT_TIMEOUT`과 함께 `TimedOut`으로 끝내므로, 사람을 기다리는 await에는 그 대기를 덮는 타임아웃을 주십시오. 자식이 기다리는 동안 부모나 어느 조상을 취소하면 그 자식과 자손이 영속적으로 취소됩니다. 이 프로세스가 실행하는 자손은 살아 있는 control로, 아니면 레코드로 취소합니다. 다른 프로세스가 재개해 아직 실행 중인 자손은 `Cancelled` 레코드로 끝나며, 그 프로세스는 자신의 발행이 거부된 것을 발견합니다.
 
-합류(rejoin)되는 것은 `ng.await(ng.spawn(...))`(또는 await된 spawn 단독)뿐입니다. join(`ng.all`, `ng.race`, `ng.quorum`)의 구성원으로 await된 자식은 합류되지 않습니다. 응답 후 부모는 대기 중인 `javascript` 명령을 조정할 효과로 가진 채 `Interrupted`로 끝나며, 자식 바인딩을 쓸 수 없을 때와 같습니다. 타입이 있는 플랜(typed plan)의 `spawn`에 대한 `await`도 같은 방식으로 이어서 실행됩니다. 플랜은 이어 갈 때 자신의 연산을 다시 재생하며 그 연산은 Program 연산 예산에서 다시 차감되므로, 그만큼의 여유를 선언하십시오.
+`ng.await(ng.spawn(...))`(또는 await된 spawn 단독)는 최상위 명령이든 join(`ng.all`, `ng.race`, `ng.quorum`)의 구성원이든 자식이 이미 dispatch되었거나 `recover_existing_child_commands`가 켜져 있을 때 합류(rejoin)됩니다. 인터럽트로 멈춘 구성원 자식이 응답을 받아 join이 이어서 실행될 때(또는 복구될 때), `settled_members`에 이미 기록된 구성원은 기록된 결과로 재생되고, 자식 관계가 기록된 미확정 구성원은 어떤 자식도 다시 dispatch하지 않고 합류되며, 부모에 자식 관계가 기록된 적 없는 미확정 구성원(예: `max_in_flight` 아래에서 아직 dispatch되지 않았던 구성원)은 join의 `max_in_flight`, 부모가 유지한 예약, 남은 예산 아래에서 일반 spawn 경로로 한 번 시작됩니다. 기록된 자식 run이 없거나, 바뀌었거나, 사용할 수 없는 구성원이 있으면 명령은 여전히 조정을 위해 pending 상태로 남습니다. 타입이 있는 플랜(typed plan)의 `spawn`에 대한 `await`도 같은 방식으로 이어서 실행됩니다. 플랜은 이어 갈 때 자신의 연산을 다시 재생하며 그 연산은 Program 연산 예산에서 다시 차감되므로, 그만큼의 여유를 선언하십시오.
 
 ## JSON 산출물과 회계
 

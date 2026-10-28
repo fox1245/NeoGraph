@@ -229,7 +229,7 @@ using ChildLaunchCallback =
     std::function<asio::awaitable<std::shared_ptr<RunControl>>(std::string, json, std::string, std::string,
                                                                std::optional<TaskGraphBudget>, bool)>;
 using ChildBindingValidationCallback = std::function<asio::awaitable<void>(std::string, std::string)>;
-enum class ChildRecoveryMode { None, Synthesis, Existing };
+enum class ChildRecoveryMode { None, Synthesis, Existing, Unrecorded };
 using ChildRecoveryCallback =
     std::function<asio::awaitable<ChildRecoveryMode>(std::string, json, std::string)>;
 using ExistingChildReconnectCallback =

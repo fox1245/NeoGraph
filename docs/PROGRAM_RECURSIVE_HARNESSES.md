@@ -85,7 +85,9 @@ included it in a checkpoint.
 ## Recovering pre-admitted children after process loss
 
 A host that restores its admitted child bindings can explicitly allow unfinished
-JavaScript `spawn`/`await` commands to reconnect to already-published children:
+JavaScript `spawn`/`await` commands, including `spawn`/`await` members of a
+join (`ng.all`, `ng.race`, `ng.quorum`), to reconnect to already-published
+children:
 
 ```cpp
 config.recover_existing_child_commands = true; // default: false
@@ -100,10 +102,21 @@ publication. The historical Program versions and host grants must still be
 available. A configured host admission resolver continues to admit the child
 attempt normally.
 
-Recovery uses a dedicated reconnect path: a child that disappears after the
-check cannot fall through to new child creation. Missing runs, changed inputs,
-or unavailable bindings leave the existing command pending for reconciliation.
-The command reservation and descendant accounting survive recovery. The flag
+Recovery uses a dedicated reconnect path for every child relation the parent
+already recorded: a recorded child that disappears after the check cannot fall
+through to new child creation. In a join (`ng.all`, `ng.race`, `ng.quorum`),
+members already recorded in `settled_members` are replayed from their recorded
+outcome, unsettled members whose child relation was recorded on the parent are
+reconnected without dispatching any child a second time, and unsettled members
+whose child relation was never recorded by the parent (for example, a member
+held behind `max_in_flight` or not yet reached before the process stopped) are
+started once through the normal spawn path under the join's `max_in_flight`,
+the parent's command reservation, and its remaining budget. A recorded child
+relation whose run is missing, changed, or unavailable, or an unavailable
+binding, still leaves the command pending for reconciliation.
+The command reservation and descendant accounting survive recovery, and
+cancelling a recovered parent ends its open children, including any child
+started during recovery. The flag
 does not authorize replay of unknown provider, tool, native, or other external
 effects.
 
@@ -132,7 +145,7 @@ When the child ends after its answer, the runtime continues the parent. A new at
 
 The deadline of an await (`timeout_ms`) is absolute from the first start of the await, as for every recovered await: an answer that arrives after it ends the parent `TimedOut` with `P_AWAIT_TIMEOUT`, so give an await that waits for a person a timeout that covers the wait. Cancelling a parent, or any ancestor, while its child waits cancels the child and its descendants durably: through their live controls where this process executes them, else from their records. A descendant that another process resumed and still runs is ended by its `Cancelled` record, and that process finds its publications refused.
 
-Only an `ng.await(ng.spawn(...))` (or the awaited spawn alone) is rejoined. A child awaited as a member of a join (`ng.all`, `ng.race`, `ng.quorum`) is not: after its answer the parent ends `Interrupted` with its pending `javascript` command as the effect to reconcile, as when a child binding is unavailable. A typed plan's `await` of a `spawn` is continued the same way; the plan replays its operations when it continues and they count against its Program operation budget again, so declare room for them.
+An `ng.await(ng.spawn(...))` (or the awaited spawn alone), whether top-level or a member of a join (`ng.all`, `ng.race`, `ng.quorum`), is rejoined when its child has already been dispatched or when `recover_existing_child_commands` is enabled. When a join continues after an interrupted member child is answered (or on recovery), members already recorded in `settled_members` are replayed from their recorded outcome, unsettled members with a recorded child relation are rejoined without dispatching any child again, and unsettled members whose child relation was never recorded by the parent (such as members not yet dispatched under `max_in_flight`) are started once through the normal spawn path under the join's `max_in_flight`, the parent's retained reservation, and its remaining budget; a member whose recorded child run is missing, changed, or unavailable still leaves the command pending for reconciliation. A typed plan's `await` of a `spawn` is continued the same way; the plan replays its operations when it continues and they count against its Program operation budget again, so declare room for them.
 
 ## JSON artifacts and accounting
 
