@@ -6718,6 +6718,35 @@ TEST(ProgramRuntimeTest, JavaScriptJoinEnforcesMaxInFlightCap) {
     EXPECT_EQ(result.usage().peak_concurrency, 2U);
 }
 
+TEST(ProgramRuntimeTest, JavaScriptJoinKeepsMaxInFlightAfterTheFirstMembersFinish) {
+    // #676: when a member finished, the join launched every member still waiting instead of one per free slot, so the
+    // cap held only for the first launches: with five members under max_in_flight 2, four ran at once.
+    blocking_calls.store(0);
+    blocking_peak.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version =
+        fixture.admit_javascript(javascript_runtime_source("runtime-short-blocking",
+                                                           R"JS(
+    const result = yield ng.all([
+        ng.callCore("main", {}, "first"),
+        ng.callCore("main", {}, "second"),
+        ng.callCore("main", {}, "third"),
+        ng.callCore("main", {}, "fourth"),
+        ng.callCore("main", {}, "fifth")
+    ], {max_in_flight: 2}, "all");
+    return result;
+)JS"));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), javascript_budget(4), "trace-js-cap-after-finish", {}});
+
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_detail(result);
+    EXPECT_EQ(blocking_calls.load(), 5U);
+    EXPECT_EQ(blocking_peak.load(), 2U);
+    EXPECT_EQ(result.usage().peak_concurrency, 2U);
+}
+
 TEST(ProgramRuntimeTest, JavaScriptJoinValidatesEveryMemberBeforeDispatch) {
     completed_calls.store(0);
     AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);

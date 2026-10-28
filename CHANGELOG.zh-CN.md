@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=16af537a4acc1e8bc529f084a67ab094b3c42298a4d8723f0cf8c3fc9e38e745 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=ec6ca3572d934ccc80fab0f514430c162310c78d06c1535f3295a5e6f32af967 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -202,6 +202,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **面向 C++ 使用方的源码与 ABI 变更：在比调用活得更久的记录上，`ProgramRunRecord::children()` 返回 `const` 引用 (#661)。** 对左值记录，它返回 `const std::vector<ProgramChildRecord>&` 而不是副本；对临时记录（例如 `handle.snapshot().children()`）仍返回自己的副本，因此遍历临时记录子运行的 range-for 不会悬空。此前将返回值绑定到非 `const` 引用、或从左值记录的子运行中移动的调用方需显式复制；请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 
 ### 修复
+- **Program：JavaScript join 在首批成员结束后仍遵守 `max_in_flight` (#676)。** `ng.all`、`ng.race` 或 `ng.quorum` 的某个成员结束时，join 会启动所有仍在等待的成员，而不是每个空位启动一个，因此上限只对首批启动有效（`max_in_flight: 2` 下的 5 个成员有 4 个同时运行）。现在只有在运行中的成员少于 `max_in_flight` 时，join 才会启动等待中的成员。
 - **Program：`main()` 对已 spawn 并 await 的子运行执行 join 的父运行在进程丢失后能够恢复，并在子中断得到回答后继续 (#659)。** 当父 Program 在成员为 `ng.await(ng.spawn(...))` 或 `ng.spawn(...)` 命令的 JavaScript join（`ng.all`、`ng.race`、`ng.quorum`）内部停止时，在启用了 `RuntimeConfig::recover_existing_child_commands = true` 的运行时上调用 `reconnect()`，或在某个因中断而暂停的成员子运行得到回答后继续时，此前会把未完成的 join（或任何尚未记录子关系的未决成员，例如 `max_in_flight` 之下的后续成员或两次 spawn 之间发生进程丢失时的成员）当作无法恢复的外部副作用处理，使父运行以 `Interrupted` 结束，同时让已发布的子运行一直保持 `Running`。现在恢复路径和中断后的继续会重放已记录在 `settled_members` 中的成员，重新连接到父运行上已记录子关系的未决成员而不会二次派发任何子运行，并在 join 的 `max_in_flight`、父运行的预留及其剩余预算之下，通过正常的 spawn 路径将父运行从未记录过子关系的未决成员启动一次；已记录的子运行若缺失、改变或不可用，仍会让该 join 保持待处理状态以等待对账，且取消恢复后的父运行时会将所有仍处于活动状态的子运行（包括恢复期间启动的子运行）以 `Cancelled` 结束。
 - **Program：子运行多的父运行发布更快 (#661)。** 校验运行记录的发布时，过去每次都读取并解析运行的整个 JavaScript 命令日志，并为每个子运行复制和扫描父运行的子运行列表。现在只有追加命令或提高日志剩余预算的发布才读取命令日志，子运行按 id 查找。追加命令的发布现在只读取最后一条已存储的条目。SQLite 和 PostgreSQL 转换存储在已存储字节未变时还会复用运行已解析的 `ProgramRunRecord`（`Options::run_record_cache_capacity`）。存储的运行记录的 owner scope 或 run id 与其所在行不一致时，现在读取时会被拒绝。发布被接受或拒绝的条件不变。在 SQLite 存储上 spawn 并 await 64 个脚本子运行的父运行，在同一台机器上从 61.5 秒降到 8.8 秒（128 个子运行：28.3 秒）；成本仍比子运行数量增长得快。
 - **await 因中断而暂停的子 Program 的父现在以 `Interrupted` 结束，并在子得到回答后带着子的结果继续 (#658)。** `main()` 对已暂停的子执行 `ng.await(ng.spawn(...))` 的父，如果在 await 之前执行过 Core 调用，会以 `P_TRANSITION_CONFLICT` 变为 `Failed`：父的 `Interrupted` 记录释放了 await 的预留，而只有该命令的 Core 调用中的中断才能释放预留，所以该转换被拒绝。如果 await 是第一条命令，父会以 `Interrupted` 结束，但恢复它会以 `P_CHECKPOINT_INCOMPATIBLE` 失败，回答子之后父仍然永远停在 `Interrupted`，关系保持 `Dispatched`。在持有 `Interrupted` 父的句柄期间被恢复的子，会被该句柄取消，恢复以 `Program resume lost the transition CAS` 失败。取消 `Interrupted` 的父，其暂停的子和更深层的所有 run 仍保持 `Interrupted` (#660)。
