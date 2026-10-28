@@ -139,7 +139,7 @@ this does not substitute for the complete patched library/source delivery.
 Matching library-only preferred source and recipient instructions are included
 in [the source asset](deps/redistribution/neograph-0.13.0-linux-lgpl-library-only-source.tar.gz)
 and in the sdist at that same path. Its SHA-256 is
-`af69f9448a3e14cd35a9814e96545fe4a13fd1fa5eebb3e3f9922c25f7e13c21`.
+`13fb825d7aa46b35c49d2f4dd511298dbc530a30d88dfa27e5fcef0663e6b0c3`.
 Extract `RECIPIENT-INSTRUCTIONS.txt` for the native build, patched-library
 replacement and LGPL 2.1 modification/reverse-engineering rights. The archive
 contains actual library inputs, not the unrelated unknown-grant upstream tests.
@@ -228,7 +228,7 @@ The pinned public source above is not proof that an uninspected binary uses it.
 ## Artifact-observed Windows closure (vcpkg)
 
 The Windows AMD64 wheels built by the same hosted run were inspected: the version
-resources of every DLL in `neograph_engine.libs`, identical across CPython 3.10-3.13
+resources of every DLL in `neograph_engine.libs`, identical across CPython 3.10-3.14
 (CPython 3.9 adds only delvewheel's load-order file). The ports come from a vcpkg
 checkout at the manifest's `builtin-baseline`
 (`5f1f266e969f8f5663e8ccca6249193c48531326`).

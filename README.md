@@ -420,7 +420,7 @@ canary, performance gates, gRPC, the Visual Studio generator and
 the other eight installed-consumer rows. Linux ARM64 is built and tested on the project's own ARM server,
 not on a hosted runner (the hosted ARM job of `ci-extended.yml` is switched off); the aarch64 wheels are built only on release tags. Run it on a release candidate before
 tagging. `wheels.yml` builds one CPython 3.12 wheel per platform for packaging changes. On
-release tags it builds wheels for CPython 3.9–3.13 on Linux (x86_64 and aarch64), macOS (arm64)
+release tags it builds wheels for CPython 3.9–3.14 on Linux (x86_64 and aarch64), macOS (arm64)
 and Windows (AMD64), with glibc 2.34 and macOS 14 as the minimum platform versions.
 
 - [Documentation index](docs/README.md)
