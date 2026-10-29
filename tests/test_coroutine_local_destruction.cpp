@@ -1,7 +1,11 @@
-// A coroutine local's destructor has run by the time an awaiting caller observes the coroutine's exit, in three
-// shapes: the coroutine rethrows an exception it caught around a co_await, it co_returns after catching one, and it
-// rethrows an exception that was thrown before any co_await (#673). The test runs on every platform and in the
-// sanitizer builds, so a compiler that ends a coroutine without running its locals' destructors fails here.
+// A probe of the toolchain: the destructor of a coroutine's local runs by the time the awaiting caller observes that
+// the coroutine has ended. The tests cover a coroutine that rethrows an exception it caught around a co_await, one that
+// co_returns after catching one, one that rethrows an exception thrown before any co_await (#673), and one whose
+// local is declared inside a try block whose exception is caught in the same coroutine.
+// MSVC 19.51 with /fsanitize=address fails the tests of the shapes that end in an exception or catch one in a try
+// block that declares a local, and the same compiler without the sanitizer passes all of them. The MSVC AddressSanitizer
+// job runs this file first, and when it fails the job leaves out the tests that scripts/msvc_asan_unwind_dependent_tests.txt
+// lists, because they depend on destruction during exception unwinding.
 #include <gtest/gtest.h>
 
 #include <asio/co_spawn.hpp>
@@ -71,6 +75,17 @@ asio::awaitable<std::optional<int>> rethrow_after_throw_before_any_co_await(bool
     }
     if (failure) std::rethrow_exception(failure);
     co_return std::nullopt;
+}
+
+asio::awaitable<std::optional<int>> local_declared_inside_the_try(bool* destroyed, bool suspend_before_throw) {
+    std::optional<int> result;
+    try {
+        LocalGuard guard{destroyed};
+        result.emplace(co_await throwing_awaitable(suspend_before_throw));
+    } catch (...) {
+        co_return std::nullopt;
+    }
+    co_return result;
 }
 
 }  // namespace
@@ -144,4 +159,29 @@ TEST(CoroutineLocalDestructionTest, DestructorRunsWhenCoroutineRethrowsAfterThro
     EXPECT_TRUE(caller_saw_exception);
     EXPECT_TRUE(destroyed_when_caught);
     EXPECT_TRUE(destroyed);
+}
+
+// A local declared inside the try block, with the exception caught inside the coroutine: the ordinary unwinding to a
+// handler of the same coroutine.
+TEST(CoroutineLocalDestructionTest, DestructorRunsWhenTheExceptionIsCaughtInsideTheCoroutine) {
+    for (const bool suspend_before_throw : {false, true}) {
+        SCOPED_TRACE(suspend_before_throw ? "suspended co_await" : "immediate co_await");
+        asio::io_context   io;
+        bool               destroyed              = false;
+        bool               caller_resumed         = false;
+        bool               destroyed_when_resumed = false;
+        std::optional<int> returned_value         = 42;
+        asio::co_spawn(
+            io,
+            [&]() -> asio::awaitable<void> {
+                returned_value         = co_await local_declared_inside_the_try(&destroyed, suspend_before_throw);
+                caller_resumed         = true;
+                destroyed_when_resumed = destroyed;
+            },
+            asio::detached);
+        io.run();
+        EXPECT_TRUE(caller_resumed);
+        EXPECT_FALSE(returned_value.has_value());
+        EXPECT_TRUE(destroyed_when_resumed);
+    }
 }

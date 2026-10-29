@@ -10870,8 +10870,8 @@ asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent
     // One caller of this process enters the publication; the others leave the run to it. Across processes the
     // publication decides, and the caller that loses it does nothing (resume_core says so with `taken`).
     // The entry is erased by release(), called before every exit, rather than left to the destructor of this
-    // coroutine local: under MSVC with AddressSanitizer in Release the entry was still in the set after the
-    // coroutine ended by std::rethrow_exception.
+    // coroutine local: under MSVC with AddressSanitizer a coroutine's local destructors do not run when it exits by an
+    // exception (CoroutineLocalDestructionTest), and the entry would stay in the set.
     struct Entry {
         std::shared_ptr<ProcessRuntimeState> state;
         std::pair<std::string, std::string>  key;
