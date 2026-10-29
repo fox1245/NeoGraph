@@ -619,6 +619,8 @@ bool reconciliation_pause(const PlanExecution& paused) {
 }
 
 std::atomic<JoinMemberLaunchObserver> join_member_launch_observer{nullptr};
+std::atomic<AttemptFinishedObserver>  attempt_finished_observer{nullptr};
+std::atomic<CancellationObserver>     cancellation_observer{nullptr};
 
 // A join member that settled before its join paused, replayed from its
 // recorded result by the attempt that resumes the join (#380).
@@ -1859,6 +1861,22 @@ asio::awaitable<std::optional<RunBudget>> held_command_remainder(const RunContro
 
 void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observer) noexcept {
     join_member_launch_observer.store(observer, std::memory_order_release);
+}
+
+void set_attempt_finished_observer_for_testing(AttemptFinishedObserver observer) noexcept {
+    attempt_finished_observer.store(observer, std::memory_order_release);
+}
+
+void notify_attempt_finished(std::string_view run_id, std::uint64_t attempt) noexcept {
+    if (const auto observer = attempt_finished_observer.load(std::memory_order_acquire)) observer(run_id, attempt);
+}
+
+void set_cancellation_observer_for_testing(CancellationObserver observer) noexcept {
+    cancellation_observer.store(observer, std::memory_order_release);
+}
+
+void notify_cancellation(std::string_view run_id, CancellationCause cause) noexcept {
+    if (const auto observer = cancellation_observer.load(std::memory_order_acquire)) observer(run_id, cause);
 }
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,

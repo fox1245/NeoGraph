@@ -66,6 +66,7 @@ extern char** environ;
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <system_error>
 #include <thread>
@@ -8140,60 +8141,105 @@ namespace {
 // Running again, with children), so that a test drives each interleaving by hand: it refuses it, holds it at a gate,
 // or lets it through and then freezes the run, which ends the attempt the way the loss of its process does. It counts
 // what it saw.
+// Records the run ids of attempts whose coroutine has ended, through the runtime's test seam, so a test waits for an
+// attempt to stop rather than for time to pass. One watch at a time; it removes the seam when it goes away.
+class AttemptFinishWatch {
+public:
+    AttemptFinishWatch() {
+        {
+            std::lock_guard lock(mutex());
+            finished().clear();
+        }
+        neograph::program::detail::set_attempt_finished_observer_for_testing(&AttemptFinishWatch::record);
+    }
+    ~AttemptFinishWatch() { neograph::program::detail::set_attempt_finished_observer_for_testing(nullptr); }
+    AttemptFinishWatch(const AttemptFinishWatch&)            = delete;
+    AttemptFinishWatch& operator=(const AttemptFinishWatch&) = delete;
+
+    bool wait_for(const std::string& run_id, std::uint64_t attempt) {
+        std::unique_lock lock(mutex());
+        // A watchdog, not the verdict: under sanitizers an attempt whose every publication is refused takes a while
+        // to make its bounded retries.
+        return cv().wait_for(lock, std::chrono::seconds(600),
+                             [&] { return finished().count({run_id, attempt}) > 0; });
+    }
+
+private:
+    static void record(std::string_view run_id, std::uint64_t attempt) {
+        {
+            std::lock_guard lock(mutex());
+            finished().emplace(std::string(run_id), attempt);
+        }
+        cv().notify_all();
+    }
+    static std::mutex& mutex() {
+        static std::mutex value;
+        return value;
+    }
+    static std::condition_variable& cv() {
+        static std::condition_variable value;
+        return value;
+    }
+    static std::multiset<std::pair<std::string, std::uint64_t>>& finished() {
+        static std::multiset<std::pair<std::string, std::uint64_t>> value;
+        return value;
+    }
+};
+
 class ContinuationInterferenceJournal final : public SyncProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
-        return inner_.load_sync(owner, run_id);
+        return inner_->load_sync(owner, run_id);
     }
     std::optional<ProgramJournalRecord> latest_sync(std::string_view owner, std::string_view run_id) const override {
-        return inner_.latest_sync(owner, run_id);
+        return inner_->latest_sync(owner, run_id);
     }
     std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run_id,
                                                std::uint64_t sequence) const override {
-        return inner_.load_events_sync(owner, run_id, sequence);
+        return inner_->load_events_sync(owner, run_id, sequence);
     }
     std::vector<ProgramEffectOutboxEntry> load_effects_sync(std::string_view owner, std::string_view run_id,
                                                             std::uint64_t sequence) const override {
-        return inner_.load_effects_sync(owner, run_id, sequence);
+        return inner_->load_effects_sync(owner, run_id, sequence);
     }
     std::vector<ProgramJavaScriptCommandJournalEntry> load_javascript_commands_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_javascript_commands_sync(owner, run_id, sequence);
+        return inner_->load_javascript_commands_sync(owner, run_id, sequence);
     }
     std::vector<ProgramContextPublication> load_context_publications_sync(
         std::string_view owner, std::string_view run_id, std::uint64_t sequence) const override {
-        return inner_.load_context_publications_sync(owner, run_id, sequence);
+        return inner_->load_context_publications_sync(owner, run_id, sequence);
     }
     std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
                                                                          std::string_view run_id) const override {
-        return inner_.load_hook_outbox_entries_sync(owner, run_id);
+        return inner_->load_hook_outbox_entries_sync(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                        std::string_view lineage_id) const override {
-        return inner_.load_lineage_sync(owner, lineage_id);
+        return inner_->load_lineage_sync(owner, lineage_id);
     }
     std::optional<ProgramRunLineage> load_run_lineage_sync(std::string_view owner,
                                                            std::string_view run_id) const override {
-        return inner_.load_run_lineage_sync(owner, run_id);
+        return inner_->load_run_lineage_sync(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_head_sync(std::string_view owner, std::string_view lineage_id,
                                                             std::string_view head_id) const override {
-        return inner_.load_lineage_head_sync(owner, lineage_id, head_id);
+        return inner_->load_lineage_head_sync(owner, lineage_id, head_id);
     }
     std::optional<ProgramRunGeneration> load_generation_sync(std::string_view owner, std::string_view lineage_id,
                                                              std::uint64_t generation) const override {
-        return inner_.load_generation_sync(owner, lineage_id, generation);
+        return inner_->load_generation_sync(owner, lineage_id, generation);
     }
     std::optional<ProgramExecutionLease> load_execution_lease_sync(std::string_view owner,
                                                                    std::string_view run_id) const override {
-        return inner_.load_execution_lease_sync(owner, run_id);
+        return inner_->load_execution_lease_sync(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
                                                         ProgramTransitionPublication publication) override {
         const auto kind = intercept(owner, publication);
         if (kind.refused) return ProgramTransitionPublishResult::Conflict;
         const auto run    = publication.run_record.run_id();
-        const auto result = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        const auto result = inner_->compare_publish_sync(owner, expected, std::move(publication));
         accepted(kind, run, result);
         return result;
     }
@@ -8204,7 +8250,7 @@ public:
         const auto kind = intercept(owner, publication);
         if (kind.refused) return ProgramTransitionPublishResult::Conflict;
         const auto run    = publication.run_record.run_id();
-        const auto result = inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+        const auto result = inner_->compare_publish_execution_sync(owner, expected, std::move(publication),
                                                                   std::move(expected_lease), std::move(next_lease));
         accepted(kind, run, result);
         return result;
@@ -8236,11 +8282,36 @@ public:
         freeze_all_.store(false);
     }
     std::uint64_t continuations() const noexcept { return continuations_.load(); }
-    bool wait_frozen_attempt_stopped() {
+    // The store without the interference. A runtime of another process reaches it through
+    // IsolatedProcessTransitionStore while this journal keeps refusing the frozen run to its own runtime.
+    std::shared_ptr<ProgramTransitionStore> backend() const { return inner_; }
+    bool wait_first_frozen_refusal() {
         std::unique_lock lock(gate_mutex_);
         return gate_cv_.wait_for(lock, std::chrono::seconds(10), [this] {
             return continuations_.load() >= 1 && refusals_.load() >= 1;
         });
+    }
+    // Hold the publication that the next frozen refusal answers inside the store until release_held_refusal: the
+    // attempt that made it cannot go on, so nothing it does later can happen before the test lets it.
+    void hold_next_frozen_refusal() noexcept { hold_armed_.store(true); }
+    void release_held_refusal() {
+        std::lock_guard lock(gate_mutex_);
+        hold_released_ = true;
+        gate_cv_.notify_all();
+    }
+    bool held_refusal_timed_out() {
+        std::lock_guard lock(gate_mutex_);
+        return hold_timed_out_;
+    }
+    // The frozen refusals by what the refused publication carried.
+    struct RefusalKinds {
+        std::uint64_t commands  = 0;
+        std::uint64_t terminals = 0;
+        std::uint64_t others    = 0;
+    };
+    RefusalKinds frozen_refusals() {
+        std::lock_guard lock(gate_mutex_);
+        return frozen_kinds_;
     }
 
 private:
@@ -8252,16 +8323,26 @@ private:
         Kind        kind;
         const auto& record = publication.run_record;
         {
-            std::lock_guard lock(gate_mutex_);
+            std::unique_lock lock(gate_mutex_);
             if (freeze_all_.load() || (!frozen_run_.empty() && frozen_run_ == record.run_id())) {
                 ++refusals_;
+                if (!publication.commands.empty())
+                    ++frozen_kinds_.commands;
+                else if (record.terminal_result())
+                    ++frozen_kinds_.terminals;
+                else
+                    ++frozen_kinds_.others;
                 gate_cv_.notify_all();
+                // A watchdog, not the verdict: a test that holds a refusal fails when it fires.
+                if (hold_armed_.exchange(false))
+                    hold_timed_out_ =
+                        !gate_cv_.wait_for(lock, std::chrono::seconds(600), [this] { return hold_released_; });
                 kind.refused = true;
                 return kind;
             }
         }
         if (record.continuation().state != ContinuationState::Running || record.children().empty()) return kind;
-        const auto stored = inner_.load_sync(owner, record.run_id());
+        const auto stored = inner_->load_sync(owner, record.run_id());
         if (!stored || stored->continuation().state != ContinuationState::Interrupted) return kind;
         kind.continuation = true;
         if (refuse_.load()) {
@@ -8288,18 +8369,53 @@ private:
         gate_cv_.notify_all();
     }
 
-    InMemoryProgramTransitionStore inner_;
+    std::shared_ptr<InMemoryProgramTransitionStore> inner_ = std::make_shared<InMemoryProgramTransitionStore>();
     std::atomic<bool>              refuse_{false};
     std::atomic<std::uint64_t>     refusals_{0};
     std::atomic<std::uint64_t>     continuations_{0};
     std::atomic<bool>              gate_armed_{false};
     std::atomic<bool>              freeze_armed_{false};
     std::atomic<bool>              freeze_all_{false};
+    std::atomic<bool>              hold_armed_{false};
     std::mutex                     gate_mutex_;
     std::condition_variable        gate_cv_;
     bool                           gate_entered_ = false;
     bool                           gate_released_ = false;
+    bool                           hold_released_ = false;
+    bool                           hold_timed_out_ = false;
+    RefusalKinds                   frozen_kinds_;
     std::string                    frozen_run_;
+};
+
+// Releases the refusal a journal holds once the runtime's shutdown has set the cancellation cause of one run, so the
+// held attempt goes on knowing that it is stopping.
+class ReleaseHeldRefusalOnShutdown {
+public:
+    ReleaseHeldRefusalOnShutdown(std::shared_ptr<ContinuationInterferenceJournal> journal, std::string run_id) {
+        target() = Target{std::move(journal), std::move(run_id)};
+        neograph::program::detail::set_cancellation_observer_for_testing(&ReleaseHeldRefusalOnShutdown::observe);
+    }
+    ~ReleaseHeldRefusalOnShutdown() {
+        neograph::program::detail::set_cancellation_observer_for_testing(nullptr);
+        target() = Target{};
+    }
+    ReleaseHeldRefusalOnShutdown(const ReleaseHeldRefusalOnShutdown&)            = delete;
+    ReleaseHeldRefusalOnShutdown& operator=(const ReleaseHeldRefusalOnShutdown&) = delete;
+
+private:
+    struct Target {
+        std::shared_ptr<ContinuationInterferenceJournal> journal;
+        std::string                                      run_id;
+    };
+    static void observe(std::string_view run_id, neograph::program::detail::CancellationCause cause) {
+        const auto& value = target();
+        if (cause == neograph::program::detail::CancellationCause::RuntimeShutdown && run_id == value.run_id)
+            value.journal->release_held_refusal();
+    }
+    static Target& target() {
+        static Target value;
+        return value;
+    }
 };
 
 }  // namespace
@@ -8383,19 +8499,63 @@ TEST(ProgramRuntimeTest, JavaScriptARestartedRuntimeRejoinsTheChildOfAContinuati
     const auto parent_id = started.parent.run_id();
     const auto child     = only_child_of(fixture, parent_id);
 
+    // The first runtime stays alive, cut off from the store as a lost process is: every publication of the run it
+    // makes is refused for as long as it runs. A runtime of another process reaches the same store directly.
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-lost-continuation-answer").status(),
               ProgramTerminalStatus::Completed);
-    for (int attempt = 0; attempt < 500 && journal->continuations() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(journal->wait_first_frozen_refusal());
     ASSERT_EQ(journal->continuations(), 1U);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    ASSERT_EQ(fixture.journal->load("tenant:runtime", parent_id)->continuation().state, ContinuationState::Running)
+        << "the lost process left the continuation Running";
+
+    auto restarted =
+        fixture.make_runtime_with_transitions(std::make_shared<IsolatedProcessTransitionStore>(journal->backend()));
+    const auto final = restarted->reconnect("tenant:runtime", parent_id).wait();
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(only_child_of(fixture, parent_id).state, ProgramChildState::Completed);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptDestroyingTheLostContinuationRuntimeBeforeThawDoesNotSpinRefusals) {
+    interrupt_calls.store(0);
+    auto journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst,
+                                                                       "trace-js-lost-continuation-reset");
+    ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_id = started.parent.run_id();
+    const auto child     = only_child_of(fixture, parent_id);
+
+    journal->freeze_after_continuation();
+    journal->hold_next_frozen_refusal();
+    ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-lost-continuation-reset-answer").status(),
+              ProgramTerminalStatus::Completed);
+    // The attempt that the continuation started is held inside its first refused publication until the shutdown below
+    // has set its cancellation cause, so every retry it could make happens while it is stopping.
+    ASSERT_TRUE(journal->wait_first_frozen_refusal());
+    ASSERT_EQ(journal->continuations(), 1U);
+    const auto before = journal->frozen_refusals();
+    ASSERT_EQ(before.others, 1U);
+    ASSERT_EQ(before.commands, 0U);
+    ASSERT_EQ(before.terminals, 0U);
+    {
+        ReleaseHeldRefusalOnShutdown release(journal, parent_id);
+        fixture.runtime.reset();
+    }
+    ASSERT_FALSE(journal->held_refusal_timed_out());
+    // Once the runtime stops, a publication the store refuses without the run's head moving is not retried: the held
+    // publication is not made again, and each publication the attempt goes on to make is attempted once.
+    const auto after = journal->frozen_refusals();
+    EXPECT_EQ(after.others, 1U);
+    EXPECT_EQ(after.commands, 1U);
+    EXPECT_EQ(after.terminals, 1U);
     ASSERT_EQ(fixture.journal->load("tenant:runtime", parent_id)->continuation().state, ContinuationState::Running)
         << "the lost process left the continuation Running";
 
     journal->thaw();
-    auto restarted = fixture.make_runtime_with_transitions(journal);
-    const auto final = restarted->reconnect("tenant:runtime", parent_id).wait();
+    auto       restarted = fixture.make_runtime_with_transitions(journal);
+    const auto final     = restarted->reconnect("tenant:runtime", parent_id).wait();
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     EXPECT_EQ(only_child_of(fixture, parent_id).state, ProgramChildState::Completed);
@@ -8416,19 +8576,23 @@ TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootEndsADescendantThatNoCon
     const auto middle     = only_child_of(fixture, root_id);
     const auto grandchild = only_child_of(fixture, middle.child_run_id);
 
+    // The middle's continuation runs in this process until the store has refused every publication of it, and the
+    // store accepts writes again only after that attempt has ended: from then on no control of this process runs it.
+    AttemptFinishWatch finished;
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, grandchild, "trace-lost-descendant-answer").status(),
               ProgramTerminalStatus::Completed);
-    for (int attempt = 0; attempt < 500 && journal->continuations() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(journal->wait_first_frozen_refusal());
+    ASSERT_TRUE(finished.wait_for(
+        middle.child_run_id, fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().attempt))
+        << "the frozen continuation never ended";
     ASSERT_EQ(journal->continuations(), 1U);
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     ASSERT_EQ(fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().state,
               ContinuationState::Running);
     journal->thaw();
 
     auto fresh = fixture.runtime->reconnect("tenant:runtime", root_id);
-    EXPECT_TRUE(fresh.cancel());
+    EXPECT_TRUE(neograph::async::run_sync(fresh.cancel_async()));
     EXPECT_EQ(fixture.journal->load("tenant:runtime", root_id)->continuation().state, ContinuationState::Cancelled);
     EXPECT_EQ(fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().state,
               ContinuationState::Cancelled);
@@ -9365,7 +9529,7 @@ TEST(ProgramRuntimeTest, JavaScriptRestartedContinuationPreservesPriorCoreCheckp
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-restarted-continuation-checkpoint-answer").status(),
               ProgramTerminalStatus::Completed);
-    ASSERT_TRUE(journal->wait_frozen_attempt_stopped());
+    ASSERT_TRUE(journal->wait_first_frozen_refusal());
 
     fixture.runtime.reset();
     journal->thaw();
@@ -20018,7 +20182,8 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfAwaitedSpawnsPublishesOneAwaitStartEntr
     // With the pending and the completed entry of the join that is at most 3 + (N - max_in_flight) entries, where one
     // entry per member would be N + 2.
     constexpr std::size_t kMembers = 6;
-    const RunBudget       child_budget{1000, 0, 0, 1, 2, 4, 0, 0, 0};
+    // Wall time is not what this test measures; each child's three seconds leave room for slow sanitizer builds.
+    const RunBudget       child_budget{3000, 0, 0, 1, 2, 4, 0, 0, 0};
     // The fixture's policy allows four concurrent operations and 32 Program operations, which bound the join to
     // four members at once and six in all.
     const RunBudget       parent_budget{20000, 0, 0, 4, 32, 40, 0, 1, kMembers};
@@ -20044,7 +20209,7 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfAwaitedSpawnsPublishesOneAwaitStartEntr
         std::vector<std::pair<std::string, ProgramVersion>> children;
         for (std::size_t index = 0; index < kMembers; ++index)
             children.emplace_back("child_" + std::to_string(index), child);
-        link_children(fixture, parent, children, BudgetLimits{1000, 0, 0, 1, 2, 4, 0, 0, 0},
+        link_children(fixture, parent, children, BudgetLimits{3000, 0, 0, 1, 2, 4, 0, 0, 0},
                       ExecutionGuarantee::Unmanaged);
 
         const auto result = fixture.runtime->run(

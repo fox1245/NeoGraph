@@ -1022,8 +1022,11 @@ void launch_failure_after(const std::shared_ptr<const detail::RuntimeScheduler>&
                           std::exception_ptr                                     error) noexcept {
     try {
         asio::co_spawn(scheduler->attempts, complete_attempt_launch_failure(control, checkpoint_id, error),
-                       asio::detached);
+                       [control](std::exception_ptr) {
+                           detail::notify_attempt_finished(control->run_id, control->attempt);
+                       });
     } catch (...) {
+        detail::notify_attempt_finished(control->run_id, control->attempt);
     }
 }
 
@@ -1046,7 +1049,10 @@ void spawn_run_attempt(const std::shared_ptr<const detail::RuntimeScheduler>& sc
                                std::move(host_admission_resolver), std::move(deadline_wait),
                                std::move(javascript_core_resume_value)),
                            [scheduler, control, checkpoint_id, keepalive](std::exception_ptr error) {
-                               if (error) launch_failure_after(scheduler, control, checkpoint_id, error);
+                               if (error)
+                                   launch_failure_after(scheduler, control, checkpoint_id, error);
+                               else
+                                   detail::notify_attempt_finished(control->run_id, control->attempt);
                            });
             return;
         }
@@ -1054,7 +1060,10 @@ void spawn_run_attempt(const std::shared_ptr<const detail::RuntimeScheduler>& sc
                        detail::execute_run_attempt(control, std::move(input), checkpoint_id,
                                                    std::move(javascript_core_resume_value)),
                        [scheduler, control, checkpoint_id, keepalive](std::exception_ptr error) {
-                           if (error) launch_failure_after(scheduler, control, checkpoint_id, error);
+                           if (error)
+                               launch_failure_after(scheduler, control, checkpoint_id, error);
+                           else
+                               detail::notify_attempt_finished(control->run_id, control->attempt);
                        });
     } catch (...) {
         launch_failure_after(scheduler, control, checkpoint_id, std::current_exception());
@@ -1598,14 +1607,23 @@ struct ChildRecordPublication {
     std::optional<ProgramRunRecord> record;
 };
 
+// Only a runtime that stops ends the publication of a child's relation or result into its parent: the stopping
+// process leaves it to recovery. Every other cancellation still publishes, because a replacement ends the source
+// generation's control the same way an ended parent does, and that generation's result belongs in the relation.
+bool is_runtime_stopping(const std::shared_ptr<detail::RunControl>& control) noexcept {
+    return control && control->cancellation_cause() == detail::CancellationCause::RuntimeShutdown;
+}
+
 asio::awaitable<ChildRecordPublication> publish_child_record(std::shared_ptr<detail::RunControl> parent,
-                                                             ProgramChildRecord                 child);
+                                                             ProgramChildRecord                 child,
+                                                             std::function<bool()>              stopping = {});
 
 asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
     std::string                             owner_scope,
     std::string                             parent_run_id,
     std::shared_ptr<ProgramTransitionStore> transitions,
-    ProgramChildRecord                      child) {
+    ProgramChildRecord                      child,
+    const std::function<bool()>&            stopping = {}) {
     for (int attempt = 0; attempt < detail::kRunPublicationAttempts; ++attempt) {
         const auto previous = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
         if (!previous) co_return ChildRecordPublication{};
@@ -1703,6 +1721,12 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
             co_return ChildRecordPublication{
                 result, co_await load_active_agent_run(transitions, owner_scope, parent_run_id)};
         }
+        // A stopping runtime retries only a refusal that another writer's progress explains; a store that refused
+        // while the parent's head stayed where this attempt read it is left to recovery.
+        if (stopping && stopping()) {
+            const auto current = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
+            if (!current || current->journal_head() == previous->journal_head()) co_return ChildRecordPublication{};
+        }
     }
     co_return ChildRecordPublication{};
 }
@@ -1711,15 +1735,22 @@ asio::awaitable<ChildRecordPublication> publish_child_record(
     std::string                             owner_scope,
     std::string                             parent_run_id,
     std::shared_ptr<ProgramTransitionStore> transitions,
-    ProgramChildRecord                      child) {
+    ProgramChildRecord                      child,
+    std::function<bool()>                   stopping = {}) {
     auto lock = co_await child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_async();
-    co_return co_await publish_child_record_unlocked(owner_scope, parent_run_id, transitions, std::move(child));
+    co_return co_await publish_child_record_unlocked(owner_scope, parent_run_id, transitions, std::move(child),
+                                                     stopping);
 }
 
 asio::awaitable<ChildRecordPublication> publish_child_record(std::shared_ptr<detail::RunControl> parent,
-                                                             ProgramChildRecord                 child) {
+                                                             ProgramChildRecord                 child,
+                                                             std::function<bool()>              stopping) {
+    auto parent_or_runtime_stopping = [weak_parent = std::weak_ptr<detail::RunControl>(parent),
+                                       stopping    = std::move(stopping)]() noexcept {
+        return is_runtime_stopping(weak_parent.lock()) || (stopping && stopping());
+    };
     co_return co_await publish_child_record(parent->owner_scope, parent->logical_run_id, parent->transitions,
-                                            std::move(child));
+                                            std::move(child), std::move(parent_or_runtime_stopping));
 }
 
 // Publishes the terminal state of a child into its parent's durable relation. False when it could not (the parent is
@@ -1729,7 +1760,8 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                                                std::string                             parent_run_id,
                                                std::string                             child_run_id,
                                                ProgramResult                           result,
-                                               bool*                                   parent_interrupted = nullptr) {
+                                               bool*                                   parent_interrupted = nullptr,
+                                               std::function<bool()>                   stopping           = {}) {
     if (parent_interrupted) *parent_interrupted = false;
     try {
         auto lock =
@@ -1761,7 +1793,8 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                 owner_scope, parent_run_id, transitions,
                 ProgramChildRecord{existing->child_run_id, existing->link_id,
                                    existing->link_receipt, existing->invocation, state, result,
-                                   terminal_generation});
+                                   terminal_generation},
+                stopping);
             if (publication.result == ProgramTransitionPublishResult::Published ||
                 publication.result == ProgramTransitionPublishResult::AlreadyPresent)
                 co_return true;
@@ -1777,8 +1810,10 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
             }
             // A rejection against an unchanged head is a validation/storage
             // failure, not competing publication. Do not strand completion
-            // waiters in an infinite retry loop for a permanent rejection.
-            if (current->journal_head() == record->journal_head()) co_return false;
+            // waiters in an infinite retry loop for a permanent rejection. A
+            // stopping runtime's attempts above already retried every refusal
+            // that another writer's progress explained.
+            if ((stopping && stopping()) || current->journal_head() == record->journal_head()) co_return false;
             // Let the other writer's turn run before reading its result.
             co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
         }
@@ -1797,11 +1832,14 @@ void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
     const std::string owner(owner_scope);
     const std::string parent(parent_run_id);
     const std::string child_id(child_run_id);
+    const auto        weak_child = std::weak_ptr<detail::RunControl>(child);
     child->set_completion_callback(
-        [transitions, owner, parent, child_id,
+        [transitions, owner, parent, child_id, weak_child,
          after_publication = std::move(after_publication)](ProgramResult result) -> asio::awaitable<void> {
+            auto stopping = [weak_child]() noexcept { return is_runtime_stopping(weak_child.lock()); };
             const bool published = co_await publish_child_completion(transitions, owner, parent, child_id,
-                                                                     std::move(result));
+                                                                     std::move(result), nullptr,
+                                                                     std::move(stopping));
             if (published && after_publication) after_publication();
         });
 }
@@ -2144,6 +2182,15 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
                 published == ProgramTransitionPublishResult::AlreadyPresent) {
                 if (execution_lease) control.clear_execution_lease(execution_lease->id());
                 co_return TerminalPublicationResult::Published;
+            }
+            // A stopping runtime retries only a refusal that another writer's progress explains; a store that refused
+            // while the run's head stayed where this attempt read it is left to recovery, and the run stays as stored.
+            // The head is one read of the record: the paired read of record and journal gives up while other writers
+            // keep moving the head, which is exactly the progress that earns a retry.
+            if (control.cancellation_cause() == detail::CancellationCause::RuntimeShutdown) {
+                const auto current = co_await control.transitions->load(control.owner_scope, control.run_id);
+                if (!current || current->journal_head() == previous->journal_head())
+                    co_return TerminalPublicationResult::TransitionConflict;
             }
         } catch (const std::exception& error) {
             cause = std::current_exception();
@@ -3070,6 +3117,7 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
             cancellation_cause_ = cause;
         }
         cancel_token->cancel();
+        notify_cancellation(run_id, cause);
         abort_handoff();
         co_await abort_graph_migration_async();
         co_await cancel_children_async(cause, held_here);
@@ -3131,6 +3179,7 @@ bool RunControl::cancel_without_waiting(CancellationCause cause, bool durable) n
     abort_handoff();
     abort_graph_migration();
     if (applied) {
+        notify_cancellation(run_id, cause);
         cancel_children_in_background(cause);
         return true;
     }
@@ -5162,7 +5211,17 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         }
         // A concurrent terminal transition cannot be retried as a live
         // command.  Otherwise, reload the head and let the exact coordinate
-        // check above classify an already-published append.
+        // check above classify an already-published append. A stopping
+        // runtime retries only a refusal that another writer's progress
+        // explains; a store that refused while the run's head stayed where
+        // this attempt read it is left to recovery. The head is one read of the
+        // record: the paired read above gives up while other writers keep
+        // moving the head, which is the progress that earns a retry.
+        if (cancellation_cause() == CancellationCause::RuntimeShutdown) {
+            const auto current = co_await async_transitions().load(owner_scope, run_id);
+            if (!current || current->journal_head() == previous->journal_head())
+                co_return co_await conflict_after_reload();
+        }
     }
     co_return co_await conflict_after_reload();
 }
@@ -6141,10 +6200,15 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     bind_budgeted_child_completion(reconnected->control_, parent->owner_scope,
                                                      parent->logical_run_id, child->child_run_id);
                     co_await parent->attach_child(reconnected->control_);
-                    if (const auto result = reconnected->try_result())
+                    if (const auto result = reconnected->try_result()) {
+                        auto cancelled = [weak_impl]() noexcept {
+                            const auto live_impl = weak_impl.lock();
+                            return !live_impl || live_impl->is_stopping();
+                        };
                         (void)co_await publish_child_completion(transitions, parent->owner_scope,
                                                                 parent->logical_run_id, child->child_run_id,
-                                                                *result);
+                                                                *result, nullptr, std::move(cancelled));
+                    }
                     co_return reconnected->control_;
                 });
         }
@@ -6728,8 +6792,13 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
              child_id](ProgramResult result) -> asio::awaitable<void> {
                 const auto status             = result.status();
                 bool       parent_interrupted = false;
+                auto       cancelled          = [weak_impl]() noexcept {
+                    const auto live_impl = weak_impl.lock();
+                    return !live_impl || live_impl->is_stopping();
+                };
                 const bool published = co_await publish_child_completion(
-                    transitions, owner, parent, child_id, std::move(result), &parent_interrupted);
+                    transitions, owner, parent, child_id, std::move(result), &parent_interrupted,
+                    std::move(cancelled));
                 if (published || !parent_interrupted || status == ProgramTerminalStatus::Interrupted)
                     co_return;
                 const auto keep = weak_impl.lock();
@@ -7362,6 +7431,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
     std::shared_ptr<ChildQuotaReservation> global_quota;
     if (!existing) global_quota = impl_->reserve_active_child(owner_scope);
 
+    const auto runtime_cancelled = [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
+        const auto live = weak_impl.lock();
+        return !live || live->is_stopping();
+    };
+
     bool reservation_active = false;
     if (!existing) {
         if (!impl_->reserve_child(parent_run_id, run_id, parent_budget, invocation.budget)) {
@@ -7372,7 +7446,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
         try {
             const auto publishing =
                 child_record_for(run_id, link, invocation, ProgramChildState::Publishing);
-            const auto attached = (co_await publish_child_record(parent.control_, publishing));
+            const auto attached =
+                (co_await publish_child_record(parent.control_, publishing, runtime_cancelled));
             if (!attached.record) {
                 impl_->release_child(parent_run_id, run_id, invocation.budget);
                 reservation_active = false;
@@ -7427,8 +7502,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                                                   run_id);
             co_await parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
-                (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
-                                         run_id, *result));
+                (co_await publish_child_completion(
+                    impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
+                    runtime_cancelled));
             co_return reconnected;
         }
         if (child_record->continuation().state != ContinuationState::Running) {
@@ -7441,8 +7517,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                                                   run_id);
             co_await parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
-                (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
-                                         run_id, *result));
+                (co_await publish_child_completion(
+                    impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
+                    runtime_cancelled));
             co_return reconnected;
         }
     }
@@ -7497,8 +7574,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                                                       parent_run_id, run_id);
                 co_await parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
-                    (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
-                                             run_id, *result));
+                    (co_await publish_child_completion(
+                        impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
+                        runtime_cancelled));
                 co_return reconnected;
             }
         }
@@ -7512,7 +7590,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
         try {
             dispatched = (co_await publish_child_record(
                 parent.control_,
-                child_record_for(run_id, link, invocation, ProgramChildState::Dispatched)));
+                child_record_for(run_id, link, invocation, ProgramChildState::Dispatched),
+                runtime_cancelled));
         } catch (...) {
             dispatch_failure = std::current_exception();
         }
@@ -7527,8 +7606,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                                                       parent_run_id, run_id);
                 co_await parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
-                    (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
-                                             run_id, *result));
+                    (co_await publish_child_completion(
+                        impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
+                        runtime_cancelled));
                 co_return reconnected;
             }
             const auto current_parent =
@@ -9244,9 +9324,15 @@ asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_cor
             persisted.state == ProgramChildState::Failed) {
             auto child = (co_await reconnect_core(owner_scope, persisted.child_run_id));
             co_await parent.control_->attach_child(child.control_);
-            if (const auto result = child.try_result())
+            if (const auto result = child.try_result()) {
+                auto cancelled = [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
+                    const auto live_impl = weak_impl.lock();
+                    return !live_impl || live_impl->is_stopping();
+                };
                 (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
-                                         persisted.child_run_id, *result));
+                                                   persisted.child_run_id, *result, nullptr,
+                                                   std::move(cancelled)));
+            }
             recovered.push_back(std::move(child));
             continue;
         }
@@ -10396,8 +10482,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
             throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
         }
         if (!previous->invocation().parent_run_id.empty()) {
-            (co_await publish_child_completion(impl_->transitions, owner_scope,
-                                     previous->invocation().parent_run_id, run_id, terminal_result));
+            (co_await publish_child_completion(
+                impl_->transitions, owner_scope, previous->invocation().parent_run_id, run_id,
+                terminal_result, nullptr,
+                [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
+                    const auto live = weak_impl.lock();
+                    return !live || live->is_stopping();
+                }));
             co_await impl_->wake_paused_parent_handling_failure(
                 owner_scope, previous->invocation().parent_run_id);
         }
@@ -11192,8 +11283,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
         auto reconnected = ProgramHandle(std::move(control));
         if (const auto result = reconnected.try_result()) {
             if (!previous->invocation().parent_run_id.empty()) {
-                (co_await publish_child_completion(impl_->transitions, owner_scope,
-                                         previous->invocation().parent_run_id, run_id, *result));
+                (co_await publish_child_completion(
+                    impl_->transitions, owner_scope, previous->invocation().parent_run_id, run_id,
+                    *result, nullptr, [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
+                        const auto live = weak_impl.lock();
+                        return !live || live->is_stopping();
+                    }));
                 co_await impl_->wake_paused_parent_handling_failure(
                     owner_scope, previous->invocation().parent_run_id);
             }
