@@ -23,7 +23,11 @@
 #include <descriptor/descriptor.h>
 #include <runtime/host.h>
 
+#include <asio/bind_cancellation_slot.hpp>
+#include <asio/cancellation_signal.hpp>
 #include <asio/co_spawn.hpp>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
 #include <asio/redirect_error.hpp>
@@ -33,6 +37,7 @@
 #include <asio/use_awaitable.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -487,6 +492,242 @@ TEST(HostLoop, ACancelledHostTimerLeavesNoHostTimerArmed) {
     while (executor->step()) {}
     EXPECT_TRUE(woken);
     EXPECT_EQ(executor->timers(), 0u);
+}
+
+namespace {
+struct ScopedSimulatedClock {
+    async::detail::SimulatedClock clock{
+        std::chrono::steady_clock::time_point(1h),
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(1700000000000LL))};
+    ScopedSimulatedClock() { async::detail::set_simulated_clock_for_testing(&clock); }
+    ~ScopedSimulatedClock() { async::detail::set_simulated_clock_for_testing(nullptr); }
+    ScopedSimulatedClock(const ScopedSimulatedClock&)            = delete;
+    ScopedSimulatedClock& operator=(const ScopedSimulatedClock&) = delete;
+};
+}  // namespace
+
+TEST(HostLoop, AHostTimerArmedAtTimePointMinUnderASimulatedClockWakesAPendingWaitOnTheNextTurn) {
+    ScopedSimulatedClock simulated;
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+
+    for (const bool armed_never : {true, false}) {
+        async::HostTimer signal(loop.executor());
+        if (armed_never) {
+            signal.arm_never();
+        } else {
+            signal.arm_after(10s);
+        }
+        bool woken = false;
+        loop.spawn(wait_on_a_signal(signal), [&](std::exception_ptr) { woken = true; });
+        while (executor->step()) {}
+        EXPECT_FALSE(woken);
+
+        signal.arm_at(std::chrono::steady_clock::time_point::min());
+        while (executor->step()) {}
+        EXPECT_TRUE(woken);
+        EXPECT_EQ(executor->timers(), 0u);
+        EXPECT_TRUE(loop.idle());
+
+        std::optional<asio::error_code> min_ec;
+        signal.arm_at(std::chrono::steady_clock::time_point::min());
+        signal.async_wait([&](const asio::error_code& ec) { min_ec = ec; });
+        while (executor->step()) {}
+        ASSERT_TRUE(min_ec.has_value());
+        EXPECT_FALSE(*min_ec);
+        EXPECT_EQ(executor->timers(), 0u);
+        EXPECT_TRUE(loop.idle());
+    }
+}
+
+TEST(HostLoop, ADueDeadlineUnderASimulatedClockIsDispatchedWhenAnotherTimerIsQueuedOneTickBeforeIt) {
+    ScopedSimulatedClock simulated;
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+
+    const auto deadline = async::RuntimeClock::now() + 10ms;
+    async::HostTimer one_tick_before(loop.executor());
+    async::HostTimer first_at_deadline(loop.executor());
+    async::HostTimer second_at_deadline(loop.executor());
+    async::HostTimer one_tick_after(loop.executor());
+
+    first_at_deadline.arm_at(deadline);
+    one_tick_after.arm_at(deadline + async::RuntimeClock::duration(1));
+    one_tick_before.arm_at(deadline - async::RuntimeClock::duration(1));
+    second_at_deadline.arm_at(deadline);
+
+    std::vector<int> completed;
+    first_at_deadline.async_wait([&](const asio::error_code& ec) {
+        if (!ec) completed.push_back(2);
+    });
+    one_tick_after.async_wait([&](const asio::error_code& ec) {
+        if (!ec) completed.push_back(4);
+    });
+    one_tick_before.async_wait([&](const asio::error_code& ec) {
+        if (!ec) completed.push_back(1);
+    });
+    second_at_deadline.async_wait([&](const asio::error_code& ec) {
+        if (!ec) completed.push_back(3);
+    });
+
+    while (executor->step()) {}
+    EXPECT_TRUE(completed.empty());
+    EXPECT_EQ(executor->timers(), 1u);
+
+    simulated.clock.advance(10ms);
+    ASSERT_TRUE(executor->step());
+    ASSERT_TRUE(executor->step());
+    EXPECT_EQ(completed, (std::vector<int>{1, 2, 3}));
+    EXPECT_FALSE(executor->step()) << "all due waits completed on the first pumped turn";
+    EXPECT_EQ(executor->timers(), 1u);
+    EXPECT_FALSE(loop.idle());
+
+    simulated.clock.advance(async::RuntimeClock::duration(1));
+    while (executor->step()) {}
+    EXPECT_EQ(completed, (std::vector<int>{1, 2, 3, 4}));
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, AHostTimerWaitCancelledThroughACancellationSlotCompletesWithOperationAbortedAndDisarms) {
+    ScopedSimulatedClock simulated;
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+
+    async::HostTimer timer(loop.executor());
+    timer.arm_after(10s);
+    async::HostTimer signal(loop.executor());
+    signal.arm_never();
+
+    bool group_done = false;
+    std::array<std::size_t, 2> completion_order{};
+    asio::error_code timer_ec;
+    asio::error_code signal_ec;
+
+    asio::experimental::make_parallel_group(
+        timer.async_wait(asio::deferred),
+        signal.async_wait(asio::deferred))
+        .async_wait(
+            asio::experimental::wait_for_one(),
+            [&](std::array<std::size_t, 2> order, asio::error_code ec0, asio::error_code ec1) {
+                completion_order = order;
+                timer_ec = ec0;
+                signal_ec = ec1;
+                group_done = true;
+            });
+
+    while (executor->step()) {}
+    EXPECT_FALSE(group_done);
+    EXPECT_EQ(executor->timers(), 1u);
+
+    signal.cancel();
+    while (executor->step()) {}
+    ASSERT_TRUE(group_done);
+    EXPECT_EQ(completion_order[0], 1u);
+    EXPECT_EQ(timer_ec, asio::error::operation_aborted);
+    EXPECT_EQ(signal_ec, asio::error::operation_aborted);
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+
+    for (const auto type : {asio::cancellation_type::terminal,
+                            asio::cancellation_type::partial,
+                            asio::cancellation_type::total}) {
+        asio::cancellation_signal cancel_signal;
+        std::optional<asio::error_code> slot_ec;
+        timer.arm_after(10s);
+        timer.async_wait(asio::bind_cancellation_slot(
+            cancel_signal.slot(),
+            [&](const asio::error_code& ec) { slot_ec = ec; }));
+        while (executor->step()) {}
+        EXPECT_FALSE(slot_ec.has_value());
+        EXPECT_EQ(executor->timers(), 1u);
+
+        // A slot can be emitted on any thread, so a simulated wait leaves the host timer to the turn it asks for.
+        cancel_signal.emit(type);
+        while (executor->step()) {}
+        ASSERT_TRUE(slot_ec.has_value());
+        EXPECT_EQ(*slot_ec, asio::error::operation_aborted);
+        EXPECT_EQ(executor->timers(), 0u);
+        EXPECT_TRUE(loop.idle());
+    }
+
+    simulated.clock.advance(10s);
+    EXPECT_FALSE(executor->step());
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, AHostTimerDestroyedWithAPendingSimulatedWaitCompletesItWithOperationAborted) {
+    ScopedSimulatedClock simulated;
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+
+    std::optional<asio::error_code> result;
+    {
+        async::HostTimer timer(loop.executor());
+        timer.arm_after(10s);
+        timer.async_wait([&](const asio::error_code& ec) { result = ec; });
+        while (executor->step()) {}
+        EXPECT_FALSE(result.has_value());
+        EXPECT_EQ(executor->timers(), 1u);
+    }
+    // The destroyed timer's wait is cancelled; the turn it asks for completes it and disarms the host timer.
+    while (executor->step()) {}
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, asio::error::operation_aborted);
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, ARuntimeClockSentinelDoesNotRetireASteadyClockDeadline) {
+    async::detail::SimulatedClock clock{
+        std::chrono::steady_clock::now() + 1h,
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(1700000000000LL))};
+    async::detail::set_simulated_clock_for_testing(&clock);
+    struct ResetClock {
+        ~ResetClock() { async::detail::set_simulated_clock_for_testing(nullptr); }
+    } reset_clock;
+
+    auto executor = std::make_shared<ManualExecutor>();
+    async::HostLoop loop(executor);
+
+    const auto deadline = async::RuntimeClock::now() + 10ms;
+    // Public note_deadline registers in the steady_clock queue; HostTimer under a simulated clock registers with
+    // the loop's simulated wait registry (and without one, in the RuntimeClock queue).
+    async::note_deadline(loop.executor(), deadline);
+    bool host_timer_done = false;
+    loop.spawn(wait_on_a_host_timer([deadline](async::HostTimer& timer) { timer.arm_at(deadline); }),
+               [&](std::exception_ptr error) { host_timer_done = !error; });
+    while (executor->step()) {}
+    EXPECT_FALSE(host_timer_done);
+
+    clock.advance(10ms);
+    while (executor->step()) {}
+    EXPECT_TRUE(host_timer_done);
+    // Completing the HostTimer wait retired its simulated deadline, but the steady_clock sentinel has not fired in
+    // the steady_clock queue, so the public note_deadline remains noted and keeps a host timer armed.
+    EXPECT_EQ(executor->timers(), 1u);
+    async::forget_deadline(loop.executor(), deadline);
+    EXPECT_EQ(executor->timers(), 0u);
+    EXPECT_TRUE(loop.idle());
+}
+
+TEST(HostLoop, SimulatedClockAdvanceSaturatesWithoutOverflow) {
+    async::detail::SimulatedClock clock(
+        std::chrono::steady_clock::time_point(1h),
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(1700000000000LL)));
+    clock.advance(std::chrono::hours::max());
+    EXPECT_EQ(clock.steady_now(), std::chrono::steady_clock::time_point::max());
+    EXPECT_EQ(clock.system_now(), std::chrono::system_clock::time_point::max());
+
+    clock.advance(std::chrono::hours::max());
+    EXPECT_EQ(clock.steady_now(), std::chrono::steady_clock::time_point::max());
+    EXPECT_EQ(clock.system_now(), std::chrono::system_clock::time_point::max());
+
+    clock.advance(std::chrono::hours::min());
+    clock.advance(std::chrono::hours::min());
+    EXPECT_EQ(clock.steady_now(), std::chrono::steady_clock::time_point::min());
+    EXPECT_EQ(clock.system_now(), std::chrono::system_clock::time_point::min());
 }
 
 TEST(HostLoop, InHostTurnIsTrueOnlyWhileATurnRunsOnTheCallingThread) {

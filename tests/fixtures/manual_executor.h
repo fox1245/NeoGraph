@@ -9,6 +9,8 @@
 
 #include <neograph/async/host_loop.h>
 
+#include "../../src/core/runtime_clock.h"
+
 #include <runtime/host.h>
 
 #include <atomic>
@@ -56,8 +58,8 @@ public:
         doomed = std::move(found->second);
         timers_.erase(found);
     }
-    sp::runtime::SteadyTime now() const noexcept override { return std::chrono::steady_clock::now() + clock_lead; }
-    sp::runtime::WallTime wall_now() const noexcept override { return std::chrono::system_clock::now(); }
+    sp::runtime::SteadyTime now() const noexcept override { return async::RuntimeClock::now() + clock_lead; }
+    sp::runtime::WallTime wall_now() const noexcept override { return async::system_now(); }
     // True on the thread that is running one of this executor's tasks, and on no other.
     bool in_thread() const noexcept override { return RunningHere::on_this_thread(this); }
     bool host_pumped() const noexcept override { return pumped_; }

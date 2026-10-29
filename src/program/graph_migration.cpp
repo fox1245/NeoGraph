@@ -11,6 +11,7 @@
 
 #include "canonical_json.h"
 #include "../core/json_walk.h"
+#include "../core/runtime_clock.h"
 #include "node_retry_budget.h"
 
 #include <algorithm>
@@ -25,6 +26,8 @@ using neograph::detail::check_walk_depth;
 
 namespace neograph::program {
 namespace {
+
+using detail::system_now;
 
 constexpr std::string_view CAPSULE_FORMAT = "neograph-graph-migration-capsule";
 constexpr std::string_view ADAPTER_FORMAT = "neograph-graph-semantic-migration-adapter";
@@ -926,7 +929,7 @@ bool does_program_execution_lease_bind(
             // Command checkpoints have their own threads; they do not mint a
             // new root execution identity or renew the original deadline.
             const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
+                system_now().time_since_epoch()).count();
             const auto checkpoint = run.exact_checkpoint();
             return run.recorded_binding_set_fingerprint().has_value() &&
                 !publication.commands.empty() &&

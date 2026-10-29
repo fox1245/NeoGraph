@@ -33,9 +33,12 @@
 #include "fixtures/coarse_clock_store.h"
 #include "fixtures/fork_share.h"
 #include "fixtures/vanishing_checkpoint_store.h"
+#include "fixtures/manual_executor.h"
 #include "javascript.h"
 #include "registry_access.h"
 #include "run_control.h"
+#include "../src/core/host_timer.h"
+#include "../src/core/runtime_clock.h"
 #include <asio/bind_cancellation_slot.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/steady_timer.hpp>
@@ -1138,6 +1141,80 @@ private:
     std::string name_;
 };
 
+struct SimulatedHoldGate {
+    std::mutex                                  mutex;
+    std::shared_ptr<neograph::async::HostTimer> timer;
+    std::atomic<unsigned>                       entered{0};
+    std::atomic<bool>                           released{false};
+
+    void start() {
+        std::lock_guard lock(mutex);
+        EXPECT_EQ(timer, nullptr);
+        timer.reset();
+        entered.store(0);
+        released.store(false);
+    }
+
+    void reset() {
+        std::lock_guard lock(mutex);
+        timer.reset();
+        entered.store(0);
+        released.store(false);
+    }
+
+    void release() {
+        std::shared_ptr<neograph::async::HostTimer> active;
+        {
+            std::lock_guard lock(mutex);
+            released.store(true);
+            active = timer;
+        }
+        if (active) {
+            active->cancel();
+            asio::post(active->get_executor(), [] {});
+        }
+    }
+} simulated_hold_gate;
+
+class SimulatedHoldNode final : public GraphNode {
+public:
+    explicit SimulatedHoldNode(std::string name) : name_(std::move(name)) {}
+
+    asio::awaitable<NodeOutput> run(NodeInput input) override {
+        auto timer =
+            std::make_shared<neograph::async::HostTimer>(co_await asio::this_coro::executor);
+        timer->arm_never();
+        bool already_released = false;
+        {
+            std::lock_guard lock(simulated_hold_gate.mutex);
+            simulated_hold_gate.timer = timer;
+            already_released          = simulated_hold_gate.released.load();
+        }
+        simulated_hold_gate.entered.fetch_add(1);
+        if (!already_released) {
+            asio::error_code error;
+            co_await timer->async_wait(asio::bind_cancellation_slot(
+                input.ctx.cancel_token->slot(),
+                asio::redirect_error(asio::use_awaitable, error)));
+        }
+        {
+            std::lock_guard lock(simulated_hold_gate.mutex);
+            if (simulated_hold_gate.timer == timer) simulated_hold_gate.timer.reset();
+        }
+        if (!simulated_hold_gate.released.load()) {
+            throw asio::system_error(asio::error::operation_aborted);
+        }
+        NodeOutput output;
+        output.writes.push_back(ChannelWrite{"value", "released"});
+        co_return output;
+    }
+
+    std::string get_name() const override { return name_; }
+
+private:
+    std::string name_;
+};
+
 RegistrySnapshot runtime_registry(
     ExecutionGuarantee completed_guarantee = ExecutionGuarantee::Strict) {
     RegistrySnapshotBuilder builder;
@@ -1345,6 +1422,13 @@ RegistrySnapshot runtime_registry(
         },
         json{{"type", "object"}},
         json{{"reads", json::array({"messages"})}});
+    builder.add_node(
+        manifest(ExecutableKind::Node, "runtime-simulated-hold", '9'),
+        [](const std::string& name, const json&, const NodeContext&) {
+            return std::make_unique<SimulatedHoldNode>(name);
+        },
+        json{{"type", "object"}},
+        json{{"writes", json::array({"value"})}, {"exports", json::array({"value"})}});
     builder.add_reducer(manifest(ExecutableKind::Reducer, "append", 'a'),
                         [](const json& current, const json& incoming) {
                             json out = current.is_array() ? current : json::array();
@@ -7746,6 +7830,159 @@ TEST(ProgramRuntimeTest, JavaScriptAwaitTimeoutCancelsDirectCoreWork) {
     EXPECT_LE(blocking_calls.load(), 1U);
     EXPECT_EQ(blocking_active.load(), 0U);
     EXPECT_LT(elapsed.count(), 2);
+}
+
+// The runtime reads this clock while the object lives. Its steady time starts an hour after the steady epoch, so
+// that no deadline computed from it is the epoch itself (the "no deadline" value), and its wall time at a fixed
+// Unix time, so that recorded timestamps are exact.
+constexpr std::int64_t kSimulatedWallStartMs = 1700000000000LL;
+struct ScopedSimulatedClock {
+    neograph::program::detail::SimulatedClock clock{
+        std::chrono::steady_clock::time_point(std::chrono::hours(1)),
+        std::chrono::system_clock::time_point(std::chrono::milliseconds(kSimulatedWallStartMs))};
+    ScopedSimulatedClock() { neograph::program::detail::set_simulated_clock_for_testing(&clock); }
+    ~ScopedSimulatedClock() { neograph::program::detail::set_simulated_clock_for_testing(nullptr); }
+    ScopedSimulatedClock(const ScopedSimulatedClock&)            = delete;
+    ScopedSimulatedClock& operator=(const ScopedSimulatedClock&) = delete;
+};
+
+TEST(ProgramRuntimeTest, SimulatedClockDrivesJavaScriptAwaitTimeoutOnHostLoop) {
+    ScopedSimulatedClock simulated;
+    simulated_hold_gate.start();
+
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    fixture.runtime.reset();
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-simulated-hold",
+        R"JS(
+    const result = yield ng.await(ng.callCore("main", {}, "await:core"), 500, "await");
+    return result;
+)JS"));
+
+    neograph::host_test::HostedRuntime hosted;
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    config.executor = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+    struct ResetHoldGate {
+        ~ResetHoldGate() { simulated_hold_gate.reset(); }
+    } reset_hold_gate;
+
+    bool                         done = false;
+    std::exception_ptr           failure;
+    std::optional<ProgramResult> result;
+    hosted.loop.spawn(
+        runtime.run_async(
+            "tenant:runtime", version,
+            ProgramInvocation{
+                json::object(), javascript_budget(1), "trace-js-simulated-await-timeout", {}}),
+        [&](std::exception_ptr error, ProgramResult value) {
+            failure = error;
+            if (!error) result = std::move(value);
+            done = true;
+        });
+
+    while (hosted.host->step()) {}
+    ASSERT_EQ(simulated_hold_gate.entered.load(), 1U);
+    EXPECT_FALSE(done);
+
+    simulated.clock.advance(std::chrono::milliseconds(499));
+    while (hosted.host->step()) {}
+    EXPECT_FALSE(done);
+
+    simulated.clock.advance(std::chrono::milliseconds(1));
+    while (hosted.host->step()) {}
+    if (failure) std::rethrow_exception(failure);
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->status(), ProgramTerminalStatus::TimedOut);
+    ASSERT_TRUE(result->failure().has_value());
+    EXPECT_EQ(result->failure()->code, "P_AWAIT_TIMEOUT");
+    EXPECT_EQ(result->usage().wall_time_ms, 500U);
+
+    const auto record = fixture.journal->load("tenant:runtime", result->run_id());
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->updated_at_ms() - record->created_at_ms(), 500);
+    simulated_hold_gate.reset();
+}
+
+TEST(ProgramRuntimeTest, SimulatedClockDrivesRecordedWallTimeAndUpdatedAtMs) {
+    ScopedSimulatedClock simulated;
+    simulated_hold_gate.start();
+
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    fixture.runtime.reset();
+    const auto version = fixture.admit_javascript(javascript_runtime_source(
+        "runtime-simulated-hold",
+        R"JS(
+    const result = yield ng.await(ng.callCore("main", {}, "await:core"), 5000, "await");
+    return result;
+)JS"));
+
+    neograph::host_test::HostedRuntime hosted;
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    config.executor = hosted.loop.executor();
+    ProgramRuntime runtime(std::move(config));
+    struct ResetHoldGate {
+        ~ResetHoldGate() { simulated_hold_gate.reset(); }
+    } reset_hold_gate;
+
+    const auto                   budget = javascript_budget(1);
+    bool                         done   = false;
+    std::exception_ptr           failure;
+    std::optional<ProgramResult> result;
+    hosted.loop.spawn(
+        runtime.run_async("tenant:runtime", version,
+                          ProgramInvocation{json::object(), budget, "trace-js-simulated-wall", {}}),
+        [&](std::exception_ptr error, ProgramResult value) {
+            failure = error;
+            if (!error) result = std::move(value);
+            done = true;
+        });
+
+    while (hosted.host->step()) {}
+    ASSERT_EQ(simulated_hold_gate.entered.load(), 1U);
+    EXPECT_FALSE(done);
+
+    simulated.clock.advance(std::chrono::milliseconds(345));
+    simulated_hold_gate.release();
+    while (hosted.host->step()) {}
+    if (failure) std::rethrow_exception(failure);
+    ASSERT_TRUE(done);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(result->usage().wall_time_ms, 345U);
+    EXPECT_EQ(result->remaining_budget().wall_time_ms, budget.wall_time_ms - 345U);
+
+    const auto record = fixture.journal->load("tenant:runtime", result->run_id());
+    ASSERT_TRUE(record.has_value());
+    EXPECT_EQ(record->created_at_ms(), kSimulatedWallStartMs);
+    EXPECT_EQ(record->updated_at_ms(), kSimulatedWallStartMs + 345);
+    EXPECT_EQ(record->updated_at_ms() - record->created_at_ms(), 345);
+    simulated_hold_gate.reset();
+}
+
+TEST(ProgramRuntimeTest, SimulatedClockRunsMandatoryLifecycleHookWithoutTimingOutAtOnce) {
+    ScopedSimulatedClock simulated;
+    completed_calls.store(0);
+
+    AdmittedRuntime   fixture;
+    const auto        version = fixture.admit("runtime-completed");
+    LifecycleHookTool admitted("admitted");
+    LifecycleHookTool before_terminal("before-terminal");
+    LifecycleHookTool failed("failed");
+
+    RuntimeConfig config{fixture.catalog, fixture.checkpoints, {}, fixture.journal, 1};
+    config.hook_runtime = lifecycle_hooks(admitted, before_terminal, failed);
+    fixture.runtime     = std::make_unique<ProgramRuntime>(std::move(config));
+
+    const auto result = fixture.runtime->run(
+        "tenant:runtime", version,
+        ProgramInvocation{json::object(), grant(), "trace-simulated-mandatory-hook", {}});
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(completed_calls.load(), 1U);
+    EXPECT_EQ(admitted.calls.load(), 1U);
+    EXPECT_EQ(before_terminal.calls.load(), 1U);
+    EXPECT_EQ(failed.calls.load(), 0U);
 }
 
 TEST(ProgramRuntimeTest, JavaScriptQuorumOrdersSuccessfulMembers) {

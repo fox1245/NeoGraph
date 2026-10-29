@@ -136,6 +136,115 @@ class TreeTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("include/neograph/late.h:2:", out)
 
+    def test_a_direct_clock_read_in_src_program_fails_unless_allowlisted(self):
+        self.write(
+            "src/program/late.cpp",
+            "void f() {\n"
+            "    auto a = std::chrono::steady_clock::now();\n"
+            "    auto b = std::chrono::system_clock::now();\n"
+            "    auto c = std::chrono::high_resolution_clock::now();\n"
+            "}\n",
+        )
+        code, out, err = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("src/program/late.cpp:2:", out)
+        self.assertIn("src/program/late.cpp:3:", out)
+        self.assertIn("src/program/late.cpp:4:", out)
+        self.assertIn("RuntimeClock", out)
+        self.assertIn("3 finding", err)
+        # The timer allowlist does not excuse a clock read: the reads stay, and its entry is unused.
+        self.write("scripts/host_timer_allowlist.txt", "src/program/late.cpp\tA reason.\n")
+        code, out, _ = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("src/program/late.cpp:2:", out)
+        self.assertIn("excuses no raw timer use", out)
+        self.write("scripts/host_timer_allowlist.txt", "# empty\n")
+        self.write("scripts/runtime_clock_allowlist.txt", "src/program/late.cpp\tA reason.\n")
+        self.assertEqual(self.run_guard()[0], 0)
+
+    def test_high_resolution_clock_now_is_refused(self):
+        self.write(
+            "src/program/hires.cpp",
+            "void f() {\n    auto now = std::chrono::high_resolution_clock::now();\n}\n",
+        )
+        code, out, err = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("src/program/hires.cpp:2:", out)
+        self.assertIn("high_resolution_clock::now", out)
+        self.assertIn("1 finding", err)
+
+    def test_clock_read_through_type_alias_is_refused_while_runtime_clock_alias_passes(self):
+        self.write(
+            "src/program/ok_alias.h",
+            "struct S {\n"
+            "    using clock = detail::RuntimeClock;\n"
+            "    using steady = std::chrono::steady_clock;\n"
+            "    using time_point = steady::time_point;\n"
+            "    static time_point f() { return clock::now(); }\n"
+            "};\n",
+        )
+        self.assertEqual(self.run_guard()[0], 0)
+
+        self.write(
+            "src/program/bad_alias.cpp",
+            "using clock = std::chrono::steady_clock;\n"
+            "typedef std::chrono::system_clock sys_clock;\n"
+            "using hires = std::chrono::high_resolution_clock;\n"
+            "void f() {\n"
+            "    auto a = clock::now();\n"
+            "    auto b = sys_clock::now();\n"
+            "    auto c = hires::now();\n"
+            "    auto d = steady::now();\n"
+            "}\n",
+        )
+        code, out, err = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("src/program/bad_alias.cpp:5:", out)
+        self.assertIn("src/program/bad_alias.cpp:6:", out)
+        self.assertIn("src/program/bad_alias.cpp:7:", out)
+        self.assertIn("src/program/bad_alias.cpp:8:", out)
+        self.assertIn("4 finding", err)
+
+    def test_include_neograph_program_and_core_clock_files_are_scanned(self):
+        self.write(
+            "include/neograph/program/header.h",
+            "inline auto f() { return std::chrono::steady_clock::now(); }\n",
+        )
+        self.write(
+            "src/core/host_admission.cpp",
+            "void g() { auto t = std::chrono::steady_clock::now(); }\n",
+        )
+        self.write(
+            "src/core/hook_runtime.cpp",
+            "void h() { auto t = std::chrono::system_clock::now(); }\n",
+        )
+        code, out, err = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("include/neograph/program/header.h:1:", out)
+        self.assertIn("src/core/host_admission.cpp:1:", out)
+        self.assertIn("src/core/hook_runtime.cpp:1:", out)
+        self.assertIn("3 finding", err)
+
+    def test_explicit_missing_clock_allowlist_fails_with_exit_2(self):
+        missing = self.root / "does_not_exist.txt"
+        code, _, err = self.run_guard("--clock-allowlist", str(missing))
+        self.assertEqual(code, 2)
+        self.assertIn("cannot read the allowlist", err)
+
+    def test_the_clock_allowlist_does_not_excuse_a_raw_timer_and_goes_stale_like_the_other(self):
+        self.write("src/program/late.cpp", "void f() {\n    asio::steady_timer timer(ex);\n}\n")
+        self.write("scripts/runtime_clock_allowlist.txt", "src/program/late.cpp\tA reason.\n")
+        code, out, _ = self.run_guard()
+        self.assertEqual(code, 1)
+        self.assertIn("src/program/late.cpp:2:", out)
+        self.assertIn("runtime_clock_allowlist.txt:1:", out)
+        self.assertIn("excuses no direct clock read", out)
+        clock = self.root / "elsewhere.txt"
+        clock.write_text("# empty\n", encoding="utf-8")
+        code, out, _ = self.run_guard("--clock-allowlist", str(clock))
+        self.assertEqual(code, 1)
+        self.assertNotIn("runtime_clock_allowlist.txt", out)
+
     def test_an_allowlisted_file_passes(self):
         self.write("src/async/client.cpp", "asio::steady_timer timer(ex);\ntimer.expires_after(1s);\n")
         self.assertEqual(self.run_guard()[0], 1)
@@ -195,6 +304,25 @@ class RealTreeTest(unittest.TestCase):
             after = guard.check(copy, copy / "scripts" / allowlist.name)
             added = [finding for finding in after if finding not in before]
             self.assertEqual([finding.path for finding in added], ["src/core/artifact_provider.cpp"])
+
+    def test_one_direct_clock_read_added_back_to_program_fails(self):
+        allowlist = ROOT / "scripts" / "host_timer_allowlist.txt"
+        with tempfile.TemporaryDirectory() as temp:
+            copy = Path(temp)
+            for name in ("src", "include"):
+                shutil.copytree(ROOT / name, copy / name)
+            (copy / "scripts").mkdir()
+            shutil.copy(allowlist, copy / "scripts")
+            shutil.copy(ROOT / "scripts" / guard.CLOCK_ALLOWLIST, copy / "scripts")
+            before = guard.check(copy, copy / "scripts" / allowlist.name)
+            target = copy / "src" / "program" / "runtime.cpp"
+            target.write_text(
+                target.read_text(encoding="utf-8") + "\nauto raw_now = std::chrono::steady_clock::now();\n",
+                encoding="utf-8",
+            )
+            after = guard.check(copy, copy / "scripts" / allowlist.name)
+            added = [finding for finding in after if finding not in before]
+            self.assertEqual([finding.path for finding in added], ["src/program/runtime.cpp"])
 
 
 if __name__ == "__main__":

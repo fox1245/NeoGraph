@@ -1,6 +1,7 @@
 #include <neograph/hook_outbox.h>
 
 #include "canonical_json.h"
+#include "runtime_clock.h"
 #include "text_safety.h"
 
 #include <neograph/graph/cancel.h>
@@ -185,7 +186,7 @@ void MandatoryHookRunner::lost_settlement(const HookInvocation& invocation,
     // deadline (a Hook that timed out) or another worker took the
     // invocation over. The first is timed_out, in the journal and in the
     // block; the second keeps the journal's state.
-    const auto now = Clock::now();
+    const auto now = async::system_now();
     const bool timed_out = now >= deadline;
     if (timed_out) (void)journal_->claim(invocation.id(), worker_id_, now, std::chrono::milliseconds(1));
     entry = journal_->get(invocation.id()).value_or(leased);
@@ -201,7 +202,7 @@ void MandatoryHookRunner::lost_settlement(const HookInvocation& invocation,
 asio::awaitable<void> MandatoryHookRunner::run_async(
     const RuntimeEvent& event, Clock::time_point deadline,
     std::uint32_t max_attempts) {
-    if (deadline <= Clock::now() || !max_attempts) {
+    if (deadline <= async::system_now() || !max_attempts) {
         throw std::invalid_argument("invalid hook execution deadline");
     }
     for (const auto& invocation : registry_->plan(event)) {
@@ -215,7 +216,7 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                               : journal_->enqueue(invocation, event, max_attempts, deadline);
         entry = journal_->publish(invocation.id());
         for (;;) {
-            const auto now = Clock::now();
+            const auto now = async::system_now();
             if (now >= deadline) {
                 // The journal records the elapsed deadline (a claim past it
                 // settles the invocation as timed_out), and the block says so.
@@ -244,9 +245,9 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                 context.identity.thread_id =
                     "hook-fence:" + std::to_string(lease->fencing_token);
                 context.deadline =
-                    std::chrono::steady_clock::now() +
+                    async::RuntimeClock::now() +
                     std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                        deadline - Clock::now());
+                        deadline - async::system_now());
                 try {
                     HookExecutionReceipt attempt_receipt = [&]() {
                         return failed_receipt(lease->entry,
@@ -295,7 +296,7 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                     }
                     const auto settled = journal_->settle(
                         invocation.id(), lease->fencing_token,
-                        std::move(attempt_receipt), Clock::now());
+                        std::move(attempt_receipt), async::system_now());
                     if (!settled) {
                         lost_settlement(invocation, deadline, entry, lease->entry);
                         break;
@@ -313,11 +314,11 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
                                                       lease->entry.data().attempt_count,
                                                       HookExecutionState::Cancelled, {},
                                                       receipt_text(error.what())}),
-                        Clock::now());
+                        async::system_now());
                 } catch (const std::exception& error) {
                     const auto settled = journal_->settle(
                         invocation.id(), lease->fencing_token,
-                        failed_receipt(lease->entry, error.what()), Clock::now());
+                        failed_receipt(lease->entry, error.what()), async::system_now());
                     if (!settled) {
                         lost_settlement(invocation, deadline, entry, lease->entry);
                         break;
@@ -329,7 +330,7 @@ asio::awaitable<void> MandatoryHookRunner::run_async(
             if (entry.data().state == HookExecutionState::Succeeded) break;
             if (entry.data().state == HookExecutionState::Failed &&
                 entry.data().attempt_count < entry.data().max_attempts &&
-                Clock::now() < deadline) {
+                async::system_now() < deadline) {
                 continue;
             }
             if (invocation.data().delivery == HookDelivery::BlockingMandatory) {

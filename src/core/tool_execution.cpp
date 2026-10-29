@@ -833,7 +833,7 @@ public:
         waiter->priority = request.priority;
         waiter->fairness_weight = std::max<std::uint8_t>(1, request.fairness_weight);
         waiter->sequence = next_sequence_++;
-        waiter->submitted_at = std::chrono::steady_clock::now();
+        waiter->submitted_at = async::RuntimeClock::now();
         resource.waiters.push_back(waiter);
         return Registration{{}, std::move(waiter)};
     }
@@ -917,7 +917,7 @@ private:
         --resource.active;
         if (stopping_) return;
         while (resource.active < resource.capacity && !resource.waiters.empty()) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = async::RuntimeClock::now();
             auto best = resource.waiters.end();
             std::uint8_t best_priority = 0;
             std::uint64_t best_sequence = std::numeric_limits<std::uint64_t>::max();
@@ -1023,7 +1023,7 @@ asio::awaitable<ResourceLease> ResourceArbiter::acquire_async(
     PendingGuard pending{impl_, std::move(registration.waiter)};
     const auto executor = co_await asio::this_coro::executor;
     async::HostTimer poll(executor);
-    const auto deadline = std::chrono::steady_clock::now() + queue_timeout;
+    const auto deadline = async::RuntimeClock::now() + queue_timeout;
 
     for (;;) {
         if (cancel_token && cancel_token->is_cancelled()) {
@@ -1044,11 +1044,13 @@ asio::awaitable<ResourceLease> ResourceArbiter::acquire_async(
                 break;
         }
 
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = async::RuntimeClock::now();
         if (now >= deadline) throw asio::system_error(asio::error::timed_out);
-        poll.arm_after(std::min(std::chrono::milliseconds{1},
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    deadline - now)));
+        constexpr std::chrono::milliseconds poll_step{1};
+        poll.arm_at(now <= (async::RuntimeClock::time_point::max)() - poll_step &&
+                            now + poll_step < deadline
+                        ? now + poll_step
+                        : deadline);
         asio::error_code wait_error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
         if (wait_error && wait_error != asio::error::operation_aborted) {
@@ -1134,13 +1136,13 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
     bool singleflight_leader = false;
     // A run deadline that has passed: no call starts after it.
     const auto deadline_passed = [&context]() {
-        return context.deadline && std::chrono::steady_clock::now() >= *context.deadline;
+        return context.deadline && async::RuntimeClock::now() >= *context.deadline;
     };
     // The run's deadline comes before the policy's queue timeout, so every
     // queue wait below ends at the deadline: a queue that times out has run
     // into the deadline.
     const bool deadline_bounds_queue = context.deadline &&
-        *context.deadline <= std::chrono::steady_clock::now() + policy.queue_timeout;
+        *context.deadline <= async::RuntimeClock::now() + policy.queue_timeout;
     auto publish_singleflight = [&](ToolExecutionResult result) {
         // Text leaves the boundary as well-formed UTF-8 (text_safety.h).
         result.output = detail::valid_utf8(std::move(result.output));
@@ -1204,7 +1206,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                 const auto executor = co_await asio::this_coro::executor;
                 async::HostTimer poll(executor);
                 auto deadline =
-                    std::chrono::steady_clock::now() + policy.queue_timeout;
+                    async::RuntimeClock::now() + policy.queue_timeout;
                 if (context.deadline) deadline = std::min(deadline, *context.deadline);
                 for (;;) {
                     {
@@ -1216,14 +1218,15 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                     if (context.cancel_token && context.cancel_token->is_cancelled()) {
                         throw graph::CancelledException("while waiting for single-flight result");
                     }
-                    const auto now = std::chrono::steady_clock::now();
+                    const auto now = async::RuntimeClock::now();
                     if (now >= deadline) {
                         throw asio::system_error(asio::error::timed_out);
                     }
-                    poll.arm_after(std::min(
-                        std::chrono::milliseconds{1},
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            deadline - now)));
+                    constexpr std::chrono::milliseconds poll_step{1};
+                    poll.arm_at(now <= (async::RuntimeClock::time_point::max)() - poll_step &&
+                                        now + poll_step < deadline
+                                    ? now + poll_step
+                                    : deadline);
                     asio::error_code wait_error;
                     co_await poll.async_wait(
                         asio::redirect_error(asio::use_awaitable, wait_error));
@@ -1344,12 +1347,12 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
             throw std::logic_error("tool retry loop exhausted without a result");
         };
 
-        auto queue_deadline = std::chrono::steady_clock::now() + policy.queue_timeout;
+        auto queue_deadline = async::RuntimeClock::now() + policy.queue_timeout;
         if (context.deadline) queue_deadline = std::min(queue_deadline, *context.deadline);
         const auto host_admission = impl_->host_admission;
         auto reserve_host = [host_admission, &policy, &tool, &identity, &context,
                              queue_deadline]() -> asio::awaitable<HostResourceLease> {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = async::RuntimeClock::now();
             if (now >= queue_deadline) throw asio::system_error(asio::error::timed_out);
 
             auto request = host_request_for(policy, tool.get_name(), identity);
@@ -1399,7 +1402,7 @@ asio::awaitable<ToolExecutionResult> ToolExecutionController::execute_result_asy
                 request.queue_timeout,
                 std::max(std::chrono::milliseconds{1},
                          std::chrono::duration_cast<std::chrono::milliseconds>(
-                             *context.deadline - std::chrono::steady_clock::now())));
+                             *context.deadline - async::RuntimeClock::now())));
         }
         request.priority = std::min(
             policy.priority_ceiling,
