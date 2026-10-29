@@ -15,6 +15,7 @@
 #include "provider_failure.h"
 #include "strand_join_signal.h"
 #include "task_graph_scheduler.h"
+#include "../core/runtime_clock.h"
 #include "../core/tool_failure.h"
 #include <asio/as_tuple.hpp>
 #include <asio/bind_executor.hpp>
@@ -52,7 +53,7 @@ static_assert(NATIVE_CONTROL_IMPORT_SLOT_MIN == JAVASCRIPT_IMPORT_SLOT_CANCEL_SC
 
 std::uint64_t elapsed_ms(std::chrono::steady_clock::time_point start) {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start);
+        RuntimeClock::now() - start);
     return elapsed.count() < 0 ? 0 : static_cast<std::uint64_t>(elapsed.count());
 }
 
@@ -720,7 +721,7 @@ void append_trace(PlanExecution& target, PlanExecution&& source) {
 // #391: an await's deadline is absolute, so its start is wall-clock time that
 // survives the process: Unix epoch milliseconds.
 std::uint64_t unix_time_ms() {
-    const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+    const auto since_epoch = system_now().time_since_epoch();
     const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count();
     return value > 0 ? static_cast<std::uint64_t>(value) : 0U;
 }
@@ -1551,7 +1552,7 @@ bool apply_terminal_cause(const std::shared_ptr<RunControl>& control,
 
 CancellationCause terminal_cause_at_deadline(const std::shared_ptr<RunControl>&    control,
                                              std::chrono::steady_clock::time_point deadline) {
-    if (std::chrono::steady_clock::now() >= deadline) {
+    if (RuntimeClock::now() >= deadline) {
         control->cancel(CancellationCause::Timeout);
     }
     return control->seal_terminal_cause();
@@ -1979,7 +1980,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             // transition store itself cannot be read during terminalization.
         }
     };
-    if (std::chrono::steady_clock::now() >= deadline) (void)co_await control->cancel_async(CancellationCause::Timeout);
+    if (RuntimeClock::now() >= deadline) (void)co_await control->cancel_async(CancellationCause::Timeout);
 
     auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
     if (deadline < std::chrono::steady_clock::time_point::max()) {
@@ -4589,7 +4590,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     const auto executor       = co_await asio::this_coro::executor;
                     auto       timeout        = std::make_shared<async::HostTimer>(executor);
                     const auto await_deadline =
-                        deadline_after(std::chrono::steady_clock::now(), *operation.timeout_ms());
+                        deadline_after(RuntimeClock::now(), *operation.timeout_ms());
                     if (await_deadline < std::chrono::steady_clock::time_point::max()) {
                         timeout->arm_at(await_deadline);
                     } else {
@@ -4639,7 +4640,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                            "Program await operation timed out", operation_id);
                 const auto executor       = co_await asio::this_coro::executor;
                 auto       timeout        = std::make_shared<async::HostTimer>(executor);
-                const auto await_deadline = deadline_after(std::chrono::steady_clock::now(), remaining);
+                const auto await_deadline = deadline_after(RuntimeClock::now(), remaining);
                 if (await_deadline < std::chrono::steady_clock::time_point::max()) {
                     timeout->arm_at(await_deadline);
                 } else {
@@ -4874,7 +4875,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (command.kind() == JavaScriptCommandKind::HostCapability) {
                     const auto native =
                         control->materialized->native_bindings.find(command.import_slot());
-                    const auto native_started_at = std::chrono::steady_clock::now();
+                    const auto native_started_at = RuntimeClock::now();
                     const auto native_deadline   = deadline;
                     if (native_started_at >= native_deadline)
                         co_return fail(ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
@@ -4894,7 +4895,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        "Native binding invocation setup failed unexpectedly");
                     }
 
-                    if (std::chrono::steady_clock::now() >= native_deadline) {
+                    if (RuntimeClock::now() >= native_deadline) {
                         invocation.cancel();
                         co_return fail(ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
                                        "Native host capability exceeded its granted run deadline");
@@ -4908,22 +4909,24 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             co_return fail(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                            "Native host capability was cancelled");
                         }
-                        const auto now = std::chrono::steady_clock::now();
+                        const auto now = RuntimeClock::now();
                         if (now >= native_deadline) {
                             invocation.cancel();
                             co_return fail(
                                 ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
                                 "Native host capability exceeded its granted run deadline");
                         }
-                        completion_wait.arm_after(std::min(
-                            std::chrono::milliseconds(1),
-                            std::chrono::duration_cast<std::chrono::milliseconds>(native_deadline -
-                                                                                  now)));
+                        constexpr std::chrono::milliseconds poll_step(1);
+                        completion_wait.arm_at(
+                            now <= (RuntimeClock::time_point::max)() - poll_step &&
+                                    now + poll_step < native_deadline
+                                ? now + poll_step
+                                : native_deadline);
                         asio::error_code wait_error;
                         co_await         completion_wait.async_wait(
                             asio::redirect_error(asio::use_awaitable, wait_error));
                     }
-                    if (std::chrono::steady_clock::now() >= native_deadline) {
+                    if (RuntimeClock::now() >= native_deadline) {
                         invocation.cancel();
                         co_return fail(
                             ProgramTerminalStatus::TimedOut, "P_RUNTIME_TIMEOUT",
@@ -5208,7 +5211,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     await_state->timer =
                         std::make_shared<async::HostTimer>(completion_executor);
                     await_state->deadline =
-                        deadline_after(std::chrono::steady_clock::now(), remaining);
+                        deadline_after(RuntimeClock::now(), remaining);
                     if (await_state->deadline < std::chrono::steady_clock::time_point::max()) {
                         await_state->timer->arm_at(await_state->deadline);
                     } else {
@@ -5231,7 +5234,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                         await_state->finished = true;
                                         // Completing after the deadline is a timeout,
                                         // whether or not the timer has fired yet.
-                                        if (std::chrono::steady_clock::now() >=
+                                        if (RuntimeClock::now() >=
                                             await_state->deadline)
                                             await_state->timed_out = true;
                                         await_state->error = error;
@@ -6419,7 +6422,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 const auto    model_before       = model_tokens(usage);
                 const auto    money_before       = monetary_used();
                 const auto    steps_before       = core_progress->steps();
-                const auto    command_started_at = std::chrono::steady_clock::now();
+                const auto    command_started_at = RuntimeClock::now();
                 PlanExecution command_result;
                 // A handler cannot await: the read of the durable remainder waits for the end of the chain.
                 bool reload_remaining_after_child_recovery = false;
@@ -6622,7 +6625,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             try {
                 JavaScriptCompileLimits javascript_limits;
                 javascript_limits.max_stack_bytes = control->scheduler->javascript_stack_bytes;
-                const auto now                    = std::chrono::steady_clock::now();
+                const auto now                    = RuntimeClock::now();
                 const auto remaining              = deadline > now
                     ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
                     : std::chrono::milliseconds::zero();

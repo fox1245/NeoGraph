@@ -1,6 +1,7 @@
 #include <neograph/host_admission.h>
 
 #include "host_timer.h"
+#include "runtime_clock.h"
 
 #include <asio/error.hpp>
 #include <asio/redirect_error.hpp>
@@ -120,7 +121,7 @@ void append_vector(std::ostringstream& stream, const HostResourceVector& value) 
 
 std::int64_t now_ms() noexcept {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+               async::system_now().time_since_epoch())
         .count();
 }
 
@@ -471,7 +472,7 @@ public:
         ensure_running_locked();
         ensure_request_can_ever_fit_locked(request);
 
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = async::RuntimeClock::now();
         if (waiters_.empty() && fits_locked(request.resources)) {
             const auto resources = request.resources;
             return {reserve_locked(request), {}, resources};
@@ -520,7 +521,7 @@ public:
             const auto found = std::find(waiters_.begin(), waiters_.end(), waiter);
             if (found != waiters_.end()) waiters_.erase(found);
             waiter->state = WaiterState::Cancelled;
-            schedule_locked(std::chrono::steady_clock::now());
+            schedule_locked(async::RuntimeClock::now());
         } else if (waiter->state == WaiterState::Granted) {
             release_locked(waiter->reservation_id);
             waiter->state = WaiterState::Cancelled;
@@ -542,7 +543,7 @@ public:
             HostResourceVector::subtract_clamped(profile_.available_capacity(), reserved_);
         const auto available_components = components(available);
         const auto held_components = components(found->second.resources);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = async::RuntimeClock::now();
         for (const auto& waiter : waiters_) {
             if (waiter->state != WaiterState::Queued) continue;
             const auto requested = components(waiter->request.resources);
@@ -563,7 +564,7 @@ public:
                                             pressure_changed_at_ms_ > 0
                                                 ? pressure_changed_at_ms_
                                                 : now_ms());
-        if (!stopping_) schedule_locked(std::chrono::steady_clock::now());
+        if (!stopping_) schedule_locked(async::RuntimeClock::now());
     }
 
     void observe_pressure(HostPressureSample sample) {
@@ -615,7 +616,7 @@ public:
             pressure_ = HostPressureLevel::Normal;
             pressure_source_ = std::move(sample.source);
         }
-        if (!stopping_) schedule_locked(std::chrono::steady_clock::now());
+        if (!stopping_) schedule_locked(async::RuntimeClock::now());
     }
 
     [[nodiscard]] HostAdmissionSnapshot snapshot() const {
@@ -640,7 +641,7 @@ public:
         stopping_ = true;
         for (auto& waiter : waiters_) waiter->state = WaiterState::Cancelled;
         waiters_.clear();
-        recompute_inheritance_locked(std::chrono::steady_clock::now());
+        recompute_inheritance_locked(async::RuntimeClock::now());
     }
 
 private:
@@ -697,7 +698,7 @@ private:
         reserved_ = HostResourceVector::saturating_add(reserved_, request.resources);
         reservations_.emplace(reservation_id,
                               Reservation{request.resources, request.priority, request.priority});
-        recompute_inheritance_locked(std::chrono::steady_clock::now());
+        recompute_inheritance_locked(async::RuntimeClock::now());
         return reservation_id;
     }
 
@@ -749,8 +750,8 @@ private:
         const auto resources = found->second.resources;
         reservations_.erase(found);
         reserved_ = HostResourceVector::subtract_clamped(reserved_, resources);
-        if (!stopping_) schedule_locked(std::chrono::steady_clock::now());
-        else recompute_inheritance_locked(std::chrono::steady_clock::now());
+        if (!stopping_) schedule_locked(async::RuntimeClock::now());
+        else recompute_inheritance_locked(async::RuntimeClock::now());
     }
 
     void recompute_inheritance_locked(const std::chrono::steady_clock::time_point now) noexcept {
@@ -875,7 +876,7 @@ asio::awaitable<HostResourceLease> HostAdmissionController::reserve_async(
     PendingGuard pending{impl_, std::move(registration.waiter)};
     const auto executor = co_await asio::this_coro::executor;
     async::HostTimer poll(executor);
-    const auto deadline = std::chrono::steady_clock::now() + pending.waiter->request.queue_timeout;
+    const auto deadline = async::RuntimeClock::now() + pending.waiter->request.queue_timeout;
 
     for (;;) {
         if (cancel_token && cancel_token->is_cancelled()) {
@@ -897,13 +898,16 @@ asio::awaitable<HostResourceLease> HostAdmissionController::reserve_async(
                 break;
         }
 
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = async::RuntimeClock::now();
         if (now >= deadline) {
             throw HostAdmissionError(HostAdmissionFailure::QueueTimeout,
                                      "queued host reservation reached its deadline");
         }
-        poll.arm_after(std::min(std::chrono::milliseconds{2},
-                                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+        constexpr std::chrono::milliseconds poll_step{2};
+        poll.arm_at(now <= (async::RuntimeClock::time_point::max)() - poll_step &&
+                            now + poll_step < deadline
+                        ? now + poll_step
+                        : deadline);
         asio::error_code error;
         co_await poll.async_wait(asio::redirect_error(asio::use_awaitable, error));
         if (error && error != asio::error::operation_aborted) throw asio::system_error(error);

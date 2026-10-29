@@ -1,0 +1,7 @@
+# Code that may read std::chrono::steady_clock::now(), system_clock::now() or high_resolution_clock::now() directly (or
+# through a clock type alias), for scripts/check_host_timers.py (#671). The scanned code is src/program,
+# include/neograph/program, src/core/host_timer.h, src/core/host_loop.cpp, src/core/host_admission.cpp,
+# src/core/hook_runtime.cpp, src/core/hook_outbox.cpp and src/core/tool_dispatch.cpp; everywhere else in that set reads
+# time through src/core/runtime_clock.h, so that a test's simulated clock drives deadlines, timeouts and timestamps.
+# One per line: path-glob<TAB>reason, with the same rules as scripts/host_timer_allowlist.txt. An entry that excuses
+# no direct clock read is an error.

@@ -18,6 +18,7 @@
 #include "operation_lock.h"
 #include "provider_failure.h"
 #include "run_control.h"
+#include "../core/runtime_clock.h"
 #include <asio/co_spawn.hpp>
 #include <asio/detached.hpp>
 #include <asio/dispatch.hpp>
@@ -50,9 +51,12 @@
 namespace neograph::program {
 namespace {
 
+using detail::RuntimeClock;
+using detail::system_now;
+
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+               system_now().time_since_epoch())
         .count();
 }
 
@@ -904,7 +908,7 @@ HostAdmissionRequest make_host_admission_request(const std::shared_ptr<detail::R
                                               control->persisted_invocation.child_depth};
     auto                              request = resolver(context);
 
-    const auto now = std::chrono::steady_clock::now();
+    const auto now = RuntimeClock::now();
     if (now >= control->deadline) {
         throw HostAdmissionError(HostAdmissionFailure::QueueTimeout,
                                  "Program deadline elapsed before host admission");
@@ -2331,7 +2335,7 @@ RunControl::RunControl(std::string                                owner,
       persisted_invocation(std::move(execution_invocation)),
       invocation(std::move(invocation_value)),
       granted_budget(persisted_invocation.granted_budget),
-      started_at(std::chrono::steady_clock::now()),
+      started_at(RuntimeClock::now()),
       deadline(deadline_after(started_at, granted_budget.wall_time_ms)),
       scheduler(std::move(scheduler_value)),
       deadline_executor(scheduler->deadlines),
@@ -2386,7 +2390,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
           record.invocation().parent_run_id, record.child_depth()}),
       invocation(record.invocation()),
       granted_budget(persisted_invocation.granted_budget),
-      started_at(std::chrono::steady_clock::now()),
+      started_at(RuntimeClock::now()),
       deadline(deadline_after(started_at, record.remaining_budget().wall_time_ms)),
       scheduler(std::move(scheduler_value)),
       deadline_executor(scheduler->deadlines),
@@ -2687,11 +2691,11 @@ void RunControl::emit_lifecycle_hook(HookPhase phase, const ProgramEvent& event,
               {"program_event_id", event.id},
               {"program_event_sequence", event.sequence}};
     if (status) data["terminal_status"] = std::string(to_string(*status));
-    const auto now       = std::chrono::steady_clock::now();
+    const auto now       = RuntimeClock::now();
     const auto remaining = deadline > now
         ? deadline - now
         : std::chrono::steady_clock::duration::zero();
-    const auto parent_deadline = deadline_after(std::chrono::system_clock::now(), remaining);
+    const auto parent_deadline = deadline_after(system_now(), remaining);
     async::run_sync(runtime->emit_async(
         phase, "program_lifecycle", owner_scope, run_id, std::move(data),
         observe_cancellation ? cancel_token : std::shared_ptr<graph::CancelToken>{},
@@ -4665,7 +4669,7 @@ asio::awaitable<void> RunControl::release_graph_migration_async(std::uint64_t re
                     remaining.wall_time_ms = std::min(
                         remaining.wall_time_ms,
                         remaining_attempt_wall_time(granted_budget.wall_time_ms, started_at,
-                                                    std::chrono::steady_clock::now()));
+                                                    RuntimeClock::now()));
                     auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
                         previous->journal_head(), run_id, previous->program_version_id(),
                         previous->bundle_id(), previous_journal->sequence + 1,
@@ -5890,7 +5894,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     throw_runtime_diagnostic("P_CHILD_SYNTHESIS_BUDGET",
                                              "Parent deadline elapsed during synthesis");
             }
-            if (control && std::chrono::steady_clock::now() >= control->deadline)
+            if (control && RuntimeClock::now() >= control->deadline)
                 throw_runtime_diagnostic("P_CHILD_SYNTHESIS_BUDGET",
                                          "Parent synthesis deadline elapsed");
             auto publication = (co_await attach_run_lineage_async(

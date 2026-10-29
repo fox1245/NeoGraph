@@ -1,5 +1,7 @@
 #include <neograph/hook_runtime.h>
 
+#include "runtime_clock.h"
+
 #include <neograph/graph/cancel.h>
 
 #include <stdexcept>
@@ -47,7 +49,7 @@ asio::awaitable<void> HookRuntime::emit_async(
     }
     if (cancellation) cancellation->throw_if_cancelled("before lifecycle hook");
     const auto deadline = std::min(parent_deadline.value_or(std::chrono::system_clock::time_point::max()),
-                                   std::chrono::system_clock::now() + default_timeout_);
+                                   async::system_now() + default_timeout_);
     // Durable callers supply their own sequence so reconnects and CAS retries
     // retain the same outbox identity.
     const auto sequence = event_sequence.value_or(
@@ -57,7 +59,7 @@ asio::awaitable<void> HookRuntime::emit_async(
         const auto event = RuntimeEvent::create({{}, sequence, phase, std::move(type),
                                                   std::move(owner_scope), std::move(run_id),
                                                   std::move(data)});
-        if (deadline <= std::chrono::system_clock::now()) {
+        if (deadline <= async::system_now()) {
             // Only a mandatory Hook that was due and could not run in time
             // timed out. An event no mandatory Hook applies to passes.
             if (runner_->blocks(event))

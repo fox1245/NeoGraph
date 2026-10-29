@@ -1,21 +1,28 @@
 #include <neograph/async/host_loop.h>
 
+#include "host_timer.h"
 #include "loop_handoff.h"
+#include "runtime_clock.h"
 
+#include <asio/basic_waitable_timer.hpp>
+#include <asio/error.hpp>
 #include <asio/error_code.hpp>
 #include <asio/post.hpp>
 #include <asio/execution_context.hpp>
-#include <asio/steady_timer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <iterator>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -23,7 +30,18 @@
 namespace neograph::async {
 namespace detail {
 
+NEOGRAPH_API std::atomic<SimulatedClock*> simulated_clock{nullptr};
+
 class HostLoopCore;
+
+struct SimulatedHostTimer {
+    explicit SimulatedHostTimer(std::shared_ptr<HostLoopCore> loop_core) noexcept
+        : core(std::move(loop_core)) {}
+
+    std::weak_ptr<HostLoopCore> core;
+    RuntimeClock::time_point expiry{};
+    std::optional<std::pair<RuntimeClock::time_point, std::uint64_t>> armed_deadline;
+};
 
 // The number of HostLoop turns the calling thread is running (they nest only when a handler runs another loop).
 thread_local unsigned host_turn_depth = 0;
@@ -69,7 +87,6 @@ public:
         if (!host_) throw std::invalid_argument("HostLoop needs a host executor");
         if (options_.turn_handlers == 0) options_.turn_handlers = 1;
         io_.emplace();
-        sentinel_.emplace(*io_);
         asio::make_service<HostLoopService>(*io_, this);
     }
 
@@ -81,8 +98,29 @@ public:
     void close() noexcept {
         closed_.store(true);
         disarm();
-        deadlines_.clear();
-        sentinel_.reset();
+        steady_deadlines_.deadlines.clear();
+        steady_deadlines_.sentinel.reset();
+        steady_deadlines_.watching = false;
+        runtime_deadlines_.deadlines.clear();
+        runtime_deadlines_.sentinel.reset();
+        runtime_deadlines_.watching = false;
+        std::vector<ClaimedSimulatedWait> abandoned_waits;
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            for (auto& [key, owner] : simulated_deadlines_) {
+                if (owner) owner->armed_deadline.reset();
+            }
+            simulated_deadlines_.clear();
+            for (auto& [key, wait] : simulated_waits_) {
+                abandoned_waits.push_back(
+                    ClaimedSimulatedWait{std::move(wait.slot_state), std::move(wait.handler)});
+            }
+            simulated_waits_.clear();
+        }
+        for (auto& wait : abandoned_waits) {
+            detach_slot(wait.slot_state);
+        }
+        abandoned_waits.clear();
         // The coroutines that await work on a pool of the process are held by that work, not by the io_context, and
         // go the same way, while the io_context they ran on still exists.
         take_handoffs();
@@ -263,13 +301,282 @@ public:
         }
     }
 
-    // The deadline stays noted until Asio has dispatched the timers up to it (see watch), whatever the host's clock
-    // says.
-    void wake_at(sp::runtime::SteadyTime at) noexcept {
+    // The deadline stays noted until Asio has dispatched the timers up to it in the same timer queue (see watch),
+    // whatever the host's clock says.
+    void wake_at(sp::runtime::SteadyTime at) noexcept { wake_at(steady_deadlines_, at); }
+    void wake_at_runtime(sp::runtime::SteadyTime at) noexcept { wake_at(runtime_deadlines_, at); }
+
+    // Takes back one noted deadline for `at`: the earliest note for that time in that timer queue. The loop then
+    // waits on, and arms the host timer for, the next one, or for none.
+    void forget_at(sp::runtime::SteadyTime at) noexcept { forget_at(steady_deadlines_, at); }
+    void forget_at_runtime(sp::runtime::SteadyTime at) noexcept { forget_at(runtime_deadlines_, at); }
+
+    bool idle() const noexcept { return closed_.load() || (!scheduled_.load() && !running_ && timer_ == 0); }
+
+    void arm_simulated(SimulatedHostTimer& timer, RuntimeClock::time_point at) {
+        std::vector<ClaimedSimulatedWait> cancelled;
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            has_simulated_.store(true, std::memory_order_release);
+            if (timer.armed_deadline) {
+                simulated_deadlines_.erase(*timer.armed_deadline);
+                timer.armed_deadline.reset();
+            }
+            for (auto it = simulated_waits_.begin(); it != simulated_waits_.end();) {
+                if (it->second.owner == &timer) {
+                    cancelled.push_back(
+                        ClaimedSimulatedWait{std::move(it->second.slot_state), std::move(it->second.handler)});
+                    it = simulated_waits_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            timer.expiry = at;
+            if (!closed_.load() && at < (RuntimeClock::time_point::max)()) {
+                const auto key = std::make_pair(at, ++simulated_seq_);
+                simulated_deadlines_.emplace(key, &timer);
+                timer.armed_deadline = key;
+            }
+        }
+        for (auto& wait : cancelled) {
+            detach_slot(wait.slot_state);
+            if (wait.handler) wait.handler->post(asio::error::operation_aborted);
+        }
+        rearm_simulated();
+    }
+
+    std::size_t cancel_simulated(SimulatedHostTimer& timer) noexcept {
+        std::vector<ClaimedSimulatedWait> cancelled;
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            if (timer.armed_deadline) {
+                simulated_deadlines_.erase(*timer.armed_deadline);
+                timer.armed_deadline.reset();
+            }
+            for (auto it = simulated_waits_.begin(); it != simulated_waits_.end();) {
+                if (it->second.owner == &timer) {
+                    cancelled.push_back(
+                        ClaimedSimulatedWait{std::move(it->second.slot_state), std::move(it->second.handler)});
+                    it = simulated_waits_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        const std::size_t count = cancelled.size();
+        for (auto& wait : cancelled) {
+            detach_slot(wait.slot_state);
+            if (wait.handler) {
+                try {
+                    wait.handler->post(asio::error::operation_aborted);
+                } catch (...) {
+                }
+            }
+        }
+        rearm_simulated();
+        return count;
+    }
+
+    void async_wait_simulated(const std::shared_ptr<SimulatedHostTimer>& timer,
+                              asio::cancellation_slot slot,
+                              std::unique_ptr<SimulatedWaitHandlerBase> handler) {
+        if (closed_.load() || !host_) {
+            if (handler) handler->post(asio::error::operation_aborted);
+            return;
+        }
+        RuntimeClock::time_point deadline{};
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            if (closed_.load()) {
+                if (handler) handler->post(asio::error::operation_aborted);
+                return;
+            }
+            has_simulated_.store(true, std::memory_order_release);
+            deadline = timer->expiry;
+            const SimulatedWaitKey key{deadline, ++simulated_seq_};
+            std::shared_ptr<SimulatedSlotState> slot_state;
+            if (slot.is_connected()) {
+                slot_state = std::make_shared<SimulatedSlotState>(slot, shared_from_this(), key);
+                slot.assign([slot_state](asio::cancellation_type type) {
+                    if ((type & (asio::cancellation_type::terminal |
+                                 asio::cancellation_type::partial |
+                                 asio::cancellation_type::total)) == asio::cancellation_type::none) {
+                        return;
+                    }
+                    std::shared_ptr<HostLoopCore> locked_core;
+                    SimulatedWaitKey wait_key{};
+                    {
+                        std::lock_guard<std::mutex> slot_lock(slot_state->mutex);
+                        if (!slot_state->active) return;
+                        slot_state->active = false;
+                        locked_core = slot_state->core.lock();
+                        wait_key = slot_state->key;
+                    }
+                    if (locked_core) locked_core->cancel_simulated_wait_from_slot(wait_key);
+                });
+            }
+            simulated_waits_.emplace(
+                key, PendingSimulatedWait{timer.get(), std::move(slot_state), std::move(handler)});
+        }
+        rearm_simulated();
+    }
+
+private:
+    struct SimulatedWaitKey {
+        RuntimeClock::time_point deadline;
+        std::uint64_t sequence;
+
+        bool operator<(const SimulatedWaitKey& other) const noexcept {
+            if (deadline != other.deadline) return deadline < other.deadline;
+            return sequence < other.sequence;
+        }
+    };
+
+    struct SimulatedSlotState {
+        SimulatedSlotState(asio::cancellation_slot s,
+                           std::weak_ptr<HostLoopCore> c,
+                           SimulatedWaitKey k) noexcept
+            : slot(s), core(std::move(c)), key(k) {}
+
+        std::mutex mutex;
+        asio::cancellation_slot slot;
+        std::weak_ptr<HostLoopCore> core;
+        SimulatedWaitKey key;
+        bool active = true;
+    };
+
+    struct PendingSimulatedWait {
+        SimulatedHostTimer* owner = nullptr;
+        std::shared_ptr<SimulatedSlotState> slot_state;
+        std::unique_ptr<SimulatedWaitHandlerBase> handler;
+    };
+
+    struct ClaimedSimulatedWait {
+        std::shared_ptr<SimulatedSlotState> slot_state;
+        std::unique_ptr<SimulatedWaitHandlerBase> handler;
+    };
+
+    static void detach_slot(const std::shared_ptr<SimulatedSlotState>& slot_state) noexcept {
+        if (!slot_state) return;
+        std::lock_guard<std::mutex> lock(slot_state->mutex);
+        if (!slot_state->active) return;
+        slot_state->active = false;
+        if (slot_state->slot.is_connected()) slot_state->slot.clear();
+    }
+
+    // A simulated wait can be registered or cancelled on any thread: a cancellation slot is emitted where the canceller
+    // runs. Only the host thread touches the host timer, so a call outside a turn asks for a turn, which completes what
+    // is due and, when it ends, arms the host timer for the earliest deadline (see turn). A call inside a turn needs
+    // nothing: that turn does both.
+    void rearm_simulated() noexcept {
+        if (closed_.load() || !host_ || runs_turn_of(this)) return;
+        wake();
+    }
+
+    void cancel_simulated_wait_from_slot(SimulatedWaitKey key) noexcept {
+        std::unique_ptr<SimulatedWaitHandlerBase> handler;
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            const auto it = simulated_waits_.find(key);
+            if (it == simulated_waits_.end()) return;
+            SimulatedHostTimer* const owner = it->second.owner;
+            handler = std::move(it->second.handler);
+            simulated_waits_.erase(it);
+            if (owner && owner->armed_deadline) {
+                bool has_other_wait = false;
+                for (const auto& [other_key, other_wait] : simulated_waits_) {
+                    if (other_wait.owner == owner) {
+                        has_other_wait = true;
+                        break;
+                    }
+                }
+                if (!has_other_wait) {
+                    simulated_deadlines_.erase(*owner->armed_deadline);
+                    owner->armed_deadline.reset();
+                }
+            }
+        }
+        if (handler) {
+            try {
+                handler->post(asio::error::operation_aborted);
+            } catch (...) {
+            }
+        }
+        rearm_simulated();
+    }
+
+    bool complete_due_simulated_waits(RuntimeClock::time_point now) {
+        std::vector<ClaimedSimulatedWait> due;
+        {
+            std::lock_guard<std::mutex> lock(simulated_mutex_);
+            for (auto it = simulated_deadlines_.begin();
+                 it != simulated_deadlines_.end() && it->first.first <= now;) {
+                if (it->second) it->second->armed_deadline.reset();
+                it = simulated_deadlines_.erase(it);
+            }
+            for (auto it = simulated_waits_.begin();
+                 it != simulated_waits_.end() &&
+                 it->first.deadline < (RuntimeClock::time_point::max)() &&
+                 it->first.deadline <= now;) {
+                if (it->second.owner && it->second.owner->armed_deadline &&
+                    it->second.owner->armed_deadline->first <= now) {
+                    simulated_deadlines_.erase(*it->second.owner->armed_deadline);
+                    it->second.owner->armed_deadline.reset();
+                }
+                due.push_back(
+                    ClaimedSimulatedWait{std::move(it->second.slot_state), std::move(it->second.handler)});
+                it = simulated_waits_.erase(it);
+            }
+        }
+        for (auto& wait : due) {
+            detach_slot(wait.slot_state);
+            if (wait.handler) wait.handler->post(asio::error_code{});
+        }
+        return !due.empty();
+    }
+
+    void retire_due_simulated_deadlines(RuntimeClock::time_point now) noexcept {
+        std::lock_guard<std::mutex> lock(simulated_mutex_);
+        for (auto it = simulated_deadlines_.begin();
+             it != simulated_deadlines_.end() && it->first.first <= now;) {
+            if (it->second) it->second->armed_deadline.reset();
+            it = simulated_deadlines_.erase(it);
+        }
+    }
+
+    std::optional<RuntimeClock::time_point> earliest_simulated_deadline() const noexcept {
+        if (!has_simulated_.load(std::memory_order_acquire)) return std::nullopt;
+        std::lock_guard<std::mutex> lock(simulated_mutex_);
+        std::optional<RuntimeClock::time_point> earliest;
+        if (!simulated_deadlines_.empty()) {
+            earliest = simulated_deadlines_.begin()->first.first;
+        }
+        if (!simulated_waits_.empty()) {
+            const auto wait_deadline = simulated_waits_.begin()->first.deadline;
+            if (wait_deadline < (RuntimeClock::time_point::max)()) {
+                if (!earliest || wait_deadline < *earliest) earliest = wait_deadline;
+            }
+        }
+        return earliest;
+    }
+
+    template <typename Clock>
+    struct DeadlineQueue {
+        std::optional<asio::basic_waitable_timer<Clock>> sentinel;
+        // Deadlines whose timers Asio has not been seen to dispatch in this clock's timer queue,
+        // each with the order it was noted in.
+        std::set<std::pair<sp::runtime::SteadyTime, std::uint64_t>> deadlines;
+        std::uint64_t noted = 0;
+        sp::runtime::SteadyTime watched{};
+        bool watching = false;
+    };
+
+    template <typename Clock>
+    void wake_at(DeadlineQueue<Clock>& queue, sp::runtime::SteadyTime at) noexcept {
         if (closed_.load() || !host_) return;
         try {
-            deadlines_.emplace(at, ++noted_);
-            watch();
+            queue.deadlines.emplace(at, ++queue.noted);
+            watch(queue);
             if (running_) return;  // the turn that is running arms the host timer when it ends
             if (at <= host_->now()) {
                 wake();
@@ -280,28 +587,24 @@ public:
         }
     }
 
-    // Takes back one noted deadline for `at`: the earliest note for that time. The loop then waits on, and arms the host
-    // timer for, the next one, or for none.
-    void forget_at(sp::runtime::SteadyTime at) noexcept {
+    template <typename Clock>
+    void forget_at(DeadlineQueue<Clock>& queue, sp::runtime::SteadyTime at) noexcept {
         if (closed_.load()) return;
         try {
-            const auto noted = deadlines_.lower_bound({at, 0});
-            if (noted == deadlines_.end() || noted->first != at) return;
-            deadlines_.erase(noted);
-            if (deadlines_.empty() && sentinel_) {
-                sentinel_->cancel();
-                watching_ = false;
+            const auto noted = queue.deadlines.lower_bound({at, 0});
+            if (noted == queue.deadlines.end() || noted->first != at) return;
+            queue.deadlines.erase(noted);
+            if (queue.deadlines.empty() && queue.sentinel) {
+                queue.sentinel->cancel();
+                queue.watching = false;
             } else {
-                watch();
+                watch(queue);
             }
             if (!running_) arm();
         } catch (...) {
         }
     }
 
-    bool idle() const noexcept { return closed_.load() || (!scheduled_.load() && !running_ && timer_ == 0); }
-
-private:
     void turn() {
         // Cleared before the poll, so that a post that lands after this point schedules the next turn (see wake).
         scheduled_.store(false);
@@ -323,11 +626,17 @@ private:
             HostTurnLink link;
         } in_turn(this);
         try {
+            if (has_simulated_.load(std::memory_order_acquire)) {
+                (void)complete_due_simulated_waits(RuntimeClock::now());
+            }
             io_->restart();
             std::size_t handled = 0;
             for (;;) {
                 if (io_->poll_one() == 0) {
-                    if (!drain_handoffs(false)) break;
+                    const bool completed_simulated =
+                        has_simulated_.load(std::memory_order_acquire) &&
+                        complete_due_simulated_waits(RuntimeClock::now());
+                    if (!drain_handoffs(false) && !completed_simulated) break;
                     io_->restart();
                     continue;
                 }
@@ -341,63 +650,89 @@ private:
             more = true;
         }
         running_ = false;
+        if (!closed_.load()) {
+            if (has_simulated_.load(std::memory_order_acquire)) retire_due_simulated_deadlines(RuntimeClock::now());
+            if (more) wake();
+            arm(started);
+        }
         if (!closed_.load() && failure && options_.on_error) {
             try {
                 options_.on_error(failure);
             } catch (...) {
             }
         }
-        if (closed_.load()) return;
-        if (more) wake();
-        arm(started);
     }
 
     // Asio decides when a timer is dispatched, and a poll at the host's deadline can find it not dispatched yet:
     // Asio's Windows reactor learns that a timer is due from a thread of its own, and a host's clock can run ahead
-    // of Asio's. So a poll that ran dry does not retire a deadline. The loop waits on a timer of its own at the
-    // earliest one instead. Asio dispatches every timer that is due in one step, so when that timer's handler runs,
-    // the timers that expire by then and were waiting before it was set have been dispatched, and their deadlines
-    // are done.
-    void watch() noexcept {
+    // of Asio's. Asio also keeps one timer queue per clock type, and timer_queue_set::get_ready_timers reads each
+    // queue's clock at a different instant, so each deadline queue (steady_clock for public note_deadline,
+    // RuntimeClock for HostTimer) waits on a sentinel in its own Asio timer queue at the earliest deadline noted
+    // there. Asio dispatches every timer that is due in a queue in one step, so when that queue's sentinel runs,
+    // the timers in that queue that expire by then and were waiting before it was set have been dispatched, and
+    // their deadlines are done.
+    template <typename Clock>
+    void watch(DeadlineQueue<Clock>& queue) noexcept {
         try {
-            if (!sentinel_ || deadlines_.empty()) return;
-            const auto next = deadlines_.begin()->first;
-            if (watching_ && watched_ == next) return;
-            sentinel_->expires_at(next);  // a wait that is pending ends with operation_aborted
-            watching_ = true;
-            watched_ = next;
-            sentinel_->async_wait([this, next, covers = noted_](const asio::error_code& error) {
-                if (!error) dispatched(next, covers);
+            if (!io_ || queue.deadlines.empty()) return;
+            if (!queue.sentinel) queue.sentinel.emplace(*io_);
+            const auto next = queue.deadlines.begin()->first;
+            if (queue.watching && queue.watched == next) return;
+            queue.sentinel->expires_at(next);  // a wait that is pending ends with operation_aborted
+            queue.watching = true;
+            queue.watched = next;
+            queue.sentinel->async_wait([this, &queue, next, covers = queue.noted](const asio::error_code& error) {
+                if (!error) dispatched(queue, next, covers);
             });
         } catch (...) {
-            watching_ = false;
+            queue.watching = false;
         }
     }
 
-    void dispatched(sp::runtime::SteadyTime up_to, std::uint64_t covers) {
+    template <typename Clock>
+    void dispatched(DeadlineQueue<Clock>& queue, sp::runtime::SteadyTime up_to, std::uint64_t covers) {
         if (closed_.load()) return;
-        if (watched_ <= up_to) watching_ = false;
-        for (auto it = deadlines_.begin(); it != deadlines_.end() && it->first <= up_to;)
-            it = it->second <= covers ? deadlines_.erase(it) : std::next(it);
-        watch();
+        if (queue.watched <= up_to) queue.watching = false;
+        for (auto it = queue.deadlines.begin(); it != queue.deadlines.end() && it->first <= up_to;)
+            it = it->second <= covers ? queue.deadlines.erase(it) : std::next(it);
+        watch(queue);
     }
 
-    // The host timer follows the earliest deadline that Asio has not been seen to dispatch. `polled` is when the
-    // turn that has just run started: an earlier deadline that is still noted was not dispatched by that turn, so
-    // look again soon instead of at a time that has passed.
-    void arm(sp::runtime::SteadyTime polled = {}) noexcept {
+    // The host timer follows the earliest deadline across both timer queues that Asio has not been seen to dispatch,
+    // and any simulated HostTimer wait or deadline. `polled` is when the turn that has just run started: an earlier
+    // Asio deadline that is still noted was not dispatched by that turn, so look again soon instead of at a time that
+    // has passed.
+    void arm(std::optional<sp::runtime::SteadyTime> polled = std::nullopt) noexcept {
         if (closed_.load() || !host_) return;
         try {
-            if (deadlines_.empty()) {
+            const auto next_for = [&](const auto& queue) {
+                auto next = queue.deadlines.begin()->first;
+                if (polled && next <= *polled) next = host_->now() + redispatch_delay;
+                return next;
+            };
+            std::optional<sp::runtime::SteadyTime> next;
+            if (!steady_deadlines_.deadlines.empty()) {
+                next = next_for(steady_deadlines_);
+            }
+            if (!runtime_deadlines_.deadlines.empty()) {
+                const auto candidate = next_for(runtime_deadlines_);
+                next = next ? std::min(*next, candidate) : candidate;
+            }
+            if (const auto simulated = earliest_simulated_deadline()) {
+                auto candidate = *simulated;
+                if (polled && candidate <= *polled && candidate > RuntimeClock::now()) {
+                    candidate = host_->now() + redispatch_delay;
+                }
+                next = next ? std::min(*next, candidate) : candidate;
+            }
+            if (!next) {
                 disarm();
                 return;
             }
-            auto next = deadlines_.begin()->first;
-            if (next <= polled) next = host_->now() + redispatch_delay;
-            if (timer_ != 0 && armed_at_ == next) return;
+            if (timer_ != 0 && armed_at_ == *next) return;
             disarm();
-            timer_ = host_->schedule(next, [self = shared_from_this()] { self->timer_fired(); });
-            armed_at_ = next;
+            timer_ = host_->schedule(*next, [self = shared_from_this()] { self->timer_fired(); });
+            armed_at_ = *next;
         } catch (...) {
             timer_ = 0;
         }
@@ -424,12 +759,14 @@ private:
     std::shared_ptr<sp::runtime::Executor> host_;
     HostLoop::Options options_;
     std::optional<asio::io_context> io_;
-    std::optional<asio::steady_timer> sentinel_;
-    // Deadlines whose timers Asio has not been seen to dispatch, each with the order it was noted in.
-    std::set<std::pair<sp::runtime::SteadyTime, std::uint64_t>> deadlines_;
-    std::uint64_t noted_ = 0;
-    sp::runtime::SteadyTime watched_{};
-    bool watching_ = false;
+    DeadlineQueue<std::chrono::steady_clock> steady_deadlines_;
+    DeadlineQueue<RuntimeClock> runtime_deadlines_;
+    // Simulated HostTimer waits and deadlines (see HostTimer): registered, completed and cancelled from any thread.
+    mutable std::mutex simulated_mutex_;
+    std::atomic<bool> has_simulated_{false};
+    std::uint64_t simulated_seq_ = 0;
+    std::map<std::pair<RuntimeClock::time_point, std::uint64_t>, SimulatedHostTimer*> simulated_deadlines_;
+    std::map<SimulatedWaitKey, PendingSimulatedWait> simulated_waits_;
     sp::runtime::Executor::Timer timer_ = 0;
     sp::runtime::SteadyTime armed_at_{};
     // What wake reads from any thread. Everything else here belongs to the host thread, except `host_`, which is only
@@ -444,12 +781,51 @@ private:
     std::vector<std::pair<Resume, asio::any_io_executor>> abandoned_;
     std::vector<std::pair<Resume, asio::any_io_executor>> spare_;
     std::size_t waking_ = 0;
-    // Whether a turn is running. The host thread's: wake reads it only after finding that it is on that thread.
+    // Whether a turn is running.
     bool running_ = false;
 };
 
 void host_loop_wake(HostLoopCore* core) noexcept {
     if (core) core->wake();
+}
+
+std::shared_ptr<SimulatedHostTimer> make_simulated_host_timer(const asio::any_io_executor& executor) {
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        if (!asio::has_service<HostLoopService>(context)) return nullptr;
+        if (auto* core = asio::use_service<HostLoopService>(context).core) {
+            return std::make_shared<SimulatedHostTimer>(core->shared_from_this());
+        }
+    } catch (...) {
+    }
+    return nullptr;
+}
+
+void arm_simulated_host_timer(SimulatedHostTimer& timer, RuntimeClock::time_point at) {
+    if (auto core = timer.core.lock()) {
+        core->arm_simulated(timer, at);
+    } else {
+        timer.expiry = at;
+    }
+}
+
+std::size_t cancel_simulated_host_timer(SimulatedHostTimer& timer) noexcept {
+    if (auto core = timer.core.lock()) return core->cancel_simulated(timer);
+    return 0;
+}
+
+void async_wait_simulated_host_timer(const std::shared_ptr<SimulatedHostTimer>& timer,
+                                     asio::cancellation_slot slot,
+                                     std::unique_ptr<SimulatedWaitHandlerBase> handler) {
+    if (!timer) {
+        if (handler) handler->post(asio::error::operation_aborted);
+        return;
+    }
+    if (auto core = timer->core.lock()) {
+        core->async_wait_simulated(timer, slot, std::move(handler));
+    } else if (handler) {
+        handler->post(asio::error::operation_aborted);
+    }
 }
 
 namespace {
@@ -488,6 +864,32 @@ void LoopHandoff::finish() noexcept {
 
 std::size_t LoopHandoff::active_count() noexcept {
     return active_handoffs.load(std::memory_order_acquire);
+}
+
+void set_simulated_clock_for_testing(SimulatedClock* clock) noexcept {
+    simulated_clock.store(clock, std::memory_order_release);
+}
+
+void note_deadline(const asio::any_io_executor& executor,
+                   std::chrono::steady_clock::time_point at,
+                   RuntimeClockTag) noexcept {
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        if (!asio::has_service<HostLoopService>(context)) return;
+        if (auto* core = asio::use_service<HostLoopService>(context).core) core->wake_at_runtime(at);
+    } catch (...) {
+    }
+}
+
+void forget_deadline(const asio::any_io_executor& executor,
+                     std::chrono::steady_clock::time_point at,
+                     RuntimeClockTag) noexcept {
+    try {
+        auto& context = asio::query(executor, asio::execution::context);
+        if (!asio::has_service<HostLoopService>(context)) return;
+        if (auto* core = asio::use_service<HostLoopService>(context).core) core->forget_at_runtime(at);
+    } catch (...) {
+    }
 }
 
 }  // namespace detail

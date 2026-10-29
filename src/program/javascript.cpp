@@ -4,6 +4,7 @@
 #include <neograph/program/compiler.h>
 
 #include "canonical_json.h"
+#include "../core/runtime_clock.h"
 
 #include <algorithm>
 #include <cctype>
@@ -504,7 +505,7 @@ int interrupt_after_budget(JSRuntime*, void* opaque) {
         return 1;
     }
     if (budget.deadline != std::chrono::steady_clock::time_point{} &&
-        std::chrono::steady_clock::now() >= budget.deadline) {
+        RuntimeClock::now() >= budget.deadline) {
         budget.reason = InterruptReason::WallTime;
         return 1;
     }
@@ -521,7 +522,7 @@ void refresh_external_interrupt(InterruptBudget& budget) {
     if (budget.cancellation_requested && budget.cancellation_requested()) {
         budget.reason = InterruptReason::Cancelled;
     } else if (budget.deadline != std::chrono::steady_clock::time_point{} &&
-               std::chrono::steady_clock::now() >= budget.deadline) {
+               RuntimeClock::now() >= budget.deadline) {
         budget.reason = InterruptReason::WallTime;
     }
 }
@@ -3010,7 +3011,7 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
     else
         reject_dynamic_module_syntax(script);
 
-    const auto        started_at = std::chrono::steady_clock::now();
+    const auto        started_at = RuntimeClock::now();
     SealedModuleResolver resolver(source.sealed_modules());
     QuickJsScope      scope(limits);
     install_sealed_module_resolver(scope, resolver);
@@ -3181,7 +3182,7 @@ struct JavaScriptGenerator::Impl {
         capture.accounting               = &scope.accounting();
         budget.limit                     = configured_limits.max_interrupt_polls;
         budget.deadline = deadline ? *deadline
-                                   : deadline_after(std::chrono::steady_clock::now(),
+                                   : deadline_after(RuntimeClock::now(),
                                                     configured_limits.max_wall_time_ms);
         budget.cancellation_requested = std::move(cancellation_requested);
     }
@@ -3731,7 +3732,7 @@ void validate_gate_javascript_module_no_imports(std::string_view         source_
             json{{"engine", "quickjs"}, {"facility", "import"}}, std::move(span));
     }
     const auto   scope_limits = to_scope_limits(limits);
-    const auto   started_at   = std::chrono::steady_clock::now();
+    const auto   started_at   = RuntimeClock::now();
     QuickJsScope scope(scope_limits);
     bool         import_denied = false;
     JS_SetModuleLoaderFunc(scope.runtime(), gate_deny_module_normalize, gate_deny_module_loader,
@@ -3786,7 +3787,7 @@ GateCaseSandboxResult evaluate_gate_candidate_case(std::string_view         sour
 #else
     validate_gate_javascript_module_no_imports(source_id, candidate_script, limits);
     const auto scope_limits = to_scope_limits(limits);
-    const auto started_at   = std::chrono::steady_clock::now();
+    const auto started_at   = RuntimeClock::now();
 
     try {
         QuickJsScope scope(scope_limits);
@@ -3973,7 +3974,7 @@ GateCaseSandboxResult evaluate_gate_property_case(std::string_view         sourc
 #else
     validate_gate_javascript_module_no_imports(source_id, property_script, limits);
     const auto scope_limits = to_scope_limits(limits);
-    const auto started_at   = std::chrono::steady_clock::now();
+    const auto started_at   = RuntimeClock::now();
 
     try {
         QuickJsScope scope(scope_limits);
@@ -4108,7 +4109,7 @@ GateCaseSandboxResult generate_gate_case_input(std::string_view         source_i
 #else
     validate_gate_javascript_module_no_imports(source_id, generator_script, limits);
     const auto scope_limits = to_scope_limits(limits);
-    const auto started_at   = std::chrono::steady_clock::now();
+    const auto started_at   = RuntimeClock::now();
 
     try {
         QuickJsScope scope(scope_limits);

@@ -91,6 +91,16 @@ class HostLoopCore;
 /// Schedules a turn of the loop. Does nothing once the loop is closed.
 NEOGRAPH_API void host_loop_wake(HostLoopCore* core) noexcept;
 
+struct RuntimeClockTag {};
+/// Tells the loop that runs `executor` about a RuntimeClock timer (HostTimer) that expires at `at`.
+NEOGRAPH_API void note_deadline(const asio::any_io_executor& executor,
+                                std::chrono::steady_clock::time_point at,
+                                RuntimeClockTag) noexcept;
+/// Takes back one RuntimeClock `note_deadline` for `at`.
+NEOGRAPH_API void forget_deadline(const asio::any_io_executor& executor,
+                                  std::chrono::steady_clock::time_point at,
+                                  RuntimeClockTag) noexcept;
+
 /// The io_context's executor, plus a turn of the loop whenever work is executed on it. Properties are forwarded, so
 /// the adapted executors that Asio derives from it (blocking.never for a post, a strand's inner executor) wake the
 /// loop too. `execute` may be called from any thread (see the note on threads above).

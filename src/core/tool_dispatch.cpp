@@ -5,6 +5,7 @@
 #include <neograph/graph/cancel.h>
 #include <neograph/graph/types.h>   // NodeInterrupt — the gate's Interrupt verdict
 
+#include "runtime_clock.h"
 #include "text_safety.h"
 #include "tool_failure.h"
 
@@ -107,8 +108,8 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
         const auto hook_deadline = [&execution]()
             -> std::optional<std::chrono::system_clock::time_point> {
             if (!execution.deadline) return std::nullopt;
-            const auto remaining = *execution.deadline - std::chrono::steady_clock::now();
-            return std::chrono::system_clock::now() +
+            const auto remaining = *execution.deadline - async::RuntimeClock::now();
+            return async::system_now() +
                    std::chrono::duration_cast<std::chrono::system_clock::duration>(remaining);
         };
 
@@ -134,7 +135,7 @@ dispatch_tool_calls(std::vector<ToolCall> calls, std::vector<Tool*> tools,
             // start, and none of its Hooks run: it expired, like a call whose
             // queue wait ran out (the controller applies the same rule to
             // every caller). Cancellation, checked first, wins.
-            if (execution.deadline && std::chrono::steady_clock::now() >= *execution.deadline) {
+            if (execution.deadline && async::RuntimeClock::now() >= *execution.deadline) {
                 co_return failure_message(tc, ToolTerminalStatus::Expired,
                                           std::string(detail::kRunDeadlineElapsed));
             }
