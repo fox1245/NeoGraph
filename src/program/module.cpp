@@ -1159,8 +1159,16 @@ ModuleLinkReceipt link_module_child(const ModuleResolution& resolution,
         [&](const ProgramModule& module) { return module.id() == parent.id(); });
     if (parent_it == resolution.modules.end())
         throw std::invalid_argument("Module resolution does not contain the parent module");
+    // Equal ids (matched above) mean equal canonical bytes except for `lifecycle`, so comparing the
+    // lifecycles as well is the same test as comparing the bytes. A module's id is never stored or
+    // supplied: ProgramModule::create() derives it as the SHA-256 identity of the structural body,
+    // which holds every field serialize_canonical() writes except `lifecycle` (the rest of that
+    // encoding is constant or the id itself), and refuses a supplied content identity that
+    // differs; parse() and with_lifecycle() build through create(), and the module is immutable
+    // afterwards. Encoding the parent twice would cost time linear in its children for every
+    // child linked, so quadratic in the number of children.
     if (parent_it->owner_scope() != parent.owner_scope() ||
-        parent_it->serialize_canonical() != parent.serialize_canonical())
+        parent_it->lifecycle() != parent.lifecycle())
         throw std::invalid_argument("Module resolution parent differs from supplied module");
     if (child.ownership_scope() != parent.owner_scope())
         throw std::invalid_argument("Child Program owner_scope differs from parent module");

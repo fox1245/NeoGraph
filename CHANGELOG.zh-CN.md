@@ -296,6 +296,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - **测试。** 让尝试在开始之前停住，针对每种结束方式，在内存存储和 SQLite 上 (`ProgramRuntimeTest`) 测试；除由 `reconnect()` 恢复的运行外，也在由测试驱动的宿主循环上 (`ProgramHostPumpedStores`) 测试。它们在之前的引擎上都失败：以 `P_TRANSITION_CONFLICT` 并留下 `running` 的记录，核对（reconcile）则以 `P_RUNTIME_INTERNAL` 失败。
 - **A2A 客户端只有在 `Content-Type` 表明是事件流时，才把响应当作事件流来读。** 以前，只要响应体里含有 `data: `，就把它当作服务器发送事件，并解析其后的文本，所以任务或 `history` 里含有该字符串的 JSON-RPC 响应（包括原样回显请求消息的情况）会以 `A2A response not valid JSON` 失败。现在只有媒体类型为 `text/event-stream` 的响应才是事件流，其消息是第一个 `data:` 事件；其他响应一律是 JSON。**行为变更：** 不带该内容类型而发送事件的服务器，不再被当作流来读。
 - **MCP stdio 客户端会跳过服务器 stdout 上不是 JSON 的文本。** 那里只要出现一行不是 JSON-RPC 消息的内容（例如启动横幅或日志行），就会结束会话并让所有待处理的调用失败，尽管规范把责任放在服务器一方。现在会话会跳过不是 JSON 的行，每个会话最多跳过 `StdioClientConfig::max_stdout_text_lines`（1000）行、`max_stdout_text_bytes`（256 KiB），并向宿主的 stderr 写一次不引用该文本的警告。超出上限的那一行会以 `MCPFailure::protocol` 结束会话，上限设为 0 则什么都不跳过。可能是损坏消息的行绝不跳过，因为跳过会让它所答复的调用一直等到超时：以 `{` 开头、以 `[` 后接 `{` 开头或提到 `"jsonrpc"` 的行，以及不是对象或批量的 JSON，仍和以前一样结束会话。
+- **Program：链接子模块时不再重新序列化父模块（#661）。** `link_module_child` 过去把 resolution 中的父模块副本与传入的模块都编码为规范字节再比较，以确认两者相同。模块会列出它链接的每个子项，因此每次链接的耗时与子项数量成正比，拥有 F 个子项的父模块的准备时间随 F 的平方增长。模块的 id 在创建或解析时总由其内容推导得出（id 不包含的唯一字段 lifecycle，则检查两侧均为 `Active`），所以现在链接比较 id 和 lifecycle。结果、拒绝行为和回执 id 均不变。在 aarch64 服务器上用内存存储测得：构建并链接拥有 64 个子项的父模块耗时 10 ms（此前为 120 ms），256 个子项耗时 24 ms（此前为 1,864 ms）。
 
 ### 安全
 
