@@ -1418,19 +1418,22 @@ std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head
 
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
     ProgramTransitionPublication publication) {
-    return compare_publish_impl(owner_scope, expected_journal_head,
+    return compare_publish_impl(owner_scope, expected_journal_head, expected_fence,
                                 std::move(publication), nullptr, nullptr, nullptr, nullptr);
 }
 
 ProgramTransitionPublishResult
 SQLiteProgramTransitionStore::compare_publish_execution_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
     ProgramTransitionPublication publication,
     std::optional<ProgramExecutionLease> expected_lease,
     std::optional<ProgramExecutionLease> next_lease) {
     return compare_publish_impl(
-        owner_scope, expected_journal_head, std::move(publication), nullptr, nullptr,
+        owner_scope, expected_journal_head, expected_fence, std::move(publication), nullptr,
+        nullptr,
         expected_lease ? &*expected_lease : nullptr,
         next_lease ? &*next_lease : nullptr);
 }
@@ -1438,17 +1441,62 @@ SQLiteProgramTransitionStore::compare_publish_execution_sync(
 ProgramTransitionPublishResult
 SQLiteProgramTransitionStore::compare_publish_graph_safe_point_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
     ProgramTransitionPublication publication,
     const ProgramGraphSafePointEvidence& evidence,
     const GraphMigrationCapsule& capsule,
     const ProgramExecutionLease& execution_lease) {
-    return compare_publish_impl(owner_scope, expected_journal_head,
+    return compare_publish_impl(owner_scope, expected_journal_head, expected_fence,
                                 std::move(publication), &evidence, &capsule,
                                 &execution_lease, nullptr);
 }
 
+ProgramTransitionPublishResult
+SQLiteProgramTransitionStore::compare_publish_takeover_sync(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence) {
+    if (!detail::transition::valid_takeover_request(owner_scope, run_id, expected_journal_head,
+                                                    expected_fence))
+        return ProgramTransitionPublishResult::Conflict;
+    std::lock_guard lock(impl_->mutex);
+    Transaction transaction(impl_->db);
+    const auto current = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
+    if (!current) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    std::optional<ProgramRunLineage> current_lineage;
+    if (const auto lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id)) {
+        current_lineage = load_current_lineage_head(impl_->db, owner_scope, *lineage_id);
+        if (!current_lineage) {
+            transaction.commit();
+            return ProgramTransitionPublishResult::Conflict;
+        }
+    }
+    auto takeover = detail::transition::prepare_takeover(
+        owner_scope, run_id, expected_journal_head, expected_fence, current->run_record,
+        current->journal_record, current_lineage);
+    if (!takeover) {
+        transaction.commit();
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    const auto run_record_bytes = takeover->run_record.serialize_canonical();
+    update_head(impl_->db, owner_scope, run_id, run_record_bytes, takeover->journal_record,
+                current->migration_plan, "");
+    if (takeover->run_lineage) {
+        update_lineage_head(impl_->db, *takeover->run_lineage);
+        insert_lineage_history(impl_->db, *takeover->run_lineage);
+    }
+    transaction.commit();
+    impl_->run_record_cache.erase(owner_scope, run_id);
+    return ProgramTransitionPublishResult::Published;
+}
+
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_impl(
     std::string_view owner_scope, std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
     ProgramTransitionPublication publication,
     const ProgramGraphSafePointEvidence* safe_point_evidence,
     const GraphMigrationCapsule* safe_point_capsule,
@@ -1473,8 +1521,8 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     SqliteReads                        reads(impl_->db, owner_scope, &impl_->run_record_cache);
     detail::transition::TransitionPlan plan;
     switch (detail::transition::validate_transition(
-        {owner_scope, expected_journal_head, publication, *publication_bytes, safe_point_evidence,
-          safe_point_capsule, expected_lease, next_lease},
+        {owner_scope, expected_journal_head, expected_fence, publication, *publication_bytes,
+          safe_point_evidence, safe_point_capsule, expected_lease, next_lease},
         head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, plan)) {
     case detail::transition::TransitionVerdict::Conflict:
         transaction.commit();

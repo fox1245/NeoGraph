@@ -560,6 +560,7 @@ public:
         return inner_->load_execution_lease(owner, run);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view head,
+                                                   std::uint64_t expected_fence,
                                                    ProgramTransitionPublication publication) override {
         const auto what = std::string("publish ") + std::string(to_string(publication.run_record.continuation().state));
         std::string note;
@@ -574,25 +575,34 @@ public:
             }
         }
         return crash_.durable(
-            what.c_str(), [&] { return inner_->compare_publish(owner, head, std::move(publication)); }, {},
+            what.c_str(), [&] { return inner_->compare_publish(owner, head, expected_fence, std::move(publication)); }, {},
             std::move(note));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(std::string_view owner, std::string_view head,
+                                                             std::uint64_t expected_fence,
                                                              ProgramTransitionPublication publication,
                                                              std::optional<ProgramExecutionLease> expected,
                                                              std::optional<ProgramExecutionLease> next) override {
         return crash_.durable("publish execution", [&] {
-            return inner_->compare_publish_execution(owner, head, std::move(publication), std::move(expected),
-                                                     std::move(next));
+            return inner_->compare_publish_execution(owner, head, expected_fence, std::move(publication),
+                                                     std::move(expected), std::move(next));
         });
     }
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
-        std::string_view owner, std::string_view head, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view head, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& lease) override {
         return crash_.durable("publish safe point", [&] {
-            return inner_->compare_publish_graph_safe_point(owner, head, std::move(publication), evidence, capsule,
-                                                            lease);
+            return inner_->compare_publish_graph_safe_point(owner, head, expected_fence, std::move(publication),
+                                                            evidence, capsule, lease);
+        });
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner, std::string_view run_id, std::string_view head,
+        std::uint64_t expected_fence) override {
+        return crash_.durable("publish takeover", [&] {
+            return inner_->compare_publish_takeover(owner, run_id, head, expected_fence);
         });
     }
 
