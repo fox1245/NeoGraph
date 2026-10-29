@@ -277,7 +277,8 @@ await check('a stores object with a misspelt member, or without the lineage read
 });
 
 await check('a durable wrapper keeps what a second object reads back after the first is released', async () => {
-  const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
+  const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
+    'transitions.comparePublishTakeover', 'programs.publishAdmitted',
     'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
     'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
   const log = [];

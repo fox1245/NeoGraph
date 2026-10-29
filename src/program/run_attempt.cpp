@@ -1968,7 +1968,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             terminal.remaining_budget =
                 settle_unreserved_javascript_wall(*unreconciled_javascript_remaining);
         }
-        if (!active_javascript_command) co_return;
+        if (!active_javascript_command || control->taken_over()) co_return;
         try {
             const auto latest = (co_await control->transitions->latest(control->owner_scope, control->run_id));
             if (!latest || !has_resource_reservation(latest->inflight_reservation)) co_return;
@@ -2641,6 +2641,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         }
                         const bool consumed = within_limit && co_await control->consume_dynamic_compile();
                         if (!consumed) {
+                            if (control->taken_over()) {
+                                co_return plan_failure(
+                                    ProgramTerminalStatus::Failed, "P_RUN_TAKEN_OVER",
+                                    "Program run was taken over by another recovery",
+                                    operation.id());
+                            }
                             co_return plan_failure(
                                 ProgramTerminalStatus::BudgetExhausted, "P_DYNAMIC_COMPILE_BUDGET",
                                 "expand_task_graph dynamic compilation budget exhausted",
@@ -5192,6 +5198,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                     std::lock_guard lock(await_starts_mutex);
                                     batch->failed = true;
                                 }
+                                if (control->taken_over())
+                                    co_return fail(ProgramTerminalStatus::Failed, "P_RUN_TAKEN_OVER",
+                                                   "Program run was taken over by another recovery");
                                 co_return fail(ProgramTerminalStatus::Failed, "P_JS_COMMAND_JOURNAL",
                                                "Could not durably record the start of a "
                                                "JavaScript await");
@@ -6151,9 +6160,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 std::nullopt, attempt_commands);
                             const auto pending = co_await std::move(publish_call_2);
                             if (pending != ProgramTransitionPublishResult::Published &&
-                                pending != ProgramTransitionPublishResult::AlreadyPresent)
+                                pending != ProgramTransitionPublishResult::AlreadyPresent) {
+                                if (control->taken_over())
+                                    throw_runtime_diagnostic("P_RUN_TAKEN_OVER",
+                                        "Program run was taken over by another recovery");
                                 throw_runtime_diagnostic("P_REPLAY_COMMAND",
                                     "Captured command target coordinate lost its CAS");
+                            }
                             // If result publication fails, the owned work stays spent;
                             // do not refund its reservation or invent an external effect.
                             unreconciled_javascript_remaining = reservation.remaining;
@@ -6198,9 +6211,13 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                 attempt_commands);
                             const auto completed = co_await std::move(publish_call_3);
                             if (completed != ProgramTransitionPublishResult::Published &&
-                                completed != ProgramTransitionPublishResult::AlreadyPresent)
+                                completed != ProgramTransitionPublishResult::AlreadyPresent) {
+                                if (control->taken_over())
+                                    throw_runtime_diagnostic("P_RUN_TAKEN_OVER",
+                                        "Program run was taken over by another recovery");
                                 throw_runtime_diagnostic("P_REPLAY_COMMAND",
                                     "Captured command result lost its exact target CAS");
+                            }
                             unreconciled_javascript_remaining = remaining;
                             settled_javascript_wall_time_ms = replay_work.wall_time_ms;
                             javascript_trace.insert(javascript_trace.end(),
@@ -6357,6 +6374,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             (void)co_await control->publish_command_reservation(
                                 std::move(reservation.remaining),
                                 std::move(reservation.reservation));
+                            if (control->taken_over()) {
+                                throw_runtime_diagnostic(
+                                    "P_RUN_TAKEN_OVER",
+                                    "Program run was taken over by another recovery");
+                            }
                             durable_resumed =
                                 co_await control->async_transitions().latest(control->owner_scope, control->run_id);
                         }
@@ -6421,6 +6443,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_return result;
                     }
                     if (pending_published != ProgramTransitionPublishResult::Published) {
+                        if (control->taken_over()) {
+                            throw_runtime_diagnostic(
+                                "P_RUN_TAKEN_OVER",
+                                "Program run was taken over by another recovery",
+                                json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                        }
                         throw_runtime_diagnostic(
                             "P_JS_COMMAND_JOURNAL",
                             "Could not durably publish the JavaScript command before dispatch",
@@ -6551,6 +6579,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         const auto recorded = co_await std::move(publish_call_5);
                         if (recorded != ProgramTransitionPublishResult::Published &&
                             recorded != ProgramTransitionPublishResult::AlreadyPresent) {
+                            if (control->taken_over()) {
+                                throw_runtime_diagnostic(
+                                    "P_RUN_TAKEN_OVER",
+                                    "Program run was taken over by another recovery",
+                                    json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                            }
                             throw_runtime_diagnostic(
                                 "P_JS_COMMAND_JOURNAL",
                                 "Could not durably record the settled members of a paused join",
@@ -6617,6 +6651,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 if (published != ProgramTransitionPublishResult::Published &&
                     published != ProgramTransitionPublishResult::AlreadyPresent) {
+                    if (control->taken_over()) {
+                        throw_runtime_diagnostic(
+                            "P_RUN_TAKEN_OVER",
+                            "Program run was taken over by another recovery",
+                            json{{"command_ordinal", ordinal}, {"effect_identity", effect_id}});
+                    }
                     throw_runtime_diagnostic(
                         "P_JS_COMMAND_JOURNAL",
                         "Could not durably publish the JavaScript command result",
@@ -6980,6 +7020,19 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         complete_budget_record(*outcome.failure, control->granted_budget, outcome.usage,
                                !control->recorded_replay, monetary && monetary->exceeded());
     outcome.provider_budget_authority = usage->authority_snapshot();
+    if (control->taken_over()) {
+        outcome.status = ProgramTerminalStatus::Failed;
+        outcome.interrupt.reset();
+        if (!outcome.failure || outcome.failure->code != "P_RUN_TAKEN_OVER") {
+            outcome.failure = ProgramFailure{
+                "P_RUN_TAKEN_OVER",
+                "Program run was taken over by another recovery",
+                outcome.failure && !outcome.failure->operation_id.empty()
+                    ? outcome.failure->operation_id
+                    : std::string("root"),
+                "", 0, json::object()};
+        }
+    }
     cancel_deadline_timer(control->deadline_executor, std::move(timer));
     (co_await control->complete_async(std::move(outcome)));
     co_return;

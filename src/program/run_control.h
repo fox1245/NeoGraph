@@ -277,7 +277,8 @@ public:
                std::shared_ptr<graph::Store>              state_store,
                std::shared_ptr<ProgramTransitionStore>    transitions,
                std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
-               std::string                                logical_run_id  = {});
+               std::string                                logical_run_id  = {},
+               std::uint64_t                              fence           = 1);
     /// A control for a run read back from the store; `events` are the run's events, which the caller has loaded.
     RunControl(ProgramRunRecord record,
                std::vector<ProgramEvent> events,
@@ -356,6 +357,7 @@ public:
     const std::string                                binding_fingerprint;
     std::string                                       operation_id{"root"};
     const std::uint64_t                              attempt;
+    const std::uint64_t                              fence = 1;
     const std::shared_ptr<const MaterializedProgram> materialized;
     const ProgramPersistedInvocation                 persisted_invocation;
     const RunInvocation                              invocation;
@@ -448,6 +450,8 @@ public:
     void              set_expected_terminal_head(std::string journal_head);
     std::optional<std::string> expected_terminal_head() const;
     bool              superseded_by_executing_attempt() const noexcept;
+    bool              taken_over() const noexcept { return taken_over_.load(); }
+    void              mark_taken_over(std::uint64_t stored_fence);
     CancellationCause cancellation_cause() const noexcept;
     CancellationCause seal_terminal_cause() noexcept;
     /// Makes `child` one of this run's children. A child of a run that is already terminal or cancelling is cancelled
@@ -612,6 +616,7 @@ private:
     std::shared_ptr<TaskGraphFragmentStore>  task_graph_fragments_;
     TaskGraphExpansionPolicyResolver         task_graph_policy_resolver_;
     std::uint64_t                            next_sequence_ = 1;
+    std::atomic_bool                         taken_over_{false};
     CancellationCause                        cancellation_cause_ = CancellationCause::None;
     bool                                     terminal_decided_ = false;
     bool                                     completion_claimed_ = false;

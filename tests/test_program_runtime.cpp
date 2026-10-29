@@ -1864,15 +1864,24 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
+        std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
         if (publication.journal_record.continuation.state != ContinuationState::Running &&
             !injected_.exchange(true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
-        return inner_.compare_publish_sync(owner, expected, std::move(publication));
+        return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
@@ -1881,7 +1890,7 @@ public:
             return ProgramTransitionPublishResult::Conflict;
         }
         return inner_.compare_publish_execution_sync(
-            owner, expected, std::move(publication), expected_lease, next_lease);
+            owner, expected, expected_fence, std::move(publication), expected_lease, next_lease);
     }
     bool injected() const noexcept { return injected_.load(); }
 
@@ -1976,11 +1985,18 @@ public:
     }
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) override {
-        return target_->compare_publish(owner, expected, std::move(publication));
+        return target_->compare_publish(owner, expected, expected_fence, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected,
+        std::uint64_t expected_fence) override {
+        return target_->compare_publish_takeover(owner, run_id, expected, expected_fence);
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
@@ -1997,16 +2013,17 @@ public:
             }
         }
         return target_->compare_publish_execution(
-            owner, expected, std::move(publication), expected_lease, next_lease);
+            owner, expected, expected_fence, std::move(publication), expected_lease, next_lease);
     }
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) override {
         return target_->compare_publish_graph_safe_point(
-            owner, expected, std::move(publication), evidence, capsule,
+            owner, expected, expected_fence, std::move(publication), evidence, capsule,
             execution_lease);
     }
     void block_execution_release() {
@@ -2208,6 +2225,7 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
+        std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
         if (before_publication) before_publication(publication);
         const bool command_result =
@@ -2231,7 +2249,7 @@ public:
         const auto observed  = after_publication
                                    ? std::optional<ProgramTransitionPublication>(publication)
                                    : std::nullopt;
-        const auto published = inner_->compare_publish(owner, expected, std::move(publication));
+        const auto published = inner_->compare_publish(owner, expected, expected_fence, std::move(publication));
         if (observed && published == ProgramTransitionPublishResult::Published)
             after_publication(*observed);
         if (!synthesis.empty() && fail_synthesis_after == synthesis.front().data().state &&
@@ -2255,8 +2273,16 @@ public:
         condition_.wait_for(lock, std::chrono::seconds(5), [this] { return released_; });
         return published;
     }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence) override {
+        return inner_->compare_publish_takeover(owner, run_id, expected, expected_fence);
+    }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
@@ -2270,7 +2296,7 @@ public:
                                    ? std::optional<ProgramTransitionPublication>(publication)
                                    : std::nullopt;
         const auto published = inner_->compare_publish_execution(
-            owner, expected, std::move(publication), expected_lease, next_lease);
+            owner, expected, expected_fence, std::move(publication), expected_lease, next_lease);
         if (observed && published == ProgramTransitionPublishResult::Published)
             after_publication(*observed);
         if (replacement && published == ProgramTransitionPublishResult::Published &&
@@ -2285,12 +2311,13 @@ public:
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner,
         std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) override {
         const auto published = inner_->compare_publish_graph_safe_point(
-            owner, expected, std::move(publication), evidence, capsule, execution_lease);
+            owner, expected, expected_fence, std::move(publication), evidence, capsule, execution_lease);
         if (published == ProgramTransitionPublishResult::Published &&
             crash_after_graph_safe_point_.exchange(false)) {
             if (unreadable_graph_safe_point_commit_.exchange(false)) {
@@ -2412,24 +2439,33 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
+        std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
         const auto children = publication.run_record.children();
         if (children.empty() || children.back().state != ProgramChildState::Dispatched ||
             !block_dispatch_.load()) {
-            return inner_.compare_publish_sync(owner, expected, std::move(publication));
+            return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         }
         if (!injected_.exchange(true)) {
             return ProgramTransitionPublishResult::Conflict;
         }
         return ProgramTransitionPublishResult::Conflict;
     }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
+    }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         return inner_.compare_publish_execution_sync(
-            owner, expected, std::move(publication), std::move(expected_lease),
+            owner, expected, expected_fence, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
     }
     void allow_dispatch() noexcept { block_dispatch_.store(false); }
@@ -2496,16 +2532,25 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
+        std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
-        return inner_.compare_publish_sync(owner, expected, std::move(publication));
+        return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         return inner_.compare_publish_execution_sync(
-            owner, expected, std::move(publication), std::move(expected_lease),
+            owner, expected, expected_fence, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
     }
     std::optional<ProgramJournalRecord> stored_latest(std::string_view run_id) const {
@@ -7867,12 +7912,12 @@ public:
         return inner_.load_execution_lease_sync(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish_sync(
-        std::string_view owner, std::string_view expected,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
         ProgramTransitionPublication publication) override {
         std::unique_lock lock(mutex_);
         if (refuses_locked(lock, publication)) return ProgramTransitionPublishResult::Conflict;
         const bool carries_target = carries_target_start(publication);
-        const auto result = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        const auto result = inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         if (carries_target && !recorded_ && result == ProgramTransitionPublishResult::Published) {
             recorded_ = true;
             cv_.notify_all();
@@ -7880,19 +7925,24 @@ public:
         return result;
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         std::unique_lock lock(mutex_);
         if (refuses_locked(lock, publication)) return ProgramTransitionPublishResult::Conflict;
         const bool carries_target = carries_target_start(publication);
         const auto result = inner_.compare_publish_execution_sync(
-            owner, expected, std::move(publication), expected_lease, next_lease);
+            owner, expected, expected_fence, std::move(publication), expected_lease, next_lease);
         if (carries_target && !recorded_ && result == ProgramTransitionPublishResult::Published) {
             recorded_ = true;
             cv_.notify_all();
         }
         return result;
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
     std::size_t refused() const noexcept {
@@ -8938,25 +8988,32 @@ public:
         return inner_->load_execution_lease_sync(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        std::uint64_t expected_fence,
                                                         ProgramTransitionPublication publication) override {
         const auto kind = intercept(owner, publication);
         if (kind.refused) return ProgramTransitionPublishResult::Conflict;
         const auto run    = publication.run_record.run_id();
-        const auto result = inner_->compare_publish_sync(owner, expected, std::move(publication));
+        const auto result = inner_->compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         accepted(kind, run, result);
         return result;
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         const auto kind = intercept(owner, publication);
         if (kind.refused) return ProgramTransitionPublishResult::Conflict;
         const auto run    = publication.run_record.run_id();
-        const auto result = inner_->compare_publish_execution_sync(owner, expected, std::move(publication),
-                                                                  std::move(expected_lease), std::move(next_lease));
+        const auto result = inner_->compare_publish_execution_sync(owner, expected, expected_fence,
+                                                                   std::move(publication),
+                                                                   std::move(expected_lease), std::move(next_lease));
         accepted(kind, run, result);
         return result;
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence) override {
+        return inner_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
     // Refuse every continuation while armed.
@@ -9361,6 +9418,123 @@ TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturns
         << wakes.describe(fixture, started.parent.run_id());
 }
 
+TEST(ProgramRuntimeTest, JavaScriptReconnectTakesOverARunningRunAndFencesTheStaleRuntime) {
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        return ordinal == 1 ? json{{"ask", true}} : json{{"write", "after-takeover"}};
+    });
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget budget{20000, 2000, 2000, 1, 8, 20, 0, 1, 1};
+    const auto      version = admit_javascript_within(
+        fixture, "fence-takeover-root.js",
+        javascript_runtime_source("runtime-plan-step", R"JS(
+    const first = yield ng.callCore("main", {}, "step:first");
+    const second = yield ng.callCore("main", {}, "step:second");
+    return {first: first, second: second};
+)JS"),
+        budget);
+
+    auto started = fixture.runtime->start(
+        "tenant:runtime", version, ProgramInvocation{json::object(), budget, "trace-fence-takeover-root", {}});
+    const auto interrupted = started.wait();
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    const auto run_id = started.run_id();
+
+    HeldResumedAttempt held;
+    auto               stale_handle = fixture.runtime->resume(
+        "tenant:runtime", run_id,
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-fence-takeover-root-resume"));
+    ASSERT_TRUE(held.entered());
+    ASSERT_EQ(fixture.journal->load("tenant:runtime", run_id)->continuation().state, ContinuationState::Running);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", run_id)->continuation().fence, 1U);
+
+    auto runtime_b =
+        fixture.make_runtime_with_transitions(std::make_shared<IsolatedProcessTransitionStore>(fixture.journal));
+    auto b_handle = runtime_b->reconnect("tenant:runtime", run_id);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", run_id)->continuation().fence, 2U);
+
+    held.release();
+
+    const auto stale_result = stale_handle.wait();
+    ASSERT_EQ(stale_result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(stale_result.failure().has_value());
+    EXPECT_EQ(stale_result.failure()->code, "P_RUN_TAKEN_OVER");
+
+    const auto b_result = b_handle.wait();
+    ASSERT_EQ(b_result.status(), ProgramTerminalStatus::Completed)
+        << (b_result.failure() ? b_result.failure()->code + ": " + b_result.failure()->message : "no failure detail");
+    EXPECT_EQ(b_result.output().at("second").at("channels").at("value").at("value"), "after-takeover");
+    EXPECT_EQ(plan_steps_counted(false), 2U);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", run_id)->continuation().fence, 2U);
+}
+
+TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenTakesOverARunningChildAndFencesTheStaleRuntime) {
+    reset_plan_steps([](std::size_t ordinal, const NodeInput&) -> json {
+        return ordinal == 1 ? json{{"ask", true}} : json{{"write", "after-takeover"}};
+    });
+    AdmittedRuntime         fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    const RunBudget child_budget{10000, 1000, 1000, 1, 8, 20, 0, 1, 1};
+    const auto      parent_version = admit_javascript_within(
+        fixture, "fence-takeover-parent.js",
+        javascript_runtime_source("runtime-completed", kAwaitFirst), kAwaitingParentBudget);
+    const auto child_version = admit_javascript_within(
+        fixture, "fence-takeover-child.js",
+        javascript_runtime_source("runtime-plan-step", R"JS(
+    const first = yield ng.callCore("main", {}, "step:first");
+    const second = yield ng.callCore("main", {}, "step:second");
+    return {first: first, second: second};
+)JS"),
+        child_budget);
+    // The child is a JavaScript Program, so the link accepts the Unmanaged guarantee.
+    const auto linked = link_child_versions(
+        fixture, parent_version, child_version, BudgetLimits{10000, 1000, 1000, 1, 8, 20, 0, 1, 1},
+        ExecutionGuarantee::Unmanaged);
+
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), kAwaitingParentBudget, "trace-fence-takeover-child-parent", {}});
+    ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    const auto parent_id = parent.run_id();
+    ASSERT_TRUE(continuations.wait_for(parent_id, 1));
+    const auto child = only_child_of(fixture, parent_id);
+    ASSERT_TRUE(child.terminal_result.has_value());
+
+    HeldResumedAttempt held;
+    auto               stale_child = fixture.runtime->resume(
+        "tenant:runtime", child.child_run_id,
+        resume_for(*child.terminal_result, json{{"decision", "approved"}}, "trace-fence-takeover-child-resume"));
+    ASSERT_TRUE(held.entered());
+    ASSERT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().state,
+              ContinuationState::Running);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().fence, 1U);
+
+    auto runtime_b =
+        fixture.make_runtime_with_transitions(std::make_shared<IsolatedProcessTransitionStore>(fixture.journal));
+    auto recovered = runtime_b->recover_children("tenant:runtime", parent_id);
+    ASSERT_EQ(recovered.size(), 1U);
+    EXPECT_EQ(recovered.front().run_id(), child.child_run_id);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().fence, 2U);
+
+    held.release();
+
+    const auto stale_result = stale_child.wait();
+    ASSERT_EQ(stale_result.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(stale_result.failure().has_value());
+    EXPECT_EQ(stale_result.failure()->code, "P_RUN_TAKEN_OVER");
+
+    const auto child_result = recovered.front().wait();
+    ASSERT_EQ(child_result.status(), ProgramTerminalStatus::Completed)
+        << (child_result.failure() ? child_result.failure()->code + ": " + child_result.failure()->message
+                                   : "no failure detail");
+    EXPECT_EQ(child_result.output().at("second").at("channels").at("value").at("value"), "after-takeover");
+    EXPECT_EQ(plan_steps_counted(false), 2U);
+    EXPECT_EQ(fixture.journal->load("tenant:runtime", child.child_run_id)->continuation().fence, 2U);
+
+    const auto parent_final = wait_until_run_ends(fixture, continuations, finished, parent_id, 2);
+    EXPECT_EQ(parent_final.status(), ProgramTerminalStatus::Completed);
+}
+
 namespace {
 
 // Holds the parent's Interrupted terminal publication at a gate so a test can finish or pause a child while the
@@ -9422,6 +9596,7 @@ public:
         return inner_.load_execution_lease_sync(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        std::uint64_t expected_fence,
                                                         ProgramTransitionPublication publication) override {
         const bool is_parent_interrupt =
             publication.run_record.child_depth() == 0 &&
@@ -9434,7 +9609,7 @@ public:
         }
         const auto published_run_id = publication.run_record.run_id();
         const auto published_depth  = publication.run_record.child_depth();
-        const auto result           = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        const auto result           = inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         if (result == ProgramTransitionPublishResult::Published && published_depth == 0) {
             const auto stored = inner_.load_sync(owner, published_run_id);
             std::lock_guard lock(mutex_);
@@ -9448,11 +9623,16 @@ public:
         return result;
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
-        return inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+        return inner_.compare_publish_execution_sync(owner, expected, expected_fence, std::move(publication),
                                                      std::move(expected_lease), std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
     void arm_parent_interrupt_gate() noexcept { hold_parent_interrupt_.store(true); }
@@ -9763,15 +9943,21 @@ public:
             return parent_->load_execution_lease_sync(owner, run_id);
         }
         ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                            std::uint64_t expected_fence,
                                                             ProgramTransitionPublication publication) override {
-            return parent_->compare_publish_sync(owner, expected, std::move(publication));
+            return parent_->compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         }
         ProgramTransitionPublishResult compare_publish_execution_sync(
-            std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+            std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+            ProgramTransitionPublication publication,
             std::optional<ProgramExecutionLease> expected_lease,
             std::optional<ProgramExecutionLease> next_lease) override {
-            return parent_->compare_publish_execution_sync(owner, expected, std::move(publication),
+            return parent_->compare_publish_execution_sync(owner, expected, expected_fence, std::move(publication),
                                                            std::move(expected_lease), std::move(next_lease));
+        }
+        ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                     std::uint64_t expected_fence) override {
+            return parent_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
         }
 
     private:
@@ -9861,6 +10047,7 @@ public:
         return inner_.load_execution_lease_sync(owner, run_id);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        std::uint64_t expected_fence,
                                                         ProgramTransitionPublication publication) override {
         {
             std::unique_lock lock(mutex_);
@@ -9875,7 +10062,7 @@ public:
         }
         const auto published_run_id = publication.run_record.run_id();
         const auto published_state  = publication.run_record.continuation().state;
-        const auto result           = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        const auto result           = inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         if (result == ProgramTransitionPublishResult::Published) {
             std::lock_guard lock(mutex_);
             if (published_run_id == child_id_ && published_state == ContinuationState::Completed) {
@@ -9890,11 +10077,16 @@ public:
         return result;
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
-        return inner_.compare_publish_execution_sync(owner, expected, std::move(publication),
+        return inner_.compare_publish_execution_sync(owner, expected, expected_fence, std::move(publication),
                                                      std::move(expected_lease), std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
 private:
@@ -11035,8 +11227,6 @@ TEST(ProgramRuntimeTest, ARecoveredJavaScriptCommandCancelledBeforeItIsReachedEn
         for (unsigned i = 0; blocking_active.load() == 0 && i < 5000; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         ASSERT_EQ(blocking_active.load(), 1U) << "the process stopped inside the command";
-        const auto held = fixture.journal->latest("tenant:runtime", original.run_id());
-        ASSERT_TRUE(held.has_value());
 
         // A runtime of the restarted process, whose only scheduler thread another run holds.
         auto fresh    = fixture.make_runtime();
@@ -11045,6 +11235,11 @@ TEST(ProgramRuntimeTest, ARecoveredJavaScriptCommandCancelledBeforeItIsReachedEn
                                      ProgramInvocation{json::object(), grant(), "trace-js-recover-holder", blocker});
         ASSERT_TRUE(blocker->entered());
         auto recovered = fresh->reconnect("tenant:runtime", original.run_id());
+        // The head is read after the reconnect: the takeover appends a journal record (fence 2, same budget and
+        // reservation), so the terminal record follows it, not the record the lost process left.
+        const auto held = fixture.journal->latest("tenant:runtime", original.run_id());
+        ASSERT_TRUE(held.has_value());
+        EXPECT_EQ(held->continuation.fence, 2U);
         EXPECT_TRUE(recovered.cancel());
         blocker->release();
         const auto ended = recovered.wait();
@@ -12619,7 +12814,7 @@ TEST(ProgramRuntimeTest, ARunGrantedUint64MaxWallTimeDoesNotTimeOutAtOnce) {
     ProgramTransitionPublication publication{running_record, running_journal, {started}, {}};
     publication.run_generation = generation;
     publication.run_lineage    = lineage;
-    ASSERT_EQ(fixture.journal->compare_publish("tenant:runtime", "", std::move(publication)),
+    ASSERT_EQ(fixture.journal->compare_publish("tenant:runtime", "", 1, std::move(publication)),
               ProgramTransitionPublishResult::Published);
 
     neograph::program::detail::RunControl record_control(
@@ -17008,6 +17203,7 @@ TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedis
             publication.run_lineage = std::move(next_lineage);
             allow_completion->store(true);
             if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
+                                            record->continuation().fence,
                                             std::move(publication)) !=
                 ProgramTransitionPublishResult::Published)
                 throw std::runtime_error("Sibling completion publication was rejected");
@@ -17138,6 +17334,7 @@ TEST(ProgramRuntimeTest,
             publication.run_lineage = std::move(next_lineage);
             allow_completion->store(true);
             if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
+                                            record->continuation().fence,
                                             std::move(publication)) !=
                 ProgramTransitionPublishResult::Published)
                 throw std::runtime_error("Sibling completion publication was rejected");
@@ -19948,12 +20145,14 @@ TEST_P(ProgramChildSynthesisPersistence, ReservationIsAtomicAndCannotFundAnother
                  std::runtime_error);
     auto       publication = test.journal->synthesis_publications.front();
     const auto expected    = publication.journal_record.previous_id;
-    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected, publication),
+    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected,
+                                       publication.run_record.continuation().fence, publication),
               ProgramTransitionPublishResult::AlreadyPresent);
     auto data                           = publication.child_synthesis_records.front().data();
     data.binding_name                   = "another-binding";
     publication.child_synthesis_records = {ProgramChildSynthesisRecord::create(std::move(data))};
-    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected, publication),
+    EXPECT_EQ(storage->compare_publish("tenant:runtime", expected,
+                                       publication.run_record.continuation().fence, publication),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(storage->load_child_syntheses("tenant:runtime", test.handle->run_id()).size(), 1U);
     EXPECT_EQ(test.handle->snapshot().remaining_budget().max_dynamic_compiles, 2U);

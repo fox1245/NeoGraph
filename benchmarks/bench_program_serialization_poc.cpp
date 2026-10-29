@@ -86,16 +86,18 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) override {
         {
             std::lock_guard lock(mutex_);
             publications_.push_back(publication);
         }
         return inner_->compare_publish(
-            owner_scope, expected_journal_head, std::move(publication));
+            owner_scope, expected_journal_head, expected_fence, std::move(publication));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope, std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
@@ -104,8 +106,13 @@ public:
             publications_.push_back(publication);
         }
         return inner_->compare_publish_execution(
-            owner_scope, expected_journal_head, std::move(publication),
+            owner_scope, expected_journal_head, expected_fence, std::move(publication),
             std::move(expected_lease), std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override {
+        return inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
 
     std::vector<ProgramTransitionPublication> snapshot() const {

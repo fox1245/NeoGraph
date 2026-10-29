@@ -242,25 +242,35 @@ public:
         return inner_->load_execution_lease_sync(owner, run);
     }
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view expected,
+                                                        std::uint64_t expected_fence,
                                                         ProgramTransitionPublication publication) override {
         enter();
-        return inner_->compare_publish_sync(owner, expected, std::move(publication));
+        return inner_->compare_publish_sync(owner, expected, expected_fence, std::move(publication));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         enter();
-        return inner_->compare_publish_execution_sync(owner, expected, std::move(publication),
+        return inner_->compare_publish_execution_sync(owner, expected, expected_fence, std::move(publication),
                                                       std::move(expected_lease), std::move(next_lease));
     }
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
-        std::string_view owner, std::string_view expected, ProgramTransitionPublication publication,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& lease) override {
         enter();
-        return inner_->compare_publish_graph_safe_point_sync(owner, expected, std::move(publication), evidence,
-                                                             capsule, lease);
+        return inner_->compare_publish_graph_safe_point_sync(owner, expected, expected_fence, std::move(publication),
+                                                             evidence, capsule, lease);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner,
+                                                                 std::string_view run_id,
+                                                                 std::string_view expected,
+                                                                 std::uint64_t expected_fence) override {
+        enter();
+        return inner_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
 protected:
@@ -371,17 +381,21 @@ public:
         co_await pause();
         co_return co_await inner_->load_execution_lease(owner_scope, run_id);
     }
-    asio::awaitable<ProgramTransitionPublishResult> compare_publish(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication) override {
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication) override {
         co_await pause();
-        co_return co_await inner_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
+        co_return co_await inner_->compare_publish(owner_scope, expected_journal_head, expected_fence, std::move(publication));
     }
-    asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication, std::optional<ProgramExecutionLease> expected_lease, std::optional<ProgramExecutionLease> next_lease) override {
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication, std::optional<ProgramExecutionLease> expected_lease, std::optional<ProgramExecutionLease> next_lease) override {
         co_await pause();
-        co_return co_await inner_->compare_publish_execution(owner_scope, expected_journal_head, std::move(publication), std::move(expected_lease), std::move(next_lease));
+        co_return co_await inner_->compare_publish_execution(owner_scope, expected_journal_head, expected_fence, std::move(publication), std::move(expected_lease), std::move(next_lease));
     }
-    asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(std::string_view owner_scope, std::string_view expected_journal_head, ProgramTransitionPublication publication, const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule, const ProgramExecutionLease& execution_lease) override {
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication, const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule, const ProgramExecutionLease& execution_lease) override {
         co_await pause();
-        co_return co_await inner_->compare_publish_graph_safe_point(owner_scope, expected_journal_head, std::move(publication), evidence, capsule, execution_lease);
+        co_return co_await inner_->compare_publish_graph_safe_point(owner_scope, expected_journal_head, expected_fence, std::move(publication), evidence, capsule, execution_lease);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence) override {
+        co_await pause();
+        co_return co_await inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
 
 private:

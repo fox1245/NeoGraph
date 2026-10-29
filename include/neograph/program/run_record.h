@@ -118,9 +118,11 @@ struct ProgramRunRecordData {
 /** Deep-owned, content-addressed run snapshot used for reconnect and CAS publication. */
 class NEOGRAPH_PROGRAM_API ProgramRunRecord {
 public:
-    /// Version 5 adds attempt_resume and version 6 settled_branches; a record
-    /// keeps the lowest version that can hold it (3 or 4 without either).
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 6;
+    /// Version 5 adds attempt_resume, version 6 settled_branches, and version 7
+    /// continuation.fence. A record keeps the lowest version that can hold it, so
+    /// version 7 is written only for a run that was taken over (fence other than 1);
+    /// versions 2 through 6 carry no fence and read as fence = 1.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 7;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
     static ProgramRunRecord parse(std::string_view stored_bytes);

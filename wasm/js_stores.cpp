@@ -357,27 +357,45 @@ public:
     // state, which also write the publication's canonical text. A publication it refuses is a Conflict, and never reaches
     // JavaScript; the text it returns is what crosses. What the stored state says about the publication is the store's.
     asio::awaitable<program::ProgramTransitionPublishResult> compare_publish(
-        std::string_view owner_scope, std::string_view expected_journal_head,
+        std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication) override {
+        if (expected_fence == 0 ||
+            publication.run_record.continuation().fence != expected_fence ||
+            publication.journal_record.continuation.fence != expected_fence)
+            return refused();
         const auto text = program::detail::transition::prepare_transition(
             owner_scope, expected_journal_head, publication, nullptr, nullptr, nullptr, nullptr);
         if (!text) return refused();
-        return member_.call(tr::compare_publish, owner_scope, expected_journal_head, PreparedText{*text});
+        return member_.call(tr::compare_publish, owner_scope, expected_journal_head, expected_fence,
+                            PreparedText{*text});
     }
     asio::awaitable<program::ProgramTransitionPublishResult> compare_publish_execution(
-        std::string_view owner_scope, std::string_view expected_journal_head,
+        std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication, std::optional<program::ProgramExecutionLease> expected_lease,
         std::optional<program::ProgramExecutionLease> next_lease) override {
         if (!member_.has(tr::compare_publish_execution))
-            return ProgramTransitionStore::compare_publish_execution(owner_scope, expected_journal_head,
-                                                                     std::move(publication), std::move(expected_lease),
-                                                                     std::move(next_lease));
+            return ProgramTransitionStore::compare_publish_execution(
+                owner_scope, expected_journal_head, expected_fence, std::move(publication),
+                std::move(expected_lease), std::move(next_lease));
+        if (expected_fence == 0 ||
+            publication.run_record.continuation().fence != expected_fence ||
+            publication.journal_record.continuation.fence != expected_fence)
+            return refused();
         const auto text = program::detail::transition::prepare_transition(
             owner_scope, expected_journal_head, publication, nullptr, nullptr,
             expected_lease ? &*expected_lease : nullptr, next_lease ? &*next_lease : nullptr);
         if (!text) return refused();
-        return member_.call(tr::compare_publish_execution, owner_scope, expected_journal_head, PreparedText{*text},
-                            expected_lease, next_lease);
+        return member_.call(tr::compare_publish_execution, owner_scope, expected_journal_head, expected_fence,
+                            PreparedText{*text}, expected_lease, next_lease);
+    }
+    asio::awaitable<program::ProgramTransitionPublishResult> compare_publish_takeover(
+        std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override {
+        if (!program::detail::transition::valid_takeover_request(owner_scope, run_id,
+                                                                 expected_journal_head, expected_fence))
+            return refused();
+        return member_.call(tr::compare_publish_takeover, owner_scope, run_id, expected_journal_head,
+                            expected_fence);
     }
     // compare_publish_graph_safe_point carries evidence that is never serialized: the base class answers Conflict.
 

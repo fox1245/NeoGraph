@@ -272,6 +272,62 @@ TEST(ProgramRecordIdentity, EventsRoundTripThroughTheirStoredBytes) {
     }
 }
 
+int schema_version_of(const std::string& stored_bytes) {
+    return neograph::detail::parse_json_strict(stored_bytes).at("storage_schema_version").get<int>();
+}
+
+bool carries_fence(const std::string& stored_bytes) {
+    return neograph::detail::parse_json_strict(stored_bytes).at("continuation").contains("fence");
+}
+
+// The schema that carries the ownership fence is written only for a run that was taken over (fence other than 1).
+// A record with fence 1 is the bytes and the id it had before the fence existed: no fence field, its previous schema
+// version, the pinned id. A taken-over record carries the field under the newer schema and parses back with it.
+TEST(ProgramRecordIdentity, OnlyATakenOverRecordCarriesTheFenceSchema) {
+    const auto first = first_journal();
+    const auto run   = run_record(first);
+
+    // Fence 1: the previous bytes, byte for byte.
+    ASSERT_EQ(first.continuation.fence, 1U);
+    ASSERT_EQ(run.continuation().fence, 1U);
+    const auto journal_bytes = first.serialize_canonical();
+    const auto run_bytes     = run.serialize_canonical();
+    EXPECT_EQ(schema_version_of(journal_bytes), 1);
+    EXPECT_FALSE(carries_fence(journal_bytes));
+    EXPECT_EQ(schema_version_of(run_bytes), 3);
+    EXPECT_FALSE(carries_fence(run_bytes));
+    EXPECT_EQ(first.id, kPinnedRecordIds.at("journal_first"));
+    EXPECT_EQ(run.id(), kPinnedRecordIds.at("run_record"));
+    EXPECT_EQ(ProgramJournalRecord::parse(journal_bytes).continuation.fence, 1U);
+    EXPECT_EQ(ProgramRunRecord::parse(run_bytes).continuation().fence, 1U);
+
+    // Fence 2: the takeover record uses the fence schema and parses back with fence 2.
+    auto taken_continuation  = first.continuation;
+    taken_continuation.fence = 2;
+    const auto taken_journal = ProgramJournalRecord::create(
+        {first.id, "run-golden", digest('a'), digest('b'), 2, taken_continuation, run_budget(), {},
+         std::nullopt, 20});
+    const auto taken_run = run_record(taken_journal);
+    ASSERT_EQ(taken_journal.continuation.fence, 2U);
+    ASSERT_EQ(taken_run.continuation().fence, 2U);
+
+    const auto taken_journal_bytes = taken_journal.serialize_canonical();
+    const auto taken_run_bytes     = taken_run.serialize_canonical();
+    EXPECT_EQ(schema_version_of(taken_journal_bytes), 2);
+    EXPECT_TRUE(carries_fence(taken_journal_bytes));
+    EXPECT_EQ(schema_version_of(taken_run_bytes), 7);
+    EXPECT_TRUE(carries_fence(taken_run_bytes));
+    const auto parsed_journal = ProgramJournalRecord::parse(taken_journal_bytes);
+    EXPECT_EQ(parsed_journal.continuation.fence, 2U);
+    EXPECT_EQ(parsed_journal.id, taken_journal.id);
+    EXPECT_EQ(parsed_journal.serialize_canonical(), taken_journal_bytes);
+    const auto parsed_run = ProgramRunRecord::parse(taken_run_bytes);
+    EXPECT_EQ(parsed_run.continuation().fence, 2U);
+    EXPECT_EQ(parsed_run.id(), taken_run.id());
+    EXPECT_EQ(parsed_run.serialize_canonical(), taken_run_bytes);
+    EXPECT_NE(taken_run.id(), run.id());
+}
+
 TEST(ProgramRecordIdentity, RecordIdsArePinned) {
     for (const auto& [name, value] : record_ids()) {
         const auto pinned = kPinnedRecordIds.find(name);

@@ -678,6 +678,7 @@ struct CurrentHead {
 struct TransitionRequest {
     std::string_view                     owner_scope;
     std::string_view                     expected_journal_head;
+    std::uint64_t                        expected_fence = 0;
     const ProgramTransitionPublication&  publication;
     /// The publication's canonical bytes, from prepare_transition().
     std::string_view                     publication_bytes;
@@ -686,6 +687,118 @@ struct TransitionRequest {
     const ProgramExecutionLease*         expected_lease      = nullptr;
     const ProgramExecutionLease*         next_lease          = nullptr;
 };
+
+struct TakeoverPublication {
+    ProgramRunRecord                  run_record;
+    ProgramJournalRecord              journal_record;
+    std::optional<ProgramRunLineage>  run_lineage;
+};
+
+inline bool valid_takeover_request(std::string_view owner_scope,
+                                   std::string_view run_id,
+                                   std::string_view expected_journal_head,
+                                   std::uint64_t    expected_fence) noexcept {
+    return !owner_scope.empty() && !run_id.empty() && is_sha256_identity(expected_journal_head) &&
+           expected_fence > 0 && expected_fence < std::numeric_limits<std::uint64_t>::max();
+}
+
+inline std::optional<TakeoverPublication> prepare_takeover(
+    std::string_view                        owner_scope,
+    std::string_view                        run_id,
+    std::string_view                        expected_journal_head,
+    std::uint64_t                           expected_fence,
+    const ProgramRunRecord&                 current_run,
+    const ProgramJournalRecord&             current_journal,
+    const std::optional<ProgramRunLineage>& current_lineage = std::nullopt) {
+    if (!valid_takeover_request(owner_scope, run_id, expected_journal_head, expected_fence))
+        return std::nullopt;
+    if (current_run.owner_scope() != owner_scope ||
+        current_run.journal_head() != expected_journal_head ||
+        current_journal.id != expected_journal_head ||
+        current_run.run_id() != run_id ||
+        current_run.run_id() != current_journal.run_id ||
+        current_run.continuation().state != ContinuationState::Running ||
+        current_journal.continuation.state != ContinuationState::Running ||
+        current_run.continuation().fence != expected_fence ||
+        current_journal.continuation.fence != expected_fence ||
+        current_journal.sequence == std::numeric_limits<std::uint64_t>::max()) {
+        return std::nullopt;
+    }
+    if (current_lineage &&
+        (current_lineage->owner_scope() != owner_scope ||
+         current_lineage->active_run_record_id() != current_run.id() ||
+         current_lineage->active_journal_head() != current_journal.id)) {
+        return std::nullopt;
+    }
+    try {
+        auto next_continuation  = current_run.continuation();
+        next_continuation.fence = expected_fence + 1;
+        auto next_journal = ProgramJournalRecord::create({
+            current_journal.id,
+            current_journal.run_id,
+            current_journal.program_version_id,
+            current_journal.bundle_id,
+            current_journal.sequence + 1,
+            next_continuation,
+            current_journal.remaining_budget,
+            current_journal.inflight_reservation,
+            current_journal.core_checkpoint,
+            current_journal.timestamp_ms,
+        });
+        auto next_run = ProgramRunRecord::create({
+            current_run.owner_scope(),
+            current_run.run_id(),
+            current_run.program_version_id(),
+            current_run.bundle_id(),
+            current_run.binding_fingerprint(),
+            current_run.invocation(),
+            current_run.child_depth(),
+            next_continuation,
+            current_run.remaining_budget(),
+            current_run.exact_checkpoint(),
+            current_run.exact_checkpoint_content_id(),
+            current_run.pending_input(),
+            current_run.pending_effect(),
+            current_run.terminal_result(),
+            current_run.fork_receipt(),
+            current_run.children(),
+            next_journal.id,
+            current_run.fork_source_run_id(),
+            current_run.fork_source_program_version_id(),
+            current_run.fork_source_checkpoint_id(),
+            current_run.recorded_binding_set_fingerprint(),
+            current_run.event_sequence(),
+            current_run.effect_sequence(),
+            current_run.created_at_ms(),
+            current_run.updated_at_ms(),
+            current_run.logical_run_id(),
+            current_run.attempt_resume(),
+            current_run.settled_branches(),
+        });
+        std::optional<ProgramRunLineage> next_lineage;
+        if (current_lineage) {
+            next_lineage = ProgramRunLineage::create(ProgramRunLineageData{
+                current_lineage->owner_scope(),
+                current_lineage->lineage_id(),
+                current_lineage->root_run_id(),
+                current_lineage->active_generation(),
+                current_lineage->active_generation_id(),
+                next_run.id(),
+                next_journal.id,
+                current_lineage->remaining_budget(),
+                current_lineage->inflight_reservation(),
+                current_lineage->id(),
+                current_lineage->created_at_ms(),
+                current_lineage->updated_at_ms(),
+                current_lineage->committed_descendant_budget(),
+            });
+        }
+        return TakeoverPublication{
+            std::move(next_run), std::move(next_journal), std::move(next_lineage)};
+    } catch (const std::invalid_argument&) {
+        return std::nullopt;
+    }
+}
 
 enum class TransitionVerdict : std::uint8_t {
     /// Every check passed; write the publication.
@@ -997,6 +1110,13 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
                                              TransitionPlan&            plan) {
     const auto& publication = request.publication;
     const auto& run_id      = publication.run_record.run_id();
+    if (request.expected_fence == 0 ||
+        publication.run_record.continuation().fence != request.expected_fence ||
+        publication.journal_record.continuation.fence != request.expected_fence ||
+        (current && (current->run_record.continuation().fence != request.expected_fence ||
+                     current->journal_record.continuation.fence != request.expected_fence))) {
+        return TransitionVerdict::Conflict;
+    }
     if (request.safe_point_evidence && !current) return TransitionVerdict::Conflict;
 
     if (current && current->last_publication_bytes == request.publication_bytes) {

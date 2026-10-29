@@ -728,11 +728,13 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view             owner,
         std::string_view             expected,
+        std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
         const bool native_result =
             !publication.commands.empty() && publication.commands.back().completed() &&
             publication.commands.back().command().kind() == JavaScriptCommandKind::HostCapability;
-        const auto published = inner_.compare_publish_sync(owner, expected, std::move(publication));
+        const auto published =
+            inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         if (!native_result || published != ProgramTransitionPublishResult::Published)
             return published;
         std::unique_lock lock(mutex_);
@@ -743,12 +745,29 @@ public:
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
         return inner_.compare_publish_execution_sync(
-            owner, expected, std::move(publication), std::move(expected_lease),
+            owner, expected, expected_fence, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
+        std::string_view owner, std::string_view expected,
+        std::uint64_t expected_fence,
+        ProgramTransitionPublication publication,
+        const ProgramGraphSafePointEvidence& evidence,
+        const GraphMigrationCapsule& capsule,
+        const ProgramExecutionLease& execution_lease) override {
+        return inner_.compare_publish_graph_safe_point_sync(
+            owner, expected, expected_fence, std::move(publication), evidence, capsule,
+            execution_lease);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected,
+        std::uint64_t expected_fence) override {
+        return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
 
     bool wait_for_result(std::chrono::milliseconds timeout) {
