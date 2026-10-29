@@ -378,6 +378,13 @@ struct JSRuntime {
     BOOL current_exception_is_uncatchable : 8;
     /* true if inside an out of memory error, to avoid recursing */
     BOOL in_out_of_memory : 8;
+    /* NeoGraph local patch: why the engine threw an exception when a
+       resource ran out. resource_exception is a counted reference to the
+       error object that JS_ThrowStackOverflow() or JS_ThrowOutOfMemory()
+       threw (or JS_NULL, which is what is thrown when that object could not be
+       allocated), and resource_exception_kind names the cause. */
+    JSExceptionResourceKindEnum resource_exception_kind;
+    JSValue resource_exception;
 
     struct JSStackFrame *current_stack_frame;
 
@@ -1194,6 +1201,7 @@ static __exception int JS_ToArrayLengthFree(JSContext *ctx, uint32_t *plen,
 static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
                              JSValueConst val, int flags, int scope_idx);
 JSValue __attribute__((format(printf, 2, 3))) JS_ThrowInternalError(JSContext *ctx, const char *fmt, ...);
+static void js_clear_resource_exception(JSRuntime *rt);
 static __maybe_unused void JS_DumpAtoms(JSRuntime *rt);
 static __maybe_unused void JS_DumpString(JSRuntime *rt, const JSString *p);
 static __maybe_unused void JS_DumpObjectHeader(JSRuntime *rt);
@@ -2151,6 +2159,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     JS_UpdateStackTop(rt);
 
     rt->current_exception = JS_UNINITIALIZED;
+    rt->resource_exception = JS_UNDEFINED;
 
     return rt;
  fail:
@@ -2443,6 +2452,7 @@ void JS_FreeRuntime(JSRuntime *rt)
     int i;
 
     JS_FreeValueRT(rt, rt->current_exception);
+    js_clear_resource_exception(rt);
 
     list_for_each_safe(el, el1, &rt->job_list) {
         JSJobEntry *e = list_entry(el, JSJobEntry, link);
@@ -7411,10 +7421,42 @@ JSValue JS_GetGlobalObject(JSContext *ctx)
     return JS_DupValue(ctx, ctx->global_obj);
 }
 
+/* NeoGraph local patch: the record of the exception that the engine threw
+   because a resource ran out. The record names an error object, so it follows
+   that object when a finally block, a for-of loop or a catch clause throws it
+   again, and any throw of another value ends it. */
+static void js_clear_resource_exception(JSRuntime *rt)
+{
+    JSValue exception = rt->resource_exception;
+    rt->resource_exception = JS_UNDEFINED;
+    rt->resource_exception_kind = JS_EXCEPTION_RESOURCE_NONE;
+    JS_FreeValueRT(rt, exception);
+}
+
+static BOOL js_is_resource_exception_object(JSRuntime *rt, JSValueConst obj)
+{
+    return rt->resource_exception_kind != JS_EXCEPTION_RESOURCE_NONE &&
+        JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT &&
+        JS_VALUE_GET_TAG(rt->resource_exception) == JS_TAG_OBJECT &&
+        JS_VALUE_GET_OBJ(obj) == JS_VALUE_GET_OBJ(rt->resource_exception);
+}
+
+/* record the exception that was just thrown as thrown by a resource limit */
+static void js_record_resource_exception(JSRuntime *rt,
+                                         JSExceptionResourceKindEnum kind)
+{
+    JSValue exception = JS_DupValueRT(rt, rt->current_exception);
+    js_clear_resource_exception(rt);
+    rt->resource_exception = exception;
+    rt->resource_exception_kind = kind;
+}
+
 /* WARNING: obj is freed */
 JSValue JS_Throw(JSContext *ctx, JSValue obj)
 {
     JSRuntime *rt = ctx->rt;
+    if (!js_is_resource_exception_object(rt, obj))
+        js_clear_resource_exception(rt);
     JS_FreeValue(ctx, rt->current_exception);
     rt->current_exception = obj;
     rt->current_exception_is_uncatchable = FALSE;
@@ -7434,6 +7476,27 @@ JSValue JS_GetException(JSContext *ctx)
 JS_BOOL JS_HasException(JSContext *ctx)
 {
     return !JS_IsUninitialized(ctx->rt->current_exception);
+}
+
+JSExceptionResourceKindEnum JS_GetExceptionResourceKind(JSContext *ctx,
+                                                        JSValueConst exception)
+{
+    if (!ctx || !js_is_resource_exception_object(ctx->rt, exception))
+        return JS_EXCEPTION_RESOURCE_NONE;
+    return ctx->rt->resource_exception_kind;
+}
+
+JSExceptionResourceKindEnum JS_GetPendingExceptionResourceKind(JSContext *ctx)
+{
+    JSRuntime *rt;
+    if (!ctx)
+        return JS_EXCEPTION_RESOURCE_NONE;
+    rt = ctx->rt;
+    /* An out of memory error that could not be allocated is thrown as null,
+       and every other throw ends the record. */
+    if (JS_IsNull(rt->current_exception) && JS_IsNull(rt->resource_exception))
+        return rt->resource_exception_kind;
+    return JS_GetExceptionResourceKind(ctx, rt->current_exception);
 }
 
 static void dbuf_put_leb128(DynBuf *s, uint32_t v)
@@ -7852,13 +7915,16 @@ JSValue JS_ThrowOutOfMemory(JSContext *ctx)
         rt->in_out_of_memory = TRUE;
         JS_ThrowInternalError(ctx, "out of memory");
         rt->in_out_of_memory = FALSE;
+        js_record_resource_exception(rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
     }
     return JS_EXCEPTION;
 }
 
 static JSValue JS_ThrowStackOverflow(JSContext *ctx)
 {
-    return JS_ThrowInternalError(ctx, "stack overflow");
+    JSValue ret = JS_ThrowInternalError(ctx, "stack overflow");
+    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    return ret;
 }
 
 static JSValue JS_ThrowTypeErrorNotAnObject(JSContext *ctx)

@@ -321,6 +321,89 @@ TEST(QuickJsRuntimeTest, SupportsAccountedCustomAllocator) {
     EXPECT_EQ(stats.allocations, 0U);
     EXPECT_EQ(stats.bytes, 0U);
 }
+
+TEST(QuickJsRuntimeTest, ExceptionResourceKindDistinguishesEngineLimitsFromThrownErrors) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    JSRuntime* runtime = engine.runtime();
+    JSContext* context = engine.context();
+    JS_SetMaxStackSize(runtime, 32U * 1024U);
+
+    EXPECT_EQ(JS_GetPendingExceptionResourceKind(context), JS_EXCEPTION_RESOURCE_NONE);
+
+    // Evaluates a script that must fail and checks why the engine threw its exception: while it is pending, and
+    // as the value that JS_GetException() takes.
+    const auto expect_failure_kind = [&](std::string_view source, JSExceptionResourceKindEnum expected) {
+        SCOPED_TRACE(std::string(source));
+        JSValue result = evaluate(context, source);
+        EXPECT_TRUE(JS_IsException(result));
+        EXPECT_EQ(JS_GetPendingExceptionResourceKind(context), expected);
+        JSValue exception = JS_GetException(context);
+        EXPECT_EQ(JS_GetPendingExceptionResourceKind(context), JS_EXCEPTION_RESOURCE_NONE);
+        EXPECT_EQ(JS_GetExceptionResourceKind(context, exception), expected);
+        JS_FreeValue(context, exception);
+        JS_FreeValue(context, result);
+    };
+
+    expect_failure_kind("(function recurse() { return 1 + recurse(); })()", JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+
+    // An error that a script throws is not an engine limit, whatever its text says, and neither is the error
+    // that a script throws after it caught an overflow.
+    expect_failure_kind("throw new Error('stack overflow')", JS_EXCEPTION_RESOURCE_NONE);
+    expect_failure_kind("throw new Error('out of memory')", JS_EXCEPTION_RESOURCE_NONE);
+    expect_failure_kind("throw new InternalError('stack overflow')", JS_EXCEPTION_RESOURCE_NONE);
+    expect_failure_kind(
+        "try { (function recurse() { return 1 + recurse(); })(); } "
+        "catch (err) { throw new Error('after stack overflow'); }",
+        JS_EXCEPTION_RESOURCE_NONE);
+
+    // The engine's own error keeps its kind when a finally block, a for-of loop or a catch clause throws it again.
+    expect_failure_kind(
+        "function recurse() { try { return 1 + recurse(); } finally { } } recurse();",
+        JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    expect_failure_kind(
+        "function recurse() { for (const item of [1]) { return 1 + recurse(); } } recurse();",
+        JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    expect_failure_kind(
+        "try { (function recurse() { return 1 + recurse(); })(); } catch (err) { throw err; }",
+        JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+
+    // A failure that has no pending exception any more, the reason of a rejected promise, still has its kind.
+    JSValue promise = evaluate(context, "(async function recurse() { return 1 + await recurse(); })()");
+    ASSERT_FALSE(JS_IsException(promise));
+    JSContext* job_context = nullptr;
+    while (JS_ExecutePendingJob(runtime, &job_context) > 0) {
+    }
+    EXPECT_EQ(JS_PromiseState(context, promise), JS_PROMISE_REJECTED);
+    JSValue reason = JS_PromiseResult(context, promise);
+    EXPECT_EQ(JS_GetExceptionResourceKind(context, reason), JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    JS_FreeValue(context, reason);
+    JS_FreeValue(context, promise);
+}
+
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesAnExhaustedMemoryLimit) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    JS_SetMemoryLimit(engine.runtime(), 256U * 1024U);
+
+    JSValue result = evaluate(
+        engine.context(), "(function () { const items = []; while (true) { items.push('x'.repeat(4096)); } })()");
+    EXPECT_TRUE(JS_IsException(result));
+    EXPECT_EQ(JS_GetPendingExceptionResourceKind(engine.context()), JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
+    JSValue exception = JS_GetException(engine.context());
+    JS_FreeValue(engine.context(), exception);
+    JS_FreeValue(engine.context(), result);
+
+    // The next failure is the script's own.
+    result = evaluate(engine.context(), "throw new Error('out of memory')");
+    EXPECT_TRUE(JS_IsException(result));
+    EXPECT_EQ(JS_GetPendingExceptionResourceKind(engine.context()), JS_EXCEPTION_RESOURCE_NONE);
+    exception = JS_GetException(engine.context());
+    JS_FreeValue(engine.context(), exception);
+    JS_FreeValue(engine.context(), result);
+}
 #if defined(_MSC_VER)
 TEST(QuickJsRuntimeTest, MsvcFunctionListMacrosPreserveMemberTypes) {
     EXPECT_EQ(msvc_function_list_entries[0].u.func.cfunc.generic, native_add);

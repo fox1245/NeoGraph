@@ -664,10 +664,26 @@ static inline JS_BOOL JS_IsObject(JSValueConst v)
     return JS_VALUE_GET_TAG(v) == JS_TAG_OBJECT;
 }
 
+/* Why the engine threw an exception: JS_EXCEPTION_RESOURCE_NONE for every
+   exception that was not thrown because a resource ran out. */
+typedef enum JSExceptionResourceKindEnum {
+    JS_EXCEPTION_RESOURCE_NONE = 0,
+    JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY = 1,
+    JS_EXCEPTION_RESOURCE_STACK_OVERFLOW = 2,
+} JSExceptionResourceKindEnum;
+
 JSValue JS_Throw(JSContext *ctx, JSValue obj);
 void JS_SetUncatchableException(JSContext *ctx, JS_BOOL flag);
 JSValue JS_GetException(JSContext *ctx);
 JS_BOOL JS_HasException(JSContext *ctx);
+/* Why the pending exception was thrown. It is not pending after
+   JS_GetException(): use JS_GetExceptionResourceKind() on the value. */
+JSExceptionResourceKindEnum JS_GetPendingExceptionResourceKind(JSContext *ctx);
+/* Why the engine threw this exception value. Only the error object that the
+   engine threw when the stack or the memory ran out is identified; a copy of
+   its message in another error is not. */
+JSExceptionResourceKindEnum JS_GetExceptionResourceKind(JSContext *ctx,
+                                                        JSValueConst exception);
 JS_BOOL JS_IsError(JSContext *ctx, JSValueConst val);
 JSValue JS_NewError(JSContext *ctx);
 JSValue __js_printf_like(2, 3) JS_ThrowSyntaxError(JSContext *ctx, const char *fmt, ...);

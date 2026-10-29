@@ -390,8 +390,8 @@ def msvc_asan(args):
     build = args.work_dir / "build"
     configure(build, options, generator="Ninja")
     build_targets(build, args.jobs, "neograph_program_tests", "neograph_quickjs_tests", "neograph_quickjs_c_smoke")
-    ctest(build, 1, "-R", "^(QuickJS[.]|QuickJsRuntimeTest[.]|ProgramCompilerTest[.]JavaScript|"
-          "ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)",
+    ctest(build, 1, "-R", "^(QuickJS[.]|QuickJsRuntimeTest[.]|CoroutineLocalDestructionTest[.]|"
+          "ProgramCompilerTest[.]JavaScript|ProgramRuntimeTest[.]JavaScript|ProgramCatalogTest[.]JavaScript)",
           timeout=SANITIZER_TEST_TIMEOUT)
 
 

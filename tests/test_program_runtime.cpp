@@ -4840,6 +4840,107 @@ TEST(ProgramRuntimeTest, JavaScriptControlStackIsTheRuntimesSetting) {
     EXPECT_EQ(shallow.output().at("depth"), 100);
 }
 
+// A stack overflow is told from the other failures of main() by the engine's own record of why it threw the
+// exception, never by the text of the message: a source that throws an error with the same text is an evaluation
+// failure, and so is a source that catches the overflow and throws another error.
+static constexpr const char* kClassifyingMain = R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-completed"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            function down(depth) {
+                return depth === 0 ? 0 : 1 + down(depth - 1);
+            }
+
+            function down_through_finally(depth) {
+                try {
+                    return depth === 0 ? 0 : 1 + down_through_finally(depth - 1);
+                } finally {
+                }
+            }
+
+            function down_through_iteration(depth) {
+                for (const step of [depth]) {
+                    return step === 0 ? 0 : 1 + down_through_iteration(step - 1);
+                }
+                return 0;
+            }
+
+            export function* main(input) {
+                let depth = 0;
+                if (input.mode === "recurse") {
+                    depth = down(input.depth);
+                } else if (input.mode === "recurse_through_finally") {
+                    depth = down_through_finally(input.depth);
+                } else if (input.mode === "recurse_through_iteration") {
+                    depth = down_through_iteration(input.depth);
+                } else if (input.mode === "throw_same_text") {
+                    throw new Error("stack overflow");
+                } else if (input.mode === "catch_then_throw") {
+                    try {
+                        down(input.depth);
+                    } catch (error) {
+                        throw new Error("replacement after a caught overflow");
+                    }
+                }
+                const core = yield ng.callCore("main", {requested: "x"});
+                return {depth, value: core.value};
+            }
+        )JS";
+
+TEST(ProgramRuntimeTest, JavaScriptStackOverflowClassificationDistinguishesEngineLimitFromThrownError) {
+    AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(kClassifyingMain);
+    const auto      run     = [&](std::string mode, std::size_t depth) {
+        return fixture.runtime->run(
+            "tenant:runtime", version,
+            ProgramInvocation{json{{"mode", std::move(mode)}, {"depth", depth}}, grant(),
+                              "trace-javascript-stack-classification", {}});
+    };
+
+    // The first candidate stack that starts the source and completes one recursion on this build.
+    std::size_t stack_bytes = 0;
+    for (const std::size_t kib : kStacksTriedKiB) {
+        fixture.javascript_stack_bytes = kib * 1024u;
+        fixture.runtime                = fixture.make_runtime();
+        if (run("recurse", 1).status() == ProgramTerminalStatus::Completed) {
+            stack_bytes = kib * 1024u;
+            break;
+        }
+    }
+    ASSERT_NE(stack_bytes, 0u) << "no stack tried started the source and completed a recursion";
+
+    constexpr std::size_t kEndlessDepth = 1'000'000'000;
+    const auto            expect_resource_limit = [&](const ProgramResult& result) {
+        ASSERT_EQ(result.status(), ProgramTerminalStatus::Failed);
+        ASSERT_TRUE(result.failure().has_value());
+        EXPECT_EQ(result.failure()->code, "P_JS_RESOURCE_LIMIT") << result.failure()->message;
+        ASSERT_TRUE(result.failure()->witness.contains("max_stack_bytes"));
+        EXPECT_EQ(result.failure()->witness.at("max_stack_bytes").get<std::size_t>(), stack_bytes);
+    };
+    expect_resource_limit(run("recurse", kEndlessDepth));
+    // The overflow stays an overflow while it passes through a finally block or the end of a for-of loop.
+    expect_resource_limit(run("recurse_through_finally", kEndlessDepth));
+    expect_resource_limit(run("recurse_through_iteration", kEndlessDepth));
+
+    const auto same_text = run("throw_same_text", 0);
+    ASSERT_EQ(same_text.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(same_text.failure().has_value());
+    EXPECT_EQ(same_text.failure()->code, "P_JS_EVALUATION") << same_text.failure()->message;
+
+    const auto replaced = run("catch_then_throw", kEndlessDepth);
+    ASSERT_EQ(replaced.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(replaced.failure().has_value());
+    EXPECT_EQ(replaced.failure()->code, "P_JS_EVALUATION") << replaced.failure()->message;
+    EXPECT_NE(replaced.failure()->message.find("replacement after a caught overflow"), std::string::npos)
+        << replaced.failure()->message;
+}
+
 TEST(ProgramRuntimeTest, RuntimeRefusesAJavaScriptStackBeyondTheMemoryLimit) {
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     fixture.javascript_stack_bytes = JavaScriptCompileLimits{}.memory_limit_bytes + 1;

@@ -74,11 +74,35 @@ Local patches (keep when updating the vendored release)
   of the open upstream fix https://github.com/bellard/quickjs/pull/565, so a
   release that merges it replaces this patch. The needles of
   cmake/NeoGraphQuickJSMsvcPort.cmake are unchanged.
+- quickjs.h and quickjs.c record why the engine threw an exception when the
+  stack or the memory ran out. JSRuntime holds resource_exception, a counted
+  reference to the error object that JS_ThrowStackOverflow or
+  JS_ThrowOutOfMemory threw (null when the out of memory error object itself
+  could not be allocated, which is what JS_ThrowError2 then throws), and
+  resource_exception_kind, which is JS_EXCEPTION_RESOURCE_STACK_OVERFLOW or
+  JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY. JS_Throw ends the record unless the value
+  it throws is that same error object, so an error thrown again by a finally
+  block, a for-of loop or a catch clause keeps its kind, and any other
+  exception, including one a source throws with the text "stack overflow",
+  has none. The record is released with the runtime. Two functions read it,
+  both prefixed in neograph/quickjs-prefix.h:
+  JS_GetPendingExceptionResourceKind(ctx) for the pending exception and
+  JS_GetExceptionResourceKind(ctx, value) for an exception value that was
+  already taken, such as the reason of a rejected promise. An embedder can
+  therefore classify a stack overflow or an out of memory failure from the
+  engine's own signal even when formatting the exception message fails under
+  stack exhaustion (for example under MSVC AddressSanitizer), without
+  searching the message text. The needles of
+  cmake/NeoGraphQuickJSMsvcPort.cmake are unchanged.
 
-Because of these patches, quickjs.c differs from the file in the archive:
-the archive's quickjs.c has SHA-256
+Because of these patches, quickjs.c and quickjs.h differ from the files in the
+archive. The archive's quickjs.c has SHA-256
 a00762d2eee42316cecbc9c15efc4549b715ec500461845cd91b2a6c38190d08 and the
 vendored one has SHA-256
-ee9ec9bc8a43dc0de45b3f2e49d6bcf2476f8473dca0ff23d644e8d97367f7b0. The other
-vendored files are those of the archive. Update the second digest with every
+232060dfeef691ae253ff77c2e3981d0781d738e35a3f8db1f4967a43c996113. The archive's
+quickjs.h has SHA-256
+2165f47772af9faee1798999a599fa9de850d1bf0259502dade1c25d4a588316 and the
+vendored one has SHA-256
+c4d951db3c7b3793cc9057b329c7b12ab20fa447e9211ce2f0b7fcb34743f515. The other
+vendored files are those of the archive. Update the vendored digests with every
 local patch.

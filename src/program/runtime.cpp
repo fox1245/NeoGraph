@@ -10869,14 +10869,22 @@ asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent
     }
     // One caller of this process enters the publication; the others leave the run to it. Across processes the
     // publication decides, and the caller that loses it does nothing (resume_core says so with `taken`).
+    // The entry is erased by release(), called before every exit, rather than left to the destructor of this
+    // coroutine local: under MSVC with AddressSanitizer in Release the entry was still in the set after the
+    // coroutine ended by std::rethrow_exception.
     struct Entry {
         std::shared_ptr<ProcessRuntimeState> state;
         std::pair<std::string, std::string>  key;
-        ~Entry() {
+        void release() noexcept {
             if (!state) return;
-            std::lock_guard lock(state->continuations_mutex);
-            state->continuations.erase(key);
+            {
+                std::lock_guard lock(state->continuations_mutex);
+                state->continuations.erase(key);
+            }
+            key   = {};
+            state = nullptr;
         }
+        ~Entry() { release(); }
     } entry;
     {
         std::lock_guard lock(impl_->process_state->continuations_mutex);
@@ -10902,13 +10910,16 @@ asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent
         failure = std::current_exception();
     }
     if (failure) {
+        entry.release();
         detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::Failed);
         std::rethrow_exception(failure);
     }
     if (taken) {
+        entry.release();
         detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::TakenByAnotherCaller);
         co_return std::nullopt;
     }
+    entry.release();
     detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::Continued);
     co_return continued;
 }

@@ -716,6 +716,86 @@ TEST(ProgramCompilerTest, JavaScriptSourceCannotOutrunItsInterruptBudget) {
     }
 }
 
+// A stack overflow is told from the other failures of a source by the engine's own record of why it threw the
+// exception, never by the text of the message.
+TEST(ProgramCompilerTest, JavaScriptStackOverflowClassificationUsesStructuredSignal) {
+    // The failure of compiling `source` with a stack of `stack_bytes`, or std::nullopt when it compiles.
+    struct Failure {
+        std::string code;
+        std::string message;
+        json        witness;
+    };
+    const auto compile_with = [](std::size_t stack_bytes, std::string_view source) -> std::optional<Failure> {
+        ProgramCompilerConfig config;
+        config.compiler_build_id          = "program-compiler-test/javascript-stack/v1";
+        config.javascript.max_stack_bytes = stack_bytes;
+        ProgramCompiler compiler(complete_snapshot(), std::move(config));
+        try {
+            (void)compiler.compile(ProgramSource::from_javascript("stack-classification.js", std::string(source)));
+        } catch (const ProgramCompileError& error) {
+            if (error.diagnostics().empty()) return Failure{"no diagnostic", error.what(), json::object()};
+            const auto& first = error.diagnostics().front();
+            return Failure{first.code, first.message, first.witness};
+        }
+        return std::nullopt;
+    };
+
+    // The first candidate stack, in KiB, under which a source that recurses once compiles on this build.
+    static constexpr std::size_t kStacksTriedKiB[] = {8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256};
+    const std::string            recursion         = R"JS(
+        function step(depth) {
+            return depth === 0 ? 0 : 1 + step(depth - 1);
+        }
+    )JS";
+    const std::string            graph             = R"JS(
+        const graph = ng.graph("main");
+        graph.channel("value", {reducer: "local-reducer", initial: 0});
+        graph.node("work", {type: "local-node"});
+        graph.entry("work");
+        graph.exit("work");
+        return graph;
+    )JS";
+    const auto define = [&](const std::string& body) {
+        return recursion + "export function define() {" + body + graph + "}";
+    };
+    std::size_t stack_bytes = 0;
+    for (const std::size_t kib : kStacksTriedKiB) {
+        if (!compile_with(kib * 1024u, define("step(1);")).has_value()) {
+            stack_bytes = kib * 1024u;
+            break;
+        }
+    }
+    ASSERT_NE(stack_bytes, 0u) << "no stack tried compiled a source that recurses once";
+
+    const auto expect_resource_limit = [&](const std::optional<Failure>& failure) {
+        ASSERT_TRUE(failure.has_value());
+        EXPECT_EQ(failure->code, "P_JS_RESOURCE_LIMIT") << failure->message;
+        ASSERT_TRUE(failure->witness.contains("max_stack_bytes"));
+        EXPECT_EQ(failure->witness.at("max_stack_bytes").get<std::size_t>(), stack_bytes);
+    };
+
+    // Recursion without end in define() and in the top-level code of the module exhausts the stack.
+    expect_resource_limit(compile_with(stack_bytes, define("step(1000000000);")));
+    expect_resource_limit(compile_with(
+        stack_bytes, recursion + "step(1000000000); export function define() {" + graph + "}"));
+
+    // An error that a source throws is an evaluation failure, whatever its text says.
+    for (const std::string text : {"stack overflow", "out of memory"}) {
+        const auto failure = compile_with(stack_bytes, define("throw new Error(\"" + text + "\");"));
+        ASSERT_TRUE(failure.has_value());
+        EXPECT_EQ(failure->code, "P_JS_EVALUATION") << failure->message;
+    }
+
+    // A source that catches the overflow and throws another error is classified by that error.
+    const auto replaced = compile_with(
+        stack_bytes, define("try { step(1000000000); } catch (error) { "
+                            "throw new Error(\"replacement after a caught overflow\"); }"));
+    ASSERT_TRUE(replaced.has_value());
+    EXPECT_EQ(replaced->code, "P_JS_EVALUATION") << replaced->message;
+    EXPECT_NE(replaced->message.find("replacement after a caught overflow"), std::string::npos)
+        << replaced->message;
+}
+
 TEST(ProgramCompilerTest, JavaScriptStrictProfileDeniesAmbientCapabilitiesDeterministically) {
     ProgramCompiler compiler(complete_snapshot(), {"program-compiler-test/javascript/v1"});
     const std::vector<std::string> denied_sources = {

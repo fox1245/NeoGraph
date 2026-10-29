@@ -63,6 +63,7 @@
 #define JS_GetClassProto neograph_qjs_JS_GetClassProto
 #define JS_GetContextOpaque neograph_qjs_JS_GetContextOpaque
 #define JS_GetException neograph_qjs_JS_GetException
+#define JS_GetExceptionResourceKind neograph_qjs_JS_GetExceptionResourceKind
 #define JS_GetGlobalObject neograph_qjs_JS_GetGlobalObject
 #define JS_GetImportMeta neograph_qjs_JS_GetImportMeta
 #define JS_GetModuleName neograph_qjs_JS_GetModuleName
@@ -72,6 +73,7 @@
 #define JS_GetOpaque2 neograph_qjs_JS_GetOpaque2
 #define JS_GetOwnProperty neograph_qjs_JS_GetOwnProperty
 #define JS_GetOwnPropertyNames neograph_qjs_JS_GetOwnPropertyNames
+#define JS_GetPendingExceptionResourceKind neograph_qjs_JS_GetPendingExceptionResourceKind
 #define JS_GetPropertyInternal neograph_qjs_JS_GetPropertyInternal
 #define JS_GetPropertyStr neograph_qjs_JS_GetPropertyStr
 #define JS_GetPropertyUint32 neograph_qjs_JS_GetPropertyUint32

@@ -164,6 +164,7 @@ if(NEOGRAPH_BUILD_PROGRAM)
         test_program_step_plan.cpp
         test_program_plan_intake.cpp
         test_program_budget_overrun.cpp
+        test_coroutine_local_destruction.cpp
     )
     target_include_directories(neograph_program_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/src/program

@@ -469,19 +469,6 @@ JavaScriptExceptionDetails take_exception_details(JSContext* context, std::strin
     return details;
 }
 
-bool looks_like_resource_exhaustion(std::string_view message) {
-    std::string lower;
-    lower.reserve(message.size());
-    for (const unsigned char value : message) {
-        if (value >= 'A' && value <= 'Z')
-            lower.push_back(static_cast<char>(value - 'A' + 'a'));
-        else
-            lower.push_back(static_cast<char>(value));
-    }
-    return lower.find("out of memory") != std::string::npos ||
-           lower.find("stack overflow") != std::string::npos;
-}
-
 enum class InterruptReason : std::uint8_t {
     None,
     PollLimit,
@@ -2933,7 +2920,14 @@ json resource_witness(JSContext*                     context,
                                            const AllocationAccounting*    accounting = nullptr,
                                            std::string_view               source     = {},
                                            std::string                    message    = {},
-                                           std::optional<SourceSpan> source_span = std::nullopt) {
+                                           std::optional<SourceSpan> source_span = std::nullopt,
+                                           JSExceptionResourceKindEnum rejection_resource_kind =
+                                               JS_EXCEPTION_RESOURCE_NONE) {
+    // The engine records why it threw an exception when the stack or the memory ran out. A failure that arrives as
+    // the reason of a rejected promise has no pending exception; its caller reads the kind from the reason.
+    const JSExceptionResourceKindEnum resource_kind =
+        rejection_resource_kind != JS_EXCEPTION_RESOURCE_NONE ? rejection_resource_kind
+                                                              : JS_GetPendingExceptionResourceKind(context);
     refresh_external_interrupt(budget);
     if (budget.reason == InterruptReason::Cancelled) {
         throw JavaScriptCompileError("P_JS_CANCELLED", "JavaScript evaluation was cancelled",
@@ -2958,7 +2952,7 @@ json resource_witness(JSContext*                     context,
     }
     const bool allocator_limit_exhausted = accounting && accounting->limit_denied_count != 0;
     if (budget.reason == InterruptReason::PollLimit || allocator_limit_exhausted ||
-        looks_like_resource_exhaustion(message)) {
+        resource_kind != JS_EXCEPTION_RESOURCE_NONE) {
         throw JavaScriptCompileError(
             "P_JS_RESOURCE_LIMIT", "JavaScript evaluation exceeded a configured resource limit",
             resource_witness(context, limits, budget, accounting), std::move(source_span));
@@ -3052,14 +3046,15 @@ JavaScriptSourceEvaluation evaluate_javascript_source(const ProgramSource&      
                 json{{"engine", "quickjs"}}, source_span_for_token(script, "define"));
         }
         if (module_state == JS_PROMISE_REJECTED) {
-            JSValue     rejection = JS_PromiseResult(scope.context(), module_result);
-            const auto  details   = exception_details(scope.context(), rejection, script);
-            const auto& message   = details.message;
+            JSValue     rejection     = JS_PromiseResult(scope.context(), module_result);
+            const auto  resource_kind = JS_GetExceptionResourceKind(scope.context(), rejection);
+            const auto  details       = exception_details(scope.context(), rejection, script);
+            const auto& message       = details.message;
             JS_FreeValue(scope.context(), rejection);
             JS_FreeValue(scope.context(), module_result);
             throw_evaluation_failure(scope.context(), capture, budget, limits, &scope.accounting(),
                                      script, "JavaScript definition module failed: " + message,
-                                     details.source_span);
+                                     details.source_span, resource_kind);
         }
         if (module_state != JS_PROMISE_FULFILLED) {
             JS_FreeValue(scope.context(), module_result);
@@ -3385,15 +3380,16 @@ std::optional<JavaScriptGenerator> JavaScriptGenerator::open(
                 json{{"engine", "quickjs"}}, source_span_for_token(script, "main"));
         }
         if (module_state == JS_PROMISE_REJECTED) {
-            JSValue     rejection = JS_PromiseResult(context, module_result);
-            const auto  details   = exception_details(context, rejection, script);
-            const auto& message   = details.message;
+            JSValue     rejection     = JS_PromiseResult(context, module_result);
+            const auto  resource_kind = JS_GetExceptionResourceKind(context, rejection);
+            const auto  details       = exception_details(context, rejection, script);
+            const auto& message       = details.message;
             JS_FreeValue(context, rejection);
             JS_FreeValue(context, module_result);
             throw_evaluation_failure(context, impl->capture, impl->budget, limits,
                                      &impl->scope.accounting(), impl->source_text,
                                      "JavaScript control module failed: " + message,
-                                     details.source_span);
+                                     details.source_span, resource_kind);
         }
         if (module_state != JS_PROMISE_FULFILLED) {
             JS_FreeValue(context, module_result);
