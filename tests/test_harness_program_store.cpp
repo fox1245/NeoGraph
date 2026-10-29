@@ -580,6 +580,40 @@ ProgramTransitionPublication terminal_publication(const Fixture&                
             {}};
 }
 
+// A Running publication that follows `previous` and changes nothing but the fence (and the time): the shape of a
+// takeover, written as an ordinary publication.
+ProgramTransitionPublication takeover_shaped_publication(const Fixture&                      fixture,
+                                                         const ProgramTransitionPublication& initial,
+                                                         const ProgramJournalRecord&         previous,
+                                                         std::uint64_t                       fence,
+                                                         std::int64_t                        timestamp) {
+    auto journal = ProgramJournalRecord::create({previous.id,
+                                                 initial.run_record.run_id(),
+                                                 fixture.version_value.id(),
+                                                 fixture.bundle_value.id(),
+                                                 previous.sequence + 1,
+                                                 {"root", ContinuationState::Running, 1, fence},
+                                                 previous.remaining_budget,
+                                                 previous.inflight_reservation,
+                                                 previous.core_checkpoint,
+                                                 timestamp});
+    ProgramRunRecordData data;
+    data.owner_scope         = fixture.policy_value.owner_scope();
+    data.run_id              = initial.run_record.run_id();
+    data.program_version_id  = fixture.version_value.id();
+    data.bundle_id           = fixture.bundle_value.id();
+    data.binding_fingerprint = initial.run_record.binding_fingerprint();
+    data.invocation          = initial.run_record.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.exact_checkpoint    = journal.core_checkpoint;
+    data.journal_head        = journal.id;
+    data.event_sequence      = initial.run_record.event_sequence();
+    data.created_at_ms       = initial.run_record.created_at_ms();
+    data.updated_at_ms       = timestamp;
+    return {ProgramRunRecord::create(std::move(data)), journal, {}, {}};
+}
+
 std::shared_ptr<program::ProgramTransitionStore> persist_and_bind(
     const std::shared_ptr<SqliteHarnessRecordStore>& store, const Fixture& fixture) {
     HarnessBoundedProgramStore bounded(
@@ -1638,4 +1672,40 @@ TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreEnforcesOwnershipFence
     const auto final_lineage = transitions->load_run_lineage(owner, "run-fenced");
     ASSERT_TRUE(final_lineage);
     EXPECT_EQ(final_lineage->active_run_record_id(), fence_3_on_new_head.run_record.id());
+}
+
+// Only the fence compares of the Harness store refuse this one: both records carry the stored fence plus one and the
+// writer names that fence, and the step is the one a takeover makes, so no record-transition rule objects. The fence
+// moves through compare_publish_takeover alone; the same publication at the stored fence is accepted.
+TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreRefusesAnOrdinaryPublicationThatRaisesTheFence) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    auto    initial     = initial_lineage_publication(fixture, "run-raised");
+
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, initial), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(transitions->compare_publish_takeover(owner, "run-raised", initial.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    const auto journal = transitions->latest(owner, "run-raised");
+    const auto lineage = transitions->load_run_lineage(owner, "run-raised");
+    ASSERT_TRUE(journal);
+    ASSERT_TRUE(lineage);
+    ASSERT_EQ(journal->continuation.fence, 2U);
+
+    auto raised = takeover_shaped_publication(fixture, initial, *journal, 3, 20);
+    attach_same_generation_lineage(raised, *lineage);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 3, raised), ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 2, raised), ProgramTransitionPublishResult::Conflict);
+    const auto unchanged = transitions->load(owner, "run-raised");
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->continuation().fence, 2U);
+    EXPECT_EQ(unchanged->journal_head(), journal->id);
+    EXPECT_EQ(transitions->load_run_lineage(owner, "run-raised")->id(), lineage->id());
+
+    auto same = takeover_shaped_publication(fixture, initial, *journal, 2, 20);
+    attach_same_generation_lineage(same, *lineage);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 2, same), ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(transitions->load(owner, "run-raised")->continuation().fence, 2U);
 }
