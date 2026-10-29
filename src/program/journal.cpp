@@ -265,21 +265,41 @@ bool same_core(const CoreCheckpointIdentity& lhs, const CoreCheckpointIdentity& 
            lhs.checkpoint_schema_version == rhs.checkpoint_schema_version;
 }
 
-BV encode_continuation(Builder& j, const ProgramContinuation& continuation) {
-    return j.object({{"operation_id", j.make(continuation.operation_id)},
-                     {"state", j.make(std::string(to_string(continuation.state)))},
-                     {"attempt", j.make(continuation.attempt)}});
+// A journal record written before the ownership fence existed has no fence field and reads as fence 1. The schema
+// that carries the field is written only for a record whose fence is not 1 (a run that was taken over), so every
+// other record keeps its schema and its id.
+std::uint32_t journal_schema_version(const ProgramContinuation& continuation) noexcept {
+    return continuation.fence == 1 ? 1U : ProgramJournalRecord::STORAGE_SCHEMA_VERSION;
 }
 
-ProgramContinuation parse_continuation(const json& value) {
+BV encode_continuation(Builder& j, const ProgramContinuation& continuation) {
+    if (journal_schema_version(continuation) == 1) {
+        return j.object({{"operation_id", j.make(continuation.operation_id)},
+                         {"state", j.make(std::string(to_string(continuation.state)))},
+                         {"attempt", j.make(continuation.attempt)}});
+    }
+    return j.object({{"operation_id", j.make(continuation.operation_id)},
+                     {"state", j.make(std::string(to_string(continuation.state)))},
+                     {"attempt", j.make(continuation.attempt)},
+                     {"fence", j.make(continuation.fence)}});
+}
+
+ProgramContinuation parse_continuation(const json& value, std::uint32_t schema_version) {
     if (!value.is_object()) {
         throw std::invalid_argument("Program journal continuation must be an object");
     }
+    if (schema_version == 1) {
+        detail::reject_unknown_fields(value, "Program journal continuation",
+                                      {"operation_id", "state", "attempt"});
+        return ProgramContinuation{require_string(value, "operation_id"),
+                                   continuation_state_from_string(require_string(value, "state")),
+                                   require_uint64(value, "attempt"), 1};
+    }
     detail::reject_unknown_fields(value, "Program journal continuation",
-                                  {"operation_id", "state", "attempt"});
+                                  {"operation_id", "state", "attempt", "fence"});
     return ProgramContinuation{require_string(value, "operation_id"),
                                continuation_state_from_string(require_string(value, "state")),
-                               require_uint64(value, "attempt")};
+                               require_uint64(value, "attempt"), require_uint64(value, "fence")};
 }
 
 bool checkpoint_required(const ProgramJournalRecord& record) noexcept {
@@ -325,6 +345,10 @@ void validate_record_body(const ProgramJournalRecord& record) {
             throw std::invalid_argument(
                 "First Program journal record must start Running");
         }
+        if (record.continuation.fence != 1) {
+            throw std::invalid_argument(
+                "First Program journal record must start with fence 1");
+        }
     } else {
         require_sha256(record.previous_id, "Program journal previous_id");
     }
@@ -333,6 +357,9 @@ void validate_record_body(const ProgramJournalRecord& record) {
     }
     if (record.continuation.attempt == 0) {
         throw std::invalid_argument("Program journal attempt must be positive");
+    }
+    if (record.continuation.fence == 0) {
+        throw std::invalid_argument("Program journal fence must be positive");
     }
     // remaining_budget is immediately dispatchable capacity, while
     // inflight_reservation is capacity withheld by already-published work.
@@ -358,7 +385,7 @@ json record_body(const ProgramJournalRecord& record) {
     Builder j;
     auto*   value = j.object(
         {{"format", j.make(std::string(JOURNAL_FORMAT))},
-         {"storage_schema_version", j.make(ProgramJournalRecord::STORAGE_SCHEMA_VERSION)},
+         {"storage_schema_version", j.make(journal_schema_version(record.continuation))},
          {"previous_id", j.make(record.previous_id)},
          {"run_id", j.make(record.run_id)},
          {"program_version_id", j.make(record.program_version_id)},
@@ -389,11 +416,22 @@ void validate_sealed_record(const ProgramJournalRecord& record) {
 bool valid_transition_impl(const ProgramJournalRecord& previous,
                            const ProgramJournalRecord& next,
                            bool allow_reservation_settlement = false) noexcept {
+    const bool valid_same_fence = next.continuation.fence == previous.continuation.fence;
+    const bool valid_takeover_fence =
+        !allow_reservation_settlement &&
+        previous.continuation.state == ContinuationState::Running &&
+        next.continuation.state == ContinuationState::Running &&
+        previous.continuation.fence != std::numeric_limits<std::uint64_t>::max() &&
+        next.continuation.fence == previous.continuation.fence + 1 &&
+        next.remaining_budget == previous.remaining_budget &&
+        next.inflight_reservation == previous.inflight_reservation;
     if (previous.sequence == std::numeric_limits<std::uint64_t>::max() ||
         next.previous_id != previous.id || next.sequence != previous.sequence + 1 ||
         next.run_id != previous.run_id || next.program_version_id != previous.program_version_id ||
         next.bundle_id != previous.bundle_id ||
         next.continuation.operation_id != previous.continuation.operation_id ||
+        previous.continuation.fence == 0 ||
+        (!valid_same_fence && !valid_takeover_fence) ||
         !budget_total_at_most(next.remaining_budget, next.inflight_reservation,
                               previous.remaining_budget, previous.inflight_reservation) ||
         (!allow_reservation_settlement &&
@@ -591,7 +629,8 @@ ProgramJournalRecord ProgramJournalRecord::parse(std::string_view stored_bytes) 
         {"format", "storage_schema_version", "id", "previous_id", "run_id", "program_version_id",
          "bundle_id", "sequence", "continuation", "remaining_budget", "inflight_reservation",
          "core_checkpoint", "timestamp_ms"});
-    if (require_uint32(value, "storage_schema_version") != STORAGE_SCHEMA_VERSION) {
+    const auto schema_version = require_uint32(value, "storage_schema_version");
+    if (schema_version != 1 && schema_version != STORAGE_SCHEMA_VERSION) {
         throw std::invalid_argument("Stored ProgramJournalRecord schema version is unsupported");
     }
 
@@ -599,14 +638,26 @@ ProgramJournalRecord ProgramJournalRecord::parse(std::string_view stored_bytes) 
     std::optional<CoreCheckpointIdentity> parsed_checkpoint;
     if (!checkpoint.is_null()) parsed_checkpoint = parse_checkpoint(checkpoint);
 
-    auto record = create(ProgramJournalRecordData{
-        require_string(value, "previous_id"), require_string(value, "run_id"),
-        require_string(value, "program_version_id"), require_string(value, "bundle_id"),
-        require_uint64(value, "sequence"), parse_continuation(require_value(value, "continuation")),
-        parse_budget(require_value(value, "remaining_budget"), "Program journal remaining_budget"),
-        parse_budget(require_value(value, "inflight_reservation"),
-                     "Program journal inflight_reservation"),
-        std::move(parsed_checkpoint), require_int64(value, "timestamp_ms")});
+    ProgramJournalRecord record;
+    record.previous_id          = require_string(value, "previous_id");
+    record.run_id               = require_string(value, "run_id");
+    record.program_version_id   = require_string(value, "program_version_id");
+    record.bundle_id            = require_string(value, "bundle_id");
+    record.sequence             = require_uint64(value, "sequence");
+    record.continuation         = parse_continuation(require_value(value, "continuation"), schema_version);
+    record.remaining_budget     = parse_budget(require_value(value, "remaining_budget"),
+                                               "Program journal remaining_budget");
+    record.inflight_reservation = parse_budget(require_value(value, "inflight_reservation"),
+                                               "Program journal inflight_reservation");
+    record.core_checkpoint      = std::move(parsed_checkpoint);
+    record.timestamp_ms         = require_int64(value, "timestamp_ms");
+    validate_record_body(record);
+    // One record has one encoding: the schema with the fence field belongs to a fence other than 1 only.
+    if (schema_version != journal_schema_version(record.continuation)) {
+        throw std::invalid_argument(
+            "Stored ProgramJournalRecord schema version does not match its fence");
+    }
+    record.id = computed_record_id(record);
     if (record.id != require_string(value, "id")) {
         throw std::invalid_argument("Stored ProgramJournalRecord id does not match its body");
     }

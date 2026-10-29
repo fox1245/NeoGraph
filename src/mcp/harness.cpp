@@ -532,29 +532,40 @@ public:
     program::ProgramTransitionPublishResult compare_publish_sync(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
+        std::uint64_t                         expected_fence,
         program::ProgramTransitionPublication publication) override {
-        return target_->compare_publish(owner_scope, expected_journal_head, std::move(publication));
+        return target_->compare_publish(owner_scope, expected_journal_head, expected_fence,
+                                        std::move(publication));
     }
     program::ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication,
         std::optional<program::ProgramExecutionLease> expected_lease,
         std::optional<program::ProgramExecutionLease> next_lease) override {
         return target_->compare_publish_execution(
-            owner_scope, expected_journal_head, std::move(publication),
+            owner_scope, expected_journal_head, expected_fence, std::move(publication),
             std::move(expected_lease), std::move(next_lease));
     }
     program::ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication,
         const program::ProgramGraphSafePointEvidence& evidence,
         const program::GraphMigrationCapsule& capsule,
         const program::ProgramExecutionLease& execution_lease) override {
         return target_->compare_publish_graph_safe_point(
-            owner_scope, expected_journal_head, std::move(publication), evidence, capsule,
-            execution_lease);
+            owner_scope, expected_journal_head, expected_fence, std::move(publication), evidence,
+            capsule, execution_lease);
+    }
+    program::ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override {
+        return target_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
 
 private:

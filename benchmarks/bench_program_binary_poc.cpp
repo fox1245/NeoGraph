@@ -69,16 +69,16 @@ public:
         return inner_->load_execution_lease(owner, run);
     }
     ProgramTransitionPublishResult compare_publish_sync(
-        std::string_view owner, std::string_view expected,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
         ProgramTransitionPublication publication) override {
         {
             std::lock_guard lock(mutex_);
             publications_.push_back(publication);
         }
-        return inner_->compare_publish(owner, expected, std::move(publication));
+        return inner_->compare_publish(owner, expected, expected_fence, std::move(publication));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
-        std::string_view owner, std::string_view expected,
+        std::string_view owner, std::string_view expected, std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override {
@@ -87,8 +87,12 @@ public:
             publications_.push_back(publication);
         }
         return inner_->compare_publish_execution(
-            owner, expected, std::move(publication), std::move(expected_lease),
+            owner, expected, expected_fence, std::move(publication), std::move(expected_lease),
             std::move(next_lease));
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence) override {
+        return inner_->compare_publish_takeover(owner, run_id, expected, expected_fence);
     }
     std::vector<ProgramTransitionPublication> snapshot() const {
         std::lock_guard lock(mutex_);

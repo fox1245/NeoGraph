@@ -297,6 +297,9 @@ void validate(const ProgramRunRecordData& d) {
     if (!d.continuation.attempt) {
         throw std::invalid_argument("Program run attempt must be positive");
     }
+    if (!d.continuation.fence) {
+        throw std::invalid_argument("Program run fence must be positive");
+    }
     d.invocation.validate();
     if (d.invocation.owner_scope != d.owner_scope || d.invocation.run_id != d.run_id ||
         d.invocation.program_version_id != d.program_version_id) {
@@ -412,6 +415,12 @@ void validate(const ProgramRunRecordData& d) {
     }
 }
 BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version) {
+    auto* continuation = j.object({{"operation_id", j.make(d.continuation.operation_id)},
+                                   {"state", j.make(std::string(to_string(d.continuation.state)))},
+                                   {"attempt", j.make(d.continuation.attempt)}});
+    if (schema_version >= 7) {
+        j.set(continuation, "fence", j.make(d.continuation.fence));
+    }
     auto* value = j.object(
         {{"format", j.make(std::string(FORMAT))},
          {"storage_schema_version", j.make(schema_version)},
@@ -422,9 +431,7 @@ BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version)
          {"binding_fingerprint", j.make(d.binding_fingerprint)},
          {"invocation", j.make(nested(d.invocation.serialize_canonical()))},
          {"child_depth", j.make(d.child_depth)},
-         {"continuation", j.object({{"operation_id", j.make(d.continuation.operation_id)},
-                                    {"state", j.make(std::string(to_string(d.continuation.state)))},
-                                    {"attempt", j.make(d.continuation.attempt)}})},
+         {"continuation", continuation},
          {"remaining_budget", eb(j, d.remaining_budget)},
          {"exact_checkpoint", d.exact_checkpoint ? ec(j, *d.exact_checkpoint) : j.null()},
          {"pending_input",
@@ -544,16 +551,23 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
         !detail::is_sha256_identity(*d.recorded_binding_set_fingerprint)) {
         throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
     }
-    // Each version is used only by the records that need it, so the ids of
-    // all other records stay unchanged.
+    // Each version is used only by the records that need it, so the ids of all other records stay unchanged: a record
+    // keeps the lowest version that can hold it. Version 7 carries continuation.fence and is written only for a run
+    // that was taken over (fence other than 1); a record without the field reads as fence 1. A newer version holds
+    // everything an older one does, so a taken-over record takes version 7 whatever else it carries.
+    constexpr std::uint32_t kSchemaSettledBranches = 6;
+    constexpr std::uint32_t kSchemaAttemptResume   = 5;
+    constexpr std::uint32_t kSchemaLogicalRun      = 4;
+    constexpr std::uint32_t kSchemaBase            = 3;
     const auto schema =
-        d.settled_branches ? STORAGE_SCHEMA_VERSION
-        : d.attempt_resume ? 5U
+        d.continuation.fence != 1 ? STORAGE_SCHEMA_VERSION
+        : d.settled_branches      ? kSchemaSettledBranches
+        : d.attempt_resume        ? kSchemaAttemptResume
         : !d.logical_run_id.empty() ||
                 std::any_of(d.children.begin(), d.children.end(),
                             [](const auto& child) { return child.terminal_generation != 0; })
-            ? 4U
-            : 3U;
+            ? kSchemaLogicalRun
+            : kSchemaBase;
     return ProgramRunRecord(std::make_shared<const Impl>(std::move(d), schema));
 }
 ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
@@ -644,11 +658,24 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     if (!continuation.is_object()) {
         throw std::invalid_argument("Program continuation must be an object");
     }
-    detail::reject_unknown_fields(continuation, "Program continuation",
-                                  {"operation_id", "state", "attempt"});
-    d.continuation         = {rs(continuation, "operation_id"),
-                              continuation_state_from_string(rs(continuation, "state")),
-                              ru(continuation, "attempt")};
+    if (schema_version >= 7) {
+        detail::reject_unknown_fields(continuation, "Program continuation",
+                                      {"operation_id", "state", "attempt", "fence"});
+        d.continuation = {rs(continuation, "operation_id"),
+                          continuation_state_from_string(rs(continuation, "state")),
+                          ru(continuation, "attempt"),
+                          ru(continuation, "fence")};
+        // One record has one encoding: the version with the fence field belongs to a fence other than 1 only.
+        if (d.continuation.fence == 1)
+            throw std::invalid_argument("Program run record version 7 carries a fence other than 1");
+    } else {
+        detail::reject_unknown_fields(continuation, "Program continuation",
+                                      {"operation_id", "state", "attempt"});
+        d.continuation = {rs(continuation, "operation_id"),
+                          continuation_state_from_string(rs(continuation, "state")),
+                          ru(continuation, "attempt"),
+                          1};
+    }
     d.remaining_budget     = db(rv(v, "remaining_budget"));
     const auto& checkpoint = rv(v, "exact_checkpoint");
     if (!checkpoint.is_null()) d.exact_checkpoint = dc(checkpoint);

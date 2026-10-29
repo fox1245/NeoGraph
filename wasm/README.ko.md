@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=42abbf35124835c1da4b1e5185db5ae192e6c83017aa1c19e54d5faa99de28ed -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=5e42f232e5b3e7d42934f66fbd0cd1ad330508e00a916da8c8e598dd570c2546 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -494,8 +494,9 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 | | `loadGenerationInitialPublication(ownerScope, lineageId, generation)` | 게시 또는 `null` | 실패 |
 | | `loadGraphMigrationCapsule(ownerScope, runId, lineageHeadId)` | 캡슐 또는 `null` | `null` |
 | | `loadExecutionLease(ownerScope, runId)` | 리스 또는 `null` | `null` |
-| | `comparePublish(ownerScope, expectedJournalHead, publication)` | 게시 결과 | 필수 |
-| | `comparePublishExecution(ownerScope, expectedJournalHead, publication, expectedLease, nextLease)` | 게시 결과. 리스는 정규 텍스트 또는 `null`입니다 | `"conflict"` |
+| | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | 게시 결과 | 필수 |
+| | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | 게시 결과. 리스는 정규 텍스트 또는 `null`입니다 | `"conflict"` |
+| | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | 게시 결과 | 필수 |
 | `programs` | `publishAdmitted(bundle, version)` | 없음 | 필수 |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | 번들 또는 `null` | 필수 |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | 버전 또는 `null` | 필수 |
@@ -523,6 +524,9 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 - **게시는 넘어가기 전에 검사합니다.** `comparePublish`와 `comparePublishExecution`은 전이 저장소의 모든 백엔드가 시작하는 방식으로 시작합니다.
   저장된 상태가 필요 없는 검사(게시의 소유자, 기대하는 헤드의 모양, 이펙트 아웃박스, 게시의 정규 텍스트)입니다. 이를 통과하지 못한 게시는 `"conflict"`이며 객체에 닿지
   않습니다. 저장된 상태가 그 게시에 대해 무엇을 말하는지는 저장소가 결정합니다.
+- **소유권 펜스.** `expectedFence`는 게시를 쓰는 제어 객체의 펜스입니다. 호출이 넘어가기 전에 `comparePublish`와 `comparePublishExecution`은 실행 레코드나 저널 레코드가 다른 펜스를 담은
+  게시에 `"conflict"`로 답합니다. 객체도 저장된 실행의 `continuation.fence`를 저널 헤드와 같은 단계에서 `expectedFence`와 비교해, 다르면 거부해야 합니다.
+  `comparePublishTakeover`는 `runId`가 가리키는 실행의 저장된 `Running` 레코드를 `fence = expectedFence + 1`과 새 저널 레코드 하나로 게시하고, 그 밖에는 아무것도 바꾸지 않습니다.
 - **지원하지 않는 것.** `compare_publish_graph_safe_point`는 직렬화되지 않는 증거를 담으므로, JavaScript 저장소는 라이브 그래프 마이그레이션에 참여하지 않습니다.
   기반 클래스처럼 `"conflict"`로 답합니다.
 
@@ -538,9 +542,10 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 `test/program_stores_test.mjs`는 Program 실행 전체에 대해 이를 합니다.
 
 ```js
-const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
-  'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
-  'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
+const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
+  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
+  'modules.setLifecycle']);
 
 function durable(reference, log) {                          // log.append(entry) is the host's storage
   const wrapped = {};

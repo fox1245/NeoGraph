@@ -503,11 +503,13 @@ std::tuple<typename Codec<A>::Owned...> decode_arguments(const json& array) {
     X(load_execution_lease, load_execution_lease, "loadExecutionLease", false,                                        \
       std::optional<program::ProgramExecutionLease>, std::string_view, std::string_view)                              \
     X(compare_publish, compare_publish, "comparePublish", true, program::ProgramTransitionPublishResult,              \
-      std::string_view, std::string_view, program::ProgramTransitionPublication)                                       \
+      std::string_view, std::string_view, std::uint64_t, program::ProgramTransitionPublication)                        \
     X(compare_publish_execution, compare_publish_execution, "comparePublishExecution", false,                         \
-      program::ProgramTransitionPublishResult, std::string_view, std::string_view,                                     \
+      program::ProgramTransitionPublishResult, std::string_view, std::string_view, std::uint64_t,                      \
       program::ProgramTransitionPublication, std::optional<program::ProgramExecutionLease>,                            \
-      std::optional<program::ProgramExecutionLease>)
+      std::optional<program::ProgramExecutionLease>)                                                                   \
+    X(compare_publish_takeover, compare_publish_takeover, "comparePublishTakeover", true,                             \
+      program::ProgramTransitionPublishResult, std::string_view, std::string_view, std::string_view, std::uint64_t)
 
 #define NEOGRAPH_JS_PROGRAM_OPS(X)                                                                                     \
     X(publish_admitted, publish_admitted, "publishAdmitted", true, void, program::ProgramBundle,                      \

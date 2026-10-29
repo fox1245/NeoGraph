@@ -736,13 +736,13 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
         source, "capsule-budget-target", 21, std::nullopt, &constrained);
     OwnedTransitionStore<InMemoryProgramTransitionStore> transitions;
     ASSERT_EQ(transitions.compare_publish(
-                  source.publication.run_record.owner_scope(), {}, source.publication),
+                  source.publication.run_record.owner_scope(), {}, 1, source.publication),
               ProgramTransitionPublishResult::Published);
 
     auto missing_plan = target;
     missing_plan.migration_plan.reset();
     EXPECT_EQ(transitions.compare_publish(
-                  target.run_record.owner_scope(), {}, std::move(missing_plan)),
+                  target.run_record.owner_scope(), {}, 1, std::move(missing_plan)),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
                                   target.run_record.run_id()));
@@ -753,16 +753,16 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
     EXPECT_EQ(source_head->id(), source.publication.run_lineage->id());
 
     EXPECT_EQ(transitions.compare_publish(
-                  wrong_attempt.run_record.owner_scope(), {}, wrong_attempt),
+                  wrong_attempt.run_record.owner_scope(), {}, 1, wrong_attempt),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(transitions.compare_publish(
-                  over_budget.run_record.owner_scope(), {}, over_budget),
+                  over_budget.run_record.owner_scope(), {}, 1, over_budget),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(transitions.compare_publish(
-                  with_command.run_record.owner_scope(), {}, with_command),
+                  with_command.run_record.owner_scope(), {}, 1, with_command),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(transitions.compare_publish(
-                  wrong_started.run_record.owner_scope(), {}, wrong_started),
+                  wrong_started.run_record.owner_scope(), {}, 1, wrong_started),
               ProgramTransitionPublishResult::Conflict);
 
     ASSERT_TRUE(is_valid_program_graph_migration_transition(
@@ -770,13 +770,13 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
         source.publication.run_record, source.capsule, *target.migration_plan,
         *target.run_generation, *target.run_lineage, target.run_record));
     EXPECT_EQ(transitions.compare_publish(
-                  target.run_record.owner_scope(), {}, target),
+                  target.run_record.owner_scope(), {}, 1, target),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
                                   target.run_record.run_id()));
 
     EXPECT_EQ(transitions.compare_publish(
-                  stale.run_record.owner_scope(), {}, stale),
+                  stale.run_record.owner_scope(), {}, 1, stale),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
                                   "capsule-stale-target"));
@@ -790,11 +790,11 @@ TEST(ProgramGraphMigrationReceipt, AtomicPublicationRequiresDurableSourceHold) {
         forged_source, "capsule-forged-source-target", 20);
     OwnedTransitionStore<InMemoryProgramTransitionStore> forged_transitions;
     ASSERT_EQ(forged_transitions.compare_publish(
-                  forged_source.publication.run_record.owner_scope(), {},
+                  forged_source.publication.run_record.owner_scope(), {}, 1,
                   forged_source.publication),
               ProgramTransitionPublishResult::Published);
     EXPECT_EQ(forged_transitions.compare_publish(
-                  forged_target.run_record.owner_scope(), {}, forged_target),
+                  forged_target.run_record.owner_scope(), {}, 1, forged_target),
               ProgramTransitionPublishResult::Conflict);
 }
 
@@ -807,10 +807,10 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
     {
         OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(database.path.string());
         ASSERT_EQ(transitions.compare_publish(
-                      source.publication.run_record.owner_scope(), {}, source.publication),
+                      source.publication.run_record.owner_scope(), {}, 1, source.publication),
                   ProgramTransitionPublishResult::Published);
         EXPECT_EQ(transitions.compare_publish(
-                      target.run_record.owner_scope(), {}, target),
+                      target.run_record.owner_scope(), {}, 1, target),
                   ProgramTransitionPublishResult::Conflict);
     }
     {
@@ -824,7 +824,7 @@ TEST(ProgramGraphMigrationReceipt, SQLiteRejectsSuccessorWithoutDurableHoldAcros
         EXPECT_FALSE(transitions.load(target.run_record.owner_scope(),
                                       target.run_record.run_id()));
         EXPECT_EQ(transitions.compare_publish(
-                      target.run_record.owner_scope(), {}, target),
+                      target.run_record.owner_scope(), {}, 1, target),
                   ProgramTransitionPublishResult::Conflict);
     }
 }
@@ -850,7 +850,7 @@ TEST_P(GraphMigrationCapsuleStoreConformance, StoredCapsuleRowMustAgreeWithItsRe
     StoreDeployment deployment(GetParam().backend, GetParam().form);
     {
         const auto store = deployment.blocking_transition_store();
-        ASSERT_EQ(store->compare_publish(owner, {}, source.publication),
+        ASSERT_EQ(store->compare_publish(owner, {}, 1, source.publication),
                   ProgramTransitionPublishResult::Published);
     }
     deployment.insert_capsule_with_foreign_identity(
