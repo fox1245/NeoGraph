@@ -689,6 +689,22 @@ inline constexpr int kRunPublicationAttempts = 64;
 using JoinMemberLaunchObserver = void (*)(std::size_t member_index, bool replayed);
 void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observer) noexcept;
 
+/// Test seam: when set, called with the run id and attempt once an attempt's
+/// coroutine has ended, its terminal publication included, so a test can wait
+/// for an attempt to stop instead of waiting for time to pass. Null outside
+/// tests.
+using AttemptFinishedObserver = void (*)(std::string_view run_id, std::uint64_t attempt);
+void set_attempt_finished_observer_for_testing(AttemptFinishedObserver observer) noexcept;
+void notify_attempt_finished(std::string_view run_id, std::uint64_t attempt) noexcept;
+
+/// Test seam: when set, called with the run id and the cause once a
+/// cancellation has stopped an executing run, after its cause is set, so a test
+/// that holds one of the run's publications can let it go on knowing that it
+/// sees the cancellation. Null outside tests.
+using CancellationObserver = void (*)(std::string_view run_id, CancellationCause cause);
+void set_cancellation_observer_for_testing(CancellationObserver observer) noexcept;
+void notify_cancellation(std::string_view run_id, CancellationCause cause) noexcept;
+
 asio::awaitable<void> execute_run_attempt(
     std::shared_ptr<RunControl> control,
     json                        input,
