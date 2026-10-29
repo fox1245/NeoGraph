@@ -705,6 +705,19 @@ using CancellationObserver = void (*)(std::string_view run_id, CancellationCause
 void set_cancellation_observer_for_testing(CancellationObserver observer) noexcept;
 void notify_cancellation(std::string_view run_id, CancellationCause cause) noexcept;
 
+/// Test seam: when set, called once `wake_paused_parent_handling_failure` has
+/// finished, after `record_parent_continuation_failure`, with the failure code
+/// (empty when the continuation published or found nothing to do), so a test
+/// can wait for an automatic parent continuation to end instead of waiting for
+/// time to pass. Null outside tests.
+using ParentContinuationObserver = void (*)(std::string_view owner_scope,
+                                            std::string_view parent_run_id,
+                                            std::string_view failure_code);
+void set_parent_continuation_observer_for_testing(ParentContinuationObserver observer) noexcept;
+void notify_parent_continuation(std::string_view owner_scope,
+                                std::string_view parent_run_id,
+                                std::string_view failure_code) noexcept;
+
 asio::awaitable<void> execute_run_attempt(
     std::shared_ptr<RunControl> control,
     json                        input,
