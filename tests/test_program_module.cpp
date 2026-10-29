@@ -582,6 +582,70 @@ TEST(ProgramModuleTest, RejectsDescriptorVersionSubstitution) {
                  std::invalid_argument);
 }
 
+// link_module_child recognizes the parent in the resolution by its id and lifecycle, without encoding
+// both modules. That is sound only if no change to a structural field keeps the id, and a lifecycle
+// that differs is refused.
+TEST(ProgramModuleTest, LinkRecognizesTheResolvedParentByIdAndLifecycle) {
+    auto       fixture = make_fixture();
+    const auto data_of = [](const ProgramModule& module) {
+        ProgramModuleData data;
+        data.owner_scope             = module.owner_scope();
+        data.coordinate              = module.coordinate();
+        data.coordinate.content_identity.clear();
+        data.attestation_id          = module.attestation_id();
+        data.lifecycle               = module.lifecycle();
+        data.dependencies            = module.dependencies();
+        data.pure_javascript_source  = module.pure_javascript_source();
+        data.children                = module.children();
+        data.allowed_capabilities    = module.allowed_capabilities();
+        data.declared_effects        = module.declared_effects();
+        return data;
+    };
+    const auto link_with = [&](const ProgramModule& resolved) {
+        auto resolution            = fixture.resolution;
+        resolution.modules.front() = resolved;
+        return link_module_child(resolution, fixture.parent, "child", fixture.child_bundle,
+                                 fixture.version);
+    };
+    const auto expected = link_module_child(fixture.resolution, fixture.parent, "child",
+                                            fixture.child_bundle, fixture.version);
+
+    // The same module rebuilt from its stored bytes has the same id and bytes, and links.
+    const auto reparsed = ProgramModule::parse(fixture.parent.serialize_canonical());
+    EXPECT_EQ(reparsed.id(), fixture.parent.id());
+    EXPECT_EQ(reparsed.serialize_canonical(), fixture.parent.serialize_canonical());
+    EXPECT_EQ(link_with(reparsed).id(), expected.id());
+
+    // Each structural field changed alone gives another id, so that copy cannot stand for the parent.
+    std::vector<ProgramModuleData> variants(9, data_of(fixture.parent));
+    variants[0].owner_scope = "tenant:other";
+    variants[1].coordinate.semantic_version = "1.0.1";
+    variants[2].attestation_id = "attestation:other";
+    variants[3].dependencies.push_back(ModuleCoordinate{"test", "dependency", "1.0.0", digest('5')});
+    variants[4].pure_javascript_source = "export function main() { return 1; }";
+    variants[5].children.front().name = "renamed";
+    variants[6].children.front().budget.max_core_steps += 1;
+    variants[7].allowed_capabilities.push_back("write");
+    variants[8].declared_effects.push_back("net");
+    for (std::size_t i = 0; i < variants.size(); ++i) {
+        const auto variant = ProgramModule::create(variants[i]);
+        EXPECT_NE(variant.id(), fixture.parent.id()) << "variant " << i;
+        EXPECT_THROW((void)link_with(variant), std::invalid_argument) << "variant " << i;
+    }
+
+    // Lifecycle is outside the id: a deprecated copy has the parent's id and other bytes, and the
+    // link refuses it, whether it is the resolution's copy or the supplied parent.
+    auto deprecated_data      = data_of(fixture.parent);
+    deprecated_data.lifecycle = ModuleLifecycle::Deprecated;
+    const auto deprecated     = ProgramModule::create(std::move(deprecated_data));
+    EXPECT_EQ(deprecated.id(), fixture.parent.id());
+    EXPECT_NE(deprecated.serialize_canonical(), fixture.parent.serialize_canonical());
+    EXPECT_THROW((void)link_with(deprecated), std::invalid_argument);
+    EXPECT_THROW((void)link_module_child(fixture.resolution, deprecated, "child",
+                                         fixture.child_bundle, fixture.version),
+                 std::invalid_argument);
+}
+
 TEST(ProgramModuleTest, RejectsChildPolicyAuthorityWiderThanParent) {
     auto fixture = make_fixture();
     PolicySnapshotBuilder policy_builder;
