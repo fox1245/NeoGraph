@@ -527,17 +527,20 @@ ProgramTransitionPublication terminal_publication(const Fixture&                
                                                   const ProgramTransitionPublication& initial,
                                                   ProgramTerminalStatus               status,
                                                   ContinuationState                   state,
-                                                  std::int64_t                        timestamp) {
+                                                  std::int64_t                        timestamp,
+                                                  const ProgramJournalRecord*         previous = nullptr,
+                                                  std::uint64_t                       fence    = 1) {
     const CoreCheckpointIdentity checkpoint{
         "main", digest('5'),
         program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
         "checkpoint-one", graph::CHECKPOINT_SCHEMA_VERSION};
-    auto                         journal = ProgramJournalRecord::create({initial.journal_record.id,
+    const auto& base = previous ? *previous : initial.journal_record;
+    auto                         journal = ProgramJournalRecord::create({base.id,
                                                                          initial.run_record.run_id(),
                                                                          fixture.version_value.id(),
                                                                          fixture.bundle_value.id(),
-                                                                         2,
-                                                                         {"root", state, 1},
+                                                                         base.sequence + 1,
+                                                                         {"root", state, 1, fence},
                                                                          budget(),
                                                                          {},
                                                                          checkpoint,
@@ -1534,29 +1537,105 @@ TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreEnforcesOwnershipFence
     Fixture fixture;
     auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
     auto    initial     = initial_lineage_publication(fixture, "run-fenced");
 
-    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, initial), ProgramTransitionPublishResult::Published);
+    const auto lineage_before = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_before);
+    ASSERT_EQ(lineage_before->active_run_record_id(), initial.run_record.id());
+    ASSERT_EQ(lineage_before->active_journal_head(), initial.journal_record.id);
+
+    EXPECT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", initial.journal_record.id, 1),
               ProgramTransitionPublishResult::Published);
-    EXPECT_EQ(transitions->compare_publish_takeover(
-                  fixture.artifact.owner_scope(), "run-fenced", initial.journal_record.id, 1),
-              ProgramTransitionPublishResult::Published);
-    EXPECT_EQ(transitions->compare_publish_takeover(
-                  fixture.artifact.owner_scope(), "run-fenced", initial.journal_record.id, 1),
+    EXPECT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", initial.journal_record.id, 1),
               ProgramTransitionPublishResult::Conflict);
 
-    const auto taken_over = transitions->load(fixture.artifact.owner_scope(), "run-fenced");
+    const auto taken_over = transitions->load(owner, "run-fenced");
     ASSERT_TRUE(taken_over);
     EXPECT_EQ(taken_over->continuation().fence, 2U);
     EXPECT_EQ(taken_over->continuation().attempt, 1U);
-    const auto taken_over_journal = transitions->latest(fixture.artifact.owner_scope(), "run-fenced");
+    const auto taken_over_journal = transitions->latest(owner, "run-fenced");
     ASSERT_TRUE(taken_over_journal);
     EXPECT_EQ(taken_over_journal->continuation.fence, 2U);
     EXPECT_EQ(taken_over_journal->sequence, 2U);
 
+    // The takeover moves the run's lineage head to the taken-over record and journal head in the same transaction; the
+    // head it replaced stays in the history, and the next publication chains from the new head.
+    const auto lineage_1 = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_1);
+    EXPECT_EQ(lineage_1->active_run_record_id(), taken_over->id());
+    EXPECT_EQ(lineage_1->active_journal_head(), taken_over_journal->id);
+    EXPECT_EQ(lineage_1->active_generation_id(), lineage_before->active_generation_id());
+    ASSERT_TRUE(lineage_1->predecessor_head_id().has_value());
+    EXPECT_EQ(*lineage_1->predecessor_head_id(), lineage_before->id());
+    const auto by_lineage_id = transitions->load_lineage(owner, lineage_1->lineage_id());
+    ASSERT_TRUE(by_lineage_id);
+    EXPECT_EQ(by_lineage_id->id(), lineage_1->id());
+    EXPECT_TRUE(transitions->load_lineage_head(owner, lineage_before->lineage_id(), lineage_before->id()));
+    EXPECT_TRUE(transitions->load_lineage_head(owner, lineage_1->lineage_id(), lineage_1->id()));
+
+    // Every publication below carries the lineage a real owner would send (a same-generation head built on the stored
+    // head), so a refusal is down to the one thing that differs between it and the accepted publication.
     auto stale = terminal_publication(
         fixture, initial, ProgramTerminalStatus::Completed, ContinuationState::Completed, 20);
-    EXPECT_EQ(transitions->compare_publish(
-                  fixture.artifact.owner_scope(), taken_over->journal_head(), 1, stale),
+    attach_same_generation_lineage(stale, *lineage_before);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 1, stale),
               ProgramTransitionPublishResult::Conflict);
+
+    // A publication of the new owner (fence 2) that builds on the lineage head the takeover replaced is refused.
+    auto on_old_lineage = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                               ContinuationState::Completed, 20, &*taken_over_journal, 2);
+    attach_same_generation_lineage(on_old_lineage, *lineage_before);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 2, on_old_lineage),
+              ProgramTransitionPublishResult::Conflict);
+
+    // A stale writer that reloaded the new head but still writes fence 1 is refused, whether it names its own fence or
+    // the stored one.
+    auto stale_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                  ContinuationState::Completed, 20, &*taken_over_journal, 1);
+    attach_same_generation_lineage(stale_on_new_head, *lineage_1);
+    ASSERT_EQ(stale_on_new_head.journal_record.previous_id, taken_over_journal->id);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 1, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 2, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+
+    // A second takeover moves the fence to 3. A writer that still holds fence 2 writes the same schema as the new
+    // owner, so only the stored fence tells them apart: it is refused on the new head, whichever fence it names, and
+    // the same publication carrying fence 3 is accepted.
+    ASSERT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", taken_over->journal_head(), 2),
+              ProgramTransitionPublishResult::Published);
+    const auto second_journal = transitions->latest(owner, "run-fenced");
+    ASSERT_TRUE(second_journal);
+    ASSERT_EQ(second_journal->continuation.fence, 3U);
+    const auto lineage_2 = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_2);
+    EXPECT_EQ(lineage_2->active_journal_head(), second_journal->id);
+    ASSERT_TRUE(lineage_2->predecessor_head_id().has_value());
+    EXPECT_EQ(*lineage_2->predecessor_head_id(), lineage_1->id());
+    auto fence_2_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                    ContinuationState::Completed, 20, &*second_journal, 2);
+    attach_same_generation_lineage(fence_2_on_new_head, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 2, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    // A publication that raises the fence by one, naming the raised fence, is a takeover written as an ordinary
+    // publication: refused, because only compare_publish_takeover moves the fence.
+    auto raised = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                       ContinuationState::Completed, 20, &*second_journal, 4);
+    attach_same_generation_lineage(raised, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 4, raised),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, raised),
+              ProgramTransitionPublishResult::Conflict);
+    auto fence_3_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                    ContinuationState::Completed, 20, &*second_journal, 3);
+    attach_same_generation_lineage(fence_3_on_new_head, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, fence_3_on_new_head),
+              ProgramTransitionPublishResult::Published);
+    const auto final_lineage = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(final_lineage);
+    EXPECT_EQ(final_lineage->active_run_record_id(), fence_3_on_new_head.run_record.id());
 }

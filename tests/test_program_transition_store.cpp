@@ -6213,9 +6213,148 @@ TEST_P(ProgramTransitionStoreConformance,
     EXPECT_EQ(store->compare_publish("owner-a", taken_journal->id, 1, progressed_fence_2),
               ProgramTransitionPublishResult::Conflict);
 
+    // A stale writer that reloaded the new journal head but still writes its own fence 1 is refused, whether it names
+    // its own fence or the stored one. (Fence 1 is also written in the older schema, so this case alone does not
+    // isolate the fence comparison; the second takeover below does.)
+    auto stale_run_data                 = copy_run_record_data(*taken_run);
+    stale_run_data.continuation.fence   = 1;
+    const ProgramTransitionPublication stale_base{
+        ProgramRunRecord::create(std::move(stale_run_data)), *taken_journal, {}, {}};
+    const auto stale_on_new_head =
+        javascript_command_publication(stale_base, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(stale_on_new_head.journal_record.previous_id, taken_journal->id);
+    ASSERT_EQ(stale_on_new_head.journal_record.continuation.fence, 1U);
+    EXPECT_EQ(store->compare_publish("owner-a", taken_journal->id, 1, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store->compare_publish("owner-a", taken_journal->id, 2, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    const auto still_taken = store->load("owner-a", "run-1");
+    ASSERT_TRUE(still_taken.has_value());
+    EXPECT_EQ(still_taken->journal_head(), taken_journal->id);
+    EXPECT_EQ(still_taken->continuation().fence, 2U);
+
     // The new owner (fence 2) can publish.
     ASSERT_EQ(store->compare_publish("owner-a", taken_journal->id, 2, progressed_fence_2),
               ProgramTransitionPublishResult::Published);
+
+    // A second takeover moves the fence to 3. A writer that still holds fence 2 writes the same schema as the new
+    // owner, so only the stored fence tells them apart: it is refused on the new head, whichever fence it names, and
+    // the same publication carrying fence 3 is accepted.
+    ASSERT_EQ(store->compare_publish_takeover("owner-a", "run-1", progressed_fence_2.journal_record.id, 2),
+              ProgramTransitionPublishResult::Published);
+    const auto second_run     = store->load("owner-a", "run-1");
+    const auto second_journal = store->latest("owner-a", "run-1");
+    ASSERT_TRUE(second_run.has_value());
+    ASSERT_TRUE(second_journal.has_value());
+    ASSERT_EQ(second_run->continuation().fence, 3U);
+    auto fence_2_data               = copy_run_record_data(*second_run);
+    fence_2_data.continuation.fence = 2;
+    const ProgramTransitionPublication fence_2_base{
+        ProgramRunRecord::create(std::move(fence_2_data)), *second_journal, {}, {}};
+    const auto fence_2_on_new_head =
+        javascript_command_publication(fence_2_base, javascript_command_entry(2, true), 30);
+    ASSERT_EQ(fence_2_on_new_head.journal_record.previous_id, second_journal->id);
+    ASSERT_EQ(fence_2_on_new_head.journal_record.continuation.fence, 2U);
+    EXPECT_EQ(store->compare_publish("owner-a", second_journal->id, 2, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store->compare_publish("owner-a", second_journal->id, 3, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    const ProgramTransitionPublication fence_3_base{*second_run, *second_journal, {}, {}};
+    const auto fence_3_on_new_head =
+        javascript_command_publication(fence_3_base, javascript_command_entry(2, true), 30);
+    EXPECT_EQ(store->compare_publish("owner-a", second_journal->id, 3, fence_3_on_new_head),
+              ProgramTransitionPublishResult::Published);
+}
+
+TEST_P(ProgramTransitionStoreConformance, AnOrdinaryPublicationCannotRaiseTheFence) {
+    auto store = deployment().blocking_transition_store();
+    const auto start = start_publication();
+    ASSERT_EQ(store->compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store->compare_publish_takeover("owner-a", "run-1", start.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    const auto run     = store->load("owner-a", "run-1");
+    const auto journal = store->latest("owner-a", "run-1");
+    ASSERT_TRUE(run.has_value());
+    ASSERT_TRUE(journal.has_value());
+    ASSERT_EQ(run->continuation().fence, 2U);
+
+    // A takeover written as an ordinary publication: the stored fence raised by one in both records, and that raised
+    // fence named as the writer's own. Both fences are equal and the step is the one a takeover makes, so only the
+    // comparison with the stored fence refuses it: the fence moves through compare_publish_takeover alone.
+    auto raised_data               = copy_run_record_data(*run);
+    raised_data.continuation.fence = 3;
+    const ProgramTransitionPublication raised_base{ProgramRunRecord::create(std::move(raised_data)), *journal, {}, {}};
+    const auto raised = javascript_command_publication(raised_base, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(raised.run_record.continuation().fence, 3U);
+    ASSERT_EQ(raised.journal_record.continuation.fence, 3U);
+    ASSERT_EQ(raised.journal_record.previous_id, journal->id);
+    EXPECT_EQ(store->compare_publish("owner-a", journal->id, 3, raised), ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store->compare_publish("owner-a", journal->id, 2, raised), ProgramTransitionPublishResult::Conflict);
+    const auto unchanged = store->load("owner-a", "run-1");
+    ASSERT_TRUE(unchanged.has_value());
+    EXPECT_EQ(unchanged->continuation().fence, 2U);
+    EXPECT_EQ(unchanged->journal_head(), journal->id);
+
+    // The same publication at the stored fence is accepted.
+    const ProgramTransitionPublication same_base{*run, *journal, {}, {}};
+    const auto same = javascript_command_publication(same_base, javascript_command_entry(1, false), 20);
+    ASSERT_EQ(same.run_record.continuation().fence, 2U);
+    EXPECT_EQ(store->compare_publish("owner-a", journal->id, 2, same), ProgramTransitionPublishResult::Published);
+}
+
+TEST_P(ProgramTransitionStoreConformance, TakeoverAdvancesTheLineageHead) {
+    auto store = deployment().blocking_transition_store();
+    auto start = start_publication();
+    attach_initial_lineage(start);
+    ASSERT_EQ(store->compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    const auto before = store->load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(before.has_value());
+    ASSERT_EQ(before->active_run_record_id(), start.run_record.id());
+    ASSERT_EQ(before->active_journal_head(), start.journal_record.id);
+
+    ASSERT_EQ(store->compare_publish_takeover("owner-a", "run-1", start.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    const auto taken_run     = store->load("owner-a", "run-1");
+    const auto taken_journal = store->latest("owner-a", "run-1");
+    ASSERT_TRUE(taken_run.has_value());
+    ASSERT_TRUE(taken_journal.has_value());
+    ASSERT_NE(taken_run->id(), start.run_record.id());
+
+    // Both reads of the lineage name the taken-over run record and its journal head; the head it replaced stays in
+    // the history.
+    const auto after = store->load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after->active_run_record_id(), taken_run->id());
+    EXPECT_EQ(after->active_journal_head(), taken_journal->id);
+    EXPECT_EQ(after->active_generation_id(), before->active_generation_id());
+    ASSERT_TRUE(after->predecessor_head_id().has_value());
+    EXPECT_EQ(*after->predecessor_head_id(), before->id());
+    const auto by_lineage_id = store->load_lineage("owner-a", after->lineage_id());
+    ASSERT_TRUE(by_lineage_id.has_value());
+    EXPECT_EQ(by_lineage_id->id(), after->id());
+    const auto old_head = store->load_lineage_head("owner-a", before->lineage_id(), before->id());
+    ASSERT_TRUE(old_head.has_value());
+    EXPECT_EQ(old_head->id(), before->id());
+    const auto new_head = store->load_lineage_head("owner-a", after->lineage_id(), after->id());
+    ASSERT_TRUE(new_head.has_value());
+    EXPECT_EQ(new_head->id(), after->id());
+
+    // The new owner's next publication is accepted when its lineage is built on the head the takeover wrote, and
+    // refused when it is built on the head the takeover replaced; the two differ in nothing else.
+    const ProgramTransitionPublication base{*taken_run, *taken_journal, {}, {}};
+    auto on_old_head = javascript_command_publication(base, javascript_command_entry(1, false), 20);
+    attach_same_generation_lineage(on_old_head, *before);
+    EXPECT_EQ(store->compare_publish("owner-a", taken_journal->id, 2, on_old_head),
+              ProgramTransitionPublishResult::Conflict);
+    auto on_new_head = javascript_command_publication(base, javascript_command_entry(1, false), 20);
+    attach_same_generation_lineage(on_new_head, *after);
+    ASSERT_EQ(store->compare_publish("owner-a", taken_journal->id, 2, on_new_head),
+              ProgramTransitionPublishResult::Published);
+    const auto next = store->load_run_lineage("owner-a", "run-1");
+    ASSERT_TRUE(next.has_value());
+    EXPECT_EQ(next->active_run_record_id(), on_new_head.run_record.id());
+    ASSERT_TRUE(next->predecessor_head_id().has_value());
+    EXPECT_EQ(*next->predecessor_head_id(), after->id());
 }
 
 TEST_P(ProgramTransitionStoreConformance, TakeoverActsOnTheNamedRunOnly) {

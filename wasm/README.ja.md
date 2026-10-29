@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=5e42f232e5b3e7d42934f66fbd0cd1ad330508e00a916da8c8e598dd570c2546 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -510,7 +510,7 @@ releaseStores(module, handle);
   ストアが決めます。
 - **所有権フェンス。** `expectedFence` は公開を書き込む制御オブジェクトのフェンスです。呼び出しが渡される前に、`comparePublish` と `comparePublishExecution` は、実行レコードまたはジャーナルレコードが
   別のフェンスを持つ公開に `"conflict"` を返します。オブジェクトも、保存された実行の `continuation.fence` をジャーナルヘッドと同じ段階で `expectedFence` と比べ、異なれば拒否しなければなりません。
-  `comparePublishTakeover` は、`runId` の実行の保存された `Running` レコードを `fence = expectedFence + 1` と新しいジャーナルレコード 1 件で公開し、それ以外は何も変えません。
+  `comparePublishTakeover` は、`runId` の実行の保存された `Running` レコードを `fence = expectedFence + 1` と新しいジャーナルレコード 1 件で公開し、系譜に結び付いた実行ならば同じ段階で系譜ヘッドをそのレコードへ移し、それ以外は何も変えません。
 - **非対応。** `compare_publish_graph_safe_point` はシリアライズされない証拠を運ぶため、JavaScript ストアはライブのグラフマイグレーションには参加しません。基底クラスと同じく `"conflict"` を返します。
 
 **参照ストア。** `neograph.memoryStores()`（`stores.mjs` の `memoryStores(module)`）は、モジュールのインメモリ C++ ストアを呼び出してこの契約を実装する

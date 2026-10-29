@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=5e42f232e5b3e7d42934f66fbd0cd1ad330508e00a916da8c8e598dd570c2546 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -526,7 +526,7 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
   않습니다. 저장된 상태가 그 게시에 대해 무엇을 말하는지는 저장소가 결정합니다.
 - **소유권 펜스.** `expectedFence`는 게시를 쓰는 제어 객체의 펜스입니다. 호출이 넘어가기 전에 `comparePublish`와 `comparePublishExecution`은 실행 레코드나 저널 레코드가 다른 펜스를 담은
   게시에 `"conflict"`로 답합니다. 객체도 저장된 실행의 `continuation.fence`를 저널 헤드와 같은 단계에서 `expectedFence`와 비교해, 다르면 거부해야 합니다.
-  `comparePublishTakeover`는 `runId`가 가리키는 실행의 저장된 `Running` 레코드를 `fence = expectedFence + 1`과 새 저널 레코드 하나로 게시하고, 그 밖에는 아무것도 바꾸지 않습니다.
+  `comparePublishTakeover`는 `runId`가 가리키는 실행의 저장된 `Running` 레코드를 `fence = expectedFence + 1`과 새 저널 레코드 하나로 게시하고, 계보에 묶인 실행이면 같은 단계에서 계보 헤드를 그 레코드로 옮기며, 그 밖에는 아무것도 바꾸지 않습니다.
 - **지원하지 않는 것.** `compare_publish_graph_safe_point`는 직렬화되지 않는 증거를 담으므로, JavaScript 저장소는 라이브 그래프 마이그레이션에 참여하지 않습니다.
   기반 클래스처럼 `"conflict"`로 답합니다.
 

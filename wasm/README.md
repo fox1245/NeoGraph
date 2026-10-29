@@ -645,7 +645,7 @@ interface, given in the last column.
   `comparePublish` and `comparePublishExecution` answer `"conflict"` for a publication whose run record or journal record
   carries another fence. The object must also compare `expectedFence` with the `continuation.fence` of the stored run in the
   same step as the journal head, and refuse when they differ. `comparePublishTakeover` publishes the stored `Running` record
-  of `runId` with `fence = expectedFence + 1` and one new journal record, and changes nothing else.
+  of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else.
 - **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
   does not take part in live graph migration: it answers `"conflict"`, as the base class does.
 

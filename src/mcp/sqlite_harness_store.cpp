@@ -2,6 +2,7 @@
 
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
+#include "../program/transition_validator.h"
 #include "../core/own_json.h"
 #include "../core/json_walk.h"
 #include "../core/sqlite_wal.h"
@@ -1516,50 +1517,53 @@ public:
                 return program::ProgramTransitionPublishResult::Conflict;
             }
 
-            auto next_continuation  = current_run.continuation();
-            next_continuation.fence = expected_fence + 1;
-            const auto next_journal = program::ProgramJournalRecord::create({
-                current_journal.id,
-                current_journal.run_id,
-                current_journal.program_version_id,
-                current_journal.bundle_id,
-                current_journal.sequence + 1,
-                next_continuation,
-                current_journal.remaining_budget,
-                current_journal.inflight_reservation,
-                current_journal.core_checkpoint,
-                current_journal.timestamp_ms,
-            });
-            const auto next_run = program::ProgramRunRecord::create({
-                current_run.owner_scope(),
-                current_run.run_id(),
-                current_run.program_version_id(),
-                current_run.bundle_id(),
-                current_run.binding_fingerprint(),
-                current_run.invocation(),
-                current_run.child_depth(),
-                next_continuation,
-                current_run.remaining_budget(),
-                current_run.exact_checkpoint(),
-                current_run.exact_checkpoint_content_id(),
-                current_run.pending_input(),
-                current_run.pending_effect(),
-                current_run.terminal_result(),
-                current_run.fork_receipt(),
-                current_run.children(),
-                next_journal.id,
-                current_run.fork_source_run_id(),
-                current_run.fork_source_program_version_id(),
-                current_run.fork_source_checkpoint_id(),
-                current_run.recorded_binding_set_fingerprint(),
-                current_run.event_sequence(),
-                current_run.effect_sequence(),
-                current_run.created_at_ms(),
-                current_run.updated_at_ms(),
-                current_run.logical_run_id(),
-                current_run.attempt_resume(),
-                current_run.settled_branches(),
-            });
+            // The lineage this run belongs to, if any: the takeover moves its head to the taken-over record in the
+            // same transaction, as every other store does.
+            std::optional<std::string> associated_lineage_id;
+            {
+                Statement association(
+                    impl_->db,
+                    "SELECT lineage_id FROM neograph_harness_program_lineage_runs "
+                    "WHERE owner_scope=? AND program_run_id=?");
+                association.bind_text(1, std::string(owner_scope));
+                association.bind_text(2, std::string(run_id));
+                const auto result = association.step();
+                if (result == SQLITE_ROW)
+                    associated_lineage_id = association.text(0);
+                else if (result != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program lineage association read failed");
+            }
+            std::optional<program::ProgramRunLineage> current_lineage;
+            if (associated_lineage_id) {
+                Statement lineage_query(
+                    impl_->db,
+                    "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                    "WHERE owner_scope=? AND lineage_id=?");
+                lineage_query.bind_text(1, std::string(owner_scope));
+                lineage_query.bind_text(2, *associated_lineage_id);
+                const auto lineage_result = lineage_query.step();
+                if (lineage_result != SQLITE_ROW) {
+                    if (lineage_result != SQLITE_DONE)
+                        throw_sqlite_error(impl_->db, "Program lineage CAS read failed");
+                    throw std::invalid_argument("Stored Program lineage association has no head");
+                }
+                current_lineage = program::ProgramRunLineage::parse(lineage_query.text(1));
+                if (current_lineage->id() != lineage_query.text(0) ||
+                    current_lineage->owner_scope() != owner_scope ||
+                    current_lineage->lineage_id() != *associated_lineage_id) {
+                    throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+                }
+            }
+
+            auto takeover = program::detail::transition::prepare_takeover(
+                owner_scope, run_id, expected_journal_head, expected_fence, current_run,
+                current_journal, current_lineage);
+            if (!takeover) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            const auto& next_journal = takeover->journal_record;
+            const auto& next_run     = takeover->run_record;
             const auto next_wrapper =
                 HarnessProgramRunRecord::create(artifact_, next_run, artifact_.projection());
             const auto serialized_wrapper = next_wrapper.serialize().dump();
@@ -1585,6 +1589,29 @@ public:
             if (sqlite3_changes(impl_->db) != 1) {
                 impl_->exec("ROLLBACK;");
                 return program::ProgramTransitionPublishResult::Conflict;
+            }
+            if (takeover->run_lineage) {
+                Statement update_lineage(
+                    impl_->db,
+                    "UPDATE neograph_harness_program_lineage_heads "
+                    "SET head_id=?, record_json=? WHERE owner_scope=? AND lineage_id=? AND head_id=?");
+                update_lineage.bind_text(1, takeover->run_lineage->id());
+                update_lineage.bind_text(2, takeover->run_lineage->serialize_canonical());
+                update_lineage.bind_text(3, std::string(owner_scope));
+                update_lineage.bind_text(4, takeover->run_lineage->lineage_id());
+                update_lineage.bind_text(5, current_lineage->id());
+                if (update_lineage.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1)
+                    throw_sqlite_error(impl_->db, "Program takeover lineage head update failed");
+                Statement insert_history(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_lineage_history "
+                    "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                insert_history.bind_text(1, std::string(owner_scope));
+                insert_history.bind_text(2, takeover->run_lineage->lineage_id());
+                insert_history.bind_text(3, takeover->run_lineage->id());
+                insert_history.bind_text(4, takeover->run_lineage->serialize_canonical());
+                if (insert_history.step() != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program takeover lineage history insert failed");
             }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
             insert_journal(storage_run_id, owner_scope, next_journal);

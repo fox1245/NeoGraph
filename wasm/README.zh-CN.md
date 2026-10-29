@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=5e42f232e5b3e7d42934f66fbd0cd1ad330508e00a916da8c8e598dd570c2546 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -475,7 +475,7 @@ releaseStores(module, handle);
   没通过这些检查的发布是 `"conflict"`，永远到不了该对象。已存储的状态对它怎么说，由存储决定。
 - **所有权围栏。** `expectedFence` 是写入该发布的控制对象的围栏。在调用越过边界之前，`comparePublish` 和 `comparePublishExecution` 对运行记录或日志记录带有其他围栏的发布回答 `"conflict"`。
   对象也必须在与日志头相同的一步里，把 `expectedFence` 与已存储运行的 `continuation.fence` 比较，不一致就拒绝。`comparePublishTakeover` 以 `fence = expectedFence + 1` 和一条新的日志记录发布 `runId` 所指运行的已存储 `Running` 记录，
-  不改变其他任何内容。
+  对绑定谱系的运行在同一步把谱系头移到该记录，不改变其他任何内容。
 - **不支持。** `compare_publish_graph_safe_point` 带有永不序列化的证据，所以 JavaScript 存储不参与实时的图迁移：它像基类一样回答 `"conflict"`。
 
 **参考存储。** `neograph.memoryStores()`（即 `stores.mjs` 的 `memoryStores(module)`）返回 `{ transitions, programs, grants, fragments, modules }`，它们通过调用模块的内存 C++ 存储来实现这份契约
