@@ -1,0 +1,11 @@
+# Tests of the MSVC AddressSanitizer job (scripts/verify_ci.py, msvc_asan) that depend on the destruction of
+# coroutine locals during exception unwinding. One test name per line; a line that starts with # is a comment.
+#
+# The job runs CoroutineLocalDestructionTest first. While that probe fails, the toolchain does not destroy the locals
+# of a coroutine that ends by an exception or that catches one inside a try block, and the job leaves out the tests
+# listed here. When the probe passes, the job runs them, and fails if this file still lists any: remove the entries.
+
+# It resumes a paused parent and rejoins its children through coroutines that end by exceptions (a refused store call,
+# a lost publication). The same compiler without the sanitizer passes it. Under /fsanitize=address the run of the
+# second child does not finish and the test waits out its timeout.
+ProgramRuntimeTest.JavaScriptRejoiningPausedChildDoesNotRecoverUncompletedSecondChildWithoutOptIn

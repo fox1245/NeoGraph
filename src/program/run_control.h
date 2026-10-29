@@ -718,6 +718,27 @@ void notify_parent_continuation(std::string_view owner_scope,
                                 std::string_view parent_run_id,
                                 std::string_view failure_code) noexcept;
 
+/// Test seam: when set, called on every return of `wake_paused_parent` with
+/// the parent run id, the reason it took that return, and (for `ChildNotFinal`)
+/// the child run id. Null outside tests.
+enum class WakePausedParentReason {
+    NotInterrupted,
+    NoCheckpoint,
+    NotPausedOnChildren,
+    ChildNotFinal,
+    ContinuationInFlight,
+    TakenByAnotherCaller,
+    Continued,
+    Failed,
+};
+using WakePausedParentObserver = void (*)(std::string_view       parent_run_id,
+                                          WakePausedParentReason reason,
+                                          std::string_view       child_run_id);
+void set_wake_paused_parent_observer_for_testing(WakePausedParentObserver observer) noexcept;
+void notify_wake_paused_parent(std::string_view       parent_run_id,
+                               WakePausedParentReason reason,
+                               std::string_view       child_run_id = {}) noexcept;
+
 asio::awaitable<void> execute_run_attempt(
     std::shared_ptr<RunControl> control,
     json                        input,

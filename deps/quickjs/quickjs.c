@@ -378,6 +378,13 @@ struct JSRuntime {
     BOOL current_exception_is_uncatchable : 8;
     /* true if inside an out of memory error, to avoid recursing */
     BOOL in_out_of_memory : 8;
+    /* NeoGraph local patch: why the engine threw an exception when a
+       resource ran out. resource_exception is a counted reference to the
+       error object that JS_ThrowStackOverflow() or JS_ThrowOutOfMemory()
+       threw (or JS_NULL, which is what is thrown when that object could not be
+       allocated), and resource_exception_kind names the cause. */
+    JSExceptionResourceKindEnum resource_exception_kind;
+    JSValue resource_exception;
 
     struct JSStackFrame *current_stack_frame;
 
@@ -1194,6 +1201,7 @@ static __exception int JS_ToArrayLengthFree(JSContext *ctx, uint32_t *plen,
 static JSValue JS_EvalObject(JSContext *ctx, JSValueConst this_obj,
                              JSValueConst val, int flags, int scope_idx);
 JSValue __attribute__((format(printf, 2, 3))) JS_ThrowInternalError(JSContext *ctx, const char *fmt, ...);
+static void js_clear_resource_exception(JSRuntime *rt);
 static __maybe_unused void JS_DumpAtoms(JSRuntime *rt);
 static __maybe_unused void JS_DumpString(JSRuntime *rt, const JSString *p);
 static __maybe_unused void JS_DumpObjectHeader(JSRuntime *rt);
@@ -2151,6 +2159,7 @@ JSRuntime *JS_NewRuntime2(const JSMallocFunctions *mf, void *opaque)
     JS_UpdateStackTop(rt);
 
     rt->current_exception = JS_UNINITIALIZED;
+    rt->resource_exception = JS_UNDEFINED;
 
     return rt;
  fail:
@@ -2443,6 +2452,7 @@ void JS_FreeRuntime(JSRuntime *rt)
     int i;
 
     JS_FreeValueRT(rt, rt->current_exception);
+    js_clear_resource_exception(rt);
 
     list_for_each_safe(el, el1, &rt->job_list) {
         JSJobEntry *e = list_entry(el, JSJobEntry, link);
@@ -7411,10 +7421,58 @@ JSValue JS_GetGlobalObject(JSContext *ctx)
     return JS_DupValue(ctx, ctx->global_obj);
 }
 
+/* NeoGraph local patch: the record of the exception that the engine threw
+   because a resource ran out. The record names an error object, so it follows
+   that object when a finally block, a for-of loop or a catch clause throws it
+   again, and any throw of another value ends it. */
+static void js_clear_resource_exception(JSRuntime *rt)
+{
+    JSValue exception = rt->resource_exception;
+    rt->resource_exception = JS_UNDEFINED;
+    rt->resource_exception_kind = JS_EXCEPTION_RESOURCE_NONE;
+    JS_FreeValueRT(rt, exception);
+}
+
+static BOOL js_is_resource_exception_object(JSRuntime *rt, JSValueConst obj)
+{
+    return rt->resource_exception_kind != JS_EXCEPTION_RESOURCE_NONE &&
+        JS_VALUE_GET_TAG(obj) == JS_TAG_OBJECT &&
+        JS_VALUE_GET_TAG(rt->resource_exception) == JS_TAG_OBJECT &&
+        JS_VALUE_GET_OBJ(obj) == JS_VALUE_GET_OBJ(rt->resource_exception);
+}
+
+/* The pending exception is the one that is recorded: an error object is
+   recorded by identity, and an out of memory error that could not be
+   allocated is recorded as null (any other throw ended that record). */
+static BOOL js_current_exception_is_recorded(JSRuntime *rt)
+{
+    if (rt->resource_exception_kind == JS_EXCEPTION_RESOURCE_NONE)
+        return FALSE;
+    return js_is_resource_exception_object(rt, rt->current_exception) ||
+        (JS_IsNull(rt->current_exception) && JS_IsNull(rt->resource_exception));
+}
+
+/* Record the exception that was just thrown as thrown by a resource limit.
+   An exception that is already recorded keeps its kind: a failure while the
+   error was being completed (for example its backtrace) is the first cause. */
+static void js_record_resource_exception(JSRuntime *rt,
+                                         JSExceptionResourceKindEnum kind)
+{
+    JSValue exception;
+    if (js_current_exception_is_recorded(rt))
+        return;
+    exception = JS_DupValueRT(rt, rt->current_exception);
+    js_clear_resource_exception(rt);
+    rt->resource_exception = exception;
+    rt->resource_exception_kind = kind;
+}
+
 /* WARNING: obj is freed */
 JSValue JS_Throw(JSContext *ctx, JSValue obj)
 {
     JSRuntime *rt = ctx->rt;
+    if (!js_is_resource_exception_object(rt, obj))
+        js_clear_resource_exception(rt);
     JS_FreeValue(ctx, rt->current_exception);
     rt->current_exception = obj;
     rt->current_exception_is_uncatchable = FALSE;
@@ -7434,6 +7492,21 @@ JSValue JS_GetException(JSContext *ctx)
 JS_BOOL JS_HasException(JSContext *ctx)
 {
     return !JS_IsUninitialized(ctx->rt->current_exception);
+}
+
+JSExceptionResourceKindEnum JS_GetExceptionResourceKind(JSContext *ctx,
+                                                        JSValueConst exception)
+{
+    if (!ctx || !js_is_resource_exception_object(ctx->rt, exception))
+        return JS_EXCEPTION_RESOURCE_NONE;
+    return ctx->rt->resource_exception_kind;
+}
+
+JSExceptionResourceKindEnum JS_GetPendingExceptionResourceKind(JSContext *ctx)
+{
+    if (!ctx || !js_current_exception_is_recorded(ctx->rt))
+        return JS_EXCEPTION_RESOURCE_NONE;
+    return ctx->rt->resource_exception_kind;
 }
 
 static void dbuf_put_leb128(DynBuf *s, uint32_t v)
@@ -7852,13 +7925,16 @@ JSValue JS_ThrowOutOfMemory(JSContext *ctx)
         rt->in_out_of_memory = TRUE;
         JS_ThrowInternalError(ctx, "out of memory");
         rt->in_out_of_memory = FALSE;
+        js_record_resource_exception(rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
     }
     return JS_EXCEPTION;
 }
 
 static JSValue JS_ThrowStackOverflow(JSContext *ctx)
 {
-    return JS_ThrowInternalError(ctx, "stack overflow");
+    JSValue ret = JS_ThrowInternalError(ctx, "stack overflow");
+    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    return ret;
 }
 
 static JSValue JS_ThrowTypeErrorNotAnObject(JSContext *ctx)
@@ -22786,6 +22862,15 @@ static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
 }
 
 
+/* NeoGraph local patch: the SyntaxError of a parser that ran out of stack
+   is recorded like the error of JS_ThrowStackOverflow(). */
+static int js_parse_stack_overflow(JSParseState *s)
+{
+    int ret = js_parse_error(s, "stack overflow");
+    js_record_resource_exception(s->ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    return ret;
+}
+
 static __exception int next_token(JSParseState *s)
 {
     const uint8_t *p;
@@ -22794,7 +22879,7 @@ static __exception int next_token(JSParseState *s)
     JSAtom atom;
 
     if (js_check_stack_overflow(s->ctx->rt, 0)) {
-        return js_parse_error(s, "stack overflow");
+        return js_parse_stack_overflow(s);
     }
 
     free_token(s, &s->token);
@@ -23441,7 +23526,7 @@ static __exception int json_next_token(JSParseState *s)
     JSAtom atom;
 
     if (js_check_stack_overflow(s->ctx->rt, 0)) {
-        return js_parse_error(s, "stack overflow");
+        return js_parse_stack_overflow(s);
     }
 
     free_token(s, &s->token);
@@ -35668,6 +35753,15 @@ typedef struct StackSizeState {
     int pc_stack_size;
 } StackSizeState;
 
+/* NeoGraph local patch: a function that needs more operand stack than the
+   engine allows fails with a stack overflow error, recorded like the error of
+   JS_ThrowStackOverflow(). */
+static void ss_throw_stack_overflow(JSContext *ctx, int op, int pos)
+{
+    JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+}
+
 /* 'op' is only used for error indication */
 static __exception int ss_check(JSContext *ctx, StackSizeState *s,
                                 int pos, int op, int stack_len, int catch_pos)
@@ -35679,7 +35773,7 @@ static __exception int ss_check(JSContext *ctx, StackSizeState *s,
     if (stack_len > s->stack_len_max) {
         s->stack_len_max = stack_len;
         if (s->stack_len_max > JS_STACK_SIZE_MAX) {
-            JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+            ss_throw_stack_overflow(ctx, op, pos);
             return -1;
         }
     }
@@ -35780,7 +35874,7 @@ static __exception int compute_stack_size(JSContext *ctx,
         if (stack_len > s->stack_len_max) {
             s->stack_len_max = stack_len;
             if (s->stack_len_max > JS_STACK_SIZE_MAX) {
-                JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+                ss_throw_stack_overflow(ctx, op, pos);
                 goto fail;
             }
         }
@@ -46440,8 +46534,12 @@ static int js_string_normalize1(JSContext *ctx, uint32_t **pout_buf,
     out_len = unicode_normalize(&out_buf, buf, buf_len, n_type,
                                 ctx->rt, (DynBufReallocFunc *)js_realloc_rt);
     js_free(ctx, buf);
-    if (out_len < 0)
+    if (out_len < 0) {
+        /* NeoGraph local patch: unicode_normalize only fails when the memory
+           ran out, and nothing was thrown for it */
+        JS_ThrowOutOfMemory(ctx);
         return -1;
+    }
     *pout_buf = out_buf;
     return out_len;
 }
@@ -47420,6 +47518,7 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     uint8_t *re_bytecode_buf;
     size_t i, len;
     int re_bytecode_len;
+    int re_resource_kind;
     JSValue ret;
     char error_msg[64];
 
@@ -47478,10 +47577,17 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     if (!str)
         return JS_EXCEPTION;
     re_bytecode_buf = lre_compile(&re_bytecode_len, error_msg,
-                                  sizeof(error_msg), str, len, re_flags, ctx);
+                                  sizeof(error_msg), str, len, re_flags, ctx,
+                                  &re_resource_kind);
     JS_FreeCString(ctx, str);
     if (!re_bytecode_buf) {
         JS_ThrowSyntaxError(ctx, "%s", error_msg);
+        /* NeoGraph local patch: the compiler says whether it gave up because
+           the stack or the memory ran out */
+        if (re_resource_kind == LRE_RESOURCE_STACK)
+            js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+        else if (re_resource_kind == LRE_RESOURCE_MEMORY)
+            js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
         return JS_EXCEPTION;
     }
 
@@ -48021,6 +48127,7 @@ static JSValue js_regexp_exec(JSContext *ctx, JSValueConst this_val,
                 JS_ThrowInterrupted(ctx);
             } else {
                 JS_ThrowInternalError(ctx, "out of memory in regexp execution");
+                js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
             }
             goto fail;
         }
@@ -48247,6 +48354,7 @@ static JSValue js_regexp_replace(JSContext *ctx, JSValueConst this_val, JSValueC
                     JS_ThrowInterrupted(ctx);
                 } else {
                     JS_ThrowInternalError(ctx, "out of memory in regexp execution");
+                    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
                 }
                 goto fail;
             }

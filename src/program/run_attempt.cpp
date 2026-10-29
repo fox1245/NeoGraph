@@ -623,6 +623,7 @@ std::atomic<JoinMemberLaunchObserver>   join_member_launch_observer{nullptr};
 std::atomic<AttemptFinishedObserver>    attempt_finished_observer{nullptr};
 std::atomic<CancellationObserver>       cancellation_observer{nullptr};
 std::atomic<ParentContinuationObserver> parent_continuation_observer{nullptr};
+std::atomic<WakePausedParentObserver>   wake_paused_parent_observer{nullptr};
 
 // A join member that settled before its join paused, replayed from its
 // recorded result by the attempt that resumes the join (#380).
@@ -1890,6 +1891,18 @@ void notify_parent_continuation(std::string_view owner_scope,
                                 std::string_view failure_code) noexcept {
     if (const auto observer = parent_continuation_observer.load(std::memory_order_acquire)) {
         observer(owner_scope, parent_run_id, failure_code);
+    }
+}
+
+void set_wake_paused_parent_observer_for_testing(WakePausedParentObserver observer) noexcept {
+    wake_paused_parent_observer.store(observer, std::memory_order_release);
+}
+
+void notify_wake_paused_parent(std::string_view       parent_run_id,
+                               WakePausedParentReason reason,
+                               std::string_view       child_run_id) noexcept {
+    if (const auto observer = wake_paused_parent_observer.load(std::memory_order_acquire)) {
+        observer(parent_run_id, reason, child_run_id);
     }
 }
 
