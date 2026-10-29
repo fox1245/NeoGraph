@@ -608,8 +608,9 @@ program::JournalAppendResult HarnessBoundedProgramJournal::compare_append(
         {},
         {},
     };
+    const auto expected_fence = publication.run_record.continuation().fence;
     switch (impl_->transitions.compare_publish(impl_->owner_scope, expected_previous_id,
-                                                std::move(publication))) {
+                                                expected_fence, std::move(publication))) {
         case program::ProgramTransitionPublishResult::Published:
             return program::JournalAppendResult::Appended;
         case program::ProgramTransitionPublishResult::AlreadyPresent:

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=42abbf35124835c1da4b1e5185db5ae192e6c83017aa1c19e54d5faa99de28ed -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -478,8 +478,9 @@ releaseStores(module, handle);
 | | `loadGenerationInitialPublication(ownerScope, lineageId, generation)` | 公開または `null` | 失敗します |
 | | `loadGraphMigrationCapsule(ownerScope, runId, lineageHeadId)` | カプセルまたは `null` | `null` |
 | | `loadExecutionLease(ownerScope, runId)` | リースまたは `null` | `null` |
-| | `comparePublish(ownerScope, expectedJournalHead, publication)` | 公開の結果 | 必須 |
-| | `comparePublishExecution(ownerScope, expectedJournalHead, publication, expectedLease, nextLease)` | 公開の結果。リースは正規テキストまたは `null` です | `"conflict"` |
+| | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | 公開の結果 | 必須 |
+| | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | 公開の結果。リースは正規テキストまたは `null` です | `"conflict"` |
+| | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | 公開の結果 | 必須 |
 | `programs` | `publishAdmitted(bundle, version)` | なし | 必須 |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | バンドルまたは `null` | 必須 |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | バージョンまたは `null` | 必須 |
@@ -507,6 +508,9 @@ releaseStores(module, handle);
 - **公開は、渡す前に検査されます。** `comparePublish` と `comparePublishExecution` は、遷移ストアのどのバックエンドとも同じように始まります。保存された状態を必要としない検査（公開の所有者、
   期待するヘッドの形、エフェクトのアウトボックス、公開の正規テキスト）です。これに通らない公開は `"conflict"` になり、オブジェクトには届きません。保存された状態がその公開について何を言うかは、
   ストアが決めます。
+- **所有権フェンス。** `expectedFence` は公開を書き込む制御オブジェクトのフェンスです。呼び出しが渡される前に、`comparePublish` と `comparePublishExecution` は、実行レコードまたはジャーナルレコードが
+  別のフェンスを持つ公開に `"conflict"` を返します。オブジェクトも、保存された実行の `continuation.fence` をジャーナルヘッドと同じ段階で `expectedFence` と比べ、異なれば拒否しなければなりません。
+  `comparePublishTakeover` は、`runId` の実行の保存された `Running` レコードを `fence = expectedFence + 1` と新しいジャーナルレコード 1 件で公開し、系譜に結び付いた実行ならば同じ段階で系譜ヘッドをそのレコードへ移し、それ以外は何も変えません。
 - **非対応。** `compare_publish_graph_safe_point` はシリアライズされない証拠を運ぶため、JavaScript ストアはライブのグラフマイグレーションには参加しません。基底クラスと同じく `"conflict"` を返します。
 
 **参照ストア。** `neograph.memoryStores()`（`stores.mjs` の `memoryStores(module)`）は、モジュールのインメモリ C++ ストアを呼び出してこの契約を実装する
@@ -519,9 +523,10 @@ releaseStores(module, handle);
 `test/program_stores_test.mjs` は、Program の実行全体についてこれを行います。
 
 ```js
-const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
-  'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
-  'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
+const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
+  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
+  'modules.setLifecycle']);
 
 function durable(reference, log) {                          // log.append(entry) is the host's storage
   const wrapped = {};

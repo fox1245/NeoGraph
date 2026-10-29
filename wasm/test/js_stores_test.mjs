@@ -357,7 +357,7 @@ const adapt = (stores) => {
 };
 
 await check('a missing required method fails adapt_js_stores, naming it', async () => {
-  const required = { transitions: ['load', 'latest', 'loadEvents', 'loadEffects', 'comparePublish'],
+  const required = { transitions: ['load', 'latest', 'loadEvents', 'loadEffects', 'comparePublish', 'comparePublishTakeover'],
     programs: ['publishAdmitted', 'getBundle', 'getVersion'], grants: ['admit', 'load', 'revoke'],
     fragments: ['publish', 'load', 'compareUpdate'], modules: ['publish', 'get', 'setLifecycle'] };
   const full = (member) => Object.fromEntries(required[member].map((method) => [method, noop]));
@@ -387,7 +387,7 @@ await check('a missing required method fails adapt_js_stores, naming it', async 
 
 await check('an optional method that the object lacks keeps the interface\'s default', async () => {
   const memory = memoryStores(module);
-  const required = { transitions: ['load', 'latest', 'loadEvents', 'loadEffects', 'comparePublish'],
+  const required = { transitions: ['load', 'latest', 'loadEvents', 'loadEffects', 'comparePublish', 'comparePublishTakeover'],
     programs: ['publishAdmitted', 'getBundle', 'getVersion'], grants: ['admit', 'load', 'revoke'],
     fragments: ['publish', 'load', 'compareUpdate'], modules: ['publish', 'get', 'setLifecycle'] };
   const stores = Object.fromEntries(MEMBERS.map((member) => [member,
@@ -443,7 +443,8 @@ await check('a Program completes over adapters whose methods all return Promises
 });
 
 await check('a durable store can wrap the reference store: replaying the logged calls restores the state', async () => {
-  const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
+  const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
+    'transitions.comparePublishTakeover', 'programs.publishAdmitted',
     'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
     'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
   const memory = memoryStores(module);

@@ -2,6 +2,7 @@
 
 #include "harness_journal_internal.h"
 #include "../program/canonical_json.h"
+#include "../program/transition_validator.h"
 #include "../core/own_json.h"
 #include "../core/json_walk.h"
 #include "../core/sqlite_wal.h"
@@ -1410,19 +1411,22 @@ public:
     program::ProgramTransitionPublishResult compare_publish_sync(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,
+        std::uint64_t                         expected_fence,
         program::ProgramTransitionPublication publication) override {
-        return compare_publish_impl(owner_scope, expected_journal_head,
+        return compare_publish_impl(owner_scope, expected_journal_head, expected_fence,
                                     std::move(publication), nullptr, nullptr, nullptr, nullptr);
     }
 
     program::ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication,
         std::optional<program::ProgramExecutionLease> expected_lease,
         std::optional<program::ProgramExecutionLease> next_lease) override {
         return compare_publish_impl(
-            owner_scope, expected_journal_head, std::move(publication), nullptr, nullptr,
+            owner_scope, expected_journal_head, expected_fence, std::move(publication), nullptr,
+            nullptr,
             expected_lease ? &*expected_lease : nullptr,
             next_lease ? &*next_lease : nullptr);
     }
@@ -1430,18 +1434,203 @@ public:
     program::ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication,
         const program::ProgramGraphSafePointEvidence& evidence,
         const program::GraphMigrationCapsule& capsule,
         const program::ProgramExecutionLease& execution_lease) override {
-        return compare_publish_impl(owner_scope, expected_journal_head,
+        return compare_publish_impl(owner_scope, expected_journal_head, expected_fence,
                                     std::move(publication), &evidence, &capsule,
                                     &execution_lease, nullptr);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override {
+        if (owner_scope.empty() || run_id.empty() || !is_program_identity(expected_journal_head) ||
+            expected_fence == 0 ||
+            expected_fence == std::numeric_limits<std::uint64_t>::max()) {
+            return program::ProgramTransitionPublishResult::Conflict;
+        }
+        std::lock_guard lock(impl_->mutex);
+        impl_->exec("BEGIN IMMEDIATE;");
+        try {
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterBegin);
+            const auto persisted_artifact = load_artifact_locked(artifact_.artifact_id());
+            if (!persisted_artifact ||
+                persisted_artifact->serialize().dump() != artifact_.serialize().dump()) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            Statement current(
+                impl_->db,
+                "SELECT run_id, owner_scope, artifact_id, bundle_id, program_version_id, "
+                "program_run_id, journal_head, record_json, program_publication_json "
+                "FROM neograph_harness_runs WHERE run_id=? AND owner_scope=? AND journal_head=? "
+                "AND program_run_id<>''");
+            current.bind_text(1, program_storage_run_id(owner_scope, run_id));
+            current.bind_text(2, std::string(owner_scope));
+            current.bind_text(3, std::string(expected_journal_head));
+            const auto step_rc = current.step();
+            if (step_rc == SQLITE_DONE) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            if (step_rc != SQLITE_ROW) {
+                throw_sqlite_error(impl_->db, "Program takeover CAS read failed");
+            }
+            const auto storage_run_id = current.text(0);
+            if (current.text(1) != owner_scope ||
+                current.text(2) != artifact_.artifact_id() ||
+                current.text(3) != artifact_.bundle().id() ||
+                current.text(4) != artifact_.version().id()) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            const auto stored_wrapper =
+                HarnessProgramRunRecord::parse(parse_own_json(current.text(7)));
+            stored_wrapper.validate_artifact(artifact_);
+            validate_publication_locked(stored_wrapper, current.text(6), current.text(8));
+            const auto& current_run = stored_wrapper.run_record();
+
+            Statement previous_journal_stmt(
+                impl_->db,
+                "SELECT record_json FROM neograph_harness_program_journal "
+                "WHERE run_id=? ORDER BY sequence DESC LIMIT 1");
+            previous_journal_stmt.bind_text(1, storage_run_id);
+            if (previous_journal_stmt.step() != SQLITE_ROW) {
+                throw std::invalid_argument("Stored Program run has no causal journal head");
+            }
+            const auto current_journal =
+                program::ProgramJournalRecord::parse(previous_journal_stmt.text(0));
+            if (current_run.journal_head() != expected_journal_head ||
+                current_run.run_id() != run_id ||
+                current_journal.id != expected_journal_head ||
+                current_run.continuation().state != program::ContinuationState::Running ||
+                current_journal.continuation.state != program::ContinuationState::Running ||
+                current_run.continuation().fence != expected_fence ||
+                current_journal.continuation.fence != expected_fence ||
+                current_journal.sequence >= static_cast<std::uint64_t>(INT64_MAX)) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+
+            // The lineage this run belongs to, if any: the takeover moves its head to the taken-over record in the
+            // same transaction, as every other store does.
+            std::optional<std::string> associated_lineage_id;
+            {
+                Statement association(
+                    impl_->db,
+                    "SELECT lineage_id FROM neograph_harness_program_lineage_runs "
+                    "WHERE owner_scope=? AND program_run_id=?");
+                association.bind_text(1, std::string(owner_scope));
+                association.bind_text(2, std::string(run_id));
+                const auto result = association.step();
+                if (result == SQLITE_ROW)
+                    associated_lineage_id = association.text(0);
+                else if (result != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program lineage association read failed");
+            }
+            std::optional<program::ProgramRunLineage> current_lineage;
+            if (associated_lineage_id) {
+                Statement lineage_query(
+                    impl_->db,
+                    "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                    "WHERE owner_scope=? AND lineage_id=?");
+                lineage_query.bind_text(1, std::string(owner_scope));
+                lineage_query.bind_text(2, *associated_lineage_id);
+                const auto lineage_result = lineage_query.step();
+                if (lineage_result != SQLITE_ROW) {
+                    if (lineage_result != SQLITE_DONE)
+                        throw_sqlite_error(impl_->db, "Program lineage CAS read failed");
+                    throw std::invalid_argument("Stored Program lineage association has no head");
+                }
+                current_lineage = program::ProgramRunLineage::parse(lineage_query.text(1));
+                if (current_lineage->id() != lineage_query.text(0) ||
+                    current_lineage->owner_scope() != owner_scope ||
+                    current_lineage->lineage_id() != *associated_lineage_id) {
+                    throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+                }
+            }
+
+            auto takeover = program::detail::transition::prepare_takeover(
+                owner_scope, run_id, expected_journal_head, expected_fence, current_run,
+                current_journal, current_lineage);
+            if (!takeover) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            const auto& next_journal = takeover->journal_record;
+            const auto& next_run     = takeover->run_record;
+            const auto next_wrapper =
+                HarnessProgramRunRecord::create(artifact_, next_run, artifact_.projection());
+            const auto serialized_wrapper = next_wrapper.serialize().dump();
+
+            Statement update(
+                impl_->db,
+                "UPDATE neograph_harness_runs SET program_run_id=?, journal_head=?, record_json=? "
+                "WHERE run_id=? AND owner_scope=? AND artifact_id=? AND bundle_id=? "
+                "AND program_version_id=? AND program_run_id=? AND journal_head=?");
+            update.bind_text(1, next_run.id());
+            update.bind_text(2, next_run.journal_head());
+            update.bind_text(3, serialized_wrapper);
+            update.bind_text(4, storage_run_id);
+            update.bind_text(5, std::string(owner_scope));
+            update.bind_text(6, artifact_.artifact_id());
+            update.bind_text(7, artifact_.bundle().id());
+            update.bind_text(8, artifact_.version().id());
+            update.bind_text(9, current.text(5));
+            update.bind_text(10, std::string(expected_journal_head));
+            if (update.step() != SQLITE_DONE) {
+                throw_sqlite_error(impl_->db, "Program takeover run update failed");
+            }
+            if (sqlite3_changes(impl_->db) != 1) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            if (takeover->run_lineage) {
+                Statement update_lineage(
+                    impl_->db,
+                    "UPDATE neograph_harness_program_lineage_heads "
+                    "SET head_id=?, record_json=? WHERE owner_scope=? AND lineage_id=? AND head_id=?");
+                update_lineage.bind_text(1, takeover->run_lineage->id());
+                update_lineage.bind_text(2, takeover->run_lineage->serialize_canonical());
+                update_lineage.bind_text(3, std::string(owner_scope));
+                update_lineage.bind_text(4, takeover->run_lineage->lineage_id());
+                update_lineage.bind_text(5, current_lineage->id());
+                if (update_lineage.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1)
+                    throw_sqlite_error(impl_->db, "Program takeover lineage head update failed");
+                Statement insert_history(
+                    impl_->db,
+                    "INSERT INTO neograph_harness_program_lineage_history "
+                    "(owner_scope, lineage_id, head_id, record_json) VALUES(?, ?, ?, ?)");
+                insert_history.bind_text(1, std::string(owner_scope));
+                insert_history.bind_text(2, takeover->run_lineage->lineage_id());
+                insert_history.bind_text(3, takeover->run_lineage->id());
+                insert_history.bind_text(4, takeover->run_lineage->serialize_canonical());
+                if (insert_history.step() != SQLITE_DONE)
+                    throw_sqlite_error(impl_->db, "Program takeover lineage history insert failed");
+            }
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
+            insert_journal(storage_run_id, owner_scope, next_journal);
+            maybe_fail(SqliteHarnessProgramFaultPoint::AfterJournalWrite);
+            maybe_fail(SqliteHarnessProgramFaultPoint::BeforeCommit);
+            impl_->exec("COMMIT;");
+            return program::ProgramTransitionPublishResult::Published;
+        } catch (...) {
+            try {
+                impl_->exec("ROLLBACK;");
+            } catch (...) {}
+            throw;
+        }
     }
 
     program::ProgramTransitionPublishResult compare_publish_impl(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         program::ProgramTransitionPublication publication,
         const program::ProgramGraphSafePointEvidence* safe_point_evidence,
         const program::GraphMigrationCapsule* safe_point_capsule,
@@ -1450,6 +1639,11 @@ public:
         std::string                            publication_bytes;
         std::optional<HarnessProgramRunRecord> wrapper;
         if (!expected_journal_head.empty() && !is_program_identity(expected_journal_head)) {
+            return program::ProgramTransitionPublishResult::Conflict;
+        }
+        if (expected_fence == 0 ||
+            publication.run_record.continuation().fence != expected_fence ||
+            publication.journal_record.continuation.fence != expected_fence) {
             return program::ProgramTransitionPublishResult::Conflict;
         }
         try {
@@ -1571,8 +1765,13 @@ public:
                 }
                 stored_wrapper.validate_artifact(artifact_);
                 validate_publication_locked(stored_wrapper, current.text(5), current.text(7));
+                if (stored_wrapper.run_record().continuation().fence != expected_fence) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
             }
-            if (exists && current.text(7) == publication_bytes) {
+            if (exists && current.text(5) == publication.journal_record.id &&
+                current.text(7) == publication_bytes) {
                 if (safe_point_capsule) {
                     const auto stored = load_graph_migration_capsule_locked(
                         owner_scope, publication.run_record.run_id(),
@@ -2111,6 +2310,8 @@ public:
                     return program::ProgramTransitionPublishResult::Conflict;
                 }
                 if (previous.id != expected_journal_head ||
+                    previous.continuation.fence != expected_fence ||
+                    previous_run.continuation().fence != expected_fence ||
                     publication.run_record.created_at_ms() != previous_run.created_at_ms() ||
                     publication.run_record.updated_at_ms() < previous_run.updated_at_ms() ||
                     publication.run_record.binding_fingerprint() !=
@@ -2476,10 +2677,41 @@ private:
         const auto& run         = wrapper.run_record();
         const auto  storage_run_id = program_storage_run_id(run.owner_scope(), run.run_id());
         if (publication.serialize_canonical() != publication_bytes ||
-            publication.run_record.serialize_canonical() != run.serialize_canonical() ||
-            publication.journal_record.id != row_journal_head ||
             run.journal_head() != row_journal_head) {
             throw std::invalid_argument("Stored Program publication binding is corrupt");
+        }
+        std::uint64_t expected_journal_count = publication.journal_record.sequence;
+        if (publication.journal_record.id == row_journal_head) {
+            if (publication.run_record.serialize_canonical() != run.serialize_canonical()) {
+                throw std::invalid_argument("Stored Program publication binding is corrupt");
+            }
+        } else {
+            Statement head_journal_stmt(
+                impl_->db,
+                "SELECT record_json FROM neograph_harness_program_journal "
+                "WHERE run_id=? AND record_id=? AND owner_scope=? "
+                "AND bundle_id=? AND program_version_id=?");
+            head_journal_stmt.bind_text(1, storage_run_id);
+            head_journal_stmt.bind_text(2, std::string(row_journal_head));
+            head_journal_stmt.bind_text(3, run.owner_scope());
+            head_journal_stmt.bind_text(4, run.bundle_id());
+            head_journal_stmt.bind_text(5, run.program_version_id());
+            if (head_journal_stmt.step() != SQLITE_ROW) {
+                throw std::invalid_argument("Stored Program takeover journal head is missing");
+            }
+            const auto head_journal =
+                program::ProgramJournalRecord::parse(head_journal_stmt.text(0));
+            if (head_journal.id != row_journal_head ||
+                head_journal.continuation != run.continuation() ||
+                run.continuation().state != program::ContinuationState::Running ||
+                run.continuation().fence <= publication.run_record.continuation().fence ||
+                head_journal.sequence !=
+                    publication.journal_record.sequence +
+                        (run.continuation().fence -
+                         publication.run_record.continuation().fence)) {
+                throw std::invalid_argument("Stored Program takeover head binding is corrupt");
+            }
+            expected_journal_count = head_journal.sequence;
         }
 
         Statement journal(impl_->db,
@@ -2558,7 +2790,7 @@ private:
                 throw std::invalid_argument("Stored Program publication sequence is incomplete");
             }
         };
-        require_count("neograph_harness_program_journal", publication.journal_record.sequence);
+        require_count("neograph_harness_program_journal", expected_journal_count);
         require_count("neograph_harness_program_events", run.event_sequence());
         require_count("neograph_harness_program_effects", run.effect_sequence());
     }

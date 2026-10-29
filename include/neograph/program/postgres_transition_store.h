@@ -100,20 +100,28 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) override;
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override;
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) override;
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override;
 
 protected:
     /** libpq blocks for long: an awaited operation runs on a thread of the bounded pool (#556). */
@@ -123,6 +131,7 @@ private:
     ProgramTransitionPublishResult compare_publish_impl(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence* evidence,
         const GraphMigrationCapsule* capsule,

@@ -534,3 +534,38 @@ TEST(ProgramJournalTest, InterruptedPendingCancellationIsValid) {
     EXPECT_EQ(journal.compare_append(interrupted.id, cancelled),
               JournalAppendResult::Appended);
 }
+
+TEST(ProgramJournalTest, OwnershipFenceRoundTripsMigratesLegacyV1AndRejectsRegression) {
+    const auto start = start_record();
+    EXPECT_EQ(start.continuation.fence, 1U);
+
+    const auto taken_over = ProgramJournalRecord::create(ProgramJournalRecordData{
+        start.id, start.run_id, start.program_version_id, start.bundle_id, 2,
+        ProgramContinuation{"root", ContinuationState::Running, 1, 2}, start.remaining_budget,
+        empty_budget(), std::nullopt, 20});
+    EXPECT_TRUE(is_valid_program_journal_transition(start, taken_over));
+    EXPECT_EQ(ProgramJournalRecord::parse(taken_over.serialize_canonical()).continuation.fence, 2U);
+
+    const auto regressed = ProgramJournalRecord::create(ProgramJournalRecordData{
+        taken_over.id, taken_over.run_id, taken_over.program_version_id, taken_over.bundle_id, 3,
+        ProgramContinuation{"root", ContinuationState::Running, 1, 1}, taken_over.remaining_budget,
+        empty_budget(), std::nullopt, 30});
+    EXPECT_FALSE(is_valid_program_journal_transition(taken_over, regressed));
+
+    const auto skipped_fence = ProgramJournalRecord::create(ProgramJournalRecordData{
+        start.id, start.run_id, start.program_version_id, start.bundle_id, 2,
+        ProgramContinuation{"root", ContinuationState::Running, 1, 3}, start.remaining_budget,
+        empty_budget(), std::nullopt, 20});
+    EXPECT_FALSE(is_valid_program_journal_transition(start, skipped_fence));
+
+    // A v1 journal record stored without a fence reads as fence = 1 and validates against its v1 id.
+    const std::string v1_journal =
+        R"({"bundle_id":")" + digest('b') +
+        R"(","continuation":{"attempt":1,"operation_id":"root","state":"running"},"core_checkpoint":null,"format":"neograph-program-journal-record","id":"sha256:6268dc604aef3ad76ef2597085755eb5421b5e266d1cf3fb655e836492a68e20","inflight_reservation":{"max_child_depth":0,"max_concurrency":0,"max_core_steps":0,"max_dynamic_compiles":0,"max_program_operations":0,"max_total_children":0,"model_tokens":0,"monetary_microunits":0,"wall_time_ms":0},"previous_id":"","program_version_id":")" +
+        digest('a') +
+        R"(","remaining_budget":{"max_child_depth":0,"max_concurrency":1,"max_core_steps":10,"max_dynamic_compiles":0,"max_program_operations":1,"max_total_children":0,"model_tokens":100,"monetary_microunits":100,"wall_time_ms":1000},"run_id":"run-golden","sequence":1,"storage_schema_version":1,"timestamp_ms":10})";
+    const auto parsed_v1 = ProgramJournalRecord::parse(v1_journal);
+    EXPECT_EQ(parsed_v1.continuation.fence, 1U);
+    EXPECT_EQ(parsed_v1.id,
+              "sha256:6268dc604aef3ad76ef2597085755eb5421b5e266d1cf3fb655e836492a68e20");
+}

@@ -527,17 +527,20 @@ ProgramTransitionPublication terminal_publication(const Fixture&                
                                                   const ProgramTransitionPublication& initial,
                                                   ProgramTerminalStatus               status,
                                                   ContinuationState                   state,
-                                                  std::int64_t                        timestamp) {
+                                                  std::int64_t                        timestamp,
+                                                  const ProgramJournalRecord*         previous = nullptr,
+                                                  std::uint64_t                       fence    = 1) {
     const CoreCheckpointIdentity checkpoint{
         "main", digest('5'),
         program_root_core_thread_id(initial.run_record.run_id(), digest('5')),
         "checkpoint-one", graph::CHECKPOINT_SCHEMA_VERSION};
-    auto                         journal = ProgramJournalRecord::create({initial.journal_record.id,
+    const auto& base = previous ? *previous : initial.journal_record;
+    auto                         journal = ProgramJournalRecord::create({base.id,
                                                                          initial.run_record.run_id(),
                                                                          fixture.version_value.id(),
                                                                          fixture.bundle_value.id(),
-                                                                         2,
-                                                                         {"root", state, 1},
+                                                                         base.sequence + 1,
+                                                                         {"root", state, 1, fence},
                                                                          budget(),
                                                                          {},
                                                                          checkpoint,
@@ -575,6 +578,40 @@ ProgramTransitionPublication terminal_publication(const Fixture&                
             {event(fixture, initial.run_record.run_id(), 2, ProgramEventKind::Terminal,
                    ProgramTerminalEvent{status}, timestamp)},
             {}};
+}
+
+// A Running publication that follows `previous` and changes nothing but the fence (and the time): the shape of a
+// takeover, written as an ordinary publication.
+ProgramTransitionPublication takeover_shaped_publication(const Fixture&                      fixture,
+                                                         const ProgramTransitionPublication& initial,
+                                                         const ProgramJournalRecord&         previous,
+                                                         std::uint64_t                       fence,
+                                                         std::int64_t                        timestamp) {
+    auto journal = ProgramJournalRecord::create({previous.id,
+                                                 initial.run_record.run_id(),
+                                                 fixture.version_value.id(),
+                                                 fixture.bundle_value.id(),
+                                                 previous.sequence + 1,
+                                                 {"root", ContinuationState::Running, 1, fence},
+                                                 previous.remaining_budget,
+                                                 previous.inflight_reservation,
+                                                 previous.core_checkpoint,
+                                                 timestamp});
+    ProgramRunRecordData data;
+    data.owner_scope         = fixture.policy_value.owner_scope();
+    data.run_id              = initial.run_record.run_id();
+    data.program_version_id  = fixture.version_value.id();
+    data.bundle_id           = fixture.bundle_value.id();
+    data.binding_fingerprint = initial.run_record.binding_fingerprint();
+    data.invocation          = initial.run_record.invocation();
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = journal.remaining_budget;
+    data.exact_checkpoint    = journal.core_checkpoint;
+    data.journal_head        = journal.id;
+    data.event_sequence      = initial.run_record.event_sequence();
+    data.created_at_ms       = initial.run_record.created_at_ms();
+    data.updated_at_ms       = timestamp;
+    return {ProgramRunRecord::create(std::move(data)), journal, {}, {}};
 }
 
 std::shared_ptr<program::ProgramTransitionStore> persist_and_bind(
@@ -655,9 +692,9 @@ TEST(HarnessProgramStoreTest, SqliteReopensExactOwnerBoundRunAndLegacyRowsStillW
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::AlreadyPresent);
 
         store->save_artifact("legacy-artifact", json{{"artifact_id", "legacy-artifact"}});
@@ -727,10 +764,10 @@ TEST(HarnessProgramStoreTest, SqliteContextPublicationRollsBackReopensAndRejects
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         store->fail_next_program_transition_for_testing(
             SqliteHarnessProgramFaultPoint::AfterContextWrite);
-        EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, publication),
+        EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, publication),
                      std::runtime_error);
         EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), publication.run_record.run_id()));
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, publication),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, publication),
                   ProgramTransitionPublishResult::Published);
     }
 
@@ -766,7 +803,7 @@ TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) 
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, source),
                   ProgramTransitionPublishResult::Published);
         ASSERT_TRUE(transitions->load_lineage(fixture.artifact.owner_scope(), lineage_id));
         EXPECT_FALSE(transitions->load_lineage("tenant-other", lineage_id));
@@ -783,7 +820,7 @@ TEST(HarnessProgramStoreTest, SqliteRejectsReceiptlessSuccessorAcrossReconnect) 
 
         auto successor = initial_publication(fixture, "lineage-successor");
         attach_successor_lineage(successor, *previous);
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, successor),
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, successor),
                    ProgramTransitionPublishResult::Conflict);
         EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "lineage-successor"));
     }
@@ -847,7 +884,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle source_transitions = persist_and_bind(store, source_fixture);
-        ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {},
+        ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {}, 1,
                                                       source),
                   ProgramTransitionPublishResult::Published);
         TransitionStoreHandle target_transitions = persist_and_bind(store, target_fixture);
@@ -857,7 +894,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
         store->fail_next_program_transition_for_testing(
             SqliteHarnessProgramFaultPoint::AfterRunWrite);
         EXPECT_THROW((void)target_transitions->compare_publish(
-                         target_fixture.artifact.owner_scope(), {}, target),
+                         target_fixture.artifact.owner_scope(), {}, 1, target),
                       std::runtime_error);
     }
 
@@ -875,7 +912,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementFaultRollsBackAndReceiptSurvivesR
             transitions->load_lineage(target_fixture.artifact.owner_scope(), lineage_id);
         ASSERT_TRUE(old_head);
         EXPECT_EQ(old_head->id(), source.run_lineage->id());
-        ASSERT_EQ(transitions->compare_publish(target_fixture.artifact.owner_scope(), {}, target),
+        ASSERT_EQ(transitions->compare_publish(target_fixture.artifact.owner_scope(), {}, 1, target),
                   ProgramTransitionPublishResult::Published);
     }
 
@@ -950,7 +987,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementRejectsMissingPredecessorArtifact
 
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle source_transitions = persist_and_bind(store, source_fixture);
-    ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {}, source),
+    ASSERT_EQ(source_transitions->compare_publish(source_fixture.artifact.owner_scope(), {}, 1, source),
               ProgramTransitionPublishResult::Published);
     TransitionStoreHandle target_transitions = persist_and_bind(store, target_fixture);
     sqlite_exec(db.path,
@@ -958,7 +995,7 @@ TEST(HarnessProgramStoreTest, SqliteReplacementRejectsMissingPredecessorArtifact
                 "WHERE artifact_id='artifact-one';");
 
     EXPECT_THROW((void)target_transitions->compare_publish(
-                     target_fixture.artifact.owner_scope(), {}, target),
+                     target_fixture.artifact.owner_scope(), {}, 1, target),
                  std::invalid_argument);
     EXPECT_FALSE(
         target_transitions->load_generation(target_fixture.artifact.owner_scope(),
@@ -982,13 +1019,13 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, source_start),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, source_start),
                   ProgramTransitionPublishResult::Published);
         auto source = publication_with_effect(fixture, source_start);
         source.context_publication.reset();
         attach_same_generation_lineage(source, *source_start.run_lineage);
         ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(),
-                                               source_start.journal_record.id, source),
+                                               source_start.journal_record.id, 1, source),
                   ProgramTransitionPublishResult::Published);
 
         // The fork takes the whole of every amount the source had; its
@@ -1016,7 +1053,7 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
             source.run_lineage->inflight_reservation(), source.run_lineage->id(),
             source.run_lineage->created_at_ms(), dropped.run_record.updated_at_ms(),
             source.run_lineage->committed_descendant_budget()});
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, dropped),
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, dropped),
                   ProgramTransitionPublishResult::Conflict);
         EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "fork-dropped-pending"));
 
@@ -1042,16 +1079,16 @@ TEST(HarnessProgramStoreTest, SqliteForkAtomicallyDebitsSourceAndCreatesTargetLi
         ASSERT_NE(source_lineage_id, target_lineage_id);
         store->fail_next_program_transition_for_testing(
             SqliteHarnessProgramFaultPoint::AfterRunWrite);
-        EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, target),
+        EXPECT_THROW((void)transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, target),
                      std::runtime_error);
         EXPECT_FALSE(transitions->load(fixture.artifact.owner_scope(), "fork-target"));
         EXPECT_EQ(transitions
                       ->load_run_lineage(fixture.artifact.owner_scope(), "fork-source")
                       ->id(),
                   source.run_lineage->id());
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, target),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, target),
                   ProgramTransitionPublishResult::Published);
-        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, target),
+        EXPECT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, target),
                   ProgramTransitionPublishResult::AlreadyPresent);
     }
 
@@ -1101,7 +1138,7 @@ TEST(HarnessProgramStoreTest, SqliteReopenSurvivesNewProcessExec) {
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
     }
 
@@ -1142,7 +1179,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
         ASSERT_TRUE(before);
         ASSERT_EQ(before->journal_head(), initial.journal_record.id);
         const auto result = transitions->compare_publish(
-            fixture.artifact.owner_scope(), initial.journal_record.id, std::move(terminal));
+            fixture.artifact.owner_scope(), initial.journal_record.id, 1, std::move(terminal));
         ASSERT_EQ(result, ProgramTransitionPublishResult::Published);
         FAIL() << "SIGKILL crash hook returned";
     }
@@ -1153,7 +1190,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
     {
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
     }
 
@@ -1187,7 +1224,7 @@ TEST(HarnessProgramStoreTest, SqliteCrashDuringTransitionReopensWithCommittedPre
     EXPECT_EQ(transitions->load_events(fixture.artifact.owner_scope(), "run-crash").size(), 1U);
 
     EXPECT_EQ(transitions->compare_publish(
-                  fixture.artifact.owner_scope(), initial.journal_record.id,
+                  fixture.artifact.owner_scope(), initial.journal_record.id, 1,
                   terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
                                        ContinuationState::Completed, 20)),
               ProgramTransitionPublishResult::Published);
@@ -1202,7 +1239,7 @@ TEST(HarnessProgramStoreTest, SqliteProgramTransitionsEnforceOwnerScope) {
     TransitionStoreHandle    transitions = persist_and_bind(store, fixture);
     auto    initial     = initial_publication(fixture);
 
-    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
               ProgramTransitionPublishResult::Published);
 
     // A run ID is only meaningful inside its admitted owner scope. Wrong-owner
@@ -1212,7 +1249,7 @@ TEST(HarnessProgramStoreTest, SqliteProgramTransitionsEnforceOwnerScope) {
     EXPECT_FALSE(transitions->latest("tenant-other", "run-one").has_value());
     EXPECT_TRUE(transitions->load_events("tenant-other", "run-one").empty());
     EXPECT_TRUE(transitions->load_effects("tenant-other", "run-one").empty());
-    EXPECT_EQ(transitions->compare_publish("tenant-other", {}, initial),
+    EXPECT_EQ(transitions->compare_publish("tenant-other", {}, 1, initial),
               ProgramTransitionPublishResult::Conflict);
 }
 
@@ -1222,14 +1259,14 @@ TEST(HarnessProgramStoreTest, SqliteCommandlessRunningCheckpointRequiresHostEvid
     auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle    transitions = persist_and_bind(store, fixture);
     auto    initial     = initial_lineage_publication(fixture);
-    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
               ProgramTransitionPublishResult::Published);
     const auto lineage = transitions->load_run_lineage(
         fixture.artifact.owner_scope(), initial.run_record.run_id());
     ASSERT_TRUE(lineage);
 
     EXPECT_EQ(transitions->compare_publish(
-                  fixture.artifact.owner_scope(), initial.journal_record.id,
+                  fixture.artifact.owner_scope(), initial.journal_record.id, 1,
                   commandless_running_checkpoint_publication(fixture, initial, *lineage)),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(transitions->latest(fixture.artifact.owner_scope(),
@@ -1246,7 +1283,7 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
     auto initial = initial_lineage_publication(fixture);
     const auto lease = execution_lease(initial);
     ASSERT_EQ(transitions->compare_publish_execution(
-                  fixture.artifact.owner_scope(), {}, initial, std::nullopt, lease),
+                  fixture.artifact.owner_scope(), {}, 1, initial, std::nullopt, lease),
               ProgramTransitionPublishResult::Published);
 
     transitions.reset();
@@ -1264,10 +1301,10 @@ TEST(HarnessProgramStoreTest, SqliteExecutionLeasePersistsAndFencesOrdinaryPubli
         ContinuationState::Completed, 20);
     attach_same_generation_lineage(terminal, *initial.run_lineage);
     EXPECT_EQ(transitions->compare_publish(
-                  fixture.artifact.owner_scope(), initial.journal_record.id, terminal),
+                  fixture.artifact.owner_scope(), initial.journal_record.id, 1, terminal),
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(transitions->compare_publish_execution(
-                  fixture.artifact.owner_scope(), initial.journal_record.id, terminal,
+                  fixture.artifact.owner_scope(), initial.journal_record.id, 1, terminal,
                   lease, std::nullopt),
               ProgramTransitionPublishResult::Published);
     EXPECT_FALSE(transitions->load_execution_lease(
@@ -1281,11 +1318,11 @@ TEST(HarnessProgramStoreTest, SqlitePublishesAnInitiallyAmbiguousEffect) {
     auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle transitions = persist_and_bind(store, fixture);
     const auto initial = initial_publication(fixture);
-    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+    ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
               ProgramTransitionPublishResult::Published);
     const auto ambiguous = publication_with_effect(fixture, initial, true);
     ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(),
-                                           initial.journal_record.id, ambiguous),
+                                           initial.journal_record.id, 1, ambiguous),
               ProgramTransitionPublishResult::Published);
     const auto run = transitions->load(fixture.artifact.owner_scope(), "run-one");
     ASSERT_TRUE(run);
@@ -1303,7 +1340,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublic
     auto writer_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle writer = persist_and_bind(writer_store, fixture);
     const auto initial = initial_publication(fixture);
-    ASSERT_EQ(writer->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+    ASSERT_EQ(writer->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
               ProgramTransitionPublishResult::Published);
     const auto completed = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
                                                 ContinuationState::Completed, 20);
@@ -1317,7 +1354,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestKeepsOneSnapshotAcrossConcurrentPublic
         bool published = false;
         reader_store->after_next_program_run_read_for_testing([&] {
             EXPECT_EQ(writer->compare_publish(fixture.artifact.owner_scope(),
-                                              initial.journal_record.id, completed),
+                                              initial.journal_record.id, 1, completed),
                       ProgramTransitionPublishResult::Published);
             published = true;
         });
@@ -1340,7 +1377,7 @@ TEST(HarnessProgramStoreTest, SqliteLatestRejectsMissingOrMisboundJournal) {
         auto store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         const auto initial = initial_publication(fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
         EXPECT_FALSE(transitions->latest("different-owner", "run-one"));
         EXPECT_FALSE(transitions->latest(fixture.artifact.owner_scope(), "missing-run"));
@@ -1356,14 +1393,14 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
     auto    first_store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
     TransitionStoreHandle    first       = persist_and_bind(first_store, fixture);
     auto    initial     = initial_publication(fixture);
-    ASSERT_EQ(first->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+    ASSERT_EQ(first->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
               ProgramTransitionPublishResult::Published);
 
     auto invalid = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
                                         ContinuationState::Completed, 15);
     invalid.events.front().sequence = 7;
     EXPECT_EQ(
-        first->compare_publish(fixture.artifact.owner_scope(), initial.journal_record.id, invalid),
+        first->compare_publish(fixture.artifact.owner_scope(), initial.journal_record.id, 1, invalid),
         ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(first->load_events(fixture.artifact.owner_scope(), "run-one").size(), 1U);
     EXPECT_EQ(first->latest(fixture.artifact.owner_scope(), "run-one")->id,
@@ -1380,7 +1417,7 @@ TEST(HarnessProgramStoreTest, TwoSqliteInstancesHaveOneCasWinnerAndRollbackInval
     auto         publish = [&](const TransitionStoreHandle& store,
                        ProgramTransitionPublication  value) {
         ready.arrive_and_wait();
-        return store->compare_publish(fixture.artifact.owner_scope(), initial.journal_record.id,
+        return store->compare_publish(fixture.artifact.owner_scope(), initial.journal_record.id, 1,
                                               std::move(value));
     };
     auto a = std::async(std::launch::async, [&] { return publish(first, completed); });
@@ -1423,14 +1460,14 @@ TEST(HarnessProgramStoreTest, SqlitePublicationFaultsRollbackAllRowsAcrossReconn
         auto   store = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
         auto initial     = initial_publication(fixture, "run-effect");
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
         auto publication = publication_with_effect(fixture, initial);
         store->fail_next_program_transition_for_testing(point);
 
         EXPECT_THROW(
             (void)transitions->compare_publish(fixture.artifact.owner_scope(),
-                                                initial.journal_record.id, publication),
+                                                initial.journal_record.id, 1, publication),
             std::runtime_error);
 
         transitions.reset();
@@ -1447,13 +1484,13 @@ TEST(HarnessProgramStoreTest, SqlitePublicationFaultsRollbackAllRowsAcrossReconn
 
         EXPECT_EQ(
             recovered->compare_publish(fixture.artifact.owner_scope(),
-                                       initial.journal_record.id, publication),
+                                       initial.journal_record.id, 1, publication),
             ProgramTransitionPublishResult::Published);
         EXPECT_EQ(recovered->load_events(fixture.artifact.owner_scope(), "run-effect").size(), 2U);
         EXPECT_EQ(recovered->load_effects(fixture.artifact.owner_scope(), "run-effect").size(), 1U);
         EXPECT_EQ(
             recovered->compare_publish(fixture.artifact.owner_scope(),
-                                       initial.journal_record.id, publication),
+                                       initial.journal_record.id, 1, publication),
             ProgramTransitionPublishResult::AlreadyPresent);
         EXPECT_EQ(recovered->load_events(fixture.artifact.owner_scope(), "run-effect").size(), 2U);
         EXPECT_EQ(recovered->load_effects(fixture.artifact.owner_scope(), "run-effect").size(), 1U);
@@ -1468,7 +1505,7 @@ TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {
             auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
             TransitionStoreHandle transitions = persist_and_bind(store, fixture);
             auto initial     = initial_publication(fixture);
-            ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+            ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                       ProgramTransitionPublishResult::Published);
         }
         sqlite_exec(db.path,
@@ -1484,7 +1521,7 @@ TEST(HarnessProgramStoreTest, ReopenRejectsTamperAndMissingPublishedOutbox) {
             auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
             TransitionStoreHandle transitions = persist_and_bind(store, fixture);
             auto initial     = initial_publication(fixture);
-            ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+            ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                       ProgramTransitionPublishResult::Published);
         }
         sqlite_exec(db.path, "DELETE FROM neograph_harness_program_events");
@@ -1512,7 +1549,7 @@ TEST(HarnessProgramStoreTest, SqliteDurablyLoadsJavaScriptCommandJournalByOwnerA
     {
         auto store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
         TransitionStoreHandle transitions = persist_and_bind(store, fixture);
-        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, initial),
+        ASSERT_EQ(transitions->compare_publish(fixture.artifact.owner_scope(), {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
     }
 
@@ -1527,4 +1564,148 @@ TEST(HarnessProgramStoreTest, SqliteDurablyLoadsJavaScriptCommandJournalByOwnerA
         transitions->load_javascript_commands(fixture.artifact.owner_scope(), "run-command", 1)
             .empty());
     EXPECT_TRUE(transitions->load_javascript_commands("tenant-other", "run-command").empty());
+}
+
+TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreEnforcesOwnershipFenceAndTakeover) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    auto    initial     = initial_lineage_publication(fixture, "run-fenced");
+
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, initial), ProgramTransitionPublishResult::Published);
+    const auto lineage_before = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_before);
+    ASSERT_EQ(lineage_before->active_run_record_id(), initial.run_record.id());
+    ASSERT_EQ(lineage_before->active_journal_head(), initial.journal_record.id);
+
+    EXPECT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", initial.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", initial.journal_record.id, 1),
+              ProgramTransitionPublishResult::Conflict);
+
+    const auto taken_over = transitions->load(owner, "run-fenced");
+    ASSERT_TRUE(taken_over);
+    EXPECT_EQ(taken_over->continuation().fence, 2U);
+    EXPECT_EQ(taken_over->continuation().attempt, 1U);
+    const auto taken_over_journal = transitions->latest(owner, "run-fenced");
+    ASSERT_TRUE(taken_over_journal);
+    EXPECT_EQ(taken_over_journal->continuation.fence, 2U);
+    EXPECT_EQ(taken_over_journal->sequence, 2U);
+
+    // The takeover moves the run's lineage head to the taken-over record and journal head in the same transaction; the
+    // head it replaced stays in the history, and the next publication chains from the new head.
+    const auto lineage_1 = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_1);
+    EXPECT_EQ(lineage_1->active_run_record_id(), taken_over->id());
+    EXPECT_EQ(lineage_1->active_journal_head(), taken_over_journal->id);
+    EXPECT_EQ(lineage_1->active_generation_id(), lineage_before->active_generation_id());
+    ASSERT_TRUE(lineage_1->predecessor_head_id().has_value());
+    EXPECT_EQ(*lineage_1->predecessor_head_id(), lineage_before->id());
+    const auto by_lineage_id = transitions->load_lineage(owner, lineage_1->lineage_id());
+    ASSERT_TRUE(by_lineage_id);
+    EXPECT_EQ(by_lineage_id->id(), lineage_1->id());
+    EXPECT_TRUE(transitions->load_lineage_head(owner, lineage_before->lineage_id(), lineage_before->id()));
+    EXPECT_TRUE(transitions->load_lineage_head(owner, lineage_1->lineage_id(), lineage_1->id()));
+
+    // Every publication below carries the lineage a real owner would send (a same-generation head built on the stored
+    // head), so a refusal is down to the one thing that differs between it and the accepted publication.
+    auto stale = terminal_publication(
+        fixture, initial, ProgramTerminalStatus::Completed, ContinuationState::Completed, 20);
+    attach_same_generation_lineage(stale, *lineage_before);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 1, stale),
+              ProgramTransitionPublishResult::Conflict);
+
+    // A publication of the new owner (fence 2) that builds on the lineage head the takeover replaced is refused.
+    auto on_old_lineage = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                               ContinuationState::Completed, 20, &*taken_over_journal, 2);
+    attach_same_generation_lineage(on_old_lineage, *lineage_before);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 2, on_old_lineage),
+              ProgramTransitionPublishResult::Conflict);
+
+    // A stale writer that reloaded the new head but still writes fence 1 is refused, whether it names its own fence or
+    // the stored one.
+    auto stale_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                  ContinuationState::Completed, 20, &*taken_over_journal, 1);
+    attach_same_generation_lineage(stale_on_new_head, *lineage_1);
+    ASSERT_EQ(stale_on_new_head.journal_record.previous_id, taken_over_journal->id);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 1, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, taken_over->journal_head(), 2, stale_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+
+    // A second takeover moves the fence to 3. A writer that still holds fence 2 writes the same schema as the new
+    // owner, so only the stored fence tells them apart: it is refused on the new head, whichever fence it names, and
+    // the same publication carrying fence 3 is accepted.
+    ASSERT_EQ(transitions->compare_publish_takeover(owner, "run-fenced", taken_over->journal_head(), 2),
+              ProgramTransitionPublishResult::Published);
+    const auto second_journal = transitions->latest(owner, "run-fenced");
+    ASSERT_TRUE(second_journal);
+    ASSERT_EQ(second_journal->continuation.fence, 3U);
+    const auto lineage_2 = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(lineage_2);
+    EXPECT_EQ(lineage_2->active_journal_head(), second_journal->id);
+    ASSERT_TRUE(lineage_2->predecessor_head_id().has_value());
+    EXPECT_EQ(*lineage_2->predecessor_head_id(), lineage_1->id());
+    auto fence_2_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                    ContinuationState::Completed, 20, &*second_journal, 2);
+    attach_same_generation_lineage(fence_2_on_new_head, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 2, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, fence_2_on_new_head),
+              ProgramTransitionPublishResult::Conflict);
+    // A publication that raises the fence by one, naming the raised fence, is a takeover written as an ordinary
+    // publication: refused, because only compare_publish_takeover moves the fence.
+    auto raised = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                       ContinuationState::Completed, 20, &*second_journal, 4);
+    attach_same_generation_lineage(raised, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 4, raised),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, raised),
+              ProgramTransitionPublishResult::Conflict);
+    auto fence_3_on_new_head = terminal_publication(fixture, initial, ProgramTerminalStatus::Completed,
+                                                    ContinuationState::Completed, 20, &*second_journal, 3);
+    attach_same_generation_lineage(fence_3_on_new_head, *lineage_2);
+    EXPECT_EQ(transitions->compare_publish(owner, second_journal->id, 3, fence_3_on_new_head),
+              ProgramTransitionPublishResult::Published);
+    const auto final_lineage = transitions->load_run_lineage(owner, "run-fenced");
+    ASSERT_TRUE(final_lineage);
+    EXPECT_EQ(final_lineage->active_run_record_id(), fence_3_on_new_head.run_record.id());
+}
+
+// Only the fence compares of the Harness store refuse this one: both records carry the stored fence plus one and the
+// writer names that fence, and the step is the one a takeover makes, so no record-transition rule objects. The fence
+// moves through compare_publish_takeover alone; the same publication at the stored fence is accepted.
+TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreRefusesAnOrdinaryPublicationThatRaisesTheFence) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    auto    initial     = initial_lineage_publication(fixture, "run-raised");
+
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, initial), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(transitions->compare_publish_takeover(owner, "run-raised", initial.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    const auto journal = transitions->latest(owner, "run-raised");
+    const auto lineage = transitions->load_run_lineage(owner, "run-raised");
+    ASSERT_TRUE(journal);
+    ASSERT_TRUE(lineage);
+    ASSERT_EQ(journal->continuation.fence, 2U);
+
+    auto raised = takeover_shaped_publication(fixture, initial, *journal, 3, 20);
+    attach_same_generation_lineage(raised, *lineage);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 3, raised), ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 2, raised), ProgramTransitionPublishResult::Conflict);
+    const auto unchanged = transitions->load(owner, "run-raised");
+    ASSERT_TRUE(unchanged);
+    EXPECT_EQ(unchanged->continuation().fence, 2U);
+    EXPECT_EQ(unchanged->journal_head(), journal->id);
+    EXPECT_EQ(transitions->load_run_lineage(owner, "run-raised")->id(), lineage->id());
+
+    auto same = takeover_shaped_publication(fixture, initial, *journal, 2, 20);
+    attach_same_generation_lineage(same, *lineage);
+    EXPECT_EQ(transitions->compare_publish(owner, journal->id, 2, same), ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(transitions->load(owner, "run-raised")->continuation().fence, 2U);
 }

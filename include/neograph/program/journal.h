@@ -33,6 +33,7 @@ struct ProgramContinuation {
     std::string       operation_id;
     ContinuationState state   = ContinuationState::Running;
     std::uint64_t     attempt = 0;
+    std::uint64_t     fence   = 1;
 
     bool operator==(const ProgramContinuation&) const = default;
 };
@@ -60,7 +61,9 @@ struct ProgramJournalRecordData {
  * make the id disagree with the canonical body.
  */
 struct NEOGRAPH_PROGRAM_API ProgramJournalRecord {
-    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 1;
+    /// Version 2 carries continuation.fence and is written only for a run that was taken
+    /// over (fence other than 1); version 1 has no fence and reads as fence = 1.
+    static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 2;
 
     std::string                           id;
     std::string                           previous_id;

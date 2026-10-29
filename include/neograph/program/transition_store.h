@@ -309,11 +309,13 @@ public:
     [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) = 0;
     /** Atomically publishes and acquires, releases, or replaces a dispatch lease. */
     [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) {
@@ -323,10 +325,23 @@ public:
     [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) {
+        co_return ProgramTransitionPublishResult::Conflict;
+    }
+    /**
+     * Atomically advances the ownership fence and the journal head of the Running run `run_id`: publishes the stored
+     * record with `fence = expected_fence + 1` and one new journal record, and changes nothing else. Conflict when the
+     * run is absent, is not Running, or its head or fence differ from the expected ones.
+     */
+    [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) {
         co_return ProgramTransitionPublishResult::Conflict;
     }
 };
@@ -420,10 +435,12 @@ public:
     virtual ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) = 0;
     virtual ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) {
@@ -432,10 +449,18 @@ public:
     virtual ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
+    virtual ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) {
         return ProgramTransitionPublishResult::Conflict;
     }
 
@@ -509,20 +534,28 @@ public:
     [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) final;
     [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) final;
     [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) final;
+    [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) final;
 
     /** True when every awaitable operation completes at once on the calling thread, not on a pool thread. */
     bool completes_at_once() const noexcept { return !offloads(); }
@@ -612,20 +645,28 @@ public:
     ProgramTransitionPublishResult compare_publish(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication) const;
     ProgramTransitionPublishResult compare_publish_execution(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) const;
     ProgramTransitionPublishResult compare_publish_graph_safe_point(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) const;
+    ProgramTransitionPublishResult compare_publish_takeover(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) const;
 
 private:
     std::shared_ptr<ProgramTransitionStore> store_;
@@ -698,20 +739,28 @@ public:
     ProgramTransitionPublishResult
     compare_publish_sync(std::string_view owner_scope,
                     std::string_view expected_journal_head,
+                    std::uint64_t expected_fence,
                     ProgramTransitionPublication publication) override;
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         std::optional<ProgramExecutionLease> expected_lease,
         std::optional<ProgramExecutionLease> next_lease) override;
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence& evidence,
         const GraphMigrationCapsule& capsule,
         const ProgramExecutionLease& execution_lease) override;
+    ProgramTransitionPublishResult compare_publish_takeover_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence) override;
 
     /// Fail the next publication at a staged boundary; test-only hook.
     void fail_next_publication_for_testing(ProgramTransitionFaultPoint point);
@@ -720,6 +769,7 @@ private:
     ProgramTransitionPublishResult compare_publish_impl(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
         ProgramTransitionPublication publication,
         const ProgramGraphSafePointEvidence* evidence,
         const GraphMigrationCapsule* capsule,

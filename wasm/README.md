@@ -611,8 +611,9 @@ interface, given in the last column.
 | | `loadGenerationInitialPublication(ownerScope, lineageId, generation)` | publication or `null` | fails |
 | | `loadGraphMigrationCapsule(ownerScope, runId, lineageHeadId)` | capsule or `null` | `null` |
 | | `loadExecutionLease(ownerScope, runId)` | lease or `null` | `null` |
-| | `comparePublish(ownerScope, expectedJournalHead, publication)` | publish result | required |
-| | `comparePublishExecution(ownerScope, expectedJournalHead, publication, expectedLease, nextLease)` | publish result; the leases are canonical texts or `null` | `"conflict"` |
+| | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | publish result | required |
+| | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | publish result; the leases are canonical texts or `null` | `"conflict"` |
+| | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | publish result | required |
 | `programs` | `publishAdmitted(bundle, version)` | nothing | required |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | bundle or `null` | required |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | version or `null` | required |
@@ -640,6 +641,11 @@ interface, given in the last column.
   the transition store begins: the checks that need no stored state (the owner of the publication, the shape of the
   expected head, the effect outbox, the canonical text of the publication). A publication that fails them is `"conflict"`
   and never reaches the object. What the stored state says about it is the store's decision.
+- **The ownership fence.** `expectedFence` is the fence of the control that writes the publication. Before the call crosses,
+  `comparePublish` and `comparePublishExecution` answer `"conflict"` for a publication whose run record or journal record
+  carries another fence. The object must also compare `expectedFence` with the `continuation.fence` of the stored run in the
+  same step as the journal head, and refuse when they differ. `comparePublishTakeover` publishes the stored `Running` record
+  of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else.
 - **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
   does not take part in live graph migration: it answers `"conflict"`, as the base class does.
 
@@ -659,9 +665,10 @@ store has decided and before it returns the result; a host that cannot lose a ca
 entry first and applies the call after it. `test/program_stores_test.mjs` does this for a whole Program run.
 
 ```js
-const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution', 'programs.publishAdmitted',
-  'programs.compareActivate', 'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish',
-  'fragments.compareUpdate', 'modules.publish', 'modules.setLifecycle']);
+const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
+  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
+  'modules.setLifecycle']);
 
 function durable(reference, log) {                          // log.append(entry) is the host's storage
   const wrapped = {};

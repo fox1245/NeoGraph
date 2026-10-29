@@ -311,9 +311,11 @@ asio::awaitable<ProgramTransitionPublishResult> compare_publish_with_lineage_asy
     ProgramTransitionStore&       transitions,
     std::string_view              owner_scope,
     std::string_view              expected_journal_head,
+    std::uint64_t                 expected_fence,
     ProgramTransitionPublication publication) {
     auto attached = co_await attach_run_lineage_async(transitions, std::move(publication));
-    co_return co_await transitions.compare_publish(owner_scope, expected_journal_head, std::move(attached));
+    co_return co_await transitions.compare_publish(
+        owner_scope, expected_journal_head, expected_fence, std::move(attached));
 }
 
 struct ActiveRunLineage {
@@ -1625,12 +1627,18 @@ asio::awaitable<ChildRecordPublication> publish_child_record(std::shared_ptr<det
 asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
     std::string                             owner_scope,
     std::string                             parent_run_id,
+    std::uint64_t                           expected_parent_fence,
     std::shared_ptr<ProgramTransitionStore> transitions,
     ProgramChildRecord                      child,
-    const std::function<bool()>&            stopping = {}) {
+    const std::function<bool()>&            stopping       = {},
+    std::shared_ptr<detail::RunControl>     parent_control = {}) {
     for (int attempt = 0; attempt < detail::kRunPublicationAttempts; ++attempt) {
         const auto previous = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
         if (!previous) co_return ChildRecordPublication{};
+        if (previous->continuation().fence != expected_parent_fence) {
+            if (parent_control) parent_control->mark_taken_over(previous->continuation().fence);
+            co_return ChildRecordPublication{};
+        }
         const auto existing = find_child(*previous, child.child_run_id);
         if (existing) {
             if (!same_child_metadata(*existing, child)) {
@@ -1682,9 +1690,11 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
         } else {
             children.push_back(child);
         }
+        auto next_continuation  = previous_journal->continuation;
+        next_continuation.fence = expected_parent_fence;
         auto                 journal = ProgramJournalRecord::create(ProgramJournalRecordData{
             previous->journal_head(), previous->run_id(), previous->program_version_id(),
-            previous->bundle_id(), previous_journal->sequence + 1, previous_journal->continuation,
+            previous->bundle_id(), previous_journal->sequence + 1, next_continuation,
             previous->remaining_budget(), previous_journal->inflight_reservation,
             previous->exact_checkpoint(), std::max(now_ms(), previous->updated_at_ms())});
         ProgramRunRecordData data;
@@ -1719,16 +1729,21 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
         auto publication                      = ProgramTransitionPublication{
             ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
         const auto result = co_await compare_publish_with_lineage_async(
-            *transitions, owner_scope, previous->journal_head(), std::move(publication));
+            *transitions, owner_scope, previous->journal_head(), expected_parent_fence,
+            std::move(publication));
         if (result == ProgramTransitionPublishResult::Published ||
             result == ProgramTransitionPublishResult::AlreadyPresent) {
             co_return ChildRecordPublication{
                 result, co_await load_active_agent_run(transitions, owner_scope, parent_run_id)};
         }
+        const auto current = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
+        if (current && current->continuation().fence != expected_parent_fence) {
+            if (parent_control) parent_control->mark_taken_over(current->continuation().fence);
+            co_return ChildRecordPublication{};
+        }
         // A stopping runtime retries only a refusal that another writer's progress explains; a store that refused
         // while the parent's head stayed where this attempt read it is left to recovery.
         if (stopping && stopping()) {
-            const auto current = co_await load_active_agent_run(transitions, owner_scope, parent_run_id);
             if (!current || current->journal_head() == previous->journal_head()) co_return ChildRecordPublication{};
         }
     }
@@ -1738,12 +1753,15 @@ asio::awaitable<ChildRecordPublication> publish_child_record_unlocked(
 asio::awaitable<ChildRecordPublication> publish_child_record(
     std::string                             owner_scope,
     std::string                             parent_run_id,
+    std::uint64_t                           expected_parent_fence,
     std::shared_ptr<ProgramTransitionStore> transitions,
     ProgramChildRecord                      child,
-    std::function<bool()>                   stopping = {}) {
+    std::function<bool()>                   stopping       = {},
+    std::shared_ptr<detail::RunControl>     parent_control = {}) {
     auto lock = co_await child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_async();
-    co_return co_await publish_child_record_unlocked(owner_scope, parent_run_id, transitions, std::move(child),
-                                                     stopping);
+    co_return co_await publish_child_record_unlocked(owner_scope, parent_run_id, expected_parent_fence,
+                                                     transitions, std::move(child), stopping,
+                                                     std::move(parent_control));
 }
 
 asio::awaitable<ChildRecordPublication> publish_child_record(std::shared_ptr<detail::RunControl> parent,
@@ -1753,8 +1771,9 @@ asio::awaitable<ChildRecordPublication> publish_child_record(std::shared_ptr<det
                                        stopping    = std::move(stopping)]() noexcept {
         return is_runtime_stopping(weak_parent.lock()) || (stopping && stopping());
     };
-    co_return co_await publish_child_record(parent->owner_scope, parent->logical_run_id, parent->transitions,
-                                            std::move(child), std::move(parent_or_runtime_stopping));
+    co_return co_await publish_child_record(parent->owner_scope, parent->logical_run_id, parent->fence,
+                                            parent->transitions, std::move(child),
+                                            std::move(parent_or_runtime_stopping), parent);
 }
 
 // Publishes the terminal state of a child into its parent's durable relation. False when it could not (the parent is
@@ -1764,8 +1783,10 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                                                std::string                             parent_run_id,
                                                std::string                             child_run_id,
                                                ProgramResult                           result,
-                                               bool*                                   parent_interrupted = nullptr,
-                                               std::function<bool()>                   stopping           = {}) {
+                                               bool*                                   parent_interrupted,
+                                               std::function<bool()>                   stopping,
+                                               std::uint64_t                           expected_parent_fence,
+                                               std::shared_ptr<detail::RunControl>     parent_control = {}) {
     if (parent_interrupted) *parent_interrupted = false;
     try {
         auto lock =
@@ -1793,12 +1814,16 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                     *parent_interrupted = record->continuation().state == ContinuationState::Interrupted;
                 co_return false;
             }
+            if (record->continuation().fence != expected_parent_fence) {
+                if (parent_control) parent_control->mark_taken_over(record->continuation().fence);
+                co_return false;
+            }
             const auto publication = co_await publish_child_record_unlocked(
-                owner_scope, parent_run_id, transitions,
+                owner_scope, parent_run_id, expected_parent_fence, transitions,
                 ProgramChildRecord{existing->child_run_id, existing->link_id,
                                    existing->link_receipt, existing->invocation, state, result,
                                    terminal_generation},
-                stopping);
+                stopping, parent_control);
             if (publication.result == ProgramTransitionPublishResult::Published ||
                 publication.result == ProgramTransitionPublishResult::AlreadyPresent)
                 co_return true;
@@ -1810,6 +1835,10 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
                 if (parent_interrupted)
                     *parent_interrupted =
                         current && current->continuation().state == ContinuationState::Interrupted;
+                co_return false;
+            }
+            if (current->continuation().fence != expected_parent_fence) {
+                if (parent_control) parent_control->mark_taken_over(current->continuation().fence);
                 co_return false;
             }
             // A rejection against an unchanged head is a validation/storage
@@ -1831,6 +1860,7 @@ void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
                            std::string_view                           owner_scope,
                            std::string_view                           parent_run_id,
                            std::string_view                           child_run_id,
+                           std::uint64_t                              expected_parent_fence,
                            std::function<void()>                      after_publication = {}) {
     const auto        transitions = child->transitions;
     const std::string owner(owner_scope);
@@ -1838,12 +1868,13 @@ void bind_child_completion(const std::shared_ptr<detail::RunControl>& child,
     const std::string child_id(child_run_id);
     const auto        weak_child = std::weak_ptr<detail::RunControl>(child);
     child->set_completion_callback(
-        [transitions, owner, parent, child_id, weak_child,
+        [transitions, owner, parent, child_id, expected_parent_fence, weak_child,
          after_publication = std::move(after_publication)](ProgramResult result) -> asio::awaitable<void> {
             auto stopping = [weak_child]() noexcept { return is_runtime_stopping(weak_child.lock()); };
             const bool published = co_await publish_child_completion(transitions, owner, parent, child_id,
                                                                      std::move(result), nullptr,
-                                                                     std::move(stopping));
+                                                                     std::move(stopping), expected_parent_fence,
+                                                                     {});
             if (published && after_publication) after_publication();
         });
 }
@@ -1858,8 +1889,11 @@ asio::awaitable<bool> is_unstarted_child_dispatch(std::shared_ptr<ProgramTransit
         record.effect_sequence() != 0 || record.exact_checkpoint() || record.pending_input() ||
         record.pending_effect() || record.terminal_result())
         co_return false;
+    // The journal holds the Started record and one takeover per fence increment, and nothing else: its length
+    // equals the fence.
     const auto journal = co_await transitions->latest(owner_scope, child_run_id);
-    if (!journal || journal->sequence != 1 || journal->previous_id != "" ||
+    if (!journal || journal->sequence != record.continuation().fence ||
+        (record.continuation().fence == 1 && !journal->previous_id.empty()) ||
         journal->id != record.journal_head())
         co_return false;
     const auto events = co_await transitions->load_events(owner_scope, child_run_id);
@@ -1881,7 +1915,7 @@ ProgramJournalRecord initial_record(
     std::optional<std::int64_t>           timestamp  = std::nullopt) {
     return ProgramJournalRecord::create(ProgramJournalRecordData{
         "", control.run_id, control.program_version_id, control.bundle_id, 1,
-        ProgramContinuation{"root", ContinuationState::Running, control.attempt},
+        ProgramContinuation{"root", ContinuationState::Running, control.attempt, control.fence},
         control.granted_budget, RunBudget{}, std::move(checkpoint), timestamp.value_or(now_ms())});
 }
 
@@ -1982,7 +2016,7 @@ ProgramJournalRecord resumed_record(const detail::RunControl&   control,
     return ProgramJournalRecord::create(ProgramJournalRecordData{
         previous.id, control.run_id, control.program_version_id, control.bundle_id,
         previous.sequence + 1,
-        ProgramContinuation{"root", ContinuationState::Running, control.attempt},
+        ProgramContinuation{"root", ContinuationState::Running, control.attempt, control.fence},
         std::move(remaining_budget), std::move(inflight_reservation), previous.core_checkpoint,
         now_ms()});
 }
@@ -2042,6 +2076,10 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             cause = std::current_exception();
             std::cerr << "terminal load unknown exception run=" << control.run_id << '\n';
             co_return TerminalPublicationResult::JournalFailure;
+        }
+        if (previous && previous->continuation().fence != control.fence) {
+            const_cast<detail::RunControl&>(control).mark_taken_over(previous->continuation().fence);
+            co_return TerminalPublicationResult::TransitionConflict;
         }
         if (!previous || previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != control.attempt) {
@@ -2119,7 +2157,8 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             auto                 journal = ProgramJournalRecord::create(ProgramJournalRecordData{
                 previous->journal_head(), control.run_id, control.program_version_id,
                 control.bundle_id, previous_journal->sequence + 1,
-                ProgramContinuation{"root", continuation_state(result.status()), control.attempt},
+                ProgramContinuation{"root", continuation_state(result.status()), control.attempt,
+                                    control.fence},
                 result.remaining_budget(), terminal_reservation, result.checkpoint(), now_ms()});
             ProgramRunRecordData data;
             data.owner_scope         = control.owner_scope;
@@ -2177,23 +2216,32 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             ProgramTransitionPublishResult published;
             if (execution_lease)
                 published = (co_await control.transitions->compare_publish_execution(
-                      control.owner_scope, previous->journal_head(), std::move(publication),
-                      execution_lease, std::nullopt));
+                      control.owner_scope, previous->journal_head(), control.fence,
+                      std::move(publication), execution_lease, std::nullopt));
             else
                 published = (co_await control.transitions->compare_publish(
-                      control.owner_scope, previous->journal_head(), std::move(publication)));
+                      control.owner_scope, previous->journal_head(), control.fence,
+                      std::move(publication)));
             if (published == ProgramTransitionPublishResult::Published ||
                 published == ProgramTransitionPublishResult::AlreadyPresent) {
                 if (execution_lease) control.clear_execution_lease(execution_lease->id());
                 co_return TerminalPublicationResult::Published;
+            }
+            const auto current_after_conflict =
+                co_await control.transitions->load(control.owner_scope, control.run_id);
+            if (current_after_conflict &&
+                current_after_conflict->continuation().fence != control.fence) {
+                const_cast<detail::RunControl&>(control).mark_taken_over(
+                    current_after_conflict->continuation().fence);
+                co_return TerminalPublicationResult::TransitionConflict;
             }
             // A stopping runtime retries only a refusal that another writer's progress explains; a store that refused
             // while the run's head stayed where this attempt read it is left to recovery, and the run stays as stored.
             // The head is one read of the record: the paired read of record and journal gives up while other writers
             // keep moving the head, which is exactly the progress that earns a retry.
             if (control.cancellation_cause() == detail::CancellationCause::RuntimeShutdown) {
-                const auto current = co_await control.transitions->load(control.owner_scope, control.run_id);
-                if (!current || current->journal_head() == previous->journal_head())
+                if (!current_after_conflict ||
+                    current_after_conflict->journal_head() == previous->journal_head())
                     co_return TerminalPublicationResult::TransitionConflict;
             }
         } catch (const std::exception& error) {
@@ -2323,7 +2371,8 @@ RunControl::RunControl(std::string                                owner,
                        std::shared_ptr<graph::Store>              store,
                        std::shared_ptr<ProgramTransitionStore>    transition_store,
                        std::optional<ProgramExecutionLease>       execution_lease,
-                       std::string                                logical_identity)
+                       std::string                                logical_identity,
+                       std::uint64_t                              fence_value)
     : owner_scope(std::move(owner)),
       run_id(std::move(run)),
       logical_run_id(logical_identity.empty() ? run_id : std::move(logical_identity)),
@@ -2331,6 +2380,7 @@ RunControl::RunControl(std::string                                owner,
       bundle_id(pinned->bundle.id()),
       binding_fingerprint(std::move(binding)),
       attempt(attempt_value),
+      fence(fence_value),
       materialized(std::move(pinned)),
       persisted_invocation(std::move(execution_invocation)),
       invocation(std::move(invocation_value)),
@@ -2384,6 +2434,7 @@ RunControl::RunControl(ProgramRunRecord                        record,
       bundle_id(record.bundle_id()),
       binding_fingerprint(record.binding_fingerprint()),
       attempt(record.continuation().attempt),
+      fence(record.continuation().fence),
       materialized(),
       persisted_invocation(ProgramPersistedInvocation{
           record.invocation().input, record.invocation().budget, record.invocation().correlation_id,
@@ -2597,6 +2648,18 @@ void RunControl::add_notice(ProgramNotice notice) {
 std::vector<ProgramNotice> RunControl::notices_snapshot() const {
     std::lock_guard lock(notices_mutex_);
     return notices;
+}
+
+void RunControl::mark_taken_over(std::uint64_t stored_fence) {
+    if (taken_over_.exchange(true)) return;
+    add_notice(ProgramNotice{
+        "P_RUN_TAKEN_OVER",
+        "Program run was taken over by another recovery",
+        json{{"run_id", run_id},
+             {"attempt", attempt},
+             {"expected_fence", fence},
+             {"stored_fence", stored_fence}}});
+    cancel_token->cancel();
 }
 
 void RunControl::set_monetary_account(std::shared_ptr<ProgramMonetaryAccount> account) {
@@ -2860,10 +2923,11 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
     // The attempt of the record that is cancelled, not of the control: a handle of an earlier attempt can cancel the
     // run once a later attempt has paused, and the journal admits a Cancelled record only in its predecessor's attempt.
     const auto attempt = previous.continuation().attempt;
+    const auto fence   = previous.continuation().fence;
     auto       journal = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous.journal_head(), control.run_id, control.program_version_id, control.bundle_id,
         previous_journal.sequence + 1,
-        ProgramContinuation{"root", ContinuationState::Cancelled, attempt},
+        ProgramContinuation{"root", ContinuationState::Cancelled, attempt, fence},
         previous.remaining_budget(), RunBudget{}, previous.exact_checkpoint(), timestamp});
     ProgramResultData result_data;
     result_data.status             = ProgramTerminalStatus::Cancelled;
@@ -2914,7 +2978,7 @@ InterruptedCancellation build_interrupted_cancellation(const RunControl&        
         journal = ProgramJournalRecord::create(ProgramJournalRecordData{
             previous.journal_head(), control.run_id, control.program_version_id, control.bundle_id,
             previous_journal.sequence + 1,
-            ProgramContinuation{"root", ContinuationState::Failed, attempt},
+            ProgramContinuation{"root", ContinuationState::Failed, attempt, fence},
             previous.remaining_budget(), RunBudget{}, previous.exact_checkpoint(), timestamp});
         ProgramResultData blocked_data;
         blocked_data.status             = ProgramTerminalStatus::Failed;
@@ -3003,6 +3067,13 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
             if (!previous_journal || previous_journal->id != previous->journal_head()) {
                 continue;
             }
+            const auto expected_fence = previous->continuation().state == ContinuationState::Running
+                                            ? fence
+                                            : previous->continuation().fence;
+            if (previous->continuation().fence != expected_fence) {
+                mark_taken_over(previous->continuation().fence);
+                break;
+            }
             auto built = build_interrupted_cancellation(*this, *previous, *previous_journal,
                                                         std::move(pending_input), std::move(pending_effect));
             auto& terminal         = built.terminal;
@@ -3010,10 +3081,12 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
             auto  attached         = co_await attach_run_lineage_async(*transitions, std::move(built.publication));
             const auto lease       = co_await transitions->load_execution_lease(owner_scope, run_id);
             const auto published   = lease ? (co_await transitions->compare_publish_execution(
-                                                 owner_scope, previous->journal_head(), std::move(attached), lease,
+                                                 owner_scope, previous->journal_head(),
+                                                 expected_fence, std::move(attached), lease,
                                                  std::nullopt))
                                            : (co_await transitions->compare_publish(
-                                                 owner_scope, previous->journal_head(), std::move(attached)));
+                                                 owner_scope, previous->journal_head(),
+                                                 expected_fence, std::move(attached)));
             if (published != ProgramTransitionPublishResult::Published) {
                 continue;
             }
@@ -3650,7 +3723,12 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             failed.status = ProgramTerminalStatus::Failed;
             const bool journal_failed = publication == TerminalPublicationResult::JournalFailure;
             auto primary_failure = result.failure();
-            if (primary_failure && primary_failure->provider_outcome) {
+            if (taken_over()) {
+                failed.failure = ProgramFailure{
+                    "P_RUN_TAKEN_OVER",
+                    "Program run was taken over by another recovery",
+                    "root", "", 0, json::object()};
+            } else if (primary_failure && primary_failure->provider_outcome) {
                 failed.failure = std::move(primary_failure);
                 failed.failure->witness["terminal_publication_failure"] =
                     journal_failed ? "journal" : "transition";
@@ -3724,7 +3802,7 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             if (is_published && callback_result.status() == ProgramTerminalStatus::Interrupted)
                 interrupted_published = interrupted_published_callback_;
         }
-        if (callback) {
+        if (is_published && callback) {
             try {
                 co_await callback(callback_result);
             } catch (...) {}
@@ -4382,6 +4460,11 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         std::optional<ActiveRunLineage> active;
         if (previous) active = co_await load_active_run_lineage_async(async_transitions(), *previous);
         const auto expected_execution_lease = execution_lease();
+        if (previous && previous->continuation().fence != fence) {
+            mark_taken_over(previous->continuation().fence);
+            throw std::runtime_error(
+                "Program source was taken over by another recovery");
+        }
         if (!previous || !previous_journal || !active ||
             !expected_execution_lease ||
             previous->journal_head() != previous_journal->id ||
@@ -4488,7 +4571,7 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         std::exception_ptr             publish_failure;
         try {
             published = co_await async_transitions().compare_publish_graph_safe_point(
-                owner_scope, previous->journal_head(), std::move(publication),
+                owner_scope, previous->journal_head(), fence, std::move(publication),
                 safe_point_evidence, candidate_capsule, *expected_execution_lease);
         } catch (...) {
             publish_failure = std::current_exception();
@@ -4663,7 +4746,8 @@ asio::awaitable<void> RunControl::release_graph_migration_async(std::uint64_t re
                 if (previous && previous_journal && active && durable_capsule &&
                     durable_capsule->id() == held_capsule->id() &&
                     active->lineage.id() == held_capsule->source_lineage_head_id() &&
-                    previous->journal_head() == previous_journal->id) {
+                    previous->journal_head() == previous_journal->id &&
+                    previous->continuation().fence == fence) {
                     const auto timestamp = std::max(now_ms(), previous->updated_at_ms());
                     auto remaining = previous->remaining_budget();
                     remaining.wall_time_ms = std::min(
@@ -4721,7 +4805,7 @@ asio::awaitable<void> RunControl::release_graph_migration_async(std::uint64_t re
                         published = next_execution_lease
                             ? (co_await transitions->compare_publish_execution(
                                   owner_scope, previous->journal_head(),
-                                  std::move(publication), std::nullopt,
+                                  fence, std::move(publication), std::nullopt,
                                   next_execution_lease))
                             : ProgramTransitionPublishResult::Conflict;
                     } catch (...) {
@@ -4848,6 +4932,10 @@ asio::awaitable<bool> RunControl::consume_dynamic_compile() {
     for (int retry = 0; retry < 3; ++retry) {
         const auto previous         = co_await async_transitions().load(owner_scope, run_id);
         const auto previous_journal = co_await async_transitions().latest(owner_scope, run_id);
+        if (previous && previous->continuation().fence != fence) {
+            mark_taken_over(previous->continuation().fence);
+            co_return false;
+        }
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt ||
@@ -4899,11 +4987,17 @@ asio::awaitable<bool> RunControl::consume_dynamic_compile() {
         auto publication = ProgramTransitionPublication{
             ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
         const auto published = co_await compare_publish_with_lineage_async(
-            async_transitions(), owner_scope, previous->journal_head(), std::move(publication));
+            async_transitions(), owner_scope, previous->journal_head(), fence,
+            std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
             limit_dynamic_compiles(remaining.max_dynamic_compiles);
             co_return true;
+        }
+        const auto current = co_await async_transitions().load(owner_scope, run_id);
+        if (current && current->continuation().fence != fence) {
+            mark_taken_over(current->continuation().fence);
+            co_return false;
         }
     }
     co_return false;
@@ -4917,6 +5011,10 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_command_rese
     if (!head) co_return ProgramTransitionPublishResult::Conflict;
     const auto& previous         = head->run_record;
     const auto& previous_journal = head->journal_record;
+    if (previous.continuation().fence != fence) {
+        mark_taken_over(previous.continuation().fence);
+        co_return ProgramTransitionPublishResult::Conflict;
+    }
     if (previous.journal_head() != previous_journal.id ||
         previous.continuation().state != ContinuationState::Running ||
         previous.continuation().attempt != attempt ||
@@ -4958,11 +5056,21 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_command_rese
     auto publication = co_await attach_run_lineage_async(async_transitions(), ProgramTransitionPublication{ProgramRunRecord::create(std::move(data)),
                                                    std::move(journal), {}, {}, std::nullopt, {}});
     const auto owned_lease = execution_lease();
+    ProgramTransitionPublishResult published;
     if (owned_lease)
-        co_return co_await async_transitions().compare_publish_execution(
-            owner_scope, previous.journal_head(), std::move(publication), owned_lease, owned_lease);
-    co_return co_await async_transitions().compare_publish(owner_scope, previous.journal_head(),
-                                                           std::move(publication));
+        published = co_await async_transitions().compare_publish_execution(
+            owner_scope, previous.journal_head(), fence, std::move(publication), owned_lease,
+            owned_lease);
+    else
+        published = co_await async_transitions().compare_publish(
+            owner_scope, previous.journal_head(), fence, std::move(publication));
+    if (published == ProgramTransitionPublishResult::Conflict) {
+        const auto current = co_await async_transitions().load(owner_scope, run_id);
+        if (current && current->continuation().fence != fence) {
+            mark_taken_over(current->continuation().fence);
+        }
+    }
+    co_return published;
 }
 
 asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_command(
@@ -5024,6 +5132,11 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         }
         const auto* previous = head ? &head->run_record : nullptr;
         const auto* previous_journal = head ? &head->journal_record : nullptr;
+        if (previous && previous->continuation().fence != fence) {
+            mark_taken_over(previous->continuation().fence);
+            publication_lock.unlock();
+            co_return co_await conflict_after_reload();
+        }
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt) {
@@ -5179,10 +5292,11 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         ProgramTransitionPublishResult published;
         if (owned_lease)
             published = co_await async_transitions().compare_publish_execution(
-                owner_scope, previous->journal_head(), std::move(publication), owned_lease, owned_lease);
+                owner_scope, previous->journal_head(), fence, std::move(publication), owned_lease,
+                owned_lease);
         else
             published = co_await async_transitions().compare_publish(
-                owner_scope, previous->journal_head(), std::move(publication));
+                owner_scope, previous->journal_head(), fence, std::move(publication));
         if (published == ProgramTransitionPublishResult::Published ||
             published == ProgramTransitionPublishResult::AlreadyPresent) {
             if (attempt_commands) {
@@ -5213,6 +5327,13 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                 deliver_event(event);
             co_return published;
         }
+        const auto current_after_conflict = co_await async_transitions().load(owner_scope, run_id);
+        if (current_after_conflict &&
+            current_after_conflict->continuation().fence != fence) {
+            mark_taken_over(current_after_conflict->continuation().fence);
+            publication_lock.unlock();
+            co_return co_await conflict_after_reload();
+        }
         // A concurrent terminal transition cannot be retried as a live
         // command.  Otherwise, reload the head and let the exact coordinate
         // check above classify an already-published append. A stopping
@@ -5222,9 +5343,11 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         // record: the paired read above gives up while other writers keep
         // moving the head, which is the progress that earns a retry.
         if (cancellation_cause() == CancellationCause::RuntimeShutdown) {
-            const auto current = co_await async_transitions().load(owner_scope, run_id);
-            if (!current || current->journal_head() == previous->journal_head())
+            if (!current_after_conflict ||
+                current_after_conflict->journal_head() == previous->journal_head()) {
+                publication_lock.unlock();
                 co_return co_await conflict_after_reload();
+            }
         }
     }
     co_return co_await conflict_after_reload();
@@ -5699,7 +5822,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             owner_scope, child_run_id, record->continuation().attempt, std::move(pinned),
             record->binding_fingerprint(), std::move(persisted), record->invocation(), core_thread_id,
             record->event_sequence(), std::shared_ptr<ProgramEventSink>{}, scheduler, config.checkpoints,
-            config.state_store, transitions);
+            config.state_store, transitions, std::nullopt, record->logical_run_id(),
+            record->continuation().fence);
         control->set_hook_runtime(config.hook_runtime);
         control->set_expected_terminal_head(record->journal_head());
         detail::RunOutcome cancelled;
@@ -5874,12 +5998,19 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                                             std::shared_ptr<detail::RunControl> control = {}) {
         co_await verify_synthesis_grant(next);
         const auto& d = next.data();
+        const auto expected_fence = control ? control->fence : d.parent.run.continuation().fence;
         for (int retry = 0; retry < 5; ++retry) {
             auto previous =
                 (co_await transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id()));
             auto journal =
                 (co_await transitions->latest(d.proposal.data().owner_scope, d.parent.run.run_id()));
             if (!previous || !journal || previous->journal_head() != journal->id) continue;
+            if (previous->continuation().fence != expected_fence) {
+                if (control) control->mark_taken_over(previous->continuation().fence);
+                throw_runtime_diagnostic(
+                    "P_CHILD_SYNTHESIS_CONFLICT",
+                    "Child synthesis stage lost its parent or record compare-and-swap");
+            }
             if (control && control->cancellation_cause() != detail::CancellationCause::None)
                 throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CANCELLED",
                                          "Parent cancelled during synthesis");
@@ -5908,11 +6039,11 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             if (lease)
                 result = (co_await transitions->compare_publish_execution(
                                       d.proposal.data().owner_scope, previous->journal_head(),
-                                      std::move(publication), lease, lease));
+                                      expected_fence, std::move(publication), lease, lease));
             else
-                result = (co_await transitions->compare_publish(d.proposal.data().owner_scope,
-                                                                      previous->journal_head(),
-                                                                      std::move(publication)));
+                result = (co_await transitions->compare_publish(
+                                      d.proposal.data().owner_scope, previous->journal_head(),
+                                      expected_fence, std::move(publication)));
             if (result == ProgramTransitionPublishResult::Published) co_return;
             if (result == ProgramTransitionPublishResult::AlreadyPresent) {
                 if (d.state == ProgramChildSynthesisState::Compiling ||
@@ -5920,6 +6051,14 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
                                              "A durable synthesis claim already has an owner");
                 co_return;
+            }
+            const auto current =
+                (co_await transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id()));
+            if (current && current->continuation().fence != expected_fence) {
+                if (control) control->mark_taken_over(current->continuation().fence);
+                throw_runtime_diagnostic(
+                    "P_CHILD_SYNTHESIS_CONFLICT",
+                    "Child synthesis stage lost its parent or record compare-and-swap");
             }
         }
         throw_runtime_diagnostic(
@@ -6202,7 +6341,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                         }
                     }
                     bind_budgeted_child_completion(reconnected->control_, parent->owner_scope,
-                                                     parent->logical_run_id, child->child_run_id);
+                                                     parent->logical_run_id, child->child_run_id,
+                                                     parent->fence, parent);
                     co_await parent->attach_child(reconnected->control_);
                     if (const auto result = reconnected->try_result()) {
                         auto cancelled = [weak_impl]() noexcept {
@@ -6211,7 +6351,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                         };
                         (void)co_await publish_child_completion(transitions, parent->owner_scope,
                                                                 parent->logical_run_id, child->child_run_id,
-                                                                *result, nullptr, std::move(cancelled));
+                                                                *result, nullptr, std::move(cancelled),
+                                                                parent->fence, parent);
                     }
                     co_return reconnected->control_;
                 });
@@ -6662,8 +6803,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         std::unordered_map<std::string, std::uint32_t> active_concurrency;
     };
     struct ParentChildBudget {
-        RunBudget parent;
-        RunBudget child;
+        RunBudget     parent;
+        RunBudget     child;
+        std::uint64_t parent_fence = 1;
     };
 
     static bool child_execution_active(const ProgramChildRecord& child) noexcept {
@@ -6776,7 +6918,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     void bind_budgeted_child_completion(const std::shared_ptr<detail::RunControl>& child,
                                         std::string_view                           owner_scope,
                                         std::string_view                           parent_run_id,
-                                        std::string_view                           child_run_id) {
+                                        std::string_view                           child_run_id,
+                                        std::uint64_t                              expected_parent_fence,
+                                        std::shared_ptr<detail::RunControl>        parent_control = {}) {
         const auto parent      = std::string(parent_run_id);
         const auto child_id    = child->logical_run_id;
         const auto concurrency = child->granted_budget.max_concurrency;
@@ -6793,8 +6937,9 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         // the continuation joins that result.
         child->set_completion_callback(
             [weak_impl = weak_from_this(), weak_child = std::weak_ptr<detail::RunControl>(child),
+             weak_parent = std::weak_ptr<detail::RunControl>(parent_control),
              transitions = child->transitions, owner = std::string(owner_scope), parent,
-             child_id](ProgramResult result) -> asio::awaitable<void> {
+             child_id, expected_parent_fence](ProgramResult result) -> asio::awaitable<void> {
                 const auto status             = result.status();
                 bool       parent_interrupted = false;
                 auto       cancelled          = [weak_impl]() noexcept {
@@ -6803,7 +6948,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 };
                 const bool published = co_await publish_child_completion(
                     transitions, owner, parent, child_id, std::move(result), &parent_interrupted,
-                    std::move(cancelled));
+                    std::move(cancelled), expected_parent_fence, weak_parent.lock());
                 if (published || !parent_interrupted || status == ProgramTerminalStatus::Interrupted)
                     co_return;
                 const auto keep = weak_impl.lock();
@@ -7070,7 +7215,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                                           {"child_run_id", std::string(child_run_id)}});
         }
         const auto available = (co_await hydrate_child_reservations(*parent, head->journal_record));
-        co_return ParentChildBudget{available, child->invocation.granted_budget};
+        co_return ParentChildBudget{available, child->invocation.granted_budget,
+                                    parent->continuation().fence};
     }
     bool is_stopping() {
         std::lock_guard lock(mutex);
@@ -7272,10 +7418,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_resolved_core(std::string  
     ProgramTransitionPublishResult published;
     if (execution_lease)
         published = (co_await control->transitions->compare_publish_execution(
-              owner_scope, "", std::move(publication), std::nullopt, execution_lease));
+              owner_scope, "", control->fence, std::move(publication), std::nullopt, execution_lease));
     else
         published = (co_await control->transitions->compare_publish(
-              owner_scope, "", std::move(publication)));
+              owner_scope, "", control->fence, std::move(publication)));
     if (published != ProgramTransitionPublishResult::Published) {
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
     }
@@ -7492,7 +7638,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                 global_quota->release();
                 global_quota.reset();
             }
-            impl_->bind_budgeted_child_completion(live, owner_scope, parent_run_id, run_id);
+            impl_->bind_budgeted_child_completion(live, owner_scope, parent_run_id, run_id,
+                                                  parent.control_->fence, parent.control_);
             co_await parent.control_->attach_child(live);
             co_return ProgramHandle(std::move(live));
         }
@@ -7504,12 +7651,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             }
             auto reconnected = (co_await reconnect_core(owner_scope, run_id));
             impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope, parent_run_id,
-                                                  run_id);
+                                                  run_id, parent.control_->fence, parent.control_);
             co_await parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
                 (co_await publish_child_completion(
                     impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
-                    runtime_cancelled));
+                    runtime_cancelled, parent.control_->fence, parent.control_));
             co_return reconnected;
         }
         if (child_record->continuation().state != ContinuationState::Running) {
@@ -7519,18 +7666,37 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             }
             auto reconnected = (co_await reconnect_core(owner_scope, run_id));
             impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope, parent_run_id,
-                                                  run_id);
+                                                  run_id, parent.control_->fence, parent.control_);
             co_await parent.control_->attach_child(reconnected.control_);
             if (const auto result = reconnected.try_result())
                 (co_await publish_child_completion(
                     impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
-                    runtime_cancelled));
+                    runtime_cancelled, parent.control_->fence, parent.control_));
             co_return reconnected;
         }
     }
 
     std::shared_ptr<detail::RunControl> control;
     try {
+        std::uint64_t child_fence = 1;
+        if (replay_initial_dispatch) {
+            const auto current_child = (co_await impl_->transitions->load(owner_scope, run_id));
+            if (!current_child ||
+                current_child->continuation().state != ContinuationState::Running) {
+                throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                         "Parent-child dispatch lost its transition CAS",
+                                         json{{"child_run_id", run_id}});
+            }
+            const auto expected_child_fence = current_child->continuation().fence;
+            const auto taken_over = (co_await impl_->transitions->compare_publish_takeover(
+                owner_scope, run_id, current_child->journal_head(), expected_child_fence));
+            if (taken_over != ProgramTransitionPublishResult::Published) {
+                throw_runtime_diagnostic("P_CHILD_CONFLICT",
+                                         "Parent-child dispatch lost its transition CAS",
+                                         json{{"child_run_id", run_id}});
+            }
+            child_fence = expected_child_fence + 1;
+        }
         const auto core_thread_id =
             core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         const auto binding_fingerprint = capability_binding_receipt_root(
@@ -7542,7 +7708,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             std::string(owner_scope), run_id, 1, std::move(pinned), binding_fingerprint,
             std::move(persisted), canonical, core_thread_id, 0, std::move(invocation.events),
             impl_->scheduler, impl_->config.checkpoints,
-             impl_->config.state_store, impl_->transitions);
+            impl_->config.state_store, impl_->transitions, std::nullopt, "", child_fence);
         control->set_hook_runtime(impl_->config.hook_runtime);
         control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
         control->set_core_tool_grant_awaitable_resolver(impl_->config.core_tool_grant_awaitable_resolver);
@@ -7550,7 +7716,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             impl_->config.core_provider_call_resolver,
             impl_->config.require_core_provider_call_broker);
         impl_->commit_active_child(control, global_quota);
-        impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id);
+        impl_->bind_budgeted_child_completion(control, owner_scope, parent_run_id, run_id,
+                                              parent.control_->fence, parent.control_);
         ProgramEvent started;
         if (replay_initial_dispatch) {
             const auto events = (co_await impl_->transitions->load_events(owner_scope, run_id));
@@ -7566,7 +7733,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
             started              = control->stage_event(ProgramEventKind::Started,
                                                         ProgramStartedEvent{invocation.budget});
             const auto published = (co_await compare_publish_with_lineage_async(
-                *control->transitions, owner_scope, "", initial_publication(*control, started)));
+                *control->transitions, owner_scope, "", control->fence,
+                initial_publication(*control, started)));
             if (published != ProgramTransitionPublishResult::Published &&
                 published != ProgramTransitionPublishResult::AlreadyPresent) {
                 auto winner = (co_await impl_->transitions->load(owner_scope, run_id));
@@ -7576,12 +7744,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                 }
                 auto reconnected = (co_await reconnect_core(owner_scope, run_id));
                 impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope,
-                                                      parent_run_id, run_id);
+                                                      parent_run_id, run_id,
+                                                      parent.control_->fence, parent.control_);
                 co_await parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
                     (co_await publish_child_completion(
                         impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
-                        runtime_cancelled));
+                        runtime_cancelled, parent.control_->fence, parent.control_));
                 co_return reconnected;
             }
         }
@@ -7608,12 +7777,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                 dispatched_record->state != ProgramChildState::Publishing) {
                 auto reconnected = (co_await reconnect_core(owner_scope, run_id));
                 impl_->bind_budgeted_child_completion(reconnected.control_, owner_scope,
-                                                      parent_run_id, run_id);
+                                                      parent_run_id, run_id,
+                                                      parent.control_->fence, parent.control_);
                 co_await parent.control_->attach_child(reconnected.control_);
                 if (const auto result = reconnected.try_result())
                     (co_await publish_child_completion(
                         impl_->transitions, owner_scope, parent_run_id, run_id, *result, nullptr,
-                        runtime_cancelled));
+                        runtime_cancelled, parent.control_->fence, parent.control_));
                 co_return reconnected;
             }
             const auto current_parent =
@@ -7740,7 +7910,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replay_recorded_core(
             owner, run_id, existing->continuation().attempt, std::move(pinned), binding,
             std::move(persisted), invocation, lease->core_thread_id(), existing->event_sequence(),
             events, impl_->scheduler, impl_->config.checkpoints,
-            impl_->config.state_store, impl_->transitions, lease);
+            impl_->config.state_store, impl_->transitions, lease, "",
+            existing->continuation().fence);
         control->recorded_replay = std::make_shared<detail::RecordedRunReplay>();
         control->recorded_replay->source_run_id = std::string(source_run_id);
         detail::RunOutcome failed;
@@ -7823,7 +7994,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replay_recorded_core(
         control->core_thread_id, graph::Checkpoint::generate_id(), acquired,
         acquired + static_cast<std::int64_t>(available.wall_time_ms)});
     const auto published = (co_await impl_->transitions->compare_publish_execution(
-        owner, "", std::move(publication), std::nullopt, lease));
+        owner, "", control->fence, std::move(publication), std::nullopt, lease));
     if (published != ProgramTransitionPublishResult::Published)
         throw_runtime_diagnostic("P_REPLAY_ALLOCATION_CONFLICT", "Source replay allocation lost its exact CAS");
     control->set_execution_lease(lease);
@@ -8250,11 +8421,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::fork_core(std::string            
     ProgramTransitionPublishResult published;
     if (execution_lease)
         published = (co_await control->transitions->compare_publish_execution(
-              owner_scope, "", std::move(publication), std::nullopt,
+              owner_scope, "", control->fence, std::move(publication), std::nullopt,
               execution_lease));
     else
         published = (co_await control->transitions->compare_publish(
-              owner_scope, "", std::move(publication)));
+              owner_scope, "", control->fence, std::move(publication)));
     if (published != ProgramTransitionPublishResult::Published) {
         if (auto existing = co_await reconnect_existing()) co_return std::move(*existing);
         throw_runtime_diagnostic("P_RUN_CONFLICT", "Requested Program run id is unavailable");
@@ -8715,11 +8886,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replace_core(std::string         
     try {
         if (execution_lease)
             published = (co_await control->transitions->compare_publish_execution(
-                  owner_scope, "", std::move(publication), std::nullopt,
+                  owner_scope, "", 1, std::move(publication), std::nullopt,
                   execution_lease));
         else
             published = (co_await control->transitions->compare_publish(
-                  owner_scope, "", std::move(publication)));
+                  owner_scope, "", 1, std::move(publication)));
     } catch (...) {
         publish_failure = std::current_exception();
     }
@@ -8752,8 +8923,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replace_core(std::string         
             throw_runtime_diagnostic("P_CHILD_CONCURRENCY",
                                      "Replacement child exceeds parent concurrency");
         impl_->commit_active_child(control, quota);
-        impl_->bind_budgeted_child_completion(control, owner_scope, invocation.parent_run_id,
-                                              control->logical_run_id);
+        const auto parent_ctrl = impl_->find_control(owner_scope, invocation.parent_run_id);
+        impl_->bind_budgeted_child_completion(
+            control, owner_scope, invocation.parent_run_id, control->logical_run_id,
+            parent_ctrl ? parent_ctrl->fence : budgets.parent_fence, parent_ctrl);
     }
     const bool family =
         !source_record->invocation().parent_run_id.empty() || !source_record->children().empty();
@@ -9199,7 +9372,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
     std::exception_ptr             publish_failure;
     try {
         published = (co_await impl_->transitions->compare_publish_execution(
-            owner_scope, "", std::move(publication), std::nullopt,
+            owner_scope, "", control->fence, std::move(publication), std::nullopt,
             target_execution_lease));
     } catch (...) {
         publish_failure = std::current_exception();
@@ -9336,7 +9509,8 @@ asio::awaitable<std::vector<ProgramHandle>> ProgramRuntime::recover_children_cor
                 };
                 (co_await publish_child_completion(impl_->transitions, owner_scope, parent_run_id,
                                                    persisted.child_run_id, *result, nullptr,
-                                                   std::move(cancelled)));
+                                                   std::move(cancelled), parent.control_->fence,
+                                                   parent.control_));
             }
             recovered.push_back(std::move(child));
             continue;
@@ -9379,6 +9553,10 @@ asio::awaitable<ProgramSynthesisReservation> ProgramRuntime::reserve_synthesis_c
                                                           source.logical_run_id())
                     .lock_async();
     const auto      run     = (co_await source.snapshot_async());
+    if (run.continuation().fence != source.control_->fence) {
+        source.control_->mark_taken_over(run.continuation().fence);
+        throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis source head is not active");
+    }
     const auto      journal = (co_await impl_->transitions->latest(owner_scope, source.run_id()));
     const auto      active  = (co_await load_active_run_lineage_async(*impl_->transitions, run));
     if (!journal || journal->id != run.journal_head() || !active ||
@@ -9412,17 +9590,22 @@ asio::awaitable<ProgramSynthesisReservation> ProgramRuntime::reserve_synthesis_c
     try {
         if (lease)
             published = (co_await impl_->transitions->compare_publish_execution(
-                              owner_scope, run.journal_head(), std::move(publication), lease, lease));
+                              owner_scope, run.journal_head(), source.control_->fence,
+                              std::move(publication), lease, lease));
         else
             published = (co_await impl_->transitions->compare_publish(
-                              owner_scope, run.journal_head(), std::move(publication)));
+                              owner_scope, run.journal_head(), source.control_->fence,
+                              std::move(publication)));
     } catch (...) {
         // A lost acknowledgement cannot restore compile authority in this live attempt.
         source.control_->limit_dynamic_compiles(remaining.max_dynamic_compiles);
         throw;
     }
-    if (published == ProgramTransitionPublishResult::Conflict)
+    if (published == ProgramTransitionPublishResult::Conflict) {
+        if (const auto latest = (co_await impl_->transitions->load(owner_scope, source.run_id())))
+            source.control_->mark_taken_over(latest->continuation().fence);
         throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis reservation lost its CAS");
+    }
     source.control_->limit_dynamic_compiles(remaining.max_dynamic_compiles);
     {
         std::lock_guard resolve_lock(handoff.impl_->resolve_mutex);
@@ -9479,6 +9662,11 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
                                  "Synthesis binding collides with a static child");
     auto run     = (co_await parent.snapshot_async());
+    if (run.continuation().fence != parent.control_->fence) {
+        parent.control_->mark_taken_over(run.continuation().fence);
+        throw_runtime_diagnostic("P_CHILD_SYNTHESIS_GENERATION",
+                                 "Parent synthesis checkpoint is no longer active");
+    }
     auto journal = (co_await impl_->transitions->latest(owner_scope, parent.run_id()));
     auto active  = (co_await load_active_run_lineage_async(*impl_->transitions, run));
     auto version = (co_await impl_->config.catalog->resolve_version_async(owner_scope, parent.program_version_id()));
@@ -9512,10 +9700,12 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
     try {
         if (lease)
             result = (co_await impl_->transitions->compare_publish_execution(
-                             owner_scope, run.journal_head(), std::move(publication), lease, lease));
+                             owner_scope, run.journal_head(), parent.control_->fence,
+                             std::move(publication), lease, lease));
         else
-            result = (co_await impl_->transitions->compare_publish(owner_scope, run.journal_head(),
-                                                                    std::move(publication)));
+            result = (co_await impl_->transitions->compare_publish(
+                             owner_scope, run.journal_head(), parent.control_->fence,
+                             std::move(publication)));
     } catch (...) {
         publish_failure = std::current_exception();
     }
@@ -9536,9 +9726,12 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
         }
         std::rethrow_exception(failure);
     }
-    if (result == ProgramTransitionPublishResult::Conflict)
+    if (result == ProgramTransitionPublishResult::Conflict) {
+        if (const auto latest = (co_await impl_->transitions->load(owner_scope, parent.run_id())))
+            parent.control_->mark_taken_over(latest->continuation().fence);
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_CONFLICT",
                                  "Synthesis reservation lost its parent compare-and-swap");
+    }
     parent.control_->limit_dynamic_compiles(remaining.max_dynamic_compiles);
     co_return co_await impl_->config.child_synthesis_gateway->continue_child_async(
             record, [&](const ProgramChildSynthesisRecord& next) -> asio::awaitable<void> {
@@ -9924,7 +10117,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 record->journal_head(), record->run_id(), record->program_version_id(),
                 record->bundle_id(), previous_journal->sequence + 1,
                 ProgramContinuation{"root", ContinuationState::TimedOut,
-                                    record->continuation().attempt},
+                                    record->continuation().attempt,
+                                    record->continuation().fence},
                 remaining, RunBudget{}, checkpoint, timestamp});
             ProgramResultData result_data;
             result_data.status = ProgramTerminalStatus::TimedOut;
@@ -9982,7 +10176,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 {terminal_event}, {}};
             const auto published = (co_await compare_publish_with_lineage_async(
                 *impl_->transitions, owner_scope, record->journal_head(),
-                std::move(publication)));
+                record->continuation().fence, std::move(publication)));
             if (published == ProgramTransitionPublishResult::Conflict) {
                 const auto winner = (co_await impl_->transitions->load_run_lineage(
                     owner_scope, record->run_id()));
@@ -10087,7 +10281,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 std::move(expired_invocation), record->invocation(), expected_thread_id,
                 record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
                 impl_->scheduler, impl_->config.checkpoints,
-                impl_->config.state_store, impl_->transitions, execution_lease);
+                impl_->config.state_store, impl_->transitions, execution_lease, "",
+                record->continuation().fence);
             expired_control->set_hook_runtime(impl_->config.hook_runtime);
             expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
             expired_control->set_core_tool_grant_awaitable_resolver(impl_->config.core_tool_grant_awaitable_resolver);
@@ -10183,9 +10378,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
         if (recovery_head)
             (co_await impl_->hydrate_child_reservations(*record, recovery_head->journal_record));
         std::shared_ptr<ChildQuotaReservation> global_quota;
+        Impl::ChildConcurrencyLease            child_concurrency;
+        std::uint64_t                          parent_fence = 1;
         if (!record->invocation().parent_run_id.empty()) {
             const auto parent_child = (co_await impl_->hydrate_parent_child_budget(
                 owner_scope, record->invocation().parent_run_id, record->logical_run_id()));
+            parent_fence = parent_child.parent_fence;
             global_quota = impl_->reserve_active_child(owner_scope);
             if (!impl_->activate_child_concurrency(record->invocation().parent_run_id,
                                                    record->logical_run_id(), parent_child.parent,
@@ -10196,6 +10394,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                     json{{"parent_run_id", record->invocation().parent_run_id},
                          {"child_run_id", std::string(run_id)}});
             }
+            child_concurrency.owner         = impl_.get();
+            child_concurrency.parent_run_id = record->invocation().parent_run_id;
+            child_concurrency.child_run_id  = record->logical_run_id();
+            child_concurrency.amount        = parent_child.child.max_concurrency;
         }
 
         std::optional<ProgramJournalRecord> loaded_journal;
@@ -10232,13 +10434,30 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 std::min(invocation.granted_budget.wall_time_ms,
                          static_cast<std::uint64_t>(*synthesis_deadline - now));
         }
+        const auto expected_fence = record->continuation().fence;
+        const auto taken_over     = (co_await impl_->transitions->compare_publish_takeover(
+            owner_scope, run_id, record->journal_head(), expected_fence));
+        if (taken_over != ProgramTransitionPublishResult::Published) {
+            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                     "Running Program recovery lost the transition CAS");
+        }
+        const auto taken_over_head =
+            (co_await impl_->transitions->load_run_publication_head(owner_scope, run_id));
+        if (!taken_over_head ||
+            taken_over_head->run_record.continuation().state != ContinuationState::Running ||
+            taken_over_head->run_record.continuation().fence != expected_fence + 1) {
+            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                     "Running Program recovery lost the transition CAS");
+        }
+        record = taken_over_head->run_record;
+        child_concurrency.commit();
         auto control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
             std::move(pinned), record->binding_fingerprint(), std::move(invocation),
             record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
             std::shared_ptr<ProgramEventSink>{}, impl_->scheduler,
             impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
-            std::nullopt, record->logical_run_id());
+            std::nullopt, record->logical_run_id(), record->continuation().fence);
         control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
         control->rejoin_paused_children =
             record->continuation().attempt > 1 && !record->attempt_resume() &&
@@ -10247,11 +10466,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
         control->fork_provider_replay =
             (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *record));
         impl_->commit_active_child(control, global_quota);
-        if (!record->invocation().parent_run_id.empty())
-            impl_->bind_budgeted_child_completion(
-                control, owner_scope, record->invocation().parent_run_id, record->logical_run_id());
         if (!record->invocation().parent_run_id.empty()) {
-            if (auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id))
+            auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id);
+            impl_->bind_budgeted_child_completion(
+                control, owner_scope, record->invocation().parent_run_id, record->logical_run_id(),
+                parent ? parent->fence : parent_fence, parent);
+            if (parent)
                 co_await parent->attach_child(control, impl_->process_state->transition_mutex);
         }
         auto registration = (co_await impl_->register_control(control, successor_generation));
@@ -10288,9 +10508,18 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
     control->set_core_provider_call_resolver(
         impl_->config.core_provider_call_resolver,
         impl_->config.require_core_provider_call_broker);
-    if (!record->invocation().parent_run_id.empty())
+    if (!record->invocation().parent_run_id.empty()) {
+        auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id);
+        std::uint64_t parent_fence = parent ? parent->fence : 1;
+        if (!parent) {
+            if (const auto parent_run = (co_await load_active_agent_run(
+                    impl_->transitions, owner_scope, record->invocation().parent_run_id)))
+                parent_fence = parent_run->continuation().fence;
+        }
         impl_->bind_budgeted_child_completion(
-            control, owner_scope, record->invocation().parent_run_id, record->logical_run_id());
+            control, owner_scope, record->invocation().parent_run_id, record->logical_run_id(),
+            parent_fence, parent);
+    }
     co_return ProgramHandle(std::move(control));
 }
 
@@ -10419,7 +10648,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
             previous->journal_head(), std::string(run_id), previous->program_version_id(),
             previous->bundle_id(), previous_journal->sequence + 1,
             ProgramContinuation{"root", ContinuationState::Failed,
-                                previous->continuation().attempt},
+                                previous->continuation().attempt,
+                                previous->continuation().fence},
             available_budget, RunBudget{}, checkpoint, now_ms()});
         ProgramResultData result_data;
         result_data.status             = ProgramTerminalStatus::Failed;
@@ -10481,19 +10711,29 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
             ProgramRunRecord::create(std::move(expired_data)), std::move(journal),
             std::move(expired_events), {}};
         const auto published         = (co_await compare_publish_with_lineage_async(
-            *impl_->transitions, owner_scope, previous->journal_head(), std::move(expired_publication)));
+            *impl_->transitions, owner_scope, previous->journal_head(),
+            previous->continuation().fence, std::move(expired_publication)));
         if (published != ProgramTransitionPublishResult::Published &&
             published != ProgramTransitionPublishResult::AlreadyPresent) {
             throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program resume lost the transition CAS");
         }
         if (!previous->invocation().parent_run_id.empty()) {
+            const auto parent_ctrl =
+                impl_->find_control(owner_scope, previous->invocation().parent_run_id);
+            std::uint64_t parent_fence = parent_ctrl ? parent_ctrl->fence : 1;
+            if (!parent_ctrl) {
+                if (const auto parent_run = (co_await load_active_agent_run(
+                        impl_->transitions, owner_scope, previous->invocation().parent_run_id)))
+                    parent_fence = parent_run->continuation().fence;
+            }
             (co_await publish_child_completion(
                 impl_->transitions, owner_scope, previous->invocation().parent_run_id, run_id,
                 terminal_result, nullptr,
                 [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
                     const auto live = weak_impl.lock();
                     return !live || live->is_stopping();
-                }));
+                },
+                parent_fence, parent_ctrl));
             co_await impl_->wake_paused_parent_handling_failure(
                 owner_scope, previous->invocation().parent_run_id);
         }
@@ -10597,10 +10837,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     }
     std::shared_ptr<ChildQuotaReservation> global_quota;
     Impl::ChildConcurrencyLease            child_concurrency;
+    std::uint64_t                          parent_fence = 1;
     if (!previous->invocation().parent_run_id.empty()) {
         const auto parent_run_id = previous->invocation().parent_run_id;
         const auto parent_child =
             (co_await impl_->hydrate_parent_child_budget(owner_scope, parent_run_id, run_id));
+        parent_fence = parent_child.parent_fence;
         global_quota = impl_->reserve_active_child(owner_scope);
         if (!impl_->activate_child_concurrency(parent_run_id, run_id, parent_child.parent,
                                                parent_child.child)) {
@@ -10657,7 +10899,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         previous->invocation(), checkpoint.core_thread_id, previous->event_sequence(),
         std::move(resume_value.events), impl_->scheduler,
         impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
-        std::nullopt, previous->logical_run_id());
+        std::nullopt, previous->logical_run_id(), previous->continuation().fence);
     control->fork_provider_replay =
         (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *previous));
     control->rejoin_paused_children = child_answered;
@@ -10665,12 +10907,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     // run: that one may lose the publication to another caller, and then leaves nothing of itself behind.
     auto link_into_parent = [&]() -> asio::awaitable<void> {
         impl_->commit_active_child(control, global_quota);
-        if (!previous->invocation().parent_run_id.empty())
-            impl_->bind_budgeted_child_completion(control, owner_scope,
-                                                  previous->invocation().parent_run_id, run_id);
         if (!previous->invocation().parent_run_id.empty()) {
-            if (auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id))
-                co_await parent->attach_child(control);
+            auto parent = impl_->find_control(owner_scope, previous->invocation().parent_run_id);
+            impl_->bind_budgeted_child_completion(control, owner_scope,
+                                                  previous->invocation().parent_run_id, run_id,
+                                                  parent ? parent->fence : parent_fence, parent);
+            if (parent) co_await parent->attach_child(control);
         }
     };
     if (!child_answered) co_await link_into_parent();
@@ -10741,11 +10983,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     ProgramTransitionPublishResult published;
     if (execution_lease)
         published = (co_await impl_->transitions->compare_publish_execution(
-              owner_scope, previous->journal_head(), std::move(publication),
+              owner_scope, previous->journal_head(), control->fence, std::move(publication),
               std::nullopt, execution_lease));
     else
         published = (co_await impl_->transitions->compare_publish(
-              owner_scope, previous->journal_head(), std::move(publication)));
+              owner_scope, previous->journal_head(), control->fence, std::move(publication)));
     if (published != ProgramTransitionPublishResult::Published) {
         if (child_answered) {
             // Nothing of this continuation is registered anywhere. Another caller that moved the head took the
@@ -11086,10 +11328,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
     }
     std::shared_ptr<ChildQuotaReservation> global_quota;
     Impl::ChildConcurrencyLease            child_concurrency;
+    std::uint64_t                          parent_fence = 1;
     if (completed && !previous->invocation().parent_run_id.empty()) {
         const auto parent_run_id = previous->invocation().parent_run_id;
         const auto parent_child =
             (co_await impl_->hydrate_parent_child_budget(owner_scope, parent_run_id, run_id));
+        parent_fence = parent_child.parent_fence;
         global_quota = impl_->reserve_active_child(owner_scope);
         if (!impl_->activate_child_concurrency(parent_run_id, run_id, parent_child.parent,
                                                parent_child.child)) {
@@ -11148,8 +11392,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
     auto journal = ProgramJournalRecord::create(ProgramJournalRecordData{
         previous->journal_head(), std::string(run_id), previous->program_version_id(),
         previous->bundle_id(), previous_journal->sequence + 1,
-        ProgramContinuation{"root", next_state, next_attempt}, resumed_remaining,
-        resumed_reservation, checkpoint, now_ms()});
+        ProgramContinuation{"root", next_state, next_attempt, previous->continuation().fence},
+        resumed_remaining, resumed_reservation, checkpoint, now_ms()});
 
     std::shared_ptr<detail::RunControl> live_control;
     std::optional<ProgramResult>        terminal;
@@ -11164,17 +11408,17 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
             checkpoint.core_thread_id, previous->event_sequence(), std::move(resolution.events),
             impl_->scheduler, impl_->config.checkpoints,
             impl_->config.state_store, impl_->transitions, std::nullopt,
-            previous->logical_run_id());
+            previous->logical_run_id(), previous->continuation().fence);
         live_control->fork_provider_replay =
             (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *previous));
         impl_->commit_active_child(live_control, global_quota);
-        if (!previous->invocation().parent_run_id.empty())
-            impl_->bind_budgeted_child_completion(live_control, owner_scope,
-                                                  previous->invocation().parent_run_id, run_id);
         if (!previous->invocation().parent_run_id.empty()) {
-            if (auto parent =
-                    impl_->find_control(owner_scope, previous->invocation().parent_run_id))
-                co_await parent->attach_child(live_control);
+            auto parent =
+                impl_->find_control(owner_scope, previous->invocation().parent_run_id);
+            impl_->bind_budgeted_child_completion(
+                live_control, owner_scope, previous->invocation().parent_run_id, run_id,
+                parent ? parent->fence : parent_fence, parent);
+            if (parent) co_await parent->attach_child(live_control);
         }
         outbox.push_back(live_control->stage_event(ProgramEventKind::Started,
                                                    ProgramStartedEvent{attempt_budget}));
@@ -11280,11 +11524,12 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
     ProgramTransitionPublishResult published;
     if (execution_lease)
         published = (co_await impl_->transitions->compare_publish_execution(
-              owner_scope, previous->journal_head(), std::move(publication),
-              std::nullopt, execution_lease));
+              owner_scope, previous->journal_head(), previous->continuation().fence,
+              std::move(publication), std::nullopt, execution_lease));
     else
         published = (co_await impl_->transitions->compare_publish(
-              owner_scope, previous->journal_head(), std::move(publication)));
+              owner_scope, previous->journal_head(), previous->continuation().fence,
+              std::move(publication)));
     if (published != ProgramTransitionPublishResult::Published) {
         const auto winner = (co_await impl_->transitions->load(owner_scope, run_id));
         if (winner && winner->pending_effect()) {
@@ -11314,18 +11559,39 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
         if (!reconciled)
             throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Reconciled Program run was not found");
         auto control = (co_await impl_->make_record_control(*reconciled));
-        if (!reconciled->invocation().parent_run_id.empty())
-            impl_->bind_budgeted_child_completion(control, owner_scope,
-                                                  reconciled->invocation().parent_run_id, run_id);
+        if (!reconciled->invocation().parent_run_id.empty()) {
+            auto parent_ctrl =
+                impl_->find_control(owner_scope, reconciled->invocation().parent_run_id);
+            std::uint64_t non_completed_parent_fence = parent_ctrl ? parent_ctrl->fence : 1;
+            if (!parent_ctrl) {
+                if (const auto parent_run = (co_await load_active_agent_run(
+                        impl_->transitions, owner_scope, reconciled->invocation().parent_run_id)))
+                    non_completed_parent_fence = parent_run->continuation().fence;
+            }
+            impl_->bind_budgeted_child_completion(
+                control, owner_scope, reconciled->invocation().parent_run_id, run_id,
+                non_completed_parent_fence, parent_ctrl);
+        }
         auto reconnected = ProgramHandle(std::move(control));
         if (const auto result = reconnected.try_result()) {
             if (!previous->invocation().parent_run_id.empty()) {
+                auto parent_ctrl =
+                    impl_->find_control(owner_scope, previous->invocation().parent_run_id);
+                std::uint64_t non_completed_parent_fence = parent_ctrl ? parent_ctrl->fence : 1;
+                if (!parent_ctrl) {
+                    if (const auto parent_run = (co_await load_active_agent_run(
+                            impl_->transitions, owner_scope,
+                            previous->invocation().parent_run_id)))
+                        non_completed_parent_fence = parent_run->continuation().fence;
+                }
                 (co_await publish_child_completion(
                     impl_->transitions, owner_scope, previous->invocation().parent_run_id, run_id,
-                    *result, nullptr, [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
+                    *result, nullptr,
+                    [weak_impl = std::weak_ptr<Impl>(impl_)]() noexcept {
                         const auto live = weak_impl.lock();
                         return !live || live->is_stopping();
-                    }));
+                    },
+                    non_completed_parent_fence, parent_ctrl));
                 co_await impl_->wake_paused_parent_handling_failure(
                     owner_scope, previous->invocation().parent_run_id);
             }
