@@ -17,6 +17,27 @@
 #endif
 #endif
 
+// The Arm path uses the ARMv8 Cryptography Extension's SHA-256 instructions. It is compiled only for
+// little-endian AArch64, where the big-endian message words are byte-reversed on load; the x86 path
+// takes precedence if both architectures were ever detected. Whether the running CPU has the
+// instructions is read from the operating system's own feature report, not from text.
+#if !defined(NEOGRAPH_DISABLE_SHA256_ACCELERATION) && !defined(NEOGRAPH_SHA256_X86) && \
+    defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__)) &&                 \
+    (defined(__linux__) || defined(__APPLE__)) &&                                         \
+    (!defined(__BYTE_ORDER__) || __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#define NEOGRAPH_SHA256_ARM 1
+#include <arm_neon.h>
+#if defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#else
+#include <sys/auxv.h>
+#if (!defined(HWCAP_SHA2) || !defined(HWCAP_ASIMD)) && __has_include(<asm/hwcap.h>)
+#include <asm/hwcap.h>
+#endif
+#endif
+#endif
+
 namespace neograph::detail {
 namespace {
 
@@ -174,23 +195,109 @@ bool cpu_has_sha() noexcept {
 }
 #endif
 
-using Compressor = void (*)(std::uint32_t*, const std::uint8_t*, std::size_t) noexcept;
-Compressor automatic_compressor() noexcept {
-#if defined(NEOGRAPH_SHA256_X86)
-    if (sha256_hardware_available()) return compress_x86_sha;
-#endif
-    return compress_portable;
+#if defined(NEOGRAPH_SHA256_ARM)
+// One message block per iteration. The four message vectors hold the last 16 schedule words and
+// rotate every four rounds, so the schedule is only extended for the first 48 rounds.
+__attribute__((target("arch=armv8-a+crypto"), noinline))
+void compress_arm_sha(std::uint32_t* state, const std::uint8_t* data,
+                      std::size_t blocks) noexcept {
+    auto abcd = vld1q_u32(state);
+    auto efgh = vld1q_u32(state + 4);
+    while (blocks--) {
+        const auto saved_abcd = abcd, saved_efgh = efgh;
+        auto m0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data)));
+        auto m1 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16)));
+        auto m2 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 32)));
+        auto m3 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 48)));
+        for (std::size_t round = 0; round < 64; round += 4) {
+            const auto message   = vaddq_u32(m0, vld1q_u32(SHA256_K.data() + round));
+            const auto before    = abcd;
+            abcd                 = vsha256hq_u32(abcd, efgh, message);
+            efgh                 = vsha256h2q_u32(efgh, before, message);
+            if (round < 48) {
+                const auto next = vsha256su1q_u32(vsha256su0q_u32(m0, m1), m2, m3);
+                m0              = m1;
+                m1              = m2;
+                m2              = m3;
+                m3              = next;
+            } else {
+                m0 = m1;
+                m1 = m2;
+                m2 = m3;
+            }
+        }
+        abcd = vaddq_u32(abcd, saved_abcd);
+        efgh = vaddq_u32(efgh, saved_efgh);
+        data += 64;
+    }
+    vst1q_u32(state, abcd);
+    vst1q_u32(state + 4, efgh);
 }
 
-}  // namespace
+// The decision comes from the operating system's typed feature report, never from parsing text.
+// Every instruction set the function uses (SHA-256 and the Advanced SIMD registers it works on)
+// must be reported. An operating system without such a report counts as "unavailable".
+bool cpu_has_arm_sha() noexcept {
+#if defined(__APPLE__)
+    int         value = 0;
+    std::size_t size  = sizeof(value);
+    return sysctlbyname("hw.optional.arm.FEAT_SHA256", &value, &size, nullptr, 0) == 0 &&
+           value == 1;
+#elif defined(HWCAP_SHA2) && defined(HWCAP_ASIMD)
+    const unsigned long wanted = HWCAP_SHA2 | HWCAP_ASIMD;
+    return (getauxval(AT_HWCAP) & wanted) == wanted;
+#else
+    return false;
+#endif
+}
+#endif
 
-bool sha256_hardware_available() noexcept {
+bool x86_sha_available() noexcept {
 #if defined(NEOGRAPH_SHA256_X86)
     static const bool available = cpu_has_sha();
     return available;
 #else
     return false;
 #endif
+}
+
+bool arm_sha_available() noexcept {
+#if defined(NEOGRAPH_SHA256_ARM)
+    static const bool available = cpu_has_arm_sha();
+    return available;
+#else
+    return false;
+#endif
+}
+
+using Compressor = void (*)(std::uint32_t*, const std::uint8_t*, std::size_t) noexcept;
+Compressor automatic_compressor() noexcept {
+#if defined(NEOGRAPH_SHA256_X86)
+    if (x86_sha_available()) return compress_x86_sha;
+#endif
+#if defined(NEOGRAPH_SHA256_ARM)
+    if (arm_sha_available()) return compress_arm_sha;
+#endif
+    return compress_portable;
+}
+
+}  // namespace
+
+bool sha256_backend_available(Sha256Backend backend) noexcept {
+    switch (backend) {
+        case Sha256Backend::Automatic:
+        case Sha256Backend::Portable:
+            return true;
+        case Sha256Backend::X86Sha:
+            return x86_sha_available();
+        case Sha256Backend::Arm64Sha:
+            return arm_sha_available();
+    }
+    return false;
+}
+
+bool sha256_hardware_available() noexcept {
+    return x86_sha_available() || arm_sha_available();
 }
 
 Sha256Stream::Sha256Stream(Sha256Backend backend)
@@ -206,8 +313,16 @@ Sha256Stream::Sha256Stream(Sha256Backend backend)
             break;
         case Sha256Backend::X86Sha:
 #if defined(NEOGRAPH_SHA256_X86)
-            if (sha256_hardware_available()) {
+            if (x86_sha_available()) {
                 compress_ = compress_x86_sha;
+                break;
+            }
+#endif
+            throw std::invalid_argument("SHA-256 hardware backend is unavailable");
+        case Sha256Backend::Arm64Sha:
+#if defined(NEOGRAPH_SHA256_ARM)
+            if (arm_sha_available()) {
+                compress_ = compress_arm_sha;
                 break;
             }
 #endif
