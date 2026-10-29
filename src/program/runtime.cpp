@@ -6766,6 +6766,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             failure_message = error.what();
         }
         record_parent_continuation_failure(owner, parent, failure_code, failure_message);
+        detail::notify_parent_continuation(owner, parent, failure_code);
     }
 
     void bind_budgeted_child_completion(const std::shared_ptr<detail::RunControl>& child,

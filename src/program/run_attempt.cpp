@@ -618,9 +618,10 @@ bool reconciliation_pause(const PlanExecution& paused) {
            payload.value("kind", std::string()) == "tool_effect_reconciliation";
 }
 
-std::atomic<JoinMemberLaunchObserver> join_member_launch_observer{nullptr};
-std::atomic<AttemptFinishedObserver>  attempt_finished_observer{nullptr};
-std::atomic<CancellationObserver>     cancellation_observer{nullptr};
+std::atomic<JoinMemberLaunchObserver>   join_member_launch_observer{nullptr};
+std::atomic<AttemptFinishedObserver>    attempt_finished_observer{nullptr};
+std::atomic<CancellationObserver>       cancellation_observer{nullptr};
+std::atomic<ParentContinuationObserver> parent_continuation_observer{nullptr};
 
 // A join member that settled before its join paused, replayed from its
 // recorded result by the attempt that resumes the join (#380).
@@ -1877,6 +1878,18 @@ void set_cancellation_observer_for_testing(CancellationObserver observer) noexce
 
 void notify_cancellation(std::string_view run_id, CancellationCause cause) noexcept {
     if (const auto observer = cancellation_observer.load(std::memory_order_acquire)) observer(run_id, cause);
+}
+
+void set_parent_continuation_observer_for_testing(ParentContinuationObserver observer) noexcept {
+    parent_continuation_observer.store(observer, std::memory_order_release);
+}
+
+void notify_parent_continuation(std::string_view owner_scope,
+                                std::string_view parent_run_id,
+                                std::string_view failure_code) noexcept {
+    if (const auto observer = parent_continuation_observer.load(std::memory_order_acquire)) {
+        observer(owner_scope, parent_run_id, failure_code);
+    }
 }
 
 asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,

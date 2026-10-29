@@ -110,7 +110,15 @@ std::atomic<neograph::ToolExecutionController*> mediated_tool_controller{nullptr
 std::string                         synthesis_execution_marker;
 std::atomic<unsigned>               interrupt_calls{0};
 std::atomic<unsigned>               blocking_calls{0};
+std::mutex                          blocking_calls_mutex;
+std::condition_variable             blocking_calls_cv;
 std::atomic<unsigned>               blocking_active{0};
+
+bool wait_blocking_calls(unsigned count = 1) {
+    std::unique_lock lock(blocking_calls_mutex);
+    return blocking_calls_cv.wait_for(lock, std::chrono::seconds(600),
+                                      [count] { return blocking_calls.load() >= count; });
+}
 std::atomic<unsigned>               blocking_peak{0};
 std::atomic<unsigned>               followup_calls{0};
 std::atomic<unsigned>               stubborn_calls{0};
@@ -926,7 +934,11 @@ public:
         : name_(std::move(name)), duration_(duration) {}
 
     asio::awaitable<NodeOutput> run(NodeInput input) override {
-        ++blocking_calls;
+        {
+            std::lock_guard lock(blocking_calls_mutex);
+            ++blocking_calls;
+        }
+        blocking_calls_cv.notify_all();
         const auto active = blocking_active.fetch_add(1, std::memory_order_relaxed) + 1;
         auto       peak   = blocking_peak.load(std::memory_order_relaxed);
         while (peak < active &&
@@ -7891,15 +7903,134 @@ ProgramChildRecord only_child_of(AdmittedRuntime& fixture, const std::string& pa
     return stored->children().front();
 }
 
-// The result of `run_id` once its record is no longer Interrupted: the continuation of a paused parent runs on its own,
-// ancestor by ancestor, after its child is answered.
-ProgramResult wait_until_run_ends(AdmittedRuntime& fixture, const std::string& run_id) {
-    for (int attempt = 0; attempt < 1000; ++attempt) {
+// Records the run ids of attempts whose coroutine has ended, through the runtime's test seam, so a test waits for an
+// attempt to stop rather than for time to pass. One watch at a time; it removes the seam when it goes away.
+class AttemptFinishWatch {
+public:
+    AttemptFinishWatch() {
+        {
+            std::lock_guard lock(mutex());
+            finished().clear();
+        }
+        neograph::program::detail::set_attempt_finished_observer_for_testing(&AttemptFinishWatch::record);
+    }
+    ~AttemptFinishWatch() { neograph::program::detail::set_attempt_finished_observer_for_testing(nullptr); }
+    AttemptFinishWatch(const AttemptFinishWatch&)            = delete;
+    AttemptFinishWatch& operator=(const AttemptFinishWatch&) = delete;
+
+    bool wait_for(const std::string& run_id, std::uint64_t attempt) {
+        std::unique_lock lock(mutex());
+        // A watchdog, not the verdict: under sanitizers an attempt whose every publication is refused takes a while
+        // to make its bounded retries.
+        return cv().wait_for(lock, std::chrono::seconds(600),
+                             [&] { return finished().count({run_id, attempt}) > 0; });
+    }
+
+private:
+    static void record(std::string_view run_id, std::uint64_t attempt) {
+        {
+            std::lock_guard lock(mutex());
+            finished().emplace(std::string(run_id), attempt);
+        }
+        cv().notify_all();
+    }
+    static std::mutex& mutex() {
+        static std::mutex value;
+        return value;
+    }
+    static std::condition_variable& cv() {
+        static std::condition_variable value;
+        return value;
+    }
+    static std::multiset<std::pair<std::string, std::uint64_t>>& finished() {
+        static std::multiset<std::pair<std::string, std::uint64_t>> value;
+        return value;
+    }
+};
+
+// Records the parent run ids and failure codes of automatic continuations whose coroutine has ended, through the
+// runtime's test seam, so a test waits for a continuation to finish rather than for time to pass. One watch at a
+// time; it removes the seam when it goes away.
+class ParentContinuationWatch {
+public:
+    struct Entry {
+        std::string owner_scope;
+        std::string parent_run_id;
+        std::string failure_code;
+    };
+
+    ParentContinuationWatch() {
+        {
+            std::lock_guard lock(mutex());
+            ended().clear();
+        }
+        neograph::program::detail::set_parent_continuation_observer_for_testing(&ParentContinuationWatch::record);
+    }
+    ~ParentContinuationWatch() {
+        neograph::program::detail::set_parent_continuation_observer_for_testing(nullptr);
+    }
+    ParentContinuationWatch(const ParentContinuationWatch&)            = delete;
+    ParentContinuationWatch& operator=(const ParentContinuationWatch&) = delete;
+
+    bool wait_for(const std::string& parent_run_id, std::size_t count = 1,
+                  std::string_view owner_scope = "tenant:runtime") {
+        std::unique_lock lock(mutex());
+        // A watchdog, not the verdict: under sanitizers a continuation and its store work can take a while.
+        return cv().wait_for(lock, std::chrono::seconds(600), [&] {
+            std::size_t matched = 0;
+            for (const auto& entry : ended()) {
+                if (entry.owner_scope == owner_scope && entry.parent_run_id == parent_run_id) ++matched;
+            }
+            return matched >= count;
+        });
+    }
+
+    std::vector<std::string> failure_codes(const std::string& parent_run_id,
+                                           std::string_view   owner_scope = "tenant:runtime") {
+        std::lock_guard          lock(mutex());
+        std::vector<std::string> codes;
+        for (const auto& entry : ended()) {
+            if (entry.owner_scope == owner_scope && entry.parent_run_id == parent_run_id)
+                codes.push_back(entry.failure_code);
+        }
+        return codes;
+    }
+
+private:
+    static void record(std::string_view owner_scope, std::string_view parent_run_id,
+                       std::string_view failure_code) {
+        {
+            std::lock_guard lock(mutex());
+            ended().push_back(
+                Entry{std::string(owner_scope), std::string(parent_run_id), std::string(failure_code)});
+        }
+        cv().notify_all();
+    }
+    static std::mutex& mutex() {
+        static std::mutex value;
+        return value;
+    }
+    static std::condition_variable& cv() {
+        static std::condition_variable value;
+        return value;
+    }
+    static std::vector<Entry>& ended() {
+        static std::vector<Entry> value;
+        return value;
+    }
+};
+
+// The result of `run_id` once its continuation and the attempt it starts have ended: the continuation of a paused
+// parent runs on its own, ancestor by ancestor, after its child is answered.
+ProgramResult wait_until_run_ends(AdmittedRuntime& fixture, ParentContinuationWatch& continuations,
+                                  AttemptFinishWatch& finished, const std::string& run_id,
+                                  std::size_t continuation_count = 2) {
+    const bool continued = continuations.wait_for(run_id, continuation_count);
+    EXPECT_TRUE(continued);
+    if (continued) {
         const auto stored = fixture.journal->load("tenant:runtime", run_id);
-        if (stored && stored->continuation().state != ContinuationState::Interrupted &&
-            stored->continuation().state != ContinuationState::Running)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        EXPECT_TRUE(stored.has_value());
+        if (stored) EXPECT_TRUE(finished.wait_for(run_id, stored->continuation().attempt));
     }
     return fixture.runtime->reconnect("tenant:runtime", run_id).wait();
 }
@@ -7962,16 +8093,19 @@ TEST(ProgramRuntimeTest, JavaScriptAnsweringAnAwaitedChildContinuesTheParentToCo
     for (const auto* body : {kAwaitFirst, kAwaitAfterCoreCall}) {
         SCOPED_TRACE(body);
         interrupt_calls.store(0);
-        AdmittedRuntime fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
-        auto            started = start_parent_awaiting_interrupting_child(fixture, body, "trace-js-await-answer");
-        const auto      interrupted = started.parent.wait();
+        AdmittedRuntime         fixture(3, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+        ParentContinuationWatch continuations;
+        AttemptFinishWatch      finished;
+        auto                    started = start_parent_awaiting_interrupting_child(fixture, body, "trace-js-await-answer");
+        const auto              interrupted = started.parent.wait();
         ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+        ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 1));
         const auto child = only_child_of(fixture, started.parent.run_id());
 
         const auto answered = answer_paused_child(fixture, child, "trace-js-await-child-answered");
         ASSERT_EQ(answered.status(), ProgramTerminalStatus::Completed);
 
-        const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+        const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 2);
         ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
             << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
         EXPECT_EQ(final.output().at("child").at("channels").at("value").at("value"), "approved");
@@ -8018,9 +8152,11 @@ ThreeLevels admit_three_levels(AdmittedRuntime& fixture, const std::string& midd
 
 TEST(ProgramRuntimeTest, JavaScriptAGrandchildThatPausesIsAnsweredAndBothAncestorsComplete) {
     interrupt_calls.store(0);
-    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
-    const auto      levels = admit_three_levels(fixture);
-    auto            root   = fixture.runtime->start("tenant:runtime", levels.root_version,
+    AdmittedRuntime         fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto              levels = admit_three_levels(fixture);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    root = fixture.runtime->start("tenant:runtime", levels.root_version,
                                        ProgramInvocation{json::object(), levels.root_budget, "trace-three-levels", {}});
     const auto interrupted = root.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
@@ -8030,11 +8166,17 @@ TEST(ProgramRuntimeTest, JavaScriptAGrandchildThatPausesIsAnsweredAndBothAncesto
     const auto grandchild = only_child_of(fixture, middle.child_run_id);
     EXPECT_EQ(middle.state, ProgramChildState::Dispatched);
     EXPECT_EQ(grandchild.state, ProgramChildState::Dispatched);
+    ASSERT_TRUE(continuations.wait_for(middle.child_run_id, 1));
+    ASSERT_TRUE(continuations.wait_for(root.run_id(), 1));
 
     const auto answered = answer_paused_child(fixture, grandchild, "trace-grandchild-answered");
     ASSERT_EQ(answered.status(), ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(middle.child_run_id, 2));
+    const auto middle_continued = fixture.journal->load("tenant:runtime", middle.child_run_id);
+    ASSERT_TRUE(middle_continued.has_value());
+    ASSERT_TRUE(finished.wait_for(middle.child_run_id, middle_continued->continuation().attempt));
 
-    const auto final = wait_until_run_ends(fixture, root.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, root.run_id(), 2);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     EXPECT_EQ(final.output().at("middle").at("grandchild").at("channels").at("value").at("value"), "approved");
@@ -8073,6 +8215,8 @@ TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootCancelsAResumedDescendan
     AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
     const auto      levels = admit_three_levels(fixture, "runtime-blocking",
                                                 "    yield ng.callCore(\"main\", {}, \"core:after\");\n");
+    ParentContinuationWatch           continuations;
+    AttemptFinishWatch                finished;
     std::optional<ProgramChildRecord> middle;
     std::optional<ProgramChildRecord> grandchild;
     std::string                       root_run_id;
@@ -8085,22 +8229,19 @@ TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootCancelsAResumedDescendan
         middle      = only_child_of(fixture, root_run_id);
         grandchild  = only_child_of(fixture, middle->child_run_id);
     }
+    ASSERT_TRUE(continuations.wait_for(middle->child_run_id, 1));
+    ASSERT_TRUE(continuations.wait_for(root_run_id, 1));
     ASSERT_EQ(answer_paused_child(fixture, *grandchild, "trace-grandchild-answered-running").status(),
               ProgramTerminalStatus::Completed);
-    for (int attempt = 0; attempt < 1000 && blocking_calls.load() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    ASSERT_GT(blocking_calls.load(), 0U);
-    EXPECT_EQ(fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state,
-              ContinuationState::Running);
+    ASSERT_TRUE(continuations.wait_for(middle->child_run_id, 2));
+    ASSERT_TRUE(wait_blocking_calls(1));
+    const auto middle_running = fixture.journal->load("tenant:runtime", middle->child_run_id);
+    ASSERT_TRUE(middle_running.has_value());
+    EXPECT_EQ(middle_running->continuation().state, ContinuationState::Running);
 
     auto fresh = fixture.runtime->reconnect("tenant:runtime", root_run_id);
     EXPECT_TRUE(fresh.cancel());
-    for (int attempt = 0; attempt < 1000; ++attempt) {
-        if (fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state !=
-            ContinuationState::Running)
-            break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    ASSERT_TRUE(finished.wait_for(middle->child_run_id, middle_running->continuation().attempt));
     EXPECT_EQ(fixture.journal->load("tenant:runtime", root_run_id)->continuation().state,
               ContinuationState::Cancelled);
     EXPECT_EQ(fixture.journal->load("tenant:runtime", middle->child_run_id)->continuation().state,
@@ -8112,9 +8253,11 @@ TEST(ProgramRuntimeTest, TypedAwaitOfAChildThatInterruptsPausesTheParentAndTheCh
     interrupt_calls.store(0);
     AdmittedRuntime fixture(3);
     // The plan replays its operations when it continues, and they count again: it needs more than the two it uses once.
-    const auto      linked = make_durable_spawn_child(fixture, "runtime-completed", "runtime-interrupt",
-                                                      std::nullopt, ExecutionGuarantee::Strict, 12);
-    auto            parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+    const auto              linked = make_durable_spawn_child(fixture, "runtime-completed", "runtime-interrupt",
+                                                              std::nullopt, ExecutionGuarantee::Strict, 12);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
                                          ProgramInvocation{json::object(),
                                                            RunBudget{10000, 1000, 1000, 1, 12, 20, 0, 1, 1},
                                                            "trace-typed-await-interrupted-child", {}});
@@ -8122,12 +8265,13 @@ TEST(ProgramRuntimeTest, TypedAwaitOfAChildThatInterruptsPausesTheParentAndTheCh
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted)
         << (interrupted.failure() ? interrupted.failure()->code + ": " + interrupted.failure()->message
                                   : "no failure detail");
+    ASSERT_TRUE(continuations.wait_for(parent.run_id(), 1));
     const auto child = only_child_of(fixture, parent.run_id());
     EXPECT_EQ(child.state, ProgramChildState::Dispatched);
 
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-typed-child-answered").status(),
               ProgramTerminalStatus::Completed);
-    const auto final = wait_until_run_ends(fixture, parent.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, parent.run_id(), 2);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     const auto relation = only_child_of(fixture, parent.run_id());
@@ -8141,51 +8285,6 @@ namespace {
 // Running again, with children), so that a test drives each interleaving by hand: it refuses it, holds it at a gate,
 // or lets it through and then freezes the run, which ends the attempt the way the loss of its process does. It counts
 // what it saw.
-// Records the run ids of attempts whose coroutine has ended, through the runtime's test seam, so a test waits for an
-// attempt to stop rather than for time to pass. One watch at a time; it removes the seam when it goes away.
-class AttemptFinishWatch {
-public:
-    AttemptFinishWatch() {
-        {
-            std::lock_guard lock(mutex());
-            finished().clear();
-        }
-        neograph::program::detail::set_attempt_finished_observer_for_testing(&AttemptFinishWatch::record);
-    }
-    ~AttemptFinishWatch() { neograph::program::detail::set_attempt_finished_observer_for_testing(nullptr); }
-    AttemptFinishWatch(const AttemptFinishWatch&)            = delete;
-    AttemptFinishWatch& operator=(const AttemptFinishWatch&) = delete;
-
-    bool wait_for(const std::string& run_id, std::uint64_t attempt) {
-        std::unique_lock lock(mutex());
-        // A watchdog, not the verdict: under sanitizers an attempt whose every publication is refused takes a while
-        // to make its bounded retries.
-        return cv().wait_for(lock, std::chrono::seconds(600),
-                             [&] { return finished().count({run_id, attempt}) > 0; });
-    }
-
-private:
-    static void record(std::string_view run_id, std::uint64_t attempt) {
-        {
-            std::lock_guard lock(mutex());
-            finished().emplace(std::string(run_id), attempt);
-        }
-        cv().notify_all();
-    }
-    static std::mutex& mutex() {
-        static std::mutex value;
-        return value;
-    }
-    static std::condition_variable& cv() {
-        static std::condition_variable value;
-        return value;
-    }
-    static std::multiset<std::pair<std::string, std::uint64_t>>& finished() {
-        static std::multiset<std::pair<std::string, std::uint64_t>> value;
-        return value;
-    }
-};
-
 class ContinuationInterferenceJournal final : public SyncProgramTransitionStore {
 public:
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
@@ -8426,18 +8525,20 @@ private:
 // the continuation, `reconnect` completes the parent (the child ended while nobody continued the parent).
 TEST(ProgramRuntimeTest, JavaScriptAContinuationTheStoreRefusesFailsOnceAndReconnectCompletesTheParent) {
     interrupt_calls.store(0);
-    auto journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-refused-continuation");
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-refused-continuation");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 1));
     const auto child = only_child_of(fixture, started.parent.run_id());
 
     journal->arm();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-refused-continuation-answer").status(),
               ProgramTerminalStatus::Completed);
-    for (int attempt = 0; attempt < 500 && journal->refusals() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 2));
+    EXPECT_EQ(continuations.failure_codes(started.parent.run_id()),
+              (std::vector<std::string>{"", "P_RESUME_CONFLICT"}));
     EXPECT_EQ(journal->refusals(), 1U) << "the refused continuation must not retry itself";
     EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().state,
               ContinuationState::Interrupted);
@@ -8464,10 +8565,13 @@ TEST(ProgramRuntimeTest, JavaScriptAContinuationTheStoreRefusesFailsOnceAndRecon
 // without publishing anything. The interleaving is held at the store by a gate, not by timing.
 TEST(ProgramRuntimeTest, JavaScriptTheContinuationOfAPausedParentIsPublishedOnce) {
     interrupt_calls.store(0);
-    auto journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-continue-once");
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-continue-once");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 1));
     const auto child = only_child_of(fixture, started.parent.run_id());
 
     journal->arm_gate();
@@ -8480,7 +8584,7 @@ TEST(ProgramRuntimeTest, JavaScriptTheContinuationOfAPausedParentIsPublishedOnce
     EXPECT_EQ(journal->continuations(), 0U);
     journal->release_gate();
 
-    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 2);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     EXPECT_EQ(journal->continuations(), 1U);
@@ -8492,11 +8596,13 @@ TEST(ProgramRuntimeTest, JavaScriptTheContinuationOfAPausedParentIsPublishedOnce
 // it dispatched, because the parent's relation holds that child's result. Nothing but the stored records says so.
 TEST(ProgramRuntimeTest, JavaScriptARestartedRuntimeRejoinsTheChildOfAContinuationThatWasLost) {
     interrupt_calls.store(0);
-    auto journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-lost-continuation");
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-lost-continuation");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
     const auto parent_id = started.parent.run_id();
+    ASSERT_TRUE(continuations.wait_for(parent_id, 1));
     const auto child     = only_child_of(fixture, parent_id);
 
     // The first runtime stays alive, cut off from the store as a lost process is: every publication of the run it
@@ -8504,6 +8610,7 @@ TEST(ProgramRuntimeTest, JavaScriptARestartedRuntimeRejoinsTheChildOfAContinuati
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-lost-continuation-answer").status(),
               ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(parent_id, 2));
     ASSERT_TRUE(journal->wait_first_frozen_refusal());
     ASSERT_EQ(journal->continuations(), 1U);
     ASSERT_EQ(fixture.journal->load("tenant:runtime", parent_id)->continuation().state, ContinuationState::Running)
@@ -8566,22 +8673,26 @@ TEST(ProgramRuntimeTest, JavaScriptDestroyingTheLostContinuationRuntimeBeforeTha
 // executing it finds its publications refused.
 TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootEndsADescendantThatNoControlOfThisProcessExecutes) {
     interrupt_calls.store(0);
-    auto journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    const auto      levels = admit_three_levels(fixture);
-    auto            root   = fixture.runtime->start("tenant:runtime", levels.root_version,
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto              levels = admit_three_levels(fixture);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    root = fixture.runtime->start("tenant:runtime", levels.root_version,
                                        ProgramInvocation{json::object(), levels.root_budget, "trace-lost-descendant", {}});
     ASSERT_EQ(root.wait().status(), ProgramTerminalStatus::Interrupted);
     const auto root_id    = root.run_id();
     const auto middle     = only_child_of(fixture, root_id);
     const auto grandchild = only_child_of(fixture, middle.child_run_id);
+    ASSERT_TRUE(continuations.wait_for(middle.child_run_id, 1));
+    ASSERT_TRUE(continuations.wait_for(root_id, 1));
 
     // The middle's continuation runs in this process until the store has refused every publication of it, and the
     // store accepts writes again only after that attempt has ended: from then on no control of this process runs it.
-    AttemptFinishWatch finished;
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, grandchild, "trace-lost-descendant-answer").status(),
               ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(middle.child_run_id, 2));
     ASSERT_TRUE(journal->wait_first_frozen_refusal());
     ASSERT_TRUE(finished.wait_for(
         middle.child_run_id, fixture.journal->load("tenant:runtime", middle.child_run_id)->continuation().attempt))
@@ -8602,28 +8713,38 @@ TEST(ProgramRuntimeTest, JavaScriptCancellingAPausedRootEndsADescendantThatNoCon
 // nothing again; once the child ended and nobody continued the parent, it continues the parent.
 TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturnsTheChildAndContinuesAnAnsweredParent) {
     interrupt_calls.store(0);
-    auto journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    auto            started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-recover-children");
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-recover-children");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 1));
     const auto child = only_child_of(fixture, started.parent.run_id());
 
+    // recover_children_core also calls wake_paused_parent_handling_failure when the parent waits on a child, so each
+    // recover_children call below adds one entry of its own alongside the pause-time and child-completion entries.
     const auto waiting = fixture.runtime->recover_children("tenant:runtime", started.parent.run_id());
     ASSERT_EQ(waiting.size(), 1U);
     EXPECT_EQ(waiting.front().run_id(), child.child_run_id);
     EXPECT_EQ(waiting.front().wait().status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 2));
     EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().state,
               ContinuationState::Interrupted);
 
     journal->arm();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-recover-children-answer").status(),
               ProgramTerminalStatus::Completed);
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 3));
+    EXPECT_EQ(continuations.failure_codes(started.parent.run_id()),
+              (std::vector<std::string>{"", "", "P_RESUME_CONFLICT"}));
     journal->disarm();
     const auto answered = fixture.runtime->recover_children("tenant:runtime", started.parent.run_id());
     ASSERT_EQ(answered.size(), 1U);
     EXPECT_EQ(answered.front().wait().status(), ProgramTerminalStatus::Completed);
-    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 4);
+    EXPECT_EQ(continuations.failure_codes(started.parent.run_id()),
+              (std::vector<std::string>{"", "", "P_RESUME_CONFLICT", ""}));
     EXPECT_EQ(final.status(), ProgramTerminalStatus::Completed);
 }
 
@@ -8833,11 +8954,14 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
     link_children(fixture, parent_version, {{"child_a", child_a}, {"child_b", child_b}},
                   BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, ExecutionGuarantee::Unmanaged);
 
-    auto parent = fixture.runtime->start(
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
+    auto                    parent = fixture.runtime->start(
         "tenant:runtime", parent_version,
         ProgramInvocation{json::object(), parent_budget, "trace-join-two-paused-children", {}});
     const auto interrupted = parent.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(parent.run_id(), 1));
 
     const auto stored_parent = fixture.journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
@@ -8862,6 +8986,8 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
                   .wait()
                   .status(),
               ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(parent.run_id(), 2));
+    EXPECT_EQ(continuations.failure_codes(parent.run_id()), (std::vector<std::string>{"", ""}));
     EXPECT_EQ(journal->continuations(), 0U);
     EXPECT_EQ(fixture.journal->load("tenant:runtime", parent.run_id())->continuation().state,
               ContinuationState::Interrupted);
@@ -8877,9 +9003,10 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
                   .status(),
               ProgramTerminalStatus::Completed);
 
-    const auto final = wait_until_run_ends(fixture, parent.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, parent.run_id(), 3);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    EXPECT_EQ(continuations.failure_codes(parent.run_id()), (std::vector<std::string>{"", "", ""}));
     EXPECT_EQ(journal->continuations(), 1U);
     EXPECT_EQ(final.output().at("a").at("channels").at("value").at("value"), "first-ok");
     EXPECT_EQ(final.output().at("b").at("channels").at("value").at("value"), "second-ok");
@@ -8890,8 +9017,10 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
 // continued once and completes instead of staying Interrupted.
 TEST(ProgramRuntimeTest, JavaScriptChildCompletingBeforeParentPublishesInterruptedStillContinuesTheParent) {
     interrupt_calls.store(0);
-    auto            journal = std::make_shared<ParentInterruptGateJournal>();
-    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto                    journal = std::make_shared<ParentInterruptGateJournal>();
+    AdmittedRuntime         fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
     journal->arm_parent_interrupt_gate();
     auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-child-finishes-before-parent-pause");
     ASSERT_TRUE(journal->wait_entered());
@@ -8899,13 +9028,15 @@ TEST(ProgramRuntimeTest, JavaScriptChildCompletingBeforeParentPublishesInterrupt
     const auto child = only_child_of(fixture, started.parent.run_id());
     ASSERT_TRUE(child.terminal_result.has_value());
     ASSERT_EQ(child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
-    // Answer the child while the parent is still Running and held before its Interrupted CAS.
+    // Answer the child while the parent is still Running and held before its Interrupted CAS: the child's completion
+    // publishes into the Running parent and starts no continuation of its own; the one continuation of the parent is
+    // the one started when its Interrupted publication commits after release().
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-child-finishes-while-parent-running").status(),
               ProgramTerminalStatus::Completed);
     EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
 
     journal->release();
-    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 1);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     EXPECT_EQ(final.output().at("child").at("channels").at("value").at("value"), "approved");
@@ -8915,22 +9046,25 @@ TEST(ProgramRuntimeTest, JavaScriptChildCompletingBeforeParentPublishesInterrupt
 // the next handle that reconnects the parent once the store recovers.
 TEST(ProgramRuntimeTest, JavaScriptRefusedContinuationWithoutHeldParentHandlePreservesNoticeOnReconnect) {
     interrupt_calls.store(0);
-    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    std::string     parent_id;
-    ProgramChildRecord child;
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    std::string             parent_id;
+    ProgramChildRecord      child;
     {
         auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-unheld-parent-notice");
         ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
         parent_id = started.parent.run_id();
         child     = only_child_of(fixture, parent_id);
     }
+    ASSERT_TRUE(continuations.wait_for(parent_id, 1));
 
     journal->arm();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-unheld-parent-notice-answer").status(),
               ProgramTerminalStatus::Completed);
-    for (int attempt = 0; attempt < 500 && journal->refusals() == 0; ++attempt)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    ASSERT_TRUE(continuations.wait_for(parent_id, 2));
+    EXPECT_EQ(continuations.failure_codes(parent_id),
+              (std::vector<std::string>{"", "P_RESUME_CONFLICT"}));
     ASSERT_EQ(journal->refusals(), 1U);
 
     journal->disarm();
@@ -9474,8 +9608,10 @@ TEST(ProgramRuntimeTest, JavaScriptChildExpirationOrReconcileFailurePreservesChi
 // wait for the child's in-memory result delivery so the parent's child relation and continuation complete cleanly.
 TEST(ProgramRuntimeTest, JavaScriptParentWokenWhileChildCompletesWaitsForChildResultDelivery) {
     interrupt_calls.store(0);
-    auto            journal = std::make_shared<ParentInterruptGateJournal>();
-    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    auto                    journal = std::make_shared<ParentInterruptGateJournal>();
+    AdmittedRuntime         fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    AttemptFinishWatch      finished;
     journal->arm_parent_interrupt_gate();
     auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-wake-while-child-completing");
     ASSERT_TRUE(journal->wait_entered());
@@ -9505,7 +9641,10 @@ TEST(ProgramRuntimeTest, JavaScriptParentWokenWhileChildCompletesWaitsForChildRe
     ASSERT_EQ(child_terminal_event_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
     ASSERT_EQ(resumed_child.wait().status(), ProgramTerminalStatus::Completed);
 
-    const auto final = wait_until_run_ends(fixture, started.parent.run_id());
+    // Two continuations run for the parent: one started when its Interrupted publication commits after release()
+    // inside the child's Terminal callback, and one started by the child's completion_callback_, which runs after
+    // that callback returns and sees the parent Interrupted in the store.
+    const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 2);
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
         << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
     EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
@@ -9515,13 +9654,15 @@ TEST(ProgramRuntimeTest, JavaScriptParentWokenWhileChildCompletesWaitsForChildRe
 // when its continuation is recovered via reconnect().
 TEST(ProgramRuntimeTest, JavaScriptRestartedContinuationPreservesPriorCoreCheckpoint) {
     interrupt_calls.store(0);
-    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitAfterCoreCall,
+    auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
+    AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    ParentContinuationWatch continuations;
+    auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitAfterCoreCall,
                                                             "trace-js-restarted-continuation-checkpoint");
     const auto interrupted = started.parent.wait();
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     const auto parent_id      = started.parent.run_id();
+    ASSERT_TRUE(continuations.wait_for(parent_id, 1));
     const auto pre_checkpoint = interrupted.checkpoint();
     ASSERT_TRUE(pre_checkpoint.has_value());
     const auto child = only_child_of(fixture, parent_id);
@@ -9529,6 +9670,7 @@ TEST(ProgramRuntimeTest, JavaScriptRestartedContinuationPreservesPriorCoreCheckp
     journal->freeze_after_continuation();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-restarted-continuation-checkpoint-answer").status(),
               ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(parent_id, 2));
     ASSERT_TRUE(journal->wait_first_frozen_refusal());
 
     fixture.runtime.reset();
