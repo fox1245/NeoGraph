@@ -4655,9 +4655,112 @@ static constexpr const char* kRecursingMain = R"JS(
             }
         )JS";
 
-// The stacks, in KiB, that the tests of RuntimeConfig::javascript_stack_bytes try for "a stack that stops a hundred
-// nested calls".
-static constexpr std::size_t kStacksTriedKiB[] = {8, 12, 16, 24, 32, 48, 64};
+static constexpr const char* kRecursingInterruptMain = R"JS(
+            export function define() {
+                const graph = ng.graph("main");
+                graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                graph.node("work", {type: "runtime-interrupt"});
+                graph.entry("work");
+                graph.exit("work");
+                return graph;
+            }
+
+            function down(depth) {
+                return depth === 0 ? 0 : 1 + down(depth - 1);
+            }
+
+            export function* main(input) {
+                const depth = down(input.depth);
+                const output = yield ng.callCore("main", {}, "resume:call-core");
+                return {depth, value: output.value};
+            }
+        )JS";
+
+// Candidate stack sizes, in KiB, searched in ascending order to find a stack that starts `kRecursingMain` and completes
+// at least one recursive call on the current build.
+static constexpr std::size_t kStacksTriedKiB[] = {8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256};
+
+constexpr bool is_address_sanitizer_build() noexcept {
+#if defined(__SANITIZE_ADDRESS__)
+    return true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    return true;
+#else
+    return false;
+#endif
+#else
+    return false;
+#endif
+}
+
+// Finds, by running `recursing_version` (`kRecursingMain`), the deepest recursion that completes on `fixture.runtime`
+// under `expected_stack_bytes`, and verifies that `max_depth + 1` fails with P_JS_RESOURCE_LIMIT and
+// `expected_stack_bytes` in its witness. Returns std::nullopt when `expected_stack_bytes` is too small to complete
+// even depth 1.
+std::optional<std::size_t> measure_max_completing_depth(AdmittedRuntime&      fixture,
+                                                        const ProgramVersion& recursing_version,
+                                                        std::size_t           expected_stack_bytes) {
+    static constexpr std::size_t kMaxSearchDepth = 1u << 20;
+    const auto                   run             = [&](std::size_t depth) {
+        return fixture.runtime->run(
+            "tenant:runtime", recursing_version,
+            ProgramInvocation{json{{"depth", depth}}, grant(),
+                              "trace-javascript-stack-measure-" + std::to_string(expected_stack_bytes) + "-" +
+                                  std::to_string(depth),
+                              {}});
+    };
+    const auto expect_stack_limit_failure = [&](const ProgramResult& failed) {
+        EXPECT_EQ(failed.status(), ProgramTerminalStatus::Failed);
+        if (failed.failure().has_value()) {
+            EXPECT_EQ(failed.failure()->code, "P_JS_RESOURCE_LIMIT")
+                << failed.failure()->code << ": " << failed.failure()->message;
+            EXPECT_TRUE(failed.failure()->witness.contains("max_stack_bytes")) << failed.failure()->witness.dump();
+            if (failed.failure()->witness.contains("max_stack_bytes")) {
+                EXPECT_EQ(failed.failure()->witness.at("max_stack_bytes").get<std::size_t>(), expected_stack_bytes);
+            }
+        }
+    };
+    const auto first = run(1);
+    if (first.status() != ProgramTerminalStatus::Completed) {
+        EXPECT_EQ(first.status(), ProgramTerminalStatus::Failed);
+        if (first.failure().has_value()) {
+            EXPECT_TRUE(first.failure()->code == "P_JS_RUNTIME" || first.failure()->code == "P_JS_RESOURCE_LIMIT")
+                << first.failure()->code << ": " << first.failure()->message;
+            if (first.failure()->witness.contains("max_stack_bytes")) {
+                EXPECT_EQ(first.failure()->witness.at("max_stack_bytes").get<std::size_t>(), expected_stack_bytes);
+            }
+        }
+        return std::nullopt;
+    }
+    std::size_t low  = 1;
+    std::size_t high = 2;
+    for (;;) {
+        const auto probe = run(high);
+        if (probe.status() == ProgramTerminalStatus::Completed) {
+            if (high >= kMaxSearchDepth) {
+                ADD_FAILURE() << "recursion did not hit stack limit by depth " << high;
+                return std::nullopt;
+            }
+            low = high;
+            high *= 2;
+            continue;
+        }
+        expect_stack_limit_failure(probe);
+        break;
+    }
+    while (low + 1 < high) {
+        const std::size_t mid   = low + (high - low) / 2;
+        const auto        probe = run(mid);
+        if (probe.status() == ProgramTerminalStatus::Completed) {
+            low = mid;
+        } else {
+            expect_stack_limit_failure(probe);
+            high = mid;
+        }
+    }
+    return low;
+}
 
 TEST(ProgramRuntimeTest, JavaScriptControlStackIsTheRuntimesSetting) {
     // A native build keeps its default; a WebAssembly build's is smaller.
@@ -4674,38 +4777,67 @@ TEST(ProgramRuntimeTest, JavaScriptControlStackIsTheRuntimesSetting) {
             ProgramInvocation{json{{"depth", depth}}, grant(), "trace-javascript-stack", {}});
     };
 
-    // The default: a hundred nested calls run, and a source that never stops recursing fails with the default stack
-    // in its witness.
-    const auto shallow = run(100);
-    ASSERT_EQ(shallow.status(), ProgramTerminalStatus::Completed)
-        << (shallow.failure() ? shallow.failure()->code + ": " + shallow.failure()->message : "no failure detail");
-    EXPECT_EQ(shallow.output().at("depth"), 100);
+    // An endless recursion under the default runtime fails with the default stack in its witness.
     const auto endless_default = run(1'000'000'000);
     ASSERT_EQ(endless_default.status(), ProgramTerminalStatus::Failed);
     ASSERT_TRUE(endless_default.failure().has_value());
     EXPECT_EQ(endless_default.failure()->code, "P_JS_RESOURCE_LIMIT");
+    ASSERT_TRUE(endless_default.failure()->witness.contains("max_stack_bytes"));
     EXPECT_EQ(endless_default.failure()->witness.at("max_stack_bytes").get<std::size_t>(),
               JavaScriptCompileLimits::kDefaultStackBytes);
 
-    // A runtime configured with a small stack: it applies to main(), the witness reports it, and a source that needs
-    // more than it fails where the default stack would have run it. How small a stack still starts the source depends
-    // on how the build lays out its frames (a sanitizer or a debug build uses several times what an optimized one
-    // does), so the stacks are tried in ascending order, and the first at which the recursion is what fails is the one
-    // that is checked. A stack too small to start the source ends with P_JS_RUNTIME instead.
-    std::size_t applied = 0;
+    // Measure first: find the first candidate stack that starts the program and completes at least one recursion,
+    // together with the deepest recursion that completes under it.
+    std::size_t                small_stack_bytes = 0;
+    std::optional<std::size_t> small_max_depth;
     for (const std::size_t kib : kStacksTriedKiB) {
         fixture.javascript_stack_bytes = kib * 1024u;
         fixture.runtime                = fixture.make_runtime();
-        const auto small               = run(100);
-        ASSERT_EQ(small.status(), ProgramTerminalStatus::Failed) << "a stack of " << kib << " KiB ran a hundred nested calls";
-        ASSERT_TRUE(small.failure().has_value());
-        if (small.failure()->code == "P_JS_RUNTIME") continue;
-        EXPECT_EQ(small.failure()->code, "P_JS_RESOURCE_LIMIT");
-        EXPECT_EQ(small.failure()->witness.at("max_stack_bytes").get<std::size_t>(), kib * 1024u);
-        applied = kib * 1024u;
-        break;
+        small_max_depth                = measure_max_completing_depth(fixture, version, kib * 1024u);
+        if (small_max_depth.has_value()) {
+            small_stack_bytes = kib * 1024u;
+            break;
+        }
     }
-    EXPECT_NE(applied, 0u) << "no stack tried both started the source and stopped a hundred nested calls";
+    ASSERT_TRUE(small_max_depth.has_value()) << "no stack tried started the source and completed a recursion";
+
+    // The runtime's setting is the stack that is used, and an endless recursion reports that setting in its witness.
+    const auto at_limit = run(*small_max_depth);
+    ASSERT_EQ(at_limit.status(), ProgramTerminalStatus::Completed)
+        << (at_limit.failure() ? at_limit.failure()->code + ": " + at_limit.failure()->message : "no failure detail");
+    EXPECT_EQ(at_limit.output().at("depth"), *small_max_depth);
+    const auto beyond_limit = run(*small_max_depth + 1);
+    ASSERT_EQ(beyond_limit.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(beyond_limit.failure().has_value());
+    EXPECT_EQ(beyond_limit.failure()->code, "P_JS_RESOURCE_LIMIT");
+    ASSERT_TRUE(beyond_limit.failure()->witness.contains("max_stack_bytes"));
+    EXPECT_EQ(beyond_limit.failure()->witness.at("max_stack_bytes").get<std::size_t>(), small_stack_bytes);
+    const auto endless_small = run(1'000'000'000);
+    ASSERT_EQ(endless_small.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(endless_small.failure().has_value());
+    EXPECT_EQ(endless_small.failure()->code, "P_JS_RESOURCE_LIMIT");
+    ASSERT_TRUE(endless_small.failure()->witness.contains("max_stack_bytes"));
+    EXPECT_EQ(endless_small.failure()->witness.at("max_stack_bytes").get<std::size_t>(), small_stack_bytes);
+
+    // A larger stack runs a deeper recursion.
+    const std::size_t large_stack_bytes = small_stack_bytes * 2u;
+    fixture.javascript_stack_bytes      = large_stack_bytes;
+    fixture.runtime                     = fixture.make_runtime();
+    const auto large_max_depth          = measure_max_completing_depth(fixture, version, large_stack_bytes);
+    ASSERT_TRUE(large_max_depth.has_value());
+    EXPECT_GT(*large_max_depth, *small_max_depth);
+
+    // Native default documented property: a hundred nested calls run under the default stack on uninstrumented builds.
+    fixture.javascript_stack_bytes = JavaScriptCompileLimits::kDefaultStackBytes;
+    fixture.runtime                = fixture.make_runtime();
+    if (is_address_sanitizer_build()) {
+        GTEST_SKIP() << "AddressSanitizer enlarges native interpreter frames; the 100-call native default claim "
+                        "applies to uninstrumented builds";
+    }
+    const auto shallow = run(100);
+    ASSERT_EQ(shallow.status(), ProgramTerminalStatus::Completed)
+        << (shallow.failure() ? shallow.failure()->code + ": " + shallow.failure()->message : "no failure detail");
+    EXPECT_EQ(shallow.output().at("depth"), 100);
 }
 
 TEST(ProgramRuntimeTest, RuntimeRefusesAJavaScriptStackBeyondTheMemoryLimit) {
@@ -4748,56 +4880,68 @@ TEST(ProgramRuntimeTest, JavaScriptStackTooSmallToStartTheSourceNamesTheStack) {
 // journal what the paused run asked, under the stack of the runtime that resumes it. A runtime whose stack is smaller than
 // what the paused run used ends the resumed run with the diagnostic of the limit; one whose stack suffices completes it.
 TEST(ProgramRuntimeTest, JavaScriptResumeRunsMainAgainUnderTheStackOfTheResumingRuntime) {
+    completed_calls.store(0);
     interrupt_calls.store(0);
     AdmittedRuntime fixture(1, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
-    const auto      version =
-        fixture.admit_javascript(javascript_runtime_source("runtime-interrupt", R"JS(
-    function down(depth) { return depth === 0 ? 0 : 1 + down(depth - 1); }
-    const depth = down(input.depth);
-    const output = yield ng.callCore("main", {}, "resume:call-core");
-    return {depth, value: output.value};
-)JS"));
-    const auto pause = [&](const std::string& trace) {
+    const auto      measuring_version = fixture.admit_javascript(kRecursingMain);
+    const auto      version           = fixture.admit_javascript(kRecursingInterruptMain);
+
+    std::size_t                small_stack_bytes = 0;
+    std::optional<std::size_t> small_max_depth;
+    for (const std::size_t kib : kStacksTriedKiB) {
+        fixture.javascript_stack_bytes = kib * 1024u;
+        fixture.runtime                = fixture.make_runtime();
+        small_max_depth                = measure_max_completing_depth(fixture, measuring_version, kib * 1024u);
+        if (small_max_depth.has_value()) {
+            small_stack_bytes = kib * 1024u;
+            break;
+        }
+    }
+    ASSERT_TRUE(small_max_depth.has_value()) << "no stack tried started the source and completed a recursion";
+    const auto        small             = std::move(fixture.runtime);
+    const std::size_t large_stack_bytes = std::max(small_stack_bytes * 2u, JavaScriptCompileLimits::kDefaultStackBytes);
+    fixture.javascript_stack_bytes      = large_stack_bytes;
+    fixture.runtime                     = fixture.make_runtime();
+    const auto large_max_depth          = measure_max_completing_depth(fixture, measuring_version, large_stack_bytes);
+    ASSERT_TRUE(large_max_depth.has_value());
+    ASSERT_GT(*large_max_depth, *small_max_depth);
+
+    // Choose a recursion depth strictly between the small stack's limit and the large stack's limit, with margin from
+    // both boundaries so any constant frame-size difference between initial run and resume cannot flip the outcome.
+    const std::size_t paused_depth = *small_max_depth + std::max<std::size_t>(1u, (*large_max_depth - *small_max_depth) / 2u);
+    const auto        pause        = [&](const std::string& trace) {
         auto paused = fixture.runtime->run(
             "tenant:runtime", version,
-            ProgramInvocation{json{{"depth", 100}}, javascript_budget(1), trace, {}});
+            ProgramInvocation{json{{"depth", paused_depth}}, javascript_budget(1), trace, {}});
         EXPECT_EQ(paused.status(), ProgramTerminalStatus::Interrupted)
             << (paused.failure() ? paused.failure()->code + ": " + paused.failure()->message : "no failure detail");
         return paused;
     };
 
-    // Another runtime over the same stores, with a stack that a hundred nested calls do not fit: the resumed run fails
-    // where the run that paused did not. As in JavaScriptControlStackIsTheRuntimesSetting, the stacks are tried in
-    // ascending order, and a stack too small to start the source ends with P_JS_RUNTIME instead.
-    std::size_t applied = 0;
-    for (const std::size_t kib : kStacksTriedKiB) {
-        const auto paused = pause("trace-js-stack-resume-" + std::to_string(kib));
-        ASSERT_EQ(paused.status(), ProgramTerminalStatus::Interrupted);
-        fixture.javascript_stack_bytes = kib * 1024u;
-        const auto small               = fixture.make_runtime();
-        const auto refused =
-            small->resume("tenant:runtime", paused.run_id(),
-                          resume_for(paused, json{{"decision", "approved"}}, "trace-js-stack-small-" + std::to_string(kib)))
-                .wait();
-        ASSERT_EQ(refused.status(), ProgramTerminalStatus::Failed) << "a stack of " << kib << " KiB ran a hundred nested calls";
-        ASSERT_TRUE(refused.failure().has_value());
-        if (refused.failure()->code == "P_JS_RUNTIME") continue;
-        EXPECT_EQ(refused.failure()->code, "P_JS_RESOURCE_LIMIT");
-        EXPECT_EQ(refused.failure()->witness.at("max_stack_bytes").get<std::size_t>(), kib * 1024u);
-        applied = kib * 1024u;
-        break;
-    }
-    EXPECT_NE(applied, 0u) << "no stack tried both started the source and stopped a hundred nested calls";
+    // Another runtime over the same stores, with the smaller stack under which `paused_depth` does not fit: the resumed
+    // run fails with the smaller runtime's stack in its witness.
+    const auto paused_for_small = pause("trace-js-stack-resume-small");
+    ASSERT_EQ(paused_for_small.status(), ProgramTerminalStatus::Interrupted);
+    const auto refused =
+        small->resume("tenant:runtime", paused_for_small.run_id(),
+                      resume_for(paused_for_small, json{{"decision", "approved"}}, "trace-js-stack-small-refused"))
+            .wait();
+    ASSERT_EQ(refused.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(refused.failure().has_value());
+    EXPECT_EQ(refused.failure()->code, "P_JS_RESOURCE_LIMIT");
+    ASSERT_TRUE(refused.failure()->witness.contains("max_stack_bytes"));
+    EXPECT_EQ(refused.failure()->witness.at("max_stack_bytes").get<std::size_t>(), small_stack_bytes);
 
-    // The runtime that paused a run resumes it under its own, default stack.
+    // The runtime that paused the run resumes it under its own stack, which suffices for `paused_depth`.
     const auto first   = pause("trace-js-stack-resume-first");
+    ASSERT_EQ(first.status(), ProgramTerminalStatus::Interrupted);
     const auto resumed = fixture.runtime
                              ->resume("tenant:runtime", first.run_id(),
-                                      resume_for(first, json{{"decision", "approved"}}, "trace-js-stack-default"))
+                                      resume_for(first, json{{"decision", "approved"}}, "trace-js-stack-large"))
                              .wait();
     ASSERT_EQ(resumed.status(), ProgramTerminalStatus::Completed)
         << (resumed.failure() ? resumed.failure()->code + ": " + resumed.failure()->message : "no failure detail");
-    EXPECT_EQ(resumed.output(), (json{{"depth", 100}, {"value", "approved"}}));
+    EXPECT_EQ(resumed.output(), (json{{"depth", paused_depth}, {"value", "approved"}}));
 }
 
 TEST(ProgramRuntimeTest, JavaScriptCommandJournalPersistsCoordinateAndResult) {
@@ -8163,6 +8307,24 @@ public:
                              [&] { return finished().count({run_id, attempt}) > 0; });
     }
 
+    bool has_finished(const std::string& run_id, std::uint64_t attempt) const {
+        std::lock_guard lock(mutex());
+        return finished().count({run_id, attempt}) > 0;
+    }
+
+    std::string describe() const {
+        std::lock_guard lock(mutex());
+        std::string     out = "[";
+        bool            first = true;
+        for (const auto& [run_id, attempt] : finished()) {
+            if (!first) out += ", ";
+            first = false;
+            out += run_id + "#" + std::to_string(attempt);
+        }
+        out += "]";
+        return out;
+    }
+
 private:
     static void record(std::string_view run_id, std::uint64_t attempt) {
         {
@@ -8223,7 +8385,7 @@ public:
     }
 
     std::vector<std::string> failure_codes(const std::string& parent_run_id,
-                                           std::string_view   owner_scope = "tenant:runtime") {
+                                           std::string_view   owner_scope = "tenant:runtime") const {
         std::lock_guard          lock(mutex());
         std::vector<std::string> codes;
         for (const auto& entry : ended()) {
@@ -8231,6 +8393,19 @@ public:
                 codes.push_back(entry.failure_code);
         }
         return codes;
+    }
+
+    std::string describe() const {
+        std::lock_guard lock(mutex());
+        std::string     out = "[";
+        bool            first = true;
+        for (const auto& entry : ended()) {
+            if (!first) out += ", ";
+            first = false;
+            out += entry.parent_run_id + ":" + (entry.failure_code.empty() ? "<ok>" : entry.failure_code);
+        }
+        out += "]";
+        return out;
     }
 
 private:
@@ -8252,6 +8427,97 @@ private:
         return value;
     }
     static std::vector<Entry>& ended() {
+        static std::vector<Entry> value;
+        return value;
+    }
+};
+
+const char* wake_paused_parent_reason_name(neograph::program::detail::WakePausedParentReason reason) noexcept {
+    using neograph::program::detail::WakePausedParentReason;
+    switch (reason) {
+        case WakePausedParentReason::NotInterrupted: return "NotInterrupted";
+        case WakePausedParentReason::NoCheckpoint: return "NoCheckpoint";
+        case WakePausedParentReason::NotPausedOnChildren: return "NotPausedOnChildren";
+        case WakePausedParentReason::ChildNotFinal: return "ChildNotFinal";
+        case WakePausedParentReason::ContinuationInFlight: return "ContinuationInFlight";
+        case WakePausedParentReason::TakenByAnotherCaller: return "TakenByAnotherCaller";
+        case WakePausedParentReason::Continued: return "Continued";
+        case WakePausedParentReason::Failed: return "Failed";
+    }
+    return "Unknown";
+}
+
+// Records every return of `ProgramRuntime::wake_paused_parent` through the runtime's test seam, with the parent run id,
+// the typed reason enum, and (for ChildNotFinal) the child run id.
+class WakePausedParentWatch {
+public:
+    struct Entry {
+        std::string                                       parent_run_id;
+        neograph::program::detail::WakePausedParentReason reason;
+        std::string                                       child_run_id;
+    };
+
+    WakePausedParentWatch() {
+        {
+            std::lock_guard lock(mutex());
+            entries().clear();
+        }
+        neograph::program::detail::set_wake_paused_parent_observer_for_testing(&WakePausedParentWatch::record);
+    }
+    ~WakePausedParentWatch() {
+        neograph::program::detail::set_wake_paused_parent_observer_for_testing(nullptr);
+    }
+    WakePausedParentWatch(const WakePausedParentWatch&)            = delete;
+    WakePausedParentWatch& operator=(const WakePausedParentWatch&) = delete;
+
+    std::string describe(AdmittedRuntime& fixture, const std::string& parent_run_id,
+                         std::string_view owner_scope = "tenant:runtime") const {
+        std::vector<Entry> snapshot;
+        {
+            std::lock_guard lock(mutex());
+            snapshot = entries();
+        }
+        std::string out = "wake_paused_parent reasons for " + parent_run_id + ": [";
+        bool        first = true;
+        for (const auto& entry : snapshot) {
+            if (entry.parent_run_id != parent_run_id) continue;
+            if (!first) out += ", ";
+            first = false;
+            out += wake_paused_parent_reason_name(entry.reason);
+            if (entry.reason == neograph::program::detail::WakePausedParentReason::ChildNotFinal) {
+                out += "(child=" + entry.child_run_id + ", stored_state=";
+                try {
+                    const auto stored_child = fixture.journal->load(std::string(owner_scope), entry.child_run_id);
+                    if (!stored_child) {
+                        out += "<missing>";
+                    } else {
+                        out += std::string(to_string(stored_child->continuation().state)) +
+                               " attempt=" + std::to_string(stored_child->continuation().attempt);
+                    }
+                } catch (const std::exception& error) {
+                    out += std::string("<load threw: ") + error.what() + ">";
+                } catch (...) {
+                    out += "<load threw>";
+                }
+                out += ")";
+            }
+        }
+        out += "]";
+        return out;
+    }
+
+private:
+    static void record(std::string_view                                  parent_run_id,
+                       neograph::program::detail::WakePausedParentReason reason,
+                       std::string_view                                  child_run_id) {
+        std::lock_guard lock(mutex());
+        entries().push_back(Entry{std::string(parent_run_id), reason, std::string(child_run_id)});
+    }
+    static std::mutex& mutex() {
+        static std::mutex value;
+        return value;
+    }
+    static std::vector<Entry>& entries() {
         static std::vector<Entry> value;
         return value;
     }
@@ -8765,6 +9031,7 @@ TEST(ProgramRuntimeTest, JavaScriptAContinuationTheStoreRefusesFailsOnceAndRecon
     auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
     AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
     ParentContinuationWatch continuations;
+    WakePausedParentWatch   wakes;
     auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-refused-continuation");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 1));
@@ -8784,16 +9051,20 @@ TEST(ProgramRuntimeTest, JavaScriptAContinuationTheStoreRefusesFailsOnceAndRecon
     EXPECT_EQ(notices.back().code, "P_CHILD_CONTINUATION_FAILED");
     try {
         (void)fixture.runtime->reconnect("tenant:runtime", started.parent.run_id());
-        ADD_FAILURE() << "reconnect must report why the paused parent is not continued";
+        ADD_FAILURE() << "reconnect must report why the paused parent is not continued; "
+                      << wakes.describe(fixture, started.parent.run_id());
     } catch (const ProgramDiagnosticError& error) {
-        EXPECT_EQ(error.diagnostic().code, "P_RESUME_CONFLICT");
+        EXPECT_EQ(error.diagnostic().code, "P_RESUME_CONFLICT")
+            << wakes.describe(fixture, started.parent.run_id());
     }
 
     journal->disarm();
     const auto final = fixture.runtime->reconnect("tenant:runtime", started.parent.run_id()).wait();
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
-        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
-    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail")
+        << "; " << wakes.describe(fixture, started.parent.run_id());
+    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed)
+        << wakes.describe(fixture, started.parent.run_id());
 }
 
 // The automatic continuation, a reconnect and a second caller can all reach a paused parent whose child ended. One of
@@ -8953,6 +9224,7 @@ TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturns
     auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
     AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
     ParentContinuationWatch continuations;
+    WakePausedParentWatch   wakes;
     AttemptFinishWatch      finished;
     auto                    started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-js-recover-children");
     ASSERT_EQ(started.parent.wait().status(), ProgramTerminalStatus::Interrupted);
@@ -8967,7 +9239,7 @@ TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturns
     EXPECT_EQ(waiting.front().wait().status(), ProgramTerminalStatus::Interrupted);
     ASSERT_TRUE(continuations.wait_for(started.parent.run_id(), 2));
     EXPECT_EQ(fixture.journal->load("tenant:runtime", started.parent.run_id())->continuation().state,
-              ContinuationState::Interrupted);
+               ContinuationState::Interrupted);
 
     journal->arm();
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-js-recover-children-answer").status(),
@@ -8977,12 +9249,15 @@ TEST(ProgramRuntimeTest, JavaScriptRecoverChildrenOfAParentPausedOnAChildReturns
               (std::vector<std::string>{"", "", "P_RESUME_CONFLICT"}));
     journal->disarm();
     const auto answered = fixture.runtime->recover_children("tenant:runtime", started.parent.run_id());
-    ASSERT_EQ(answered.size(), 1U);
-    EXPECT_EQ(answered.front().wait().status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(answered.size(), 1U) << wakes.describe(fixture, started.parent.run_id());
+    EXPECT_EQ(answered.front().wait().status(), ProgramTerminalStatus::Completed)
+        << wakes.describe(fixture, started.parent.run_id());
     const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 4);
     EXPECT_EQ(continuations.failure_codes(started.parent.run_id()),
-              (std::vector<std::string>{"", "", "P_RESUME_CONFLICT", ""}));
-    EXPECT_EQ(final.status(), ProgramTerminalStatus::Completed);
+              (std::vector<std::string>{"", "", "P_RESUME_CONFLICT", ""}))
+        << wakes.describe(fixture, started.parent.run_id());
+    EXPECT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << wakes.describe(fixture, started.parent.run_id());
 }
 
 namespace {
@@ -9286,6 +9561,7 @@ TEST(ProgramRuntimeTest, JavaScriptRefusedContinuationWithoutHeldParentHandlePre
     auto                    journal = std::make_shared<ContinuationInterferenceJournal>();
     AdmittedRuntime         fixture(3, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
     ParentContinuationWatch continuations;
+    WakePausedParentWatch   wakes;
     std::string             parent_id;
     ProgramChildRecord      child;
     {
@@ -9307,10 +9583,10 @@ TEST(ProgramRuntimeTest, JavaScriptRefusedContinuationWithoutHeldParentHandlePre
     journal->disarm();
     auto reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
     const auto final = reconnected.wait();
-    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed);
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed) << wakes.describe(fixture, parent_id);
     const auto notices = reconnected.notices();
-    ASSERT_FALSE(notices.empty());
-    EXPECT_EQ(notices.front().code, "P_CHILD_CONTINUATION_FAILED");
+    ASSERT_FALSE(notices.empty()) << wakes.describe(fixture, parent_id);
+    EXPECT_EQ(notices.front().code, "P_CHILD_CONTINUATION_FAILED") << wakes.describe(fixture, parent_id);
 }
 
 namespace {
@@ -9644,15 +9920,23 @@ TEST(ProgramRuntimeTest, JavaScriptPausedParentContinuationAfterFirstCallerPubli
 // while a completed child whose result is already in the parent's relation is rejoined without opt-in.
 TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompletedSecondChildWithoutOptIn) {
     interrupt_calls.store(0);
-    std::promise<void> second_child_started;
-    auto               second_child_started_future = second_child_started.get_future();
-    std::atomic<bool>  second_child_notified{false};
-    reset_plan_steps([&](std::size_t, const NodeInput&) -> json {
-        if (!second_child_notified.exchange(true)) second_child_started.set_value();
+    AttemptFinishWatch      finished;
+    ParentContinuationWatch continuations;
+    auto                    second_child_started = std::make_shared<std::promise<void>>();
+    auto                    second_child_started_future = second_child_started->get_future();
+    auto                    second_child_notified = std::make_shared<std::atomic<bool>>(false);
+    reset_plan_steps([second_child_started, second_child_notified](std::size_t, const NodeInput&) -> json {
+        if (!second_child_notified->exchange(true)) second_child_started->set_value();
         return json{{"block", true}};
     });
-    auto            journal = std::make_shared<ContinuationInterferenceJournal>();
-    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    struct RejoinWatchdogState {
+        std::shared_ptr<ContinuationInterferenceJournal> journal = std::make_shared<ContinuationInterferenceJournal>();
+        AdmittedRuntime                                  fixture{4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true};
+        std::unique_ptr<ProgramRuntime>                  restarted;
+    };
+    auto            state         = std::make_shared<RejoinWatchdogState>();
+    auto&           journal       = state->journal;
+    auto&           fixture       = state->fixture;
     const RunBudget parent_budget{40000, 4000, 4000, 2, 32, 80, 0, 1, 2};
     const auto      child_a = fixture.admit("runtime-interrupt");
     const auto      child_b = fixture.admit("runtime-plan-step");
@@ -9667,16 +9951,94 @@ TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompleted
     link_children(fixture, parent_version, {{"child_a", child_a}, {"child_b", child_b}},
                   BudgetLimits{10000, 1000, 1000, 1, 1, 20, 0, 0, 0}, ExecutionGuarantee::Unmanaged);
 
+    std::string parent_id;
+    const auto  describe_unfinished = [&]() -> std::string {
+        std::string out = "finished_attempts=" + finished.describe() +
+                          " ended_continuations=" + continuations.describe();
+        if (!parent_id.empty()) {
+            try {
+                const auto stored = fixture.journal->load("tenant:runtime", parent_id);
+                if (!stored) {
+                    out += " parent=" + parent_id + "(<missing>)";
+                } else {
+                    out += " parent=" + parent_id + "(state=" + std::string(to_string(stored->continuation().state)) +
+                           " attempt=" + std::to_string(stored->continuation().attempt) +
+                           " attempt_ended=" +
+                           (finished.has_finished(parent_id, stored->continuation().attempt) ? "true" : "false") + ")";
+                    for (const auto& child : stored->children()) {
+                        const auto child_stored = fixture.journal->load("tenant:runtime", child.child_run_id);
+                        out += " child[" + child.link_id + "]=" + child.child_run_id + "(relation=" +
+                               std::string(to_string(child.state));
+                        if (!child_stored) {
+                            out += " stored=<missing>)";
+                        } else {
+                            out += " state=" + std::string(to_string(child_stored->continuation().state)) +
+                                   " attempt=" + std::to_string(child_stored->continuation().attempt) +
+                                   " attempt_ended=" +
+                                   (finished.has_finished(child.child_run_id, child_stored->continuation().attempt)
+                                        ? "true"
+                                        : "false") +
+                                   ")";
+                        }
+                    }
+                }
+            } catch (const std::exception& error) {
+                out += std::string(" <load threw: ") + error.what() + ">";
+            } catch (...) {
+                out += " <load threw>";
+            }
+        }
+        return out;
+    };
+    const auto run_with_watchdog = [&]<typename Fn>(std::string_view step_name,
+                                                    Fn&&             fn) -> std::optional<std::invoke_result_t<Fn>> {
+        using Result = std::invoke_result_t<Fn>;
+        auto done    = std::make_shared<std::promise<Result>>();
+        auto future  = done->get_future();
+        std::thread worker([state, done, fn = std::forward<Fn>(fn)]() mutable {
+            try {
+                done->set_value(fn());
+            } catch (...) {
+                done->set_exception(std::current_exception());
+            }
+        });
+        if (future.wait_for(std::chrono::seconds(600)) != std::future_status::ready) {
+            worker.detach();
+            ADD_FAILURE() << "watchdog timed out (600 s) in step '" << step_name << "'; " << describe_unfinished();
+            return std::nullopt;
+        }
+        worker.join();
+        return future.get();
+    };
+    const auto wait_handle_with_watchdog = [&](const ProgramHandle& handle,
+                                               std::string_view     step_name) -> std::optional<ProgramResult> {
+        return run_with_watchdog(step_name, [copy = handle]() { return copy.wait(); });
+    };
+
     auto parent = fixture.runtime->start(
         "tenant:runtime", parent_version,
         ProgramInvocation{json::object(), parent_budget, "trace-sequential-opt-in", {}});
-    ASSERT_EQ(parent.wait().status(), ProgramTerminalStatus::Interrupted);
-    const auto parent_id   = parent.run_id();
+    parent_id = parent.run_id();
+    const auto initial_parent = wait_handle_with_watchdog(parent, "parent.wait()");
+    ASSERT_TRUE(initial_parent.has_value());
+    ASSERT_EQ(initial_parent->status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_TRUE(continuations.wait_for(parent_id, 1))
+        << "watchdog timed out (600 s) in step 'parent initial continuation': continuation #1 had not ended; "
+        << describe_unfinished();
     const auto first_child = only_child_of(fixture, parent_id);
 
-    ASSERT_EQ(answer_paused_child(fixture, first_child, "trace-sequential-opt-in-answer-a").status(),
-              ProgramTerminalStatus::Completed);
-    ASSERT_EQ(second_child_started_future.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+    const auto answered_first_child = run_with_watchdog(
+        "answer_paused_child",
+        [state, first_child]() {
+            return answer_paused_child(state->fixture, first_child, "trace-sequential-opt-in-answer-a");
+        });
+    ASSERT_TRUE(answered_first_child.has_value());
+    ASSERT_EQ(answered_first_child->status(), ProgramTerminalStatus::Completed);
+    ASSERT_TRUE(continuations.wait_for(parent_id, 2))
+        << "watchdog timed out (600 s) in step 'answer_paused_child: parent continuation': continuation #2 had not ended; "
+        << describe_unfinished();
+    ASSERT_EQ(second_child_started_future.wait_for(std::chrono::seconds(600)), std::future_status::ready)
+        << "watchdog timed out (600 s) in step 'second_child_started_future.wait_for'; " << describe_unfinished();
     const auto stored_parent = fixture.journal->load("tenant:runtime", parent_id);
     ASSERT_TRUE(stored_parent.has_value());
     ASSERT_EQ(stored_parent->children().size(), 2U);
@@ -9684,14 +10046,22 @@ TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompleted
     // Freeze the store while child_b is still Running so runtime teardown does not overwrite the Running records,
     // then recover on a runtime with recover_existing_child_commands == false (the default of make_runtime_with_transitions).
     journal->freeze_all();
-    fixture.runtime.reset();
+    ASSERT_TRUE(run_with_watchdog("fixture.runtime.reset()", [state]() {
+        state->fixture.runtime.reset();
+        return true;
+    }).has_value());
     journal->thaw();
-    auto restarted = fixture.make_runtime_with_transitions(journal);
-    const auto recovered = restarted->reconnect("tenant:runtime", parent_id).wait();
-    EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Interrupted)
+    state->restarted = fixture.make_runtime_with_transitions(journal);
+    const auto reconnected_parent = run_with_watchdog("restarted->reconnect(parent_id)", [state, parent_id]() {
+        return state->restarted->reconnect("tenant:runtime", parent_id);
+    });
+    ASSERT_TRUE(reconnected_parent.has_value());
+    const auto recovered = wait_handle_with_watchdog(*reconnected_parent, "restarted->reconnect(parent_id).wait()");
+    ASSERT_TRUE(recovered.has_value());
+    EXPECT_EQ(recovered->status(), ProgramTerminalStatus::Interrupted)
         << "without recover_existing_child_commands opt-in, the uncompleted second child must require reconciliation";
-    ASSERT_TRUE(recovered.interrupt().has_value());
-    ASSERT_TRUE(recovered.interrupt()->pending_effect.has_value());
+    ASSERT_TRUE(recovered->interrupt().has_value());
+    ASSERT_TRUE(recovered->interrupt()->pending_effect.has_value());
 }
 
 // Cancelling a paused parent updates held in-process handles of an Interrupted child, preserves

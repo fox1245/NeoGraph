@@ -10836,19 +10836,30 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
 asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent(std::string owner_scope,
                                                                                  std::string parent_run_id) {
     const auto record = (co_await load_active_agent_run(impl_->transitions, owner_scope, parent_run_id));
-    if (!record || record->continuation().state != ContinuationState::Interrupted ||
-        !record->exact_checkpoint())
+    if (!record || record->continuation().state != ContinuationState::Interrupted) {
+        detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::NotInterrupted);
         co_return std::nullopt;
+    }
+    if (!record->exact_checkpoint()) {
+        detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::NoCheckpoint);
+        co_return std::nullopt;
+    }
     const auto commands =
         (co_await impl_->transitions->load_javascript_commands(owner_scope, record->run_id()));
     const auto latest_journal = (co_await impl_->transitions->latest(owner_scope, record->run_id()));
     const auto paused_on = detail::children_paused_on(*record, commands, latest_journal);
-    if (paused_on.empty()) co_return std::nullopt;
+    if (paused_on.empty()) {
+        detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::NotPausedOnChildren);
+        co_return std::nullopt;
+    }
     for (const auto& child : paused_on) {
         const auto stored =
             (co_await load_active_agent_run(impl_->transitions, owner_scope, child.child_run_id));
-        if (!stored || !detail::transition::is_final(stored->continuation().state))
+        if (!stored || !detail::transition::is_final(stored->continuation().state)) {
+            detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::ChildNotFinal,
+                                              child.child_run_id);
             co_return std::nullopt;
+        }
         if (const auto live = impl_->find_control(owner_scope, child.child_run_id);
             live && !live->try_result())
             (void)co_await live->wait_async();
@@ -10869,7 +10880,10 @@ asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent
     } entry;
     {
         std::lock_guard lock(impl_->process_state->continuations_mutex);
-        if (!impl_->process_state->continuations.insert({owner_scope, record->run_id()}).second) co_return std::nullopt;
+        if (!impl_->process_state->continuations.insert({owner_scope, record->run_id()}).second) {
+            detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::ContinuationInFlight);
+            co_return std::nullopt;
+        }
         entry.state = impl_->process_state;
         entry.key   = {owner_scope, record->run_id()};
     }
@@ -10887,8 +10901,15 @@ asio::awaitable<std::optional<ProgramHandle>> ProgramRuntime::wake_paused_parent
     } catch (...) {
         failure = std::current_exception();
     }
-    if (failure) std::rethrow_exception(failure);
-    if (taken) co_return std::nullopt;
+    if (failure) {
+        detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::Failed);
+        std::rethrow_exception(failure);
+    }
+    if (taken) {
+        detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::TakenByAnotherCaller);
+        co_return std::nullopt;
+    }
+    detail::notify_wake_paused_parent(parent_run_id, detail::WakePausedParentReason::Continued);
     co_return continued;
 }
 
