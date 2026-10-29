@@ -43,9 +43,17 @@
 /* trailer length after the group name including the trailing '\0' */
 #define LRE_GROUP_NAME_TRAILER_LEN 2 
 
+/* NeoGraph local patch (deps/quickjs/NEOGRAPH_PROVENANCE): when lre_compile
+   returns NULL, *presource_kind (if not NULL) says whether it gave up because
+   the stack or the memory ran out, and is LRE_RESOURCE_NONE for every other
+   error. */
+#define LRE_RESOURCE_NONE   0
+#define LRE_RESOURCE_STACK  1
+#define LRE_RESOURCE_MEMORY 2
+
 uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
                      const char *buf, size_t buf_len, int re_flags,
-                     void *opaque);
+                     void *opaque, int *presource_kind);
 int lre_get_alloc_count(const uint8_t *bc_buf);
 int lre_get_capture_count(const uint8_t *bc_buf);
 int lre_get_flags(const uint8_t *bc_buf);

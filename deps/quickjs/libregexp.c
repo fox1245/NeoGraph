@@ -85,6 +85,7 @@ typedef struct {
     int has_named_captures; /* -1 = don't know, 0 = no, 1 = yes */
     void *opaque;
     DynBuf group_names;
+    int resource_kind; /* LRE_RESOURCE_x of the last error */
     union {
         char error_msg[TMP_BUF_SIZE];
         char tmp_buf[TMP_BUF_SIZE];
@@ -676,12 +677,22 @@ static int __attribute__((format(printf, 2, 3))) re_parse_error(REParseState *s,
     va_start(ap, fmt);
     vsnprintf(s->u.error_msg, sizeof(s->u.error_msg), fmt, ap);
     va_end(ap);
+    s->resource_kind = LRE_RESOURCE_NONE;
     return -1;
 }
 
 static int re_parse_out_of_memory(REParseState *s)
 {
-    return re_parse_error(s, "out of memory");
+    re_parse_error(s, "out of memory");
+    s->resource_kind = LRE_RESOURCE_MEMORY;
+    return -1;
+}
+
+static int re_parse_stack_overflow(REParseState *s)
+{
+    re_parse_error(s, "stack overflow");
+    s->resource_kind = LRE_RESOURCE_STACK;
+    return -1;
 }
 
 /* If allow_overflow is false, return -1 in case of
@@ -1388,7 +1399,7 @@ static int re_parse_nested_class(REParseState *s, REStringList *cr, const uint8_
     BOOL invert, is_first;
 
     if (lre_check_stack_overflow(s->opaque, 0))
-        return re_parse_error(s, "stack overflow");
+        return re_parse_stack_overflow(s);
 
     re_string_list_init(s, cr);
     p = *pp;
@@ -2408,7 +2419,7 @@ static int re_parse_disjunction(REParseState *s, BOOL is_backward_dir)
     int start, len, pos;
 
     if (lre_check_stack_overflow(s->opaque, 0))
-        return re_parse_error(s, "stack overflow");
+        return re_parse_stack_overflow(s);
 
     start = s->byte_code.size;
     if (re_parse_alternative(s, is_backward_dir))
@@ -2521,12 +2532,14 @@ static void *lre_bytecode_realloc(void *opaque, void *ptr, size_t size)
 */
 uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
                      const char *buf, size_t buf_len, int re_flags,
-                     void *opaque)
+                     void *opaque, int *presource_kind)
 {
     REParseState s_s, *s = &s_s;
     int register_count;
     BOOL is_sticky;
 
+    if (presource_kind)
+        *presource_kind = LRE_RESOURCE_NONE;
     memset(s, 0, sizeof(*s));
     s->opaque = opaque;
     s->buf_ptr = (const uint8_t *)buf;
@@ -2567,6 +2580,8 @@ uint8_t *lre_compile(int *plen, char *error_msg, int error_msg_size,
         dbuf_free(&s->byte_code);
         dbuf_free(&s->group_names);
         pstrcpy(error_msg, error_msg_size, s->u.error_msg);
+        if (presource_kind)
+            *presource_kind = s->resource_kind;
         *plen = 0;
         return NULL;
     }
@@ -3417,7 +3432,7 @@ int main(int argc, char **argv)
     }
     flags = atoi(argv[2]);
     bc = lre_compile(&len, error_msg, sizeof(error_msg), argv[1],
-                     strlen(argv[1]), flags, NULL);
+                     strlen(argv[1]), flags, NULL, NULL);
     if (!bc) {
         fprintf(stderr, "error: %s\n", error_msg);
         exit(1);

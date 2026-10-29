@@ -76,33 +76,58 @@ Local patches (keep when updating the vendored release)
   cmake/NeoGraphQuickJSMsvcPort.cmake are unchanged.
 - quickjs.h and quickjs.c record why the engine threw an exception when the
   stack or the memory ran out. JSRuntime holds resource_exception, a counted
-  reference to the error object that JS_ThrowStackOverflow or
-  JS_ThrowOutOfMemory threw (null when the out of memory error object itself
-  could not be allocated, which is what JS_ThrowError2 then throws), and
-  resource_exception_kind, which is JS_EXCEPTION_RESOURCE_STACK_OVERFLOW or
-  JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY. JS_Throw ends the record unless the value
-  it throws is that same error object, so an error thrown again by a finally
-  block, a for-of loop or a catch clause keeps its kind, and any other
-  exception, including one a source throws with the text "stack overflow",
-  has none. The record is released with the runtime. Two functions read it,
-  both prefixed in neograph/quickjs-prefix.h:
+  reference to the error object that was thrown (null when the out of memory
+  error object itself could not be allocated, which is what JS_ThrowError2 then
+  throws), and resource_exception_kind, which is
+  JS_EXCEPTION_RESOURCE_STACK_OVERFLOW or JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY.
+  JS_Throw ends the record unless the value it throws is that same error object,
+  so an error thrown again by a finally block, a for-of loop or a catch clause
+  keeps its kind, and any other exception, including one a source throws with
+  the text "stack overflow", has none. An exception that is already recorded
+  keeps its kind. The record is released with the runtime. Two functions read
+  it, both prefixed in neograph/quickjs-prefix.h:
   JS_GetPendingExceptionResourceKind(ctx) for the pending exception and
   JS_GetExceptionResourceKind(ctx, value) for an exception value that was
   already taken, such as the reason of a rejected promise. An embedder can
   therefore classify a stack overflow or an out of memory failure from the
   engine's own signal even when formatting the exception message fails under
   stack exhaustion (for example under MSVC AddressSanitizer), without
-  searching the message text. The needles of
+  searching the message text. The throw type and the message of every error
+  are those of upstream; the patch only adds the record at each place where the
+  engine gives up because the stack or the memory ran out:
+  JS_ThrowStackOverflow and JS_ThrowOutOfMemory; next_token and json_next_token,
+  which throw a SyntaxError "stack overflow" through js_parse_stack_overflow;
+  the two checks in compute_stack_size (ss_check), which throw an InternalError
+  "stack overflow (op=..., pc=...)" through ss_throw_stack_overflow when a
+  function needs more operand stack than JS_STACK_SIZE_MAX; the two places that
+  turn a failed lre_exec into an InternalError "out of memory in regexp
+  execution" (js_regexp_exec and js_regexp_replace); and js_compile_regexp,
+  which turns a failed lre_compile into a SyntaxError. For the last one
+  lre_compile in libregexp.c and libregexp.h takes a further argument,
+  presource_kind, and stores LRE_RESOURCE_STACK or LRE_RESOURCE_MEMORY in it
+  when it gave up at its stack check (re_parse_stack_overflow) or at an
+  allocation failure (re_parse_out_of_memory), and LRE_RESOURCE_NONE for every
+  other error, so that the message text is not consulted. Separately,
+  js_string_normalize1 throws the out of memory error when unicode_normalize
+  fails, which upstream returned without throwing anything. The needles of
   cmake/NeoGraphQuickJSMsvcPort.cmake are unchanged.
 
-Because of these patches, quickjs.c and quickjs.h differ from the files in the
-archive. The archive's quickjs.c has SHA-256
+Because of these patches, quickjs.c, quickjs.h, libregexp.c and libregexp.h
+differ from the files in the archive. The archive's quickjs.c has SHA-256
 a00762d2eee42316cecbc9c15efc4549b715ec500461845cd91b2a6c38190d08 and the
 vendored one has SHA-256
-232060dfeef691ae253ff77c2e3981d0781d738e35a3f8db1f4967a43c996113. The archive's
+cf34c4764b58da64b5fba6d5796a88202a4e6262b0c5c8f551ed0f8f0803d59e. The archive's
 quickjs.h has SHA-256
 2165f47772af9faee1798999a599fa9de850d1bf0259502dade1c25d4a588316 and the
 vendored one has SHA-256
-c4d951db3c7b3793cc9057b329c7b12ab20fa447e9211ce2f0b7fcb34743f515. The other
+c4d951db3c7b3793cc9057b329c7b12ab20fa447e9211ce2f0b7fcb34743f515. The archive's
+libregexp.c has SHA-256
+fdfcf86167029ab2c39c35730d4ae6875b7bbeb9406a0fcc886de4e9b1f5e2ac and the
+vendored one has SHA-256
+b2ee0ebc5ca18bb1478024b4069bb0b3e0163cad6e81ac18924aa78fc5eea595. The archive's
+libregexp.h has SHA-256
+f5c5ef1899f224dcc718422a22c789ef9d8b5b837b622818fcfaf681ae793446 and the
+vendored one has SHA-256
+8cd7a74fd7802667f6e2e1d76fc154b6e68e7c58e6d391bcfaafa886f0ec392b. The other
 vendored files are those of the archive. Update the vendored digests with every
 local patch.

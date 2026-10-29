@@ -7441,11 +7441,27 @@ static BOOL js_is_resource_exception_object(JSRuntime *rt, JSValueConst obj)
         JS_VALUE_GET_OBJ(obj) == JS_VALUE_GET_OBJ(rt->resource_exception);
 }
 
-/* record the exception that was just thrown as thrown by a resource limit */
+/* The pending exception is the one that is recorded: an error object is
+   recorded by identity, and an out of memory error that could not be
+   allocated is recorded as null (any other throw ended that record). */
+static BOOL js_current_exception_is_recorded(JSRuntime *rt)
+{
+    if (rt->resource_exception_kind == JS_EXCEPTION_RESOURCE_NONE)
+        return FALSE;
+    return js_is_resource_exception_object(rt, rt->current_exception) ||
+        (JS_IsNull(rt->current_exception) && JS_IsNull(rt->resource_exception));
+}
+
+/* Record the exception that was just thrown as thrown by a resource limit.
+   An exception that is already recorded keeps its kind: a failure while the
+   error was being completed (for example its backtrace) is the first cause. */
 static void js_record_resource_exception(JSRuntime *rt,
                                          JSExceptionResourceKindEnum kind)
 {
-    JSValue exception = JS_DupValueRT(rt, rt->current_exception);
+    JSValue exception;
+    if (js_current_exception_is_recorded(rt))
+        return;
+    exception = JS_DupValueRT(rt, rt->current_exception);
     js_clear_resource_exception(rt);
     rt->resource_exception = exception;
     rt->resource_exception_kind = kind;
@@ -7488,15 +7504,9 @@ JSExceptionResourceKindEnum JS_GetExceptionResourceKind(JSContext *ctx,
 
 JSExceptionResourceKindEnum JS_GetPendingExceptionResourceKind(JSContext *ctx)
 {
-    JSRuntime *rt;
-    if (!ctx)
+    if (!ctx || !js_current_exception_is_recorded(ctx->rt))
         return JS_EXCEPTION_RESOURCE_NONE;
-    rt = ctx->rt;
-    /* An out of memory error that could not be allocated is thrown as null,
-       and every other throw ends the record. */
-    if (JS_IsNull(rt->current_exception) && JS_IsNull(rt->resource_exception))
-        return rt->resource_exception_kind;
-    return JS_GetExceptionResourceKind(ctx, rt->current_exception);
+    return ctx->rt->resource_exception_kind;
 }
 
 static void dbuf_put_leb128(DynBuf *s, uint32_t v)
@@ -22852,6 +22862,15 @@ static JSAtom parse_ident(JSParseState *s, const uint8_t **pp,
 }
 
 
+/* NeoGraph local patch: the SyntaxError of a parser that ran out of stack
+   is recorded like the error of JS_ThrowStackOverflow(). */
+static int js_parse_stack_overflow(JSParseState *s)
+{
+    int ret = js_parse_error(s, "stack overflow");
+    js_record_resource_exception(s->ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+    return ret;
+}
+
 static __exception int next_token(JSParseState *s)
 {
     const uint8_t *p;
@@ -22860,7 +22879,7 @@ static __exception int next_token(JSParseState *s)
     JSAtom atom;
 
     if (js_check_stack_overflow(s->ctx->rt, 0)) {
-        return js_parse_error(s, "stack overflow");
+        return js_parse_stack_overflow(s);
     }
 
     free_token(s, &s->token);
@@ -23507,7 +23526,7 @@ static __exception int json_next_token(JSParseState *s)
     JSAtom atom;
 
     if (js_check_stack_overflow(s->ctx->rt, 0)) {
-        return js_parse_error(s, "stack overflow");
+        return js_parse_stack_overflow(s);
     }
 
     free_token(s, &s->token);
@@ -35734,6 +35753,15 @@ typedef struct StackSizeState {
     int pc_stack_size;
 } StackSizeState;
 
+/* NeoGraph local patch: a function that needs more operand stack than the
+   engine allows fails with a stack overflow error, recorded like the error of
+   JS_ThrowStackOverflow(). */
+static void ss_throw_stack_overflow(JSContext *ctx, int op, int pos)
+{
+    JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+}
+
 /* 'op' is only used for error indication */
 static __exception int ss_check(JSContext *ctx, StackSizeState *s,
                                 int pos, int op, int stack_len, int catch_pos)
@@ -35745,7 +35773,7 @@ static __exception int ss_check(JSContext *ctx, StackSizeState *s,
     if (stack_len > s->stack_len_max) {
         s->stack_len_max = stack_len;
         if (s->stack_len_max > JS_STACK_SIZE_MAX) {
-            JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+            ss_throw_stack_overflow(ctx, op, pos);
             return -1;
         }
     }
@@ -35846,7 +35874,7 @@ static __exception int compute_stack_size(JSContext *ctx,
         if (stack_len > s->stack_len_max) {
             s->stack_len_max = stack_len;
             if (s->stack_len_max > JS_STACK_SIZE_MAX) {
-                JS_ThrowInternalError(ctx, "stack overflow (op=%d, pc=%d)", op, pos);
+                ss_throw_stack_overflow(ctx, op, pos);
                 goto fail;
             }
         }
@@ -46506,8 +46534,12 @@ static int js_string_normalize1(JSContext *ctx, uint32_t **pout_buf,
     out_len = unicode_normalize(&out_buf, buf, buf_len, n_type,
                                 ctx->rt, (DynBufReallocFunc *)js_realloc_rt);
     js_free(ctx, buf);
-    if (out_len < 0)
+    if (out_len < 0) {
+        /* NeoGraph local patch: unicode_normalize only fails when the memory
+           ran out, and nothing was thrown for it */
+        JS_ThrowOutOfMemory(ctx);
         return -1;
+    }
     *pout_buf = out_buf;
     return out_len;
 }
@@ -47486,6 +47518,7 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     uint8_t *re_bytecode_buf;
     size_t i, len;
     int re_bytecode_len;
+    int re_resource_kind;
     JSValue ret;
     char error_msg[64];
 
@@ -47544,10 +47577,17 @@ static JSValue js_compile_regexp(JSContext *ctx, JSValueConst pattern,
     if (!str)
         return JS_EXCEPTION;
     re_bytecode_buf = lre_compile(&re_bytecode_len, error_msg,
-                                  sizeof(error_msg), str, len, re_flags, ctx);
+                                  sizeof(error_msg), str, len, re_flags, ctx,
+                                  &re_resource_kind);
     JS_FreeCString(ctx, str);
     if (!re_bytecode_buf) {
         JS_ThrowSyntaxError(ctx, "%s", error_msg);
+        /* NeoGraph local patch: the compiler says whether it gave up because
+           the stack or the memory ran out */
+        if (re_resource_kind == LRE_RESOURCE_STACK)
+            js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_STACK_OVERFLOW);
+        else if (re_resource_kind == LRE_RESOURCE_MEMORY)
+            js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
         return JS_EXCEPTION;
     }
 
@@ -48087,6 +48127,7 @@ static JSValue js_regexp_exec(JSContext *ctx, JSValueConst this_val,
                 JS_ThrowInterrupted(ctx);
             } else {
                 JS_ThrowInternalError(ctx, "out of memory in regexp execution");
+                js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
             }
             goto fail;
         }
@@ -48313,6 +48354,7 @@ static JSValue js_regexp_replace(JSContext *ctx, JSValueConst this_val, JSValueC
                     JS_ThrowInterrupted(ctx);
                 } else {
                     JS_ThrowInternalError(ctx, "out of memory in regexp execution");
+                    js_record_resource_exception(ctx->rt, JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY);
                 }
                 goto fail;
             }

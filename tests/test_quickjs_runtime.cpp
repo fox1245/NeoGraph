@@ -404,6 +404,147 @@ TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesAnExhaustedMemoryLimit) {
     JS_FreeValue(engine.context(), exception);
     JS_FreeValue(engine.context(), result);
 }
+namespace {
+
+// Evaluates a script that must fail, takes its exception, and returns why the engine threw it. `message` is for the
+// failure report only.
+JSExceptionResourceKindEnum failure_kind(JSContext* context, std::string_view source, std::string* message = nullptr) {
+    JSValue result = evaluate(context, source);
+    EXPECT_TRUE(JS_IsException(result)) << "the script did not fail: " << source.substr(0, 80);
+    const auto pending = JS_GetPendingExceptionResourceKind(context);
+    JSValue    exception = JS_GetException(context);
+    EXPECT_EQ(JS_GetExceptionResourceKind(context, exception), pending);
+    if (message != nullptr) {
+        const char* text = JS_ToCString(context, exception);
+        *message         = text ? text : "<unprintable exception>";
+        if (text) JS_FreeCString(context, text);
+        JSValue stack = JS_GetPropertyStr(context, exception, "stack");
+        if (const char* stack_text = JS_IsString(stack) ? JS_ToCString(context, stack) : nullptr) {
+            *message += std::string("\n") + stack_text;
+            JS_FreeCString(context, stack_text);
+        }
+        JS_FreeValue(context, stack);
+    }
+    JS_FreeValue(context, exception);
+    JS_FreeValue(context, result);
+    return pending;
+}
+
+}  // namespace
+
+// Every place where the engine gives up because the stack ran out records it, whichever check reaches the end of the
+// stack first: the check moves with the size of the stack, so each script runs under a range of sizes.
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesEveryStackCheck) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+
+    const std::string_view scripts[] = {
+        // a JSON reviver that calls JSON.parse again
+        "(function recurse() { return JSON.parse('[0]', function () { return recurse(); }); })()",
+        // nested JSON text, nested source text, nested regular expression patterns
+        "JSON.parse('['.repeat(200000))",
+        "JSON.parse('{\"a\":'.repeat(200000))",
+        "eval('('.repeat(100000))",
+        "eval('['.repeat(100000))",
+        "eval('({a:'.repeat(100000))",
+        "new RegExp('('.repeat(100000))",
+        "new RegExp('(?:'.repeat(100000))",
+        "new RegExp('['.repeat(100000), 'v')",
+        "new RegExp('[[a-z]'.repeat(50000) + ']'.repeat(50000), 'v')",
+    };
+    constexpr std::size_t first_stack_bytes = 16U * 1024U;
+    constexpr std::size_t last_stack_bytes  = 40U * 1024U;
+    constexpr std::size_t stack_step_bytes  = 61U;
+    for (const auto script : scripts) {
+        SCOPED_TRACE(std::string(script));
+        for (std::size_t stack_bytes = first_stack_bytes; stack_bytes <= last_stack_bytes; stack_bytes += stack_step_bytes) {
+            JS_SetMaxStackSize(engine.runtime(), stack_bytes);
+            std::string message;
+            const auto  kind = failure_kind(engine.context(), script, &message);
+            if (kind != JS_EXCEPTION_RESOURCE_STACK_OVERFLOW) {
+                ADD_FAILURE() << "stack " << stack_bytes << " bytes: " << message;
+                break;
+            }
+        }
+    }
+}
+
+// A function that needs more operand stack than the engine allows fails to compile with a stack overflow error.
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesAnOperandStackLimit) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    // The parser allows 65535 arguments in a call, and a function may use 65534 operand stack slots.
+    const std::string_view scripts[] = {
+        "new Function('f', 'return f(' + '0,'.repeat(65533) + '0)')",
+        "new Function('f', 'return f.g(' + '0,'.repeat(65533) + '0)')",
+        "new Function('f', 'return new f(' + '0,'.repeat(65533) + '0)')",
+    };
+    for (const auto script : scripts) {
+        SCOPED_TRACE(std::string(script));
+        std::string message;
+        EXPECT_EQ(failure_kind(engine.context(), script, &message), JS_EXCEPTION_RESOURCE_STACK_OVERFLOW) << message;
+    }
+}
+
+// A regular expression that runs out of memory while it runs: its backtracking stack outgrows the memory limit.
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesARegularExpressionThatRunsOutOfMemory) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    ASSERT_EQ(evaluated_string(engine.context(),
+                               "globalThis.text = 'ab'.repeat(50000); globalThis.pattern = /(?:a|b)*c/; "
+                               "globalThis.global_pattern = /(?:a|b)*c/g; 'ready'"),
+              "ready");
+    JSMemoryUsage usage;
+    JS_ComputeMemoryUsage(engine.runtime(), &usage);
+    JS_SetMemoryLimit(engine.runtime(), static_cast<std::size_t>(usage.malloc_size) + 64U * 1024U);
+
+    const std::string_view scripts[] = {
+        "pattern.test(text)",
+        "text.replace(global_pattern, '')",
+    };
+    for (const auto script : scripts) {
+        SCOPED_TRACE(std::string(script));
+        std::string message;
+        EXPECT_EQ(failure_kind(engine.context(), script, &message), JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY) << message;
+        EXPECT_NE(message.find("regexp execution"), std::string::npos) << message;
+    }
+}
+
+// A regular expression whose bytecode outgrows the memory limit while it is compiled.
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesARegularExpressionThatCannotBeCompiledInMemory) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    ASSERT_EQ(evaluated_string(engine.context(), "globalThis.source = 'a'.repeat(100000); 'ready'"), "ready");
+    JSMemoryUsage usage;
+    JS_ComputeMemoryUsage(engine.runtime(), &usage);
+    // The pattern is copied as text first, and its bytecode needs about three times as much.
+    JS_SetMemoryLimit(engine.runtime(), static_cast<std::size_t>(usage.malloc_size) + 150U * 1024U);
+    std::string message;
+    EXPECT_EQ(failure_kind(engine.context(), "new RegExp(source)", &message), JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY)
+        << message;
+    EXPECT_NE(message.find("SyntaxError"), std::string::npos) << message;
+}
+
+// String.prototype.normalize reports the memory it could not get.
+TEST(QuickJsRuntimeTest, ExceptionResourceKindNamesANormalizationThatRunsOutOfMemory) {
+    Runtime engine;
+    ASSERT_NE(engine.runtime(), nullptr);
+    ASSERT_NE(engine.context(), nullptr);
+    constexpr std::size_t length = 20000;
+    ASSERT_EQ(evaluated_string(engine.context(), "globalThis.text = '\\u00e9'.repeat(20000); 'ready'"), "ready");
+    JSMemoryUsage usage;
+    JS_ComputeMemoryUsage(engine.runtime(), &usage);
+    // The first buffer of 4 bytes per code point fits and the second does not.
+    JS_SetMemoryLimit(engine.runtime(), static_cast<std::size_t>(usage.malloc_size) + 6U * length);
+    std::string message;
+    EXPECT_EQ(failure_kind(engine.context(), "text.normalize('NFD')", &message), JS_EXCEPTION_RESOURCE_OUT_OF_MEMORY)
+        << message;
+}
+
 #if defined(_MSC_VER)
 TEST(QuickJsRuntimeTest, MsvcFunctionListMacrosPreserveMemberTypes) {
     EXPECT_EQ(msvc_function_list_entries[0].u.func.cfunc.generic, native_add);
