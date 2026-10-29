@@ -11,7 +11,7 @@ namespace neograph::detail {
 
 // Internal selectors support independent correctness checks without mutable
 // process-wide overrides. This header is not part of the installed SDK.
-enum class Sha256Backend { Automatic, Portable, X86Sha };
+enum class Sha256Backend { Automatic, Portable, X86Sha, Arm64Sha };
 
 constexpr bool sha256_x86_features_supported(std::uint32_t maximum_leaf,
                                              std::uint32_t leaf1_ecx,
@@ -20,6 +20,11 @@ constexpr bool sha256_x86_features_supported(std::uint32_t maximum_leaf,
            (leaf7_ebx & (1u << 29));
 }
 
+// True when the CPU running this process has the instructions the given backend uses and this build
+// compiled it in. Automatic and Portable are always available; a backend that is not available
+// makes sha256_digest and Sha256Stream throw std::invalid_argument.
+NEOGRAPH_API bool sha256_backend_available(Sha256Backend backend) noexcept;
+// True when any hardware backend (X86Sha or Arm64Sha) is available; Automatic then uses it.
 NEOGRAPH_API bool sha256_hardware_available() noexcept;
 NEOGRAPH_API std::array<std::uint8_t, 32> sha256_digest(
     std::string_view input, Sha256Backend backend = Sha256Backend::Automatic);

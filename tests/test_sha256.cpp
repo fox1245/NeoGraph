@@ -3,6 +3,8 @@
 #include "sha256_test_vectors.h"
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <cstdint>
 #include <future>
 #include <string>
 #include <vector>
@@ -28,11 +30,34 @@ std::string ramp(std::size_t size) {
     return result;
 }
 
-std::vector<Sha256Backend> backends() {
-    std::vector<Sha256Backend> result{Sha256Backend::Portable, Sha256Backend::Automatic};
-    if (neograph::detail::sha256_hardware_available()) result.push_back(Sha256Backend::X86Sha);
+// Every hardware backend this CPU and build provide. Empty when only the portable code is available.
+std::vector<Sha256Backend> hardware_backends() {
+    std::vector<Sha256Backend> result;
+    for (const auto backend : {Sha256Backend::X86Sha, Sha256Backend::Arm64Sha})
+        if (neograph::detail::sha256_backend_available(backend)) result.push_back(backend);
     return result;
 }
+
+std::vector<Sha256Backend> backends() {
+    std::vector<Sha256Backend> result{Sha256Backend::Portable, Sha256Backend::Automatic};
+    for (const auto backend : hardware_backends()) result.push_back(backend);
+    return result;
+}
+
+// xorshift32 stream with a fixed seed: the same bytes and chunk sizes on every platform.
+class Xorshift {
+public:
+    explicit Xorshift(std::uint32_t seed) : state_(seed) {}
+    std::uint32_t next() {
+        state_ ^= state_ << 13;
+        state_ ^= state_ >> 17;
+        state_ ^= state_ << 5;
+        return state_;
+    }
+
+private:
+    std::uint32_t state_;
+};
 }
 
 TEST(Sha256Test, StandardKnownAnswersMatchEveryAvailableBackend) {
@@ -107,10 +132,26 @@ TEST(Sha256Test, CpuDispatchRequiresEveryInstructionSetUsed) {
     EXPECT_FALSE(sha256_x86_features_supported(7, ssse3, sha));
     EXPECT_FALSE(sha256_x86_features_supported(7, ssse3 | sse41, 0));
     EXPECT_TRUE(sha256_x86_features_supported(7, ssse3 | sse41, sha));
-    if (!neograph::detail::sha256_hardware_available()) {
-        EXPECT_THROW((void)sha256_digest("abc", Sha256Backend::X86Sha), std::invalid_argument);
-    }
     EXPECT_THROW((void)sha256_digest("abc", static_cast<Sha256Backend>(99)), std::invalid_argument);
+}
+
+TEST(Sha256Test, ABackendThatIsNotAvailableIsRefusedAndAnAvailableOneIsNot) {
+    using neograph::detail::sha256_backend_available;
+    EXPECT_TRUE(sha256_backend_available(Sha256Backend::Automatic));
+    EXPECT_TRUE(sha256_backend_available(Sha256Backend::Portable));
+    EXPECT_FALSE(sha256_backend_available(static_cast<Sha256Backend>(99)));
+    const bool x86 = sha256_backend_available(Sha256Backend::X86Sha);
+    const bool arm = sha256_backend_available(Sha256Backend::Arm64Sha);
+    EXPECT_FALSE(x86 && arm) << "one CPU architecture offers one hardware backend";
+    EXPECT_EQ(neograph::detail::sha256_hardware_available(), x86 || arm);
+    for (const auto backend : {Sha256Backend::X86Sha, Sha256Backend::Arm64Sha}) {
+        if (sha256_backend_available(backend)) {
+            EXPECT_NO_THROW((void)Sha256Stream(backend));
+        } else {
+            EXPECT_THROW((void)sha256_digest("abc", backend), std::invalid_argument);
+            EXPECT_THROW((void)Sha256Stream(backend), std::invalid_argument);
+        }
+    }
 }
 
 TEST(Sha256Test, HardwareAndPortableAgreeAcrossDeterministicCorpus) {
@@ -123,8 +164,45 @@ TEST(Sha256Test, HardwareAndPortableAgreeAcrossDeterministicCorpus) {
         }
         const auto portable = sha256_digest(input, Sha256Backend::Portable);
         EXPECT_EQ(sha256_digest(input), portable);
-        if (neograph::detail::sha256_hardware_available())
-            EXPECT_EQ(sha256_digest(input, Sha256Backend::X86Sha), portable);
+        for (const auto backend : hardware_backends())
+            EXPECT_EQ(sha256_digest(input, backend), portable);
+    }
+}
+
+TEST(Sha256Test, EveryBackendMatchesPortableForEveryLengthUpToAKilobyte) {
+    Xorshift random(0x5eed1234u);
+    std::string input(1024, '\0');
+    for (char& byte : input) byte = static_cast<char>(random.next() >> 11);
+    for (std::size_t length = 0; length <= input.size(); ++length) {
+        const auto view     = std::string_view(input).substr(0, length);
+        const auto portable = sha256_digest(view, Sha256Backend::Portable);
+        for (const auto backend : backends())
+            ASSERT_EQ(hex(sha256_digest(view, backend)), hex(portable))
+                << "length=" << length << " backend=" << static_cast<int>(backend);
+    }
+}
+
+TEST(Sha256Test, EveryBackendMatchesPortableOnLargeBuffersFedInRandomPieces) {
+    Xorshift random(0xc0ffee11u);
+    // Sizes around block and megabyte boundaries, so the tail padding takes both the one-block and
+    // two-block form.
+    for (const std::size_t size : {1048576u + 55u, 1048576u + 56u, 3u * 1048576u + 64u + 17u}) {
+        std::string input(size, '\0');
+        for (char& byte : input) byte = static_cast<char>(random.next() >> 9);
+        const auto portable = hex(sha256_digest(input, Sha256Backend::Portable));
+        for (const auto backend : backends()) {
+            Sha256Stream hash(backend);
+            std::size_t  at = 0;
+            while (at < input.size()) {
+                // Mostly small pieces (every residue mod 64), sometimes a multi-block run.
+                const std::size_t piece =
+                    random.next() % 8 == 0 ? random.next() % 70000u : random.next() % 200u;
+                hash.update(std::string_view(input).substr(at, piece));
+                at += std::min(piece, input.size() - at);
+            }
+            EXPECT_EQ(hex(hash.finish()), portable)
+                << "size=" << size << " backend=" << static_cast<int>(backend);
+        }
     }
 }
 
