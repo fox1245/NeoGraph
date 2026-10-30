@@ -270,6 +270,26 @@ private:
         std::vector<json>* failure_records,
         const detail::SendStep* send_step = nullptr);
 
+    /// Save the Before anchor checkpoint of a super-step that has no parent
+    /// checkpoint and whose ready node returned Sends, and record the ready
+    /// nodes' results as pending writes against it. The anchor re-enters the
+    /// step, so its metadata carries the counters from before the step.
+    asio::awaitable<std::string> save_send_step_anchor_async(
+        const detail::SendStep& send_step,
+        const std::string& anchor_node,
+        int step,
+        const GraphState& state,
+        const CheckpointCoordinator& coord,
+        const RunContext& ctx) const;
+
+    /// Rebuild `step_state` holding the state the current super-step started
+    /// from (`runtime->step_start->state`).
+    void restore_step_start_state(
+        GraphState& step_state,
+        const GraphState& state,
+        const RunContext& ctx,
+        const char* missing_message) const;
+
     /// The retry loop. With a slot, every attempt runs under its own
     /// invocation scope and effect namespace and attempt k >= 1 first records
     /// that it started; without one, `ctx` is used as given.

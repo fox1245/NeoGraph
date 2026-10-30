@@ -460,9 +460,13 @@ TEST(SendInterrupt, ASqliteEntryStepRecordsItsFinishedWorkUnderTheInterrupt) {
     auto store = std::make_shared<SqliteCheckpointStore>(file);
     const auto saved = store->load_by_id(checkpoint_id);
     ASSERT_TRUE(saved.has_value());
-    EXPECT_TRUE(saved->parent_id.empty());
+    ASSERT_FALSE(saved->parent_id.empty());
+    const auto anchor = store->load_by_id(saved->parent_id);
+    ASSERT_TRUE(anchor.has_value());
+    EXPECT_TRUE(anchor->parent_id.empty());
+    EXPECT_EQ(anchor->interrupt_phase, CheckpointPhase::Before);
     std::set<std::string> recorded;
-    for (const auto& write : store->get_writes("entry", checkpoint_id)) recorded.insert(write.node_name);
+    for (const auto& write : store->get_writes("entry", anchor->id)) recorded.insert(write.node_name);
     EXPECT_EQ(recorded, (std::set<std::string>{"map", "worker"}));
 
     auto      engine = build(entry_map_graph(probe), store, 2);

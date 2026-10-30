@@ -2203,7 +2203,7 @@ GraphEngine::execute_graph_async(
     }
     if (owned_lease && !budget_source) {
         last_checkpoint_id = co_await coord.save_super_step_async(
-            state, "__managed_bank_root__", ready, CheckpointPhase::Before, start_step,
+            state, kManagedBankRootNode, ready, CheckpointPhase::Before, start_step,
             last_checkpoint_id, barrier_state,
             detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::BetweenSteps));
     }
@@ -2363,6 +2363,12 @@ GraphEngine::execute_graph_async(
                     coord, last_checkpoint_id, barrier_state,
                     trace, cb, stream_mode, ctx));
             } else {
+                if (coord.enabled() && last_checkpoint_id.empty()) {
+                    last_checkpoint_id = co_await coord.save_super_step_async(
+                        state, kFirstStepAnchorNode, ready,
+                        CheckpointPhase::Before, step, last_checkpoint_id,
+                        barrier_state, checkpoint_metadata());
+                }
                 // Sem 3.7: full async fan-out via
                 // asio::experimental::make_parallel_group. The
                 // io_context's worker thread now stays free for other
@@ -2394,6 +2400,10 @@ GraphEngine::execute_graph_async(
             // node, from a checkpoint that re-enters this whole step.
             if (!pending_sends.empty()) {
                 const detail::SendStep send_step{ready, step_results, barrier_state};
+                if (coord.enabled() && last_checkpoint_id.empty()) {
+                    last_checkpoint_id = co_await executor_->save_send_step_anchor_async(
+                        send_step, kFirstStepAnchorNode, step, state, coord, ctx);
+                }
                 send_routings = co_await executor_->run_sends_impl_async(
                     pending_sends, step, state, replay_results,
                     coord, last_checkpoint_id, trace, cb, stream_mode, ctx, &send_failures,

@@ -327,13 +327,17 @@ TEST_P(AbandonedPause, ASiblingOfTheLaterPauseReplaysAndTheAbandonedOnesRowIsNot
     const auto p1 = saved(first.checkpoint_id);
     const auto p2 = saved(second.checkpoint_id);
     ASSERT_EQ(p2.parent_id, p1.id);
-    ASSERT_EQ(p1.parent_id, "") << "no checkpoint precedes the first step";
+    ASSERT_FALSE(p1.parent_id.empty());
+    const auto p1_anchor = saved(p1.parent_id);
+    ASSERT_EQ(p1_anchor.parent_id, "");
+    EXPECT_EQ(p1_anchor.interrupt_phase, CheckpointPhase::Before);
 
-    // Both turns' calm are recorded under the abandoned pause: its own, for
-    // step 0, and the second turn's, for step 1, whose parent it is.
+    const auto under_anchor = store()->get_writes("t", p1.parent_id);
+    ASSERT_EQ(under_anchor.size(), 1U);
+    EXPECT_EQ(task_ids_of(under_anchor), (std::set<std::string>{"s0:calm"}));
     const auto under_p1 = store()->get_writes("t", p1.id);
-    ASSERT_EQ(under_p1.size(), 2U);
-    EXPECT_EQ(task_ids_of(under_p1), (std::set<std::string>{"s0:calm", "s1:calm"}));
+    ASSERT_EQ(under_p1.size(), 1U);
+    EXPECT_EQ(task_ids_of(under_p1), (std::set<std::string>{"s1:calm"}));
 
     // The writes a resume of the later pause replays: the second turn's calm.
     const auto replayed = resume_pending_writes(*store(), p2);
@@ -453,7 +457,12 @@ TEST_P(AbandonedPause, ARunThatSharesTheStepNumberButNotThePauseHangsFromNothing
     ASSERT_EQ(second.status(), RunStatus::Interrupted);
     const auto p1 = saved(first.checkpoint_id);
     const auto p2 = saved(second.checkpoint_id);
-    ASSERT_EQ(p2.parent_id, "");
+    ASSERT_FALSE(p2.parent_id.empty());
+    ASSERT_NE(p2.parent_id, p1.id);
+    ASSERT_NE(p2.parent_id, p1.parent_id);
+    const auto p2_anchor = saved(p2.parent_id);
+    ASSERT_EQ(p2_anchor.parent_id, "");
+    EXPECT_EQ(p2_anchor.interrupt_phase, CheckpointPhase::Before);
     ASSERT_EQ(p2.step, p1.step);
 
     const auto replayed = resume_pending_writes(*store(), p2);

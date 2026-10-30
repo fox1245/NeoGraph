@@ -427,6 +427,17 @@ asio::awaitable<void> record_attempt_start(const CheckpointCoordinator& coord,
                                               node_name, started, step);
 }
 
+asio::awaitable<void> record_send_step_ready_writes(const CheckpointCoordinator& coord,
+                                                    const std::string&           cp_id,
+                                                    const detail::SendStep&      send_step,
+                                                    int                          step) {
+    for (std::size_t i = 0; i < send_step.ready.size() && i < send_step.results.size(); ++i) {
+        const auto task_id = make_static_task_id(step, send_step.ready[i]);
+        co_await coord.record_pending_write_async(cp_id, task_id, task_id,
+                                                  send_step.ready[i], send_step.results[i], step);
+    }
+}
+
 // #385: the NodeInterrupt checkpoint of a Send that interrupts. Like a ready
 // node that interrupts in a fan-out step, it re-enters the whole step: the
 // state the step started from, the step's ready nodes as next nodes, the
@@ -450,11 +461,7 @@ asio::awaitable<std::string> save_send_interrupt(const CheckpointCoordinator&   
         step_state, sends[interrupted].target_node, next_nodes, CheckpointPhase::NodeInterrupt,
         step, parent_cp_id, send_step.barrier_state, metadata);
     if (!parent_cp_id.empty()) co_return interrupt_cp_id;
-    for (std::size_t i = 0; i < send_step.ready.size() && i < send_step.results.size(); ++i) {
-        const auto task_id = make_static_task_id(step, send_step.ready[i]);
-        co_await coord.record_pending_write_async(interrupt_cp_id, task_id, task_id,
-                                                  send_step.ready[i], send_step.results[i], step);
-    }
+    co_await record_send_step_ready_writes(coord, interrupt_cp_id, send_step, step);
     for (std::size_t si = 0; si < sends.size(); ++si) {
         const auto task_id = make_send_task_id(step, si, sends[si].target_node, sends[si].input);
         if (finished[si])
@@ -2042,6 +2049,38 @@ asio::awaitable<std::vector<NodeResult>> NodeExecutor::run_parallel_async(
 // captures exceptions into the parallel_group's excs array; the
 // first exception (if any) is rethrown after the wait resolves.
 
+void NodeExecutor::restore_step_start_state(GraphState&       step_state,
+                                            const GraphState& state,
+                                            const RunContext& ctx,
+                                            const char*       missing_message) const {
+    const auto runtime = detail::runtime_for(ctx);
+    if (!runtime || !runtime->step_start || !runtime->step_start->state)
+        throw std::logic_error(missing_message);
+    init_state(step_state);
+    step_state.copy_provider_history_from(state);
+    step_state.restore_runtime(*runtime->step_start->state);
+}
+
+asio::awaitable<std::string> NodeExecutor::save_send_step_anchor_async(
+    const detail::SendStep&      send_step,
+    const std::string&           anchor_node,
+    int                          step,
+    const GraphState&            state,
+    const CheckpointCoordinator& coord,
+    const RunContext&            ctx) const {
+    GraphState step_state;
+    restore_step_start_state(
+        step_state, state, ctx, "A Send step has no record of the state it started from");
+    const auto metadata = detail::checkpoint_metadata_for(ctx, detail::CheckpointTiming::DuringStep);
+    std::vector<std::string> next_nodes = send_step.ready;
+    std::string              parent_cp_id;
+    const auto anchor_cp_id = co_await coord.save_super_step_async(
+        step_state, anchor_node, next_nodes, CheckpointPhase::Before, step,
+        parent_cp_id, send_step.barrier_state, metadata);
+    co_await record_send_step_ready_writes(coord, anchor_cp_id, send_step, step);
+    co_return anchor_cp_id;
+}
+
 asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_async(
     const std::vector<Send>&                           sends,
     int                                                step,
@@ -2117,13 +2156,9 @@ asio::awaitable<std::vector<StepRouting>> NodeExecutor::run_sends_impl_async(
                      bool listed) -> asio::awaitable<void> {
         const auto metadata = record_step_interrupts(ctx, std::move(pending), listed);
         if (!send_step || !coord.enabled()) co_return;
-        const auto runtime = detail::runtime_for(ctx);
-        if (!runtime || !runtime->step_start || !runtime->step_start->state)
-            throw std::logic_error("A Send interrupted without the state its step started from");
         GraphState step_state;
-        init_state(step_state);
-        step_state.copy_provider_history_from(state);
-        step_state.restore_runtime(*runtime->step_start->state);
+        restore_step_start_state(
+            step_state, state, ctx, "A Send interrupted without the state its step started from");
         const auto checkpoint_id =
             co_await save_send_interrupt(coord, step_state, *send_step, sends, finished,
                                          interrupted_attempts, interrupted, step, parent_cp_id,
