@@ -2365,16 +2365,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // #557: with a host's executor there is no process-wide attempt pool to dispatch node attempts to.
                 if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts;
                 metadata.node_retry_ceiling = node_retry_ceiling;
+                // Concurrent branches add recovery checkpoints, so the set is read under the same mutex.
+                bool resumes_recovery_checkpoint = false;
                 if (next_resume) {
                     std::lock_guard lock(plan_mutex);
                     if (resume_core_interrupt && resume_core_interrupt->first == *next_resume) {
                         metadata.resume_interrupt_id = std::move(resume_core_interrupt->second);
                         resume_core_interrupt.reset();
                     }
+                    resumes_recovery_checkpoint = recovery_checkpoint_ids.count(*next_resume) != 0;
                 }
                 auto operation_checkpoints = control->checkpoints;
-                if (next_resume && resume_checkpoint_content_id &&
-                    !recovery_checkpoint_ids.count(*next_resume)) {
+                if (next_resume && resume_checkpoint_content_id && !resumes_recovery_checkpoint) {
                     operation_checkpoints =
                         std::make_shared<ExactCheckpointContentStore>(
                             control->checkpoints, *next_resume,
