@@ -569,7 +569,8 @@ private:
                 continue;
             }
             if (command_.type == Command::Resume && latest->id == command_.checkpoint) continue;
-            if (latest->interrupt_phase == CheckpointPhase::Before ||
+            if ((latest->interrupt_phase == CheckpointPhase::Before &&
+                 latest->current_node != kFirstStepAnchorNode) ||
                 latest->interrupt_phase == CheckpointPhase::After) {
                 Outcome outcome;
                 outcome.status     = Status::Interrupted;

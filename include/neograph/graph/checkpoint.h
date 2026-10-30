@@ -169,6 +169,17 @@ enum class CheckpointPhase {
 /// blobs to pre-enum NeoGraph.
 NEOGRAPH_API const char* to_string(CheckpointPhase phase);
 
+/// `current_node` of the `Before` checkpoint that roots a managed token budget.
+/// It is not a node name and not a gate: a run resumed from it re-enters its
+/// first step.
+inline constexpr const char* kManagedBankRootNode = "__managed_bank_root__";
+
+/// `current_node` of the `Before` anchor checkpoint that a thread's first
+/// super-step saves when it has no parent checkpoint and runs several tasks.
+/// It is not a node name and not a gate: a run resumed from it re-enters the
+/// same step, and each finished task replays from its pending write.
+inline constexpr const char* kFirstStepAnchorNode = "__first_step_anchor__";
+
 /// @brief Parse a phase string back to the enum.
 ///
 /// Useful for deserializing checkpoints from persistent stores. Unknown

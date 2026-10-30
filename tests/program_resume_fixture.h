@@ -156,6 +156,9 @@ struct Peer {
     std::map<std::string, int>    attempted;  // call tag -> broker invocations
     int                           attempted_total = 0;
     std::map<std::string, int>    sent;       // call tag -> requests
+    /// Requests that reached the transport after the process died. Their
+    /// dispatch marker may be in the durable copy, so the journal holds them.
+    int                           sent_after_death = 0;
     int                           total = 0;
     std::function<void(const std::string&)> after_send;  // runs once the reply is ready
 
@@ -164,6 +167,7 @@ struct Peer {
         attempted.clear();
         attempted_total = 0;
         sent.clear();
+        sent_after_death = 0;
         total = 0;
         after_send = nullptr;
     }
@@ -191,6 +195,9 @@ std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer> peer) {
                     ++peer->total;
                 }
                 if (peer->sending) peer->sending();
+            } else {
+                std::lock_guard lock(peer->mutex);
+                ++peer->sent_after_death;
             }
             co_return neograph::test::success("reply-" + tag, priced_usage());
         },
@@ -240,8 +247,9 @@ struct CrashPoints {
     /// Arms by a predicate over the operations seen so far instead of an index.
     std::function<bool(const std::vector<std::string>& seen)> armed_when;
     std::vector<std::string>                                  seen;
-    /// For each operation seen that saved a checkpoint, its Core thread, and
-    /// "first" when it is the first checkpoint of a Core run (no parent);
+    /// For each operation seen that saved a checkpoint, its Core thread (none
+    /// for a first super-step's anchor), and "first" when it is the first
+    /// checkpoint of a Core run (no parent, or the anchor as parent);
     /// for each publication that appends to the JavaScript command journal,
     /// "pending" or "failed" or "result"; empty otherwise.
     std::vector<std::string> threads, firsts;
@@ -275,9 +283,12 @@ struct CrashPoints {
         const bool here  = !taken && (armed_when ? armed_when(seen) : op == armed);
         if (here) taken_at = what;
         if (here && !after) {
+            // The process is dead from this operation on: a request another
+            // thread sends while the image is copied never happened, and no
+            // dispatch marker written after the copy starts is in the image.
+            alive = false;
             crash_image(live, image);
             taken = true;
-            alive = false;
         }
         lock.unlock();
         if constexpr (std::is_void_v<decltype(apply())>) {
@@ -291,9 +302,9 @@ struct CrashPoints {
     }
     void take() {
         std::lock_guard lock(mutex);
+        alive = false;
         crash_image(live, image);
         taken = true;
-        alive = false;
     }
 };
 
@@ -461,8 +472,9 @@ public:
     CountingCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner, CrashPoints& crash)
         : inner_(std::move(inner)), crash_(crash) {}
     void save(const graph::Checkpoint& checkpoint) override {
+        const bool anchor = checkpoint.current_node == graph::kFirstStepAnchorNode;
         crash_.durable(to_string(checkpoint.interrupt_phase), [&] { inner_->save(checkpoint); },
-                       checkpoint.thread_id, checkpoint.parent_id.empty() ? "first" : "");
+                       anchor ? std::string() : checkpoint.thread_id, first_note(checkpoint));
     }
     void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write) override {
         crash_.durable("put_writes", [&] { inner_->put_writes(thread, parent, write); });
@@ -478,6 +490,17 @@ public:
     bool requires_managed_budget(const std::string& thread) override { return inner_->requires_managed_budget(thread); }
 
 private:
+    /// "first" for the first checkpoint a Core run continues from. The anchor a
+    /// first super-step saves ahead of its tasks is not one, and is recorded
+    /// with no Core thread: a call that stopped with only the anchor is
+    /// reconciled, so the step's own checkpoint, whose parent it is, is the first.
+    std::string first_note(const graph::Checkpoint& checkpoint) {
+        if (checkpoint.current_node == graph::kFirstStepAnchorNode) return {};
+        if (checkpoint.parent_id.empty()) return "first";
+        const auto parent = inner_->load_by_id(checkpoint.parent_id);
+        return parent && parent->current_node == graph::kFirstStepAnchorNode ? "first" : "";
+    }
+
     std::shared_ptr<graph::CheckpointStore> inner_;
     CrashPoints&                            crash_;
 };

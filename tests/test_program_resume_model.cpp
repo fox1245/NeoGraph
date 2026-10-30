@@ -663,6 +663,9 @@ struct Observed {
     std::set<std::string> reconciled_tags;
     /// The durable operation the crash copy was taken at.
     std::string crash_at;
+    /// A request reached the transport after the crash copy was decided: a
+    /// branch running beside the crashed operation had begun to send it.
+    bool request_out_at_crash = false;
     /// Every durable operation of the run, and the Core thread of each one
     /// that saved a checkpoint.
     std::vector<std::string> op_labels, op_threads, op_firsts;
@@ -750,6 +753,7 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             {
                 std::lock_guard lock(peer->mutex);
                 for (const auto& [tag, count] : peer->sent) observed.sent[tag] += count;
+                if (peer->sent_after_death > 0) observed.request_out_at_crash = true;
             }
             host.reset();
             if (std::getenv("NEOGRAPH_PROGRAM_RESUME_MODEL_DEBUG")) {
@@ -1022,7 +1026,7 @@ void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, cons
     // A crash while a request was out leaves its dispatch unresolved: the
     // journal never sends it again and holds it (#364), so the run cannot end
     // as the reference does. Only a second send is a mismatch then.
-    if (observed.crash_at == "provider dispatch" &&
+    if ((observed.crash_at == "provider dispatch" || observed.request_out_at_crash) &&
         std::none_of(problems.begin(), problems.end(), [](const std::string& problem) {
             return problem.rfind("P1: the call of", 0) == 0 && problem.find("sent 2") != std::string::npos;
         })) {

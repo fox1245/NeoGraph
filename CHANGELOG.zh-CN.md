@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=6dd360e7ed379fa2647fc63ea1c40f032308243ada83f9b2b0abc91ce81b3b19 -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=4c423ffebd27922f0196db6d08c6889cb67f137d78319826bb2ce8f719170c5a -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -211,6 +211,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 
 ### 修复
 - **Program：在连接池大小有限的检查点存储上运行时，连接池耗尽不再导致挂起。** `ProgramRuntime` 的尝试、终止发布，以及 fork、迁移、重连、恢复和协调路径，曾在运行时执行器上运行的协程中以同步调用读写检查点存储。对于 `PostgresCheckpointStore`，当所有连接都在使用时，调用会阻塞执行器线程，而这些连接由只能在同一执行器上继续并归还连接的异步操作持有。当所有执行器线程都这样被阻塞时（例如在默认的 8 个连接上并发运行大量子 Program），运行永远不会结束。这些路径现在等待存储的异步调用，等待连接的协程被挂起，线程继续为执行器服务。`copy_resume_pending_writes_async` 是 `copy_resume_pending_writes` 的 awaitable 形式。
+- **GraphEngine：线程的首个超步在扇出时会保留已完成任务的结果。** 当线程尚无已提交的检查点时，若其首个超步运行多个就绪节点或返回 `Send`，已完成任务的结果此前不会记录为待处理写入（pending write）；若在该步提交前崩溃，`resume()` 会以 "No checkpoint found" 失败，而新的运行会重新执行已完成的任务。现在，没有父检查点的首个超步在运行多个就绪节点或返回 `Send` 时，会像之后的每一步一样先写入一个 `Before` 检查点并将每个已完成的任务记录在其下，从而在恢复时重放已完成的任务并仅运行其余任务。首个超步仅运行单个节点且不返回 `Send` 的图不受影响，不会额外写入任何内容；首个超步发生扇出的图会在线程开始时多写入一个检查点（由 `get_state_history` 列出），并在该步提交前为每个任务记录一条待处理写入。
 - **Program：即使无法读取错误消息，JavaScript 栈溢出也会报告为 `P_JS_RESOURCE_LIMIT`，且源码自身提及栈溢出的错误不再被报告为栈溢出 (#673)。** 内置的 QuickJS 现在会记录栈或内存耗尽时它抛出的错误对象（本地补丁，列于 `deps/quickjs/NEOGRAPH_PROVENANCE`），NeoGraph 根据这一记录而不是在消息文本中搜索 `"stack overflow"` 或 `"out of memory"` 来分类失败。源码自己抛出的错误，或捕获溢出后抛出的错误，无论文本如何都是求值失败。
 - **Program：恢复后不再出现两个进程同时执行同一个 `Program` 运行的情况。** 当进程对控制权不在本进程内的已存储 `Running` 运行调用 `ProgramRuntime::reconnect()` 或 `recover_children()` 时，此前不会对旧进程施加围栏便直接启动新的尝试，因此变慢或发生分区的旧写入者仍可与恢复后的尝试一起继续发布转换并派发后续副作用。现在恢复已存储的 `Running` 运行时会在启动尝试之前调用 `compare_publish_takeover`，在一次 compare-and-swap 中推进 `continuation().fence` 并追加一条接管日志条目。所有存储在 `compare_publish*` 中校验 `expected_fence`，围栏已被取代的过期写入者不再重试或派发更多副作用，并以 `P_RUN_TAKEN_OVER` 结束其本地句柄。
 - **Program：正在停止的运行时不再重试存储持续拒绝的发布 (#673)。** 存储拒绝某次运行的 JavaScript 命令发布或终止发布，或子级在父级中的关系或完成发布时，即使运行时已开始关闭，仍会最多重试 64 次，因此销毁一个其运行无法发布的运行时会等待所有重试结束（在 sanitizer 下超过 30 秒）。现在运行时停止后，如果拒绝时运行的日志头仍停在尝试读取的位置，就不再重试，运行保持存储中的状态等待恢复；能由其他写入者的进展解释的拒绝仍会重试。
