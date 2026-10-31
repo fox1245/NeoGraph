@@ -166,6 +166,9 @@ public:
     // ----- Membership -----
     bool contains(const char* key) const;
     bool contains(const std::string& key) const;
+    // Removes the member `key` of an object and returns how many were removed (0 or 1), like nlohmann's
+    // erase(key). On a value that is not an object it removes nothing and returns 0, as contains() is false there.
+    std::size_t erase(const std::string& key);
 
     // ----- Extraction -----
     template <typename T> T get() const;

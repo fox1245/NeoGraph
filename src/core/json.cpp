@@ -721,6 +721,10 @@ bool json::contains(const std::string& key) const {
     if (!val_ || !yyjson_mut_is_obj(val_)) return false;
     return yyjson_mut_obj_getn(val_, key.data(), key.size()) != nullptr;
 }
+std::size_t json::erase(const std::string& key) {
+    if (!val_ || !yyjson_mut_is_obj(val_)) return 0;
+    return yyjson_mut_obj_remove_keyn(val_, key.data(), key.size()) != nullptr ? 1 : 0;
+}
 
 // ===========================================================================
 // Push back (array)
