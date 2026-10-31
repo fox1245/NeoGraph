@@ -43,3 +43,31 @@ TEST(JsonEquality, ObjectOrderIsIrrelevantButArrayOrderAndValuesRemainSignifican
     EXPECT_NE(first, json::parse(R"({"nested":{"input":0,"output":null},"parts":[{"id":"b"},{"id":"a"}]})"));
     EXPECT_NE(first, json::parse(R"({"nested":{"input":null,"output":null},"parts":[{"id":"a"},{"id":"b"}]})"));
 }
+
+// ── Object erase (nlohmann's erase(key)) ──
+
+TEST(JsonObjectErase, RemovesTheMemberAndCountsIt) {
+    json obj = {{"id", "x"}, {"run_id", "r"}, {"n", 3}};
+    EXPECT_EQ(obj.erase("id"), 1U);
+    EXPECT_FALSE(obj.contains("id"));
+    EXPECT_TRUE(obj.contains("run_id"));
+    EXPECT_EQ(obj.size(), 2U);
+    EXPECT_EQ(obj.erase("id"), 0U);
+    EXPECT_EQ(obj.dump(), json({{"run_id", "r"}, {"n", 3}}).dump());
+}
+
+TEST(JsonObjectErase, RemovesNothingFromAValueThatIsNotAnObject) {
+    json arr = json::array();
+    arr.push_back(json("id"));
+    EXPECT_EQ(arr.erase("id"), 0U);
+    EXPECT_EQ(arr.size(), 1U);
+    json number = 7;
+    EXPECT_EQ(number.erase("id"), 0U);
+}
+
+TEST(JsonObjectErase, RemovesAMemberOfANestedObject) {
+    json doc = {{"outer", {{"keep", 1}, {"drop", 2}}}};
+    EXPECT_EQ(doc["outer"].erase("drop"), 1U);
+    EXPECT_FALSE(doc.at("outer").contains("drop"));
+    EXPECT_TRUE(doc.at("outer").contains("keep"));
+}
