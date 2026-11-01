@@ -1169,10 +1169,8 @@ struct SimulatedHoldGate {
             released.store(true);
             active = timer;
         }
-        if (active) {
-            active->cancel();
-            asio::post(active->get_executor(), [] {});
-        }
+        // The timer belongs to the node's executor, which may be starting its wait right now: cancel it there.
+        if (active) asio::post(active->get_executor(), [active] { active->cancel(); });
     }
 } simulated_hold_gate;
 
