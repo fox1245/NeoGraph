@@ -317,6 +317,18 @@ void copy_resume_pending_writes(CheckpointStore& store, const Checkpoint& source
         store.put_writes(target.thread_id, target.id, write);
 }
 
+asio::awaitable<void> copy_resume_pending_writes_async(std::shared_ptr<CheckpointStore> store,
+                                                       Checkpoint source, Checkpoint target) {
+    if (target.id.empty() || target.thread_id.empty())
+        throw std::invalid_argument("Pending writes need a target checkpoint with an id and a thread");
+    if (target.step != source.step)
+        throw std::invalid_argument("Pending writes belong to the source checkpoint's super-step");
+    const auto source_thread = source.thread_id;
+    // GCC-13: await outside the range-for initializer.
+    const auto rows = co_await collect_resume_writes_async(store, source_thread, std::move(source));
+    for (const auto& write : rows) co_await store->put_writes_async(target.thread_id, target.id, write);
+}
+
 // =========================================================================
 // CheckpointCoordinator
 // =========================================================================

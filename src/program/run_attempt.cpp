@@ -334,25 +334,27 @@ RunBudget settle_resource_reservation(const RunBudget&    available,
     return settled;
 }
 
-std::optional<CoreCheckpointIdentity> inspect_checkpoint(const RunControl& control,
-                                                         std::string_view  checkpoint_id) {
-    if (checkpoint_id.empty()) return std::nullopt;
-    const auto checkpoint = control.checkpoints->load_by_id(std::string(checkpoint_id));
-    if (!checkpoint || checkpoint->id != checkpoint_id) return std::nullopt;
-    return CoreCheckpointIdentity{
-        control.materialized->root->core_name, control.materialized->root->compiled_plan_identity,
+// Every read of the checkpoint store below runs inside a coroutine of the runtime's executor. It awaits the store, so
+// that a store with a bounded pool of connections suspends the coroutine instead of holding an executor thread while
+// it waits for a connection that another coroutine of the same executor has to give back.
+asio::awaitable<std::optional<CoreCheckpointIdentity>> inspect_checkpoint(
+    std::shared_ptr<RunControl> control, std::string checkpoint_id) {
+    if (checkpoint_id.empty()) co_return std::nullopt;
+    const auto checkpoint = co_await control->checkpoints->load_by_id_async(checkpoint_id);
+    if (!checkpoint || checkpoint->id != checkpoint_id) co_return std::nullopt;
+    co_return CoreCheckpointIdentity{
+        control->materialized->root->core_name, control->materialized->root->compiled_plan_identity,
         checkpoint->thread_id, checkpoint->id, checkpoint->schema_version};
 }
 
-std::optional<CoreCheckpointIdentity> inspect_checkpoint_for(const RunControl& control,
-                                                             std::string_view  checkpoint_id,
-                                                             std::string_view  thread_id) {
-    if (checkpoint_id.empty()) return std::nullopt;
-    const auto checkpoint = control.checkpoints->load_by_id(std::string(checkpoint_id));
+asio::awaitable<std::optional<CoreCheckpointIdentity>> inspect_checkpoint_for(
+    std::shared_ptr<RunControl> control, std::string checkpoint_id, std::string thread_id) {
+    if (checkpoint_id.empty()) co_return std::nullopt;
+    const auto checkpoint = co_await control->checkpoints->load_by_id_async(checkpoint_id);
     if (!checkpoint || checkpoint->id != checkpoint_id || checkpoint->thread_id != thread_id)
-        return std::nullopt;
-    return CoreCheckpointIdentity{
-        control.materialized->root->core_name, control.materialized->root->compiled_plan_identity,
+        co_return std::nullopt;
+    co_return CoreCheckpointIdentity{
+        control->materialized->root->core_name, control->materialized->root->compiled_plan_identity,
         checkpoint->thread_id, checkpoint->id, checkpoint->schema_version};
 }
 
@@ -912,15 +914,14 @@ struct JavaScriptRecovery {
     std::map<std::string, std::string> saved;
     std::set<std::string>              unstarted;
 };
-std::optional<JavaScriptRecovery> javascript_recovery_checkpoints(const RunControl&         control,
-                                                                  const JavaScriptCommand& command,
-                                                                  const std::string& operation_id,
-                                                                  const json& await_starts) {
-    if (!control.checkpoints) return std::nullopt;
+asio::awaitable<std::optional<JavaScriptRecovery>> javascript_recovery_checkpoints(
+    std::shared_ptr<RunControl> control, JavaScriptCommand command, std::string operation_id,
+    json await_starts) {
+    if (!control->checkpoints) co_return std::nullopt;
     std::vector<std::pair<std::string, bool>> calls;
     if (!collect_call_core_operations(command, operation_id, await_starts, false, calls) ||
         calls.empty())
-        return std::nullopt;
+        co_return std::nullopt;
     JavaScriptRecovery recovery;
     bool               may_have_started = false;
     for (const auto& [call, unstarted] : calls) {
@@ -929,14 +930,15 @@ std::optional<JavaScriptRecovery> javascript_recovery_checkpoints(const RunContr
             continue;
         }
         may_have_started = true;
-        const auto latest = control.checkpoints->load_latest(operation_thread_id(control, call));
+        const auto latest =
+            co_await control->checkpoints->load_latest_async(operation_thread_id(*control, call));
         if (!latest || latest->interrupt_phase == graph::CheckpointPhase::Before ||
             latest->interrupt_phase == graph::CheckpointPhase::After)
             continue;
         recovery.saved.emplace(call, latest->id);
     }
-    if (may_have_started && recovery.saved.empty()) return std::nullopt;
-    return recovery;
+    if (may_have_started && recovery.saved.empty()) co_return std::nullopt;
+    co_return recovery;
 }
 std::uint64_t native_invocation_id(const RunControl& control,
                                    std::string_view  operation_id,
@@ -1372,54 +1374,26 @@ bool checkpoint_matches(const RunControl&             control,
            checkpoint.core_thread_id == control.core_thread_id;
 }
 
-bool checkpoint_is_available(const RunControl& control, std::string_view checkpoint_id) noexcept {
+asio::awaitable<bool> checkpoint_is_available(std::shared_ptr<RunControl> control,
+                                              std::string                 checkpoint_id) {
     try {
-        if (checkpoint_id.empty()) return false;
-        const auto loaded = control.checkpoints->load_by_id(std::string(checkpoint_id));
+        if (checkpoint_id.empty()) co_return false;
+        const auto loaded = co_await control->checkpoints->load_by_id_async(checkpoint_id);
         if (!loaded) {
             // A transient read miss after the Core engine has consumed the
             // checkpoint is still a Core failure, not an identity mismatch.
-            const auto latest = control.checkpoints->load_latest(control.core_thread_id);
-            return latest && latest->id == checkpoint_id;
+            const auto latest = co_await control->checkpoints->load_latest_async(control->core_thread_id);
+            co_return latest && latest->id == checkpoint_id;
         }
-        if (loaded->id != checkpoint_id) return false;
-        const CoreCheckpointIdentity identity{control.materialized->root->core_name,
-                                              control.materialized->root->compiled_plan_identity,
+        if (loaded->id != checkpoint_id) co_return false;
+        const CoreCheckpointIdentity identity{control->materialized->root->core_name,
+                                              control->materialized->root->compiled_plan_identity,
                                               loaded->thread_id, loaded->id,
                                               loaded->schema_version};
-        return checkpoint_matches(control, identity);
+        co_return checkpoint_matches(*control, identity);
     } catch (...) {
-        return false;
+        co_return false;
     }
-}
-
-std::uint64_t executed_core_steps(const RunControl&                 control,
-                                  std::string_view                  final_checkpoint_id,
-                                  const std::optional<std::string>& source_checkpoint_id,
-                                  graph::RunStatus                  status) {
-    if (status == graph::RunStatus::StepLimit) {
-        return control.granted_budget.max_core_steps;
-    }
-    const auto final_checkpoint = control.checkpoints->load_by_id(std::string(final_checkpoint_id));
-    if (!final_checkpoint) return control.granted_budget.max_core_steps;
-
-    std::int64_t start_step = 0;
-    if (source_checkpoint_id) {
-        const auto source = control.checkpoints->load_by_id(*source_checkpoint_id);
-        if (!source) return control.granted_budget.max_core_steps;
-        if (final_checkpoint_id == *source_checkpoint_id) return 0;
-        start_step = source->step;
-        if (source->interrupt_phase == graph::CheckpointPhase::After ||
-            source->interrupt_phase == graph::CheckpointPhase::Completed ||
-            source->interrupt_phase == graph::CheckpointPhase::Updated) {
-            ++start_step;
-        }
-    }
-    const auto end_step =
-        static_cast<std::int64_t>(final_checkpoint->step) +
-        (final_checkpoint->interrupt_phase == graph::CheckpointPhase::Before ? 0 : 1);
-    if (end_step < start_step) return control.granted_budget.max_core_steps;
-    return static_cast<std::uint64_t>(end_step - start_step);
 }
 
 std::uint64_t failed_core_steps(const RunControl& control,
@@ -2016,6 +1990,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     RunOutcome                            outcome;
     // The handlers below cannot suspend: they note that the durable command disposition is owed, and it is read after them.
     bool                                  needs_durable_disposition = false;
+    // The same, for the read that tells whether the checkpoint a failed run resumed is still there: the message of the
+    // failure that has not yet been marked as a checkpoint incompatibility.
+    std::optional<std::string>            checkpoint_availability_owed_message;
     // #443: the plan completed over a budget, and `outcome` has the record of it.
     bool                                  completed_over_budget = false;
     try {
@@ -2027,7 +2004,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // holds, and the reservation stays unreturned.
         if (control_source) unreconciled_javascript_remaining = co_await held_command_remainder(*control);
         if (checkpoint_id) {
-            resume_checkpoint = inspect_checkpoint(*control, *checkpoint_id);
+            resume_checkpoint = co_await inspect_checkpoint(control, *checkpoint_id);
             if (const auto durable = co_await control->async_transitions().load(
                     control->owner_scope, control->run_id);
                 durable && durable->exact_checkpoint() &&
@@ -2036,7 +2013,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             }
             bool content_valid = true;
             if (resume_checkpoint_content_id) {
-                const auto stored = control->checkpoints->load_by_id(*checkpoint_id);
+                const auto stored = co_await control->checkpoints->load_by_id_async(*checkpoint_id);
                 content_valid = stored &&
                     graph_migration_checkpoint_content_id(*stored) ==
                         *resume_checkpoint_content_id;
@@ -2307,28 +2284,28 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // interrupt_before or interrupt_after pause, which a resume would pass.
         std::map<std::string, std::size_t> recovery_calls_on_thread;
         const auto plan_recovery_checkpoint =
-            [&](const std::string& thread) -> std::optional<std::string> {
+            [&](std::string thread) -> asio::awaitable<std::optional<std::string>> {
             std::size_t index = 0;
             {
                 std::lock_guard lock(plan_mutex);
                 index = recovery_calls_on_thread[thread]++;
             }
-            const auto history = control->checkpoints->list(thread, 100000);
+            const auto history = co_await control->checkpoints->list_async(thread, 100000);
             std::vector<const graph::Checkpoint*> runs;
             for (auto stored = history.rbegin(); stored != history.rend(); ++stored) {
                 if (stored->parent_id.empty() || runs.empty()) runs.push_back(&*stored);
                 else runs.back() = &*stored;
             }
-            if (index >= runs.size()) return std::nullopt;
+            if (index >= runs.size()) co_return std::nullopt;
             const auto* latest = runs[index];
             if (latest->interrupt_phase == graph::CheckpointPhase::Before ||
                 latest->interrupt_phase == graph::CheckpointPhase::After)
-                return std::nullopt;
+                co_return std::nullopt;
             {
                 std::lock_guard lock(plan_mutex);
                 recovery_checkpoint_ids.insert(latest->id);
             }
-            return latest->id;
+            co_return latest->id;
         };
         auto run_core = [&](std::string operation_id, json core_input,
                              std::optional<std::string> resume, std::string thread_id,
@@ -2444,7 +2421,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         std::move(resources));
                 }
 
-                auto checkpoint = inspect_checkpoint_for(*control, result.checkpoint_id, thread_id);
+                auto checkpoint = co_await inspect_checkpoint_for(control, result.checkpoint_id, thread_id);
                 if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
                 if (result.status() != graph::RunStatus::SafePoint) {
                     co_return CoreInvocation{std::move(result), std::move(checkpoint)};
@@ -3402,7 +3379,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 if (control->recover_plan_without_checkpoint && !control->recorded_replay) {
                     // #404: continue the call's own Core run, answering nothing,
                     // or have the host reconcile a call that saved nothing.
-                    auto continued = plan_recovery_checkpoint(thread_id);
+                    auto continued = co_await plan_recovery_checkpoint(thread_id);
                     if (!continued) {
                         PlanExecution held;
                         held.status    = ProgramTerminalStatus::Interrupted;
@@ -3455,6 +3432,16 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 update_peak(active + 1);
                 CoreInvocation invocation;
                 const auto     resume_checkpoint_for_error = resume;
+                // The handlers cannot suspend: they note the failure, and the checkpoint is read after them.
+                struct CoreCallFailure {
+                    std::string        message;
+                    std::string        node;
+                    std::uint32_t      attempts = 0;
+                    std::exception_ptr cause;
+                    // The exception that was handled: NestedOperationFailure records the one in flight when it is built.
+                    std::exception_ptr handled;
+                };
+                std::optional<CoreCallFailure> core_call_failure;
                 try {
                     invocation =
                         co_await run_core(operation_id, std::move(state), std::move(resume),
@@ -3467,26 +3454,32 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     throw;
                 } catch (const graph::NodeExecutionError& error) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
-                    const bool checkpoint_incompatible =
-                        resume_checkpoint_for_error &&
-                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
-                    throw NestedOperationFailure(operation_id, error.what(), error.node_name(),
-                                                 static_cast<std::uint32_t>(error.attempts()),
-                                                 checkpoint_incompatible, error.cause());
+                    core_call_failure = CoreCallFailure{error.what(), error.node_name(),
+                                                        static_cast<std::uint32_t>(error.attempts()),
+                                                        error.cause(), std::current_exception()};
                 } catch (const std::exception& error) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
-                    const bool checkpoint_incompatible =
-                        resume_checkpoint_for_error &&
-                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
-                    throw NestedOperationFailure(operation_id, error.what(), {}, 0,
-                                                 checkpoint_incompatible, std::current_exception());
+                    core_call_failure =
+                        CoreCallFailure{error.what(), {}, 0, std::current_exception(),
+                                        std::current_exception()};
                 } catch (...) {
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    core_call_failure =
+                        CoreCallFailure{"Unknown Core failure", {}, 0, std::current_exception(),
+                                        std::current_exception()};
+                }
+                if (core_call_failure) {
                     const bool checkpoint_incompatible =
                         resume_checkpoint_for_error &&
-                        !checkpoint_is_available(*control, *resume_checkpoint_for_error);
-                    throw NestedOperationFailure(operation_id, "Unknown Core failure", {}, 0,
-                                                 checkpoint_incompatible, std::current_exception());
+                        !co_await checkpoint_is_available(control, *resume_checkpoint_for_error);
+                    // Built while the handled exception is in flight again, so that it is nested in the failure.
+                    try {
+                        std::rethrow_exception(core_call_failure->handled);
+                    } catch (...) {
+                        throw NestedOperationFailure(operation_id, core_call_failure->message,
+                                                     core_call_failure->node, core_call_failure->attempts,
+                                                     checkpoint_incompatible, core_call_failure->cause);
+                    }
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
 
@@ -6303,8 +6296,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             }
                             resumed_join_members = *settled;
                         }
-                    } else if (auto saved = javascript_recovery_checkpoints(
-                                   *control, command_value, operation_id,
+                    } else if (auto saved = co_await javascript_recovery_checkpoints(
+                                   control, command_value, operation_id,
                                    prior->await_started_at().value_or(json::object()))) {
                         // #402: the command's calls that saved a Core checkpoint
                         // continue from it; one that saved none is reconciled.
@@ -6866,10 +6859,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         outcome.usage.node_retries       = node_retries_used();
         outcome.remaining_budget         = settle_budget(control->granted_budget, outcome.usage);
         const auto cause                 = terminal_cause_at_deadline(control, deadline);
-        if (!apply_terminal_cause(control, outcome, cause, error.what()) && checkpoint_id &&
-            !checkpoint_is_available(*control, *checkpoint_id)) {
-            apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
-                                          error.what());
+        if (!apply_terminal_cause(control, outcome, cause, error.what()) && checkpoint_id) {
+            checkpoint_availability_owed_message = error.what();
         }
         needs_durable_disposition = true;
     } catch (...) {
@@ -6883,6 +6874,12 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
         needs_durable_disposition = true;
+    }
+
+    if (checkpoint_availability_owed_message && checkpoint_id &&
+        !co_await checkpoint_is_available(control, *checkpoint_id)) {
+        apply_checkpoint_incompatible(outcome, control, *checkpoint_id, resume_checkpoint,
+                                      *checkpoint_availability_owed_message);
     }
 
     if (needs_durable_disposition) co_await apply_durable_javascript_disposition(outcome);

@@ -453,7 +453,7 @@ asio::awaitable<std::optional<detail::RunControl::ForkProviderReplay>> fork_prov
     const auto source_run_id = record.fork_source_run_id();
     const auto source_checkpoint_id = record.fork_source_checkpoint_id();
     if (!source_run_id || !source_checkpoint_id) co_return std::nullopt;
-    const auto forked = checkpoints.load_by_id(*source_checkpoint_id);
+    const auto forked = co_await checkpoints.load_by_id_async(*source_checkpoint_id);
     if (!forked) co_return std::nullopt;
     const auto source = co_await transitions.load(owner_scope, *source_run_id);
     if (!source || !source->exact_checkpoint()) co_return std::nullopt;
@@ -582,16 +582,17 @@ json rebind_recorded_members(const json& members, std::string_view owner_scope,
 // continuation gets its own copy, on the call's Core thread in the new run,
 // so that answering the call there never writes into the source run.
 // A settled branch's provider evidence is re-bound to the new run (#398).
-std::optional<json> continued_replay_records(const ProgramRunRecord&         source,
-                                             std::string_view                run_id,
-                                             const detail::MaterializedProgram& target,
-                                             graph::CheckpointStore&         checkpoints,
-                                             const std::shared_ptr<sp::NativeArchive>& archive) {
+asio::awaitable<std::optional<json>> continued_replay_records(
+    const ProgramRunRecord&                  source,
+    std::string                              run_id,
+    const detail::MaterializedProgram&       target,
+    std::shared_ptr<graph::CheckpointStore>  checkpoints,
+    std::shared_ptr<sp::NativeArchive>       archive) {
     const auto records = source.settled_branches();
-    if (!records) return std::nullopt;
+    if (!records) co_return std::nullopt;
     const RecordCustody source_custody{source.run_id(), source.program_version_id(),
                                        source.bundle_id()};
-    const RecordCustody target_custody{std::string(run_id), target.version.id(),
+    const RecordCustody target_custody{run_id, target.version.id(),
                                        target.bundle.id()};
     json carried = json::object();
     for (const auto& [key, stored] : records->items()) {
@@ -605,7 +606,7 @@ std::optional<json> continued_replay_records(const ProgramRunRecord&         sou
         }
         if (record.is_object() && record.contains("kind") && record["kind"] == json("paused")) {
             const auto checkpoint_id = record["checkpoint"]["checkpoint_id"].get<std::string>();
-            const auto loaded        = checkpoints.load_by_id(checkpoint_id);
+            const auto loaded        = co_await checkpoints->load_by_id_async(checkpoint_id);
             if (!loaded || loaded->id != checkpoint_id)
                 throw_runtime_diagnostic("P_CHECKPOINT_NOT_FOUND",
                                          "A paused call's checkpoint was not found");
@@ -617,9 +618,9 @@ std::optional<json> continued_replay_records(const ProgramRunRecord&         sou
             copy.metadata["forked_from"] =
                 json{{"thread_id", loaded->thread_id}, {"checkpoint_id", loaded->id}};
             copy.timestamp = std::max<std::int64_t>(now_ms(), loaded->timestamp + 1);
-            checkpoints.save(copy);
+            co_await checkpoints->save_async(copy);
             // #390: the copy replays what the call's paused step finished.
-            graph::copy_resume_pending_writes(checkpoints, *loaded, copy);
+            co_await graph::copy_resume_pending_writes_async(checkpoints, *loaded, copy);
             record["checkpoint"] = json{{"core_name", target.root->core_name},
                                         {"core_generation_id", target.root->compiled_plan_identity},
                                         {"core_thread_id", copy.thread_id},
@@ -628,7 +629,7 @@ std::optional<json> continued_replay_records(const ProgramRunRecord&         sou
         }
         carried[key] = std::move(record);
     }
-    return carried;
+    co_return carried;
 }
 
 std::optional<std::string> javascript_call_core_operation_for_thread(
@@ -2084,10 +2085,10 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             if (result.status() == ProgramTerminalStatus::Interrupted ||
                 result.status() == ProgramTerminalStatus::AmbiguousEffect) {
                 terminal_reservation = previous_journal->inflight_reservation;
-                const auto stored_checkpoint =
-                    result.checkpoint() && control.checkpoints
-                        ? control.checkpoints->load_by_id(result.checkpoint()->checkpoint_id)
-                        : std::nullopt;
+                std::optional<graph::Checkpoint> stored_checkpoint;
+                if (result.checkpoint() && control.checkpoints)
+                    stored_checkpoint = co_await control.checkpoints->load_by_id_async(
+                        result.checkpoint()->checkpoint_id);
                 const bool synthetic_terminal_checkpoint =
                     stored_checkpoint && stored_checkpoint->metadata.is_object() &&
                     stored_checkpoint->metadata.value("neograph_program", std::string{}) ==
@@ -3483,8 +3484,8 @@ ProgramResult RunControl::make_result(RunOutcome outcome) const {
         owner_scope, native_history_archive);
 }
 
-void ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
-    if (outcome.checkpoint || !control.checkpoints || !control.materialized) return;
+asio::awaitable<void> ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
+    if (outcome.checkpoint || !control.checkpoints || !control.materialized) co_return;
 
     graph::Checkpoint checkpoint;
     checkpoint.id               = graph::Checkpoint::generate_id();
@@ -3499,7 +3500,7 @@ void ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) 
     checkpoint.step             = 0;
     checkpoint.timestamp        = now_ms();
     checkpoint.schema_version   = graph::CHECKPOINT_SCHEMA_VERSION;
-    control.checkpoints->save(checkpoint);
+    co_await control.checkpoints->save_async(checkpoint);
     outcome.checkpoint = CoreCheckpointIdentity{
         control.materialized->root->core_name, control.materialized->root->compiled_plan_identity,
         control.core_thread_id, checkpoint.id, checkpoint.schema_version};
@@ -3562,7 +3563,7 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
         if (!retained_children)
             co_await cancel_children_async(current_cause == CancellationCause::None
                                                ? CancellationCause::ParentTerminal : current_cause);
-        ensure_terminal_checkpoint(*this, outcome);
+        co_await ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
         bool                      checkpoint_already_published = false;
@@ -7975,7 +7976,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::fork_core(std::string            
     auto source_pinned = (co_await detail::CatalogRuntimeAccess::pin_async(*impl_->config.catalog, *source_version));
     const auto checkpoint_identity = *source_record->exact_checkpoint();
     const auto loaded_checkpoint =
-        impl_->config.checkpoints->load_by_id(checkpoint_identity.checkpoint_id);
+        co_await impl_->config.checkpoints->load_by_id_async(checkpoint_identity.checkpoint_id);
     if (!loaded_checkpoint || loaded_checkpoint->id != checkpoint_identity.checkpoint_id ||
         loaded_checkpoint->thread_id != checkpoint_identity.core_thread_id ||
         loaded_checkpoint->schema_version != checkpoint_identity.checkpoint_schema_version) {
@@ -8175,11 +8176,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::fork_core(std::string            
              {"checkpoint_id", checkpoint_identity.checkpoint_id}};
     cloned_checkpoint.timestamp =
         std::max<std::int64_t>(now_ms(), loaded_checkpoint->timestamp + 1);
-    impl_->config.checkpoints->save(cloned_checkpoint);
+    co_await impl_->config.checkpoints->save_async(cloned_checkpoint);
     // #390: the fork replays the work the paused step finished, as a resume
     // of the source would, instead of running and charging it again.
-    graph::copy_resume_pending_writes(*impl_->config.checkpoints, *loaded_checkpoint,
-                                      cloned_checkpoint);
+    co_await graph::copy_resume_pending_writes_async(impl_->config.checkpoints, *loaded_checkpoint,
+                                                     cloned_checkpoint);
     const auto                   cloned_checkpoint_id = cloned_checkpoint.id;
     const CoreCheckpointIdentity target_checkpoint{
         target_pinned->root->core_name, target_pinned->root->compiled_plan_identity,
@@ -8219,9 +8220,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::fork_core(std::string            
         ProgramAttemptResume{target_checkpoint.checkpoint_id, resume_value.value}};
     // #386: the fork replays what the source's paused plan finished, as a
     // resume of the source would.
-    auto fork_records = continued_replay_records(*source_record, run_id, *control->materialized,
-                                                 *impl_->config.checkpoints,
-                                                 impl_->config.native_history_archive);
+    auto fork_records = co_await continued_replay_records(*source_record, run_id, *control->materialized,
+                                                          impl_->config.checkpoints,
+                                                          impl_->config.native_history_archive);
     auto publication =
         initial_publication(*control, started, target_checkpoint, receipt, std::nullopt,
                             std::move(fork_pending_input), std::move(fork_pending_effect),
@@ -9061,9 +9062,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             target.semantic_adapter->id();
     }
     target_snapshot.timestamp = snapshot_time;
-    impl_->config.checkpoints->save(target_snapshot);
+    co_await impl_->config.checkpoints->save_async(target_snapshot);
     const auto durable_target_checkpoint =
-        impl_->config.checkpoints->load_by_id(target_snapshot.id);
+        co_await impl_->config.checkpoints->load_by_id_async(target_snapshot.id);
     const auto target_checkpoint_content_id =
         graph_migration_checkpoint_content_id(target_snapshot);
     if (!durable_target_checkpoint ||
@@ -9119,10 +9120,10 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
     started = ProgramEvent::create(std::move(started));
     control->adopt_published_event(started);
     // #386: the same replay records as any continuation of the source.
-    auto migrated_records = continued_replay_records(*source_record, target_run_id,
-                                                     *control->materialized,
-                                                     *impl_->config.checkpoints,
-                                                     impl_->config.native_history_archive);
+    auto migrated_records = co_await continued_replay_records(*source_record, target_run_id,
+                                                              *control->materialized,
+                                                              impl_->config.checkpoints,
+                                                              impl_->config.native_history_archive);
     auto publication = initial_publication(
         *control, started, target_checkpoint, std::nullopt, std::nullopt,
         std::nullopt, std::nullopt, transition_time,
@@ -10150,7 +10151,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                          "Running Program recovery identity is incompatible");
             }
             const auto stored_checkpoint =
-                impl_->config.checkpoints->load_by_id(checkpoint->checkpoint_id);
+                co_await impl_->config.checkpoints->load_by_id_async(checkpoint->checkpoint_id);
             if (!stored_checkpoint || stored_checkpoint->id != checkpoint->checkpoint_id ||
                 stored_checkpoint->thread_id != checkpoint->core_thread_id ||
                 stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
@@ -10581,7 +10582,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     // checks in execute_run_attempt and Core remain authoritative because the
     // checkpoint may change between this lookup and execution.
     const auto stored_resume_checkpoint =
-        impl_->config.checkpoints->load_by_id(checkpoint.checkpoint_id);
+        co_await impl_->config.checkpoints->load_by_id_async(checkpoint.checkpoint_id);
 
     const auto previous_journal = (co_await impl_->transitions->latest(owner_scope, run_id));
     if (!previous_journal || previous_journal->id != previous->journal_head()) {
@@ -11070,7 +11071,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
             throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
                                      "Program reconciliation checkpoint identity is incompatible");
         }
-        const auto stored = impl_->config.checkpoints->load_by_id(checkpoint.checkpoint_id);
+        const auto stored = co_await impl_->config.checkpoints->load_by_id_async(checkpoint.checkpoint_id);
         if (!stored || stored->thread_id != checkpoint.core_thread_id ||
             stored->schema_version != checkpoint.checkpoint_schema_version ||
             stored->schema_version != graph::CHECKPOINT_SCHEMA_VERSION) {

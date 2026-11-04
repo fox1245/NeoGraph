@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=326b8c01407c927f94e28d7b1675a62de4bc55e25efcfec51180c5d43bce103b -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=8b04af6b5e157b18fea50778f558565631b34afba7d8154f606c89d9c0240cf2 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -205,6 +205,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
 - **CPU 具有 Arm SHA-2 指令时，SHA-256 使用这些指令（#661）。** 硬件路径原来只有 x86-64，因此在 64 位 Arm 上，所有摘要（记录、日志、bundle、版本和模块标识以及检查点）都由可移植代码计算。在小端 AArch64 上，只要操作系统报告具备，压缩函数现在就使用加密扩展（Cryptography Extension）的 SHA-256 指令（`vsha256hq_u32` 等）：Linux 和 Android 读取 `getauxval(AT_HWCAP)` 的 `HWCAP_SHA2` 与 `HWCAP_ASIMD`，macOS 读取 `hw.optional.arm.FEAT_SHA256`。判断依据是这些类型明确的报告值，而不是文本。CPU 或操作系统没有报告这些指令时（Windows 和 FreeBSD 尚无检测），仍像以前一样运行可移植代码，`NEOGRAPH_ENABLE_SHA256_ACCELERATION=OFF` 依旧关闭所有硬件路径。只有这一个函数按该扩展编译，因此库的基线架构编译选项不变。摘要逐字节相同：测试把每个可用后端与可移植代码比较，覆盖 0 到 1024 字节的每一种长度，以及按随机大小分块输入的大缓冲区。在 aarch64 服务器 CPU 上用 64 MiB 缓冲区测得的值（5 次取中位数）：可移植代码为 133 MiB/s，Arm 指令为 1,396 MiB/s（GCC 13 下快 10.5 倍）。在该机器上对持久子运行扇出做性能剖析时，可移植的 SHA-256 占运行 CPU 时间的 34%。
 
 ### 修复
+- **Program：在连接池大小有限的检查点存储上运行时，连接池耗尽不再导致挂起。** `ProgramRuntime` 的尝试、终止发布，以及 fork、迁移、重连、恢复和协调路径，曾在运行时执行器上运行的协程中以同步调用读写检查点存储。对于 `PostgresCheckpointStore`，当所有连接都在使用时，调用会阻塞执行器线程，而这些连接由只能在同一执行器上继续并归还连接的异步操作持有。当所有执行器线程都这样被阻塞时（例如在默认的 8 个连接上并发运行大量子 Program），运行永远不会结束。这些路径现在等待存储的异步调用，等待连接的协程被挂起，线程继续为执行器服务。`copy_resume_pending_writes_async` 是 `copy_resume_pending_writes` 的 awaitable 形式。
 - **Program：即使无法读取错误消息，JavaScript 栈溢出也会报告为 `P_JS_RESOURCE_LIMIT`，且源码自身提及栈溢出的错误不再被报告为栈溢出 (#673)。** 内置的 QuickJS 现在会记录栈或内存耗尽时它抛出的错误对象（本地补丁，列于 `deps/quickjs/NEOGRAPH_PROVENANCE`），NeoGraph 根据这一记录而不是在消息文本中搜索 `"stack overflow"` 或 `"out of memory"` 来分类失败。源码自己抛出的错误，或捕获溢出后抛出的错误，无论文本如何都是求值失败。
 - **Program：正在停止的运行时不再重试存储持续拒绝的发布 (#673)。** 存储拒绝某次运行的 JavaScript 命令发布或终止发布，或子级在父级中的关系或完成发布时，即使运行时已开始关闭，仍会最多重试 64 次，因此销毁一个其运行无法发布的运行时会等待所有重试结束（在 sanitizer 下超过 30 秒）。现在运行时停止后，如果拒绝时运行的日志头仍停在尝试读取的位置，就不再重试，运行保持存储中的状态等待恢复；能由其他写入者的进展解释的拒绝仍会重试。
 - **Program：JavaScript join 在首批成员结束后仍遵守 `max_in_flight` (#676)。** `ng.all`、`ng.race` 或 `ng.quorum` 的某个成员结束时，join 会启动所有仍在等待的成员，而不是每个空位启动一个，因此上限只对首批启动有效（`max_in_flight: 2` 下的 5 个成员有 4 个同时运行）。现在只有在运行中的成员少于 `max_in_flight` 时，join 才会启动等待中的成员。
