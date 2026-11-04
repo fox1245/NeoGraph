@@ -171,6 +171,11 @@ public:
     std::optional<std::string> fork_source_checkpoint_id() const;
     std::optional<std::string> recorded_binding_set_fingerprint() const;
     std::string serialize_canonical() const;
+    /**
+     * Whether this object carries runtime-only state that its canonical bytes do not (a hydrated terminal result, a
+     * snapshot overlay). A record without it is exactly what its bytes parse to.
+     */
+    bool has_runtime_overlay() const noexcept { return hydrated_terminal_.has_value() || snapshot_children_ != nullptr; }
 
 private:
     struct Impl;

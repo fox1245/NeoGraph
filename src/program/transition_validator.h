@@ -1092,10 +1092,11 @@ struct TransitionRequest {
     const ProgramTransitionPublication&  publication;
     /// The publication's canonical bytes, from prepare_transition().
     std::string_view                     publication_bytes;
-    const ProgramGraphSafePointEvidence* safe_point_evidence = nullptr;
-    const GraphMigrationCapsule*         safe_point_capsule  = nullptr;
-    const ProgramExecutionLease*         expected_lease      = nullptr;
-    const ProgramExecutionLease*         next_lease          = nullptr;
+    const ProgramGraphSafePointEvidence* safe_point_evidence    = nullptr;
+    const GraphMigrationCapsule*         safe_point_capsule     = nullptr;
+    const ProgramExecutionLease*         expected_lease         = nullptr;
+    const ProgramExecutionLease*         next_lease             = nullptr;
+    bool                                 stored_history_vouched = false;
 };
 
 struct TakeoverPublication {
@@ -1639,21 +1640,25 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
         return TransitionVerdict::Conflict;
     }
 
-    const auto context_history = reads.context_history(run_id);
-    if (!reads.context_history_is_intact(context_history.get()) ||
-        !is_valid_program_context_history_append(context_history.get(),
-                                                 publication.context_publication))
-        return TransitionVerdict::Conflict;
+    if (publication.context_publication || (current && !request.stored_history_vouched)) {
+        const auto context_history = reads.context_history(run_id);
+        if (!reads.context_history_is_intact(context_history.get()) ||
+            !is_valid_program_context_history_append(context_history.get(),
+                                                     publication.context_publication))
+            return TransitionVerdict::Conflict;
+    }
     if (!publication.child_synthesis_records.empty() &&
         !is_valid_program_child_synthesis_publication(
             reads.synthesis_heads(run_id).get(), current ? &current->run_record : nullptr,
             publication))
         return TransitionVerdict::Conflict;
-    const auto hook_heads =
-        reads.hook_heads(run_id, current ? current->run_record : publication.run_record);
-    if (!is_valid_program_hook_history_append(hook_heads.get(), publication.hook_outbox_entries,
-                                              publication.run_record))
-        return TransitionVerdict::Conflict;
+    if (!publication.hook_outbox_entries.empty() || (current && !request.stored_history_vouched)) {
+        const auto hook_heads =
+            reads.hook_heads(run_id, current ? current->run_record : publication.run_record);
+        if (!is_valid_program_hook_history_append(hook_heads.get(), publication.hook_outbox_entries,
+                                                  publication.run_record))
+            return TransitionVerdict::Conflict;
+    }
 
     if (!lineage_binds(reads, current, publication, request.next_lease, plan) ||
         !fork_source_binds(reads, current, publication) ||

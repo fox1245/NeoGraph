@@ -32,6 +32,19 @@ public:
          * entries are evicted when the cache is full; 0 disables the cache.
          */
         std::size_t run_record_cache_capacity = 256;
+
+        /**
+         * Maximum number of runs whose last published head this instance remembers for
+         * ProgramTransitionStore::own_head_hint; 0 disables the hint. Least-recently-used entries are
+         * evicted when the table is full.
+         */
+        std::size_t own_head_hint_capacity = 256;
+
+        /**
+         * Maximum number of run generations kept in memory. A stored generation never changes, and a reader
+         * compares what it takes from the cache with the lineage head that names it; 0 disables the cache.
+         */
+        std::size_t generation_cache_capacity = 256;
     };
 
     explicit PostgreSQLProgramTransitionStore(std::string connection_string);
@@ -43,6 +56,9 @@ public:
     ~PostgreSQLProgramTransitionStore() override;
 
     std::string process_coordination_key() const override;
+    std::optional<ProgramOwnHeadHint> own_head_hint(std::string_view owner_scope,
+                                                    std::string_view run_id) const override;
+    void forget_own_head(std::string_view owner_scope, std::string_view run_id) const noexcept override;
 
     std::optional<ProgramRunPublicationHead> load_run_publication_head_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
@@ -70,6 +86,8 @@ public:
         std::uint64_t after_sequence = 0) const override;
     std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
+    void verify_stored_history_sync(std::string_view owner_scope,
+                                    std::string_view run_id) const override;
     std::vector<ProgramChildSynthesisRecord> load_child_syntheses_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
     std::optional<MigrationPlan> load_migration_plan_sync(

@@ -44,6 +44,9 @@ public:
         std::string_view owner, std::string_view run, std::uint64_t after) const override {
         return inner_->load_javascript_commands(owner, run, after);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run) const override {
+        inner_->verify_stored_history(owner, run);
+    }
     std::optional<MigrationPlan> load_migration_plan_sync(std::string_view owner,
                                                      std::string_view run) const override {
         return inner_->load_migration_plan(owner, run);

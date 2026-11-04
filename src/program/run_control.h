@@ -1,5 +1,6 @@
 #pragma once
 
+#include "synthesis_heads_cache.h"
 #include <neograph/graph/engine.h>
 #include <neograph/hook_runtime.h>
 #include <neograph/program/event.h>
@@ -330,6 +331,15 @@ public:
     asio::awaitable<void> refresh_children_held() const;
     /// The last aggregate read by refresh_children_held; the whole budget except wall time and concurrency counts.
     RunBudget children_held() const;
+    /// The run's child-synthesis records as this control last read them, or nothing. The log grows only by publications
+    /// that carry a synthesis record, and each of those calls forget_synthesis_heads; a control that was taken over
+    /// reads from the store.
+    std::optional<std::vector<ProgramChildSynthesisRecord>> cached_synthesis_heads() const;
+    /// Keeps `heads` read while the control's synthesis epoch was `epoch` (see synthesis_epoch); refused when a
+    /// publication of a synthesis record ran since.
+    void cache_synthesis_heads(std::vector<ProgramChildSynthesisRecord> heads, std::uint64_t epoch) const;
+    std::uint64_t synthesis_epoch() const;
+    void forget_synthesis_heads() const;
     void set_existing_child_reconnect_callback(ExistingChildReconnectCallback callback) noexcept;
     void set_descendant_cancel_callback(DescendantCancelCallback callback) noexcept;
     asio::awaitable<std::shared_ptr<RunControl>> reconnect_existing_child(std::string binding,
@@ -625,6 +635,7 @@ private:
     ChildRecoveryCallback                         child_recovery_callback_;
     ChildGrantCallback                            child_grant_callback_;
     mutable RunBudget                             children_held_;
+    mutable SynthesisHeadsCache                   synthesis_heads_;
     ExistingChildReconnectCallback                existing_child_reconnect_callback_;
     DescendantCancelCallback                         descendant_cancel_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;

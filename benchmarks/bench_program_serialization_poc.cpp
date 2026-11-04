@@ -58,6 +58,10 @@ public:
         std::uint64_t    after_sequence) const override {
         return inner_->load_javascript_commands(owner_scope, run_id, after_sequence);
     }
+    void verify_stored_history_sync(std::string_view owner_scope,
+                                    std::string_view run_id) const override {
+        inner_->verify_stored_history(owner_scope, run_id);
+    }
     std::optional<MigrationPlan> load_migration_plan_sync(std::string_view owner_scope,
                                                      std::string_view run_id) const override {
         return inner_->load_migration_plan(owner_scope, run_id);

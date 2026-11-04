@@ -293,6 +293,7 @@ public:
             return ProgramTransitionStore::load_hook_outbox_entries(owner_scope, run_id);
         return member_.call(tr::load_hook_outbox_entries, owner_scope, run_id);
     }
+    // verify_stored_history keeps the ProgramTransitionStore default for JavaScript host stores.
     asio::awaitable<program::ProgramEffectiveRuntimeState> load_effective_runtime_state(
         std::string_view owner_scope, std::string_view run_id) const override {
         if (!member_.has(tr::load_effective_runtime_state))

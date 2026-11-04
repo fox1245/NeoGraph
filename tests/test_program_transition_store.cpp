@@ -2,7 +2,9 @@
 #include <neograph/program/replay.h>
 
 #include "canonical_json.h"
+#include "own_head_hints.h"
 #include "run_record_cache.h"
+#include "synthesis_heads_cache.h"
 #include "transition_validator.h"
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 #include <neograph/program/sqlite_transition_store.h>
@@ -807,6 +809,9 @@ public:
                                                                  std::string_view previous,
                                                                  std::uint64_t expected_fence) override {
         return backend.compare_publish_takeover_sync(owner, run_id, previous, expected_fence);
+    }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run) const override {
+        backend.verify_stored_history_sync(owner, run);
     }
 };
 void exercise_javascript_command_reservation_settlement(BlockingProgramTransitionStore& store) {
@@ -4850,6 +4855,322 @@ TEST(ProgramTransitionStoreTest, SQLiteConcurrentCasAcrossConnectionsHasOneWinne
     }
     std::filesystem::remove(path);
 }
+
+std::string serialize_stored_context_publication_bytes_for_test(
+    const ProgramContextPublication& context) {
+    auto artifacts = json::array();
+    for (const auto& artifact : context.artifacts) {
+        artifacts.push_back(detail::parse_json_strict(artifact.serialize_canonical()));
+    }
+    return detail::canonical_json_bytes(json{
+        {"artifacts", std::move(artifacts)},
+        {"assembly_receipt",
+         detail::parse_json_strict(context.assembly_receipt.serialize_canonical())},
+        {"epoch", detail::parse_json_strict(context.epoch.serialize_canonical())},
+    });
+}
+
+neograph::HookOutboxEntry pending_hook_outbox_entry_for_run(std::string run_id) {
+    const auto runtime = neograph::RuntimeEvent::create(
+        {{}, 1, neograph::HookPhase::BeforeTerminalPublication, "program_terminal",
+         "owner-a", std::move(run_id), json::object()});
+    const auto invocation = neograph::HookInvocation::create(
+        {{}, digest('f'), runtime.id(), "audit",
+         neograph::HookPhase::BeforeTerminalPublication,
+         neograph::HookDelivery::BlockingMandatory, neograph::HookFailureMode::FailClosed,
+         neograph::HookIdempotency::NonIdempotent, neograph::ToolEffectClass::ExternalWrite,
+         {}, {}, json::object()});
+    return neograph::HookOutboxEntry::create(
+        {invocation, runtime, neograph::HookExecutionState::Pending, 0, 2,
+         std::chrono::system_clock::time_point(std::chrono::milliseconds(1000000))});
+}
+
+std::string hex_encode_bytes_for_test(std::string_view bytes) {
+    static const char digits[] = "0123456789abcdef";
+    std::string       hex;
+    hex.reserve(bytes.size() * 2);
+    for (const unsigned char byte : bytes) {
+        hex.push_back(digits[byte >> 4]);
+        hex.push_back(digits[byte & 15]);
+    }
+    return hex;
+}
+
+template <class FirstStore, class SecondStore, class CorruptContextRow, class CorruptHookRow>
+void check_stored_history_checks_follow_appends_and_unvouched_heads(
+    FirstStore& first, SecondStore& second, CorruptContextRow&& corrupt_context_row,
+    CorruptHookRow&& corrupt_hook_row, const std::string& prefix) {
+    const std::string owner       = "owner-a";
+    const std::string intact_run  = prefix + "-intact";
+    const std::string context_run = prefix + "-context";
+    const std::string writer_run  = prefix + "-writer";
+    const std::string hook_run    = prefix + "-hook";
+
+    // Missing run and intact run pass verify_stored_history.
+    EXPECT_NO_THROW(first.verify_stored_history(owner, prefix + "-missing"));
+    auto intact_start                = start_publication_for(intact_run, digest('1'), digest('2'), budget(), 100);
+    intact_start.context_publication = context_publication(1, std::nullopt, {}, intact_run);
+    intact_start.hook_outbox_entries = {pending_hook_outbox_entry_for_run(intact_run)};
+    attach_initial_lineage(intact_start);
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, intact_start),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_NO_THROW(first.verify_stored_history(owner, intact_run));
+    EXPECT_NO_THROW(second.verify_stored_history(owner, intact_run));
+
+    // Publish two context epochs on `first`, then corrupt the second epoch's stored row so its
+    // predecessor_id no longer matches the first epoch.
+    auto ctx_start                = start_publication_for(context_run, digest('1'), digest('2'), budget(), 200);
+    ctx_start.context_publication = context_publication(1, std::nullopt, {}, context_run);
+    attach_initial_lineage(ctx_start);
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, ctx_start),
+              ProgramTransitionPublishResult::Published);
+
+    auto ctx_second =
+        javascript_command_publication(ctx_start, javascript_command_entry(1, false), 210);
+    ctx_second.context_publication =
+        context_publication(2, ctx_start.context_publication->epoch.id(), {}, context_run);
+    attach_same_generation_lineage(ctx_second, *ctx_start.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, ctx_start.journal_record.id, 1, ctx_second),
+              ProgramTransitionPublishResult::Published);
+
+    const auto corrupt_epoch_two = context_publication(2, digest('e'), {}, context_run);
+    corrupt_context_row(context_run, 2,
+                        serialize_stored_context_publication_bytes_for_test(corrupt_epoch_two));
+
+    // (5) verify_stored_history on the corrupted context run throws std::invalid_argument naming "context".
+    try {
+        first.verify_stored_history(owner, context_run);
+        ADD_FAILURE() << "expected verify_stored_history to reject corrupted context history";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string_view(error.what()).find("context"), std::string_view::npos)
+            << error.what();
+    }
+
+    // (2) A non-appending publication on the vouching instance `first` returns Published.
+    auto ctx_non_appending =
+        javascript_command_publication(ctx_second, javascript_command_entry(2, true), 220);
+    attach_same_generation_lineage(ctx_non_appending, *ctx_second.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, ctx_second.journal_record.id, 1, ctx_non_appending),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(first.store().own_head_hint(owner, context_run).has_value());
+
+    // (3) A non-appending publication on a second store instance (no hint) returns Conflict.
+    auto ctx_from_second = javascript_command_publication(
+        ctx_non_appending, javascript_command_entry(3, false, 2), 230);
+    attach_same_generation_lineage(ctx_from_second, *ctx_non_appending.run_lineage);
+    EXPECT_EQ(second.compare_publish(owner, ctx_non_appending.journal_record.id, 1, ctx_from_second),
+              ProgramTransitionPublishResult::Conflict);
+
+    // (1) A third context-appending publication on the vouching instance `first` returns Conflict.
+    ASSERT_TRUE(first.store().own_head_hint(owner, context_run).has_value());
+    auto ctx_third_append = javascript_command_publication(
+        ctx_non_appending, javascript_command_entry(3, false, 2), 235);
+    ctx_third_append.context_publication =
+        context_publication(3, ctx_second.context_publication->epoch.id(), {}, context_run);
+    attach_same_generation_lineage(ctx_third_append, *ctx_non_appending.run_lineage);
+    EXPECT_EQ(first.compare_publish(owner, ctx_non_appending.journal_record.id, 1, ctx_third_append),
+              ProgramTransitionPublishResult::Conflict);
+
+    // (4) After `first`'s hint is dropped (by a second writer's publication or by a takeover), a
+    // non-appending publication on `first` returns Conflict.
+    auto writer_start                = start_publication_for(writer_run, digest('1'), digest('2'), budget(), 300);
+    writer_start.context_publication = context_publication(1, std::nullopt, {}, writer_run);
+    attach_initial_lineage(writer_start);
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, writer_start),
+              ProgramTransitionPublishResult::Published);
+    auto writer_second =
+        javascript_command_publication(writer_start, javascript_command_entry(1, false), 310);
+    writer_second.context_publication =
+        context_publication(2, writer_start.context_publication->epoch.id(), {}, writer_run);
+    attach_same_generation_lineage(writer_second, *writer_start.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, writer_start.journal_record.id, 1, writer_second),
+              ProgramTransitionPublishResult::Published);
+    // Second writer advances the head before corruption so `first`'s hint lags behind the stored head.
+    auto writer_third =
+        javascript_command_publication(writer_second, javascript_command_entry(2, true), 320);
+    attach_same_generation_lineage(writer_third, *writer_second.run_lineage);
+    ASSERT_EQ(second.compare_publish(owner, writer_second.journal_record.id, 1, writer_third),
+              ProgramTransitionPublishResult::Published);
+    corrupt_context_row(
+        writer_run, 2,
+        serialize_stored_context_publication_bytes_for_test(
+            context_publication(2, digest('e'), {}, writer_run)));
+    auto writer_from_first =
+        javascript_command_publication(writer_third, javascript_command_entry(3, false, 2), 330);
+    attach_same_generation_lineage(writer_from_first, *writer_third.run_lineage);
+    EXPECT_EQ(first.compare_publish(owner, writer_third.journal_record.id, 1, writer_from_first),
+              ProgramTransitionPublishResult::Conflict);
+
+    // Also verify takeover drops `first`'s hint and causes a non-appending publication on `first` to return Conflict.
+    ASSERT_EQ(first.compare_publish_takeover(owner, context_run, ctx_non_appending.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(first.store().own_head_hint(owner, context_run).has_value());
+    const auto taken_over_head = first.load_run_publication_head(owner, context_run);
+    ASSERT_TRUE(taken_over_head.has_value());
+    ProgramTransitionPublication taken_over_pub{taken_over_head->run_record,
+                                                taken_over_head->journal_record};
+    taken_over_pub.run_lineage = ctx_non_appending.run_lineage;
+    auto after_takeover =
+        javascript_command_publication(taken_over_pub, javascript_command_entry(3, false, 2), 240);
+    attach_same_generation_lineage(after_takeover, *taken_over_pub.run_lineage);
+    EXPECT_EQ(first.compare_publish(owner, taken_over_head->journal_record.id, 2, after_takeover),
+              ProgramTransitionPublishResult::Conflict);
+
+    // (6) Hook-history test of the same shape as 1/2/4.
+    const auto hook_pending = pending_hook_outbox_entry_for_run(hook_run);
+    // A dispatched entry holds a lease bounded by the deadline.
+    auto dispatched_data             = hook_pending.data();
+    dispatched_data.state            = neograph::HookExecutionState::Dispatched;
+    dispatched_data.attempt_count    = 1;
+    dispatched_data.fencing_token    = 1;
+    dispatched_data.lease_expires_at = dispatched_data.deadline;
+    const auto hook_dispatched       = neograph::HookOutboxEntry::create(std::move(dispatched_data));
+    const auto hook_succeeded =
+        hook_outbox_entry_with_state(hook_pending, neograph::HookExecutionState::Succeeded);
+
+    auto hook_start                = start_publication_for(hook_run, digest('1'), digest('2'), budget(), 400);
+    hook_start.hook_outbox_entries = {hook_pending};
+    attach_initial_lineage(hook_start);
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, hook_start),
+              ProgramTransitionPublishResult::Published);
+
+    auto hook_second =
+        javascript_command_publication(hook_start, javascript_command_entry(1, false), 410);
+    hook_second.hook_outbox_entries = {hook_dispatched};
+    attach_same_generation_lineage(hook_second, *hook_start.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, hook_start.journal_record.id, 1, hook_second),
+              ProgramTransitionPublishResult::Published);
+
+    // Corrupt stored hook row 2 so stored history attempts Pending -> Succeeded without Dispatched.
+    corrupt_hook_row(hook_run, 2, hook_succeeded.serialize_canonical());
+
+    try {
+        first.verify_stored_history(owner, hook_run);
+        ADD_FAILURE() << "expected verify_stored_history to reject corrupted hook history";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string_view(error.what()).find("hook"), std::string_view::npos)
+            << error.what();
+    }
+
+    const auto hook_publication_refused = [&](auto& store, std::string_view expected_head,
+                                              std::uint64_t fence,
+                                              const ProgramTransitionPublication& pub) {
+        try {
+            return store.compare_publish(owner, expected_head, fence, pub) ==
+                   ProgramTransitionPublishResult::Conflict;
+        } catch (const std::invalid_argument& error) {
+            return std::string_view(error.what()).find("hook") != std::string_view::npos;
+        }
+    };
+
+    // Non-appending publication on vouching `first` publishes without reading stored hook rows.
+    auto hook_non_appending =
+        javascript_command_publication(hook_second, javascript_command_entry(2, true), 420);
+    attach_same_generation_lineage(hook_non_appending, *hook_second.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, hook_second.journal_record.id, 1, hook_non_appending),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(first.store().own_head_hint(owner, hook_run).has_value());
+
+    // Fresh instance `second` (no hint) is refused on a non-appending publication.
+    auto hook_from_second = javascript_command_publication(
+        hook_non_appending, javascript_command_entry(3, false, 2), 430);
+    attach_same_generation_lineage(hook_from_second, *hook_non_appending.run_lineage);
+    EXPECT_TRUE(hook_publication_refused(
+        second, hook_non_appending.journal_record.id, 1, hook_from_second));
+
+    // Appending hook publication on vouching `first` is refused.
+    ASSERT_TRUE(first.store().own_head_hint(owner, hook_run).has_value());
+    auto hook_appending = javascript_command_publication(
+        hook_non_appending, javascript_command_entry(3, false, 2), 435);
+    hook_appending.hook_outbox_entries = {hook_succeeded};
+    attach_same_generation_lineage(hook_appending, *hook_non_appending.run_lineage);
+    EXPECT_TRUE(hook_publication_refused(
+        first, hook_non_appending.journal_record.id, 1, hook_appending));
+
+    // After takeover drops `first`'s hint, a non-appending publication on `first` is also refused.
+    ASSERT_EQ(first.compare_publish_takeover(owner, hook_run, hook_non_appending.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    const auto hook_taken_over = first.load_run_publication_head(owner, hook_run);
+    ASSERT_TRUE(hook_taken_over.has_value());
+    ProgramTransitionPublication hook_taken_over_pub{hook_taken_over->run_record,
+                                                     hook_taken_over->journal_record};
+    hook_taken_over_pub.run_lineage = hook_non_appending.run_lineage;
+    auto hook_after_takeover = javascript_command_publication(
+        hook_taken_over_pub, javascript_command_entry(3, false, 2), 440);
+    attach_same_generation_lineage(hook_after_takeover, *hook_taken_over_pub.run_lineage);
+    EXPECT_TRUE(hook_publication_refused(
+        first, hook_taken_over->journal_record.id, 2, hook_after_takeover));
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteStoredHistoryChecksFollowAppendsAndUnvouchedHeads) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-vouch-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> first(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> second(path);
+        const auto corrupt_context = [&](const std::string& run_id, std::uint64_t seq,
+                                         const std::string& bytes) {
+            TestSqliteDatabase db(path);
+            db.execute("UPDATE program_transition_context_log_v1 SET canonical_bytes = X'" +
+                       hex_encode_bytes_for_test(bytes) +
+                       "' WHERE owner_scope = 'owner-a' AND run_id = '" + run_id +
+                       "' AND sequence = " + std::to_string(seq));
+        };
+        const auto corrupt_hook = [&](const std::string& run_id, std::uint64_t seq,
+                                      const std::string& bytes) {
+            TestSqliteDatabase db(path);
+            db.execute("UPDATE program_transition_hook_outbox_log_v1 SET canonical_bytes = X'" +
+                       hex_encode_bytes_for_test(bytes) +
+                       "' WHERE owner_scope = 'owner-a' AND run_id = '" + run_id +
+                       "' AND sequence = " + std::to_string(seq));
+        };
+        check_stored_history_checks_follow_appends_and_unvouched_heads(
+            first, second, corrupt_context, corrupt_hook, "sqlite-vouch");
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, InMemoryMultiPublicationContextAppendChecksPredecessor) {
+    OwnedTransitionStore<InMemoryProgramTransitionStore> store;
+    const std::string                                    owner  = "owner-a";
+    const std::string                                    run_id = "inmem-context-chain";
+
+    auto first                = start_publication_for(run_id, digest('1'), digest('2'), budget(), 100);
+    first.context_publication = context_publication(1, std::nullopt, {}, run_id);
+    attach_initial_lineage(first);
+    ASSERT_EQ(store.compare_publish(owner, {}, 1, first),
+              ProgramTransitionPublishResult::Published);
+
+    auto second = javascript_command_publication(first, javascript_command_entry(1, false), 110);
+    second.context_publication =
+        context_publication(2, first.context_publication->epoch.id(), {}, run_id);
+    attach_same_generation_lineage(second, *first.run_lineage);
+    ASSERT_EQ(store.compare_publish(owner, first.journal_record.id, 1, second),
+              ProgramTransitionPublishResult::Published);
+
+    // Third epoch pointing to the first epoch instead of the second is rejected with Conflict.
+    auto wrong_predecessor =
+        javascript_command_publication(second, javascript_command_entry(2, true), 120);
+    wrong_predecessor.context_publication =
+        context_publication(3, first.context_publication->epoch.id(), {}, run_id);
+    attach_same_generation_lineage(wrong_predecessor, *second.run_lineage);
+    EXPECT_EQ(store.compare_publish(owner, second.journal_record.id, 1, wrong_predecessor),
+              ProgramTransitionPublishResult::Conflict);
+
+    // Third epoch pointing to the second epoch's id publishes.
+    auto valid_third =
+        javascript_command_publication(second, javascript_command_entry(2, true), 125);
+    valid_third.context_publication =
+        context_publication(3, second.context_publication->epoch.id(), {}, run_id);
+    attach_same_generation_lineage(valid_third, *second.run_lineage);
+    EXPECT_EQ(store.compare_publish(owner, second.journal_record.id, 1, valid_third),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_NO_THROW(store.verify_stored_history(owner, run_id));
+}
 #endif
 
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
@@ -4952,6 +5273,257 @@ TEST(ProgramTransitionStoreTest, PostgreSQLConcurrentInitialCasHasOneWinner) {
     EXPECT_TRUE(winner->id() == first.run_record.id() || winner->id() == second.run_record.id());
 }
 
+
+// The head a store instance last published for a run (own_head_hint): it follows the instance's own publications, goes
+// stale when another instance publishes, and is gone after a publication that did not publish, after a takeover and
+// when the run ended. `first` and `second` are two instances over one database.
+template <class FirstStore, class SecondStore>
+void check_own_head_hint(FirstStore& first, SecondStore& second, const std::string& run_id) {
+    const std::string owner = "owner-a";
+    auto              start = start_publication_for(run_id, digest('1'), digest('2'), budget(), 200);
+    attach_initial_lineage(start);
+
+    EXPECT_FALSE(first.store().own_head_hint(owner, run_id).has_value());
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, start), ProgramTransitionPublishResult::Published);
+    const auto after_start = first.store().own_head_hint(owner, run_id);
+    ASSERT_TRUE(after_start.has_value());
+    EXPECT_EQ(after_start->journal_record.id, start.journal_record.id);
+    EXPECT_EQ(after_start->run_record.id(), start.run_record.id());
+    EXPECT_TRUE(after_start->latest_command_known);
+    EXPECT_FALSE(after_start->latest_command.has_value());
+    ASSERT_TRUE(after_start->lineage.has_value());
+    EXPECT_EQ(after_start->lineage->id(), start.run_lineage->id());
+    EXPECT_FALSE(second.store().own_head_hint(owner, run_id).has_value()) << "an instance remembers only its own";
+
+    auto pending = javascript_command_publication(start, javascript_command_entry(1, false), 210);
+    attach_same_generation_lineage(pending, *start.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, start.journal_record.id, 1, pending),
+              ProgramTransitionPublishResult::Published);
+    const auto after_pending = first.store().own_head_hint(owner, run_id);
+    ASSERT_TRUE(after_pending.has_value());
+    EXPECT_EQ(after_pending->journal_record.id, pending.journal_record.id);
+    ASSERT_TRUE(after_pending->latest_command.has_value());
+    EXPECT_EQ(after_pending->latest_command->sequence(), 1U);
+
+    // Another instance moves the head: the first still remembers the head it published, which is out of date.
+    auto completed = javascript_command_publication(pending, javascript_command_entry(2, true), 220);
+    attach_same_generation_lineage(completed, *pending.run_lineage);
+    ASSERT_EQ(second.compare_publish(owner, pending.journal_record.id, 1, completed),
+              ProgramTransitionPublishResult::Published);
+    const auto stale = first.store().own_head_hint(owner, run_id);
+    ASSERT_TRUE(stale.has_value());
+    EXPECT_EQ(stale->journal_record.id, pending.journal_record.id);
+
+    // A publication built on the out-of-date head is refused, and the refusal drops the hint; the head that is
+    // read after it is the other instance's, and a publication built on that one publishes.
+    auto from_stale = javascript_command_publication(pending, javascript_command_entry(2, true), 221);
+    attach_same_generation_lineage(from_stale, *pending.run_lineage);
+    EXPECT_EQ(first.compare_publish(owner, stale->journal_record.id, 1, from_stale),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(first.store().own_head_hint(owner, run_id).has_value());
+    const auto reloaded = first.load_run_publication_head(owner, run_id);
+    ASSERT_TRUE(reloaded.has_value());
+    EXPECT_EQ(reloaded->journal_record.id, completed.journal_record.id);
+    auto next = javascript_command_publication(completed, javascript_command_entry(3, false, 2), 230);
+    attach_same_generation_lineage(next, *completed.run_lineage);
+    ASSERT_EQ(first.compare_publish(owner, reloaded->journal_record.id, 1, next),
+              ProgramTransitionPublishResult::Published);
+    const auto after_next = first.store().own_head_hint(owner, run_id);
+    ASSERT_TRUE(after_next.has_value());
+    EXPECT_EQ(after_next->journal_record.id, next.journal_record.id);
+
+    // A hint dropped on request is dropped.
+    first.store().forget_own_head(owner, run_id);
+    EXPECT_FALSE(first.store().own_head_hint(owner, run_id).has_value());
+    // A repeated publication is AlreadyPresent: the instance does not claim to know the head after it.
+    ASSERT_EQ(first.compare_publish(owner, completed.journal_record.id, 1, next),
+              ProgramTransitionPublishResult::AlreadyPresent);
+    EXPECT_FALSE(first.store().own_head_hint(owner, run_id).has_value());
+}
+
+template <class FirstStore, class SecondStore>
+void check_own_head_hint_is_dropped_by_takeover_and_by_the_end_of_the_run(FirstStore& first, SecondStore&,
+                                                                          const std::string& run_id) {
+    const std::string owner = "owner-a";
+    auto              start = start_publication_for(run_id, digest('1'), digest('2'), budget(), 300);
+    attach_initial_lineage(start);
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(first.store().own_head_hint(owner, run_id).has_value());
+    ASSERT_EQ(first.compare_publish_takeover(owner, run_id, start.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(first.store().own_head_hint(owner, run_id).has_value()) << "a takeover drops the hint";
+
+    // A run without a lineage association ends: no hint of it remains.
+    const auto begun = start_publication();
+    ASSERT_EQ(first.compare_publish(owner, {}, 1, begun), ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(first.store().own_head_hint(owner, "run-1").has_value());
+    const auto terminal =
+        terminal_publication(begun, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+    ASSERT_EQ(first.compare_publish(owner, begun.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(first.store().own_head_hint(owner, "run-1").has_value()) << "an ended run keeps no hint";
+}
+
+// A published record is kept for the next read only when it is exactly what its bytes parse to: a terminal result may
+// carry a live cause that its bytes do not, so what a later read returns is a parse of the stored bytes.
+template <class Store>
+void check_published_terminal_record_is_not_what_a_later_read_returns(Store& store) {
+    const auto start = start_publication();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    const auto terminal =
+        terminal_publication(start, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    const auto loaded = store.load("owner-a", "run-1");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->serialize_canonical(), terminal.run_record.serialize_canonical());
+    EXPECT_NE(&loaded->id(), &terminal.run_record.id());
+    const auto head = store.load_run_publication_head("owner-a", "run-1");
+    ASSERT_TRUE(head.has_value());
+    EXPECT_EQ(head->run_record.serialize_canonical(), terminal.run_record.serialize_canonical());
+    EXPECT_NE(&head->run_record.id(), &terminal.run_record.id());
+}
+
+TEST(ProgramTransitionStoreTest, SQLitePublishedTerminalRecordIsNotWhatALaterReadReturns) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-terminal-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
+        check_published_terminal_record_is_not_what_a_later_read_returns(store);
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLPublishedTerminalRecordIsNotWhatALaterReadReturns) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
+    check_published_terminal_record_is_not_what_a_later_read_returns(store);
+}
+
+// A publication writes its lineage head: the hints of the other runs of that lineage held the old head and are dropped, and
+// the hints of runs of other lineages stay.
+TEST(ProgramTransitionStoreTest, OwnHeadHintsOfOtherRunsOfALineageAreDroppedWhenItsHeadMoves) {
+    const std::string owner = "owner-a";
+    auto make = [&](const std::string& run_id, const std::optional<ProgramRunLineage>& shared) {
+        auto start = start_publication_for(run_id, digest('1'), digest('2'), budget(), 200);
+        attach_initial_lineage(start);
+        ProgramOwnHeadHint hint{start.run_record, start.journal_record, std::nullopt, true,
+                                shared ? shared : start.run_lineage};
+        return hint;
+    };
+    detail::OwnHeadHints hints(8);
+    const auto           first  = make("lineage-run-a", std::nullopt);
+    const auto           second = make("lineage-run-b", first.lineage);
+    const auto           other  = make("lineage-run-c", std::nullopt);
+    hints.record(owner, "lineage-run-b", second);
+    hints.record(owner, "lineage-run-c", other);
+    ASSERT_TRUE(hints.get(owner, "lineage-run-b").has_value());
+    hints.record(owner, "lineage-run-a", first);
+    EXPECT_TRUE(hints.get(owner, "lineage-run-a").has_value());
+    EXPECT_FALSE(hints.get(owner, "lineage-run-b").has_value());
+    EXPECT_TRUE(hints.get(owner, "lineage-run-c").has_value());
+    hints.forget_lineage(owner, other.lineage->lineage_id());
+    EXPECT_FALSE(hints.get(owner, "lineage-run-c").has_value());
+    EXPECT_TRUE(hints.get(owner, "lineage-run-a").has_value());
+    hints.erase(owner, "lineage-run-a");
+    EXPECT_FALSE(hints.get(owner, "lineage-run-a").has_value());
+
+    detail::OwnHeadHints disabled(0);
+    disabled.record(owner, "lineage-run-a", first);
+    EXPECT_FALSE(disabled.get(owner, "lineage-run-a").has_value()) << "capacity 0 keeps nothing";
+}
+
+// The synthesis log a control read before a publication of a record that it then stores is out of date: the cache refuses
+// it and holds only a log read after the last forget.
+TEST(ProgramTransitionStoreTest, SynthesisHeadsReadBeforeAForgetAreNotKept) {
+    detail::SynthesisHeadsCache cache;
+    EXPECT_FALSE(cache.get().has_value());
+    const auto before = cache.epoch();
+    cache.put({}, before);
+    EXPECT_TRUE(cache.get().has_value());
+    cache.forget();
+    EXPECT_FALSE(cache.get().has_value());
+    cache.put({}, before);
+    EXPECT_FALSE(cache.get().has_value()) << "a log read before the forget must not come back";
+    cache.put({}, cache.epoch());
+    EXPECT_TRUE(cache.get().has_value());
+}
+
+TEST(ProgramTransitionStoreTest, SQLiteOwnHeadHintFollowsItsPublicationsAndGoesStaleBehindAnotherWriter) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-transition-hint-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> first(path);
+        OwnedTransitionStore<SQLiteProgramTransitionStore> second(path);
+        check_own_head_hint(first, second, "hint-run-a");
+        check_own_head_hint_is_dropped_by_takeover_and_by_the_end_of_the_run(first, second, "hint-run-b");
+    }
+    std::filesystem::remove(path);
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLOwnHeadHintFollowsItsPublicationsAndGoesStaleBehindAnotherWriter) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> first(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> second(url);
+    check_own_head_hint(first, second, "hint-run-a");
+    check_own_head_hint_is_dropped_by_takeover_and_by_the_end_of_the_run(first, second, "hint-run-b");
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLStoredHistoryChecksFollowAppendsAndUnvouchedHeads) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) {
+        GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set; skipping PostgreSQL transition test.";
+    }
+    reset_postgres_transition_schema(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> first(url);
+    OwnedTransitionStore<PostgreSQLProgramTransitionStore> second(url);
+    std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
+    ASSERT_EQ(PQstatus(connection.get()), CONNECTION_OK);
+    const auto corrupt_context = [&](const std::string& run_id, std::uint64_t seq,
+                                     const std::string& bytes) {
+        const auto        seq_str   = std::to_string(seq);
+        const char*       values[3] = {bytes.c_str(), run_id.c_str(), seq_str.c_str()};
+        std::unique_ptr<PGresult, decltype(&PQclear)> res(
+            PQexecParams(connection.get(),
+                         "UPDATE neograph_program_transition_context_log_v1 "
+                         "SET canonical_bytes = $1 "
+                         "WHERE owner_scope = 'owner-a' AND run_id = $2 AND sequence = $3::bigint",
+                         3, nullptr, values, nullptr, nullptr, 0),
+            PQclear);
+        ASSERT_EQ(PQresultStatus(res.get()), PGRES_COMMAND_OK);
+    };
+    const auto corrupt_hook = [&](const std::string& run_id, std::uint64_t seq,
+                                  const std::string& bytes) {
+        const auto        seq_str   = std::to_string(seq);
+        const char*       values[3] = {bytes.c_str(), run_id.c_str(), seq_str.c_str()};
+        std::unique_ptr<PGresult, decltype(&PQclear)> res(
+            PQexecParams(connection.get(),
+                         "UPDATE neograph_program_transition_hook_outbox_log_v1 "
+                         "SET canonical_bytes = $1 "
+                         "WHERE owner_scope = 'owner-a' AND run_id = $2 AND sequence = $3::bigint",
+                         3, nullptr, values, nullptr, nullptr, 0),
+            PQclear);
+        ASSERT_EQ(PQresultStatus(res.get()), PGRES_COMMAND_OK);
+    };
+    check_stored_history_checks_follow_appends_and_unvouched_heads(
+        first, second, corrupt_context, corrupt_hook, "pg-vouch");
+}
 
 TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSurviveReopen) {
     const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
@@ -6883,9 +7455,9 @@ TEST_P(ProgramTransitionStoreConformance,
         const auto second_read = store->load(owner, run_1_id);
         expect_loaded_record(first_read, start_1.run_record);
         expect_loaded_record(second_read, *first_read);
-        // A read returns what the stored bytes parse to, never the published object (which can carry state its
-        // bytes do not); the second read of unchanged bytes reuses the first parse.
-        EXPECT_NE(&first_read->id(), &start_1.run_record.id());
+        // A read returns what the stored bytes parse to. A published record that has no runtime-only state is
+        // exactly that, so the store keeps it for the next read; the second read of unchanged bytes reuses the
+        // first parse. A record that carries state its bytes do not is never kept (checked below).
         if (capacity > 0) {
             EXPECT_EQ(&first_read->id(), &second_read->id());
         } else {

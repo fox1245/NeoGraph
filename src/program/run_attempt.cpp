@@ -1834,8 +1834,29 @@ CommandBudgetReservation reserve_command_resources(RunBudget available, const Ru
     return CommandBudgetReservation{std::move(available), std::move(reservation)};
 }
 
+// The head this store instance last published for the control's own attempt, when it still knows it. A record read here
+// supplies the budget a later publication of the run settles; that publication compares the head it builds on, so a head
+// that moved since fails it like a read that raced.
+std::optional<ProgramOwnHeadHint> own_head_of_attempt(const RunControl& control) {
+    auto hint = control.async_transitions().own_head_hint(control.owner_scope, control.run_id);
+    if (!hint || hint->run_record.continuation().fence != control.fence ||
+        hint->run_record.continuation().attempt != control.attempt)
+        return std::nullopt;
+    return hint;
+}
+
+asio::awaitable<std::optional<ProgramRunRecord>> own_or_stored_run_record(const RunControl& control) {
+    if (auto hint = own_head_of_attempt(control)) co_return std::move(hint->run_record);
+    co_return co_await control.async_transitions().load(control.owner_scope, control.run_id);
+}
+
 asio::awaitable<std::optional<RunBudget>> held_command_remainder(const RunControl& control) {
     if (!control.materialized->bundle.control_source()) co_return std::nullopt;
+    if (auto hint = own_head_of_attempt(control)) {
+        if (has_resource_reservation(hint->journal_record.inflight_reservation))
+            co_return hint->journal_record.remaining_budget;
+        co_return std::nullopt;
+    }
     const auto held = co_await control.async_transitions().latest(control.owner_scope, control.run_id);
     if (held && has_resource_reservation(held->inflight_reservation)) co_return held->remaining_budget;
     co_return std::nullopt;
@@ -6495,8 +6516,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (auto failure = (co_await validate_javascript_command(command_value, operation_id, 0)))
                         co_return std::move(*failure);
 
-                    const auto durable_before_dispatch =
-                        co_await control->async_transitions().load(control->owner_scope, control->run_id);
+                    const auto durable_before_dispatch = co_await own_or_stored_run_record(*control);
                     if (!durable_before_dispatch) {
                         throw_runtime_diagnostic(
                             "P_JS_COMMAND_JOURNAL",
@@ -6727,7 +6747,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 const auto terminal_result = javascript_command_terminal_result(
                     command_result, to_string(command_result.status), command_usage);
-                auto durable = co_await control->async_transitions().load(control->owner_scope, control->run_id);
+                auto durable = co_await own_or_stored_run_record(*control);
                 if (!durable) {
                     throw_runtime_diagnostic("P_JS_COMMAND_JOURNAL",
                                              "JavaScript command result lost its running snapshot");
