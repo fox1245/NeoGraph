@@ -223,6 +223,19 @@ struct ProgramCommandPublicationHead {
 };
 
 /**
+ * The head a store instance last published for a run in this process (ProgramTransitionStore::own_head_hint).
+ * `latest_command` is meaningful only when `latest_command_known`; `lineage` is the lineage head the publication wrote,
+ * when it wrote one.
+ */
+struct ProgramOwnHeadHint {
+    ProgramRunRecord run_record;
+    ProgramJournalRecord journal_record;
+    std::optional<ProgramJavaScriptCommandJournalEntry> latest_command;
+    bool latest_command_known = false;
+    std::optional<ProgramRunLineage> lineage;
+};
+
+/**
  * The durable store of Program transitions, as the runtime uses it (#556). Every operation is awaitable: a store whose
  * backend is synchronous completes it at once (SyncProgramTransitionStore), and a host's store may complete it on a
  * later turn of the host's event loop. The arguments of a call, string views included, must stay alive until the
@@ -234,6 +247,21 @@ public:
 
     /** Process-local namespace used to coordinate wrappers over one backend. */
     virtual std::string process_coordination_key() const { return {}; }
+
+    /**
+     * The head this store instance last published for the run in this process, or nothing. A hint, not a read: a
+     * writer outside this instance (another process, another connection) may have moved the run since. A caller
+     * uses it only to build a publication whose compare-and-swap checks it, so that a stale hint ends in a
+     * Conflict and a reload and never in a decision taken from state the run no longer has. A store forgets a
+     * run on any publication of it that did not publish, on a takeover, and when the publication ended the run.
+     * The default answers nothing.
+     */
+    virtual std::optional<ProgramOwnHeadHint> own_head_hint(std::string_view /*owner_scope*/,
+                                                            std::string_view /*run_id*/) const {
+        return std::nullopt;
+    }
+    /** Drops the hint of the run; a caller that found a hint out of date calls it. The default does nothing. */
+    virtual void forget_own_head(std::string_view /*owner_scope*/, std::string_view /*run_id*/) const noexcept {}
 
     /** Wrong-owner lookups are indistinguishable from absence. */
     [[nodiscard]] virtual asio::awaitable<std::optional<ProgramRunRecord>> load(
@@ -290,6 +318,17 @@ public:
     [[nodiscard]] virtual asio::awaitable<std::vector<HookOutboxEntry>> load_hook_outbox_entries(
         std::string_view owner_scope,
         std::string_view run_id) const;
+    /**
+     * Verifies that the run's stored context history and hook history are intact. Returns normally when both
+     * histories are intact or when the run has none, and throws std::invalid_argument naming the history (context
+     * or hook) that is not intact. The base class default does nothing: a store that keeps only histories it
+     * validated in memory has nothing to check.
+     */
+    [[nodiscard]] virtual asio::awaitable<void> verify_stored_history(
+        std::string_view /*owner_scope*/,
+        std::string_view /*run_id*/) const {
+        co_return;
+    }
     /** Target-local state plus source-origin hook heads authorized by its generation. */
     [[nodiscard]] virtual asio::awaitable<ProgramEffectiveRuntimeState> load_effective_runtime_state(
         std::string_view owner_scope,
@@ -475,6 +514,9 @@ public:
     virtual std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner_scope,
         std::string_view run_id) const;
+    virtual void verify_stored_history_sync(
+        std::string_view /*owner_scope*/,
+        std::string_view /*run_id*/) const {}
     virtual ProgramEffectiveRuntimeState load_effective_runtime_state_sync(
         std::string_view owner_scope,
         std::string_view run_id) const;
@@ -608,6 +650,9 @@ public:
     [[nodiscard]] asio::awaitable<std::vector<HookOutboxEntry>> load_hook_outbox_entries(
         std::string_view owner_scope,
         std::string_view run_id) const final;
+    [[nodiscard]] asio::awaitable<void> verify_stored_history(
+        std::string_view owner_scope,
+        std::string_view run_id) const final;
     [[nodiscard]] asio::awaitable<ProgramEffectiveRuntimeState> load_effective_runtime_state(
         std::string_view owner_scope,
         std::string_view run_id) const final;
@@ -739,6 +784,9 @@ public:
         std::string_view run_id,
         std::uint64_t after_sequence = 0) const;
     std::vector<HookOutboxEntry> load_hook_outbox_entries(
+        std::string_view owner_scope,
+        std::string_view run_id) const;
+    void verify_stored_history(
         std::string_view owner_scope,
         std::string_view run_id) const;
     ProgramEffectiveRuntimeState load_effective_runtime_state(

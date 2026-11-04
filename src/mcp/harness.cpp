@@ -477,6 +477,10 @@ public:
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_hook_outbox_entries(owner_scope, run_id);
     }
+    void verify_stored_history_sync(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        select(run_id).verify_stored_history(owner_scope, run_id);
+    }
     std::optional<program::MigrationPlan> load_migration_plan_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         return select(run_id).load_migration_plan(owner_scope, run_id);

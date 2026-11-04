@@ -1834,6 +1834,9 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage_sync(owner, lineage_id);
@@ -1947,6 +1950,11 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         if (recovery_run_id_ == run_id) return recovery_hooks_;
         return target_->load_hook_outbox_entries(owner, run_id);
+    }
+    void verify_stored_history_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        if (recovery_run_id_ == run_id) return;
+        target_->verify_stored_history(owner, run_id);
     }
     std::optional<MigrationPlan> load_migration_plan_sync(
         std::string_view owner, std::string_view run_id) const override {
@@ -2219,6 +2227,10 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         return inner_->load_hook_outbox_entries(owner, run_id);
     }
+    void verify_stored_history_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        inner_->verify_stored_history(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_->load_lineage(owner, lineage_id);
@@ -2460,6 +2472,9 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage_sync(owner, lineage_id);
@@ -2559,6 +2574,9 @@ public:
     std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(
         std::string_view owner, std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
@@ -7940,6 +7958,9 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                        std::string_view lineage_id) const override {
         return inner_.load_lineage_sync(owner, lineage_id);
@@ -9051,6 +9072,9 @@ public:
                                                                          std::string_view run_id) const override {
         return inner_->load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_->verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                        std::string_view lineage_id) const override {
         return inner_->load_lineage_sync(owner, lineage_id);
@@ -9676,6 +9700,9 @@ public:
                                                                          std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                        std::string_view lineage_id) const override {
         return inner_.load_lineage_sync(owner, lineage_id);
@@ -10253,6 +10280,9 @@ public:
                                                                              std::string_view run_id) const override {
             return parent_->load_hook_outbox_entries_sync(owner, run_id);
         }
+        void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+            parent_->verify_stored_history_sync(owner, run_id);
+        }
         std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                            std::string_view lineage_id) const override {
             return parent_->load_lineage_sync(owner, lineage_id);
@@ -10356,6 +10386,9 @@ public:
     std::vector<neograph::HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner,
                                                                          std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
+    }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
     }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                        std::string_view lineage_id) const override {
@@ -17534,24 +17567,30 @@ TEST(ProgramRuntimeTest, RecursiveChildGrantsAttenuateToZeroAtTheConfiguredBound
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 4, 4},
                                                  "trace-recursive-parent",
                                                  {}});
+    // Each run of the chain holds every Core step it gives the next one: the Core call of a run has to have started
+    // before its child is attached.
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
                           RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 3, 3},
                           "trace-recursive-child",
                           {}});
+    ASSERT_TRUE(wait_blocking_calls(2));
     auto grandchild = fixture.runtime->start_child(
         "tenant:runtime", child, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
                           RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 2, 2},
                           "trace-recursive-grandchild",
                           {}});
+    ASSERT_TRUE(wait_blocking_calls(3));
     auto great_grandchild = fixture.runtime->start_child(
         "tenant:runtime", grandchild, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
                           RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 1, 1},
                           "trace-recursive-great-grandchild",
                           {}});
+    ASSERT_TRUE(wait_blocking_calls(4));
     auto leaf = fixture.runtime->start_child(
         "tenant:runtime", great_grandchild, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
@@ -19015,6 +19054,7 @@ TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-complete",
                                                  {}});
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
@@ -19026,6 +19066,7 @@ TEST(ProgramRuntimeTest, ParentCompletionCancelsAttachedChild) {
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
+    blocking_calls.store(0);
     AdmittedRuntime fixture(2);
     const auto linked = make_linked_child(fixture, "runtime-short-blocking", "runtime-blocking");
     auto       parent =
@@ -19034,6 +19075,7 @@ TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-reopen",
                                                  {}});
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),

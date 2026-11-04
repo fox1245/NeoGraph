@@ -1918,7 +1918,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     detail::transition::TransitionPlan plan;
     switch (detail::transition::validate_transition(
         {owner, expected, expected_fence, publication, publication_bytes, safe_point_evidence,
-         safe_point_capsule, expected_lease, next_lease},
+         safe_point_capsule, expected_lease, next_lease, true},
         head ? &*head : nullptr,
         current_lease == impl_->execution_leases.end() ? nullptr : &current_lease->second, reads,
         plan)) {
@@ -2393,6 +2393,20 @@ asio::awaitable<std::vector<HookOutboxEntry>> SyncProgramTransitionStore::load_h
     });
 }
 
+asio::awaitable<void> SyncProgramTransitionStore::verify_stored_history(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::verify_stored_history");
+    if (!detail::offload_store_call(offloads())) {
+        verify_stored_history_sync(owner_scope, run_id);
+        co_return;
+    }
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_await detail::offload_sync_call<void>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id)]() mutable {
+        verify_stored_history_sync(owner_scope, run_id);
+    });
+}
+
 asio::awaitable<ProgramEffectiveRuntimeState> SyncProgramTransitionStore::load_effective_runtime_state(
     std::string_view owner_scope,
     std::string_view run_id) const {
@@ -2713,6 +2727,17 @@ std::vector<HookOutboxEntry> BlockingProgramTransitionStore::load_hook_outbox_en
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_hook_outbox_entries");
     if (sync_) return sync_->load_hook_outbox_entries_sync(owner_scope, run_id);
     return detail::block_on_store(store_->load_hook_outbox_entries(owner_scope, run_id), policy_, "ProgramTransitionStore::load_hook_outbox_entries");
+}
+
+void BlockingProgramTransitionStore::verify_stored_history(
+    std::string_view owner_scope,
+    std::string_view run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::verify_stored_history");
+    if (sync_) {
+        sync_->verify_stored_history_sync(owner_scope, run_id);
+        return;
+    }
+    detail::block_on_store(store_->verify_stored_history(owner_scope, run_id), policy_, "ProgramTransitionStore::verify_stored_history");
 }
 
 ProgramEffectiveRuntimeState BlockingProgramTransitionStore::load_effective_runtime_state(

@@ -548,6 +548,9 @@ public:
     std::vector<HookOutboxEntry> load_hook_outbox_entries_sync(std::string_view owner, std::string_view run) const override {
         return inner_->load_hook_outbox_entries(owner, run);
     }
+    void verify_stored_history_sync(std::string_view owner, std::string_view run) const override {
+        inner_->verify_stored_history(owner, run);
+    }
     ProgramEffectiveRuntimeState load_effective_runtime_state_sync(std::string_view owner,
                                                               std::string_view run) const override {
         return inner_->load_effective_runtime_state(owner, run);

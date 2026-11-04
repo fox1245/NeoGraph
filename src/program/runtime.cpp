@@ -290,7 +290,15 @@ asio::awaitable<ProgramTransitionPublication> attach_run_lineage_async(
     if (publication.run_lineage) co_return publication;
 
     const auto& run = publication.run_record;
-    auto current = co_await transitions.load_run_lineage(run.owner_scope(), run.run_id());
+    // The lineage head this store instance wrote with the head the publication builds on is the lineage head the
+    // publication's compare-and-swap expects; a hint that is out of date ends in a Conflict, as a read that raced would.
+    // A run's first publication has no lineage association yet: its lineage id is derived, not read.
+    std::optional<ProgramRunLineage> current;
+    const auto hint = transitions.own_head_hint(run.owner_scope(), run.run_id());
+    if (hint && hint->lineage && hint->journal_record.id == publication.journal_record.previous_id)
+        current = hint->lineage;
+    else if (!publication.journal_record.previous_id.empty())
+        current = co_await transitions.load_run_lineage(run.owner_scope(), run.run_id());
     const auto lineage_id = current ? current->lineage_id()
                                     : program_run_lineage_id(run.owner_scope(), run.run_id());
     if (!current) current = co_await transitions.load_lineage(run.owner_scope(), lineage_id);
@@ -2018,13 +2026,33 @@ enum class TerminalPublicationResult : std::uint8_t {
 asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail::RunControl& control,
                                                                   const ProgramResult&      result,
                                                                   std::exception_ptr&       cause) {
-    for (std::size_t retry = 0; retry < detail::kRunPublicationAttempts; ++retry) {
+    // The head this store instance last published for the run stands in for the read of it while no decision below
+    // leaves the publication: a decision that would is taken again from the stored head, and a head that moved since
+    // fails the compare-and-swap like any read that raced.
+    bool        use_head_hint = true;
+    std::size_t attempts_after_hint = 0;  // the read that replaces a dropped hint is not one of the attempts
+    for (std::size_t retry = 0; retry < detail::kRunPublicationAttempts + attempts_after_hint; ++retry) {
         std::optional<ProgramRunPublicationHead> head;
         std::optional<ProgramRunRecord> loaded_previous;
         const ProgramRunRecord* previous = nullptr;
+        bool head_from_hint = false;
+        const auto stale_hint = [&]() -> bool {
+            if (!head_from_hint) return false;
+            control.transitions->forget_own_head(control.owner_scope, control.run_id);
+            use_head_hint       = false;
+            attempts_after_hint = 1;
+            return true;
+        };
         try {
-            head = (co_await control.transitions->load_run_publication_head(control.owner_scope,
-                                                                 control.run_id));
+            if (use_head_hint) {
+                if (auto hint = control.transitions->own_head_hint(control.owner_scope, control.run_id)) {
+                    head = ProgramRunPublicationHead{std::move(hint->run_record), std::move(hint->journal_record)};
+                    head_from_hint = true;
+                }
+            }
+            if (!head)
+                head = (co_await control.transitions->load_run_publication_head(control.owner_scope,
+                                                                     control.run_id));
             if (head) {
                 previous = &head->run_record;
             } else {
@@ -2044,17 +2072,21 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             co_return TerminalPublicationResult::JournalFailure;
         }
         if (previous && previous->continuation().fence != control.fence) {
+            if (stale_hint()) continue;
             const_cast<detail::RunControl&>(control).mark_taken_over(previous->continuation().fence);
             co_return TerminalPublicationResult::TransitionConflict;
         }
         if (!previous || previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != control.attempt) {
+            if (stale_hint()) continue;
             co_return TerminalPublicationResult::TransitionConflict;
         }
         // A control that decided from a record it loaded ends only that record, not a run that has moved on from it.
         if (const auto expected = control.expected_terminal_head();
-            expected && *expected != previous->journal_head())
+            expected && *expected != previous->journal_head()) {
+            if (stale_hint()) continue;
             co_return TerminalPublicationResult::TransitionConflict;
+        }
 
         std::optional<ProgramJournalRecord> loaded_previous_journal;
         const ProgramJournalRecord* previous_journal = head ? &head->journal_record : nullptr;
@@ -2075,6 +2107,7 @@ asio::awaitable<TerminalPublicationResult> publish_terminal_record(const detail:
             co_return TerminalPublicationResult::JournalFailure;
         }
         if (!previous_journal || previous_journal->id != previous->journal_head()) {
+            if (stale_hint()) continue;
             std::cerr << "terminal journal mismatch run=" << control.run_id
                       << " record_head=" << previous->journal_head()
                       << " latest=" << (previous_journal ? previous_journal->id : "<none>")
@@ -2560,6 +2593,15 @@ RunBudget RunControl::children_held() const {
     std::lock_guard lock(mutex_);
     return children_held_;
 }
+std::optional<std::vector<ProgramChildSynthesisRecord>> RunControl::cached_synthesis_heads() const {
+    if (taken_over()) return std::nullopt;
+    return synthesis_heads_.get();
+}
+void RunControl::cache_synthesis_heads(std::vector<ProgramChildSynthesisRecord> heads, std::uint64_t epoch) const {
+    synthesis_heads_.put(std::move(heads), epoch);
+}
+std::uint64_t RunControl::synthesis_epoch() const { return synthesis_heads_.epoch(); }
+void RunControl::forget_synthesis_heads() const { synthesis_heads_.forget(); }
 asio::awaitable<ChildRecoveryMode> RunControl::can_recover_child(std::string binding,
                                                                  json        input,
                                                                  std::string operation) const {
@@ -5164,7 +5206,12 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         co_return ProgramTransitionPublishResult::Conflict;
     };
 
-    for (int retry = 0; retry < kRunPublicationAttempts; ++retry) {
+    // The head this store instance last published for the run stands in for the read of it while no decision below
+    // leaves the publication: a decision that would is taken again from the stored head, and a head that moved since
+    // fails the compare-and-swap like any read that raced.
+    bool use_head_hint = true;
+    int  attempts_after_hint = 0;  // the read that replaces a dropped hint is not one of the attempts
+    for (int retry = 0; retry < kRunPublicationAttempts + attempts_after_hint; ++retry) {
         detail::OperationLock::Guard publication_lock;
         if (serialize_with_child_relations) {
             publication_lock =
@@ -5172,18 +5219,37 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                                                           logical_run_id)
                     .lock_async();
         }
-        const auto head = co_await async_transitions().load_command_publication_head(owner_scope, run_id);
+        std::optional<ProgramCommandPublicationHead> head;
+        bool                                         head_from_hint = false;
+        if (use_head_hint) {
+            if (auto hint = async_transitions().own_head_hint(owner_scope, run_id);
+                hint && hint->latest_command_known) {
+                head = ProgramCommandPublicationHead{std::move(hint->run_record), std::move(hint->journal_record),
+                                                     std::move(hint->latest_command)};
+                head_from_hint = true;
+            }
+        }
+        if (!head) head = co_await async_transitions().load_command_publication_head(owner_scope, run_id);
+        const auto stale_hint = [&]() -> bool {
+            if (!head_from_hint) return false;
+            async_transitions().forget_own_head(owner_scope, run_id);
+            use_head_hint       = false;
+            attempts_after_hint = 1;
+            return true;
+        };
         // The default store implementation reads optimistically. A child join
         // can advance its head between reads; retry that miss before treating
         // a command-result publication as an unresolved external outcome.
         if (!head) continue;
         if (attempt_commands && !commands_match_latest(head->latest_command)) {
+            if (stale_hint()) continue;
             co_await reload_attempt_commands();
             if (!commands_match_latest(head->latest_command)) continue;
         }
         const auto* previous = head ? &head->run_record : nullptr;
         const auto* previous_journal = head ? &head->journal_record : nullptr;
         if (previous && previous->continuation().fence != fence) {
+            if (stale_hint()) continue;
             mark_taken_over(previous->continuation().fence);
             publication_lock.unlock();
             co_return co_await conflict_after_reload();
@@ -5191,6 +5257,7 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         if (!previous || !previous_journal || previous->journal_head() != previous_journal->id ||
             previous->continuation().state != ContinuationState::Running ||
             previous->continuation().attempt != attempt) {
+            if (stale_hint()) continue;
             publication_lock.unlock();
             co_return co_await conflict_after_reload();
         }
@@ -5227,10 +5294,12 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                 detail::canonical_json_bytes(found->command().to_json()) !=
                     detail::canonical_json_bytes(command.to_json()) ||
                 found->effect_identity() != effect_identity) {
+                if (stale_hint()) continue;
                 publication_lock.unlock();
                 co_return co_await conflict_after_reload();
             }
             if (found->completed()) {
+                if (stale_hint()) continue;
                 if (found->terminal_result() == terminal_result)
                     co_return ProgramTransitionPublishResult::AlreadyPresent;
                 publication_lock.unlock();
@@ -5248,6 +5317,7 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                     for (const auto& [operation_id, started_at] : next_await_started_at->items()) {
                         // A recorded start never moves.
                         if (merged.contains(operation_id) && merged[operation_id] != started_at) {
+                            if (stale_hint()) continue;
                             publication_lock.unlock();
                             co_return co_await conflict_after_reload();
                         }
@@ -5255,8 +5325,10 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
                     }
                     starts = std::move(merged);
                 }
-                if (members == found->settled_members() && starts == found->await_started_at())
+                if (members == found->settled_members() && starts == found->await_started_at()) {
+                    if (stale_hint()) continue;
                     co_return ProgramTransitionPublishResult::AlreadyPresent;
+                }
                 next_settled_members  = std::move(members);
                 next_await_started_at = std::move(starts);
             }
@@ -5264,6 +5336,7 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
         // Settled members and await starts belong to an existing pending
         // coordinate.
         if ((next_settled_members || next_await_started_at) && (terminal_result || !found)) {
+            if (stale_hint()) continue;
             publication_lock.unlock();
             co_return co_await conflict_after_reload();
         }
@@ -6069,6 +6142,18 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         co_await verify_synthesis_grant(next);
         const auto& d = next.data();
         const auto expected_fence = control ? control->fence : d.parent.run.continuation().fence;
+        // Every control of this run that kept the log forgets it, whether or not the record is published.
+        struct ForgetSynthesisHeads {
+            Impl*                               impl;
+            std::string                         owner_scope;
+            std::string                         run_id;
+            std::shared_ptr<detail::RunControl> control;
+            ~ForgetSynthesisHeads() {
+                if (control) control->forget_synthesis_heads();
+                if (auto live = impl->find_control(owner_scope, run_id); live && live != control)
+                    live->forget_synthesis_heads();
+            }
+        } forget_heads{this, d.proposal.data().owner_scope, d.parent.run.run_id(), control};
         for (int retry = 0; retry < 5; ++retry) {
             auto previous =
                 (co_await transitions->load(d.proposal.data().owner_scope, d.parent.run.run_id()));
@@ -6141,8 +6226,13 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         if (!parent->invocation.budget.max_dynamic_compiles || !parent->materialized ||
             !parent->materialized->bundle.control_source())
             co_return std::nullopt;
-        for (const auto& record :
-             (co_await transitions->load_child_syntheses(parent->owner_scope, parent->run_id))) {
+        auto heads = parent->cached_synthesis_heads();
+        if (!heads) {
+            const auto epoch = parent->synthesis_epoch();
+            heads            = co_await transitions->load_child_syntheses(parent->owner_scope, parent->run_id);
+            parent->cache_synthesis_heads(*heads, epoch);
+        }
+        for (const auto& record : *heads) {
             if (record.data().binding_name != name) continue;
             (co_await verify_synthesis_grant(record));
             using State = ProgramChildSynthesisState;
@@ -9713,6 +9803,11 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
         {proposal, grant, std::move(context), reservation, std::move(binding_name)});
     (co_await impl_->verify_synthesis_grant(record, false));
     publication.child_synthesis_records.push_back(record);
+    // The parent's control forgets the synthesis log it kept, whether or not this record is published.
+    struct ForgetSynthesisHeads {
+        std::shared_ptr<detail::RunControl> control;
+        ~ForgetSynthesisHeads() { control->forget_synthesis_heads(); }
+    } forget_heads{parent.control_};
     const auto lease =
         (co_await impl_->transitions->load_execution_lease(owner_scope, parent.run_id()));
     ProgramTransitionPublishResult result = ProgramTransitionPublishResult::Conflict;

@@ -705,6 +705,10 @@ public:
         std::string_view owner, std::string_view run_id) const override {
         return inner_.load_hook_outbox_entries_sync(owner, run_id);
     }
+    void verify_stored_history_sync(
+        std::string_view owner, std::string_view run_id) const override {
+        inner_.verify_stored_history_sync(owner, run_id);
+    }
     std::optional<ProgramRunLineage> load_lineage_sync(std::string_view owner,
                                                     std::string_view lineage_id) const override {
         return inner_.load_lineage_sync(owner, lineage_id);

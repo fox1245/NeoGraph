@@ -1353,6 +1353,12 @@ public:
         return entries;
     }
 
+    void verify_stored_history_sync(
+        std::string_view owner_scope, std::string_view run_id) const override {
+        (void)load_context_publications_sync(owner_scope, run_id, 0);
+        (void)load_hook_outbox_entries_sync(owner_scope, run_id);
+    }
+
     std::optional<program::MigrationPlan> load_migration_plan_sync(
         std::string_view owner_scope, std::string_view run_id) const override {
         const auto wrapper = load_wrapper(owner_scope, run_id);

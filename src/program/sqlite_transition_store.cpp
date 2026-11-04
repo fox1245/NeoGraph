@@ -3,6 +3,7 @@
 #include "canonical_json.h"
 #include "node_retry_budget.h"
 #include "command_publication_head.h"
+#include "own_head_hints.h"
 #include "run_record_cache.h"
 #include "transition_validator.h"
 #include <sqlite3.h>
@@ -282,6 +283,58 @@ std::optional<StoredHead> load_head(sqlite3*                db,
                        column_blob(statement.get(), 3)};
 }
 
+// One column of a run head, for a caller that needs only that column. An absent row reads as absent and drops the
+// parsed-record cache entry, as load_head does; `parse` turns the column of a present row into the result.
+template <typename Parse>
+auto read_head_column(sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+                      const char* column, detail::RunRecordCache* cache, Parse&& parse)
+    -> std::optional<decltype(parse(std::declval<Statement&>()))> {
+    Statement statement(db, std::string("SELECT ") + column +
+                                " FROM program_transition_run_heads_v2 WHERE owner_scope = ?1 AND run_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) {
+        if (cache) cache->erase(owner_scope, run_id);
+        return std::nullopt;
+    }
+    return parse(statement);
+}
+
+std::optional<ProgramRunRecord> load_head_run_record(sqlite3* db, std::string_view owner_scope,
+                                                     std::string_view run_id,
+                                                     detail::RunRecordCache* cache) {
+    return read_head_column(db, owner_scope, run_id, "run_record_bytes", cache, [&](Statement& row) {
+        return parse_run_record(cache, owner_scope, run_id, column_blob(row.get(), 0));
+    });
+}
+
+std::optional<ProgramJournalRecord> load_head_journal_record(sqlite3* db, std::string_view owner_scope,
+                                                             std::string_view run_id,
+                                                             detail::RunRecordCache* cache) {
+    return read_head_column(db, owner_scope, run_id, "journal_record_bytes", cache, [&](Statement& row) {
+        return ProgramJournalRecord::parse(column_blob(row.get(), 0));
+    });
+}
+
+std::optional<MigrationPlan> load_head_migration_plan(sqlite3* db, std::string_view owner_scope,
+                                                      std::string_view run_id,
+                                                      detail::RunRecordCache* cache) {
+    const auto plan = read_head_column(
+        db, owner_scope, run_id, "migration_plan_bytes", cache, [&](Statement& row) {
+            const auto bytes = column_optional_blob(row.get(), 0);
+            return bytes ? std::optional<MigrationPlan>(MigrationPlan::parse(*bytes)) : std::nullopt;
+        });
+    return plan ? *plan : std::nullopt;
+}
+
+ProgramRunLineage parse_lineage_head(std::string_view bytes, std::string_view owner_scope,
+                                     std::string_view lineage_id) {
+    auto lineage = ProgramRunLineage::parse(bytes);
+    if (lineage.owner_scope() != owner_scope || lineage.lineage_id() != lineage_id)
+        throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+    return lineage;
+}
+
 std::optional<ProgramRunLineage> load_current_lineage_head(sqlite3* db,
                                                             std::string_view owner_scope,
                                                             std::string_view lineage_id) {
@@ -291,10 +344,31 @@ std::optional<ProgramRunLineage> load_current_lineage_head(sqlite3* db,
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, lineage_id);
     if (!statement.step_row()) return std::nullopt;
-    auto lineage = ProgramRunLineage::parse(column_blob(statement.get(), 0));
-    if (lineage.owner_scope() != owner_scope || lineage.lineage_id() != lineage_id)
-        throw std::invalid_argument("Stored Program lineage head binding is corrupt");
-    return lineage;
+    return parse_lineage_head(column_blob(statement.get(), 0), owner_scope, lineage_id);
+}
+
+// The lineage a run belongs to and that lineage's head, in one statement. `id` is empty when the run belongs to
+// no lineage; `head` is empty when the association names a lineage with no head.
+struct RunLineageRead {
+    std::optional<std::string>       id;
+    std::optional<ProgramRunLineage> head;
+};
+
+RunLineageRead load_run_lineage_and_head(sqlite3* db, std::string_view owner_scope,
+                                         std::string_view run_id) {
+    Statement statement(
+        db, "SELECT r.lineage_id, h.head_bytes FROM program_run_lineage_runs_v1 r "
+            "LEFT JOIN program_run_lineage_heads_v1 h "
+            "ON h.owner_scope = r.owner_scope AND h.lineage_id = r.lineage_id "
+            "WHERE r.owner_scope = ?1 AND r.run_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, run_id);
+    if (!statement.step_row()) return {};
+    RunLineageRead read;
+    read.id = column_text(statement.get(), 0);
+    if (sqlite3_column_type(statement.get(), 1) != SQLITE_NULL)
+        read.head = parse_lineage_head(column_blob(statement.get(), 1), owner_scope, *read.id);
+    return read;
 }
 
 std::optional<ProgramRunLineage> load_historical_lineage_head(sqlite3* db,
@@ -318,7 +392,11 @@ std::optional<ProgramRunLineage> load_historical_lineage_head(sqlite3* db,
 std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
                                                             std::string_view owner_scope,
                                                             std::string_view lineage_id,
-                                                            std::uint64_t generation) {
+                                                            std::uint64_t generation,
+                                                            detail::GenerationCache* cache = nullptr) {
+    if (cache) {
+        if (auto cached = cache->get(owner_scope, lineage_id, generation)) return cached;
+    }
     Statement statement(
         db, "SELECT generation_id, canonical_bytes FROM program_run_generations_v1 "
             "WHERE owner_scope = ?1 AND lineage_id = ?2 AND generation = ?3");
@@ -330,6 +408,7 @@ std::optional<ProgramRunGeneration> load_generation_record(sqlite3* db,
     if (value.owner_scope() != owner_scope || value.lineage_id() != lineage_id ||
         value.generation() != generation || value.id() != column_text(statement.get(), 0))
         throw std::invalid_argument("Stored Program generation binding is corrupt");
+    if (cache) cache->put(owner_scope, lineage_id, generation, value);
     return value;
 }
 
@@ -377,6 +456,15 @@ std::optional<GraphMigrationCapsule> load_graph_migration_capsule_record(
     return capsule;
 }
 
+ProgramExecutionLease parse_execution_lease(std::string_view owner_scope, std::string_view run_id,
+                                            std::string_view lease_id, std::string_view lease_bytes) {
+    auto lease = ProgramExecutionLease::parse(lease_bytes);
+    if (lease.owner_scope() != owner_scope || lease.run_id() != run_id || lease.id() != lease_id) {
+        throw std::invalid_argument("Stored Program execution lease binding is corrupt");
+    }
+    return lease;
+}
+
 std::optional<ProgramExecutionLease> load_execution_lease_record(
     sqlite3* db, std::string_view owner_scope, std::string_view run_id) {
     Statement statement(
@@ -385,24 +473,44 @@ std::optional<ProgramExecutionLease> load_execution_lease_record(
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, run_id);
     if (!statement.step_row()) return std::nullopt;
-    auto lease = ProgramExecutionLease::parse(column_blob(statement.get(), 1));
-    if (lease.owner_scope() != owner_scope || lease.run_id() != run_id ||
-        lease.id() != column_text(statement.get(), 0)) {
-        throw std::invalid_argument("Stored Program execution lease binding is corrupt");
-    }
-    return lease;
+    return parse_execution_lease(owner_scope, run_id, column_text(statement.get(), 0),
+                                 column_blob(statement.get(), 1));
 }
 
-std::optional<std::string> load_run_lineage_id(sqlite3* db,
-                                               std::string_view owner_scope,
-                                               std::string_view run_id) {
+struct StoredHeadAndLease {
+    std::optional<StoredHead>            head;
+    std::optional<ProgramExecutionLease> lease;
+};
+
+// The run head and the execution lease of the run, in one statement. A lease row references its head, so a run
+// without a head has no lease.
+StoredHeadAndLease load_head_and_lease(sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+                                       detail::RunRecordCache* cache) {
     Statement statement(
-        db, "SELECT lineage_id FROM program_run_lineage_runs_v1 "
-            "WHERE owner_scope = ?1 AND run_id = ?2");
+        db, "SELECT h.run_record_bytes, h.journal_record_bytes, h.migration_plan_bytes, "
+            "h.last_publication_bytes, l.lease_id, l.lease_bytes "
+            "FROM program_transition_run_heads_v2 h "
+            "LEFT JOIN program_execution_leases_v1 l "
+            "ON l.owner_scope = h.owner_scope AND l.run_id = h.run_id "
+            "WHERE h.owner_scope = ?1 AND h.run_id = ?2");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, run_id);
-    if (!statement.step_row()) return std::nullopt;
-    return column_text(statement.get(), 0);
+    if (!statement.step_row()) {
+        if (cache) cache->erase(owner_scope, run_id);
+        return {};
+    }
+    const auto migration_plan_bytes = column_optional_blob(statement.get(), 2);
+    StoredHeadAndLease loaded;
+    loaded.head = StoredHead{parse_run_record(cache, owner_scope, run_id, column_blob(statement.get(), 0)),
+                             ProgramJournalRecord::parse(column_blob(statement.get(), 1)),
+                             migration_plan_bytes
+                                 ? std::optional<MigrationPlan>(MigrationPlan::parse(*migration_plan_bytes))
+                                 : std::nullopt,
+                             column_blob(statement.get(), 3)};
+    if (sqlite3_column_type(statement.get(), 4) != SQLITE_NULL)
+        loaded.lease = parse_execution_lease(owner_scope, run_id, column_text(statement.get(), 4),
+                                             column_blob(statement.get(), 5));
+    return loaded;
 }
 
 std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_command(
@@ -445,9 +553,8 @@ std::vector<ProgramJavaScriptCommandJournalEntry> load_all_javascript_commands(
         commands.push_back(std::move(entry));
     }
     if (!commands.empty()) {
-        const auto head = load_head(db, owner_scope, run_id, cache);
-        if (!head ||
-            !detail::transition::valid_command_history_append(head->run_record, {}, commands)) {
+        const auto run = load_head_run_record(db, owner_scope, run_id, cache);
+        if (!run || !detail::transition::valid_command_history_append(*run, {}, commands)) {
             throw std::invalid_argument("Stored JavaScript command journal history is corrupt");
         }
     }
@@ -491,11 +598,9 @@ ProgramContextPublication parse_context_publication_bytes(std::string_view bytes
     return context;
 }
 
-std::vector<ProgramContextPublication> load_context_publication_history(
-    sqlite3* db, std::string_view owner_scope, std::string_view run_id,
-    std::uint64_t after_sequence = 0, detail::RunRecordCache* cache = nullptr) {
-    const auto head = load_head(db, owner_scope, run_id, cache);
-    if (!head) return {};
+std::vector<ProgramContextPublication> load_context_publication_log(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id, const ProgramRunRecord& run,
+    std::uint64_t after_sequence = 0) {
     Statement statement(
         db, "SELECT sequence, canonical_bytes FROM program_transition_context_log_v1 "
             "WHERE owner_scope = ?1 AND run_id = ?2 AND sequence > ?3 ORDER BY sequence ASC");
@@ -508,13 +613,21 @@ std::vector<ProgramContextPublication> load_context_publication_history(
         if (stored_sequence <= 0) {
             throw std::invalid_argument("Stored Program context sequence is corrupt");
         }
-        auto context = parse_context_publication_bytes(column_blob(statement.get(), 1), head->run_record);
+        auto context = parse_context_publication_bytes(column_blob(statement.get(), 1), run);
         if (context.epoch.sequence() != static_cast<std::uint64_t>(stored_sequence)) {
             throw std::invalid_argument("Stored Program context sequence column mismatch");
         }
         result.push_back(std::move(context));
     }
     return result;
+}
+
+std::vector<ProgramContextPublication> load_context_publication_history(
+    sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+    std::uint64_t after_sequence = 0, detail::RunRecordCache* cache = nullptr) {
+    const auto run = load_head_run_record(db, owner_scope, run_id, cache);
+    if (!run) return {};
+    return load_context_publication_log(db, owner_scope, run_id, *run, after_sequence);
 }
 
 bool valid_context_history(const std::vector<ProgramContextPublication>& history) {
@@ -550,17 +663,12 @@ std::vector<HookOutboxEntry> load_hook_outbox_heads(sqlite3* db, std::string_vie
     return result;
 }
 
-std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         db,
-                                                              std::string_view owner_scope,
-                                                              std::string_view run_id) {
+std::vector<ProgramChildSynthesisRecord> synthesis_heads_of_rows(Statement&        rows,
+                                                                 std::string_view owner_scope,
+                                                                 std::string_view run_id) {
     std::vector<ProgramChildSynthesisRecord> heads;
-    Statement                                rows(
-        db,
-        "SELECT proposal_id, head_id, canonical_bytes FROM program_transition_synthesis_log_v1 "
-                                       "WHERE owner_scope=?1 AND run_id=?2 ORDER BY sequence ASC");
-    rows.bind_text(1, owner_scope);
-    rows.bind_text(2, run_id);
     while (rows.step_row()) {
+        if (sqlite3_column_type(rows.get(), 0) == SQLITE_NULL) continue;  // the run has a head and no synthesis rows
         auto entry = ProgramChildSynthesisRecord::parse(column_blob(rows.get(), 2));
         if (entry.data().proposal.id() != column_text(rows.get(), 0) ||
             entry.id() != column_text(rows.get(), 1))
@@ -578,6 +686,33 @@ std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         d
             *found = std::move(entry);
     }
     return heads;
+}
+
+std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         db,
+                                                              std::string_view owner_scope,
+                                                              std::string_view run_id) {
+    Statement rows(
+        db,
+        "SELECT proposal_id, head_id, canonical_bytes FROM program_transition_synthesis_log_v1 "
+        "WHERE owner_scope=?1 AND run_id=?2 ORDER BY sequence ASC");
+    rows.bind_text(1, owner_scope);
+    rows.bind_text(2, run_id);
+    return synthesis_heads_of_rows(rows, owner_scope, run_id);
+}
+
+// The synthesis records of a stored run, or none when the run has no head: one statement reads both.
+std::vector<ProgramChildSynthesisRecord> load_synthesis_heads_of_stored_run(sqlite3*         db,
+                                                                            std::string_view owner_scope,
+                                                                            std::string_view run_id) {
+    Statement rows(
+        db,
+        "SELECT l.proposal_id, l.head_id, l.canonical_bytes FROM program_transition_run_heads_v2 h "
+        "LEFT JOIN program_transition_synthesis_log_v1 l "
+        "ON l.owner_scope = h.owner_scope AND l.run_id = h.run_id "
+        "WHERE h.owner_scope = ?1 AND h.run_id = ?2 ORDER BY l.sequence ASC");
+    rows.bind_text(1, owner_scope);
+    rows.bind_text(2, run_id);
+    return synthesis_heads_of_rows(rows, owner_scope, run_id);
 }
 
 // The stored state as the transition validator reads it, inside the caller's transaction.
@@ -640,8 +775,17 @@ std::vector<ProgramChildRelation> load_relation_rows(sqlite3*         db,
 
 class SqliteReads final : public detail::transition::TransitionReads {
 public:
-    SqliteReads(sqlite3* db, std::string_view owner_scope, detail::RunRecordCache* cache)
-        : db_(db), owner_scope_(owner_scope), cache_(cache) {}
+    SqliteReads(sqlite3* db, std::string_view owner_scope, detail::RunRecordCache* cache,
+                detail::GenerationCache* generations = nullptr)
+        : db_(db), owner_scope_(owner_scope), cache_(cache), generations_(generations) {}
+
+    /// The transaction has read the head of `run_id`; `run` is its record, or null when the run has no head. A
+    /// read of that run's head inside the same transaction answers from it.
+    void know_head(std::string_view run_id, const ProgramRunRecord* run) {
+        known_run_id_ = std::string(run_id);
+        known_run_    = run;
+        has_known_    = true;
+    }
 
     std::optional<GraphMigrationCapsule> graph_migration_capsule(
         std::string_view run_id, std::string_view lineage_head_id) override {
@@ -666,22 +810,36 @@ public:
         return load_latest_javascript_command(db_, owner_scope_, run_id);
     }
     std::optional<ProgramRunRecord> run_record(std::string_view run_id, Lock) override {
-        auto head = load_head(db_, owner_scope_, run_id, cache_);
+        const auto& head = stored_head(run_id);
         if (!head) return std::nullopt;
-        return std::move(head->run_record);
+        return head->run_record;
     }
     std::optional<ProgramRunLineage> lineage_head(std::string_view lineage_id, Lock) override {
+        // The head the run's lineage lookup already read in this transaction.
+        if (lineage_memo_ && lineage_memo_->id == lineage_id) return lineage_memo_->head;
         return load_current_lineage_head(db_, owner_scope_, lineage_id);
     }
     std::optional<ProgramRunGeneration> generation(std::string_view lineage_id,
                                                    std::uint64_t    ordinal) override {
-        return load_generation_record(db_, owner_scope_, lineage_id, ordinal);
+        return load_generation_record(db_, owner_scope_, lineage_id, ordinal, generations_);
     }
     std::optional<std::string> run_lineage_id(std::string_view run_id) override {
-        return load_run_lineage_id(db_, owner_scope_, run_id);
+        // The lineage id and its head come from one statement: the validator reads the head of the lineage a
+        // run is recorded in right after it learns the id.
+        auto read = load_run_lineage_and_head(db_, owner_scope_, run_id);
+        lineage_memo_.reset();
+        if (read.id) lineage_memo_ = LineageMemo{*read.id, std::move(read.head)};
+        return read.id;
     }
     Borrowed<std::vector<ProgramContextPublication>> context_history(
         std::string_view run_id) override {
+        if (has_known_ && known_run_id_ == run_id) {
+            if (!known_run_)
+                return Borrowed<std::vector<ProgramContextPublication>>(
+                    std::vector<ProgramContextPublication>{});
+            return Borrowed<std::vector<ProgramContextPublication>>(
+                load_context_publication_log(db_, owner_scope_, run_id, *known_run_));
+        }
         return Borrowed<std::vector<ProgramContextPublication>>(
             load_context_publication_history(db_, owner_scope_, run_id, 0, cache_));
     }
@@ -699,13 +857,18 @@ public:
             load_hook_outbox_heads(db_, owner_scope_, run_id, run));
     }
     std::optional<ProgramJournalRecord> journal_record(std::string_view run_id, Lock) override {
-        auto head = load_head(db_, owner_scope_, run_id, cache_);
+        const auto& head = stored_head(run_id);
         if (!head) return std::nullopt;
-        return std::move(head->journal_record);
+        return head->journal_record;
     }
     std::optional<ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
                                                           Lock) override {
-        return load_relation_head_record(db_, owner_scope_, parent_run_id);
+        // Nothing is written while the transaction validates.
+        if (const auto found = relation_heads_.find(parent_run_id); found != relation_heads_.end())
+            return found->second;
+        auto head = load_relation_head_record(db_, owner_scope_, parent_run_id);
+        relation_heads_.insert_or_assign(std::string(parent_run_id), head);
+        return head;
     }
     std::optional<ProgramChildRelation> relation_row(std::string_view parent_run_id,
                                                       std::string_view child_run_id, Lock) override {
@@ -713,9 +876,28 @@ public:
     }
 
 private:
-    sqlite3*                db_;
-    std::string_view        owner_scope_;
-    detail::RunRecordCache* cache_;
+    struct LineageMemo {
+        std::string                      id;
+        std::optional<ProgramRunLineage> head;
+    };
+    // What the transaction has read of a run's head: the validator reads the same row for several of its checks.
+    const std::optional<StoredHead>& stored_head(std::string_view run_id) {
+        auto found = heads_.find(run_id);
+        if (found == heads_.end())
+            found = heads_.emplace(std::string(run_id), load_head(db_, owner_scope_, run_id, cache_)).first;
+        return found->second;
+    }
+
+    sqlite3*                   db_;
+    std::string_view           owner_scope_;
+    detail::RunRecordCache*    cache_;
+    detail::GenerationCache*   generations_;
+    std::optional<LineageMemo> lineage_memo_;
+    std::map<std::string, std::optional<StoredHead>, std::less<>>                 heads_;
+    std::map<std::string, std::optional<ProgramChildRelationHead>, std::less<>> relation_heads_;
+    std::string                known_run_id_;
+    const ProgramRunRecord*    known_run_ = nullptr;
+    bool                       has_known_ = false;
 };
 
 
@@ -1275,7 +1457,10 @@ void initialize_schema(sqlite3* db) {
 
 struct SQLiteProgramTransitionStore::Impl {
     Impl(std::string value, Options options)
-        : path(std::move(value)), run_record_cache(options.run_record_cache_capacity) {}
+        : path(std::move(value)),
+          run_record_cache(options.run_record_cache_capacity),
+          own_heads(options.own_head_hint_capacity),
+          generations(options.generation_cache_capacity) {}
     ~Impl() {
         if (db) {
             unregister_statement_cache(db);
@@ -1289,6 +1474,8 @@ struct SQLiteProgramTransitionStore::Impl {
     sqlite3*                       db = nullptr;
     mutable StatementCache         statement_cache;
     mutable detail::RunRecordCache run_record_cache;
+    mutable detail::OwnHeadHints   own_heads;
+    mutable detail::GenerationCache generations;
     mutable std::mutex             mutex;
 };
 
@@ -1357,6 +1544,16 @@ std::string SQLiteProgramTransitionStore::process_coordination_key() const {
     return impl_->coordination_key;
 }
 
+std::optional<ProgramOwnHeadHint> SQLiteProgramTransitionStore::own_head_hint(
+    std::string_view owner_scope, std::string_view run_id) const {
+    return impl_->own_heads.get(owner_scope, run_id);
+}
+
+void SQLiteProgramTransitionStore::forget_own_head(std::string_view owner_scope,
+                                                   std::string_view run_id) const noexcept {
+    impl_->own_heads.erase(owner_scope, run_id);
+}
+
 std::optional<ProgramRunPublicationHead>
 SQLiteProgramTransitionStore::load_run_publication_head_sync(std::string_view owner,
                                                        std::string_view run_id) const {
@@ -1415,17 +1612,13 @@ SQLiteProgramTransitionStore::load_command_publication_head_sync(std::string_vie
 std::optional<ProgramRunRecord> SQLiteProgramTransitionStore::load_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    if (!head) return std::nullopt;
-    return head->run_record;
+    return load_head_run_record(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
 }
 
 std::optional<ProgramJournalRecord> SQLiteProgramTransitionStore::latest_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    if (!head) return std::nullopt;
-    return head->journal_record;
+    return load_head_journal_record(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
 }
 
 std::vector<ProgramEvent> SQLiteProgramTransitionStore::load_events_sync(
@@ -1491,28 +1684,41 @@ std::vector<ProgramContextPublication> SQLiteProgramTransitionStore::load_contex
 std::vector<ProgramChildSynthesisRecord> SQLiteProgramTransitionStore::load_child_syntheses_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    if (!load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache)) return {};
-    return load_synthesis_heads(impl_->db, owner_scope, run_id);
+    return load_synthesis_heads_of_stored_run(impl_->db, owner_scope, run_id);
 }
 
 std::vector<HookOutboxEntry> SQLiteProgramTransitionStore::load_hook_outbox_entries_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return {};
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    if (!head) return {};
-    auto entries = load_hook_outbox_heads(impl_->db, owner_scope, run_id, head->run_record);
-    if (!is_valid_program_hook_history_append({}, entries, head->run_record))
+    const auto run = load_head_run_record(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
+    if (!run) return {};
+    auto entries = load_hook_outbox_heads(impl_->db, owner_scope, run_id, *run);
+    if (!is_valid_program_hook_history_append({}, entries, *run))
         throw std::invalid_argument("Stored Program hook outbox history is corrupt");
     return entries;
+}
+
+void SQLiteProgramTransitionStore::verify_stored_history_sync(std::string_view owner_scope,
+                                                              std::string_view run_id) const {
+    if (owner_scope.empty() || run_id.empty()) return;
+    std::lock_guard lock(impl_->mutex);
+    const auto all =
+        load_context_publication_history(impl_->db, owner_scope, run_id, 0, &impl_->run_record_cache);
+    if (!valid_context_history(all)) {
+        throw std::invalid_argument("Stored Program context history is not contiguous");
+    }
+    const auto run = load_head_run_record(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
+    if (!run) return;
+    const auto entries = load_hook_outbox_heads(impl_->db, owner_scope, run_id, *run);
+    if (!is_valid_program_hook_history_append({}, entries, *run))
+        throw std::invalid_argument("Stored Program hook outbox history is corrupt");
 }
 
 std::optional<MigrationPlan> SQLiteProgramTransitionStore::load_migration_plan_sync(
     std::string_view owner_scope, std::string_view run_id) const {
     std::lock_guard lock(impl_->mutex);
-    const auto head = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    if (!head) return std::nullopt;
-    return head->migration_plan;
+    return load_head_migration_plan(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
 }
 
 std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_sync(
@@ -1526,19 +1732,18 @@ std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_run_lineage_
     std::string_view owner_scope, std::string_view run_id) const {
     if (owner_scope.empty() || run_id.empty()) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
-    const auto lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id);
-    if (!lineage_id) return std::nullopt;
-    const auto lineage = load_current_lineage_head(impl_->db, owner_scope, *lineage_id);
-    if (!lineage)
+    auto read = load_run_lineage_and_head(impl_->db, owner_scope, run_id);
+    if (!read.id) return std::nullopt;
+    if (!read.head)
         throw std::invalid_argument("Stored Program run lineage association is corrupt");
-    return lineage;
+    return std::move(read.head);
 }
 
 std::optional<ProgramRunGeneration> SQLiteProgramTransitionStore::load_generation_sync(
     std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const {
     if (owner_scope.empty() || lineage_id.empty() || generation == 0) return std::nullopt;
     std::lock_guard lock(impl_->mutex);
-    return load_generation_record(impl_->db, owner_scope, lineage_id, generation);
+    return load_generation_record(impl_->db, owner_scope, lineage_id, generation, &impl_->generations);
 }
 
 std::optional<ProgramTransitionPublication>
@@ -1679,6 +1884,8 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
     if (!detail::transition::valid_takeover_request(owner_scope, run_id, expected_journal_head,
                                                     expected_fence))
         return ProgramTransitionPublishResult::Conflict;
+    // A takeover moves the run's head and its lineage head from under every hint of them.
+    impl_->own_heads.erase(owner_scope, run_id);
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
     const auto current = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
@@ -1687,11 +1894,14 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
         return ProgramTransitionPublishResult::Conflict;
     }
     std::optional<ProgramRunLineage> current_lineage;
-    if (const auto lineage_id = load_run_lineage_id(impl_->db, owner_scope, run_id)) {
-        current_lineage = load_current_lineage_head(impl_->db, owner_scope, *lineage_id);
-        if (!current_lineage) {
-            transaction.commit();
-            return ProgramTransitionPublishResult::Conflict;
+    {
+        auto read = load_run_lineage_and_head(impl_->db, owner_scope, run_id);
+        if (read.id) {
+            if (!read.head) {
+                transaction.commit();
+                return ProgramTransitionPublishResult::Conflict;
+            }
+            current_lineage = std::move(read.head);
         }
     }
     auto takeover = detail::transition::prepare_takeover(
@@ -1710,6 +1920,7 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
     }
     transaction.commit();
     impl_->run_record_cache.erase(owner_scope, run_id);
+    if (takeover->run_lineage) impl_->own_heads.forget_lineage(owner_scope, takeover->run_lineage->lineage_id());
     return ProgramTransitionPublishResult::Published;
 }
 
@@ -1727,21 +1938,31 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     if (!publication_bytes) return ProgramTransitionPublishResult::Conflict;
 
     const std::string run_id = publication.run_record.run_id();
+    // Only a publication that publishes leaves a hint of the run: every other way out forgets it.
+    const auto previous_hint = impl_->own_heads.get(owner_scope, run_id);
+    impl_->own_heads.erase(owner_scope, run_id);
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
-    const auto current = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    const auto current_lease = load_execution_lease_record(impl_->db, owner_scope, run_id);
+    auto        loaded        = load_head_and_lease(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
+    const auto& current       = loaded.head;
+    const auto& current_lease = loaded.lease;
 
     std::optional<detail::transition::CurrentHead> head;
     if (current)
         head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
                                                      current->migration_plan,
                                                      current->last_publication_bytes});
-    SqliteReads                        reads(impl_->db, owner_scope, &impl_->run_record_cache);
+    SqliteReads                        reads(impl_->db, owner_scope, &impl_->run_record_cache,
+                                             &impl_->generations);
+    reads.know_head(run_id, current ? &current->run_record : nullptr);
+    const bool stored_history_vouched =
+        current && previous_hint &&
+        previous_hint->journal_record.id == current->journal_record.id;
     detail::transition::TransitionPlan plan;
     switch (detail::transition::validate_transition(
         {owner_scope, expected_journal_head, expected_fence, publication, *publication_bytes,
-          safe_point_evidence, safe_point_capsule, expected_lease, next_lease},
+         safe_point_evidence, safe_point_capsule, expected_lease, next_lease,
+         stored_history_vouched},
         head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, plan)) {
     case detail::transition::TransitionVerdict::Conflict:
         transaction.commit();
@@ -1797,9 +2018,15 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     else if (expected_lease)
         delete_execution_lease(impl_->db, *expected_lease);
     transaction.commit();
-    // The published record object may carry state that its bytes do not (a live provider cause): drop the
-    // entry, and let the next read cache what the stored bytes parse to.
-    impl_->run_record_cache.erase(owner_scope, run_id);
+    // A record without a terminal result and without runtime-only state is exactly what its stored bytes parse to: the
+    // next read of the run finds it cached. A terminal result may carry state that its bytes do not (a live provider
+    // cause), so a record that has one is dropped and the next read caches what the stored bytes parse to.
+    if (publication.run_record.terminal_result() || publication.run_record.has_runtime_overlay())
+        impl_->run_record_cache.erase(owner_scope, run_id);
+    else
+        impl_->run_record_cache.put(owner_scope, run_id, run_record_bytes, publication.run_record);
+    detail::record_published_head(impl_->own_heads, owner_scope, run_id, expected_journal_head, previous_hint,
+                                  publication, current.has_value());
     return ProgramTransitionPublishResult::Published;
 }
 

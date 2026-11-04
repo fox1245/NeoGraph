@@ -155,6 +155,10 @@ public:
         co_await turns_->turn("transition", "load_hook_outbox_entries");
         co_return co_await inner_->load_hook_outbox_entries(owner_scope, run_id);
     }
+    asio::awaitable<void> verify_stored_history(std::string_view owner_scope, std::string_view run_id) const override {
+        co_await turns_->turn("transition", "verify_stored_history");
+        co_await inner_->verify_stored_history(owner_scope, run_id);
+    }
     asio::awaitable<ProgramEffectiveRuntimeState> load_effective_runtime_state(std::string_view owner_scope, std::string_view run_id) const override {
         co_await turns_->turn("transition", "load_effective_runtime_state");
         co_return co_await inner_->load_effective_runtime_state(owner_scope, run_id);
