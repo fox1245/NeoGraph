@@ -154,9 +154,10 @@ public:
     /**
      * The child relations as `ProgramHandle::snapshot()` read them from the store, for a caller that wants to look at
      * them. Empty for every record that was not made by a snapshot. A runtime-only overlay: it is not part of the
-     * canonical record, its identity or its bytes.
+     * canonical record, its identity or its bytes. Returned by value: `handle.snapshot().snapshot_children()` must
+     * stay valid after the temporary record is gone.
      */
-    const std::vector<ProgramChildRecord>& snapshot_children() const noexcept;
+    std::vector<ProgramChildRecord> snapshot_children() const;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;
     std::uint64_t event_sequence() const noexcept;

@@ -2644,15 +2644,17 @@ void init_program(py::module_& m) {
         .def("serialize_canonical", &ProgramChildSynthesisGrant::serialize_canonical);
 
     py::class_<ProgramChildSynthesisParent>(m, "ProgramChildSynthesisParent")
-        .def(py::init<ProgramVersion, ProgramRunRecord, ProgramRunLineage, ProgramRunGeneration>(),
+        .def(py::init<ProgramVersion, ProgramRunRecord, ProgramRunLineage, ProgramRunGeneration, RunBudget>(),
              py::arg("version"),
              py::arg("run"),
              py::arg("lineage"),
-             py::arg("generation"))
+             py::arg("generation"),
+             py::arg("committed_descendants"))
         .def_readonly("version", &ProgramChildSynthesisParent::version)
         .def_readonly("run", &ProgramChildSynthesisParent::run)
         .def_readonly("lineage", &ProgramChildSynthesisParent::lineage)
-        .def_readonly("generation", &ProgramChildSynthesisParent::generation);
+        .def_readonly("generation", &ProgramChildSynthesisParent::generation)
+        .def_readonly("committed_descendants", &ProgramChildSynthesisParent::committed_descendants);
 
     py::class_<ProgramChildSynthesisAuthorization>(m, "ProgramChildSynthesisAuthorization")
         .def_property_readonly("id", &ProgramChildSynthesisAuthorization::id)

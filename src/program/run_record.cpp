@@ -802,9 +802,8 @@ std::uint64_t ProgramRunRecord::effect_sequence() const noexcept {
 const std::vector<ProgramChildRecord>& ProgramRunRecord::legacy_children_for_migration() const noexcept {
     return impl_->legacy_children;
 }
-const std::vector<ProgramChildRecord>& ProgramRunRecord::snapshot_children() const noexcept {
-    static const std::vector<ProgramChildRecord> none;
-    return snapshot_children_ ? *snapshot_children_ : none;
+std::vector<ProgramChildRecord> ProgramRunRecord::snapshot_children() const {
+    return snapshot_children_ ? *snapshot_children_ : std::vector<ProgramChildRecord>{};
 }
 ProgramRunRecord ProgramRunRecord::with_snapshot_children(std::vector<ProgramChildRecord> children) const {
     auto record = *this;

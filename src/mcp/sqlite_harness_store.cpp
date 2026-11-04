@@ -2369,6 +2369,20 @@ public:
                 }
                 const auto previous =
                     program::ProgramJournalRecord::parse(previous_journal.text(0));
+                {
+                    // A spend leaves enough for the children already granted. The store hosts no child run,
+                    // so its relation head is absent and the check passes; it is made here so that the
+                    // rule holds for every store that has rows.
+                    const std::optional<program::MigrationPlan> no_plan;
+                    const program::detail::transition::CurrentHead current_head{previous_run, previous,
+                                                                                no_plan, {}};
+                    RelationReads spend_reads(*this, owner_scope);
+                    if (!program::detail::transition::spend_keeps_children_funded(
+                            spend_reads, &current_head, publication)) {
+                        impl_->exec("ROLLBACK;");
+                        return program::ProgramTransitionPublishResult::Conflict;
+                    }
+                }
                 std::vector<program::ProgramEffectOutboxEntry> previous_effects;
                 Statement previous_effect_rows(
                     impl_->db,

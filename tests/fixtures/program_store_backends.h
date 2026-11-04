@@ -237,6 +237,7 @@ inline void reset_postgres_program_tables(const char* url) {
             "PostgreSQL conformance tests require the disposable neograph_test database");
     postgres_execute(url, R"SQL(
 DROP TABLE IF EXISTS neograph_program_child_relations_v1;
+DROP TABLE IF EXISTS neograph_program_child_relation_migration_v1;
 DROP TABLE IF EXISTS neograph_program_child_relation_heads_v1;
 DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
 DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;

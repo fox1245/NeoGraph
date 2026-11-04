@@ -331,8 +331,8 @@ bool is_valid_program_replacement_transition(
                    program_replacement_remaining_budget(source, previous_lineage,
                                                         target.created_at_ms()) &&
                next_lineage.inflight_reservation() == RunBudget{} &&
-               next_lineage.committed_descendant_budget() ==
-                   previous_lineage.committed_descendant_budget() &&
+               // The permanent share of the children is the relation head's aggregate, which the transition
+               // validator compares with the successor's lineage; the lineage rule keeps it from decreasing.
                target.remaining_budget() == next_lineage.remaining_budget() &&
                target.invocation().budget == next_lineage.remaining_budget();
     } catch (const std::exception&) {
