@@ -529,6 +529,33 @@ public:
         std::string_view run_id) const override {
         return select(run_id).load_execution_lease(owner_scope, run_id);
     }
+    std::optional<program::ProgramChildRelationHead> load_child_relation_head_sync(
+        std::string_view owner_scope, std::string_view parent_run_id) const override {
+        return select(parent_run_id).load_child_relation_head(owner_scope, parent_run_id);
+    }
+    std::optional<program::ProgramChildRelation> load_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::string_view child_run_id) const override {
+        return select(parent_run_id).load_child_relation(owner_scope, parent_run_id, child_run_id);
+    }
+    std::vector<program::ProgramChildRelation> load_child_relations_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        bool open_only) const override {
+        return select(parent_run_id).load_child_relations(owner_scope, parent_run_id, open_only);
+    }
+    program::ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, program::ProgramChildRecord child) override {
+        return target_->insert_child_relation(owner_scope, parent_run_id, expected_parent_fence,
+                                              std::move(child));
+    }
+    program::ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, std::optional<std::uint64_t> expected_row_version,
+        program::ProgramChildRecord next) override {
+        return target_->update_child_relation(owner_scope, parent_run_id, expected_parent_fence,
+                                              expected_row_version, std::move(next));
+    }
     program::ProgramTransitionPublishResult compare_publish_sync(
         std::string_view                      owner_scope,
         std::string_view                      expected_journal_head,

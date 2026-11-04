@@ -614,6 +614,11 @@ interface, given in the last column.
 | | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | publish result | required |
 | | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | publish result; the leases are canonical texts or `null` | `"conflict"` |
 | | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | publish result | required |
+| | `loadChildRelationHead(ownerScope, parentRunId)` | relation head or `null` | required |
+| | `loadChildRelation(ownerScope, parentRunId, childRunId)` | relation row or `null` | required |
+| | `loadChildRelations(ownerScope, parentRunId, openOnly)` | list of relation rows in attach order | required |
+| | `insertChildRelation(ownerScope, parentRunId, expectedParentFence, child)` | relation outcome | required |
+| | `updateChildRelation(ownerScope, parentRunId, expectedParentFence, expectedRowVersion, next)` | relation outcome | required |
 | `programs` | `publishAdmitted(bundle, version)` | nothing | required |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | bundle or `null` | required |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | version or `null` | required |
@@ -646,6 +651,7 @@ interface, given in the last column.
   carries another fence. The object must also compare `expectedFence` with the `continuation.fence` of the stored run in the
   same step as the journal head, and refuse when they differ. `comparePublishTakeover` publishes the stored `Running` record
   of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else.
+- **Child relations.** The children of a parent are rows keyed by the parent's logical run id, with one head per parent (the epoch, the counts, the permanent budget aggregate and whether it is closed). `insertChildRelation` and `updateChildRelation` change a row and the head in one step, compare `expectedParentFence` with the parent's stored fence, and answer `{status, refusal, relation, head}`; `status` is `"applied"`, `"already_present"` or `"refused"`. A publication may carry a relation part (`child_relations`) that the object applies in the same step as the publication; a final publication closes its own head. The rules are those of `src/program/transition_validator.h`: a host that wraps the reference store gets them. The five methods are required, as the operations are pure virtual in C++.
 - **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
   does not take part in live graph migration: it answers `"conflict"`, as the base class does.
 
@@ -666,7 +672,8 @@ entry first and applies the call after it. `test/program_stores_test.mjs` does t
 
 ```js
 const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
-  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'transitions.comparePublishTakeover', 'transitions.insertChildRelation', 'transitions.updateChildRelation',
+  'programs.publishAdmitted', 'programs.compareActivate',
   'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
   'modules.setLifecycle']);
 

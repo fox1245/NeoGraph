@@ -97,6 +97,20 @@ public:
     std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope, std::string_view run_id) const override;
 
+    std::optional<ProgramChildRelationHead> load_child_relation_head_sync(
+        std::string_view owner_scope, std::string_view parent_run_id) const override;
+    std::optional<ProgramChildRelation> load_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::string_view child_run_id) const override;
+    std::vector<ProgramChildRelation> load_child_relations_sync(
+        std::string_view owner_scope, std::string_view parent_run_id, bool open_only) const override;
+    ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, ProgramChildRecord child) override;
+    ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord next) override;
     ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,

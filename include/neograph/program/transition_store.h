@@ -7,6 +7,7 @@
 #include <neograph/api.h>
 #include <neograph/program/store_call.h>
 #include <neograph/hook_outbox.h>
+#include <neograph/program/child_relation.h>
 #include <neograph/program/child_synthesis.h>
 #include <neograph/program/command_journal.h>
 #include <neograph/program/event.h>
@@ -111,6 +112,38 @@ struct ProgramRecordedReplaySource {
     std::string lineage_head_id;
 };
 
+/**
+ * The relation rows a publication changes in its own transaction (#661). A part is checked against the parent's
+ * stored head and relation head by the store that commits the publication.
+ */
+struct ProgramChildRelationSpawn {
+    /// Logical run id of the parent the child attaches to.
+    std::string parent_run_id;
+    /// The fence the writer holds on the parent; the store compares it with the parent's stored fence.
+    std::uint64_t parent_fence = 0;
+    /// The row to insert for the run this publication creates: state Dispatched, or Publishing.
+    ProgramChildRecord child;
+};
+struct ProgramChildRelationCompletion {
+    std::string   parent_run_id;
+    std::uint64_t parent_fence = 0;
+    /// When present, the row must hold exactly this version; otherwise the update applies to the stored row.
+    std::optional<std::uint64_t> expected_row_version;
+    /// The row's next content: the terminal state, its result and the generation that produced it.
+    ProgramChildRecord child;
+};
+struct ProgramChildRelationPart {
+    /// The parent publication holds only while the parent's relation epoch is still this value (0 when the
+    /// parent has no rows). Set by a transition that decided from the relation set.
+    std::optional<std::uint64_t>                  expected_epoch;
+    /// Present on a child's first publication: the parent relation row is inserted in the same transaction, or
+    /// the whole publication is refused.
+    std::optional<ProgramChildRelationSpawn>      spawn;
+    /// Present on a child's terminal publication: the parent relation row follows in the same transaction when
+    /// the update is admitted. A refused update does not refuse the child's own publication.
+    std::optional<ProgramChildRelationCompletion> completion;
+};
+
 struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     ProgramRunRecord                      run_record;
     ProgramJournalRecord                  journal_record;
@@ -135,6 +168,8 @@ struct NEOGRAPH_PROGRAM_API ProgramTransitionPublication {
     /// First-publication-only CAS allocation of retained replay work authority.
     std::optional<ProgramRecordedReplaySource> recorded_replay_source;
     std::optional<ProgramRunLineage> recorded_replay_source_lineage;
+    /// Child relation rows changed in the same transaction as this publication (#661).
+    std::optional<ProgramChildRelationPart> child_relations;
     static ProgramTransitionPublication parse(std::string_view stored_bytes);
     std::string serialize_canonical() const;
 };
@@ -160,6 +195,7 @@ enum class ProgramTransitionFaultPoint : std::uint8_t {
     AfterContextSnapshot,
     AfterHookSnapshot,
     AfterLineageSnapshot,
+    AfterRelationSnapshot,
     BeforeCommit,
 };
 
@@ -302,6 +338,49 @@ public:
     }
 
     /**
+     * The parent's relation head, or nothing when the parent has no rows (epoch 0). `parent_run_id` is the parent's
+     * logical run id: a replacement generation of the parent reads the same rows.
+     */
+    [[nodiscard]] virtual asio::awaitable<std::optional<ProgramChildRelationHead>> load_child_relation_head(
+        std::string_view owner_scope,
+        std::string_view parent_run_id) const = 0;
+    [[nodiscard]] virtual asio::awaitable<std::optional<ProgramChildRelation>> load_child_relation(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view child_run_id) const = 0;
+    /** The parent's rows in attach order; with `open_only`, only the rows whose child is Publishing or Dispatched. */
+    [[nodiscard]] virtual asio::awaitable<std::vector<ProgramChildRelation>> load_child_relations(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        bool             open_only = false) const = 0;
+    /**
+     * Inserts one relation row in a transaction that reads the parent's head. Applied when the parent is Running
+     * with `expected_parent_fence`, the relation head is open, the row is new, and the child's permanent
+     * reservation fits the parent's remaining budget on top of the head's aggregate. The row, the head's epoch,
+     * counts and aggregate change together. An exact repeat of a stored row is AlreadyPresent; every other
+     * refusal carries its reason and changes nothing.
+     */
+    [[nodiscard]] virtual asio::awaitable<ProgramChildRelationOutcome> insert_child_relation(
+        std::string_view   owner_scope,
+        std::string_view   parent_run_id,
+        std::uint64_t      expected_parent_fence,
+        ProgramChildRecord child) = 0;
+    /**
+     * Moves one relation row to its next state in a transaction that reads the parent's head. The writer's fence
+     * is compared with the parent's stored fence; the row's identity, link, invocation and granted budget cannot
+     * change; the state follows the transition rule; a terminal result must bind the child's active generation;
+     * Publishing to Dispatched needs a Running parent and an open head. `expected_row_version`, when present, must
+     * equal the stored version. The relation epoch increases but is not compared: a progress update never
+     * conflicts with a parent publication that did not read the relation set.
+     */
+    [[nodiscard]] virtual asio::awaitable<ProgramChildRelationOutcome> update_child_relation(
+        std::string_view             owner_scope,
+        std::string_view             parent_run_id,
+        std::uint64_t                expected_parent_fence,
+        std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord           next) = 0;
+
+    /**
      * Atomically publishes the run snapshot, journal head, events, effect outbox,
      * and JavaScript command appends. A throw has the strong exception guarantee.
      * An exact retry is AlreadyPresent.
@@ -432,6 +511,28 @@ public:
         std::string_view /*run_id*/) const {
         return std::nullopt;
     }
+    virtual std::optional<ProgramChildRelationHead> load_child_relation_head_sync(
+        std::string_view owner_scope,
+        std::string_view parent_run_id) const = 0;
+    virtual std::optional<ProgramChildRelation> load_child_relation_sync(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view child_run_id) const = 0;
+    virtual std::vector<ProgramChildRelation> load_child_relations_sync(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        bool             open_only) const = 0;
+    virtual ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view   owner_scope,
+        std::string_view   parent_run_id,
+        std::uint64_t      expected_parent_fence,
+        ProgramChildRecord child) = 0;
+    virtual ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view             owner_scope,
+        std::string_view             parent_run_id,
+        std::uint64_t                expected_parent_fence,
+        std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord           next) = 0;
     virtual ProgramTransitionPublishResult compare_publish_sync(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
@@ -531,6 +632,28 @@ public:
     [[nodiscard]] asio::awaitable<std::optional<ProgramExecutionLease>> load_execution_lease(
         std::string_view owner_scope,
         std::string_view run_id) const final;
+    [[nodiscard]] asio::awaitable<std::optional<ProgramChildRelationHead>> load_child_relation_head(
+        std::string_view owner_scope,
+        std::string_view parent_run_id) const final;
+    [[nodiscard]] asio::awaitable<std::optional<ProgramChildRelation>> load_child_relation(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view child_run_id) const final;
+    [[nodiscard]] asio::awaitable<std::vector<ProgramChildRelation>> load_child_relations(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        bool             open_only) const final;
+    [[nodiscard]] asio::awaitable<ProgramChildRelationOutcome> insert_child_relation(
+        std::string_view   owner_scope,
+        std::string_view   parent_run_id,
+        std::uint64_t      expected_parent_fence,
+        ProgramChildRecord child) final;
+    [[nodiscard]] asio::awaitable<ProgramChildRelationOutcome> update_child_relation(
+        std::string_view             owner_scope,
+        std::string_view             parent_run_id,
+        std::uint64_t                expected_parent_fence,
+        std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord           next) final;
     [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
@@ -642,6 +765,28 @@ public:
     std::optional<ProgramExecutionLease> load_execution_lease(
         std::string_view owner_scope,
         std::string_view run_id) const;
+    std::optional<ProgramChildRelationHead> load_child_relation_head(
+        std::string_view owner_scope,
+        std::string_view parent_run_id) const;
+    std::optional<ProgramChildRelation> load_child_relation(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        std::string_view child_run_id) const;
+    std::vector<ProgramChildRelation> load_child_relations(
+        std::string_view owner_scope,
+        std::string_view parent_run_id,
+        bool             open_only = false) const;
+    ProgramChildRelationOutcome insert_child_relation(
+        std::string_view   owner_scope,
+        std::string_view   parent_run_id,
+        std::uint64_t      expected_parent_fence,
+        ProgramChildRecord child) const;
+    ProgramChildRelationOutcome update_child_relation(
+        std::string_view             owner_scope,
+        std::string_view             parent_run_id,
+        std::uint64_t                expected_parent_fence,
+        std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord           next) const;
     ProgramTransitionPublishResult compare_publish(
         std::string_view owner_scope,
         std::string_view expected_journal_head,
@@ -736,6 +881,20 @@ public:
     std::optional<ProgramExecutionLease> load_execution_lease_sync(
         std::string_view owner_scope,
         std::string_view run_id) const override;
+    std::optional<ProgramChildRelationHead> load_child_relation_head_sync(
+        std::string_view owner_scope, std::string_view parent_run_id) const override;
+    std::optional<ProgramChildRelation> load_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::string_view child_run_id) const override;
+    std::vector<ProgramChildRelation> load_child_relations_sync(
+        std::string_view owner_scope, std::string_view parent_run_id, bool open_only) const override;
+    ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, ProgramChildRecord child) override;
+    ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, std::optional<std::uint64_t> expected_row_version,
+        ProgramChildRecord next) override;
     ProgramTransitionPublishResult
     compare_publish_sync(std::string_view owner_scope,
                     std::string_view expected_journal_head,

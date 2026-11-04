@@ -29,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include "relation_forwarding.h"
 
 namespace neograph::program::test_support {
 
@@ -114,6 +115,7 @@ private:
 /// Not a Sync...Store: a view over it that waits for it is refused inside a turn of the host's loop.
 class HostPumpedTransitionStore final : public ProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_ASYNC(*inner_, co_await turns_->turn("transition", "child_relation");)
     HostPumpedTransitionStore(std::shared_ptr<ProgramTransitionStore> inner, std::shared_ptr<HostTurns> turns)
         : inner_(std::move(inner)), turns_(std::move(turns)) {}
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=cf049db713e21fcba84cf537e639af46d1f40f11de828eb352161487eb63f2c0 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -447,6 +447,11 @@ releaseStores(module, handle);
 | | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | 发布结果 | 必需 |
 | | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | 发布结果；租约是规范文本或 `null` | `"conflict"` |
 | | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | 发布结果 | 必需 |
+| | `loadChildRelationHead(ownerScope, parentRunId)` | 关系头或 `null` | 必需 |
+| | `loadChildRelation(ownerScope, parentRunId, childRunId)` | 关系行或 `null` | 必需 |
+| | `loadChildRelations(ownerScope, parentRunId, openOnly)` | 按附加顺序排列的关系行列表 | 必需 |
+| | `insertChildRelation(ownerScope, parentRunId, expectedParentFence, child)` | 关系结果 | 必需 |
+| | `updateChildRelation(ownerScope, parentRunId, expectedParentFence, expectedRowVersion, next)` | 关系结果 | 必需 |
 | `programs` | `publishAdmitted(bundle, version)` | 无 | 必需 |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | 包或 `null` | 必需 |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | 版本或 `null` | 必需 |
@@ -476,6 +481,7 @@ releaseStores(module, handle);
 - **所有权围栏。** `expectedFence` 是写入该发布的控制对象的围栏。在调用越过边界之前，`comparePublish` 和 `comparePublishExecution` 对运行记录或日志记录带有其他围栏的发布回答 `"conflict"`。
   对象也必须在与日志头相同的一步里，把 `expectedFence` 与已存储运行的 `continuation.fence` 比较，不一致就拒绝。`comparePublishTakeover` 以 `fence = expectedFence + 1` 和一条新的日志记录发布 `runId` 所指运行的已存储 `Running` 记录，
   对绑定谱系的运行在同一步把谱系头移到该记录，不改变其他任何内容。
+- **子关系。** 父运行的子运行是以父运行的逻辑运行 ID 为键的行，每个父运行有一个头（纪元、计数、永久预算汇总、是否已关闭）。`insertChildRelation` 和 `updateChildRelation` 在同一步里修改行和头，把 `expectedParentFence` 与父运行已存储的栅栏比较，并返回 `{status, refusal, relation, head}`；`status` 是 `"applied"`、`"already_present"` 或 `"refused"`。一次发布可以带有关系部分（`child_relations`），对象在与发布相同的一步里应用它；最终发布会关闭自己的头。规则是 `src/program/transition_validator.h` 中的规则，包装参考存储的宿主会得到它们。这些操作在 C++ 中是纯虚函数，所以这五个方法是必需的。
 - **不支持。** `compare_publish_graph_safe_point` 带有永不序列化的证据，所以 JavaScript 存储不参与实时的图迁移：它像基类一样回答 `"conflict"`。
 
 **参考存储。** `neograph.memoryStores()`（即 `stores.mjs` 的 `memoryStores(module)`）返回 `{ transitions, programs, grants, fragments, modules }`，它们通过调用模块的内存 C++ 存储来实现这份契约
@@ -488,7 +494,8 @@ releaseStores(module, handle);
 
 ```js
 const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
-  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'transitions.comparePublishTakeover', 'transitions.insertChildRelation', 'transitions.updateChildRelation',
+  'programs.publishAdmitted', 'programs.compareActivate',
   'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
   'modules.setLifecycle']);
 

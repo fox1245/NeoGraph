@@ -10,6 +10,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "../tests/fixtures/relation_forwarding.h"
 
 namespace {
 using namespace neograph;
@@ -29,6 +30,7 @@ std::size_t byte_fingerprint(const void* input, std::size_t size) noexcept {
 
 class CaptureTransitionStore final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_BLOCKING(*inner_)
     explicit CaptureTransitionStore(std::shared_ptr<ProgramTransitionStore> inner)
         : inner_(std::make_shared<BlockingProgramTransitionStore>(std::move(inner))) {}
 

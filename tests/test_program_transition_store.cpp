@@ -39,6 +39,7 @@
 #include <string_view>
 #include <utility>
 #include "fixtures/store_handle.h"
+#include "fixtures/relation_forwarding.h"
 
 using neograph::program::test_support::OwnedTransitionStore;
 namespace {
@@ -775,6 +776,7 @@ void exercise_command_head_concurrency(BlockingProgramTransitionStore& writer,
 // An existing user wrapper need not implement the new virtual read.
 class LegacyCommandHeadStore final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(backend)
     InMemoryProgramTransitionStore backend;
     mutable std::function<void()> after_command_read;
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
@@ -1141,6 +1143,28 @@ json publication_reference_body(const ProgramTransitionPublication& publication)
 }
 class CommandReadUnsupportedStore final : public SyncProgramTransitionStore {
 public:
+    // The store holds nothing: no relation rows, and every relation write is refused.
+    std::optional<ProgramChildRelationHead> load_child_relation_head_sync(std::string_view,
+                                                                          std::string_view) const override {
+        return std::nullopt;
+    }
+    std::optional<ProgramChildRelation> load_child_relation_sync(std::string_view, std::string_view,
+                                                                  std::string_view) const override {
+        return std::nullopt;
+    }
+    std::vector<ProgramChildRelation> load_child_relations_sync(std::string_view, std::string_view,
+                                                                 bool) const override {
+        return {};
+    }
+    ProgramChildRelationOutcome insert_child_relation_sync(std::string_view, std::string_view, std::uint64_t,
+                                                           ProgramChildRecord) override {
+        return {};
+    }
+    ProgramChildRelationOutcome update_child_relation_sync(std::string_view, std::string_view, std::uint64_t,
+                                                           std::optional<std::uint64_t>,
+                                                           ProgramChildRecord) override {
+        return {};
+    }
     std::optional<ProgramRunRecord> load_sync(std::string_view, std::string_view) const override {
         return std::nullopt;
     }
@@ -1460,6 +1484,8 @@ void reset_postgres_transition_schema(const char* url) {
     }
     PQclear(database);
     const char* sql    = R"SQL(
+DROP TABLE IF EXISTS neograph_program_child_relations_v1;
+DROP TABLE IF EXISTS neograph_program_child_relation_heads_v1;
 DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
 DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;
 DROP TABLE IF EXISTS neograph_program_run_lineage_runs_v1;
@@ -3238,6 +3264,793 @@ TEST_P(ProgramTransitionStoreConformance, ChildMetadataPublicationIsIdempotentAn
               ProgramTransitionPublishResult::Conflict);
     EXPECT_EQ(store.latest("owner-a", "run-1")->id, publishing.journal_record.id);
 }
+
+// ---------------------------------------------------------------------------
+// Child relation rows (#661): the contract of the relation operations on every backend.
+// ---------------------------------------------------------------------------
+namespace {
+RunBudget relation_parent_budget() { return {100000, 1000, 1000, 4, 100, 100, 4, 3, 8}; }
+RunBudget relation_child_grant() { return {100, 10, 10, 1, 5, 5, 0, 0, 0}; }
+// What one such child keeps charged to the parent for good: no concurrency lease, one child for itself.
+RunBudget relation_child_reservation() { return {100, 10, 10, 0, 5, 5, 0, 0, 1}; }
+
+ProgramTransitionPublication relation_parent_start() {
+    return start_publication_for("run-1", digest('1'), digest('2'), relation_parent_budget(), 10);
+}
+
+ProgramChildRecord relation_child(std::string id = "child-1",
+                                  ProgramChildState state = ProgramChildState::Publishing,
+                                  RunBudget grant = relation_child_grant(),
+                                  std::string trace = "child-trace") {
+    return ProgramChildRecord{
+        std::move(id), digest('7'), "link-receipt",
+        ProgramPersistedInvocation{{{"child", true}}, grant, std::move(trace), "run-1", 1}, state};
+}
+
+ProgramResult relation_child_result(const std::string& child_id,
+                                    ProgramTerminalStatus status = ProgramTerminalStatus::Completed) {
+    ProgramResultData data;
+    data.status             = status;
+    data.run_id             = child_id;
+    data.program_version_id = digest('5');
+    data.bundle_id          = digest('6');
+    data.operation_id       = "root";
+    data.attempt            = 1;
+    data.output             = json{{"child", true}};
+    data.remaining_budget   = relation_child_grant();
+    data.checkpoint =
+        CoreCheckpointIdentity{"main", digest('4'), program_root_core_thread_id(child_id, digest('4')),
+                               "checkpoint-1", 1};
+    if (status == ProgramTerminalStatus::Cancelled)
+        data.failure = ProgramFailure{"P_TEST", "cancelled", "root", "main", 1, json::object()};
+    return ProgramResult::create(std::move(data));
+}
+
+ProgramChildRecord relation_child_after(const ProgramChildRecord& before, ProgramChildState state,
+                                        ProgramTerminalStatus status = ProgramTerminalStatus::Completed) {
+    auto next = before;
+    next.state = state;
+    if (state == ProgramChildState::Completed || state == ProgramChildState::Cancelled)
+        next.terminal_result = relation_child_result(before.child_run_id, status);
+    return next;
+}
+
+// An ordinary publication of the parent: it changes nothing but the journal head.
+ProgramTransitionPublication relation_running_publication(const ProgramTransitionPublication& previous,
+                                                          std::int64_t                        time) {
+    auto journal = ProgramJournalRecord::create({previous.journal_record.id,
+                                                 "run-1",
+                                                 digest('1'),
+                                                 digest('2'),
+                                                 previous.journal_record.sequence + 1,
+                                                 {"root", ContinuationState::Running, 1},
+                                                 previous.journal_record.remaining_budget,
+                                                 {},
+                                                 std::nullopt,
+                                                 time});
+    auto data              = copy_run_record_data(previous.run_record);
+    data.continuation      = journal.continuation;
+    data.remaining_budget  = journal.remaining_budget;
+    data.journal_head      = journal.id;
+    data.updated_at_ms     = time;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
+}
+
+ProgramChildRelationPart epoch_guard(std::uint64_t epoch) {
+    ProgramChildRelationPart part;
+    part.expected_epoch = epoch;
+    return part;
+}
+
+// The first publication of a child run of "run-1".
+ProgramTransitionPublication relation_child_start(const std::string& child_id,
+                                                  RunBudget          grant = relation_child_grant()) {
+    auto journal = ProgramJournalRecord::create({{},
+                                                 child_id,
+                                                 digest('5'),
+                                                 digest('6'),
+                                                 1,
+                                                 {"root", ContinuationState::Running, 1},
+                                                 grant,
+                                                 {},
+                                                 std::nullopt,
+                                                 20});
+    RunInvocation invocation;
+    invocation.owner_scope        = "owner-a";
+    invocation.agent_id           = "agent-a";
+    invocation.program_version_id = digest('5');
+    invocation.run_id             = child_id;
+    invocation.parent_run_id      = "run-1";
+    invocation.budget             = grant;
+    invocation.input              = json{{"child", true}};
+    invocation.message_sequence   = 1;
+    invocation.idempotency_key    = "idem-" + child_id;
+    invocation.correlation_id     = "child-trace";
+
+    ProgramRunRecordData data;
+    data.owner_scope         = "owner-a";
+    data.run_id              = child_id;
+    data.program_version_id  = digest('5');
+    data.bundle_id           = digest('6');
+    data.binding_fingerprint = digest('3');
+    data.invocation          = std::move(invocation);
+    data.child_depth         = 1;
+    data.continuation        = journal.continuation;
+    data.remaining_budget    = grant;
+    data.journal_head        = journal.id;
+    data.event_sequence      = 1;
+    data.created_at_ms       = 20;
+    data.updated_at_ms       = 20;
+    auto run                 = ProgramRunRecord::create(std::move(data));
+
+    ProgramEvent started;
+    started.sequence           = 1;
+    started.timestamp_ms       = 20;
+    started.run_id             = child_id;
+    started.program_version_id = digest('5');
+    started.bundle_id          = digest('6');
+    started.operation_id       = "root";
+    started.core_generation_id = digest('4');
+    started.core_run_id        = program_root_core_thread_id(child_id, digest('4'));
+    started.trace_id           = "child-trace";
+    started.kind               = ProgramEventKind::Started;
+    started.payload            = ProgramStartedEvent{grant};
+    started.attempt            = 1;
+    return {std::move(run), std::move(journal), {ProgramEvent::create(std::move(started))}, {}};
+}
+
+ProgramTransitionPublication relation_spawn_publication(const std::string& child_id, std::uint64_t parent_fence,
+                                                        ProgramChildState state = ProgramChildState::Dispatched,
+                                                        RunBudget grant = relation_child_grant()) {
+    auto publication = relation_child_start(child_id, grant);
+    ProgramChildRelationPart part;
+    part.spawn = ProgramChildRelationSpawn{"run-1", parent_fence,
+                                           relation_child(child_id, state, grant)};
+    publication.child_relations = std::move(part);
+    return publication;
+}
+
+// The child's terminal publication: Completed, with its result.
+ProgramTransitionPublication relation_child_terminal(const ProgramTransitionPublication& start,
+                                                     const std::string& child_id) {
+    const auto result = relation_child_result(child_id);
+    const auto cp = *result.checkpoint();
+    auto journal = ProgramJournalRecord::create({start.journal_record.id,
+                                                 child_id,
+                                                 digest('5'),
+                                                 digest('6'),
+                                                 2,
+                                                 {"root", ContinuationState::Completed, 1},
+                                                 relation_child_grant(),
+                                                 {},
+                                                 cp,
+                                                 30});
+    auto data              = copy_run_record_data(start.run_record);
+    data.continuation      = journal.continuation;
+    data.remaining_budget  = journal.remaining_budget;
+    data.exact_checkpoint  = cp;
+    data.terminal_result   = result;
+    data.journal_head      = journal.id;
+    data.event_sequence    = 2;
+    data.updated_at_ms     = 30;
+    ProgramEvent terminal;
+    terminal.sequence           = 2;
+    terminal.timestamp_ms       = 30;
+    terminal.run_id             = child_id;
+    terminal.program_version_id = digest('5');
+    terminal.bundle_id          = digest('6');
+    terminal.operation_id       = "root";
+    terminal.core_generation_id = digest('4');
+    terminal.core_run_id        = program_root_core_thread_id(child_id, digest('4'));
+    terminal.trace_id           = "child-trace";
+    terminal.kind               = ProgramEventKind::Terminal;
+    terminal.payload            = ProgramTerminalEvent{ProgramTerminalStatus::Completed};
+    terminal.attempt            = 1;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal),
+            {ProgramEvent::create(std::move(terminal))}, {}};
+}
+
+void expect_refused(const ProgramChildRelationOutcome& outcome, ProgramChildRelationRefusal refusal) {
+    EXPECT_EQ(outcome.status, ProgramChildRelationStatus::Refused);
+    EXPECT_EQ(outcome.refusal, refusal) << "refused as " << to_string(outcome.refusal);
+}
+}  // namespace
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationInsertCountsTheRowAndTheBudget) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(store.load_child_relation_head("owner-a", "run-1").has_value());
+    EXPECT_TRUE(store.load_child_relations("owner-a", "run-1").empty());
+
+    const auto first = store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1"));
+    ASSERT_EQ(first.status, ProgramChildRelationStatus::Applied);
+    ASSERT_TRUE(first.relation && first.head);
+    EXPECT_EQ(first.relation->ordinal(), 0U);
+    EXPECT_EQ(first.relation->row_version(), 1U);
+    EXPECT_EQ(first.head->epoch(), 1U);
+    EXPECT_EQ(first.head->count(), 1U);
+    EXPECT_EQ(first.head->open_count(), 1U);
+    EXPECT_EQ(first.head->committed_budget(), relation_child_reservation());
+    EXPECT_FALSE(first.head->closed());
+
+    const auto second =
+        store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-2", ProgramChildState::Dispatched));
+    ASSERT_EQ(second.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(second.relation->ordinal(), 1U);
+    EXPECT_EQ(second.head->epoch(), 2U);
+    EXPECT_EQ(second.head->count(), 2U);
+    EXPECT_EQ(second.head->committed_budget().max_total_children, 2U);
+    EXPECT_EQ(second.head->committed_budget().wall_time_ms, 200U);
+
+    const auto head = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(head.has_value());
+    EXPECT_EQ(head->id(), second.head->id());
+    const auto rows = store.load_child_relations("owner-a", "run-1");
+    ASSERT_EQ(rows.size(), 2U);
+    EXPECT_EQ(rows[0].child_run_id(), "child-1");
+    EXPECT_EQ(rows[1].child_run_id(), "child-2");
+    const auto one = store.load_child_relation("owner-a", "run-1", "child-2");
+    ASSERT_TRUE(one.has_value());
+    EXPECT_EQ(one->id(), second.relation->id());
+    EXPECT_EQ(one->child().state, ProgramChildState::Dispatched);
+    EXPECT_FALSE(store.load_child_relation("owner-a", "run-1", "child-3").has_value());
+    // Other owners and other parents see nothing.
+    EXPECT_FALSE(store.load_child_relation("owner-b", "run-1", "child-1").has_value());
+    EXPECT_FALSE(store.load_child_relation_head("owner-a", "run-2").has_value());
+    // Rows round-trip through their stored text.
+    EXPECT_EQ(ProgramChildRelation::parse(one->serialize_canonical()).id(), one->id());
+    EXPECT_EQ(ProgramChildRelationHead::parse(head->serialize_canonical()).id(), head->id());
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationInsertRepeatIsAlreadyPresentAndIdentityIsFixed) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto first = store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1"));
+    ASSERT_EQ(first.status, ProgramChildRelationStatus::Applied);
+
+    const auto repeat = store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1"));
+    EXPECT_EQ(repeat.status, ProgramChildRelationStatus::AlreadyPresent);
+    ASSERT_TRUE(repeat.relation && repeat.head);
+    EXPECT_EQ(repeat.relation->id(), first.relation->id());
+    EXPECT_EQ(repeat.head->id(), first.head->id());
+
+    // The same child id with another trace is another child: refused, nothing changes.
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1,
+                                               relation_child("child-1", ProgramChildState::Publishing,
+                                                              relation_child_grant(), "other-trace")),
+                   ProgramChildRelationRefusal::RowConflict);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), first.head->id());
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-1")->id(), first.relation->id());
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationInsertRefusalsChangeNothing) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto nothing_stored = [&] {
+        EXPECT_FALSE(store.load_child_relation_head("owner-a", "run-1").has_value());
+        EXPECT_TRUE(store.load_child_relations("owner-a", "run-1").empty());
+    };
+
+    // A writer that does not hold the parent's fence.
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 2, relation_child()),
+                   ProgramChildRelationRefusal::FenceMismatch);
+    // A parent that is not stored.
+    expect_refused(store.insert_child_relation("owner-a", "run-9", 1, relation_child()),
+                   ProgramChildRelationRefusal::ParentAbsent);
+    // A row is inserted before the child ends: not in a terminal state, not with a result.
+    expect_refused(store.insert_child_relation(
+                       "owner-a", "run-1", 1,
+                       relation_child_after(relation_child(), ProgramChildState::Completed)),
+                   ProgramChildRelationRefusal::Invalid);
+    // A child of another depth or another parent does not bind this parent.
+    auto deeper = relation_child();
+    deeper.invocation.child_depth = 2;
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1, deeper),
+                   ProgramChildRelationRefusal::Invalid);
+    auto stranger = relation_child();
+    stranger.invocation.parent_run_id = "run-7";
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1, stranger),
+                   ProgramChildRelationRefusal::Invalid);
+    // A grant that does not fit the parent's remainder, or its child count.
+    auto too_long = relation_child_grant();
+    too_long.wall_time_ms = relation_parent_budget().wall_time_ms + 1;
+    expect_refused(store.insert_child_relation(
+                       "owner-a", "run-1", 1,
+                       relation_child("child-1", ProgramChildState::Publishing, too_long)),
+                   ProgramChildRelationRefusal::BudgetExceeded);
+    auto too_many = relation_child_grant();
+    too_many.max_total_children = relation_parent_budget().max_total_children;
+    expect_refused(store.insert_child_relation(
+                       "owner-a", "run-1", 1,
+                       relation_child("child-1", ProgramChildState::Publishing, too_many)),
+                   ProgramChildRelationRefusal::BudgetExceeded);
+    nothing_stored();
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationAggregateBoundsTheSumOfTheChildren) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    auto grant = relation_child_grant();
+    grant.wall_time_ms = relation_parent_budget().wall_time_ms * 2 / 5;  // 40% of the parent's wall time
+    for (const char* id : {"child-1", "child-2"})
+        ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1,
+                                              relation_child(id, ProgramChildState::Publishing, grant))
+                      .status,
+                  ProgramChildRelationStatus::Applied);
+    const auto before = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(before.has_value());
+    // The third would commit 120% of the parent's wall time.
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1,
+                                               relation_child("child-3", ProgramChildState::Publishing, grant)),
+                   ProgramChildRelationRefusal::BudgetExceeded);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), before->id());
+    EXPECT_EQ(store.load_child_relations("owner-a", "run-1").size(), 2U);
+    // A smaller child still fits.
+    EXPECT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-4")).status,
+              ProgramChildRelationStatus::Applied);
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationUpdateFollowsTheStateRule) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto publishing = relation_child("child-1");
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, publishing).status,
+              ProgramChildRelationStatus::Applied);
+
+    const auto dispatched = relation_child_after(publishing, ProgramChildState::Dispatched);
+    const auto to_dispatched = store.update_child_relation("owner-a", "run-1", 1, 1, dispatched);
+    ASSERT_EQ(to_dispatched.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(to_dispatched.relation->row_version(), 2U);
+    EXPECT_EQ(to_dispatched.relation->child().state, ProgramChildState::Dispatched);
+    EXPECT_EQ(to_dispatched.head->epoch(), 2U);
+    EXPECT_EQ(to_dispatched.head->open_count(), 1U);
+    EXPECT_EQ(to_dispatched.head->count(), 1U);
+    EXPECT_EQ(to_dispatched.head->committed_budget(), relation_child_reservation());
+
+    // The same update again changes nothing.
+    const auto repeat = store.update_child_relation("owner-a", "run-1", 1, std::nullopt, dispatched);
+    EXPECT_EQ(repeat.status, ProgramChildRelationStatus::AlreadyPresent);
+    EXPECT_EQ(repeat.head->id(), to_dispatched.head->id());
+
+    // A stale version, a missing row, a stranger's fence and a changed identity are each refused.
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, 1,
+                                               relation_child_after(publishing, ProgramChildState::Failed)),
+                   ProgramChildRelationRefusal::RowVersionMismatch);
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, relation_child("child-9")),
+                   ProgramChildRelationRefusal::RowMissing);
+    expect_refused(store.update_child_relation("owner-a", "run-1", 2, std::nullopt,
+                                               relation_child_after(publishing, ProgramChildState::Cancelled,
+                                                                    ProgramTerminalStatus::Cancelled)),
+                   ProgramChildRelationRefusal::FenceMismatch);
+    auto changed = dispatched;
+    changed.invocation.trace_id = "other-trace";
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, changed),
+                   ProgramChildRelationRefusal::RowConflict);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), to_dispatched.head->id());
+
+    const auto completed = relation_child_after(publishing, ProgramChildState::Completed);
+    const auto done = store.update_child_relation("owner-a", "run-1", 1, 2, completed);
+    ASSERT_EQ(done.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(done.relation->row_version(), 3U);
+    EXPECT_FALSE(done.relation->is_open());
+    EXPECT_EQ(done.head->open_count(), 0U);
+    EXPECT_EQ(done.head->count(), 1U);
+    EXPECT_EQ(done.head->epoch(), 3U);
+    // The budget a child was granted stays charged after it ends.
+    EXPECT_EQ(done.head->committed_budget(), relation_child_reservation());
+    EXPECT_TRUE(store.load_child_relations("owner-a", "run-1", true).empty());
+    EXPECT_EQ(store.load_child_relations("owner-a", "run-1", false).size(), 1U);
+
+    // A terminal state is final: no way back, no other end, no other result.
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, dispatched),
+                   ProgramChildRelationRefusal::InvalidTransition);
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                               relation_child_after(publishing, ProgramChildState::Cancelled,
+                                                                    ProgramTerminalStatus::Cancelled)),
+                   ProgramChildRelationRefusal::InvalidTransition);
+    EXPECT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, completed).status,
+              ProgramChildRelationStatus::AlreadyPresent);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), done.head->id());
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationEpochGuardsTheParentPublicationsThatReadTheSet) {
+    auto& store = primary_store();
+    const auto start = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1")).status,
+              ProgramChildRelationStatus::Applied);  // epoch 1
+
+    // A publication that read the set at epoch 0 is refused; the parent's head stays.
+    auto stale = relation_running_publication(start, 25);
+    stale.child_relations = epoch_guard(0);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, stale),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+
+    auto fresh = relation_running_publication(start, 25);
+    fresh.child_relations = epoch_guard(1);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, fresh),
+              ProgramTransitionPublishResult::Published);
+    // The guard does not move the epoch.
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->epoch(), 1U);
+
+    // A progress update moves the epoch, and conflicts with no parent publication that did not read the set.
+    ASSERT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-1"),
+                                                               ProgramChildState::Dispatched))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    const auto ordinary = relation_running_publication(fresh, 30);
+    ASSERT_EQ(store.compare_publish("owner-a", fresh.journal_record.id, 1, ordinary),
+              ProgramTransitionPublishResult::Published);
+    // ... while a publication guarded by the old epoch is refused.
+    auto late = relation_running_publication(ordinary, 35);
+    late.child_relations = epoch_guard(1);
+    EXPECT_EQ(store.compare_publish("owner-a", ordinary.journal_record.id, 1, late),
+              ProgramTransitionPublishResult::Conflict);
+    late.child_relations = epoch_guard(2);
+    EXPECT_EQ(store.compare_publish("owner-a", ordinary.journal_record.id, 1, late),
+              ProgramTransitionPublishResult::Published);
+    // A parent that has no rows reads epoch 0.
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1,
+                                    start_publication_for("run-2", digest('1'), digest('2'),
+                                                          relation_parent_budget(), 10)),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(store.load_child_relation_head("owner-a", "run-2").has_value());
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationFinalPublicationClosesTheHeadAndKeepsTheRows) {
+    auto& store = primary_store();
+    const auto start = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1")).status,
+              ProgramChildRelationStatus::Applied);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1,
+                                          relation_child("child-2", ProgramChildState::Dispatched))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    const auto open = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(open.has_value());
+
+    const auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
+                                               ContinuationState::Completed);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    const auto closed = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(closed.has_value());
+    EXPECT_TRUE(closed->closed());
+    EXPECT_EQ(closed->data().closed_by, terminal.journal_record.id);
+    EXPECT_EQ(closed->epoch(), open->epoch() + 1);
+    EXPECT_EQ(closed->count(), 2U);
+    EXPECT_EQ(closed->open_count(), 2U);
+    EXPECT_EQ(closed->committed_budget(), open->committed_budget());
+    // Closing leaves the children as they were: no row is rewritten.
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-1")->child().state,
+              ProgramChildState::Publishing);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-2")->child().state,
+              ProgramChildState::Dispatched);
+
+    // No new child, no dispatch of a child that was never dispatched.
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-3")),
+                   ProgramChildRelationRefusal::Closed);
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                               relation_child_after(relation_child("child-1"),
+                                                                    ProgramChildState::Dispatched)),
+                   ProgramChildRelationRefusal::Closed);
+    // The ends of children are still recorded: a result must not be lost.
+    EXPECT_EQ(store.update_child_relation(
+                       "owner-a", "run-1", 1, std::nullopt,
+                       relation_child_after(relation_child("child-1"), ProgramChildState::Cancelled,
+                                            ProgramTerminalStatus::Cancelled))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-2"),
+                                                               ProgramChildState::Completed))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    const auto settled = store.load_child_relation_head("owner-a", "run-1");
+    EXPECT_EQ(settled->open_count(), 0U);
+    EXPECT_TRUE(settled->closed());
+    EXPECT_EQ(settled->data().closed_by, terminal.journal_record.id);
+
+    // A parent that never had a child writes no head, not even when it ends.
+    StoreDeployment dep(GetParam().backend, GetParam().form);
+    const auto      lone_store = dep.blocking_transition_store();
+    const auto      lone = relation_parent_start();
+    ASSERT_EQ(lone_store->compare_publish("owner-a", {}, 1, lone), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(lone_store->compare_publish("owner-a", lone.journal_record.id, 1,
+                                          terminal_publication(lone, ProgramTerminalStatus::Completed,
+                                                               ContinuationState::Completed)),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(lone_store->load_child_relation_head("owner-a", "run-1").has_value());
+}
+
+// A child that ends while the parent publishes its end: the parent's terminal publication does not compare the
+// epoch, so it succeeds whichever way the two interleave, and no row is rewritten by the close.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationChildCompletesAroundTheParentsTerminalPublication) {
+    auto& store = primary_store();
+    const auto start = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    for (const char* id : {"child-1", "child-2"})
+        ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1,
+                                              relation_child(id, ProgramChildState::Dispatched))
+                      .status,
+                  ProgramChildRelationStatus::Applied);
+
+    // child-1 ends after the parent read the set and before the parent's terminal publication: the epoch moved.
+    const auto epoch_read = store.load_child_relation_head("owner-a", "run-1")->epoch();
+    ASSERT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-1"),
+                                                               ProgramChildState::Completed))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    ASSERT_NE(store.load_child_relation_head("owner-a", "run-1")->epoch(), epoch_read);
+
+    const auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed,
+                                               ContinuationState::Completed);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    const auto closed = store.load_child_relation_head("owner-a", "run-1");
+    EXPECT_TRUE(closed->closed());
+    EXPECT_EQ(closed->open_count(), 1U);
+
+    // child-2 ends after the close: its result is accepted and nothing was turned into Cancelled by the close.
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-1")->child().state,
+              ProgramChildState::Completed);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-2")->child().state,
+              ProgramChildState::Dispatched);
+    ASSERT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-2"),
+                                                               ProgramChildState::Completed))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    const auto settled = store.load_child_relation("owner-a", "run-1", "child-2");
+    EXPECT_EQ(settled->child().state, ProgramChildState::Completed);
+    ASSERT_TRUE(settled->child().terminal_result.has_value());
+    EXPECT_EQ(settled->child().terminal_result->status(), ProgramTerminalStatus::Completed);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->open_count(), 0U);
+    // The other order, a dispatch after the close, is refused.
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-3")).status,
+              ProgramChildRelationStatus::Refused);
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationPausedParentIsNotClosed) {
+    auto& store = primary_store();
+    const auto start = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1,
+                                          relation_child("child-1", ProgramChildState::Dispatched))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+    const auto paused = interrupted_effect_publication(start);
+    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, paused),
+              ProgramTransitionPublishResult::Published);
+    const auto head = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(head.has_value());
+    EXPECT_FALSE(head->closed());
+    // A paused parent attaches nothing, but its children still end.
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-2")),
+                   ProgramChildRelationRefusal::ParentNotRunning);
+    EXPECT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-1"),
+                                                               ProgramChildState::Completed))
+                  .status,
+              ProgramChildRelationStatus::Applied);
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationSpawnPublishesTheRowWithTheChildsFirstHead) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+
+    // A writer that does not hold the parent's fence creates neither the child nor its row.
+    EXPECT_EQ(store.compare_publish("owner-a", {}, 1, relation_spawn_publication("child-1", 2)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "child-1").has_value());
+    EXPECT_FALSE(store.load_child_relation_head("owner-a", "run-1").has_value());
+    // A grant the parent cannot afford creates neither.
+    auto greedy = relation_child_grant();
+    greedy.model_tokens = relation_parent_budget().model_tokens + 1;
+    EXPECT_EQ(store.compare_publish("owner-a", {}, 1,
+                                    relation_spawn_publication("child-1", 1, ProgramChildState::Dispatched, greedy)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "child-1").has_value());
+
+    const auto spawn = relation_spawn_publication("child-1", 1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(store.load("owner-a", "child-1").has_value());
+    const auto row = store.load_child_relation("owner-a", "run-1", "child-1");
+    ASSERT_TRUE(row.has_value());
+    EXPECT_EQ(row->child().state, ProgramChildState::Dispatched);
+    EXPECT_EQ(row->row_version(), 1U);
+    const auto head = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_TRUE(head.has_value());
+    EXPECT_EQ(head->epoch(), 1U);
+    EXPECT_EQ(head->count(), 1U);
+    EXPECT_EQ(head->committed_budget(), relation_child_reservation());
+
+    // The retry of the same publication does not count the child twice.
+    EXPECT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::AlreadyPresent);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), head->id());
+
+    // A row left Publishing by an earlier attempt advances to Dispatched with the child's first head: one row, one
+    // aggregate, and the epoch moves once.
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-2")).status,
+              ProgramChildRelationStatus::Applied);
+    const auto before = store.load_child_relation_head("owner-a", "run-1");
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_spawn_publication("child-2", 1)),
+              ProgramTransitionPublishResult::Published);
+    const auto after = store.load_child_relation_head("owner-a", "run-1");
+    EXPECT_EQ(after->count(), before->count());
+    EXPECT_EQ(after->committed_budget(), before->committed_budget());
+    EXPECT_EQ(after->epoch(), before->epoch() + 1);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-2")->child().state,
+              ProgramChildState::Dispatched);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-2")->row_version(), 2U);
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationSpawnIsRefusedAfterTheParentEnded) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1")).status,
+              ProgramChildRelationStatus::Applied);
+    ASSERT_EQ(store.compare_publish("owner-a", parent.journal_record.id, 1,
+                                    terminal_publication(parent, ProgramTerminalStatus::Completed,
+                                                         ContinuationState::Completed)),
+              ProgramTransitionPublishResult::Published);
+    const auto head = store.load_child_relation_head("owner-a", "run-1");
+    EXPECT_EQ(store.compare_publish("owner-a", {}, 1, relation_spawn_publication("child-2", 1)),
+              ProgramTransitionPublishResult::Conflict);
+    // The Publishing row cannot be dispatched by the child's first head either.
+    EXPECT_EQ(store.compare_publish("owner-a", {}, 1, relation_spawn_publication("child-1", 1)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(store.load("owner-a", "child-1").has_value());
+    EXPECT_FALSE(store.load("owner-a", "child-2").has_value());
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), head->id());
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationCompletionRidesInTheChildsTerminalPublication) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    const auto spawn = relation_spawn_publication("child-1", 1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    const auto dispatched = store.load_child_relation("owner-a", "run-1", "child-1");
+    ASSERT_TRUE(dispatched.has_value());
+
+    const auto completed = relation_child_after(relation_child("child-1"), ProgramChildState::Completed);
+    // A completion the parent's fence refuses does not refuse the child's own result.
+    {
+        auto terminal = relation_child_terminal(spawn, "child-1");
+        ProgramChildRelationPart part;
+        part.completion = ProgramChildRelationCompletion{"run-1", 2, std::nullopt, completed};
+        terminal.child_relations = std::move(part);
+        ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, terminal),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load("owner-a", "child-1")->continuation().state, ContinuationState::Completed);
+        const auto row = store.load_child_relation("owner-a", "run-1", "child-1");
+        EXPECT_EQ(row->child().state, ProgramChildState::Dispatched);
+        EXPECT_EQ(row->row_version(), dispatched->row_version());
+        EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->open_count(), 1U);
+    }
+}
+
+TEST_P(ProgramTransitionStoreConformance, ChildRelationCompletionUpdatesTheRowInTheSameTransaction) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    const auto spawn = relation_spawn_publication("child-1", 1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    const auto before = store.load_child_relation_head("owner-a", "run-1");
+
+    auto terminal = relation_child_terminal(spawn, "child-1");
+    ProgramChildRelationPart part;
+    part.completion = ProgramChildRelationCompletion{
+        "run-1", 1, 1, relation_child_after(relation_child("child-1"), ProgramChildState::Completed)};
+    terminal.child_relations = std::move(part);
+    ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    const auto row = store.load_child_relation("owner-a", "run-1", "child-1");
+    ASSERT_TRUE(row.has_value());
+    EXPECT_EQ(row->child().state, ProgramChildState::Completed);
+    EXPECT_EQ(row->row_version(), 2U);
+    ASSERT_TRUE(row->child().terminal_result.has_value());
+    EXPECT_EQ(row->child().terminal_result->id(), store.load("owner-a", "child-1")->terminal_result()->id());
+    const auto head = store.load_child_relation_head("owner-a", "run-1");
+    EXPECT_EQ(head->open_count(), 0U);
+    EXPECT_EQ(head->epoch(), before->epoch() + 1);
+    // The standalone update that follows finds the row already there.
+    EXPECT_EQ(store.update_child_relation("owner-a", "run-1", 1, std::nullopt,
+                                          relation_child_after(relation_child("child-1"),
+                                                               ProgramChildState::Completed))
+                  .status,
+              ProgramChildRelationStatus::AlreadyPresent);
+    // The retry of the child's publication is AlreadyPresent and changes no row.
+    EXPECT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::AlreadyPresent);
+    EXPECT_EQ(store.load_child_relation_head("owner-a", "run-1")->id(), head->id());
+}
+
+TEST(ProgramTransitionStoreTest, ChildRelationPartRoundTripsAndOnlyThePublicationsThatNeedItCarryIt) {
+    const auto plain = relation_parent_start();
+    EXPECT_EQ(detail::parse_json_strict(plain.serialize_canonical()).at("storage_schema_version"), 5);
+
+    auto spawn = relation_spawn_publication("child-1", 1);
+    auto bytes = spawn.serialize_canonical();
+    EXPECT_EQ(detail::parse_json_strict(bytes).at("storage_schema_version"), 8);
+    const auto parsed = ProgramTransitionPublication::parse(bytes);
+    ASSERT_TRUE(parsed.child_relations.has_value());
+    ASSERT_TRUE(parsed.child_relations->spawn.has_value());
+    EXPECT_EQ(parsed.child_relations->spawn->parent_fence, 1U);
+    EXPECT_EQ(parsed.child_relations->spawn->child, relation_child("child-1", ProgramChildState::Dispatched));
+    EXPECT_EQ(parsed.serialize_canonical(), bytes);
+
+    auto guarded = relation_running_publication(relation_parent_start(), 25);
+    guarded.child_relations = epoch_guard(7);
+    EXPECT_EQ(ProgramTransitionPublication::parse(guarded.serialize_canonical()).child_relations->expected_epoch, 7U);
+
+    // A publication carries a spawn or a completion, each bound to the run it publishes.
+    ProgramChildRelationPart both;
+    both.spawn = spawn.child_relations->spawn;
+    both.completion = ProgramChildRelationCompletion{
+        "run-1", 1, std::nullopt, relation_child_after(relation_child("child-1"), ProgramChildState::Completed)};
+    spawn.child_relations = both;
+    EXPECT_THROW((void)spawn.serialize_canonical(), std::invalid_argument);
+    auto wrong_child = relation_spawn_publication("child-1", 1);
+    wrong_child.child_relations->spawn->child.child_run_id = "child-2";
+    EXPECT_THROW((void)wrong_child.serialize_canonical(), std::invalid_argument);
+    auto not_a_first_head = relation_parent_start();
+    not_a_first_head = relation_running_publication(not_a_first_head, 25);
+    not_a_first_head.child_relations = ProgramChildRelationPart{};
+    not_a_first_head.child_relations->spawn = relation_spawn_publication("child-1", 1).child_relations->spawn;
+    EXPECT_THROW((void)not_a_first_head.serialize_canonical(), std::invalid_argument);
+    ProgramChildRelationPart empty;
+    auto nothing = relation_parent_start();
+    nothing.child_relations = empty;
+    EXPECT_THROW((void)nothing.serialize_canonical(), std::invalid_argument);
+}
+
+TEST(ProgramTransitionStoreTest, ChildRelationRowAndHeadRejectTamperAndInconsistentShapes) {
+    const auto row = ProgramChildRelation::create({"owner-a", "run-1", 0, relation_child("child-1"), 1});
+    auto row_bytes = row.serialize_canonical();
+    EXPECT_EQ(ProgramChildRelation::parse(row_bytes).id(), row.id());
+    row_bytes.replace(row_bytes.find("child-trace"), 11, "other-trace");
+    EXPECT_THROW((void)ProgramChildRelation::parse(row_bytes), std::invalid_argument);
+    // A row binds its parent: a child of another parent is not this parent's.
+    auto stranger = relation_child("child-1");
+    stranger.invocation.parent_run_id = "run-7";
+    EXPECT_THROW((void)ProgramChildRelation::create({"owner-a", "run-1", 0, stranger, 1}), std::invalid_argument);
+    EXPECT_THROW((void)ProgramChildRelation::create({"owner-a", "run-1", 0, relation_child("child-1"), 0}),
+                 std::invalid_argument);
+
+    auto head_data           = ProgramChildRelationHeadData{"owner-a", "run-1", 2, 2, 1, relation_child_reservation(),
+                                                            false, ""};
+    const auto head          = ProgramChildRelationHead::create(head_data);
+    auto       head_bytes    = head.serialize_canonical();
+    EXPECT_EQ(ProgramChildRelationHead::parse(head_bytes).id(), head.id());
+    head_bytes.replace(head_bytes.find("\"epoch\":2"), 9, "\"epoch\":3");
+    EXPECT_THROW((void)ProgramChildRelationHead::parse(head_bytes), std::invalid_argument);
+    auto more_open_than_rows = head_data;
+    more_open_than_rows.open_count = 3;
+    EXPECT_THROW((void)ProgramChildRelationHead::create(more_open_than_rows), std::invalid_argument);
+    auto epoch_below_count = head_data;
+    epoch_below_count.epoch = 1;
+    EXPECT_THROW((void)ProgramChildRelationHead::create(epoch_below_count), std::invalid_argument);
+    auto closed_without_closer = head_data;
+    closed_without_closer.closed = true;
+    EXPECT_THROW((void)ProgramChildRelationHead::create(closed_without_closer), std::invalid_argument);
+    auto leased = head_data;
+    leased.committed_budget.max_concurrency = 1;
+    EXPECT_THROW((void)ProgramChildRelationHead::create(leased), std::invalid_argument);
+}
+
 TEST(ProgramTransitionStoreTest, TerminalChildStatesRequireMatchingDurableResults) {
     const auto start = start_publication();
     EXPECT_THROW((void)child_metadata_publication(start, ProgramChildState::Completed),
@@ -4358,6 +5171,21 @@ TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesNoPartialPublication)
 
 // A replacement moves the source's context and hook ownership in the same unit as the new
 // generation: a failed write leaves the source as the only owner.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationWritesCommitWithTheirPublicationOrNotAtAll) {
+    StoreDeployment dep(GetParam().backend, GetParam().form);
+    const auto      store = dep.blocking_transition_store();
+    ASSERT_EQ(store->compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto spawn = relation_spawn_publication("child-1", 1);
+    expect_fault_leaves_state_then_retries(dep, *store, WriteStage::Relation, {}, spawn, [&] {
+        EXPECT_FALSE(store->load("owner-a", "child-1").has_value());
+        EXPECT_FALSE(store->load_child_relation_head("owner-a", "run-1").has_value());
+        EXPECT_FALSE(store->load_child_relation("owner-a", "run-1", "child-1").has_value());
+    });
+    EXPECT_TRUE(store->load_child_relation("owner-a", "run-1", "child-1").has_value());
+    EXPECT_EQ(store->load_child_relation_head("owner-a", "run-1")->count(), 1U);
+}
+
 TEST_P(ProgramTransitionStoreConformance, FailedWriteLeavesTheSourceAsTheOnlyOwnerAcrossAReplacement) {
     for (const auto stage : {WriteStage::Run, WriteStage::Context, WriteStage::Lineage}) {
         SCOPED_TRACE(neograph::program::test_support::write_stage_name(stage));
@@ -5475,6 +6303,15 @@ public:
     hook_heads(std::string_view, const ProgramRunRecord&) override {
         return neograph::program::detail::transition::Borrowed<
             std::vector<neograph::HookOutboxEntry>>(hooks);
+    }
+    std::optional<ProgramJournalRecord> journal_record(std::string_view, Lock) override {
+        return std::nullopt;
+    }
+    std::optional<ProgramChildRelationHead> relation_head(std::string_view, Lock) override {
+        return std::nullopt;
+    }
+    std::optional<ProgramChildRelation> relation_row(std::string_view, std::string_view, Lock) override {
+        return std::nullopt;
     }
 };
 }  // namespace

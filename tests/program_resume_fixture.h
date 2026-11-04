@@ -488,6 +488,32 @@ public:
     CountingTransitionStore(std::shared_ptr<ProgramTransitionStore> inner, CrashPoints& crash)
         : inner_(std::make_shared<BlockingProgramTransitionStore>(std::move(inner))), crash_(crash) {}
     std::string process_coordination_key() const override { return inner_->process_coordination_key(); }
+    std::optional<ProgramChildRelationHead> load_child_relation_head_sync(std::string_view owner,
+                                                                          std::string_view parent) const override {
+        return inner_->load_child_relation_head(owner, parent);
+    }
+    std::optional<ProgramChildRelation> load_child_relation_sync(std::string_view owner, std::string_view parent,
+                                                                  std::string_view child) const override {
+        return inner_->load_child_relation(owner, parent, child);
+    }
+    std::vector<ProgramChildRelation> load_child_relations_sync(std::string_view owner, std::string_view parent,
+                                                                 bool open_only) const override {
+        return inner_->load_child_relations(owner, parent, open_only);
+    }
+    ProgramChildRelationOutcome insert_child_relation_sync(std::string_view owner, std::string_view parent,
+                                                           std::uint64_t fence, ProgramChildRecord child) override {
+        return crash_.durable("insert child relation", [&] {
+            return inner_->insert_child_relation(owner, parent, fence, std::move(child));
+        });
+    }
+    ProgramChildRelationOutcome update_child_relation_sync(std::string_view owner, std::string_view parent,
+                                                           std::uint64_t fence,
+                                                           std::optional<std::uint64_t> version,
+                                                           ProgramChildRecord next) override {
+        return crash_.durable("update child relation", [&] {
+            return inner_->update_child_relation(owner, parent, fence, version, std::move(next));
+        });
+    }
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
         return inner_->load(owner, run);
     }

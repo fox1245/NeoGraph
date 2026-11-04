@@ -21,6 +21,7 @@
  */
 #pragma once
 
+#include <neograph/program/child_relation.h>
 #include <neograph/program/child_synthesis.h>
 #include <neograph/program/graph_migration.h>
 #include <neograph/program/journal.h>
@@ -53,6 +54,21 @@ namespace neograph::program::detail::transition {
 inline bool is_final(ContinuationState state) noexcept {
     return state != ContinuationState::Running && state != ContinuationState::Interrupted &&
            state != ContinuationState::AmbiguousEffect;
+}
+
+/** The relation state a child's terminal result puts its row in; a paused child stays Dispatched. */
+inline ProgramChildState relation_state_for_result(ProgramTerminalStatus status) noexcept {
+    switch (status) {
+        case ProgramTerminalStatus::Completed:
+            return ProgramChildState::Completed;
+        case ProgramTerminalStatus::Cancelled:
+            return ProgramChildState::Cancelled;
+        case ProgramTerminalStatus::Interrupted:
+        case ProgramTerminalStatus::AmbiguousEffect:
+            return ProgramChildState::Dispatched;
+        default:
+            return ProgramChildState::Failed;
+    }
 }
 
 inline bool same_child_metadata(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
@@ -661,7 +677,321 @@ public:
     /** The current hook head of every invocation of the run; `run` is the run they bind. */
     virtual Borrowed<std::vector<HookOutboxEntry>> hook_heads(std::string_view       run_id,
                                                               const ProgramRunRecord& run) = 0;
+    /** The run's head journal record. */
+    virtual std::optional<ProgramJournalRecord> journal_record(std::string_view run_id, Lock lock) = 0;
+    /** The relation head of a parent, by its logical run id; absent while the parent has no rows. */
+    virtual std::optional<ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
+                                                                   Lock             lock) = 0;
+    virtual std::optional<ProgramChildRelation> relation_row(std::string_view parent_run_id,
+                                                              std::string_view child_run_id,
+                                                              Lock             lock) = 0;
 };
+
+// ---------------------------------------------------------------------------
+// Child relations (#661). Written once here; a backend supplies the reads and writes the rows and heads the
+// plan names in its own transaction.
+// ---------------------------------------------------------------------------
+
+/** The part of a child's reservation that stays charged to the parent for good (the concurrency lease is not). */
+inline std::optional<RunBudget> child_permanent_reservation(const RunBudget& granted) noexcept {
+    if (granted.max_total_children == std::numeric_limits<std::uint64_t>::max()) return std::nullopt;
+    RunBudget reservation;
+    reservation.wall_time_ms           = granted.wall_time_ms;
+    reservation.model_tokens           = granted.model_tokens;
+    reservation.monetary_microunits    = granted.monetary_microunits;
+    reservation.max_program_operations = granted.max_program_operations;
+    reservation.max_core_steps         = granted.max_core_steps;
+    reservation.max_dynamic_compiles   = granted.max_dynamic_compiles;
+    reservation.max_total_children     = granted.max_total_children + 1;
+    return reservation;
+}
+
+/** `aggregate + addition` over the permanent fields; nothing when a field would overflow. */
+inline std::optional<RunBudget> add_permanent_budget(RunBudget aggregate,
+                                                      const RunBudget& addition) noexcept {
+    const auto add = [](auto& target, auto value) noexcept {
+        using Integer = std::decay_t<decltype(target)>;
+        if (value > std::numeric_limits<Integer>::max() - target) return false;
+        target = static_cast<Integer>(target + value);
+        return true;
+    };
+    if (!add(aggregate.wall_time_ms, addition.wall_time_ms) ||
+        !add(aggregate.model_tokens, addition.model_tokens) ||
+        !add(aggregate.monetary_microunits, addition.monetary_microunits) ||
+        !add(aggregate.max_program_operations, addition.max_program_operations) ||
+        !add(aggregate.max_core_steps, addition.max_core_steps) ||
+        !add(aggregate.max_dynamic_compiles, addition.max_dynamic_compiles) ||
+        !add(aggregate.max_total_children, addition.max_total_children))
+        return std::nullopt;
+    return aggregate;
+}
+
+/** The budget a parent can still give children: its remainder plus what a pending command holds in reserve. */
+inline std::optional<RunBudget> restore_reservation(const RunBudget& available,
+                                                     const RunBudget& reservation) noexcept {
+    const auto add = [](auto& target, auto value) noexcept {
+        using Integer = std::decay_t<decltype(target)>;
+        if (value > std::numeric_limits<Integer>::max() - target) return false;
+        target = static_cast<Integer>(target + value);
+        return true;
+    };
+    RunBudget restored = available;
+    if (!add(restored.wall_time_ms, reservation.wall_time_ms) ||
+        !add(restored.model_tokens, reservation.model_tokens) ||
+        !add(restored.monetary_microunits, reservation.monetary_microunits) ||
+        !add(restored.max_program_operations, reservation.max_program_operations) ||
+        !add(restored.max_core_steps, reservation.max_core_steps))
+        return std::nullopt;
+    return restored;
+}
+
+/**
+ * Whether a child's permanent reservation fits on top of what the parent's relation head already commits. One rule
+ * for every backend and for the runtime: `limit` is the parent's restorable remainder, `committed` the head's
+ * aggregate. Returns the aggregate after the insert, or nothing when the child does not fit.
+ */
+inline std::optional<RunBudget> child_relation_insert_admits(const RunBudget& parent_remaining,
+                                                              const RunBudget& parent_inflight,
+                                                              const RunBudget& committed,
+                                                              const RunBudget& child_granted) noexcept {
+    const auto limit       = restore_reservation(parent_remaining, parent_inflight);
+    const auto reservation = child_permanent_reservation(child_granted);
+    if (!limit || !reservation) return std::nullopt;
+    const auto fits = [](auto bound, auto used, auto requested) noexcept {
+        return used <= bound && requested <= bound - used;
+    };
+    if (!fits(limit->wall_time_ms, committed.wall_time_ms, reservation->wall_time_ms) ||
+        !fits(limit->model_tokens, committed.model_tokens, reservation->model_tokens) ||
+        !fits(limit->monetary_microunits, committed.monetary_microunits,
+              reservation->monetary_microunits) ||
+        !fits(limit->max_program_operations, committed.max_program_operations,
+              reservation->max_program_operations) ||
+        !fits(limit->max_core_steps, committed.max_core_steps, reservation->max_core_steps) ||
+        !fits(limit->max_dynamic_compiles, committed.max_dynamic_compiles,
+              reservation->max_dynamic_compiles) ||
+        !fits(limit->max_total_children, committed.max_total_children,
+              reservation->max_total_children))
+        return std::nullopt;
+    return add_permanent_budget(committed, *reservation);
+}
+
+/** What a relation write decided; a backend writes `row` and `head` when the status is Applied. */
+struct RelationPlan {
+    ProgramChildRelationStatus              status  = ProgramChildRelationStatus::Refused;
+    ProgramChildRelationRefusal             refusal = ProgramChildRelationRefusal::Invalid;
+    /// Applied: the row to write. Otherwise the stored row, if any.
+    std::optional<ProgramChildRelation>     row;
+    /// Applied: the head to write. Otherwise the stored head, if any.
+    std::optional<ProgramChildRelationHead> head;
+};
+
+inline RelationPlan relation_refused(ProgramChildRelationRefusal             refusal,
+                                     std::optional<ProgramChildRelation>     row,
+                                     std::optional<ProgramChildRelationHead> head) {
+    return RelationPlan{ProgramChildRelationStatus::Refused, refusal, std::move(row), std::move(head)};
+}
+inline RelationPlan relation_present(std::optional<ProgramChildRelation>     row,
+                                     std::optional<ProgramChildRelationHead> head) {
+    return RelationPlan{ProgramChildRelationStatus::AlreadyPresent, ProgramChildRelationRefusal::None,
+                        std::move(row), std::move(head)};
+}
+
+/** The head or, for a parent without rows, the empty head: epoch 0 is the one reading of "no rows". */
+inline ProgramChildRelationHead relation_head_or_empty(const std::optional<ProgramChildRelationHead>& head,
+                                                       std::string_view owner_scope,
+                                                       std::string_view parent_run_id) {
+    return head ? *head : ProgramChildRelationHead::empty(owner_scope, parent_run_id);
+}
+
+/**
+ * The parent's head: the active generation's run record and journal head. A parent without a lineage is the run
+ * `logical_run_id` itself. Absent when the run, its lineage generation or its journal is not stored, or the two
+ * disagree.
+ */
+inline std::optional<ProgramRunPublicationHead> active_parent_head(TransitionReads& reads,
+                                                                   std::string_view owner_scope,
+                                                                   std::string_view logical_run_id,
+                                                                   TransitionReads::Lock lock) {
+    std::string run_id(logical_run_id);
+    if (const auto lineage =
+            reads.lineage_head(program_run_lineage_id(owner_scope, logical_run_id), lock)) {
+        const auto generation = reads.generation(lineage->lineage_id(), lineage->active_generation());
+        if (!generation || generation->id() != lineage->active_generation_id()) return std::nullopt;
+        run_id = generation->run_id();
+    }
+    auto run     = reads.run_record(run_id, lock);
+    auto journal = reads.journal_record(run_id, lock);
+    if (!run || !journal || run->journal_head() != journal->id) return std::nullopt;
+    return ProgramRunPublicationHead{std::move(*run), std::move(*journal)};
+}
+
+inline bool same_child_result_and_generation(const ProgramChildRecord& lhs, const ProgramChildRecord& rhs) {
+    if (lhs.terminal_generation != rhs.terminal_generation) return false;
+    if (lhs.terminal_result.has_value() != rhs.terminal_result.has_value()) return false;
+    return !lhs.terminal_result || lhs.terminal_result->id() == rhs.terminal_result->id();
+}
+
+/**
+ * A result of a replaced child generation binds that generation's own terminal record. `pending_child_run` is the
+ * record the same transaction is about to write, when the update rides in the child's own publication.
+ */
+inline bool relation_result_binds(TransitionReads&         reads,
+                                  std::string_view         owner_scope,
+                                  const ProgramRunRecord&  parent,
+                                  const ProgramChildRecord& child,
+                                  const ProgramRunRecord*  pending_child_run) {
+    if (!child.terminal_generation) return true;
+    const auto lineage_id = program_run_lineage_id(owner_scope, child.child_run_id);
+    const auto lineage    = reads.lineage_head(lineage_id, TransitionReads::Lock::None);
+    const auto generation = reads.generation(lineage_id, child.terminal_generation);
+    if (!lineage || !generation) return false;
+    std::optional<ProgramRunRecord> stored;
+    const ProgramRunRecord*         run = nullptr;
+    if (pending_child_run && pending_child_run->run_id() == generation->run_id()) {
+        run = pending_child_run;
+    } else {
+        stored = reads.run_record(generation->run_id(), TransitionReads::Lock::None);
+        if (!stored) return false;
+        run = &*stored;
+    }
+    return does_program_child_generation_result_bind(parent, child, *generation, *lineage, *run);
+}
+
+/** Insert (or, for a spawn, advance a Publishing row to Dispatched). See ProgramTransitionStore::insert_child_relation. */
+inline RelationPlan plan_relation_insert(TransitionReads&          reads,
+                                         std::string_view          owner_scope,
+                                         std::string_view          parent_run_id,
+                                         std::uint64_t             expected_parent_fence,
+                                         const ProgramChildRecord& child,
+                                         bool                      advance_publishing) {
+    const auto stored_head = reads.relation_head(parent_run_id, TransitionReads::Lock::Update);
+    const auto existing = reads.relation_row(parent_run_id, child.child_run_id, TransitionReads::Lock::Update);
+    const auto refuse = [&](ProgramChildRelationRefusal refusal) {
+        return relation_refused(refusal, existing, stored_head);
+    };
+    if ((child.state != ProgramChildState::Publishing && child.state != ProgramChildState::Dispatched) ||
+        child.terminal_result || child.terminal_generation != 0)
+        return refuse(ProgramChildRelationRefusal::Invalid);
+    const auto parent = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
+    if (!parent) return refuse(ProgramChildRelationRefusal::ParentAbsent);
+    const auto& parent_run = parent->run_record;
+    if (parent_run.continuation().fence != expected_parent_fence)
+        return refuse(ProgramChildRelationRefusal::FenceMismatch);
+    const auto head = relation_head_or_empty(stored_head, owner_scope, parent_run_id);
+    try {
+        if (existing) {
+            if (!same_child_metadata(existing->child(), child))
+                return refuse(ProgramChildRelationRefusal::RowConflict);
+            const auto stored_state = existing->child().state;
+            const bool advance = advance_publishing && stored_state == ProgramChildState::Publishing &&
+                                 child.state == ProgramChildState::Dispatched;
+            if (!advance) return relation_present(existing, stored_head);
+            if (head.closed()) return refuse(ProgramChildRelationRefusal::Closed);
+            if (parent_run.continuation().state != ContinuationState::Running)
+                return refuse(ProgramChildRelationRefusal::ParentNotRunning);
+            auto next_data   = existing->data();
+            next_data.child.state = ProgramChildState::Dispatched;
+            ++next_data.row_version;
+            auto head_data = head.data();
+            ++head_data.epoch;
+            return RelationPlan{ProgramChildRelationStatus::Applied, ProgramChildRelationRefusal::None,
+                                ProgramChildRelation::create(std::move(next_data)),
+                                ProgramChildRelationHead::create(std::move(head_data))};
+        }
+        if (head.closed()) return refuse(ProgramChildRelationRefusal::Closed);
+        if (parent_run.continuation().state != ContinuationState::Running)
+            return refuse(ProgramChildRelationRefusal::ParentNotRunning);
+        if (child.invocation.parent_run_id != parent_run.logical_run_id() ||
+            child.invocation.child_depth != parent_run.child_depth() + 1 ||
+            child.child_run_id == parent_run.run_id())
+            return refuse(ProgramChildRelationRefusal::Invalid);
+        const auto aggregate = child_relation_insert_admits(
+            parent_run.remaining_budget(), parent->journal_record.inflight_reservation,
+            head.committed_budget(), child.invocation.granted_budget);
+        if (!aggregate || head.count() == std::numeric_limits<std::uint64_t>::max() ||
+            head.epoch() == std::numeric_limits<std::uint64_t>::max())
+            return refuse(ProgramChildRelationRefusal::BudgetExceeded);
+        auto head_data             = head.data();
+        head_data.epoch += 1;
+        head_data.count += 1;
+        head_data.open_count += 1;
+        head_data.committed_budget = *aggregate;
+        return RelationPlan{
+            ProgramChildRelationStatus::Applied, ProgramChildRelationRefusal::None,
+            ProgramChildRelation::create(
+                ProgramChildRelationData{std::string(owner_scope), std::string(parent_run_id),
+                                         head.count(), child, 1}),
+            ProgramChildRelationHead::create(std::move(head_data))};
+    } catch (const std::invalid_argument&) {
+        return refuse(ProgramChildRelationRefusal::Invalid);
+    }
+}
+
+/** Update. See ProgramTransitionStore::update_child_relation. */
+inline RelationPlan plan_relation_update(TransitionReads&          reads,
+                                         std::string_view          owner_scope,
+                                         std::string_view          parent_run_id,
+                                         std::uint64_t             expected_parent_fence,
+                                         std::optional<std::uint64_t> expected_row_version,
+                                         const ProgramChildRecord& next,
+                                         const ProgramRunRecord*   pending_child_run) {
+    const auto stored_head = reads.relation_head(parent_run_id, TransitionReads::Lock::Update);
+    const auto existing = reads.relation_row(parent_run_id, next.child_run_id, TransitionReads::Lock::Update);
+    const auto refuse = [&](ProgramChildRelationRefusal refusal) {
+        return relation_refused(refusal, existing, stored_head);
+    };
+    if (!existing || !stored_head) return refuse(ProgramChildRelationRefusal::RowMissing);
+    const auto parent = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
+    if (!parent) return refuse(ProgramChildRelationRefusal::ParentAbsent);
+    if (parent->run_record.continuation().fence != expected_parent_fence)
+        return refuse(ProgramChildRelationRefusal::FenceMismatch);
+    if (!same_child_metadata(existing->child(), next))
+        return refuse(ProgramChildRelationRefusal::RowConflict);
+    if (expected_row_version && *expected_row_version != existing->row_version())
+        return refuse(ProgramChildRelationRefusal::RowVersionMismatch);
+    const auto& current = existing->child();
+    if (current.state == next.state && same_child_result_and_generation(current, next))
+        return relation_present(existing, stored_head);
+    // A terminal state is final: only an identical repeat, answered above, is accepted from one.
+    if (!existing->is_open() || !valid_child_state_transition(current.state, next.state))
+        return refuse(ProgramChildRelationRefusal::InvalidTransition);
+    if (current.state == ProgramChildState::Publishing && next.state == ProgramChildState::Dispatched) {
+        if (stored_head->closed()) return refuse(ProgramChildRelationRefusal::Closed);
+        if (parent->run_record.continuation().state != ContinuationState::Running)
+            return refuse(ProgramChildRelationRefusal::ParentNotRunning);
+    }
+    if (existing->row_version() == std::numeric_limits<std::uint64_t>::max() ||
+        stored_head->epoch() == std::numeric_limits<std::uint64_t>::max())
+        return refuse(ProgramChildRelationRefusal::Invalid);
+    try {
+        auto next_data        = existing->data();
+        next_data.child       = next;
+        next_data.row_version = existing->row_version() + 1;
+        auto row              = ProgramChildRelation::create(std::move(next_data));
+        if (!relation_result_binds(reads, owner_scope, parent->run_record, next, pending_child_run))
+            return refuse(ProgramChildRelationRefusal::ResultUnbound);
+        auto head_data = stored_head->data();
+        ++head_data.epoch;
+        if (existing->is_open() && !row.is_open()) --head_data.open_count;
+        return RelationPlan{ProgramChildRelationStatus::Applied, ProgramChildRelationRefusal::None,
+                            std::move(row), ProgramChildRelationHead::create(std::move(head_data))};
+    } catch (const std::invalid_argument&) {
+        return refuse(ProgramChildRelationRefusal::Invalid);
+    }
+}
+
+/** The closed head a final publication writes, or nothing when the parent has no rows or the head is closed. */
+inline std::optional<ProgramChildRelationHead> plan_relation_close(TransitionReads& reads,
+                                                                   std::string_view logical_run_id,
+                                                                   std::string_view journal_id) {
+    const auto head = reads.relation_head(logical_run_id, TransitionReads::Lock::Update);
+    if (!head || head->closed()) return std::nullopt;
+    auto data = head->data();
+    ++data.epoch;
+    data.closed    = true;
+    data.closed_by = std::string(journal_id);
+    return ProgramChildRelationHead::create(std::move(data));
+}
 
 // ---------------------------------------------------------------------------
 // The state machine.
@@ -814,6 +1144,12 @@ struct TransitionPlan {
     bool run_lineage_recorded = false;
     /// The publication's lineage already has a head; the head is updated, not created.
     bool lineage_head_exists = false;
+    /// The parent's relation row and head this publication writes (a spawn inserts or advances the row, a
+    /// completion updates it); both are set together. Written in the publication's transaction.
+    std::optional<ProgramChildRelation>     relation_row;
+    std::optional<ProgramChildRelationHead> relation_head;
+    /// The run's own relation head, closed by its final publication.
+    std::optional<ProgramChildRelationHead> closed_relation_head;
 };
 
 /**
@@ -1096,6 +1432,53 @@ inline bool replay_source_binds(TransitionReads&                    reads,
 }
 
 /**
+ * The relation parts of a publication: the parent's epoch guard, the child's spawn row, the child's completion row,
+ * and the closing of the run's own head by a final publication. False refuses the publication. A completion that is
+ * not admitted is skipped, not refused: the child's own result commits either way.
+ */
+inline bool relation_parts_bind(TransitionReads&                    reads,
+                                std::string_view                    owner_scope,
+                                bool                                run_exists,
+                                const ProgramTransitionPublication& publication,
+                                TransitionPlan&                     plan) {
+    const auto& run  = publication.run_record;
+    const auto* part = publication.child_relations ? &*publication.child_relations : nullptr;
+    if (part && part->expected_epoch) {
+        const auto head = reads.relation_head(run.logical_run_id(), TransitionReads::Lock::Update);
+        if ((head ? head->epoch() : 0) != *part->expected_epoch) return false;
+    }
+    if (part && part->spawn) {
+        const auto& spawn = *part->spawn;
+        if (run_exists || spawn.child.child_run_id != run.run_id() ||
+            run.invocation().parent_run_id != spawn.parent_run_id)
+            return false;
+        auto planned = plan_relation_insert(reads, owner_scope, spawn.parent_run_id, spawn.parent_fence,
+                                            spawn.child, true);
+        if (planned.status == ProgramChildRelationStatus::Refused) return false;
+        if (planned.status == ProgramChildRelationStatus::Applied) {
+            plan.relation_row  = std::move(planned.row);
+            plan.relation_head = std::move(planned.head);
+        }
+    }
+    if (part && part->completion) {
+        const auto& completion = *part->completion;
+        if (!run_exists || !run.terminal_result() || completion.child.child_run_id != run.logical_run_id())
+            return false;
+        auto planned = plan_relation_update(reads, owner_scope, completion.parent_run_id,
+                                            completion.parent_fence, completion.expected_row_version,
+                                            completion.child, &run);
+        if (planned.status == ProgramChildRelationStatus::Applied) {
+            plan.relation_row  = std::move(planned.row);
+            plan.relation_head = std::move(planned.head);
+        }
+    }
+    if (is_final(run.continuation().state))
+        plan.closed_relation_head =
+            plan_relation_close(reads, run.logical_run_id(), publication.journal_record.id);
+    return true;
+}
+
+/**
  * Decides whether `request` may be written against the stored state. `current` is the
  * run's head and `current_lease` its execution lease, both loaded by the caller (null
  * when the run has none). The checks run in this order, and the first to fail is a
@@ -1187,7 +1570,8 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
 
     if (!lineage_binds(reads, current, publication, request.next_lease, plan) ||
         !fork_source_binds(reads, current, publication) ||
-        !replay_source_binds(reads, current, publication))
+        !replay_source_binds(reads, current, publication) ||
+        !relation_parts_bind(reads, request.owner_scope, current != nullptr, publication, plan))
         return TransitionVerdict::Conflict;
     return TransitionVerdict::Proceed;
 }

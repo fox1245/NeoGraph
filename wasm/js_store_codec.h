@@ -67,6 +67,31 @@ struct EnumNames<program::ProgramTransitionPublishResult> {
     };
 };
 template <>
+struct EnumNames<program::ProgramChildRelationStatus> {
+    static constexpr std::pair<program::ProgramChildRelationStatus, const char*> table[] = {
+        {program::ProgramChildRelationStatus::Applied, "applied"},
+        {program::ProgramChildRelationStatus::AlreadyPresent, "already_present"},
+        {program::ProgramChildRelationStatus::Refused, "refused"},
+    };
+};
+template <>
+struct EnumNames<program::ProgramChildRelationRefusal> {
+    static constexpr std::pair<program::ProgramChildRelationRefusal, const char*> table[] = {
+        {program::ProgramChildRelationRefusal::None, "none"},
+        {program::ProgramChildRelationRefusal::ParentAbsent, "parent_absent"},
+        {program::ProgramChildRelationRefusal::ParentNotRunning, "parent_not_running"},
+        {program::ProgramChildRelationRefusal::FenceMismatch, "fence_mismatch"},
+        {program::ProgramChildRelationRefusal::Closed, "closed"},
+        {program::ProgramChildRelationRefusal::RowConflict, "row_conflict"},
+        {program::ProgramChildRelationRefusal::RowMissing, "row_missing"},
+        {program::ProgramChildRelationRefusal::RowVersionMismatch, "row_version_mismatch"},
+        {program::ProgramChildRelationRefusal::InvalidTransition, "invalid_transition"},
+        {program::ProgramChildRelationRefusal::BudgetExceeded, "budget_exceeded"},
+        {program::ProgramChildRelationRefusal::ResultUnbound, "result_unbound"},
+        {program::ProgramChildRelationRefusal::Invalid, "invalid"},
+    };
+};
+template <>
 struct EnumNames<program::ProgramActivationResult> {
     static constexpr std::pair<program::ProgramActivationResult, const char*> table[] = {
         {program::ProgramActivationResult::Activated, "activated"},
@@ -297,6 +322,37 @@ struct Codec<program::ProgramEffectiveRuntimeState> {
     }
 };
 
+// A child record crosses as the canonical text of its relation body.
+template <>
+struct Codec<program::ProgramChildRecord> {
+    using Owned = program::ProgramChildRecord;
+    static json encode(const Owned& value) { return json(program::serialize_program_child_record(value)); }
+    static Owned decode(const json& value) {
+        std::string storage;
+        return program::parse_program_child_record(codec_detail::expect_string(value, storage));
+    }
+};
+
+template <>
+struct Codec<program::ProgramChildRelationOutcome> {
+    using Owned = program::ProgramChildRelationOutcome;
+    static json encode(const Owned& value) {
+        json out = json::object();
+        out["status"]   = Codec<program::ProgramChildRelationStatus>::encode(value.status);
+        out["refusal"]  = Codec<program::ProgramChildRelationRefusal>::encode(value.refusal);
+        out["relation"] = Codec<std::optional<program::ProgramChildRelation>>::encode(value.relation);
+        out["head"]     = Codec<std::optional<program::ProgramChildRelationHead>>::encode(value.head);
+        return out;
+    }
+    static Owned decode(const json& value) {
+        codec_detail::expect_members(value, {"status", "refusal", "relation", "head"});
+        return Owned{Codec<program::ProgramChildRelationStatus>::decode(value["status"]),
+                     Codec<program::ProgramChildRelationRefusal>::decode(value["refusal"]),
+                     Codec<std::optional<program::ProgramChildRelation>>::decode(value["relation"]),
+                     Codec<std::optional<program::ProgramChildRelationHead>>::decode(value["head"])};
+    }
+};
+
 template <>
 struct Codec<program::ProgramActivationBinding> {
     using Owned = program::ProgramActivationBinding;
@@ -502,6 +558,18 @@ std::tuple<typename Codec<A>::Owned...> decode_arguments(const json& array) {
       std::optional<program::GraphMigrationCapsule>, std::string_view, std::string_view, std::string_view)            \
     X(load_execution_lease, load_execution_lease, "loadExecutionLease", false,                                        \
       std::optional<program::ProgramExecutionLease>, std::string_view, std::string_view)                              \
+    X(load_child_relation_head, load_child_relation_head, "loadChildRelationHead", true,                              \
+      std::optional<program::ProgramChildRelationHead>, std::string_view, std::string_view)                            \
+    X(load_child_relation, load_child_relation, "loadChildRelation", true,                                            \
+      std::optional<program::ProgramChildRelation>, std::string_view, std::string_view, std::string_view)             \
+    X(load_child_relations, load_child_relations, "loadChildRelations", true,                                         \
+      std::vector<program::ProgramChildRelation>, std::string_view, std::string_view, bool)                           \
+    X(insert_child_relation, insert_child_relation, "insertChildRelation", true,                                      \
+      program::ProgramChildRelationOutcome, std::string_view, std::string_view, std::uint64_t,                         \
+      program::ProgramChildRecord)                                                                                     \
+    X(update_child_relation, update_child_relation, "updateChildRelation", true,                                      \
+      program::ProgramChildRelationOutcome, std::string_view, std::string_view, std::uint64_t,                         \
+      std::optional<std::uint64_t>, program::ProgramChildRecord)                                                       \
     X(compare_publish, compare_publish, "comparePublish", true, program::ProgramTransitionPublishResult,              \
       std::string_view, std::string_view, std::uint64_t, program::ProgramTransitionPublication)                        \
     X(compare_publish_execution, compare_publish_execution, "comparePublishExecution", false,                         \

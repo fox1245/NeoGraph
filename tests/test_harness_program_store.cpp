@@ -1709,3 +1709,135 @@ TEST(HarnessProgramStoreTest, SqliteHarnessTransitionStoreRefusesAnOrdinaryPubli
     EXPECT_EQ(transitions->compare_publish(owner, journal->id, 2, same), ProgramTransitionPublishResult::Published);
     EXPECT_EQ(transitions->load(owner, "run-raised")->continuation().fence, 2U);
 }
+
+namespace {
+RunBudget relation_child_grant() { return {100, 10, 10, 1, 1, 1, 0, 0, 0}; }
+
+ProgramChildRecord relation_child(std::string id, ProgramChildState state = ProgramChildState::Publishing) {
+    return ProgramChildRecord{
+        std::move(id), digest('7'), "link-receipt",
+        ProgramPersistedInvocation{json{{"child", true}}, relation_child_grant(), "child-trace", "run-one", 1},
+        state};
+}
+
+ProgramResult relation_child_result(const Fixture& fixture, const std::string& child_id) {
+    ProgramResultData data;
+    data.status             = ProgramTerminalStatus::Completed;
+    data.run_id             = child_id;
+    data.program_version_id = fixture.version_value.id();
+    data.bundle_id          = fixture.bundle_value.id();
+    data.operation_id       = "root";
+    data.attempt            = 1;
+    data.output             = json{{"child", true}};
+    data.remaining_budget   = relation_child_grant();
+    return ProgramResult::create(std::move(data));
+}
+
+// The first publication of a child run of "run-one", with the spawn part naming `state`.
+ProgramTransitionPublication relation_spawn_publication(const Fixture& fixture, const std::string& child_id,
+                                                        std::uint64_t parent_fence) {
+    auto publication = initial_publication(fixture, child_id, relation_child_grant(), 20);
+    ProgramRunRecordData data;
+    const auto&          run = publication.run_record;
+    data.owner_scope         = run.owner_scope();
+    data.run_id              = run.run_id();
+    data.program_version_id  = run.program_version_id();
+    data.bundle_id           = run.bundle_id();
+    data.binding_fingerprint = run.binding_fingerprint();
+    auto invocation          = run.invocation();
+    invocation.parent_run_id = "run-one";
+    data.invocation          = std::move(invocation);
+    data.child_depth         = 1;
+    data.continuation        = run.continuation();
+    data.remaining_budget    = run.remaining_budget();
+    data.journal_head        = run.journal_head();
+    data.event_sequence      = run.event_sequence();
+    data.created_at_ms       = run.created_at_ms();
+    data.updated_at_ms       = run.updated_at_ms();
+    publication.run_record   = ProgramRunRecord::create(std::move(data));
+    ProgramChildRelationPart part;
+    part.spawn = ProgramChildRelationSpawn{"run-one", parent_fence,
+                                           relation_child(child_id, ProgramChildState::Dispatched)};
+    publication.child_relations = std::move(part);
+    return publication;
+}
+}  // namespace
+
+TEST(HarnessProgramStoreTest, SqliteHarnessChildRelationsFollowTheStoreContractAndSurviveReopen) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    const auto            parent      = initial_publication(fixture, "run-one");
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, parent), ProgramTransitionPublishResult::Published);
+    EXPECT_FALSE(transitions->load_child_relation_head(owner, "run-one").has_value());
+
+    const auto first = transitions->insert_child_relation(owner, "run-one", 1, relation_child("child-one"));
+    ASSERT_EQ(first.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(first.head->epoch(), 1U);
+    EXPECT_EQ(first.head->committed_budget().max_total_children, 1U);
+    EXPECT_EQ(transitions->insert_child_relation(owner, "run-one", 1, relation_child("child-one")).status,
+              ProgramChildRelationStatus::AlreadyPresent);
+    // A stranger's fence, an unknown parent and a grant beyond the parent's remainder are each refused.
+    EXPECT_EQ(transitions->insert_child_relation(owner, "run-one", 2, relation_child("child-two")).refusal,
+              ProgramChildRelationRefusal::FenceMismatch);
+    EXPECT_EQ(transitions->insert_child_relation(owner, "run-nine", 1, relation_child("child-two")).refusal,
+              ProgramChildRelationRefusal::ParentAbsent);
+    auto too_much = relation_child("child-two");
+    too_much.invocation.granted_budget.wall_time_ms = budget().wall_time_ms + 1;
+    EXPECT_EQ(transitions->insert_child_relation(owner, "run-one", 1, too_much).refusal,
+              ProgramChildRelationRefusal::BudgetExceeded);
+
+    auto dispatched = relation_child("child-one", ProgramChildState::Dispatched);
+    const auto dispatch = transitions->update_child_relation(owner, "run-one", 1, 1, dispatched);
+    ASSERT_EQ(dispatch.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(dispatch.relation->row_version(), 2U);
+    auto completed   = dispatched;
+    completed.state  = ProgramChildState::Completed;
+    completed.terminal_result = relation_child_result(fixture, "child-one");
+    ASSERT_EQ(transitions->update_child_relation(owner, "run-one", 1, std::nullopt, completed).status,
+              ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(transitions->update_child_relation(owner, "run-one", 1, std::nullopt, dispatched).refusal,
+              ProgramChildRelationRefusal::InvalidTransition);
+
+    // A second connection reads the same rows.
+    auto reopened = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle again = persist_and_bind(reopened, fixture);
+    const auto head = again->load_child_relation_head(owner, "run-one");
+    ASSERT_TRUE(head.has_value());
+    EXPECT_EQ(head->epoch(), 3U);
+    EXPECT_EQ(head->open_count(), 0U);
+    const auto rows = again->load_child_relations(owner, "run-one");
+    ASSERT_EQ(rows.size(), 1U);
+    EXPECT_EQ(rows[0].child().state, ProgramChildState::Completed);
+
+    // The parent's final publication closes the head; the rows stay.
+    ASSERT_EQ(again->compare_publish(
+                  owner, parent.journal_record.id, 1,
+                  terminal_publication(fixture, parent, ProgramTerminalStatus::Completed,
+                                       ContinuationState::Completed, 30)),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_TRUE(again->load_child_relation_head(owner, "run-one")->closed());
+    EXPECT_EQ(again->insert_child_relation(owner, "run-one", 1, relation_child("child-three")).refusal,
+              ProgramChildRelationRefusal::Closed);
+}
+
+// The Harness store hosts the runs of its one artifact, and those have no parent: a child run is not one of them. A
+// spawn publication is therefore refused, and it writes no relation row.
+TEST(HarnessProgramStoreTest, SqliteHarnessRefusesAChildSpawnWithoutWritingARelationRow) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, initial_publication(fixture, "run-one")),
+              ProgramTransitionPublishResult::Published);
+
+    for (const std::uint64_t fence : {2U, 1U})
+        EXPECT_EQ(transitions->compare_publish(owner, {}, 1, relation_spawn_publication(fixture, "child-one", fence)),
+                  ProgramTransitionPublishResult::Conflict);
+    EXPECT_FALSE(transitions->load(owner, "child-one").has_value());
+    EXPECT_FALSE(transitions->load_child_relation_head(owner, "run-one").has_value());
+    EXPECT_FALSE(transitions->load_child_relation(owner, "run-one", "child-one").has_value());
+}
