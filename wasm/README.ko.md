@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=512f5d7ef220302d310a2829370f4f1b293f7bfea59844949c30341cce983441 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=d1621eecee9e120a95bce8298de99d4b71f64d9a0c534189007012bdf5847ce8 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -532,7 +532,7 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 - **소유권 펜스.** `expectedFence`는 게시를 쓰는 제어 객체의 펜스입니다. 호출이 넘어가기 전에 `comparePublish`와 `comparePublishExecution`은 실행 레코드나 저널 레코드가 다른 펜스를 담은
   게시에 `"conflict"`로 답합니다. 객체도 저장된 실행의 `continuation.fence`를 저널 헤드와 같은 단계에서 `expectedFence`와 비교해, 다르면 거부해야 합니다.
   `comparePublishTakeover`는 `runId`가 가리키는 실행의 저장된 `Running` 레코드를 `fence = expectedFence + 1`과 새 저널 레코드 하나로 게시하고, 계보에 묶인 실행이면 같은 단계에서 계보 헤드를 그 레코드로 옮기며, 그 밖에는 아무것도 바꾸지 않습니다.
-- **자식 관계.** 부모의 자식은 부모의 논리 실행 ID를 키로 하는 행이고, 부모마다 헤드가 하나 있습니다(에폭, 개수, 영구 예산 집계, 닫힘 여부). `insertChildRelation`과 `updateChildRelation`은 행과 헤드를 같은 단계에서 바꾸고, `expectedParentFence`를 부모의 저장된 펜스와 비교하며, `{status, refusal, relation, head}`로 답합니다. `status`는 `"applied"`, `"already_present"`, `"refused"` 중 하나입니다. 게시는 관계 부분(`child_relations`)을 담을 수 있고, 객체는 게시와 같은 단계에서 그것을 적용합니다. 마지막 게시는 자기 헤드를 닫습니다. 규칙은 `src/program/transition_validator.h`의 것이며, 참조 저장소를 감싸는 호스트는 그것을 얻습니다. C++에서 이 연산들이 순수 가상이므로 다섯 메서드는 필수입니다. `updateChildRelation`의 펜스는 쓰는 쪽의 것입니다. 삽입과 dispatched로의 이동은 부모의 펜스, 행의 종료 상태는 끝나는 자식 자신의 펜스이며 부모의 헤드를 읽지 않습니다.
+- **자식 관계.** 부모의 자식은 부모의 논리 실행 ID를 키로 하는 행이고, 부모마다 헤드가 하나 있습니다(에폭, 개수, 영구 예산 집계, 닫힘 여부). `insertChildRelation`과 `updateChildRelation`은 행과 헤드를 같은 단계에서 바꾸고, `expectedParentFence`를 부모의 저장된 펜스와 비교하며, `{status, refusal, relation, head}`로 답합니다. `status`는 `"applied"`, `"already_present"`, `"refused"` 중 하나입니다. 게시는 관계 부분(`child_relations`)을 담을 수 있고, 객체는 게시와 같은 단계에서 그것을 적용합니다. 마지막 게시는 자기 헤드를 닫습니다. 규칙은 `src/program/transition_validator.h`의 것이며, 참조 저장소를 감싸는 호스트는 그것을 얻습니다. C++에서 이 연산들이 순수 가상이므로 다섯 메서드는 필수입니다. `updateChildRelation`의 펜스는 쓰는 쪽의 것입니다. 삽입과 dispatched로의 이동은 부모의 펜스, 행의 종료 상태와 일시정지는 그 결과를 낸 자식 자신의 펜스이며 부모의 헤드를 읽지 않습니다. 한 번도 실행되지 않은 자식의 행은 부모의 펜스로 끝납니다.
 - **지원하지 않는 것.** `compare_publish_graph_safe_point`는 직렬화되지 않는 증거를 담으므로, JavaScript 저장소는 라이브 그래프 마이그레이션에 참여하지 않습니다.
   기반 클래스처럼 `"conflict"`로 답합니다.
 

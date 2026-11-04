@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -585,6 +586,73 @@ struct SqliteHarnessRecordStore::Impl {
         }
     }
 
+    void write_relation_head(const program::ProgramChildRelationHead& head) {
+        Statement statement(
+            db,
+            "INSERT INTO neograph_harness_program_child_relation_heads "
+            "(owner_scope, parent_run_id, record_json) VALUES(?, ?, ?) "
+            "ON CONFLICT(owner_scope, parent_run_id) DO UPDATE SET record_json=excluded.record_json");
+        statement.bind_text(1, head.data().owner_scope);
+        statement.bind_text(2, head.data().parent_run_id);
+        statement.bind_text(3, head.serialize_canonical());
+        if (statement.step() != SQLITE_DONE)
+            throw_sqlite_error(db, "Program child relation head write failed");
+    }
+
+    void write_relation_row(const program::ProgramChildRelation& row) {
+        Statement statement(
+            db,
+            "INSERT INTO neograph_harness_program_child_relations "
+            "(owner_scope, parent_run_id, child_run_id, ordinal, open, record_json) "
+            "VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(owner_scope, parent_run_id, child_run_id) "
+            "DO UPDATE SET open=excluded.open, record_json=excluded.record_json");
+        statement.bind_text(1, row.owner_scope());
+        statement.bind_text(2, row.parent_run_id());
+        statement.bind_text(3, row.child_run_id());
+        statement.bind_int64(4, static_cast<std::int64_t>(row.ordinal()));
+        statement.bind_int64(5, row.is_open() ? 1 : 0);
+        statement.bind_text(6, row.serialize_canonical());
+        if (statement.step() != SQLITE_DONE)
+            throw_sqlite_error(db, "Program child relation write failed");
+    }
+
+    // A database written before the children left the run record holds them inside the stored record. The pass that
+    // creates the relation tables turns them into rows and a head (the record is not rewritten: its id binds lineage,
+    // generations and receipts). A parent with several stored generations is read from its newest record.
+    void materialize_legacy_relations() {
+        struct Found {
+            std::int64_t                                    updated_at_ms = 0;
+            program::detail::transition::LegacyRelationPlan plan;
+        };
+        std::map<std::pair<std::string, std::string>, Found> newest;
+        {
+            Statement scan(db, "SELECT record_json FROM neograph_harness_runs WHERE program_run_id<>''");
+            while (true) {
+                const auto result = scan.step();
+                if (result == SQLITE_DONE) break;
+                if (result != SQLITE_ROW) throw_sqlite_error(db, "legacy child relation scan failed");
+                const auto  wrapper = HarnessProgramRunRecord::parse(parse_own_json(scan.text(0)));
+                const auto& record  = wrapper.run_record();
+                auto        plan    = program::detail::transition::plan_legacy_relations(record);
+                if (!plan) continue;
+                const auto key = std::make_pair(record.owner_scope(), record.logical_run_id());
+                const auto at  = newest.find(key);
+                if (at == newest.end() || at->second.updated_at_ms <= record.updated_at_ms())
+                    newest.insert_or_assign(key, Found{record.updated_at_ms(), std::move(*plan)});
+            }
+        }
+        for (const auto& [key, found] : newest) {
+            Statement present(db,
+                              "SELECT COUNT(*) FROM neograph_harness_program_child_relation_heads "
+                              "WHERE owner_scope=? AND parent_run_id=?");
+            present.bind_text(1, key.first);
+            present.bind_text(2, key.second);
+            if (present.step() == SQLITE_ROW && present.integer(0) > 0) continue;
+            write_relation_head(found.plan.head);
+            for (const auto& row : found.plan.rows) write_relation_row(row);
+        }
+    }
+
     void ensure_schema() {
         exec("BEGIN IMMEDIATE;");
         try {
@@ -789,6 +857,7 @@ CREATE INDEX IF NOT EXISTS neograph_harness_program_child_relations_open
     ON neograph_harness_program_child_relations (owner_scope, parent_run_id, open, ordinal);
 UPDATE neograph_harness_schema SET version = 10 WHERE singleton = 1;
 )SQL");
+                materialize_legacy_relations();
                 schema_version = 10;
             }
             if (schema_version != 10) {
@@ -2767,34 +2836,10 @@ private:
     }
 
     void write_relation_head_locked(const program::ProgramChildRelationHead& head) {
-        Statement statement(
-            impl_->db,
-            "INSERT INTO neograph_harness_program_child_relation_heads "
-            "(owner_scope, parent_run_id, record_json) VALUES(?, ?, ?) "
-            "ON CONFLICT(owner_scope, parent_run_id) DO UPDATE SET record_json=excluded.record_json");
-        statement.bind_text(1, head.data().owner_scope);
-        statement.bind_text(2, head.data().parent_run_id);
-        statement.bind_text(3, head.serialize_canonical());
-        if (statement.step() != SQLITE_DONE)
-            throw_sqlite_error(impl_->db, "Program child relation head write failed");
+        impl_->write_relation_head(head);
     }
 
-    void write_relation_row_locked(const program::ProgramChildRelation& row) {
-        Statement statement(
-            impl_->db,
-            "INSERT INTO neograph_harness_program_child_relations "
-            "(owner_scope, parent_run_id, child_run_id, ordinal, open, record_json) "
-            "VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(owner_scope, parent_run_id, child_run_id) "
-            "DO UPDATE SET open=excluded.open, record_json=excluded.record_json");
-        statement.bind_text(1, row.owner_scope());
-        statement.bind_text(2, row.parent_run_id());
-        statement.bind_text(3, row.child_run_id());
-        statement.bind_int64(4, static_cast<std::int64_t>(row.ordinal()));
-        statement.bind_int64(5, row.is_open() ? 1 : 0);
-        statement.bind_text(6, row.serialize_canonical());
-        if (statement.step() != SQLITE_DONE)
-            throw_sqlite_error(impl_->db, "Program child relation write failed");
-    }
+    void write_relation_row_locked(const program::ProgramChildRelation& row) { impl_->write_relation_row(row); }
 
     // The writes a relation plan names, in the transaction that validated it: the head first, which the rows reference.
     void apply_relation_writes_locked(const std::optional<program::ProgramChildRelation>&     row,

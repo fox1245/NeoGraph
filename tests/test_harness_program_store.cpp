@@ -4,6 +4,7 @@
 #include <neograph/mcp/sqlite_harness_store.h>
 #include <neograph/program/registry.h>
 #include <neograph/program/replay.h>
+#include "canonical_json.h"
 
 #include <gtest/gtest.h>
 #include <sqlite3.h>
@@ -1823,6 +1824,54 @@ TEST(HarnessProgramStoreTest, SqliteHarnessChildRelationsFollowTheStoreContractA
               ProgramChildRelationRefusal::Closed);
 }
 
+// A pause is the result of a run, and the Harness store hosts no child run: a row takes no pause here, and its end is
+// still written by the parent's process under the parent's fence.
+TEST(HarnessProgramStoreTest, SqliteHarnessRefusesAChildPauseThatNamesARunItDoesNotHold) {
+    TempDb  db;
+    Fixture fixture;
+    auto    store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+    TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+    const auto            owner       = fixture.artifact.owner_scope();
+    const auto            parent      = initial_publication(fixture, "run-one");
+    ASSERT_EQ(transitions->compare_publish(owner, {}, 1, parent), ProgramTransitionPublishResult::Published);
+    const auto dispatched = relation_child("child-one", ProgramChildState::Dispatched);
+    ASSERT_EQ(transitions->insert_child_relation(owner, "run-one", 1, dispatched).status,
+              ProgramChildRelationStatus::Applied);
+
+    ProgramPendingEffectData pending_data;
+    pending_data.operation_id         = "root";
+    pending_data.call_id              = "effect-call";
+    pending_data.effect_id            = "effect-one";
+    pending_data.result_schema        = {{"type", "object"}, {"additionalProperties", true}};
+    pending_data.payload              = {{"kind", "publish"}};
+    pending_data.expires_at_unix_ms   = 5000;
+    pending_data.effect_mode          = EffectMode::Brokered;
+    pending_data.idempotency          = ProgramEffectIdempotency::NonIdempotent;
+    pending_data.core_node            = "main";
+    pending_data.core_interrupt_value = {{"value", "effect"}};
+    const ProgramPendingEffect pending(std::move(pending_data));
+    ProgramResultData          paused_data;
+    paused_data.status             = ProgramTerminalStatus::Interrupted;
+    paused_data.run_id             = "child-one";
+    paused_data.program_version_id = fixture.version_value.id();
+    paused_data.bundle_id          = fixture.bundle_value.id();
+    paused_data.operation_id       = "root";
+    paused_data.attempt            = 1;
+    paused_data.remaining_budget   = relation_child_grant();
+    paused_data.interrupt          = ProgramInterrupt{"main", pending.core_interrupt_value(), std::nullopt, pending};
+    auto paused             = dispatched;
+    paused.terminal_result  = ProgramResult::create(std::move(paused_data));
+    EXPECT_EQ(transitions->update_child_relation(owner, "run-one", 1, std::nullopt, paused).refusal,
+              ProgramChildRelationRefusal::InvalidTransition);
+    EXPECT_FALSE(transitions->load_child_relation(owner, "run-one", "child-one")->child().terminal_result.has_value());
+
+    auto completed            = dispatched;
+    completed.state           = ProgramChildState::Completed;
+    completed.terminal_result = relation_child_result(fixture, "child-one");
+    EXPECT_EQ(transitions->update_child_relation(owner, "run-one", 1, std::nullopt, completed).status,
+              ProgramChildRelationStatus::Applied);
+}
+
 // The Harness store hosts the runs of its one artifact, and those have no parent: a child run is not one of them. A
 // spawn publication is therefore refused, and it writes no relation row.
 TEST(HarnessProgramStoreTest, SqliteHarnessRefusesAChildSpawnWithoutWritingARelationRow) {
@@ -1840,4 +1889,126 @@ TEST(HarnessProgramStoreTest, SqliteHarnessRefusesAChildSpawnWithoutWritingARela
     EXPECT_FALSE(transitions->load(owner, "child-one").has_value());
     EXPECT_FALSE(transitions->load_child_relation_head(owner, "run-one").has_value());
     EXPECT_FALSE(transitions->load_child_relation(owner, "run-one", "child-one").has_value());
+}
+
+namespace {
+// The run record of `run` as an earlier version stored it: the same body with the children inside it, under the id of
+// that body. The record of a run that is stored carries no children any more.
+std::string legacy_run_record_bytes(const ProgramRunRecord& run, const std::vector<ProgramChildRecord>& children,
+                                    std::string& legacy_id) {
+    json legacy = json::object();
+    for (const auto& [key, value] : json::parse(run.serialize_canonical()).items())
+        if (key != "id") legacy[key] = value;
+    legacy["children"] = json::array();
+    for (const auto& child : children) legacy["children"].push_back(json::parse(serialize_program_child_record(child)));
+    legacy["id"] = program::detail::sha256_identity("program-run-record/v1",
+                                                    program::detail::canonical_json_bytes(legacy));
+    legacy_id = legacy["id"].get<std::string>();
+    return program::detail::canonical_json_bytes(legacy);
+}
+
+// Turns the one stored Program run of a database into a record of the earlier schema (children inside the record, no
+// relation tables, schema version 9). The record id changes, so the wrapper, its row and the publication that binds
+// the record follow it.
+void rewrite_as_earlier_schema(const std::filesystem::path& path, const std::vector<ProgramChildRecord>& children) {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open(path.string().c_str(), &db), SQLITE_OK);
+    std::string wrapper_text;
+    std::string publication_text;
+    {
+        sqlite3_stmt* select = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(db, "SELECT record_json, program_publication_json FROM neograph_harness_runs "
+                                         "WHERE program_run_id<>''", -1, &select, nullptr), SQLITE_OK);
+        ASSERT_EQ(sqlite3_step(select), SQLITE_ROW);
+        wrapper_text     = reinterpret_cast<const char*>(sqlite3_column_text(select, 0));
+        publication_text = reinterpret_cast<const char*>(sqlite3_column_text(select, 1));
+        ASSERT_EQ(sqlite3_step(select), SQLITE_DONE);
+        sqlite3_finalize(select);
+    }
+    auto        wrapper = json::parse(wrapper_text);
+    auto        publication = ProgramTransitionPublication::parse(publication_text);
+    std::string legacy_id;
+    const auto  bytes = legacy_run_record_bytes(publication.run_record, children, legacy_id);
+    ASSERT_EQ(ProgramRunRecord::parse(bytes).legacy_children_for_migration().size(), children.size());
+    wrapper["program_run"]    = bytes;
+    wrapper["program_run_id"] = legacy_id;
+    publication.run_record    = ProgramRunRecord::parse(bytes);
+    {
+        sqlite3_stmt* update = nullptr;
+        ASSERT_EQ(sqlite3_prepare_v2(db, "UPDATE neograph_harness_runs SET program_run_id=?1, record_json=?2, "
+                                         "program_publication_json=?3 WHERE program_run_id<>''",
+                                     -1, &update, nullptr), SQLITE_OK);
+        const auto record = wrapper.dump();
+        const auto stored = publication.serialize_canonical();
+        sqlite3_bind_text(update, 1, legacy_id.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update, 2, record.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update, 3, stored.c_str(), -1, SQLITE_TRANSIENT);
+        ASSERT_EQ(sqlite3_step(update), SQLITE_DONE);
+        sqlite3_finalize(update);
+    }
+    sqlite3_close(db);
+    sqlite_exec(path, "DROP TABLE neograph_harness_program_child_relations;"
+                      "DROP TABLE neograph_harness_program_child_relation_heads;"
+                      "UPDATE neograph_harness_schema SET version = 9 WHERE singleton = 1;");
+}
+}  // namespace
+
+// A database written before the children left the run record: the children inside the stored record become relation
+// rows and a head when the store opens, whether the parent is still running or has ended, and the record itself is
+// not rewritten.
+TEST(HarnessProgramStoreTest, SqliteOpenMaterializesTheChildrenOfAStoredRecord) {
+    for (const bool ended : {false, true}) {
+        TempDb  db;
+        Fixture fixture;
+        RunBudget one_child;
+        {
+            auto                  store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+            TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+            const auto            owner       = fixture.artifact.owner_scope();
+            const auto            parent      = initial_publication(fixture, "run-one");
+            ASSERT_EQ(transitions->compare_publish(owner, {}, 1, parent), ProgramTransitionPublishResult::Published);
+            // What one stored child holds, as the store itself counts it.
+            const auto inserted = transitions->insert_child_relation(owner, "run-one", 1, relation_child("child-a"));
+            ASSERT_EQ(inserted.status, ProgramChildRelationStatus::Applied);
+            one_child = inserted.head->committed_budget();
+            if (ended)
+                ASSERT_EQ(transitions->compare_publish(
+                              owner, parent.journal_record.id, 1,
+                              terminal_publication(fixture, parent, ProgramTerminalStatus::Completed,
+                                                   ContinuationState::Completed, 30)),
+                          ProgramTransitionPublishResult::Published);
+        }
+        // The relation tables of a fresh database hold the child that was inserted above; the legacy rewrite drops them.
+        rewrite_as_earlier_schema(db.path, {relation_child("child-a", ProgramChildState::Dispatched),
+                                            relation_child("child-b", ProgramChildState::Publishing)});
+        for (int open = 0; open < 2; ++open) {  // the second open finds version 10 and writes nothing
+            auto                  store       = std::make_shared<SqliteHarnessRecordStore>(db.path.string());
+            TransitionStoreHandle transitions = persist_and_bind(store, fixture);
+            const auto            owner       = fixture.artifact.owner_scope();
+            const auto            head        = transitions->load_child_relation_head(owner, "run-one");
+            ASSERT_TRUE(head.has_value()) << "ended " << ended;
+            EXPECT_EQ(head->count(), 2U);
+            EXPECT_EQ(head->open_count(), 2U);
+            EXPECT_EQ(head->closed(), ended);
+            EXPECT_EQ(head->epoch(), ended ? 3U : 2U);
+            RunBudget both = one_child;
+            both.wall_time_ms *= 2;
+            both.model_tokens *= 2;
+            both.monetary_microunits *= 2;
+            both.max_program_operations *= 2;
+            both.max_core_steps *= 2;
+            both.max_total_children *= 2;
+            EXPECT_EQ(head->committed_budget(), both);
+            const auto rows = transitions->load_child_relations(owner, "run-one");
+            ASSERT_EQ(rows.size(), 2U);
+            EXPECT_EQ(rows[0].child().child_run_id, "child-a");
+            EXPECT_EQ(rows[0].child().state, ProgramChildState::Dispatched);
+            EXPECT_EQ(rows[1].child().child_run_id, "child-b");
+            EXPECT_EQ(rows[1].ordinal(), 1U);
+            // The stored record is as the earlier version wrote it, and it still loads.
+            const auto run = transitions->load(owner, "run-one");
+            ASSERT_TRUE(run.has_value());
+            EXPECT_EQ(run->legacy_children_for_migration().size(), 2U);
+        }
+    }
 }

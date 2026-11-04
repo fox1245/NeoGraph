@@ -1281,6 +1281,57 @@ bool budget_sum_fits(const RunBudget& parent, const RunBudget& used, const RunBu
            fits(parent.max_total_children, used.max_total_children, additional.max_total_children);
 }
 
+// The budget a spawned child is granted: the link's ceiling, narrowed by a task-graph override and by what the
+// parent's own depth and child-count grants leave. One derivation for the launch of a child and for the grant a
+// command reserves ahead of it, so the two cannot differ.
+RunBudget granted_child_budget(const ModuleLinkReceipt&             receipt,
+                               const RunBudget&                     parent_granted,
+                               const std::optional<TaskGraphBudget>& budget_override,
+                               bool                                 exact_budget) {
+    const auto& limits = receipt.budget();
+    RunBudget   budget{limits.wall_time_ms,           limits.model_tokens,
+                     limits.monetary_microunits,    limits.max_concurrency,
+                     limits.max_program_operations, limits.max_core_steps,
+                     limits.max_dynamic_compiles,   limits.max_child_depth,
+                     limits.max_total_children};
+    if (budget_override) {
+        // Schema-1 fragments read 0 as "the link's whole ceiling". Schema-2 fragments
+        // are exact: the child gets what the aggregate counted, and 0 grants nothing.
+        const auto apply_requested = [exact_budget](std::uint64_t requested, std::uint64_t ceiling) {
+            if (exact_budget) return std::min(requested, ceiling);
+            return requested == 0 ? ceiling : std::min(requested, ceiling);
+        };
+        budget.wall_time_ms = apply_requested(budget_override->wall_time_ms, budget.wall_time_ms);
+        budget.model_tokens = apply_requested(budget_override->model_tokens, budget.model_tokens);
+        budget.monetary_microunits =
+            apply_requested(budget_override->monetary_microunits, budget.monetary_microunits);
+    }
+    if (parent_granted.max_child_depth > 0) {
+        budget.max_child_depth = std::min(budget.max_child_depth, parent_granted.max_child_depth - 1);
+    } else {
+        budget.max_child_depth = 0;
+    }
+    if (parent_granted.max_total_children > 0) {
+        budget.max_total_children = std::min(budget.max_total_children, parent_granted.max_total_children - 1);
+    } else {
+        budget.max_total_children = 0;
+    }
+    // #364: a spawned child runs under its parent's retry ceiling.
+    budget.max_node_retries = parent_granted.max_node_retries;
+    return budget;
+}
+
+// What a run's children hold, from its relation head: the budget that a command it resumes must leave out of its
+// reservation. A run whose grant allows no children has none and reads nothing.
+asio::awaitable<RunBudget> children_held_by(std::shared_ptr<ProgramTransitionStore> store,
+                                            std::string                             owner_scope,
+                                            std::string                             logical_run_id,
+                                            RunBudget                               attempt_budget) {
+    if (attempt_budget.max_total_children == 0) co_return RunBudget{};
+    const auto head = co_await store->load_child_relation_head(owner_scope, logical_run_id);
+    co_return head ? head->committed_budget() : RunBudget{};
+}
+
 RunBudget restore_reserved_resources(const RunBudget& available, const RunBudget& reservation) {
     RunBudget  restored    = available;
     const auto add_checked = [](auto current, auto reserved, std::string_view resource) {
@@ -2485,6 +2536,30 @@ void RunControl::set_child_recovery_callback(ChildRecoveryCallback callback) noe
     std::lock_guard lock(mutex_);
     child_recovery_callback_ = std::move(callback);
 }
+void RunControl::set_child_grant_callback(ChildGrantCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    child_grant_callback_ = std::move(callback);
+}
+asio::awaitable<std::optional<RunBudget>> RunControl::child_grant(std::string binding) const {
+    ChildGrantCallback callback;
+    {
+        std::lock_guard lock(mutex_);
+        callback = child_grant_callback_;
+    }
+    if (!callback) co_return std::nullopt;
+    co_return co_await callback(std::move(binding));
+}
+asio::awaitable<void> RunControl::refresh_children_held() const {
+    // A run that cannot have children reads nothing; the gate is the run's own grant, which is stable across restarts.
+    if (granted_budget.max_total_children == 0 || recorded_replay) co_return;
+    const auto head = co_await transitions->load_child_relation_head(owner_scope, logical_run_id);
+    std::lock_guard lock(mutex_);
+    children_held_ = head ? head->committed_budget() : RunBudget{};
+}
+RunBudget RunControl::children_held() const {
+    std::lock_guard lock(mutex_);
+    return children_held_;
+}
 asio::awaitable<ChildRecoveryMode> RunControl::can_recover_child(std::string binding,
                                                                  json        input,
                                                                  std::string operation) const {
@@ -2514,7 +2589,9 @@ asio::awaitable<std::shared_ptr<RunControl>> RunControl::reconnect_existing_chil
     }
     if (!callback)
         throw_runtime_diagnostic("P_CHILD_RECOVERY", "Existing child reconnect is not configured");
-    co_return co_await callback(std::move(binding), std::move(input), std::move(operation));
+    auto child = co_await callback(std::move(binding), std::move(input), std::move(operation));
+    co_await refresh_children_held();
+    co_return child;
 }
 void RunControl::set_child_binding_validation_callback(
     ChildBindingValidationCallback callback) noexcept {
@@ -2758,8 +2835,11 @@ asio::awaitable<std::shared_ptr<RunControl>> RunControl::launch_child(
                                  json{{"binding", std::string(binding_name)},
                                       {"operation_id", std::string(operation_id)}});
     try {
-        co_return co_await callback(binding_name, std::move(input), operation_id, execution_key,
-                                    std::move(budget_override), exact_budget);
+        auto child = co_await callback(binding_name, std::move(input), operation_id, execution_key,
+                                       std::move(budget_override), exact_budget);
+        // The child's grant is in the relation head now: the run's own spending leaves it out from here on.
+        co_await refresh_children_held();
+        co_return child;
     } catch (const ProgramDiagnosticError& error) {
         auto diagnostic = error.diagnostic();
         if (!diagnostic.witness.is_object()) diagnostic.witness = json::object();
@@ -3728,8 +3808,12 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             sink_.reset();
         }
         // A child that this run created and never started has no parent to start it now: end it Cancelled, after the
-        // parent's own terminal state is durable. A run that created no child reads nothing here.
-        if (is_published && child_creation_noted() && result.status() != ProgramTerminalStatus::Interrupted &&
+        // parent's own terminal state is durable. The signal is stored, not remembered: the run's final publication
+        // closed its relation head, and that head counts the rows that are still open, whichever process created them.
+        // A run whose granted budget allows no child cannot have rows and reads nothing here; a run with rows reads one
+        // head, and lists its rows only when the head counts an open one.
+        if (is_published && granted_budget.max_total_children != 0 &&
+            result.status() != ProgramTerminalStatus::Interrupted &&
             result.status() != ProgramTerminalStatus::AmbiguousEffect) {
             UnstartedChildrenEnder ender;
             {
@@ -3739,7 +3823,9 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             if (ender) {
                 std::vector<ProgramNotice> not_ended;
                 try {
-                    not_ended = co_await ender(EndedParent{owner_scope, logical_run_id, run_id});
+                    const auto head = co_await transitions->load_child_relation_head(owner_scope, logical_run_id);
+                    if (head && head->open_count() > 0)
+                        not_ended = co_await ender(EndedParent{owner_scope, logical_run_id, run_id});
                 } catch (...) {
                     not_ended.push_back(ProgramNotice{
                         "P_CHILD_NOT_ENDED",
@@ -6462,41 +6548,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                                                  resolved->version, std::move(invocation)))
                     .control_;
             }
-            const auto& limits = resolved->receipt.budget();
-            RunBudget   budget{limits.wall_time_ms,           limits.model_tokens,
-                             limits.monetary_microunits,    limits.max_concurrency,
-                             limits.max_program_operations, limits.max_core_steps,
-                             limits.max_dynamic_compiles,   limits.max_child_depth,
-                             limits.max_total_children};
-            if (budget_override) {
-                // Schema-1 fragments read 0 as "the link's whole ceiling". Schema-2 fragments
-                // are exact: the child gets what the aggregate counted, and 0 grants nothing.
-                const auto apply_requested = [exact_budget](std::uint64_t requested,
-                                                            std::uint64_t ceiling) {
-                    if (exact_budget) return std::min(requested, ceiling);
-                    return requested == 0 ? ceiling : std::min(requested, ceiling);
-                };
-                budget.wall_time_ms =
-                    apply_requested(budget_override->wall_time_ms, budget.wall_time_ms);
-                budget.model_tokens =
-                    apply_requested(budget_override->model_tokens, budget.model_tokens);
-                budget.monetary_microunits = apply_requested(budget_override->monetary_microunits,
-                                                             budget.monetary_microunits);
-            }
-            if (parent->granted_budget.max_child_depth > 0) {
-                budget.max_child_depth =
-                    std::min(budget.max_child_depth, parent->granted_budget.max_child_depth - 1);
-            } else {
-                budget.max_child_depth = 0;
-            }
-            if (parent->granted_budget.max_total_children > 0) {
-                budget.max_total_children = std::min(budget.max_total_children,
-                                                     parent->granted_budget.max_total_children - 1);
-            } else {
-                budget.max_total_children = 0;
-            }
-            // #364: a spawned child runs under its parent's retry ceiling.
-            budget.max_node_retries = parent->granted_budget.max_node_retries;
+            const auto budget =
+                granted_child_budget(resolved->receipt, parent->granted_budget, budget_override, exact_budget);
             const auto child_run_id = detail::sha256_identity(
                 "program-dsl-child/v1",
                 detail::canonical_json_bytes(
@@ -6547,6 +6600,24 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             }
             co_return child.control_;
         });
+        // What a command's spawn will be granted, derived exactly as the launch above derives it, so a command can
+        // leave that grant out of its reservation.
+        control->set_child_grant_callback(
+            [this, weak_impl, weak_control](std::string binding_name)
+                -> asio::awaitable<std::optional<RunBudget>> {
+                const auto keep = weak_impl.lock();
+                if (!keep) throw std::runtime_error("ProgramRuntime has been destroyed");
+                const auto parent = weak_control.lock();
+                if (!parent) throw std::runtime_error("Parent Program control expired");
+                const auto resolved = (co_await resolve_child_binding(parent, binding_name));
+                if (!resolved)
+                    throw_runtime_diagnostic("P_CHILD_BINDING",
+                                             "Verified child binding was not resolved",
+                                             json{{"binding", std::string(binding_name)}});
+                // An inherited child holds its grant in the relation head already.
+                if (co_await inherited_child(parent, binding_name)) co_return std::nullopt;
+                co_return granted_child_budget(resolved->receipt, parent->granted_budget, std::nullopt, false);
+            });
         if (config.task_graph_fragments && config.task_graph_policy_resolver)
             control->set_task_graph_expansion_context(config.task_graph_fragments,
                                                       config.task_graph_policy_resolver);
@@ -7499,8 +7570,6 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
     const std::string parent_run_id(parent.control_->logical_run_id);
     invocation.parent_run_id    = parent_run_id;
     invocation.child_depth      = parent_depth + 1;
-    // The parent's end must look for a child that this call creates and never starts.
-    parent.control_->note_child_creation();
     const auto run_id           = child_run_id_for(parent_run_id, link, invocation);
     invocation.requested_run_id = run_id;
     const auto canonical = bind_runtime_invocation(invocation, owner_scope, version.id(), run_id);
@@ -10830,7 +10899,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
         resumed_reservation = RunBudget{};
     } else if (javascript_pending && javascript_pending->core_resume_operation_id &&
                resumed_reservation == RunBudget{}) {
-        auto reservation    = detail::reserve_command_resources(attempt_budget);
+        const auto held = co_await children_held_by(impl_->transitions, std::string(owner_scope),
+                                                    previous->logical_run_id(), attempt_budget);
+        auto reservation    = detail::reserve_command_resources(attempt_budget, held);
         resumed_remaining   = std::move(reservation.remaining);
         resumed_reservation = std::move(reservation.reservation);
     }
@@ -11366,7 +11437,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconcile_core(std::string       
     // released it. The attempt that continues the call needs one, as a resume
     // makes it (resume_core), so that the call settles its usage against it.
     if (resume_javascript_core && resumed_reservation == RunBudget{}) {
-        auto reservation    = detail::reserve_command_resources(attempt_budget);
+        const auto held = co_await children_held_by(impl_->transitions, std::string(owner_scope),
+                                                    previous->logical_run_id(), attempt_budget);
+        auto reservation    = detail::reserve_command_resources(attempt_budget, held);
         resumed_remaining   = std::move(reservation.remaining);
         resumed_reservation = std::move(reservation.reservation);
     }

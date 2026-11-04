@@ -968,6 +968,8 @@ inline RelationPlan plan_relation_update(TransitionReads&          reads,
             if (writer->continuation().fence != writer_fence)
                 return refuse(ProgramChildRelationRefusal::FenceMismatch);
         } else {
+            // A pause is the result of a run: a row with no run takes none.
+            if (!ends) return refuse(ProgramChildRelationRefusal::InvalidTransition);
             const auto owner_parent =
                 active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::None);
             if (!owner_parent || owner_parent->run_record.continuation().fence != writer_fence)

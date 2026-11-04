@@ -1816,16 +1816,21 @@ std::string javascript_command_effect_identity(std::string_view         bundle_i
         detail::canonical_json_bytes(payload));
 }
 
-CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept {
+CommandBudgetReservation reserve_command_resources(RunBudget available, const RunBudget& withheld) noexcept {
     RunBudget reservation;
+    // Wall time is a clock: it is reserved whole, as it drains while the children run beside the command.
     reservation.wall_time_ms        = available.wall_time_ms;
-    reservation.model_tokens        = available.model_tokens;
-    reservation.monetary_microunits = available.monetary_microunits;
-    reservation.max_core_steps      = available.max_core_steps;
     available.wall_time_ms          = 0;
-    available.model_tokens          = 0;
-    available.monetary_microunits   = 0;
-    available.max_core_steps        = 0;
+    // The rest is reserved without what the parent's children hold or are about to hold: that part stays in the
+    // remainder, where the command cannot spend it and the settlement leaves it standing.
+    const auto reserve = [](std::uint64_t& remaining, std::uint64_t& reserved, std::uint64_t kept) noexcept {
+        const auto left = std::min(remaining, kept);
+        reserved        = remaining - left;
+        remaining       = left;
+    };
+    reserve(available.model_tokens, reservation.model_tokens, withheld.model_tokens);
+    reserve(available.monetary_microunits, reservation.monetary_microunits, withheld.monetary_microunits);
+    reserve(available.max_core_steps, reservation.max_core_steps, withheld.max_core_steps);
     return CommandBudgetReservation{std::move(available), std::move(reservation)};
 }
 
@@ -1910,6 +1915,41 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::uint64_t            dynamic_compile_count = 0;
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
+    // The part of the grant that the running JavaScript command leaves to the parent's children (what they hold and
+    // what the command's own spawns will be granted): the command's Core calls cannot spend it. Zero outside a command.
+    std::atomic<std::uint64_t> command_withheld_tokens{0};
+    std::atomic<std::uint64_t> command_withheld_steps{0};
+    std::atomic<std::uint64_t> command_withheld_money{0};
+    // What a Core call may not spend: the larger of the running command's withheld part and what the run's children
+    // hold now. A plan has no command, so for a plan parent it is the holdings alone, read at every Core dispatch,
+    // after the spawn that placed them.
+    const auto core_withheld = [&]() {
+        const auto held = control->children_held();
+        RunBudget  withheld;
+        withheld.model_tokens =
+            std::max(command_withheld_tokens.load(std::memory_order_acquire), held.model_tokens);
+        withheld.max_core_steps =
+            std::max(command_withheld_steps.load(std::memory_order_acquire), held.max_core_steps);
+        withheld.monetary_microunits =
+            std::max(command_withheld_money.load(std::memory_order_acquire), held.monetary_microunits);
+        return withheld;
+    };
+    const auto apply_core_ceiling = [&]() {
+        if (monetary)
+            monetary->set_ceiling(subtract_saturated(control->granted_budget.monetary_microunits,
+                                                     core_withheld().monetary_microunits));
+    };
+    const auto apply_command_withheld = [&](const RunBudget& kept) {
+        command_withheld_tokens.store(kept.model_tokens, std::memory_order_release);
+        command_withheld_steps.store(kept.max_core_steps, std::memory_order_release);
+        command_withheld_money.store(kept.monetary_microunits, std::memory_order_release);
+        apply_core_ceiling();
+    };
+    // Program operations are debited up front, so the children's operations come off the parent's own ceiling.
+    const auto spendable_operations = [&]() {
+        return subtract_saturated(control->granted_budget.max_program_operations,
+                                  control->children_held().max_program_operations);
+    };
     // #364: RunBudget::max_node_retries, shared by every Core call of the
     // attempt; its use is reported as ProgramUsage::node_retries.
     const auto node_retry_ceiling =
@@ -2003,6 +2043,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // before the command has settled it must not return it unmeasured: it ends with the remainder the journal
         // holds, and the reservation stays unreturned.
         if (control_source) unreconciled_javascript_remaining = co_await held_command_remainder(*control);
+        // What the run's children hold is read once here, so that a resumed or recovered attempt reserves a command
+        // without it; the run's own launches refresh it as they happen.
+        co_await control->refresh_children_held();
         if (checkpoint_id) {
             resume_checkpoint = co_await inspect_checkpoint(control, *checkpoint_id);
             if (const auto durable = co_await control->async_transitions().load(
@@ -2124,7 +2167,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         };
         auto charge_operation = [&](std::string_view operation_id) -> std::optional<PlanExecution> {
             std::lock_guard lock(plan_mutex);
-            if (operation_count >= control->granted_budget.max_program_operations)
+            if (operation_count >= spendable_operations())
                 return plan_failure(
                     ProgramTerminalStatus::BudgetExhausted, "P_PROGRAM_OPERATION_BUDGET",
                     "Program operation budget exhausted", std::string(operation_id));
@@ -2134,7 +2177,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         auto reserve_operations = [&](std::string_view operation_id,
                                       std::size_t      count) -> std::optional<PlanExecution> {
             std::lock_guard lock(plan_mutex);
-            const auto      limit = control->granted_budget.max_program_operations;
+            const auto      limit = spendable_operations();
             if (count > limit || operation_count > limit - count)
                 return plan_failure(
                     ProgramTerminalStatus::BudgetExhausted, "P_PROGRAM_OPERATION_BUDGET",
@@ -2272,6 +2315,42 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             co_return std::nullopt;
         };
 
+        // The permanent budget that the spawns of a command (through ng.await and the members of a join) will be
+        // granted, added to `total`; false when a sum overflows. A spawn whose child the run already holds adds
+        // nothing: its grant is in the relation head. The grants are those the launch of each child derives.
+        std::function<asio::awaitable<bool>(const JavaScriptCommand&, std::string, std::size_t, RunBudget&)>
+            collect_spawn_grants;
+        collect_spawn_grants = [&](const JavaScriptCommand& command, std::string operation_id,
+                                   std::size_t scope_depth, RunBudget& total) -> asio::awaitable<bool> {
+            if (scope_depth > kMaxJavaScriptStructuredScopeDepth) co_return false;
+            const auto arguments = command.arguments();
+            if (command.kind() == JavaScriptCommandKind::Spawn) {
+                const auto binding = arguments.at("child_binding").get<std::string>();
+                if ((co_await control->can_recover_child(binding, arguments.at("input"), operation_id)) ==
+                    ChildRecoveryMode::Existing)
+                    co_return true;
+                const auto grant = co_await control->child_grant(binding);
+                if (!grant) co_return true;
+                const auto permanent = transition::child_permanent_reservation(*grant);
+                if (!permanent) co_return false;
+                const auto sum = transition::add_permanent_budget(total, *permanent);
+                if (!sum) co_return false;
+                total = *sum;
+            } else if (command.kind() == JavaScriptCommandKind::Await) {
+                co_return co_await collect_spawn_grants(JavaScriptCommand::from_json(arguments.at("command")),
+                                                        operation_id + "/await", scope_depth + 1, total);
+            } else if (command.kind() == JavaScriptCommandKind::Join) {
+                const auto& members = arguments.at("members");
+                for (std::size_t index = 0; index < members.size(); ++index) {
+                    if (!(co_await collect_spawn_grants(JavaScriptCommand::from_json(members.at(index)),
+                                                        operation_id + "/member/" + std::to_string(index),
+                                                        scope_depth + 1, total)))
+                        co_return false;
+                }
+            }
+            co_return true;
+        };
+
         // #402: the checkpoints a recovered command's calls continue from;
         // their content is not the run's exact checkpoint.
         std::set<std::string> recovery_checkpoint_ids;
@@ -2314,18 +2393,22 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             auto next_resume = std::move(resume);
             auto next_input = std::move(core_input);
             for (;;) {
+                const auto withheld = core_withheld();
+                apply_core_ceiling();
                 graph::RunConfig config;
                 config.thread_id          = thread_id;
                 config.input              = next_resume ? json::object() : next_input;
                 config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
-                    subtract_saturated(control->granted_budget.max_core_steps,
-                                       core_progress->steps()),
+                    subtract_saturated(
+                        subtract_saturated(control->granted_budget.max_core_steps, withheld.max_core_steps),
+                        core_progress->steps()),
                     static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
                 config.stream_mode        = graph::StreamMode::ALL;
                 config.cancel_token       = operation_token;
                 config.usage              = usage;
                 config.model_token_budget = control->recorded_replay
-                    ? control->invocation.budget.model_tokens : control->granted_budget.model_tokens;
+                    ? control->invocation.budget.model_tokens
+                    : subtract_saturated(control->granted_budget.model_tokens, withheld.model_tokens);
                 // A grant is an amount, and 0 grants nothing: Core holds every model call against the ceiling,
                 // 0 included, and sends none under it. A recorded replay sends none, so its ceiling is only read.
                 config.model_token_budget_bounded = !control->recorded_replay;
@@ -3410,7 +3493,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         if (resume_checkpoint) thread_id = resume_checkpoint->core_thread_id;
                         state = resume_answer ? detail::owned_json_copy(*resume_answer) : json();
                     } else if (!control->recorded_replay) {
-                        if (operation_count >= control->granted_budget.max_program_operations)
+                        if (operation_count >= spendable_operations())
                             co_return plan_failure(ProgramTerminalStatus::BudgetExhausted,
                                                    "P_PROGRAM_OPERATION_BUDGET",
                                                    "Program operation budget exhausted",
@@ -6364,8 +6447,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         const auto record =
                             co_await control->async_transitions().load(control->owner_scope, control->run_id);
                         if (record && record->fork_receipt()) {
-                            auto reservation =
-                                reserve_command_resources(durable_resumed->remaining_budget);
+                            auto reservation = reserve_command_resources(
+                                durable_resumed->remaining_budget, control->children_held());
                             (void)co_await control->publish_command_reservation(
                                 std::move(reservation.remaining),
                                 std::move(reservation.reservation));
@@ -6386,6 +6469,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                     resource_reservation = durable_resumed->inflight_reservation;
                     unreconciled_javascript_remaining = durable_resumed->remaining_budget;
+                    // What the journal left in the remainder beneath the reservation is what the command may not spend.
+                    apply_command_withheld(durable_resumed->remaining_budget);
                     active_javascript_command =
                         ActiveJavaScriptCommand{ordinal, command_value, effect_id};
                 }
@@ -6421,7 +6506,27 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         0, 0, 0, static_cast<std::uint64_t>(command_count), 0, 0};
                     const auto after_operations = settle_budget(
                         durable_before_dispatch->remaining_budget(), operation_reservation);
-                    auto reservation             = reserve_command_resources(after_operations);
+                    // The command reserves what the parent can still spend: not what its children hold, and not
+                    // what the spawns of this command will be granted. The spawns' grants must fit what is left
+                    // beyond the holdings, as the store admits a child; a command that cannot fund them ends here,
+                    // before any member starts, whichever member would have started first.
+                    RunBudget spawn_grants;
+                    if (!(co_await collect_spawn_grants(command_value, operation_id, 0, spawn_grants)))
+                        co_return plan_failure(ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                                               "Child budget exceeds the range of the parent's allocation",
+                                               operation_id);
+                    const auto children_withheld = transition::add_permanent_budget(control->children_held(), spawn_grants);
+                    const auto without_clock = [](RunBudget budget) {
+                        budget.wall_time_ms = 0;
+                        return budget;
+                    };
+                    if (!children_withheld ||
+                        !transition::permanent_budget_at_most(without_clock(*children_withheld),
+                                                              without_clock(after_operations)))
+                        co_return plan_failure(ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                                               "Child budget exceeds the parent's unspent allocation",
+                                               operation_id);
+                    auto reservation             = reserve_command_resources(after_operations, *children_withheld);
                     resource_reservation         = reservation.reservation;
                     const auto pending_remaining = reservation.remaining;
                     auto publish_call_4 = control->publish_javascript_command(
@@ -6452,6 +6557,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     unreconciled_javascript_remaining = pending_remaining;
                     active_javascript_command =
                         ActiveJavaScriptCommand{ordinal, command_value, effect_id};
+                    apply_command_withheld(pending_remaining);
                 }
 
                 const auto    checkpoint_before_command = root_checkpoint();
@@ -6659,6 +6765,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
                 unreconciled_javascript_remaining = remaining;
                 active_javascript_command.reset();
+                apply_command_withheld(RunBudget{});
                 if (command_result.status != ProgramTerminalStatus::Completed)
                     co_return command_result;
                 if (command_value.kind() == JavaScriptCommandKind::Checkpoint) {

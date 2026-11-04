@@ -3276,7 +3276,21 @@ ProgramResult relation_child_result(const std::string& child_id,
                                "checkpoint-1", 1};
     if (status == ProgramTerminalStatus::Cancelled)
         data.failure = ProgramFailure{"P_TEST", "cancelled", "root", "main", 1, json::object()};
+    if (status == ProgramTerminalStatus::Interrupted) {
+        const auto pending = pending_effect();
+        data.interrupt     = ProgramInterrupt{"main", pending.core_interrupt_value(), std::nullopt, pending};
+    }
     return ProgramResult::create(std::move(data));
+}
+
+// A child's pause: its row stays open (Dispatched) and carries the Interrupted result of `result_run_id` (the child's
+// own run unless one is named).
+ProgramChildRecord relation_child_paused(const ProgramChildRecord& before, std::string result_run_id = {}) {
+    auto next            = before;
+    next.state           = ProgramChildState::Dispatched;
+    next.terminal_result = relation_child_result(result_run_id.empty() ? before.child_run_id : result_run_id,
+                                                 ProgramTerminalStatus::Interrupted);
+    return next;
 }
 
 ProgramChildRecord relation_child_after(const ProgramChildRecord& before, ProgramChildState state,
@@ -3625,6 +3639,54 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationEndIsRecordedUnderTheChil
     ASSERT_EQ(recorded.status, ProgramChildRelationStatus::Applied);
     EXPECT_EQ(recorded.relation->child().state, ProgramChildState::Completed);
     EXPECT_EQ(recorded.head->open_count(), 0U);
+}
+
+// The pause of a child (its row stays open and carries the Interrupted result of its run) is the child's own write too:
+// the child's run holds the fence, not the parent.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationPauseIsRecordedUnderTheChildsFenceNotTheParents) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_spawn_publication("child-1", 1)),
+              ProgramTransitionPublishResult::Published);
+    // The parent is taken over: its fence is 2, and the child's run still runs under 1.
+    ASSERT_EQ(store.compare_publish_takeover("owner-a", "run-1", parent.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+
+    const auto paused = relation_child_paused(relation_child("child-1", ProgramChildState::Dispatched));
+    expect_refused(store.update_child_relation("owner-a", "run-1", 2, std::nullopt, paused),
+                   ProgramChildRelationRefusal::FenceMismatch);
+    ASSERT_TRUE(store.load_child_relation("owner-a", "run-1", "child-1").has_value());
+    EXPECT_FALSE(store.load_child_relation("owner-a", "run-1", "child-1")->child().terminal_result.has_value());
+
+    const auto recorded = store.update_child_relation("owner-a", "run-1", 1, std::nullopt, paused);
+    ASSERT_EQ(recorded.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(recorded.relation->child().state, ProgramChildState::Dispatched);
+    ASSERT_TRUE(recorded.relation->child().terminal_result.has_value());
+    EXPECT_EQ(recorded.relation->child().terminal_result->status(), ProgramTerminalStatus::Interrupted);
+    EXPECT_EQ(recorded.head->open_count(), 1U);
+}
+
+// A pause is the result of a run, so a row with no run behind it takes none. Only a terminal state may be written for
+// such a row, by the parent's process under the parent's fence.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationPauseNamingARunThatDoesNotExistIsRefused) {
+    auto& store = primary_store();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto dispatched = relation_child("child-1", ProgramChildState::Dispatched);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, dispatched).status,
+              ProgramChildRelationStatus::Applied);
+    ASSERT_FALSE(store.load("owner-a", "child-1").has_value());
+
+    expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, relation_child_paused(dispatched)),
+                   ProgramChildRelationRefusal::InvalidTransition);
+    EXPECT_FALSE(store.load_child_relation("owner-a", "run-1", "child-1")->child().terminal_result.has_value());
+
+    const auto ended = store.update_child_relation(
+        "owner-a", "run-1", 1, std::nullopt,
+        relation_child_after(dispatched, ProgramChildState::Cancelled, ProgramTerminalStatus::Cancelled));
+    ASSERT_EQ(ended.status, ProgramChildRelationStatus::Applied);
+    EXPECT_FALSE(ended.relation->is_open());
 }
 
 TEST_P(ProgramTransitionStoreConformance, ChildRelationUpdateFollowsTheStateRule) {
@@ -4083,6 +4145,18 @@ TEST(ProgramTransitionStoreTest, ChildRelationRowAndHeadRejectTamperAndInconsist
     auto leased = head_data;
     leased.committed_budget.max_concurrency = 1;
     EXPECT_THROW((void)ProgramChildRelationHead::create(leased), std::invalid_argument);
+}
+
+// The run record as an earlier version stored it: the same body with a `children` array, under the id of that body.
+std::string legacy_run_record_bytes(const ProgramRunRecord& run, const std::vector<ProgramChildRecord>& children) {
+    json legacy = json::object();
+    for (const auto& [key, value] : json::parse(run.serialize_canonical()).items()) {
+        if (key != "id") legacy[key] = value;
+    }
+    legacy["children"] = json::array();
+    for (const auto& child : children) legacy["children"].push_back(json::parse(serialize_program_child_record(child)));
+    legacy["id"] = detail::sha256_identity("program-run-record/v1", detail::canonical_json_bytes(legacy));
+    return detail::canonical_json_bytes(legacy);
 }
 
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
@@ -4573,18 +4647,9 @@ TEST(ProgramTransitionStoreTest, SQLiteOpenMaterializesTheChildrenOfAStoredRecor
         OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
     }
-    // The record as an earlier version stored it: the same body with a `children` array, under the id of that body.
-    json legacy = json::object();
-    for (const auto& [key, value] : json::parse(start.run_record.serialize_canonical()).items()) {
-        if (key != "id") legacy[key] = value;
-    }
-    legacy["children"] = json::array();
-    const auto dispatched = relation_child("child-a", ProgramChildState::Dispatched);
-    const auto publishing = relation_child("child-b", ProgramChildState::Publishing);
-    for (const auto& child : {dispatched, publishing})
-        legacy["children"].push_back(json::parse(serialize_program_child_record(child)));
-    legacy["id"] = detail::sha256_identity("program-run-record/v1", detail::canonical_json_bytes(legacy));
-    const auto legacy_bytes = detail::canonical_json_bytes(legacy);
+    const auto dispatched   = relation_child("child-a", ProgramChildState::Dispatched);
+    const auto publishing   = relation_child("child-b", ProgramChildState::Publishing);
+    const auto legacy_bytes = legacy_run_record_bytes(start.run_record, {dispatched, publishing});
     ASSERT_EQ(ProgramRunRecord::parse(legacy_bytes).legacy_children_for_migration().size(), 2U);
     std::string hex;
     for (const unsigned char byte : legacy_bytes) {
@@ -4996,6 +5061,59 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
         ASSERT_TRUE(run);
         ASSERT_EQ(children_of(store, "owner-a", *run).size(), 1U);
         EXPECT_EQ(children_of(store, "owner-a", *run).front().child_run_id, "child-run-1");
+    }
+}
+
+// A database written before the children left the run record: the children inside the stored record become relation
+// rows when the store opens, once, and the record itself is not rewritten.
+TEST(ProgramTransitionStoreTest, PostgreSQLOpenMaterializesTheChildrenOfAStoredRecord) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);  // drops the relation tables and the migration marker with them
+    const auto start = relation_parent_start();
+    {
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    }
+    const auto dispatched   = relation_child("child-a", ProgramChildState::Dispatched);
+    const auto publishing   = relation_child("child-b", ProgramChildState::Publishing);
+    const auto legacy_bytes = legacy_run_record_bytes(start.run_record, {dispatched, publishing});
+    ASSERT_EQ(ProgramRunRecord::parse(legacy_bytes).legacy_children_for_migration().size(), 2U);
+    {
+        std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
+        ASSERT_EQ(PQstatus(connection.get()), CONNECTION_OK);
+        const char* values[1] = {legacy_bytes.c_str()};
+        std::unique_ptr<PGresult, decltype(&PQclear)> update(
+            PQexecParams(connection.get(),
+                         "UPDATE neograph_program_transition_run_heads_v2 SET run_record_bytes = $1 WHERE run_id = 'run-1'",
+                         1, nullptr, values, nullptr, nullptr, 0),
+            PQclear);
+        ASSERT_EQ(PQresultStatus(update.get()), PGRES_COMMAND_OK);
+        std::unique_ptr<PGresult, decltype(&PQclear)> drop(
+            PQexec(connection.get(), "DROP TABLE IF EXISTS neograph_program_child_relation_migration_v1"), PQclear);
+        ASSERT_EQ(PQresultStatus(drop.get()), PGRES_COMMAND_OK);
+    }
+    for (int open = 0; open < 2; ++open) {  // the second open finds the marker and writes nothing
+        OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
+        const auto head = store.load_child_relation_head("owner-a", "run-1");
+        ASSERT_TRUE(head.has_value());
+        EXPECT_EQ(head->count(), 2U);
+        EXPECT_EQ(head->open_count(), 2U);
+        EXPECT_FALSE(head->closed());
+        EXPECT_EQ(head->epoch(), 2U);
+        RunBudget both = relation_child_reservation();
+        both.wall_time_ms *= 2; both.model_tokens *= 2; both.monetary_microunits *= 2;
+        both.max_program_operations *= 2; both.max_core_steps *= 2; both.max_total_children *= 2;
+        EXPECT_EQ(head->committed_budget(), both);
+        const auto rows = store.load_child_relations("owner-a", "run-1");
+        ASSERT_EQ(rows.size(), 2U);
+        EXPECT_EQ(rows[0].child().child_run_id, "child-a");
+        EXPECT_EQ(rows[0].child().state, ProgramChildState::Dispatched);
+        EXPECT_EQ(rows[1].child().child_run_id, "child-b");
+        EXPECT_EQ(rows[1].ordinal(), 1U);
+        const auto run = store.load("owner-a", "run-1");
+        ASSERT_TRUE(run.has_value());
+        EXPECT_EQ(run->serialize_canonical(), legacy_bytes);
     }
 }
 #endif
@@ -6197,7 +6315,7 @@ TEST_P(ProgramTransitionStoreConformance, ErrorsAreConflictsOrRuntimeErrors) {
 }
 
 namespace {
-class CountingTransitionReads final : public neograph::program::detail::transition::TransitionReads {
+class CountingTransitionReads : public neograph::program::detail::transition::TransitionReads {
 public:
     std::size_t                                               command_log_reads    = 0;
     std::size_t                                               latest_command_reads = 0;
@@ -6263,6 +6381,52 @@ public:
     }
 };
 }  // namespace
+
+namespace {
+// The stored state of one parent that still reads as running while its relation head is closed, holding one row that
+// was never dispatched.
+class ClosedHeadReads final : public CountingTransitionReads {
+public:
+    std::optional<ProgramRunRecord>         run;
+    std::optional<ProgramJournalRecord>     journal;
+    std::optional<ProgramChildRelationHead> head;
+    std::optional<ProgramChildRelation>     row;
+
+    std::optional<ProgramRunRecord> run_record(std::string_view, Lock) override { return run; }
+    std::optional<ProgramJournalRecord> journal_record(std::string_view, Lock) override { return journal; }
+    std::optional<ProgramChildRelationHead> relation_head(std::string_view, Lock) override { return head; }
+    std::optional<ProgramChildRelation> relation_row(std::string_view, std::string_view, Lock) override {
+        return row;
+    }
+};
+}  // namespace
+
+// Moving a row that is still Publishing to Dispatched, as a child's first publication does, is refused as Closed when
+// the parent's head is closed, whatever state the parent reads as: the head is the authority for the set of rows.
+TEST(ProgramTransitionStoreTest, RelationInsertThatAdvancesAPublishingRowRefusesAClosedHeadAsClosed) {
+    namespace transition = neograph::program::detail::transition;
+    const auto start     = relation_parent_start();
+    ClosedHeadReads reads;
+    reads.run     = start.run_record;
+    reads.journal = start.journal_record;
+    ProgramChildRelationHeadData head;
+    head.owner_scope      = "owner-a";
+    head.parent_run_id    = "run-1";
+    head.epoch            = 2;
+    head.count            = 1;
+    head.open_count       = 1;
+    head.committed_budget = relation_child_reservation();
+    head.closed           = true;
+    head.closed_by        = start.journal_record.id;
+    reads.head            = ProgramChildRelationHead::create(std::move(head));
+    reads.row = ProgramChildRelation::create(
+        ProgramChildRelationData{"owner-a", "run-1", 0, relation_child("child-1"), 1});
+
+    const auto refused = transition::plan_relation_insert(
+        reads, "owner-a", "run-1", 1, relation_child("child-1", ProgramChildState::Dispatched), true);
+    EXPECT_EQ(refused.status, ProgramChildRelationStatus::Refused);
+    EXPECT_EQ(refused.refusal, ProgramChildRelationRefusal::Closed);
+}
 
 TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
     namespace transition = neograph::program::detail::transition;
