@@ -2100,10 +2100,14 @@ public:
     NG_FORWARD_RELATION_BLOCKING_READS_EXCEPT_LIST(*inner_)
     /// How many times the whole relation set of a parent was listed: the cold paths list it, the per-child path never.
     mutable std::atomic<unsigned> relation_list_reads{0};
+    /// Rewrites the rows a listing returns, to present a stored state that the store itself would have refused to write.
+    std::function<void(std::vector<ProgramChildRelation>&)> filter_listed_relations;
     std::vector<ProgramChildRelation> load_child_relations_sync(
         std::string_view o, std::string_view p, bool open_only) const override {
         relation_list_reads.fetch_add(1, std::memory_order_relaxed);
-        return inner_->load_child_relations(o, p, open_only);
+        auto rows = inner_->load_child_relations(o, p, open_only);
+        if (filter_listed_relations) filter_listed_relations(rows);
+        return rows;
     }
     /// Runs after an insert or update of a relation row was applied, with the row's child record.
     std::function<void(const ProgramChildRecord&)> after_relation_write;
@@ -18786,6 +18790,77 @@ TEST(ProgramRuntimeTest, RecoveryOfAResumedCoreCallKeepsTheReservationThatLeftOu
     const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
     ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
     EXPECT_EQ(recovered.output(), (json{{"value", json{{"decision", "approved"}}.dump()}}));
+    held.release();
+    (void)original.wait();
+}
+
+// A runtime that hydrates the child reservations of a parent it did not start counts the parent's in-flight
+// reservation once. The parent holds a resumed Core call: its remainder is the child's grant, its reservation is what
+// the call may still spend, and together they are exactly what the parent had when the child was admitted. The stored
+// row of the child is then read with one Core step more than that sum (a state the store would refuse to write), which
+// fits only if the reservation were counted twice: recovery refuses it with P_CHILD_BUDGET, and the child is never run.
+TEST(ProgramRuntimeTest, HydratingAParentsChildReservationsRestoresItsInflightReservationOnce) {
+    interrupt_calls.store(0);
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    AdmittedRuntime fixture(2, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    constexpr std::uint64_t child_steps = 20;
+    const RunBudget         parent_budget{40000, 4000, 4000, 2, 32, 30, 0, 1, 1};
+    const auto              child_version  = fixture.admit("runtime-completed");
+    const auto              parent_version = admit_javascript_within(
+        fixture, "hydration-restores-inflight-once.js",
+        javascript_runtime_source("runtime-resume-hook", R"JS(
+    yield ng.spawn("child", {}, "spawn:child");
+    const reply = yield ng.callCore("main", {decision: input.decision}, "approval");
+    return {value: reply.value};
+)JS"),
+        parent_budget);
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
+                                            ExecutionGuarantee::Unmanaged);
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"decision", "run input"}}, parent_budget, "trace-hydration-once", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+    const auto paused = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(paused.has_value());
+    const auto kept = paused->remaining_budget.max_core_steps;
+    ASSERT_GT(kept, child_steps);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-hydration-once-resume"));
+    ASSERT_TRUE(held.entered());
+    const auto holding = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(holding.has_value());
+    const auto inflight_steps = holding->inflight_reservation.max_core_steps;
+    ASSERT_GT(inflight_steps, 0U);
+    // What the parent can spend and has set aside is exactly what it had before the call: one restore of the
+    // reservation gives `kept`, two would give `kept + inflight_steps`.
+    ASSERT_EQ(holding->remaining_budget.max_core_steps + inflight_steps, kept);
+
+    // The recovering process reads the child's row with a grant that exceeds one restore and fits a second one.
+    const std::uint64_t one_step_over = kept + 1;
+    ASSERT_LE(one_step_over, kept + inflight_steps);
+    journal->filter_listed_relations = [&](std::vector<ProgramChildRelation>& rows) {
+        for (auto& row : rows) {
+            auto data = row.data();
+            data.child.invocation.granted_budget.max_core_steps = one_step_over;
+            row = ProgramChildRelation::create(std::move(data));
+        }
+    };
+    const std::uint64_t dispatched_before = completed_calls.load();
+    auto                fresh             = fixture.make_runtime();
+    try {
+        const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+        ADD_FAILURE() << "recovery accepted child reservations that exceed the parent's remainder: "
+                      << failure_detail(recovered);
+    } catch (const ProgramDiagnosticError& error) {
+        EXPECT_EQ(error.diagnostic().code, "P_CHILD_BUDGET") << error.what();
+    }
+    journal->filter_listed_relations = {};
+    EXPECT_EQ(completed_calls.load(), dispatched_before) << "the refused recovery dispatched work";
     held.release();
     (void)original.wait();
 }
