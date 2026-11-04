@@ -357,11 +357,14 @@ if(TARGET neograph_mcp_sqlite)
         test_harness_tenant_persistence.cpp
     )
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_TESTING)
+    # The legacy-record test writes a stored record of the earlier schema, which needs the content identity of the engine.
+    target_include_directories(neograph_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
 
     add_executable(neograph_harness_program_store_tests
         test_harness_program_store.cpp
     )
     target_compile_definitions(neograph_harness_program_store_tests PRIVATE NEOGRAPH_TESTING)
+    target_include_directories(neograph_harness_program_store_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/program)
     target_link_libraries(neograph_harness_program_store_tests PRIVATE
         neograph::mcp_sqlite
         SQLite::SQLite3

@@ -91,7 +91,16 @@ public:
     /// `ceiling` is the attempt's granted monetary_microunits; 0 grants nothing.
     ProgramMonetaryAccount(std::uint64_t ceiling, std::uint64_t attempt);
 
-    std::uint64_t ceiling() const noexcept { return ceiling_; }
+    std::uint64_t ceiling() const {
+        std::lock_guard lock(mutex_);
+        return ceiling_;
+    }
+    /// Sets the amount the attempt may still charge in all: the grant less what a running command leaves to the
+    /// parent's children. A hold already placed is not recalled; the next one is held against the new ceiling.
+    void set_ceiling(std::uint64_t ceiling) {
+        std::lock_guard lock(mutex_);
+        ceiling_ = ceiling;
+    }
     std::uint64_t attempt() const noexcept { return attempt_; }
 
     /// Hold `amount` for a call about to be dispatched; fails when charged +
@@ -118,7 +127,7 @@ public:
 
 private:
     mutable std::mutex                 mutex_;
-    const std::uint64_t                ceiling_;
+    std::uint64_t                      ceiling_;
     const std::uint64_t                attempt_;
     std::uint64_t                      charged_  = 0;
     std::uint64_t                      reserved_ = 0;

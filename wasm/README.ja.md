@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=512f5d7ef220302d310a2829370f4f1b293f7bfea59844949c30341cce983441 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ja source_sha256=d1621eecee9e120a95bce8298de99d4b71f64d9a0c534189007012bdf5847ce8 -->
 # WebAssembly 上の NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -516,7 +516,7 @@ releaseStores(module, handle);
 - **所有権フェンス。** `expectedFence` は公開を書き込む制御オブジェクトのフェンスです。呼び出しが渡される前に、`comparePublish` と `comparePublishExecution` は、実行レコードまたはジャーナルレコードが
   別のフェンスを持つ公開に `"conflict"` を返します。オブジェクトも、保存された実行の `continuation.fence` をジャーナルヘッドと同じ段階で `expectedFence` と比べ、異なれば拒否しなければなりません。
   `comparePublishTakeover` は、`runId` の実行の保存された `Running` レコードを `fence = expectedFence + 1` と新しいジャーナルレコード 1 件で公開し、系譜に結び付いた実行ならば同じ段階で系譜ヘッドをそのレコードへ移し、それ以外は何も変えません。
-- **子の関係。** 親の子は、親の論理的な実行 ID をキーにした行で、親ごとにヘッドが 1 つあります（エポック、件数、永続的な予算の集計、閉じたかどうか）。`insertChildRelation` と `updateChildRelation` は行とヘッドを同じ段階で変更し、`expectedParentFence` を親の保存されたフェンスと比較して、`{status, refusal, relation, head}` を返します。`status` は `"applied"`、`"already_present"`、`"refused"` のいずれかです。公開は関係の部分（`child_relations`）を運ぶことができ、オブジェクトは公開と同じ段階でそれを適用します。最終の公開は自身のヘッドを閉じます。規則は `src/program/transition_validator.h` のものです。参照ストアを包むホストはそれを得ます。C++ ではこれらの操作が純粋仮想なので、5 つのメソッドは必須です。 `updateChildRelation` の fence は書き込む側のものです。挿入と dispatched への移行は親の fence、行の終端状態は終わる子自身の fence で、親のヘッドは読みません。
+- **子の関係。** 親の子は、親の論理的な実行 ID をキーにした行で、親ごとにヘッドが 1 つあります（エポック、件数、永続的な予算の集計、閉じたかどうか）。`insertChildRelation` と `updateChildRelation` は行とヘッドを同じ段階で変更し、`expectedParentFence` を親の保存されたフェンスと比較して、`{status, refusal, relation, head}` を返します。`status` は `"applied"`、`"already_present"`、`"refused"` のいずれかです。公開は関係の部分（`child_relations`）を運ぶことができ、オブジェクトは公開と同じ段階でそれを適用します。最終の公開は自身のヘッドを閉じます。規則は `src/program/transition_validator.h` のものです。参照ストアを包むホストはそれを得ます。C++ ではこれらの操作が純粋仮想なので、5 つのメソッドは必須です。 `updateChildRelation` の fence は書き込む側のものです。挿入と dispatched への移行は親の fence、行の終端状態と一時停止は結果を出した子自身の fence で、親のヘッドは読みません。一度も実行されなかった子の行は親の fence で終了します。
 - **非対応。** `compare_publish_graph_safe_point` はシリアライズされない証拠を運ぶため、JavaScript ストアはライブのグラフマイグレーションには参加しません。基底クラスと同じく `"conflict"` を返します。
 
 **参照ストア。** `neograph.memoryStores()`（`stores.mjs` の `memoryStores(module)`）は、モジュールのインメモリ C++ ストアを呼び出してこの契約を実装する

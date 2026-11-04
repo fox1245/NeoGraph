@@ -9816,6 +9816,222 @@ TEST(ProgramRuntimeTest, JavaScriptParentWhoseOwnInterruptMatchesAChildsPayloadI
     EXPECT_EQ(final.output().at("own").at("channels").at("value").at("value"), "parent-approved");
 }
 
+namespace {
+
+// Starts a JavaScript parent whose command sequence is `body` over one child, and describes how the parent ended.
+// `parent_steps` is the parent's own Core step grant and `child_steps` the ceiling of the link the child is spawned
+// through, which is also what the child is granted.
+struct StepsHeldByAChildProbe {
+    ProgramTerminalStatus status = ProgramTerminalStatus::Failed;
+    std::string           failure_code;
+    std::string           description;
+    std::size_t           children          = 0;
+    std::uint64_t         parent_steps_kept = 0;
+    std::uint64_t         child_steps_held  = 0;
+    bool                  children_ended_completed = true;
+};
+
+StepsHeldByAChildProbe summarize_steps_held_by_a_child(AdmittedRuntime&        fixture,
+                                                       ProgramHandle&          parent,
+                                                       const ProgramResult&    result) {
+    const auto stored = fixture.journal->load("tenant:runtime", parent.run_id());
+    StepsHeldByAChildProbe probe;
+    probe.status       = result.status();
+    probe.failure_code = result.failure() ? result.failure()->code : std::string{};
+    if (!stored) {
+        probe.description = "the parent has no stored record";
+        return probe;
+    }
+    const auto children = children_of(fixture.journal, "tenant:runtime", *stored);
+    probe.children          = children.size();
+    probe.parent_steps_kept = stored->remaining_budget().max_core_steps;
+    probe.child_steps_held  = children.empty() ? 0 : children.front().invocation.granted_budget.max_core_steps;
+    for (const auto& child : children)
+        if (child.terminal_result && child.terminal_result->status() != ProgramTerminalStatus::Completed)
+            probe.children_ended_completed = false;
+    probe.description   = std::string("status ") + std::string(to_string(result.status())) + ", failure " +
+                        (result.failure() ? result.failure()->code + ": " + result.failure()->message
+                                          : std::string("none")) +
+                        ", the parent keeps " + std::to_string(probe.parent_steps_kept) +
+                        " core steps while its " + std::to_string(children.size()) + " child holds " +
+                        std::to_string(probe.child_steps_held);
+    return probe;
+}
+
+StepsHeldByAChildProbe run_steps_held_by_a_child_probe(const char*   body,
+                                                       const char*   trace,
+                                                       std::uint64_t parent_steps = 20,
+                                                       std::uint64_t child_steps  = 20,
+                                                       std::uint64_t parent_operations = 32) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget parent_budget{40000, 4000, 4000, 2, parent_operations, parent_steps, 0, 1, 1};
+    const auto      child_version  = fixture.admit("runtime-completed");
+    const auto      parent_version = admit_javascript_within(
+        fixture, "steps-held-by-a-child.js", javascript_runtime_source("runtime-completed", body), parent_budget);
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
+                                            ExecutionGuarantee::Unmanaged);
+    auto       parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+                                               ProgramInvocation{json::object(), parent_budget, trace, {}});
+    const auto result = parent.wait();
+    return summarize_steps_held_by_a_child(fixture, parent, result);
+}
+
+// The same probe for a plan parent: `steps` are the plan's operations, run in one attempt without any command.
+StepsHeldByAChildProbe run_plan_steps_held_by_a_child_probe(std::vector<std::string> steps,
+                                                            const char*              trace,
+                                                            std::uint64_t            parent_steps = 20,
+                                                            std::uint64_t            child_steps  = 20) {
+    completed_calls.store(0);
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    const RunBudget parent_budget{10000, 1000, 1000, 2, 32, parent_steps, 0, 1, 1};
+    json            children = json::array();
+    for (const auto& step : steps) {
+        if (step == "spawn")
+            children.push_back(json{{"op", "await"},
+                                    {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}});
+        else
+            children.push_back(json{{"op", "call_core"}});
+    }
+    auto document = orchestration_document(json{{"op", "sequence"}, {"children", std::move(children)}}, "runtime-completed");
+    document["declared_budget_requirements"][5]["maximum"] = parent_steps;
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = 1;
+    document["declared_budget_requirements"][8]["maximum"] = 1;
+    const auto child_version  = fixture.admit("runtime-completed");
+    const auto parent_version = fixture.admit_document(std::move(document));
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
+                                            ExecutionGuarantee::Unmanaged);
+    auto       parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+                                               ProgramInvocation{json::object(), parent_budget, trace, {}});
+    const auto result = parent.wait();
+    return summarize_steps_held_by_a_child(fixture, parent, result);
+}
+
+constexpr const char* kCoreCallAfterASpawn = R"JS(
+    yield ng.spawn("child", {}, "spawn:child");
+    return yield ng.callCore("main", {}, "call:core");
+)JS";
+constexpr const char* kJoinOfACoreCallThenASpawn = R"JS(
+    const both = yield ng.all([
+        ng.callCore("main", {}, "call:core"),
+        ng.spawn("child", {}, "spawn:child")
+    ], {max_in_flight: 2}, "join:mixed");
+    return {};
+)JS";
+constexpr const char* kJoinOfASpawnThenACoreCall = R"JS(
+    const both = yield ng.all([
+        ng.spawn("child", {}, "spawn:child"),
+        ng.callCore("main", {}, "call:core")
+    ], {max_in_flight: 2}, "join:mixed");
+    return {};
+)JS";
+
+}  // namespace
+
+// A command reserves only what its parent can still spend: the Core steps that its children hold are not reserved.
+// Here the child is granted every step the parent has, so the Core call that follows has none left to spend and the
+// run ends with the Core step budget, with the child it spawned intact and the parent still holding what the child
+// holds; the store never has to refuse the settlement of a spend.
+TEST(ProgramRuntimeTest, JavaScriptCoreCallAfterASpawnDoesNotSpendTheStepsTheChildWasGranted) {
+    const auto probe = run_steps_held_by_a_child_probe(kCoreCallAfterASpawn, "trace-core-call-after-spawn");
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+    EXPECT_TRUE(probe.children_ended_completed) << probe.description;
+    EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+// The parent keeps more steps than it gave the child: the Core call spends from its own share and the run completes.
+TEST(ProgramRuntimeTest, JavaScriptCoreCallAfterASpawnSpendsTheStepsTheParentKept) {
+    const auto probe = run_steps_held_by_a_child_probe(kCoreCallAfterASpawn, "trace-core-call-after-spawn-fits", 30, 20);
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+    EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+// A plan parent follows the same rule as a command: its Core call after a spawn cannot spend the steps the child was
+// granted, so a child granted every step the parent has leaves the call none and the run ends with the Core step
+// budget, never with the store refusing the spend.
+TEST(ProgramRuntimeTest, PlanCoreCallAfterASpawnDoesNotSpendTheStepsTheChildWasGranted) {
+    const auto probe = run_plan_steps_held_by_a_child_probe({"spawn", "core"}, "trace-plan-core-call-after-spawn");
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+    EXPECT_TRUE(probe.children_ended_completed) << probe.description;
+    EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+// The plan keeps more steps than it gave the child: its Core call spends from its own share and the plan completes.
+TEST(ProgramRuntimeTest, PlanCoreCallAfterASpawnSpendsTheStepsTheParentKept) {
+    const auto probe =
+        run_plan_steps_held_by_a_child_probe({"spawn", "core"}, "trace-plan-core-call-after-spawn-fits", 30, 20);
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+    EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+// The Core call and the spawn are members of one join, in flight together: the join reserves the Core call its own
+// share and leaves the spawn's grant in the remainder, whichever member starts first, so the join completes when both fit.
+TEST(ProgramRuntimeTest, JavaScriptJoinOfACoreCallAndASpawnCompletesWhenBothGrantsFit) {
+    for (const char* body : {kJoinOfACoreCallThenASpawn, kJoinOfASpawnThenACoreCall}) {
+        const auto probe = run_steps_held_by_a_child_probe(body, "trace-join-core-and-spawn-fits", 30, 20);
+        EXPECT_EQ(probe.children, 1U) << probe.description;
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+        EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+    }
+}
+
+// The spawn's grant leaves the Core call nothing: the join ends with the Core step budget, the same way whether the
+// Core call or the spawn is the first member, never with a refused settlement.
+TEST(ProgramRuntimeTest, JavaScriptJoinWhoseSpawnGrantLeavesTheCoreCallNothingEndsTheSameInEitherMemberOrder) {
+    std::vector<StepsHeldByAChildProbe> probes;
+    for (const char* body : {kJoinOfACoreCallThenASpawn, kJoinOfASpawnThenACoreCall})
+        probes.push_back(run_steps_held_by_a_child_probe(body, "trace-join-core-and-spawn-exceeds"));
+    for (const auto& probe : probes) {
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+        // The parent's end cancels a child that had not ended; the parent keeps what the child holds either way.
+        EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+    }
+    EXPECT_EQ(probes[0].status, probes[1].status);
+    EXPECT_EQ(probes[0].failure_code, probes[1].failure_code);
+}
+
+// Program operations are debited up front, so the operations a child holds come off the parent's own ceiling: the
+// third command here would leave the parent fewer operations than its child holds, and the run ends with the operation
+// budget instead of the store refusing the publication of that command.
+TEST(ProgramRuntimeTest, JavaScriptCommandsAfterASpawnDoNotSpendTheOperationsTheChildWasGranted) {
+    const auto probe = run_steps_held_by_a_child_probe(R"JS(
+    yield ng.spawn("child", {}, "spawn:child");
+    yield ng.callCore("main", {}, "call:first");
+    yield ng.callCore("main", {}, "call:second");
+    return yield ng.callCore("main", {}, "call:third");
+)JS",
+                                                       "trace-operations-held-by-a-child", 30, 20, 3);
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_PROGRAM_OPERATION_BUDGET") << probe.description;
+}
+
+// A spawn whose grant is more than the parent can give is refused at admission with the child budget diagnostic, and
+// a join that holds it starts no member: no child exists whichever member would have started first.
+TEST(ProgramRuntimeTest, JavaScriptJoinWhoseSpawnGrantExceedsTheParentsStepsStartsNoMember) {
+    for (const char* body : {kJoinOfACoreCallThenASpawn, kJoinOfASpawnThenACoreCall}) {
+        const auto probe = run_steps_held_by_a_child_probe(body, "trace-join-spawn-over-grant", 10, 20);
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::Failed) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CHILD_BUDGET") << probe.description;
+        EXPECT_EQ(probe.children, 0U) << probe.description;
+    }
+    const auto sequential = run_steps_held_by_a_child_probe(kCoreCallAfterASpawn, "trace-spawn-over-grant", 10, 20);
+    EXPECT_EQ(sequential.status, ProgramTerminalStatus::Failed) << sequential.description;
+    EXPECT_EQ(sequential.failure_code, "P_CHILD_BUDGET") << sequential.description;
+    EXPECT_EQ(sequential.children, 0U) << sequential.description;
+}
+
 // With two awaited children in a join that both pause on interrupts, answering one does not continue the parent while
 // the other still waits; answering the second continues the parent once and rejoins both results.
 TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBothFinish) {
@@ -17511,6 +17727,9 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
                           RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 12, 12},
                           "trace-depth-12-active-0",
                           {}}));
+    // Each run of the chain holds every Core step and Program operation it gave the next one: the Core call of a run
+    // has to have started before its child is attached.
+    ASSERT_TRUE(wait_blocking_calls(1));
     for (std::uint32_t depth = 1; depth <= 12; ++depth) {
         const auto remaining = 12u - depth;
         active_chain.push_back(deep_fixture.runtime->start_child(
@@ -17521,6 +17740,7 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
                               "trace-depth-12-active-" + std::to_string(depth),
                               {}}));
         EXPECT_EQ(active_chain.back().snapshot().child_depth(), depth);
+        ASSERT_TRUE(wait_blocking_calls(depth + 1));
     }
 
     try {
@@ -17610,6 +17830,9 @@ TEST(ProgramRuntimeTest, ChildResumeReclaimsGlobalQuotaAfterACompetingChildStops
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-quota-resume-parent",
                                                  {}});
+    // The child below is granted every Core step and Program operation the parent has, so the parent's own Core call has
+    // to have started before the child is attached.
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto interrupted_child = fixture.runtime->start_child(
         "tenant:runtime", interrupted_parent, interrupted_link.receipt,
         interrupted_link.child_version,
@@ -17626,6 +17849,7 @@ TEST(ProgramRuntimeTest, ChildResumeReclaimsGlobalQuotaAfterACompetingChildStops
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-quota-active-parent",
                                                  {}});
+    ASSERT_TRUE(wait_blocking_calls(2));
     auto active_child = fixture.runtime->start_child(
         "tenant:runtime", active_parent, active_link.receipt, active_link.child_version,
         ProgramInvocation{json::object(),
@@ -17732,6 +17956,9 @@ TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-duplicate",
                                                  {}});
+    // The child below is granted every Core step and Program operation the parent has, so the parent's own Core call has
+    // to have started before the child is attached.
+    ASSERT_TRUE(wait_blocking_calls(1));
     ProgramInvocation invocation{json::object(),
                                  RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
                                  "trace-child-duplicate",
@@ -17750,6 +17977,7 @@ TEST(ProgramRuntimeTest, DuplicateChildRecoveryReturnsTheExistingRun) {
 }
 TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     interrupt_calls.store(0);
+    blocking_calls.store(0);
     AdmittedRuntime fixture(2);
     const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
     auto            parent =
@@ -17758,6 +17986,9 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-interrupted-child",
                                                  {}});
+    // The child below is granted every Core step and Program operation the parent has, so the parent's own Core call has
+    // to have started before the child is attached.
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
@@ -17914,6 +18145,7 @@ TEST(ProgramRuntimeTest, FanOutNeverListsTheRelationSetOnThePerChildPath) {
 
 TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicateDispatch) {
     completed_calls.store(0);
+    blocking_calls.store(0);
     auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);
     const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
@@ -17923,6 +18155,9 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-recover-children",
                                                  {}});
+    // The child below is granted every Core step the parent has, so the parent's own Core call has to have started
+    // before the child is attached: a call that starts afterwards finds no steps left to spend.
+    ASSERT_TRUE(wait_blocking_calls(1));
     ProgramInvocation child_invocation{json::object(),
                                        RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
                                        "trace-child-recover-children",
@@ -18041,7 +18276,8 @@ struct ParentEndsDuringDispatch {
 };
 
 // A parent that waits at a gate, then pauses for an answer, and keeps running after the answer.
-LinkedChildAdmission make_gated_interrupting_parent(AdmittedRuntime& fixture) {
+LinkedChildAdmission make_gated_interrupting_parent(AdmittedRuntime& fixture,
+                                                    std::string      hold_node_type = "runtime-blocking") {
     auto parent_document                      = program_document("runtime-typed-parent-gate");
     parent_document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
     parent_document["declared_budget_requirements"][4]["minimum"] = 2;
@@ -18051,7 +18287,7 @@ LinkedChildAdmission make_gated_interrupting_parent(AdmittedRuntime& fixture) {
     parent_document["declared_budget_requirements"][8]["minimum"] = 1;
     parent_document["declared_budget_requirements"][8]["maximum"] = 1;
     parent_document["root"]["definition"]["nodes"]["ask"]  = json{{"type", "runtime-interrupt"}};
-    parent_document["root"]["definition"]["nodes"]["hold"] = json{{"type", "runtime-blocking"}};
+    parent_document["root"]["definition"]["nodes"]["hold"] = json{{"type", std::move(hold_node_type)}};
     parent_document["root"]["definition"]["edges"] =
         json::array({json{{"from", "__start__"}, {"to", "work"}}, json{{"from", "work"}, {"to", "ask"}},
                      json{{"from", "ask"}, {"to", "hold"}}, json{{"from", "hold"}, {"to", "__end__"}}});
@@ -18183,10 +18419,12 @@ struct PausedParentWithPublishedChild {
     std::optional<ProgramHandle> parent;
     ParentEndsDuringDispatch     race;
     std::optional<ProgramResult> paused;
+    /// The node the parent runs after its answer: it decides how long the parent runs once it continues.
+    std::string                  hold_node_type = "runtime-blocking";
 
     void set_up(AdmittedRuntime& fixture, BlockAfterJavaScriptResultJournal& journal, const char* trace) {
         interrupt_calls.store(0);
-        linked.emplace(make_gated_interrupting_parent(fixture));
+        linked.emplace(make_gated_interrupting_parent(fixture, hold_node_type));
         parent.emplace(fixture.runtime->start("tenant:runtime", linked->parent_version,
                                               ProgramInvocation{json::object(),
                                                                 RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
@@ -18385,6 +18623,171 @@ TEST(ProgramRuntimeTest, CancellingAPausedParentFromARestartedRuntimeEndsItsPubl
     EXPECT_EQ(again.wait().status(), ProgramTerminalStatus::Cancelled);
     EXPECT_FALSE(again.cancel());
     expect_published_child_cancelled_durably(fixture, *journal, child_id);
+}
+
+// A parent that created a child before a process restart and ends after it: the child that was created and never
+// started is found from the stored relation head, not from anything the new process remembers.
+void expect_child_created_before_a_restart_ends_with_the_parent(const std::string& hold_node_type,
+                                                                bool               cancel_after_restart,
+                                                                const char*        trace) {
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime              fixture(4, {}, journal);
+    std::string                  parent_id;
+    std::string                  child_id;
+    std::optional<ProgramResult> paused;
+    {
+        PausedParentWithPublishedChild setup;
+        setup.hold_node_type = hold_node_type;
+        setup.set_up(fixture, *journal, trace);
+        ASSERT_TRUE(setup.parent.has_value() && setup.paused.has_value());
+        parent_id = setup.parent->run_id();
+        child_id  = setup.race.child_id;
+        paused    = setup.paused;
+    }
+    // The first process is gone: nothing of it is held, and the child is created and never started.
+    fixture.runtime.reset();
+    fixture.runtime = fixture.make_runtime();
+    const auto before = journal->load_sync("tenant:runtime", child_id);
+    ASSERT_TRUE(before.has_value());
+    ASSERT_EQ(before->continuation().state, ContinuationState::Running);
+
+    auto resumed = fixture.runtime->resume("tenant:runtime", parent_id,
+                                           resume_for(*paused, json{{"decision", "approved"}}, trace));
+    if (cancel_after_restart) {
+        EXPECT_TRUE(resumed.cancel());
+        EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Cancelled);
+    } else {
+        EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Completed);
+    }
+
+    const auto stored_parent = journal->load_sync("tenant:runtime", parent_id);
+    ASSERT_TRUE(stored_parent.has_value());
+    EXPECT_EQ(stored_parent->continuation().state,
+              cancel_after_restart ? ContinuationState::Cancelled : ContinuationState::Completed);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Cancelled);
+    expect_published_child_cancelled_durably(fixture, *journal, child_id);
+}
+
+TEST(ProgramRuntimeTest, ParentThatCompletesAfterARestartEndsTheChildItCreatedBeforeTheRestart) {
+    expect_child_created_before_a_restart_ends_with_the_parent("runtime-short-blocking", false,
+                                                               "trace-parent-completes-after-restart");
+}
+
+TEST(ProgramRuntimeTest, ParentThatIsCancelledAfterARestartEndsTheChildItCreatedBeforeTheRestart) {
+    expect_child_created_before_a_restart_ends_with_the_parent("runtime-blocking", true,
+                                                               "trace-parent-cancelled-after-restart");
+}
+
+// A parent that spawned a child before a restart and continues a Core call after it reserves that call without the
+// steps its child holds: the new process reads what the children hold from the stored relation head, it does not
+// remember it. The reservation the resume publishes is the parent's remaining steps less the child's grant.
+TEST(ProgramRuntimeTest, ParentThatContinuesACoreCallAfterARestartReservesWithoutTheStepsItsChildHolds) {
+    interrupt_calls.store(0);
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->release_result();
+    AdmittedRuntime fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    constexpr std::uint64_t child_steps = 20;
+    const RunBudget         parent_budget{40000, 4000, 4000, 2, 32, 30, 0, 1, 1};
+    const auto              child_version = fixture.admit("runtime-completed");
+    const auto              parent_version = admit_javascript_within(
+        fixture, "core-call-after-a-restart.js",
+        javascript_runtime_source("runtime-interrupt", R"JS(
+    const spawned = yield ng.spawn("child", {}, "spawn:child");
+    const own = yield ng.callCore("main", {}, "core:approve");
+    return {spawned: spawned.child_run_id, own: own};
+)JS"),
+        parent_budget);
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
+                                            ExecutionGuarantee::Unmanaged);
+    std::string                  parent_id;
+    std::optional<ProgramResult> paused;
+    std::uint64_t                kept_before_restart = 0;
+    {
+        auto parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+                                             ProgramInvocation{json::object(), parent_budget,
+                                                               "trace-core-call-after-restart", {}});
+        paused    = parent.wait();
+        parent_id = parent.run_id();
+        ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted);
+        const auto stored = journal->load_sync("tenant:runtime", parent_id);
+        ASSERT_TRUE(stored.has_value());
+        ASSERT_EQ(children_of(journal, "tenant:runtime", *stored).size(), 1U);
+        kept_before_restart = stored->remaining_budget().max_core_steps;
+        ASSERT_GT(kept_before_restart, child_steps);
+    }
+    fixture.runtime.reset();
+    fixture.runtime = fixture.make_runtime();
+
+    std::mutex                  mutex;
+    std::vector<std::uint64_t>  reserved_steps;
+    journal->before_publication = [&](const ProgramTransitionPublication& publication) {
+        if (publication.run_record.run_id() != parent_id) return;
+        const auto steps = publication.journal_record.inflight_reservation.max_core_steps;
+        if (steps == 0) return;
+        std::lock_guard lock(mutex);
+        reserved_steps.push_back(steps);
+    };
+    auto resumed = fixture.runtime->resume("tenant:runtime", parent_id,
+                                           resume_for(*paused, json{{"decision", "approved"}},
+                                                      "trace-core-call-after-restart"));
+    const auto final = resumed.wait();
+    journal->before_publication = {};
+    ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+    std::lock_guard lock(mutex);
+    ASSERT_FALSE(reserved_steps.empty());
+    EXPECT_EQ(reserved_steps.front(), kept_before_restart - child_steps);
+}
+
+// The process that resumed a Core call stops inside it, holding the reservation that left out the steps its child
+// holds; the process that recovers the run continues the call under that reservation and the run completes.
+TEST(ProgramRuntimeTest, RecoveryOfAResumedCoreCallKeepsTheReservationThatLeftOutTheStepsItsChildHolds) {
+    interrupt_calls.store(0);
+    completed_calls.store(0);
+    AdmittedRuntime fixture(2, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    constexpr std::uint64_t child_steps = 20;
+    const RunBudget         parent_budget{40000, 4000, 4000, 2, 32, 30, 0, 1, 1};
+    const auto              child_version  = fixture.admit("runtime-completed");
+    const auto              parent_version = admit_javascript_within(
+        fixture, "recovery-with-held-steps.js",
+        javascript_runtime_source("runtime-resume-hook", R"JS(
+    yield ng.spawn("child", {}, "spawn:child");
+    const reply = yield ng.callCore("main", {decision: input.decision}, "approval");
+    return {value: reply.value};
+)JS"),
+        parent_budget);
+    const auto linked = link_child_versions(fixture, parent_version, child_version,
+                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
+                                            ExecutionGuarantee::Unmanaged);
+    const auto interrupted = fixture.runtime->run(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json{{"decision", "run input"}}, parent_budget, "trace-recovery-held-steps", {}});
+    ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted) << failure_detail(interrupted);
+    const auto paused = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(paused.has_value());
+    const auto kept = paused->remaining_budget.max_core_steps;
+    ASSERT_GT(kept, child_steps);
+
+    HeldResumedAttempt held;
+    auto original = fixture.runtime->resume(
+        "tenant:runtime", interrupted.run_id(),
+        resume_for(interrupted, json{{"decision", "approved"}}, "trace-recovery-held-steps-resume"));
+    ASSERT_TRUE(held.entered());
+    const auto holding = fixture.journal->latest("tenant:runtime", interrupted.run_id());
+    ASSERT_TRUE(holding.has_value());
+    EXPECT_EQ(holding->inflight_reservation.max_core_steps, kept - child_steps);
+    EXPECT_EQ(holding->remaining_budget.max_core_steps, child_steps);
+
+    auto       fresh     = fixture.make_runtime();
+    const auto recovered = fresh->reconnect("tenant:runtime", interrupted.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_detail(recovered);
+    EXPECT_EQ(recovered.output(), (json{{"value", json{{"decision", "approved"}}.dump()}}));
+    held.release();
+    (void)original.wait();
 }
 
 TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResult) {

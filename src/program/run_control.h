@@ -229,6 +229,9 @@ using ChildLaunchCallback =
     std::function<asio::awaitable<std::shared_ptr<RunControl>>(std::string, json, std::string, std::string,
                                                                std::optional<TaskGraphBudget>, bool)>;
 using ChildBindingValidationCallback = std::function<asio::awaitable<void>(std::string, std::string)>;
+/// The budget a new spawn of a child binding is granted: the same value that the launch of that child derives, or
+/// nothing when the binding names a child the run already holds (its grant is in the relation head already).
+using ChildGrantCallback = std::function<asio::awaitable<std::optional<RunBudget>>(std::string)>;
 enum class ChildRecoveryMode { None, Synthesis, Existing, Unrecorded };
 using ChildRecoveryCallback =
     std::function<asio::awaitable<ChildRecoveryMode>(std::string, json, std::string)>;
@@ -318,6 +321,15 @@ public:
         std::string_view expansion_operation_id) const;
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
     void set_child_recovery_callback(ChildRecoveryCallback callback) noexcept;
+    void set_child_grant_callback(ChildGrantCallback callback) noexcept;
+    /// What a new spawn of `binding` is granted (see ChildGrantCallback); nothing when the run has no child launcher.
+    asio::awaitable<std::optional<RunBudget>> child_grant(std::string binding) const;
+    /// Reads the run's relation head and keeps its aggregate: the budget the run's children hold. Does nothing for a
+    /// run whose granted budget allows no children. Called when an attempt starts and after the run launches or
+    /// reconnects a child, never per Core step.
+    asio::awaitable<void> refresh_children_held() const;
+    /// The last aggregate read by refresh_children_held; the whole budget except wall time and concurrency counts.
+    RunBudget children_held() const;
     void set_existing_child_reconnect_callback(ExistingChildReconnectCallback callback) noexcept;
     void set_descendant_cancel_callback(DescendantCancelCallback callback) noexcept;
     asio::awaitable<std::shared_ptr<RunControl>> reconnect_existing_child(std::string binding,
@@ -446,15 +458,11 @@ public:
         std::string run_id;
     };
     /// Ends the children that an ended parent created and never started (#655). cancel_async awaits it once a paused
-    /// parent's Cancelled state is durable, and complete_async awaits it once the terminal state of a parent that
-    /// created a child is durable. It returns a notice for each child that it could not end, and none for a child that
+    /// parent's Cancelled state is durable, and complete_async awaits it once the terminal state of a parent whose relation head counts an
+    /// open row is durable. It returns a notice for each child that it could not end, and none for a child that
     /// it ended or that another path ended. Set when the control is registered or read back from the stores.
     using UnstartedChildrenEnder = std::function<asio::awaitable<std::vector<ProgramNotice>>(EndedParent)>;
     void              set_unstarted_children_ender(UnstartedChildrenEnder ender);
-    /// Records that this run began to create a child: from then on its end looks for a child that was created and
-    /// never started, which a run that created none has no reason to read.
-    void              note_child_creation() noexcept { child_creation_noted_.store(true); }
-    bool              child_creation_noted() const noexcept { return child_creation_noted_.load(); }
     /// The terminal publication of this control compares against the run record with this journal head and publishes
     /// nothing when the run has moved on from it. Set by a path that decided from a record it loaded.
     void              set_expected_terminal_head(std::string journal_head);
@@ -615,6 +623,8 @@ private:
     bool                                          follow_successor_ = false;
     ChildLaunchCallback                     child_launch_callback_;
     ChildRecoveryCallback                         child_recovery_callback_;
+    ChildGrantCallback                            child_grant_callback_;
+    mutable RunBudget                             children_held_;
     ExistingChildReconnectCallback                existing_child_reconnect_callback_;
     DescendantCancelCallback                         descendant_cancel_callback_;
     ChildBindingValidationCallback           child_binding_validation_callback_;
@@ -640,7 +650,6 @@ private:
     std::shared_ptr<PendingCancellations>     pending_cancellations_;
     std::function<bool(const RunControl*)>    executing_attempt_check_;
     UnstartedChildrenEnder                    unstarted_children_ender_;
-    std::atomic<bool>                         child_creation_noted_{false};
     std::optional<std::string>                expected_terminal_head_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;
@@ -676,7 +685,12 @@ struct CommandBudgetReservation {
     RunBudget reservation;
 };
 
-CommandBudgetReservation reserve_command_resources(RunBudget available) noexcept;
+/// The command reserves the wall time, tokens, money and Core steps of `available` except what `withheld` keeps out of
+/// it: the budget the parent's children hold or will be granted inside the command (wall time is a clock and is always
+/// reserved whole). The withheld part stays in `remaining`, so the parent cannot spend it while the command runs and
+/// the reservation settles above what its children hold.
+CommandBudgetReservation reserve_command_resources(RunBudget available,
+                                                   const RunBudget& withheld) noexcept;
 
 /// The remaining budget that the journal of a JavaScript run holds beneath the reservation of a command, or nothing when
 /// the journal holds no reservation (a Program without a JavaScript `main()` never reserves one).
