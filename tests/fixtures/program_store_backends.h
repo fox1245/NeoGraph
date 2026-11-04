@@ -133,7 +133,7 @@ inline std::optional<std::string> backend_unavailable_reason(StoreBackend backen
 
 // The writes one publication makes in the same transaction. Failing one of them
 // must leave every other write of that publication unobservable.
-enum class WriteStage { Run, Events, Effects, Context, Hooks, Lineage };
+enum class WriteStage { Run, Events, Effects, Context, Hooks, Lineage, Relation };
 
 inline const char* write_stage_name(WriteStage stage) {
     switch (stage) {
@@ -143,6 +143,7 @@ inline const char* write_stage_name(WriteStage stage) {
     case WriteStage::Context: return "Context";
     case WriteStage::Hooks: return "Hooks";
     case WriteStage::Lineage: return "Lineage";
+    case WriteStage::Relation: return "Relation";
     }
     return "Unknown";
 }
@@ -188,6 +189,9 @@ inline StageTable transition_stage_table(StoreBackend backend, WriteStage stage)
     case WriteStage::Lineage:
         return {pg ? "neograph_program_run_lineage_heads_v1"
                    : "program_run_lineage_heads_v1", true};
+    case WriteStage::Relation:
+        return {pg ? "neograph_program_child_relation_heads_v1"
+                   : "program_child_relation_heads_v1", true};
     }
     throw std::logic_error("unknown write stage");
 }
@@ -232,6 +236,8 @@ inline void reset_postgres_program_tables(const char* url) {
         throw std::runtime_error(
             "PostgreSQL conformance tests require the disposable neograph_test database");
     postgres_execute(url, R"SQL(
+DROP TABLE IF EXISTS neograph_program_child_relations_v1;
+DROP TABLE IF EXISTS neograph_program_child_relation_heads_v1;
 DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
 DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;
 DROP TABLE IF EXISTS neograph_program_run_lineage_runs_v1;
@@ -518,6 +524,7 @@ private:
         case WriteStage::Context: return ProgramTransitionFaultPoint::AfterContextSnapshot;
         case WriteStage::Hooks: return ProgramTransitionFaultPoint::AfterHookSnapshot;
         case WriteStage::Lineage: return ProgramTransitionFaultPoint::AfterLineageSnapshot;
+        case WriteStage::Relation: return ProgramTransitionFaultPoint::AfterRelationSnapshot;
         }
         throw std::logic_error("unknown write stage");
     }

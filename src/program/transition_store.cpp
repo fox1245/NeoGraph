@@ -523,6 +523,37 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
                 publication.run_lineage->lineage_id())
             throw std::invalid_argument("Recorded replay source debit does not bind its initial target");
     }
+    if (publication.child_relations) {
+        const auto& part = *publication.child_relations;
+        if (!part.expected_epoch && !part.spawn && !part.completion)
+            throw std::invalid_argument("Program child relation part must name something");
+        if (part.spawn && part.completion)
+            throw std::invalid_argument("A publication carries a child spawn or a child completion, not both");
+        if (part.spawn) {
+            const auto& spawn = *part.spawn;
+            if (journal.sequence != 1 || !journal.previous_id.empty() || spawn.parent_fence == 0 ||
+                spawn.child.child_run_id != run.run_id() ||
+                run.invocation().parent_run_id != spawn.parent_run_id ||
+                (spawn.child.state != ProgramChildState::Publishing &&
+                 spawn.child.state != ProgramChildState::Dispatched) ||
+                spawn.child.terminal_result || spawn.child.terminal_generation != 0)
+                throw std::invalid_argument("Program child spawn does not bind the child's first publication");
+        }
+        if (part.completion) {
+            const auto& completion = *part.completion;
+            const auto  terminal   = run.terminal_result();
+            const bool  replaced   = run.logical_run_id() != run.run_id();
+            if (!terminal || completion.parent_fence == 0 ||
+                completion.child.child_run_id != run.logical_run_id() ||
+                run.invocation().parent_run_id != completion.parent_run_id ||
+                !completion.child.terminal_result ||
+                completion.child.terminal_result->id() != terminal->id() ||
+                completion.child.state != detail::transition::relation_state_for_result(terminal->status()) ||
+                (completion.child.terminal_generation != 0) != replaced)
+                throw std::invalid_argument(
+                    "Program child completion does not bind the child's terminal publication");
+        }
+    }
 }
 
 constexpr std::size_t MAX_CANONICAL_PUBLICATION_BYTES = 16u * 1024u * 1024u;
@@ -534,11 +565,70 @@ void append_publication_bytes(std::string& out, std::string_view bytes) {
     out.append(bytes);
 }
 
+json relation_part_json(const ProgramChildRelationPart& part) {
+    json out = json::object();
+    if (part.expected_epoch) out["expected_epoch"] = *part.expected_epoch;
+    if (part.spawn) {
+        out["spawn"] = json{{"parent_run_id", part.spawn->parent_run_id},
+                            {"parent_fence", part.spawn->parent_fence},
+                            {"child", nested(serialize_program_child_record(part.spawn->child))}};
+    }
+    if (part.completion) {
+        json completion{{"parent_run_id", part.completion->parent_run_id},
+                        {"parent_fence", part.completion->parent_fence},
+                        {"child", nested(serialize_program_child_record(part.completion->child))}};
+        if (part.completion->expected_row_version)
+            completion["expected_row_version"] = *part.completion->expected_row_version;
+        out["completion"] = std::move(completion);
+    }
+    return out;
+}
+
+ProgramChildRelationPart parse_relation_part(const json& v) {
+    if (!v.is_object()) throw std::invalid_argument("Program child relation part must be an object");
+    detail::reject_unknown_fields(v, "Program child relation part",
+                                  {"expected_epoch", "spawn", "completion"});
+    ProgramChildRelationPart part;
+    if (v.contains("expected_epoch")) part.expected_epoch = ru(v, "expected_epoch");
+    if (v.contains("spawn")) {
+        const auto& spawn = v.at("spawn");
+        if (!spawn.is_object()) throw std::invalid_argument("Program child relation spawn must be an object");
+        detail::reject_unknown_fields(spawn, "Program child relation spawn",
+                                      {"parent_run_id", "parent_fence", "child"});
+        part.spawn = ProgramChildRelationSpawn{
+            rs(spawn, "parent_run_id"), ru(spawn, "parent_fence"),
+            parse_program_child_record(detail::canonical_json_bytes(rv(spawn, "child")))};
+    }
+    if (v.contains("completion")) {
+        const auto& completion = v.at("completion");
+        if (!completion.is_object())
+            throw std::invalid_argument("Program child relation completion must be an object");
+        detail::reject_unknown_fields(completion, "Program child relation completion",
+                                      {"parent_run_id", "parent_fence", "child", "expected_row_version"});
+        ProgramChildRelationCompletion value;
+        value.parent_run_id = rs(completion, "parent_run_id");
+        value.parent_fence  = ru(completion, "parent_fence");
+        if (completion.contains("expected_row_version"))
+            value.expected_row_version = ru(completion, "expected_row_version");
+        value.child = parse_program_child_record(detail::canonical_json_bytes(rv(completion, "child")));
+        part.completion = std::move(value);
+    }
+    if (!part.expected_epoch && !part.spawn && !part.completion)
+        throw std::invalid_argument("Program child relation part must name something");
+    return part;
+}
+
 std::string publication_bytes(const ProgramTransitionPublication& publication) {
     std::string bytes;
     bytes.reserve(4096);
 
     append_publication_bytes(bytes, "{");
+    if (publication.child_relations) {
+        append_publication_bytes(bytes, "\"child_relations\":");
+        append_publication_bytes(bytes, detail::canonical_json_bytes(
+                                            relation_part_json(*publication.child_relations)));
+        append_publication_bytes(bytes, ",");
+    }
     if (!publication.child_synthesis_records.empty()) {
         append_publication_bytes(bytes, "\"child_synthesis_records\":[");
         for (std::size_t i = 0; i < publication.child_synthesis_records.size(); ++i) {
@@ -627,7 +717,10 @@ std::string publication_bytes(const ProgramTransitionPublication& publication) {
     }
     append_publication_bytes(bytes, ",\"run_record\":");
     append_publication_bytes(bytes, publication.run_record.serialize_canonical());
-    append_publication_bytes(bytes, publication.recorded_replay_source
+    // Each version is written only by the publications that need it; version 8 adds the child relation part.
+    append_publication_bytes(bytes, publication.child_relations
+        ? ",\"storage_schema_version\":8}"
+        : publication.recorded_replay_source
         ? ",\"storage_schema_version\":7}"
         : publication.child_synthesis_records.empty()
             ? ",\"storage_schema_version\":5}" : ",\"storage_schema_version\":6}");
@@ -787,6 +880,13 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
              "effects", "commands", "migration_plan", "run_generation", "run_lineage",
              "fork_source_lineage", "context_publication", "hook_outbox_entries",
              "child_synthesis_records", "recorded_replay_source", "recorded_replay_source_lineage"});
+    } else if (schema_version == 8) {
+        detail::reject_unknown_fields(v, "Stored Program publication",
+            {"format", "storage_schema_version", "run_record", "journal_record", "events",
+             "effects", "commands", "migration_plan", "run_generation", "run_lineage",
+             "fork_source_lineage", "context_publication", "hook_outbox_entries",
+             "child_synthesis_records", "recorded_replay_source", "recorded_replay_source_lineage",
+             "child_relations"});
     } else {
         throw std::invalid_argument("Stored Program publication schema unsupported");
     }
@@ -894,7 +994,10 @@ ProgramTransitionPublication ProgramTransitionPublication::parse(std::string_vie
             out.child_synthesis_records.push_back(
                 ProgramChildSynthesisRecord::parse(detail::canonical_json_bytes(entry)));
     }
-    if (schema_version == 7) {
+    if (schema_version == 8) {
+        out.child_relations = parse_relation_part(rv(v, "child_relations"));
+    }
+    if (schema_version == 7 || (schema_version == 8 && v.contains("recorded_replay_source"))) {
         const auto& source = rv(v, "recorded_replay_source");
         if (!source.is_object())
             throw std::invalid_argument("Recorded replay source receipt must be an object");
@@ -1240,13 +1343,38 @@ struct InMemoryProgramTransitionStore::Impl {
         std::map<std::uint64_t, std::string>          initial_publications;
         std::map<std::string, ProgramRunLineage, std::less<>> heads;
     };
+    /// One parent's relation head and rows. Changed in place under `mutex`; a change is staged first so that
+    /// committing it cannot throw.
+    struct RelationSet {
+        std::optional<ProgramChildRelationHead>                  head;
+        std::map<std::string, ProgramChildRelation, std::less<>> rows;
+    };
+    /// A relation change prepared by stage_relations(): every allocation is done, commit() cannot throw.
+    struct RelationStage {
+        std::string                                              set_key;
+        RelationSet*                                             set = nullptr;
+        std::map<std::string, RelationSet, std::less<>>          inserted_set;
+        std::map<std::string, ProgramChildRelation, std::less<>> inserted_row;
+        ProgramChildRelation*                                    replaced_row = nullptr;
+        std::optional<ProgramChildRelation>                      row;
+        std::optional<ProgramChildRelationHead>                  head;
+        RelationSet*                                             closed_set = nullptr;
+        std::optional<ProgramChildRelationHead>                  closed_head;
+    };
     mutable std::mutex                                                mutex;
+    std::map<std::string, RelationSet, std::less<>>                   relations;
     std::map<std::string, std::shared_ptr<const Stored>, std::less<>> runs;
     std::map<std::string, std::shared_ptr<const StoredLineage>, std::less<>> lineages;
     std::map<std::string, GraphMigrationCapsule, std::less<>> graph_migration_capsules;
     std::map<std::string, ProgramExecutionLease, std::less<>> execution_leases;
     std::optional<ProgramTransitionFaultPoint>                        fault;
     class Reads;
+    /// Prepares the writes of a relation plan; throws before anything changed.
+    RelationStage stage_relations(std::string_view                                 owner,
+                                  const std::optional<ProgramChildRelation>&       row,
+                                  const std::optional<ProgramChildRelationHead>&   head,
+                                  const std::optional<ProgramChildRelationHead>&   closed_head);
+    void commit_relations(RelationStage& stage) noexcept;
 };
 
 // The stored state as the transition validator reads it. The caller holds `mutex`, so what
@@ -1311,6 +1439,25 @@ public:
                                                       const ProgramRunRecord&) override {
         return history_of(stored(run_id), &Stored::hook_outbox_entries);
     }
+    std::optional<ProgramJournalRecord> journal_record(std::string_view run_id, Lock) override {
+        const auto* run = stored(run_id);
+        if (!run) return std::nullopt;
+        return run->journal;
+    }
+    std::optional<ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
+                                                          Lock) override {
+        const auto found = impl_.relations.find(key(owner_scope_, parent_run_id));
+        if (found == impl_.relations.end()) return std::nullopt;
+        return found->second.head;
+    }
+    std::optional<ProgramChildRelation> relation_row(std::string_view parent_run_id,
+                                                      std::string_view child_run_id, Lock) override {
+        const auto set = impl_.relations.find(key(owner_scope_, parent_run_id));
+        if (set == impl_.relations.end()) return std::nullopt;
+        const auto row = set->second.rows.find(child_run_id);
+        if (row == set->second.rows.end()) return std::nullopt;
+        return row->second;
+    }
 
 private:
     // One of the run's stored histories, or an empty one for a run that is not stored.
@@ -1332,6 +1479,52 @@ private:
     const Impl&      impl_;
     std::string_view owner_scope_;
 };
+InMemoryProgramTransitionStore::Impl::RelationStage InMemoryProgramTransitionStore::Impl::stage_relations(
+    std::string_view                               owner,
+    const std::optional<ProgramChildRelation>&     row,
+    const std::optional<ProgramChildRelationHead>& head,
+    const std::optional<ProgramChildRelationHead>& closed_head) {
+    RelationStage stage;
+    if (row && head) {
+        stage.set_key = key(owner, head->data().parent_run_id);
+        const auto found = relations.find(stage.set_key);
+        if (found == relations.end()) {
+            RelationSet set;
+            set.head = *head;
+            set.rows.emplace(row->child_run_id(), *row);
+            stage.inserted_set.emplace(stage.set_key, std::move(set));
+        } else {
+            stage.set = &found->second;
+            const auto existing = found->second.rows.find(row->child_run_id());
+            if (existing == found->second.rows.end())
+                stage.inserted_row.emplace(row->child_run_id(), *row);
+            else
+                stage.replaced_row = &existing->second;
+            stage.row = *row;
+        }
+        stage.head = *head;
+    }
+    if (closed_head) {
+        const auto found = relations.find(key(owner, closed_head->data().parent_run_id));
+        if (found != relations.end()) {
+            stage.closed_set  = &found->second;
+            stage.closed_head = *closed_head;
+        }
+    }
+    return stage;
+}
+
+void InMemoryProgramTransitionStore::Impl::commit_relations(RelationStage& stage) noexcept {
+    if (!stage.inserted_set.empty()) {
+        relations.merge(stage.inserted_set);
+    } else if (stage.set) {
+        if (!stage.inserted_row.empty()) stage.set->rows.merge(stage.inserted_row);
+        else if (stage.replaced_row) *stage.replaced_row = std::move(*stage.row);
+        stage.set->head = std::move(*stage.head);
+    }
+    if (stage.closed_set) stage.closed_set->head = std::move(*stage.closed_head);
+}
+
 InMemoryProgramTransitionStore::InMemoryProgramTransitionStore()
     : impl_(std::make_unique<Impl>()) {}
 InMemoryProgramTransitionStore::~InMemoryProgramTransitionStore() = default;
@@ -1568,6 +1761,77 @@ InMemoryProgramTransitionStore::load_execution_lease_sync(
     return found == impl_->execution_leases.end()
         ? std::nullopt : std::optional<ProgramExecutionLease>{found->second};
 }
+std::optional<ProgramChildRelationHead> InMemoryProgramTransitionStore::load_child_relation_head_sync(
+    std::string_view owner, std::string_view parent_run_id) const {
+    if (owner.empty() || parent_run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->relations.find(key(owner, parent_run_id));
+    if (found == impl_->relations.end()) return std::nullopt;
+    return found->second.head;
+}
+std::optional<ProgramChildRelation> InMemoryProgramTransitionStore::load_child_relation_sync(
+    std::string_view owner, std::string_view parent_run_id, std::string_view child_run_id) const {
+    if (owner.empty() || parent_run_id.empty() || child_run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    const auto set = impl_->relations.find(key(owner, parent_run_id));
+    if (set == impl_->relations.end()) return std::nullopt;
+    const auto row = set->second.rows.find(child_run_id);
+    if (row == set->second.rows.end()) return std::nullopt;
+    return row->second;
+}
+std::vector<ProgramChildRelation> InMemoryProgramTransitionStore::load_child_relations_sync(
+    std::string_view owner, std::string_view parent_run_id, bool open_only) const {
+    std::vector<ProgramChildRelation> rows;
+    if (owner.empty() || parent_run_id.empty()) return rows;
+    std::lock_guard lock(impl_->mutex);
+    const auto set = impl_->relations.find(key(owner, parent_run_id));
+    if (set == impl_->relations.end()) return rows;
+    rows.reserve(set->second.rows.size());
+    for (const auto& [id, row] : set->second.rows) {
+        (void)id;
+        if (!open_only || row.is_open()) rows.push_back(row);
+    }
+    std::sort(rows.begin(), rows.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.ordinal() < rhs.ordinal();
+    });
+    return rows;
+}
+ProgramChildRelationOutcome InMemoryProgramTransitionStore::insert_child_relation_sync(
+    std::string_view owner, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+    ProgramChildRecord child) {
+    if (owner.empty() || parent_run_id.empty())
+        return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
+                                           ProgramChildRelationRefusal::Invalid, std::nullopt,
+                                           std::nullopt};
+    std::lock_guard lock(impl_->mutex);
+    Impl::Reads     reads(*impl_, owner);
+    auto            planned = detail::transition::plan_relation_insert(
+        reads, owner, parent_run_id, expected_parent_fence, child, false);
+    if (planned.status == ProgramChildRelationStatus::Applied) {
+        auto stage = impl_->stage_relations(owner, planned.row, planned.head, std::nullopt);
+        impl_->commit_relations(stage);
+    }
+    return ProgramChildRelationOutcome{planned.status, planned.refusal, std::move(planned.row),
+                                       std::move(planned.head)};
+}
+ProgramChildRelationOutcome InMemoryProgramTransitionStore::update_child_relation_sync(
+    std::string_view owner, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+    std::optional<std::uint64_t> expected_row_version, ProgramChildRecord next) {
+    if (owner.empty() || parent_run_id.empty())
+        return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
+                                           ProgramChildRelationRefusal::Invalid, std::nullopt,
+                                           std::nullopt};
+    std::lock_guard lock(impl_->mutex);
+    Impl::Reads     reads(*impl_, owner);
+    auto            planned = detail::transition::plan_relation_update(
+        reads, owner, parent_run_id, expected_parent_fence, expected_row_version, next, nullptr);
+    if (planned.status == ProgramChildRelationStatus::Applied) {
+        auto stage = impl_->stage_relations(owner, planned.row, planned.head, std::nullopt);
+        impl_->commit_relations(stage);
+    }
+    return ProgramChildRelationOutcome{planned.status, planned.refusal, std::move(planned.row),
+                                       std::move(planned.head)};
+}
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_sync(
     std::string_view owner,
     std::string_view expected,
@@ -1779,6 +2043,9 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
             replay_source_current->initial_publications, std::move(heads)});
     }
     maybe_fail(ProgramTransitionFaultPoint::AfterLineageSnapshot);
+    auto relation_stage = impl_->stage_relations(owner, plan.relation_row, plan.relation_head,
+                                                 plan.closed_relation_head);
+    maybe_fail(ProgramTransitionFaultPoint::AfterRelationSnapshot);
 
     std::vector<ProgramEvent>            events;
     std::vector<ProgramEffectOutboxEntry> effects;
@@ -1893,12 +2160,15 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
         if (expected_lease && !next_lease) {
             const auto retired_lease = impl_->execution_leases.extract(current_lease);
         }
+        impl_->commit_relations(relation_stage);
     } else if (current == impl_->runs.end()) {
         maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
         impl_->runs.emplace(std::move(storage_key), std::move(candidate));
+        impl_->commit_relations(relation_stage);
     } else {
         maybe_fail(ProgramTransitionFaultPoint::BeforeCommit);
         current->second = std::move(candidate);
+        impl_->commit_relations(relation_stage);
     }
     return ProgramTransitionPublishResult::Published;
 }
@@ -2254,6 +2524,68 @@ asio::awaitable<std::optional<ProgramExecutionLease>> SyncProgramTransitionStore
     });
 }
 
+asio::awaitable<std::optional<ProgramChildRelationHead>> SyncProgramTransitionStore::load_child_relation_head(
+    std::string_view owner_scope,
+    std::string_view parent_run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relation_head");
+    if (!detail::offload_store_call(offloads())) co_return load_child_relation_head_sync(owner_scope, parent_run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramChildRelationHead>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id)]() mutable -> std::optional<ProgramChildRelationHead> {
+        return load_child_relation_head_sync(owner_scope, parent_run_id);
+    });
+}
+
+asio::awaitable<std::optional<ProgramChildRelation>> SyncProgramTransitionStore::load_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view child_run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relation");
+    if (!detail::offload_store_call(offloads())) co_return load_child_relation_sync(owner_scope, parent_run_id, child_run_id);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::optional<ProgramChildRelation>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), child_run_id = std::string(child_run_id)]() mutable -> std::optional<ProgramChildRelation> {
+        return load_child_relation_sync(owner_scope, parent_run_id, child_run_id);
+    });
+}
+
+asio::awaitable<std::vector<ProgramChildRelation>> SyncProgramTransitionStore::load_child_relations(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    bool open_only) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relations");
+    if (!detail::offload_store_call(offloads())) co_return load_child_relations_sync(owner_scope, parent_run_id, open_only);
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<std::vector<ProgramChildRelation>>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), open_only]() mutable -> std::vector<ProgramChildRelation> {
+        return load_child_relations_sync(owner_scope, parent_run_id, open_only);
+    });
+}
+
+asio::awaitable<ProgramChildRelationOutcome> SyncProgramTransitionStore::insert_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::uint64_t expected_parent_fence,
+    ProgramChildRecord child) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::insert_child_relation");
+    if (!detail::offload_store_call(offloads())) co_return insert_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, std::move(child));
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramChildRelationOutcome>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expected_parent_fence, child = std::move(child)]() mutable -> ProgramChildRelationOutcome {
+        return insert_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, std::move(child));
+    });
+}
+
+asio::awaitable<ProgramChildRelationOutcome> SyncProgramTransitionStore::update_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::uint64_t expected_parent_fence,
+    std::optional<std::uint64_t> expected_row_version,
+    ProgramChildRecord next) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::update_child_relation");
+    if (!detail::offload_store_call(offloads())) co_return update_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, expected_row_version, std::move(next));
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramChildRelationOutcome>([this, owner_scope = std::string(owner_scope), parent_run_id = std::string(parent_run_id), expected_parent_fence, expected_row_version, next = std::move(next)]() mutable -> ProgramChildRelationOutcome {
+        return update_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, expected_row_version, std::move(next));
+    });
+}
+
 asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::compare_publish(
     std::string_view owner_scope,
     std::string_view expected_journal_head,
@@ -2482,6 +2814,53 @@ std::optional<ProgramExecutionLease> BlockingProgramTransitionStore::load_execut
     detail::assert_no_pure_lock_held("ProgramTransitionStore::load_execution_lease");
     if (sync_) return sync_->load_execution_lease_sync(owner_scope, run_id);
     return detail::block_on_store(store_->load_execution_lease(owner_scope, run_id), policy_, "ProgramTransitionStore::load_execution_lease");
+}
+
+std::optional<ProgramChildRelationHead> BlockingProgramTransitionStore::load_child_relation_head(
+    std::string_view owner_scope,
+    std::string_view parent_run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relation_head");
+    if (sync_) return sync_->load_child_relation_head_sync(owner_scope, parent_run_id);
+    return detail::block_on_store(store_->load_child_relation_head(owner_scope, parent_run_id), policy_, "ProgramTransitionStore::load_child_relation_head");
+}
+
+std::optional<ProgramChildRelation> BlockingProgramTransitionStore::load_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::string_view child_run_id) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relation");
+    if (sync_) return sync_->load_child_relation_sync(owner_scope, parent_run_id, child_run_id);
+    return detail::block_on_store(store_->load_child_relation(owner_scope, parent_run_id, child_run_id), policy_, "ProgramTransitionStore::load_child_relation");
+}
+
+std::vector<ProgramChildRelation> BlockingProgramTransitionStore::load_child_relations(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    bool open_only) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::load_child_relations");
+    if (sync_) return sync_->load_child_relations_sync(owner_scope, parent_run_id, open_only);
+    return detail::block_on_store(store_->load_child_relations(owner_scope, parent_run_id, open_only), policy_, "ProgramTransitionStore::load_child_relations");
+}
+
+ProgramChildRelationOutcome BlockingProgramTransitionStore::insert_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::uint64_t expected_parent_fence,
+    ProgramChildRecord child) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::insert_child_relation");
+    if (sync_) return sync_->insert_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, std::move(child));
+    return detail::block_on_store(store_->insert_child_relation(owner_scope, parent_run_id, expected_parent_fence, std::move(child)), policy_, "ProgramTransitionStore::insert_child_relation");
+}
+
+ProgramChildRelationOutcome BlockingProgramTransitionStore::update_child_relation(
+    std::string_view owner_scope,
+    std::string_view parent_run_id,
+    std::uint64_t expected_parent_fence,
+    std::optional<std::uint64_t> expected_row_version,
+    ProgramChildRecord next) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::update_child_relation");
+    if (sync_) return sync_->update_child_relation_sync(owner_scope, parent_run_id, expected_parent_fence, expected_row_version, std::move(next));
+    return detail::block_on_store(store_->update_child_relation(owner_scope, parent_run_id, expected_parent_fence, expected_row_version, std::move(next)), policy_, "ProgramTransitionStore::update_child_relation");
 }
 
 ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish(

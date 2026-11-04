@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=60bf21624d077f7d1b21955a3f0c9cef2671eaf6ac86cb09195522bc36140484 -->
+<!-- neograph-i18n: source=wasm/README.md locale=ko source_sha256=cf049db713e21fcba84cf537e639af46d1f40f11de828eb352161487eb63f2c0 -->
 # WebAssembly에서의 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -497,6 +497,11 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 | | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | 게시 결과 | 필수 |
 | | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | 게시 결과. 리스는 정규 텍스트 또는 `null`입니다 | `"conflict"` |
 | | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | 게시 결과 | 필수 |
+| | `loadChildRelationHead(ownerScope, parentRunId)` | 관계 헤드 또는 `null` | 필수 |
+| | `loadChildRelation(ownerScope, parentRunId, childRunId)` | 관계 행 또는 `null` | 필수 |
+| | `loadChildRelations(ownerScope, parentRunId, openOnly)` | 붙인 순서의 관계 행 목록 | 필수 |
+| | `insertChildRelation(ownerScope, parentRunId, expectedParentFence, child)` | 관계 결과 | 필수 |
+| | `updateChildRelation(ownerScope, parentRunId, expectedParentFence, expectedRowVersion, next)` | 관계 결과 | 필수 |
 | `programs` | `publishAdmitted(bundle, version)` | 없음 | 필수 |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | 번들 또는 `null` | 필수 |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | 버전 또는 `null` | 필수 |
@@ -527,6 +532,7 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 - **소유권 펜스.** `expectedFence`는 게시를 쓰는 제어 객체의 펜스입니다. 호출이 넘어가기 전에 `comparePublish`와 `comparePublishExecution`은 실행 레코드나 저널 레코드가 다른 펜스를 담은
   게시에 `"conflict"`로 답합니다. 객체도 저장된 실행의 `continuation.fence`를 저널 헤드와 같은 단계에서 `expectedFence`와 비교해, 다르면 거부해야 합니다.
   `comparePublishTakeover`는 `runId`가 가리키는 실행의 저장된 `Running` 레코드를 `fence = expectedFence + 1`과 새 저널 레코드 하나로 게시하고, 계보에 묶인 실행이면 같은 단계에서 계보 헤드를 그 레코드로 옮기며, 그 밖에는 아무것도 바꾸지 않습니다.
+- **자식 관계.** 부모의 자식은 부모의 논리 실행 ID를 키로 하는 행이고, 부모마다 헤드가 하나 있습니다(에폭, 개수, 영구 예산 집계, 닫힘 여부). `insertChildRelation`과 `updateChildRelation`은 행과 헤드를 같은 단계에서 바꾸고, `expectedParentFence`를 부모의 저장된 펜스와 비교하며, `{status, refusal, relation, head}`로 답합니다. `status`는 `"applied"`, `"already_present"`, `"refused"` 중 하나입니다. 게시는 관계 부분(`child_relations`)을 담을 수 있고, 객체는 게시와 같은 단계에서 그것을 적용합니다. 마지막 게시는 자기 헤드를 닫습니다. 규칙은 `src/program/transition_validator.h`의 것이며, 참조 저장소를 감싸는 호스트는 그것을 얻습니다. C++에서 이 연산들이 순수 가상이므로 다섯 메서드는 필수입니다.
 - **지원하지 않는 것.** `compare_publish_graph_safe_point`는 직렬화되지 않는 증거를 담으므로, JavaScript 저장소는 라이브 그래프 마이그레이션에 참여하지 않습니다.
   기반 클래스처럼 `"conflict"`로 답합니다.
 
@@ -543,7 +549,8 @@ JavaScript 오류의 메시지, 또는 거부 값을 문자열로 바꾼 것을 
 
 ```js
 const CHANGES = new Set(['transitions.comparePublish', 'transitions.comparePublishExecution',
-  'transitions.comparePublishTakeover', 'programs.publishAdmitted', 'programs.compareActivate',
+  'transitions.comparePublishTakeover', 'transitions.insertChildRelation', 'transitions.updateChildRelation',
+  'programs.publishAdmitted', 'programs.compareActivate',
   'programs.collectGarbage', 'grants.admit', 'grants.revoke', 'fragments.publish', 'fragments.compareUpdate', 'modules.publish',
   'modules.setLifecycle']);
 

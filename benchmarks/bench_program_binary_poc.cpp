@@ -12,6 +12,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include "../tests/fixtures/relation_forwarding.h"
 
 namespace {
 using namespace neograph;
@@ -22,6 +23,7 @@ volatile std::size_t blackhole = 0;
 
 class CaptureTransitionStore final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_BLOCKING(*inner_)
     explicit CaptureTransitionStore(std::shared_ptr<ProgramTransitionStore> inner)
         : inner_(std::make_shared<BlockingProgramTransitionStore>(std::move(inner))) {}
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {

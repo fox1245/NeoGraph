@@ -594,7 +594,7 @@ CREATE TABLE IF NOT EXISTS neograph_harness_schema (
     version   INTEGER NOT NULL
 );
 INSERT INTO neograph_harness_schema (singleton, version)
-VALUES (1, 9)
+VALUES (1, 10)
 ON CONFLICT(singleton) DO NOTHING;
 CREATE TABLE IF NOT EXISTS neograph_harness_artifacts (
     artifact_id  TEXT PRIMARY KEY,
@@ -763,7 +763,35 @@ UPDATE neograph_harness_schema SET version = 9 WHERE singleton = 1;
 )SQL");
                 schema_version = 9;
             }
-            if (schema_version != 9) {
+            if (schema_version == 9) {
+                // Child relations (#661): one head per parent and one row per child.
+                exec(R"SQL(
+CREATE TABLE IF NOT EXISTS neograph_harness_program_child_relation_heads (
+    owner_scope   TEXT NOT NULL,
+    parent_run_id TEXT NOT NULL,
+    record_json   TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, parent_run_id)
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_child_relations (
+    owner_scope   TEXT NOT NULL,
+    parent_run_id TEXT NOT NULL,
+    child_run_id  TEXT NOT NULL,
+    ordinal       INTEGER NOT NULL,
+    open          INTEGER NOT NULL,
+    record_json   TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, parent_run_id, child_run_id),
+    UNIQUE (owner_scope, parent_run_id, ordinal),
+    FOREIGN KEY (owner_scope, parent_run_id)
+        REFERENCES neograph_harness_program_child_relation_heads (owner_scope, parent_run_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS neograph_harness_program_child_relations_open
+    ON neograph_harness_program_child_relations (owner_scope, parent_run_id, open, ordinal);
+UPDATE neograph_harness_schema SET version = 10 WHERE singleton = 1;
+)SQL");
+                schema_version = 10;
+            }
+            if (schema_version != 10) {
                 throw std::runtime_error("SqliteHarnessRecordStore: unsupported schema version");
             }
             exec(R"SQL(
@@ -928,6 +956,27 @@ CREATE TABLE IF NOT EXISTS neograph_harness_program_execution_leases (
     lease_json TEXT NOT NULL,
     PRIMARY KEY (owner_scope, program_run_id)
 );
+CREATE TABLE IF NOT EXISTS neograph_harness_program_child_relation_heads (
+    owner_scope   TEXT NOT NULL,
+    parent_run_id TEXT NOT NULL,
+    record_json   TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, parent_run_id)
+);
+CREATE TABLE IF NOT EXISTS neograph_harness_program_child_relations (
+    owner_scope   TEXT NOT NULL,
+    parent_run_id TEXT NOT NULL,
+    child_run_id  TEXT NOT NULL,
+    ordinal       INTEGER NOT NULL,
+    open          INTEGER NOT NULL,
+    record_json   TEXT NOT NULL,
+    PRIMARY KEY (owner_scope, parent_run_id, child_run_id),
+    UNIQUE (owner_scope, parent_run_id, ordinal),
+    FOREIGN KEY (owner_scope, parent_run_id)
+        REFERENCES neograph_harness_program_child_relation_heads (owner_scope, parent_run_id)
+        ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS neograph_harness_program_child_relations_open
+    ON neograph_harness_program_child_relations (owner_scope, parent_run_id, open, ordinal);
 CREATE TABLE IF NOT EXISTS neograph_harness_contract_runs (
     run_id             TEXT PRIMARY KEY,
     owner_scope        TEXT NOT NULL,
@@ -1406,6 +1455,66 @@ public:
         if (owner_scope.empty() || run_id.empty()) return std::nullopt;
         std::lock_guard lock(impl_->mutex);
         return load_execution_lease_locked(owner_scope, run_id);
+    }
+
+    std::optional<program::ProgramChildRelationHead> load_child_relation_head_sync(
+        std::string_view owner_scope, std::string_view parent_run_id) const override {
+        if (owner_scope.empty() || parent_run_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        return load_relation_head_locked(owner_scope, parent_run_id);
+    }
+
+    std::optional<program::ProgramChildRelation> load_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::string_view child_run_id) const override {
+        if (owner_scope.empty() || parent_run_id.empty() || child_run_id.empty()) return std::nullopt;
+        std::lock_guard lock(impl_->mutex);
+        return load_relation_row_locked(owner_scope, parent_run_id, child_run_id);
+    }
+
+    std::vector<program::ProgramChildRelation> load_child_relations_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        bool open_only) const override {
+        if (owner_scope.empty() || parent_run_id.empty()) return {};
+        std::lock_guard lock(impl_->mutex);
+        Statement       query(impl_->db,
+                              open_only ? "SELECT record_json FROM neograph_harness_program_child_relations "
+                                          "WHERE owner_scope=? AND parent_run_id=? AND open=1 ORDER BY ordinal"
+                                        : "SELECT record_json FROM neograph_harness_program_child_relations "
+                                          "WHERE owner_scope=? AND parent_run_id=? ORDER BY ordinal");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(parent_run_id));
+        std::vector<program::ProgramChildRelation> rows;
+        while (true) {
+            const auto result = query.step();
+            if (result == SQLITE_DONE) break;
+            if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program child relation read failed");
+            auto row = program::ProgramChildRelation::parse(query.text(0));
+            if (row.owner_scope() != owner_scope || row.parent_run_id() != parent_run_id)
+                throw std::invalid_argument("Stored Program child relation binding is corrupt");
+            rows.push_back(std::move(row));
+        }
+        return rows;
+    }
+
+    program::ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, program::ProgramChildRecord child) override {
+        return run_relation_write(owner_scope, parent_run_id, [&](RelationReads& reads) {
+            return program::detail::transition::plan_relation_insert(
+                reads, owner_scope, parent_run_id, expected_parent_fence, child, false);
+        });
+    }
+
+    program::ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::uint64_t expected_parent_fence, std::optional<std::uint64_t> expected_row_version,
+        program::ProgramChildRecord next) override {
+        return run_relation_write(owner_scope, parent_run_id, [&](RelationReads& reads) {
+            return program::detail::transition::plan_relation_update(
+                reads, owner_scope, parent_run_id, expected_parent_fence, expected_row_version, next,
+                nullptr);
+        });
     }
 
     program::ProgramTransitionPublishResult compare_publish_sync(
@@ -2179,6 +2288,16 @@ public:
                 }
             }
 
+            program::detail::transition::TransitionPlan relation_plan;
+            {
+                RelationReads relation_reads(*this, owner_scope);
+                if (!program::detail::transition::relation_parts_bind(
+                        relation_reads, owner_scope, exists, publication, relation_plan)) {
+                    impl_->exec("ROLLBACK;");
+                    return program::ProgramTransitionPublishResult::Conflict;
+                }
+            }
+
             const auto new_terminal = publication.run_record.terminal_result();
             const bool publishes_terminal_event =
                 !publication.events.empty() &&
@@ -2519,6 +2638,8 @@ public:
                 if (insert_source_history.step() != SQLITE_DONE)
                     throw_sqlite_error(impl_->db, "Recorded replay source lineage history insert failed");
             }
+            apply_relation_writes_locked(relation_plan.relation_row, relation_plan.relation_head,
+                                         relation_plan.closed_relation_head);
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
 
             insert_journal(storage_run_id, owner_scope, publication.journal_record);
@@ -2596,6 +2717,200 @@ public:
     }
 
 private:
+    std::optional<program::ProgramChildRelationHead> load_relation_head_locked(
+        std::string_view owner_scope, std::string_view parent_run_id) const {
+        Statement query(impl_->db,
+                        "SELECT record_json FROM neograph_harness_program_child_relation_heads "
+                        "WHERE owner_scope=? AND parent_run_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(parent_run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program child relation head read failed");
+        auto head = program::ProgramChildRelationHead::parse(query.text(0));
+        if (head.data().owner_scope != owner_scope || head.data().parent_run_id != parent_run_id)
+            throw std::invalid_argument("Stored Program child relation head binding is corrupt");
+        return head;
+    }
+
+    std::optional<program::ProgramChildRelation> load_relation_row_locked(
+        std::string_view owner_scope, std::string_view parent_run_id,
+        std::string_view child_run_id) const {
+        Statement query(impl_->db,
+                        "SELECT record_json FROM neograph_harness_program_child_relations "
+                        "WHERE owner_scope=? AND parent_run_id=? AND child_run_id=?");
+        query.bind_text(1, std::string(owner_scope));
+        query.bind_text(2, std::string(parent_run_id));
+        query.bind_text(3, std::string(child_run_id));
+        const auto result = query.step();
+        if (result == SQLITE_DONE) return std::nullopt;
+        if (result != SQLITE_ROW) throw_sqlite_error(impl_->db, "Program child relation read failed");
+        auto row = program::ProgramChildRelation::parse(query.text(0));
+        if (row.owner_scope() != owner_scope || row.parent_run_id() != parent_run_id ||
+            row.child_run_id() != child_run_id)
+            throw std::invalid_argument("Stored Program child relation binding is corrupt");
+        return row;
+    }
+
+    void write_relation_head_locked(const program::ProgramChildRelationHead& head) {
+        Statement statement(
+            impl_->db,
+            "INSERT INTO neograph_harness_program_child_relation_heads "
+            "(owner_scope, parent_run_id, record_json) VALUES(?, ?, ?) "
+            "ON CONFLICT(owner_scope, parent_run_id) DO UPDATE SET record_json=excluded.record_json");
+        statement.bind_text(1, head.data().owner_scope);
+        statement.bind_text(2, head.data().parent_run_id);
+        statement.bind_text(3, head.serialize_canonical());
+        if (statement.step() != SQLITE_DONE)
+            throw_sqlite_error(impl_->db, "Program child relation head write failed");
+    }
+
+    void write_relation_row_locked(const program::ProgramChildRelation& row) {
+        Statement statement(
+            impl_->db,
+            "INSERT INTO neograph_harness_program_child_relations "
+            "(owner_scope, parent_run_id, child_run_id, ordinal, open, record_json) "
+            "VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(owner_scope, parent_run_id, child_run_id) "
+            "DO UPDATE SET open=excluded.open, record_json=excluded.record_json");
+        statement.bind_text(1, row.owner_scope());
+        statement.bind_text(2, row.parent_run_id());
+        statement.bind_text(3, row.child_run_id());
+        statement.bind_int64(4, static_cast<std::int64_t>(row.ordinal()));
+        statement.bind_int64(5, row.is_open() ? 1 : 0);
+        statement.bind_text(6, row.serialize_canonical());
+        if (statement.step() != SQLITE_DONE)
+            throw_sqlite_error(impl_->db, "Program child relation write failed");
+    }
+
+    // The writes a relation plan names, in the transaction that validated it: the head first, which the rows reference.
+    void apply_relation_writes_locked(const std::optional<program::ProgramChildRelation>&     row,
+                                      const std::optional<program::ProgramChildRelationHead>& head,
+                                      const std::optional<program::ProgramChildRelationHead>& closed_head) {
+        if (row && head) {
+            write_relation_head_locked(*head);
+            write_relation_row_locked(*row);
+        }
+        if (closed_head) write_relation_head_locked(*closed_head);
+    }
+
+    // The part of the read set the relation planner uses; the other reads are not reachable from it.
+    class RelationReads final : public program::detail::transition::TransitionReads {
+    public:
+        RelationReads(const SqliteHarnessProgramTransitionStore& store, std::string_view owner_scope)
+            : store_(store), owner_scope_(owner_scope) {}
+
+        std::optional<program::GraphMigrationCapsule> graph_migration_capsule(
+            std::string_view, std::string_view) override { unsupported(); }
+        bool effect_id_published(std::string_view, std::string_view) override { unsupported(); }
+        program::detail::transition::Borrowed<std::vector<program::ProgramJavaScriptCommandJournalEntry>>
+        command_log(std::string_view) override { unsupported(); }
+        std::optional<program::ProgramJavaScriptCommandJournalEntry> latest_command(
+            std::string_view) override { unsupported(); }
+        std::optional<program::ProgramRunRecord> run_record(std::string_view run_id, Lock) override {
+            auto wrapper = store_.load_wrapper_locked(owner_scope_, run_id);
+            if (!wrapper) return std::nullopt;
+            return wrapper->run_record();
+        }
+        std::optional<program::ProgramRunLineage> lineage_head(std::string_view lineage_id,
+                                                               Lock) override {
+            Statement query(store_.impl_->db,
+                            "SELECT head_id, record_json FROM neograph_harness_program_lineage_heads "
+                            "WHERE owner_scope=? AND lineage_id=?");
+            query.bind_text(1, std::string(owner_scope_));
+            query.bind_text(2, std::string(lineage_id));
+            const auto result = query.step();
+            if (result == SQLITE_DONE) return std::nullopt;
+            if (result != SQLITE_ROW)
+                throw_sqlite_error(store_.impl_->db, "Program lineage head read failed");
+            auto lineage = program::ProgramRunLineage::parse(query.text(1));
+            if (lineage.id() != query.text(0) || lineage.owner_scope() != owner_scope_ ||
+                lineage.lineage_id() != lineage_id)
+                throw std::invalid_argument("Stored Program lineage head binding is corrupt");
+            return lineage;
+        }
+        std::optional<program::ProgramRunGeneration> generation(std::string_view lineage_id,
+                                                                std::uint64_t    ordinal) override {
+            Statement query(store_.impl_->db,
+                            "SELECT generation_id, record_json FROM neograph_harness_program_generations "
+                            "WHERE owner_scope=? AND lineage_id=? AND generation=?");
+            query.bind_text(1, std::string(owner_scope_));
+            query.bind_text(2, std::string(lineage_id));
+            query.bind_int64(3, static_cast<std::int64_t>(ordinal));
+            const auto result = query.step();
+            if (result == SQLITE_DONE) return std::nullopt;
+            if (result != SQLITE_ROW)
+                throw_sqlite_error(store_.impl_->db, "Program generation read failed");
+            auto generation = program::ProgramRunGeneration::parse(query.text(1));
+            if (generation.id() != query.text(0) || generation.owner_scope() != owner_scope_ ||
+                generation.lineage_id() != lineage_id || generation.generation() != ordinal)
+                throw std::invalid_argument("Stored Program generation binding is corrupt");
+            return generation;
+        }
+        std::optional<std::string> run_lineage_id(std::string_view) override { unsupported(); }
+        program::detail::transition::Borrowed<std::vector<program::ProgramContextPublication>>
+        context_history(std::string_view) override { unsupported(); }
+        program::detail::transition::Borrowed<std::vector<program::ProgramChildSynthesisRecord>>
+        synthesis_heads(std::string_view) override { unsupported(); }
+        program::detail::transition::Borrowed<std::vector<neograph::HookOutboxEntry>> hook_heads(
+            std::string_view, const program::ProgramRunRecord&) override { unsupported(); }
+        std::optional<program::ProgramJournalRecord> journal_record(std::string_view run_id,
+                                                                    Lock) override {
+            Statement query(store_.impl_->db,
+                            "SELECT record_json FROM neograph_harness_program_journal "
+                            "WHERE run_id=? ORDER BY sequence DESC LIMIT 1");
+            query.bind_text(1, program_storage_run_id(owner_scope_, run_id));
+            const auto result = query.step();
+            if (result == SQLITE_DONE) return std::nullopt;
+            if (result != SQLITE_ROW)
+                throw_sqlite_error(store_.impl_->db, "Program journal read failed");
+            return program::ProgramJournalRecord::parse(query.text(0));
+        }
+        std::optional<program::ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
+                                                                       Lock) override {
+            return store_.load_relation_head_locked(owner_scope_, parent_run_id);
+        }
+        std::optional<program::ProgramChildRelation> relation_row(std::string_view parent_run_id,
+                                                                  std::string_view child_run_id,
+                                                                  Lock) override {
+            return store_.load_relation_row_locked(owner_scope_, parent_run_id, child_run_id);
+        }
+
+    private:
+        [[noreturn]] static void unsupported() {
+            throw std::logic_error("Harness relation reads do not serve this read");
+        }
+        const SqliteHarnessProgramTransitionStore& store_;
+        std::string_view                           owner_scope_;
+    };
+
+    // One standalone relation write: a transaction that plans from the stored state and writes what the plan names.
+    template <typename PlanWrite>
+    program::ProgramChildRelationOutcome run_relation_write(std::string_view owner_scope,
+                                                            std::string_view parent_run_id,
+                                                            PlanWrite&&      plan_write) {
+        if (owner_scope.empty() || parent_run_id.empty())
+            return program::ProgramChildRelationOutcome{program::ProgramChildRelationStatus::Refused,
+                                                        program::ProgramChildRelationRefusal::Invalid,
+                                                        std::nullopt, std::nullopt};
+        std::lock_guard lock(impl_->mutex);
+        impl_->exec("BEGIN IMMEDIATE;");
+        try {
+            RelationReads reads(*this, owner_scope);
+            auto          planned = plan_write(reads);
+            if (planned.status == program::ProgramChildRelationStatus::Applied)
+                apply_relation_writes_locked(planned.row, planned.head, std::nullopt);
+            impl_->exec("COMMIT;");
+            return program::ProgramChildRelationOutcome{planned.status, planned.refusal,
+                                                        std::move(planned.row),
+                                                        std::move(planned.head)};
+        } catch (...) {
+            try {
+                impl_->exec("ROLLBACK;");
+            } catch (...) {}
+            throw;
+        }
+    }
+
     std::optional<program::ProgramExecutionLease> load_execution_lease_locked(
         std::string_view owner_scope, std::string_view run_id) const {
         Statement query(

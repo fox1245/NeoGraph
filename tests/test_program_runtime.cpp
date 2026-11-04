@@ -77,6 +77,7 @@ extern char** environ;
 #include <vector>
 #include "fixtures/store_handle.h"
 #include "transition_validator.h"
+#include "fixtures/relation_forwarding.h"
 
 using neograph::program::test_support::FragmentStoreHandle;
 using neograph::program::test_support::GrantStoreHandle;
@@ -1799,6 +1800,7 @@ private:
 
 class ConflictOnceJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);
@@ -1899,6 +1901,7 @@ private:
 
 class IsolatedProcessTransitionStore final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_BLOCKING(*target_)
     explicit IsolatedProcessTransitionStore(
         std::shared_ptr<ProgramTransitionStore> target)
         : target_(std::make_shared<BlockingProgramTransitionStore>(std::move(target))) {}
@@ -2092,6 +2095,7 @@ neograph::HookOutboxEntry recovery_hook(std::string run_id) {
 
 class BlockAfterJavaScriptResultJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_BLOCKING(*inner_)
     explicit BlockAfterJavaScriptResultJournal(std::shared_ptr<ProgramTransitionStore> inner = {})
         : inner_(std::make_shared<BlockingProgramTransitionStore>(
               inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>())) {}
@@ -2381,6 +2385,7 @@ private:
 
 class FailChildDispatchOnceJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);
@@ -2475,6 +2480,7 @@ private:
 };
 class ThrowOnLatestJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);
@@ -7842,6 +7848,7 @@ namespace {
 // in a row and lets that record's next compare through, along with every other publication.
 class RefuseAwaitStartJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     explicit RefuseAwaitStartJournal(
         std::size_t limit,
         std::string target_operation_id = "root.javascript.1/member/0")
@@ -8939,6 +8946,7 @@ namespace {
 // what it saw.
 class ContinuationInterferenceJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(*inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
         return inner_->load_sync(owner, run_id);
     }
@@ -9539,6 +9547,7 @@ namespace {
 // parent is still Running in the store, then release the parent's Interrupted publication.
 class ParentInterruptGateJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
         const auto record = inner_.load_sync(owner, run_id);
         {
@@ -9882,6 +9891,7 @@ namespace {
 class ContinuationRaceJournal final : public SyncProgramTransitionStore,
                                       public std::enable_shared_from_this<ContinuationRaceJournal> {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     enum class Stage {
         None,
         PreContinuations,
@@ -9891,6 +9901,7 @@ public:
 
     class PeerView final : public SyncProgramTransitionStore {
     public:
+        NG_FORWARD_RELATION_SYNC(*parent_)
         explicit PeerView(std::shared_ptr<ContinuationRaceJournal> parent) : parent_(std::move(parent)) {}
 
         std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {

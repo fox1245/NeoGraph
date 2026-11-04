@@ -43,6 +43,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "fixtures/relation_forwarding.h"
 
 using namespace neograph;
 using namespace neograph::program;
@@ -151,6 +152,7 @@ RuntimeConfig runtime_config(ExecutorFixture& fixture) {
 // first operation that ran on a pool thread.
 class OffloadingJournal final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(*inner_)
     OffloadingJournal() : inner_(std::make_shared<InMemoryProgramTransitionStore>()) {}
 
     std::set<std::thread::id> threads() const {
@@ -309,6 +311,7 @@ private:
 // executor, as a store whose backend answers through an event loop does.
 class DelayedJournal final : public ProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_ASYNC(*inner_, co_await pause();)
     DelayedJournal() : inner_(std::make_shared<InMemoryProgramTransitionStore>()) {}
 
     asio::awaitable<std::optional<ProgramRunRecord>> load(std::string_view owner_scope, std::string_view run_id) const override {

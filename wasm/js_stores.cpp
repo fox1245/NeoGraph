@@ -353,6 +353,29 @@ public:
             return ProgramTransitionStore::load_execution_lease(owner_scope, run_id);
         return member_.call(tr::load_execution_lease, owner_scope, run_id);
     }
+    asio::awaitable<std::optional<program::ProgramChildRelationHead>> load_child_relation_head(
+        std::string_view owner_scope, std::string_view parent_run_id) const override {
+        return member_.call(tr::load_child_relation_head, owner_scope, parent_run_id);
+    }
+    asio::awaitable<std::optional<program::ProgramChildRelation>> load_child_relation(
+        std::string_view owner_scope, std::string_view parent_run_id, std::string_view child_run_id) const override {
+        return member_.call(tr::load_child_relation, owner_scope, parent_run_id, child_run_id);
+    }
+    asio::awaitable<std::vector<program::ProgramChildRelation>> load_child_relations(
+        std::string_view owner_scope, std::string_view parent_run_id, bool open_only) const override {
+        return member_.call(tr::load_child_relations, owner_scope, parent_run_id, open_only);
+    }
+    asio::awaitable<program::ProgramChildRelationOutcome> insert_child_relation(
+        std::string_view owner_scope, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+        program::ProgramChildRecord child) override {
+        return member_.call(tr::insert_child_relation, owner_scope, parent_run_id, expected_parent_fence, child);
+    }
+    asio::awaitable<program::ProgramChildRelationOutcome> update_child_relation(
+        std::string_view owner_scope, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+        std::optional<std::uint64_t> expected_row_version, program::ProgramChildRecord next) override {
+        return member_.call(tr::update_child_relation, owner_scope, parent_run_id, expected_parent_fence,
+                            expected_row_version, next);
+    }
     // Every backend of the transition store begins a publication with prepare_transition: the checks that need no stored
     // state, which also write the publication's canonical text. A publication it refuses is a Conflict, and never reaches
     // JavaScript; the text it returns is what crosses. What the stored state says about the publication is the store's.

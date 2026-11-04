@@ -1,4 +1,5 @@
 #include <neograph/program/run_record.h>
+#include <neograph/program/child_relation.h>
 
 #include "canonical_json.h"
 #include "../core/json_builder.h"
@@ -273,6 +274,47 @@ void validate_result_state(const ProgramRunRecordData& d) {
     }
 }
 
+// What a child record must satisfy by itself, wherever it is stored: a run record's child list or a relation row.
+void validate_child_shape(const ProgramChildRecord& child) {
+    detail::validate_token(child.child_run_id, "Program child run_id");
+    if (!detail::is_sha256_identity(child.link_id))
+        throw std::invalid_argument("Program run child link identity must be a sha256 value");
+    if (child.link_receipt.empty())
+        throw std::invalid_argument("Program child link receipt must not be empty");
+    detail::validate_utf8(child.link_receipt);
+    if ((child.state == ProgramChildState::Publishing && child.terminal_result) ||
+        ((child.state == ProgramChildState::Completed ||
+          child.state == ProgramChildState::Failed) &&
+         !child.terminal_result)) {
+        throw std::invalid_argument(
+            "Program child terminal result does not match its lifecycle state");
+    }
+    if (child.terminal_generation && !child.terminal_result)
+        throw std::invalid_argument("Child generation requires a result");
+    if (child.terminal_result) {
+        const auto& result = *child.terminal_result;
+        const bool failed_status =
+            result.status() == ProgramTerminalStatus::Failed ||
+            result.status() == ProgramTerminalStatus::BudgetExhausted ||
+            result.status() == ProgramTerminalStatus::TimedOut ||
+            result.status() == ProgramTerminalStatus::CheckpointIncompatible;
+        if ((result.run_id() != child.child_run_id && child.terminal_generation < 2) ||
+            (result.run_id() == child.child_run_id && child.terminal_generation != 0) ||
+            result.program_version_id().empty() || result.attempt() == 0 ||
+            (child.state == ProgramChildState::Completed &&
+             result.status() != ProgramTerminalStatus::Completed) ||
+            (child.state == ProgramChildState::Cancelled &&
+             result.status() != ProgramTerminalStatus::Cancelled) ||
+            (child.state == ProgramChildState::Failed && !failed_status) ||
+            (child.state == ProgramChildState::Dispatched &&
+             result.status() != ProgramTerminalStatus::Interrupted &&
+             result.status() != ProgramTerminalStatus::AmbiguousEffect)) {
+            throw std::invalid_argument("Program child terminal result does not bind its state");
+        }
+    }
+    (void)invocation_body(child.invocation);
+}
+
 void validate(const ProgramRunRecordData& d) {
     // Nested values are validated by stored_body(); keep this pass structural
     // so serialization does not repeat their canonical work.
@@ -370,48 +412,13 @@ void validate(const ProgramRunRecordData& d) {
         detail::validate_token(child.child_run_id, "Program child run_id");
         if (child.child_run_id == d.run_id || !child_ids.insert(child.child_run_id).second)
             throw std::invalid_argument("Program run child identities must be unique");
-        if (!detail::is_sha256_identity(child.link_id))
-            throw std::invalid_argument("Program run child link identity must be a sha256 value");
-        if (child.link_receipt.empty())
-            throw std::invalid_argument("Program child link receipt must not be empty");
-        detail::validate_utf8(child.link_receipt);
         if (child.invocation.parent_run_id !=
                 (d.logical_run_id.empty() ? d.run_id : d.logical_run_id) ||
             d.child_depth == std::numeric_limits<std::uint32_t>::max() ||
             child.invocation.child_depth != d.child_depth + 1) {
             throw std::invalid_argument("Program child invocation does not bind its parent");
         }
-        if ((child.state == ProgramChildState::Publishing && child.terminal_result) ||
-            ((child.state == ProgramChildState::Completed ||
-              child.state == ProgramChildState::Failed) &&
-             !child.terminal_result)) {
-            throw std::invalid_argument(
-                "Program child terminal result does not match its lifecycle state");
-        }
-        if (child.terminal_generation && !child.terminal_result)
-            throw std::invalid_argument("Child generation requires a result");
-        if (child.terminal_result) {
-            const auto& result = *child.terminal_result;
-            const bool failed_status =
-                result.status() == ProgramTerminalStatus::Failed ||
-                result.status() == ProgramTerminalStatus::BudgetExhausted ||
-                result.status() == ProgramTerminalStatus::TimedOut ||
-                result.status() == ProgramTerminalStatus::CheckpointIncompatible;
-            if ((result.run_id() != child.child_run_id && child.terminal_generation < 2) ||
-                (result.run_id() == child.child_run_id && child.terminal_generation != 0) ||
-                result.program_version_id().empty() || result.attempt() == 0 ||
-                (child.state == ProgramChildState::Completed &&
-                 result.status() != ProgramTerminalStatus::Completed) ||
-                (child.state == ProgramChildState::Cancelled &&
-                 result.status() != ProgramTerminalStatus::Cancelled) ||
-                (child.state == ProgramChildState::Failed && !failed_status) ||
-                (child.state == ProgramChildState::Dispatched &&
-                 result.status() != ProgramTerminalStatus::Interrupted &&
-                 result.status() != ProgramTerminalStatus::AmbiguousEffect)) {
-                throw std::invalid_argument("Program child terminal result does not bind its state");
-            }
-        }
-        (void)invocation_body(child.invocation);
+        validate_child_shape(child);
     }
 }
 BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version) {
@@ -817,4 +824,233 @@ std::optional<std::string> ProgramRunRecord::recorded_binding_set_fingerprint() 
     return impl_->data.recorded_binding_set_fingerprint;
 }
 std::string ProgramRunRecord::serialize_canonical() const { return impl_->canonical_bytes; }
+
+// ---- Child relation rows and heads (#661) ----
+
+namespace {
+constexpr std::string_view RELATION_FORMAT      = "neograph-program-child-relation";
+constexpr std::string_view RELATION_HEAD_FORMAT = "neograph-program-child-relation-head";
+
+json budget_body(const RunBudget& budget) {
+    Builder j;
+    auto*   root = eb(j, budget);
+    return std::move(j).finish(root);
+}
+
+bool relation_child_is_open(ProgramChildState state) noexcept {
+    return state == ProgramChildState::Publishing || state == ProgramChildState::Dispatched;
+}
+
+void validate_relation(const ProgramChildRelationData& d) {
+    if (d.owner_scope.empty())
+        throw std::invalid_argument("Program child relation owner_scope must not be empty");
+    detail::validate_utf8(d.owner_scope);
+    detail::validate_token(d.parent_run_id, "Program child relation parent run_id");
+    if (d.row_version == 0)
+        throw std::invalid_argument("Program child relation row version must be positive");
+    if (d.child.child_run_id == d.parent_run_id)
+        throw std::invalid_argument("Program child relation cannot name its parent as the child");
+    if (d.child.invocation.parent_run_id != d.parent_run_id || d.child.invocation.child_depth == 0)
+        throw std::invalid_argument("Program child relation invocation does not bind its parent");
+    validate_child_shape(d.child);
+}
+
+void validate_relation_head(const ProgramChildRelationHeadData& d) {
+    if (d.owner_scope.empty())
+        throw std::invalid_argument("Program child relation head owner_scope must not be empty");
+    detail::validate_utf8(d.owner_scope);
+    detail::validate_token(d.parent_run_id, "Program child relation head parent run_id");
+    if (d.open_count > d.count)
+        throw std::invalid_argument("Program child relation head counts more open rows than rows");
+    if (d.epoch < d.count)
+        throw std::invalid_argument("Program child relation head epoch is below its row count");
+    if (d.closed == d.closed_by.empty())
+        throw std::invalid_argument("Program child relation head closed state and closer disagree");
+    if (d.committed_budget.max_concurrency != 0 || d.committed_budget.max_child_depth != 0 ||
+        d.committed_budget.max_node_retries)
+        throw std::invalid_argument("Program child relation head holds only permanent budget");
+    if (d.count == 0 && (d.open_count != 0 || d.committed_budget != RunBudget{}))
+        throw std::invalid_argument("Program child relation head without rows commits nothing");
+}
+}  // namespace
+
+struct ProgramChildRelation::Impl {
+    explicit Impl(ProgramChildRelationData value) : data(std::move(value)) {
+        json body{{"format", std::string(RELATION_FORMAT)},
+                  {"storage_schema_version", STORAGE_SCHEMA_VERSION},
+                  {"owner_scope", data.owner_scope},
+                  {"parent_run_id", data.parent_run_id},
+                  {"ordinal", data.ordinal},
+                  {"row_version", data.row_version},
+                  {"child", child_body(data.child)}};
+        id = detail::sha256_identity("program-child-relation/v1", detail::canonical_json_bytes(body));
+        body["id"]      = id;
+        canonical_bytes = detail::canonical_json_bytes(body);
+    }
+    ProgramChildRelationData data;
+    std::string              id;
+    std::string              canonical_bytes;
+};
+
+ProgramChildRelation::ProgramChildRelation(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
+
+std::string serialize_program_child_record(const ProgramChildRecord& child) {
+    validate_child_shape(child);
+    return detail::canonical_json_bytes(child_body(child));
+}
+
+ProgramChildRecord parse_program_child_record(std::string_view stored_bytes) {
+    auto child = parse_child(detail::parse_json_strict(stored_bytes));
+    validate_child_shape(child);
+    return child;
+}
+
+ProgramChildRelation ProgramChildRelation::create(ProgramChildRelationData data) {
+    validate_relation(data);
+    return ProgramChildRelation(std::make_shared<const Impl>(std::move(data)));
+}
+
+ProgramChildRelation ProgramChildRelation::parse(std::string_view stored_bytes) {
+    json v;
+    try {
+        v = detail::parse_json_strict(stored_bytes);
+    } catch (const std::exception& e) {
+        throw std::invalid_argument(std::string("Invalid stored ProgramChildRelation JSON: ") + e.what());
+    }
+    if (!v.is_object() || rs(v, "format") != RELATION_FORMAT)
+        throw std::invalid_argument("Stored ProgramChildRelation has unknown format");
+    if (r32(v, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+        throw std::invalid_argument("Stored ProgramChildRelation schema version is unsupported");
+    detail::reject_unknown_fields(v, "Stored ProgramChildRelation",
+                                  {"format", "storage_schema_version", "id", "owner_scope",
+                                   "parent_run_id", "ordinal", "row_version", "child"});
+    ProgramChildRelationData d;
+    d.owner_scope   = rs(v, "owner_scope");
+    d.parent_run_id = rs(v, "parent_run_id");
+    d.ordinal       = ru(v, "ordinal");
+    d.row_version   = ru(v, "row_version");
+    d.child         = parse_child(rv(v, "child"));
+    auto out        = ProgramChildRelation::create(std::move(d));
+    if (out.id() != rs(v, "id"))
+        throw std::invalid_argument("Stored ProgramChildRelation id does not match canonical body");
+    return out;
+}
+
+const ProgramChildRelationData& ProgramChildRelation::data() const noexcept { return impl_->data; }
+const std::string& ProgramChildRelation::owner_scope() const noexcept { return impl_->data.owner_scope; }
+const std::string& ProgramChildRelation::parent_run_id() const noexcept { return impl_->data.parent_run_id; }
+const std::string& ProgramChildRelation::child_run_id() const noexcept {
+    return impl_->data.child.child_run_id;
+}
+std::uint64_t ProgramChildRelation::ordinal() const noexcept { return impl_->data.ordinal; }
+std::uint64_t ProgramChildRelation::row_version() const noexcept { return impl_->data.row_version; }
+const ProgramChildRecord& ProgramChildRelation::child() const noexcept { return impl_->data.child; }
+bool ProgramChildRelation::is_open() const noexcept {
+    return relation_child_is_open(impl_->data.child.state);
+}
+const std::string& ProgramChildRelation::id() const noexcept { return impl_->id; }
+std::string ProgramChildRelation::serialize_canonical() const { return impl_->canonical_bytes; }
+
+struct ProgramChildRelationHead::Impl {
+    explicit Impl(ProgramChildRelationHeadData value) : data(std::move(value)) {
+        json body{{"format", std::string(RELATION_HEAD_FORMAT)},
+                  {"storage_schema_version", STORAGE_SCHEMA_VERSION},
+                  {"owner_scope", data.owner_scope},
+                  {"parent_run_id", data.parent_run_id},
+                  {"epoch", data.epoch},
+                  {"count", data.count},
+                  {"open_count", data.open_count},
+                  {"committed_budget", budget_body(data.committed_budget)},
+                  {"closed", data.closed},
+                  {"closed_by", data.closed_by}};
+        id = detail::sha256_identity("program-child-relation-head/v1",
+                                     detail::canonical_json_bytes(body));
+        body["id"]      = id;
+        canonical_bytes = detail::canonical_json_bytes(body);
+    }
+    ProgramChildRelationHeadData data;
+    std::string                  id;
+    std::string                  canonical_bytes;
+};
+
+ProgramChildRelationHead::ProgramChildRelationHead(std::shared_ptr<const Impl> impl)
+    : impl_(std::move(impl)) {}
+
+ProgramChildRelationHead ProgramChildRelationHead::empty(std::string_view owner_scope,
+                                                         std::string_view parent_run_id) {
+    ProgramChildRelationHeadData data;
+    data.owner_scope   = std::string(owner_scope);
+    data.parent_run_id = std::string(parent_run_id);
+    return create(std::move(data));
+}
+
+ProgramChildRelationHead ProgramChildRelationHead::create(ProgramChildRelationHeadData data) {
+    validate_relation_head(data);
+    return ProgramChildRelationHead(std::make_shared<const Impl>(std::move(data)));
+}
+
+ProgramChildRelationHead ProgramChildRelationHead::parse(std::string_view stored_bytes) {
+    json v;
+    try {
+        v = detail::parse_json_strict(stored_bytes);
+    } catch (const std::exception& e) {
+        throw std::invalid_argument(std::string("Invalid stored ProgramChildRelationHead JSON: ") +
+                                    e.what());
+    }
+    if (!v.is_object() || rs(v, "format") != RELATION_HEAD_FORMAT)
+        throw std::invalid_argument("Stored ProgramChildRelationHead has unknown format");
+    if (r32(v, "storage_schema_version") != STORAGE_SCHEMA_VERSION)
+        throw std::invalid_argument("Stored ProgramChildRelationHead schema version is unsupported");
+    detail::reject_unknown_fields(v, "Stored ProgramChildRelationHead",
+                                  {"format", "storage_schema_version", "id", "owner_scope",
+                                   "parent_run_id", "epoch", "count", "open_count",
+                                   "committed_budget", "closed", "closed_by"});
+    ProgramChildRelationHeadData d;
+    d.owner_scope      = rs(v, "owner_scope");
+    d.parent_run_id    = rs(v, "parent_run_id");
+    d.epoch            = ru(v, "epoch");
+    d.count            = ru(v, "count");
+    d.open_count       = ru(v, "open_count");
+    d.committed_budget = db(rv(v, "committed_budget"));
+    if (!rv(v, "closed").is_boolean())
+        throw std::invalid_argument("Program child relation head field 'closed' must be a boolean");
+    d.closed    = rv(v, "closed").get<bool>();
+    d.closed_by = rs(v, "closed_by");
+    auto out    = ProgramChildRelationHead::create(std::move(d));
+    if (out.id() != rs(v, "id"))
+        throw std::invalid_argument("Stored ProgramChildRelationHead id does not match canonical body");
+    return out;
+}
+
+const ProgramChildRelationHeadData& ProgramChildRelationHead::data() const noexcept {
+    return impl_->data;
+}
+std::uint64_t ProgramChildRelationHead::epoch() const noexcept { return impl_->data.epoch; }
+std::uint64_t ProgramChildRelationHead::count() const noexcept { return impl_->data.count; }
+std::uint64_t ProgramChildRelationHead::open_count() const noexcept { return impl_->data.open_count; }
+const RunBudget& ProgramChildRelationHead::committed_budget() const noexcept {
+    return impl_->data.committed_budget;
+}
+bool ProgramChildRelationHead::closed() const noexcept { return impl_->data.closed; }
+const std::string& ProgramChildRelationHead::id() const noexcept { return impl_->id; }
+std::string ProgramChildRelationHead::serialize_canonical() const { return impl_->canonical_bytes; }
+
+std::string_view to_string(ProgramChildRelationRefusal refusal) noexcept {
+    switch (refusal) {
+        case ProgramChildRelationRefusal::None: return "none";
+        case ProgramChildRelationRefusal::ParentAbsent: return "parent_absent";
+        case ProgramChildRelationRefusal::ParentNotRunning: return "parent_not_running";
+        case ProgramChildRelationRefusal::FenceMismatch: return "fence_mismatch";
+        case ProgramChildRelationRefusal::Closed: return "closed";
+        case ProgramChildRelationRefusal::RowConflict: return "row_conflict";
+        case ProgramChildRelationRefusal::RowMissing: return "row_missing";
+        case ProgramChildRelationRefusal::RowVersionMismatch: return "row_version_mismatch";
+        case ProgramChildRelationRefusal::InvalidTransition: return "invalid_transition";
+        case ProgramChildRelationRefusal::BudgetExceeded: return "budget_exceeded";
+        case ProgramChildRelationRefusal::ResultUnbound: return "result_unbound";
+        case ProgramChildRelationRefusal::Invalid: return "invalid";
+    }
+    return "unknown";
+}
+
 }  // namespace neograph::program

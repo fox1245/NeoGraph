@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 #include "fixtures/store_handle.h"
+#include "fixtures/relation_forwarding.h"
 
 using neograph::program::test_support::OwnedTransitionStore;
 using neograph::program::test_support::TransitionStoreHandle;
@@ -672,6 +673,7 @@ private:
 
 class BlockAfterNativeResultStore final : public SyncProgramTransitionStore {
 public:
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);

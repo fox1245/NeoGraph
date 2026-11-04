@@ -581,6 +581,63 @@ std::vector<ProgramChildSynthesisRecord> load_synthesis_heads(sqlite3*         d
 }
 
 // The stored state as the transition validator reads it, inside the caller's transaction.
+std::optional<ProgramChildRelationHead> load_relation_head_record(sqlite3*         db,
+                                                                   std::string_view owner_scope,
+                                                                   std::string_view parent_run_id) {
+    Statement statement(
+        db, "SELECT head_bytes FROM program_child_relation_heads_v1 "
+            "WHERE owner_scope = ?1 AND parent_run_id = ?2");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, parent_run_id);
+    if (!statement.step_row()) return std::nullopt;
+    auto head = ProgramChildRelationHead::parse(column_blob(statement.get(), 0));
+    if (head.data().owner_scope != owner_scope || head.data().parent_run_id != parent_run_id)
+        throw std::invalid_argument("Stored Program child relation head binding is corrupt");
+    return head;
+}
+
+ProgramChildRelation parse_relation_row(std::string_view owner_scope, std::string_view parent_run_id,
+                                        std::string_view bytes) {
+    auto row = ProgramChildRelation::parse(bytes);
+    if (row.owner_scope() != owner_scope || row.parent_run_id() != parent_run_id)
+        throw std::invalid_argument("Stored Program child relation binding is corrupt");
+    return row;
+}
+
+std::optional<ProgramChildRelation> load_relation_row_record(sqlite3*         db,
+                                                             std::string_view owner_scope,
+                                                             std::string_view parent_run_id,
+                                                             std::string_view child_run_id) {
+    Statement statement(
+        db, "SELECT row_bytes FROM program_child_relations_v1 "
+            "WHERE owner_scope = ?1 AND parent_run_id = ?2 AND child_run_id = ?3");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, parent_run_id);
+    statement.bind_text(3, child_run_id);
+    if (!statement.step_row()) return std::nullopt;
+    auto row = parse_relation_row(owner_scope, parent_run_id, column_blob(statement.get(), 0));
+    if (row.child_run_id() != child_run_id)
+        throw std::invalid_argument("Stored Program child relation binding is corrupt");
+    return row;
+}
+
+std::vector<ProgramChildRelation> load_relation_rows(sqlite3*         db,
+                                                     std::string_view owner_scope,
+                                                     std::string_view parent_run_id,
+                                                     bool             open_only) {
+    Statement statement(
+        db, open_only ? "SELECT row_bytes FROM program_child_relations_v1 "
+                        "WHERE owner_scope = ?1 AND parent_run_id = ?2 AND open = 1 ORDER BY ordinal"
+                      : "SELECT row_bytes FROM program_child_relations_v1 "
+                        "WHERE owner_scope = ?1 AND parent_run_id = ?2 ORDER BY ordinal");
+    statement.bind_text(1, owner_scope);
+    statement.bind_text(2, parent_run_id);
+    std::vector<ProgramChildRelation> rows;
+    while (statement.step_row())
+        rows.push_back(parse_relation_row(owner_scope, parent_run_id, column_blob(statement.get(), 0)));
+    return rows;
+}
+
 class SqliteReads final : public detail::transition::TransitionReads {
 public:
     SqliteReads(sqlite3* db, std::string_view owner_scope, detail::RunRecordCache* cache)
@@ -640,6 +697,19 @@ public:
                                                       const ProgramRunRecord& run) override {
         return Borrowed<std::vector<HookOutboxEntry>>(
             load_hook_outbox_heads(db_, owner_scope_, run_id, run));
+    }
+    std::optional<ProgramJournalRecord> journal_record(std::string_view run_id, Lock) override {
+        auto head = load_head(db_, owner_scope_, run_id, cache_);
+        if (!head) return std::nullopt;
+        return std::move(head->journal_record);
+    }
+    std::optional<ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
+                                                          Lock) override {
+        return load_relation_head_record(db_, owner_scope_, parent_run_id);
+    }
+    std::optional<ProgramChildRelation> relation_row(std::string_view parent_run_id,
+                                                      std::string_view child_run_id, Lock) override {
+        return load_relation_row_record(db_, owner_scope_, parent_run_id, child_run_id);
     }
 
 private:
@@ -727,6 +797,57 @@ void create_v2_schema(sqlite3* db) {
     exec(db, "CREATE TABLE IF NOT EXISTS program_execution_leases_v1 ("
              "owner_scope TEXT NOT NULL, run_id TEXT NOT NULL, lease_id TEXT NOT NULL, "
              "lease_bytes BLOB NOT NULL, PRIMARY KEY(owner_scope, run_id))");
+    // Child relations (#661): one head per parent and one row per child, keyed by the parent's logical run id.
+    exec(db, "CREATE TABLE IF NOT EXISTS program_child_relation_heads_v1 ("
+             "owner_scope TEXT NOT NULL, parent_run_id TEXT NOT NULL, head_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, parent_run_id))");
+    exec(db, "CREATE TABLE IF NOT EXISTS program_child_relations_v1 ("
+             "owner_scope TEXT NOT NULL, parent_run_id TEXT NOT NULL, child_run_id TEXT NOT NULL, "
+             "ordinal INTEGER NOT NULL, open INTEGER NOT NULL, row_bytes BLOB NOT NULL, "
+             "PRIMARY KEY(owner_scope, parent_run_id, child_run_id), "
+             "UNIQUE(owner_scope, parent_run_id, ordinal), "
+             "FOREIGN KEY(owner_scope, parent_run_id) REFERENCES "
+             "program_child_relation_heads_v1(owner_scope, parent_run_id) ON DELETE CASCADE)");
+    exec(db, "CREATE INDEX IF NOT EXISTS program_child_relations_open_v1 ON "
+             "program_child_relations_v1(owner_scope, parent_run_id, open, ordinal)");
+}
+
+void write_relation_head(sqlite3* db, const ProgramChildRelationHead& head) {
+    Statement statement(
+        db, "INSERT INTO program_child_relation_heads_v1(owner_scope, parent_run_id, head_bytes) "
+            "VALUES(?1, ?2, ?3) ON CONFLICT(owner_scope, parent_run_id) DO UPDATE SET "
+            "head_bytes = excluded.head_bytes");
+    statement.bind_text(1, head.data().owner_scope);
+    statement.bind_text(2, head.data().parent_run_id);
+    statement.bind_blob(3, head.serialize_canonical());
+    statement.step_done();
+}
+
+void write_relation_row(sqlite3* db, const ProgramChildRelation& row) {
+    Statement statement(
+        db, "INSERT INTO program_child_relations_v1"
+            "(owner_scope, parent_run_id, child_run_id, ordinal, open, row_bytes) "
+            "VALUES(?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(owner_scope, parent_run_id, child_run_id) "
+            "DO UPDATE SET open = excluded.open, row_bytes = excluded.row_bytes");
+    statement.bind_text(1, row.owner_scope());
+    statement.bind_text(2, row.parent_run_id());
+    statement.bind_text(3, row.child_run_id());
+    statement.bind_uint64(4, row.ordinal());
+    statement.bind_uint64(5, row.is_open() ? 1 : 0);
+    statement.bind_blob(6, row.serialize_canonical());
+    statement.step_done();
+}
+
+// The writes a relation plan names, in the transaction that validated it: the head first, which the rows reference.
+void apply_relation_writes(sqlite3*                                        db,
+                           const std::optional<ProgramChildRelation>&       row,
+                           const std::optional<ProgramChildRelationHead>&   head,
+                           const std::optional<ProgramChildRelationHead>&   closed_head) {
+    if (row && head) {
+        write_relation_head(db, *head);
+        write_relation_row(db, *row);
+    }
+    if (closed_head) write_relation_head(db, *closed_head);
 }
 
 void insert_lineage_head(sqlite3* db, const ProgramRunLineage& lineage) {
@@ -1416,6 +1537,65 @@ std::optional<ProgramRunLineage> SQLiteProgramTransitionStore::load_lineage_head
     return load_historical_lineage_head(impl_->db, owner_scope, lineage_id, head_id);
 }
 
+std::optional<ProgramChildRelationHead> SQLiteProgramTransitionStore::load_child_relation_head_sync(
+    std::string_view owner_scope, std::string_view parent_run_id) const {
+    if (owner_scope.empty() || parent_run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_relation_head_record(impl_->db, owner_scope, parent_run_id);
+}
+
+std::optional<ProgramChildRelation> SQLiteProgramTransitionStore::load_child_relation_sync(
+    std::string_view owner_scope, std::string_view parent_run_id, std::string_view child_run_id) const {
+    if (owner_scope.empty() || parent_run_id.empty() || child_run_id.empty()) return std::nullopt;
+    std::lock_guard lock(impl_->mutex);
+    return load_relation_row_record(impl_->db, owner_scope, parent_run_id, child_run_id);
+}
+
+std::vector<ProgramChildRelation> SQLiteProgramTransitionStore::load_child_relations_sync(
+    std::string_view owner_scope, std::string_view parent_run_id, bool open_only) const {
+    if (owner_scope.empty() || parent_run_id.empty()) return {};
+    std::lock_guard lock(impl_->mutex);
+    return load_relation_rows(impl_->db, owner_scope, parent_run_id, open_only);
+}
+
+ProgramChildRelationOutcome SQLiteProgramTransitionStore::insert_child_relation_sync(
+    std::string_view owner_scope, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+    ProgramChildRecord child) {
+    if (owner_scope.empty() || parent_run_id.empty())
+        return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
+                                           ProgramChildRelationRefusal::Invalid, std::nullopt,
+                                           std::nullopt};
+    std::lock_guard lock(impl_->mutex);
+    Transaction     transaction(impl_->db);
+    SqliteReads     reads(impl_->db, owner_scope, &impl_->run_record_cache);
+    auto            planned = detail::transition::plan_relation_insert(
+        reads, owner_scope, parent_run_id, expected_parent_fence, child, false);
+    if (planned.status == ProgramChildRelationStatus::Applied)
+        apply_relation_writes(impl_->db, planned.row, planned.head, std::nullopt);
+    transaction.commit();
+    return ProgramChildRelationOutcome{planned.status, planned.refusal, std::move(planned.row),
+                                       std::move(planned.head)};
+}
+
+ProgramChildRelationOutcome SQLiteProgramTransitionStore::update_child_relation_sync(
+    std::string_view owner_scope, std::string_view parent_run_id, std::uint64_t expected_parent_fence,
+    std::optional<std::uint64_t> expected_row_version, ProgramChildRecord next) {
+    if (owner_scope.empty() || parent_run_id.empty())
+        return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
+                                           ProgramChildRelationRefusal::Invalid, std::nullopt,
+                                           std::nullopt};
+    std::lock_guard lock(impl_->mutex);
+    Transaction     transaction(impl_->db);
+    SqliteReads     reads(impl_->db, owner_scope, &impl_->run_record_cache);
+    auto            planned = detail::transition::plan_relation_update(
+        reads, owner_scope, parent_run_id, expected_parent_fence, expected_row_version, next, nullptr);
+    if (planned.status == ProgramChildRelationStatus::Applied)
+        apply_relation_writes(impl_->db, planned.row, planned.head, std::nullopt);
+    transaction.commit();
+    return ProgramChildRelationOutcome{planned.status, planned.refusal, std::move(planned.row),
+                                       std::move(planned.head)};
+}
+
 ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_sync(
     std::string_view owner_scope, std::string_view expected_journal_head,
     std::uint64_t expected_fence,
@@ -1571,6 +1751,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
         update_lineage_head(impl_->db, *publication.recorded_replay_source_lineage);
         insert_lineage_history(impl_->db, *publication.recorded_replay_source_lineage);
     }
+    apply_relation_writes(impl_->db, plan.relation_row, plan.relation_head, plan.closed_relation_head);
     if (safe_point_capsule) insert_graph_migration_capsule(impl_->db, *safe_point_capsule);
     if (next_lease)
         insert_execution_lease(impl_->db, *next_lease);
