@@ -1365,7 +1365,11 @@ public:
 
     std::optional<ProgramRunRecord> run_record(const std::string& run_id) const {
         py::gil_scoped_release release;
-        return BlockingProgramTransitionStore(stores_.transitions).load(owner_scope_, run_id);
+        BlockingProgramTransitionStore transitions(stores_.transitions);
+        auto record = transitions.load(owner_scope_, run_id);
+        if (!record) return std::nullopt;
+        return with_child_relations(*record,
+                                    transitions.load_child_relations(owner_scope_, record->logical_run_id()));
     }
 
     std::optional<ProgramBundle> bundle(const std::string& bundle_id) const {

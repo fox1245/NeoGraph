@@ -265,13 +265,14 @@ def test_a_child_that_pauses_again_after_its_answer_stays_resumable_and_then_con
 
 
 def test_the_continued_parent_spends_the_budget_of_its_journal_and_gets_no_new_grant():
-    host, version, run_budget, *_ = _setup(AWAIT_AFTER_CORE_CALL)
+    host, version, run_budget, _, child_budget, _ = _setup(AWAIT_AFTER_CORE_CALL)
     result = host.run(version, {}, run_budget)
     assert result.status == ng.ProgramTerminalStatus.Interrupted, s.describe(result)
     assert result.usage.core_steps == 1
-    assert result.remaining_budget.max_core_steps == 0
-    # The child's grant is reserved, not taken out of the parent's remainder; the Core call, the spawn and the
-    # await are charged to the parent.
+    # The await reserves only the Core steps the parent can still spend, without what its child holds: the
+    # journal keeps the child's grant beneath the reservation, which the parent cannot spend.
+    assert result.remaining_budget.max_core_steps == child_budget.max_core_steps
+    # The Core call, the spawn and the await are charged to the parent.
     assert result.remaining_budget.max_program_operations == run_budget.max_program_operations - 3
     child_id = host.run_record(result.run_id).children[0].child_run_id
     assert host.resume(child_id, ANSWER).wait().status == ng.ProgramTerminalStatus.Completed

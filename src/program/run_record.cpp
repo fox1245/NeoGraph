@@ -954,6 +954,12 @@ const std::string& ProgramChildRelation::child_run_id() const noexcept {
 std::uint64_t ProgramChildRelation::ordinal() const noexcept { return impl_->data.ordinal; }
 std::uint64_t ProgramChildRelation::row_version() const noexcept { return impl_->data.row_version; }
 const ProgramChildRecord& ProgramChildRelation::child() const noexcept { return impl_->data.child; }
+ProgramRunRecord with_child_relations(const ProgramRunRecord& record, const std::vector<ProgramChildRelation>& rows) {
+    std::vector<ProgramChildRecord> children;
+    children.reserve(rows.size());
+    for (const auto& row : rows) children.push_back(row.child());
+    return record.with_snapshot_children(std::move(children));
+}
 bool ProgramChildRelation::is_open() const noexcept {
     return relation_child_is_open(impl_->data.child.state);
 }

@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
 
@@ -154,5 +155,14 @@ struct ProgramChildRelationOutcome {
     /// The head after an applied write, the stored head otherwise (absent when the parent has no rows).
     std::optional<ProgramChildRelationHead>    head;
 };
+
+/**
+ * The record with the children of its run attached as its snapshot overlay (`ProgramRunRecord::snapshot_children`),
+ * from the relation rows that a store holds for the run's logical run id, in the order the rows were attached. A
+ * record read from a store carries no children of its own; every API that returns a record for a caller to look at
+ * (`ProgramHandle::snapshot`, a host's read of a stored record) fills it this way.
+ */
+NEOGRAPH_PROGRAM_API ProgramRunRecord with_child_relations(const ProgramRunRecord& record,
+                                                           const std::vector<ProgramChildRelation>& rows);
 
 }  // namespace neograph::program

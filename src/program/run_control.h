@@ -233,6 +233,9 @@ using ChildBindingValidationCallback = std::function<asio::awaitable<void>(std::
 /// The budget a new spawn of a child binding is granted: the same value that the launch of that child derives, or
 /// nothing when the binding names a child the run already holds (its grant is in the relation head already).
 using ChildGrantCallback = std::function<asio::awaitable<std::optional<RunBudget>>(std::string)>;
+/// The part of a run's grant that its running attempt has not spent yet, read at the moment of the call (model
+/// tokens, money and Core steps; the other fields of the returned budget are not meaningful).
+using LiveRemainingProvider = std::function<RunBudget()>;
 enum class ChildRecoveryMode { None, Synthesis, Existing, Unrecorded };
 using ChildRecoveryCallback =
     std::function<asio::awaitable<ChildRecoveryMode>(std::string, json, std::string)>;
@@ -323,6 +326,12 @@ public:
     void set_child_binding_validation_callback(ChildBindingValidationCallback callback) noexcept;
     void set_child_recovery_callback(ChildRecoveryCallback callback) noexcept;
     void set_child_grant_callback(ChildGrantCallback callback) noexcept;
+    /// A plan parent publishes no spend while its attempt runs, so the remainder its record stores lags what the
+    /// attempt has spent. The attempt registers a provider of the live remainder, and the admission of a new child
+    /// holds the child's grant against the lesser of the two (model tokens, money and Core steps).
+    void set_live_remaining_budget(LiveRemainingProvider provider) noexcept;
+    /// The attempt's unspent model tokens, money and Core steps now; nothing when no attempt registered a provider.
+    std::optional<RunBudget> live_remaining_budget() const;
     /// What a new spawn of `binding` is granted (see ChildGrantCallback); nothing when the run has no child launcher.
     asio::awaitable<std::optional<RunBudget>> child_grant(std::string binding) const;
     /// Reads the run's relation head and keeps its aggregate: the budget the run's children hold. Does nothing for a
@@ -634,6 +643,7 @@ private:
     ChildLaunchCallback                     child_launch_callback_;
     ChildRecoveryCallback                         child_recovery_callback_;
     ChildGrantCallback                            child_grant_callback_;
+    LiveRemainingProvider                         live_remaining_provider_;
     mutable RunBudget                             children_held_;
     mutable SynthesisHeadsCache                   synthesis_heads_;
     ExistingChildReconnectCallback                existing_child_reconnect_callback_;

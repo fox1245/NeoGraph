@@ -158,6 +158,9 @@ public:
      * stay valid after the temporary record is gone.
      */
     std::vector<ProgramChildRecord> snapshot_children() const;
+    /// A copy of this record that carries `children` as its snapshot overlay. `with_child_relations`
+    /// (child_relation.h) fills it from the stored relation rows.
+    ProgramRunRecord with_snapshot_children(std::vector<ProgramChildRecord> children) const;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;
     std::uint64_t event_sequence() const noexcept;
@@ -186,7 +189,6 @@ private:
     ProgramRunRecord with_hydrated_terminal(ProgramResult result) const;
     // Runtime-only overlay of a snapshot; canonical identity stays unchanged.
     std::shared_ptr<const std::vector<ProgramChildRecord>> snapshot_children_;
-    ProgramRunRecord with_snapshot_children(std::vector<ProgramChildRecord> children) const;
     friend class detail::RunControl;
 };
 

@@ -35,6 +35,7 @@
 #include "fixtures/vanishing_checkpoint_store.h"
 #include "fixtures/manual_executor.h"
 #include "javascript.h"
+#include "monetary.h"
 #include "registry_access.h"
 #include "run_control.h"
 #include "../src/core/host_timer.h"
@@ -111,6 +112,14 @@ using namespace neograph::program_test;
 using neograph::program::test::children_of;
 
 std::atomic<unsigned>               completed_calls{0};
+// The smallest model-token and money ceilings that Core calls of the current test ran under: a CompletedNode reads the
+// first from its context and the Core provider resolver of a test reads the second from the attempt's account.
+std::atomic<std::uint64_t>          observed_model_token_ceiling{std::numeric_limits<std::uint64_t>::max()};
+std::atomic<std::uint64_t>          observed_money_ceiling{std::numeric_limits<std::uint64_t>::max()};
+void observe_smallest(std::atomic<std::uint64_t>& smallest, std::uint64_t value) {
+    auto current = smallest.load();
+    while (value < current && !smallest.compare_exchange_weak(current, value)) {}
+}
 std::atomic<unsigned>               mediated_tool_calls{0};
 std::atomic<neograph::ToolExecutionController*> mediated_tool_controller{nullptr};
 std::string                         synthesis_execution_marker;
@@ -146,8 +155,9 @@ class CompletedNode final : public GraphNode {
 public:
     explicit CompletedNode(std::string name) : name_(std::move(name)) {}
 
-    asio::awaitable<NodeOutput> run(NodeInput) override {
+    asio::awaitable<NodeOutput> run(NodeInput in) override {
         ++completed_calls;
+        observe_smallest(observed_model_token_ceiling, in.ctx.model_token_budget);
         if (!synthesis_execution_marker.empty()) {
             std::ofstream marker(synthesis_execution_marker, std::ios::app);
             marker << "executed\n";
@@ -9856,9 +9866,12 @@ struct StepsHeldByAChildProbe {
     ProgramTerminalStatus status = ProgramTerminalStatus::Failed;
     std::string           failure_code;
     std::string           description;
-    std::size_t           children          = 0;
-    std::uint64_t         parent_steps_kept = 0;
-    std::uint64_t         child_steps_held  = 0;
+    std::size_t           children                 = 0;
+    std::uint64_t         parent_steps_kept        = 0;
+    std::uint64_t         child_steps_held         = 0;
+    std::uint64_t         core_steps               = 0;
+    std::size_t           operation_started_events = 0;
+    unsigned              completed_calls_count    = 0;
     bool                  children_ended_completed = true;
 };
 
@@ -9866,9 +9879,15 @@ StepsHeldByAChildProbe summarize_steps_held_by_a_child(AdmittedRuntime&        f
                                                        ProgramHandle&          parent,
                                                        const ProgramResult&    result) {
     const auto stored = fixture.journal->load("tenant:runtime", parent.run_id());
+    const auto events = fixture.journal->load_events("tenant:runtime", parent.run_id(), 0);
     StepsHeldByAChildProbe probe;
-    probe.status       = result.status();
-    probe.failure_code = result.failure() ? result.failure()->code : std::string{};
+    probe.status                = result.status();
+    probe.failure_code          = result.failure() ? result.failure()->code : std::string{};
+    probe.core_steps            = result.usage().core_steps;
+    probe.completed_calls_count = completed_calls.load();
+    for (const auto& event : events) {
+        if (event.kind == ProgramEventKind::OperationStarted) ++probe.operation_started_events;
+    }
     if (!stored) {
         probe.description = "the parent has no stored record";
         return probe;
@@ -9909,15 +9928,70 @@ StepsHeldByAChildProbe run_steps_held_by_a_child_probe(const char*   body,
     return summarize_steps_held_by_a_child(fixture, parent, result);
 }
 
+StepsHeldByAChildProbe run_plan_root_steps_held_by_a_child_probe(
+    json          root,
+    const char*   trace,
+    std::uint64_t parent_steps      = 20,
+    std::uint64_t child_steps       = 20,
+    std::string   child_node_type   = "runtime-completed",
+    bool          self_looping_core = false,
+    std::uint64_t parent_tokens     = 1000,
+    std::uint64_t parent_money      = 1000,
+    std::uint64_t parent_children   = 1,
+    std::uint64_t child_children    = 1,
+    // Changes the parent's document and budget after the defaults above are applied (a newer schema version, the
+    // requirements of the operations a test adds).
+    const std::function<void(json&, RunBudget&)>& adjust = {},
+    json          input             = json::object(),
+    bool          observe_money     = false) {
+    completed_calls.store(0);
+    observed_model_token_ceiling.store(std::numeric_limits<std::uint64_t>::max());
+    observed_money_ceiling.store(std::numeric_limits<std::uint64_t>::max());
+    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
+    RunBudget       parent_budget{10000, parent_tokens, parent_money, 2, 32, parent_steps, 0, 1, parent_children};
+    auto            document = orchestration_document(std::move(root), "runtime-completed");
+    if (self_looping_core)
+        document["root"]["definition"] = step_limited_program_document()["root"]["definition"];
+    document["declared_budget_requirements"][1]["maximum"] = parent_tokens;
+    document["declared_budget_requirements"][2]["maximum"] = parent_money;
+    document["declared_budget_requirements"][5]["maximum"] = parent_steps;
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = parent_children;
+    document["declared_budget_requirements"][8]["maximum"] = parent_children;
+    if (adjust) adjust(document, parent_budget);
+    const auto          child_version  = fixture.admit(std::move(child_node_type));
+    const auto          parent_version = fixture.admit_document(std::move(document));
+    const std::uint32_t child_depth    = child_children > 0 ? 1u : 0u;
+    const auto          linked         = link_child_versions(
+        fixture, parent_version, child_version,
+        BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, child_depth, child_children},
+        ExecutionGuarantee::Unmanaged);
+    if (observe_money) {
+        fixture.core_provider_call_resolver =
+            [broker = std::make_shared<ProgramBrokerProbe>()](
+                const ProgramCoreProviderCallContext& context) -> std::optional<ProgramCoreProviderCallBinding> {
+            if (context.monetary_account) observe_smallest(observed_money_ceiling, context.monetary_account->ceiling());
+            return ProgramCoreProviderCallBinding{std::string(context.owner_scope),
+                                                  std::string(context.program_version_id),
+                                                  std::string(context.run_id),
+                                                  std::string(context.operation_id),
+                                                  context.attempt, broker};
+        };
+        fixture.runtime = fixture.make_runtime();
+    }
+    auto       parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
+                                               ProgramInvocation{std::move(input), parent_budget, trace, {}});
+    const auto result = parent.wait();
+    return summarize_steps_held_by_a_child(fixture, parent, result);
+}
+
 // The same probe for a plan parent: `steps` are the plan's operations, run in one attempt without any command.
 StepsHeldByAChildProbe run_plan_steps_held_by_a_child_probe(std::vector<std::string> steps,
                                                             const char*              trace,
                                                             std::uint64_t            parent_steps = 20,
                                                             std::uint64_t            child_steps  = 20) {
-    completed_calls.store(0);
-    AdmittedRuntime fixture(4, {}, {}, {}, ExecutionGuarantee::Unmanaged, true);
-    const RunBudget parent_budget{10000, 1000, 1000, 2, 32, parent_steps, 0, 1, 1};
-    json            children = json::array();
+    json children = json::array();
     for (const auto& step : steps) {
         if (step == "spawn")
             children.push_back(json{{"op", "await"},
@@ -9925,21 +9999,8 @@ StepsHeldByAChildProbe run_plan_steps_held_by_a_child_probe(std::vector<std::str
         else
             children.push_back(json{{"op", "call_core"}});
     }
-    auto document = orchestration_document(json{{"op", "sequence"}, {"children", std::move(children)}}, "runtime-completed");
-    document["declared_budget_requirements"][5]["maximum"] = parent_steps;
-    document["declared_budget_requirements"][7]["minimum"] = 1;
-    document["declared_budget_requirements"][7]["maximum"] = 1;
-    document["declared_budget_requirements"][8]["minimum"] = 1;
-    document["declared_budget_requirements"][8]["maximum"] = 1;
-    const auto child_version  = fixture.admit("runtime-completed");
-    const auto parent_version = fixture.admit_document(std::move(document));
-    const auto linked = link_child_versions(fixture, parent_version, child_version,
-                                            BudgetLimits{10000, 1000, 1000, 1, 1, child_steps, 0, 1, 1},
-                                            ExecutionGuarantee::Unmanaged);
-    auto       parent = fixture.runtime->start("tenant:runtime", linked.parent_version,
-                                               ProgramInvocation{json::object(), parent_budget, trace, {}});
-    const auto result = parent.wait();
-    return summarize_steps_held_by_a_child(fixture, parent, result);
+    return run_plan_root_steps_held_by_a_child_probe(
+        json{{"op", "sequence"}, {"children", std::move(children)}}, trace, parent_steps, child_steps);
 }
 
 constexpr const char* kCoreCallAfterASpawn = R"JS(
@@ -10003,6 +10064,342 @@ TEST(ProgramRuntimeTest, PlanCoreCallAfterASpawnSpendsTheStepsTheParentKept) {
     EXPECT_EQ(probe.children, 1U) << probe.description;
     EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
     EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+// A plan parallel or race whose spawn grant exceeds what the parent can give ends Failed with P_CHILD_BUDGET before
+// any branch starts, whichever branch comes first.
+TEST(ProgramRuntimeTest, PlanParallelWhoseSpawnGrantExceedsTheParentsStepsStartsNoBranch) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    for (const char* op : {"parallel", "race"}) {
+        for (const auto& branches :
+             {json::array({call_core, spawn_branch}), json::array({spawn_branch, call_core})}) {
+            const auto probe = run_plan_root_steps_held_by_a_child_probe(
+                json{{"op", op}, {"branches", branches}}, "trace-plan-parallel-spawn-exceeds", 10, 20);
+            EXPECT_EQ(probe.status, ProgramTerminalStatus::Failed) << probe.description;
+            EXPECT_EQ(probe.failure_code, "P_CHILD_BUDGET") << probe.description;
+            EXPECT_EQ(probe.children, 0U) << probe.description;
+            EXPECT_EQ(probe.operation_started_events, 1U) << probe.description;
+            EXPECT_EQ(probe.completed_calls_count, 0U) << probe.description;
+            EXPECT_EQ(probe.core_steps, 0U) << probe.description;
+        }
+    }
+}
+
+// Before any branch of a plan parallel starts, the grants of the spawns in its branches are set aside from what its
+// Core calls may spend, even when the spawn sits on a branch arm that is not taken.
+TEST(ProgramRuntimeTest, PlanParallelCoreBranchCannotSpendWhatItsSpawnBranchesWouldBeGranted) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    const json emit_filler{{"op", "emit"}, {"value", json{{"ok", true}}}};
+    const json non_taken_spawn{{"op", "branch"},
+                               {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                               {"then", spawn_branch},
+                               {"else", emit_filler}};
+    for (const auto& branches :
+         {json::array({call_core, non_taken_spawn}), json::array({non_taken_spawn, call_core})}) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            json{{"op", "parallel"}, {"branches", branches}}, "trace-plan-parallel-withholds-spawn-grant",
+            30, 20, "runtime-completed", true);
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+        EXPECT_EQ(probe.core_steps, 10U) << probe.description;
+        EXPECT_EQ(probe.children, 0U) << probe.description;
+    }
+}
+
+// Spawns nested inside a parallel, sequence, or loop branch of an outer parallel are set aside before any branch of
+// the outer parallel starts, with a loop's body multiplied by its iteration bound.
+TEST(ProgramRuntimeTest, PlanNestedAndSequencedSpawnBranchesAreSetAsideLikeDirectOnes) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    const json emit_filler{{"op", "emit"}, {"value", json{{"ok", true}}}};
+    const json non_taken_spawn{{"op", "branch"},
+                               {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                               {"then", spawn_branch},
+                               {"else", emit_filler}};
+    const std::vector<json> roots{
+        json{{"op", "parallel"},
+             {"branches", json::array({call_core,
+                                       json{{"op", "parallel"},
+                                            {"branches", json::array({non_taken_spawn, emit_filler})}}})}},
+        json{{"op", "parallel"},
+             {"branches", json::array({call_core,
+                                       json{{"op", "sequence"},
+                                            {"children", json::array({emit_filler, non_taken_spawn})}}})}},
+        json{{"op", "parallel"},
+             {"branches", json::array({non_taken_spawn,
+                                       json{{"op", "parallel"},
+                                            {"branches", json::array({call_core, emit_filler})}}})}},
+    };
+    for (const auto& root : roots) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            root, "trace-plan-nested-spawn-withheld", 30, 20, "runtime-completed", true);
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+        EXPECT_EQ(probe.core_steps, 10U) << probe.description;
+        EXPECT_EQ(probe.children, 0U) << probe.description;
+    }
+
+    const json loop_root{
+        {"op", "parallel"},
+        {"branches",
+         json::array({call_core,
+                      json{{"op", "loop"},
+                           {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                           {"max_iterations", 2},
+                           {"body", non_taken_spawn}}})}};
+    const auto loop_probe = run_plan_root_steps_held_by_a_child_probe(
+        loop_root, "trace-plan-loop-spawn-withheld", 50, 20, "runtime-completed", true, 4000, 4000, 2, 0);
+    EXPECT_EQ(loop_probe.status, ProgramTerminalStatus::BudgetExhausted) << loop_probe.description;
+    EXPECT_EQ(loop_probe.failure_code, "P_CORE_STEP_BUDGET") << loop_probe.description;
+    EXPECT_EQ(loop_probe.core_steps, 10U) << loop_probe.description;
+    EXPECT_EQ(loop_probe.children, 0U) << loop_probe.description;
+}
+
+// Once a plan parallel finishes, the grant it set aside for an untaken spawn is released and a subsequent Core call
+// can spend the parent's remaining steps.
+TEST(ProgramRuntimeTest, PlanParallelReleasesWhatItSetAside) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    const json emit_filler{{"op", "emit"}, {"value", json{{"ok", true}}}};
+    const json non_taken_spawn{{"op", "branch"},
+                               {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                               {"then", spawn_branch},
+                               {"else", emit_filler}};
+    const json root{
+        {"op", "sequence"},
+        {"children",
+         json::array({json{{"op", "parallel"}, {"branches", json::array({emit_filler, non_taken_spawn})}},
+                      call_core})}};
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        root, "trace-plan-parallel-releases-withheld", 30, 20, "runtime-completed", true);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+    EXPECT_EQ(probe.core_steps, 30U) << probe.description;
+    EXPECT_EQ(probe.children, 0U) << probe.description;
+}
+
+// A plan parallel with a Core branch and a spawn branch whose child takes all of the parent's Core steps ends
+// BudgetExhausted with P_CORE_STEP_BUDGET in either branch order, without spending any parent Core step.
+TEST(ProgramRuntimeTest, PlanParallelWithASpawnBranchEndsTheSameWayInEitherBranchOrder) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    for (const auto& branches :
+         {json::array({call_core, spawn_branch}), json::array({spawn_branch, call_core})}) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            json{{"op", "parallel"}, {"branches", branches}}, "trace-plan-parallel-either-order", 20, 20);
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+        EXPECT_EQ(probe.core_steps, 0U) << probe.description;
+        EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+    }
+}
+
+// When the spawned child interrupts and its grant leaves the parent no Core steps, the sibling Core branch fails with
+// P_CORE_STEP_BUDGET rather than spending a step and causing a transition conflict when the parallel pauses.
+TEST(ProgramRuntimeTest, PlanParallelPausedOnAnInterruptingChildEndsWithTheStepBudget) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    for (const auto& branches :
+         {json::array({call_core, spawn_branch}), json::array({spawn_branch, call_core})}) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            json{{"op", "parallel"}, {"branches", branches}}, "trace-plan-parallel-interrupting-child",
+            20, 20, "runtime-interrupt");
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+        EXPECT_EQ(probe.core_steps, 0U) << probe.description;
+        EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+    }
+}
+
+// When the parent has enough Core steps for both the child's grant and the sibling Core branch, the plan parallel
+// completes in either branch order and keeps at least what the child holds.
+TEST(ProgramRuntimeTest, PlanParallelWhoseSpawnGrantFitsStillCompletes) {
+    const json call_core{{"op", "call_core"}};
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    for (const auto& branches :
+         {json::array({call_core, spawn_branch}), json::array({spawn_branch, call_core})}) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            json{{"op", "parallel"}, {"branches", branches}}, "trace-plan-parallel-fits", 30, 20);
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+        EXPECT_EQ(probe.children, 1U) << probe.description;
+        EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+    }
+}
+
+// A plan parent publishes no spend while it runs, so a child is held against what the attempt has not spent: a spawn
+// after a Core call that left the parent less than the child's grant ends with P_CHILD_BUDGET, and no child is created.
+TEST(ProgramRuntimeTest, PlanSpawnAfterACoreCallIsHeldAgainstWhatTheCoreCallLeft) {
+    const auto probe = run_plan_steps_held_by_a_child_probe({"core", "spawn"}, "trace-plan-spawn-after-core", 20, 20);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Failed) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CHILD_BUDGET") << probe.description;
+    EXPECT_EQ(probe.children, 0U) << probe.description;
+    EXPECT_EQ(probe.core_steps, 1U) << probe.description;
+}
+
+// The parent keeps more steps than the Core call spent and the child is granted: the spawn is admitted.
+TEST(ProgramRuntimeTest, PlanSpawnAfterACoreCallIsAdmittedWhenTheParentKeepsEnough) {
+    const auto probe = run_plan_steps_held_by_a_child_probe({"core", "spawn"}, "trace-plan-spawn-after-core-fits", 30, 20);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+    EXPECT_EQ(probe.children, 1U) << probe.description;
+    EXPECT_GE(probe.parent_steps_kept, probe.child_steps_held) << probe.description;
+}
+
+namespace {
+
+json plan_parallel_map_operation(json items, std::uint64_t max_items, std::uint32_t max_in_flight = 1) {
+    return json{{"op", "parallel_map"},
+                {"item_source", std::move(items)},
+                {"child_binding", "child"},
+                {"input_binding", json{{"from", json{{"field", ""}}}, {"to", json{{"field", "/item"}}}}},
+                {"output_binding", json{{"from", json{{"field", "/channels/value/value"}}}}},
+                {"max_items", max_items},
+                {"max_in_flight", max_in_flight},
+                {"max_output_bytes", 65536},
+                {"failure_policy", "fail_fast"}};
+}
+
+// Changes a probe's parent document to the schema version that has parallel_map.
+// The wall time of a parent is also reserved for each of its children (each child's link holds 10000 ms), so the parent
+// is given enough of it for the children a test launches.
+std::function<void(json&, RunBudget&)> parallel_map_parent() {
+    return [](json& document, RunBudget& budget) {
+        document["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V3;
+        document["declared_budget_requirements"][0]["maximum"] = 30000;
+        budget.wall_time_ms                                    = 30000;
+    };
+}
+
+// A parallel of a self-looping Core call and a branch whose arm holding `operation` is never taken: the operation does
+// not run, so only what the parallel sets aside for it limits the Core call.
+json plan_parallel_with_untaken(json operation) {
+    const json emit_filler{{"op", "emit"}, {"value", json{{"ok", true}}}};
+    const json untaken{{"op", "branch"},
+                       {"condition", json{{"path", "/unused"}, {"exists", true}}},
+                       {"then", std::move(operation)},
+                       {"else", emit_filler}};
+    return json{{"op", "parallel"}, {"branches", json::array({json{{"op", "call_core"}}, untaken})}};
+}
+
+}  // namespace
+
+// The children of a parallel_map are set aside before any branch of the parallel starts: its literal items, each
+// granted the link's ceiling, come off what the Core call may spend (2 items of 10 steps leave a parent of 30 steps
+// 10), and the bound is the number of items, not the operation's max_items (4 items would not fit the parent).
+TEST(ProgramRuntimeTest, PlanParallelSetsAsideTheGrantsOfAParallelMapForItsLiteralItems) {
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(plan_parallel_map_operation(json{{"literal", json::array({1, 2})}}, 4)),
+        "trace-plan-parallel-map-literal-withheld", 50, 20, "runtime-completed", true, 5000, 5000, 4, 0,
+        parallel_map_parent());
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+    EXPECT_EQ(probe.core_steps, 10U) << probe.description;
+    EXPECT_EQ(probe.children, 0U) << probe.description;
+}
+
+// An item source read from the branch's exact input counts the items that input holds; a source that does not
+// resolve ends the operation before it launches a child, so nothing is set aside for it.
+TEST(ProgramRuntimeTest, PlanParallelSetsAsideTheGrantsOfAParallelMapForTheItemsOfItsInput) {
+    const auto items_from_input = json{{"artifact", "input"}, {"field", "/items"}};
+    const auto counted = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(plan_parallel_map_operation(items_from_input, 4)),
+        "trace-plan-parallel-map-input-withheld", 50, 20, "runtime-completed", true, 5000, 5000, 4, 0,
+        parallel_map_parent(), json{{"items", json::array({1, 2})}});
+    EXPECT_EQ(counted.status, ProgramTerminalStatus::BudgetExhausted) << counted.description;
+    EXPECT_EQ(counted.failure_code, "P_CORE_STEP_BUDGET") << counted.description;
+    EXPECT_EQ(counted.core_steps, 10U) << counted.description;
+
+    const auto unresolved = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(plan_parallel_map_operation(items_from_input, 4)),
+        "trace-plan-parallel-map-input-unresolved", 50, 20, "runtime-completed", true, 5000, 5000, 4, 0,
+        parallel_map_parent(), json::object());
+    EXPECT_EQ(unresolved.status, ProgramTerminalStatus::BudgetExhausted) << unresolved.description;
+    EXPECT_EQ(unresolved.failure_code, "P_CORE_STEP_BUDGET") << unresolved.description;
+    EXPECT_EQ(unresolved.core_steps, 50U) << unresolved.description;
+}
+
+// A parallel_map whose items' grants do not fit what the parent can still give ends with P_CHILD_BUDGET before any
+// branch starts.
+TEST(ProgramRuntimeTest, PlanParallelWhoseParallelMapGrantsExceedTheParentsStepsStartsNoBranch) {
+    const json call_core{{"op", "call_core"}};
+    const auto map = plan_parallel_map_operation(json{{"literal", json::array({1, 2})}}, 2);
+    for (const auto& branches : {json::array({call_core, map}), json::array({map, call_core})}) {
+        const auto probe = run_plan_root_steps_held_by_a_child_probe(
+            json{{"op", "parallel"}, {"branches", branches}}, "trace-plan-parallel-map-exceeds", 30, 20,
+            "runtime-completed", false, 5000, 5000, 2, 0, parallel_map_parent());
+        EXPECT_EQ(probe.status, ProgramTerminalStatus::Failed) << probe.description;
+        EXPECT_EQ(probe.failure_code, "P_CHILD_BUDGET") << probe.description;
+        EXPECT_EQ(probe.children, 0U) << probe.description;
+        EXPECT_EQ(probe.operation_started_events, 1U) << probe.description;
+        EXPECT_EQ(probe.completed_calls_count, 0U) << probe.description;
+        EXPECT_EQ(probe.core_steps, 0U) << probe.description;
+    }
+}
+
+// Children launched together are held against what the parent has not spent together: after a Core call that
+// leaves 39 of 40 steps, two items of 20 steps do not both fit, however the two workers interleave.
+TEST(ProgramRuntimeTest, PlanParallelMapAfterACoreCallIsHeldAgainstWhatTheCoreCallLeft) {
+    const json sequence{
+        {"op", "sequence"},
+        {"children", json::array({json{{"op", "call_core"}},
+                                  plan_parallel_map_operation(json{{"literal", json::array({1, 2})}}, 2, 2)})}};
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        sequence, "trace-plan-parallel-map-after-core", 40, 20, "runtime-completed", false, 5000, 5000, 2, 0,
+        parallel_map_parent());
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Failed) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CHILD_BUDGET") << probe.description;
+    EXPECT_LE(probe.children, 1U) << probe.description;
+}
+
+// The tasks of an expand_task_graph are set aside before any branch starts: at most the operation's own task limit,
+// each granted the link's ceiling for the host's template (2 tasks of 20 steps leave a parent of 50 steps 10).
+TEST(ProgramRuntimeTest, PlanParallelSetsAsideTheGrantsOfAnExpandTaskGraph) {
+    json expand{{"op", "expand_task_graph"},
+                {"proposal_source", json{{"inline", expansion_proposal()}}},
+                {"max_tasks", 2},
+                {"max_edges", 4},
+                {"max_depth", 1},
+                {"max_dynamic_compiles", 1},
+                {"max_total_children", 2},
+                {"max_concurrency", 1},
+                {"failure_policy", "collect"}};
+    const auto adjust = [](json& document, RunBudget& budget) {
+        document["program_schema_version"]                     = PROGRAM_SCHEMA_VERSION_V4;
+        document["declared_budget_requirements"][6]["minimum"] = 1;
+        document["declared_budget_requirements"][6]["maximum"] = 1;
+        budget.max_dynamic_compiles                            = 1;
+    };
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(std::move(expand)), "trace-plan-parallel-expand-withheld", 50, 20,
+        "runtime-completed", true, 5000, 5000, 2, 0, adjust);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
+    EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
+    EXPECT_EQ(probe.core_steps, 10U) << probe.description;
+    EXPECT_EQ(probe.children, 0U) << probe.description;
+}
+
+// What a parallel sets aside comes off the model tokens a Core call may spend, as it comes off the steps: the grant of
+// a spawn on an arm that is not taken (1000 tokens) leaves a parent of 1500 tokens 500, the ceiling the Core call
+// runs under.
+TEST(ProgramRuntimeTest, PlanParallelSetsAsideModelTokensForItsSpawnBranches) {
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(spawn_branch), "trace-plan-parallel-tokens-withheld", 30, 20,
+        "runtime-completed", false, 1500, 1500, 1, 1);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+    EXPECT_EQ(observed_model_token_ceiling.load(), 500U);
+}
+
+// The same for money: the grant of the untaken spawn (1000 microunits) leaves a parent of 1500 microunits a monetary
+// ceiling of 500, which the attempt's account holds when the Core call resolves its provider broker.
+TEST(ProgramRuntimeTest, PlanParallelSetsAsideMoneyForItsSpawnBranches) {
+    const json spawn_branch{{"op", "await"}, {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}};
+    const auto probe = run_plan_root_steps_held_by_a_child_probe(
+        plan_parallel_with_untaken(spawn_branch), "trace-plan-parallel-money-withheld", 30, 20,
+        "runtime-completed", false, 1500, 1500, 1, 1, {}, json::object(), true);
+    EXPECT_EQ(probe.status, ProgramTerminalStatus::Completed) << probe.description;
+    EXPECT_EQ(observed_money_ceiling.load(), 500U);
 }
 
 // The Core call and the spawn are members of one join, in flight together: the join reserves the Core call its own
@@ -17667,6 +18064,10 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
                                {"body", json{{"op", "spawn"}, {"child_binding", "child"}}}}})}};
         auto document = orchestration_document(std::move(stage_root), "runtime-plan-step");
         document["declared_budget_requirements"][3]["maximum"] = 1;
+        // Each stage runs one Core step before it spawns, so the stage keeps one step less than it was granted, and
+        // the child below it is granted that much: a stage with `remaining_depth` stages below it holds
+        // 8 + remaining_depth steps (the root holds the policy ceiling of 20) and grants 7 + remaining_depth.
+        document["declared_budget_requirements"][5]["maximum"] = 8 + remaining_depth;
         document["declared_budget_requirements"][4]["minimum"] = 4;
         document["declared_budget_requirements"][4]["maximum"] = 4;
         document["declared_budget_requirements"][7]["minimum"] = 1;
@@ -17696,7 +18097,9 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
         deep_fixture.max_supported_child_depth = 12;
     }
 
-    ProgramVersion current_version = deep_fixture.admit("runtime-plan-step");
+    auto leaf_document = program_document("runtime-plan-step");
+    leaf_document["declared_budget_requirements"][5]["maximum"] = 8;
+    ProgramVersion current_version = deep_fixture.admit_document(std::move(leaf_document));
     for (std::uint32_t remaining_depth = 1; remaining_depth <= 12; ++remaining_depth) {
         auto parent_version =
             deep_fixture.admit_document(make_spawn_stage_document(remaining_depth));
@@ -17707,7 +18110,7 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
             deep_fixture,
             std::move(parent_version),
             std::move(current_version),
-            BudgetLimits{10000, 1000, 1000, 1, child_ops, 20, 0, child_grant_depth,
+            BudgetLimits{10000, 1000, 1000, 1, child_ops, 7 + remaining_depth, 0, child_grant_depth,
                          child_grant_children});
         current_version = std::move(linked.parent_version);
     }
