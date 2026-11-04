@@ -2097,7 +2097,14 @@ neograph::HookOutboxEntry recovery_hook(std::string run_id) {
 
 class BlockAfterJavaScriptResultJournal final : public SyncProgramTransitionStore {
 public:
-    NG_FORWARD_RELATION_BLOCKING_READS(*inner_)
+    NG_FORWARD_RELATION_BLOCKING_READS_EXCEPT_LIST(*inner_)
+    /// How many times the whole relation set of a parent was listed: the cold paths list it, the per-child path never.
+    mutable std::atomic<unsigned> relation_list_reads{0};
+    std::vector<ProgramChildRelation> load_child_relations_sync(
+        std::string_view o, std::string_view p, bool open_only) const override {
+        relation_list_reads.fetch_add(1, std::memory_order_relaxed);
+        return inner_->load_child_relations(o, p, open_only);
+    }
     /// Runs after an insert or update of a relation row was applied, with the row's child record.
     std::function<void(const ProgramChildRecord&)> after_relation_write;
     /// Runs before an insert (`inserting`) or update of a relation row of the parent `parent_run_id`.
@@ -2274,7 +2281,16 @@ public:
         const auto observed  = after_publication
                                    ? std::optional<ProgramTransitionPublication>(publication)
                                    : std::nullopt;
+        // A child's first publication carries its row, and its terminal publication the update of the row: the
+        // relation hooks see those writes too.
+        const auto relation_part = publication.child_relations;
+        if (before_relation_write && relation_part && relation_part->spawn)
+            before_relation_write(relation_part->spawn->parent_run_id, relation_part->spawn->child, true);
         const auto published = inner_->compare_publish(owner, expected, expected_fence, std::move(publication));
+        if (after_relation_write && relation_part && published == ProgramTransitionPublishResult::Published) {
+            if (relation_part->spawn) after_relation_write(relation_part->spawn->child);
+            if (relation_part->completion) after_relation_write(relation_part->completion->child);
+        }
         if (observed && published == ProgramTransitionPublishResult::Published)
             after_publication(*observed);
         if (!synthesis.empty() && fail_synthesis_after == synthesis.front().data().state &&
@@ -2408,7 +2424,7 @@ private:
 
 class FailChildDispatchOnceJournal final : public SyncProgramTransitionStore {
 public:
-    NG_FORWARD_RELATION_SYNC_EXCEPT_UPDATE(inner_)
+    NG_FORWARD_RELATION_SYNC(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);
@@ -2467,19 +2483,19 @@ public:
         std::string_view             expected,
         std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
+        // A child's first publication carries its relation row: while dispatch is blocked it is refused, whole.
+        if (publication.child_relations && publication.child_relations->spawn && block_dispatch_.load()) {
+            std::lock_guard lock(refused_mutex_);
+            refused_spawn_ = publication.child_relations->spawn->child;
+            injected_.store(true);
+            return ProgramTransitionPublishResult::Conflict;
+        }
         return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
     }
-    // The parent's Publishing -> Dispatched step is a relation update: it fails once while dispatch is blocked.
-    ProgramChildRelationOutcome update_child_relation_sync(
-        std::string_view owner, std::string_view parent_run_id, std::uint64_t fence,
-        std::optional<std::uint64_t> version, ProgramChildRecord next) override {
-        if (next.state == ProgramChildState::Dispatched && block_dispatch_.load()) {
-            injected_.store(true);
-            return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
-                                               ProgramChildRelationRefusal::RowConflict, std::nullopt,
-                                               std::nullopt};
-        }
-        return inner_.update_child_relation_sync(owner, parent_run_id, fence, version, std::move(next));
+    /// The child record of the last spawn that was refused.
+    std::optional<ProgramChildRecord> refused_spawn() const {
+        std::lock_guard lock(refused_mutex_);
+        return refused_spawn_;
     }
     ProgramTransitionPublishResult compare_publish_takeover_sync(
         std::string_view owner,
@@ -2504,6 +2520,8 @@ private:
     InMemoryProgramTransitionStore inner_;
     std::atomic<bool>              injected_{false};
     std::atomic<bool>              block_dispatch_{true};
+    mutable std::mutex             refused_mutex_;
+    std::optional<ProgramChildRecord> refused_spawn_;
 };
 class ThrowOnLatestJournal final : public SyncProgramTransitionStore {
 public:
@@ -8653,6 +8671,20 @@ public:
     WakePausedParentWatch(const WakePausedParentWatch&)            = delete;
     WakePausedParentWatch& operator=(const WakePausedParentWatch&) = delete;
 
+    // Waits until `wake_paused_parent` has returned `reason` for `parent_run_id` `count` times. A watchdog, not the
+    // verdict: the wait ends when the return is recorded.
+    bool wait_for(const std::string& parent_run_id, neograph::program::detail::WakePausedParentReason reason,
+                  std::size_t count = 1) {
+        std::unique_lock lock(mutex());
+        return cv().wait_for(lock, std::chrono::seconds(600), [&] { return matching(parent_run_id, reason) >= count; });
+    }
+
+    std::size_t count_of(const std::string& parent_run_id,
+                         neograph::program::detail::WakePausedParentReason reason) const {
+        std::lock_guard lock(mutex());
+        return matching(parent_run_id, reason);
+    }
+
     std::string describe(AdmittedRuntime& fixture, const std::string& parent_run_id,
                          std::string_view owner_scope = "tenant:runtime") const {
         std::vector<Entry> snapshot;
@@ -8693,11 +8725,26 @@ private:
     static void record(std::string_view                                  parent_run_id,
                        neograph::program::detail::WakePausedParentReason reason,
                        std::string_view                                  child_run_id) {
-        std::lock_guard lock(mutex());
-        entries().push_back(Entry{std::string(parent_run_id), reason, std::string(child_run_id)});
+        {
+            std::lock_guard lock(mutex());
+            entries().push_back(Entry{std::string(parent_run_id), reason, std::string(child_run_id)});
+        }
+        cv().notify_all();
+    }
+    static std::size_t matching(const std::string& parent_run_id,
+                                neograph::program::detail::WakePausedParentReason reason) {
+        std::size_t matched = 0;
+        for (const auto& entry : entries()) {
+            if (entry.parent_run_id == parent_run_id && entry.reason == reason) ++matched;
+        }
+        return matched;
     }
     static std::mutex& mutex() {
         static std::mutex value;
+        return value;
+    }
+    static std::condition_variable& cv() {
+        static std::condition_variable value;
         return value;
     }
     static std::vector<Entry>& entries() {
@@ -9343,9 +9390,11 @@ TEST(ProgramRuntimeTest, JavaScriptDestroyingTheLostContinuationRuntimeBeforeTha
     // has set its cancellation cause, so every retry it could make happens while it is stopping.
     ASSERT_TRUE(journal->wait_first_frozen_refusal());
     ASSERT_EQ(journal->continuations(), 1U);
+    // A child's end is a relation row of its own, not a parent publication: the first publication the attempt
+    // makes after the continuation is its command.
     const auto before = journal->frozen_refusals();
-    ASSERT_EQ(before.others, 1U);
-    ASSERT_EQ(before.commands, 0U);
+    ASSERT_EQ(before.others, 0U);
+    ASSERT_EQ(before.commands, 1U);
     ASSERT_EQ(before.terminals, 0U);
     {
         ReleaseHeldRefusalOnShutdown release(journal, parent_id);
@@ -9355,7 +9404,7 @@ TEST(ProgramRuntimeTest, JavaScriptDestroyingTheLostContinuationRuntimeBeforeTha
     // Once the runtime stops, a publication the store refuses without the run's head moving is not retried: the held
     // publication is not made again, and each publication the attempt goes on to make is attempted once.
     const auto after = journal->frozen_refusals();
-    EXPECT_EQ(after.others, 1U);
+    EXPECT_EQ(after.others, 0U);
     EXPECT_EQ(after.commands, 1U);
     EXPECT_EQ(after.terminals, 1U);
     ASSERT_EQ(fixture.journal->load("tenant:runtime", parent_id)->continuation().state, ContinuationState::Running)
@@ -9576,7 +9625,19 @@ namespace {
 // parent is still Running in the store, then release the parent's Interrupted publication.
 class ParentInterruptGateJournal final : public SyncProgramTransitionStore {
 public:
-    NG_FORWARD_RELATION_SYNC(inner_)
+    NG_FORWARD_RELATION_SYNC_EXCEPT_UPDATE(inner_)
+    ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view o, std::string_view p, std::uint64_t fence, std::optional<std::uint64_t> version,
+        ProgramChildRecord next) override {
+        const bool ends = next.terminal_result.has_value();
+        auto outcome = inner_.update_child_relation_sync(o, p, fence, version, std::move(next));
+        if (ends && outcome.status == ProgramChildRelationStatus::Applied) {
+            std::lock_guard lock(mutex_);
+            child_recorded_ = true;
+            cv_.notify_all();
+        }
+        return outcome;
+    }
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run_id) const override {
         const auto record = inner_.load_sync(owner, run_id);
         {
@@ -9647,13 +9708,8 @@ public:
         const auto published_depth  = publication.run_record.child_depth();
         const auto result           = inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
         if (result == ProgramTransitionPublishResult::Published && published_depth == 0) {
-            const auto stored = inner_.load_sync(owner, published_run_id);
             std::lock_guard lock(mutex_);
             if (is_parent_interrupt) parent_interrupted_published_ = true;
-            if (stored && !children_of(inner_, owner, *stored).empty() &&
-                children_of(inner_, owner, *stored).front().terminal_result.has_value()) {
-                child_recorded_ = true;
-            }
             cv_.notify_all();
         }
         return result;
@@ -9842,32 +9898,49 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
 }
 
 // The child finishes before the parent's Interrupted terminal publication commits: the parent's child relation is
-// updated while the parent is still Running, and once the parent's Interrupted record is published, the parent is
-// continued once and completes instead of staying Interrupted.
+// updated while the parent is still Running, and the wake the child's end owes the parent finds a parent that is not
+// paused and is dropped. The parent's own Interrupted publication then wakes it again, so the parent is continued
+// once and completes instead of staying Interrupted.
+//
+// Every step waits for the event it depends on, not for time and not for a wake that did nothing: the dropped wake is
+// observed before the parent's publication is released, the continuation is observed through the return of the wake
+// that entered it, and the result is read once the continued attempt has ended. A wake that returns because another
+// caller is already continuing the parent says nothing about that continuation, so it is not waited on.
 TEST(ProgramRuntimeTest, JavaScriptChildCompletingBeforeParentPublishesInterruptedStillContinuesTheParent) {
+    using neograph::program::detail::WakePausedParentReason;
     interrupt_calls.store(0);
     auto                    journal = std::make_shared<ParentInterruptGateJournal>();
     AdmittedRuntime         fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
-    ParentContinuationWatch continuations;
     AttemptFinishWatch      finished;
+    WakePausedParentWatch   wakes;
     journal->arm_parent_interrupt_gate();
     auto started = start_parent_awaiting_interrupting_child(fixture, kAwaitFirst, "trace-child-finishes-before-parent-pause");
+    const auto parent_id = started.parent.run_id();
     ASSERT_TRUE(journal->wait_entered());
 
-    const auto child = only_child_of(fixture, started.parent.run_id());
+    const auto child = only_child_of(fixture, parent_id);
     ASSERT_TRUE(child.terminal_result.has_value());
     ASSERT_EQ(child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
     // Answer the child while the parent is still Running and held before its Interrupted CAS: the child's completion
-    // publishes into the Running parent and starts no continuation of its own; the one continuation of the parent is
-    // the one started when its Interrupted publication commits after release().
+    // publishes into the Running parent, and the wake it owes finds no paused parent and is dropped.
     ASSERT_EQ(answer_paused_child(fixture, child, "trace-child-finishes-while-parent-running").status(),
               ProgramTerminalStatus::Completed);
-    EXPECT_EQ(only_child_of(fixture, started.parent.run_id()).state, ProgramChildState::Completed);
+    EXPECT_EQ(only_child_of(fixture, parent_id).state, ProgramChildState::Completed);
+    ASSERT_TRUE(wakes.wait_for(parent_id, WakePausedParentReason::NotInterrupted));
+    EXPECT_EQ(wakes.count_of(parent_id, WakePausedParentReason::Continued), 0U);
 
+    // The parent publishes Interrupted after the child ended; that publication wakes the parent once more, and that
+    // wake continues it.
     journal->release();
-    const auto final = wait_until_run_ends(fixture, continuations, finished, started.parent.run_id(), 1);
+    ASSERT_TRUE(wakes.wait_for(parent_id, WakePausedParentReason::Continued));
+    const auto stored = fixture.journal->load("tenant:runtime", parent_id);
+    ASSERT_TRUE(stored.has_value());
+    ASSERT_TRUE(finished.wait_for(parent_id, stored->continuation().attempt));
+    const auto final = fixture.runtime->reconnect("tenant:runtime", parent_id).wait();
     ASSERT_EQ(final.status(), ProgramTerminalStatus::Completed)
-        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail");
+        << (final.failure() ? final.failure()->code + ": " + final.failure()->message : "no failure detail") << " "
+        << wakes.describe(fixture, parent_id);
+    EXPECT_EQ(wakes.count_of(parent_id, WakePausedParentReason::Continued), 1U);
     EXPECT_EQ(final.output().at("child").at("channels").at("value").at("value"), "approved");
 }
 
@@ -16785,7 +16858,10 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphPublishesAndBindsDependentChildTasks) {
     const auto lineage    = fixture.journal->load_lineage("tenant:runtime", lineage_id);
     ASSERT_TRUE(lineage.has_value());
     EXPECT_EQ(lineage->remaining_budget().max_dynamic_compiles, 0U);
-    EXPECT_GT(lineage->committed_descendant_budget().max_total_children, 0U);
+    // The children's permanent share is the relation head's aggregate; the lineage holds a carried copy of it.
+    const auto relation_head = fixture.journal->load_child_relation_head("tenant:runtime", result.run_id());
+    ASSERT_TRUE(relation_head.has_value());
+    EXPECT_GT(relation_head->committed_budget().max_total_children, 0U);
     const auto output = result.output();
     ASSERT_TRUE(output.is_object());
     ASSERT_TRUE(output.contains("fragment_id"));
@@ -17750,7 +17826,7 @@ TEST(ProgramRuntimeTest, CancellingARunningParentCancelsItsInterruptedChildDurab
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
-TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
+TEST(ProgramRuntimeTest, FailedSpawnWritesNothingAndIsRetried) {
     auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);
     const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
@@ -17768,10 +17844,12 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
                                                     linked.child_version, child_invocation),
                  ProgramDiagnosticError);
 
-    const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
-    ASSERT_TRUE(publishing.has_value());
-    ASSERT_EQ(children_of(journal, "tenant:runtime", *publishing).size(), 1U);
-    EXPECT_EQ(children_of(journal, "tenant:runtime", *publishing).front().state, ProgramChildState::Publishing);
+    // The child's run and its row are one write: a refused spawn leaves neither.
+    const auto refused = journal->load_sync("tenant:runtime", parent.run_id());
+    ASSERT_TRUE(refused.has_value());
+    EXPECT_TRUE(children_of(journal, "tenant:runtime", *refused).empty());
+    ASSERT_TRUE(journal->refused_spawn().has_value());
+    EXPECT_FALSE(journal->load_sync("tenant:runtime", journal->refused_spawn()->child_run_id).has_value());
 
     journal->allow_dispatch();
     auto recovered = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
@@ -17784,6 +17862,53 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
     ASSERT_TRUE(children_of(journal, "tenant:runtime", *completed).front().terminal_result.has_value());
 
     EXPECT_TRUE(parent.cancel());
+    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
+}
+
+// The cost of a child must not grow with its siblings (#661): spawning, dispatching and completing F children, and the
+// parent's ordinary publications between them, never list the parent's relation set. The cold paths (cancel, recover,
+// a paused parent's wake, a snapshot) do.
+TEST(ProgramRuntimeTest, FanOutNeverListsTheRelationSetOnThePerChildPath) {
+    constexpr unsigned kChildren = 3;
+    completed_calls.store(0);
+    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
+    journal->javascript_reads_unavailable = true;
+    journal->release_result();
+    AdmittedRuntime fixture(2, {}, journal);
+    TypedParentGate gate;
+    auto document = program_document("runtime-typed-parent-gate");
+    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
+    document["declared_budget_requirements"][4]["minimum"] = kChildren + 1;
+    document["declared_budget_requirements"][4]["maximum"] = kChildren + 1;
+    document["declared_budget_requirements"][7]["minimum"] = 1;
+    document["declared_budget_requirements"][7]["maximum"] = 1;
+    document["declared_budget_requirements"][8]["minimum"] = kChildren;
+    document["declared_budget_requirements"][8]["maximum"] = kChildren;
+    const auto linked = link_child_versions(
+        fixture, fixture.admit_document(std::move(document)), fixture.admit("runtime-completed"));
+    auto parent = fixture.runtime->start(
+        "tenant:runtime", linked.parent_version,
+        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, kChildren + 1, 20, 0, 1, kChildren},
+                          "trace-parent-fanout", {}, "fanout-parent"});
+    for (unsigned index = 0; index < kChildren; ++index) {
+        auto child = fixture.runtime->start_child(
+            "tenant:runtime", parent, linked.receipt, linked.child_version,
+            ProgramInvocation{json::object(), RunBudget{3333, 333, 333, 1, 1, 6, 0, 0, 0},
+                              "trace-child-fanout-" + std::to_string(index), {}});
+        EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Completed);
+    }
+    EXPECT_EQ(journal->relation_list_reads.load(), 0U)
+        << "spawn, dispatch and completion listed the parent's relation set";
+
+    // The cold path does list it, and sees every child ended.
+    const auto stored = journal->load_sync("tenant:runtime", "fanout-parent");
+    ASSERT_TRUE(stored.has_value());
+    const auto rows = children_of(journal, "tenant:runtime", *stored);
+    ASSERT_EQ(rows.size(), kChildren);
+    for (const auto& row : rows) EXPECT_EQ(row.state, ProgramChildState::Completed);
+    EXPECT_GT(journal->relation_list_reads.load(), 0U);
+    EXPECT_TRUE(parent.cancel());
+    gate.open();
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
@@ -17806,6 +17931,13 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
     EXPECT_THROW((void)fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
                                                     linked.child_version, child_invocation),
                  ProgramDiagnosticError);
+    // A row an earlier version left Publishing (it wrote the row first and dispatched in a second step): seed it
+    // from the refused spawn, with no child run behind it.
+    auto legacy = journal->refused_spawn();
+    ASSERT_TRUE(legacy.has_value());
+    legacy->state = ProgramChildState::Publishing;
+    ASSERT_EQ(journal->insert_child_relation_sync("tenant:runtime", parent.run_id(), 1, *legacy).status,
+              ProgramChildRelationStatus::Applied);
     const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
     ASSERT_EQ(children_of(journal, "tenant:runtime", *publishing).size(), 1U);
@@ -17840,7 +17972,8 @@ struct ParentEndsDuringDispatch {
     bool                       fail_child_cancellation = false;
 
     static ProgramInvocation child_invocation() {
-        return ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
+        // The child holds half of the parent's core steps for good, so the parent keeps enough for its own steps.
+        return ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 1, 10, 0, 0, 0},
                                  "trace-child-never-started", {}};
     }
 
@@ -17861,10 +17994,17 @@ struct ParentEndsDuringDispatch {
             if (fail_child_cancellation && !child_id.empty() && record.run_id() == child_id &&
                 record.continuation().state == ContinuationState::Cancelled)
                 throw std::runtime_error("simulated store outage");
+        };
+        // The process stops right after the child's first publication committed: the child run and its row exist, and
+        // nothing has started it. The parent ends (or pauses) while the process is held there.
+        journal.after_publication = [&](const ProgramTransitionPublication& value) {
+            const auto&      record = value.run_record;
+            std::unique_lock lock(mutex);
             if (record.invocation().parent_run_id != parent.run_id() || !child_id.empty()) return;
             child_id = record.run_id();
             condition.notify_all();
             condition.wait_for(lock, std::chrono::seconds(20), [&] { return parent_ended; });
+            throw std::runtime_error("simulated stop after the child's first publication");
         };
         std::thread starter([&] {
             try {
@@ -17872,6 +18012,8 @@ struct ParentEndsDuringDispatch {
                                                    linked.child_version, child_invocation());
             } catch (const ProgramDiagnosticError& error) {
                 failure_code = error.diagnostic().code;
+            } catch (const std::exception&) {
+                failure_code = "simulated-stop";
             }
         });
         bool held = false;
@@ -17887,6 +18029,7 @@ struct ParentEndsDuringDispatch {
         condition.notify_all();
         starter.join();
         journal.before_publication = {};
+        journal.after_publication  = {};
         EXPECT_TRUE(held) << "the child's first publication was never reached";
     }
 
@@ -17947,8 +18090,8 @@ TEST(ProgramRuntimeTest, ChildNeverStartedBecauseItsParentWasCancelledEndsCancel
 
     ASSERT_FALSE(race.child_id.empty());
     ASSERT_TRUE(race.failure_code.has_value());
-    EXPECT_EQ(*race.failure_code, "P_CHILD_CONFLICT");
-    // The parent's own terminal record closed the relation of the child it never dispatched.
+    EXPECT_EQ(*race.failure_code, "simulated-stop");
+    // The parent's cancellation ended the child that was created and never started.
     const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
     EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Cancelled);
@@ -17962,15 +18105,15 @@ TEST(ProgramRuntimeTest, ChildNeverStartedBecauseItsParentWasCancelledEndsCancel
     auto reconnected = fixture.runtime->reconnect("tenant:runtime", race.child_id);
     EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Cancelled);
 
-    // The child's Cancelled record came after the parent's, and the row never held Dispatched (checked above).
+    // The child's Cancelled record came after the parent's.
     const auto parent_cancelled = race.first_publication_of(parent.run_id(), ContinuationState::Cancelled);
     const auto child_cancelled  = race.first_publication_of(race.child_id, ContinuationState::Cancelled);
     ASSERT_TRUE(parent_cancelled && child_cancelled);
     EXPECT_LT(*parent_cancelled, *child_cancelled);
 }
 
-// A parent that pauses for an answer keeps the child it did not dispatch as Publishing, so the child is not
-// ended: once the parent runs again, starting the same child dispatches the run that was published.
+// A parent that pauses for an answer leaves the child that was created and never started as it is, so the child is
+// not ended: once the parent runs again, starting the same child reconnects the run that was created.
 TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhenTheParentRunsAgain) {
     interrupt_calls.store(0);
     auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
@@ -17993,14 +18136,15 @@ TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhe
 
     ASSERT_FALSE(race.child_id.empty());
     ASSERT_TRUE(paused.has_value());
-    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted);
+    ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted)
+        << (paused->failure() ? paused->failure()->code + ": " + paused->failure()->message : "no failure");
     ASSERT_TRUE(race.failure_code.has_value());
-    EXPECT_EQ(*race.failure_code, "P_CHILD_CONFLICT");
+    EXPECT_EQ(*race.failure_code, "simulated-stop");
     const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
     EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Interrupted);
     ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
-    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Publishing);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Dispatched);
     const auto published_child = journal->load_sync("tenant:runtime", race.child_id);
     ASSERT_TRUE(published_child.has_value());
     EXPECT_EQ(published_child->continuation().state, ContinuationState::Running);
@@ -18016,9 +18160,19 @@ TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhe
                                                   linked.child_version,
                                                   ParentEndsDuringDispatch::child_invocation());
     EXPECT_EQ(recovered.run_id(), race.child_id);
-    EXPECT_EQ(recovered.wait().status(), ProgramTerminalStatus::Completed);
+    // The child was created and may have begun before the process stopped: a typed plan that is not replay-safe is
+    // returned for reconciliation, as after any crash, and the parent's end ends it with the parent.
+    const auto describe = [](const ProgramResult& result) {
+        return result.failure() ? result.failure()->code + ": " + result.failure()->message : std::string("no failure");
+    };
+    const auto recovered_result = recovered.wait();
+    EXPECT_EQ(recovered_result.status(), ProgramTerminalStatus::Interrupted) << describe(recovered_result);
     EXPECT_TRUE(resumed.cancel());
-    EXPECT_EQ(resumed.wait().status(), ProgramTerminalStatus::Cancelled);
+    const auto resumed_result = resumed.wait();
+    EXPECT_EQ(resumed_result.status(), ProgramTerminalStatus::Cancelled) << describe(resumed_result);
+    const auto ended_child = journal->load_sync("tenant:runtime", race.child_id);
+    ASSERT_TRUE(ended_child.has_value());
+    EXPECT_EQ(ended_child->continuation().state, ContinuationState::Cancelled);
 }
 
 // #655: a parent that paused (an interrupt) while it was starting a child holds the child as Publishing, and the
@@ -18044,11 +18198,12 @@ struct PausedParentWithPublishedChild {
         });
         ASSERT_FALSE(race.child_id.empty());
         ASSERT_TRUE(paused.has_value());
-        ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted);
+        ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted)
+        << (paused->failure() ? paused->failure()->code + ": " + paused->failure()->message : "no failure");
         const auto stored_parent = journal.load_sync("tenant:runtime", parent->run_id());
         ASSERT_TRUE(stored_parent.has_value());
         ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
-        ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Publishing);
+        ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Dispatched);
         const auto published_child = journal.load_sync("tenant:runtime", race.child_id);
         ASSERT_TRUE(published_child.has_value());
         ASSERT_EQ(published_child->continuation().state, ContinuationState::Running);
@@ -18134,7 +18289,13 @@ TEST(ProgramRuntimeTest, CancellingAPausedParentWhoseChildCannotBeEndedStillCanc
         EXPECT_TRUE(setup.parent->cancel());
         journal->before_publication = {};
         EXPECT_EQ(setup.parent->wait().status(), ProgramTerminalStatus::Cancelled);
-        expect_parent_cancelled_with_child_closed(*journal, parent_id);
+        // The parent's end closes its relation and leaves the row of the child that could not be ended open.
+        const auto cancelled_parent = journal->load_sync("tenant:runtime", parent_id);
+        ASSERT_TRUE(cancelled_parent.has_value());
+        EXPECT_EQ(cancelled_parent->continuation().state, ContinuationState::Cancelled);
+        ASSERT_EQ(children_of(journal, "tenant:runtime", *cancelled_parent).size(), 1U);
+        EXPECT_EQ(children_of(journal, "tenant:runtime", *cancelled_parent).front().state,
+                  ProgramChildState::Dispatched);
         const auto stored_child = journal->load_sync("tenant:runtime", child_id);
         ASSERT_TRUE(stored_child.has_value());
         EXPECT_EQ(stored_child->continuation().state, ContinuationState::Running);
@@ -18154,6 +18315,7 @@ TEST(ProgramRuntimeTest, CancellingAPausedParentWhoseChildCannotBeEndedStillCanc
     ASSERT_EQ(recovered.size(), 1U);
     EXPECT_EQ(recovered.front().run_id(), child_id);
     EXPECT_EQ(recovered.front().wait().status(), ProgramTerminalStatus::Cancelled);
+    expect_parent_cancelled_with_child_closed(*journal, parent_id);
     expect_published_child_cancelled_durably(fixture, *journal, child_id);
 }
 
@@ -18965,8 +19127,9 @@ struct ChildSynthesisFixture {
         auto generation = journal->load_generation_sync("tenant:runtime", lineage->lineage_id(),
                                                    lineage->active_generation());
         if (!generation) throw std::runtime_error("Missing parent generation");
-        parent.emplace(
-            ProgramChildSynthesisParent{*version, std::move(run), *lineage, *generation});
+        const auto relation_head = journal->load_child_relation_head_sync("tenant:runtime", run.logical_run_id());
+        parent.emplace(ProgramChildSynthesisParent{*version, std::move(run), *lineage, *generation,
+                                                   relation_head ? relation_head->committed_budget() : RunBudget{}});
         if (durable) trusted_grant = ProgramChildSynthesisGrant::create(grant_data());
         reservation_head      = lineage->id();
         reservation_remaining = lineage->remaining_budget();
@@ -20317,7 +20480,7 @@ std::vector<std::string> synthesis_crash_boundaries() {
         if (backend == "Memory") continue;
         for (const auto* boundary :
              {"Reserved", "Compiling", "Compiled", "Validating", "Validated", "Admitting",
-              "Admitted", "Bound", "Dispatching", "Spawned", "ChildPublishing", "ChildDispatched",
+              "Admitted", "Bound", "Dispatching", "Spawned", "ChildDispatched",
               "ChildTerminal", "ChildResult", "ChildResultBeforeSpawned", "CommandResult",
               "ParentTerminal", "ConcurrentRecovery"})
             result.push_back(backend + "_" + boundary);
@@ -20389,8 +20552,6 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
                 // The relation rows are written on their own, not with the parent's record.
                 child.journal->after_relation_write = [&](const ProgramChildRecord& relation) {
                     bool stop = false;
-                    if (boundary() == "ChildPublishing" && relation.state == ProgramChildState::Publishing)
-                        stop = true;
                     if (boundary() == "ChildDispatched" && relation.state == ProgramChildState::Dispatched)
                         stop = true;
                     if ((boundary() == "ChildResult" || boundary() == "ChildResultBeforeSpawned") &&
@@ -22686,7 +22847,13 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveParentCannotReuseDelegatedComp
     const auto before  = test.root->snapshot();
     const auto lineage = test.journal->load_run_lineage_sync("tenant:runtime", test.root->run_id());
     EXPECT_EQ(before.remaining_budget().max_dynamic_compiles, 3U);
-    EXPECT_EQ(lineage->committed_descendant_budget().max_dynamic_compiles, 2U);
+    // The relation head holds the budget granted to the children; the lineage head carries a copy that no
+    // epoch-compared publication has refreshed, so it may lag the aggregate and never lead it.
+    const auto relation_head = test.journal->load_child_relation_head_sync("tenant:runtime", test.root->run_id());
+    ASSERT_TRUE(relation_head.has_value());
+    EXPECT_EQ(relation_head->committed_budget().max_dynamic_compiles, 2U);
+    EXPECT_LE(lineage->committed_descendant_budget().max_dynamic_compiles,
+              relation_head->committed_budget().max_dynamic_compiles);
     const RunBudget attempted{1000, 10, 10, 1, 4, 4, 1, 1, 1};
     EXPECT_THROW(
         test.synthesize(*test.root, *test.root_hold, "reused-budget.js", attempted, "second-child"),

@@ -36,7 +36,7 @@
 
 // A SyncProgramTransitionStore whose inner object is a BlockingProgramTransitionStore (no `_sync` suffix).
 // Only the relation reads, for a store that decides the writes itself.
-#define NG_FORWARD_RELATION_BLOCKING_READS(INNER)                                                                           \
+#define NG_FORWARD_RELATION_BLOCKING_READS_EXCEPT_LIST(INNER)                                                                           \
     std::optional<::neograph::program::ProgramChildRelationHead> load_child_relation_head_sync(                       \
         std::string_view o, std::string_view p) const override {                                                      \
         return (INNER).load_child_relation_head(o, p);                                                                \
@@ -44,11 +44,15 @@
     std::optional<::neograph::program::ProgramChildRelation> load_child_relation_sync(                                \
         std::string_view o, std::string_view p, std::string_view c) const override {                                  \
         return (INNER).load_child_relation(o, p, c);                                                                  \
-    }                                                                                                                 \
+    }
+
+#define NG_FORWARD_RELATION_BLOCKING_LIST(INNER)                                                                      \
     std::vector<::neograph::program::ProgramChildRelation> load_child_relations_sync(                                 \
         std::string_view o, std::string_view p, bool open_only) const override {                                      \
         return (INNER).load_child_relations(o, p, open_only);                                                         \
     }
+
+#define NG_FORWARD_RELATION_BLOCKING_READS(INNER) NG_FORWARD_RELATION_BLOCKING_READS_EXCEPT_LIST(INNER) NG_FORWARD_RELATION_BLOCKING_LIST(INNER)
 
 #define NG_FORWARD_RELATION_BLOCKING_WRITES(INNER)                                                                     \
     ::neograph::program::ProgramChildRelationOutcome insert_child_relation_sync(                                      \

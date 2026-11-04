@@ -1224,11 +1224,50 @@ void backfill_generation_initial_publications(sqlite3* db) {
     }
 }
 
+// A database written before the children left the run record holds them inside the record. One pass at open turns
+// them into relation rows (the record is not rewritten: its id binds lineage, generations and receipts), and a marker
+// says the pass is done. A parent with several stored generations is read from its newest record.
+void materialize_legacy_relations(sqlite3* db) {
+    exec(db, "CREATE TABLE IF NOT EXISTS program_child_relation_migration_v1 (done INTEGER NOT NULL)");
+    {
+        Statement marker(db, "SELECT COUNT(*) FROM program_child_relation_migration_v1");
+        if (marker.step_row() && sqlite3_column_int64(marker.get(), 0) > 0) return;
+    }
+    struct Found {
+        std::int64_t                                            updated_at_ms = 0;
+        detail::transition::LegacyRelationPlan                  plan;
+    };
+    std::map<std::pair<std::string, std::string>, Found> newest;
+    {
+        Statement scan(db, "SELECT run_record_bytes FROM program_transition_run_heads_v2");
+        while (scan.step_row()) {
+            const auto record = ProgramRunRecord::parse(column_blob(scan.get(), 0));
+            auto       plan   = detail::transition::plan_legacy_relations(record);
+            if (!plan) continue;
+            const auto key = std::make_pair(record.owner_scope(), record.logical_run_id());
+            const auto at  = newest.find(key);
+            if (at == newest.end() || at->second.updated_at_ms <= record.updated_at_ms())
+                newest.insert_or_assign(key, Found{record.updated_at_ms(), std::move(*plan)});
+        }
+    }
+    for (const auto& [key, found] : newest) {
+        Statement present(db, "SELECT COUNT(*) FROM program_child_relation_heads_v1 "
+                              "WHERE owner_scope = ?1 AND parent_run_id = ?2");
+        present.bind_text(1, key.first);
+        present.bind_text(2, key.second);
+        if (present.step_row() && sqlite3_column_int64(present.get(), 0) > 0) continue;
+        write_relation_head(db, found.plan.head);
+        for (const auto& row : found.plan.rows) write_relation_row(db, row);
+    }
+    exec(db, "INSERT INTO program_child_relation_migration_v1(done) VALUES(1)");
+}
+
 void initialize_schema(sqlite3* db) {
     Transaction transaction(db);
     create_v2_schema(db);
     migrate_legacy_schema(db);
     backfill_generation_initial_publications(db);
+    materialize_legacy_relations(db);
     transaction.commit();
 }
 

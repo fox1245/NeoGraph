@@ -678,7 +678,7 @@ ProgramChildSynthesisAuthorization authorize_program_child_synthesis(
                                          "Child grant cannot lower the parent guarantee floor");
     }
     auto        available = parent.lineage.remaining_budget();
-    const auto  committed = parent.lineage.committed_descendant_budget();
+    const auto  committed = parent.committed_descendants;
     const auto  debit     = [](auto& remaining, auto allocated) {
         if (allocated > remaining)
             throw ProgramChildSynthesisError("P_CHILD_SYNTHESIS_BUDGET",

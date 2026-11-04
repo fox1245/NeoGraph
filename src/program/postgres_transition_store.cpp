@@ -981,6 +981,55 @@ void write_relation_row(PGconn* connection, const ProgramChildRelation& row) {
          row.is_open() ? "true" : "false", row.serialize_canonical()});
 }
 
+// A database written before the children left the run record holds them inside the record. One pass at open turns
+// them into relation rows (the record is not rewritten: its id binds lineage, generations and receipts), and a marker
+// says the pass is done. The pass runs under an advisory lock, so stores that open at once migrate once. A parent with
+// several stored generations is read from its newest record.
+void materialize_legacy_relations(PGconn* connection) {
+    Transaction transaction(connection);
+    (void)exec_params(connection, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+                      {"neograph_program_child_relation_migration_v1"});
+    exec_sql(connection,
+             "CREATE TABLE IF NOT EXISTS neograph_program_child_relation_migration_v1 (done BOOLEAN NOT NULL)");
+    {
+        const auto marker = exec_params(
+            connection, "SELECT COUNT(*) FROM neograph_program_child_relation_migration_v1", {});
+        if (row_text(marker, 0, 0) != "0") {
+            transaction.commit();
+            return;
+        }
+    }
+    struct Found {
+        std::int64_t                           updated_at_ms = 0;
+        detail::transition::LegacyRelationPlan plan;
+    };
+    std::map<std::pair<std::string, std::string>, Found> newest;
+    {
+        const auto scan = exec_params(
+            connection, "SELECT run_record_bytes FROM neograph_program_transition_run_heads_v2", {});
+        for (int index = 0; index < PQntuples(scan.get()); ++index) {
+            const auto record = ProgramRunRecord::parse(row_text(scan, index, 0));
+            auto       plan   = detail::transition::plan_legacy_relations(record);
+            if (!plan) continue;
+            const auto key = std::make_pair(record.owner_scope(), record.logical_run_id());
+            const auto at  = newest.find(key);
+            if (at == newest.end() || at->second.updated_at_ms <= record.updated_at_ms())
+                newest.insert_or_assign(key, Found{record.updated_at_ms(), std::move(*plan)});
+        }
+    }
+    for (const auto& [key, found] : newest) {
+        const auto present = exec_params(
+            connection,
+            "SELECT COUNT(*) FROM neograph_program_child_relation_heads_v1 WHERE owner_scope = $1 AND parent_run_id = $2",
+            {key.first, key.second});
+        if (row_text(present, 0, 0) != "0") continue;
+        write_relation_head(connection, found.plan.head);
+        for (const auto& row : found.plan.rows) write_relation_row(connection, row);
+    }
+    exec_sql(connection, "INSERT INTO neograph_program_child_relation_migration_v1(done) VALUES(TRUE)");
+    transaction.commit();
+}
+
 // The writes a relation plan names, in the transaction that validated it: the head first, which the rows reference.
 void apply_relation_writes(PGconn*                                          connection,
                            const std::optional<ProgramChildRelation>&       row,
@@ -1030,6 +1079,7 @@ PostgreSQLProgramTransitionStore::PostgreSQLProgramTransitionStore(std::string c
     }
     try {
         create_schema(impl_->connection);
+        materialize_legacy_relations(impl_->connection);
     } catch (...) {
         PQfinish(impl_->connection);
         impl_->connection = nullptr;

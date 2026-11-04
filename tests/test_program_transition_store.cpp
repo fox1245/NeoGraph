@@ -958,7 +958,8 @@ ProgramPendingEffect pending_effect(std::string effect_id = "effect-one") {
 }
 
 ProgramTransitionPublication interrupted_effect_publication(
-    const ProgramTransitionPublication& start) {
+    const ProgramTransitionPublication& start, std::optional<RunBudget> remaining = std::nullopt) {
+    const auto        kept    = remaining ? *remaining : budget();
     auto              pending = pending_effect();
     const auto        cp      = checkpoint();
     auto              journal = ProgramJournalRecord::create({start.journal_record.id,
@@ -967,7 +968,7 @@ ProgramTransitionPublication interrupted_effect_publication(
                                                               digest('2'),
                                                               2,
                                                               {"root", ContinuationState::Interrupted, 1},
-                                                              budget(),
+                                                              kept,
                                                               {},
                                                               cp,
                                                               20});
@@ -978,7 +979,7 @@ ProgramTransitionPublication interrupted_effect_publication(
     result_data.bundle_id          = digest('2');
     result_data.attempt            = 1;
     result_data.output             = json::object();
-    result_data.remaining_budget   = budget();
+    result_data.remaining_budget   = kept;
     result_data.checkpoint         = cp;
     result_data.interrupt =
         ProgramInterrupt{"main", pending.core_interrupt_value(), std::nullopt, pending};
@@ -1477,6 +1478,7 @@ void reset_postgres_transition_schema(const char* url) {
     PQclear(database);
     const char* sql    = R"SQL(
 DROP TABLE IF EXISTS neograph_program_child_relations_v1;
+DROP TABLE IF EXISTS neograph_program_child_relation_migration_v1;
 DROP TABLE IF EXISTS neograph_program_child_relation_heads_v1;
 DROP TABLE IF EXISTS neograph_program_execution_leases_v1;
 DROP TABLE IF EXISTS neograph_program_graph_migration_capsules_v1;
@@ -3600,6 +3602,31 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationSpendIsCheckedAgainstTheC
               ProgramTransitionPublishResult::Published);
 }
 
+// The end of a child is the child's own write: it is checked against the child's fence and reads no parent head, so a
+// parent that was taken over, or never read again, changes nothing about it.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationEndIsRecordedUnderTheChildsFenceWhateverTheParentDid) {
+    auto& store = primary_store();
+    const auto parent = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    const auto spawn = relation_spawn_publication("child-1", 1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    // The child ends in its own record (no relation part), then the parent is taken over: its fence is 2.
+    const auto child_end = relation_child_terminal(spawn, "child-1");
+    ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, child_end),
+              ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.compare_publish_takeover("owner-a", "run-1", parent.journal_record.id, 1),
+              ProgramTransitionPublishResult::Published);
+
+    const auto completed = relation_child_after(relation_child("child-1"), ProgramChildState::Completed);
+    // The writer of a child's end holds the child's fence (1), not the parent's (2).
+    expect_refused(store.update_child_relation("owner-a", "run-1", 2, std::nullopt, completed),
+                   ProgramChildRelationRefusal::FenceMismatch);
+    const auto recorded = store.update_child_relation("owner-a", "run-1", 1, std::nullopt, completed);
+    ASSERT_EQ(recorded.status, ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(recorded.relation->child().state, ProgramChildState::Completed);
+    EXPECT_EQ(recorded.head->open_count(), 0U);
+}
+
 TEST_P(ProgramTransitionStoreConformance, ChildRelationUpdateFollowsTheStateRule) {
     auto& store = primary_store();
     ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
@@ -3835,7 +3862,7 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationPausedParentIsNotClosed) 
                                           relation_child("child-1", ProgramChildState::Dispatched))
                   .status,
               ProgramChildRelationStatus::Applied);
-    const auto paused = interrupted_effect_publication(start);
+    const auto paused = interrupted_effect_publication(start, relation_parent_budget());
     ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, paused),
               ProgramTransitionPublishResult::Published);
     const auto head = store.load_child_relation_head("owner-a", "run-1");
@@ -3933,11 +3960,11 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationCompletionRidesInTheChild
     ASSERT_TRUE(dispatched.has_value());
 
     const auto completed = relation_child_after(relation_child("child-1"), ProgramChildState::Completed);
-    // A completion the parent's fence refuses does not refuse the child's own result.
+    // A completion the row refuses (a stale version) does not refuse the child's own result.
     {
         auto terminal = relation_child_terminal(spawn, "child-1");
         ProgramChildRelationPart part;
-        part.completion = ProgramChildRelationCompletion{"run-1", 2, std::nullopt, completed};
+        part.completion = ProgramChildRelationCompletion{"run-1", 1, dispatched->row_version() + 40, completed};
         terminal.child_relations = std::move(part);
         ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, terminal),
                   ProgramTransitionPublishResult::Published);
@@ -4527,6 +4554,74 @@ TEST(ProgramTransitionStoreTest, SQLiteChildRelationSurvivesReopen) {
         const auto head = store.load_child_relation_head("owner-a", "run-1");
         ASSERT_TRUE(head.has_value());
         EXPECT_EQ(head->count(), 1U);
+    }
+    std::filesystem::remove(path);
+}
+
+// A database written before the children left the run record: the children inside the stored record become relation
+// rows when the store opens, once, and the record itself is not rewritten.
+TEST(ProgramTransitionStoreTest, SQLiteOpenMaterializesTheChildrenOfAStoredRecord) {
+    static std::atomic<unsigned> sequence{0};
+    const auto                   path =
+        (std::filesystem::temp_directory_path() /
+         ("neograph-program-legacy-children-" + std::to_string(sequence.fetch_add(1)) + ".db"))
+            .string();
+    std::filesystem::remove(path);
+
+    const auto start = relation_parent_start();
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    }
+    // The record as an earlier version stored it: the same body with a `children` array, under the id of that body.
+    json legacy = json::object();
+    for (const auto& [key, value] : json::parse(start.run_record.serialize_canonical()).items()) {
+        if (key != "id") legacy[key] = value;
+    }
+    legacy["children"] = json::array();
+    const auto dispatched = relation_child("child-a", ProgramChildState::Dispatched);
+    const auto publishing = relation_child("child-b", ProgramChildState::Publishing);
+    for (const auto& child : {dispatched, publishing})
+        legacy["children"].push_back(json::parse(serialize_program_child_record(child)));
+    legacy["id"] = detail::sha256_identity("program-run-record/v1", detail::canonical_json_bytes(legacy));
+    const auto legacy_bytes = detail::canonical_json_bytes(legacy);
+    ASSERT_EQ(ProgramRunRecord::parse(legacy_bytes).legacy_children_for_migration().size(), 2U);
+    std::string hex;
+    for (const unsigned char byte : legacy_bytes) {
+        static const char digits[] = "0123456789abcdef";
+        hex += digits[byte >> 4];
+        hex += digits[byte & 15];
+    }
+    {
+        TestSqliteDatabase database(path);
+        database.execute("UPDATE program_transition_run_heads_v2 SET run_record_bytes = X'" + hex +
+                         "' WHERE run_id = 'run-1'");
+        database.execute("DROP TABLE IF EXISTS program_child_relation_migration_v1");
+    }
+    for (int open = 0; open < 2; ++open) {  // the second open finds the marker and writes nothing
+        OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
+        const auto head = store.load_child_relation_head("owner-a", "run-1");
+        ASSERT_TRUE(head.has_value());
+        EXPECT_EQ(head->count(), 2U);
+        EXPECT_EQ(head->open_count(), 2U);
+        EXPECT_FALSE(head->closed());
+        EXPECT_EQ(head->epoch(), 2U);
+        RunBudget both = relation_child_reservation();
+        both.wall_time_ms *= 2; both.model_tokens *= 2; both.monetary_microunits *= 2;
+        both.max_program_operations *= 2; both.max_core_steps *= 2; both.max_total_children *= 2;
+        EXPECT_EQ(head->committed_budget(), both);
+        const auto rows = store.load_child_relations("owner-a", "run-1");
+        ASSERT_EQ(rows.size(), 2U);
+        EXPECT_EQ(rows[0].child().child_run_id, "child-a");
+        EXPECT_EQ(rows[0].child().state, ProgramChildState::Dispatched);
+        EXPECT_EQ(rows[1].child().child_run_id, "child-b");
+        EXPECT_EQ(rows[1].ordinal(), 1U);
+        // The relation rows are live: a stored child ends like any other.
+        if (open == 0) {
+            const auto run = store.load("owner-a", "run-1");
+            ASSERT_TRUE(run.has_value());
+            EXPECT_EQ(run->serialize_canonical(), legacy_bytes);
+        }
     }
     std::filesystem::remove(path);
 }

@@ -258,6 +258,12 @@ struct ProgramChildSynthesisParent {
     ProgramRunRecord     run;
     ProgramRunLineage    lineage;
     ProgramRunGeneration generation;
+    /**
+     * What the parent's children already hold for good: the aggregate of its relation head, read with the other
+     * snapshots. The lineage keeps a carried copy that may lag behind it, so the budget check uses this value. An empty
+     * budget means the parent has no children.
+     */
+    RunBudget            committed_descendants;
 };
 
 struct ProgramChildSynthesisAuthorizationData {

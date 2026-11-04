@@ -34,6 +34,14 @@ NEOGRAPH_PROGRAM_API bool does_program_child_generation_result_bind(
     const ProgramRunGeneration& generation,
     const ProgramRunLineage&    lineage,
     const ProgramRunRecord&     result_run) noexcept;
+/** The same binding, from the parent's owner scope and logical run id alone (no parent record is read). */
+NEOGRAPH_PROGRAM_API bool does_program_child_generation_result_bind(
+    std::string_view            parent_owner_scope,
+    std::string_view            parent_logical_run_id,
+    const ProgramChildRecord&   child,
+    const ProgramRunGeneration& generation,
+    const ProgramRunLineage&    lineage,
+    const ProgramRunRecord&     result_run) noexcept;
 
 /** Exact context evidence selected for one Program transition. */
 struct NEOGRAPH_PROGRAM_API ProgramContextPublication {
@@ -126,7 +134,9 @@ struct ProgramChildRelationSpawn {
 };
 struct ProgramChildRelationCompletion {
     std::string   parent_run_id;
-    std::uint64_t parent_fence = 0;
+    /// The ending child's own fence: the fence its publication runs under, which the publication's compare-and-swap
+    /// already checks against the stored child. The parent's fence is not involved in a child's end.
+    std::uint64_t child_fence = 0;
     /// When present, the row must hold exactly this version; otherwise the update applies to the stored row.
     std::optional<std::uint64_t> expected_row_version;
     /// The row's next content: the terminal state, its result and the generation that produced it.

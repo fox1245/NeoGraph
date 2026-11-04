@@ -439,12 +439,22 @@ public:
     /// Answers, for a control, whether a later attempt of the same run executes in this process; set when the control
     /// is registered. A handle of an attempt that the run has left has nothing to cancel while that attempt executes.
     void              set_executing_attempt_check(std::function<bool(const RunControl*)> check);
-    /// Ends the children that a paused parent published and never dispatched (#655). cancel_async awaits it with the
-    /// parent's record as it was before the cancellation, once the parent's Cancelled state is durable. It returns a
-    /// notice for each child that it could not end, and none for a child that it ended or that another path ended.
-    /// Set when the control is registered or read back from the stores.
-    using UnstartedChildrenEnder = std::function<asio::awaitable<std::vector<ProgramNotice>>(ProgramRunRecord)>;
+    /// The parent whose children an UnstartedChildrenEnder ends.
+    struct EndedParent {
+        std::string owner_scope;
+        std::string logical_run_id;
+        std::string run_id;
+    };
+    /// Ends the children that an ended parent created and never started (#655). cancel_async awaits it once a paused
+    /// parent's Cancelled state is durable, and complete_async awaits it once the terminal state of a parent that
+    /// created a child is durable. It returns a notice for each child that it could not end, and none for a child that
+    /// it ended or that another path ended. Set when the control is registered or read back from the stores.
+    using UnstartedChildrenEnder = std::function<asio::awaitable<std::vector<ProgramNotice>>(EndedParent)>;
     void              set_unstarted_children_ender(UnstartedChildrenEnder ender);
+    /// Records that this run began to create a child: from then on its end looks for a child that was created and
+    /// never started, which a run that created none has no reason to read.
+    void              note_child_creation() noexcept { child_creation_noted_.store(true); }
+    bool              child_creation_noted() const noexcept { return child_creation_noted_.load(); }
     /// The terminal publication of this control compares against the run record with this journal head and publishes
     /// nothing when the run has moved on from it. Set by a path that decided from a record it loaded.
     void              set_expected_terminal_head(std::string journal_head);
@@ -630,6 +640,7 @@ private:
     std::shared_ptr<PendingCancellations>     pending_cancellations_;
     std::function<bool(const RunControl*)>    executing_attempt_check_;
     UnstartedChildrenEnder                    unstarted_children_ender_;
+    std::atomic<bool>                         child_creation_noted_{false};
     std::optional<std::string>                expected_terminal_head_;
     std::function<bool(const RunControl*)>    handoff_admission_;
     std::uint64_t                            next_handoff_request_id_ = 1;

@@ -618,7 +618,7 @@ interface, given in the last column.
 | | `loadChildRelation(ownerScope, parentRunId, childRunId)` | relation row or `null` | required |
 | | `loadChildRelations(ownerScope, parentRunId, openOnly)` | list of relation rows in attach order | required |
 | | `insertChildRelation(ownerScope, parentRunId, expectedParentFence, child)` | relation outcome | required |
-| | `updateChildRelation(ownerScope, parentRunId, expectedParentFence, expectedRowVersion, next)` | relation outcome | required |
+| | `updateChildRelation(ownerScope, parentRunId, writerFence, expectedRowVersion, next)` | relation outcome | required |
 | `programs` | `publishAdmitted(bundle, version)` | nothing | required |
 | | `getBundle(id)`, `getBundle(ownerScope, id)` | bundle or `null` | required |
 | | `getVersion(id)`, `getVersion(ownerScope, id)` | version or `null` | required |
@@ -651,7 +651,7 @@ interface, given in the last column.
   carries another fence. The object must also compare `expectedFence` with the `continuation.fence` of the stored run in the
   same step as the journal head, and refuse when they differ. `comparePublishTakeover` publishes the stored `Running` record
   of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else.
-- **Child relations.** The children of a parent are rows keyed by the parent's logical run id, with one head per parent (the epoch, the counts, the permanent budget aggregate and whether it is closed). `insertChildRelation` and `updateChildRelation` change a row and the head in one step, compare `expectedParentFence` with the parent's stored fence, and answer `{status, refusal, relation, head}`; `status` is `"applied"`, `"already_present"` or `"refused"`. A publication may carry a relation part (`child_relations`) that the object applies in the same step as the publication; a final publication closes its own head. The rules are those of `src/program/transition_validator.h`: a host that wraps the reference store gets them. The five methods are required, as the operations are pure virtual in C++.
+- **Child relations.** The children of a parent are rows keyed by the parent's logical run id, with one head per parent (the epoch, the counts, the permanent budget aggregate and whether it is closed). `insertChildRelation` and `updateChildRelation` change a row and the head in one step, compare the writer's fence (the parent's for an insert and for a row's move to dispatched; the ending child's own for a row's terminal state, which reads no parent head) with the stored one, and answer `{status, refusal, relation, head}`; `status` is `"applied"`, `"already_present"` or `"refused"`. A publication may carry a relation part (`child_relations`) that the object applies in the same step as the publication; a final publication closes its own head. The rules are those of `src/program/transition_validator.h`: a host that wraps the reference store gets them. The five methods are required, as the operations are pure virtual in C++.
 - **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
   does not take part in live graph migration: it answers `"conflict"`, as the base class does.
 

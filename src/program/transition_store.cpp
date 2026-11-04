@@ -516,7 +516,7 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             const auto& completion = *part.completion;
             const auto  terminal   = run.terminal_result();
             const bool  replaced   = run.logical_run_id() != run.run_id();
-            if (!terminal || completion.parent_fence == 0 ||
+            if (!terminal || completion.child_fence == 0 || completion.child_fence != run.continuation().fence ||
                 completion.child.child_run_id != run.logical_run_id() ||
                 run.invocation().parent_run_id != completion.parent_run_id ||
                 !completion.child.terminal_result ||
@@ -548,7 +548,7 @@ json relation_part_json(const ProgramChildRelationPart& part) {
     }
     if (part.completion) {
         json completion{{"parent_run_id", part.completion->parent_run_id},
-                        {"parent_fence", part.completion->parent_fence},
+                        {"child_fence", part.completion->child_fence},
                         {"child", nested(serialize_program_child_record(part.completion->child))}};
         if (part.completion->expected_row_version)
             completion["expected_row_version"] = *part.completion->expected_row_version;
@@ -577,10 +577,10 @@ ProgramChildRelationPart parse_relation_part(const json& v) {
         if (!completion.is_object())
             throw std::invalid_argument("Program child relation completion must be an object");
         detail::reject_unknown_fields(completion, "Program child relation completion",
-                                      {"parent_run_id", "parent_fence", "child", "expected_row_version"});
+                                      {"parent_run_id", "child_fence", "child", "expected_row_version"});
         ProgramChildRelationCompletion value;
         value.parent_run_id = rs(completion, "parent_run_id");
-        value.parent_fence  = ru(completion, "parent_fence");
+        value.child_fence   = ru(completion, "child_fence");
         if (completion.contains("expected_row_version"))
             value.expected_row_version = ru(completion, "expected_row_version");
         value.child = parse_program_child_record(detail::canonical_json_bytes(rv(completion, "child")));
@@ -737,14 +737,24 @@ bool does_program_child_generation_result_bind(const ProgramRunRecord&     paren
                                                const ProgramRunGeneration& generation,
                                                const ProgramRunLineage&    lineage,
                                                const ProgramRunRecord&     result_run) noexcept {
+    return does_program_child_generation_result_bind(parent.owner_scope(), parent.logical_run_id(), child,
+                                                     generation, lineage, result_run);
+}
+
+bool does_program_child_generation_result_bind(std::string_view            parent_owner_scope,
+                                               std::string_view            parent_logical_run_id,
+                                               const ProgramChildRecord&   child,
+                                               const ProgramRunGeneration& generation,
+                                               const ProgramRunLineage&    lineage,
+                                               const ProgramRunRecord&     result_run) noexcept {
     return child.terminal_result && result_run.terminal_result() &&
-           parent.owner_scope() == result_run.owner_scope() &&
-           child.invocation.parent_run_id == parent.logical_run_id() &&
+           parent_owner_scope == result_run.owner_scope() &&
+           child.invocation.parent_run_id == parent_logical_run_id &&
            lineage.root_run_id() == child.child_run_id &&
            child.terminal_generation == generation.generation() && child.terminal_generation >= 2 &&
            generation.replacement_receipt().has_value() &&
            does_program_run_generation_bind(generation, lineage, result_run) &&
-           result_run.invocation().parent_run_id == parent.logical_run_id() &&
+           result_run.invocation().parent_run_id == parent_logical_run_id &&
            result_run.child_depth() == child.invocation.child_depth &&
            child.terminal_result->id() == result_run.terminal_result()->id();
 }
