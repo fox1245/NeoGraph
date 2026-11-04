@@ -17691,6 +17691,7 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
 // interrupted child takes that lock to publish its Cancelled state: the lock must be handed down, not taken twice.
 TEST(ProgramRuntimeTest, CancellingARunningParentCancelsItsInterruptedChildDurably) {
     interrupt_calls.store(0);
+    blocking_calls.store(0);
     AdmittedRuntime fixture(2);
     const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-interrupt");
     auto            parent =
@@ -17699,6 +17700,10 @@ TEST(ProgramRuntimeTest, CancellingARunningParentCancelsItsInterruptedChildDurab
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-cancels-interrupted-child",
                                                  {}});
+    // The child below is granted every Core step and Program operation the parent has, so the parent's own Core call has
+    // to have started before the child is attached: a child attached first leaves the parent nothing to run its call
+    // with, the parent ends, and the end of the parent cancels the child.
+    ASSERT_TRUE(wait_blocking_calls(1));
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
         ProgramInvocation{json::object(),
