@@ -571,7 +571,7 @@ public:
             run.fragment_id = run.result.output()["fragment_id"].get<std::string>();
             run.record      = fixture.task_graph_fragments->load(run.fragment_id);
         }
-        for (const auto& child : handle.snapshot().children())
+        for (const auto& child : handle.snapshot().snapshot_children())
             run.child_budgets[child.child_run_id] = child.invocation.granted_budget;
         return run;
     }

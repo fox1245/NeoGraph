@@ -315,14 +315,12 @@ bool is_valid_program_replacement_transition(
                source.continuation().state == ContinuationState::Running &&
                !source.recorded_binding_set_fingerprint() && !source.pending_input() &&
                !source.pending_effect() && !source.terminal_result() &&
-               target.children() == source.children() &&
                target.child_depth() == source.child_depth() &&
                target.invocation().parent_run_id == source.invocation().parent_run_id &&
                previous_lineage.inflight_reservation() == RunBudget{} &&
                target.run_id() != source.run_id() &&
                (target.logical_run_id() == source.logical_run_id() ||
-                (target.logical_run_id() == target.run_id() && source.children().empty() &&
-                 target.children().empty() && source.child_depth() == 0 &&
+                (target.logical_run_id() == target.run_id() && source.child_depth() == 0 &&
                  target.child_depth() == 0)) &&
                target.continuation().state == ContinuationState::Running &&
                !target.pending_input() && !target.pending_effect() && !target.terminal_result() &&

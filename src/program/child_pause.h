@@ -7,6 +7,7 @@
 // child(ren) it awaits by the identity of the awaited spawn operation and child run id, never by
 // comparing interrupt payloads.
 
+#include <neograph/program/child_relation.h>
 #include <neograph/program/command_journal.h>
 #include <neograph/program/result.h>
 #include <neograph/program/run_record.h>
@@ -79,10 +80,11 @@ inline bool child_matches_spawn_operation(const ProgramRunRecord&   run,
            child.invocation.trace_id.ends_with(trace_suffix);
 }
 
-/// The children of `run` that its paused await waits on, matched by command/child identity.
-/// Empty for a run paused on a question of its own.
+/// The children of `run` that its paused await waits on, matched by command/child identity among the relation
+/// rows `rows` of the run. Empty for a run paused on a question of its own.
 inline std::vector<ProgramChildRecord> children_paused_on(
     const ProgramRunRecord&                                  run,
+    const std::vector<ProgramChildRelation>&                 rows,
     const std::vector<ProgramJavaScriptCommandJournalEntry>& commands       = {},
     const std::optional<ProgramJournalRecord>&               latest_journal = std::nullopt) {
     std::vector<ProgramChildRecord> paused;
@@ -102,10 +104,10 @@ inline std::vector<ProgramChildRecord> children_paused_on(
             latest_command.command(),
             "root.javascript." + std::to_string(latest_command.command_ordinal()),
             latest_command.settled_members(), false, awaited_spawns);
-        for (const auto& child : run.children()) {
+        for (const auto& row : rows) {
             for (const auto& op : awaited_spawns) {
-                if (child_matches_spawn_operation(run, child, op)) {
-                    paused.push_back(child);
+                if (child_matches_spawn_operation(run, row.child(), op)) {
+                    paused.push_back(row.child());
                     break;
                 }
             }
@@ -123,9 +125,9 @@ inline std::vector<ProgramChildRecord> children_paused_on(
                 continue;
             }
             const auto awaited_id = entry.at("child_run_id").get<std::string>();
-            for (const auto& child : run.children()) {
-                if (child.child_run_id == awaited_id) {
-                    paused.push_back(child);
+            for (const auto& row : rows) {
+                if (row.child_run_id() == awaited_id) {
+                    paused.push_back(row.child());
                     break;
                 }
             }

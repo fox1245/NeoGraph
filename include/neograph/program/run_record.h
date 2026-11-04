@@ -85,7 +85,6 @@ struct ProgramRunRecordData {
     std::optional<ProgramPendingEffect>    pending_effect;
     std::optional<ProgramResult>           terminal_result;
     std::optional<ForkCompatibilityReceipt> fork_receipt;
-    std::vector<ProgramChildRecord>           children;
     std::string                           journal_head;
     std::optional<std::string>              fork_source_run_id;
     std::optional<std::string>              fork_source_program_version_id;
@@ -121,7 +120,9 @@ public:
     /// Version 5 adds attempt_resume, version 6 settled_branches, and version 7
     /// continuation.fence. A record keeps the lowest version that can hold it, so
     /// version 7 is written only for a run that was taken over (fence other than 1);
-    /// versions 2 through 6 carry no fence and read as fence = 1.
+    /// versions 2 through 6 carry no fence and read as fence = 1. No version writes
+    /// the children of a run: they are relation rows (child_relation.h). A stored
+    /// record of an earlier version that has `children` still parses, with the same id.
     static constexpr std::uint32_t STORAGE_SCHEMA_VERSION = 7;
 
     static ProgramRunRecord create(ProgramRunRecordData data);
@@ -144,11 +145,18 @@ public:
     std::optional<ProgramPendingInput> pending_input() const;
     std::optional<ProgramPendingEffect> pending_effect() const;
     std::optional<ProgramResult> terminal_result() const;
-    bool has_children() const noexcept;
-    /** The child relations. A record that outlives the call lends them; a temporary record
-     *  returns its own copy, so a range-for over a temporary's children never dangles. */
-    const std::vector<ProgramChildRecord>& children() const&;
-    std::vector<ProgramChildRecord> children() const&&;
+    /**
+     * The children of a record stored before the relation rows existed (storage schema 7 and earlier kept them in the
+     * record). A record written by this version has none. A store reads them once, to materialize the relation rows of
+     * the parent; nothing else may look at them.
+     */
+    const std::vector<ProgramChildRecord>& legacy_children_for_migration() const noexcept;
+    /**
+     * The child relations as `ProgramHandle::snapshot()` read them from the store, for a caller that wants to look at
+     * them. Empty for every record that was not made by a snapshot. A runtime-only overlay: it is not part of the
+     * canonical record, its identity or its bytes.
+     */
+    const std::vector<ProgramChildRecord>& snapshot_children() const noexcept;
     std::optional<ForkCompatibilityReceipt> fork_receipt() const;
     const std::string& journal_head() const noexcept;
     std::uint64_t event_sequence() const noexcept;
@@ -170,6 +178,9 @@ private:
     // Runtime-only typed custody overlay; canonical identity stays unchanged.
     std::optional<ProgramResult> hydrated_terminal_;
     ProgramRunRecord with_hydrated_terminal(ProgramResult result) const;
+    // Runtime-only overlay of a snapshot; canonical identity stays unchanged.
+    std::shared_ptr<const std::vector<ProgramChildRecord>> snapshot_children_;
+    ProgramRunRecord with_snapshot_children(std::vector<ProgramChildRecord> children) const;
     friend class detail::RunControl;
 };
 

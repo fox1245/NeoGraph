@@ -259,31 +259,6 @@ bool effect_history_contains(const std::vector<ProgramEffectOutboxEntry>& effect
     return false;
 }
 
-template <typename Integer>
-bool checked_add(Integer& target, Integer value) noexcept {
-    if (value > std::numeric_limits<Integer>::max() - target) return false;
-    target = static_cast<Integer>(target + value);
-    return true;
-}
-
-std::optional<RunBudget> committed_descendant_budget(const ProgramRunRecord& run) noexcept {
-    RunBudget committed;
-    for (const auto& child : run.children()) {
-        const auto& budget = child.invocation.granted_budget;
-        if (!checked_add(committed.wall_time_ms, budget.wall_time_ms) ||
-            !checked_add(committed.model_tokens, budget.model_tokens) ||
-            !checked_add(committed.monetary_microunits, budget.monetary_microunits) ||
-            !checked_add(committed.max_program_operations, budget.max_program_operations) ||
-            !checked_add(committed.max_core_steps, budget.max_core_steps) ||
-            !checked_add(committed.max_dynamic_compiles, budget.max_dynamic_compiles) ||
-            budget.max_total_children == std::numeric_limits<std::uint64_t>::max() ||
-            !checked_add(committed.max_total_children, budget.max_total_children + 1)) {
-            return std::nullopt;
-        }
-    }
-    return committed;
-}
-
 bool fork_resume_binds_initial_target(const ForkCompatibilityReceipt& receipt,
                                       const ProgramRunRecord&         target) {
     if (receipt.storage_schema_version() < ForkCompatibilityReceipt::STORAGE_SCHEMA_VERSION) {
@@ -463,13 +438,11 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
     }
     if (publication.run_lineage) {
         const auto& lineage = *publication.run_lineage;
-        const auto  committed = committed_descendant_budget(run);
         if (lineage.owner_scope() != owner ||
             lineage.active_run_record_id() != run.id() ||
             lineage.active_journal_head() != journal.id ||
             lineage.remaining_budget() != journal.remaining_budget ||
-            lineage.inflight_reservation() != journal.inflight_reservation || !committed ||
-            lineage.committed_descendant_budget() != *committed) {
+            lineage.inflight_reservation() != journal.inflight_reservation) {
             throw std::invalid_argument("Program lineage head does not bind the transition");
         }
         if (publication.run_generation) {

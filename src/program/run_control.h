@@ -563,6 +563,9 @@ public:
     asio::awaitable<void> release_graph_migration_async(std::uint64_t request_id);
     ProgramRunRecord                      snapshot() const;
     asio::awaitable<ProgramRunRecord>     snapshot_async() const;
+    /// The record with the relation rows of the run attached (ProgramRunRecord::snapshot_children). The runtime's own
+    /// reads use snapshot_async: they never read the rows of a parent that they do not need.
+    asio::awaitable<ProgramRunRecord>     snapshot_with_children_async() const;
     void              cancel_children(CancellationCause cause) noexcept;
     void              cancel_children_in_background(CancellationCause cause) noexcept;
     bool              schedule_interrupted_cancellation(CancellationCause cause) noexcept;
