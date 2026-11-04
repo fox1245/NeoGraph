@@ -12,6 +12,9 @@
 
 #include <neograph/async/host_loop.h>
 #include <neograph/program/runtime.h>
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT)
+#include <neograph/graph/postgres_checkpoint.h>
+#endif
 
 #include <runtime/host.h>
 
@@ -30,13 +33,16 @@
 #include <condition_variable>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <future>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
 #include <thread>
+#include <vector>
 
 using namespace neograph;
 using namespace neograph::program;
@@ -895,6 +901,266 @@ TEST(ProgramRuntimeExecutorTest, AViewWithoutAPolicyRefusesToWaitForAStoreInside
     ASSERT_TRUE(hosted.host->run_until([&] { return verdict.has_value(); }));
     EXPECT_EQ(*verdict, "ProgramCoreToolGrantStore::load");
 }
+
+// ---- A checkpoint store whose pool is exhausted when the run reaches it ----
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT)
+namespace neograph::graph::test_access {
+/// Takes and returns a pool slot of a PostgreSQL store without running a query.
+class PostgresCheckpointStoreTestAccess {
+public:
+    static std::size_t acquire(PostgresCheckpointStore& store) { return store.acquire_slot(); }
+    static void        release(PostgresCheckpointStore& store, std::size_t slot) { store.release_slot(slot); }
+};
+}  // namespace neograph::graph::test_access
+
+namespace {
+
+using PoolAccess = graph::test_access::PostgresCheckpointStoreTestAccess;
+
+/// A one-connection PostgreSQL checkpoint store that is busy whenever an operation reaches it. Each operation, before
+/// it runs, finds the only connection taken by another user whose way of giving it back is a handler on the executor
+/// that the run's coroutines use: the position of an asynchronous operation of the store that is waiting for its
+/// socket. An operation that waits for the connection while holding a thread of that executor can then never be
+/// served; an operation that suspends its coroutine can.
+class BusyPoolStore final : public graph::PostgresCheckpointStore {
+    using Base = graph::PostgresCheckpointStore;
+
+public:
+    explicit BusyPoolStore(const std::string& url) : Base(url, 1) {}
+
+    /// The executor whose handlers return the connection, and the thread that runs them.
+    void serve_on(asio::any_io_executor executor, std::thread::id thread) {
+        executor_ = std::move(executor);
+        thread_   = thread;
+    }
+    /// The synchronous operations that were entered on the executor's thread.
+    std::vector<std::string> blocking_operations() const {
+        std::lock_guard lock(mutex_);
+        return blocking_;
+    }
+    /// Gives every connection that the executor has not returned back, from the calling thread, and takes none from
+    /// then on. A test calls it once when the run did not finish, so that every thread waiting for a connection can
+    /// end, later operations do not wait again, and the test can fail.
+    void return_connections() {
+        std::vector<std::shared_ptr<Return>> pending;
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+            pending   = returns_;
+        }
+        for (const auto& item : pending) item->run(*this);
+    }
+    std::size_t operations() const {
+        std::lock_guard lock(mutex_);
+        return operations_;
+    }
+
+    void save(const graph::Checkpoint& checkpoint) override {
+        busy("save", true);
+        Base::save(checkpoint);
+    }
+    std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
+        busy("load_latest", true);
+        return Base::load_latest(thread_id);
+    }
+    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+        busy("load_by_id", true);
+        return Base::load_by_id(id);
+    }
+    std::vector<graph::Checkpoint> list(const std::string& thread_id, int limit) override {
+        busy("list", true);
+        return Base::list(thread_id, limit);
+    }
+    void delete_thread(const std::string& thread_id) override {
+        busy("delete_thread", true);
+        Base::delete_thread(thread_id);
+    }
+    void put_writes(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                    const graph::PendingWrite& write) override {
+        busy("put_writes", true);
+        Base::put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    std::vector<graph::PendingWrite> get_writes(const std::string& thread_id,
+                                                const std::string& parent_checkpoint_id) override {
+        busy("get_writes", true);
+        return Base::get_writes(thread_id, parent_checkpoint_id);
+    }
+    void clear_writes(const std::string& thread_id, const std::string& parent_checkpoint_id) override {
+        busy("clear_writes", true);
+        Base::clear_writes(thread_id, parent_checkpoint_id);
+    }
+    bool requires_managed_budget(const std::string& thread_id) override {
+        busy("requires_managed_budget", true);
+        return Base::requires_managed_budget(thread_id);
+    }
+
+    asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
+        busy("save_async", false);
+        co_await Base::save_async(checkpoint);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(const std::string& thread_id) override {
+        busy("load_latest_async", false);
+        co_return co_await Base::load_latest_async(thread_id);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_by_id_async(const std::string& id) override {
+        busy("load_by_id_async", false);
+        co_return co_await Base::load_by_id_async(id);
+    }
+    asio::awaitable<std::vector<graph::Checkpoint>> list_async(const std::string& thread_id, int limit) override {
+        busy("list_async", false);
+        co_return co_await Base::list_async(thread_id, limit);
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        busy("delete_thread_async", false);
+        co_await Base::delete_thread_async(thread_id);
+    }
+    asio::awaitable<void> put_writes_async(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                                           const graph::PendingWrite& write) override {
+        busy("put_writes_async", false);
+        co_await Base::put_writes_async(thread_id, parent_checkpoint_id, write);
+    }
+    asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
+        const std::string& thread_id, const std::string& parent_checkpoint_id) override {
+        busy("get_writes_async", false);
+        co_return co_await Base::get_writes_async(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id) override {
+        busy("clear_writes_async", false);
+        co_await Base::clear_writes_async(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
+        busy("requires_managed_budget_async", false);
+        co_return co_await Base::requires_managed_budget_async(std::move(thread_id));
+    }
+
+private:
+    struct Return {
+        std::size_t       slot = 0;
+        std::atomic<bool> done{false};
+        void              run(BusyPoolStore& store) {
+            if (!done.exchange(true)) PoolAccess::release(store, slot);
+        }
+    };
+
+    void busy(const char* operation, bool synchronous) {
+        {
+            std::lock_guard lock(mutex_);
+            if (synchronous && std::this_thread::get_id() == thread_) blocking_.emplace_back(operation);
+            if (released_) return;
+        }
+        auto taken  = std::make_shared<Return>();
+        taken->slot = PoolAccess::acquire(*this);
+        {
+            std::lock_guard lock(mutex_);
+            ++operations_;
+            returns_.push_back(taken);
+        }
+        asio::post(executor_, [this, taken] { taken->run(*this); });
+    }
+
+    asio::any_io_executor                executor_;
+    std::thread::id                      thread_;
+    mutable std::mutex                   mutex_;
+    std::vector<std::string>             blocking_;
+    std::vector<std::shared_ptr<Return>> returns_;
+    std::size_t                          operations_ = 0;
+    bool                                 released_   = false;
+};
+
+/// Runs `version` on a single-thread executor over a store with one busy connection, and reports whether the run
+/// ended. The wait is bounded only so that a run that cannot end fails the test instead of hanging the suite.
+struct BusyPoolRun {
+    bool                     finished = false;
+    ProgramTerminalStatus    status   = ProgramTerminalStatus::Failed;
+    std::vector<std::string> blocking;
+    std::size_t              operations = 0;
+};
+
+BusyPoolRun run_over_busy_pool(const std::function<ProgramVersion(ExecutorFixture&)>& admit,
+                               const std::shared_ptr<BusyPoolStore>& store, ExecutionGuarantee guarantee,
+                               bool allow_javascript) {
+    ExecutorFixture fixture(1, store, {}, {}, guarantee, allow_javascript);
+    fixture.runtime.reset();
+    const auto version = admit(fixture);
+
+    asio::io_context io;
+    auto             work = asio::make_work_guard(io);
+    std::thread      io_thread([&] { io.run(); });
+    store->serve_on(io.get_executor(), io_thread.get_id());
+
+    auto config     = runtime_config(fixture);
+    config.executor = io.get_executor();
+    BusyPoolRun report;
+    {
+        ProgramRuntime runtime(std::move(config));
+        auto           handle  = runtime.start("tenant:runtime", version, invocation("trace-busy-pool"));
+        auto           outcome = std::async(std::launch::async, [&] { return handle.wait(); });
+        report.finished        = outcome.wait_for(20s) == std::future_status::ready;
+        if (!report.finished) store->return_connections();
+        report.status = outcome.get().status();
+    }
+    report.blocking   = store->blocking_operations();
+    report.operations = store->operations();
+    work.reset();
+    io_thread.join();
+    return report;
+}
+
+std::string describe_blocking(const BusyPoolRun& run) {
+    std::string text = "synchronous store operations entered on the executor thread:";
+    for (const auto& name : run.blocking) text += " " + name;
+    return text;
+}
+
+}  // namespace
+
+TEST(ProgramRuntimeExecutorTest, ACoreResultIsReadFromAnExhaustedCheckpointPoolWithoutHoldingTheExecutor) {
+    const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url) GTEST_SKIP() << "PostgreSQL test URL is required";
+    auto store = std::make_shared<BusyPoolStore>(url);
+    const auto run = run_over_busy_pool(
+        [](ExecutorFixture& fixture) { return fixture.admit("executor-record"); },
+        store, ExecutionGuarantee::Strict, false);
+    EXPECT_TRUE(run.finished) << "the run did not end: its coroutine waits for a connection on the executor's only "
+                                 "thread, so the handler that returns the connection cannot run; "
+                              << describe_blocking(run);
+    EXPECT_EQ(run.status, ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(run.blocking.empty()) << describe_blocking(run);
+    EXPECT_GT(run.operations, 0U);
+}
+
+TEST(ProgramRuntimeExecutorTest, ATerminalCheckpointIsSavedToAnExhaustedCheckpointPoolWithoutHoldingTheExecutor) {
+    const char* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url) GTEST_SKIP() << "PostgreSQL test URL is required";
+    auto store = std::make_shared<BusyPoolStore>(url);
+    const auto run = run_over_busy_pool(
+        [](ExecutorFixture& fixture) {
+            return fixture.admit_javascript(
+                R"JS(
+                    export function define() {
+                        const graph = ng.graph("main");
+                        graph.channel("value", {reducer: "runtime-overwrite", initial: ""});
+                        graph.node("work", {type: "executor-record"});
+                        graph.entry("work");
+                        graph.exit("work");
+                        return graph;
+                    }
+
+                    export function* main() {
+                        return {finished: true};
+                    }
+                )JS");
+        },
+        store, ExecutionGuarantee::Unmanaged, true);
+    EXPECT_TRUE(run.finished) << "the run did not end: its coroutine waits for a connection on the executor's only "
+                                 "thread, so the handler that returns the connection cannot run; "
+                              << describe_blocking(run);
+    EXPECT_EQ(run.status, ProgramTerminalStatus::Completed);
+    EXPECT_TRUE(run.blocking.empty()) << describe_blocking(run);
+}
+#endif
 
 // ---- The operation lock ----
 

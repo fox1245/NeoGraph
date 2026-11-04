@@ -886,6 +886,9 @@ void PostgresCheckpointStore::drop_schema() {
     // a cached plan.
 }
 
+// Blocks the calling thread until a connection is free. A connection that is in use by an asynchronous operation is
+// returned by a handler of that operation's executor, so a thread that runs such an executor must not call this: it
+// awaits acquire_slot_async instead, which suspends the coroutine and leaves the thread to run that handler.
 size_t PostgresCheckpointStore::acquire_slot() {
     auto             state = pool_wait_state(this);
     std::unique_lock lock(pool_mutex_);

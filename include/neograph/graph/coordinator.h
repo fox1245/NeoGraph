@@ -117,6 +117,11 @@ NEOGRAPH_API std::vector<PendingWrite> resume_pending_writes(CheckpointStore& st
 NEOGRAPH_API void copy_resume_pending_writes(CheckpointStore& store, const Checkpoint& source,
                                              const Checkpoint& target);
 
+/// The awaitable form of copy_resume_pending_writes: the same rows, read and written through the store's
+/// asynchronous calls, so that a coroutine does not hold its thread while the store works.
+NEOGRAPH_API asio::awaitable<void> copy_resume_pending_writes_async(
+    std::shared_ptr<CheckpointStore> store, Checkpoint source, Checkpoint target);
+
 /**
  * @brief Per-run coordinator for checkpoint lifecycle operations.
  *
