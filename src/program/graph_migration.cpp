@@ -1646,7 +1646,7 @@ bool is_valid_program_graph_migration_transition(
                source.continuation().attempt == target.continuation().attempt &&
                !source.recorded_binding_set_fingerprint() && !source.pending_input() &&
                !source.pending_effect() && !source.terminal_result() &&
-               source.children().empty() && source.child_depth() == 0 &&
+               source.child_depth() == 0 &&
                source.effect_sequence() == 0 &&
                source.updated_at_ms() >= capsule.checkpoint().timestamp &&
                source.invocation().parent_run_id.empty() &&
@@ -1685,7 +1685,7 @@ bool is_valid_program_graph_migration_transition(
                !target.pending_input() && !target.pending_effect() &&
                !target.terminal_result() && !target.fork_receipt() &&
                !target.recorded_binding_set_fingerprint() &&
-               target.children().empty() && target.effect_sequence() == 0 &&
+               target.effect_sequence() == 0 &&
                 target.created_at_ms() >= source.updated_at_ms() &&
                 migration_elapsed <= source.remaining_budget().wall_time_ms &&
                 target.created_at_ms() >= capsule.checkpoint().timestamp &&
@@ -1755,10 +1755,10 @@ bool is_valid_program_graph_safe_point_transition(
             previous.child_depth() != 0 || next.child_depth() != 0 ||
             !previous.invocation().parent_run_id.empty() ||
             previous.pending_input() || previous.pending_effect() ||
-            previous.terminal_result() || !previous.children().empty() ||
+            previous.terminal_result() ||
             previous.effect_sequence() != 0 || next.pending_input() ||
             next.pending_effect() || next.terminal_result() ||
-            !next.children().empty() || next.effect_sequence() != 0 ||
+            next.effect_sequence() != 0 ||
             previous.recorded_binding_set_fingerprint() ||
             next.recorded_binding_set_fingerprint() ||
             previous_journal.id != previous.journal_head() ||

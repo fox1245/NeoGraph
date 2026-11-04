@@ -5,7 +5,8 @@
 #include <neograph/program/transition_store.h>
 
 // A SyncProgramTransitionStore whose inner object exposes the `..._sync` operations (a SyncProgramTransitionStore).
-#define NG_FORWARD_RELATION_SYNC(INNER)                                                                               \
+// Everything but the row update, for a store that decides the update itself.
+#define NG_FORWARD_RELATION_SYNC_EXCEPT_UPDATE(INNER)                                                                               \
     std::optional<::neograph::program::ProgramChildRelationHead> load_child_relation_head_sync(                       \
         std::string_view o, std::string_view p) const override {                                                      \
         return (INNER).load_child_relation_head_sync(o, p);                                                           \
@@ -22,15 +23,20 @@
         std::string_view o, std::string_view p, std::uint64_t fence,                                                  \
         ::neograph::program::ProgramChildRecord child) override {                                                     \
         return (INNER).insert_child_relation_sync(o, p, fence, std::move(child));                                     \
-    }                                                                                                                 \
+    }
+
+#define NG_FORWARD_RELATION_SYNC_UPDATE(INNER)                                                                        \
     ::neograph::program::ProgramChildRelationOutcome update_child_relation_sync(                                      \
         std::string_view o, std::string_view p, std::uint64_t fence, std::optional<std::uint64_t> version,           \
         ::neograph::program::ProgramChildRecord next) override {                                                      \
         return (INNER).update_child_relation_sync(o, p, fence, version, std::move(next));                             \
     }
 
+#define NG_FORWARD_RELATION_SYNC(INNER) NG_FORWARD_RELATION_SYNC_EXCEPT_UPDATE(INNER) NG_FORWARD_RELATION_SYNC_UPDATE(INNER)
+
 // A SyncProgramTransitionStore whose inner object is a BlockingProgramTransitionStore (no `_sync` suffix).
-#define NG_FORWARD_RELATION_BLOCKING(INNER)                                                                           \
+// Only the relation reads, for a store that decides the writes itself.
+#define NG_FORWARD_RELATION_BLOCKING_READS(INNER)                                                                           \
     std::optional<::neograph::program::ProgramChildRelationHead> load_child_relation_head_sync(                       \
         std::string_view o, std::string_view p) const override {                                                      \
         return (INNER).load_child_relation_head(o, p);                                                                \
@@ -42,7 +48,9 @@
     std::vector<::neograph::program::ProgramChildRelation> load_child_relations_sync(                                 \
         std::string_view o, std::string_view p, bool open_only) const override {                                      \
         return (INNER).load_child_relations(o, p, open_only);                                                         \
-    }                                                                                                                 \
+    }
+
+#define NG_FORWARD_RELATION_BLOCKING_WRITES(INNER)                                                                     \
     ::neograph::program::ProgramChildRelationOutcome insert_child_relation_sync(                                      \
         std::string_view o, std::string_view p, std::uint64_t fence,                                                  \
         ::neograph::program::ProgramChildRecord child) override {                                                     \
@@ -53,6 +61,8 @@
         ::neograph::program::ProgramChildRecord next) override {                                                      \
         return (INNER).update_child_relation(o, p, fence, version, std::move(next));                                  \
     }
+
+#define NG_FORWARD_RELATION_BLOCKING(INNER) NG_FORWARD_RELATION_BLOCKING_READS(INNER) NG_FORWARD_RELATION_BLOCKING_WRITES(INNER)
 
 // A ProgramTransitionStore (awaitable) whose inner object is a ProgramTransitionStore; BEFORE is a statement run
 // before each forwarded call (for example `co_await pause();`, or nothing).

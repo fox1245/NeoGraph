@@ -40,10 +40,12 @@
 #include <utility>
 #include "fixtures/store_handle.h"
 #include "fixtures/relation_forwarding.h"
+#include "fixtures/relation_children.h"
 
 using neograph::program::test_support::OwnedTransitionStore;
 namespace {
 using namespace neograph::program;
+using neograph::program::test::children_of;
 using neograph::ContextArtifact;
 using neograph::ContextArtifactData;
 using neograph::ContextArtifactKind;
@@ -144,7 +146,6 @@ ProgramRunRecordData copy_run_record_data(const ProgramRunRecord& run) {
     data.pending_effect                   = run.pending_effect();
     data.terminal_result                  = run.terminal_result();
     data.fork_receipt                     = run.fork_receipt();
-    data.children                         = run.children();
     data.journal_head                     = run.journal_head();
     data.fork_source_run_id               = run.fork_source_run_id();
     data.fork_source_program_version_id   = run.fork_source_program_version_id();
@@ -582,7 +583,6 @@ ProgramTransitionPublication javascript_command_publication(
     data.binding_fingerprint              = old_run.binding_fingerprint();
     data.invocation                       = old_run.invocation();
     data.child_depth                      = old_run.child_depth();
-    data.children                         = old_run.children();
     data.continuation                     = journal.continuation;
     data.remaining_budget                 = journal.remaining_budget;
     data.exact_checkpoint                 = old_run.exact_checkpoint();
@@ -911,15 +911,10 @@ ProgramTransitionPublication terminal_publication(const ProgramTransitionPublica
             {}};
 }
 
-ProgramTransitionPublication child_metadata_publication(
-    const ProgramTransitionPublication& start,
-    ProgramChildState                   state = ProgramChildState::Publishing,
-    std::int64_t                        time  = 20,
-    std::string                         trace = "child-trace") {
-    const auto child = ProgramChildRecord{
-        "child-run-1", digest('7'), "link-receipt",
-        ProgramPersistedInvocation{{{"child", true}}, budget(), std::move(trace), "run-1", 1},
-        state};
+
+/** The parent's next ordinary publication after `start` (a later journal record, no relation part). */
+ProgramTransitionPublication next_parent_publication(const ProgramTransitionPublication& start,
+                                                     std::int64_t                        time = 20) {
     auto journal             = ProgramJournalRecord::create({start.journal_record.id,
                                                              "run-1",
                                                              digest('1'),
@@ -939,7 +934,6 @@ ProgramTransitionPublication child_metadata_publication(
     data.invocation          = start.run_record.invocation();
     data.continuation        = journal.continuation;
     data.remaining_budget    = journal.remaining_budget;
-    data.children            = {child};
     data.journal_head        = journal.id;
     data.event_sequence      = start.run_record.event_sequence();
     data.effect_sequence     = start.run_record.effect_sequence();
@@ -1106,7 +1100,6 @@ void attach_fork_receipt(ProgramTransitionPublication& publication,
                                                                                    {}})
                              .with_initial_resume_binding(std::move(pending_id), resume_value);
     data.fork_receipt                     = std::move(receipt);
-    data.children                         = run.children();
     data.journal_head                     = run.journal_head();
     data.recorded_binding_set_fingerprint = run.recorded_binding_set_fingerprint();
     data.event_sequence                   = run.event_sequence();
@@ -1404,7 +1397,6 @@ void exercise_cross_thread_call_core_settlement(BlockingProgramTransitionStore& 
     data.binding_fingerprint = old_run.binding_fingerprint();
     data.invocation          = old_run.invocation();
     data.child_depth         = old_run.child_depth();
-    data.children            = old_run.children();
     data.continuation        = journal.continuation;
     data.remaining_budget    = settled;
     data.exact_checkpoint    = unrelated_checkpoint;
@@ -3244,27 +3236,6 @@ TEST_P(ProgramTransitionStoreConformance, TerminalResultCannotPublishWithoutTerm
     EXPECT_EQ(store.load_events("owner-a", "run-1").size(), 1U);
 }
 
-TEST_P(ProgramTransitionStoreConformance, ChildMetadataPublicationIsIdempotentAndConflictDetecting) {
-    auto& store = primary_store();
-    const auto                     start = start_publication();
-    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start),
-              ProgramTransitionPublishResult::Published);
-
-    const auto publishing = child_metadata_publication(start);
-    ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, publishing),
-              ProgramTransitionPublishResult::Published);
-    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, publishing),
-              ProgramTransitionPublishResult::AlreadyPresent);
-    ASSERT_TRUE(store.load("owner-a", "run-1").has_value());
-    ASSERT_EQ(store.load("owner-a", "run-1")->children().size(), 1U);
-
-    const auto conflicting = child_metadata_publication(publishing, ProgramChildState::Publishing,
-                                                        21, "different-child-trace");
-    EXPECT_EQ(store.compare_publish("owner-a", publishing.journal_record.id, 1, conflicting),
-              ProgramTransitionPublishResult::Conflict);
-    EXPECT_EQ(store.latest("owner-a", "run-1")->id, publishing.journal_record.id);
-}
-
 // ---------------------------------------------------------------------------
 // Child relation rows (#661): the contract of the relation operations on every backend.
 // ---------------------------------------------------------------------------
@@ -3317,14 +3288,15 @@ ProgramChildRecord relation_child_after(const ProgramChildRecord& before, Progra
 
 // An ordinary publication of the parent: it changes nothing but the journal head.
 ProgramTransitionPublication relation_running_publication(const ProgramTransitionPublication& previous,
-                                                          std::int64_t                        time) {
+                                                          std::int64_t                        time,
+                                                          std::optional<RunBudget>            remaining = std::nullopt) {
     auto journal = ProgramJournalRecord::create({previous.journal_record.id,
                                                  "run-1",
                                                  digest('1'),
                                                  digest('2'),
                                                  previous.journal_record.sequence + 1,
                                                  {"root", ContinuationState::Running, 1},
-                                                 previous.journal_record.remaining_budget,
+                                                 remaining ? *remaining : previous.journal_record.remaining_budget,
                                                  {},
                                                  std::nullopt,
                                                  time});
@@ -3594,6 +3566,40 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationAggregateBoundsTheSumOfTh
               ProgramChildRelationStatus::Applied);
 }
 
+// Spawn c1, validate a spend, spawn c2, publish the spend: a spend counts the children granted up to its own commit.
+TEST_P(ProgramTransitionStoreConformance, ChildRelationSpendIsCheckedAgainstTheChildrenGrantedBeforeItsCommit) {
+    auto& store = primary_store();
+    const auto start = relation_parent_start();
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-1")).status,
+              ProgramChildRelationStatus::Applied);
+
+    // The spend leaves room for one child's permanent share only (one child unit), which is all it saw.
+    auto leaves_one = relation_parent_budget();
+    leaves_one.max_total_children = 1;
+    const auto spend = relation_running_publication(start, 20, leaves_one);
+    // The second child is granted after the spend was built and before it commits.
+    ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-2")).status,
+              ProgramChildRelationStatus::Applied);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, spend),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+
+    // A spend that leaves room for both children commits, and then no third child fits.
+    auto leaves_two = relation_parent_budget();
+    leaves_two.max_total_children = 2;
+    const auto fitting = relation_running_publication(start, 21, leaves_two);
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, fitting),
+              ProgramTransitionPublishResult::Published);
+    expect_refused(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-3")),
+                   ProgramChildRelationRefusal::BudgetExceeded);
+
+    // A publication that spends nothing does not read the children: it commits whatever they hold.
+    EXPECT_EQ(store.compare_publish("owner-a", fitting.journal_record.id, 1,
+                                    relation_running_publication(fitting, 22)),
+              ProgramTransitionPublishResult::Published);
+}
+
 TEST_P(ProgramTransitionStoreConformance, ChildRelationUpdateFollowsTheStateRule) {
     auto& store = primary_store();
     ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
@@ -3619,7 +3625,8 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationUpdateFollowsTheStateRule
 
     // A stale version, a missing row, a stranger's fence and a changed identity are each refused.
     expect_refused(store.update_child_relation("owner-a", "run-1", 1, 1,
-                                               relation_child_after(publishing, ProgramChildState::Failed)),
+                                               relation_child_after(publishing, ProgramChildState::Cancelled,
+                                                                    ProgramTerminalStatus::Cancelled)),
                    ProgramChildRelationRefusal::RowVersionMismatch);
     expect_refused(store.update_child_relation("owner-a", "run-1", 1, std::nullopt, relation_child("child-9")),
                    ProgramChildRelationRefusal::RowMissing);
@@ -4051,57 +4058,6 @@ TEST(ProgramTransitionStoreTest, ChildRelationRowAndHeadRejectTamperAndInconsist
     EXPECT_THROW((void)ProgramChildRelationHead::create(leased), std::invalid_argument);
 }
 
-TEST(ProgramTransitionStoreTest, TerminalChildStatesRequireMatchingDurableResults) {
-    const auto start = start_publication();
-    EXPECT_THROW((void)child_metadata_publication(start, ProgramChildState::Completed),
-                 std::invalid_argument);
-    EXPECT_THROW((void)child_metadata_publication(start, ProgramChildState::Failed),
-                 std::invalid_argument);
-}
-TEST(ProgramTransitionStoreTest, TerminalChildResultSurvivesRecordRoundTrip) {
-    const auto start      = start_publication();
-    auto       publishing = child_metadata_publication(start, ProgramChildState::Dispatched);
-    auto       children   = publishing.run_record.children();
-    ASSERT_EQ(children.size(), 1U);
-
-    const auto        child_id = children.front().child_run_id;
-    ProgramResultData child_result_data;
-    child_result_data.status             = ProgramTerminalStatus::Completed;
-    child_result_data.run_id             = child_id;
-    child_result_data.program_version_id = digest('1');
-    child_result_data.bundle_id          = digest('2');
-    child_result_data.operation_id       = "root";
-    child_result_data.attempt            = 1;
-    child_result_data.output             = json{{"child", true}};
-    child_result_data.remaining_budget   = budget();
-    child_result_data.checkpoint         = checkpoint();
-    children.front().state               = ProgramChildState::Completed;
-    children.front().terminal_result     = ProgramResult::create(std::move(child_result_data));
-
-    const auto&          run = publishing.run_record;
-    ProgramRunRecordData data;
-    data.owner_scope         = run.owner_scope();
-    data.run_id              = run.run_id();
-    data.program_version_id  = run.program_version_id();
-    data.bundle_id           = run.bundle_id();
-    data.binding_fingerprint = run.binding_fingerprint();
-    data.invocation          = run.invocation();
-    data.continuation        = run.continuation();
-    data.remaining_budget    = run.remaining_budget();
-    data.children            = std::move(children);
-    data.journal_head        = run.journal_head();
-    data.event_sequence      = run.event_sequence();
-    data.effect_sequence     = run.effect_sequence();
-    data.created_at_ms       = run.created_at_ms();
-    data.updated_at_ms       = run.updated_at_ms();
-    const auto parsed =
-        ProgramRunRecord::parse(ProgramRunRecord::create(std::move(data)).serialize_canonical());
-    ASSERT_TRUE(parsed.children().front().terminal_result.has_value());
-    EXPECT_EQ(parsed.children().front().state, ProgramChildState::Completed);
-    EXPECT_EQ(parsed.children().front().terminal_result->status(),
-              ProgramTerminalStatus::Completed);
-    EXPECT_EQ(parsed.children().front().terminal_result->run_id(), child_id);
-}
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_SQLITE
 
 TEST(ProgramTransitionStoreTest, SQLiteRejectsReceiptlessSuccessorAcrossReopen) {
@@ -4543,7 +4499,7 @@ TEST(ProgramTransitionStoreTest, SQLiteEffectOutboxSurvivesResumePublication) {
     std::filesystem::remove(path);
 }
 
-TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
+TEST(ProgramTransitionStoreTest, SQLiteChildRelationSurvivesReopen) {
     static std::atomic<unsigned> sequence{0};
     const auto                   path =
         (std::filesystem::temp_directory_path() /
@@ -4551,24 +4507,26 @@ TEST(ProgramTransitionStoreTest, SQLiteChildMetadataPublicationSurvivesReopen) {
             .string();
     std::filesystem::remove(path);
 
-    const auto start = start_publication();
-    const auto child = child_metadata_publication(start);
+    const auto start = relation_parent_start();
     {
         OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start),
                   ProgramTransitionPublishResult::Published);
-        ASSERT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, child),
-                  ProgramTransitionPublishResult::Published);
-        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, child),
-                  ProgramTransitionPublishResult::AlreadyPresent);
+        EXPECT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-run-1")).status,
+                  ProgramChildRelationStatus::Applied);
+        EXPECT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-run-1")).status,
+                  ProgramChildRelationStatus::AlreadyPresent);
     }
     {
         OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         const auto                   run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run.has_value());
-        ASSERT_EQ(run->children().size(), 1U);
-        EXPECT_EQ(run->children().front().child_run_id, "child-run-1");
-        EXPECT_EQ(store.latest("owner-a", "run-1")->id, child.journal_record.id);
+        ASSERT_EQ(children_of(store, "owner-a", *run).size(), 1U);
+        EXPECT_EQ(children_of(store, "owner-a", *run).front().child_run_id, "child-run-1");
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+        const auto head = store.load_child_relation_head("owner-a", "run-1");
+        ASSERT_TRUE(head.has_value());
+        EXPECT_EQ(head->count(), 1U);
     }
     std::filesystem::remove(path);
 }
@@ -4582,7 +4540,7 @@ TEST(ProgramTransitionStoreTest, SQLiteStoresTransitionDeltasAndReopens) {
     std::filesystem::remove(path);
 
     const auto start = start_publication();
-    const auto child = child_metadata_publication(start);
+    const auto child = next_parent_publication(start);
     {
         OwnedTransitionStore<SQLiteProgramTransitionStore> store(path);
         ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start),
@@ -4930,20 +4888,19 @@ TEST(ProgramTransitionStoreTest, PostgreSQLReplacementEffectsHooksAndChildrenSur
 
     reset_postgres_transition_schema(url);
     {
-        const auto initial = start_publication();
-        const auto child = child_metadata_publication(initial);
+        const auto initial = relation_parent_start();
         OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         ASSERT_EQ(store.compare_publish("owner-a", {}, 1, initial),
                   ProgramTransitionPublishResult::Published);
-        ASSERT_EQ(store.compare_publish("owner-a", initial.journal_record.id, 1, child),
-                  ProgramTransitionPublishResult::Published);
+        ASSERT_EQ(store.insert_child_relation("owner-a", "run-1", 1, relation_child("child-run-1")).status,
+                  ProgramChildRelationStatus::Applied);
     }
     {
         OwnedTransitionStore<PostgreSQLProgramTransitionStore> store(url);
         const auto run = store.load("owner-a", "run-1");
         ASSERT_TRUE(run);
-        ASSERT_EQ(run->children().size(), 1U);
-        EXPECT_EQ(run->children().front().child_run_id, "child-run-1");
+        ASSERT_EQ(children_of(store, "owner-a", *run).size(), 1U);
+        EXPECT_EQ(children_of(store, "owner-a", *run).front().child_run_id, "child-run-1");
     }
 }
 #endif
@@ -5512,47 +5469,6 @@ TEST(ProgramTransitionStoreTest, UnimplementedDurableReadsFailClosed) {
 }
 
 namespace {
-// The parent's publication that records its child's result. `terminal_generation` is nonzero
-// only for a result that belongs to a replacement generation of the child.
-ProgramTransitionPublication child_result_publication(const ProgramTransitionPublication& previous,
-                                                      std::uint64_t terminal_generation,
-                                                      std::int64_t  time = 30) {
-    auto children = previous.run_record.children();
-    ProgramResultData child_result;
-    child_result.status             = ProgramTerminalStatus::Completed;
-    // A replacement generation's result is that run's, not the child's own.
-    child_result.run_id = terminal_generation ? "child-run-1-replacement"
-                                              : children.front().child_run_id;
-    child_result.program_version_id = digest('1');
-    child_result.bundle_id          = digest('2');
-    child_result.operation_id       = "root";
-    child_result.attempt            = 1;
-    child_result.output             = json{{"child", true}};
-    child_result.remaining_budget   = budget();
-    child_result.checkpoint         = checkpoint();
-    children.front().state               = ProgramChildState::Completed;
-    children.front().terminal_result     = ProgramResult::create(std::move(child_result));
-    children.front().terminal_generation = terminal_generation;
-
-    auto journal = ProgramJournalRecord::create({previous.journal_record.id,
-                                                 "run-1",
-                                                 digest('1'),
-                                                 digest('2'),
-                                                 previous.journal_record.sequence + 1,
-                                                 {"root", ContinuationState::Running, 1},
-                                                 budget(),
-                                                 {},
-                                                 std::nullopt,
-                                                 time});
-    auto data            = copy_run_record_data(previous.run_record);
-    data.children        = std::move(children);
-    data.continuation    = journal.continuation;
-    data.remaining_budget = journal.remaining_budget;
-    data.journal_head    = journal.id;
-    data.updated_at_ms   = time;
-    return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
-}
-
 // A run that finished with its provider-budget custody, the exact record a recorded replay
 // starts from. It has a lineage, which the replay debits.
 ProgramTransitionPublication published_finished_source(BlockingProgramTransitionStore& store) {
@@ -6018,47 +5934,6 @@ const std::vector<GoldenRow>& golden_rows() {
              return verdict_of_call(
                  [&] { return store.compare_publish("owner-a", {}, 1, fork_of(source, "run-2")); });
          }},
-        {"child metadata published once and retried", "AlreadyPresent",
-         [](auto& store) {
-             const auto start = published_start(store);
-             const auto child = published(store, child_metadata_publication(start), start.journal_record.id);
-             return verdict_of_call(
-                 [&] { return store.compare_publish("owner-a", start.journal_record.id, 1, child); });
-         }},
-        {"child metadata that changes after publication", "Conflict",
-         [](auto& store) {
-             const auto start = published_start(store);
-             const auto child = published(store, child_metadata_publication(start), start.journal_record.id);
-             return verdict_of_call([&] {
-                 return store.compare_publish(
-                     "owner-a", child.journal_record.id, 1,
-                     child_metadata_publication(child, ProgramChildState::Publishing, 21,
-                                                "different-child-trace"));
-             });
-         }},
-        {"child removed from the record", "Conflict",
-         [](auto& store) {
-             const auto start = published_start(store);
-             const auto child = published(store, child_metadata_publication(start), start.journal_record.id);
-             return verdict_of_call([&] {
-                 return store.compare_publish(
-                     "owner-a", child.journal_record.id, 1,
-                     terminal_publication(child, ProgramTerminalStatus::Completed,
-                                          ContinuationState::Completed, 30));
-             });
-         }},
-        {"child with an illegal state transition", "Conflict",
-         [](auto& store) {
-             const auto start      = published_start(store);
-             const auto dispatched = published(
-                 store, child_metadata_publication(start, ProgramChildState::Dispatched),
-                 start.journal_record.id);
-             return verdict_of_call([&] {
-                 return store.compare_publish(
-                     "owner-a", dispatched.journal_record.id, 1,
-                     child_metadata_publication(dispatched, ProgramChildState::Publishing, 30));
-             });
-         }},
         {"replacement at the exact checkpoint", "Published",
          [](auto& store) {
              const auto boundary = publish_replacement_boundary(store);
@@ -6150,28 +6025,6 @@ const std::vector<GoldenRow>& golden_rows() {
                  {}});
              return verdict_of_call(
                  [&] { return store.compare_publish("owner-a", fork.journal_record.id, 1, next); });
-         }},
-        {"child result without a replacement generation", "Published",
-         [](auto& store) {
-             const auto start = published_start(store);
-             const auto child = published(
-                 store, child_metadata_publication(start, ProgramChildState::Dispatched),
-                 start.journal_record.id);
-             return verdict_of_call([&] {
-                 return store.compare_publish("owner-a", child.journal_record.id, 1,
-                                              child_result_publication(child, 0));
-             });
-         }},
-        {"child result naming a generation that is not stored", "Conflict",
-         [](auto& store) {
-             const auto start = published_start(store);
-             const auto child = published(
-                 store, child_metadata_publication(start, ProgramChildState::Dispatched),
-                 start.journal_record.id);
-             return verdict_of_call([&] {
-                 return store.compare_publish("owner-a", child.journal_record.id, 1,
-                                              child_result_publication(child, 2));
-             });
          }},
         {"recorded replay taking the source's whole remainder", "Published",
          [](auto& store) {
@@ -6330,13 +6183,13 @@ TEST(ProgramTransitionStoreTest, ValidIncrementReadsCommandLogOnlyWhenNeeded) {
     };
 
     // A publication without commands and without a budget increase does not read the command log.
-    const auto child_pub = child_metadata_publication(start, ProgramChildState::Publishing, 20);
+    const auto child_pub = next_parent_publication(start, 20);
     EXPECT_TRUE(check_increment(start, child_pub));
     EXPECT_EQ(reads.command_log_reads, 0U);
     EXPECT_EQ(reads.latest_command_reads, 0U);
 
     const auto dispatched_pub =
-        child_metadata_publication(child_pub, ProgramChildState::Dispatched, 25);
+        next_parent_publication(child_pub, 25);
     EXPECT_TRUE(check_increment(child_pub, dispatched_pub));
     EXPECT_EQ(reads.command_log_reads, 0U);
     EXPECT_EQ(reads.latest_command_reads, 0U);
@@ -6718,7 +6571,7 @@ TEST(ProgramTransitionStoreTest, ValidCommandHistoryAppendAfterEquivalence) {
         run, std::nullopt, {javascript_command_entry(3, false, 2)}));
     EXPECT_FALSE(transition::valid_command_history_append_after(
         run, pending_log.front(), {javascript_command_entry(3, false, 2)}));
-    const auto ordinary_child_pub = child_metadata_publication(start);
+    const auto ordinary_child_pub = next_parent_publication(start);
     EXPECT_TRUE(transition::valid_command_reservation_transition(
         start.run_record, start.journal_record, ordinary_child_pub.journal_record, std::nullopt,
         ordinary_child_pub, nullptr, nullptr, nullptr));
@@ -6737,107 +6590,6 @@ TEST(ProgramTransitionStoreTest, ValidCommandHistoryAppendAfterEquivalence) {
                                             second_Completed_pub.journal_record.id, nullptr,
                                             nullptr, nullptr));
     EXPECT_EQ(reads.latest_command_reads, 1U);
-    EXPECT_EQ(reads.command_log_reads, 0U);
-}
-
-TEST(ProgramTransitionStoreTest, ChildIndexPreservesValidationAndRejectsDuplicateChildRunIds) {
-    namespace transition = neograph::program::detail::transition;
-
-    const auto start = start_publication();
-    const auto make_child = [](std::string id, ProgramChildState state) {
-        return ProgramChildRecord{
-            std::move(id), digest('7'), "link-receipt",
-            ProgramPersistedInvocation{{{"child", true}}, budget(), "child-trace", "run-1", 1},
-            state};
-    };
-
-    // ProgramRunRecord::create rejects duplicate child_run_id entries.
-    {
-        auto duplicate_data     = copy_run_record_data(start.run_record);
-        duplicate_data.children = {make_child("child-run-1", ProgramChildState::Publishing),
-                                   make_child("child-run-1", ProgramChildState::Dispatched)};
-        EXPECT_THROW((void)ProgramRunRecord::create(std::move(duplicate_data)),
-                     std::invalid_argument);
-    }
-
-    // Multiple children validate state transitions, removal rejection, and result binding via the index.
-    const auto with_children = [&](const ProgramTransitionPublication& previous,
-                                   std::vector<ProgramChildRecord>     children,
-                                   std::int64_t                        time) {
-        auto journal = ProgramJournalRecord::create({previous.journal_record.id,
-                                                     "run-1",
-                                                     digest('1'),
-                                                     digest('2'),
-                                                     previous.journal_record.sequence + 1,
-                                                     {"root", ContinuationState::Running, 1},
-                                                     budget(),
-                                                     {},
-                                                     std::nullopt,
-                                                     time});
-        auto data             = copy_run_record_data(previous.run_record);
-        data.children         = std::move(children);
-        data.continuation     = journal.continuation;
-        data.remaining_budget = journal.remaining_budget;
-        data.journal_head     = journal.id;
-        data.updated_at_ms    = time;
-        return ProgramTransitionPublication{
-            ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
-    };
-
-    CountingTransitionReads reads;
-    const auto check_increment = [&](const ProgramTransitionPublication& old_pub,
-                                     const ProgramTransitionPublication& next_pub) {
-        const transition::CurrentHead old_head{
-            old_pub.run_record, old_pub.journal_record, old_pub.migration_plan, {}};
-        return transition::valid_increment(reads, old_head, next_pub, old_pub.journal_record.id,
-                                           nullptr, nullptr, nullptr);
-    };
-
-    const auto pub_two = with_children(
-        start,
-        {make_child("child-run-1", ProgramChildState::Publishing),
-         make_child("child-run-2", ProgramChildState::Dispatched)},
-        20);
-    EXPECT_TRUE(check_increment(start, pub_two));
-    const transition::CurrentHead start_head{
-        start.run_record, start.journal_record, start.migration_plan, {}};
-    EXPECT_TRUE(transition::child_results_bind(reads, "owner-a", &start_head, pub_two));
-
-    // Removing a child is rejected.
-    const auto removed_second = with_children(
-        pub_two, {make_child("child-run-1", ProgramChildState::Dispatched)}, 30);
-    EXPECT_FALSE(check_increment(pub_two, removed_second));
-
-    // Illegal state transition (Dispatched -> Publishing) on the second child is rejected.
-    const auto illegal_second = with_children(
-        pub_two,
-        {make_child("child-run-1", ProgramChildState::Dispatched),
-         make_child("child-run-2", ProgramChildState::Publishing)},
-        30);
-    EXPECT_FALSE(check_increment(pub_two, illegal_second));
-
-    // Completing the second child while advancing the first to Dispatched is accepted.
-    auto completed_child_2 = make_child("child-run-2", ProgramChildState::Completed);
-    ProgramResultData child_2_result;
-    child_2_result.status             = ProgramTerminalStatus::Completed;
-    child_2_result.run_id             = "child-run-2";
-    child_2_result.program_version_id = digest('1');
-    child_2_result.bundle_id          = digest('2');
-    child_2_result.operation_id       = "root";
-    child_2_result.attempt            = 1;
-    child_2_result.output             = json{{"child", 2}};
-    child_2_result.remaining_budget   = budget();
-    child_2_result.checkpoint         = checkpoint();
-    completed_child_2.terminal_result = ProgramResult::create(std::move(child_2_result));
-
-    const auto progressed = with_children(
-        pub_two,
-        {make_child("child-run-1", ProgramChildState::Dispatched), std::move(completed_child_2)},
-        30);
-    EXPECT_TRUE(check_increment(pub_two, progressed));
-    const transition::CurrentHead pub_two_head{
-        pub_two.run_record, pub_two.journal_record, pub_two.migration_plan, {}};
-    EXPECT_TRUE(transition::child_results_bind(reads, "owner-a", &pub_two_head, progressed));
     EXPECT_EQ(reads.command_log_reads, 0U);
 }
 

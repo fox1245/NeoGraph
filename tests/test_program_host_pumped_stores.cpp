@@ -50,12 +50,14 @@
 #include <vector>
 
 #include "fixtures/store_handle.h"
+#include "fixtures/relation_children.h"
 
 namespace {
 
 using namespace neograph;
 using namespace neograph::program;
 using namespace neograph::program::test_support;
+using neograph::program::test::children_of;
 using namespace neograph::program_test;
 using neograph::host_test::HostedRuntime;
 using namespace std::chrono_literals;
@@ -744,8 +746,8 @@ TEST(ProgramHostPumpedStores, AChildIsStartedAndItsCompletionPublishedOverHostPu
     // The parent's record holds both children as completed: their completions were published into it.
     const auto record = host.fixture.journal->load(kOwner, "parent-1");
     ASSERT_TRUE(record);
-    ASSERT_EQ(record->children().size(), 2U);
-    for (const auto& child_record : record->children()) EXPECT_EQ(child_record.state, ProgramChildState::Completed);
+    ASSERT_EQ(children_of(host.fixture.journal, kOwner, *record).size(), 2U);
+    for (const auto& child_record : children_of(host.fixture.journal, kOwner, *record)) EXPECT_EQ(child_record.state, ProgramChildState::Completed);
     EXPECT_COMPLETED_ON_THE_HOST_THREAD(host);
     EXPECT_NO_THREAD_STARTED(census);
 }

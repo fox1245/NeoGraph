@@ -1108,8 +1108,8 @@ struct Tenant {
                  {"state", run->terminal_result()
                                ? std::string(to_string(run->terminal_result()->status()))
                                : "running"}});
-            for (const auto& child : run->children())
-                visit(child.child_run_id);
+            for (const auto& row : store->transitions_view->load_child_relations(owner, run->logical_run_id()))
+                visit(row.child().child_run_id);
         };
         visit(owner + ":main");
         return result;

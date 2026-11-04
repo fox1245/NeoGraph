@@ -89,24 +89,6 @@ inline bool valid_child_state_transition(ProgramChildState previous, ProgramChil
     return false;
 }
 
-inline bool valid_children_transition(const ProgramRunRecord& previous,
-                                      const ProgramRunRecord& next) {
-    const auto& previous_children = previous.children();
-    const auto& next_children     = next.children();
-    std::unordered_map<std::string_view, const ProgramChildRecord*> next_by_id;
-    next_by_id.reserve(next_children.size());
-    for (const auto& child : next_children) {
-        next_by_id.emplace(child.child_run_id, &child);
-    }
-    for (const auto& child : previous_children) {
-        const auto found = next_by_id.find(child.child_run_id);
-        if (found == next_by_id.end() || !same_child_metadata(child, *found->second) ||
-            !valid_child_state_transition(child.state, found->second->state))
-            return false;
-    }
-    return true;
-}
-
 inline bool same_fork(const ProgramRunRecord& old_run, const ProgramRunRecord& new_run) {
     const auto old_receipt = old_run.fork_receipt();
     const auto new_receipt = new_run.fork_receipt();
@@ -864,6 +846,8 @@ inline RelationPlan plan_relation_insert(TransitionReads&          reads,
                                          std::uint64_t             expected_parent_fence,
                                          const ProgramChildRecord& child,
                                          bool                      advance_publishing) {
+    // Lock order, the same for every writer that touches both: the parent's head, then the relation head, then the row.
+    const auto parent      = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
     const auto stored_head = reads.relation_head(parent_run_id, TransitionReads::Lock::Update);
     const auto existing = reads.relation_row(parent_run_id, child.child_run_id, TransitionReads::Lock::Update);
     const auto refuse = [&](ProgramChildRelationRefusal refusal) {
@@ -872,7 +856,6 @@ inline RelationPlan plan_relation_insert(TransitionReads&          reads,
     if ((child.state != ProgramChildState::Publishing && child.state != ProgramChildState::Dispatched) ||
         child.terminal_result || child.terminal_generation != 0)
         return refuse(ProgramChildRelationRefusal::Invalid);
-    const auto parent = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
     if (!parent) return refuse(ProgramChildRelationRefusal::ParentAbsent);
     const auto& parent_run = parent->run_record;
     if (parent_run.continuation().fence != expected_parent_fence)
@@ -935,13 +918,13 @@ inline RelationPlan plan_relation_update(TransitionReads&          reads,
                                          std::optional<std::uint64_t> expected_row_version,
                                          const ProgramChildRecord& next,
                                          const ProgramRunRecord*   pending_child_run) {
+    const auto parent      = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
     const auto stored_head = reads.relation_head(parent_run_id, TransitionReads::Lock::Update);
     const auto existing = reads.relation_row(parent_run_id, next.child_run_id, TransitionReads::Lock::Update);
     const auto refuse = [&](ProgramChildRelationRefusal refusal) {
         return relation_refused(refusal, existing, stored_head);
     };
     if (!existing || !stored_head) return refuse(ProgramChildRelationRefusal::RowMissing);
-    const auto parent = active_parent_head(reads, owner_scope, parent_run_id, TransitionReads::Lock::Update);
     if (!parent) return refuse(ProgramChildRelationRefusal::ParentAbsent);
     if (parent->run_record.continuation().fence != expected_parent_fence)
         return refuse(ProgramChildRelationRefusal::FenceMismatch);
@@ -991,6 +974,22 @@ inline std::optional<ProgramChildRelationHead> plan_relation_close(TransitionRea
     data.closed    = true;
     data.closed_by = std::string(journal_id);
     return ProgramChildRelationHead::create(std::move(data));
+}
+
+/** Whether the parent has no rows: no head, or none counted. */
+inline bool relation_set_is_empty(TransitionReads& reads, std::string_view logical_run_id) {
+    const auto head = reads.relation_head(logical_run_id, TransitionReads::Lock::Update);
+    return !head || head->count() == 0;
+}
+
+/** Every field of the permanent ledger of `smaller` is at most the one of `larger`. */
+inline bool permanent_budget_at_most(const RunBudget& smaller, const RunBudget& larger) noexcept {
+    return smaller.wall_time_ms <= larger.wall_time_ms && smaller.model_tokens <= larger.model_tokens &&
+           smaller.monetary_microunits <= larger.monetary_microunits &&
+           smaller.max_program_operations <= larger.max_program_operations &&
+           smaller.max_core_steps <= larger.max_core_steps &&
+           smaller.max_dynamic_compiles <= larger.max_dynamic_compiles &&
+           smaller.max_total_children <= larger.max_total_children;
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,7 +1090,6 @@ inline std::optional<TakeoverPublication> prepare_takeover(
             current_run.pending_effect(),
             current_run.terminal_result(),
             current_run.fork_receipt(),
-            current_run.children(),
             next_journal.id,
             current_run.fork_source_run_id(),
             current_run.fork_source_program_version_id(),
@@ -1226,7 +1224,6 @@ inline bool valid_increment(TransitionReads&                     reads,
         next_run.logical_run_id() != old_run.logical_run_id() ||
         (next_run.exact_checkpoint() == old_run.exact_checkpoint() &&
          next_run.exact_checkpoint_content_id() != old_run.exact_checkpoint_content_id()) ||
-        !valid_children_transition(old_run, next_run) ||
         next_run.event_sequence() != old_run.event_sequence() + next_publication.events.size() ||
         next_run.effect_sequence() != old_run.effect_sequence() + next_publication.effects.size())
         return false;
@@ -1236,6 +1233,7 @@ inline bool valid_increment(TransitionReads&                     reads,
     if (!next_publication.effects.empty() &&
         next_publication.effects.front().sequence() != old_run.effect_sequence() + 1)
         return false;
+    if (safe_point_evidence && !relation_set_is_empty(reads, old_run.logical_run_id())) return false;
     if (!effect_ids_are_new(reads, old_run.run_id(), next_publication.effects)) return false;
     // Read the last command only when the publication appends commands or raises the remaining
     // budget: valid_command_history_append_after returns at once when commands is empty, and
@@ -1258,44 +1256,42 @@ inline bool valid_increment(TransitionReads&                     reads,
     return true;
 }
 
-/** A child's terminal result is bound to the child's own durable generation. */
-inline bool child_results_bind(TransitionReads&                    reads,
-                               std::string_view                    owner_scope,
-                               const CurrentHead*                  current,
-                               const ProgramTransitionPublication& publication) {
-    // Every old record per id: a result is unchanged when any of them matches it, as a full scan would find.
-    std::unordered_multimap<std::string_view, const ProgramChildRecord*> old_by_id;
-    if (current) {
-        const auto& old_children = current->run_record.children();
-        old_by_id.reserve(old_children.size());
-        for (const auto& old : old_children) {
-            old_by_id.emplace(old.child_run_id, &old);
-        }
-    }
-    for (const auto& child : publication.run_record.children()) {
-        if (!child.terminal_generation ||
-            (publication.run_generation && publication.run_generation->replacement_receipt()))
-            continue;
-        bool unchanged = false;
-        for (auto [it, end] = old_by_id.equal_range(child.child_run_id); it != end; ++it) {
-            const auto& old = *it->second;
-            if (old.terminal_generation == child.terminal_generation && old.terminal_result &&
-                child.terminal_result && old.terminal_result->id() == child.terminal_result->id())
-                unchanged = true;
-        }
-        if (unchanged) continue;
-        const auto lineage_id = program_run_lineage_id(owner_scope, child.child_run_id);
-        const auto lineage    = reads.lineage_head(lineage_id, TransitionReads::Lock::None);
-        const auto generation = reads.generation(lineage_id, child.terminal_generation);
-        const auto run        = generation ? reads.run_record(generation->run_id(),
-                                                              TransitionReads::Lock::None)
-                                           : std::nullopt;
-        if (!lineage || !generation || !run ||
-            !does_program_child_generation_result_bind(publication.run_record, child, *generation,
-                                                       *lineage, *run))
-            return false;
-    }
-    return true;
+/**
+ * The permanent budget a lineage head claims for the descendants of its run is a carried copy of the relation head's
+ * aggregate, which is the authority. An ordinary publication carries the value it read earlier, so it may lag the
+ * aggregate, never lead it. A publication that decided from the relation set (it names the epoch it read) or that
+ * starts a generation states the aggregate exactly. The value never decreases (the lineage transition rule).
+ */
+inline bool lineage_ledger_binds(TransitionReads& reads, const ProgramTransitionPublication& publication) {
+    if (!publication.run_lineage) return true;
+    const auto head = reads.relation_head(publication.run_record.logical_run_id(), TransitionReads::Lock::Update);
+    const RunBudget aggregate = head ? head->committed_budget() : RunBudget{};
+    const auto&     claimed   = publication.run_lineage->committed_descendant_budget();
+    const bool exact = publication.run_generation.has_value() ||
+                       (publication.child_relations && publication.child_relations->expected_epoch);
+    if (exact) return claimed == aggregate;
+    return permanent_budget_at_most(claimed, aggregate);
+}
+
+/**
+ * A publication that spends the parent's budget leaves enough for the children already granted. A relation insert
+ * does not change the parent's journal head, so the head compare-and-swap alone cannot see an insert that landed
+ * after the spend was validated: the spend reads the relation head here, inside its own transaction and after the
+ * parent's head is locked (the order every relation writer follows), and the sum of what the run keeps and what its
+ * children hold has to stay within what the run could give before.
+ */
+inline bool spend_keeps_children_funded(TransitionReads&                    reads,
+                                        const CurrentHead*                  current,
+                                        const ProgramTransitionPublication& publication) {
+    if (!current) return true;
+    const auto before = restore_reservation(current->journal_record.remaining_budget,
+                                            current->journal_record.inflight_reservation);
+    const auto after  = restore_reservation(publication.journal_record.remaining_budget,
+                                            publication.journal_record.inflight_reservation);
+    if (!after) return false;
+    if (before && permanent_budget_at_most(*before, *after)) return true;  // nothing was spent
+    const auto head = reads.relation_head(publication.run_record.logical_run_id(), TransitionReads::Lock::Update);
+    return !head || permanent_budget_at_most(head->committed_budget(), *after);
 }
 
 /** The run's lineage and generation: the head moves only to an admitted successor. */
@@ -1376,6 +1372,10 @@ inline bool lineage_binds(TransitionReads&                    reads,
                                   publication.run_record);
         }
         if (!valid_successor) return false;
+        // Rows belong to a logical run: a migration, and a replacement that starts another logical run, carry none.
+        if ((graph_migration || publication.run_record.logical_run_id() != source->logical_run_id()) &&
+            !relation_set_is_empty(reads, source->logical_run_id()))
+            return false;
     }
     if (publication.run_generation && current_lineage &&
         reads.generation(publication.run_lineage->lineage_id(),
@@ -1549,9 +1549,6 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
         return TransitionVerdict::Conflict;
     }
 
-    if (!child_results_bind(reads, request.owner_scope, current, publication))
-        return TransitionVerdict::Conflict;
-
     const auto context_history = reads.context_history(run_id);
     if (!reads.context_history_is_intact(context_history.get()) ||
         !is_valid_program_context_history_append(context_history.get(),
@@ -1571,6 +1568,8 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
     if (!lineage_binds(reads, current, publication, request.next_lease, plan) ||
         !fork_source_binds(reads, current, publication) ||
         !replay_source_binds(reads, current, publication) ||
+        !lineage_ledger_binds(reads, publication) ||
+        !spend_keeps_children_funded(reads, current, publication) ||
         !relation_parts_bind(reads, request.owner_scope, current != nullptr, publication, plan))
         return TransitionVerdict::Conflict;
     return TransitionVerdict::Proceed;

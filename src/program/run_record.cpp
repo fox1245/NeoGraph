@@ -407,8 +407,11 @@ void validate(const ProgramRunRecordData& d) {
         throw std::invalid_argument(
             "Program settled branches belong to a paused or resumed run's exact checkpoint");
     }
+}
+// The children a stored record of an earlier version carries: what the record itself used to check of them.
+void validate_legacy_children(const ProgramRunRecordData& d, const std::vector<ProgramChildRecord>& children) {
     std::set<std::string, std::less<>> child_ids;
-    for (const auto& child : d.children) {
+    for (const auto& child : children) {
         detail::validate_token(child.child_run_id, "Program child run_id");
         if (child.child_run_id == d.run_id || !child_ids.insert(child.child_run_id).second)
             throw std::invalid_argument("Program run child identities must be unique");
@@ -421,7 +424,8 @@ void validate(const ProgramRunRecordData& d) {
         validate_child_shape(child);
     }
 }
-BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version) {
+BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version,
+        const std::vector<ProgramChildRecord>& legacy_children) {
     auto* continuation = j.object({{"operation_id", j.make(d.continuation.operation_id)},
                                    {"state", j.make(std::string(to_string(d.continuation.state)))},
                                    {"attempt", j.make(d.continuation.attempt)}});
@@ -471,16 +475,17 @@ BV body(Builder& j, const ProgramRunRecordData& d, std::uint32_t schema_version)
                         {"value", j.make(d.attempt_resume->value)}}));
     }
     if (d.settled_branches) j.set(value, "settled_branches", j.make(*d.settled_branches));
-    if (!d.children.empty()) {
+    if (!legacy_children.empty()) {
         auto* children = j.array();
-        for (const auto& child : d.children) j.push(children, child_body(j, child));
+        for (const auto& child : legacy_children) j.push(children, child_body(j, child));
         j.set(value, "children", children);
     }
     return value;
 }
-json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version) {
+json stored_body(const ProgramRunRecordData& d, std::uint32_t schema_version,
+                 const std::vector<ProgramChildRecord>& legacy_children) {
     Builder j;
-    auto*   value = body(j, d, schema_version);
+    auto*   value = body(j, d, schema_version, legacy_children);
     j.set(value, "recorded_binding_set_fingerprint",
           d.recorded_binding_set_fingerprint ? j.make(*d.recorded_binding_set_fingerprint)
                                              : j.null());
@@ -508,9 +513,9 @@ ProgramChildState program_child_state_from_string(std::string_view value) {
     return child_state_from_string(value);
 }
 struct ProgramRunRecord::Impl {
-    explicit Impl(ProgramRunRecordData value, std::uint32_t version)
-        : data(std::move(value)), schema_version(version) {
-        auto body_bytes = detail::canonical_json_bytes(stored_body(data, schema_version));
+    Impl(ProgramRunRecordData value, std::uint32_t version, std::vector<ProgramChildRecord> legacy)
+        : data(std::move(value)), schema_version(version), legacy_children(std::move(legacy)) {
+        auto body_bytes = detail::canonical_json_bytes(stored_body(data, schema_version, legacy_children));
         id = detail::sha256_identity("program-run-record/v1", body_bytes);
         const auto format_position =
             body_bytes.find("\"format\":\"neograph-program-run-record\"");
@@ -524,10 +529,11 @@ struct ProgramRunRecord::Impl {
         canonical_bytes = std::move(body_bytes);
     }
 
-    ProgramRunRecordData data;
-    std::uint32_t        schema_version;
-    std::string          id;
-    std::string          canonical_bytes;
+    ProgramRunRecordData            data;
+    std::uint32_t                   schema_version;
+    std::vector<ProgramChildRecord> legacy_children;
+    std::string                     id;
+    std::string                     canonical_bytes;
 };
 ProgramRunRecord::ProgramRunRecord(std::shared_ptr<const Impl> p) : impl_(std::move(p)) {}
 
@@ -570,12 +576,10 @@ ProgramRunRecord ProgramRunRecord::create(ProgramRunRecordData d) {
         d.continuation.fence != 1 ? STORAGE_SCHEMA_VERSION
         : d.settled_branches      ? kSchemaSettledBranches
         : d.attempt_resume        ? kSchemaAttemptResume
-        : !d.logical_run_id.empty() ||
-                std::any_of(d.children.begin(), d.children.end(),
-                            [](const auto& child) { return child.terminal_generation != 0; })
-            ? kSchemaLogicalRun
-            : kSchemaBase;
-    return ProgramRunRecord(std::make_shared<const Impl>(std::move(d), schema));
+        : !d.logical_run_id.empty() ? kSchemaLogicalRun
+                                    : kSchemaBase;
+    return ProgramRunRecord(std::make_shared<const Impl>(std::move(d), schema,
+                                                         std::vector<ProgramChildRecord>{}));
 }
 ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     json v;
@@ -696,15 +700,16 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.fork_source_program_version_id   = os(rv(v, "fork_source_program_version_id"));
     d.fork_source_checkpoint_id        = os(rv(v, "fork_source_checkpoint_id"));
     d.recorded_binding_set_fingerprint = os(rv(v, "recorded_binding_set_fingerprint"));
+    std::vector<ProgramChildRecord> legacy_children;
     if (v.contains("children")) {
         const auto& children = rv(v, "children");
         if (!children.is_array())
             throw std::invalid_argument("Program run children must be an array");
-        d.children.reserve(children.size());
-        for (const auto& child : children) d.children.push_back(parse_child(child));
+        legacy_children.reserve(children.size());
+        for (const auto& child : children) legacy_children.push_back(parse_child(child));
         if (schema_version < 4 &&
             std::any_of(
-                d.children.begin(), d.children.end(),
+                legacy_children.begin(), legacy_children.end(),
                 [](const auto& child) { return child.terminal_generation != 0; }))
             throw std::invalid_argument("Legacy child result cannot carry generation proof");
     }
@@ -714,6 +719,7 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
     d.created_at_ms                    = ri(v, "created_at_ms");
     d.updated_at_ms                    = ri(v, "updated_at_ms");
     validate(d);
+    validate_legacy_children(d, legacy_children);
     validate_continuation_state(d);
     validate_result_state(d);
     if (d.recorded_binding_set_fingerprint &&
@@ -721,7 +727,7 @@ ProgramRunRecord ProgramRunRecord::parse(std::string_view bytes) {
         throw std::invalid_argument("Recorded binding set fingerprint must be a sha256 identity");
     }
     auto out = ProgramRunRecord(
-        std::make_shared<const Impl>(std::move(d), schema_version));
+        std::make_shared<const Impl>(std::move(d), schema_version, std::move(legacy_children)));
     if (out.id() != rs(v, "id")) {
         throw std::invalid_argument("Stored ProgramRunRecord id does not match canonical body");
     }
@@ -793,14 +799,18 @@ std::uint64_t ProgramRunRecord::event_sequence() const noexcept {
 std::uint64_t ProgramRunRecord::effect_sequence() const noexcept {
     return impl_->data.effect_sequence;
 }
-bool ProgramRunRecord::has_children() const noexcept {
-    return !impl_->data.children.empty();
+const std::vector<ProgramChildRecord>& ProgramRunRecord::legacy_children_for_migration() const noexcept {
+    return impl_->legacy_children;
 }
-const std::vector<ProgramChildRecord>& ProgramRunRecord::children() const& {
-    return impl_->data.children;
+const std::vector<ProgramChildRecord>& ProgramRunRecord::snapshot_children() const noexcept {
+    static const std::vector<ProgramChildRecord> none;
+    return snapshot_children_ ? *snapshot_children_ : none;
 }
-std::vector<ProgramChildRecord> ProgramRunRecord::children() const&& {
-    return impl_->data.children;
+ProgramRunRecord ProgramRunRecord::with_snapshot_children(std::vector<ProgramChildRecord> children) const {
+    auto record = *this;
+    record.snapshot_children_ =
+        std::make_shared<const std::vector<ProgramChildRecord>>(std::move(children));
+    return record;
 }
 std::int64_t ProgramRunRecord::created_at_ms() const noexcept {
     return impl_->data.created_at_ms;

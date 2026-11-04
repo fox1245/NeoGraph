@@ -78,6 +78,7 @@ extern char** environ;
 #include "fixtures/store_handle.h"
 #include "transition_validator.h"
 #include "fixtures/relation_forwarding.h"
+#include "fixtures/relation_children.h"
 
 using neograph::program::test_support::FragmentStoreHandle;
 using neograph::program::test_support::GrantStoreHandle;
@@ -107,6 +108,7 @@ using neograph::ToolExecutionController;
 using namespace neograph::graph;
 using namespace neograph::program;
 using namespace neograph::program_test;
+using neograph::program::test::children_of;
 
 std::atomic<unsigned>               completed_calls{0};
 std::atomic<unsigned>               mediated_tool_calls{0};
@@ -2095,7 +2097,28 @@ neograph::HookOutboxEntry recovery_hook(std::string run_id) {
 
 class BlockAfterJavaScriptResultJournal final : public SyncProgramTransitionStore {
 public:
-    NG_FORWARD_RELATION_BLOCKING(*inner_)
+    NG_FORWARD_RELATION_BLOCKING_READS(*inner_)
+    /// Runs after an insert or update of a relation row was applied, with the row's child record.
+    std::function<void(const ProgramChildRecord&)> after_relation_write;
+    /// Runs before an insert (`inserting`) or update of a relation row of the parent `parent_run_id`.
+    std::function<void(std::string_view parent_run_id, const ProgramChildRecord&, bool inserting)> before_relation_write;
+    ProgramChildRelationOutcome insert_child_relation_sync(
+        std::string_view o, std::string_view p, std::uint64_t fence, ProgramChildRecord child) override {
+        if (before_relation_write) before_relation_write(p, child, true);
+        auto outcome = inner_->insert_child_relation(o, p, fence, std::move(child));
+        if (after_relation_write && outcome.status == ProgramChildRelationStatus::Applied && outcome.relation)
+            after_relation_write(outcome.relation->child());
+        return outcome;
+    }
+    ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view o, std::string_view p, std::uint64_t fence, std::optional<std::uint64_t> version,
+        ProgramChildRecord next) override {
+        if (before_relation_write) before_relation_write(p, next, false);
+        auto outcome = inner_->update_child_relation(o, p, fence, version, std::move(next));
+        if (after_relation_write && outcome.status == ProgramChildRelationStatus::Applied && outcome.relation)
+            after_relation_write(outcome.relation->child());
+        return outcome;
+    }
     explicit BlockAfterJavaScriptResultJournal(std::shared_ptr<ProgramTransitionStore> inner = {})
         : inner_(std::make_shared<BlockingProgramTransitionStore>(
               inner ? std::move(inner) : std::make_shared<InMemoryProgramTransitionStore>())) {}
@@ -2385,7 +2408,7 @@ private:
 
 class FailChildDispatchOnceJournal final : public SyncProgramTransitionStore {
 public:
-    NG_FORWARD_RELATION_SYNC(inner_)
+    NG_FORWARD_RELATION_SYNC_EXCEPT_UPDATE(inner_)
     std::optional<ProgramRunRecord> load_sync(std::string_view owner,
                                          std::string_view run_id) const override {
         return inner_.load_sync(owner, run_id);
@@ -2444,15 +2467,19 @@ public:
         std::string_view             expected,
         std::uint64_t                expected_fence,
         ProgramTransitionPublication publication) override {
-        const auto children = publication.run_record.children();
-        if (children.empty() || children.back().state != ProgramChildState::Dispatched ||
-            !block_dispatch_.load()) {
-            return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
+        return inner_.compare_publish_sync(owner, expected, expected_fence, std::move(publication));
+    }
+    // The parent's Publishing -> Dispatched step is a relation update: it fails once while dispatch is blocked.
+    ProgramChildRelationOutcome update_child_relation_sync(
+        std::string_view owner, std::string_view parent_run_id, std::uint64_t fence,
+        std::optional<std::uint64_t> version, ProgramChildRecord next) override {
+        if (next.state == ProgramChildState::Dispatched && block_dispatch_.load()) {
+            injected_.store(true);
+            return ProgramChildRelationOutcome{ProgramChildRelationStatus::Refused,
+                                               ProgramChildRelationRefusal::RowConflict, std::nullopt,
+                                               std::nullopt};
         }
-        if (!injected_.exchange(true)) {
-            return ProgramTransitionPublishResult::Conflict;
-        }
-        return ProgramTransitionPublishResult::Conflict;
+        return inner_.update_child_relation_sync(owner, parent_run_id, fence, version, std::move(next));
     }
     ProgramTransitionPublishResult compare_publish_takeover_sync(
         std::string_view owner,
@@ -8352,7 +8379,7 @@ TEST(ProgramRuntimeTest, JavaScriptRaceCancelsLoserChildrenWithoutOrphans) {
     EXPECT_EQ(result.output(), (json{{"winner", true}}));
     // The losing member may be cancelled before it spawns its child (#367,
     // #368); a child it did spawn is cancelled, not left running.
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     EXPECT_LE(children.size(), 1U);
     for (const auto& child : children) EXPECT_EQ(child.state, ProgramChildState::Cancelled);
 }
@@ -8436,8 +8463,8 @@ const char* const kAwaitAfterCoreCall = R"JS(
 ProgramChildRecord only_child_of(AdmittedRuntime& fixture, const std::string& parent_run_id) {
     const auto stored = fixture.journal->load("tenant:runtime", parent_run_id);
     EXPECT_TRUE(stored.has_value());
-    EXPECT_EQ(stored->children().size(), 1U);
-    return stored->children().front();
+    EXPECT_EQ(children_of(fixture.journal, "tenant:runtime", *stored).size(), 1U);
+    return children_of(fixture.journal, "tenant:runtime", *stored).front();
 }
 
 // Records the run ids of attempts whose coroutine has ended, through the runtime's test seam, so a test waits for an
@@ -9107,7 +9134,9 @@ private:
                 return kind;
             }
         }
-        if (record.continuation().state != ContinuationState::Running || record.children().empty()) return kind;
+        if (record.continuation().state != ContinuationState::Running) return kind;
+        const auto relation_head = inner_->load_child_relation_head_sync(owner, record.logical_run_id());
+        if (!relation_head || relation_head->count() == 0) return kind;
         const auto stored = inner_->load_sync(owner, record.run_id());
         if (!stored || stored->continuation().state != ContinuationState::Interrupted) return kind;
         kind.continuation = true;
@@ -9621,8 +9650,8 @@ public:
             const auto stored = inner_.load_sync(owner, published_run_id);
             std::lock_guard lock(mutex_);
             if (is_parent_interrupt) parent_interrupted_published_ = true;
-            if (stored && !stored->children().empty() &&
-                stored->children().front().terminal_result.has_value()) {
+            if (stored && !children_of(inner_, owner, *stored).empty() &&
+                children_of(inner_, owner, *stored).front().terminal_result.has_value()) {
                 child_recorded_ = true;
             }
             cv_.notify_all();
@@ -9765,8 +9794,8 @@ TEST(ProgramRuntimeTest, JavaScriptJoinOfTwoAwaitedChildrenContinuesOnlyAfterBot
 
     const auto stored_parent = fixture.journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
-    ASSERT_EQ(stored_parent->children().size(), 2U);
-    const auto& children     = stored_parent->children();
+    ASSERT_EQ(children_of(fixture.journal, "tenant:runtime", *stored_parent).size(), 2U);
+    const auto& children     = children_of(fixture.journal, "tenant:runtime", *stored_parent);
     const auto  first_child  = children[0].invocation.trace_id.find("member/0") != std::string::npos
                                    ? children[0]
                                    : children[1];
@@ -10267,7 +10296,7 @@ TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompleted
                            " attempt=" + std::to_string(stored->continuation().attempt) +
                            " attempt_ended=" +
                            (finished.has_finished(parent_id, stored->continuation().attempt) ? "true" : "false") + ")";
-                    for (const auto& child : stored->children()) {
+                    for (const auto& child : children_of(fixture.journal, "tenant:runtime", *stored)) {
                         const auto child_stored = fixture.journal->load("tenant:runtime", child.child_run_id);
                         out += " child[" + child.link_id + "]=" + child.child_run_id + "(relation=" +
                                std::string(to_string(child.state));
@@ -10343,7 +10372,7 @@ TEST(ProgramRuntimeTest, JavaScriptRejoiningPausedChildDoesNotRecoverUncompleted
         << "watchdog timed out (600 s) in step 'second_child_started_future.wait_for'; " << describe_unfinished();
     const auto stored_parent = fixture.journal->load("tenant:runtime", parent_id);
     ASSERT_TRUE(stored_parent.has_value());
-    ASSERT_EQ(stored_parent->children().size(), 2U);
+    ASSERT_EQ(children_of(fixture.journal, "tenant:runtime", *stored_parent).size(), 2U);
 
     // Freeze the store while child_b is still Running so runtime teardown does not overwrite the Running records,
     // then recover on a runtime with recover_existing_child_commands == false (the default of make_runtime_with_transitions).
@@ -16837,7 +16866,7 @@ ExpansionBudgetRun run_budgeted_expansion(AdmittedRuntime& fixture, json proposa
     std::map<std::string, RunBudget> granted;
     for (const auto& task : record->tasks) {
         if (!task.child_run_id) continue;
-        for (const auto& child : parent.snapshot().children()) {
+        for (const auto& child : parent.snapshot().snapshot_children()) {
             if (child.child_run_id == *task.child_run_id)
                 granted[task.task_id] = child.invocation.granted_budget;
         }
@@ -16924,7 +16953,7 @@ TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoRefusesUnsetDimensionsBeforeAny
     for (std::size_t index = 0; index < diagnostics.size(); ++index)
         EXPECT_EQ(diagnostics[index]["code"], "P_PROPOSAL_BUDGET_ZERO");
     EXPECT_EQ(completed_calls.load(), 0U);
-    EXPECT_TRUE(parent.snapshot().children().empty());
+    EXPECT_TRUE(parent.snapshot().snapshot_children().empty());
 }
 
 TEST(ProgramRuntimeTest, ExpandTaskGraphSchemaTwoZeroGrantsNothingWhereTheTemplateCannotSpend) {
@@ -17112,7 +17141,7 @@ TEST(ProgramRuntimeTest, TypedChildStoreDoesNotRequireJavaScriptHistory) {
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
     const auto head = journal->load_run_publication_head_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(head);
-    const auto children = head->run_record.children();
+    const auto children = children_of(journal, "tenant:runtime", head->run_record);
     ASSERT_EQ(children.size(), 1U);
     ASSERT_TRUE(children.front().terminal_result);
     EXPECT_EQ(children.front().terminal_result->id(), result.id());
@@ -17124,7 +17153,9 @@ TEST(ProgramRuntimeTest, TypedChildStoreDoesNotRequireJavaScriptHistory) {
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
 
-TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedispatch) {
+// A sibling's completion and a new child's insert are separate relation writes: neither compares the other's row, so
+// the new child commits after the sibling finished without a retry and without a second dispatch.
+TEST(ProgramRuntimeTest, TypedChildInsertNeedsNoRetryAfterASiblingCompleted) {
     completed_calls.store(0);
     auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
     journal->javascript_reads_unavailable = true;
@@ -17141,236 +17172,27 @@ TEST(ProgramRuntimeTest, TypedChildFallbackRetriesSiblingPublicationWithoutRedis
     document["declared_budget_requirements"][8]["maximum"] = 2;
     const auto linked = link_child_versions(
         fixture, fixture.admit_document(std::move(document)), fixture.admit("runtime-completed"));
-    const std::string parent_id = "typed-fallback-parent";
-    auto armed = std::make_shared<std::atomic<bool>>(false);
-    auto sibling_completion = std::make_shared<std::optional<ProgramResult>>();
-    auto allow_completion = std::make_shared<std::atomic<bool>>(false);
-    journal->before_publication =
-        [parent_id, allow_completion](const ProgramTransitionPublication& value) {
-            if (value.run_record.run_id() != parent_id || allow_completion->load()) return;
-            for (const auto& child : value.run_record.children())
-                if (child.terminal_result)
-                    throw std::runtime_error("defer sibling completion until acquisition");
-        };
     const RunBudget child_budget{3333, 333, 333, 1, 1, 6, 0, 0, 0};
-    auto advances = std::make_shared<std::atomic<unsigned>>(0);
-    const auto weak_journal = std::weak_ptr<BlockAfterJavaScriptResultJournal>(journal);
-    // Simulate another publisher committing the real sibling result after the
-    // fallback has captured its first parent record, before it reads the journal.
-    journal->filter_run_read =
-        [parent_id, sibling_completion, allow_completion, armed, advances, weak_journal](
-            std::string_view id, std::optional<ProgramRunRecord> record) {
-            if (id != parent_id || !record || !armed->load() || advances->exchange(1) != 0)
-                return record;
-            const auto store = weak_journal.lock();
-            const auto previous_journal = store->latest_sync("tenant:runtime", parent_id);
-            const auto lineage = store->load_run_lineage_sync("tenant:runtime", parent_id);
-            if (!previous_journal || !lineage)
-                throw std::runtime_error("Sibling publication has no durable parent head");
-            auto next_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
-                record->journal_head(), parent_id, record->program_version_id(), record->bundle_id(),
-                previous_journal->sequence + 1, record->continuation(), record->remaining_budget(),
-                previous_journal->inflight_reservation, record->exact_checkpoint(),
-                record->updated_at_ms()});
-            ProgramRunRecordData data;
-            data.owner_scope = record->owner_scope();
-            data.run_id = record->run_id();
-            data.logical_run_id = record->logical_run_id();
-            data.program_version_id = record->program_version_id();
-            data.bundle_id = record->bundle_id();
-            data.binding_fingerprint = record->binding_fingerprint();
-            data.invocation = record->invocation();
-            data.child_depth = record->child_depth();
-            data.continuation = record->continuation();
-            data.remaining_budget = record->remaining_budget();
-            data.exact_checkpoint = record->exact_checkpoint();
-            data.exact_checkpoint_content_id = record->exact_checkpoint_content_id();
-            data.pending_input = record->pending_input();
-            data.pending_effect = record->pending_effect();
-            data.terminal_result = record->terminal_result();
-            data.fork_receipt = record->fork_receipt();
-            data.children = record->children();
-            data.children.front().state = ProgramChildState::Completed;
-            data.children.front().terminal_result = **sibling_completion;
-            data.journal_head = next_journal.id;
-            data.fork_source_run_id = record->fork_source_run_id();
-            data.fork_source_program_version_id = record->fork_source_program_version_id();
-            data.fork_source_checkpoint_id = record->fork_source_checkpoint_id();
-            data.recorded_binding_set_fingerprint = record->recorded_binding_set_fingerprint();
-            data.event_sequence = record->event_sequence();
-            data.effect_sequence = record->effect_sequence();
-            data.created_at_ms = record->created_at_ms();
-            data.updated_at_ms = record->updated_at_ms();
-            auto next_run = ProgramRunRecord::create(std::move(data));
-            auto next_lineage = ProgramRunLineage::create(ProgramRunLineageData{
-                lineage->owner_scope(), lineage->lineage_id(), lineage->root_run_id(),
-                lineage->active_generation(), lineage->active_generation_id(), next_run.id(),
-                next_run.journal_head(), lineage->remaining_budget(),
-                lineage->inflight_reservation(), lineage->id(), lineage->created_at_ms(),
-                next_run.updated_at_ms(), lineage->committed_descendant_budget()});
-            ProgramTransitionPublication publication{next_run, std::move(next_journal), {}, {}};
-            publication.run_lineage = std::move(next_lineage);
-            allow_completion->store(true);
-            if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
-                                            record->continuation().fence,
-                                            std::move(publication)) !=
-                ProgramTransitionPublishResult::Published)
-                throw std::runtime_error("Sibling completion publication was rejected");
-            return record;
-        };
     auto parent = fixture.runtime->start(
         "tenant:runtime", linked.parent_version,
         ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 2},
-                          "typed-fallback-parent", {}, parent_id});
+                          "typed-insert-parent", {}, "typed-insert-parent"});
     auto sibling = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), child_budget, "typed-fallback-sibling", {}});
+        ProgramInvocation{json::object(), child_budget, "typed-insert-sibling", {}});
     const auto sibling_result = sibling.wait();
     ASSERT_EQ(sibling_result.status(), ProgramTerminalStatus::Completed)
         << sibling_result.serialize_canonical();
-    ASSERT_EQ(parent.snapshot().children().front().state, ProgramChildState::Dispatched);
-    *sibling_completion = sibling_result;
-    armed->store(true);
     auto child = fixture.runtime->start_child(
         "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), child_budget, "typed-fallback-new-child", {}});
+        ProgramInvocation{json::object(), child_budget, "typed-insert-new-child", {}});
     const auto result = child.wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
-    EXPECT_EQ(advances->load(), 1U);
     EXPECT_EQ(completed_calls.load(), 2U);
     EXPECT_EQ(journal->javascript_read_attempts.load(), 0U);
-    const auto children = parent.snapshot().children();
-    ASSERT_EQ(children.size(), 2U);
-    ASSERT_TRUE(children.front().terminal_result);
-    ASSERT_TRUE(children.back().terminal_result);
-    EXPECT_EQ(children.front().terminal_result->id(), sibling_result.id());
-    EXPECT_EQ(children.back().terminal_result->id(), result.id());
-    EXPECT_TRUE(parent.cancel());
-    gate.open();
-    EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
-}
-
-TEST(ProgramRuntimeTest,
-     TypedChildFallbackRetriesSiblingPublicationWhenHydrationSeesDispatchedSibling) {
-    completed_calls.store(0);
-    auto journal = std::make_shared<BlockAfterJavaScriptResultJournal>();
-    journal->javascript_reads_unavailable = true;
-    journal->release_result();
-    AdmittedRuntime fixture(2, {}, journal);
-    TypedParentGate gate;
-    auto document = program_document("runtime-typed-parent-gate");
-    document["program_schema_version"] = PROGRAM_SCHEMA_VERSION_V2;
-    document["declared_budget_requirements"][4]["minimum"] = 2;
-    document["declared_budget_requirements"][4]["maximum"] = 2;
-    document["declared_budget_requirements"][7]["minimum"] = 1;
-    document["declared_budget_requirements"][7]["maximum"] = 1;
-    document["declared_budget_requirements"][8]["minimum"] = 2;
-    document["declared_budget_requirements"][8]["maximum"] = 2;
-    const auto linked = link_child_versions(
-        fixture, fixture.admit_document(std::move(document)), fixture.admit("runtime-completed"));
-    const std::string parent_id = "typed-fallback-stale-hydration-parent";
-    auto armed = std::make_shared<std::atomic<bool>>(false);
-    auto sibling_completion = std::make_shared<std::optional<ProgramResult>>();
-    auto allow_completion = std::make_shared<std::atomic<bool>>(false);
-    journal->before_publication =
-        [parent_id, allow_completion](const ProgramTransitionPublication& value) {
-            if (value.run_record.run_id() != parent_id || allow_completion->load()) return;
-            for (const auto& child : value.run_record.children())
-                if (child.terminal_result)
-                    throw std::runtime_error("defer sibling completion until acquisition");
-        };
-    const RunBudget child_budget{3333, 333, 333, 1, 1, 6, 0, 0, 0};
-    auto parent_reads_after_arm = std::make_shared<std::atomic<unsigned>>(0);
-    auto advances = std::make_shared<std::atomic<unsigned>>(0);
-    const auto weak_journal = std::weak_ptr<BlockAfterJavaScriptResultJournal>(journal);
-    // Let load_run_publication_head observe a coherent parent snapshot where the
-    // completed sibling is still Dispatched (as happens when a concurrent reader
-    // races the one-shot hook), then publish the sibling completion before the new
-    // child's relation publication CAS.
-    journal->filter_run_read =
-        [parent_id, sibling_completion, allow_completion, armed, parent_reads_after_arm, advances,
-         weak_journal](std::string_view id, std::optional<ProgramRunRecord> record) {
-            if (id != parent_id || !record || !armed->load()) return record;
-            if (parent_reads_after_arm->fetch_add(1) < 2 || advances->exchange(1) != 0)
-                return record;
-            const auto store = weak_journal.lock();
-            const auto previous_journal = store->latest_sync("tenant:runtime", parent_id);
-            const auto lineage = store->load_run_lineage_sync("tenant:runtime", parent_id);
-            if (!previous_journal || !lineage)
-                throw std::runtime_error("Sibling publication has no durable parent head");
-            auto next_journal = ProgramJournalRecord::create(ProgramJournalRecordData{
-                record->journal_head(), parent_id, record->program_version_id(), record->bundle_id(),
-                previous_journal->sequence + 1, record->continuation(), record->remaining_budget(),
-                previous_journal->inflight_reservation, record->exact_checkpoint(),
-                record->updated_at_ms()});
-            ProgramRunRecordData data;
-            data.owner_scope = record->owner_scope();
-            data.run_id = record->run_id();
-            data.logical_run_id = record->logical_run_id();
-            data.program_version_id = record->program_version_id();
-            data.bundle_id = record->bundle_id();
-            data.binding_fingerprint = record->binding_fingerprint();
-            data.invocation = record->invocation();
-            data.child_depth = record->child_depth();
-            data.continuation = record->continuation();
-            data.remaining_budget = record->remaining_budget();
-            data.exact_checkpoint = record->exact_checkpoint();
-            data.exact_checkpoint_content_id = record->exact_checkpoint_content_id();
-            data.pending_input = record->pending_input();
-            data.pending_effect = record->pending_effect();
-            data.terminal_result = record->terminal_result();
-            data.fork_receipt = record->fork_receipt();
-            data.children = record->children();
-            data.children.front().state = ProgramChildState::Completed;
-            data.children.front().terminal_result = **sibling_completion;
-            data.journal_head = next_journal.id;
-            data.fork_source_run_id = record->fork_source_run_id();
-            data.fork_source_program_version_id = record->fork_source_program_version_id();
-            data.fork_source_checkpoint_id = record->fork_source_checkpoint_id();
-            data.recorded_binding_set_fingerprint = record->recorded_binding_set_fingerprint();
-            data.event_sequence = record->event_sequence();
-            data.effect_sequence = record->effect_sequence();
-            data.created_at_ms = record->created_at_ms();
-            data.updated_at_ms = record->updated_at_ms();
-            auto next_run = ProgramRunRecord::create(std::move(data));
-            auto next_lineage = ProgramRunLineage::create(ProgramRunLineageData{
-                lineage->owner_scope(), lineage->lineage_id(), lineage->root_run_id(),
-                lineage->active_generation(), lineage->active_generation_id(), next_run.id(),
-                next_run.journal_head(), lineage->remaining_budget(),
-                lineage->inflight_reservation(), lineage->id(), lineage->created_at_ms(),
-                next_run.updated_at_ms(), lineage->committed_descendant_budget()});
-            ProgramTransitionPublication publication{next_run, std::move(next_journal), {}, {}};
-            publication.run_lineage = std::move(next_lineage);
-            allow_completion->store(true);
-            if (store->compare_publish_sync("tenant:runtime", record->journal_head(),
-                                            record->continuation().fence,
-                                            std::move(publication)) !=
-                ProgramTransitionPublishResult::Published)
-                throw std::runtime_error("Sibling completion publication was rejected");
-            return std::optional<ProgramRunRecord>{next_run};
-        };
-    auto parent = fixture.runtime->start(
-        "tenant:runtime", linked.parent_version,
-        ProgramInvocation{json::object(), RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 2},
-                          "typed-fallback-stale-hydration-parent", {}, parent_id});
-    auto sibling = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), child_budget, "typed-fallback-sibling", {}});
-    const auto sibling_result = sibling.wait();
-    ASSERT_EQ(sibling_result.status(), ProgramTerminalStatus::Completed)
-        << sibling_result.serialize_canonical();
-    ASSERT_EQ(parent.snapshot().children().front().state, ProgramChildState::Dispatched);
-    *sibling_completion = sibling_result;
-    armed->store(true);
-    auto child = fixture.runtime->start_child(
-        "tenant:runtime", parent, linked.receipt, linked.child_version,
-        ProgramInvocation{json::object(), child_budget, "typed-fallback-new-child", {}});
-    const auto result = child.wait();
-    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
-    EXPECT_EQ(advances->load(), 1U);
-    EXPECT_EQ(completed_calls.load(), 2U);
-    EXPECT_EQ(journal->javascript_read_attempts.load(), 0U);
-    const auto children = parent.snapshot().children();
+    const auto stored = journal->load_sync("tenant:runtime", "typed-insert-parent");
+    ASSERT_TRUE(stored.has_value());
+    const auto children = children_of(journal, "tenant:runtime", *stored);
     ASSERT_EQ(children.size(), 2U);
     ASSERT_TRUE(children.front().terminal_result);
     ASSERT_TRUE(children.back().terminal_result);
@@ -17567,7 +17389,7 @@ TEST(ProgramRuntimeTest, EnforcesConfiguredChildDepthCeilingAndRunsDepthTwelveCh
     std::string current_run_id = result.run_id();
     for (std::uint32_t expected_depth = 1; expected_depth <= 12; ++expected_depth) {
         const auto handle   = deep_fixture.runtime->reconnect("tenant:runtime", current_run_id);
-        const auto children = handle.snapshot().children();
+        const auto children = handle.snapshot().snapshot_children();
         ASSERT_EQ(children.size(), 1u);
         EXPECT_EQ(children[0].invocation.child_depth, expected_depth);
         EXPECT_EQ(children[0].state, ProgramChildState::Completed);
@@ -17871,10 +17693,10 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     ASSERT_EQ(interrupted.status(), ProgramTerminalStatus::Interrupted);
     const auto parent_after_interrupt = fixture.journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(parent_after_interrupt.has_value());
-    ASSERT_EQ(parent_after_interrupt->children().size(), 1U);
-    EXPECT_EQ(parent_after_interrupt->children().front().state, ProgramChildState::Dispatched);
-    ASSERT_TRUE(parent_after_interrupt->children().front().terminal_result.has_value());
-    EXPECT_EQ(parent_after_interrupt->children().front().terminal_result->status(),
+    ASSERT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_interrupt).size(), 1U);
+    EXPECT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_interrupt).front().state, ProgramChildState::Dispatched);
+    ASSERT_TRUE(children_of(fixture.journal, "tenant:runtime", *parent_after_interrupt).front().terminal_result.has_value());
+    EXPECT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_interrupt).front().terminal_result->status(),
               ProgramTerminalStatus::Interrupted);
 
     auto resumed = fixture.runtime->resume(
@@ -17886,10 +17708,10 @@ TEST(ProgramRuntimeTest, InterruptedChildRemainsInFlightAndResumeJoinsDurably) {
     EXPECT_EQ(result.output()["channels"]["value"]["value"], "approved");
     const auto parent_after_resume = fixture.journal->load("tenant:runtime", parent.run_id());
     ASSERT_TRUE(parent_after_resume.has_value());
-    ASSERT_EQ(parent_after_resume->children().size(), 1U);
-    EXPECT_EQ(parent_after_resume->children().front().state, ProgramChildState::Completed);
-    ASSERT_TRUE(parent_after_resume->children().front().terminal_result.has_value());
-    EXPECT_EQ(parent_after_resume->children().front().terminal_result->status(),
+    ASSERT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_resume).size(), 1U);
+    EXPECT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_resume).front().state, ProgramChildState::Completed);
+    ASSERT_TRUE(children_of(fixture.journal, "tenant:runtime", *parent_after_resume).front().terminal_result.has_value());
+    EXPECT_EQ(children_of(fixture.journal, "tenant:runtime", *parent_after_resume).front().terminal_result->status(),
               ProgramTerminalStatus::Completed);
 
     EXPECT_TRUE(parent.cancel());
@@ -17948,8 +17770,8 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
 
     const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
-    ASSERT_EQ(publishing->children().size(), 1U);
-    EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *publishing).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *publishing).front().state, ProgramChildState::Publishing);
 
     journal->allow_dispatch();
     auto recovered = fixture.runtime->start_child("tenant:runtime", parent, linked.receipt,
@@ -17957,9 +17779,9 @@ TEST(ProgramRuntimeTest, FailedDispatchIsRetriedFromPublishingBoundary) {
     EXPECT_EQ(recovered.wait().status(), ProgramTerminalStatus::Completed);
     const auto completed = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(completed.has_value());
-    ASSERT_EQ(completed->children().size(), 1U);
-    EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
-    ASSERT_TRUE(completed->children().front().terminal_result.has_value());
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *completed).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *completed).front().state, ProgramChildState::Completed);
+    ASSERT_TRUE(children_of(journal, "tenant:runtime", *completed).front().terminal_result.has_value());
 
     EXPECT_TRUE(parent.cancel());
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
@@ -17986,8 +17808,8 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
                  ProgramDiagnosticError);
     const auto publishing = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(publishing.has_value());
-    ASSERT_EQ(publishing->children().size(), 1U);
-    EXPECT_EQ(publishing->children().front().state, ProgramChildState::Publishing);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *publishing).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *publishing).front().state, ProgramChildState::Publishing);
 
     journal->allow_dispatch();
     auto recovered = fixture.runtime->recover_children("tenant:runtime", parent.run_id());
@@ -17997,8 +17819,8 @@ TEST(ProgramRuntimeTest, RecoverChildrenRetriesPublishingBoundaryWithoutDuplicat
 
     const auto completed = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(completed.has_value());
-    ASSERT_EQ(completed->children().size(), 1U);
-    EXPECT_EQ(completed->children().front().state, ProgramChildState::Completed);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *completed).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *completed).front().state, ProgramChildState::Completed);
     EXPECT_TRUE(parent.cancel());
     EXPECT_EQ(parent.wait().status(), ProgramTerminalStatus::Cancelled);
 }
@@ -18010,7 +17832,6 @@ struct ParentEndsDuringDispatch {
     struct Publication {
         std::string                      run_id;
         ContinuationState                state;
-        std::optional<ProgramChildState> last_child;
     };
     std::string                child_id;
     std::optional<std::string> failure_code;
@@ -18036,10 +17857,7 @@ struct ParentEndsDuringDispatch {
         journal.before_publication = [&](const ProgramTransitionPublication& value) {
             const auto&      record = value.run_record;
             std::unique_lock lock(mutex);
-            publications.push_back({record.run_id(), record.continuation().state,
-                                    record.children().empty()
-                                        ? std::nullopt
-                                        : std::optional(record.children().back().state)});
+            publications.push_back({record.run_id(), record.continuation().state});
             if (fail_child_cancellation && !child_id.empty() && record.run_id() == child_id &&
                 record.continuation().state == ContinuationState::Cancelled)
                 throw std::runtime_error("simulated store outage");
@@ -18134,8 +17952,8 @@ TEST(ProgramRuntimeTest, ChildNeverStartedBecauseItsParentWasCancelledEndsCancel
     const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
     EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Cancelled);
-    ASSERT_EQ(stored_parent->children().size(), 1U);
-    EXPECT_EQ(stored_parent->children().front().state, ProgramChildState::Cancelled);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Cancelled);
     expect_child_ended_cancelled(*journal, race.child_id);
     const auto stored_child = journal->load_sync("tenant:runtime", race.child_id);
     ASSERT_TRUE(stored_child.has_value() && stored_child->terminal_result().has_value());
@@ -18144,14 +17962,11 @@ TEST(ProgramRuntimeTest, ChildNeverStartedBecauseItsParentWasCancelledEndsCancel
     auto reconnected = fixture.runtime->reconnect("tenant:runtime", race.child_id);
     EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Cancelled);
 
-    // The child's Cancelled record came after the parent's, and the parent never published a Dispatched one.
+    // The child's Cancelled record came after the parent's, and the row never held Dispatched (checked above).
     const auto parent_cancelled = race.first_publication_of(parent.run_id(), ContinuationState::Cancelled);
     const auto child_cancelled  = race.first_publication_of(race.child_id, ContinuationState::Cancelled);
     ASSERT_TRUE(parent_cancelled && child_cancelled);
     EXPECT_LT(*parent_cancelled, *child_cancelled);
-    for (const auto& entry : race.publications)
-        if (entry.run_id == parent.run_id())
-            EXPECT_NE(entry.last_child, std::optional(ProgramChildState::Dispatched));
 }
 
 // A parent that pauses for an answer keeps the child it did not dispatch as Publishing, so the child is not
@@ -18184,8 +17999,8 @@ TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhe
     const auto stored_parent = journal->load_sync("tenant:runtime", parent.run_id());
     ASSERT_TRUE(stored_parent.has_value());
     EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Interrupted);
-    ASSERT_EQ(stored_parent->children().size(), 1U);
-    EXPECT_EQ(stored_parent->children().front().state, ProgramChildState::Publishing);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Publishing);
     const auto published_child = journal->load_sync("tenant:runtime", race.child_id);
     ASSERT_TRUE(published_child.has_value());
     EXPECT_EQ(published_child->continuation().state, ContinuationState::Running);
@@ -18193,9 +18008,6 @@ TEST(ProgramRuntimeTest, ChildNotDispatchedBecauseItsParentPausedIsDispatchedWhe
     // The parent never published a Dispatched record, and nothing ended the child.
     EXPECT_TRUE(race.first_publication_of(parent.run_id(), ContinuationState::Interrupted).has_value());
     EXPECT_FALSE(race.first_publication_of(race.child_id, ContinuationState::Cancelled).has_value());
-    for (const auto& entry : race.publications)
-        if (entry.run_id == parent.run_id())
-            EXPECT_NE(entry.last_child, std::optional(ProgramChildState::Dispatched));
 
     auto resumed = fixture.runtime->resume("tenant:runtime", parent.run_id(),
                                            resume_for(*paused, json{{"decision", "approved"}},
@@ -18235,8 +18047,8 @@ struct PausedParentWithPublishedChild {
         ASSERT_EQ(paused->status(), ProgramTerminalStatus::Interrupted);
         const auto stored_parent = journal.load_sync("tenant:runtime", parent->run_id());
         ASSERT_TRUE(stored_parent.has_value());
-        ASSERT_EQ(stored_parent->children().size(), 1U);
-        ASSERT_EQ(stored_parent->children().front().state, ProgramChildState::Publishing);
+        ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
+        ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Publishing);
         const auto published_child = journal.load_sync("tenant:runtime", race.child_id);
         ASSERT_TRUE(published_child.has_value());
         ASSERT_EQ(published_child->continuation().state, ContinuationState::Running);
@@ -18248,8 +18060,8 @@ void expect_parent_cancelled_with_child_closed(BlockAfterJavaScriptResultJournal
     const auto stored_parent = journal.load_sync("tenant:runtime", parent_id);
     ASSERT_TRUE(stored_parent.has_value());
     EXPECT_EQ(stored_parent->continuation().state, ContinuationState::Cancelled);
-    ASSERT_EQ(stored_parent->children().size(), 1U);
-    EXPECT_EQ(stored_parent->children().front().state, ProgramChildState::Cancelled);
+    ASSERT_EQ(children_of(journal, "tenant:runtime", *stored_parent).size(), 1U);
+    EXPECT_EQ(children_of(journal, "tenant:runtime", *stored_parent).front().state, ProgramChildState::Cancelled);
 }
 
 void expect_published_child_cancelled_durably(AdmittedRuntime&                   fixture,
@@ -18430,7 +18242,7 @@ TEST(ProgramRuntimeTest, DurableDslSpawnDispatchesTheLinkedChildAndJoinsItsResul
     EXPECT_EQ(completed_calls.load(), 1U);
 
     const auto record   = parent.snapshot();
-    const auto children = record.children();
+    const auto children = record.snapshot_children();
     ASSERT_EQ(children.size(), 1U);
     const auto& child = children.front();
     EXPECT_EQ(child.link_id, linked.receipt.id());
@@ -18536,13 +18348,13 @@ TEST(ProgramRuntimeTest, DurableDslAwaitTimeoutCancelsAndRecordsItsChild) {
     EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
 
     const auto pending          = parent.snapshot();
-    const auto pending_children = pending.children();
+    const auto pending_children = pending.snapshot_children();
     ASSERT_EQ(pending_children.size(), 1U);
     auto child =
         fixture.runtime->reconnect("tenant:runtime", pending_children.front().child_run_id);
     EXPECT_EQ(child.wait().status(), ProgramTerminalStatus::Cancelled);
     const auto settled          = parent.snapshot();
-    const auto settled_children = settled.children();
+    const auto settled_children = settled.snapshot_children();
     ASSERT_EQ(settled_children.size(), 1U);
     EXPECT_EQ(settled_children.front().state, ProgramChildState::Cancelled);
     // Parent timeout and child cancellation publish through independent
@@ -18594,15 +18406,15 @@ TEST(ProgramRuntimeTest, ParentTerminalReconnectRetainsDurableChildRecords) {
     const auto parent_id = parent.run_id();
     const auto child_id  = child.run_id();
     const auto before    = parent.snapshot();
-    ASSERT_EQ(before.children().size(), 1U);
-    EXPECT_EQ(before.children().front().child_run_id, child_id);
+    ASSERT_EQ(before.snapshot_children().size(), 1U);
+    EXPECT_EQ(before.snapshot_children().front().child_run_id, child_id);
 
     fixture.recreate_catalog_and_runtime();
     auto       reconnected = fixture.runtime->reconnect("tenant:runtime", parent_id);
     const auto after       = reconnected.snapshot();
-    ASSERT_EQ(after.children().size(), 1U);
-    EXPECT_EQ(after.children().front().child_run_id, child_id);
-    EXPECT_EQ(after.children().front().invocation.parent_run_id, parent_id);
+    ASSERT_EQ(after.snapshot_children().size(), 1U);
+    EXPECT_EQ(after.snapshot_children().front().child_run_id, child_id);
+    EXPECT_EQ(after.snapshot_children().front().invocation.parent_run_id, parent_id);
     EXPECT_EQ(reconnected.wait().status(), ProgramTerminalStatus::Completed);
 }
 TEST(ProgramRuntimeTest, FailedChildPublicationReleasesParentReservation) {
@@ -18676,7 +18488,7 @@ TEST(ProgramRuntimeTest, ParallelMapBindsInputAndReturnsOrderedBoundedChildOutpu
     EXPECT_EQ(output.at(2).get<std::string>(), "completed");
     EXPECT_EQ(result.usage().peak_concurrency, 2U);
     EXPECT_EQ(completed_calls.load(), 3U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 3U);
     // Two workers claim items in ordinal order but register each child when it reaches
     // launch_child, so the record lists children in launch order: a worker that finishes item 0
@@ -18747,8 +18559,7 @@ TEST(ProgramRuntimeTest, ParallelMapRejectsDynamicCollectionBeforeLaunchingChild
     EXPECT_EQ(result.failure()->operation_id, "root");
     EXPECT_EQ(completed_calls.load(), 0U);
     EXPECT_TRUE(fixture.runtime->reconnect("tenant:runtime", result.run_id())
-                    .snapshot()
-                    .children()
+                    .snapshot().snapshot_children()
                     .empty());
 }
 TEST(ProgramRuntimeTest, ParallelMapRejectsMissingInputArtifactFieldBeforeChildLaunch) {
@@ -18771,8 +18582,7 @@ TEST(ProgramRuntimeTest, ParallelMapRejectsMissingInputArtifactFieldBeforeChildL
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_SOURCE");
     EXPECT_TRUE(fixture.runtime->reconnect("tenant:runtime", result.run_id())
-                    .snapshot()
-                    .children()
+                    .snapshot().snapshot_children()
                     .empty());
 }
 
@@ -18796,7 +18606,7 @@ TEST(ProgramRuntimeTest, ParallelMapRejectsMissingChildOutputField) {
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_PARALLEL_MAP_OUTPUT");
     ASSERT_EQ(
-        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children().size(),
+        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().snapshot_children().size(),
         1U);
 }
 TEST(ProgramRuntimeTest, ParallelMapRejectsChildOutputContractMismatch) {
@@ -18821,7 +18631,7 @@ TEST(ProgramRuntimeTest, ParallelMapRejectsChildOutputContractMismatch) {
     ASSERT_TRUE(result.failure().has_value());
     EXPECT_EQ(result.failure()->code, "P_OUTPUT_CONTRACT");
     ASSERT_EQ(
-        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children().size(),
+        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().snapshot_children().size(),
         1U);
 }
 
@@ -18844,7 +18654,7 @@ TEST(ProgramRuntimeTest, ParallelMapBuildsNestedArrayInputBindings) {
 
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed);
     const auto children =
-        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children();
+        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 1U);
     const json expected_input{{"payload", json::array({json{{"id", 7}}})}};
     EXPECT_EQ(children.front().invocation.input, expected_input);
@@ -18874,7 +18684,7 @@ TEST(ProgramRuntimeTest, ParallelMapCollectWaitsForEveryChildFailure) {
     EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->operation_id, "root");
     EXPECT_EQ(result.failure()->witness["item_index"], 0U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 3U);
     for (const auto& child : children)
         EXPECT_EQ(child.state, ProgramChildState::Failed);
@@ -18904,7 +18714,7 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastStopsLaunchingAfterFirstFailedItem) 
     EXPECT_EQ(result.failure()->code, "NG.TaskFailed");
     EXPECT_EQ(result.failure()->witness["item_index"], 0U);
     const auto children =
-        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().children();
+        fixture.runtime->reconnect("tenant:runtime", result.run_id()).snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 1U);
     EXPECT_EQ(children.front().state, ProgramChildState::Failed);
 }
@@ -18936,7 +18746,7 @@ TEST(ProgramRuntimeTest, ParallelMapFailFastCancelsActiveSiblingAfterFailure) {
     EXPECT_EQ(map_fail_first_calls.load(), 2U);
     EXPECT_EQ(map_fail_first_active.load(), 0U);
 
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     std::size_t failed    = 0;
     std::size_t cancelled = 0;
@@ -19007,7 +18817,7 @@ TEST(ProgramRuntimeTest, ParallelMapProvidesBoundedChildOverlapAndCancelsActiveC
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Cancelled);
     EXPECT_EQ(blocking_active.load(), 0U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     for (const auto& child : children)
         EXPECT_EQ(child.state, ProgramChildState::Cancelled);
@@ -20101,7 +19911,7 @@ TEST_P(ProgramChildSynthesisPersistence, BindsSpawnsAndJoinsWithoutRefundOrDupli
     const auto records = storage->load_child_syntheses("tenant:runtime", test.handle->run_id());
     ASSERT_EQ(records.size(), 1U);
     EXPECT_EQ(records.front().data().state, ProgramChildSynthesisState::Spawned);
-    EXPECT_EQ(test.handle->snapshot().children().size(), 1U);
+    EXPECT_EQ(test.handle->snapshot().snapshot_children().size(), 1U);
 }
 TEST_P(ProgramChildSynthesisPersistence, ReusesCommittedCompileValidationAndFrozenAdmission) {
     for (auto state : {ProgramChildSynthesisState::Compiled, ProgramChildSynthesisState::Validated,
@@ -20283,7 +20093,7 @@ TEST_P(ProgramChildSynthesisPersistence,
     const auto result = parent.wait();
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
     EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
-    EXPECT_EQ(parent.snapshot().children().size(), 1U);
+    EXPECT_EQ(parent.snapshot().snapshot_children().size(), 1U);
     const auto head = host.journal->load_child_syntheses("tenant:runtime", run_id).front();
     EXPECT_EQ(head.data().state, ProgramChildSynthesisState::Spawned);
     metadata.close();
@@ -20309,7 +20119,7 @@ TEST_P(ProgramChildSynthesisPersistence, SemanticRejectionPersistsEvidenceWithou
                   .id(),
               rejected.id());
     EXPECT_EQ(test.semantic_calls, 1U);
-    EXPECT_TRUE(test.handle->snapshot().children().empty());
+    EXPECT_TRUE(test.handle->snapshot().snapshot_children().empty());
 }
 TEST_P(ProgramChildSynthesisPersistence, ADecisionOfAnotherValidatorOrContractFailsWithoutAdmission) {
     for (const bool validator : {false, true}) {
@@ -20327,7 +20137,7 @@ TEST_P(ProgramChildSynthesisPersistence, ADecisionOfAnotherValidatorOrContractFa
         EXPECT_FALSE(failed.data().artifacts.contains("validation"));
         EXPECT_EQ(test.admissions, 0U);
         EXPECT_EQ(test.semantic_calls, 1U);
-        EXPECT_TRUE(test.handle->snapshot().children().empty());
+        EXPECT_TRUE(test.handle->snapshot().snapshot_children().empty());
     }
 }
 TEST_P(ProgramChildSynthesisPersistence, ConcurrentRetriesHaveOneReservationAndOneSemanticCall) {
@@ -20573,21 +20383,21 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
                                 if (boundary() == "CommandResult" &&
                                     command.command_ordinal() == 2 && command.completed())
                                     stop = true;
-                            for (const auto& relation : run.children()) {
-                                if (boundary() == "ChildPublishing" &&
-                                    relation.state == ProgramChildState::Publishing)
-                                    stop = true;
-                                if (boundary() == "ChildDispatched" &&
-                                    relation.state == ProgramChildState::Dispatched)
-                                    stop = true;
-                                if ((boundary() == "ChildResult" ||
-                                     boundary() == "ChildResultBeforeSpawned") &&
-                                    relation.terminal_result)
-                                    stop = true;
-                            }
                         }
                         if (stop) std::_Exit(77);
                     };
+                // The relation rows are written on their own, not with the parent's record.
+                child.journal->after_relation_write = [&](const ProgramChildRecord& relation) {
+                    bool stop = false;
+                    if (boundary() == "ChildPublishing" && relation.state == ProgramChildState::Publishing)
+                        stop = true;
+                    if (boundary() == "ChildDispatched" && relation.state == ProgramChildState::Dispatched)
+                        stop = true;
+                    if ((boundary() == "ChildResult" || boundary() == "ChildResultBeforeSpawned") &&
+                        relation.terminal_result)
+                        stop = true;
+                    if (stop) std::_Exit(77);
+                };
                 child.fixture.runtime->prepare_child_synthesis(
                     "tenant:runtime", *child.handle, *child.hold, proposal, *child.trusted_grant,
                     "generated-child");
@@ -20612,9 +20422,9 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
     EXPECT_EQ(previous_parent->remaining_budget().max_dynamic_compiles +
                   previous_journal->inflight_reservation.max_dynamic_compiles,
               2U);
-    const auto      original_child = previous_parent->children().empty()
+    const auto      original_child = children_of(storage, "tenant:runtime", *previous_parent).empty()
                                          ? std::string{}
-                                         : previous_parent->children().front().child_run_id;
+                                         : children_of(storage, "tenant:runtime", *previous_parent).front().child_run_id;
     AdmittedRuntime host(2, checkpoints(), storage, {}, ExecutionGuarantee::Strict, true);
     host.catalog = std::make_shared<ProgramCatalog>(
         CatalogConfig{programs(), host.registry, host.engines, "program-runtime-test/v1"});
@@ -20737,9 +20547,9 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
         recovered.data().error_code == "P_CHILD_SYNTHESIS_CHILD_UNCERTAIN") {
         EXPECT_TRUE(boundary() == "ChildDispatched" || boundary() == "Spawned");
         EXPECT_THROW(host.runtime->reconnect("tenant:runtime", run_id), std::runtime_error);
-        ASSERT_EQ(storage->load("tenant:runtime", run_id)->children().size(), 1U);
-        EXPECT_EQ(storage->load("tenant:runtime", run_id)->children().front().child_run_id,
-                  original_child);
+        const auto stored_children = children_of(storage, "tenant:runtime", *storage->load("tenant:runtime", run_id));
+        ASSERT_EQ(stored_children.size(), 1U);
+        EXPECT_EQ(stored_children.front().child_run_id, original_child);
         EXPECT_EQ(semantic_calls, 0U);
         EXPECT_EQ(admission_calls, 0U);
         return;
@@ -20749,7 +20559,7 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
         EXPECT_EQ(semantic_calls, 0U);
         EXPECT_EQ(admission_calls, 0U);
         EXPECT_THROW(host.runtime->reconnect("tenant:runtime", run_id), std::runtime_error);
-        EXPECT_TRUE(storage->load("tenant:runtime", run_id)->children().empty());
+        EXPECT_TRUE(children_of(storage, "tenant:runtime", *storage->load("tenant:runtime", run_id)).empty());
         EXPECT_EQ(storage->load("tenant:runtime", run_id)->remaining_budget().max_dynamic_compiles,
                   2U);
         return;
@@ -20766,14 +20576,14 @@ TEST_P(ProgramChildSynthesisCrash, ProcessLossPreservesBudgetIdentityAndRecorded
     EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
     EXPECT_EQ(result.remaining_budget().max_program_operations, 13U);
     const auto snapshot = parent.snapshot();
-    ASSERT_EQ(snapshot.children().size(), 1U);
+    ASSERT_EQ(snapshot.snapshot_children().size(), 1U);
     if (!original_child.empty())
-        EXPECT_EQ(snapshot.children().front().child_run_id, original_child);
-    EXPECT_EQ(snapshot.children().front().state, ProgramChildState::Completed);
+        EXPECT_EQ(snapshot.snapshot_children().front().child_run_id, original_child);
+    EXPECT_EQ(snapshot.snapshot_children().front().state, ProgramChildState::Completed);
     EXPECT_EQ(host.runtime->reconnect("tenant:runtime", run_id).wait().id(), result.id());
     const auto head = storage->load_child_syntheses("tenant:runtime", run_id).front();
     EXPECT_EQ(head.data().state, State::Spawned);
-    EXPECT_EQ(head.data().artifacts.at("child_run_id"), snapshot.children().front().child_run_id);
+    EXPECT_EQ(head.data().artifacts.at("child_run_id"), snapshot.snapshot_children().front().child_run_id);
     if (boundary() == "ChildTerminal" || boundary() == "ChildResult" ||
         boundary() == "ChildResultBeforeSpawned" || boundary() == "CommandResult" ||
         boundary() == "ParentTerminal") {
@@ -20828,7 +20638,7 @@ TEST_P(ProgramChildSynthesisPersistence, CancellationDuringValidationCannotAdmit
     EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
     EXPECT_EQ(test.admissions, 0U);
     EXPECT_EQ(completed_calls.load(), 0U);
-    EXPECT_TRUE(test.handle->snapshot().children().empty());
+    EXPECT_TRUE(test.handle->snapshot().snapshot_children().empty());
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS) && defined(NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES)
@@ -20890,7 +20700,7 @@ TEST_P(ProgramChildSynthesisPersistence, ActivationCannotRedirectTheAdmittedChil
     test.hold.reset();
     const auto result = test.handle->wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
-    const auto relation = test.handle->snapshot().children().front();
+    const auto relation = test.handle->snapshot().snapshot_children().front();
     const auto link     = ModuleLinkReceipt::parse(relation.link_receipt);
     EXPECT_EQ(link.child_program_version_id(),
               bound.data().artifacts.at("version").at("id").get<std::string>());
@@ -20913,7 +20723,7 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(result.status(), ProgramTerminalStatus::Failed);
     EXPECT_EQ(result.remaining_budget().max_dynamic_compiles, 2U);
     EXPECT_EQ(completed_calls.load(), 0U);
-    EXPECT_TRUE(test.handle->snapshot().children().empty());
+    EXPECT_TRUE(test.handle->snapshot().snapshot_children().empty());
 }
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
@@ -20969,13 +20779,10 @@ TEST_P(ProgramChildSynthesisPersistence, LiveReconnectDoesNotMisclassifyAnActive
     auto               ready  = reached.get_future();
     auto               resume = release.get_future().share();
     std::atomic<bool>  observed{false};
-    test.journal->after_publication = [&](const auto& publication) {
-        if (publication.run_record.run_id() != test.handle->run_id()) return;
-        for (const auto& child : publication.run_record.children()) {
-            if (child.state == ProgramChildState::Dispatched && !observed.exchange(true)) {
-                reached.set_value();
-                (void)resume.wait_for(std::chrono::seconds(10));
-            }
+    test.journal->after_relation_write = [&](const ProgramChildRecord& child) {
+        if (child.state == ProgramChildState::Dispatched && !observed.exchange(true)) {
+            reached.set_value();
+            (void)resume.wait_for(std::chrono::seconds(10));
         }
     };
     test.hold.reset();
@@ -21308,8 +21115,8 @@ TEST_P(ProgramChildSynthesisPersistence,
     const auto initial = test.journal->load_sync("tenant:runtime", test.replacement->run_id());
     ASSERT_TRUE(initial);
     EXPECT_EQ(initial->logical_run_id(), child_root);
-    ASSERT_EQ(initial->children().size(), 1U);
-    EXPECT_EQ(initial->children().front().child_run_id, grandchild_root);
+    ASSERT_EQ(children_of(test.journal, "tenant:runtime", *initial).size(), 1U);
+    EXPECT_EQ(children_of(test.journal, "tenant:runtime", *initial).front().child_run_id, grandchild_root);
     test.grandchild_hold.reset();
     const auto result = test.root->wait();
     ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << result.serialize_canonical();
@@ -21317,24 +21124,24 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(test.child->wait().id(), test.replacement->wait().id());
     EXPECT_EQ(completed_calls.load(), 10U);
     const auto main = test.root->snapshot();
-    ASSERT_EQ(main.children().size(), 1U);
-    EXPECT_EQ(main.children().front().child_run_id, child_root);
-    EXPECT_EQ(main.children().front().terminal_generation, 2U);
-    EXPECT_EQ(main.children().front().terminal_result->run_id(), test.replacement->run_id());
+    ASSERT_EQ(main.snapshot_children().size(), 1U);
+    EXPECT_EQ(main.snapshot_children().front().child_run_id, child_root);
+    EXPECT_EQ(main.snapshot_children().front().terminal_generation, 2U);
+    EXPECT_EQ(main.snapshot_children().front().terminal_result->run_id(), test.replacement->run_id());
     const auto lineage = test.journal->load_run_lineage_sync("tenant:runtime", child_root);
     const auto generation =
         test.journal->load_generation_sync("tenant:runtime", lineage->lineage_id(), 2);
     EXPECT_TRUE(does_program_child_generation_result_bind(
-        main, main.children().front(), *generation, *lineage, test.replacement->snapshot()));
-    auto forged                = main.children().front();
+        main, main.snapshot_children().front(), *generation, *lineage, test.replacement->snapshot()));
+    auto forged                = main.snapshot_children().front();
     forged.terminal_generation = 3;
     EXPECT_FALSE(does_program_child_generation_result_bind(main, forged, *generation, *lineage,
                                                            test.replacement->snapshot()));
-    forged              = main.children().front();
+    forged              = main.snapshot_children().front();
     forged.child_run_id = grandchild_root;
     EXPECT_FALSE(does_program_child_generation_result_bind(main, forged, *generation, *lineage,
                                                            test.replacement->snapshot()));
-    EXPECT_EQ(test.replacement->snapshot().children().front().child_run_id, grandchild_root);
+    EXPECT_EQ(test.replacement->snapshot().snapshot_children().front().child_run_id, grandchild_root);
     EXPECT_EQ(test.replacement->wait().remaining_budget().max_dynamic_compiles, 1U);
     std::set<std::string> topologies;
     for (const auto& id :
@@ -21416,20 +21223,15 @@ TEST_P(ProgramChildSynthesisPersistence, InheritedChildLookupSurvivesParentHeadA
     test.prepare_tree();
     const std::set<std::string> predecessors{test.root->run_id(), test.child->run_id(),
                                              test.grandchild->run_id()};
-    test.journal->after_publication = [observe = test.journal->after_publication, completion,
-                                       predecessors, grandchild = test.grandchild->run_id()](
-                                          const ProgramTransitionPublication& publication) {
-        observe(publication);
-        const auto& record = publication.run_record;
-        if (predecessors.contains(record.run_id())) return;
-        for (const auto& child : record.children()) {
-            if (child.child_run_id != grandchild || !child.terminal_result) continue;
-            {
-                std::lock_guard lock(completion->mutex);
-                completion->published = true;
-            }
-            completion->condition.notify_all();
+    // The grandchild's result is recorded in its relation row, written on its own.
+    test.journal->after_relation_write = [completion, grandchild = test.grandchild->run_id()](
+                                             const ProgramChildRecord& child) {
+        if (child.child_run_id != grandchild || !child.terminal_result) return;
+        {
+            std::lock_guard lock(completion->mutex);
+            completion->published = true;
         }
+        completion->condition.notify_all();
     };
     auto release_grandchild =
         std::make_shared<std::optional<ProgramHandoff>>(std::move(test.grandchild_hold));
@@ -21527,13 +21329,13 @@ TEST_P(ProgramChildSynthesisPersistence, RecursiveTreeReopensAfterNestedReplacem
     EXPECT_EQ(result.output().at("generation"), 2);
     EXPECT_EQ(completed_calls.load() + saved.at("executed").get<unsigned>(), 10U);
     const auto parent = recovered.root->snapshot();
-    ASSERT_EQ(parent.children().size(), 1U);
-    EXPECT_EQ(parent.children().front().child_run_id, child);
-    EXPECT_EQ(parent.children().front().terminal_generation, 2U);
+    ASSERT_EQ(parent.snapshot_children().size(), 1U);
+    EXPECT_EQ(parent.snapshot_children().front().child_run_id, child);
+    EXPECT_EQ(parent.snapshot_children().front().terminal_generation, 2U);
     const auto active = recovered.host.runtime->reconnect("tenant:runtime", child);
     EXPECT_EQ(active.snapshot().logical_run_id(), child);
-    ASSERT_EQ(active.snapshot().children().size(), 1U);
-    EXPECT_EQ(active.snapshot().children().front().child_run_id, grandchild);
+    ASSERT_EQ(active.snapshot().snapshot_children().size(), 1U);
+    EXPECT_EQ(active.snapshot().snapshot_children().front().child_run_id, grandchild);
     const auto child_remaining = active.wait().remaining_budget();
     EXPECT_EQ(child_remaining.max_dynamic_compiles, 1U);
     EXPECT_LE(child_remaining.wall_time_ms,
@@ -21696,15 +21498,16 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                                             effect_crash);
             test.start(replace);
             const auto save = [&](const ProgramRunRecord& active) {
-                const auto    child      = active.children().front();
+                const auto    active_children = children_of(test.journal, "tenant:runtime", active);
+                const auto    child      = active_children.front();
                 const auto    descendant = test.journal->load_sync("tenant:runtime", child.child_run_id);
                 std::ofstream saved(database + ".static-family");
                 saved << json{{"root", test.root->run_id()},
                               {"active", active.run_id()},
                               {"child", child.child_run_id},
                               {"child_record_id", descendant->id()},
-                              {"grandchild", descendant->children().front().child_run_id},
-                              {"root_children", active.children().size()},
+                              {"grandchild", children_of(test.journal, "tenant:runtime", *descendant).front().child_run_id},
+                              {"root_children", active_children.size()},
                               {"child_record", json::parse(child.link_receipt)},
                               {"dynamic_compiles", active.remaining_budget().max_dynamic_compiles},
                               {"root_budget",
@@ -21793,7 +21596,6 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
             d.child_depth         = record->child_depth();
             d.continuation        = record->continuation();
             d.remaining_budget    = record->remaining_budget();
-            d.children            = record->children();
             d.journal_head        = record->journal_head();
             d.event_sequence      = record->event_sequence();
             d.effect_sequence     = record->effect_sequence();
@@ -21814,10 +21616,10 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
         ASSERT_TRUE(grand);
         EXPECT_EQ(child->continuation().state, ContinuationState::Interrupted);
         EXPECT_EQ(grand->continuation().state, ContinuationState::Interrupted);
-        ASSERT_EQ(child->children().size(), 1U);
-        EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
-        ASSERT_EQ(recovered.root->snapshot().children().size(), 1U);
-        EXPECT_EQ(recovered.root->snapshot().children().front().state, ProgramChildState::Dispatched);
+        ASSERT_EQ(children_of(recovered.journal, "tenant:runtime", *child).size(), 1U);
+        EXPECT_EQ(children_of(recovered.journal, "tenant:runtime", *child).front().state, ProgramChildState::Dispatched);
+        ASSERT_EQ(recovered.root->snapshot().snapshot_children().size(), 1U);
+        EXPECT_EQ(recovered.root->snapshot().snapshot_children().front().state, ProgramChildState::Dispatched);
         EXPECT_EQ(recovered.journal->load_javascript_commands_sync("tenant:runtime", grand->run_id(), 0)
                       .size(), 23U);
         const auto events = recovered.journal->load_events_sync("tenant:runtime", grand->run_id(), 0);
@@ -21841,7 +21643,7 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
                                                  saved.at("grandchild").get<std::string>())
                       .size(),
                   2U);
-        EXPECT_EQ(recovered.root->snapshot().children().size(), 1U);
+        EXPECT_EQ(recovered.root->snapshot().snapshot_children().size(), 1U);
         std::filesystem::remove(database + ".static-family");
         return;
     }
@@ -21851,15 +21653,15 @@ void ProgramChildSynthesisPersistence::check_static_child_recovery(bool         
               saved.at("dynamic_compiles").get<std::uint64_t>());
     EXPECT_EQ(recovered.root->run_id(), saved.at("active").get<std::string>());
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 1U);
-    EXPECT_EQ(active.children().front().child_run_id, saved.at("child").get<std::string>());
-    EXPECT_EQ(json::parse(active.children().front().link_receipt), saved.at("child_record"));
+    ASSERT_EQ(active.snapshot_children().size(), 1U);
+    EXPECT_EQ(active.snapshot_children().front().child_run_id, saved.at("child").get<std::string>());
+    EXPECT_EQ(json::parse(active.snapshot_children().front().link_receipt), saved.at("child_record"));
     EXPECT_EQ(active.remaining_budget().model_tokens, saved.at("root_budget").get<std::uint64_t>());
     const auto child =
         recovered.journal->load_sync("tenant:runtime", saved.at("child").get<std::string>());
     ASSERT_TRUE(child);
-    ASSERT_EQ(child->children().size(), 1U);
-    EXPECT_EQ(child->children().front().child_run_id, saved.at("grandchild").get<std::string>());
+    ASSERT_EQ(children_of(recovered.journal, "tenant:runtime", *child).size(), 1U);
+    EXPECT_EQ(children_of(recovered.journal, "tenant:runtime", *child).front().child_run_id, saved.at("grandchild").get<std::string>());
     EXPECT_EQ(recovered.journal
                   ->load_javascript_commands_sync("tenant:runtime",
                                              saved.at("grandchild").get<std::string>(), 0)
@@ -22144,7 +21946,7 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildFanOutRecoversAfterPro
             test.start(2);
             const auto active = test.root->snapshot();
             json       children = json::array();
-            for (const auto& child : active.children()) children.push_back(child.child_run_id);
+            for (const auto& child : active.snapshot_children()) children.push_back(child.child_run_id);
             std::ofstream saved(database + ".joined-fanout");
             saved << json{{"root", active.run_id()}, {"children", std::move(children)}}.dump();
             saved.close();
@@ -22167,10 +21969,10 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildFanOutRecoversAfterPro
     EXPECT_EQ(result.output(), (json{{"leaves", 2}}));
     EXPECT_EQ(completed_calls.load(), 2U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
     for (std::size_t i = 0; i < 2; ++i) {
         const auto child_id = saved.at("children").at(i).get<std::string>();
-        EXPECT_EQ(active.children().at(i).child_run_id, child_id);
+        EXPECT_EQ(active.snapshot_children().at(i).child_run_id, child_id);
         const auto child_handle = recovered.host.runtime->reconnect("tenant:runtime", child_id);
         EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
         const auto child_record = recovered.journal->load_sync("tenant:runtime", child_id);
@@ -22194,10 +21996,10 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildSerialFanOutRecoversAf
             JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
             test.start(1, "joined-static-serial:first-held");
             const auto active = test.root->snapshot();
-            ASSERT_EQ(active.children().size(), 1U);
+            ASSERT_EQ(active.snapshot_children().size(), 1U);
             std::ofstream saved(database + ".joined-serial");
             saved << json{{"root", active.run_id()},
-                          {"first_child", active.children().front().child_run_id}}
+                          {"first_child", active.snapshot_children().front().child_run_id}}
                          .dump();
             saved.close();
             std::_Exit(77);
@@ -22219,10 +22021,10 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildSerialFanOutRecoversAf
               (json{{"leaves", 2}, {"first", "r.0"}, {"second", "r.1"}}));
     EXPECT_EQ(completed_calls.load(), 2U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
-    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
-    EXPECT_NE(active.children().at(1).child_run_id, active.children().at(0).child_run_id);
-    for (const auto& child : active.children()) {
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
+    EXPECT_EQ(active.snapshot_children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_NE(active.snapshot_children().at(1).child_run_id, active.snapshot_children().at(0).child_run_id);
+    for (const auto& child : active.snapshot_children()) {
         EXPECT_EQ(child.state, ProgramChildState::Completed);
         const auto child_handle =
             recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
@@ -22251,14 +22053,15 @@ TEST_P(ProgramChildSynthesisPersistence,
         ([&] {
             JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
             test.hold_checkpoints.store(false);
-            test.journal->before_publication =
-                [&](const ProgramTransitionPublication& publication) {
-                    if (publication.run_record.child_depth() == 0 &&
-                        publication.run_record.children().size() == 2) {
+            // The second child's relation row is about to be written: the first child has settled.
+            test.journal->before_relation_write =
+                [&](std::string_view parent_run_id, const ProgramChildRecord& child, bool inserting) {
+                    if (!inserting || child.invocation.child_depth != 1) return;
+                    const auto rows = test.journal->load_child_relations_sync("tenant:runtime", parent_run_id, false);
+                    if (rows.size() == 1) {
                         std::ofstream saved(database + ".joined-serial-settled");
-                        saved << json{{"root", publication.run_record.run_id()},
-                                      {"first_child",
-                                       publication.run_record.children().front().child_run_id},
+                        saved << json{{"root", std::string(parent_run_id)},
+                                      {"first_child", rows.front().child().child_run_id},
                                       {"executed", completed_calls.load()}}
                                      .dump();
                         saved.close();
@@ -22283,8 +22086,8 @@ TEST_P(ProgramChildSynthesisPersistence,
     const auto before =
         recovered.journal->load_sync("tenant:runtime", saved.at("root").get<std::string>());
     ASSERT_TRUE(before);
-    ASSERT_EQ(before->children().size(), 1U);
-    EXPECT_EQ(before->children().front().state, ProgramChildState::Completed);
+    ASSERT_EQ(children_of(recovered.journal, "tenant:runtime", *before).size(), 1U);
+    EXPECT_EQ(children_of(recovered.journal, "tenant:runtime", *before).front().state, ProgramChildState::Completed);
 
     recovered.root =
         recovered.host.runtime->reconnect("tenant:runtime", saved.at("root").get<std::string>());
@@ -22297,10 +22100,10 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(completed_calls.load(), 1U);
     EXPECT_EQ(saved.at("executed").get<unsigned>() + completed_calls.load(), 2U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
-    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
-    EXPECT_NE(active.children().at(1).child_run_id, active.children().at(0).child_run_id);
-    for (const auto& child : active.children()) {
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
+    EXPECT_EQ(active.snapshot_children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_NE(active.snapshot_children().at(1).child_run_id, active.snapshot_children().at(0).child_run_id);
+    for (const auto& child : active.snapshot_children()) {
         EXPECT_EQ(child.state, ProgramChildState::Completed);
         const auto child_handle =
             recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
@@ -22330,10 +22133,10 @@ TEST_P(ProgramChildSynthesisPersistence,
             JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "serial", true);
             test.start(1, "joined-static-serial:cancel");
             const auto active = test.root->snapshot();
-            ASSERT_EQ(active.children().size(), 1U);
+            ASSERT_EQ(active.snapshot_children().size(), 1U);
             std::ofstream saved(database + ".joined-serial-cancel");
             saved << json{{"root", active.run_id()},
-                          {"first_child", active.children().front().child_run_id}}
+                          {"first_child", active.snapshot_children().front().child_run_id}}
                          .dump();
             saved.close();
             std::_Exit(77);
@@ -22354,12 +22157,12 @@ TEST_P(ProgramChildSynthesisPersistence,
     recovered.release_holds();
     EXPECT_EQ(recovered.root->wait().status(), ProgramTerminalStatus::Cancelled);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
-    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
-    EXPECT_EQ(active.children().at(0).state, ProgramChildState::Completed);
-    const auto second_child_id = active.children().at(1).child_run_id;
-    EXPECT_NE(second_child_id, active.children().at(0).child_run_id);
-    EXPECT_EQ(active.children().at(1).state, ProgramChildState::Cancelled);
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
+    EXPECT_EQ(active.snapshot_children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_EQ(active.snapshot_children().at(0).state, ProgramChildState::Completed);
+    const auto second_child_id = active.snapshot_children().at(1).child_run_id;
+    EXPECT_NE(second_child_id, active.snapshot_children().at(0).child_run_id);
+    EXPECT_EQ(active.snapshot_children().at(1).state, ProgramChildState::Cancelled);
     const auto second_handle =
         recovered.host.runtime->reconnect("tenant:runtime", second_child_id);
     EXPECT_EQ(second_handle.wait().status(), ProgramTerminalStatus::Cancelled);
@@ -22383,8 +22186,8 @@ TEST_P(ProgramChildSynthesisPersistence,
     const auto paused_parent = test.root->snapshot();
     const auto root_run_id   = test.root->run_id();
     test.root.reset();
-    ASSERT_EQ(paused_parent.children().size(), 1U);
-    const auto first_child = paused_parent.children().front();
+    ASSERT_EQ(paused_parent.snapshot_children().size(), 1U);
+    const auto first_child = paused_parent.snapshot_children().front();
     EXPECT_EQ(first_child.state, ProgramChildState::Dispatched);
     ASSERT_TRUE(first_child.terminal_result.has_value());
     EXPECT_EQ(first_child.terminal_result->status(), ProgramTerminalStatus::Interrupted);
@@ -22409,11 +22212,11 @@ TEST_P(ProgramChildSynthesisPersistence,
     EXPECT_EQ(completed_calls.load(), 1U);
     EXPECT_EQ(interrupt_calls.load(), 2U);
     const auto active = continued.snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
-    EXPECT_EQ(active.children().at(0).child_run_id, first_child.child_run_id);
-    EXPECT_EQ(active.children().at(0).state, ProgramChildState::Completed);
-    EXPECT_NE(active.children().at(1).child_run_id, first_child.child_run_id);
-    EXPECT_EQ(active.children().at(1).state, ProgramChildState::Completed);
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
+    EXPECT_EQ(active.snapshot_children().at(0).child_run_id, first_child.child_run_id);
+    EXPECT_EQ(active.snapshot_children().at(0).state, ProgramChildState::Completed);
+    EXPECT_NE(active.snapshot_children().at(1).child_run_id, first_child.child_run_id);
+    EXPECT_EQ(active.snapshot_children().at(1).state, ProgramChildState::Completed);
 }
 
 TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildChainRecoversAfterProcessLoss) {
@@ -22427,12 +22230,12 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildChainRecoversAfterProc
             JoinedStaticChildRecoveryFixture test(backend(), checkpoint_backend(), "chain", true);
             test.start(1);
             const auto active     = test.root->snapshot();
-            const auto child_id   = active.children().front().child_run_id;
+            const auto child_id   = active.snapshot_children().front().child_run_id;
             const auto descendant = test.journal->load_sync("tenant:runtime", child_id);
             std::ofstream saved(database + ".joined-chain");
             saved << json{{"root", active.run_id()},
                           {"child", child_id},
-                          {"grandchild", descendant->children().front().child_run_id}}
+                          {"grandchild", children_of(test.journal, "tenant:runtime", *descendant).front().child_run_id}}
                          .dump();
             saved.close();
             std::_Exit(77);
@@ -22458,8 +22261,8 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildChainRecoversAfterProc
     EXPECT_EQ(result.output(), (json{{"leaves", 1}, {"leaf", "r.0.0"}}));
     EXPECT_EQ(completed_calls.load(), 1U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 1U);
-    EXPECT_EQ(active.children().front().child_run_id, child_id);
+    ASSERT_EQ(active.snapshot_children().size(), 1U);
+    EXPECT_EQ(active.snapshot_children().front().child_run_id, child_id);
     EXPECT_EQ(paused_child.wait().status(), ProgramTerminalStatus::Completed);
     EXPECT_EQ(recovered.host.runtime->reconnect("tenant:runtime", child_id).wait().status(),
               ProgramTerminalStatus::Completed);
@@ -22467,8 +22270,8 @@ TEST_P(ProgramChildSynthesisPersistence, JoinedStaticChildChainRecoversAfterProc
               ProgramTerminalStatus::Completed);
     const auto child_record = recovered.journal->load_sync("tenant:runtime", child_id);
     ASSERT_TRUE(child_record);
-    ASSERT_EQ(child_record->children().size(), 1U);
-    EXPECT_EQ(child_record->children().front().child_run_id, grandchild_id);
+    ASSERT_EQ(children_of(recovered.journal, "tenant:runtime", *child_record).size(), 1U);
+    EXPECT_EQ(children_of(recovered.journal, "tenant:runtime", *child_record).front().child_run_id, grandchild_id);
     EXPECT_EQ(
         recovered.journal->load_javascript_commands_sync("tenant:runtime", grandchild_id, 0).size(),
         4U);
@@ -22487,7 +22290,7 @@ TEST_P(ProgramChildSynthesisPersistence, CancelledRecoveredJoinedParentEndsOpenC
             test.start(2);
             const auto active   = test.root->snapshot();
             json       children = json::array();
-            for (const auto& child : active.children()) children.push_back(child.child_run_id);
+            for (const auto& child : active.snapshot_children()) children.push_back(child.child_run_id);
             std::ofstream saved(database + ".joined-cancel");
             saved << json{{"root", active.run_id()}, {"children", std::move(children)}}.dump();
             saved.close();
@@ -22531,7 +22334,7 @@ TEST_P(ProgramChildSynthesisPersistence, SingleStaticChildControlRecoversAfterPr
             const auto active = test.root->snapshot();
             std::ofstream saved(database + ".single-static-control");
             saved << json{{"root", active.run_id()},
-                          {"first_child", active.children().front().child_run_id}}
+                          {"first_child", active.snapshot_children().front().child_run_id}}
                          .dump();
             saved.close();
             std::_Exit(77);
@@ -22552,9 +22355,9 @@ TEST_P(ProgramChildSynthesisPersistence, SingleStaticChildControlRecoversAfterPr
     EXPECT_EQ(result.output().at("leaves"), 1);
     EXPECT_EQ(completed_calls.load(), 1U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 1U);
-    EXPECT_EQ(active.children().front().child_run_id, saved.at("first_child").get<std::string>());
-    for (const auto& child : active.children()) {
+    ASSERT_EQ(active.snapshot_children().size(), 1U);
+    EXPECT_EQ(active.snapshot_children().front().child_run_id, saved.at("first_child").get<std::string>());
+    for (const auto& child : active.snapshot_children()) {
         const auto child_handle =
             recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
         EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
@@ -22576,11 +22379,11 @@ TEST_P(ProgramChildSynthesisPersistence, SequentialStaticChildControlsRecoverAft
             test.release_current_holds_keep_holding();
             ASSERT_EQ(test.wait_for_holds_or_root_terminal(1), 1U);
             const auto active = test.root->snapshot();
-            ASSERT_EQ(active.children().size(), 2U);
+            ASSERT_EQ(active.snapshot_children().size(), 2U);
             std::ofstream saved(database + ".sequential-static-control");
             saved << json{{"root", active.run_id()},
-                          {"first_child", active.children().at(0).child_run_id},
-                          {"second_child", active.children().at(1).child_run_id},
+                          {"first_child", active.snapshot_children().at(0).child_run_id},
+                          {"second_child", active.snapshot_children().at(1).child_run_id},
                           {"executed", completed_calls.load()}}
                          .dump();
             saved.close();
@@ -22604,10 +22407,10 @@ TEST_P(ProgramChildSynthesisPersistence, SequentialStaticChildControlsRecoverAft
     EXPECT_EQ(completed_calls.load(), 1U);
     EXPECT_EQ(saved.at("executed").get<unsigned>() + completed_calls.load(), 2U);
     const auto active = recovered.root->snapshot();
-    ASSERT_EQ(active.children().size(), 2U);
-    EXPECT_EQ(active.children().at(0).child_run_id, saved.at("first_child").get<std::string>());
-    EXPECT_EQ(active.children().at(1).child_run_id, saved.at("second_child").get<std::string>());
-    for (const auto& child : active.children()) {
+    ASSERT_EQ(active.snapshot_children().size(), 2U);
+    EXPECT_EQ(active.snapshot_children().at(0).child_run_id, saved.at("first_child").get<std::string>());
+    EXPECT_EQ(active.snapshot_children().at(1).child_run_id, saved.at("second_child").get<std::string>());
+    for (const auto& child : active.snapshot_children()) {
         const auto child_handle =
             recovered.host.runtime->reconnect("tenant:runtime", child.child_run_id);
         EXPECT_EQ(child_handle.wait().status(), ProgramTerminalStatus::Completed);
@@ -22681,14 +22484,14 @@ TEST_P(ProgramChildSynthesisPersistence, AmbiguousDescendantDoesNotStrandFamilyC
     EXPECT_TRUE(failed.load());
     ASSERT_EQ(result.status(), ProgramTerminalStatus::AmbiguousEffect) << result.serialize_canonical();
     const auto root = test.root->snapshot();
-    ASSERT_EQ(root.children().size(), 1U);
-    EXPECT_EQ(root.children().front().state, ProgramChildState::Dispatched);
-    const auto child = test.journal->load_sync("tenant:runtime", root.children().front().child_run_id);
+    ASSERT_EQ(root.snapshot_children().size(), 1U);
+    EXPECT_EQ(root.snapshot_children().front().state, ProgramChildState::Dispatched);
+    const auto child = test.journal->load_sync("tenant:runtime", root.snapshot_children().front().child_run_id);
     ASSERT_TRUE(child);
-    ASSERT_EQ(child->children().size(), 1U);
+    ASSERT_EQ(children_of(test.journal, "tenant:runtime", *child).size(), 1U);
     EXPECT_EQ(child->continuation().state, ContinuationState::AmbiguousEffect);
-    EXPECT_EQ(child->children().front().state, ProgramChildState::Dispatched);
-    const auto grand = test.journal->load_sync("tenant:runtime", child->children().front().child_run_id);
+    EXPECT_EQ(children_of(test.journal, "tenant:runtime", *child).front().state, ProgramChildState::Dispatched);
+    const auto grand = test.journal->load_sync("tenant:runtime", children_of(test.journal, "tenant:runtime", *child).front().child_run_id);
     ASSERT_TRUE(grand);
     EXPECT_EQ(grand->continuation().state, ContinuationState::AmbiguousEffect);
     EXPECT_FALSE(test.root->cancel());
@@ -23150,7 +22953,7 @@ TEST(ProgramRuntimeTest, AwaitScopedParallelMapTimeoutCancelsAndDrainsChildren) 
     EXPECT_EQ(blocking_calls.load(), 2U);  // No dispatch of the third item after scoped cancellation.
     EXPECT_EQ(blocking_peak.load(), 2U);
     EXPECT_EQ(blocking_active.load(), 0U); // No borrowed child work survives parent completion.
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     for (const auto& child : children) {
         EXPECT_EQ(child.state, ProgramChildState::Cancelled);
@@ -23196,7 +22999,7 @@ TEST(ProgramRuntimeTest, AwaitScopedExpansionTimeoutCancelsActiveBatchAndStopsPe
     EXPECT_EQ(blocking_calls.load(), 2U);
     EXPECT_EQ(blocking_peak.load(), 2U);
     EXPECT_EQ(blocking_active.load(), 0U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     for (const auto& child : children) {
         EXPECT_EQ(child.state, ProgramChildState::Cancelled);
@@ -23250,7 +23053,7 @@ TEST(ProgramRuntimeTest, ExpansionPartialLaunchFailureDrainsAlreadyBorrowingTask
     EXPECT_EQ(blocking_calls.load(), 2U);
     EXPECT_EQ(blocking_peak.load(), 2U);
     EXPECT_EQ(blocking_active.load(), 0U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     for (const auto& child : children) {
         EXPECT_EQ(child.state, ProgramChildState::Cancelled);
@@ -23298,7 +23101,7 @@ TEST(ProgramRuntimeTest, AwaitScopedParallelMapTimeoutCancelsLateAttachedChild) 
     EXPECT_EQ(result.failure()->code, "P_AWAIT_TIMEOUT");
     EXPECT_GE(blocking_calls.load(), 1U);
     EXPECT_EQ(blocking_active.load(), 0U);
-    const auto children = parent.snapshot().children();
+    const auto children = parent.snapshot().snapshot_children();
     ASSERT_EQ(children.size(), 2U);
     for (const auto& child : children) {
         EXPECT_EQ(child.state, ProgramChildState::Cancelled);
