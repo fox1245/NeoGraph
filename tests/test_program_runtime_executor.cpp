@@ -1243,3 +1243,327 @@ TEST(ProgramOperationLockTest, ABlockingCallerWaitsForAnAwaitingHolder) {
     work.reset();
     io_thread.join();
 }
+
+namespace {
+
+asio::awaitable<void> park_coroutine(std::vector<std::function<void()>>& continuations) {
+    const auto executor = co_await asio::this_coro::executor;
+    co_await asio::async_initiate<decltype(asio::use_awaitable), void()>(
+        [&continuations, executor](auto handler) {
+            using Handler   = std::decay_t<decltype(handler)>;
+            auto completion = std::make_shared<Handler>(std::move(handler));
+            continuations.push_back([executor, completion]() mutable {
+                asio::post(executor, [completion] { (*completion)(); });
+            });
+        },
+        asio::use_awaitable);
+}
+
+class FirstPublicationParkingJournal final : public ProgramTransitionStore {
+public:
+    NG_FORWARD_RELATION_ASYNC(*inner_, ;)
+    FirstPublicationParkingJournal() : inner_(std::make_shared<InMemoryProgramTransitionStore>()) {}
+
+    bool wait_for_parked(std::size_t target, std::chrono::milliseconds limit) {
+        std::unique_lock lock(mutex_);
+        return changed_.wait_for(lock, limit, [this, target] { return parked_runs_.size() >= target; });
+    }
+
+    std::size_t parked_count() const {
+        std::lock_guard lock(mutex_);
+        return parked_runs_.size();
+    }
+
+    void release_all() {
+        std::vector<std::function<void()>> continuations;
+        {
+            std::lock_guard lock(mutex_);
+            released_ = true;
+            continuations.swap(continuations_);
+        }
+        for (auto& resume : continuations) resume();
+    }
+
+    asio::awaitable<std::optional<ProgramRunRecord>> load(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramJournalRecord>> latest(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->latest(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunPublicationHead>> load_run_publication_head(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_run_publication_head(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramEvent>> load_events(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_return co_await inner_->load_events(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<ProgramEffectOutboxEntry>> load_effects(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_return co_await inner_->load_effects(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<ProgramJavaScriptCommandJournalEntry>> load_javascript_commands(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_return co_await inner_->load_javascript_commands(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::optional<ProgramCommandPublicationHead>> load_command_publication_head(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_command_publication_head(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramContextPublication>> load_context_publications(std::string_view owner_scope, std::string_view run_id, std::uint64_t after_sequence) const override {
+        co_return co_await inner_->load_context_publications(owner_scope, run_id, after_sequence);
+    }
+    asio::awaitable<std::vector<HookOutboxEntry>> load_hook_outbox_entries(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_hook_outbox_entries(owner_scope, run_id);
+    }
+    asio::awaitable<ProgramEffectiveRuntimeState> load_effective_runtime_state(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_effective_runtime_state(owner_scope, run_id);
+    }
+    asio::awaitable<std::vector<ProgramChildSynthesisRecord>> load_child_syntheses(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_child_syntheses(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<MigrationPlan>> load_migration_plan(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_migration_plan(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_lineage(std::string_view owner_scope, std::string_view lineage_id) const override {
+        co_return co_await inner_->load_lineage(owner_scope, lineage_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_run_lineage(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_run_lineage(owner_scope, run_id);
+    }
+    asio::awaitable<std::optional<ProgramRunLineage>> load_lineage_head(std::string_view owner_scope, std::string_view lineage_id, std::string_view head_id) const override {
+        co_return co_await inner_->load_lineage_head(owner_scope, lineage_id, head_id);
+    }
+    asio::awaitable<std::optional<ProgramRunGeneration>> load_generation(std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const override {
+        co_return co_await inner_->load_generation(owner_scope, lineage_id, generation);
+    }
+    asio::awaitable<std::optional<ProgramTransitionPublication>> load_generation_initial_publication(std::string_view owner_scope, std::string_view lineage_id, std::uint64_t generation) const override {
+        co_return co_await inner_->load_generation_initial_publication(owner_scope, lineage_id, generation);
+    }
+    asio::awaitable<std::optional<GraphMigrationCapsule>> load_graph_migration_capsule(std::string_view owner_scope, std::string_view source_run_id, std::string_view source_lineage_head_id) const override {
+        co_return co_await inner_->load_graph_migration_capsule(owner_scope, source_run_id, source_lineage_head_id);
+    }
+    asio::awaitable<std::optional<ProgramExecutionLease>> load_execution_lease(std::string_view owner_scope, std::string_view run_id) const override {
+        co_return co_await inner_->load_execution_lease(owner_scope, run_id);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication) override {
+        if (!expected_journal_head.empty()) {
+            const auto executor = co_await asio::this_coro::executor;
+            auto       token    = asio::bind_executor(executor, asio::use_awaitable);
+            co_await asio::async_initiate<decltype(token), void()>(
+                [this, executor, run_id = publication.run_record.run_id()](auto handler) {
+                    using Handler   = std::decay_t<decltype(handler)>;
+                    auto completion = std::make_shared<Handler>(std::move(handler));
+                    bool resume_now = false;
+                    {
+                        std::lock_guard lock(mutex_);
+                        if (released_ || !parked_runs_.insert(run_id).second) {
+                            resume_now = true;
+                        } else {
+                            continuations_.push_back([executor, completion]() mutable {
+                                asio::post(executor, [completion] { (*completion)(); });
+                            });
+                            changed_.notify_all();
+                        }
+                    }
+                    if (resume_now) asio::post(executor, [completion] { (*completion)(); });
+                },
+                token);
+        }
+        co_return co_await inner_->compare_publish(owner_scope, expected_journal_head, expected_fence, std::move(publication));
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_execution(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication, std::optional<ProgramExecutionLease> expected_lease, std::optional<ProgramExecutionLease> next_lease) override {
+        co_return co_await inner_->compare_publish_execution(owner_scope, expected_journal_head, expected_fence, std::move(publication), std::move(expected_lease), std::move(next_lease));
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_graph_safe_point(std::string_view owner_scope, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramTransitionPublication publication, const ProgramGraphSafePointEvidence& evidence, const GraphMigrationCapsule& capsule, const ProgramExecutionLease& execution_lease) override {
+        co_return co_await inner_->compare_publish_graph_safe_point(owner_scope, expected_journal_head, expected_fence, std::move(publication), evidence, capsule, execution_lease);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence) override {
+        co_return co_await inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
+    }
+
+private:
+    std::shared_ptr<InMemoryProgramTransitionStore> inner_;
+    mutable std::mutex                              mutex_;
+    std::condition_variable                         changed_;
+    std::set<std::string>                           parked_runs_;
+    std::vector<std::function<void()>>              continuations_;
+    bool                                            released_ = false;
+};
+
+}  // namespace
+
+namespace {
+
+// Runs every handler that is ready on `ioc` and returns when none is: coroutines that are parked do not keep it going.
+void run_ready(asio::io_context& ioc) {
+    ioc.restart();
+    ioc.poll();
+}
+
+}  // namespace
+
+TEST(ProgramOperationLockTest, KeyedOperationLockHasNoCollisions) {
+    neograph::program::detail::KeyedOperationLock lock;
+    asio::io_context                              ioc(1);
+    std::vector<std::function<void()>>            continuations;
+    int                                           holders = 0;
+
+    for (int index = 0; index < 258; ++index) {
+        asio::co_spawn(
+            ioc,
+            [&, index]() -> asio::awaitable<void> {
+                auto guard = co_await lock.lock_async(
+                    {"coord", "tenant:runtime", "run-" + std::to_string(index)});
+                ++holders;
+                co_await park_coroutine(continuations);
+                --holders;
+            },
+            asio::detached);
+    }
+    run_ready(ioc);
+    EXPECT_EQ(holders, 258);
+    EXPECT_EQ(continuations.size(), 258U);
+    EXPECT_EQ(lock.size_for_test(), 258U);
+
+    for (auto& resume : continuations) resume();
+    run_ready(ioc);
+    EXPECT_EQ(holders, 0);
+    EXPECT_EQ(lock.size_for_test(), 0U);
+}
+
+TEST(ProgramOperationLockTest, KeyedOperationLockGrantsOneKeyInOrder) {
+    neograph::program::detail::KeyedOperationLock            lock;
+    const neograph::program::detail::KeyedOperationLock::Key key{"coord", "tenant:runtime", "run-shared"};
+    asio::io_context                                         ioc(1);
+    std::vector<std::function<void()>>                       continuations;
+    std::vector<int>                                         order;
+    int                                                      inside = 0;
+    int                                                      peak   = 0;
+    asio::cancellation_signal                                cancel;
+    std::optional<std::size_t>                               cancelled_waiter_ended_after;
+    std::size_t                                              released = 0;
+
+    auto spawn_acquirer = [&](int index) {
+        asio::co_spawn(
+            ioc,
+            [&, index]() -> asio::awaitable<void> {
+                auto guard = co_await lock.lock_async(key);
+                ++inside;
+                peak = std::max(peak, inside);
+                order.push_back(index);
+                co_await park_coroutine(continuations);
+                --inside;
+            },
+            asio::detached);
+    };
+
+    for (int index = 0; index < 128; ++index) spawn_acquirer(index);
+    // A waiter that is cancelled while it waits keeps its place in the queue, takes its turn and releases.
+    asio::co_spawn(
+        ioc,
+        [&]() -> asio::awaitable<void> {
+            auto guard = co_await lock.lock_async(key);
+            order.push_back(-1);
+        },
+        asio::bind_cancellation_slot(cancel.slot(), [&](std::exception_ptr) {
+            cancelled_waiter_ended_after = released;
+        }));
+    for (int index = 128; index < 258; ++index) spawn_acquirer(index);
+
+    run_ready(ioc);
+    ASSERT_EQ(continuations.size(), 1U);
+    EXPECT_EQ(inside, 1);
+    EXPECT_EQ(lock.size_for_test(), 1U);
+
+    cancel.emit(asio::cancellation_type::terminal);
+    run_ready(ioc);
+    EXPECT_FALSE(cancelled_waiter_ended_after.has_value());
+
+    while (released < continuations.size()) {
+        EXPECT_EQ(inside, 1);
+        EXPECT_EQ(lock.size_for_test(), 1U);
+        continuations[released++]();
+        run_ready(ioc);
+    }
+
+    EXPECT_EQ(inside, 0);
+    EXPECT_EQ(peak, 1);
+    // 258 acquirers park in turn; the cancelled waiter took its turn after the 128th and released at once.
+    EXPECT_EQ(released, 258U);
+    ASSERT_TRUE(cancelled_waiter_ended_after.has_value());
+    EXPECT_EQ(*cancelled_waiter_ended_after, 128U);
+    ASSERT_EQ(order.size(), 259U);
+    for (std::size_t position = 0; position < order.size(); ++position) {
+        const int expected = position < 128 ? static_cast<int>(position)
+                           : position == 128 ? -1
+                                             : static_cast<int>(position) - 1;
+        EXPECT_EQ(order[position], expected);
+    }
+    EXPECT_EQ(lock.size_for_test(), 0U);
+}
+
+#if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
+TEST(ProgramRuntimeExecutorTest, Runtime258RunsReachTheirFirstPublication) {
+    auto            journal = std::make_shared<FirstPublicationParkingJournal>();
+    ExecutorFixture fixture(4, {}, journal, {}, ExecutionGuarantee::Unmanaged, true);
+    const auto      version = fixture.admit_javascript(
+        "export function define() {\n"
+        "  const graph = ng.graph(\"main\");\n"
+        "  graph.channel(\"value\", {reducer: \"runtime-overwrite\", initial: \"\"});\n"
+        "  graph.node(\"work\", {type: \"executor-record\"});\n"
+        "  graph.entry(\"work\");\n"
+        "  graph.exit(\"work\");\n"
+        "  return graph;\n"
+        "}\n\n"
+        "export function* main(input) {\n"
+        "  return yield ng.callCore(\"main\", input, \"first\");\n"
+        "}\n");
+
+    const RunBudget            child_enabled_budget{60000, 1000, 1000, 1, 4, 20, 0, 1, 1};
+    std::vector<ProgramHandle> handles;
+    handles.reserve(258);
+    for (int index = 0; index < 258; ++index) {
+        handles.push_back(fixture.runtime->start(
+            "tenant:runtime", version,
+            ProgramInvocation{json::object(), child_enabled_budget,
+                              "trace-258-" + std::to_string(index), {},
+                              "run-258-" + std::to_string(index)}));
+    }
+
+    EXPECT_TRUE(journal->wait_for_parked(258, 10s));
+    EXPECT_EQ(journal->parked_count(), 258U);
+    journal->release_all();
+
+    for (auto& handle : handles) {
+        const auto result = handle.wait();
+        EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed);
+    }
+}
+#endif
+
+TEST(ProgramOperationLockTest, KeyedOperationLockStress) {
+    neograph::program::detail::KeyedOperationLock lock;
+    const std::array<neograph::program::detail::KeyedOperationLock::Key, 4> keys{{
+        {"coord", "tenant:runtime", "key-0"},
+        {"coord", "tenant:runtime", "key-1"},
+        {"coord", "tenant:runtime", "key-2"},
+        {"coord", "tenant:runtime", "key-3"},
+    }};
+    std::array<std::atomic<int>, 4> active{{0, 0, 0, 0}};
+    std::atomic<bool>               overlap{false};
+    std::vector<std::thread>        threads;
+    threads.reserve(8);
+
+    for (int thread_id = 0; thread_id < 8; ++thread_id) {
+        threads.emplace_back([&, thread_id] {
+            for (int cycle = 0; cycle < 20000; ++cycle) {
+                const auto index = static_cast<std::size_t>((thread_id + cycle) & 3);
+                auto       guard = lock.lock_blocking(keys[index]);
+                if (active[index].fetch_add(1, std::memory_order_acq_rel) != 0)
+                    overlap.store(true, std::memory_order_relaxed);
+                if (active[index].fetch_sub(1, std::memory_order_acq_rel) != 1)
+                    overlap.store(true, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+
+    EXPECT_FALSE(overlap.load());
+    EXPECT_EQ(lock.size_for_test(), 0U);
+}

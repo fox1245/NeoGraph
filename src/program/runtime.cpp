@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -1607,21 +1608,78 @@ ProgramChildState child_state_for_result(ProgramTerminalStatus status) {
     }
 }
 
-// A parent run's child relation is one durable compare-and-swap chain.  Child
-// dispatch, child completion, and parent terminal publication can run on
-// different scheduler threads; serialize local writers for the same chain.
-// Striping avoids a global bottleneck while harmlessly serializing collisions.
-detail::OperationLock& child_relation_publication_mutex(const ProgramTransitionStore& transitions,
-                                                        std::string_view owner_scope,
-                                                        std::string_view parent_run_id) {
-    static std::array<detail::OperationLock, 257> locks;
-    const auto                         mix = [](std::size_t seed, std::size_t value) noexcept {
-        return seed ^ (value + 0x9e3779b97f4a7c15ULL + (seed << 6U) + (seed >> 2U));
+struct ProcessRuntimeState {
+    struct ControlEntry {
+        std::string                       owner_scope;
+        std::string                       run_id;
+        std::weak_ptr<detail::RunControl> control;
     };
-    auto key = std::hash<const void*>{}(static_cast<const void*>(&transitions));
-    key      = mix(key, std::hash<std::string_view>{}(owner_scope));
-    key      = mix(key, std::hash<std::string_view>{}(parent_run_id));
-    return locks[key % locks.size()];
+
+    std::shared_ptr<detail::ReentrantOperationLock> transition_mutex =
+        std::make_shared<detail::ReentrantOperationLock>();
+    detail::KeyedOperationLock child_relation_publication_locks;
+    detail::PureMutex          controls_mutex;
+    std::vector<ControlEntry>  controls;
+    // Every control that is still held by a handle, finished or not (it holds weakly): where a notice about a paused
+    // run goes when nothing else in this process can say why the run was not continued (#658).
+    std::vector<ControlEntry> held_controls;
+    // Notices for runs that had no held control in memory when an asynchronous continuation or descendant action
+    // failed: delivered to the next control created for that run (#658).
+    std::map<std::pair<std::string, std::string>, std::vector<ProgramNotice>> pending_notices;
+    // The paused runs (owner scope, run id) whose continuation after an answered child is entering a publication in
+    // this process: one entry decides, and another caller leaves the run to it (#658).
+    detail::PureMutex                                 continuations_mutex;
+    std::set<std::pair<std::string, std::string>>     continuations;
+    // The cancellations of interrupted runs that a task of an executor has yet to record.
+    std::shared_ptr<detail::PendingCancellations> pending_cancellations =
+        std::make_shared<detail::PendingCancellations>();
+};
+
+std::shared_ptr<ProcessRuntimeState> process_runtime_state(const ProgramTransitionStore& transitions) {
+    static std::mutex registry_mutex;
+    static std::unordered_map<const ProgramTransitionStore*, std::weak_ptr<ProcessRuntimeState>>
+        address_registry;
+    static std::unordered_map<std::string, std::weak_ptr<ProcessRuntimeState>> key_registry;
+    std::lock_guard lock(registry_mutex);
+    std::erase_if(address_registry, [](const auto& entry) { return entry.second.expired(); });
+    std::erase_if(key_registry, [](const auto& entry) { return entry.second.expired(); });
+    const auto coordination_key = transitions.process_coordination_key();
+    auto& weak = coordination_key.empty() ? address_registry[&transitions]
+                                          : key_registry[coordination_key];
+    if (auto state = weak.lock()) return state;
+    auto state = std::make_shared<ProcessRuntimeState>();
+    weak       = state;
+    return state;
+}
+
+bool same_process_coordination_backend(const ProgramTransitionStore& lhs,
+                                       const ProgramTransitionStore& rhs) {
+    const auto lhs_key = lhs.process_coordination_key();
+    const auto rhs_key = rhs.process_coordination_key();
+    return !lhs_key.empty() || !rhs_key.empty() ? !lhs_key.empty() && lhs_key == rhs_key
+                                                : &lhs == &rhs;
+}
+
+detail::KeyedOperationLock::Key child_relation_publication_key(const ProgramTransitionStore& transitions,
+                                                               std::string_view              owner_scope,
+                                                               std::string_view              logical_run_id) {
+    auto coordination = transitions.process_coordination_key();
+    if (coordination.empty())
+        coordination = std::to_string(reinterpret_cast<std::uintptr_t>(&transitions));
+    return detail::KeyedOperationLock::Key{std::move(coordination), std::string(owner_scope),
+                                           std::string(logical_run_id)};
+}
+
+// One parent's command publications are serialized against its child-relation publications (spawn, completion), its
+// admission snapshot and its synthesis, because the publications build on a head they read and a sibling's write
+// between the read and the compare-and-swap costs a retry. It serializes nothing across different keys.
+asio::awaitable<detail::KeyedOperationLock::Guard> lock_child_relation_publication(
+    const ProgramTransitionStore& transitions,
+    std::string_view              owner_scope,
+    std::string_view              logical_run_id) {
+    auto state = process_runtime_state(transitions);
+    co_return co_await state->child_relation_publication_locks.lock_async(
+        child_relation_publication_key(transitions, owner_scope, logical_run_id));
 }
 
 asio::awaitable<std::optional<ProgramRunRecord>> load_active_agent_run(
@@ -1751,7 +1809,7 @@ asio::awaitable<ChildRecordPublication> publish_child_record(
     ProgramChildRecord                      child,
     std::function<bool()>                   stopping       = {},
     std::shared_ptr<detail::RunControl>     parent_control = {}) {
-    auto lock = co_await child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_async();
+    auto lock = co_await lock_child_relation_publication(*transitions, owner_scope, parent_run_id);
     co_return co_await publish_child_record_unlocked(owner_scope, parent_run_id, expected_parent_fence,
                                                      transitions, std::move(child), stopping,
                                                      std::move(parent_control));
@@ -1785,7 +1843,7 @@ asio::awaitable<bool> publish_child_completion(std::shared_ptr<ProgramTransition
     if (owes_wake) *owes_wake = false;
     try {
         auto lock =
-            co_await child_relation_publication_mutex(*transitions, owner_scope, parent_run_id).lock_async();
+            co_await lock_child_relation_publication(*transitions, owner_scope, parent_run_id);
         std::uint64_t terminal_generation = 0;
         const auto    child_lineage = co_await transitions->load_run_lineage(owner_scope, child_run_id);
         if (child_lineage) {
@@ -2572,6 +2630,19 @@ void RunControl::set_child_recovery_callback(ChildRecoveryCallback callback) noe
 void RunControl::set_child_grant_callback(ChildGrantCallback callback) noexcept {
     std::lock_guard lock(mutex_);
     child_grant_callback_ = std::move(callback);
+}
+void RunControl::set_live_remaining_budget(LiveRemainingProvider provider) noexcept {
+    std::lock_guard lock(mutex_);
+    live_remaining_provider_ = std::move(provider);
+}
+std::optional<RunBudget> RunControl::live_remaining_budget() const {
+    LiveRemainingProvider provider;
+    {
+        std::lock_guard lock(mutex_);
+        provider = live_remaining_provider_;
+    }
+    if (!provider) return std::nullopt;
+    return provider();
 }
 asio::awaitable<std::optional<RunBudget>> RunControl::child_grant(std::string binding) const {
     ChildGrantCallback callback;
@@ -5011,10 +5082,7 @@ asio::awaitable<ProgramRunRecord> RunControl::snapshot_async() const {
 asio::awaitable<ProgramRunRecord> RunControl::snapshot_with_children_async() const {
     auto record = co_await snapshot_async();
     const auto rows = co_await transitions->load_child_relations(owner_scope, record.logical_run_id());
-    std::vector<ProgramChildRecord> children;
-    children.reserve(rows.size());
-    for (const auto& row : rows) children.push_back(row.child());
-    co_return record.with_snapshot_children(std::move(children));
+    co_return with_child_relations(record, rows);
 }
 ProgramRunRecord RunControl::snapshot() const {
     return scheduler->run_blocking(snapshot_with_children_async(), "ProgramHandle::snapshot", "ProgramHandle::snapshot_async",
@@ -5212,12 +5280,11 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
     bool use_head_hint = true;
     int  attempts_after_hint = 0;  // the read that replaces a dropped hint is not one of the attempts
     for (int retry = 0; retry < kRunPublicationAttempts + attempts_after_hint; ++retry) {
-        detail::OperationLock::Guard publication_lock;
+        detail::KeyedOperationLock::Guard publication_lock;
         if (serialize_with_child_relations) {
             publication_lock =
-                co_await child_relation_publication_mutex(async_transitions(), owner_scope,
-                                                          logical_run_id)
-                    .lock_async();
+                co_await lock_child_relation_publication(async_transitions(), owner_scope,
+                                                         logical_run_id);
         }
         std::optional<ProgramCommandPublicationHead> head;
         bool                                         head_from_hint = false;
@@ -5481,57 +5548,6 @@ namespace {
 
 asio::awaitable<ProgramResult> wait_for_control(std::shared_ptr<detail::RunControl> control) {
     co_return co_await control->wait_async();
-}
-
-struct ProcessRuntimeState {
-    struct ControlEntry {
-        std::string                       owner_scope;
-        std::string                       run_id;
-        std::weak_ptr<detail::RunControl> control;
-    };
-
-    std::shared_ptr<detail::ReentrantOperationLock> transition_mutex =
-        std::make_shared<detail::ReentrantOperationLock>();
-    detail::PureMutex         controls_mutex;
-    std::vector<ControlEntry> controls;
-    // Every control that is still held by a handle, finished or not (it holds weakly): where a notice about a paused
-    // run goes when nothing else in this process can say why the run was not continued (#658).
-    std::vector<ControlEntry> held_controls;
-    // Notices for runs that had no held control in memory when an asynchronous continuation or descendant action
-    // failed: delivered to the next control created for that run (#658).
-    std::map<std::pair<std::string, std::string>, std::vector<ProgramNotice>> pending_notices;
-    // The paused runs (owner scope, run id) whose continuation after an answered child is entering a publication in
-    // this process: one entry decides, and another caller leaves the run to it (#658).
-    detail::PureMutex                                 continuations_mutex;
-    std::set<std::pair<std::string, std::string>>     continuations;
-    // The cancellations of interrupted runs that a task of an executor has yet to record.
-    std::shared_ptr<detail::PendingCancellations> pending_cancellations =
-        std::make_shared<detail::PendingCancellations>();
-};
-
-std::shared_ptr<ProcessRuntimeState> process_runtime_state(const ProgramTransitionStore& transitions) {
-    static std::mutex registry_mutex;
-    static std::unordered_map<const ProgramTransitionStore*, std::weak_ptr<ProcessRuntimeState>>
-        address_registry;
-    static std::unordered_map<std::string, std::weak_ptr<ProcessRuntimeState>> key_registry;
-    std::lock_guard lock(registry_mutex);
-    std::erase_if(address_registry, [](const auto& entry) { return entry.second.expired(); });
-    std::erase_if(key_registry, [](const auto& entry) { return entry.second.expired(); });
-    const auto coordination_key = transitions.process_coordination_key();
-    auto& weak = coordination_key.empty() ? address_registry[&transitions]
-                                          : key_registry[coordination_key];
-    if (auto state = weak.lock()) return state;
-    auto state = std::make_shared<ProcessRuntimeState>();
-    weak       = state;
-    return state;
-}
-
-bool same_process_coordination_backend(const ProgramTransitionStore& lhs,
-                                       const ProgramTransitionStore& rhs) {
-    const auto lhs_key = lhs.process_coordination_key();
-    const auto rhs_key = rhs.process_coordination_key();
-    return !lhs_key.empty() || !rhs_key.empty() ? !lhs_key.empty() && lhs_key == rhs_key
-                                                : &lhs == &rhs;
 }
 
 }  // namespace
@@ -6635,7 +6651,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     child->invocation.child_depth};
                 co_return (co_await ProgramRuntime(keep, ProgramRuntime::Borrowed{})
                                .start_child_core(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
-                                                 resolved->version, std::move(invocation)))
+                                                 resolved->version, std::move(invocation), true))
                     .control_;
             }
             const auto budget =
@@ -6680,7 +6696,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             ProgramHandle child =
                 co_await ProgramRuntime(keep, ProgramRuntime::Borrowed{})
                     .start_child_core(parent->owner_scope, ProgramHandle(parent), resolved->receipt,
-                                      resolved->version, std::move(invocation));
+                                      resolved->version, std::move(invocation), true);
             if (synthesis && synthesis->data().state == ProgramChildSynthesisState::Dispatching) {
                 auto data        = synthesis->data();
                 data.previous_id = synthesis->id();
@@ -7612,7 +7628,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
                                                                ProgramHandle     parent,
                                                                ModuleLinkReceipt link,
                                                                ProgramVersion    version,
-                                                               ProgramInvocation invocation) {
+                                                               ProgramInvocation invocation,
+                                                               bool              hold_against_live_remaining) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (!parent.control_) throw std::invalid_argument("Parent Program handle is empty");
     if (parent.control_->transitions.get() != impl_->transitions.get())
@@ -7624,9 +7641,8 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
     // a concurrent child completion may advance both immediately after this read.
     std::optional<ProgramRunPublicationHead> parent_head;
     {
-        auto lock = co_await child_relation_publication_mutex(*impl_->transitions, owner_scope,
-                                                              parent.control_->logical_run_id)
-                        .lock_async();
+        auto lock = co_await lock_child_relation_publication(*impl_->transitions, owner_scope,
+                                                             parent.control_->logical_run_id);
         parent_head = co_await impl_->transitions->load_run_publication_head(owner_scope, parent.run_id());
     }
     if (!parent_head)
@@ -7728,6 +7744,18 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
         }
         parent_budget = restore_reserved_resources(parent_record.remaining_budget(),
                                                     parent_journal.inflight_reservation);
+        // A plan parent publishes no spend while its attempt runs: the stored remainder is what the attempt was
+        // granted, however much a Core call has spent since. A child is held against the lesser of the two, so
+        // that the parent keeps what it has not spent for its children and a child is never granted what the
+        // parent already spent. The ledger check below runs under one lock, so children launched at the same
+        // time are held against it together.
+        if (const auto live = hold_against_live_remaining ? parent.control_->live_remaining_budget()
+                                                          : std::nullopt) {
+            parent_budget.model_tokens = std::min(parent_budget.model_tokens, live->model_tokens);
+            parent_budget.monetary_microunits =
+                std::min(parent_budget.monetary_microunits, live->monetary_microunits);
+            parent_budget.max_core_steps = std::min(parent_budget.max_core_steps, live->max_core_steps);
+        }
         const auto reserved = impl_->reserved_children(parent_run_id);
         validate_child_link(*pinned, link, version, invocation, parent_budget, reserved,
                             max_supported_child_depth);
@@ -9652,9 +9680,8 @@ asio::awaitable<ProgramSynthesisReservation> ProgramRuntime::reserve_synthesis_c
     (void)handoff.value();
     if (impl_->find_control(owner_scope, source.run_id()) != source.control_)
         throw_runtime_diagnostic("P_SYNTHESIS_GENERATION", "Synthesis requires the owning runtime");
-    auto lock = co_await child_relation_publication_mutex(*impl_->transitions, owner_scope,
-                                                          source.logical_run_id())
-                    .lock_async();
+    auto lock = co_await lock_child_relation_publication(*impl_->transitions, owner_scope,
+                                                         source.logical_run_id());
     const auto      run     = (co_await source.snapshot_async());
     if (run.continuation().fence != source.control_->fence) {
         source.control_->mark_taken_over(run.continuation().fence);
@@ -9735,8 +9762,8 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::prepare_child_synth
                                  "Child synthesis requires this runtime's held parent checkpoint");
     (void)handoff.value();
     auto synthesis_lock =
-        co_await child_relation_publication_mutex(*impl_->transitions, owner_scope, parent.run_id())
-            .lock_async();
+        co_await lock_child_relation_publication(*impl_->transitions, owner_scope,
+                                                 parent.logical_run_id());
     if (!impl_->config.child_synthesis_gateway || !impl_->config.child_synthesis_grant_resolver)
         throw_runtime_diagnostic("P_CHILD_SYNTHESIS_AUTHORITY",
                                  "Child synthesis host policy is unavailable");

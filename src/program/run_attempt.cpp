@@ -1932,27 +1932,36 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         return monetary ? monetary->used() : 0;
     };
     auto                     core_progress         = std::make_shared<AttemptCoreProgress>();
+    PureMutex                plan_mutex;
     std::uint64_t            operation_count       = 0;
     std::uint64_t            dynamic_compile_count = 0;
     std::atomic<std::size_t> active_concurrency{0};
     std::atomic<std::size_t> peak_concurrency{0};
-    // The part of the grant that the running JavaScript command leaves to the parent's children (what they hold and
-    // what the command's own spawns will be granted): the command's Core calls cannot spend it. Zero outside a command.
+    // The part of the grant that the running JavaScript command or carving plan parallel/race leaves to the parent's
+    // children (what they hold and what its own spawns will be granted): its Core calls cannot spend it. Zero outside a
+    // command and outside a carving parallel/race.
     std::atomic<std::uint64_t> command_withheld_tokens{0};
     std::atomic<std::uint64_t> command_withheld_steps{0};
     std::atomic<std::uint64_t> command_withheld_money{0};
-    // What a Core call may not spend: the larger of the running command's withheld part and what the run's children
-    // hold now. A plan has no command, so for a plan parent it is the holdings alone, read at every Core dispatch,
-    // after the spawn that placed them.
+    std::atomic<std::uint64_t> plan_withheld_tokens{0};
+    std::atomic<std::uint64_t> plan_withheld_steps{0};
+    std::atomic<std::uint64_t> plan_withheld_money{0};
+    std::atomic<std::size_t>   active_carving_scopes{0};
+    // What a Core call may not spend: the largest of the running command's withheld part, the active plan parallel/race
+    // withheld part, and what the run's children hold now.
     const auto core_withheld = [&]() {
         const auto held = control->children_held();
         RunBudget  withheld;
         withheld.model_tokens =
-            std::max(command_withheld_tokens.load(std::memory_order_acquire), held.model_tokens);
+            std::max({command_withheld_tokens.load(std::memory_order_acquire),
+                      plan_withheld_tokens.load(std::memory_order_acquire), held.model_tokens});
         withheld.max_core_steps =
-            std::max(command_withheld_steps.load(std::memory_order_acquire), held.max_core_steps);
+            std::max({command_withheld_steps.load(std::memory_order_acquire),
+                      plan_withheld_steps.load(std::memory_order_acquire), held.max_core_steps});
         withheld.monetary_microunits =
-            std::max(command_withheld_money.load(std::memory_order_acquire), held.monetary_microunits);
+            std::max({command_withheld_money.load(std::memory_order_acquire),
+                      plan_withheld_money.load(std::memory_order_acquire),
+                      held.monetary_microunits});
         return withheld;
     };
     const auto apply_core_ceiling = [&]() {
@@ -1966,10 +1975,31 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         command_withheld_money.store(kept.monetary_microunits, std::memory_order_release);
         apply_core_ceiling();
     };
+    const auto apply_plan_withheld = [&](const RunBudget& kept) {
+        plan_withheld_tokens.store(kept.model_tokens, std::memory_order_release);
+        plan_withheld_steps.store(kept.max_core_steps, std::memory_order_release);
+        plan_withheld_money.store(kept.monetary_microunits, std::memory_order_release);
+        apply_core_ceiling();
+    };
     // Program operations are debited up front, so the children's operations come off the parent's own ceiling.
     const auto spendable_operations = [&]() {
         return subtract_saturated(control->granted_budget.max_program_operations,
                                   control->children_held().max_program_operations);
+    };
+    const auto plan_spendable = [&]() {
+        ProgramUsage current_usage;
+        current_usage.model_tokens        = model_tokens(usage);
+        current_usage.monetary_microunits = monetary_used();
+        {
+            std::lock_guard lock(plan_mutex);
+            current_usage.program_operations = operation_count;
+        }
+        current_usage.core_steps = core_progress->steps();
+        return settle_budget(control->granted_budget, current_usage);
+    };
+    const auto without_clock = [](RunBudget budget) {
+        budget.wall_time_ms = 0;
+        return budget;
     };
     // #364: RunBudget::max_node_retries, shared by every Core call of the
     // attempt; its use is reported as ProgramUsage::node_retries.
@@ -2067,6 +2097,18 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         // What the run's children hold is read once here, so that a resumed or recovered attempt reserves a command
         // without it; the run's own launches refresh it as they happen.
         co_await control->refresh_children_held();
+        // A plan publishes no spend while it runs, so the remainder its record stores is what the attempt was granted.
+        // A child it launches is held against what the attempt has not spent (see RunControl::set_live_remaining_budget);
+        // the provider owns what it reads, so it stays valid whatever the attempt's frame does.
+        if (!control_source && !control->recorded_replay)
+            control->set_live_remaining_budget(
+                [granted = control->granted_budget, usage, monetary, core_progress]() {
+                    ProgramUsage spent;
+                    spent.model_tokens        = model_tokens(usage);
+                    spent.monetary_microunits = monetary ? monetary->used() : 0;
+                    spent.core_steps          = core_progress->steps();
+                    return settle_budget(granted, spent);
+                });
         if (checkpoint_id) {
             resume_checkpoint = co_await inspect_checkpoint(control, *checkpoint_id);
             if (const auto durable = co_await control->async_transitions().load(
@@ -2109,7 +2151,6 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             throw_runtime_diagnostic("P_RUNTIME_PLAN",
                                      "Admitted Program root operation is missing");
 
-        PureMutex                            plan_mutex;
         OperationLock                        dynamic_compile_turn;
         std::optional<std::string>            resume_id = checkpoint_id;
         std::optional<CoreCheckpointIdentity> last_root_checkpoint;
@@ -2370,6 +2411,233 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 }
             }
             co_return true;
+        };
+
+        const auto multiply_permanent_budget = [](RunBudget     budget,
+                                                  std::uint64_t bound) -> std::optional<RunBudget> {
+            const auto mul = [bound](std::uint64_t& field) {
+                if (bound != 0 && field > std::numeric_limits<std::uint64_t>::max() / bound)
+                    return false;
+                field *= bound;
+                return true;
+            };
+            if (!mul(budget.wall_time_ms) || !mul(budget.model_tokens) ||
+                !mul(budget.monetary_microunits) || !mul(budget.max_program_operations) ||
+                !mul(budget.max_core_steps) || !mul(budget.max_dynamic_compiles) ||
+                !mul(budget.max_total_children))
+                return std::nullopt;
+            return budget;
+        };
+
+        const auto larger_permanent_budget = [](const RunBudget& lhs, const RunBudget& rhs) {
+            RunBudget larger;
+            larger.wall_time_ms           = std::max(lhs.wall_time_ms, rhs.wall_time_ms);
+            larger.model_tokens           = std::max(lhs.model_tokens, rhs.model_tokens);
+            larger.monetary_microunits    = std::max(lhs.monetary_microunits, rhs.monetary_microunits);
+            larger.max_program_operations = std::max(lhs.max_program_operations, rhs.max_program_operations);
+            larger.max_core_steps         = std::max(lhs.max_core_steps, rhs.max_core_steps);
+            larger.max_dynamic_compiles   = std::max(lhs.max_dynamic_compiles, rhs.max_dynamic_compiles);
+            larger.max_total_children     = std::max(lhs.max_total_children, rhs.max_total_children);
+            return larger;
+        };
+
+        // The permanent budget that the plan operation `id` could hold for children, added to `total`; false when a
+        // sum overflows. A plan parallel or race sets it aside before any branch starts (see the callers). Where the
+        // number of children is not fixed by the plan, the bound is the largest the operation's own limits allow, so
+        // the set-aside never falls short of what the children are granted; it may exceed what an operation that
+        // launches fewer children is granted, and a parallel whose bound does not fit ends P_CHILD_BUDGET.
+        // A spawn whose child an earlier attempt already launched is credited only when its input is exactly known
+        // (the first operation of a branch); one that is not (a later operation of a sequence, a loop body, the
+        // children of a parallel_map or an expand_task_graph that an earlier attempt launched) is counted again on top
+        // of what the run's children hold, which can refuse a resumed attempt whose budget is tight and never
+        // overspends.
+        std::function<asio::awaitable<bool>(const std::string&, const json&, bool, RunBudget&)>
+            collect_plan_spawn_grants;
+        collect_plan_spawn_grants = [&](const std::string& id, const json& state, bool exact_input,
+                                        RunBudget& total) -> asio::awaitable<bool> {
+            {
+                std::lock_guard lock(plan_mutex);
+                const auto      record = replay_records.find(id);
+                if (record != replay_records.end() && record.value().is_object() &&
+                    record.value().value("kind", std::string{}) != "entered")
+                    co_return true;
+            }
+            const auto* node = typed_plan.find(id);
+            if (!node) co_return true;
+            switch (node->dispatch().operation) {
+                case ProgramOperationKind::Spawn: {
+                    if (!node->child_binding()) co_return true;
+                    const auto& binding = *node->child_binding();
+                    if (exact_input &&
+                        (co_await control->can_recover_child(binding, state, id)) ==
+                            ChildRecoveryMode::Existing)
+                        co_return true;
+                    const auto grant = co_await control->child_grant(binding);
+                    if (!grant) co_return true;
+                    const auto permanent = transition::child_permanent_reservation(*grant);
+                    if (!permanent) co_return false;
+                    const auto sum = transition::add_permanent_budget(total, *permanent);
+                    if (!sum) co_return false;
+                    total = *sum;
+                    co_return true;
+                }
+                case ProgramOperationKind::Await:
+                case ProgramOperationKind::Checkpoint:
+                    if (node->body())
+                        co_return co_await collect_plan_spawn_grants(*node->body(), state,
+                                                                     exact_input, total);
+                    co_return true;
+                case ProgramOperationKind::Parallel:
+                case ProgramOperationKind::Race:
+                    for (const auto& branch_id : node->branches()) {
+                        if (!(co_await collect_plan_spawn_grants(branch_id, state, exact_input,
+                                                                 total)))
+                            co_return false;
+                    }
+                    co_return true;
+                case ProgramOperationKind::Sequence: {
+                    bool child_exact = exact_input;
+                    for (const auto& child_id : node->children()) {
+                        if (!(co_await collect_plan_spawn_grants(child_id, state, child_exact,
+                                                                 total)))
+                            co_return false;
+                        child_exact = false;
+                    }
+                    co_return true;
+                }
+                case ProgramOperationKind::Branch: {
+                    RunBudget then_total;
+                    RunBudget else_total;
+                    if (node->then_id() &&
+                        !(co_await collect_plan_spawn_grants(*node->then_id(), state, exact_input,
+                                                             then_total)))
+                        co_return false;
+                    if (node->else_id() &&
+                        !(co_await collect_plan_spawn_grants(*node->else_id(), state, exact_input,
+                                                             else_total)))
+                        co_return false;
+                    const auto larger = larger_permanent_budget(then_total, else_total);
+                    const auto sum = transition::add_permanent_budget(total, larger);
+                    if (!sum) co_return false;
+                    total = *sum;
+                    co_return true;
+                }
+                case ProgramOperationKind::Loop:
+                case ProgramOperationKind::Retry:
+                case ProgramOperationKind::Map: {
+                    if (!node->body()) co_return true;
+                    const std::uint64_t bound =
+                        node->dispatch().operation == ProgramOperationKind::Loop
+                            ? node->max_iterations().value_or(0)
+                            : node->dispatch().operation == ProgramOperationKind::Retry
+                                  ? node->max_attempts().value_or(0)
+                                  : static_cast<std::uint64_t>(node->items().size());
+                    RunBudget body_total;
+                    if (!(co_await collect_plan_spawn_grants(*node->body(), state, false,
+                                                             body_total)))
+                        co_return false;
+                    const auto scaled = multiply_permanent_budget(body_total, bound);
+                    if (!scaled) co_return false;
+                    const auto sum = transition::add_permanent_budget(total, *scaled);
+                    if (!sum) co_return false;
+                    total = *sum;
+                    co_return true;
+                }
+                case ProgramOperationKind::ParallelMap: {
+                    // One child per item, each granted the link's ceiling: the bound is the item count when the plan
+                    // fixes it (a literal source, or a source read from the branch's exact input) and the
+                    // operation's max_items otherwise. A source that does not resolve ends the operation before
+                    // it launches any child.
+                    const auto& map = node->parallel_map();
+                    if (!map) co_return true;
+                    const auto grant = co_await control->child_grant(map->child_binding);
+                    if (!grant) co_return true;
+                    auto permanent = transition::child_permanent_reservation(*grant);
+                    if (!permanent) co_return false;
+                    // Wall time is a clock, not held for children; the fit check leaves it out.
+                    permanent->wall_time_ms = 0;
+                    std::uint64_t items = map->max_items;
+                    if (map->item_source == ProgramParallelMapItemSource::Literal) {
+                        if (map->literal_items.is_array())
+                            items = std::min<std::uint64_t>(items, map->literal_items.size());
+                    } else if (exact_input) {
+                        const auto selected = json_path_value(state, map->input_field);
+                        items = selected && selected->is_array()
+                                    ? std::min<std::uint64_t>(items, selected->size())
+                                    : 0;
+                    }
+                    const auto scaled = multiply_permanent_budget(*permanent, items);
+                    if (!scaled) co_return false;
+                    const auto sum = transition::add_permanent_budget(total, *scaled);
+                    if (!sum) co_return false;
+                    total = *sum;
+                    co_return true;
+                }
+                case ProgramOperationKind::ExpandTaskGraph: {
+                    // The tasks of an expansion come from a proposal that the run reads and compiles later, so the
+                    // plan fixes neither their number nor their templates. A task is a child of one of the host's
+                    // templates, granted at most that template's link ceiling, and an expansion has at most as many
+                    // tasks as its own limit, the host's limit and the parent's child count allow: the bound is the
+                    // largest template grant times that count. Without a host policy the expansion ends before it
+                    // launches a child.
+                    const auto& spec = node->expand_task_graph();
+                    if (!spec) co_return true;
+                    const auto policy = control->task_graph_policy(id);
+                    if (!policy) co_return true;
+                    std::uint64_t tasks = spec->max_tasks;
+                    if (policy->limits.max_tasks != 0) tasks = std::min(tasks, policy->limits.max_tasks);
+                    if (control->granted_budget.max_total_children != 0)
+                        tasks = std::min(tasks, control->granted_budget.max_total_children);
+                    RunBudget per_task;
+                    for (const auto& contract : policy->template_allowlist) {
+                        const auto grant = co_await control->child_grant(contract.child_binding);
+                        if (!grant) continue;
+                        auto permanent = transition::child_permanent_reservation(*grant);
+                        if (!permanent) co_return false;
+                        permanent->wall_time_ms = 0;  // a clock, not held for children
+                        per_task = larger_permanent_budget(per_task, *permanent);
+                    }
+                    const auto scaled = multiply_permanent_budget(per_task, tasks);
+                    if (!scaled) co_return false;
+                    const auto sum = transition::add_permanent_budget(total, *scaled);
+                    if (!sum) co_return false;
+                    total = *sum;
+                    co_return true;
+                }
+                case ProgramOperationKind::Quorum:
+                case ProgramOperationKind::CallCore:
+                case ProgramOperationKind::Emit:
+                case ProgramOperationKind::Cancel:
+                case ProgramOperationKind::Return:
+                    // Quorum runs its branches one after the other, so none of them runs beside a Core call of
+                    // its own parallel.
+                    co_return true;
+            }
+            co_return true;
+        };
+
+        struct PlanCarvingScope {
+            std::atomic<std::size_t>&             active;
+            std::function<void(const RunBudget&)> apply_withheld;
+            bool                                  enabled      = false;
+            bool                                  is_outermost = false;
+
+            PlanCarvingScope(bool                                  enable,
+                             std::atomic<std::size_t>&             counter,
+                             std::function<void(const RunBudget&)> apply)
+                : active(counter), apply_withheld(std::move(apply)), enabled(enable) {
+                if (enabled)
+                    is_outermost = active.fetch_add(1, std::memory_order_acq_rel) == 0;
+            }
+
+            PlanCarvingScope(const PlanCarvingScope&)            = delete;
+            PlanCarvingScope& operator=(const PlanCarvingScope&) = delete;
+
+            ~PlanCarvingScope() {
+                if (!enabled) return;
+                if (is_outermost) apply_withheld(RunBudget{});
+                active.fetch_sub(1, std::memory_order_acq_rel);
+            }
         };
 
         // #402: the checkpoints a recovered command's calls continue from;
@@ -3788,6 +4056,26 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         "Program parallel fan-out exceeds its admitted concurrency budget",
                         operation_id);
 
+                PlanCarvingScope carving_scope(!control->recorded_replay, active_carving_scopes,
+                                               apply_plan_withheld);
+                if (carving_scope.is_outermost) {
+                    RunBudget total = control->children_held();
+                    for (const auto& branch_id : branches) {
+                        if (!(co_await collect_plan_spawn_grants(branch_id, state, true, total)))
+                            co_return plan_failure(
+                                ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                                "Child budget exceeds the range of the parent's allocation",
+                                operation_id);
+                    }
+                    if (!transition::permanent_budget_at_most(without_clock(total),
+                                                              without_clock(plan_spendable())))
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                            "Child budget exceeds the parent's unspent allocation",
+                            operation_id);
+                    apply_plan_withheld(total);
+                }
+
                 // #384: a branch's interrupt pauses the parallel. The attempt
                 // that resumes the run replays what the pause recorded (see
                 // execute): a branch that finished returns its result without
@@ -4003,6 +4291,25 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     if (result.status == ProgramTerminalStatus::Interrupted)
                         result.reentry = json{{"winner", winner}};
                     co_return result;
+                }
+                PlanCarvingScope carving_scope(!control->recorded_replay, active_carving_scopes,
+                                               apply_plan_withheld);
+                if (carving_scope.is_outermost) {
+                    RunBudget total = control->children_held();
+                    for (const auto& branch_id : branches) {
+                        if (!(co_await collect_plan_spawn_grants(branch_id, state, true, total)))
+                            co_return plan_failure(
+                                ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                                "Child budget exceeds the range of the parent's allocation",
+                                operation_id);
+                    }
+                    if (!transition::permanent_budget_at_most(without_clock(total),
+                                                              without_clock(plan_spendable())))
+                        co_return plan_failure(
+                            ProgramTerminalStatus::Failed, "P_CHILD_BUDGET",
+                            "Child budget exceeds the parent's unspent allocation",
+                            operation_id);
+                    apply_plan_withheld(total);
                 }
                 // A race winner is the first completion; if both branches become
                 // ready in one scheduler turn, declaration order is the tie break.

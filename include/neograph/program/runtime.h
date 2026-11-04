@@ -499,9 +499,13 @@ private:
                                               ProgramInvocation invocation);
     asio::awaitable<ProgramHandle> start_resolved_core(std::string owner_scope, ProgramVersion version,
                                                        ProgramInvocation invocation, bool active_selection = false);
+    /// `hold_against_live_remaining`: a child that the parent's own operations launch is held against what the
+    /// parent's attempt has not spent, not only against the remainder of its stored record (see
+    /// RunControl::set_live_remaining_budget); a child that a host attaches is held against the record only.
     asio::awaitable<ProgramHandle> start_child_core(std::string owner_scope, ProgramHandle parent,
                                                     ModuleLinkReceipt link, ProgramVersion version,
-                                                    ProgramInvocation invocation);
+                                                    ProgramInvocation invocation,
+                                                    bool hold_against_live_remaining = false);
     asio::awaitable<ProgramHandle> replay_recorded_core(std::string source_run_id, RunInvocation invocation,
                                                         RecordedBindingSet recorded,
                                                         std::shared_ptr<ProgramEventSink> events);
