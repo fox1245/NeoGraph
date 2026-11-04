@@ -12,6 +12,7 @@
 
 #include <neograph/async/host_loop.h>
 #include <neograph/program/runtime.h>
+#include <neograph/program/store_call.h>
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES_CHECKPOINT)
 #include <neograph/graph/postgres_checkpoint.h>
 #endif
@@ -1211,6 +1212,37 @@ TEST(ProgramOperationLockTest, GrantsInOrderAndNeverToTwoHoldersAtOnce) {
     EXPECT_EQ(peak, 1);
     EXPECT_EQ(order, (std::vector<int>{0, 1, 2, 3, 4}));
     EXPECT_TRUE(lock.try_lock().has_value());
+}
+
+// A thread that waits for the lock through the synchronous path runs its coroutine on a private io_context, which the
+// thread destroys when it exits. The releasing thread must be finished with that context's wake-up primitives by then.
+// Several drivers run at once so that a releasing thread is often preempted inside the hand-over while its waiter ends.
+TEST(ProgramOperationLockTest, AShortLivedSynchronousWaiterMayExitRightAfterTheHandOver) {
+    constexpr int kDrivers = 8;
+    constexpr int kRounds  = 500;
+    auto          driver   = [] {
+        for (int round = 0; round < kRounds; ++round) {
+            neograph::program::detail::OperationLock lock;
+            auto                                     held = lock.try_lock();
+            ASSERT_TRUE(held.has_value());
+            std::promise<void> arrived;
+            std::thread        waiter([&] {
+                neograph::program::detail::run_to_completion(
+                    [&]() -> asio::awaitable<void> {
+                        arrived.set_value();
+                        auto guard = co_await lock.lock_async();
+                    }(),
+                    "operation lock hand-over");
+            });
+            arrived.get_future().get();
+            held->unlock();  // hands the lock over by a post to the waiter's context; the waiter then ends and exits
+            waiter.join();
+            EXPECT_TRUE(lock.try_lock().has_value());
+        }
+    };
+    std::vector<std::thread> drivers;
+    for (int i = 0; i < kDrivers; ++i) drivers.emplace_back(driver);
+    for (auto& d : drivers) d.join();
 }
 
 TEST(ProgramOperationLockTest, ABlockingCallerWaitsForAnAwaitingHolder) {

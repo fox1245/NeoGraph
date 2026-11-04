@@ -25,6 +25,7 @@
 #include <asio/async_result.hpp>
 #include <asio/awaitable.hpp>
 #include <asio/bind_executor.hpp>
+#include <asio/executor_work_guard.hpp>
 #include <asio/post.hpp>
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
@@ -128,6 +129,11 @@ public:
                     } else {
                         auto waiter    = std::make_shared<Waiter>();
                         waiter->resume = [executor, completion]() mutable {
+                            // The waiter may be a thread that ends as soon as its coroutine does, and then destroys
+                            // its io_context. A post signals that context after it has released its mutex, so the
+                            // context must stay busy until the post has returned: the guard ends it, under the
+                            // context's mutex, as the last thing this thread does with the context.
+                            auto work = asio::make_work_guard(executor);
                             asio::post(executor, [completion] { (*completion)(); });
                         };
                         queue_.push_back(std::move(waiter));
