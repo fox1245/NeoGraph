@@ -3,6 +3,10 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    # The benchmark comparison pins record the versions behind the published tables; they change when the tables are
+    # measured again, together with the tables.
+    exclude-paths:
+      - "benchmarks/requirements-compare.txt"
     schedule:
       interval: "monthly"
       time: "09:00"
