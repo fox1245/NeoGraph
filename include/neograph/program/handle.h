@@ -43,6 +43,24 @@ struct ProgramNotice {
     bool operator==(const ProgramNotice&) const = default;
 };
 
+/**
+ * The handle of one attempt of a run. Copies share it.
+ *
+ * A handle may outlive the ProgramRuntime that made it and, once that runtime has been destroyed and the run has ended
+ * (a run that paused has ended too: its result is Interrupted), the execution context of RuntimeConfig::executor or of
+ * the runtime's own pools. That context takes back, as it shuts down, every copy of its executor that the handle holds,
+ * and the handle never reaches the context again:
+ *   - wait(), try_result(), events_after(), latest_checkpoint(), notices() and wait_async() answer from the state the
+ *     handle holds; wait_async() completes on the executor of the coroutine that awaits it.
+ *   - cancel() returns false for a run that is over. For a run that paused it records the Cancelled state through the
+ *     transition store on the calling thread, where that thread may wait; on a host-pumped executor, where it may
+ *     not, it returns false, since the executor can take no task. cancel_async() records it on the executor of the
+ *     coroutine that awaits it.
+ *   - wait() and wait_async() on a run that has not ended would wait for an attempt that the context destroyed: they
+ *     throw a ProgramDiagnosticError with the code P_EXECUTOR_DESTROYED.
+ * The handle still holds what the host gave the run (its event sink, hook runtime and resolvers) until its last copy
+ * is gone.
+ */
 class NEOGRAPH_PROGRAM_API ProgramHandle {
 public:
     ProgramHandle(const ProgramHandle&) noexcept            = default;

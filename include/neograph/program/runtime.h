@@ -228,9 +228,16 @@ struct ProgramExecutorIdentity {
        * instead of the process-wide attempt pool, so a node body must not block the thread: a body that blocks holds
        * every other run that shares the executor.
        *
-       * The runtime keeps the executor alive until its last attempt has finished. Destroying the runtime cancels its
-       * runs and, on an injected executor, does not wait for them: keep running the executor until the handles are
-       * terminal. On a host-pumped executor the synchronous calls (start, resume, fork, replace, migrate_graph, run
+       * The runtime and its handles hold copies of the executor (and strands of it), not its execution context: keep
+       * the context alive and running until the runtime has been destroyed, the run of every handle has ended, and
+       * every coroutine that awaits a call of the runtime or of a handle has resumed.
+       * Destroying the runtime cancels its runs and, on an injected executor, does not wait for them. After that the
+       * context may be destroyed while handles remain: as it shuts down it takes back every copy of the executor that
+       * the runtime and its handles hold, and executor_identity.running_in_this_thread with them, and each handle
+       * answers from the state it holds from then on (see ProgramHandle). Do not destroy it while another thread uses
+       * a handle. A copy of an executor that tracks outstanding work keeps the context's run() or join() from
+       * returning for as long as it is held, so give one that does not, as io_context::get_executor() and
+       * thread_pool::get_executor() do not. On a host-pumped executor the synchronous calls (start, resume, fork, replace, migrate_graph, run
        * and the rest) and ProgramHandle::wait are refused with ProgramBlockingCallRefused; use the `_async` forms.
        * A hook_runtime blocks its caller and is refused on a host-pumped executor with the same error type.
        */

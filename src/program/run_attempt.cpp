@@ -2060,11 +2060,11 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     };
     if (RuntimeClock::now() >= deadline) (void)co_await control->cancel_async(CancellationCause::Timeout);
 
-    auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
+    auto timer = std::make_shared<async::HostTimer>(control->scheduler->deadlines());
     if (deadline < std::chrono::steady_clock::time_point::max()) {
         timer->arm_at(deadline);
         asio::co_spawn(
-            control->deadline_executor,
+            control->scheduler->deadlines(),
             [control, timer]() -> asio::awaitable<void> {
                 asio::error_code error;
                 co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
@@ -2136,7 +2136,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     "Journal-published Core checkpoint changed after resume admission");
                 // No node of the call this attempt continues has run: it ends with the remainder beneath the reservation.
                 co_await apply_durable_javascript_disposition(outcome);
-                cancel_deadline_timer(control->deadline_executor, std::move(timer));
+                cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
                 (co_await control->complete_async(std::move(outcome)));
                 co_return;
             }
@@ -2712,7 +2712,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // Join members and await timers share this scheduler.
                 metadata.shared_scheduler = true;
                 // #557: with a host's executor there is no process-wide attempt pool to dispatch node attempts to.
-                if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts;
+                if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts();
                 metadata.node_retry_ceiling = node_retry_ceiling;
                 // Concurrent branches add recovery checkpoints, so the set is read under the same mutex.
                 bool resumes_recovery_checkpoint = false;
@@ -7466,7 +7466,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 "", 0, json::object()};
         }
     }
-    cancel_deadline_timer(control->deadline_executor, std::move(timer));
+    cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
     (co_await control->complete_async(std::move(outcome)));
     co_return;
 }

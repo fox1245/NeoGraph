@@ -26,6 +26,7 @@
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
 #include <asio/prefer.hpp>
+#include <asio/query.hpp>
 #include <asio/strand.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/this_coro.hpp>
@@ -38,6 +39,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <initializer_list>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -938,10 +940,10 @@ HostAdmissionRequest make_host_admission_request(const std::shared_ptr<detail::R
 
 std::shared_ptr<async::HostTimer> arm_host_admission_deadline(
     const std::shared_ptr<detail::RunControl>& control) {
-    auto timer = std::make_shared<async::HostTimer>(control->deadline_executor);
+    auto timer = std::make_shared<async::HostTimer>(control->scheduler->deadlines());
     timer->arm_at(control->deadline);
     asio::co_spawn(
-        control->deadline_executor,
+        control->scheduler->deadlines(),
         [control, timer]() -> asio::awaitable<void> {
             asio::error_code error;
             co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
@@ -955,7 +957,7 @@ std::shared_ptr<async::HostTimer> arm_host_admission_deadline(
 void cancel_host_admission_deadline(const std::shared_ptr<detail::RunControl>& control,
                                     std::shared_ptr<async::HostTimer>          timer) noexcept {
     try {
-        asio::post(control->deadline_executor, [timer = std::move(timer)] { timer->cancel(); });
+        asio::post(control->scheduler->deadlines(), [timer = std::move(timer)] { timer->cancel(); });
     } catch (...) {}
 }
 
@@ -1031,7 +1033,7 @@ void launch_failure_after(const std::shared_ptr<const detail::RuntimeScheduler>&
                           const std::optional<std::string>&                      checkpoint_id,
                           std::exception_ptr                                     error) noexcept {
     try {
-        asio::co_spawn(scheduler->attempts, complete_attempt_launch_failure(control, checkpoint_id, error),
+        asio::co_spawn(scheduler->attempts(), complete_attempt_launch_failure(control, checkpoint_id, error),
                        [control](std::exception_ptr) {
                            detail::notify_attempt_finished(control->run_id, control->attempt);
                        });
@@ -1053,7 +1055,7 @@ void spawn_run_attempt(const std::shared_ptr<const detail::RuntimeScheduler>& sc
     try {
         if (host_admission) {
             auto deadline_wait = arm_host_admission_deadline(control);
-            asio::co_spawn(scheduler->attempts,
+            asio::co_spawn(scheduler->attempts(),
                            execute_host_admitted_attempt(
                                control, std::move(input), checkpoint_id, std::move(host_admission),
                                std::move(host_admission_resolver), std::move(deadline_wait),
@@ -1066,7 +1068,7 @@ void spawn_run_attempt(const std::shared_ptr<const detail::RuntimeScheduler>& sc
                            });
             return;
         }
-        asio::co_spawn(scheduler->attempts,
+        asio::co_spawn(scheduler->attempts(),
                        detail::execute_run_attempt(control, std::move(input), checkpoint_id,
                                                    std::move(javascript_core_resume_value)),
                        [scheduler, control, checkpoint_id, keepalive](std::exception_ptr error) {
@@ -2389,19 +2391,151 @@ bool runs_in_this_thread(const asio::any_io_executor& executor) noexcept {
     }
     return false;
 }
+
+[[noreturn]] void throw_executor_destroyed() {
+    throw_runtime_diagnostic("P_EXECUTOR_DESTROYED",
+                             "The execution context of the runtime's executor has been destroyed, so nothing can run "
+                             "on it any more");
+}
+
+// A service of an execution context that closes the RuntimeSchedulers whose executors run on the context when the
+// context shuts down. A context shuts its services down as it is destroyed, before it destroys them, so the schedulers
+// drop their copies of its executors, strands included, while the context can still take them back.
+class SchedulerClosingService final : public asio::execution_context::service {
+public:
+    static asio::execution_context::id id;
+
+    explicit SchedulerClosingService(asio::execution_context& context) : asio::execution_context::service(context) {}
+
+    void watch(const std::shared_ptr<RuntimeScheduler>& scheduler) {
+        {
+            std::lock_guard lock(mutex_);
+            if (!shut_down_) {
+                std::erase_if(schedulers_, [](const auto& weak) { return weak.expired(); });
+                schedulers_.push_back(scheduler);
+                return;
+            }
+        }
+        scheduler->close();
+    }
+
+private:
+    void shutdown() override {
+        std::vector<std::shared_ptr<RuntimeScheduler>> live;
+        {
+            std::lock_guard lock(mutex_);
+            shut_down_ = true;
+            for (const auto& weak : schedulers_)
+                if (auto scheduler = weak.lock()) live.push_back(std::move(scheduler));
+            schedulers_.clear();
+        }
+        for (const auto& scheduler : live) scheduler->close();
+    }
+
+    std::mutex                                     mutex_;
+    bool                                           shut_down_ = false;
+    std::vector<std::weak_ptr<RuntimeScheduler>> schedulers_;
+};
+
+asio::execution_context::id SchedulerClosingService::id;
+
+// Has every execution context that runs one of the scheduler's executors close it as the context shuts down.
+void close_with_execution_contexts(const std::shared_ptr<RuntimeScheduler>& scheduler,
+                                   std::initializer_list<const asio::any_io_executor*> executors) {
+    std::vector<asio::execution_context*> contexts;
+    for (const auto* executor : executors) {
+        if (!*executor) continue;
+        auto& context = asio::query(*executor, asio::execution::context);
+        if (std::find(contexts.begin(), contexts.end(), &context) == contexts.end()) contexts.push_back(&context);
+    }
+    for (auto* context : contexts) asio::use_service<SchedulerClosingService>(*context).watch(scheduler);
+}
 }  // namespace
 
+void RuntimeScheduler::install(asio::any_io_executor attempts,
+                               asio::any_io_executor deadlines,
+                               asio::any_io_executor waiters,
+                               asio::any_io_executor host_executor,
+                               std::function<bool()> running_in_this_thread) {
+    std::lock_guard lock(executors_mutex_);
+    attempts_      = std::move(attempts);
+    deadlines_     = std::move(deadlines);
+    waiters_       = std::move(waiters);
+    host_executor_ = std::move(host_executor);
+    if (running_in_this_thread)
+        running_in_this_thread_ = std::make_shared<const std::function<bool()>>(std::move(running_in_this_thread));
+}
+
+asio::any_io_executor RuntimeScheduler::attempts() const {
+    std::lock_guard lock(executors_mutex_);
+    if (closed_.load()) throw_executor_destroyed();
+    return attempts_;
+}
+
+asio::any_io_executor RuntimeScheduler::deadlines() const {
+    std::lock_guard lock(executors_mutex_);
+    if (closed_.load()) throw_executor_destroyed();
+    return deadlines_;
+}
+
+asio::strand<asio::any_io_executor> RuntimeScheduler::waiter_strand() const {
+    asio::any_io_executor waiters;
+    {
+        std::lock_guard lock(executors_mutex_);
+        if (closed_.load()) throw_executor_destroyed();
+        waiters = waiters_;
+    }
+    return asio::make_strand(std::move(waiters));
+}
+
+bool RuntimeScheduler::closed() const noexcept {
+    return closed_.load();
+}
+
+void RuntimeScheduler::close() noexcept {
+    asio::any_io_executor                        attempts, deadlines, waiters, host_executor;
+    std::shared_ptr<const std::function<bool()>> running_in_this_thread;
+    {
+        std::lock_guard lock(executors_mutex_);
+        closed_.store(true);
+        attempts               = std::move(attempts_);
+        deadlines              = std::move(deadlines_);
+        waiters                = std::move(waiters_);
+        host_executor          = std::move(host_executor_);
+        running_in_this_thread = std::move(running_in_this_thread_);
+    }
+    // The copies are destroyed here, outside the lock, while the context that is shutting down still has its services.
+}
 
 bool RuntimeScheduler::on_executor_thread() const {
     if (!injected) return false;
-    if (running_in_this_thread) return running_in_this_thread();
+    asio::any_io_executor                        host_executor;
+    std::shared_ptr<const std::function<bool()>> running_in_this_thread;
+    {
+        std::lock_guard lock(executors_mutex_);
+        // No thread runs a context that has shut down, and the host's test may reach it.
+        if (closed_.load()) return false;
+        if (running_in_this_thread_)
+            running_in_this_thread = running_in_this_thread_;
+        else
+            host_executor = host_executor_;
+    }
+    if (running_in_this_thread) return (*running_in_this_thread)();
     return runs_in_this_thread(host_executor);
 }
 
 bool RuntimeScheduler::runs_on_attempt_thread() const {
     if (on_executor_thread()) return true;
+    if (injected) return false;
     // The runtime's own pools: attempts run on one, deadline timers on the other.
-    return !injected && (runs_in_this_thread(attempts) || runs_in_this_thread(deadlines));
+    asio::any_io_executor attempts, deadlines;
+    {
+        std::lock_guard lock(executors_mutex_);
+        if (closed_.load()) return false;
+        attempts  = attempts_;
+        deadlines = deadlines_;
+    }
+    return runs_in_this_thread(attempts) || runs_in_this_thread(deadlines);
 }
 
 void RuntimeScheduler::require_synchronous_call(std::string_view operation,
@@ -2415,6 +2549,8 @@ void RuntimeScheduler::require_synchronous_call(std::string_view operation,
 }
 
 void RuntimeScheduler::require_wait(std::string_view operation, std::string_view alternative) const {
+    // The executor's context is gone, and with it every attempt that could end what this call waits for.
+    if (closed()) throw_executor_destroyed();
     if (host_pumped)
         throw ProgramBlockingCallRefused(
             std::string(operation), std::string(alternative),
@@ -2459,8 +2595,6 @@ RunControl::RunControl(std::string                                owner,
       started_at(RuntimeClock::now()),
       deadline(deadline_after(started_at, granted_budget.wall_time_ms)),
       scheduler(std::move(scheduler_value)),
-      deadline_executor(scheduler->deadlines),
-      waiter_strand(asio::make_strand(scheduler->waiters)),
       core_thread_id(std::move(thread)),
       trace_id(invocation.correlation_id),
       checkpoints(std::move(checkpoint_store)),
@@ -2515,8 +2649,6 @@ RunControl::RunControl(ProgramRunRecord                        record,
       started_at(RuntimeClock::now()),
       deadline(deadline_after(started_at, record.remaining_budget().wall_time_ms)),
       scheduler(std::move(scheduler_value)),
-      deadline_executor(scheduler->deadlines),
-      waiter_strand(asio::make_strand(scheduler->waiters)),
       core_thread_id(record.exact_checkpoint() ? record.exact_checkpoint()->core_thread_id
                                                : std::string{}),
       trace_id(invocation.correlation_id),
@@ -2601,10 +2733,7 @@ asio::awaitable<void> RunControl::retire_to(std::shared_ptr<RunControl> successo
     abort_handoff();
     co_await abort_graph_migration_async();
     cv_.notify_all();
-    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-        for (const auto& waiter : waiters)
-            if (auto timer = waiter.timer.lock()) timer->cancel();
-    });
+    wake_async_waiters(std::move(waiters));
 }
 
 void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
@@ -2980,7 +3109,7 @@ void RunControl::cancel_children(CancellationCause cause) noexcept {
 void RunControl::cancel_children_in_background(CancellationCause cause) noexcept {
     try {
         asio::co_spawn(
-            scheduler->attempts,
+            scheduler->attempts(),
             [keep = shared_from_this(), cause]() -> asio::awaitable<void> {
                 co_await keep->cancel_children_async(cause);
             },
@@ -3305,11 +3434,7 @@ asio::awaitable<bool> RunControl::cancel_async(CancellationCause cause,
                 waiters.swap(waiters_);
                 cv_.notify_all();
             }
-            asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-                for (const auto& waiter : waiters) {
-                    if (auto timer = waiter.timer.lock()) timer->cancel();
-                }
-            });
+            wake_async_waiters(std::move(waiters));
             co_return true;
         }
         {
@@ -3434,6 +3559,8 @@ std::optional<std::string> RunControl::expected_terminal_head() const {
 // afterwards is refused until the task has ended.
 bool RunControl::schedule_interrupted_cancellation(CancellationCause cause) noexcept {
     try {
+        // An executor whose context has shut down takes no task: attempts() throws, before the claim is taken.
+        const auto executor = scheduler->attempts();
         std::shared_ptr<PendingCancellations> pending;
         {
             std::lock_guard lock(mutex_);
@@ -3448,7 +3575,7 @@ bool RunControl::schedule_interrupted_cancellation(CancellationCause cause) noex
         // the task is queued, in a turn of the loop as well: it has taken no lock and read no record when this returns.
         // The claim above is what keeps a resume that is called next from overtaking it.
         asio::co_spawn(
-            scheduler->attempts,
+            executor,
             [keep = shared_from_this(), cause, claim = std::move(claim)]() mutable -> asio::awaitable<void> {
                 co_await record_scheduled_cancellation(std::move(keep), cause, std::move(claim));
             },
@@ -3604,11 +3731,7 @@ void RunControl::adopt_cancelled_terminal(CancellationCause cause, const Program
         waiters.swap(waiters_);
         cv_.notify_all();
     }
-    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-        for (const auto& waiter : waiters) {
-            if (auto timer = waiter.timer.lock()) timer->cancel();
-        }
-    });
+    wake_async_waiters(std::move(waiters));
 }
 
 ProgramEvent RunControl::stage_event(ProgramEventKind kind, ProgramEventPayload payload) {
@@ -3751,10 +3874,7 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
                 waiters.swap(waiters_);
                 cv_.notify_all();
             }
-            asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-                for (const auto& waiter : waiters)
-                    if (auto timer = waiter.timer.lock()) timer->cancel();
-            });
+            wake_async_waiters(std::move(waiters));
             co_return;
         }
         const auto current_cause = cancellation_cause();
@@ -3974,11 +4094,7 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
             waiters.swap(waiters_);
             cv_.notify_all();
         }
-        asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-            for (const auto& waiter : waiters) {
-                if (auto timer = waiter.timer.lock()) timer->cancel();
-            }
-        });
+        wake_async_waiters(std::move(waiters));
         if (interrupted_published) {
             try {
                 co_await interrupted_published();
@@ -4019,10 +4135,7 @@ void RunControl::fail_closed(std::exception_ptr error) noexcept {
             waiters.swap(waiters_);
             cv_.notify_all();
         }
-        asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-            for (const auto& waiter : waiters)
-                if (auto timer = waiter.timer.lock()) timer->cancel();
-        });
+        wake_async_waiters(std::move(waiters));
     } catch (...) {
         std::terminate();  // not even a minimal failure could be delivered
     }
@@ -4045,21 +4158,11 @@ asio::awaitable<ProgramResult> RunControl::wait_async() const {
 }
 asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
     std::shared_ptr<const RunControl> control) {
-    auto timer = std::make_shared<async::HostTimer>(control->waiter_strand);
-    timer->arm_never();
-    co_await asio::co_spawn(
-        control->waiter_strand,
-        [control, timer]() -> asio::awaitable<void> {
-            {
-                std::lock_guard lock(control->mutex_);
-                if (control->result_ || (control->follow_successor_ && control->successor_))
-                    co_return;
-                control->waiters_.push_back(AsyncWaiter{timer});
-            }
-            asio::error_code error;
-            co_await         timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
-        },
-        asio::use_awaitable);
+    // A run that has ended, or that is followed by its successor, is answered from what the control holds.
+    const auto* waited = control.get();
+    co_await control->park_until_woken(
+        [waited] { return !(waited->result_ || (waited->follow_successor_ && waited->successor_)); },
+        [waited](std::shared_ptr<async::HostTimer> timer) { waited->waiters_.push_back(AsyncWaiter{std::move(timer)}); });
     std::shared_ptr<RunControl>  next;
     std::optional<ProgramResult> result;
     {
@@ -4242,25 +4345,13 @@ HeldProgramHandoff RunControl::wait_handoff(std::uint64_t request_id) {
 
 asio::awaitable<HeldProgramHandoff> RunControl::wait_handoff_async(
     std::uint64_t request_id) {
-    auto       control    = shared_from_this();
-    auto       timer      = std::make_shared<async::HostTimer>(waiter_strand);
-    timer->arm_never();
-    co_await asio::co_spawn(
-        waiter_strand,
-        [control, request_id, timer]() -> asio::awaitable<void> {
-            {
-                std::lock_guard lock(control->mutex_);
-                if (control->handoff_request_id_ != request_id || control->held_handoff_ ||
-                    control->result_ ||
-                    control->cancellation_cause_ != CancellationCause::None) {
-                    co_return;
-                }
-                control->handoff_waiters_.push_back(AsyncWaiter{timer});
-            }
-            asio::error_code error;
-            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    const auto control = shared_from_this();
+    co_await park_until_woken(
+        [this, request_id] {
+            return handoff_request_id_ == request_id && !held_handoff_ && !result_ &&
+                   cancellation_cause_ == CancellationCause::None;
         },
-        asio::use_awaitable);
+        [this](std::shared_ptr<async::HostTimer> timer) { handoff_waiters_.push_back(AsyncWaiter{std::move(timer)}); });
 
     std::lock_guard lock(mutex_);
     if (handoff_request_id_ == request_id && held_handoff_) {
@@ -4301,38 +4392,22 @@ asio::awaitable<void> RunControl::reach_latest_handoff_if_requested() {
         waiters.swap(handoff_waiters_);
         handoff_cv_.notify_all();
     }
-    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-        for (const auto& waiter : waiters) {
-            if (auto waiting = waiter.timer.lock()) waiting->cancel();
-        }
-    });
+    wake_async_waiters(std::move(waiters));
 }
 
 asio::awaitable<void> RunControl::hold_latest_handoff_if_requested(std::uint64_t ordinal) {
     if (checkpoint_handler) co_await checkpoint_handler(ordinal);
     co_await reach_latest_handoff_if_requested();
 
-    auto control = shared_from_this();
-    auto timer = std::make_shared<async::HostTimer>(waiter_strand);
-    timer->arm_never();
-    // Register and initiate the wait on the same strand used by release.
-    // A pool executor alone permits expiry mutation to race async_wait.
-    co_await asio::co_spawn(
-        waiter_strand,
-        [control, timer]() -> asio::awaitable<void> {
-            {
-                std::lock_guard lock(control->mutex_);
-                if (control->handoff_request_id_ == 0 || !control->held_handoff_ ||
-                    control->result_ || control->terminal_decided_ ||
-                    control->cancellation_cause_ != CancellationCause::None) {
-                    co_return;
-                }
-                control->handoff_release_waiter_ = timer;
-            }
-            asio::error_code error;
-            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    // The wait registers and starts on the strand its release expires the timer on: a pool executor alone would let the
+    // expiry race async_wait. Without a held handoff it returns at once.
+    const auto control = shared_from_this();
+    co_await park_until_woken(
+        [this] {
+            return handoff_request_id_ != 0 && held_handoff_ && !result_ && !terminal_decided_ &&
+                   cancellation_cause_ == CancellationCause::None;
         },
-        asio::use_awaitable);
+        [this](std::shared_ptr<async::HostTimer> timer) { handoff_release_waiter_ = std::move(timer); });
     co_return;
 }
 
@@ -4359,11 +4434,7 @@ void RunControl::release_handoff(std::uint64_t request_id) noexcept {
                                } catch (...) {}
                            });
         }
-        asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-            for (const auto& waiter : waiters) {
-                if (auto waiting = waiter.timer.lock()) waiting->cancel();
-            }
-        });
+        wake_async_waiters(std::move(waiters));
     } catch (...) {}
 }
 
@@ -4485,34 +4556,67 @@ void RunControl::notify_graph_migration_locked(std::vector<AsyncWaiter>& async_w
 }
 
 void RunControl::wake_async_waiters(std::vector<AsyncWaiter> waiters) const {
-    if (waiters.empty()) return;
-    asio::dispatch(waiter_strand, [waiters = std::move(waiters)] {
-        for (const auto& waiter : waiters)
-            if (auto timer = waiter.timer.lock()) timer->cancel();
-    });
+    for (const auto& waiter : waiters) {
+        // A timer that is gone belongs to a wait that has ended. One that lives belongs to a wait that is still pending
+        // on the strand it made: a context that shuts down destroys the waits pending on it, and their timers with them.
+        auto timer = waiter.timer.lock();
+        if (!timer) continue;
+        const auto strand = timer->get_executor();
+        asio::dispatch(strand, [timer = std::move(timer)] { timer->cancel(); });
+    }
 }
 
-asio::awaitable<GraphMigrationCapsule> RunControl::wait_graph_migration_async(std::uint64_t request_id) {
-    auto control = shared_from_this();
-    auto timer   = std::make_shared<async::HostTimer>(waiter_strand);
-    timer->arm_never();
+asio::awaitable<void> RunControl::park_until_woken(
+    std::function<bool()> waiting, std::function<void(std::shared_ptr<async::HostTimer>)> enlist) const {
+    {
+        std::lock_guard lock(mutex_);
+        if (!waiting()) co_return;
+    }
+    // The strand is this wait's own, and so is the timer, which the waiting coroutine creates, registers, waits on and
+    // destroys there: a control holds no strand between waits.
+    std::optional<asio::strand<asio::any_io_executor>> strand;
+    std::exception_ptr                                  refused;
+    try {
+        strand.emplace(scheduler->waiter_strand());
+    } catch (...) {
+        refused = std::current_exception();
+    }
+    if (refused) {
+        // The run may have ended since it was looked at: then there is nothing to wait for.
+        {
+            std::lock_guard lock(mutex_);
+            if (!waiting()) co_return;
+        }
+        std::rethrow_exception(refused);
+    }
     co_await asio::co_spawn(
-        waiter_strand,
-        [control, request_id, timer]() -> asio::awaitable<void> {
+        *std::move(strand),
+        [control = shared_from_this(), waiting = std::move(waiting),
+         enlist = std::move(enlist)]() -> asio::awaitable<void> {
+            auto timer = std::make_shared<async::HostTimer>(co_await asio::this_coro::executor);
+            timer->arm_never();
             {
                 std::lock_guard lock(control->mutex_);
-                if (control->graph_migration_request_id_ != request_id ||
-                    control->held_graph_migration_ ||
-                    control->finished_graph_migration_request_id_ == request_id || control->result_ ||
-                    control->cancellation_cause_ != CancellationCause::None) {
-                    co_return;
-                }
-                control->graph_migration_waiters_.push_back(AsyncWaiter{timer});
+                if (!waiting()) co_return;
+                enlist(timer);
             }
             asio::error_code error;
             co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
         },
         asio::use_awaitable);
+}
+
+asio::awaitable<GraphMigrationCapsule> RunControl::wait_graph_migration_async(std::uint64_t request_id) {
+    const auto control = shared_from_this();
+    co_await park_until_woken(
+        [this, request_id] {
+            return graph_migration_request_id_ == request_id && !held_graph_migration_ &&
+                   finished_graph_migration_request_id_ != request_id && !result_ &&
+                   cancellation_cause_ == CancellationCause::None;
+        },
+        [this](std::shared_ptr<async::HostTimer> timer) {
+            graph_migration_waiters_.push_back(AsyncWaiter{std::move(timer)});
+        });
 
     std::lock_guard lock(mutex_);
     if (graph_migration_request_id_ == request_id && held_graph_migration_) {
@@ -4822,28 +4926,15 @@ asio::awaitable<void> RunControl::hold_graph_migration(
         co_return;
     }
 
-    auto control = shared_from_this();
-    auto timer = std::make_shared<async::HostTimer>(waiter_strand);
-    timer->arm_never();
-    // Registration and wait initiation must serialize with the release expiry,
-    // including when the migration caller rejects before this coroutine suspends.
-    co_await asio::co_spawn(
-        waiter_strand,
-        [control, request_id, timer]() -> asio::awaitable<void> {
-            {
-                std::lock_guard lock(control->mutex_);
-                if (control->graph_migration_request_id_ != request_id ||
-                    !control->held_graph_migration_ || control->result_ ||
-                    control->terminal_decided_ ||
-                    control->cancellation_cause_ != CancellationCause::None) {
-                    co_return;
-                }
-                control->graph_migration_release_waiter_ = timer;
-            }
-            asio::error_code error;
-            co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
+    // Registration and wait initiation serialize with the release expiry on the wait's strand, including when the
+    // migration caller rejects before this coroutine suspends.
+    const auto control = shared_from_this();
+    co_await park_until_woken(
+        [this, request_id] {
+            return graph_migration_request_id_ == request_id && held_graph_migration_ && !result_ &&
+                   !terminal_decided_ && cancellation_cause_ == CancellationCause::None;
         },
-        asio::use_awaitable);
+        [this](std::shared_ptr<async::HostTimer> timer) { graph_migration_release_waiter_ = std::move(timer); });
 }
 
 bool RunControl::has_active_graph_migration_request() const noexcept {
@@ -5035,7 +5126,7 @@ void RunControl::release_graph_migration(std::uint64_t request_id) noexcept {
         // executor: the held source is released in the host's turns, not left parked.
         try {
             asio::co_spawn(
-                scheduler->attempts,
+                scheduler->attempts(),
                 [keep = shared_from_this(), request_id]() -> asio::awaitable<void> {
                     co_await keep->release_graph_migration_async(request_id);
                 },
@@ -5738,8 +5829,6 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             executors->injected = true;
             executors->host_pumped = config.executor_identity.host_pumped ||
                                      async::is_host_pumped(config.executor) || !NEOGRAPH_BUILD_THREADS;
-            executors->host_executor          = config.executor;
-            executors->running_in_this_thread = config.executor_identity.running_in_this_thread;
             if (executors->host_pumped && config.hook_runtime)
                 throw ProgramBlockingCallRefused(
                     "RuntimeConfig::hook_runtime", {},
@@ -5747,18 +5836,25 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     "host's event loop");
             const asio::any_io_executor never_inline =
                 asio::prefer(config.executor, asio::execution::blocking.never);
-            executors->attempts  = never_inline;
-            executors->deadlines = never_inline;
-            executors->waiters   = never_inline;
+            executors->install(never_inline, never_inline, never_inline, config.executor,
+                               config.executor_identity.running_in_this_thread);
+            // The handles share the scheduler and may outlive the host's context: the context closes it as the
+            // context shuts down, so that nothing of the runtime holds an executor of a destroyed context. The
+            // scheduler holds the only copies, which its closing drops.
+            detail::close_with_execution_contexts(executors, {&never_inline, &config.executor});
+            config.executor                                 = {};
+            config.executor_identity.running_in_this_thread = {};
         } else {
             if (!NEOGRAPH_BUILD_THREADS) throw ProgramExecutorRequired();
             // Today's pools are one implementation of an executor: attempts on `scheduler_threads` threads,
             // deadline timers on one, waiters on the system executor.
             pool.emplace(config.scheduler_threads);
             deadline_pool.emplace(1);
-            executors->attempts  = pool->get_executor();
-            executors->deadlines = deadline_pool->get_executor();
-            executors->waiters   = asio::system_executor{};
+            const asio::any_io_executor attempts = pool->get_executor(), deadlines = deadline_pool->get_executor();
+            executors->install(attempts, deadlines, asio::system_executor{}, {}, {});
+            // The pools go with the runtime, which joins them first, and the handles may outlive it: each pool closes
+            // the scheduler as it is destroyed. The system executor's context lasts as long as the process.
+            detail::close_with_execution_contexts(executors, {&attempts, &deadlines});
         }
         // Every operation of the runtime is a coroutine that awaits the stores (#557); the synchronous API runs the
         // same coroutine to completion on the calling thread. That wait is refused (RuntimeScheduler::run_blocking)
@@ -6077,7 +6173,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     template <typename Result, typename Body>
     asio::awaitable<Result> run_on_executor(Body body) {
         auto produced = co_await asio::co_spawn(
-            scheduler->attempts,
+            scheduler->attempts(),
             [keep = shared_from_this(), body = std::move(body)]() mutable -> asio::awaitable<std::optional<Result>> {
                 co_return std::optional<Result>(body());
             },
@@ -6088,7 +6184,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     template <typename Result, typename Body>
     asio::awaitable<Result> run_coroutine_on_executor(Body body) {
         auto produced = co_await asio::co_spawn(
-            scheduler->attempts,
+            scheduler->attempts(),
             [keep = shared_from_this(), body = std::move(body)]() mutable -> asio::awaitable<std::optional<Result>> {
                 co_return std::optional<Result>(co_await body());
             },
@@ -6812,7 +6908,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                     const auto keep = weak_impl.lock();
                     if (!keep || keep->is_stopping()) co_return;
                     asio::co_spawn(
-                        keep->scheduler->attempts,
+                        keep->scheduler->attempts(),
                         [weak_impl, owner, run_id]() -> asio::awaitable<void> {
                             const auto keep = weak_impl.lock();
                             if (!keep || keep->is_stopping()) co_return;
@@ -7111,7 +7207,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 const auto keep = weak_impl.lock();
                 if (!keep || keep->is_stopping()) co_return;
                 asio::co_spawn(
-                    keep->scheduler->attempts,
+                    keep->scheduler->attempts(),
                     [weak_impl, weak_child, owner, parent]() -> asio::awaitable<void> {
                         const auto keep = weak_impl.lock();
                         if (!keep || keep->is_stopping()) co_return;
