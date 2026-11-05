@@ -3,6 +3,7 @@
 
 #include "canonical_json.h"
 #include "own_head_hints.h"
+#include "publication_plan.h"
 #include "run_record_cache.h"
 #include "synthesis_heads_cache.h"
 #include "transition_validator.h"
@@ -14,6 +15,8 @@
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
 #include <neograph/program/postgres_transition_store.h>
 #include <libpq-fe.h>
+
+#include "postgres_pipeline.h"
 #endif
 #include "fixtures/program_store_backends.h"
 #include <gtest/gtest.h>
@@ -23,6 +26,7 @@
 #include <asio/io_context.hpp>
 #include <asio/use_awaitable.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #if NEOGRAPH_BUILD_THREADS
@@ -35,6 +39,8 @@
 #include <future>
 #endif
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -402,6 +408,42 @@ void attach_initial_lineage(ProgramTransitionPublication& publication) {
         run.updated_at_ms()});
     publication.run_generation = std::move(generation);
     publication.run_lineage    = std::move(lineage);
+}
+
+// The lineage of a child run: its first generation records the child's depth.
+void attach_child_lineage(ProgramTransitionPublication& publication) {
+    const auto& run        = publication.run_record;
+    const auto  lineage_id = program_run_lineage_id(run.owner_scope(), run.run_id());
+    auto generation = ProgramRunGeneration::create(ProgramRunGenerationData{
+        run.owner_scope(), lineage_id, 1, run.run_id(), run.program_version_id(), run.bundle_id(),
+        run.id(), run.journal_head(), std::nullopt, run.created_at_ms(), run.child_depth()});
+    auto lineage = ProgramRunLineage::create(ProgramRunLineageData{
+        run.owner_scope(), lineage_id, run.run_id(), 1, generation.id(), run.id(),
+        run.journal_head(), publication.journal_record.remaining_budget,
+        publication.journal_record.inflight_reservation, std::nullopt, run.created_at_ms(),
+        run.updated_at_ms()});
+    publication.run_generation = std::move(generation);
+    publication.run_lineage    = std::move(lineage);
+}
+
+// The publication after `previous` whose run record and journal record carry the given fences.
+ProgramTransitionPublication next_publication_with_fences(const ProgramTransitionPublication& previous,
+                                                          std::uint64_t run_fence, std::uint64_t journal_fence) {
+    auto journal = ProgramJournalRecord::create({previous.journal_record.id,
+                                                 "run-1",
+                                                 digest('1'),
+                                                 digest('2'),
+                                                 previous.journal_record.sequence + 1,
+                                                 {"root", ContinuationState::Running, 1, journal_fence},
+                                                 budget(),
+                                                 {},
+                                                 std::nullopt,
+                                                 20});
+    auto data          = copy_run_record_data(previous.run_record);
+    data.continuation  = {"root", ContinuationState::Running, 1, run_fence};
+    data.journal_head  = journal.id;
+    data.updated_at_ms = 20;
+    return {ProgramRunRecord::create(std::move(data)), std::move(journal), {}, {}};
 }
 
 void attach_same_generation_lineage(ProgramTransitionPublication& publication,
@@ -1531,7 +1573,7 @@ protected:
         if (const auto reason =
                 neograph::program::test_support::backend_unavailable_reason(GetParam().backend))
             GTEST_SKIP() << *reason;
-        deployment_.emplace(GetParam().backend, GetParam().form);
+        deployment_.emplace(GetParam().backend, GetParam().form, GetParam().path);
         store_ = deployment_->blocking_transition_store();
     }
     void TearDown() override {
@@ -1564,7 +1606,7 @@ constexpr const char* NOT_DURABLE =
 
 INSTANTIATE_TEST_SUITE_P(
     Backends, ProgramTransitionStoreConformance,
-    ::testing::ValuesIn(neograph::program::test_support::store_cases()),
+    ::testing::ValuesIn(neograph::program::test_support::transition_store_cases()),
     [](const ::testing::TestParamInfo<StoreCase>& info) {
         return neograph::program::test_support::case_name(info.param);
     });
@@ -4043,6 +4085,32 @@ TEST_P(ProgramTransitionStoreConformance, ChildRelationCompletionRidesInTheChild
     }
 }
 
+// The relation head of a parent that a publication does not read is not parsed for it: a publication that spends nothing
+// and claims no permanent budget decides without it, whatever the stored bytes of the head are.
+TEST_P(ProgramTransitionStoreConformance, AnOrdinaryPublicationDoesNotParseARelationHeadItDoesNotRead) {
+    if (!deployment().durable()) GTEST_SKIP() << NOT_DURABLE;
+    auto& store  = primary_store();
+    auto  parent = relation_parent_start();
+    attach_initial_lineage(parent);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+    auto spawn = relation_spawn_publication("child-1", 1);
+    attach_child_lineage(spawn);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(store.load_child_relation_head("owner-a", "run-1").has_value());
+
+    deployment().corrupt_relation_head("owner-a", "run-1");
+    auto ordinary = relation_running_publication(parent, 20);
+    attach_same_generation_lineage(ordinary, *parent.run_lineage);
+    EXPECT_EQ(store.compare_publish("owner-a", parent.journal_record.id, 1, ordinary),
+              ProgramTransitionPublishResult::Published);
+    // A publication that does read it meets the corruption.
+    auto leaves_one = relation_parent_budget();
+    leaves_one.max_total_children = 1;
+    auto spend = relation_running_publication(ordinary, 21, leaves_one);
+    attach_same_generation_lineage(spend, *ordinary.run_lineage);
+    EXPECT_THROW((void)store.compare_publish("owner-a", ordinary.journal_record.id, 1, spend), std::exception);
+}
+
 TEST_P(ProgramTransitionStoreConformance, ChildRelationCompletionUpdatesTheRowInTheSameTransaction) {
     auto& store = primary_store();
     const auto parent = relation_parent_start();
@@ -5688,6 +5756,133 @@ TEST(ProgramTransitionStoreTest, PostgreSQLOpenMaterializesTheChildrenOfAStoredR
         EXPECT_EQ(run->serialize_canonical(), legacy_bytes);
     }
 }
+
+namespace {
+using PostgresTestStore = OwnedTransitionStore<PostgreSQLProgramTransitionStore>;
+
+PostgreSQLProgramTransitionStore::Options postgres_test_options(bool batched) {
+    PostgreSQLProgramTransitionStore::Options options;
+    options.batched_publication = batched;
+    return options;
+}
+
+// The first publication of a run that has a lineage, and one command publication after it.
+struct LeafRun {
+    ProgramTransitionPublication start;
+    ProgramTransitionPublication command;
+};
+LeafRun leaf_run(const std::string& run_id) {
+    auto start = start_publication_for(run_id, digest('1'), digest('2'), budget(), 10);
+    attach_initial_lineage(start);
+    auto command = javascript_command_publication(start, javascript_command_entry(1, false), 20);
+    attach_same_generation_lineage(command, *start.run_lineage);
+    return LeafRun{std::move(start), std::move(command)};
+}
+
+// A command entry of a run whose bundle is `bundle_id`.
+ProgramJavaScriptCommandJournalEntry command_entry_for_bundle(std::uint64_t sequence, bool completed,
+                                                              const std::string& bundle_id) {
+    return ProgramJavaScriptCommandJournalEntry(ProgramJavaScriptCommandJournalEntryData{
+        sequence, bundle_id, 1, JavaScriptCommand::call_core("journal:store", "main", json{{"input", 1}}),
+        digest('8'), completed ? std::optional<json>{json{{"status", "completed"}}} : std::nullopt});
+}
+}  // namespace
+
+TEST(ProgramTransitionStoreTest, PostgreSQLArrayParameterEscapesIdentifiers) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    // A comma, a quote, a backslash, braces and a space, in the id of the run, of its lineage and of a child.
+    const std::string run_id = "r,\"q\\{b} s";
+    const std::string child  = "c,\"q\\{c} t";
+    PostgresTestStore store(url, postgres_test_options(true));
+    const auto        leaf = leaf_run(run_id);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+    ASSERT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+              ProgramTransitionPublishResult::Published);
+    const auto stored = store.load("owner-a", run_id);
+    ASSERT_TRUE(stored.has_value());
+    EXPECT_EQ(stored->journal_head(), leaf.command.journal_record.id);
+    ASSERT_TRUE(store.load_run_lineage("owner-a", run_id).has_value());
+    EXPECT_EQ(store.load_run_lineage("owner-a", run_id)->id(), leaf.command.run_lineage->id());
+    EXPECT_EQ(store.load_javascript_commands("owner-a", run_id).size(), 1U);
+
+    // A child of such an id, spawned under a parent, goes through the relation row group.
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, relation_parent_start()),
+              ProgramTransitionPublishResult::Published);
+    const auto spawn = relation_spawn_publication(child, 1);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    ASSERT_TRUE(store.load_child_relation("owner-a", "run-1", child).has_value());
+    auto terminal = relation_child_terminal(spawn, child);
+    ProgramChildRelationPart part;
+    part.completion = ProgramChildRelationCompletion{
+        "run-1", 1, 1, relation_child_after(relation_child(child), ProgramChildState::Completed)};
+    terminal.child_relations = std::move(part);
+    ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", child)->child().state, ProgramChildState::Completed);
+    EXPECT_EQ(store.store().late_lock_count(), 0U);
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLChildPathTakesNoLateLock) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgresTestStore store(url, postgres_test_options(true));
+    auto              parent = relation_parent_start();
+    attach_initial_lineage(parent);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, parent), ProgramTransitionPublishResult::Published);
+
+    // A child that is spawned, publishes two commands and ends with its row completed; another that ends at once.
+    auto spawn = relation_spawn_publication("child-1", 1);
+    attach_child_lineage(spawn);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, spawn), ProgramTransitionPublishResult::Published);
+    auto pending = javascript_command_publication(spawn, command_entry_for_bundle(1, false, digest('6')), 21);
+    attach_same_generation_lineage(pending, *spawn.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", spawn.journal_record.id, 1, pending),
+              ProgramTransitionPublishResult::Published);
+    auto done = javascript_command_publication(pending, command_entry_for_bundle(2, true, digest('6')), 22);
+    attach_same_generation_lineage(done, *pending.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", pending.journal_record.id, 1, done),
+              ProgramTransitionPublishResult::Published);
+
+    auto second_spawn = relation_spawn_publication("child-2", 1);
+    attach_child_lineage(second_spawn);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, second_spawn), ProgramTransitionPublishResult::Published);
+    auto terminal = relation_child_terminal(second_spawn, "child-2");
+    attach_same_generation_lineage(terminal, *second_spawn.run_lineage);
+    ProgramChildRelationPart part;
+    part.completion = ProgramChildRelationCompletion{
+        "run-1", 1, 1, relation_child_after(relation_child("child-2"), ProgramChildState::Completed)};
+    terminal.child_relations = std::move(part);
+    ASSERT_EQ(store.compare_publish("owner-a", second_spawn.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.load_child_relation("owner-a", "run-1", "child-2")->child().state, ProgramChildState::Completed);
+    EXPECT_EQ(store.store().late_lock_count(), 0U);
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLPublicationWithAnInconsistentFenceSendsNoStatement) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    for (const bool batched : {true, false}) {
+        PostgresTestStore store(url, postgres_test_options(batched));
+        const auto        before = store.store().statements_sent();
+        EXPECT_EQ(store.compare_publish("owner-a", {}, 2, start_publication_for("run-x", digest('1'), digest('2'),
+                                                                                budget(), 10)),
+                  ProgramTransitionPublishResult::Conflict);
+        EXPECT_EQ(store.store().statements_sent(), before);
+        // A publication that is consistent in itself but stale against the stored head is read, then refused.
+        const auto start = start_publication();
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+        const auto sent = store.store().statements_sent();
+        EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 2,
+                                        next_publication_with_fences(start, 2, 2)),
+                  ProgramTransitionPublishResult::Conflict);
+        EXPECT_GT(store.store().statements_sent(), sent);
+        reset_postgres_transition_schema(url);
+    }
+}
 #endif
 
 TEST(ProgramTransitionStoreTest, HookOutboxHeadsAreAtomicAndReconnectable) {
@@ -6891,6 +7086,7 @@ class CountingTransitionReads : public neograph::program::detail::transition::Tr
 public:
     std::size_t                                               command_log_reads    = 0;
     std::size_t                                               latest_command_reads = 0;
+    std::size_t                                               relation_head_reads  = 0;
     std::vector<ProgramJavaScriptCommandJournalEntry>         commands;
     std::vector<ProgramContextPublication>                    contexts;
     std::vector<ProgramChildSynthesisRecord>                  syntheses;
@@ -6946,6 +7142,7 @@ public:
         return std::nullopt;
     }
     std::optional<ProgramChildRelationHead> relation_head(std::string_view, Lock) override {
+        ++relation_head_reads;
         return std::nullopt;
     }
     std::optional<ProgramChildRelation> relation_row(std::string_view, std::string_view, Lock) override {
@@ -7999,5 +8196,785 @@ TEST(ProgramTransitionStoreTest, SQLiteWalModeReadsEveryCommittedPublicationAfte
 TEST(ProgramTransitionStoreTest, SQLiteRollbackJournalOptionWorksAcrossReopen) {
     expect_sqlite_journal_mode_keeps_every_publication(SQLiteProgramTransitionStore::JournalMode::Rollback,
                                                        "delete");
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Publication planning and the checks that need no stored state (#661).
+// ---------------------------------------------------------------------------
+namespace {
+void expect_sorted_and_unique(const neograph::program::detail::transition::PublicationLockPlan& plan) {
+    const auto strictly_ascending = [](const auto& values) {
+        return std::adjacent_find(values.begin(), values.end(),
+                                  [](const auto& a, const auto& b) { return !(a < b); }) == values.end();
+    };
+    EXPECT_TRUE(strictly_ascending(plan.lineage_ids));
+    EXPECT_TRUE(strictly_ascending(plan.run_ids));
+    EXPECT_TRUE(strictly_ascending(plan.relation_parent_ids));
+    EXPECT_TRUE(strictly_ascending(plan.relation_rows));
+}
+
+std::vector<std::string> sorted(std::vector<std::string> values) {
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+neograph::program::detail::transition::PublicationLockPlan plan_of(const ProgramTransitionPublication& publication) {
+    namespace transition = neograph::program::detail::transition;
+    return transition::plan_publication_locks(transition::TransitionRequest{"owner-a", {}, 1, publication, {}});
+}
+
+}  // namespace
+
+TEST(ProgramTransitionStoreTest, PostgreSQLPublicationPlanLocksInOneOrder) {
+    const auto lineage_of = [](std::string_view run) { return program_run_lineage_id("owner-a", run); };
+
+    // A spawn: the child's own lineage and run, the parent's lineage, run and relation head, and the child's row.
+    auto spawn = relation_spawn_publication("child-1", 1);
+    attach_initial_lineage(spawn);
+    const auto spawn_plan = plan_of(spawn);
+    expect_sorted_and_unique(spawn_plan);
+    EXPECT_EQ(spawn_plan.lineage_ids, sorted({lineage_of("child-1"), lineage_of("run-1")}));
+    EXPECT_EQ(spawn_plan.run_ids, (std::vector<std::string>{"child-1", "run-1"}));
+    EXPECT_EQ(spawn_plan.relation_parent_ids, (std::vector<std::string>{"child-1", "run-1"}));
+    ASSERT_EQ(spawn_plan.relation_rows.size(), 1U);
+    EXPECT_EQ(spawn_plan.relation_rows.front(), std::make_pair(std::string("run-1"), std::string("child-1")));
+
+    // A completion names the child's lineage only when the row records a generation that produced the result.
+    auto terminal = relation_child_terminal(relation_spawn_publication("child-1", 1), "child-1");
+    ProgramChildRelationPart part;
+    part.completion = ProgramChildRelationCompletion{
+        "run-1", 1, std::nullopt, relation_child_after(relation_child("child-1"), ProgramChildState::Completed)};
+    terminal.child_relations = part;
+    const auto without_generation = plan_of(terminal);
+    expect_sorted_and_unique(without_generation);
+    EXPECT_TRUE(without_generation.lineage_ids.empty());
+    EXPECT_EQ(without_generation.relation_parent_ids, (std::vector<std::string>{"child-1", "run-1"}));
+    ASSERT_EQ(without_generation.relation_rows.size(), 1U);
+    terminal.child_relations->completion->child.terminal_generation = 2;
+    const auto with_generation = plan_of(terminal);
+    expect_sorted_and_unique(with_generation);
+    EXPECT_EQ(with_generation.lineage_ids, (std::vector<std::string>{lineage_of("child-1")}));
+    EXPECT_EQ(with_generation.run_ids, (std::vector<std::string>{"child-1"}));
+
+    // A fork also locks the source lineage it debits; a recorded replay also locks its source lineage and run.
+    auto source = start_publication();
+    attach_initial_lineage(source);
+    auto fork = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_split(fork, *source.run_lineage);
+    const auto fork_plan = plan_of(fork);
+    expect_sorted_and_unique(fork_plan);
+    EXPECT_EQ(fork_plan.lineage_ids, sorted({lineage_of("run-1"), lineage_of("run-2")}));
+    EXPECT_EQ(fork_plan.run_ids, (std::vector<std::string>{"run-2"}));
+
+    auto replay = start_publication_for("run-3", digest('1'), digest('2'), budget(), 30);
+    attach_initial_lineage(replay);
+    replay.recorded_replay_source         = ProgramRecordedReplaySource{"run-1", digest('3'), digest('4'), digest('5')};
+    replay.recorded_replay_source_lineage = *source.run_lineage;
+    const auto replay_plan                = plan_of(replay);
+    expect_sorted_and_unique(replay_plan);
+    EXPECT_EQ(replay_plan.lineage_ids, sorted({lineage_of("run-1"), lineage_of("run-3")}));
+    EXPECT_EQ(replay_plan.run_ids, (std::vector<std::string>{"run-1", "run-3"}));
+}
+
+TEST(ProgramTransitionStoreTest, PreparedTransitionRefusesInconsistentFenceBeforeAnyRead) {
+    namespace transition = neograph::program::detail::transition;
+    const auto start     = start_publication();
+    const auto head_id   = start.journal_record.id;
+    const auto prepare   = [&](const ProgramTransitionPublication& publication, std::uint64_t expected_fence) {
+        return transition::prepare_transition("owner-a", head_id, expected_fence, publication, nullptr, nullptr,
+                                              nullptr, nullptr);
+    };
+    const auto same_fence = next_publication_with_fences(start, 1, 1);
+    EXPECT_TRUE(prepare(same_fence, 1).has_value());
+    EXPECT_FALSE(prepare(same_fence, 0).has_value());  // no writer holds fence 0
+    EXPECT_FALSE(prepare(same_fence, 2).has_value());  // the records carry fence 1
+    EXPECT_FALSE(prepare(next_publication_with_fences(start, 2, 1), 1).has_value());  // the run record differs
+    EXPECT_FALSE(prepare(next_publication_with_fences(start, 1, 2), 1).has_value());  // the journal record differs
+    EXPECT_FALSE(prepare(next_publication_with_fences(start, 2, 1), 2).has_value());  // and so does the journal record
+    EXPECT_TRUE(prepare(next_publication_with_fences(start, 2, 2), 2).has_value());   // consistent, whatever is stored
+
+    // The stores answer such a publication with Conflict, the in-memory one too, and the run is left as it was.
+    OwnedTransitionStore<InMemoryProgramTransitionStore> store;
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, start), ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.compare_publish("owner-a", head_id, 0, same_fence), ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.compare_publish("owner-a", head_id, 1, next_publication_with_fences(start, 1, 2)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.compare_publish("owner-a", head_id, 1, next_publication_with_fences(start, 2, 1)),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.compare_publish("owner-a", head_id, 2, next_publication_with_fences(start, 2, 2)),
+              ProgramTransitionPublishResult::Conflict);  // consistent, but not the fence the stored run holds
+    EXPECT_EQ(store.latest("owner-a", "run-1")->id, head_id);
+    EXPECT_EQ(store.compare_publish("owner-a", head_id, 1, same_fence), ProgramTransitionPublishResult::Published);
+
+    // The validator reads nothing for a stored head whose fence differs from the writer's.
+    CountingTransitionReads reads;
+    const auto              head = transition::CurrentHead{start.run_record, start.journal_record, {}, {}};
+    transition::TransitionPlan plan;
+    const auto                 fence_two = next_publication_with_fences(start, 2, 2);
+    EXPECT_EQ(transition::validate_transition({"owner-a", head_id, 2, fence_two, {}}, &head, nullptr, reads, plan),
+              transition::TransitionVerdict::Conflict);
+    EXPECT_EQ(reads.command_log_reads + reads.latest_command_reads + reads.relation_head_reads, 0U);
+}
+
+TEST(ProgramTransitionStoreTest, LineageLedgerWithZeroClaimReadsNoRelationHead) {
+    namespace transition = neograph::program::detail::transition;
+    auto initial         = start_publication();
+    attach_initial_lineage(initial);
+
+    // An ordinary publication that claims no permanent budget is at most any aggregate, so the relation head is not read.
+    auto ordinary = javascript_command_publication(initial, javascript_command_entry(1, false), 20);
+    attach_same_generation_lineage(ordinary, *initial.run_lineage);
+    CountingTransitionReads zero_claim;
+    EXPECT_TRUE(transition::lineage_ledger_binds(zero_claim, ordinary));
+    EXPECT_EQ(zero_claim.relation_head_reads, 0U);
+
+    // A publication that starts a generation states the aggregate exactly: it reads the head.
+    CountingTransitionReads exact;
+    EXPECT_TRUE(transition::lineage_ledger_binds(exact, initial));
+    EXPECT_EQ(exact.relation_head_reads, 1U);
+
+    // A claim that is not zero is compared with the aggregate, which this stored state does not have.
+    auto claiming = ordinary;
+    {
+        const auto& previous = *initial.run_lineage;
+        const auto& run      = claiming.run_record;
+        RunBudget   claimed;
+        claimed.max_total_children = 1;
+        claiming.run_lineage       = ProgramRunLineage::create(ProgramRunLineageData{
+            previous.owner_scope(), previous.lineage_id(), previous.root_run_id(), previous.active_generation(),
+            previous.active_generation_id(), run.id(), run.journal_head(),
+            claiming.journal_record.remaining_budget, claiming.journal_record.inflight_reservation, previous.id(),
+            previous.created_at_ms(), run.updated_at_ms(), claimed});
+    }
+    CountingTransitionReads nonzero;
+    EXPECT_FALSE(transition::lineage_ledger_binds(nonzero, claiming));
+    EXPECT_EQ(nonzero.relation_head_reads, 1U);
+
+    // A publication without a lineage claims nothing and reads nothing.
+    CountingTransitionReads none;
+    EXPECT_TRUE(transition::lineage_ledger_binds(none, start_publication()));
+    EXPECT_EQ(none.relation_head_reads, 0U);
+}
+
+// ---------------------------------------------------------------------------
+// The PostgreSQL store sends a publication in two pipelines, and in one statement for the common shapes (#661).
+// ---------------------------------------------------------------------------
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+namespace {
+// A publication path of the store: the options of a store and the name a failure is reported under.
+struct PostgresPublicationPath {
+    const char* name;
+    bool        batched;
+    bool        pipeline;
+};
+constexpr PostgresPublicationPath POSTGRES_PATHS[] = {
+    {"sequential", false, true}, {"batched without pipeline", true, false}, {"batched with pipeline", true, true}};
+
+PostgreSQLProgramTransitionStore::Options postgres_path_options(const PostgresPublicationPath& path) {
+    PostgreSQLProgramTransitionStore::Options options;
+    options.batched_publication = path.batched;
+    options.use_pipeline        = path.pipeline;
+    return options;
+}
+
+std::string postgres_verdict(const std::function<ProgramTransitionPublishResult()>& call) {
+    try {
+        switch (call()) {
+        case ProgramTransitionPublishResult::Published: return "Published";
+        case ProgramTransitionPublishResult::AlreadyPresent: return "AlreadyPresent";
+        case ProgramTransitionPublishResult::Conflict: return "Conflict";
+        }
+    } catch (const std::exception& error) {
+        return std::string("throws ") + error.what();
+    }
+    return "unknown";
+}
+
+// Every row of one table, as the server writes it, in an order that does not depend on how the rows were written.
+std::vector<std::string> postgres_table_rows(const char* url, const std::string& table) {
+    std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
+    if (PQstatus(connection.get()) != CONNECTION_OK) throw std::runtime_error("PostgreSQL snapshot connection failed");
+    std::unique_ptr<PGresult, decltype(&PQclear)> result(
+        PQexec(connection.get(), ("SELECT t::text FROM " + table + " t ORDER BY t::text").c_str()), PQclear);
+    if (PQresultStatus(result.get()) != PGRES_TUPLES_OK)
+        throw std::runtime_error("PostgreSQL snapshot failed: " + std::string(PQerrorMessage(connection.get())));
+    std::vector<std::string> rows;
+    for (int row = 0; row < PQntuples(result.get()); ++row) rows.emplace_back(PQgetvalue(result.get(), row, 0));
+    return rows;
+}
+
+const char* const POSTGRES_TRANSITION_TABLES[] = {
+    "neograph_program_transition_run_heads_v2",
+    "neograph_program_transition_event_log_v2",
+    "neograph_program_transition_effect_log_v2",
+    "neograph_program_transition_javascript_command_log_v2",
+    "neograph_program_transition_context_log_v1",
+    "neograph_program_transition_synthesis_log_v1",
+    "neograph_program_transition_hook_outbox_log_v1",
+    "neograph_program_run_lineage_heads_v1",
+    "neograph_program_run_generations_v1",
+    "neograph_program_run_generation_publications_v1",
+    "neograph_program_run_lineage_history_v1",
+    "neograph_program_run_lineage_runs_v1",
+    "neograph_program_graph_migration_capsules_v1",
+    "neograph_program_execution_leases_v1",
+    "neograph_program_child_relation_heads_v1",
+    "neograph_program_child_relations_v1",
+};
+
+struct PostgresRun {
+    std::vector<std::string>                          verdicts;
+    std::map<std::string, std::vector<std::string>>   rows;
+};
+
+void snapshot_postgres_rows(const char* url, PostgresRun& run, const std::string& prefix) {
+    for (const auto* table : POSTGRES_TRANSITION_TABLES)
+        run.rows[prefix + table] = postgres_table_rows(url, table);
+}
+
+// A parent with two children (one that publishes commands, one that completes its row), a spend, a stale retry, the
+// parent's end that closes the relation head, an exact retry and a refused publication.
+void run_relation_shapes(PostgresTestStore& store, PostgresRun& run) {
+    const auto publish = [&](std::string_view expected, const ProgramTransitionPublication& publication,
+                             std::uint64_t fence = 1) {
+        run.verdicts.push_back(postgres_verdict(
+            [&] { return store.compare_publish("owner-a", expected, fence, publication); }));
+    };
+    auto parent = relation_parent_start();
+    attach_initial_lineage(parent);
+    publish({}, parent);
+
+    auto spawn = relation_spawn_publication("child-1", 1);
+    attach_child_lineage(spawn);
+    publish({}, spawn);
+    publish({}, spawn);  // an exact retry
+    auto pending = javascript_command_publication(spawn, command_entry_for_bundle(1, false, digest('6')), 21);
+    attach_same_generation_lineage(pending, *spawn.run_lineage);
+    publish(spawn.journal_record.id, pending);
+    auto stale = javascript_command_publication(spawn, command_entry_for_bundle(1, false, digest('6')), 22);
+    attach_same_generation_lineage(stale, *spawn.run_lineage);
+    publish(spawn.journal_record.id, stale);  // built on a head that moved
+    auto done = javascript_command_publication(pending, command_entry_for_bundle(2, true, digest('6')), 23);
+    attach_same_generation_lineage(done, *pending.run_lineage);
+    publish(pending.journal_record.id, done);
+
+    auto second = relation_spawn_publication("child-2", 1);
+    attach_child_lineage(second);
+    publish({}, second);
+    auto terminal = relation_child_terminal(second, "child-2");
+    attach_same_generation_lineage(terminal, *second.run_lineage);
+    ProgramChildRelationPart part;
+    part.completion = ProgramChildRelationCompletion{
+        "run-1", 1, 1, relation_child_after(relation_child("child-2"), ProgramChildState::Completed)};
+    terminal.child_relations = std::move(part);
+    publish(second.journal_record.id, terminal);
+
+    // A spend that leaves room for one child only is refused; one that leaves room for both commits.
+    auto leaves_one = relation_parent_budget();
+    leaves_one.max_total_children = 1;
+    auto too_much = relation_running_publication(parent, 30, leaves_one);
+    attach_same_generation_lineage(too_much, *parent.run_lineage);
+    publish(parent.journal_record.id, too_much);
+    auto leaves_two = relation_parent_budget();
+    leaves_two.max_total_children = 2;
+    auto spend = relation_running_publication(parent, 31, leaves_two);
+    attach_same_generation_lineage(spend, *parent.run_lineage);
+    publish(parent.journal_record.id, spend);
+
+    auto end = terminal_publication(spend, ProgramTerminalStatus::Completed, ContinuationState::Completed, 40);
+    attach_same_generation_lineage(end, *spend.run_lineage);
+    publish(spend.journal_record.id, end);
+    publish(spend.journal_record.id, end);  // retried after it committed
+    publish({}, relation_spawn_publication("child-3", 1));  // refused: the parent ended
+    publish({}, parent, 2);                                  // refused: the writer's fence is not the records'
+}
+
+// An interrupted run with an effect, a fork that debits it, and a run that starts with a context.
+void run_effect_and_fork_shapes(PostgresTestStore& store, PostgresRun& run) {
+    const auto publish = [&](std::string_view expected, const ProgramTransitionPublication& publication) {
+        run.verdicts.push_back(postgres_verdict(
+            [&] { return store.compare_publish("owner-a", expected, 1, publication); }));
+    };
+    auto start = start_publication();
+    attach_initial_lineage(start);
+    publish({}, start);
+    auto interrupted = interrupted_effect_publication(start);
+    attach_same_generation_lineage(interrupted, *start.run_lineage);
+    publish(start.journal_record.id, interrupted);
+    publish(start.journal_record.id, interrupted);  // an exact retry
+    publish({}, interrupted);                       // refused: a first publication of a run that exists
+
+    auto fork = start_publication_for("run-2", digest('1'), digest('2'), budget(), 30);
+    attach_fork_receipt(fork);
+    fork.migration_plan = MigrationPlan::create(MigrationPlanData{
+        digest('1'), digest('1'), "owner-a", MigrationCompatibility::ForkCompatible, {}, {}, {}});
+    attach_fork_split(fork, *interrupted.run_lineage);
+    publish({}, fork);
+
+    auto with_context = start_publication_for("run-3", digest('1'), digest('2'), budget(), 31);
+    with_context.context_publication = context_publication(1, std::nullopt, {}, "run-3");
+    attach_initial_lineage(with_context);
+    publish({}, with_context);
+}
+
+// A run that reaches a checkpoint and is replaced by a successor generation; a second successor is refused.
+void run_successor_shapes(PostgresTestStore& store, PostgresRun& run) {
+    const auto boundary = publish_replacement_boundary(store);
+    const auto lineage  = store.load_run_lineage("owner-a", boundary.publication.run_record.run_id());
+    const auto predecessor =
+        store.load_generation("owner-a", lineage->lineage_id(), lineage->active_generation());
+    const auto input = json{{"handoff", json{{"cursor", 7}, {"state", "ready"}}}, {"previous_run_id", "run-1"}};
+    const auto successor_budget =
+        program_replacement_remaining_budget(boundary.publication.run_record, *lineage, 40);
+    auto first  = start_publication_for("run-2", digest('7'), digest('8'), successor_budget, 40, input);
+    auto second = start_publication_for("run-3", digest('9'), digest('a'), successor_budget, 40, input);
+    attach_replacement_successor(first, *lineage, *predecessor, boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+    attach_replacement_successor(second, *lineage, *predecessor, boundary.publication.run_record,
+                                 boundary.completed_checkpoint);
+    run.verdicts.push_back(postgres_verdict([&] { return store.compare_publish("owner-a", {}, 1, first); }));
+    run.verdicts.push_back(postgres_verdict([&] { return store.compare_publish("owner-a", {}, 1, second); }));
+}
+}  // namespace
+
+TEST(ProgramTransitionStoreTest, PostgreSQLBatchedAndSequentialPathsStoreTheSameRows) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    std::vector<PostgresRun> runs;
+    for (const auto& path : POSTGRES_PATHS) {
+        reset_postgres_transition_schema(url);
+        PostgresRun run;
+        {
+            PostgresTestStore store(url, postgres_path_options(path));
+            run_relation_shapes(store, run);
+            snapshot_postgres_rows(url, run, "relations ");
+        }
+        reset_postgres_transition_schema(url);
+        {
+            PostgresTestStore store(url, postgres_path_options(path));
+            run_effect_and_fork_shapes(store, run);
+            snapshot_postgres_rows(url, run, "effects ");
+        }
+        reset_postgres_transition_schema(url);
+        {
+            PostgresTestStore store(url, postgres_path_options(path));
+            run_successor_shapes(store, run);
+            snapshot_postgres_rows(url, run, "successor ");
+        }
+        runs.push_back(std::move(run));
+    }
+    // The verdicts are the ones the sequence is built to give, and every path stores the same rows.
+    const auto& reference = runs.front();
+    EXPECT_EQ(reference.verdicts,
+              (std::vector<std::string>{
+                  "Published", "Published", "AlreadyPresent", "Published", "Conflict", "Published", "Published",
+                  "Published", "Conflict", "Published", "Published", "AlreadyPresent", "Conflict", "Conflict",
+                  "Published", "Published", "AlreadyPresent", "Conflict", "Published", "Published", "Published",
+                  "Conflict"}));
+    for (std::size_t index = 1; index < runs.size(); ++index) {
+        EXPECT_EQ(runs[index].verdicts, reference.verdicts) << POSTGRES_PATHS[index].name;
+        for (const auto& [table, rows] : reference.rows)
+            EXPECT_EQ(runs[index].rows.at(table), rows) << POSTGRES_PATHS[index].name << ": " << table;
+    }
+    // The sequence does write: the tables the shapes use are not empty.
+    for (const char* table : {"relations neograph_program_transition_event_log_v2",
+                              "relations neograph_program_child_relations_v1",
+                              "effects neograph_program_transition_effect_log_v2",
+                              "effects neograph_program_transition_context_log_v1",
+                              "successor neograph_program_run_generations_v1"})
+        EXPECT_FALSE(reference.rows.at(table).empty()) << table;
+}
+
+// STEP3-TEST-BEGIN
+TEST(ProgramTransitionStoreTest, PostgreSQLBatchedPublicationSendsFewerStatementsThanTheSequentialPath) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgresTestStore batched(url, postgres_test_options(true));
+    PostgresTestStore sequential(url, postgres_test_options(false));
+
+    const auto leaf_statements = [](PostgresTestStore& store, const std::string& run_id) {
+        const auto leaf = leaf_run(run_id);
+        EXPECT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+        const auto before = store.store().statements_sent();
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                  ProgramTransitionPublishResult::Published);
+        return store.store().statements_sent() - before;
+    };
+    const auto with_batches = leaf_statements(batched, "run-batched");
+    const auto one_by_one   = leaf_statements(sequential, "run-sequential");
+    EXPECT_LT(with_batches, one_by_one);
+    EXPECT_LE(with_batches, 7U);  // BEGIN, owner lock, three read groups, one write statement, COMMIT
+}
+// STEP3-TEST-END
+
+TEST(ProgramTransitionStoreTest, PostgreSQLInitialPublicationRacedByAnotherConnectionIsReplanned) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (!path.batched) continue;  // the sequential path does not replan
+        for (const bool identical : {false, true}) {
+            SCOPED_TRACE(std::string(path.name) + (identical ? ", identical bytes" : ", different bytes"));
+            reset_postgres_transition_schema(url);
+            PostgresTestStore first(url, postgres_path_options(path));
+            PostgresTestStore peer(url, postgres_path_options(path));
+            // The peer does not take the owner lock, as a writer of another locking protocol would not.
+            auto peer_hooks             = std::make_shared<detail::PublicationTestHooks>();
+            peer_hooks->skip_owner_lock = true;
+            peer.store().set_publication_test_hooks(peer_hooks);
+
+            auto mine = start_publication_for("run-race", digest('1'), digest('2'), budget(), 10);
+            attach_initial_lineage(mine);
+            auto theirs = identical ? mine : start_publication_for("run-race", digest('1'), digest('2'), budget(), 11);
+            if (!identical) attach_initial_lineage(theirs);
+
+            int  fired = 0;
+            auto hooks = std::make_shared<detail::PublicationTestHooks>();
+            hooks->after_reads = [&] {
+                if (fired++ != 0) return;
+                EXPECT_EQ(peer.compare_publish("owner-a", {}, 1, theirs), ProgramTransitionPublishResult::Published);
+            };
+            first.store().set_publication_test_hooks(hooks);
+            EXPECT_EQ(first.compare_publish("owner-a", {}, 1, mine),
+                      identical ? ProgramTransitionPublishResult::AlreadyPresent
+                                : ProgramTransitionPublishResult::Conflict);
+            EXPECT_EQ(fired, 2) << "the publication is decided a second time against what the peer stored";
+            const auto stored = first.latest("owner-a", "run-race");
+            ASSERT_TRUE(stored.has_value());
+            EXPECT_EQ(stored->id, theirs.journal_record.id);
+            EXPECT_EQ(first.load_events("owner-a", "run-race").size(), 1U);
+        }
+    }
+}
+
+TEST(ProgramTransitionStoreTest, PostgreSQLPipelineWriteErrorRollsBackAndLeavesTheConnectionUsable) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (!path.batched) continue;
+        SCOPED_TRACE(path.name);
+        reset_postgres_transition_schema(url);
+        PostgresTestStore store(url, postgres_path_options(path));
+        const auto        leaf = leaf_run("run-fail");
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+        auto hooks        = std::make_shared<detail::PublicationTestHooks>();
+        hooks->fail_write = true;
+        store.store().set_publication_test_hooks(hooks);
+        EXPECT_THROW((void)store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                     std::runtime_error);
+        // Nothing of the publication is stored, and no transaction is left open on the connection.
+        EXPECT_EQ(store.latest("owner-a", "run-fail")->id, leaf.start.journal_record.id);
+        EXPECT_TRUE(store.load_javascript_commands("owner-a", "run-fail").empty());
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-fail")->id(), leaf.start.run_lineage->id());
+
+        hooks->fail_write = false;
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-fail").size(), 1U);
+    }
+}
+
+// A compare-and-swap that changes no row (here the execution lease the publication releases was deleted after the
+// validator read it) aborts the transaction on the server before the COMMIT that follows it in the pipeline.
+TEST(ProgramTransitionStoreTest, PostgreSQLCompareAndSwapMissLeavesNoCommittedChange) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (!path.batched) continue;
+        SCOPED_TRACE(path.name);
+        reset_postgres_transition_schema(url);
+        PostgresTestStore store(url, postgres_path_options(path));
+        auto              start = start_publication();
+        attach_initial_lineage(start);
+        const auto lease = execution_lease(start);
+        ASSERT_EQ(store.compare_publish_execution("owner-a", "", 1, start, std::nullopt, lease),
+                  ProgramTransitionPublishResult::Published);
+
+        auto terminal = terminal_publication(start, ProgramTerminalStatus::Completed, ContinuationState::Completed);
+        attach_same_generation_lineage(terminal, *start.run_lineage);
+        auto hooks          = std::make_shared<detail::PublicationTestHooks>();
+        hooks->before_write = [&] {
+            neograph::program::test_support::detail::postgres_execute(
+                url, "DELETE FROM neograph_program_execution_leases_v1");
+        };
+        store.store().set_publication_test_hooks(hooks);
+        EXPECT_THROW((void)store.compare_publish_execution("owner-a", start.journal_record.id, 1, terminal, lease,
+                                                           std::nullopt),
+                     std::runtime_error);
+        // Nothing of the publication is committed: not the head, not the terminal event, not the lineage head.
+        EXPECT_EQ(store.latest("owner-a", "run-1")->id, start.journal_record.id);
+        EXPECT_EQ(store.load_events("owner-a", "run-1").size(), start.events.size());
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-1")->id(), start.run_lineage->id());
+        EXPECT_FALSE(store.load("owner-a", "run-1")->terminal_result().has_value());
+    }
+}
+
+// The server ends the session between the two pipelines of a publication: the publication throws and nothing of it is
+// stored. The store starts its session over when the publication ends, so its own next call runs on a new connection,
+// and another store over the database publishes.
+TEST(ProgramTransitionStoreTest, PostgreSQLConnectionLostBetweenThePipelinesStoresNothing) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    reset_postgres_transition_schema(url);
+    PostgresTestStore store(url, postgres_test_options(true));
+    PostgresTestStore other(url, postgres_test_options(true));
+    const auto        leaf = leaf_run("run-drop");
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+    auto hooks           = std::make_shared<detail::PublicationTestHooks>();
+    hooks->before_commit = [&] {
+        neograph::program::test_support::detail::postgres_execute(
+            url, "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = current_database() "
+                 "AND pid <> pg_backend_pid() AND state = 'idle in transaction'");
+    };
+    store.store().set_publication_test_hooks(hooks);
+    EXPECT_THROW((void)store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                 std::runtime_error);
+    EXPECT_EQ(store.latest("owner-a", "run-drop")->id, leaf.start.journal_record.id);
+    EXPECT_EQ(other.latest("owner-a", "run-drop")->id, leaf.start.journal_record.id);
+    EXPECT_TRUE(other.load_javascript_commands("owner-a", "run-drop").empty());
+    EXPECT_EQ(other.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+              ProgramTransitionPublishResult::Published);
+}
+
+// The number of times a publication is decided again after a lost insert race is the store's option.
+TEST(ProgramTransitionStoreTest, PostgreSQLLostRaceReplansFollowTheOption) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const std::size_t replans : {std::size_t{0}, std::size_t{1}}) {
+        SCOPED_TRACE("replans " + std::to_string(replans));
+        reset_postgres_transition_schema(url);
+        auto options              = postgres_test_options(true);
+        options.lost_race_replans = replans;
+        PostgresTestStore first(url, options);
+        PostgresTestStore peer(url, postgres_test_options(true));
+        auto peer_hooks             = std::make_shared<detail::PublicationTestHooks>();
+        peer_hooks->skip_owner_lock = true;
+        peer.store().set_publication_test_hooks(peer_hooks);
+
+        auto mine = start_publication_for("run-race", digest('1'), digest('2'), budget(), 10);
+        attach_initial_lineage(mine);
+        int  fired = 0;
+        auto hooks = std::make_shared<detail::PublicationTestHooks>();
+        hooks->after_reads = [&] {
+            if (fired++ != 0) return;
+            EXPECT_EQ(peer.compare_publish("owner-a", {}, 1, mine), ProgramTransitionPublishResult::Published);
+        };
+        first.store().set_publication_test_hooks(hooks);
+        // The peer published the same bytes: decided again, the publication is already there; not decided again,
+        // the lost race is a Conflict.
+        EXPECT_EQ(first.compare_publish("owner-a", {}, 1, mine),
+                  replans == 0 ? ProgramTransitionPublishResult::Conflict
+                               : ProgramTransitionPublishResult::AlreadyPresent);
+        EXPECT_EQ(fired, static_cast<int>(replans) + 1);
+    }
+}
+
+// The number of rows `sql` counts for the server processes `pids` (its one parameter is their comma-separated list),
+// read on a connection of its own.
+std::size_t postgres_count_for_pids(const char* url, const char* sql, const std::vector<int>& pids) {
+    std::string list;
+    for (const int pid : pids) list += (list.empty() ? "" : ",") + std::to_string(pid);
+    std::unique_ptr<PGconn, decltype(&PQfinish)> connection(PQconnectdb(url), PQfinish);
+    if (!connection || PQstatus(connection.get()) != CONNECTION_OK)
+        throw std::runtime_error("PostgreSQL monitor connection failed");
+    const char*                                   values[] = {list.c_str()};
+    std::unique_ptr<PGresult, decltype(&PQclear)> result(
+        PQexecParams(connection.get(), sql, 1, nullptr, values, nullptr, nullptr, 0), PQclear);
+    if (PQresultStatus(result.get()) != PGRES_TUPLES_OK) throw std::runtime_error("PostgreSQL monitor query failed");
+    return static_cast<std::size_t>(std::stoull(PQgetvalue(result.get(), 0, 0)));
+}
+// The locks (row, table, transaction id and advisory) the server processes `pids` hold.
+std::size_t postgres_locks_held_by(const char* url, const std::vector<int>& pids) {
+    return postgres_count_for_pids(url,
+                                   "SELECT count(*) FROM pg_locks WHERE granted "
+                                   "AND locktype IN ('relation', 'tuple', 'transactionid', 'advisory') "
+                                   "AND pid = ANY(string_to_array($1, ',')::int[])",
+                                   pids);
+}
+// How many of the server processes `pids` are not idle.
+std::size_t postgres_not_idle(const char* url, const std::vector<int>& pids) {
+    return postgres_count_for_pids(url,
+                                   "SELECT count(*) FROM pg_stat_activity WHERE state <> 'idle' "
+                                   "AND pid = ANY(string_to_array($1, ',')::int[])",
+                                   pids);
+}
+
+// A pipeline that does not leave pipeline mode resets the store's connection: neither an open transaction nor locks
+// survive on the server, and the store's next call runs on a clean connection out of pipeline mode.
+TEST(ProgramTransitionStoreTest, PostgreSQLPipelineLeaveFailureResetsConnectionAndEndsTransaction) {
+#ifndef LIBPQ_HAS_PIPELINING
+    GTEST_SKIP() << "libpq built without pipeline mode";
+#else
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    if (!neograph::program::detail::pipeline_mode_supported()) GTEST_SKIP() << "libpq has no pipeline mode";
+    reset_postgres_transition_schema(url);
+    PostgresTestStore store(url, postgres_test_options(true));
+
+    const auto leaf = leaf_run("run-pipeline-leave");
+    auto       done = javascript_command_publication(leaf.command, javascript_command_entry(2, true), 30);
+    attach_same_generation_lineage(done, *leaf.command.run_lineage);
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+    const auto initial_pids = store.store().connection_backend_pids();
+    ASSERT_EQ(initial_pids.size(), 1U);
+    const int first_pid = initial_pids.front();
+
+    std::size_t locks_before_reset    = 0;
+    std::size_t not_idle_before_reset = 0;
+    auto        hooks                 = std::make_shared<detail::PublicationTestHooks>();
+    hooks->fail_pipeline_leave        = true;
+    hooks->after_reads                = [&] {
+        locks_before_reset    = postgres_locks_held_by(url, {first_pid});
+        not_idle_before_reset = postgres_not_idle(url, {first_pid});
+    };
+    store.store().set_publication_test_hooks(hooks);
+    // The read pipeline locks the run's rows in a transaction and leaves the connection in pipeline mode; the expected
+    // head does not match, and ending the read transaction with PQexec fails in pipeline mode, so the call unwinds
+    // through the transaction's cleanup.
+    EXPECT_THROW((void)store.compare_publish("owner-a", digest('9'), 1, leaf.command), std::runtime_error);
+    hooks->after_reads = nullptr;
+    EXPECT_FALSE(hooks->fail_pipeline_leave);
+    EXPECT_GT(locks_before_reset, 0U);
+    EXPECT_EQ(not_idle_before_reset, 1U);
+
+    const auto pids_after_read_leave_failure = store.store().connection_backend_pids();
+    ASSERT_EQ(pids_after_read_leave_failure.size(), 1U);
+    const int second_pid = pids_after_read_leave_failure.front();
+    EXPECT_NE(second_pid, first_pid) << "the connection that stayed in pipeline mode was reset";
+    EXPECT_EQ(postgres_locks_held_by(url, pids_after_read_leave_failure), 0U);
+    EXPECT_EQ(postgres_not_idle(url, pids_after_read_leave_failure), 0U);
+
+    // The store's next calls run on the reset connection, and no lock of the old session blocks an update of the run.
+    ASSERT_TRUE(store.load("owner-a", "run-pipeline-leave").has_value());
+    EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+              ProgramTransitionPublishResult::Published);
+    EXPECT_EQ(store.store().connection_backend_pids().front(), second_pid);
+
+    // A write pipeline whose COMMIT the server answered as a commit, but that stays in pipeline mode, is reset as well,
+    // and its publication is stored.
+    hooks->before_commit = [&] { hooks->fail_pipeline_leave = true; };
+    EXPECT_EQ(store.compare_publish("owner-a", leaf.command.journal_record.id, 1, done),
+              ProgramTransitionPublishResult::Published);
+    hooks->before_commit = nullptr;
+    EXPECT_FALSE(hooks->fail_pipeline_leave);
+    const auto pids_after_write_leave_failure = store.store().connection_backend_pids();
+    ASSERT_EQ(pids_after_write_leave_failure.size(), 1U);
+    const int third_pid = pids_after_write_leave_failure.front();
+    EXPECT_NE(third_pid, second_pid);
+    EXPECT_EQ(postgres_locks_held_by(url, pids_after_write_leave_failure), 0U);
+    EXPECT_EQ(postgres_not_idle(url, pids_after_write_leave_failure), 0U);
+
+    const auto loaded = store.load("owner-a", "run-pipeline-leave");
+    ASSERT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->id(), done.run_record.id());
+    const auto latest = store.latest("owner-a", "run-pipeline-leave");
+    ASSERT_TRUE(latest.has_value());
+    EXPECT_EQ(latest->id, done.journal_record.id);
+    EXPECT_EQ(store.load_javascript_commands("owner-a", "run-pipeline-leave").size(), 2U);
+    EXPECT_EQ(store.store().connection_backend_pids().front(), third_pid);
+#endif
+}
+#endif
+
+namespace {
+// A final publication of a replaced generation (its run id differs from its logical run id, and invocation.parent_run_id
+// is the logical run id) whose child relation names the run's own logical run id as the parent, and the start it
+// follows.
+struct SelfParentPublications {
+    ProgramTransitionPublication start;
+    ProgramTransitionPublication terminal;
+};
+SelfParentPublications self_parent_publications() {
+    auto start = relation_child_start("child-gen-2");
+    attach_initial_lineage(start);
+    auto start_data           = copy_run_record_data(start.run_record);
+    start_data.logical_run_id = "run-1";
+    start.run_record          = ProgramRunRecord::create(std::move(start_data));
+
+    auto terminal = relation_child_terminal(start, "child-gen-2");
+    attach_same_generation_lineage(terminal, *start.run_lineage);
+    auto self_relation                = relation_child_after(relation_child("run-1"), ProgramChildState::Completed);
+    self_relation.terminal_generation = 2;
+    self_relation.terminal_result     = terminal.run_record.terminal_result();
+    ProgramChildRelationPart part;
+    part.completion          = ProgramChildRelationCompletion{"run-1", 1, std::nullopt, self_relation};
+    terminal.child_relations = part;
+    return {std::move(start), std::move(terminal)};
+}
+}  // namespace
+
+// A child relation that names the run itself as its parent is refused: a store would otherwise plan two changes of one
+// relation head for the publication.
+TEST(ProgramTransitionStoreTest, SelfParentRelationInFinalPublicationIsRefused) {
+    namespace transition = neograph::program::detail::transition;
+    auto [start, terminal] = self_parent_publications();
+
+    try {
+        (void)terminal.serialize_canonical();
+        FAIL() << "expected serialize_canonical to refuse a child relation that names the run itself as parent";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string_view(error.what()), "Program child relation cannot name the run itself as its parent");
+    }
+
+    terminal.run_lineage.reset();
+    auto terminal_without_relation = terminal;
+    terminal_without_relation.child_relations.reset();
+    {
+        CountingTransitionReads    baseline_reads;
+        const auto                 head = transition::CurrentHead{start.run_record, start.journal_record, {}, "stored-start"};
+        transition::TransitionPlan baseline_plan;
+        EXPECT_EQ(transition::validate_transition(
+                      {"owner-a", start.journal_record.id, 1, terminal_without_relation, "terminal-bytes"}, &head,
+                      nullptr, baseline_reads, baseline_plan),
+                  transition::TransitionVerdict::Proceed);
+    }
+    CountingTransitionReads    reads;
+    const auto                 head = transition::CurrentHead{start.run_record, start.journal_record, {}, "stored-start"};
+    transition::TransitionPlan plan;
+    EXPECT_EQ(transition::validate_transition({"owner-a", start.journal_record.id, 1, terminal, "terminal-bytes"}, &head,
+                                              nullptr, reads, plan),
+              transition::TransitionVerdict::Conflict);
+    EXPECT_EQ(reads.relation_head_reads, 0U);
+    EXPECT_FALSE(plan.relation_head.has_value());
+    EXPECT_FALSE(plan.closed_relation_head.has_value());
+
+    // A spawn that names the run's own logical run id as the parent is refused the same way.
+    auto self_spawn = start;
+    attach_same_generation_lineage(self_spawn, *start.run_lineage);
+    ProgramChildRelationPart spawn_part;
+    spawn_part.spawn           = ProgramChildRelationSpawn{"run-1", 1, relation_child("child-gen-2")};
+    self_spawn.child_relations = spawn_part;
+    try {
+        (void)self_spawn.serialize_canonical();
+        FAIL() << "expected serialize_canonical to refuse a child spawn that names the run itself as parent";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_EQ(std::string_view(error.what()), "Program child relation cannot name the run itself as its parent");
+    }
+    self_spawn.run_lineage.reset();
+    CountingTransitionReads    spawn_reads;
+    transition::TransitionPlan spawn_plan;
+    EXPECT_EQ(transition::validate_transition({"owner-a", {}, 1, self_spawn, "spawn-bytes"}, nullptr, nullptr,
+                                              spawn_reads, spawn_plan),
+              transition::TransitionVerdict::Conflict);
+    EXPECT_EQ(spawn_reads.relation_head_reads, 0U);
+    EXPECT_FALSE(spawn_plan.relation_head.has_value());
+}
+
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+// The PostgreSQL store refuses a self-parent child relation as a Conflict before it sends any statement. (The
+// publication is otherwise well formed: without the refusal it would open a transaction.)
+TEST(ProgramTransitionStoreTest, PostgreSQLRefusesASelfParentRelationBeforeAnyStatement) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    auto [start, terminal] = self_parent_publications();
+    reset_postgres_transition_schema(url);
+    PostgresTestStore store(url, postgres_test_options(true));
+    const auto        statements_before = store.store().statements_sent();
+    EXPECT_EQ(store.compare_publish("owner-a", start.journal_record.id, 1, terminal),
+              ProgramTransitionPublishResult::Conflict);
+    EXPECT_EQ(store.store().statements_sent(), statements_before) << "refused before any statement is sent";
 }
 #endif

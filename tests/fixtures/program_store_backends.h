@@ -91,17 +91,33 @@ inline std::vector<StoreBackend> store_backends() {
 
 enum class StoreForm { Direct, Awaited };
 
+// How the stores of a PostgreSQL deployment publish: Default is the store's default options; Sequential sends one
+// statement per question (the path the others are compared with); NoPipeline reads in groups and writes in one
+// statement but sends every statement on its own.
+enum class PostgresPath { Default, Sequential, NoPipeline };
+
 inline const char* form_name(StoreForm form) { return form == StoreForm::Direct ? "Direct" : "Awaited"; }
 
 // One conformance case: a backend, and the form its store is called in.
 struct StoreCase {
     StoreBackend backend = StoreBackend::InMemory;
     StoreForm    form    = StoreForm::Direct;
+    PostgresPath path    = PostgresPath::Default;
 };
+
+inline const char* postgres_path_name(PostgresPath path) {
+    switch (path) {
+    case PostgresPath::Default: return "";
+    case PostgresPath::Sequential: return "Sequential";
+    case PostgresPath::NoPipeline: return "NoPipeline";
+    }
+    return "";
+}
 
 // The Direct form keeps the backend's name, so a case keeps the name it had before the forms.
 inline std::string case_name(const StoreCase& value) {
-    return std::string(backend_name(value.backend)) + (value.form == StoreForm::Awaited ? "Awaited" : "");
+    return std::string(backend_name(value.backend)) + postgres_path_name(value.path) +
+           (value.form == StoreForm::Awaited ? "Awaited" : "");
 }
 
 inline void PrintTo(const StoreCase& value, std::ostream* out) { *out << case_name(value); }
@@ -110,6 +126,18 @@ inline std::vector<StoreCase> store_cases() {
     std::vector<StoreCase> out;
     for (const auto backend : store_backends())
         for (const auto form : {StoreForm::Direct, StoreForm::Awaited}) out.push_back({backend, form});
+    return out;
+}
+
+// The cases of the transition store suites: every backend in both forms, and the PostgreSQL store on each of its
+// publication paths.
+inline std::vector<StoreCase> transition_store_cases() {
+    auto out = store_cases();
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+    for (const auto path : {PostgresPath::Sequential, PostgresPath::NoPipeline})
+        for (const auto form : {StoreForm::Direct, StoreForm::Awaited})
+            out.push_back({StoreBackend::PostgreSql, form, path});
+#endif
     return out;
 }
 
@@ -264,8 +292,9 @@ DROP TABLE IF EXISTS neograph_program_bundles;
 
 class StoreDeployment {
 public:
-    explicit StoreDeployment(StoreBackend backend, StoreForm form = StoreForm::Direct)
-        : backend_(backend), form_(form) {
+    explicit StoreDeployment(StoreBackend backend, StoreForm form = StoreForm::Direct,
+                             PostgresPath path = PostgresPath::Default)
+        : backend_(backend), form_(form), path_(path) {
         if (backend == StoreBackend::InMemory) {
             memory_transitions_ = std::make_shared<InMemoryProgramTransitionStore>();
             memory_catalog_     = std::make_shared<InMemoryProgramStore>();
@@ -326,7 +355,7 @@ public:
 #endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
         if (backend_ == StoreBackend::PostgreSql)
-            return std::make_shared<PostgreSQLProgramTransitionStore>(url_);
+            return std::make_shared<PostgreSQLProgramTransitionStore>(url_, postgres_options());
 #endif
         throw std::logic_error("backend is not built");
     }
@@ -349,9 +378,11 @@ public:
                 database_, SQLiteProgramTransitionStore::Options{capacity});
 #endif
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
-        if (backend_ == StoreBackend::PostgreSql)
-            return std::make_shared<PostgreSQLProgramTransitionStore>(
-                url_, PostgreSQLProgramTransitionStore::Options{capacity});
+        if (backend_ == StoreBackend::PostgreSql) {
+            auto options = postgres_options();
+            options.run_record_cache_capacity = capacity;
+            return std::make_shared<PostgreSQLProgramTransitionStore>(url_, options);
+        }
 #endif
         throw std::logic_error("backend is not built");
     }
@@ -463,6 +494,13 @@ public:
                 detail::quote_literal(owner_scope) + " AND run_id = " + detail::quote_literal(run_id));
     }
 
+    // Replaces the stored relation head of a parent with bytes that are not a canonical head.
+    void corrupt_relation_head(std::string_view owner_scope, std::string_view parent_run_id) {
+        execute("UPDATE " + table("program_child_relation_heads_v1") +
+                " SET head_bytes = 'broken' WHERE owner_scope = " + detail::quote_literal(owner_scope) +
+                " AND parent_run_id = " + detail::quote_literal(parent_run_id));
+    }
+
     // Gives a stored execution lease an id column that the lease in its bytes does not carry.
     void corrupt_lease_identity(std::string_view owner_scope, std::string_view run_id) {
         execute("UPDATE " + table("program_execution_leases_v1") +
@@ -511,6 +549,16 @@ public:
     }
 
 private:
+#ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_POSTGRES
+    // The options of the PostgreSQL transition stores of this deployment, as its publication path sets them.
+    PostgreSQLProgramTransitionStore::Options postgres_options() const {
+        PostgreSQLProgramTransitionStore::Options options;
+        if (path_ == PostgresPath::Sequential) options.batched_publication = false;
+        if (path_ == PostgresPath::NoPipeline) options.use_pipeline = false;
+        return options;
+    }
+#endif
+
     // A table of the Program schema: the SQLite name, or the same name under the PostgreSQL prefix.
     std::string table(std::string_view name) const {
         return backend_ == StoreBackend::PostgreSql ? "neograph_" + std::string(name)
@@ -579,6 +627,7 @@ private:
 
     StoreBackend backend_;
     StoreForm    form_ = StoreForm::Direct;
+    PostgresPath path_ = PostgresPath::Default;
     std::shared_ptr<InMemoryProgramTransitionStore> memory_transitions_;
     std::shared_ptr<InMemoryProgramStore>           memory_catalog_;
 #ifdef NEOGRAPH_PROGRAM_TESTS_HAVE_JS_STORES
