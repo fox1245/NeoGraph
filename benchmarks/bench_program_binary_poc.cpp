@@ -99,6 +99,10 @@ public:
         std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence) override {
         return inner_->compare_publish_takeover(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_->compare_publish_takeover_execution(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
     std::vector<ProgramTransitionPublication> snapshot() const {
         std::lock_guard lock(mutex_);
         return publications_;

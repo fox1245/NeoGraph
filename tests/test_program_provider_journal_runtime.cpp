@@ -1024,7 +1024,7 @@ TEST(ProgramProviderJournalRuntime, RecoveredResumedAttemptRebuildsItsRequestFro
     EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));
 }
 
-TEST(ProgramProviderJournalRuntime, RootExecutionLeaseRejectsCrashRecoveryBeforeFirstCheckpoint) {
+TEST(ProgramProviderJournalRuntime, RootExecutionLeaseIsTakenOverByCrashRecoveryBeforeFirstCheckpoint) {
     TempDir files("crash-first");
     TempDir image("crash-first-image");
     auto shared = std::make_shared<Shared>();
@@ -1042,11 +1042,18 @@ TEST(ProgramProviderJournalRuntime, RootExecutionLeaseRejectsCrashRecoveryBefore
     EXPECT_EQ(crashed[0].state, "dispatched");
     auto recovery = std::make_shared<Shared>();
     Wire restarted(image, recovery);
-    try {
-        (void)restarted.runtime().reconnect(owner, "crash-run");
-        FAIL() << "the captured root execution lease must still fence reconnect";
-    } catch (const ProgramDiagnosticError& error) {
-        EXPECT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
+    // Recovery takes the run over by the fence and deletes its lease. The Core call saved no checkpoint and its
+    // request may have been sent, so the run stops for the host to reconcile the call; nothing is sent again.
+    const auto recovered = restarted.runtime().reconnect(owner, "crash-run").wait();
+    EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Interrupted) << failure_text(recovered);
+    ASSERT_TRUE(recovered.interrupt());
+    EXPECT_TRUE(recovered.interrupt()->pending_effect);
+    {
+        OwnedTransitionStore<SQLiteProgramTransitionStore> transitions(image.program_db());
+        const auto record = transitions.load(owner, "crash-run");
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record->continuation().fence, 2U);
+        EXPECT_FALSE(transitions.load_execution_lease(owner, "crash-run"));
     }
     EXPECT_EQ(recovery->transport.load(), 0);
     EXPECT_TRUE(same_rows(rows(image.provider_db()), crashed));

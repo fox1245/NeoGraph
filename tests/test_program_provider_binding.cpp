@@ -25,6 +25,7 @@
 #include "monetary.h"
 #include "provider_binding.h"
 
+#include "../src/core/runtime_clock.h"
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
@@ -2745,47 +2746,78 @@ TEST(ProgramProviderBindingJournal, TheUpstreamNameIsOutsideTheJournalsIdentity)
     EXPECT_EQ(unnamed, records[0]) << "the name is the only difference between the two records";
 }
 
+// The runtime reads this clock while the object lives. It starts at the real times and moves only when a test
+// advances it, so the absolute wall deadline of a run can be passed without waiting for it.
+struct ScopedSimulatedClock {
+    async::detail::SimulatedClock clock{std::chrono::steady_clock::now(), std::chrono::system_clock::now()};
+    ScopedSimulatedClock() { async::detail::set_simulated_clock_for_testing(&clock); }
+    ~ScopedSimulatedClock() { async::detail::set_simulated_clock_for_testing(nullptr); }
+    ScopedSimulatedClock(const ScopedSimulatedClock&)            = delete;
+    ScopedSimulatedClock& operator=(const ScopedSimulatedClock&) = delete;
+};
+
+// A define()-only run without child budgets holds a root execution lease. The process dies after the run's model
+// call is journaled; `crashed` is a copy of what it had made durable.
+void crash_after_the_journaled_call(const TempDir& files, const TempDir& image, const HostOptions& options) {
+    auto peer = std::make_shared<Peer>();
+    Host h(peer, options, &files);
+    bool taken = false;
+    h.script().after = [&](const std::string&) {
+        if (taken) return;
+        taken = true;
+        crash_image(files.path, image.path);
+    };
+    const auto done = h.run(Shape::LlmThenAfter, "lease-run");
+    ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
+    ASSERT_TRUE(taken);
+}
+
 TEST(ProgramProviderBindingJournal, AnExpiredLeaseStillChargesTheJournaledCall) {
-    // A define()-only run without child budgets recovers through its root
-    // execution lease: once the lease expires the run ends TimedOut without
-    // running again, and the call it journaled must still be charged.
+    // Recovered once its absolute wall deadline has passed (the lease's expiry), the run ends TimedOut without
+    // running again, and the call it journaled is still charged, once.
+    ScopedSimulatedClock clock;
     TempDir     files("lease");
     TempDir     image("lease-image");
-    auto        peer = std::make_shared<Peer>();
     HostOptions options;
-    options.wall_time_ms = 1500;
-    {
-        Host h(peer, options, &files);
-        bool taken = false;
-        h.script().after = [&](const std::string&) {
-            if (taken) return;
-            taken = true;
-            crash_image(files.path, image.path);
-        };
-        const auto done = h.run(Shape::LlmThenAfter, "lease-run");
-        ASSERT_EQ(done.status(), ProgramTerminalStatus::Completed) << failure_text(done);
-        ASSERT_TRUE(taken);
-    }
+    options.wall_time_ms = 60'000;
+    crash_after_the_journaled_call(files, image, options);
     ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
+    clock.clock.advance(std::chrono::milliseconds(options.wall_time_ms));
     auto recovery = std::make_shared<Peer>();
     Host restarted(recovery, options, &image);
-    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(20);
-    std::optional<ProgramResult> result;
-    while (!result && std::chrono::steady_clock::now() < until) {
-        try {
-            result = restarted.runtime().reconnect(kOwner, "lease-run").wait();
-        } catch (const ProgramDiagnosticError& error) {
-            ASSERT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-    }
-    ASSERT_TRUE(result);
-    EXPECT_EQ(result->status(), ProgramTerminalStatus::TimedOut) << failure_text(*result);
+    const auto result = restarted.runtime().reconnect(kOwner, "lease-run").wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::TimedOut) << failure_text(result);
+    ASSERT_TRUE(result.failure());
+    EXPECT_EQ(result.failure()->code, "P_RUN_LEASE_EXPIRED");
     EXPECT_EQ(recovery->transport.load(), 0);
-    ASSERT_EQ(result->monetary_records().size(), 1U);
-    EXPECT_TRUE(result->monetary_records().front().replayed);
-    EXPECT_EQ(result->usage().monetary_microunits, 1235U);
-    EXPECT_EQ(result->remaining_budget().monetary_microunits, 1'000'000U - 1235U);
+    ASSERT_EQ(result.monetary_records().size(), 1U);
+    EXPECT_TRUE(result.monetary_records().front().replayed);
+    EXPECT_EQ(result.usage().monetary_microunits, 1235U);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - 1235U);
+}
+
+TEST(ProgramProviderBindingJournal, ALeasedRootRecoveredBeforeItsDeadlineChargesTheJournaledCallOnce) {
+    // Recovered before its deadline, the run is taken over and continues from its checkpoint: the journaled call is
+    // not sent again and is charged once.
+    ScopedSimulatedClock clock;
+    TempDir     files("lease-takeover");
+    TempDir     image("lease-takeover-image");
+    HostOptions options;
+    options.wall_time_ms = 60'000;
+    crash_after_the_journaled_call(files, image, options);
+    ASSERT_EQ(journal_states(image.provider_db()), std::vector<std::string>{"succeeded"});
+    clock.clock.advance(std::chrono::milliseconds(1'000));
+    auto recovery = std::make_shared<Peer>();
+    Host restarted(recovery, options, &image);
+    const auto result = restarted.runtime().reconnect(kOwner, "lease-run").wait();
+    ASSERT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_text(result);
+    EXPECT_EQ(recovery->transport.load(), 0) << "the journaled request is not sent again";
+    ASSERT_EQ(result.monetary_records().size(), 1U) << "charged once";
+    EXPECT_TRUE(result.monetary_records().front().replayed);
+    EXPECT_EQ(result.usage().monetary_microunits, 1235U);
+    EXPECT_EQ(result.remaining_budget().monetary_microunits, 1'000'000U - 1235U);
+    EXPECT_EQ(result.remaining_budget().wall_time_ms, options.wall_time_ms - 1'000)
+        << "recovery keeps the run's absolute wall deadline";
 }
 
 TEST(ProgramProviderBindingJournal, AnUncertainDispatchIsHeldAcrossARestart) {

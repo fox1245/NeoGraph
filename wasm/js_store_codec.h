@@ -577,7 +577,10 @@ std::tuple<typename Codec<A>::Owned...> decode_arguments(const json& array) {
       program::ProgramTransitionPublication, std::optional<program::ProgramExecutionLease>,                            \
       std::optional<program::ProgramExecutionLease>)                                                                   \
     X(compare_publish_takeover, compare_publish_takeover, "comparePublishTakeover", true,                             \
-      program::ProgramTransitionPublishResult, std::string_view, std::string_view, std::string_view, std::uint64_t)
+      program::ProgramTransitionPublishResult, std::string_view, std::string_view, std::string_view, std::uint64_t)    \
+    X(compare_publish_takeover_execution, compare_publish_takeover_execution, "comparePublishTakeoverExecution",      \
+      false, program::ProgramTransitionPublishResult, std::string_view, std::string_view, std::string_view,           \
+      std::uint64_t, program::ProgramExecutionLease)
 
 #define NEOGRAPH_JS_PROGRAM_OPS(X)                                                                                     \
     X(publish_admitted, publish_admitted, "publishAdmitted", true, void, program::ProgramBundle,                      \

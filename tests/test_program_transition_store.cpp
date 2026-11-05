@@ -856,6 +856,14 @@ public:
                                                                  std::uint64_t expected_fence) override {
         return backend.compare_publish_takeover_sync(owner, run_id, previous, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner,
+                                                                           std::string_view run_id,
+                                                                           std::string_view previous,
+                                                                           std::uint64_t expected_fence,
+                                                                           ProgramExecutionLease expected_lease) override {
+        return backend.compare_publish_takeover_execution_sync(owner, run_id, previous, expected_fence,
+                                                               std::move(expected_lease));
+    }
     void verify_stored_history_sync(std::string_view owner, std::string_view run) const override {
         backend.verify_stored_history_sync(owner, run);
     }

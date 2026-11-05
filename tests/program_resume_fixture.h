@@ -657,6 +657,13 @@ public:
             return inner_->compare_publish_takeover(owner, run_id, head, expected_fence);
         });
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner, std::string_view run_id, std::string_view head,
+        std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return crash_.durable("publish takeover", [&] {
+            return inner_->compare_publish_takeover_execution(owner, run_id, head, expected_fence, std::move(expected_lease));
+        });
+    }
 
 private:
     std::shared_ptr<BlockingProgramTransitionStore> inner_;

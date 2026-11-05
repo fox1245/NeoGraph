@@ -1210,6 +1210,24 @@ inline std::optional<TakeoverPublication> prepare_takeover(
     }
 }
 
+/**
+ * The execution lease a takeover finds is the one it was given. A takeover given no lease takes over only a run that
+ * holds none; one given a lease takes over only a run whose stored lease is that lease (lease ids are content
+ * addressed) for the run's owner, attempt, version and bundle, and deletes it in the same step.
+ */
+inline bool takeover_lease_binds(std::string_view             owner_scope,
+                                 const ProgramRunRecord&      current_run,
+                                 const ProgramExecutionLease* current_lease,
+                                 const ProgramExecutionLease* expected_lease) noexcept {
+    if (!expected_lease) return current_lease == nullptr;
+    return current_lease && current_lease->id() == expected_lease->id() &&
+           expected_lease->owner_scope() == owner_scope &&
+           expected_lease->run_id() == current_run.run_id() &&
+           expected_lease->attempt() == current_run.continuation().attempt &&
+           expected_lease->program_version_id() == current_run.program_version_id() &&
+           expected_lease->bundle_id() == current_run.bundle_id();
+}
+
 enum class TransitionVerdict : std::uint8_t {
     /// Every check passed; write the publication.
     Proceed,

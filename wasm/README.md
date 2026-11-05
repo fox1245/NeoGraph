@@ -614,6 +614,7 @@ interface, given in the last column.
 | | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | publish result | required |
 | | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | publish result; the leases are canonical texts or `null` | `"conflict"` |
 | | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | publish result | required |
+| | `comparePublishTakeoverExecution(ownerScope, runId, expectedJournalHead, expectedFence, expectedLease)` | publish result; the lease is canonical text | `"conflict"` |
 | | `loadChildRelationHead(ownerScope, parentRunId)` | relation head or `null` | required |
 | | `loadChildRelation(ownerScope, parentRunId, childRunId)` | relation row or `null` | required |
 | | `loadChildRelations(ownerScope, parentRunId, openOnly)` | list of relation rows in attach order | required |
@@ -650,7 +651,10 @@ interface, given in the last column.
   `comparePublish` and `comparePublishExecution` answer `"conflict"` for a publication whose run record or journal record
   carries another fence. The object must also compare `expectedFence` with the `continuation.fence` of the stored run in the
   same step as the journal head, and refuse when they differ. `comparePublishTakeover` publishes the stored `Running` record
-  of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else.
+  of `runId` with `fence = expectedFence + 1` and one new journal record and, for a run bound to a lineage, moves the lineage head to that record in the same step; it changes nothing else, and it refuses a run that holds an execution lease.
+  `comparePublishTakeoverExecution` does the same for a run whose stored execution lease is `expectedLease` and deletes
+  that lease in the same step; it refuses a run that holds no lease or another one. Without it, `reconnect` of a running
+  Core-only root that holds a lease answers `P_RUN_RECOVERY_CONFLICT` until the lease expires.
 - **Child relations.** The children of a parent are rows keyed by the parent's logical run id, with one head per parent (the epoch, the counts, the permanent budget aggregate and whether it is closed). `insertChildRelation` and `updateChildRelation` change a row and the head in one step, compare the writer's fence (the parent's for an insert and for a row's move to dispatched; the child's own for the end or the pause of a row, which reads no parent head; a row whose child never ran is ended under the parent's) with the stored one, and answer `{status, refusal, relation, head}`; `status` is `"applied"`, `"already_present"` or `"refused"`. A publication may carry a relation part (`child_relations`) that the object applies in the same step as the publication; a final publication closes its own head. The rules are those of `src/program/transition_validator.h`: a host that wraps the reference store gets them. The five methods are required, as the operations are pure virtual in C++.
 - **Not supported.** `compare_publish_graph_safe_point` carries evidence that is never serialized, so a JavaScript store
   does not take part in live graph migration: it answers `"conflict"`, as the base class does.

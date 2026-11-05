@@ -804,15 +804,10 @@ print(json.dumps({"unreachable": True}), flush=True)
 
 _LEASE_EXPIRED_PROCESS = _LEASE_SETUP + r'''
 import time
-deadline = time.monotonic() + 30
-while True:
-    try:
-        result = host.reconnect(sys.argv[4]).wait()
-        break
-    except RuntimeError as error:
-        if "P_RUN_LEASE_HELD" not in str(error) or time.monotonic() > deadline:
-            raise
-        time.sleep(0.1)
+# The run's absolute wall deadline is its last publication, made before the crashing process died, plus its wall
+# time. This process starts after that one died, so once the wall time has passed here the deadline has passed.
+time.sleep(BUDGET.wall_time_ms / 1000)
+result = host.reconnect(sys.argv[4]).wait()
 print(json.dumps({
     "status": str(result.status), "code": result.failure.code if result.failure else None,
     "tokens": result.usage.model_tokens,
@@ -938,50 +933,45 @@ def test_the_overshoot_record_says_how_far_the_last_reply_went_over(peer):
 
 
 # ---------------------------------------------------------------------------
-# reconnect() of a run that holds an execution lease says why it is held (#421)
+# reconnect() takes over a run that holds an execution lease
 #
 # A define()-only Program started without child budgets holds a root execution
-# lease for its wall time, so that no other runtime continues a run whose owner
-# may still be alive. The error names the lease and the two ways out: wait for
-# it to expire (the run then ends TimedOut), or start the Program with child
-# budgets, which holds no lease and recovers from the last checkpoint
-# (test_a_call_journaled_before_a_crash_is_charged_once_after_recovery).
+# lease while it runs. reconnect() takes such a run over by its ownership fence,
+# deletes the lease, and continues the run from its last checkpoint before its
+# wall-time deadline: the journaled call is replayed, not sent again, and is
+# charged once (test_an_expired_lease_charges_the_journaled_calls_tokens_with_its_money
+# covers a reconnect after the deadline).
 # ---------------------------------------------------------------------------
 
 _LEASE_HELD_SETUP = _LEASE_SETUP.replace("wall_time_ms=3_000", "wall_time_ms=60_000")
 _LEASE_HELD_CRASHING_PROCESS = _LEASE_HELD_SETUP + _LEASE_CRASHING_PROCESS[len(_LEASE_SETUP):]
-_LEASE_HELD_RECONNECT = _LEASE_HELD_SETUP + r'''
-try:
-    host.reconnect(sys.argv[4])
-except RuntimeError as error:
-    print(json.dumps({"diagnostic": error.diagnostics[0]}, default=str), flush=True)
-else:
-    print(json.dumps({"reconnected": True}), flush=True)
+_LEASE_TAKEOVER_RECONNECT = _LEASE_HELD_SETUP + r'''
+result = host.reconnect(sys.argv[4]).wait()
+print(json.dumps({
+    "status": str(result.status), "code": result.failure.code if result.failure else None,
+    "tokens": result.usage.model_tokens,
+    "monetary": result.usage.monetary_microunits,
+}), flush=True)
 '''
 
 
 @pytest.mark.skipif(sys.platform == "win32",
                     reason="NativeArchive custody needs an owner-only protected directory")
-def test_reconnect_of_a_leased_run_names_the_lease_and_the_child_budget_exit(peer, tmp_path):
+def test_reconnect_takes_over_a_leased_run_and_continues_it(peer, tmp_path):
     store = str(tmp_path / "runs")
     crashed = run_python(_LEASE_HELD_CRASHING_PROCESS, peer.base_url, store, "first", timeout=120)
     assert crashed.returncode == 9, (crashed.returncode, crashed.stdout, crashed.stderr[-2000:])
     lines = [json.loads(line) for line in crashed.stdout.splitlines() if line.startswith("{")]
 
-    held = run_python(_LEASE_HELD_RECONNECT, peer.base_url, store, "again", lines[0]["run_id"],
-                      timeout=120)
-    assert held.returncode == 0, held.stderr[-2000:]
-    diagnostic = last_json_line(held.stdout)["diagnostic"]
-    assert diagnostic["code"] == "P_RUN_LEASE_HELD", diagnostic
-    message = diagnostic["message"]
-    assert "execution lease" in message, message
-    assert "TimedOut" in message, message
-    assert "max_child_depth" in message and "max_total_children" in message, message
-    witness = diagnostic["witness"]
-    assert witness["run_id"] == lines[0]["run_id"]
-    assert 0 < witness["retry_after_ms"] <= 60_000, witness
-    assert witness["expires_at_ms"] > 0
-    assert peer.request_count() == 1, "the held run was not dispatched again"
+    recovered = run_python(_LEASE_TAKEOVER_RECONNECT, peer.base_url, store, "again", lines[0]["run_id"],
+                           timeout=120)
+    assert recovered.returncode == 0, recovered.stderr[-2000:]
+    outcome = last_json_line(recovered.stdout)
+    assert outcome["status"] == "ProgramTerminalStatus.Completed", outcome
+    assert outcome["code"] is None, outcome
+    assert peer.request_count() == 1, "the journaled call was replayed, not sent again"
+    assert outcome["monetary"] == 1235, outcome
+    assert outcome["tokens"] == 24, outcome
 
 
 # ---------------------------------------------------------------------------

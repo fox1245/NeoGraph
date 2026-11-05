@@ -1894,6 +1894,13 @@ public:
         std::uint64_t    expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         std::uint64_t expected_fence,
@@ -2014,6 +2021,11 @@ public:
         std::string_view owner, std::string_view run_id, std::string_view expected,
         std::uint64_t expected_fence) override {
         return target_->compare_publish_takeover(owner, run_id, expected, expected_fence);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected,
+        std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return target_->compare_publish_takeover_execution(owner, run_id, expected, expected_fence, std::move(expected_lease));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
@@ -2347,6 +2359,13 @@ public:
         std::uint64_t    expected_fence) override {
         return inner_->compare_publish_takeover(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_->compare_publish_takeover_execution(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         std::uint64_t expected_fence,
@@ -2533,6 +2552,13 @@ public:
         std::uint64_t    expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
         std::uint64_t expected_fence,
@@ -2623,6 +2649,13 @@ public:
         std::string_view expected,
         std::uint64_t    expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner,
+        std::string_view run_id,
+        std::string_view expected,
+        std::uint64_t    expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(
         std::string_view owner, std::string_view expected,
@@ -5806,7 +5839,7 @@ TEST(ProgramRuntimeTest, CancellationAfterHeldSourceLinearizesBehindMigrationCom
     (void)source.wait();
 }
 
-TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
+TEST(ProgramRuntimeTest, RemoteReconnectTakesOverALiveRootAndDeletesItsExecutionLease) {
     blocking_calls.store(0);
     blocking_active.store(0);
     TransitionStoreHandle backend = std::make_shared<InMemoryProgramTransitionStore>();
@@ -5821,38 +5854,28 @@ TEST(ProgramRuntimeTest, RemoteReconnectCannotStealLiveRootExecutionLease) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_EQ(blocking_active.load(), 1U);
-    const auto lease = backend->load_execution_lease(
-        "tenant:runtime", source.run_id());
-    ASSERT_TRUE(lease);
+    ASSERT_TRUE(backend->load_execution_lease("tenant:runtime", source.run_id()));
 
+    // Another process recovers the run by the ownership fence, as it recovers every other run, and the takeover
+    // deletes the lease in the same step.
     auto remote_view = std::make_shared<IsolatedProcessTransitionStore>(backend);
     auto remote_runtime = fixture.make_runtime_with_transitions(remote_view);
-    try {
-        (void)remote_runtime->reconnect("tenant:runtime", source.run_id());
-        FAIL() << "remote reconnect unexpectedly stole a live root execution lease";
-    } catch (const ProgramDiagnosticError& error) {
-        EXPECT_EQ(error.diagnostic().code, "P_RUN_LEASE_HELD");
-        // #421: the error names the lease, what happens when it expires, and
-        // the child budgets that take no lease.
-        const auto& message = error.diagnostic().message;
-        EXPECT_NE(message.find("execution lease"), std::string::npos) << message;
-        EXPECT_NE(message.find("TimedOut"), std::string::npos) << message;
-        EXPECT_NE(message.find("max_child_depth"), std::string::npos) << message;
-        EXPECT_NE(message.find("max_total_children"), std::string::npos) << message;
-        const auto& witness = error.diagnostic().witness;
-        EXPECT_EQ(witness.value("run_id", std::string()), source.run_id());
-        EXPECT_EQ(witness.value("lease_id", std::string()), lease->id());
-        EXPECT_EQ(witness.value("expires_at_ms", std::int64_t{0}), lease->expires_at_ms());
-        const auto retry_after = witness.value("retry_after_ms", std::int64_t{0});
-        EXPECT_GT(retry_after, 0);
-        EXPECT_LE(retry_after, lease->expires_at_ms() - lease->acquired_at_ms());
-    }
-    EXPECT_EQ(blocking_calls.load(), 1U);
+    auto recovered = remote_runtime->reconnect("tenant:runtime", source.run_id());
+    const auto taken = backend->load("tenant:runtime", source.run_id());
+    ASSERT_TRUE(taken);
+    EXPECT_EQ(taken->continuation().fence, 2U);
+    EXPECT_FALSE(backend->load_execution_lease("tenant:runtime", source.run_id()));
 
+    // The original process is fenced: what it publishes next is refused, and it ends taken over.
     EXPECT_TRUE(source.cancel());
-    EXPECT_EQ(source.wait().status(), ProgramTerminalStatus::Cancelled);
-    EXPECT_FALSE(backend->load_execution_lease(
-        "tenant:runtime", source.run_id()));
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed);
+    ASSERT_TRUE(stale.failure());
+    EXPECT_EQ(stale.failure()->code, "P_RUN_TAKEN_OVER");
+    (void)recovered.cancel();
+    (void)recovered.wait();
+    EXPECT_FALSE(backend->load_execution_lease("tenant:runtime", source.run_id()));
+    EXPECT_EQ(backend->load("tenant:runtime", source.run_id())->continuation().fence, 2U);
 }
 
 TEST(ProgramRuntimeTest, ExpiredRootExecutionLeaseFencesWithoutRedispatch) {
@@ -8029,6 +8052,10 @@ public:
         std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner, std::string_view run_id, std::string_view expected, std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
 
     std::size_t refused() const noexcept {
         std::lock_guard lock(mutex_);
@@ -9133,6 +9160,10 @@ public:
                                                                  std::uint64_t expected_fence) override {
         return inner_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_->compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
 
     // Refuse every continuation while armed.
     void          arm() noexcept { refuse_.store(true); }
@@ -9766,6 +9797,10 @@ public:
     ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
                                                                  std::uint64_t expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
     }
 
     void arm_parent_interrupt_gate() noexcept { hold_parent_interrupt_.store(true); }
@@ -10733,6 +10768,10 @@ public:
                                                                      std::uint64_t expected_fence) override {
             return parent_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
         }
+        ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                     std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+            return parent_->compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+        }
 
     private:
         std::shared_ptr<ContinuationRaceJournal> parent_;
@@ -10864,6 +10903,10 @@ public:
     ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
                                                                  std::uint64_t expected_fence) override {
         return inner_.compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
+    }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner, std::string_view run_id, std::string_view expected,
+                                                                 std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_.compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
     }
 
 private:

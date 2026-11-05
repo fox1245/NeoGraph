@@ -1942,6 +1942,28 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
     std::string_view run_id,
     std::string_view expected_journal_head,
     std::uint64_t expected_fence) {
+    return compare_publish_takeover_impl(owner_scope, run_id, expected_journal_head,
+                                         expected_fence, nullptr);
+}
+
+ProgramTransitionPublishResult
+SQLiteProgramTransitionStore::compare_publish_takeover_execution_sync(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    ProgramExecutionLease expected_lease) {
+    return compare_publish_takeover_impl(owner_scope, run_id, expected_journal_head,
+                                         expected_fence, &expected_lease);
+}
+
+ProgramTransitionPublishResult
+SQLiteProgramTransitionStore::compare_publish_takeover_impl(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    const ProgramExecutionLease* expected_lease) {
     if (!detail::transition::valid_takeover_request(owner_scope, run_id, expected_journal_head,
                                                     expected_fence))
         return ProgramTransitionPublishResult::Conflict;
@@ -1949,8 +1971,12 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
     impl_->own_heads.erase(owner_scope, run_id);
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
-    const auto current = load_head(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    if (!current) {
+    const auto loaded  = load_publication_read(impl_->db, owner_scope, run_id, {}, &impl_->run_record_cache);
+    const auto& current = loaded.head;
+    if (!current ||
+        !detail::transition::takeover_lease_binds(owner_scope, current->run_record,
+                                                  loaded.lease ? &*loaded.lease : nullptr,
+                                                  expected_lease)) {
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
     }
@@ -1979,6 +2005,8 @@ SQLiteProgramTransitionStore::compare_publish_takeover_sync(
         update_lineage_head(impl_->db, *takeover->run_lineage);
         insert_lineage_history(impl_->db, *takeover->run_lineage);
     }
+    // The lease the takeover was given ends with it, in the same transaction: the new owner holds no lease.
+    if (expected_lease) delete_execution_lease(impl_->db, *expected_lease);
     transaction.commit();
     impl_->run_record_cache.erase(owner_scope, run_id);
     if (takeover->run_lineage) impl_->own_heads.forget_lineage(owner_scope, takeover->run_lineage->lineage_id());

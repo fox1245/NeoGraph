@@ -3810,6 +3810,23 @@ ProgramResult RunControl::make_result(RunOutcome outcome) const {
 
 asio::awaitable<void> ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
     if (outcome.checkpoint || !control.checkpoints || !control.materialized) co_return;
+    // An attempt whose run another process took over publishes no terminal state, and leaves no checkpoint on the
+    // run's Core thread for it. The stored fence is read as before a Core checkpoint save: a read that fails or finds
+    // no run is not a takeover.
+    if (control.taken_over()) co_return;
+    if (control.transitions) {
+        std::optional<std::uint64_t> stored_fence;
+        try {
+            const auto stored = co_await control.transitions->load(control.owner_scope, control.run_id);
+            if (stored) stored_fence = stored->continuation().fence;
+        } catch (...) {
+            stored_fence.reset();
+        }
+        if (stored_fence && *stored_fence != control.fence) {
+            const_cast<RunControl&>(control).mark_taken_over(*stored_fence);
+            co_return;
+        }
+    }
 
     graph::Checkpoint checkpoint;
     checkpoint.id               = graph::Checkpoint::generate_id();
@@ -10458,12 +10475,19 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                      "Running Program recovery identity is incompatible");
         }
 
+        // A migration-capable root holds an execution lease while it runs. Its recovery takes the run over by the
+        // fence, as every other run's recovery does, and the takeover deletes the lease in the same step: the
+        // recovered attempt runs without a lease and only until the run's absolute wall deadline, the instant the
+        // lease expires. A run that was taken over before has no lease, unless a later resume or reconcile acquired
+        // one again; at fence 1 a missing lease is corruption.
+        std::optional<ProgramExecutionLease> recovered_lease;
+        bool                                 keeps_root_deadline = false;
         if (supports_root_execution_lease(*pinned, record->remaining_budget()) &&
             record->child_depth() == 0 &&
             record->invocation().parent_run_id.empty()) {
             const auto execution_lease =
                 (co_await impl_->transitions->load_execution_lease(owner_scope, run_id));
-            if (!execution_lease) {
+            if (!execution_lease && record->continuation().fence == 1) {
                 throw_runtime_diagnostic(
                     "P_RUN_LEASE_MISSING",
                     "Migration-capable Program recovery has no durable execution lease");
@@ -10472,105 +10496,106 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 ? record->exact_checkpoint()->core_thread_id
                 : core_thread_identity(run_id, pinned->root->compiled_plan_identity);
             const auto valid_lease =
-                execution_lease->owner_scope() == owner_scope &&
-                execution_lease->run_id() == run_id &&
-                execution_lease->attempt() == record->continuation().attempt &&
-                execution_lease->program_version_id() == record->program_version_id() &&
-                execution_lease->bundle_id() == record->bundle_id() &&
-                execution_lease->core_name() == pinned->root->core_name &&
-                execution_lease->core_generation_id() ==
-                    pinned->root->compiled_plan_identity &&
-                execution_lease->core_thread_id() == expected_thread_id &&
-                execution_lease->acquired_at_ms() == record->updated_at_ms() &&
-                execution_lease->expires_at_ms() >=
-                    execution_lease->acquired_at_ms() &&
-                static_cast<std::uint64_t>(execution_lease->expires_at_ms() -
-                                           execution_lease->acquired_at_ms()) ==
-                    record->remaining_budget().wall_time_ms;
+                !execution_lease ||
+                (execution_lease->owner_scope() == owner_scope &&
+                 execution_lease->run_id() == run_id &&
+                 execution_lease->attempt() == record->continuation().attempt &&
+                 execution_lease->program_version_id() == record->program_version_id() &&
+                 execution_lease->bundle_id() == record->bundle_id() &&
+                 execution_lease->core_name() == pinned->root->core_name &&
+                 execution_lease->core_generation_id() ==
+                     pinned->root->compiled_plan_identity &&
+                 execution_lease->core_thread_id() == expected_thread_id &&
+                 execution_lease->acquired_at_ms() == record->updated_at_ms() &&
+                 execution_lease->expires_at_ms() >=
+                     execution_lease->acquired_at_ms() &&
+                 static_cast<std::uint64_t>(execution_lease->expires_at_ms() -
+                                            execution_lease->acquired_at_ms()) ==
+                     record->remaining_budget().wall_time_ms);
             if (!valid_lease) {
                 throw_runtime_diagnostic(
                     "P_RUN_LEASE_CORRUPT",
                     "Migration-capable Program recovery has an invalid execution lease");
             }
 
-            const auto timestamp = std::max(now_ms(), record->updated_at_ms());
-            if (timestamp < execution_lease->expires_at_ms()) {
-                // #421: say why the run is held and what ends it. Only a
-                // define()-only Program without child budgets holds this lease.
+            // The absolute deadline is the instant of the run's last publication plus the wall time it had left
+            // then. A lease that binds the record expires at that instant, and a takeover keeps both terms.
+            const auto wall = record->remaining_budget().wall_time_ms;
+            if (wall > static_cast<std::uint64_t>(INT64_MAX - record->updated_at_ms())) {
                 throw_runtime_diagnostic(
-                    "P_RUN_LEASE_HELD",
-                    "Program execution is held by an execution lease for the run's wall time: "
-                    "reconnect() cannot continue the run until the lease expires, and then ends "
-                    "it TimedOut. A Program with main(), or one started with child budgets "
-                    "(max_child_depth and max_total_children above zero), holds no lease and "
-                    "continues from its last checkpoint",
-                    json{{"run_id", record->run_id()},
-                         {"lease_id", execution_lease->id()},
-                         {"expires_at_ms", execution_lease->expires_at_ms()},
-                         {"retry_after_ms", execution_lease->expires_at_ms() - timestamp}});
+                    "P_RUN_RECOVERY_BUDGET", "Running Program recovery deadline is out of range");
             }
-
-            ProgramPersistedInvocation expired_invocation{
-                record->invocation().input, record->remaining_budget(),
-                record->invocation().correlation_id,
-                record->invocation().parent_run_id, record->child_depth()};
-            auto expired_control = std::make_shared<detail::RunControl>(
-                std::string(owner_scope), std::string(run_id),
-                record->continuation().attempt, pinned, record->binding_fingerprint(),
-                std::move(expired_invocation), record->invocation(), expected_thread_id,
-                record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
-                impl_->scheduler, impl_->config.checkpoints,
-                impl_->config.state_store, impl_->transitions, execution_lease, "",
-                record->continuation().fence);
-            expired_control->set_hook_runtime(impl_->config.hook_runtime);
-            expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
-            expired_control->set_core_tool_grant_awaitable_resolver(impl_->config.core_tool_grant_awaitable_resolver);
-            expired_control->set_core_provider_call_resolver(
-                impl_->config.core_provider_call_resolver,
-                impl_->config.require_core_provider_call_broker);
-            detail::RunOutcome timed_out;
-            timed_out.status = ProgramTerminalStatus::TimedOut;
-            timed_out.remaining_budget = program_replacement_remaining_budget(
-                *record, active_lineage->lineage, timestamp);
-            timed_out.checkpoint = record->exact_checkpoint();
-            timed_out.failure = ProgramFailure{
-                "P_RUN_LEASE_EXPIRED",
-                "Program execution lease exhausted its wall-time budget", "root",
-                pinned->root->core_name, 0,
-                json{{"lease_id", execution_lease->id()}}};
-            if (impl_->config.core_provider_call_resolver) {
-                // The stopped attempt's journaled calls were never settled into
-                // the run's budget. Binding the root operation charges them,
-                // once, to this terminal result: their money (#372) and their
-                // tokens (#381).
-                const auto monetary = std::make_shared<ProgramMonetaryAccount>(
-                    record->remaining_budget().monetary_microunits,
-                    record->continuation().attempt);
-                const auto tokens = std::make_shared<UsageAccumulator>();
-                expired_control->set_monetary_account(monetary);
-                expired_control->set_journaled_usage(tokens);
-                (void)expired_control->resolve_core_provider_call_broker(
-                    pinned->bundle.typed_orchestration_plan().root_id());
-                const auto charged = monetary->used();
-                timed_out.usage.monetary_microunits = charged;
-                timed_out.remaining_budget.monetary_microunits =
-                    charged >= timed_out.remaining_budget.monetary_microunits
-                        ? 0 : timed_out.remaining_budget.monetary_microunits - charged;
-                timed_out.monetary_records = monetary->records();
-                const auto charged_tokens = tokens->total_tokens_wide();
-                timed_out.usage.model_tokens = charged_tokens;
-                timed_out.remaining_budget.model_tokens =
-                    charged_tokens >= timed_out.remaining_budget.model_tokens
-                        ? 0 : timed_out.remaining_budget.model_tokens - charged_tokens;
+            const auto root_deadline = record->updated_at_ms() + static_cast<std::int64_t>(wall);
+            const auto timestamp = std::max(now_ms(), record->updated_at_ms());
+            if (timestamp < root_deadline) {
+                recovered_lease     = execution_lease;
+                keeps_root_deadline = true;
+            } else {
+                ProgramPersistedInvocation expired_invocation{
+                    record->invocation().input, record->remaining_budget(),
+                    record->invocation().correlation_id,
+                    record->invocation().parent_run_id, record->child_depth()};
+                auto expired_control = std::make_shared<detail::RunControl>(
+                    std::string(owner_scope), std::string(run_id),
+                    record->continuation().attempt, pinned, record->binding_fingerprint(),
+                    std::move(expired_invocation), record->invocation(), expected_thread_id,
+                    record->event_sequence(), std::shared_ptr<ProgramEventSink>{},
+                    impl_->scheduler, impl_->config.checkpoints,
+                    impl_->config.state_store, impl_->transitions, execution_lease, "",
+                    record->continuation().fence);
+                expired_control->set_hook_runtime(impl_->config.hook_runtime);
+                expired_control->set_core_tool_grant_resolver(impl_->config.core_tool_grant_resolver);
+                expired_control->set_core_tool_grant_awaitable_resolver(impl_->config.core_tool_grant_awaitable_resolver);
+                expired_control->set_core_provider_call_resolver(
+                    impl_->config.core_provider_call_resolver,
+                    impl_->config.require_core_provider_call_broker);
+                detail::RunOutcome timed_out;
+                timed_out.status = ProgramTerminalStatus::TimedOut;
+                timed_out.remaining_budget = program_replacement_remaining_budget(
+                    *record, active_lineage->lineage, timestamp);
+                timed_out.checkpoint = record->exact_checkpoint();
+                timed_out.failure = ProgramFailure{
+                    "P_RUN_LEASE_EXPIRED",
+                    execution_lease
+                        ? "Program execution lease exhausted its wall-time budget"
+                        : "Program run reached its wall-time deadline before recovery",
+                    "root", pinned->root->core_name, 0,
+                    execution_lease ? json{{"lease_id", execution_lease->id()}}
+                                    : json{{"deadline_ms", root_deadline}}};
+                if (impl_->config.core_provider_call_resolver) {
+                    // The stopped attempt's journaled calls were never settled into
+                    // the run's budget. Binding the root operation charges them,
+                    // once, to this terminal result: their money (#372) and their
+                    // tokens (#381).
+                    const auto monetary = std::make_shared<ProgramMonetaryAccount>(
+                        record->remaining_budget().monetary_microunits,
+                        record->continuation().attempt);
+                    const auto tokens = std::make_shared<UsageAccumulator>();
+                    expired_control->set_monetary_account(monetary);
+                    expired_control->set_journaled_usage(tokens);
+                    (void)expired_control->resolve_core_provider_call_broker(
+                        pinned->bundle.typed_orchestration_plan().root_id());
+                    const auto charged = monetary->used();
+                    timed_out.usage.monetary_microunits = charged;
+                    timed_out.remaining_budget.monetary_microunits =
+                        charged >= timed_out.remaining_budget.monetary_microunits
+                            ? 0 : timed_out.remaining_budget.monetary_microunits - charged;
+                    timed_out.monetary_records = monetary->records();
+                    const auto charged_tokens = tokens->total_tokens_wide();
+                    timed_out.usage.model_tokens = charged_tokens;
+                    timed_out.remaining_budget.model_tokens =
+                        charged_tokens >= timed_out.remaining_budget.model_tokens
+                            ? 0 : timed_out.remaining_budget.model_tokens - charged_tokens;
+                }
+                (co_await expired_control->complete_async(std::move(timed_out)));
+                const auto result = expired_control->try_result();
+                if (result && result->status() == ProgramTerminalStatus::TimedOut) {
+                    co_return ProgramHandle(std::move(expired_control));
+                }
+                throw_runtime_diagnostic(
+                    "P_RUN_RECOVERY_CONFLICT",
+                    "Expired Program execution lease lost its terminal fencing CAS");
             }
-            (co_await expired_control->complete_async(std::move(timed_out)));
-            const auto result = expired_control->try_result();
-            if (result && result->status() == ProgramTerminalStatus::TimedOut) {
-                co_return ProgramHandle(std::move(expired_control));
-            }
-            throw_runtime_diagnostic(
-                "P_RUN_RECOVERY_CONFLICT",
-                "Expired Program execution lease lost its terminal fencing CAS");
         }
 
         const auto                 checkpoint = record->exact_checkpoint();
@@ -10672,8 +10697,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                          static_cast<std::uint64_t>(*synthesis_deadline - now));
         }
         const auto expected_fence = record->continuation().fence;
-        const auto taken_over     = (co_await impl_->transitions->compare_publish_takeover(
-            owner_scope, run_id, record->journal_head(), expected_fence));
+        ProgramTransitionPublishResult taken_over;
+        if (recovered_lease)
+            taken_over = (co_await impl_->transitions->compare_publish_takeover_execution(
+                owner_scope, run_id, record->journal_head(), expected_fence, *recovered_lease));
+        else
+            taken_over = (co_await impl_->transitions->compare_publish_takeover(
+                owner_scope, run_id, record->journal_head(), expected_fence));
         if (taken_over != ProgramTransitionPublishResult::Published) {
             throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
                                      "Running Program recovery lost the transition CAS");
@@ -10687,6 +10717,17 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                                      "Running Program recovery lost the transition CAS");
         }
         record = taken_over_head->run_record;
+        if (keeps_root_deadline) {
+            // A recovered root keeps the absolute deadline it was started with, which the takeover kept: the attempt
+            // is granted only the wall time left before it, read after the takeover. A deadline that passed while
+            // the run was taken over ends the run TimedOut, as a reconnect after it does.
+            const auto deadline =
+                record->updated_at_ms() + static_cast<std::int64_t>(record->remaining_budget().wall_time_ms);
+            const auto now = std::max(now_ms(), record->updated_at_ms());
+            if (now >= deadline) co_return (co_await reconnect_core(owner_scope, run_id, true));
+            invocation.granted_budget.wall_time_ms = std::min(invocation.granted_budget.wall_time_ms,
+                                                              static_cast<std::uint64_t>(deadline - now));
+        }
         child_concurrency.commit();
         auto control = std::make_shared<detail::RunControl>(
             std::string(owner_scope), std::string(run_id), record->continuation().attempt,
