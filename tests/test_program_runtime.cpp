@@ -9905,6 +9905,15 @@ StepsHeldByAChildProbe summarize_steps_held_by_a_child(AdmittedRuntime&        f
                         ", the parent keeps " + std::to_string(probe.parent_steps_kept) +
                         " core steps while its " + std::to_string(children.size()) + " child holds " +
                         std::to_string(probe.child_steps_held);
+    for (const auto& child : children) {
+        probe.description += "; child " + child.child_run_id + " ";
+        if (!child.terminal_result) {
+            probe.description += "has no terminal result";
+        } else {
+            probe.description += std::string(to_string(child.terminal_result->status()));
+            if (child.terminal_result->failure()) probe.description += " " + child.terminal_result->failure()->code;
+        }
+    }
     return probe;
 }
 
@@ -10007,6 +10016,12 @@ constexpr const char* kCoreCallAfterASpawn = R"JS(
     yield ng.spawn("child", {}, "spawn:child");
     return yield ng.callCore("main", {}, "call:core");
 )JS";
+// The child ends before the Core call, so its end does not race the parent's: a parent that ends first cancels the
+// children it still has.
+constexpr const char* kCoreCallAfterAnAwaitedSpawn = R"JS(
+    yield ng.await(ng.spawn("child", {}, "spawn:child"), 20000, "await:child");
+    return yield ng.callCore("main", {}, "call:core");
+)JS";
 constexpr const char* kJoinOfACoreCallThenASpawn = R"JS(
     const both = yield ng.all([
         ng.callCore("main", {}, "call:core"),
@@ -10027,9 +10042,10 @@ constexpr const char* kJoinOfASpawnThenACoreCall = R"JS(
 // A command reserves only what its parent can still spend: the Core steps that its children hold are not reserved.
 // Here the child is granted every step the parent has, so the Core call that follows has none left to spend and the
 // run ends with the Core step budget, with the child it spawned intact and the parent still holding what the child
-// holds; the store never has to refuse the settlement of a spend.
+// holds; the store never has to refuse the settlement of a spend. The child is awaited first: a child still running
+// when the parent ends is cancelled with it, which this test is not about.
 TEST(ProgramRuntimeTest, JavaScriptCoreCallAfterASpawnDoesNotSpendTheStepsTheChildWasGranted) {
-    const auto probe = run_steps_held_by_a_child_probe(kCoreCallAfterASpawn, "trace-core-call-after-spawn");
+    const auto probe = run_steps_held_by_a_child_probe(kCoreCallAfterAnAwaitedSpawn, "trace-core-call-after-spawn");
     EXPECT_EQ(probe.children, 1U) << probe.description;
     EXPECT_EQ(probe.status, ProgramTerminalStatus::BudgetExhausted) << probe.description;
     EXPECT_EQ(probe.failure_code, "P_CORE_STEP_BUDGET") << probe.description;
