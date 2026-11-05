@@ -413,6 +413,18 @@ public:
         return member_.call(tr::compare_publish_takeover, owner_scope, run_id, expected_journal_head,
                             expected_fence);
     }
+    asio::awaitable<program::ProgramTransitionPublishResult> compare_publish_takeover_execution(
+        std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head,
+        std::uint64_t expected_fence, program::ProgramExecutionLease expected_lease) override {
+        if (!member_.has(tr::compare_publish_takeover_execution))
+            return ProgramTransitionStore::compare_publish_takeover_execution(
+                owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+        if (!program::detail::transition::valid_takeover_request(owner_scope, run_id,
+                                                                 expected_journal_head, expected_fence))
+            return refused();
+        return member_.call(tr::compare_publish_takeover_execution, owner_scope, run_id, expected_journal_head,
+                            expected_fence, expected_lease);
+    }
     // compare_publish_graph_safe_point carries evidence that is never serialized: the base class answers Conflict.
 
 private:

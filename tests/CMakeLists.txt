@@ -1111,6 +1111,16 @@ if(TARGET neograph_program_sqlite AND TARGET neograph_sqlite AND TARGET neograph
             NEOGRAPH_PROGRAM_RESUME_MODEL_HAVE_QUICKJS)
     endif()
     neograph_discover_tests(neograph_program_resume_model_tests PROPERTIES LABELS "program;resume-model" TIMEOUT 300)
+
+    # Recovery of a running Core-only root that holds an execution lease: takeover by the fence, the lease deleted in
+    # the same step, the absolute wall deadline kept, and a taken-over process stopped before its next checkpoint.
+    add_executable(neograph_program_root_lease_tests test_program_root_lease_takeover.cpp)
+    target_include_directories(neograph_program_root_lease_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/program)
+    target_link_libraries(neograph_program_root_lease_tests PRIVATE
+        neograph::program neograph::program_sqlite neograph::sqlite
+        neograph::llm SQLite::SQLite3 GTest::gtest_main)
+    neograph_discover_tests(neograph_program_root_lease_tests PROPERTIES LABELS "program" TIMEOUT 300)
 endif()
 
 if(NEOGRAPH_BUILD_SQLITE)

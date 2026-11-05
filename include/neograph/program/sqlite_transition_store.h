@@ -181,8 +181,20 @@ public:
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) override;
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) override;
 
 private:
+    ProgramTransitionPublishResult compare_publish_takeover_impl(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        const ProgramExecutionLease* expected_lease);
     ProgramTransitionPublishResult compare_publish_impl(
         std::string_view owner_scope,
         std::string_view expected_journal_head,

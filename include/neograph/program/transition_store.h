@@ -463,13 +463,26 @@ public:
     /**
      * Atomically advances the ownership fence and the journal head of the Running run `run_id`: publishes the stored
      * record with `fence = expected_fence + 1` and one new journal record, and changes nothing else. Conflict when the
-     * run is absent, is not Running, or its head or fence differ from the expected ones.
+     * run is absent, is not Running, holds an execution lease, or its head or fence differ from the expected ones.
      */
     [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(
         std::string_view owner_scope,
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) {
+        co_return ProgramTransitionPublishResult::Conflict;
+    }
+    /**
+     * compare_publish_takeover for a run that holds an execution lease: in the same step it deletes the run's lease,
+     * which must be `expected_lease` (the same lease id, for the run's owner, attempt, version and bundle). Conflict,
+     * with nothing written, when the run holds no lease or another one.
+     */
+    [[nodiscard]] virtual asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover_execution(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) {
         co_return ProgramTransitionPublishResult::Conflict;
     }
 };
@@ -616,6 +629,14 @@ public:
         std::uint64_t expected_fence) {
         return ProgramTransitionPublishResult::Conflict;
     }
+    virtual ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) {
+        return ProgramTransitionPublishResult::Conflict;
+    }
 
     // The awaitable interface, completed by the operations above: at once on the calling thread,
     // or on a thread of a bounded pool when offloads() is true.
@@ -734,6 +755,12 @@ public:
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) final;
+    [[nodiscard]] asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover_execution(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) final;
 
     /** True when every awaitable operation completes at once on the calling thread, not on a pool thread. */
     bool completes_at_once() const noexcept { return !offloads(); }
@@ -870,6 +897,12 @@ public:
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) const;
+    ProgramTransitionPublishResult compare_publish_takeover_execution(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) const;
 
 private:
     std::shared_ptr<ProgramTransitionStore> store_;
@@ -978,11 +1011,23 @@ public:
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) override;
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        ProgramExecutionLease expected_lease) override;
 
     /// Fail the next publication at a staged boundary; test-only hook.
     void fail_next_publication_for_testing(ProgramTransitionFaultPoint point);
 
 private:
+    ProgramTransitionPublishResult compare_publish_takeover_impl(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        const ProgramExecutionLease* expected_lease);
     ProgramTransitionPublishResult compare_publish_impl(
         std::string_view owner_scope,
         std::string_view expected_journal_head,

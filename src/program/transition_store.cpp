@@ -1858,6 +1858,26 @@ InMemoryProgramTransitionStore::compare_publish_takeover_sync(
     std::string_view run_id,
     std::string_view expected_journal_head,
     std::uint64_t expected_fence) {
+    return compare_publish_takeover_impl(owner, run_id, expected_journal_head, expected_fence,
+                                         nullptr);
+}
+ProgramTransitionPublishResult
+InMemoryProgramTransitionStore::compare_publish_takeover_execution_sync(
+    std::string_view owner,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    ProgramExecutionLease expected_lease) {
+    return compare_publish_takeover_impl(owner, run_id, expected_journal_head, expected_fence,
+                                         &expected_lease);
+}
+ProgramTransitionPublishResult
+InMemoryProgramTransitionStore::compare_publish_takeover_impl(
+    std::string_view owner,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    const ProgramExecutionLease* expected_lease) {
     if (!detail::transition::valid_takeover_request(owner, run_id, expected_journal_head,
                                                     expected_fence))
         return ProgramTransitionPublishResult::Conflict;
@@ -1865,6 +1885,12 @@ InMemoryProgramTransitionStore::compare_publish_takeover_sync(
     const auto it = impl_->runs.find(key(owner, run_id));
     if (it == impl_->runs.end()) return ProgramTransitionPublishResult::Conflict;
     const auto& stored = *it->second;
+    const auto current_lease = impl_->execution_leases.find(key(owner, run_id));
+    if (!detail::transition::takeover_lease_binds(
+            owner, stored.run,
+            current_lease == impl_->execution_leases.end() ? nullptr : &current_lease->second,
+            expected_lease))
+        return ProgramTransitionPublishResult::Conflict;
     std::optional<ProgramRunLineage> current_lineage_head;
     auto lineage_it = impl_->lineages.end();
     if (stored.lineage_id) {
@@ -1891,6 +1917,8 @@ InMemoryProgramTransitionStore::compare_publish_takeover_sync(
         stored.migration_plan, stored.lineage_id, {}});
     it->second = std::move(candidate);
     if (staged_lineage) lineage_it->second = std::move(staged_lineage);
+    // The lease the takeover was given ends with it: the new owner holds no lease.
+    if (expected_lease) impl_->execution_leases.erase(current_lease);
     return ProgramTransitionPublishResult::Published;
 }
 ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_impl(
@@ -2645,6 +2673,20 @@ asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::comp
     });
 }
 
+asio::awaitable<ProgramTransitionPublishResult> SyncProgramTransitionStore::compare_publish_takeover_execution(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    ProgramExecutionLease expected_lease) {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_takeover_execution");
+    if (!detail::offload_store_call(offloads())) co_return compare_publish_takeover_execution_sync(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+    // The work runs on a pool thread and may outlive this frame: it owns its arguments.
+    co_return co_await detail::offload_sync_call<ProgramTransitionPublishResult>([this, owner_scope = std::string(owner_scope), run_id = std::string(run_id), expected_journal_head = std::string(expected_journal_head), expected_fence, expected_lease = std::move(expected_lease)]() mutable -> ProgramTransitionPublishResult {
+        return compare_publish_takeover_execution_sync(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+    });
+}
+
 BlockingProgramTransitionStore::BlockingProgramTransitionStore(std::shared_ptr<ProgramTransitionStore> store, BlockingStorePolicy policy)
     : store_(std::move(store)), policy_(std::move(policy)) {
     if (!store_) throw std::invalid_argument("BlockingProgramTransitionStore requires a store");
@@ -2919,6 +2961,17 @@ ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish_t
     detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_takeover");
     if (sync_) return sync_->compare_publish_takeover_sync(owner_scope, run_id, expected_journal_head, expected_fence);
     return detail::block_on_store(store_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence), policy_, "ProgramTransitionStore::compare_publish_takeover");
+}
+
+ProgramTransitionPublishResult BlockingProgramTransitionStore::compare_publish_takeover_execution(
+    std::string_view owner_scope,
+    std::string_view run_id,
+    std::string_view expected_journal_head,
+    std::uint64_t expected_fence,
+    ProgramExecutionLease expected_lease) const {
+    detail::assert_no_pure_lock_held("ProgramTransitionStore::compare_publish_takeover_execution");
+    if (sync_) return sync_->compare_publish_takeover_execution_sync(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+    return detail::block_on_store(store_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease)), policy_, "ProgramTransitionStore::compare_publish_takeover_execution");
 }
 
 }  // namespace neograph::program

@@ -286,6 +286,13 @@ public:
         enter();
         return inner_->compare_publish_takeover_sync(owner, run_id, expected, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(std::string_view owner,
+                                                                 std::string_view run_id,
+                                                                 std::string_view expected,
+                                                                 std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        enter();
+        return inner_->compare_publish_takeover_execution_sync(owner, run_id, expected, expected_fence, std::move(expected_lease));
+    }
 
 protected:
     bool offloads() const noexcept override { return true; }
@@ -415,6 +422,10 @@ public:
     asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence) override {
         co_await pause();
         co_return co_await inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover_execution(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        co_await pause();
+        co_return co_await inner_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
     }
 
 private:
@@ -1407,6 +1418,9 @@ public:
     }
     asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence) override {
         co_return co_await inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
+    }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover_execution(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        co_return co_await inner_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
     }
 
 private:

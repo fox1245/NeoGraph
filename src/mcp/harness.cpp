@@ -598,6 +598,15 @@ public:
         std::uint64_t expected_fence) override {
         return target_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
+    program::ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        program::ProgramExecutionLease expected_lease) override {
+        return target_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head,
+                                                           expected_fence, std::move(expected_lease));
+    }
 
 private:
     const program::BlockingProgramTransitionStore& select(std::string_view run_id) const {

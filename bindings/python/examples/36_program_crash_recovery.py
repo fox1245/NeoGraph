@@ -8,10 +8,10 @@ last checkpoint, the journaled reply is replayed instead of being sent again, an
 charged once. The scripted model lives in this parent process, so it counts every request.
 
 A host that binds a provider also needs `native_history_archive=`: the journal keeps every
-reply under the archive's custody. This Program has only a `define()`, so child budgets
-(`max_child_depth` and `max_total_children`) are what let `reconnect` continue it from its
-checkpoint at once. Without them it holds an execution lease for its wall time: `reconnect`
-raises P_RUN_LEASE_HELD until the lease expires, and the run then ends TimedOut.
+reply under the archive's custody. `reconnect` takes the run over and continues it from its
+checkpoint at once, with or without child budgets (`max_child_depth` and `max_total_children`).
+Without them, a run of a Program that has only a `define()` keeps the absolute wall-time
+deadline it was started with: once that deadline has passed, `reconnect` ends it TimedOut.
 
 Run:
     python 36_program_crash_recovery.py

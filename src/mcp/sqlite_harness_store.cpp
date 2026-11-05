@@ -1633,6 +1633,26 @@ public:
         std::string_view run_id,
         std::string_view expected_journal_head,
         std::uint64_t expected_fence) override {
+        return compare_publish_takeover_impl(owner_scope, run_id, expected_journal_head,
+                                             expected_fence, nullptr);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope,
+        std::string_view run_id,
+        std::string_view expected_journal_head,
+        std::uint64_t expected_fence,
+        program::ProgramExecutionLease expected_lease) override {
+        return compare_publish_takeover_impl(owner_scope, run_id, expected_journal_head,
+                                             expected_fence, &expected_lease);
+    }
+
+    program::ProgramTransitionPublishResult compare_publish_takeover_impl(
+        std::string_view                       owner_scope,
+        std::string_view                       run_id,
+        std::string_view                       expected_journal_head,
+        std::uint64_t                          expected_fence,
+        const program::ProgramExecutionLease*  expected_lease) {
         if (owner_scope.empty() || run_id.empty() || !is_program_identity(expected_journal_head) ||
             expected_fence == 0 ||
             expected_fence == std::numeric_limits<std::uint64_t>::max()) {
@@ -1697,6 +1717,13 @@ public:
                 current_run.continuation().fence != expected_fence ||
                 current_journal.continuation.fence != expected_fence ||
                 current_journal.sequence >= static_cast<std::uint64_t>(INT64_MAX)) {
+                impl_->exec("ROLLBACK;");
+                return program::ProgramTransitionPublishResult::Conflict;
+            }
+            const auto current_lease = load_execution_lease_locked(owner_scope, run_id);
+            if (!program::detail::transition::takeover_lease_binds(
+                    owner_scope, current_run, current_lease ? &*current_lease : nullptr,
+                    expected_lease)) {
                 impl_->exec("ROLLBACK;");
                 return program::ProgramTransitionPublishResult::Conflict;
             }
@@ -1796,6 +1823,18 @@ public:
                 insert_history.bind_text(4, takeover->run_lineage->serialize_canonical());
                 if (insert_history.step() != SQLITE_DONE)
                     throw_sqlite_error(impl_->db, "Program takeover lineage history insert failed");
+            }
+            // The lease the takeover was given ends with it, in the same transaction: the new owner holds no lease.
+            if (expected_lease) {
+                Statement delete_lease(
+                    impl_->db,
+                    "DELETE FROM neograph_harness_program_execution_leases "
+                    "WHERE owner_scope=? AND program_run_id=? AND lease_id=?");
+                delete_lease.bind_text(1, expected_lease->owner_scope());
+                delete_lease.bind_text(2, expected_lease->run_id());
+                delete_lease.bind_text(3, expected_lease->id());
+                if (delete_lease.step() != SQLITE_DONE || sqlite3_changes(impl_->db) != 1)
+                    throw_sqlite_error(impl_->db, "Program takeover lease delete failed");
             }
             maybe_fail(SqliteHarnessProgramFaultPoint::AfterRunWrite);
             insert_journal(storage_run_id, owner_scope, next_journal);

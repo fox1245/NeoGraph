@@ -215,6 +215,10 @@ public:
         co_await turns_->turn("transition", "compare_publish_takeover");
         co_return co_await inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
+    asio::awaitable<ProgramTransitionPublishResult> compare_publish_takeover_execution(std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head, std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        co_await turns_->turn("transition", "compare_publish_takeover_execution");
+        co_return co_await inner_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+    }
 
 private:
     std::shared_ptr<ProgramTransitionStore> inner_;

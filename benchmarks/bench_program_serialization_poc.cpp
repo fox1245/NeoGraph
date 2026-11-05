@@ -120,6 +120,11 @@ public:
         std::uint64_t expected_fence) override {
         return inner_->compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence);
     }
+    ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
+        std::string_view owner_scope, std::string_view run_id, std::string_view expected_journal_head,
+        std::uint64_t expected_fence, ProgramExecutionLease expected_lease) override {
+        return inner_->compare_publish_takeover_execution(owner_scope, run_id, expected_journal_head, expected_fence, std::move(expected_lease));
+    }
 
     std::vector<ProgramTransitionPublication> snapshot() const {
         std::lock_guard lock(mutex_);
