@@ -502,6 +502,11 @@ void validate_pub(const ProgramTransitionPublication& publication, std::string_v
             throw std::invalid_argument("Program child relation part must name something");
         if (part.spawn && part.completion)
             throw std::invalid_argument("A publication carries a child spawn or a child completion, not both");
+        if ((part.spawn && (part.spawn->parent_run_id == run.logical_run_id() ||
+                            part.spawn->parent_run_id == part.spawn->child.child_run_id)) ||
+            (part.completion && (part.completion->parent_run_id == run.logical_run_id() ||
+                                 part.completion->parent_run_id == part.completion->child.child_run_id)))
+            throw std::invalid_argument("Program child relation cannot name the run itself as its parent");
         if (part.spawn) {
             const auto& spawn = *part.spawn;
             if (journal.sequence != 1 || !journal.previous_id.empty() || spawn.parent_fence == 0 ||
@@ -1898,7 +1903,7 @@ ProgramTransitionPublishResult InMemoryProgramTransitionStore::compare_publish_i
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
     auto prepared = detail::transition::prepare_transition(
-        owner, expected, publication, safe_point_evidence, safe_point_capsule, expected_lease,
+        owner, expected, expected_fence, publication, safe_point_evidence, safe_point_capsule, expected_lease,
         next_lease);
     if (!prepared) return ProgramTransitionPublishResult::Conflict;
     std::string publication_bytes = std::move(*prepared);

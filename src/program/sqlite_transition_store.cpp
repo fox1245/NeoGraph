@@ -477,40 +477,59 @@ std::optional<ProgramExecutionLease> load_execution_lease_record(
                                  column_blob(statement.get(), 1));
 }
 
-struct StoredHeadAndLease {
-    std::optional<StoredHead>            head;
-    std::optional<ProgramExecutionLease> lease;
+// What a publication reads first, in one statement: the run's head and its execution lease, the lineage the run is
+// recorded in and that lineage's head, and the relation head of the run's logical id. Each is absent when its row is.
+struct PublicationRead {
+    std::optional<StoredHead>               head;
+    std::optional<ProgramExecutionLease>    lease;
+    std::optional<std::string>              lineage_id;
+    /// The stored bytes of the lineage head and of the relation head: SqliteReads parses them when the validator reads
+    /// them, as the separate reads did.
+    std::optional<std::string>              lineage_head_bytes;
+    std::optional<std::string>              relation_head_bytes;
 };
 
-// The run head and the execution lease of the run, in one statement. A lease row references its head, so a run
-// without a head has no lease.
-StoredHeadAndLease load_head_and_lease(sqlite3* db, std::string_view owner_scope, std::string_view run_id,
-                                       detail::RunRecordCache* cache) {
+PublicationRead load_publication_read(sqlite3* db, std::string_view owner_scope, std::string_view run_id,
+                                      std::string_view logical_run_id, detail::RunRecordCache* cache) {
     Statement statement(
         db, "SELECT h.run_record_bytes, h.journal_record_bytes, h.migration_plan_bytes, "
-            "h.last_publication_bytes, l.lease_id, l.lease_bytes "
-            "FROM program_transition_run_heads_v2 h "
+            "h.last_publication_bytes, l.lease_id, l.lease_bytes, r.lineage_id, lh.head_bytes, rh.head_bytes "
+            "FROM (SELECT ?1 AS owner_scope, ?2 AS run_id, ?3 AS logical_run_id) q "
+            "LEFT JOIN program_transition_run_heads_v2 h "
+            "ON h.owner_scope = q.owner_scope AND h.run_id = q.run_id "
             "LEFT JOIN program_execution_leases_v1 l "
             "ON l.owner_scope = h.owner_scope AND l.run_id = h.run_id "
-            "WHERE h.owner_scope = ?1 AND h.run_id = ?2");
+            "LEFT JOIN program_run_lineage_runs_v1 r "
+            "ON r.owner_scope = q.owner_scope AND r.run_id = q.run_id "
+            "LEFT JOIN program_run_lineage_heads_v1 lh "
+            "ON lh.owner_scope = r.owner_scope AND lh.lineage_id = r.lineage_id "
+            "LEFT JOIN program_child_relation_heads_v1 rh "
+            "ON rh.owner_scope = q.owner_scope AND rh.parent_run_id = q.logical_run_id");
     statement.bind_text(1, owner_scope);
     statement.bind_text(2, run_id);
-    if (!statement.step_row()) {
+    statement.bind_text(3, logical_run_id);
+    if (!statement.step_row()) throw std::runtime_error("SQLite publication read returned no row");
+    PublicationRead read;
+    auto*           stmt = statement.get();
+    if (sqlite3_column_type(stmt, 0) == SQLITE_NULL) {
         if (cache) cache->erase(owner_scope, run_id);
-        return {};
+    } else {
+        const auto migration_plan_bytes = column_optional_blob(stmt, 2);
+        read.head = StoredHead{parse_run_record(cache, owner_scope, run_id, column_blob(stmt, 0)),
+                               ProgramJournalRecord::parse(column_blob(stmt, 1)),
+                               migration_plan_bytes
+                                   ? std::optional<MigrationPlan>(MigrationPlan::parse(*migration_plan_bytes))
+                                   : std::nullopt,
+                               column_blob(stmt, 3)};
+        if (sqlite3_column_type(stmt, 4) != SQLITE_NULL)
+            read.lease = parse_execution_lease(owner_scope, run_id, column_text(stmt, 4), column_blob(stmt, 5));
     }
-    const auto migration_plan_bytes = column_optional_blob(statement.get(), 2);
-    StoredHeadAndLease loaded;
-    loaded.head = StoredHead{parse_run_record(cache, owner_scope, run_id, column_blob(statement.get(), 0)),
-                             ProgramJournalRecord::parse(column_blob(statement.get(), 1)),
-                             migration_plan_bytes
-                                 ? std::optional<MigrationPlan>(MigrationPlan::parse(*migration_plan_bytes))
-                                 : std::nullopt,
-                             column_blob(statement.get(), 3)};
-    if (sqlite3_column_type(statement.get(), 4) != SQLITE_NULL)
-        loaded.lease = parse_execution_lease(owner_scope, run_id, column_text(statement.get(), 4),
-                                             column_blob(statement.get(), 5));
-    return loaded;
+    if (sqlite3_column_type(stmt, 6) != SQLITE_NULL) {
+        read.lineage_id = column_text(stmt, 6);
+        if (sqlite3_column_type(stmt, 7) != SQLITE_NULL) read.lineage_head_bytes = column_blob(stmt, 7);
+    }
+    if (sqlite3_column_type(stmt, 8) != SQLITE_NULL) read.relation_head_bytes = column_blob(stmt, 8);
+    return read;
 }
 
 std::optional<ProgramJavaScriptCommandJournalEntry> load_latest_javascript_command(
@@ -787,6 +806,23 @@ public:
         has_known_    = true;
     }
 
+    /// What the publication's first read found (load_publication_read): the run's head, the lineage the run is recorded
+    /// in with that lineage's head, and the relation head of the run's logical id. A later read of any of them in this
+    /// transaction answers from it; anything else is read when asked.
+    void seed(std::string_view run_id, std::string_view logical_run_id, PublicationRead& read) {
+        heads_.insert_or_assign(std::string(run_id), std::move(read.head));
+        seeded_run_id_ = std::string(run_id);
+        seeded_run_lineage_ = read.lineage_id;
+        if (read.lineage_id) {
+            seeded_lineage_bytes_ = std::move(read.lineage_head_bytes);
+            lineage_memo_         = LineageMemo{*read.lineage_id, std::nullopt};
+            lineage_unparsed_     = true;
+        }
+        seeded_relation_id_    = std::string(logical_run_id);
+        seeded_relation_bytes_ = std::move(read.relation_head_bytes);
+    }
+    const std::optional<StoredHead>& head_of(std::string_view run_id) const { return heads_.at(std::string(run_id)); }
+
     std::optional<GraphMigrationCapsule> graph_migration_capsule(
         std::string_view run_id, std::string_view lineage_head_id) override {
         return load_graph_migration_capsule_record(db_, owner_scope_, run_id, lineage_head_id);
@@ -816,7 +852,14 @@ public:
     }
     std::optional<ProgramRunLineage> lineage_head(std::string_view lineage_id, Lock) override {
         // The head the run's lineage lookup already read in this transaction.
-        if (lineage_memo_ && lineage_memo_->id == lineage_id) return lineage_memo_->head;
+        if (lineage_memo_ && lineage_memo_->id == lineage_id) {
+            if (lineage_unparsed_) {
+                if (seeded_lineage_bytes_)
+                    lineage_memo_->head = parse_lineage_head(*seeded_lineage_bytes_, owner_scope_, lineage_id);
+                lineage_unparsed_ = false;
+            }
+            return lineage_memo_->head;
+        }
         return load_current_lineage_head(db_, owner_scope_, lineage_id);
     }
     std::optional<ProgramRunGeneration> generation(std::string_view lineage_id,
@@ -824,10 +867,12 @@ public:
         return load_generation_record(db_, owner_scope_, lineage_id, ordinal, generations_);
     }
     std::optional<std::string> run_lineage_id(std::string_view run_id) override {
+        if (seeded_run_id_ && *seeded_run_id_ == run_id) return seeded_run_lineage_;
         // The lineage id and its head come from one statement: the validator reads the head of the lineage a
         // run is recorded in right after it learns the id.
         auto read = load_run_lineage_and_head(db_, owner_scope_, run_id);
         lineage_memo_.reset();
+        lineage_unparsed_ = false;
         if (read.id) lineage_memo_ = LineageMemo{*read.id, std::move(read.head)};
         return read.id;
     }
@@ -864,6 +909,16 @@ public:
     std::optional<ProgramChildRelationHead> relation_head(std::string_view parent_run_id,
                                                           Lock) override {
         // Nothing is written while the transaction validates.
+        if (seeded_relation_id_ && *seeded_relation_id_ == parent_run_id) {
+            std::optional<ProgramChildRelationHead> head;
+            if (seeded_relation_bytes_) {
+                head = ProgramChildRelationHead::parse(*seeded_relation_bytes_);
+                if (head->data().owner_scope != owner_scope_ || head->data().parent_run_id != parent_run_id)
+                    throw std::invalid_argument("Stored Program child relation head binding is corrupt");
+            }
+            relation_heads_.insert_or_assign(std::string(parent_run_id), std::move(head));
+            seeded_relation_id_.reset();
+        }
         if (const auto found = relation_heads_.find(parent_run_id); found != relation_heads_.end())
             return found->second;
         auto head = load_relation_head_record(db_, owner_scope_, parent_run_id);
@@ -893,6 +948,12 @@ private:
     detail::RunRecordCache*    cache_;
     detail::GenerationCache*   generations_;
     std::optional<LineageMemo> lineage_memo_;
+    std::optional<std::string> seeded_lineage_bytes_;  // the lineage head of the association, parsed when asked
+    bool                       lineage_unparsed_ = false;
+    std::optional<std::string> seeded_relation_id_;    // the relation head the first read answered, parsed when asked
+    std::optional<std::string> seeded_relation_bytes_;
+    std::optional<std::string> seeded_run_id_;  // the run whose lineage association the first read answered
+    std::optional<std::string> seeded_run_lineage_;
     std::map<std::string, std::optional<StoredHead>, std::less<>>                 heads_;
     std::map<std::string, std::optional<ProgramChildRelationHead>, std::less<>> relation_heads_;
     std::string                known_run_id_;
@@ -1933,7 +1994,7 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     const ProgramExecutionLease* expected_lease,
     const ProgramExecutionLease* next_lease) {
     const auto publication_bytes = detail::transition::prepare_transition(
-        owner_scope, expected_journal_head, publication, safe_point_evidence, safe_point_capsule,
+        owner_scope, expected_journal_head, expected_fence, publication, safe_point_evidence, safe_point_capsule,
         expected_lease, next_lease);
     if (!publication_bytes) return ProgramTransitionPublishResult::Conflict;
 
@@ -1943,17 +2004,19 @@ ProgramTransitionPublishResult SQLiteProgramTransitionStore::compare_publish_imp
     impl_->own_heads.erase(owner_scope, run_id);
     std::lock_guard lock(impl_->mutex);
     Transaction transaction(impl_->db);
-    auto        loaded        = load_head_and_lease(impl_->db, owner_scope, run_id, &impl_->run_record_cache);
-    const auto& current       = loaded.head;
-    const auto& current_lease = loaded.lease;
+    SqliteReads reads(impl_->db, owner_scope, &impl_->run_record_cache, &impl_->generations);
+    auto        first_read    = load_publication_read(impl_->db, owner_scope, run_id,
+                                                      publication.run_record.logical_run_id(),
+                                                      &impl_->run_record_cache);
+    const auto  current_lease = first_read.lease;
+    reads.seed(run_id, publication.run_record.logical_run_id(), first_read);
+    const auto& current = reads.head_of(run_id);
 
     std::optional<detail::transition::CurrentHead> head;
     if (current)
         head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
                                                      current->migration_plan,
                                                      current->last_publication_bytes});
-    SqliteReads                        reads(impl_->db, owner_scope, &impl_->run_record_cache,
-                                             &impl_->generations);
     reads.know_head(run_id, current ? &current->run_record : nullptr);
     const bool stored_history_vouched =
         current && previous_hint &&

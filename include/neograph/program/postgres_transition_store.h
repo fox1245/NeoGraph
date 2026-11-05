@@ -7,11 +7,37 @@
 #include <neograph/program/transition_store.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace neograph::program {
+
+namespace detail {
+
+/**
+ * Points in a batched publication at which a test runs code, and faults it makes. For tests only: no product code
+ * sets them, and none of them waits. An unset member does nothing.
+ */
+struct PublicationTestHooks {
+    /// After the read groups were read and before the validator runs.
+    std::function<void()> after_reads;
+    /// After the publication was validated and before its write statements are built.
+    std::function<void()> before_write;
+    /// After the write statements are built and before they and the COMMIT are sent.
+    std::function<void()> before_commit;
+    /// The write statements of the next publications contain one statement the server refuses.
+    bool fail_write = false;
+    /// The next pipeline leaves the connection in pipeline mode instead of exiting it.
+    bool fail_pipeline_leave = false;
+    /// The publication does not take the owner-scope lock: the writer a peer process without it would be.
+    bool skip_owner_lock = false;
+};
+
+}  // namespace detail
 
 /**
  * Durable owner-scoped ProgramTransitionStore backed by PostgreSQL.
@@ -45,6 +71,38 @@ public:
          * compares what it takes from the cache with the lineage head that names it; 0 disables the cache.
          */
         std::size_t generation_cache_capacity = 256;
+
+        /**
+         * A publication reads the rows it will lock (lineage heads, run heads with their execution lease, relation
+         * heads and rows) in at most four ordered statements before it validates, and the validator finds them
+         * already read. A row that the publication's typed parts do not name is read, locked, when the validator asks,
+         * as before; late_lock_count() counts those reads. False sends one statement per question, as earlier
+         * versions did; for intact stored rows the verdicts and the stored rows are the same either way. On either path,
+         * a transaction that ends with the connection still in pipeline mode, or not idle outside a transaction,
+         * resets the connection.
+         */
+        bool batched_publication = true;
+
+        /**
+         * With batched_publication, the statements of a publication are sent in two pipelines (libpq pipeline mode,
+         * libpq 14 or later): BEGIN, the owner lock and the read groups; then the writes and COMMIT, each pipeline
+         * with one synchronization point and one round trip. A statement that fails rolls the transaction back and
+         * throws, and so does a COMMIT that the server answered as a rollback. The COMMIT goes out with the writes,
+         * before any write is answered: when the connection is lost after that batch was sent, the publication throws
+         * although the server may have committed it, as a COMMIT whose answer is lost may have committed; with one
+         * statement at a time that window is only the COMMIT's own round trip. False, or a libpq without pipeline
+         * mode, sends the same statements one after the other, with the same results.
+         */
+        bool use_pipeline = true;
+
+        /**
+         * With batched_publication, how many times a publication is decided again after another writer inserted a row
+         * it inserts because it found it absent (the owner lock makes that unreachable; a writer without it can reach
+         * it). The transaction is rolled back and the publication runs again against what is stored; when it loses
+         * the race this many times it returns Conflict, which the caller answers by reading the stored head again. 0
+         * returns Conflict at the first loss.
+         */
+        std::size_t lost_race_replans = 1;
     };
 
     explicit PostgreSQLProgramTransitionStore(std::string connection_string);
@@ -54,6 +112,18 @@ public:
     PostgreSQLProgramTransitionStore(const PostgreSQLProgramTransitionStore&) = delete;
     PostgreSQLProgramTransitionStore& operator=(const PostgreSQLProgramTransitionStore&) = delete;
     ~PostgreSQLProgramTransitionStore() override;
+
+    /// For tests only: sets the hooks a publication of this store runs. Pass null to remove them.
+    void set_publication_test_hooks(std::shared_ptr<detail::PublicationTestHooks> hooks);
+
+    /// The number of statements this store has sent on its connection, one per statement.
+    std::uint64_t statements_sent() const noexcept;
+    /// The number of reads that took a row lock the publication's read groups had not taken: the lock order of
+    /// batched_publication was not the whole order of that publication.
+    std::uint64_t late_lock_count() const noexcept;
+    /// The server process id of the store's open connection (empty when it has none), for a test that looks it up in
+    /// pg_locks or pg_stat_activity.
+    std::vector<int> connection_backend_pids() const;
 
     std::string process_coordination_key() const override;
     std::optional<ProgramOwnHeadHint> own_head_hint(std::string_view owner_scope,

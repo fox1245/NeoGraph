@@ -1241,12 +1241,17 @@ struct TransitionPlan {
 inline std::optional<std::string> prepare_transition(
     std::string_view                     owner_scope,
     std::string_view                     expected_journal_head,
+    std::uint64_t                        expected_fence,
     const ProgramTransitionPublication&  publication,
     const ProgramGraphSafePointEvidence* safe_point_evidence,
     const GraphMigrationCapsule*         safe_point_capsule,
     const ProgramExecutionLease*         expected_lease,
     const ProgramExecutionLease*         next_lease) {
     try {
+        // The fence the writer holds is the one its run record and journal record carry; no stored state is involved.
+        if (expected_fence == 0 || publication.run_record.continuation().fence != expected_fence ||
+            publication.journal_record.continuation.fence != expected_fence)
+            return std::nullopt;
         if (!expected_journal_head.empty() && !is_sha256_identity(expected_journal_head))
             return std::nullopt;
         if (publication.run_record.owner_scope() != owner_scope ||
@@ -1346,11 +1351,13 @@ inline bool valid_increment(TransitionReads&                     reads,
  */
 inline bool lineage_ledger_binds(TransitionReads& reads, const ProgramTransitionPublication& publication) {
     if (!publication.run_lineage) return true;
+    const auto& claimed = publication.run_lineage->committed_descendant_budget();
+    const bool  exact   = publication.run_generation.has_value() ||
+                       (publication.child_relations && publication.child_relations->expected_epoch);
+    // An ordinary publication that claims no permanent budget is at most any aggregate: the relation head is not read.
+    if (!exact && permanent_budget_at_most(claimed, RunBudget{})) return true;
     const auto head = reads.relation_head(publication.run_record.logical_run_id(), TransitionReads::Lock::Update);
     const RunBudget aggregate = head ? head->committed_budget() : RunBudget{};
-    const auto&     claimed   = publication.run_lineage->committed_descendant_budget();
-    const bool exact = publication.run_generation.has_value() ||
-                       (publication.child_relations && publication.child_relations->expected_epoch);
     if (exact) return claimed == aggregate;
     return permanent_budget_at_most(claimed, aggregate);
 }
@@ -1541,6 +1548,8 @@ inline bool relation_parts_bind(TransitionReads&                    reads,
     if (part && part->spawn) {
         const auto& spawn = *part->spawn;
         if (run_exists || spawn.child.child_run_id != run.run_id() ||
+            spawn.parent_run_id == run.logical_run_id() ||
+            spawn.parent_run_id == spawn.child.child_run_id ||
             run.invocation().parent_run_id != spawn.parent_run_id)
             return false;
         auto planned = plan_relation_insert(reads, owner_scope, spawn.parent_run_id, spawn.parent_fence,
@@ -1553,7 +1562,9 @@ inline bool relation_parts_bind(TransitionReads&                    reads,
     }
     if (part && part->completion) {
         const auto& completion = *part->completion;
-        if (!run_exists || !run.terminal_result() || completion.child.child_run_id != run.logical_run_id())
+        if (!run_exists || !run.terminal_result() || completion.child.child_run_id != run.logical_run_id() ||
+            completion.parent_run_id == run.logical_run_id() ||
+            completion.parent_run_id == completion.child.child_run_id)
             return false;
         auto planned = plan_relation_update(reads, owner_scope, completion.parent_run_id,
                                             completion.child_fence, completion.expected_row_version,
@@ -1584,11 +1595,9 @@ inline TransitionVerdict validate_transition(const TransitionRequest&   request,
                                              TransitionPlan&            plan) {
     const auto& publication = request.publication;
     const auto& run_id      = publication.run_record.run_id();
-    if (request.expected_fence == 0 ||
-        publication.run_record.continuation().fence != request.expected_fence ||
-        publication.journal_record.continuation.fence != request.expected_fence ||
-        (current && (current->run_record.continuation().fence != request.expected_fence ||
-                     current->journal_record.continuation.fence != request.expected_fence))) {
+    // The writer's own fence checks are prepare_transition's; the stored head's are decided here.
+    if (current && (current->run_record.continuation().fence != request.expected_fence ||
+                    current->journal_record.continuation.fence != request.expected_fence)) {
         return TransitionVerdict::Conflict;
     }
     if (request.safe_point_evidence && !current) return TransitionVerdict::Conflict;
