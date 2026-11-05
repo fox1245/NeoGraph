@@ -13536,9 +13536,7 @@ TEST(ProgramRuntimeTest, ARunGrantedUint64MaxWallTimeDoesNotTimeOutAtOnce) {
     unbounded_budget.wall_time_ms = maximum;
 
     auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
-    scheduler->attempts  = asio::system_executor{};
-    scheduler->deadlines = asio::system_executor{};
-    scheduler->waiters   = asio::system_executor{};
+    scheduler->install(asio::system_executor{}, asio::system_executor{}, asio::system_executor{}, {}, {});
 
     const auto materialized =
         neograph::program::detail::CatalogRuntimeAccess::pin(*fixture.catalog, version);
@@ -13686,9 +13684,7 @@ TEST(ProgramRuntimeTest, ARunGrantedWallTimeJustBelowWhatATimePointHoldsComplete
     const auto existing = fixture.journal->load("tenant:runtime", result.run_id());
     ASSERT_TRUE(existing.has_value());
     auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
-    scheduler->attempts  = asio::system_executor{};
-    scheduler->deadlines = asio::system_executor{};
-    scheduler->waiters   = asio::system_executor{};
+    scheduler->install(asio::system_executor{}, asio::system_executor{}, asio::system_executor{}, {}, {});
     neograph::program::detail::RunControl below_overflow_control(
         *existing, fixture.journal->load_events("tenant:runtime", result.run_id()),
         fixture.journal, nullptr, scheduler);
@@ -13732,9 +13728,7 @@ TEST(ProgramRuntimeTest, AResumedRecordWithMoreRemainingWallTimeThanATimePointHo
     EXPECT_GT(existing->remaining_budget().wall_time_ms, room_ms);
 
     auto scheduler       = std::make_shared<neograph::program::detail::RuntimeScheduler>();
-    scheduler->attempts  = asio::system_executor{};
-    scheduler->deadlines = asio::system_executor{};
-    scheduler->waiters   = asio::system_executor{};
+    scheduler->install(asio::system_executor{}, asio::system_executor{}, asio::system_executor{}, {}, {});
     neograph::program::detail::RunControl continued_control(
         *existing, fixture.journal->load_events("tenant:runtime", paused.run_id()),
         fixture.journal, nullptr, scheduler);

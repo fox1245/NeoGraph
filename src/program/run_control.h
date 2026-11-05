@@ -164,20 +164,40 @@ private:
  * The executors and the blocking rules of one ProgramRuntime, shared by every RunControl it creates (#557). Without
  * RuntimeConfig::executor the three executors are the runtime's own pools (attempts on one, deadlines on another,
  * waiters on the system executor), as they always were. With it, all three are that executor.
+ *
+ * Every handle of the runtime shares the scheduler, so it may live longer than the execution contexts of its
+ * executors. It holds them only until one of those contexts shuts down, which a context does as it is destroyed, before
+ * it destroys its services: the context then closes the scheduler (close()), which drops every executor and the
+ * host's thread test. A closed scheduler reaches no context: the accessors throw P_EXECUTOR_DESTROYED, and no thread
+ * runs its executors. A RunControl keeps no executor of its own; a wait makes its strand when it has to wait.
  */
 struct RuntimeScheduler {
-    asio::any_io_executor attempts;
-    asio::any_io_executor deadlines;
-    asio::any_io_executor waiters;
+    /// Installs the executors before the scheduler is shared. `host_executor` is RuntimeConfig::executor as the host
+    /// gave it (empty for the runtime's own pools), and `running_in_this_thread` is
+    /// RuntimeConfig::executor_identity.running_in_this_thread: when it is empty, the thread is found from
+    /// `host_executor` when that is the executor of an io_context or a thread_pool, or a strand of either.
+    void install(asio::any_io_executor attempts,
+                 asio::any_io_executor deadlines,
+                 asio::any_io_executor waiters,
+                 asio::any_io_executor host_executor,
+                 std::function<bool()> running_in_this_thread);
+    /// The executor that attempts and the runtime's tasks run on.
+    asio::any_io_executor attempts() const;
+    /// The executor that deadline timers run on.
+    asio::any_io_executor deadlines() const;
+    /// A strand of the executor that waiters run on, made for one wait: a wait registers its timer and starts waiting in
+    /// one handler of it, and its waker cancels the timer there.
+    asio::strand<asio::any_io_executor> waiter_strand() const;
+    /// True once the execution context of one of the executors has shut down.
+    bool closed() const noexcept;
+    /// Drops the executors and the host's thread test. Called by an execution context of the executors as it shuts
+    /// down; the copies are destroyed while the context still has its services.
+    void close() noexcept;
+
     /// RuntimeConfig::executor was given.
     bool injected = false;
     /// The executor is pumped by a host's event loop, or the build has no threads to wait on.
     bool host_pumped = false;
-    /// RuntimeConfig::executor as the host gave it; the three above are adapted from it.
-    asio::any_io_executor host_executor;
-    /// RuntimeConfig::executor_identity.running_in_this_thread; empty: found from host_executor when it is the
-    /// executor of an io_context or a thread_pool, or a strand of either.
-    std::function<bool()> running_in_this_thread;
     /// RuntimeConfig::javascript_stack_bytes, 0 resolved to the default: the stack of a JavaScript control source.
     std::size_t javascript_stack_bytes = 0;
     /// Every store the runtime reads is a Sync...Store, so its awaitable operations complete at once (the catalog's
@@ -218,6 +238,16 @@ struct RuntimeScheduler {
         }
         return run_to_completion(std::move(body), operation);
     }
+
+private:
+    /// Guards everything below, which close() drops.
+    mutable PureMutex     executors_mutex_;
+    std::atomic_bool      closed_{false};
+    asio::any_io_executor attempts_;
+    asio::any_io_executor deadlines_;
+    asio::any_io_executor waiters_;
+    asio::any_io_executor host_executor_;
+    std::shared_ptr<const std::function<bool()>> running_in_this_thread_;
 };
 
 
@@ -396,8 +426,6 @@ public:
     const std::chrono::steady_clock::time_point      started_at;
     const std::chrono::steady_clock::time_point      deadline;
     const std::shared_ptr<const RuntimeScheduler>    scheduler;
-    const asio::any_io_executor                      deadline_executor;
-    const asio::strand<asio::any_io_executor>        waiter_strand;
     const std::string                                core_thread_id;
     const std::string                                trace_id;
     const std::shared_ptr<graph::CheckpointStore>    checkpoints;
@@ -692,7 +720,16 @@ private:
     /// Wakes the blocked thread and takes the coroutines that wait for a graph migration state change; the caller
     /// passes them to wake_async_waiters after it unlocks mutex_.
     void notify_graph_migration_locked(std::vector<AsyncWaiter>& async_waiters);
+    /// Cancels the timer of each waiter whose wait is still pending, on the strand that wait made. Touches no executor
+    /// for a waiter whose wait has ended, nor for an empty list.
     void wake_async_waiters(std::vector<AsyncWaiter> waiters) const;
+    /// Suspends the calling coroutine until a waker cancels the timer that `enlist` registered. `waiting` and `enlist`
+    /// run with mutex_ held: `waiting` says whether there is still something to wait for, and `enlist` registers the
+    /// timer where the waker finds it. When there is nothing to wait for, it returns at once and touches no executor;
+    /// otherwise the wait runs on a strand of the scheduler's waiter executor made for it, where the timer is created,
+    /// registered, waited on and destroyed. Throws P_EXECUTOR_DESTROYED when it has to wait and the scheduler is closed.
+    asio::awaitable<void> park_until_woken(std::function<bool()> waiting,
+                                           std::function<void(std::shared_ptr<async::HostTimer>)> enlist) const;
     void abort_handoff() noexcept;
     void abort_graph_migration() noexcept;
     asio::awaitable<void> abort_graph_migration_async();
