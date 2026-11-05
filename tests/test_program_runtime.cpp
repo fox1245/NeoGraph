@@ -18520,6 +18520,7 @@ TEST(ProgramRuntimeTest, CancellingARunningParentCancelsItsInterruptedChildDurab
 }
 
 TEST(ProgramRuntimeTest, FailedSpawnWritesNothingAndIsRetried) {
+    blocking_calls.store(0);
     auto            journal = std::make_shared<FailChildDispatchOnceJournal>();
     AdmittedRuntime fixture(2, {}, journal);
     const auto      linked = make_linked_child(fixture, "runtime-blocking", "runtime-completed");
@@ -18529,6 +18530,10 @@ TEST(ProgramRuntimeTest, FailedSpawnWritesNothingAndIsRetried) {
                                                  RunBudget{10000, 1000, 1000, 1, 2, 20, 0, 1, 1},
                                                  "trace-parent-dispatch-recovery",
                                                  {}});
+    // The child is granted every Core step the parent has, so the parent's own Core call has to have started before the
+    // child is attached: a child attached first leaves the parent nothing to run its call with, the parent ends, and
+    // the end of the parent cancels the child.
+    ASSERT_TRUE(wait_blocking_calls(1));
     ProgramInvocation child_invocation{json::object(),
                                        RunBudget{10000, 1000, 1000, 1, 1, 20, 0, 0, 0},
                                        "trace-child-dispatch-recovery",
