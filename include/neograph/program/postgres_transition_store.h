@@ -10,16 +10,27 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace neograph::program {
 
+/**
+ * A publication that began sending its COMMIT lost its connection, or failed while sending or flushing without a
+ * server statement error, before the answer was read, and the single outcome check on a new session could not decide
+ * whether the server committed the publication.
+ */
+class NEOGRAPH_PROGRAM_API ProgramTransitionOutcomeUnknown : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 namespace detail {
 
 /**
- * Points in a batched publication at which a test runs code, and faults it makes. For tests only: no product code
+ * Points in a publication at which a test runs code, and faults it makes. For tests only: no product code
  * sets them, and none of them waits. An unset member does nothing.
  */
 struct PublicationTestHooks {
@@ -29,12 +40,24 @@ struct PublicationTestHooks {
     std::function<void()> before_write;
     /// After the write statements are built and before they and the COMMIT are sent.
     std::function<void()> before_commit;
+    /// After the batch or statement that contains the publication's COMMIT was sent and before its answer is read,
+    /// with PQsocket of the connection.
+    std::function<void(int socket)> after_send;
+    /// Statements inserted at the start of the next publication's writes, after BEGIN and the reads.
+    std::vector<std::string> extra_write_statements;
     /// The write statements of the next publications contain one statement the server refuses.
     bool fail_write = false;
+    /// Sending or flushing the batch or statement that contains COMMIT fails after COMMIT was handed to libpq, while
+    /// the connection stays CONNECTION_OK.
+    bool fail_commit_send = false;
     /// The next pipeline leaves the connection in pipeline mode instead of exiting it.
     bool fail_pipeline_leave = false;
     /// The publication does not take the owner-scope lock: the writer a peer process without it would be.
     bool skip_owner_lock = false;
+    /// The outcome check after a lost COMMIT treats the old session's identity as unknown.
+    bool unknown_session_identity = false;
+    /// The outcome check after a lost COMMIT sends a terminate statement the server refuses.
+    bool fail_recheck_terminate = false;
 };
 
 }  // namespace detail
@@ -88,10 +111,13 @@ public:
          * libpq 14 or later): BEGIN, the owner lock and the read groups; then the writes and COMMIT, each pipeline
          * with one synchronization point and one round trip. A statement that fails rolls the transaction back and
          * throws, and so does a COMMIT that the server answered as a rollback. The COMMIT goes out with the writes,
-         * before any write is answered: when the connection is lost after that batch was sent, the publication throws
-         * although the server may have committed it, as a COMMIT whose answer is lost may have committed; with one
-         * statement at a time that window is only the COMMIT's own round trip. False, or a libpq without pipeline
-         * mode, sends the same statements one after the other, with the same results.
+         * before any write is answered: when the connection is lost, or sending or flushing fails without a server
+         * statement error, after a publication began sending its COMMIT and before the answer was read, the store
+         * fences the old session on a new session, takes the owner lock, and checks the outcome once with the
+         * validator (AlreadyPresent returns Published, Conflict returns Conflict, Proceed throws because the
+         * publication did not commit, and an undecided check throws ProgramTransitionOutcomeUnknown).
+         * False, or a libpq without pipeline mode, sends the same statements one after the other, with the same
+         * results.
          */
         bool use_pipeline = true;
 

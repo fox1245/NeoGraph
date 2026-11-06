@@ -16,6 +16,10 @@
 #include <neograph/program/postgres_transition_store.h>
 #include <libpq-fe.h>
 
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
+
 #include "postgres_pipeline.h"
 #endif
 #include "fixtures/program_store_backends.h"
@@ -8876,6 +8880,296 @@ TEST(ProgramTransitionStoreTest, PostgreSQLPipelineLeaveFailureResetsConnectionA
     EXPECT_EQ(store.load_javascript_commands("owner-a", "run-pipeline-leave").size(), 2U);
     EXPECT_EQ(store.store().connection_backend_pids().front(), third_pid);
 #endif
+}
+
+namespace {
+void shutdown_postgres_socket(int socket) {
+#ifdef _WIN32
+    EXPECT_EQ(::shutdown(static_cast<SOCKET>(socket), SD_BOTH), 0);
+#else
+    EXPECT_EQ(::shutdown(socket, SHUT_RDWR), 0);
+#endif
+}
+}  // namespace
+
+// A session terminated before COMMIT arrives is fenced and checked on a new session: the validator returns Proceed,
+// the publication throws an exception that is not ProgramTransitionOutcomeUnknown, nothing of it is stored, and the
+// next publication on the same store succeeds.
+TEST(ProgramTransitionStoreTest, PostgreSQLConnectionLostBeforeCommitArrivedThrowsAndNextPublicationSucceeds) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (path.batched && path.pipeline && !neograph::program::detail::pipeline_mode_supported()) continue;
+        SCOPED_TRACE(path.name);
+        reset_postgres_transition_schema(url);
+        PostgresTestStore store(url, postgres_path_options(path));
+        const auto        leaf = leaf_run("run-lost-before-commit");
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+        const auto pids = store.store().connection_backend_pids();
+        ASSERT_EQ(pids.size(), 1U);
+        const int store_pid = pids.front();
+
+        auto hooks           = std::make_shared<detail::PublicationTestHooks>();
+        hooks->before_commit = [&] {
+            neograph::program::test_support::detail::postgres_execute(
+                url, "SELECT pg_terminate_backend(" + std::to_string(store_pid) + ")");
+        };
+        store.store().set_publication_test_hooks(hooks);
+        bool threw_not_committed = false;
+        try {
+            (void)store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command);
+            FAIL() << "expected publication to throw when its session is terminated before COMMIT";
+        } catch (const ProgramTransitionOutcomeUnknown& error) {
+            FAIL() << "unexpected ProgramTransitionOutcomeUnknown: " << error.what();
+        } catch (const std::exception&) {
+            threw_not_committed = true;
+        }
+        EXPECT_TRUE(threw_not_committed);
+        hooks->before_commit = nullptr;
+
+        EXPECT_EQ(store.load("owner-a", "run-lost-before-commit")->id(), leaf.start.run_record.id());
+        EXPECT_EQ(store.latest("owner-a", "run-lost-before-commit")->id, leaf.start.journal_record.id);
+        EXPECT_TRUE(store.load_javascript_commands("owner-a", "run-lost-before-commit").empty());
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-lost-before-commit")->id(), leaf.start.run_lineage->id());
+
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.latest("owner-a", "run-lost-before-commit")->id, leaf.command.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-lost-before-commit").size(), 1U);
+    }
+}
+
+// When the connection is lost after the server committed the publication and before the COMMIT answer was read, the
+// outcome check on a new session finds AlreadyPresent and returns Published.
+TEST(ProgramTransitionStoreTest, PostgreSQLConnectionLostAfterCommitAppliedReturnsPublished) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (path.batched && path.pipeline && !neograph::program::detail::pipeline_mode_supported()) continue;
+        SCOPED_TRACE(path.name);
+        reset_postgres_transition_schema(url);
+        PostgresTestStore store(url, postgres_path_options(path));
+        const auto        leaf = leaf_run("run-lost-after-commit");
+        auto              done = javascript_command_publication(leaf.command, javascript_command_entry(2, true), 30);
+        attach_same_generation_lineage(done, *leaf.command.run_lineage);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+        auto hooks        = std::make_shared<detail::PublicationTestHooks>();
+        hooks->after_send = [&](int socket) {
+            neograph::program::test_support::detail::postgres_execute(
+                url, "BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('owner-a', 0)); COMMIT");
+            shutdown_postgres_socket(socket);
+        };
+        store.store().set_publication_test_hooks(hooks);
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                  ProgramTransitionPublishResult::Published);
+        hooks->after_send = nullptr;
+
+        EXPECT_EQ(store.load("owner-a", "run-lost-after-commit")->id(), leaf.command.run_record.id());
+        EXPECT_EQ(store.latest("owner-a", "run-lost-after-commit")->id, leaf.command.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-lost-after-commit").size(), 1U);
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-lost-after-commit")->id(), leaf.command.run_lineage->id());
+        const auto hint = store.store().own_head_hint("owner-a", "run-lost-after-commit");
+        ASSERT_TRUE(hint.has_value());
+        EXPECT_EQ(hint->journal_record.id, leaf.command.journal_record.id);
+
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.command.journal_record.id, 1, done),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.latest("owner-a", "run-lost-after-commit")->id, done.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-lost-after-commit").size(), 2U);
+    }
+}
+
+// When the old session is still running its writes while the connection is lost, the outcome check terminates it by
+// pid and backend_start and waits on the owner lock before reading stored state, so the old session cannot commit
+// after the check decided.
+TEST(ProgramTransitionStoreTest, PostgreSQLOutcomeCheckFencesOldSessionStillRunning) {
+#ifndef LIBPQ_HAS_PIPELINING
+    GTEST_SKIP() << "libpq built without pipeline mode";
+#else
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    if (!neograph::program::detail::pipeline_mode_supported()) GTEST_SKIP() << "libpq has no pipeline mode";
+    reset_postgres_transition_schema(url);
+    PostgresTestStore store(url, postgres_test_options(true));
+    const auto        leaf = leaf_run("run-still-running");
+    ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+    std::unique_ptr<PGconn, decltype(&PQfinish)> blocker(PQconnectdb(url), PQfinish);
+    ASSERT_NE(blocker.get(), nullptr);
+    ASSERT_EQ(PQstatus(blocker.get()), CONNECTION_OK);
+    const auto exec_blocker = [&](const char* sql) {
+        std::unique_ptr<PGresult, decltype(&PQclear)> res(PQexec(blocker.get(), sql), PQclear);
+        ASSERT_TRUE(res && (PQresultStatus(res.get()) == PGRES_COMMAND_OK ||
+                            PQresultStatus(res.get()) == PGRES_TUPLES_OK))
+            << (blocker ? PQerrorMessage(blocker.get()) : "");
+    };
+    exec_blocker("SELECT pg_advisory_lock(hashtextextended('neograph-recheck-fence-lock', 0))");
+
+    auto hooks                    = std::make_shared<detail::PublicationTestHooks>();
+    hooks->extra_write_statements = {"SELECT pg_advisory_xact_lock(hashtextextended('neograph-recheck-fence-lock', 0))"};
+    hooks->after_send             = [&](int socket) { shutdown_postgres_socket(socket); };
+    store.store().set_publication_test_hooks(hooks);
+
+    std::optional<ProgramTransitionPublishResult> published;
+    bool                                          threw_not_committed = false;
+    try {
+        published = store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command);
+    } catch (const ProgramTransitionOutcomeUnknown& error) {
+        exec_blocker("SELECT pg_advisory_unlock(hashtextextended('neograph-recheck-fence-lock', 0))");
+        FAIL() << "unexpected ProgramTransitionOutcomeUnknown: " << error.what();
+    } catch (const std::exception&) {
+        threw_not_committed = true;
+    }
+    hooks->extra_write_statements.clear();
+    hooks->after_send = nullptr;
+
+    // Release K and wait on the owner lock so an unfenced old session that was still holding the owner lock finishes
+    // whatever buffered statements it had before the stored state is inspected.
+    exec_blocker("SELECT pg_advisory_unlock(hashtextextended('neograph-recheck-fence-lock', 0))");
+    exec_blocker("BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('owner-a', 0)); COMMIT");
+
+    if (published) {
+        EXPECT_EQ(*published, ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.load("owner-a", "run-still-running")->id(), leaf.command.run_record.id());
+        EXPECT_EQ(store.latest("owner-a", "run-still-running")->id, leaf.command.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-still-running").size(), 1U);
+    } else {
+        EXPECT_TRUE(threw_not_committed);
+        EXPECT_EQ(store.load("owner-a", "run-still-running")->id(), leaf.start.run_record.id());
+        EXPECT_EQ(store.latest("owner-a", "run-still-running")->id, leaf.start.journal_record.id);
+        EXPECT_TRUE(store.load_javascript_commands("owner-a", "run-still-running").empty());
+        EXPECT_EQ(store.load_run_lineage("owner-a", "run-still-running")->id(), leaf.start.run_lineage->id());
+    }
+#endif
+}
+
+// When the connection is lost after COMMIT was sent and the outcome check cannot fence the old session (unknown
+// session identity or a refused terminate statement), the store throws ProgramTransitionOutcomeUnknown; clearing the
+// fault on the same store lets the check classify Published and Conflict verdicts through the validator.
+TEST(ProgramTransitionStoreTest, PostgreSQLOutcomeCheckThrowsOutcomeUnknownWhenItCannotDecide) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (path.batched && path.pipeline && !neograph::program::detail::pipeline_mode_supported()) continue;
+        for (const bool refuse_terminate : {false, true}) {
+            SCOPED_TRACE(std::string(path.name) + (refuse_terminate ? ", refused terminate" : ", unknown identity"));
+            reset_postgres_transition_schema(url);
+            PostgresTestStore store(url, postgres_path_options(path));
+            PostgresTestStore peer(url, postgres_path_options(path));
+            const auto        leaf = leaf_run("run-outcome-unknown");
+            ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+            auto hooks                      = std::make_shared<detail::PublicationTestHooks>();
+            hooks->unknown_session_identity = !refuse_terminate;
+            hooks->fail_recheck_terminate   = refuse_terminate;
+            hooks->after_send               = [&](int socket) { shutdown_postgres_socket(socket); };
+            store.store().set_publication_test_hooks(hooks);
+            EXPECT_THROW((void)store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                         ProgramTransitionOutcomeUnknown);
+            neograph::program::test_support::detail::postgres_execute(
+                url, "BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('owner-a', 0)); COMMIT");
+
+            // Clearing the fault on the same store lets the outcome check run the validator and return Conflict when a
+            // peer published a competing transition after the old session was terminated.
+            hooks->unknown_session_identity = false;
+            hooks->fail_recheck_terminate   = false;
+            hooks->after_send               = nullptr;
+            const auto recovered            = leaf_run("run-outcome-recovered");
+            ASSERT_EQ(store.compare_publish("owner-a", {}, 1, recovered.start),
+                      ProgramTransitionPublishResult::Published);
+            auto competing = javascript_command_publication(
+                recovered.start, javascript_command_entry(1, false), 21);
+            attach_same_generation_lineage(competing, *recovered.start.run_lineage);
+            const int store_pid  = store.store().connection_backend_pids().front();
+            hooks->before_commit = [&] {
+                neograph::program::test_support::detail::postgres_execute(
+                    url, "SELECT pg_terminate_backend(" + std::to_string(store_pid) + ")");
+                EXPECT_EQ(peer.compare_publish("owner-a", recovered.start.journal_record.id, 1, competing),
+                          ProgramTransitionPublishResult::Published);
+            };
+            EXPECT_EQ(store.compare_publish("owner-a", recovered.start.journal_record.id, 1, recovered.command),
+                      ProgramTransitionPublishResult::Conflict);
+            hooks->before_commit = nullptr;
+        }
+    }
+}
+
+// A send or flush failure after the batch or statement containing COMMIT began to be sent, while libpq still reports
+// CONNECTION_OK, runs the outcome check: it returns Published when the server committed, and fences an uncommitted
+// session and throws when it did not.
+TEST(ProgramTransitionStoreTest, PostgreSQLCommitSendFailureWithConnectionOkRunsOutcomeCheck) {
+    const auto* url = std::getenv("NEOGRAPH_TEST_POSTGRES_URL");
+    if (!url || !*url) GTEST_SKIP() << "NEOGRAPH_TEST_POSTGRES_URL not set";
+    for (const auto& path : POSTGRES_PATHS) {
+        if (path.batched && path.pipeline && !neograph::program::detail::pipeline_mode_supported()) continue;
+        SCOPED_TRACE(path.name);
+        reset_postgres_transition_schema(url);
+        PostgresTestStore store(url, postgres_path_options(path));
+        const auto        leaf = leaf_run("run-commit-send-failure");
+        auto              done = javascript_command_publication(leaf.command, javascript_command_entry(2, true), 30);
+        attach_same_generation_lineage(done, *leaf.command.run_lineage);
+        ASSERT_EQ(store.compare_publish("owner-a", {}, 1, leaf.start), ProgramTransitionPublishResult::Published);
+
+        auto hooks              = std::make_shared<detail::PublicationTestHooks>();
+        hooks->fail_commit_send = true;
+        hooks->after_send       = [&](int) {
+            neograph::program::test_support::detail::postgres_execute(
+                url, "BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('owner-a', 0)); COMMIT");
+        };
+        store.store().set_publication_test_hooks(hooks);
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.start.journal_record.id, 1, leaf.command),
+                  ProgramTransitionPublishResult::Published);
+        hooks->fail_commit_send = false;
+        hooks->after_send       = nullptr;
+
+        EXPECT_EQ(store.load("owner-a", "run-commit-send-failure")->id(), leaf.command.run_record.id());
+        EXPECT_EQ(store.latest("owner-a", "run-commit-send-failure")->id, leaf.command.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-commit-send-failure").size(), 1U);
+        const auto hint = store.store().own_head_hint("owner-a", "run-commit-send-failure");
+        ASSERT_TRUE(hint.has_value());
+        EXPECT_EQ(hint->journal_record.id, leaf.command.journal_record.id);
+
+        std::unique_ptr<PGconn, decltype(&PQfinish)> blocker(PQconnectdb(url), PQfinish);
+        ASSERT_NE(blocker.get(), nullptr);
+        ASSERT_EQ(PQstatus(blocker.get()), CONNECTION_OK);
+        const auto exec_blocker = [&](const char* sql) {
+            std::unique_ptr<PGresult, decltype(&PQclear)> res(PQexec(blocker.get(), sql), PQclear);
+            ASSERT_TRUE(res && (PQresultStatus(res.get()) == PGRES_COMMAND_OK ||
+                                PQresultStatus(res.get()) == PGRES_TUPLES_OK))
+                << (blocker ? PQerrorMessage(blocker.get()) : "");
+        };
+        if (path.batched && path.pipeline) {
+            exec_blocker("SELECT pg_advisory_lock(hashtextextended('neograph-recheck-fence-lock', 0))");
+            hooks->extra_write_statements = {
+                "SELECT pg_advisory_xact_lock(hashtextextended('neograph-recheck-fence-lock', 0))"};
+        }
+        hooks->fail_commit_send  = true;
+        bool threw_not_committed = false;
+        try {
+            (void)store.compare_publish("owner-a", leaf.command.journal_record.id, 1, done);
+            FAIL() << "expected publication to throw when old session was fenced before COMMIT";
+        } catch (const ProgramTransitionOutcomeUnknown& error) {
+            if (path.batched && path.pipeline)
+                exec_blocker("SELECT pg_advisory_unlock(hashtextextended('neograph-recheck-fence-lock', 0))");
+            FAIL() << "unexpected ProgramTransitionOutcomeUnknown: " << error.what();
+        } catch (const std::runtime_error&) {
+            threw_not_committed = true;
+        }
+        hooks->extra_write_statements.clear();
+        hooks->fail_commit_send = false;
+        if (path.batched && path.pipeline)
+            exec_blocker("SELECT pg_advisory_unlock(hashtextextended('neograph-recheck-fence-lock', 0))");
+        exec_blocker("BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('owner-a', 0)); COMMIT");
+        EXPECT_TRUE(threw_not_committed);
+        EXPECT_EQ(store.latest("owner-a", "run-commit-send-failure")->id, leaf.command.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-commit-send-failure").size(), 1U);
+
+        EXPECT_EQ(store.compare_publish("owner-a", leaf.command.journal_record.id, 1, done),
+                  ProgramTransitionPublishResult::Published);
+        EXPECT_EQ(store.latest("owner-a", "run-commit-send-failure")->id, done.journal_record.id);
+        EXPECT_EQ(store.load_javascript_commands("owner-a", "run-commit-send-failure").size(), 2U);
+    }
 }
 #endif
 

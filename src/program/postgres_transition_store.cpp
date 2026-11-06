@@ -80,15 +80,20 @@ inline void note_statement() noexcept {
 // A statement the server refused. `sqlstate` is the code the server reported (empty when it reported none).
 class PgError final : public std::runtime_error {
 public:
-    PgError(const std::string& message, std::string sqlstate, std::string constraint = {})
-        : std::runtime_error(message), sqlstate_(std::move(sqlstate)), constraint_(std::move(constraint)) {}
+    PgError(const std::string& message, ExecStatusType status, std::string sqlstate, std::string constraint = {})
+        : std::runtime_error(message),
+          status_(status),
+          sqlstate_(std::move(sqlstate)),
+          constraint_(std::move(constraint)) {}
+    ExecStatusType status() const noexcept { return status_; }
     const std::string& sqlstate() const noexcept { return sqlstate_; }
     /// The constraint the statement violated (empty when the error names none).
     const std::string& constraint() const noexcept { return constraint_; }
 
 private:
-    std::string sqlstate_;
-    std::string constraint_;
+    ExecStatusType status_;
+    std::string    sqlstate_;
+    std::string    constraint_;
 };
 
 // A compare-and-swap statement that changed no row (or more than one) inserts a row into an always-empty table whose
@@ -100,6 +105,12 @@ constexpr const char* CAS_GUARD_CONSTRAINT = "neograph_program_transition_cas_mi
 // SQLSTATE of a unique violation: another writer inserted the row a statement inserts.
 constexpr const char* UNIQUE_VIOLATION = "23505";
 
+// Whether `error` is a statement error answered by the server on a connection that is still open.
+bool is_server_statement_error(PGconn* connection, const PgError& error) noexcept {
+    detail::consume_available_input(connection);
+    return PQstatus(connection) == CONNECTION_OK && error.status() == PGRES_FATAL_ERROR && !error.sqlstate().empty();
+}
+
 void check_result(PGconn* connection, const PgResult& result, std::string_view operation) {
     if (!result.get()) throw_pg(connection, operation);
     const auto status = PQresultStatus(result.get());
@@ -110,7 +121,7 @@ void check_result(PGconn* connection, const PgResult& result, std::string_view o
     if (detail && *detail) message += detail;
     const auto* sqlstate   = PQresultErrorField(result.get(), PG_DIAG_SQLSTATE);
     const auto* constraint = PQresultErrorField(result.get(), PG_DIAG_CONSTRAINT_NAME);
-    throw PgError(message, sqlstate ? sqlstate : "", constraint ? constraint : "");
+    throw PgError(message, status, sqlstate ? sqlstate : "", constraint ? constraint : "");
 }
 
 PgResult exec_sql(PGconn* connection, std::string_view sql) {
@@ -158,7 +169,7 @@ void verify_statement_result(PGconn* connection, const SqlStatement& statement, 
         check_result(connection, result, "PostgreSQL transition statement");
     } catch (const PgError& error) {
         if (!statement.cas_failure.empty() && error.constraint() == CAS_GUARD_CONSTRAINT)
-            throw std::runtime_error(statement.cas_failure);
+            throw PgError(statement.cas_failure, error.status(), error.sqlstate(), error.constraint());
         throw;
     }
     if (!statement.command_tag.empty()) {
@@ -176,9 +187,30 @@ std::vector<const char*> statement_values(const SqlStatement& statement) {
     return values;
 }
 
-PgResult exec_statement(PGconn* connection, const SqlStatement& statement) {
+PgResult exec_statement(PGconn* connection, const SqlStatement& statement,
+                        const std::function<void(int)>* after_send = nullptr, bool fail_send = false) {
     note_statement();
     const auto values = statement_values(statement);
+    if ((after_send && *after_send) || fail_send) {
+        if (fail_send && !(after_send && *after_send))
+            throw_pg(connection, "PostgreSQL transition statement");
+        if (PQsendQueryParams(connection, statement.sql.c_str(), static_cast<int>(values.size()), nullptr,
+                              values.empty() ? nullptr : values.data(), nullptr, nullptr, 0) != 1)
+            throw_pg(connection, "PostgreSQL transition statement");
+        while (const int flushed = PQflush(connection)) {
+            if (flushed < 0) throw_pg(connection, "PostgreSQL transition statement");
+        }
+        if (after_send && *after_send) {
+            (*after_send)(PQsocket(connection));
+            detail::consume_available_input(connection);
+            if (PQstatus(connection) == CONNECTION_BAD) throw_pg(connection, "PostgreSQL transition statement");
+        }
+        if (fail_send) throw_pg(connection, "PostgreSQL transition statement");
+        PgResult last(nullptr);
+        while (PGresult* raw = PQgetResult(connection)) last = PgResult(raw);
+        verify_statement_result(connection, statement, last);
+        return last;
+    }
     PgResult   result(PQexecParams(connection, statement.sql.c_str(), static_cast<int>(values.size()), nullptr,
                                    values.empty() ? nullptr : values.data(), nullptr, nullptr, 0));
     verify_statement_result(connection, statement, result);
@@ -190,7 +222,9 @@ PgResult exec_statement(PGconn* connection, const SqlStatement& statement) {
 // statement that fails decides the error (every statement after it was aborted by the server), and a statement's own
 // check runs when its answer is read.
 std::vector<PgResult> run_statements(PGconn* connection, const std::vector<SqlStatement>& statements,
-                                     bool pipeline, detail::PublicationTestHooks* hooks = nullptr) {
+                                     bool pipeline, detail::PublicationTestHooks* hooks = nullptr,
+                                     const std::function<void(int)>* after_send = nullptr,
+                                     bool fail_send = false) {
     std::vector<PgResult> results;
     results.reserve(statements.size());
 #ifdef LIBPQ_HAS_PIPELINING
@@ -201,7 +235,7 @@ std::vector<PgResult> run_statements(PGconn* connection, const std::vector<SqlSt
                 note_statement();
                 queue.send(statement.sql, statement_values(statement));
             }
-            for (auto& result : queue.finish()) results.emplace_back(result.release());
+            for (auto& result : queue.finish(after_send, fail_send)) results.emplace_back(result.release());
         }
         for (std::size_t index = 0; index < statements.size(); ++index)
             verify_statement_result(connection, statements[index], results[index]);
@@ -211,7 +245,11 @@ std::vector<PgResult> run_statements(PGconn* connection, const std::vector<SqlSt
     (void)pipeline;
     (void)hooks;
 #endif
-    for (const auto& statement : statements) results.push_back(exec_statement(connection, statement));
+    for (std::size_t index = 0; index < statements.size(); ++index) {
+        const bool last = index + 1 == statements.size();
+        results.push_back(exec_statement(connection, statements[index], last ? after_send : nullptr,
+                                         last && fail_send));
+    }
     return results;
 }
 
@@ -254,22 +292,54 @@ bool is_clean_idle_connection(PGconn* connection) noexcept {
            is_pipeline_off(connection) && PQisnonblocking(connection) == 0;
 }
 
+// The server process of a connection's current session, identified by pid and backend_start from pg_stat_activity so
+// a reused pid is not mistaken for the same session. Read when a session opens or is reset, without counting as a
+// transition statement.
+struct SessionIdentity {
+    int         pid = 0;
+    std::string backend_start;
+
+    bool known() const noexcept { return pid > 0 && !backend_start.empty(); }
+};
+
+SessionIdentity read_session_identity(PGconn* connection) noexcept {
+    if (!is_clean_idle_connection(connection)) return {};
+    const int pid = PQbackendPID(connection);
+    if (pid <= 0) return {};
+    const auto  pid_text = std::to_string(pid);
+    const char* values[] = {pid_text.c_str()};
+    PgResult    result(PQexecParams(connection, "SELECT backend_start FROM pg_stat_activity WHERE pid = $1", 1,
+                                    nullptr, values, nullptr, nullptr, 0));
+    if (!result.get() || PQresultStatus(result.get()) != PGRES_TUPLES_OK || PQntuples(result.get()) != 1 ||
+        PQnfields(result.get()) != 1 || PQgetisnull(result.get(), 0, 0))
+        return {};
+    std::string started(PQgetvalue(result.get(), 0, 0), static_cast<std::size_t>(PQgetlength(result.get(), 0, 0)));
+    if (started.empty()) return {};
+    return SessionIdentity{pid, std::move(started)};
+}
+
 // Starts the session over: the server ends the old session's transaction and releases its locks.
-void reset_connection(PGconn* connection) noexcept {
-    if (!connection) return;
+void reset_connection(PGconn* connection, SessionIdentity* identity = nullptr) noexcept {
+    if (!connection) {
+        if (identity) *identity = {};
+        return;
+    }
     PQreset(connection);
     (void)PQsetnonblocking(connection, 0);
+    if (identity) *identity = read_session_identity(connection);
 }
 
 class Transaction final {
 public:
-    explicit Transaction(PGconn* connection) : connection_(connection) {
+    explicit Transaction(PGconn* connection, SessionIdentity* identity = nullptr)
+        : connection_(connection), identity_(identity) {
         exec_sql(connection_, "BEGIN");
     }
     /// The BEGIN is the first statement of a batch the caller sends next. The transaction is rolled back on every exit
     /// that did not commit, whether or not the BEGIN reached the server.
     struct BegunByBatch {};
-    Transaction(PGconn* connection, BegunByBatch) : connection_(connection) {}
+    Transaction(PGconn* connection, BegunByBatch, SessionIdentity* identity = nullptr)
+        : connection_(connection), identity_(identity) {}
     Transaction(const Transaction&) = delete;
     Transaction& operator=(const Transaction&) = delete;
     // A connection still in pipeline mode refuses a ROLLBACK, and one that is not idle afterwards would carry its
@@ -277,7 +347,7 @@ public:
     ~Transaction() {
         if (!committed_) {
             if (!is_pipeline_off(connection_)) {
-                reset_connection(connection_);
+                reset_connection(connection_, identity_);
                 return;
             }
             try {
@@ -285,18 +355,21 @@ public:
             } catch (...) {
             }
         }
-        if (!is_clean_idle_connection(connection_)) reset_connection(connection_);
+        if (!is_clean_idle_connection(connection_)) reset_connection(connection_, identity_);
     }
-    void commit() {
-        exec_sql(connection_, "COMMIT");
+    void commit(const std::function<void(int)>* after_send = nullptr, bool fail_send = false) {
+        (void)exec_statement(connection_, {"COMMIT", {}, {}, "COMMIT"}, after_send, fail_send);
         committed_ = true;
     }
     /// A batch whose last statement is COMMIT was answered as a commit.
     void committed_by_batch() noexcept { committed_ = true; }
+    /// The session was reset after a lost connection, ending this transaction on the old session.
+    void ended_by_reset() noexcept { committed_ = true; }
 
 private:
-    PGconn* connection_ = nullptr;
-    bool committed_ = false;
+    PGconn*          connection_ = nullptr;
+    SessionIdentity* identity_   = nullptr;
+    bool             committed_  = false;
 };
 
 SqlStatement lock_owner_statement(std::string_view owner_scope) {
@@ -2008,6 +2081,7 @@ struct PostgreSQLProgramTransitionStore::Impl {
     std::string                    coordination_key;
     Options                        options;
     PGconn*                        connection = nullptr;
+    SessionIdentity                session_identity;
     mutable detail::RunRecordCache run_record_cache;
     mutable detail::OwnHeadHints   own_heads;
     mutable detail::GenerationCache generations;
@@ -2034,6 +2108,27 @@ struct PostgreSQLProgramTransitionStore::Impl {
         std::lock_guard<std::mutex> lock_;
         std::atomic<std::uint64_t>* previous_;
     };
+
+    struct ValidatedAttempt {
+        detail::transition::TransitionVerdict verdict = detail::transition::TransitionVerdict::Conflict;
+        std::optional<StoredHead>             current;
+        detail::transition::TransitionPlan    plan;
+    };
+
+    ValidatedAttempt read_and_validate_sequential(const PublishArgs& call, const std::string& run_id,
+                                                  const std::optional<ProgramOwnHeadHint>& previous_hint,
+                                                  detail::PublicationTestHooks* test_hooks);
+    ValidatedAttempt read_and_validate_batched(const PublishArgs& call, const std::string& run_id,
+                                               const std::optional<ProgramOwnHeadHint>& previous_hint,
+                                               detail::PublicationTestHooks* test_hooks);
+    /// Checks the outcome of a publication once on a new session after the connection was lost while sending or
+    /// awaiting its COMMIT. Returns Published or Conflict when the validator decides that outcome, or nullopt when
+    /// the validator returns Proceed (the publication did not commit, so the caller rethrows the commit failure);
+    /// throws ProgramTransitionOutcomeUnknown when the check itself cannot decide.
+    std::optional<ProgramTransitionPublishResult> recheck_after_lost_commit(
+        const PublishArgs& call, const std::string& run_id, const std::string& run_record_bytes,
+        const std::optional<ProgramOwnHeadHint>& previous_hint, bool run_existed, SessionIdentity old_session,
+        detail::PublicationTestHooks* test_hooks);
 
     ProgramTransitionPublishResult publish_sequential(const PublishArgs& call);
     ProgramTransitionPublishResult publish_batched(const PublishArgs& call);
@@ -2068,6 +2163,7 @@ PostgreSQLProgramTransitionStore::PostgreSQLProgramTransitionStore(std::string c
     try {
         create_schema(impl_->connection);
         materialize_legacy_relations(impl_->connection);
+        impl_->session_identity = read_session_identity(impl_->connection);
     } catch (...) {
         PQfinish(impl_->connection);
         impl_->connection = nullptr;
@@ -2344,7 +2440,7 @@ ProgramChildRelationOutcome PostgreSQLProgramTransitionStore::insert_child_relat
                                            ProgramChildRelationRefusal::Invalid, std::nullopt,
                                            std::nullopt};
     Impl::ConnectionLock lock(*impl_);
-    Transaction     transaction(impl_->connection);
+    Transaction     transaction(impl_->connection, &impl_->session_identity);
     lock_owner(impl_->connection, owner_scope);
     PostgresReads   reads(impl_->connection, owner_scope, &impl_->run_record_cache);
     auto            planned = detail::transition::plan_relation_insert(
@@ -2364,7 +2460,7 @@ ProgramChildRelationOutcome PostgreSQLProgramTransitionStore::update_child_relat
                                            ProgramChildRelationRefusal::Invalid, std::nullopt,
                                            std::nullopt};
     Impl::ConnectionLock lock(*impl_);
-    Transaction     transaction(impl_->connection);
+    Transaction     transaction(impl_->connection, &impl_->session_identity);
     lock_owner(impl_->connection, owner_scope);
     PostgresReads   reads(impl_->connection, owner_scope, &impl_->run_record_cache);
     auto            planned = detail::transition::plan_relation_update(
@@ -2421,7 +2517,7 @@ PostgreSQLProgramTransitionStore::compare_publish_takeover_sync(
     // A takeover moves the run's head and its lineage head from under every hint of them.
     impl_->own_heads.erase(owner_scope, run_id);
     Impl::ConnectionLock lock(*impl_);
-    Transaction transaction(impl_->connection);
+    Transaction transaction(impl_->connection, &impl_->session_identity);
     lock_owner(impl_->connection, owner_scope);
     const auto current =
         load_head(impl_->connection, owner_scope, run_id, true, &impl_->run_record_cache);
@@ -2510,18 +2606,15 @@ void PostgreSQLProgramTransitionStore::Impl::note_published(
                                   publication, run_existed);
 }
 
-// One statement at a time, each answered before the next is sent: the behaviour the batched path is checked against.
-ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::Impl::publish_sequential(const PublishArgs& call) {
-    const auto&       owner_scope = call.owner_scope;
-    const auto&       publication = call.publication;
-    const std::string run_id      = publication.run_record.run_id();
-    // Only a publication that publishes leaves a hint of the run: every other way out forgets it.
-    const auto previous_hint = own_heads.get(owner_scope, run_id);
-    own_heads.erase(owner_scope, run_id);
-    ConnectionLock lock(*this);
-    Transaction    transaction(connection);
-    lock_owner(connection, owner_scope);
-    auto        locked        = load_head_and_lease_for_update(connection, owner_scope, run_id, &run_record_cache);
+PostgreSQLProgramTransitionStore::Impl::ValidatedAttempt
+PostgreSQLProgramTransitionStore::Impl::read_and_validate_sequential(
+    const PublishArgs& call, const std::string& run_id, const std::optional<ProgramOwnHeadHint>& previous_hint,
+    detail::PublicationTestHooks* test_hooks) {
+    const auto& owner_scope = call.owner_scope;
+    const auto& publication = call.publication;
+    if (!(test_hooks && test_hooks->skip_owner_lock)) lock_owner(connection, owner_scope);
+    auto locked = load_head_and_lease_for_update(connection, owner_scope, run_id, &run_record_cache);
+    if (test_hooks && test_hooks->after_reads) test_hooks->after_reads();
     const auto& current       = locked.head;
     const auto& current_lease = locked.lease;
 
@@ -2535,12 +2628,131 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::Impl::publish_s
     const bool stored_history_vouched =
         current && previous_hint &&
         previous_hint->journal_record.id == current->journal_record.id;
-    detail::transition::TransitionPlan plan;
-    switch (detail::transition::validate_transition(
+    ValidatedAttempt out;
+    out.verdict = detail::transition::validate_transition(
         {owner_scope, call.expected_journal_head, call.expected_fence, publication, call.publication_bytes,
          call.safe_point_evidence, call.safe_point_capsule, call.expected_lease, call.next_lease,
          stored_history_vouched},
-        head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, plan)) {
+        head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, out.plan);
+    out.current = std::move(locked.head);
+    return out;
+}
+
+PostgreSQLProgramTransitionStore::Impl::ValidatedAttempt
+PostgreSQLProgramTransitionStore::Impl::read_and_validate_batched(
+    const PublishArgs& call, const std::string& run_id, const std::optional<ProgramOwnHeadHint>& previous_hint,
+    detail::PublicationTestHooks* test_hooks) {
+    const auto& owner_scope = call.owner_scope;
+    const auto& publication = call.publication;
+    detail::transition::TransitionRequest request{
+        owner_scope, call.expected_journal_head, call.expected_fence, publication, call.publication_bytes,
+        call.safe_point_evidence, call.safe_point_capsule, call.expected_lease, call.next_lease, false};
+    const auto lock_plan = detail::transition::plan_publication_locks(request);
+    const auto groups    = read_group_statements(
+        owner_scope, lock_plan, publication.commands.empty() ? std::string_view() : std::string_view(run_id));
+
+    // BEGIN, the owner lock and the read groups: one pipeline, or one statement after another.
+    std::vector<SqlStatement> first_batch;
+    first_batch.push_back({"BEGIN", {}, {}, "BEGIN"});
+    if (!(test_hooks && test_hooks->skip_owner_lock)) first_batch.push_back(lock_owner_statement(owner_scope));
+    const auto group_offset = first_batch.size();
+    for (const auto& group : groups) first_batch.push_back(group.statement);
+    auto first_results = run_statements(connection, first_batch, pipeline_enabled, test_hooks);
+    std::vector<PgResult> results;
+    results.reserve(groups.size());
+    for (std::size_t index = group_offset; index < first_results.size(); ++index)
+        results.push_back(std::move(first_results[index]));
+    BatchedPostgresReads reads(connection, owner_scope, &run_record_cache, &generations, &late_locks);
+    seed_read_groups(owner_scope, run_id, lock_plan, groups, results, &run_record_cache, reads);
+    if (test_hooks && test_hooks->after_reads) test_hooks->after_reads();
+
+    const auto& current       = reads.head_of(run_id);
+    const auto& current_lease = reads.lease_of(run_id);
+    std::optional<detail::transition::CurrentHead> head;
+    if (current)
+        head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
+                                                     current->migration_plan,
+                                                     current->last_publication_bytes});
+    reads.know_head(run_id, current ? &current->run_record : nullptr);
+    request.stored_history_vouched =
+        current && previous_hint &&
+        previous_hint->journal_record.id == current->journal_record.id;
+    ValidatedAttempt out;
+    out.verdict = detail::transition::validate_transition(
+        request, head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, out.plan);
+    out.current = current;
+    return out;
+}
+
+std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::Impl::recheck_after_lost_commit(
+    const PublishArgs& call, const std::string& run_id, const std::string& run_record_bytes,
+    const std::optional<ProgramOwnHeadHint>& previous_hint, bool run_existed, SessionIdentity old_session,
+    detail::PublicationTestHooks* test_hooks) {
+    reset_connection(connection, &session_identity);
+    if (!is_clean_idle_connection(connection) || !old_session.known() ||
+        (test_hooks && test_hooks->unknown_session_identity))
+        throw ProgramTransitionOutcomeUnknown(
+            "PostgreSQL Program transition outcome cannot be checked without a live replacement session and previous "
+            "session identity");
+    try {
+        const char* terminate_sql =
+            (test_hooks && test_hooks->fail_recheck_terminate)
+                ? "SELECT pg_terminate_backend(pid) FROM neograph_program_no_such_table_v1 "
+                  "WHERE pid = $1 AND backend_start = $2"
+                : "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid = $1 AND backend_start = $2";
+        (void)exec_params(connection, terminate_sql, {std::to_string(old_session.pid), old_session.backend_start});
+    } catch (...) {
+        if (!is_clean_idle_connection(connection)) reset_connection(connection, &session_identity);
+        throw ProgramTransitionOutcomeUnknown(
+            "PostgreSQL Program transition outcome check could not fence the previous session");
+    }
+
+    ValidatedAttempt validated;
+    try {
+        if (options.batched_publication) {
+            Transaction recheck(connection, Transaction::BegunByBatch{}, &session_identity);
+            validated = read_and_validate_batched(call, run_id, previous_hint, nullptr);
+            recheck.commit();
+        } else {
+            Transaction recheck(connection, &session_identity);
+            validated = read_and_validate_sequential(call, run_id, previous_hint, nullptr);
+            recheck.commit();
+        }
+    } catch (...) {
+        throw ProgramTransitionOutcomeUnknown(
+            "PostgreSQL Program transition outcome check failed while reading stored state");
+    }
+
+    switch (validated.verdict) {
+    case detail::transition::TransitionVerdict::AlreadyPresent:
+        note_published(call, run_id, run_record_bytes, previous_hint, run_existed);
+        return ProgramTransitionPublishResult::Published;
+    case detail::transition::TransitionVerdict::Conflict:
+        return ProgramTransitionPublishResult::Conflict;
+    case detail::transition::TransitionVerdict::Proceed:
+        return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+// One statement at a time, each answered before the next is sent: the behaviour the batched path is checked against.
+ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::Impl::publish_sequential(const PublishArgs& call) {
+    const auto&                                   owner_scope = call.owner_scope;
+    const auto&                                   publication = call.publication;
+    const std::string                             run_id      = publication.run_record.run_id();
+    std::shared_ptr<detail::PublicationTestHooks> test_hooks;
+    {
+        std::lock_guard hook_lock(hooks_mutex);
+        test_hooks = hooks;
+    }
+    // Only a publication that publishes leaves a hint of the run: every other way out forgets it.
+    const auto previous_hint = own_heads.get(owner_scope, run_id);
+    own_heads.erase(owner_scope, run_id);
+    ConnectionLock lock(*this);
+    const auto     old_session = session_identity;
+    Transaction    transaction(connection, &session_identity);
+    const auto     validated = read_and_validate_sequential(call, run_id, previous_hint, test_hooks.get());
+    switch (validated.verdict) {
     case detail::transition::TransitionVerdict::Conflict:
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
@@ -2550,12 +2762,42 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::Impl::publish_s
     case detail::transition::TransitionVerdict::Proceed:
         break;
     }
+    if (test_hooks && test_hooks->before_write) test_hooks->before_write();
 
     const auto run_record_bytes = publication.run_record.serialize_canonical();
-    for (const auto& statement : publication_write_statements(call, run_id, run_record_bytes, current, plan))
+    if (test_hooks) {
+        for (const auto& sql : test_hooks->extra_write_statements)
+            exec_write(connection, SqlStatement{sql, {}, {}, {}});
+        if (test_hooks->fail_write)
+            exec_write(connection,
+                       SqlStatement{"INSERT INTO neograph_program_transition_run_heads_v2(owner_scope, run_id) "
+                                    "VALUES(NULL, NULL)",
+                                    {}, {}, {}});
+    }
+    for (const auto& statement :
+         publication_write_statements(call, run_id, run_record_bytes, validated.current, validated.plan))
         exec_write(connection, statement);
-    transaction.commit();
-    note_published(call, run_id, run_record_bytes, previous_hint, current.has_value());
+    if (test_hooks && test_hooks->before_commit) test_hooks->before_commit();
+    try {
+        transaction.commit(test_hooks ? &test_hooks->after_send : nullptr,
+                           test_hooks && test_hooks->fail_commit_send);
+    } catch (const PgError& error) {
+        if (is_server_statement_error(connection, error)) throw;
+        transaction.ended_by_reset();
+        if (const auto outcome = recheck_after_lost_commit(call, run_id, run_record_bytes, previous_hint,
+                                                           validated.current.has_value(), old_session,
+                                                           test_hooks.get()))
+            return *outcome;
+        throw;
+    } catch (...) {
+        transaction.ended_by_reset();
+        if (const auto outcome = recheck_after_lost_commit(call, run_id, run_record_bytes, previous_hint,
+                                                           validated.current.has_value(), old_session,
+                                                           test_hooks.get()))
+            return *outcome;
+        throw;
+    }
+    note_published(call, run_id, run_record_bytes, previous_hint, validated.current.has_value());
     return ProgramTransitionPublishResult::Published;
 }
 
@@ -2581,7 +2823,6 @@ ProgramTransitionPublishResult PostgreSQLProgramTransitionStore::Impl::publish_b
 
 std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::Impl::publish_batched_attempt(
     const PublishArgs& call, const std::string& run_id, const std::optional<ProgramOwnHeadHint>& previous_hint) {
-    const auto&                                   owner_scope = call.owner_scope;
     const auto&                                   publication = call.publication;
     std::shared_ptr<detail::PublicationTestHooks> test_hooks;
     {
@@ -2589,44 +2830,10 @@ std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::
         test_hooks = hooks;
     }
     ConnectionLock lock(*this);
-    Transaction    transaction(connection, Transaction::BegunByBatch{});
-
-    detail::transition::TransitionRequest request{
-        owner_scope, call.expected_journal_head, call.expected_fence, publication, call.publication_bytes,
-        call.safe_point_evidence, call.safe_point_capsule, call.expected_lease, call.next_lease, false};
-    const auto lock_plan = detail::transition::plan_publication_locks(request);
-    const auto groups    = read_group_statements(
-        owner_scope, lock_plan, publication.commands.empty() ? std::string_view() : std::string_view(run_id));
-
-    // BEGIN, the owner lock and the read groups: one pipeline, or one statement after another.
-    std::vector<SqlStatement> first_batch;
-    first_batch.push_back({"BEGIN", {}, {}, "BEGIN"});
-    if (!(test_hooks && test_hooks->skip_owner_lock)) first_batch.push_back(lock_owner_statement(owner_scope));
-    const auto group_offset = first_batch.size();
-    for (const auto& group : groups) first_batch.push_back(group.statement);
-    auto first_results = run_statements(connection, first_batch, pipeline_enabled, test_hooks.get());
-    std::vector<PgResult> results;
-    results.reserve(groups.size());
-    for (std::size_t index = group_offset; index < first_results.size(); ++index)
-        results.push_back(std::move(first_results[index]));
-    BatchedPostgresReads reads(connection, owner_scope, &run_record_cache, &generations, &late_locks);
-    seed_read_groups(owner_scope, run_id, lock_plan, groups, results, &run_record_cache, reads);
-    if (test_hooks && test_hooks->after_reads) test_hooks->after_reads();
-
-    const auto& current       = reads.head_of(run_id);
-    const auto& current_lease = reads.lease_of(run_id);
-    std::optional<detail::transition::CurrentHead> head;
-    if (current)
-        head.emplace(detail::transition::CurrentHead{current->run_record, current->journal_record,
-                                                     current->migration_plan,
-                                                     current->last_publication_bytes});
-    reads.know_head(run_id, current ? &current->run_record : nullptr);
-    request.stored_history_vouched =
-        current && previous_hint &&
-        previous_hint->journal_record.id == current->journal_record.id;
-    detail::transition::TransitionPlan plan;
-    switch (detail::transition::validate_transition(
-        request, head ? &*head : nullptr, current_lease ? &*current_lease : nullptr, reads, plan)) {
+    const auto     old_session = session_identity;
+    Transaction    transaction(connection, Transaction::BegunByBatch{}, &session_identity);
+    const auto     validated = read_and_validate_batched(call, run_id, previous_hint, test_hooks.get());
+    switch (validated.verdict) {
     case detail::transition::TransitionVerdict::Conflict:
         transaction.commit();
         return ProgramTransitionPublishResult::Conflict;
@@ -2638,7 +2845,9 @@ std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::
     }
     if (test_hooks && test_hooks->before_write) test_hooks->before_write();
 
-    const auto run_record_bytes = publication.run_record.serialize_canonical();
+    const auto&               current          = validated.current;
+    const auto&               plan             = validated.plan;
+    const auto                run_record_bytes = publication.run_record.serialize_canonical();
     std::vector<SqlStatement> writes;
     if (const auto parts = single_write_parts(call, current, plan))
         writes.push_back(single_write_statement(*parts, call, run_id, run_record_bytes, current, plan));
@@ -2649,6 +2858,13 @@ std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::
                       SqlStatement{"INSERT INTO neograph_program_transition_run_heads_v2(owner_scope, run_id) "
                                    "VALUES(NULL, NULL)",
                                    {}, {}, {}});
+    if (test_hooks && !test_hooks->extra_write_statements.empty()) {
+        std::vector<SqlStatement> prefix;
+        prefix.reserve(test_hooks->extra_write_statements.size() + writes.size());
+        for (const auto& sql : test_hooks->extra_write_statements) prefix.push_back(SqlStatement{sql, {}, {}, {}});
+        for (auto& statement : writes) prefix.push_back(std::move(statement));
+        writes = std::move(prefix);
+    }
     if (test_hooks && test_hooks->before_commit) test_hooks->before_commit();
     writes.push_back({"COMMIT", {}, {}, "COMMIT"});
     // Rows this publication inserts because the validator found them absent: a unique violation on them means another
@@ -2656,9 +2872,24 @@ std::optional<ProgramTransitionPublishResult> PostgreSQLProgramTransitionStore::
     const bool inserts_absent_rows =
         !current || (publication.run_lineage && (!plan.lineage_head_exists || !plan.run_lineage_recorded));
     try {
-        (void)run_statements(connection, writes, pipeline_enabled, test_hooks.get());
+        (void)run_statements(connection, writes, pipeline_enabled, test_hooks.get(),
+                             test_hooks ? &test_hooks->after_send : nullptr,
+                             test_hooks && test_hooks->fail_commit_send);
     } catch (const PgError& error) {
-        if (inserts_absent_rows && error.sqlstate() == UNIQUE_VIOLATION) return std::nullopt;
+        if (is_server_statement_error(connection, error)) {
+            if (inserts_absent_rows && error.sqlstate() == UNIQUE_VIOLATION) return std::nullopt;
+            throw;
+        }
+        transaction.ended_by_reset();
+        if (const auto outcome = recheck_after_lost_commit(call, run_id, run_record_bytes, previous_hint,
+                                                           current.has_value(), old_session, test_hooks.get()))
+            return *outcome;
+        throw;
+    } catch (...) {
+        transaction.ended_by_reset();
+        if (const auto outcome = recheck_after_lost_commit(call, run_id, run_record_bytes, previous_hint,
+                                                           current.has_value(), old_session, test_hooks.get()))
+            return *outcome;
         throw;
     }
     transaction.committed_by_batch();

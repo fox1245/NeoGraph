@@ -19,6 +19,7 @@
 
 #include <cerrno>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -49,6 +50,27 @@ inline bool pipeline_mode_supported() noexcept {
 #endif
 }
 
+/// Reads what has arrived on the socket without waiting, so a closed socket sets CONNECTION_BAD even when an earlier
+/// answer is already in the kernel buffer.
+inline void consume_available_input(PGconn* connection) noexcept {
+    for (;;) {
+        const auto socket = PQsocket(connection);
+        if (socket < 0) return;
+#ifdef _WIN32
+        WSAPOLLFD wait{static_cast<SOCKET>(socket), POLLRDNORM, 0};
+        const int ready = WSAPoll(&wait, 1, 0);
+        const bool readable = ready > 0 && (wait.revents & (POLLRDNORM | POLLERR | POLLHUP));
+#else
+        pollfd wait{socket, POLLIN, 0};
+        const int ready = ::poll(&wait, 1, 0);
+        if (ready < 0 && errno == EINTR) continue;
+        const bool readable = ready > 0 && (wait.revents & (POLLIN | POLLERR | POLLHUP));
+#endif
+        if (!readable) return;
+        if (PQconsumeInput(connection) != 1) return;
+    }
+}
+
 #ifdef LIBPQ_HAS_PIPELINING
 class PgPipeline final {
 public:
@@ -76,10 +98,16 @@ public:
 
     /// Ends the pipeline with one synchronization point, sends everything, and returns one result per queued statement
     /// in order. A statement that failed is its own result; every statement after it carries PGRES_PIPELINE_ABORTED.
-    std::vector<PipelineResult> finish() {
+    std::vector<PipelineResult> finish(const std::function<void(int)>* after_send = nullptr, bool fail_send = false) {
         if (PQpipelineSync(connection_) != 1) fail("PostgreSQL pipeline could not be synchronized");
         synced_ = true;
         flush();
+        if (after_send && *after_send) {
+            (*after_send)(PQsocket(connection_));
+            consume_available_input(connection_);
+            if (PQstatus(connection_) == CONNECTION_BAD) fail("PostgreSQL pipeline lost its connection");
+        }
+        if (fail_send) fail("PostgreSQL pipeline could not be flushed");
         std::vector<PipelineResult> results;
         results.reserve(queued_);
         for (std::size_t index = 0; index < queued_; ++index) {
@@ -129,23 +157,14 @@ private:
         }
     }
 
-    // Leaves the pipeline: reads and drops what is still owed, exits pipeline mode, makes the connection blocking again.
-    // Never throws; a connection that cannot be restored is reset, and one that cannot be reset fails every later statement, as a dropped connection always did.
+    // Leaves the pipeline after its synchronization point: exits pipeline mode and makes the connection blocking
+    // again. A pipeline that did not reach its synchronization point or lost its connection is left for Transaction or
+    // the outcome check to reset.
     void leave() noexcept {
         if (!entered_) return;
-        try {
-            if (!synced_ && PQpipelineSync(connection_) == 1) synced_ = true;
-            if (synced_ && !sync_seen_) {
-                flush();
-                // Every queued statement owes a result and a null result after it; the synchronization point ends them.
-                for (std::size_t owed = 0; owed < 2 * queued_ + 2 && !sync_seen_; ++owed) {
-                    PGresult* result = PQgetResult(connection_);
-                    if (!result) continue;
-                    sync_seen_ = PQresultStatus(result) == PGRES_PIPELINE_SYNC;
-                    PQclear(result);
-                }
-            }
-        } catch (...) {
+        if (PQstatus(connection_) == CONNECTION_BAD || !sync_seen_) {
+            entered_ = false;
+            return;
         }
         if (fail_leave_ && *fail_leave_) {
             *fail_leave_ = false;
@@ -155,9 +174,7 @@ private:
         if (PQexitPipelineMode(connection_) != 1) {
             // A null result may still be owed after the synchronization point.
             while (PGresult* result = PQgetResult(connection_)) PQclear(result);
-            // Answers are still owed that cannot be read (the connection dropped, or a send or a flush failed): the
-            // session is started over, so the connection is neither left in pipeline mode nor inside a transaction.
-            if (PQexitPipelineMode(connection_) != 1) PQreset(connection_);
+            (void)PQexitPipelineMode(connection_);
         }
         (void)PQsetnonblocking(connection_, 0);
         entered_ = false;
