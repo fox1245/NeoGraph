@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=6501b1fe6b364e9b65c3a8da15cce96536d407a7cd404a31cc09a32dc42f68a2 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=c0a5b72cb3f53e6d82366aa66bb5a2839bce82abaff00780b43ef65bc38c57cc -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -251,6 +251,14 @@ cmake -S . -B build-core \
 cmake --build build-core --parallel --target example_core_quickstart
 ./build-core/example_core_quickstart
 ```
+
+## アーキテクチャマップ
+
+NeoGraph のモジュールとそのつながり、そして Program の実行がソースから終了レコードまでたどる経路です。青い箱は NeoGraph、灰色の箱は NeoGraph の外にある構成要素です。図中のテキストは英語で、[`docs/images/architecture-map.tex`](docs/images/architecture-map.tex) から生成されます。
+
+![NeoGraph のモジュールとそのつながり](docs/images/architecture-map-1.svg)
+
+![Program の実行ライフサイクル: ソースから実行中の Program とその子まで](docs/images/architecture-map-2.svg)
 
 ## Core と ProgramRuntime
 
