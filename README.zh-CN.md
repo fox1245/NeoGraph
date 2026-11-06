@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=6501b1fe6b364e9b65c3a8da15cce96536d407a7cd404a31cc09a32dc42f68a2 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=c0a5b72cb3f53e6d82366aa66bb5a2839bce82abaff00780b43ef65bc38c57cc -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -251,6 +251,14 @@ cmake -S . -B build-core \
 cmake --build build-core --parallel --target example_core_quickstart
 ./build-core/example_core_quickstart
 ```
+
+## 架构图
+
+NeoGraph 的模块及其连接方式，以及一次 Program 运行从源代码到终止记录所经过的路径。蓝色方框是 NeoGraph，灰色方框是 NeoGraph 之外的组件。图中文字为英文，由 [`docs/images/architecture-map.tex`](docs/images/architecture-map.tex) 生成。
+
+![NeoGraph 的模块及其连接方式](docs/images/architecture-map-1.svg)
+
+![Program 运行生命周期：从源代码到运行中的 Program 及其子运行](docs/images/architecture-map-2.svg)
 
 ## Core 与 ProgramRuntime
 

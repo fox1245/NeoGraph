@@ -250,6 +250,14 @@ cmake --build build-core --parallel --target example_core_quickstart
 ./build-core/example_core_quickstart
 ```
 
+## Architecture map
+
+The modules of NeoGraph and how they connect, and the path a Program run takes from its source to its terminal record. Blue boxes are NeoGraph; grey boxes are outside it. The diagrams are built from [`docs/images/architecture-map.tex`](docs/images/architecture-map.tex).
+
+![NeoGraph modules and how they connect](docs/images/architecture-map-1.svg)
+
+![Program run lifecycle: from a source to a running Program and its children](docs/images/architecture-map-2.svg)
+
 ## Core and ProgramRuntime
 
 `GraphEngine` executes a compiled graph. It owns node scheduling, state updates, routing, retries, streaming, cancellation, and graph checkpoint/resume. A compiled topology is immutable; supported generation migration occurs at controlled safe points rather than through arbitrary mutation while nodes run.

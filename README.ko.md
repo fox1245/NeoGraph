@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=README.md locale=ko source_sha256=6501b1fe6b364e9b65c3a8da15cce96536d407a7cd404a31cc09a32dc42f68a2 -->
+<!-- neograph-i18n: source=README.md locale=ko source_sha256=c0a5b72cb3f53e6d82366aa66bb5a2839bce82abaff00780b43ef65bc38c57cc -->
 # NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -251,6 +251,14 @@ cmake -S . -B build-core \
 cmake --build build-core --parallel --target example_core_quickstart
 ./build-core/example_core_quickstart
 ```
+
+## 아키텍처 맵
+
+NeoGraph의 모듈과 그 연결 관계, 그리고 Program 실행이 소스에서 종료 기록까지 거치는 경로입니다. 파란 상자는 NeoGraph이고 회색 상자는 NeoGraph 바깥의 구성 요소입니다. 그림의 글은 영어이며, [`docs/images/architecture-map.tex`](docs/images/architecture-map.tex)에서 만들어집니다.
+
+![NeoGraph 모듈과 그 연결 관계](docs/images/architecture-map-1.svg)
+
+![Program 실행 수명주기: 소스에서 실행 중인 Program과 그 자식까지](docs/images/architecture-map-2.svg)
 
 ## Core와 ProgramRuntime
 
