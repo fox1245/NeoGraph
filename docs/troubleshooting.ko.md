@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=059f7da5000cc79ba45e2bfb3ef2931da6781a19f6caa69b0f778ef2e27e19ff -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ko source_sha256=63e74ee549ceb47f55f1a9ecea44535099dda4d3968034ba2ddb836445e410c2 -->
 # 문제 해결
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -113,7 +113,8 @@ worker_count의 기본값은 `1`이므로 엔진이 소유하는 풀이 만들�
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 실행 예산이 `compile_admit`에 넘긴 예산과 다르다 | 같은 예산을 넘기거나, 다시 컴파일하고 승인(admission)한다 |
 | `ng.spawn`에서 발생하는 `P_CHILD_BINDING` | `LocalProgramHost`에 자식 바인딩 resolver가 없다 | 자식 Program은 C++ 호스트에서 실행한다 |
 | `resume()`에서 발생하는 `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | 그 실행이 다른 `LocalProgramHost`나 이미 소멸한 호스트의 것이다 | 그 실행을 시작한 호스트로 재개한다 |
-| `reconnect()`에서 발생하는 `P_RUN_LEASE_HELD` | 자식 예산 없이 시작한 `define()`만 있는 Program은 `wall_time_ms` 동안 실행 lease를 잡으므로, 소유자가 아직 살아 있을 수 있는 실행을 다른 런타임이 이어 가지 못한다 | 진단의 witness에 있는 `retry_after_ms`가 지난 뒤에 다시 시도한다. 그러면 실행은 `TimedOut`으로 끝난다. 멈춘 실행을 마지막 체크포인트에서 이어 가려면 `main()`을 쓰거나 자식 예산(`max_child_depth`와 `max_total_children`을 0보다 크게)으로 Program을 시작한다 |
+| `reconnect()`에서 발생하는 `P_RUN_LEASE_EXPIRED` | 자식 예산 없이 시작한 `define()`만 있는 Program은 시작할 때 정해진 절대 벽시계 시간 데드라인을 유지하는데, 그 데드라인이 지난 뒤에 재연결되어 다시 실행되지 않고 `TimedOut`으로 끝났다 | 실행에 더 큰 `wall_time_ms`를 주거나, 데드라인 전에 재연결한다. 데드라인 전에 재연결하면 `reconnect`가 실행을 인계해 마지막 체크포인트에서 이어 간다 |
+| 실행 핸들의 `P_RUN_TAKEN_OVER` | 이 프로세스가 아직 실행을 수행하는 동안 다른 프로세스가 실행을 재연결해 인계했다. 이 프로세스는 더 이상 아무것도 발행하지 않고, 진행 중이던 슈퍼스텝까지만 실행한 뒤 다음 Core 체크포인트 저장에서 멈춘다 | 실행을 재연결한 프로세스를 통해 실행을 따라간다 |
 | `fork()`에서 발생하는 `P_FORK_SOURCE_BUDGET` | 포크의 예산이 일시 정지한 실행에 남은 `wall_time_ms`나 `max_core_steps`를 전부 가져가서, 그 실행이 재개할 수 없게 된다 | 포크에는 `paused.remaining_budget`의 일부(예: 절반)를 준다. `max_concurrency`는 그대로 줘도 된다 |
 | `P_CORE_BARRIER_STALLED` | barrier 멤버가 join으로 이어지지 않는 경로를 택해서 join이 더는 발동할 수 없다 | 모든 멤버를 join이나 `__end__`로 라우팅한다. `P_CORE_E15`가 컴파일 시점에 이런 경로를 경고한다 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 실행이 `wall_time_ms`를 모두 썼거나 그 뒤에 끝났다. `failure.witness["wall_time_ms"]`가 얼마나 넘겼는지 알려 주고, 중단된 연산의 텍스트는 `failure.witness["cause_message"]`에 있다 | 더 큰 `wall_time_ms`로 다시 컴파일하고 승인(admission)한다 |

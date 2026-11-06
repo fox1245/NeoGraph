@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=1c4ad7303ff4ca8e871ff65f9601b0212fac06c2d41cb4304bf977fff92126e7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=zh-CN source_sha256=99acab940ff63fbc4c56d0cbb9b84ede57d06c70dfa461751c57d8f2980cef97 -->
 # Program 指南：协调图的 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -296,7 +296,7 @@ python restart.py state resume run-...
 
 第一条命令打印状态 `Interrupted` 和运行 ID；把该 ID 传给第二条命令，它会打印 `Completed` 和报告。目录 `state` 中有 `program.db`、`checkpoints.db` 和 `provider_calls.db`。
 
-进程停止时仍处于运行状态（而不是暂停）的运行，用 `host.reconnect(run_id)` 继续，具体怎么继续取决于 Program。没有子预算（`max_child_depth` 和 `max_total_children` 都是 0，这是默认值）的、只有 `define()` 的 Program，会在其 `wall_time_ms` 内持有执行租约，以免别的进程接着运行一个所有者可能仍然存活的运行。租约到期前，`reconnect` 会抛出 `P_RUN_LEASE_HELD`；到期后，它让运行以 `TimedOut` 结束，而不会继续运行。带有 `main()` 的 Program，或带子预算（两者都大于 0）启动的 Program，不持有租约，`reconnect` 会立即从最近一个检查点继续，重放已记入 journal 的模型调用，并只计一次费（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。
+进程停止时仍处于运行状态（而不是暂停）的运行，用 `host.reconnect(run_id)` 继续：它会接管该运行并立即从最近一个检查点继续，重放已记入 journal 的模型调用，并只计一次费（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。接管会推进运行的所有权围栏，因此仍在执行该运行的进程不会再发布任何内容，并在下一次保存 Core 检查点时停止，以 `P_RUN_TAKEN_OVER` 结束：它最多只运行当前所在的超步，且仍有可能写出一次过期的检查点，因此这不是恰好一次（exactly-once）执行。没有子预算（`max_child_depth` 和 `max_total_children` 都是 0，这是默认值）的、只有 `define()` 的 Program 在运行期间持有执行租约，实时图迁移需要这一租约。接管会在同一步删除该租约，继续运行的运行在后续 `resume` 或 `reconcile` 之前不持有租约，因此在此期间无法迁移。它保留启动时设定的绝对挂钟时间截止时间：`reconnect` 只授予该截止时间之前剩余的挂钟时间；一旦超过该截止时间，`reconnect` 会让运行以 `TimedOut` 和 `P_RUN_LEASE_EXPIRED` 结束，而不会继续运行。停在图迁移安全点上的运行不会被接管（`P_GRAPH_MIGRATION_HELD`）。
 
 ## `define()` 能表达什么
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=059f7da5000cc79ba45e2bfb3ef2931da6781a19f6caa69b0f778ef2e27e19ff -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=ja source_sha256=63e74ee549ceb47f55f1a9ecea44535099dda4d3968034ba2ddb836445e410c2 -->
 # トラブルシューティング
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -113,7 +113,8 @@ worker_countのデフォルトは `1` で、エンジンが所有するプール
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 実行時の予算が、`compile_admit` に渡した予算と異なります | 同じ予算を渡すか、コンパイルとadmissionをやり直します |
 | `ng.spawn` が出す `P_CHILD_BINDING` | `LocalProgramHost` に、子のバインディングを解決するリゾルバーがありません | 子Programは、C++のホストで実行します |
 | `resume()` が出す `P_RUN_NOT_FOUND`: `run '<id>' was not found in this LocalProgramHost` | その実行は、別の、または破棄済みの `LocalProgramHost` のものです | その実行を開始したホストを通して再開します |
-| `reconnect()` が出す `P_RUN_LEASE_HELD` | 子の予算なしで始めた `define()` だけの Program は、`wall_time_ms` の間、実行リースを保持します。所有者がまだ生きているかもしれない実行を、別のランタイムが続行しないようにするためです | 診断の witness にある `retry_after_ms` の後で再試行します。その後、実行は `TimedOut` で終わります。止まった実行を最後のチェックポイントから続行するには、`main()` を使うか、子の予算（`max_child_depth` と `max_total_children` を 0 より大きく）を付けて Program を開始します |
+| `reconnect()` が出す `P_RUN_LEASE_EXPIRED` | 子の予算なしで始めた `define()` だけの Program は、開始時の絶対的な実時間のデッドラインを保ちます。そのデッドラインの後に再接続されたため、再び実行されることなく `TimedOut` で終わります | 実行により大きな `wall_time_ms` を与えるか、デッドラインの前に再接続します。デッドラインの前であれば、`reconnect` が実行を引き継ぎ、最後のチェックポイントから続行します |
+| 実行のハンドルに出る `P_RUN_TAKEN_OVER` | このプロセスがまだ実行を動かしている間に別のプロセスがその実行に再接続して引き継ぎました。このプロセスはそれ以上何も公開せず、最大でも実行中だったスーパーステップの後、次の Core チェックポイント保存で止まります | 再接続したプロセスを通して実行を追います |
 | `fork()` が出す `P_FORK_SOURCE_BUDGET` | フォークの予算が、一時停止した実行に残っている `wall_time_ms` または `max_core_steps` をすべて取るため、その実行が再開できなくなります | フォークには `paused.remaining_budget` の一部（たとえば半分）を渡します。`max_concurrency` はそのまま渡して構いません |
 | `P_CORE_BARRIER_STALLED` | バリアのメンバーが、joinにつながらないルートを取ったため、joinはもう発火できません | すべてのメンバーを、joinか `__end__` にルーティングします。そうしたルートは、コンパイル時に `P_CORE_E15` が警告します |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 実行が `wall_time_ms` を使い切ったか、その後に完了しました。`failure.witness["wall_time_ms"]` がどれだけ超えたかを示し、中断された操作のテキストは `failure.witness["cause_message"]` にあります | `wall_time_ms` を大きくして、コンパイルとadmissionをやり直します |

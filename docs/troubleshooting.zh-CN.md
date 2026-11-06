@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=059f7da5000cc79ba45e2bfb3ef2931da6781a19f6caa69b0f778ef2e27e19ff -->
+<!-- neograph-i18n: source=docs/troubleshooting.md locale=zh-CN source_sha256=63e74ee549ceb47f55f1a9ecea44535099dda4d3968034ba2ddb836445e410c2 -->
 # 故障排查
 
 **Languages:** [English](troubleshooting.md) | [한국어](troubleshooting.ko.md) | [日本語](troubleshooting.ja.md) | [简体中文](troubleshooting.zh-CN.md)
@@ -113,7 +113,8 @@ worker_count 默认是 `1`，因此不会创建引擎自己的线程池。I/O �
 | `P_START_BUDGET`: `Program invocation budget <field>=<n> is outside its admitted bounds` | 运行预算与传给 `compile_admit` 的预算不一致 | 传入相同的预算，或者重新编译并准入 |
 | `ng.spawn` 抛出 `P_CHILD_BINDING` | `LocalProgramHost` 没有子绑定解析器 | 在 C++ 宿主里运行子 Program |
 | `resume()` 抛出 `P_RUN_NOT_FOUND`：`run '<id>' was not found in this LocalProgramHost` | 这个运行属于另一个 `LocalProgramHost`，或者所属的宿主已销毁 | 通过启动该运行的宿主来恢复 |
-| `reconnect()` 抛出 `P_RUN_LEASE_HELD` | 没有子预算的、只有 `define()` 的 Program 会在其 `wall_time_ms` 内持有执行租约，以免别的运行时接着运行一个所有者可能仍然存活的运行 | 等过了诊断 witness 里的 `retry_after_ms` 后重试，运行随后以 `TimedOut` 结束。要让崩溃的运行从最近的检查点继续，请使用 `main()`，或为 Program 设置子预算（`max_child_depth` 和 `max_total_children` 大于 0）后再启动 |
+| `reconnect()` 抛出 `P_RUN_LEASE_EXPIRED` | 没有子预算的、只有 `define()` 的 Program 保留启动时设定的绝对挂钟时间截止时间；它的运行在该截止时间之后才被重新连接，因此不再运行而直接以 `TimedOut` 结束 | 给运行更大的 `wall_time_ms`，或者在截止时间之前重新连接：届时 `reconnect` 会接管该运行并从最近一个检查点继续 |
+| 运行句柄上的 `P_RUN_TAKEN_OVER` | 本进程仍在执行该运行时，另一个进程重新连接并接管了它；本进程不再发布任何内容，最多只运行当时所在的超步，并在下一次保存 Core 检查点时停止 | 通过重新连接该运行的那个进程继续跟踪它 |
 | `fork()` 抛出 `P_FORK_SOURCE_BUDGET` | 分叉的预算拿走了已暂停运行剩下的全部 `wall_time_ms` 或全部 `max_core_steps`，该运行将无法恢复 | 只给分叉 `paused.remaining_budget` 的一部分，例如一半；`max_concurrency` 可以原样给 |
 | `P_CORE_BARRIER_STALLED` | 屏障的某个成员走了不通向 join 的路由，join 再也无法触发 | 让每个成员都路由到 join 或 `__end__`；`P_CORE_E15` 会在编译时对这类路由发出警告 |
 | `P_RUNTIME_TIMEOUT`: `Program wall-time budget (N ms) expired` | 运行用完了 `wall_time_ms`，或者在它之后才完成；`failure.witness["wall_time_ms"]` 说明超出了多少，被打断的操作的文本在 `failure.witness["cause_message"]` 里 | 用更大的 `wall_time_ms` 重新编译并准入 |

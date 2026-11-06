@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=1c4ad7303ff4ca8e871ff65f9601b0212fac06c2d41cb4304bf977fff92126e7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ko source_sha256=99acab940ff63fbc4c56d0cbb9b84ede57d06c70dfa461751c57d8f2980cef97 -->
 # Program 가이드: 그래프를 조율하는 JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -296,7 +296,7 @@ python restart.py state resume run-...
 
 첫 번째 명령은 상태 `Interrupted`와 실행 ID를 출력합니다. 그 ID를 두 번째 명령에 넘기면 `Completed`와 리포트를 출력합니다. `state` 디렉터리에는 `program.db`, `checkpoints.db`, `provider_calls.db`가 들어 있습니다.
 
-프로세스가 일시 정지가 아니라 실행 중인 채로 남긴 실행은 `host.reconnect(run_id)`로 이어 갑니다. 어떻게 이어지는지는 Program에 따라 다릅니다. 자식 예산 없이 시작한 `define()`만 있는 Program(`max_child_depth`와 `max_total_children`이 모두 0인 기본값)은 `wall_time_ms` 동안 실행 lease를 잡습니다. 소유자가 아직 살아 있을 수 있는 실행을 다른 프로세스가 이어 가지 못하게 하기 위해서입니다. lease가 만료될 때까지 `reconnect`는 `P_RUN_LEASE_HELD`를 발생시키고, 만료된 뒤에는 실행을 이어 가지 않고 `TimedOut`으로 끝냅니다. `main()`이 있는 Program이나 자식 예산(둘 다 0보다 큼)으로 시작한 Program은 lease를 잡지 않으며, `reconnect`는 마지막 체크포인트에서 바로 이어 가면서 저널에 기록된 모델 호출을 재생하고 한 번만 과금합니다([`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)).
+프로세스가 일시 정지가 아니라 실행 중인 채로 남긴 실행은 `host.reconnect(run_id)`로 이어 갑니다. 실행을 인계해 마지막 체크포인트에서 바로 이어 가면서 저널에 기록된 모델 호출을 재생하고 한 번만 과금합니다([`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)). 인계는 실행의 소유권 펜스를 올리므로, 여전히 그 실행을 수행하는 프로세스는 더 이상 아무것도 발행하지 않고 다음 Core 체크포인트 저장에서 멈추며 `P_RUN_TAKEN_OVER`로 끝납니다. 진행 중이던 슈퍼스텝까지만 실행하며, 그 프로세스가 오래된 체크포인트를 한 번 쓰는 일은 여전히 가능하므로 정확히 한 번(exactly-once) 실행은 아닙니다. 자식 예산 없이 시작한 `define()`만 있는 Program(`max_child_depth`와 `max_total_children`이 모두 0인 기본값)은 실행되는 동안 라이브 그래프 마이그레이션에 필요한 실행 lease를 잡습니다. 인계는 같은 단계에서 lease를 지우며, 이어지는 실행은 나중에 `resume`이나 `reconcile`이 있을 때까지 lease를 잡지 않으므로 그사이에는 마이그레이션할 수 없습니다. 시작할 때 정해진 절대 벽시계 시간 데드라인은 그대로 유지됩니다. `reconnect`는 그 데드라인까지 남은 벽시계 시간만 부여하며, 데드라인이 지나면 `reconnect`는 실행을 이어 가지 않고 `P_RUN_LEASE_EXPIRED`와 함께 `TimedOut`으로 끝냅니다. 그래프 마이그레이션 세이프 포인트에 붙잡힌 실행은 인계되지 않습니다(`P_GRAPH_MIGRATION_HELD`).
 
 ## `define()`이 표현할 수 있는 것
 
