@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=1c4ad7303ff4ca8e871ff65f9601b0212fac06c2d41cb4304bf977fff92126e7 -->
+<!-- neograph-i18n: source=docs/program-guide.md locale=ja source_sha256=99acab940ff63fbc4c56d0cbb9b84ede57d06c70dfa461751c57d8f2980cef97 -->
 # Program ガイド: グラフを取りまとめる JavaScript
 
 **Languages:** [English](program-guide.md) | [한국어](program-guide.ko.md) | [日本語](program-guide.ja.md) | [简体中文](program-guide.zh-CN.md)
@@ -296,7 +296,7 @@ python restart.py state resume run-...
 
 最初のコマンドはステータス `Interrupted` と実行 ID を出力します。その ID を2番目のコマンドに渡すと、`Completed` とレポートが出力されます。ディレクトリ `state` には `program.db`、`checkpoints.db`、`provider_calls.db` が入ります。
 
-プロセスが一時停止ではなく実行中のまま残した実行は、`host.reconnect(run_id)` で続行します。どう続行されるかは Program によって違います。子の予算なしで始めた `define()` だけの Program（`max_child_depth` と `max_total_children` がどちらも 0 の、デフォルトの状態）は、`wall_time_ms` の間、実行リースを保持します。所有者がまだ生きているかもしれない実行を、別のプロセスが続行しないようにするためです。リースが切れるまで `reconnect` は `P_RUN_LEASE_HELD` を送出し、切れた後は実行を続行せず `TimedOut` で終わらせます。`main()` を持つ Program や、子の予算（どちらも 0 より大きい）付きで始めた Program はリースを持たず、`reconnect` は最後のチェックポイントからすぐに続行します。そのとき、ジャーナルに記録済みのモデル呼び出しはリプレイされ、課金は1回だけです（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。
+プロセスが一時停止ではなく実行中のまま残した実行は、`host.reconnect(run_id)` で続行します。実行を引き継いで最後のチェックポイントからすぐに続行し、ジャーナルに記録済みのモデル呼び出しをリプレイして1回だけ課金します（[`36_program_crash_recovery.py`](../bindings/python/examples/36_program_crash_recovery.py)）。引き継ぎは実行の所有権フェンスを進めるため、まだその実行を動かしているプロセスはそれ以上何も公開せず、次の Core チェックポイント保存で止まり、`P_RUN_TAKEN_OVER` で終わります。実行するのは最大でも実行中のスーパーステップまでで、古いチェックポイント書き込みが1回残る可能性はあるため、これは exactly-once 実行ではありません。子の予算なしで始めた `define()` だけの Program（`max_child_depth` と `max_total_children` がどちらも 0 の、デフォルトの状態）は、実行中、ライブのグラフマイグレーションが必要とする実行リースを保持します。引き継ぎは同じ段階でリースを削除し、続行された実行は後の `resume` または `reconcile` までリースを持たないため、そのあいだはマイグレーションできません。開始時の絶対的な実時間のデッドラインは保たれます。`reconnect` はそのデッドラインまでに残っている実時間だけを付与し、デッドラインを過ぎると `reconnect` は実行を続行せず `P_RUN_LEASE_EXPIRED` を伴う `TimedOut` で終わらせます。グラフマイグレーションのセーフポイントに保持されている実行は引き継がれません（`P_GRAPH_MIGRATION_HELD`）。
 
 ## `define()` で表現できること
 

@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=d1621eecee9e120a95bce8298de99d4b71f64d9a0c534189007012bdf5847ce8 -->
+<!-- neograph-i18n: source=wasm/README.md locale=zh-CN source_sha256=c581b3c9aca1b709483022bbbf40ed7cb2e0c3070a0315ce696e0a6b54927bf5 -->
 # WebAssembly 上的 NeoGraph
 
 **Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
@@ -447,6 +447,7 @@ releaseStores(module, handle);
 | | `comparePublish(ownerScope, expectedJournalHead, expectedFence, publication)` | 发布结果 | 必需 |
 | | `comparePublishExecution(ownerScope, expectedJournalHead, expectedFence, publication, expectedLease, nextLease)` | 发布结果；租约是规范文本或 `null` | `"conflict"` |
 | | `comparePublishTakeover(ownerScope, runId, expectedJournalHead, expectedFence)` | 发布结果 | 必需 |
+| | `comparePublishTakeoverExecution(ownerScope, runId, expectedJournalHead, expectedFence, expectedLease)` | 发布结果；租约是规范文本 | `"conflict"` |
 | | `loadChildRelationHead(ownerScope, parentRunId)` | 关系头或 `null` | 必需 |
 | | `loadChildRelation(ownerScope, parentRunId, childRunId)` | 关系行或 `null` | 必需 |
 | | `loadChildRelations(ownerScope, parentRunId, openOnly)` | 按附加顺序排列的关系行列表 | 必需 |
@@ -480,7 +481,8 @@ releaseStores(module, handle);
   没通过这些检查的发布是 `"conflict"`，永远到不了该对象。已存储的状态对它怎么说，由存储决定。
 - **所有权围栏。** `expectedFence` 是写入该发布的控制对象的围栏。在调用越过边界之前，`comparePublish` 和 `comparePublishExecution` 对运行记录或日志记录带有其他围栏的发布回答 `"conflict"`。
   对象也必须在与日志头相同的一步里，把 `expectedFence` 与已存储运行的 `continuation.fence` 比较，不一致就拒绝。`comparePublishTakeover` 以 `fence = expectedFence + 1` 和一条新的日志记录发布 `runId` 所指运行的已存储 `Running` 记录，
-  对绑定谱系的运行在同一步把谱系头移到该记录，不改变其他任何内容。
+  对绑定谱系的运行在同一步把谱系头移到该记录；它不改变其他任何内容，并拒绝持有执行租约的运行。
+  `comparePublishTakeoverExecution` 对已存储执行租约为 `expectedLease` 的运行做同样的发布，并在同一步删除该租约；它拒绝不持有租约或持有其他租约的运行。若无此方法，对持有租约的运行中仅 Core 根运行调用 `reconnect`，在租约到期前会回答 `P_RUN_RECOVERY_CONFLICT`。
 - **子关系。** 父运行的子运行是以父运行的逻辑运行 ID 为键的行，每个父运行有一个头（纪元、计数、永久预算汇总、是否已关闭）。`insertChildRelation` 和 `updateChildRelation` 在同一步里修改行和头，把 `expectedParentFence` 与父运行已存储的栅栏比较，并返回 `{status, refusal, relation, head}`；`status` 是 `"applied"`、`"already_present"` 或 `"refused"`。一次发布可以带有关系部分（`child_relations`），对象在与发布相同的一步里应用它；最终发布会关闭自己的头。规则是 `src/program/transition_validator.h` 中的规则，包装参考存储的宿主会得到它们。这些操作在 C++ 中是纯虚函数，所以这五个方法是必需的。 `updateChildRelation` 的 fence 是写入方的:插入以及把行移到 dispatched 用父运行的 fence,行的终止状态和暂停用产生结果的子运行自己的 fence,且不读取父运行的头;从未运行过的子运行的行在父运行的 fence 下结束。
 - **不支持。** `compare_publish_graph_safe_point` 带有永不序列化的证据，所以 JavaScript 存储不参与实时的图迁移：它像基类一样回答 `"conflict"`。
 
