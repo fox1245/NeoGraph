@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=813525015a6a040e79083e2d1af66d32a5abc4699cd97e12c9e7c1306b35932a -->
+<!-- neograph-i18n: source=CHANGELOG.md locale=zh-CN source_sha256=f41a5ab59508091879d493a6a92166d6ed3a3261d3a4623e7bbd01a625ed4e04 -->
 # 变更日志
 
 **Languages:** [English](CHANGELOG.md) | [한국어](CHANGELOG.ko.md) | [日本語](CHANGELOG.ja.md) | [简体中文](CHANGELOG.zh-CN.md)
@@ -135,6 +135,7 @@ NeoGraph 的所有显著变更均记录在本文件中。
   - `ServeOptions` 变大了，因此构造它的代码要随库一起重新构建。身份验证拦截器和在一个端口上提供多个服务，仍然是把 `make_graph_service()`、`make_tool_service()` 或 `make_checkpoint_service()` 注册到你自己的 `grpc::ServerBuilder`。
 
 ### 变更
+- **macOS wheel 在 macOS 15 上构建，最低平台版本为 macOS 15.0（`MACOSX_DEPLOYMENT_TARGET=15.0`）。** 由于 `macos-14` 托管运行器已不再提供，不再构建 macOS 14 wheel。
 - **Program 运行时的按运行发布锁按存储、所有者范围和逻辑运行 ID 精确区分。** 将父运行的命令发布与其子关系发布、准入快照和合成串行化的锁，此前取自按哈希共享的固定锁表，因此缓慢的存储调用可能拖慢落入同一槽位的无关运行。现在每个正在使用的键在持有与等待期间拥有各自的锁条目，不同键的运行不再相互等待。
 - **请重新构建 C++ 使用方：`ProgramContinuation` 与 `ProgramTransitionStore` 的 `compare_publish*` 操作携带所有权 `fence`。** `ProgramContinuation` 新增 `std::uint64_t fence = 1`（新运行为 1；旧版本存储的不含 `fence` 的记录与日志条目按 `fence = 1` 读取）。从未被接管的运行，其记录保持原有的存储模式版本和 id，逐字节不变；新的模式版本（`ProgramRunRecord` 为 7，`ProgramJournalRecord` 为 2）只写入被接管的运行，即 `fence` 不为 1 的运行。`ProgramTransitionStore::compare_publish`、`compare_publish_execution` 和 `compare_publish_graph_safe_point` 及其对应的 `SyncProgramTransitionStore`（`..._sync`）、`BlockingProgramTransitionStore` 和 WebAssembly JavaScript 宿主存储方法在 `publication` 之前接收 `std::uint64_t expected_fence`，且所有存储新增 `compare_publish_takeover(owner_scope, run_id, expected_journal_head, expected_fence)`。仓库外的存储实现必须透传并比较 `expected_fence`，拒绝与已存储运行的 `continuation().fence` 不一致或在 `compare_publish_takeover` 之外改变下一条记录 `fence` 的发布，并实现将已存储的 `Running` 记录以 `fence = expected_fence + 1` 发布、且对绑定谱系的运行在同一步把谱系头移到该记录的 `compare_publish_takeover`。请把 NeoGraph、C++ 使用方和 Python 扩展一起重新构建（见 [`docs/ABI_POLICY.md`](docs/ABI_POLICY.md)）。
 - **请重新构建 C++ 使用方：Program 运行的子运行按每个子运行一行存储，`ProgramTransitionStore` 新增五个纯虚操作（#661）。** `load_child_relation_head`、`load_child_relation`、`load_child_relations`、`insert_child_relation` 与 `update_child_relation` 读取并修改父运行的关系行（以父运行的逻辑运行 ID 为键），以及保存其纪元、计数、永久预算汇总和父运行是否已结束的关系头。插入和更新会把写入者的栅栏与父运行已存储的栅栏比较，插入还会在同一事务中，把授予子运行的预算与父运行的剩余预算及汇总对照检查。一次发布可以带有关系部分（发布模式版本 8，只由带有关系部分的发布写入）：对关系纪元的守卫、子运行第一次发布中的行，或子运行终止发布中的行更新。父运行的最终发布会关闭其关系头：不再接受新行，也不再接受从未派发过的行的派发，但已派发子运行的结束仍会被记录。内存、SQLite、PostgreSQL、Harness SQLite 与 WebAssembly JavaScript 存储实现了这些操作（SQLite 与 PostgreSQL 存储新增两张表，Harness SQLite 存储升级到模式版本 10），自行编写且未实现它们的存储将无法再编译。在 `programs({ stores })` 的 WebAssembly 契约中，方法 `loadChildRelationHead`、`loadChildRelation`、`loadChildRelations`、`insertChildRelation` 与 `updateChildRelation` 是必需的（`wasm/README.zh-CN.md`）。
