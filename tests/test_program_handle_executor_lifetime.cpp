@@ -5,11 +5,14 @@
 // A to E and I run the scenarios themselves, on a thread_pool that the test destroys, and check the answers. F to H
 // count what reaches the executor once its context has shut down, so they show it in any build: an executor that counts
 // its live copies, and the work and context lookups it receives, over an io_context whose services the test shuts down
-// before it destroys them. J checks that the waits, which make their strands as they need them, are all woken.
+// before it destroys them. J checks that the waits, which make their strands as they need them, are all woken. K
+// destroys a runtime while a finished node attempt of its run is still being released.
 #include <gtest/gtest.h>
 
+#include "../core/dispatched_attempt_seam.h"
 #include "program_expansion_fixture.h"
 
+#include <neograph/graph/executor.h>
 #include <neograph/program/runtime.h>
 
 #include <asio/co_spawn.hpp>
@@ -24,6 +27,7 @@
 #include <asio/thread_pool.hpp>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -33,6 +37,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -599,4 +604,92 @@ TEST(ProgramHandleExecutorLifetimeTest, J_EveryAwaitedWaitOfARunIsWokenWhenTheRu
         EXPECT_EQ(completed.load(), kWaiters) << "run " << run;
         EXPECT_EQ(failed.load(), 0) << "run " << run;
     }
+}
+
+// ---- The release of a finished node attempt ----
+
+namespace {
+
+// Holds the release of the finished node attempts of one run until the test lets it go
+// (graph::detail::set_dispatched_attempt_release_observer_for_testing).
+struct AttemptReleaseHold {
+    std::mutex              mutex;
+    std::condition_variable changed;
+    std::string             run_id;             // the run whose attempts' releases are held
+    bool                    holding   = false;  // a release of that run is held
+    bool                    released  = false;  // the test let the releases go
+    bool                    destroyed = false;  // the runtime is gone
+
+    void reset() {
+        std::lock_guard lock(mutex);
+        run_id.clear();
+        holding = released = destroyed = false;
+    }
+    template <typename Predicate>
+    void await(Predicate predicate) {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [&] { return predicate(*this); });
+    }
+    template <typename Change>
+    void update(Change change) {
+        {
+            std::lock_guard lock(mutex);
+            change(*this);
+        }
+        changed.notify_all();
+    }
+};
+AttemptReleaseHold attempt_release_hold;
+
+void hold_attempt_release(std::string_view run_id) noexcept {
+    auto&            hold = attempt_release_hold;
+    std::unique_lock lock(hold.mutex);
+    if (hold.run_id.empty() || run_id != hold.run_id) return;
+    hold.holding = true;
+    hold.changed.notify_all();
+    hold.changed.wait(lock, [&hold] { return hold.released; });
+}
+
+}  // namespace
+
+// A finished node attempt is released on a worker of the process-wide attempt pool, which can be after its run has
+// ended. The test holds that release, destroys the runtime on a thread of its own, and lets the release go only once the
+// runtime is gone: the attempt must hold nothing of the runtime's pools by then, which the sanitizers see.
+TEST(ProgramHandleExecutorLifetimeTest, K_TheRuntimeIsDestroyedWhileAFinishedAttemptIsStillBeingReleased) {
+    LifetimeFixture fixture(2);
+    const auto version = fixture.admit("executor-gated");
+    struct Seams {
+        Seams() {
+            attempt_release_hold.reset();
+            graph::detail::set_dispatched_attempt_release_observer_for_testing(&hold_attempt_release);
+        }
+        ~Seams() {
+            // Lets a held release go however the test ends, before the seams are cleared.
+            attempt_release_hold.update([](AttemptReleaseHold& hold) { hold.released = true; });
+            graph::detail::set_dispatched_attempt_release_observer_for_testing(nullptr);
+        }
+    } seams;
+    struct OpenAtExit {
+        ~OpenAtExit() { lifetime_gate.release(); }
+    } open_at_exit;
+
+    // The node passes the gate only once the run id is known, so its release is the one held.
+    lifetime_gate.close();
+    auto handle = fixture.runtime->start("tenant:runtime", version, lifetime_invocation("trace-k"));
+    attempt_release_hold.update([&handle](AttemptReleaseHold& hold) { hold.run_id = handle.run_id(); });
+    lifetime_gate.release();
+    EXPECT_EQ(handle.wait().status(), ProgramTerminalStatus::Completed);
+    attempt_release_hold.await([](const AttemptReleaseHold& hold) { return hold.holding; });
+
+    std::thread destroyer([&fixture] {
+        fixture.runtime.reset();
+        attempt_release_hold.update([](AttemptReleaseHold& hold) { hold.destroyed = true; });
+    });
+    // The runtime is destroyed while the release is still held; only then does the release go.
+    attempt_release_hold.await([](const AttemptReleaseHold& hold) { return hold.destroyed; });
+    attempt_release_hold.update([](AttemptReleaseHold& hold) { hold.released = true; });
+    destroyer.join();
+    // The release has finished: the attempt, and everything it held, is gone.
+    EXPECT_TRUE(graph::wait_for_node_attempts(std::chrono::seconds(30)));
+    expect_answers_of_a_completed_run(handle);
 }
