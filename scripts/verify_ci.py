@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILES = (
@@ -615,9 +616,12 @@ def packaging(args):
         elif platform.system() == "Darwin":
             # Preserve the existing repair tool and floors without depending on
             # GitHub's source-dist/source directory layout when invoked locally.
+            # The floor is the one pyproject.toml gives cibuildwheel for macOS.
+            floor = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+                "tool"]["cibuildwheel"]["macos"]["environment"]["MACOSX_DEPLOYMENT_TARGET"]
             env["CIBW_REPAIR_WHEEL_COMMAND_MACOS"] = (
                 f'python "{ROOT / "cmake/repair-macos-wheel.py"}" --require-archs {{delocate_archs}} '
-                '--require-target-macos-version 14.0 -w "{dest_dir}" "{wheel}"')
+                f'--require-target-macos-version {floor} -w "{{dest_dir}}" "{{wheel}}"')
         elif platform.system() == "Windows":
             require_tools("cl", "vcpkg")
             vcpkg_root = Path(env.get("VCPKG_INSTALLATION_ROOT") or env.get("VCPKG_ROOT") or

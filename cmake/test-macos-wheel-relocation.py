@@ -4,7 +4,8 @@
 CI invocation (the wheel's CPython interpreter, once per cp39--cp314 wheel):
     python -I "{package}/cmake/test-macos-wheel-relocation.py"
 
-Requires an actual arm64 macOS 14 runner and /usr/bin/sandbox-exec. No build
+Requires an actual arm64 macOS runner matching the MACOSX_DEPLOYMENT_TARGET
+floor and /usr/bin/sandbox-exec. No build
 stage is sandboxed, and no global files or permissions are changed. A fresh
 exec'd interpreter imports the original installed distribution, not a copied
 wheel. Its Seatbelt profile denies reads of Homebrew opt/Cellar trees. An owned
@@ -66,9 +67,32 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def parse_macos_version(raw, label):
+    require(raw is not None and raw.strip() != "",
+            f"{label} must be set to a non-empty macOS version")
+    parts = raw.strip().split(".")
+    require(1 <= len(parts) <= 3 and all(part.isascii() and part.isdigit() for part in parts),
+            f"malformed {label}: {raw!r}")
+    numbers = [int(part) for part in parts]
+    while len(numbers) < 3:
+        numbers.append(0)
+    major, minor, patch = numbers
+    require(major > 0 and 0 <= minor < 256 and 0 <= patch < 256,
+            f"out-of-range {label}: {raw!r}")
+    return major, minor, patch
+
+
+def deployment_target_floor():
+    return parse_macos_version(os.environ.get("MACOSX_DEPLOYMENT_TARGET"),
+                               "MACOSX_DEPLOYMENT_TARGET")
+
+
 def platform_gate():
     require(sys.platform == "darwin", "macOS runtime proof requires Darwin; no Linux soft pass")
-    require(platform.mac_ver()[0].split(".")[0] == "14", "run this floor gate on macOS 14")
+    target_major, _, _ = deployment_target_floor()
+    running_major, _, _ = parse_macos_version(platform.mac_ver()[0], "running macOS version")
+    require(running_major == target_major,
+            f"run this floor gate on macOS {target_major} (running macOS {running_major})")
     require(platform.machine() == "arm64", "run this wheel gate natively on arm64")
     require(sys.implementation.name == "cpython" and (3, 9) <= sys.version_info[:2] <= (3, 14),
             "the release gate requires CPython 3.9 through 3.14")
@@ -157,8 +181,12 @@ def macho(path):
             result["minimum_macos"].append(struct.unpack_from("<I", row, 8)[0])
         cursor += size
     require(cursor == length, "Mach-O command count/size mismatch")
-    require(result["minimum_macos"] and all(0 < v <= (14 << 16) for v in result["minimum_macos"]),
-            "packaged binary is missing floor metadata or requires newer than macOS 14.0: " + str(path))
+    floor_major, floor_minor, floor_patch = deployment_target_floor()
+    floor_packed = (floor_major << 16) | (floor_minor << 8) | floor_patch
+    floor_label = (f"{floor_major}.{floor_minor}" if floor_patch == 0
+                   else f"{floor_major}.{floor_minor}.{floor_patch}")
+    require(result["minimum_macos"] and all(0 < v <= floor_packed for v in result["minimum_macos"]),
+            f"packaged binary is missing floor metadata or requires newer than macOS {floor_label}: {path}")
     result["minimum_macos"] = ["%d.%d.%d" % (v >> 16, (v >> 8) & 255, v & 255)
                                 for v in result["minimum_macos"]]
     return result
@@ -485,7 +513,8 @@ def main():
             # or DYLD injection from crossing into the cold interpreter. This is not the
             # isolation proof: the independently verified Seatbelt deny rules are.
             environment = {"HOME": str(work), "TMPDIR": str(work), "PATH": "/usr/bin:/bin",
-                           "LANG": "en_US.UTF-8"}
+                           "LANG": "en_US.UTF-8",
+                           "MACOSX_DEPLOYMENT_TARGET": os.environ["MACOSX_DEPLOYMENT_TARGET"]}
             child = subprocess.Popen(["/usr/bin/sandbox-exec", "-f", str(profile), sys.executable,
                                       "-I", "-B", str(script), "--worker", str(config)],
                                      cwd=work, env=environment, stdout=subprocess.PIPE,
