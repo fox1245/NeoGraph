@@ -618,6 +618,11 @@ struct ProgramCase {
     /// The call pauses at an `interrupt_before` gate, the only checkpoint it
     /// saves before the pause is published (#402).
     bool gated = false;
+    /// The codes, besides NG.EffectUncertain, that a run ends with when a held
+    /// call fails a member of a combinator that reports its own failure in
+    /// place of the member's: a quorum that cannot reach its required
+    /// successes.
+    std::set<std::string> absorbed_failure_codes;
     Expected    expected;
     /// By operation id, the commands the host can reconcile as completed with
     /// their reference result: a call, an awaited call or a pair whose nodes
@@ -648,7 +653,11 @@ struct Observed {
     std::vector<Pause>                 pauses;
     json                               output;
     std::string                        failure;
+    std::string                        failure_code;  // the code of the failure, when the run failed
     std::map<std::string, int>         sent;      // tag -> requests the transport sent
+    /// The requests of `sent` that the original process sent before the crash
+    /// copy was decided.
+    std::map<std::string, int> sent_before_crash;
     std::vector<StepJournal::Run>      runs;      // node body runs
     std::uint64_t                      tokens = 0, money = 0;  // charged over the run
     int                                ops    = 0;
@@ -663,9 +672,15 @@ struct Observed {
     std::set<std::string> reconciled_tags;
     /// The durable operation the crash copy was taken at.
     std::string crash_at;
-    /// A request reached the transport after the crash copy was decided: a
-    /// branch running beside the crashed operation had begun to send it.
-    bool request_out_at_crash = false;
+    /// What the crash copy holds of the provider calls the original process
+    /// had begun, by call tag, read from the copy's provider journal: the
+    /// calls whose dispatch record has no outcome yet (a recovered process
+    /// never sends such a call again, #364), and the calls whose outcome is
+    /// recorded. A call that began after the copy has no record in it.
+    std::map<std::string, int> image_unanswered, image_answered;
+    /// What the copy's dispatch records without an outcome hold: the tokens
+    /// and the microunits a held call keeps reserved.
+    std::uint64_t image_held_tokens = 0, image_held_money = 0;
     /// Every durable operation of the run, and the Core thread of each one
     /// that saved a checkpoint.
     std::vector<std::string> op_labels, op_threads, op_firsts;
@@ -702,10 +717,38 @@ void finish(Observed& observed, const ProgramResult& result, bool plan) {
     observed.status = result.status();
     if (result.status() == ProgramTerminalStatus::Completed)
         observed.output = plan ? project_plan_output(result.output()) : result.output();
-    if (const auto failure = result.failure()) observed.failure = failure->code + ": " + failure->message;
+    if (const auto failure = result.failure()) {
+        observed.failure      = failure->code + ": " + failure->message;
+        observed.failure_code = failure->code;
+    }
     const auto initial    = Host::budget();
     observed.tokens       = initial.model_tokens - result.remaining_budget().model_tokens;
     observed.money        = initial.monetary_microunits - result.remaining_budget().monetary_microunits;
+}
+
+/// Reads the crash copy's provider journal for the calls the original process
+/// had begun: which have a dispatch record and no outcome, and which have an
+/// outcome. It reads the rows by the journal's own API, not the clock: a call
+/// that was out at some moment may or may not have its record in the copy.
+void read_crash_image(Observed& observed, Peer& peer, const std::filesystem::path& image) {
+    std::map<std::string, std::set<std::pair<std::string, std::string>>> dispatches;
+    {
+        std::lock_guard lock(peer.mutex);
+        dispatches = peer.dispatches;
+    }
+    if (dispatches.empty()) return;
+    const SQLiteProgramProviderCallJournal journal((image / "durable.sqlite").string());
+    for (const auto& [tag, rows] : dispatches)
+        for (const auto& [owner, dispatch_id] : rows) {
+            const auto record = journal.inspect(owner, dispatch_id);
+            if (!record) continue;
+            if (record->state == SQLiteProgramProviderCallJournal::State::Dispatched) {
+                ++observed.image_unanswered[tag];
+                observed.image_held_tokens += record->claim_amount;
+                if (record->monetary_record) observed.image_held_money += record->monetary_record->microunits;
+            } else if (record->state == SQLiteProgramProviderCallJournal::State::Succeeded)
+                ++observed.image_answered[tag];
+        }
 }
 
 /// Runs one schedule. Every pause is answered in turn ("d1", "d2", ...) until
@@ -752,9 +795,12 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
             observed.crashed = true;
             {
                 std::lock_guard lock(peer->mutex);
-                for (const auto& [tag, count] : peer->sent) observed.sent[tag] += count;
-                if (peer->sent_after_death > 0) observed.request_out_at_crash = true;
+                for (const auto& [tag, count] : peer->sent) {
+                    observed.sent[tag] += count;
+                    observed.sent_before_crash[tag] += count;
+                }
             }
+            read_crash_image(observed, *peer, image.path);
             host.reset();
             if (std::getenv("NEOGRAPH_PROGRAM_RESUME_MODEL_DEBUG")) {
                 OwnedTransitionStore<SQLiteProgramTransitionStore> inspect((image.path / "durable.sqlite").string());
@@ -887,18 +933,45 @@ Observed run_schedule(const ProgramCase& program, bool durable, const Schedule& 
 // Properties
 // ---------------------------------------------------------------------------
 
+/// Whether the run ended on a held call (#364): the crash copy holds a
+/// dispatch record without an outcome, and the recovered run failed with
+/// NG.EffectUncertain (or the code of a combinator that reports its own
+/// failure for it) instead of ending as the reference does. The end of the
+/// run, the pauses after it and the calls it never reaches are then what that
+/// call costs; nothing else is.
+bool ended_on_held_call(const ProgramCase& program, const Observed& observed) {
+    return !observed.image_unanswered.empty() && observed.status == ProgramTerminalStatus::Failed &&
+           observed.status != program.expected.status &&
+           (observed.failure_code == graph::node_failure_code(graph::NodeFailureClass::EffectUncertain) ||
+            program.absorbed_failure_codes.count(observed.failure_code) > 0);
+}
+
+/// The tags of the calls whose dispatch the crash copy holds without an outcome.
+std::string held_tags(const Observed& observed) {
+    std::string tags;
+    for (const auto& [tag, count] : observed.image_unanswered) tags += (tags.empty() ? "" : ",") + tag;
+    return tags;
+}
+
 std::vector<std::string> compare(const ProgramCase& program, const Observed& observed, bool durable) {
     const auto& expected = program.expected;
     const auto  want     = program.plan ? expected.out : json{{"out", expected.out}};
+    const bool  held     = ended_on_held_call(program, observed);
     std::vector<std::string> problems;
     if (!observed.error.empty()) problems.push_back("P3: the host got an exception: " + observed.error);
-    if (observed.status != expected.status)
-        problems.push_back("P3: status reference " + std::string(to_string(expected.status)) + ", runtime " +
-                           std::string(to_string(observed.status)) +
-                           (observed.failure.empty() ? "" : " (" + observed.failure + ")"));
-    else if (expected.status == ProgramTerminalStatus::Completed && observed.output.dump() != want.dump())
+    if (observed.status != expected.status) {
+        if (!held)
+            problems.push_back("P3: status reference " + std::string(to_string(expected.status)) + ", runtime " +
+                               std::string(to_string(observed.status)) +
+                               (observed.failure.empty() ? "" : " (" + observed.failure + ")"));
+    } else if (expected.status == ProgramTerminalStatus::Completed && observed.output.dump() != want.dump())
         problems.push_back("P3: output reference " + want.dump() + ", runtime " + observed.output.dump());
-    if (observed.pauses != expected.pauses) {
+    // A run that stopped on a held call reached a prefix of the reference's pauses.
+    const bool pauses_match =
+        held ? observed.pauses.size() <= expected.pauses.size() &&
+                   std::equal(observed.pauses.begin(), observed.pauses.end(), expected.pauses.begin())
+             : observed.pauses == expected.pauses;
+    if (!pauses_match) {
         std::ostringstream out;
         out << "P2: pauses reference [";
         for (const auto& pause : expected.pauses) out << " " << pause.operation << "(" << pause.tag << ")";
@@ -925,13 +998,30 @@ std::vector<std::string> compare(const ProgramCase& program, const Observed& obs
         const int want = durable ? static_cast<int>(expected.call_slots.at(tag).size()) : runs;
         expected_sends += want;
         const auto found = observed.sent.find(tag);
-        const int  got   = found == observed.sent.end() ? 0 : found->second;
-        // A reconciled command's calls were sent before the crash, or not.
-        if (observed.reconciled_tags.count(tag) ? got > want : got != want)
+        int        got   = found == observed.sent.end() ? 0 : found->second;
+        // The copy is decided before it is taken, and a call another thread
+        // sends in between has its outcome in the copy: the copy holds an
+        // outcome only for a request that reached the transport, so it was sent.
+        const auto answered = observed.image_answered.find(tag);
+        if (answered != observed.image_answered.end()) {
+            const auto before = observed.sent_before_crash.find(tag);
+            got += std::max(0, answered->second - (before == observed.sent_before_crash.end() ? 0 : before->second));
+        }
+        // A reconciled command's calls were sent before the crash, or not. A
+        // run that stopped on a held call never reached the calls after it,
+        // and never sends the held one again; no call is sent more than the
+        // reference sends it, and a call whose outcome the copy holds was sent.
+        const bool may_lack = held || observed.reconciled_tags.count(tag);
+        if (may_lack ? got > want : got != want)
             problems.push_back("P1: the call of " + tag + " was sent " + std::to_string(got) + " time(s), reference " +
                                std::to_string(want));
     }
-    for (const auto& [tag, count] : observed.sent)
+    // A call the reference never makes is a mismatch whether the transport
+    // counted it or only the crash copy holds it.
+    std::set<std::string> made;
+    for (const auto* tags : {&observed.sent, &observed.image_answered, &observed.image_unanswered})
+        for (const auto& [tag, count] : *tags) made.insert(tag);
+    for (const auto& tag : made)
         if (!expected.runs_to_call.count(tag))
             problems.push_back("P1: " + tag + " sent a call the reference never makes");
     // A reconciled command keeps the tokens and money it reserved (#403).
@@ -941,6 +1031,28 @@ std::vector<std::string> compare(const ProgramCase& program, const Observed& obs
                            std::to_string(observed.money) + " microunits, reference " +
                            std::to_string(kCallTokens * expected_sends) + " and " +
                            std::to_string(kCallMoney * expected_sends));
+    // A run that stopped on a held call is charged whole calls, once each, and
+    // what the held calls keep reserved: the calls the copy holds an outcome
+    // for, at least, and the reference's calls without the held ones, at most.
+    if (held && observed.error.empty()) {
+        int answered_calls = 0, held_calls = 0;
+        for (const auto& [tag, count] : observed.image_answered) answered_calls += count;
+        for (const auto& [tag, count] : observed.image_unanswered) held_calls += count;
+        const auto whole_calls = [&](std::uint64_t charged, std::uint64_t reserved, std::uint64_t per_call) {
+            if (charged < reserved || (charged - reserved) % per_call != 0) return false;
+            const auto whole = static_cast<std::int64_t>((charged - reserved) / per_call);
+            return whole >= answered_calls && whole <= std::max(0, expected_sends - held_calls);
+        };
+        if (!whole_calls(observed.tokens, observed.image_held_tokens, kCallTokens) ||
+            !whole_calls(observed.money, observed.image_held_money, kCallMoney))
+            problems.push_back("P1: charged " + std::to_string(observed.tokens) + " tokens and " +
+                               std::to_string(observed.money) + " microunits, which are not whole calls (" +
+                               std::to_string(answered_calls) + " to " +
+                               std::to_string(std::max(0, expected_sends - held_calls)) + ") and the " +
+                               std::to_string(observed.image_held_tokens) + " and " +
+                               std::to_string(observed.image_held_money) + " that " + std::to_string(held_calls) +
+                               " held call(s) keep reserved");
+    }
     return problems;
 }
 
@@ -1000,16 +1112,24 @@ void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, cons
            const Observed& observed, const Observed* base = nullptr) {
     ++totals.schedules;
     const auto problems = compare(program, observed, durable);
-    if (problems.empty()) return;
     // Behaviours this harness reports instead of failing (tests/model/README.md):
     // a call that stopped before its first checkpoint is left to the host to
-    // reconcile (#402, #404), and a crash while a request was out holds that
-    // call (#364).
+    // reconcile (#402, #404), and a crash whose copy holds a call's dispatch
+    // record without its outcome holds that call (#364).
     const auto known = [&](const std::string& issue, const std::string& example) {
         ++totals.known[issue];
         ProgramTotals::keep(totals.known_example, issue,
                             {totals.program_index, program.description + " | " + describe(schedule) + " | " + example});
     };
+    // The call is held, never sent again, and the run cannot end as the
+    // reference does. compare() left that end and its consequences out: what
+    // remains in `problems` is a mismatch.
+    if (problems.empty()) {
+        if (ended_on_held_call(program, observed))
+            known("uncertain dispatch after a crash (held, never sent again)",
+                  "held " + held_tags(observed) + ": " + observed.failure);
+        return;
+    }
     if (observed.reconciliation && !observed.reconciled && schedule.crash_op >= 0 && base &&
         before_first_checkpoint(*base, schedule.crash_op, schedule.crash_after)) {
         known("reconciliation of a call stopped before its first checkpoint", problems.front());
@@ -1021,16 +1141,6 @@ void judge(ProgramTotals& totals, const ProgramCase& program, bool durable, cons
     // Program publishes the pause.
     if (observed.reconciliation && !observed.reconciled && schedule.crash_op >= 0 && program.gated) {
         known("reconciliation of a call stopped at a gate", problems.front());
-        return;
-    }
-    // A crash while a request was out leaves its dispatch unresolved: the
-    // journal never sends it again and holds it (#364), so the run cannot end
-    // as the reference does. Only a second send is a mismatch then.
-    if ((observed.crash_at == "provider dispatch" || observed.request_out_at_crash) &&
-        std::none_of(problems.begin(), problems.end(), [](const std::string& problem) {
-            return problem.rfind("P1: the call of", 0) == 0 && problem.find("sent 2") != std::string::npos;
-        })) {
-        known("uncertain dispatch after a crash (held, never sent again)", problems.front());
         return;
     }
     std::string kind = problems.front().substr(0, problems.front().find(':')) + " " +
@@ -1101,6 +1211,8 @@ ProgramCase javascript_case(const Spec& spec, std::size_t max_answers) {
     program.sequential      = spec.sequential();
     program.crash_candidate = crash_candidate(spec);
     program.expected        = reference(spec, max_answers);
+    for (const auto& command : spec.commands)
+        if (command.op == Op::Quorum) program.absorbed_failure_codes.insert("P_QUORUM_UNREACHABLE");
     const auto value_of     = [](const Member& member) -> std::optional<std::string> {
         if (member.beh == Beh::Ok) return "done:" + member.tag;
         if (member.beh == Beh::Llm) return "reply-" + member.tag;
@@ -1320,3 +1432,122 @@ TEST(ProgramResumeModel, PlanRunsMatchTheReference) {
     check_cases(cases, bound, "typed plans");
 }
 
+
+// The oracle's own decision: what a crash copy holding a dispatch record
+// without an outcome excuses, and what it does not. The observations are
+// synthetic; a real schedule needs a build that sends a call twice or loses a
+// write to show the same.
+namespace {
+
+/// A program with a work call "x" and a side call "s", each made once.
+ProgramCase two_calls_case() {
+    ProgramCase program;
+    program.description                = "synthetic work and side calls";
+    program.expected.status            = ProgramTerminalStatus::Completed;
+    program.expected.pauses            = {Pause{"op.1", "x"}, Pause{"op.1", "s"}};
+    program.expected.runs_to_call      = {{"x", 1}, {"s", 1}};
+    program.expected.call_slots        = {{"x", {"x"}}, {"s", {"s"}}};
+    return program;
+}
+
+/// What a copy taken while the work call "x" was out leaves: x's dispatch
+/// record has no outcome, the side call "s" is answered, and the recovered run
+/// failed on the held call without sending it again.
+Observed held_work_call() {
+    Observed observed;
+    observed.status       = ProgramTerminalStatus::Failed;
+    observed.failure_code = graph::node_failure_code(graph::NodeFailureClass::EffectUncertain);
+    observed.failure      = observed.failure_code + ": the outcome of the call is unknown";
+    observed.crashed      = true;
+    observed.pauses       = {Pause{"op.1", "x"}};
+    observed.sent         = {{"s", 1}};
+    observed.sent_before_crash = {{"s", 1}};
+    observed.image_unanswered  = {{"x", 1}};
+    observed.image_answered    = {{"s", 1}};
+    observed.image_held_tokens = 1064;
+    observed.image_held_money  = 525;
+    observed.tokens            = kCallTokens + observed.image_held_tokens;
+    observed.money             = kCallMoney + observed.image_held_money;
+    return observed;
+}
+
+ProgramTotals judged(const ProgramCase& program, const Observed& observed) {
+    ProgramTotals totals;
+    judge(totals, program, true, Schedule{4, -1, 3, false}, observed);
+    return totals;
+}
+
+}  // namespace
+
+TEST(ProgramResumeModel, AHeldCallIsKnownAndNothingElseOfItsScheduleIs) {
+    const auto program = two_calls_case();
+    {
+        // The copy holds x's dispatch without an outcome: the run cannot end as
+        // the reference does, and that is all this schedule shows.
+        const auto totals = judged(program, held_work_call());
+        EXPECT_EQ(totals.mismatches, 0U);
+        EXPECT_EQ(totals.known.size(), 1U);
+    }
+    {
+        // x was sent three times where the reference sends it twice.
+        auto program_twice = program;
+        program_twice.expected.call_slots["x"] = {"x", "x2"};
+        auto observed      = held_work_call();
+        observed.sent["x"] = 3;
+        observed.sent_before_crash["x"] = 1;
+        EXPECT_EQ(judged(program_twice, observed).mismatches, 1U);
+        EXPECT_EQ(judged(program_twice, observed).signatures.count("P1 sent after a crash, sqlite"), 1U);
+    }
+    {
+        // A call the reference never makes.
+        auto observed         = held_work_call();
+        observed.sent["ghost"] = 1;
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+    {
+        // The held call is excused; the side branch's write is lost, so its
+        // call is sent again.
+        auto observed       = held_work_call();
+        observed.sent["s"]  = 2;
+        observed.tokens += kCallTokens;
+        observed.money += kCallMoney;
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+    {
+        // The side call is sent once, but the run is charged for it twice.
+        auto observed = held_work_call();
+        observed.tokens += 2 * kCallTokens;
+        observed.money += 2 * kCallMoney;
+        const auto totals = judged(program, observed);
+        EXPECT_EQ(totals.mismatches, 1U);
+        EXPECT_EQ(totals.signatures.count("P1 charged after a crash, sqlite"), 1U);
+    }
+    {
+        // The side call's outcome is in the copy, yet the recovered run never
+        // delivered it: an answer was lost.
+        auto observed = held_work_call();
+        observed.error = "the side write is missing";
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+    {
+        // The recovered run asked something the reference never asks.
+        auto observed   = held_work_call();
+        observed.pauses = {Pause{"op.2", "s"}};
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+    {
+        // A failure of another kind is not what a held call makes.
+        auto observed         = held_work_call();
+        observed.failure_code = graph::node_failure_code(graph::NodeFailureClass::Ordinary);
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+    {
+        // The same end with no dispatch record without an outcome in the copy.
+        auto observed              = held_work_call();
+        observed.image_unanswered.clear();
+        observed.image_held_tokens = observed.image_held_money = 0;
+        observed.tokens = kCallTokens;
+        observed.money  = kCallMoney;
+        EXPECT_EQ(judged(program, observed).mismatches, 1U);
+    }
+}
