@@ -150,7 +150,15 @@ a plan, is returned to the host to reconcile (#402, #404), which the harness
 accepts only when the crash left the call without one; a call that stopped at
 an `interrupt_before` gate (the failure routes) is returned the same way,
 because recovery never passes a gate unanswered (#402); and a crash while a
-request was out holds that call, which is never sent again (#364). A call the
+provider call's dispatch record has no outcome in the crash copy (the harness
+reads the copy's provider journal, whichever operation or branch the copy was
+taken at) holds that call, which is never sent again (#364). Only what that
+call costs is reported: the run's end (`NG.EffectUncertain`, or the failure of
+a quorum that cannot reach its required successes), the pauses after it, the
+calls the run never reaches, and the reservation the call keeps. A call sent
+more often than the reference sends it, a call the reference never makes, a
+wrong answer, a lost write, or a charge that is not whole calls plus the
+reservation is still a mismatch. A call the
 host can reconcile as completed (a call, an awaited call or a pair that neither
 asks nor fails, with no priced call after it) it reconciles with the reference
 result, and the run must then end as the reference does (#403).

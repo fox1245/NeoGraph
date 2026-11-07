@@ -7,6 +7,7 @@
 #include <neograph/graph/state.h>
 
 #include "canonical_json.h"
+#include "dispatched_attempt_seam.h"
 #include "failure_routing.h"
 #include "host_timer.h"
 #include "run_context_runtime.h"
@@ -43,6 +44,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <type_traits>
+#include <utility>
 
 namespace neograph::graph {
 
@@ -563,6 +565,10 @@ RunningAttempts& running_attempts() {
     return *instance;
 }
 
+// Test seams (dispatched_attempt_seam.h); null outside tests.
+std::atomic<detail::DispatchedAttemptReleaseObserver> attempt_release_observer{nullptr};
+std::atomic<detail::DispatchedAttemptTimeoutObserver> attempt_timeout_observer{nullptr};
+
 struct ProcessAttemptLease {
     ProcessAttemptLease() {
         auto&           running = running_attempts();
@@ -623,7 +629,14 @@ struct DispatchedAttempt {
                 error  = std::move(failure);
             }
         }
-        if (wake) wake();
+        // The orchestrator is woken once. Its wake-up goes here, under the
+        // lock the orchestrator takes before it goes on: nothing of the
+        // orchestrator's executor stays in the attempt, whose last references
+        // are released later, on a worker of attempt_pool().
+        if (wake) {
+            wake();
+            wake = nullptr;
+        }
     }
 };
 
@@ -633,7 +646,11 @@ asio::awaitable<void> run_dispatched_body(std::shared_ptr<DispatchedAttempt> uni
         std::lock_guard lock(unit->mutex);
         if (unit->settled) {
             unit->stopped = true;
-            if (unit->wake) unit->wake();
+            // As in finish(): the wake-up goes with its one use.
+            if (unit->wake) {
+                unit->wake();
+                unit->wake = nullptr;
+            }
             co_return;
         }
     }
@@ -674,6 +691,9 @@ void start_dispatched_body(const std::shared_ptr<DispatchedAttempt>& unit) {
                                [unit, body_executor](std::exception_ptr error) {
                                    if (error) unit->finish(std::nullopt, std::move(error));
                                    asio::post(body_executor, [unit] {
+                                       if (const auto observer =
+                                               attempt_release_observer.load(std::memory_order_acquire))
+                                           observer(unit->context.run_id);
                                        unit->execution->unbind_executor();
                                        unit->token->unbind_executor();
                                    });
@@ -699,6 +719,7 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
     for (;;) {
         bool                    cancel_attempt = false;
         bool                    done           = false;
+        bool                    timed_out_now  = false;
         AttemptClock::time_point wake_at{};
         {
             std::lock_guard lock(unit->mutex);
@@ -709,6 +730,7 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
                 if (!unit->settled && unit->timeout_at && now >= *unit->timeout_at) {
                     unit->settled   = true;
                     unit->timed_out = true;
+                    timed_out_now   = true;
                 }
                 if (unit->timed_out && !stop_deadline) {
                     stop_deadline  = now + stop_grace;
@@ -725,6 +747,10 @@ asio::awaitable<void> await_dispatched(std::shared_ptr<DispatchedAttempt> unit,
             }
             // No wake-up is posted once the orchestrator stops waiting.
             if (done) unit->wake = nullptr;
+        }
+        if (timed_out_now) {
+            if (const auto observer = attempt_timeout_observer.load(std::memory_order_acquire))
+                observer(unit->context.run_id);
         }
         if (cancel_attempt) {
             if (unit->events) unit->events->close();
@@ -755,10 +781,12 @@ asio::awaitable<void> await_stopped(std::shared_ptr<DispatchedAttempt> unit) {
             using Handler   = std::decay_t<decltype(handler)>;
             auto completion = std::make_shared<Handler>(std::move(handler));
             // Only the first call resumes the wait. It also drops the handler,
-            // which owns this coroutine, so `unit` no longer owns it.
-            std::function<void()> resume = [executor, completion]() mutable {
+            // which owns this coroutine, so `unit` no longer owns it, and the
+            // executor, so `unit` holds nothing of the orchestrator's.
+            std::function<void()> resume = [executor = asio::any_io_executor(executor), completion]() mutable {
                 if (!completion) return;
-                asio::post(executor, [completion = std::move(completion)] { (*completion)(); });
+                asio::post(std::exchange(executor, asio::any_io_executor{}),
+                           [completion = std::move(completion)] { (*completion)(); });
             };
             std::lock_guard lock(unit->mutex);
             if (unit->stopped)
@@ -781,6 +809,18 @@ bool wait_for_node_attempts(std::chrono::milliseconds timeout) {
     }
     return running.idle.wait_for(lock, timeout, idle);
 }
+
+namespace detail {
+
+void set_dispatched_attempt_release_observer_for_testing(DispatchedAttemptReleaseObserver observer) noexcept {
+    attempt_release_observer.store(observer, std::memory_order_release);
+}
+
+void set_dispatched_attempt_timeout_observer_for_testing(DispatchedAttemptTimeoutObserver observer) noexcept {
+    attempt_timeout_observer.store(observer, std::memory_order_release);
+}
+
+}  // namespace detail
 
 // =========================================================================
 // NodeExecutor construction + helpers

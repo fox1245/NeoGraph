@@ -154,6 +154,10 @@ struct Peer {
     const std::atomic<bool>*      alive;
     std::mutex                    mutex;
     std::map<std::string, int>    attempted;  // call tag -> broker invocations
+    /// Call tag -> the journal rows (owner scope, dispatch id) of the calls the
+    /// broker was invoked for, before or after the crash copy was decided: the
+    /// copy holds the rows of those whose dispatch record it caught.
+    std::map<std::string, std::set<std::pair<std::string, std::string>>> dispatches;
     int                           attempted_total = 0;
     std::map<std::string, int>    sent;       // call tag -> requests
     /// Requests that reached the transport after the process died. Their
@@ -165,6 +169,7 @@ struct Peer {
     void reset() {
         std::lock_guard lock(mutex);
         attempted.clear();
+        dispatches.clear();
         attempted_total = 0;
         sent.clear();
         sent_after_death = 0;
@@ -204,18 +209,46 @@ std::shared_ptr<Provider> make_provider(std::shared_ptr<Peer> peer) {
         "upstream-descriptor", client_for(std::string(kOpenRouter), std::string(kModel), kInputLimit));
 }
 
+/// The scope of one Program operation's provider calls, kept by value: the
+/// context a resolver is given only lives for the resolver's call. It names
+/// the journal row of a call (provider_call_slot_id).
+struct ProviderCallScope {
+    std::string owner, version, run, operation;
+
+    explicit ProviderCallScope(const ProgramCoreProviderCallContext& context)
+        : owner(context.owner_scope), version(context.program_version_id), run(context.run_id),
+          operation(context.operation_id) {}
+    std::string slot_of(const graph::ProviderCallIdentity& call) const {
+        ProgramCoreProviderCallContext context;
+        context.owner_scope        = owner;
+        context.program_version_id = version;
+        context.run_id             = run;
+        context.operation_id       = operation;
+        return program::detail::provider_call_slot_id(context, call);
+    }
+};
+
 class CountingProviderCallBroker final : public graph::ProviderCallBroker {
 public:
-    CountingProviderCallBroker(std::shared_ptr<graph::ProviderCallBroker> inner, std::shared_ptr<Peer> peer)
-        : inner_(std::move(inner)), peer_(std::move(peer)) {}
+    /// `scope` is set when the calls are journaled: the broker then records the
+    /// journal row of each call by its tag, to read a crash image by.
+    CountingProviderCallBroker(std::shared_ptr<graph::ProviderCallBroker> inner, std::shared_ptr<Peer> peer,
+                               std::shared_ptr<const ProviderCallScope> scope = {})
+        : inner_(std::move(inner)), peer_(std::move(peer)), scope_(std::move(scope)) {}
 
     asio::awaitable<sp::runtime::Result> invoke(graph::ProviderCallIdentity identity,
                                                 std::shared_ptr<Provider>   provider,
                                                 ProviderRequest             request) override {
-        if (peer_ && (!peer_->alive || *peer_->alive)) {
+        if (peer_) {
+            const auto tag = request_tag(request);
             std::lock_guard lock(peer_->mutex);
-            ++peer_->attempted[request_tag(request)];
-            ++peer_->attempted_total;
+            if (!peer_->alive || *peer_->alive) {
+                ++peer_->attempted[tag];
+                ++peer_->attempted_total;
+            }
+            // Whether the call began before or after the copy was decided, its
+            // dispatch record may be in the copy.
+            if (scope_) peer_->dispatches[tag].emplace(scope_->owner, scope_->slot_of(identity));
         }
         return inner_->invoke(std::move(identity), std::move(provider), std::move(request));
     }
@@ -223,6 +256,7 @@ public:
 private:
     std::shared_ptr<graph::ProviderCallBroker> inner_;
     std::shared_ptr<Peer>                      peer_;
+    std::shared_ptr<const ProviderCallScope>   scope_;
 };
 
 // ---------------------------------------------------------------------------
@@ -284,8 +318,9 @@ struct CrashPoints {
         if (here) taken_at = what;
         if (here && !after) {
             // The process is dead from this operation on: a request another
-            // thread sends while the image is copied never happened, and no
-            // dispatch marker written after the copy starts is in the image.
+            // thread sends while the image is copied is not counted. The copy
+            // may still hold its dispatch record or its outcome, which the
+            // oracle reads from the copy (Observed::image_unanswered).
             alive = false;
             crash_image(live, image);
             taken = true;
@@ -307,7 +342,6 @@ struct CrashPoints {
         taken = true;
     }
 };
-
 
 // ---------------------------------------------------------------------------
 // The Core node
@@ -764,7 +798,8 @@ public:
                  deployment = program::detail::provider_deployment_identity("resume-model")](
                     const ProgramCoreProviderCallContext& call) -> std::optional<ProgramCoreProviderCallBinding> {
                 auto binding   = journal->bind_priced(call, deployment);
-                binding.broker = std::make_shared<CountingProviderCallBroker>(std::move(binding.broker), peer);
+                binding.broker = std::make_shared<CountingProviderCallBroker>(
+                    std::move(binding.broker), peer, std::make_shared<const ProviderCallScope>(call));
                 return binding;
             };
         } else {

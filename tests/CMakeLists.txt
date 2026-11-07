@@ -1216,6 +1216,14 @@ if(NEOGRAPH_BUILD_SQLITE)
     target_link_libraries(neograph_attempt_timeout_tests PRIVATE
         neograph::core neograph::sqlite SQLite::SQLite3 GTest::gtest_main)
     neograph_discover_tests(neograph_attempt_timeout_tests PROPERTIES LABELS "core;failure-routing")
+    # A dispatched node attempt is released after its run has been woken, possibly after the executor the run ran on is
+    # gone: it holds nothing of that executor by then.
+    add_executable(neograph_dispatched_attempt_release_tests test_dispatched_attempt_release.cpp)
+    target_include_directories(neograph_dispatched_attempt_release_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/core)
+    target_link_libraries(neograph_dispatched_attempt_release_tests PRIVATE
+        neograph::core GTest::gtest_main)
+    neograph_discover_tests(neograph_dispatched_attempt_release_tests PROPERTIES LABELS "core;failure-routing")
     # #385: a Send target that interrupts pauses the run like any other node,
     # on every entry point, in memory and on SQLite.
     add_executable(neograph_send_interrupt_tests test_send_interrupt.cpp)
