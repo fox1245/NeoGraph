@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# LLVM 20.1.8 has an arm64 Sonoma bottle and stable C++20 stop-token support.
-# Keep its headers and runtime together; the wheel repair checks every copied
-# dylib against macOS 14.0 rather than retagging a newer-runtime dependency.
+# LLVM 20.1.8 has stable C++20 stop-token support. Keep its headers and runtime
+# together; the wheel repair checks every copied dylib against the deployment
+# target rather than retagging a newer-runtime dependency.
 brew install llvm@20 libpq sqlite openssl@3 libnghttp2
 
 : "${CXX:?The macOS build must select llvm@20 clang++}"
 : "${CXXFLAGS:?The macOS build must select the matching libc++ headers}"
 : "${LDFLAGS:?The macOS build must select the matching libc++ runtime}"
-if [[ "${MACOSX_DEPLOYMENT_TARGET:-}" != "14.0" ]]; then
-    echo "The macOS release deployment target must remain 14.0" >&2
-    exit 1
-fi
+: "${MACOSX_DEPLOYMENT_TARGET:?The macOS build must set MACOSX_DEPLOYMENT_TARGET (the wheel floor)}"
 
 # Probe the actual selected standard library, not just the compiler version.
 # Use the same flags as CMake's wheel/native-archive builds, including arm64.
@@ -48,7 +45,7 @@ CPP
 read -r -a cxx_flags <<< "$CXXFLAGS"
 read -r -a link_flags <<< "$LDFLAGS"
 "$CXX" --version
-"$CXX" -std=c++20 -arch arm64 -mmacosx-version-min=14.0 \
+"$CXX" -std=c++20 -arch arm64 -mmacosx-version-min="$MACOSX_DEPLOYMENT_TARGET" \
     "${cxx_flags[@]}" "$work/stop-token.cpp" "${link_flags[@]}" \
     -o "$work/stop-token"
 # A successful new-header probe against Apple's old dylib is not sufficient.
@@ -64,7 +61,7 @@ if len(runtimes) != 1 or runtimes[0].startswith(("/usr/lib/", "/System/")):
     raise SystemExit("The stop-token probe must link Homebrew LLVM's libc++ runtime")
 PY
 "$work/stop-token"
-echo "LLVM 20 libc++ stop-token compile, link and execution probe passed (arm64, macOS 14.0 target)"
+echo "LLVM 20 libc++ stop-token compile, link and execution probe passed (arm64, macOS ${MACOSX_DEPLOYMENT_TARGET} target)"
 
 # The published binaries bundle the curl of cmake/wheel-curl.sh, built here against
 # Homebrew's OpenSSL and nghttp2, rather than Homebrew's curl formula, which pulls in
@@ -82,7 +79,7 @@ tar -xf "$curl_work/curl.tar.xz" -C "$curl_work"
     cd "$curl_work/curl-${wheel_curl_version}"
     # curl is C: Apple clang with the release deployment target, not the LLVM 20
     # C++ runtime flags of the NeoGraph build.
-    env -u CXX -u CXXFLAGS -u LDFLAGS CC=clang CFLAGS="-arch arm64 -mmacosx-version-min=14.0" \
+    env -u CXX -u CXXFLAGS -u LDFLAGS CC=clang CFLAGS="-arch arm64 -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET" \
         ./configure --prefix="$prefix" --libdir="$prefix/lib" \
         --with-openssl="$(brew --prefix openssl@3)" \
         "${wheel_curl_configure_args[@]/--with-nghttp2/--with-nghttp2=$(brew --prefix libnghttp2)}"
