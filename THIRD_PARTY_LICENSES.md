@@ -159,7 +159,7 @@ file says of the macOS and Windows closures for 0.15.1 still holds.
 
 ## LLVM 20.1.8 macOS runtime notices
 
-The macOS route selects LLVM 20.1.8 **runtime dylibs** for the macOS 14 floor.
+The macOS route selects LLVM 20.1.8 **runtime dylibs** for the macOS floor (15.0 from the release after 0.16.0, 14.0 before).
 Using a compiler alone would not imply distributing its runtime libraries;
 copying these dylibs does. Section 22 reproduces each exact runtime-project
 license in full, including the LLVM exceptions and legacy NCSA/MIT notices.
@@ -183,20 +183,23 @@ From the release after 0.16.0, the macOS wheel and the macOS portable archive no
 longer link Homebrew's curl formula. `cmake/build-wheel-macos.sh` builds the curl release
 pinned in `cmake/wheel-curl.sh` (the one the Linux wheel builds) against Homebrew's
 `openssl@3` and `libnghttp2`, without Brotli, zstd, libssh2, libpsl, IDN, LDAP or
-GSSAPI. The macOS 14 arm64 wheel built by the hosted Wheels run 40192544754 for that
-change was inspected: `neograph_engine/.dylibs` holds the libraries below, and
-`libcurl.4.dylib` links only `libnghttp2`, `libssl`, `libcrypto` and the system's
-`libz`. Homebrew formula versions float with the runner image, so a later build can
-differ and must be inspected again.
+GSSAPI. The macOS wheels build on macOS 15 with a macOS 15.0 floor. The macOS 15 arm64
+wheel built by the hosted Wheels run 42336528667 was inspected: `neograph_engine/.dylibs`
+holds the libraries below. `libcurl.4.dylib` links `libssl.3` and `libcrypto.3`
+(`openssl@3`); Homebrew's `libpq` on that runner links `libssl.4` and `libcrypto.4`
+(Homebrew `openssl`, OpenSSL 4), so both OpenSSL 3 and OpenSSL 4 are copied. Homebrew
+formula versions float with the runner image, so a later build can differ and must be
+inspected again.
 
 | Component / observed version | Matching upstream legal document | License / scope |
 |---|---|---|
 | curl 8.22.0 (source-built, `cmake/wheel-curl.sh`) | Section 9 of the full notices | curl license; the exact 8.22.0 notice text was not re-verified |
-| OpenSSL 3.6.3 (`openssl@3`) | Section 11 of the full notices | Apache 2.0; copied as `libssl` and `libcrypto`; the exact 3.6.3 notice text was not re-verified |
-| nghttp2 1.70.0 (`libnghttp2`) | Section 10 of the full notices | MIT |
-| MIT Kerberos 1.22.2 (`krb5`) | Sections 19 and 21 of the full notices (other versions) | BSD-style and per-file notices; Homebrew's `libpq` links Homebrew's `krb5` for GSSAPI, which was copied (`libkrb5`, `libgssapi_krb5`, `libk5crypto`, `libkrb5support`, `libcom_err`), not the system Kerberos; the 1.22.2 `NOTICE` was not reproduced |
+| OpenSSL 3.5.9 (`openssl@3`, linked by curl) | Section 11 of the full notices | Apache 2.0; copied as `libssl.3` and `libcrypto.3`; the exact 3.5.9 notice text was not re-verified |
+| OpenSSL 4.1.0 (Homebrew `openssl`, linked by `libpq`) | Section 11 of the full notices | Apache 2.0; copied as `libssl.4` and `libcrypto.4`; the exact 4.1.0 notice text was not re-verified |
+| nghttp2 1.71.0 (`libnghttp2`) | Section 10 of the full notices | MIT |
+| MIT Kerberos 1.22.2 (`krb5`) | Sections 19 and 21 of the full notices (other versions) | BSD-style and per-file notices; Homebrew's `libpq` links Homebrew's `krb5` for GSSAPI, which was copied (`libkrb5`, `libgssapi_krb5`, `libk5crypto`, `libkrb5support`, `libcom_err`) |
 | libpq 18.6 | Section 12 of the full notices | PostgreSQL license; the exact 18.6 copyright text was not re-verified |
-| SQLite 3.53.4 | Section 13 of the full notices | public domain |
+| SQLite 3.54.1 | Section 13 of the full notices | public domain |
 | LLVM 20.1.8 runtimes (`llvm@20`) | Section 22 of the full notices | libc++, libc++abi, libunwind: see the LLVM section above |
 
 Releases up to and including 0.16.0 linked Homebrew's curl formula; their macOS
