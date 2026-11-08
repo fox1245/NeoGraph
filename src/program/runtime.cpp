@@ -2784,7 +2784,15 @@ namespace {
 std::atomic<RefusalDrainParkedObserver>  refusal_drain_parked_observer{nullptr};
 std::atomic<SelfTakeoverEnteredObserver> self_takeover_entered_observer{nullptr};
 std::atomic<ControlWaitParkedObserver>   control_wait_parked_observer{nullptr};
+std::atomic<GraphMigrationRequestedObserver> graph_migration_requested_observer{nullptr};
 }  // namespace
+
+void set_graph_migration_requested_observer_for_testing(GraphMigrationRequestedObserver observer) noexcept {
+    graph_migration_requested_observer.store(observer, std::memory_order_release);
+}
+void notify_graph_migration_requested(std::string_view run_id) noexcept {
+    if (const auto observer = graph_migration_requested_observer.load(std::memory_order_acquire)) observer(run_id);
+}
 
 void set_refusal_drain_parked_observer_for_testing(RefusalDrainParkedObserver observer) noexcept {
     refusal_drain_parked_observer.store(observer, std::memory_order_release);
@@ -4866,8 +4874,13 @@ asio::awaitable<std::uint64_t> RunControl::request_graph_migration_async() {
     if (!coordination_mutex || !admission) {
         throw std::logic_error("Program graph migration coordination is not configured");
     }
-    auto coordination_lock = co_await coordination_mutex->lock_async();
-    co_return arm_graph_migration(admission);
+    std::uint64_t request_id = 0;
+    {
+        auto coordination_lock = co_await coordination_mutex->lock_async();
+        request_id = arm_graph_migration(admission);
+    }
+    notify_graph_migration_requested(run_id);
+    co_return request_id;
 }
 
 GraphMigrationCapsule RunControl::wait_graph_migration(std::uint64_t request_id) {

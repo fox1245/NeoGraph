@@ -1303,13 +1303,51 @@ TEST(ProgramRootLeaseTakeover, AFailedRunReadBeforeACheckpointIsNotATakeover) {
     EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
 }
 
-/// Starts a migration of `source` on another thread and lets the source past its fan step once the migration has
-/// read the source's lineage, the last read before it asks for a safe point. The source is held in its fan step and
-/// reads no lineage there, so the first read after the hook is installed is the migration's.
+/// Lets the source of a migration past its fan step once the migration's request is registered on the source's
+/// control, so the source reaches its next safe point with the request in place (letting it go earlier, for example
+/// when the migration has only read the lineage, lets a fast source finish before anyone asks it to stop).
+struct MigrationRequestedGate {
+    MigrationRequestedGate(std::string run_id, Gate& gate) {
+        std::lock_guard lock(mutex());
+        slot() = Slot{std::move(run_id), &gate};
+        program::detail::set_graph_migration_requested_observer_for_testing(&MigrationRequestedGate::dispatch);
+    }
+    ~MigrationRequestedGate() {
+        program::detail::set_graph_migration_requested_observer_for_testing(nullptr);
+        std::lock_guard lock(mutex());
+        slot() = Slot{};
+    }
+    MigrationRequestedGate(const MigrationRequestedGate&)            = delete;
+    MigrationRequestedGate& operator=(const MigrationRequestedGate&) = delete;
+
+private:
+    struct Slot {
+        std::string run_id;
+        Gate*       gate = nullptr;
+    };
+    static std::mutex& mutex() {
+        static std::mutex m;
+        return m;
+    }
+    static Slot& slot() {
+        static Slot s;
+        return s;
+    }
+    static void dispatch(std::string_view run_id) {
+        Gate* gate = nullptr;
+        {
+            std::lock_guard lock(mutex());
+            if (slot().gate && slot().run_id == run_id) gate = slot().gate;
+        }
+        if (gate) gate->release();
+    }
+};
+
+/// Starts a migration of `source` on another thread and lets the source past its fan step once the migration's
+/// request is registered (MigrationRequestedGate).
 struct MigrationRace {
     MigrationRace(Process& process, LeaseWorld& world, const ProgramVersion& version, ProgramHandle source)
-        : process_(process), world_(world) {
-        process_.view->on_run_lineage_read = [this] { world_.fan_gate.release(); };
+        : process_(process), world_(world), requested_(world.run_id(), world.fan_gate) {
         migration = std::async(std::launch::async, [this, &version, source]() -> std::optional<ProgramResult> {
             try {
                 return process_.host.runtime()
@@ -1320,12 +1358,12 @@ struct MigrationRace {
             }
         });
     }
-    ~MigrationRace() { process_.view->on_run_lineage_read = nullptr; }
     std::future<std::optional<ProgramResult>> migration;
 
 private:
-    Process&    process_;
-    LeaseWorld& world_;
+    Process&               process_;
+    LeaseWorld&            world_;
+    MigrationRequestedGate requested_;
 };
 
 TEST(ProgramRootLeaseTakeover, ATakeoverDuringASafePointPublicationRefusesTheMigration) {
