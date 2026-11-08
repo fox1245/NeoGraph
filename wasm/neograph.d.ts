@@ -323,6 +323,7 @@ export interface ProgramStores {
   grants?: object;
   fragments?: object;
   modules?: object;
+  checkpoints?: object;
 }
 
 /** The in-memory stores of the module, as stores of the host: `programs({ stores })` takes them. Methods return values. */

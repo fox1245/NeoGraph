@@ -176,11 +176,17 @@ message ToolCallResponse {
 // run and fails the run when it is UNIMPLEMENTED (a managed budget is never
 // assumed absent); a server that manages no budget returns required = false.
 service CheckpointService {
+  rpc GetCheckpointCapabilities(CheckpointCapabilitiesRequest) returns (CheckpointCapabilitiesResponse);
+  rpc RaiseCheckpointFence(RaiseCheckpointFenceRequest) returns (RaiseCheckpointFenceResponse);
+  rpc LoadCheckpointFence(LoadCheckpointFenceRequest) returns (LoadCheckpointFenceResponse);
   rpc SaveCheckpoint(SaveCheckpointRequest) returns (StatusResponse);
   rpc LoadLatestCheckpoint(LoadLatestRequest) returns (CheckpointResponse);
   rpc LoadCheckpointById(LoadByIdRequest) returns (CheckpointResponse);
   rpc ListCheckpoints(ListCheckpointsRequest) returns (ListCheckpointsResponse);
   rpc DeleteThreadCheckpoints(DeleteThreadRequest) returns (StatusResponse);
+  rpc PutCheckpointWrites(PutCheckpointWritesRequest) returns (StatusResponse);
+  rpc GetCheckpointWrites(GetCheckpointWritesRequest) returns (GetCheckpointWritesResponse);
+  rpc ClearCheckpointWrites(ClearCheckpointWritesRequest) returns (StatusResponse);
   rpc RequiresManagedBudget(RequiresManagedBudgetRequest) returns (RequiresManagedBudgetResponse);
   // Receipt payloads are untrusted claims. Each operation delegates to the
   // persistent backend's current generation/actor/head compare-and-set.
@@ -189,6 +195,74 @@ service CheckpointService {
   rpc SettleManagedBudgetEffect(SettleManagedBudgetEffectRequest) returns (ManagedBudgetLeaseResponse);
   rpc PublishManagedBudgetCheckpoint(PublishManagedBudgetCheckpointRequest) returns (ManagedBudgetLeaseResponse);
   rpc ReleaseManagedBudgetLease(ReleaseManagedBudgetLeaseRequest) returns (ManagedBudgetLeaseResponse);
+}
+
+message WriteFenceProto {
+  string owner_scope = 1;
+  string run_id = 2;
+  uint64 fence = 3;
+}
+
+message CheckpointCapabilitiesRequest {}
+
+message CheckpointCapabilitiesResponse {
+  bool supports_write_fence = 1;
+}
+
+message RaiseCheckpointFenceRequest {
+  WriteFenceProto write_fence = 1;
+  string owner_scope = 2;
+  string run_id = 3;
+  uint64 new_fence = 4;
+}
+
+message RaiseCheckpointFenceResponse {
+  bool ok = 1;
+  string error = 2;
+  uint64 stored_fence = 3;
+}
+
+message LoadCheckpointFenceRequest {
+  string owner_scope = 1;
+  string run_id = 2;
+}
+
+message LoadCheckpointFenceResponse {
+  bool found = 1;
+  uint64 fence = 2;
+}
+
+message PendingWriteProto {
+  string task_id = 1;
+  string task_path = 2;
+  string node_name = 3;
+  string writes_json = 4;
+  string command_json = 5;
+  string sends_json = 6;
+  int64 step = 7;
+  int64 timestamp = 8;
+}
+
+message PutCheckpointWritesRequest {
+  string thread_id = 1;
+  string parent_checkpoint_id = 2;
+  PendingWriteProto write = 3;
+  WriteFenceProto write_fence = 4;
+}
+
+message GetCheckpointWritesRequest {
+  string thread_id = 1;
+  string parent_checkpoint_id = 2;
+}
+
+message GetCheckpointWritesResponse {
+  repeated PendingWriteProto writes = 1;
+}
+
+message ClearCheckpointWritesRequest {
+  string thread_id = 1;
+  string parent_checkpoint_id = 2;
+  WriteFenceProto write_fence = 3;
 }
 
 message CheckpointBlob {
@@ -212,7 +286,10 @@ message StatusResponse {
   string error = 2;   // engine-side failure surfaces here, not as gRPC status
 }
 
-message SaveCheckpointRequest  { CheckpointBlob checkpoint = 1; }
+message SaveCheckpointRequest  {
+  CheckpointBlob checkpoint = 1;
+  WriteFenceProto write_fence = 2;
+}
 message LoadLatestRequest      { string thread_id = 1; }
 message LoadByIdRequest        { string id = 1; }
 message CheckpointResponse {
@@ -226,7 +303,10 @@ message ListCheckpointsRequest {
 message ListCheckpointsResponse {
   repeated CheckpointBlob checkpoints = 1;
 }
-message DeleteThreadRequest    { string thread_id = 1; }
+message DeleteThreadRequest    {
+  string thread_id = 1;
+  WriteFenceProto write_fence = 2;
+}
 message RequiresManagedBudgetRequest { string thread_id = 1; }
 message RequiresManagedBudgetResponse {
   // Denies omission of a managed bank; never authenticates or authorizes it.
@@ -248,6 +328,7 @@ message AcquireManagedBudgetLeaseRequest {
   ManagedBudgetLeaseScope scope = 1;
   string expected_checkpoint_id = 2;
   string expected_checkpoint_commitment = 3;
+  WriteFenceProto write_fence = 4;
 }
 message ManagedBudgetLeaseResponse {
   // Actual backend receipt after successful commit; absent/corrupt denies.
@@ -258,6 +339,7 @@ message BeginManagedBudgetEffectRequest {
   string effect_id = 2;
   uint64 exact_claim_amount = 3;
   string prepared_request_digest = 4;
+  WriteFenceProto write_fence = 5;
 }
 message ManagedBudgetEffectResponse {
   string lease_json = 1;
@@ -274,11 +356,14 @@ message SettleManagedBudgetEffectRequest {
   // Complete atomic AuthoritySnapshot, authenticated by the outcome's
   // archive binding to this exact lease/effect/snapshot. Never a grant.
   string authority_json = 4;
+  WriteFenceProto write_fence = 5;
 }
 message PublishManagedBudgetCheckpointRequest {
   string lease_json = 1;
   CheckpointBlob checkpoint = 2;
+  WriteFenceProto write_fence = 3;
 }
 message ReleaseManagedBudgetLeaseRequest {
   string lease_json = 1;
+  WriteFenceProto write_fence = 2;
 }

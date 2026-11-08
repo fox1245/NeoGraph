@@ -9,6 +9,7 @@
 // optional null, a list an array, an enum a lower_snake_case string. wasm/README.md has the table.
 #pragma once
 
+#include <neograph/graph/checkpoint.h>
 #include <neograph/json.h>
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/module.h>
@@ -16,9 +17,12 @@
 #include <neograph/program/task_graph_fragment.h>
 #include <neograph/program/transition_store.h>
 
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -174,6 +178,50 @@ struct Codec<std::uint64_t> {
         if (value.is_number_integer() && !value.is_number_unsigned() && value.get<long long>() < 0)
             codec_detail::malformed("expected a non-negative integer");
         return value.get<unsigned long long>();
+    }
+};
+
+template <>
+struct Codec<std::int64_t> {
+    using Owned = std::int64_t;
+    static json encode(std::int64_t value) { return json(static_cast<long long>(value)); }
+    static std::int64_t decode(const json& value) {
+        if (!value.is_number_integer() && !value.is_number_unsigned()) codec_detail::malformed("expected an integer");
+        return value.get<long long>();
+    }
+};
+
+template <>
+struct Codec<int> {
+    using Owned = int;
+    static json encode(int value) { return json(value); }
+    static int decode(const json& value) {
+        if (!value.is_number_integer() && !value.is_number_unsigned()) codec_detail::malformed("expected an integer");
+        return value.get<int>();
+    }
+};
+
+/// A 64-bit fence token serialized as a decimal string so values above 2^53 - 1 never lose precision in JavaScript.
+struct FenceToken {
+    std::uint64_t value = 0;
+    operator std::uint64_t() const noexcept { return value; }
+};
+
+template <>
+struct Codec<FenceToken> {
+    using Owned = FenceToken;
+    static json encode(FenceToken token) { return json(std::to_string(token.value)); }
+    static FenceToken decode(const json& value) {
+        if (value.is_string()) {
+            const auto text = value.get<std::string>();
+            if (text.empty()) codec_detail::malformed("expected a non-empty fence string");
+            std::uint64_t parsed = 0;
+            const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed, 10);
+            if (ec != std::errc{} || ptr != text.data() + text.size())
+                codec_detail::malformed("expected a 64-bit unsigned integer fence");
+            return FenceToken{parsed};
+        }
+        return FenceToken{Codec<std::uint64_t>::decode(value)};
     }
 };
 
@@ -470,6 +518,131 @@ struct Codec<program::ProgramCoreToolGrantContext> {
     }
 };
 
+template <>
+struct Codec<graph::CheckpointWriteFence> {
+    using Owned = graph::CheckpointWriteFence;
+    static json encode(const Owned& value) {
+        value.validate();
+        json out = json::object();
+        out["owner_scope"] = json(value.owner_scope);
+        out["run_id"]      = json(value.run_id);
+        out["fence"]       = Codec<FenceToken>::encode(FenceToken{value.fence});
+        return out;
+    }
+    static Owned decode(const json& value) {
+        if (!value.is_object()) codec_detail::malformed("expected a CheckpointWriteFence object");
+        Owned out;
+        if (value.contains("owner_scope")) {
+            out.owner_scope = Codec<std::string>::decode(value["owner_scope"]);
+        } else if (value.contains("ownerScope")) {
+            out.owner_scope = Codec<std::string>::decode(value["ownerScope"]);
+        } else {
+            codec_detail::malformed("missing member 'owner_scope'");
+        }
+        if (value.contains("run_id")) {
+            out.run_id = Codec<std::string>::decode(value["run_id"]);
+        } else if (value.contains("runId")) {
+            out.run_id = Codec<std::string>::decode(value["runId"]);
+        } else {
+            codec_detail::malformed("missing member 'run_id'");
+        }
+        if (!value.contains("fence")) codec_detail::malformed("missing member 'fence'");
+        out.fence = Codec<FenceToken>::decode(value["fence"]).value;
+        out.validate();
+        return out;
+    }
+};
+
+template <>
+struct Codec<graph::Checkpoint> {
+    using Owned = graph::Checkpoint;
+    static json encode(const Owned& value) {
+        json barrier = json::object();
+        for (const auto& [node, upstreams] : value.barrier_state) {
+            json arr = json::array();
+            for (const auto& upstream : upstreams) arr.push_back(json(upstream));
+            barrier[node] = std::move(arr);
+        }
+        json out = json::object();
+        out["id"]               = json(value.id);
+        out["thread_id"]        = json(value.thread_id);
+        out["channel_values"]   = value.channel_values;
+        out["channel_versions"] = value.channel_versions;
+        out["parent_id"]        = json(value.parent_id);
+        out["current_node"]     = json(value.current_node);
+        out["next_nodes"]       = Codec<std::vector<std::string>>::encode(value.next_nodes);
+        out["interrupt_phase"]  = json(graph::to_string(value.interrupt_phase));
+        out["barrier_state"]    = std::move(barrier);
+        out["metadata"]         = graph::checkpoint_storage_metadata(value);
+        out["step"]             = Codec<std::int64_t>::encode(value.step);
+        out["timestamp"]        = Codec<std::int64_t>::encode(value.timestamp);
+        out["schema_version"]   = Codec<std::uint64_t>::encode(value.schema_version);
+        return out;
+    }
+    static Owned decode(const json& value) {
+        if (!value.is_object()) codec_detail::malformed("expected a Checkpoint object");
+        Owned out;
+        out.id               = Codec<std::string>::decode(codec_detail::member(value, "id"));
+        out.thread_id        = Codec<std::string>::decode(codec_detail::member(value, "thread_id"));
+        out.channel_values   = value.contains("channel_values") ? value["channel_values"] : json::object();
+        out.channel_versions = value.contains("channel_versions") ? value["channel_versions"] : json();
+        out.parent_id        = value.contains("parent_id") ? Codec<std::string>::decode(value["parent_id"]) : std::string{};
+        out.current_node     = value.contains("current_node") ? Codec<std::string>::decode(value["current_node"]) : std::string{};
+        if (value.contains("next_nodes"))
+            out.next_nodes = Codec<std::vector<std::string>>::decode(value["next_nodes"]);
+        if (value.contains("interrupt_phase")) {
+            std::string phase_str;
+            out.interrupt_phase = graph::parse_checkpoint_phase(codec_detail::expect_string(value["interrupt_phase"], phase_str));
+        }
+        if (value.contains("barrier_state") && value["barrier_state"].is_object()) {
+            for (const auto& [node, arr] : value["barrier_state"].items()) {
+                if (!arr.is_array()) codec_detail::malformed("expected barrier_state entry to be an array");
+                std::set<std::string> upstreams;
+                for (std::size_t i = 0; i < arr.size(); ++i) upstreams.insert(Codec<std::string>::decode(arr[i]));
+                out.barrier_state.emplace(node, std::move(upstreams));
+            }
+        }
+        out.metadata       = value.contains("metadata") ? value["metadata"] : json();
+        out.step           = value.contains("step") ? Codec<std::int64_t>::decode(value["step"]) : 0;
+        out.timestamp      = value.contains("timestamp") ? Codec<std::int64_t>::decode(value["timestamp"]) : 0;
+        out.schema_version = value.contains("schema_version")
+                                 ? static_cast<std::uint32_t>(Codec<std::uint64_t>::decode(value["schema_version"]))
+                                 : graph::CHECKPOINT_SCHEMA_VERSION;
+        graph::restore_checkpoint_storage_envelope(out);
+        return out;
+    }
+};
+
+template <>
+struct Codec<graph::PendingWrite> {
+    using Owned = graph::PendingWrite;
+    static json encode(const Owned& value) {
+        json out = json::object();
+        out["task_id"]   = json(value.task_id);
+        out["task_path"] = json(value.task_path);
+        out["node_name"] = json(value.node_name);
+        out["writes"]    = value.writes;
+        out["command"]   = value.command;
+        out["sends"]     = value.sends;
+        out["step"]      = Codec<std::int64_t>::encode(value.step);
+        out["timestamp"] = Codec<std::int64_t>::encode(value.timestamp);
+        return out;
+    }
+    static Owned decode(const json& value) {
+        if (!value.is_object()) codec_detail::malformed("expected a PendingWrite object");
+        Owned out;
+        out.task_id   = Codec<std::string>::decode(codec_detail::member(value, "task_id"));
+        out.task_path = value.contains("task_path") ? Codec<std::string>::decode(value["task_path"]) : std::string{};
+        out.node_name = value.contains("node_name") ? Codec<std::string>::decode(value["node_name"]) : std::string{};
+        out.writes    = value.contains("writes") ? value["writes"] : json::array();
+        out.command   = value.contains("command") ? value["command"] : json();
+        out.sends     = value.contains("sends") ? value["sends"] : json::array();
+        out.step      = value.contains("step") ? Codec<std::int64_t>::decode(value["step"]) : 0;
+        out.timestamp = value.contains("timestamp") ? Codec<std::int64_t>::decode(value["timestamp"]) : 0;
+        return out;
+    }
+};
+
 // ---------------------------------------------------------------------------------------------------------------
 // Arguments and results.
 
@@ -623,6 +796,24 @@ std::tuple<typename Codec<A>::Owned...> decode_arguments(const json& array) {
     X(get_owned, get, "get", false, std::optional<program::ProgramModule>, std::string_view, std::string_view)        \
     X(set_lifecycle, set_lifecycle, "setLifecycle", true, void, std::string_view, program::ModuleLifecycle)
 
+#define NEOGRAPH_JS_CHECKPOINT_OPS(X)                                                                                  \
+    X(save, save, "save", true, void, graph::Checkpoint)                                                               \
+    X(save_fenced, save, "save", false, void, graph::Checkpoint, graph::CheckpointWriteFence)                          \
+    X(load_latest, load_latest, "loadLatest", true, std::optional<graph::Checkpoint>, std::string)                     \
+    X(load_by_id, load_by_id, "loadById", true, std::optional<graph::Checkpoint>, std::string)                         \
+    X(list, list, "list", true, std::vector<graph::Checkpoint>, std::string, int)                                      \
+    X(delete_thread, delete_thread, "deleteThread", true, void, std::string)                                           \
+    X(delete_thread_fenced, delete_thread, "deleteThread", false, void, std::string, graph::CheckpointWriteFence)      \
+    X(put_writes, put_writes, "putWrites", false, void, std::string, std::string, graph::PendingWrite)                 \
+    X(put_writes_fenced, put_writes, "putWrites", false, void, std::string, std::string, graph::PendingWrite,          \
+      graph::CheckpointWriteFence)                                                                                     \
+    X(get_writes, get_writes, "getWrites", false, std::vector<graph::PendingWrite>, std::string, std::string)          \
+    X(clear_writes, clear_writes, "clearWrites", false, void, std::string, std::string)                                \
+    X(clear_writes_fenced, clear_writes, "clearWrites", false, void, std::string, std::string,                         \
+      graph::CheckpointWriteFence)                                                                                     \
+    X(raise_fence, raise_fence, "raiseFence", false, FenceToken, std::string, std::string, FenceToken)                 \
+    X(load_fence, load_fence, "loadFence", false, FenceToken, std::string, std::string)
+
 /// One method of a store: the JavaScript name, whether the object must have it, and the types that cross.
 template <class R, class... A>
 struct Op {
@@ -668,5 +859,9 @@ namespace module_ops {
 NEOGRAPH_JS_MODULE_OPS(NEOGRAPH_JS_OP_CONSTANT)
 inline constexpr OpInfo all[] = {NEOGRAPH_JS_MODULE_OPS(NEOGRAPH_JS_OP_INFO)};
 }  // namespace module_ops
+namespace checkpoint_ops {
+NEOGRAPH_JS_CHECKPOINT_OPS(NEOGRAPH_JS_OP_CONSTANT)
+inline constexpr OpInfo all[] = {NEOGRAPH_JS_CHECKPOINT_OPS(NEOGRAPH_JS_OP_INFO)};
+}  // namespace checkpoint_ops
 
 }  // namespace neograph::wasm

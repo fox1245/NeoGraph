@@ -250,6 +250,8 @@ InvocationExit exit_of(const std::exception_ptr& error) {
                    : InvocationExit::Interrupt;
     } catch (const CancelledException&) {
         return InvocationExit::Stop;
+    } catch (const CheckpointWriteFenceError&) {
+        return InvocationExit::Stop;
     } catch (const std::bad_alloc&) {
         return InvocationExit::Stop;
     } catch (...) {
@@ -1242,6 +1244,8 @@ int settle_failed_attempt(const AttemptFailureEnv& env, const RetryPolicy& polic
         if (slot && slot->interrupted_attempt) *slot->interrupted_attempt = attempt;
         throw;
     } catch (const CancelledException&) {
+        throw;
+    } catch (const CheckpointWriteFenceError&) {
         throw;
     } catch (const std::bad_alloc&) {
         throw;

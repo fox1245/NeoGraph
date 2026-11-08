@@ -1,4 +1,4 @@
-<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=ea7bd7d795c0c89726c25c8477b01a8e4523b5ce127265d2a9e2623b2ef94756 -->
+<!-- neograph-i18n: source=docs/reference-en.md locale=ja source_sha256=82e247c60757fe9517f39c9e8d5b5ebdd1db3e0f3bcbf90bb1a0fbb1f51a21d7 -->
 # NeoGraph API — ナラティブツアー
 **Languages:** [English](reference-en.md) | [한국어](reference-ko.md) | [日本語](reference-ja.md) | [简体中文](reference-zh-CN.md)
 この文書は NeoGraph の公開 API を順に案内する **ナラティブツアー** であり、
@@ -2119,77 +2119,169 @@ bank、lease の権限を与えません。
 必要です。
 
 ```cpp
+inline constexpr std::uint64_t kInitialCheckpointWriteFence = 1;
+
+struct CheckpointWriteFence {
+    static constexpr std::uint64_t kInitialFence = kInitialCheckpointWriteFence;
+
+    std::string owner_scope;
+    std::string run_id;
+    std::uint64_t fence = 0;
+
+    bool active() const noexcept { return !run_id.empty() && fence > 0; }
+    void validate() const;
+    friend bool operator==(const CheckpointWriteFence&,
+                           const CheckpointWriteFence&) noexcept = default;
+};
+
+struct CheckpointWriteFenceRefusal {
+    std::string owner_scope;
+    std::string run_id;
+    std::uint64_t writer_fence = 0;
+    std::uint64_t stored_fence = 0;
+};
+
+class CheckpointWriteFenceError final : public CheckpointException {
+public:
+    static constexpr const char* kErrorCode = "G_CHECKPOINT_WRITE_FENCE";
+
+    explicit CheckpointWriteFenceError(CheckpointWriteFenceRefusal refusal);
+    CheckpointWriteFenceError(CheckpointWriteFenceRefusal refusal, std::string message);
+
+    const char* code() const noexcept { return kErrorCode; }
+    const CheckpointWriteFenceRefusal& refusal() const noexcept { return refusal_; }
+};
+
 class CheckpointStore {
 public:
     virtual ~CheckpointStore() = default;
 
+    // ── Write fencing ────────────────────────────────────────────
+    virtual bool supports_write_fence() const { return false; }
+    virtual std::uint64_t raise_fence(const std::string& owner_scope,
+                                      const std::string& run_id,
+                                      std::uint64_t min_fence);
+    virtual asio::awaitable<std::uint64_t> raise_fence_async(
+        std::string owner_scope,
+        std::string run_id,
+        std::uint64_t min_fence);
+    virtual std::uint64_t load_fence(const std::string& owner_scope,
+                                     const std::string& run_id);
+    virtual asio::awaitable<std::uint64_t> load_fence_async(
+        std::string owner_scope,
+        std::string run_id);
+
     // ── Sync facade (5 virtuals; missing operation throws) ──────
     virtual void save(const Checkpoint& cp);
+    virtual void save(const Checkpoint& cp, const CheckpointWriteFence& fence);
     virtual std::optional<Checkpoint> load_latest(const std::string& thread_id);
     virtual std::optional<Checkpoint> load_by_id(const std::string& id);
     virtual std::vector<Checkpoint>   list(const std::string& thread_id,
                                            int limit = 100);
     virtual void delete_thread(const std::string& thread_id);
+    virtual void delete_thread(const std::string& thread_id,
+                               const CheckpointWriteFence& fence);
 
     // ── Async peers (5 virtuals; sync-only operations offload) ──
     virtual asio::awaitable<void> save_async(const Checkpoint& cp);
+    virtual asio::awaitable<void> save_async(const Checkpoint& cp,
+                                             CheckpointWriteFence fence);
     virtual asio::awaitable<std::optional<Checkpoint>>
         load_latest_async(const std::string& thread_id);
     virtual asio::awaitable<std::optional<Checkpoint>>
         load_by_id_async(const std::string& id);
     virtual asio::awaitable<std::vector<Checkpoint>>
         list_async(const std::string& thread_id, int limit = 100);
-    virtual asio::awaitable<void>
-        delete_thread_async(const std::string& thread_id);
+    virtual asio::awaitable<void> delete_thread_async(
+        const std::string& thread_id);
+    virtual asio::awaitable<void> delete_thread_async(
+        const std::string& thread_id,
+        CheckpointWriteFence fence);
 
     // ── Pending writes — fine-grained super-step progress log ──────
     //
     // Default no-ops: backends that don't support per-node durable
     // writes fall back to "full super-step replay" on resume.
-    virtual void put_writes(const std::string& thread_id,
-                            const std::string& parent_checkpoint_id,
-                            const PendingWrite& write) {}
+    virtual void put_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write) {}
+    virtual void put_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write,
+        const CheckpointWriteFence& fence);
     virtual std::vector<PendingWrite> get_writes(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id) { return {}; }
-    virtual void clear_writes(const std::string& thread_id,
-                              const std::string& parent_checkpoint_id) {}
+    virtual void clear_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) {}
+    virtual void clear_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const CheckpointWriteFence& fence);
 
     // ── Async pending-writes peers (default-bridge to sync) ────────
     virtual asio::awaitable<void> put_writes_async(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id,
         const PendingWrite& write);
+    virtual asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const PendingWrite& write,
+        CheckpointWriteFence fence);
     virtual asio::awaitable<std::vector<PendingWrite>> get_writes_async(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id);
     virtual asio::awaitable<void> clear_writes_async(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id);
+    virtual asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        CheckpointWriteFence fence);
 };
 ```
 
 | メソッド | 説明 |
 |--------|-------------|
-| `save(cp)` / `save_async(cp)` | チェックポイントを永続化します。エンジンはスーパーステップごとに 1 つ書き込みます。 |
+| `save(cp, fence)` / `save_async(cp, fence)` | チェックポイントを永続化します。エンジンはスーパーステップごとに 1 つ書き込みます。`fence.active()` のとき、保存されている実行フェンスが `fence.fence` を超えている場合は `CheckpointWriteFenceError`（`G_CHECKPOINT_WRITE_FENCE`）を送出します。 |
 | `load_latest(thread_id)` / `_async` | スレッドの最新チェックポイントを読み込みます。 |
 | `load_by_id(id)` / `_async` | UUID で指定したチェックポイントを読み込みます (タイムトラベル)。 |
 | `list(thread_id, limit)` / `_async` | スレッドのチェックポイントを新しい順に最大 `limit` 件列挙します。 |
-| `delete_thread(thread_id)` / `_async` | スレッドのすべてのチェックポイントを削除します。 |
-| `put_writes(thread_id, parent_cp, write)` / `_async` | スーパーステップ途中で成功したノード実行を記録します。エンジンはノードが戻った直後、かつその書き込みを GraphState に適用する *前* にこれを呼び出します。デフォルトは no-op です。 |
+| `delete_thread(thread_id, fence)` / `_async` | スレッドのすべてのチェックポイントを削除します（アクティブな場合は `fence` でフェンシングされます）。 |
+| `put_writes(thread_id, parent_cp, write, fence)` / `_async` | スーパーステップ途中で成功したノード実行を記録します。エンジンはノードが戻った直後、かつその書き込みを GraphState に適用する *前* にこれを呼び出します（アクティブな場合は `fence` でフェンシングされます）。デフォルトは no-op です。 |
 | `get_writes(thread_id, parent_cp)` / `_async` | 親チェックポイントに紐づく保留中の書き込みを挿入順に読み込みます。エンジンは resume 時にこれを呼び出し、完了済みタスクをスキップします。1つの task id に複数の行があるときは、resume は最も新しい行をリプレイします。デフォルトは空です。 |
-| `clear_writes(thread_id, parent_cp)` / `_async` | 後続スーパーステップのチェックポイントが永続保存された後、保留中の書き込みを破棄します。デフォルトは no-op です。 |
+| `clear_writes(thread_id, parent_cp, fence)` / `_async` | 後続スーパーステップのチェックポイントが永続保存された後、保留中の書き込みを破棄します（アクティブな場合は `fence` でフェンシングされます）。デフォルトは no-op です。 |
+| `supports_write_fence()` | バックエンドが原子的な実行ごとの書き込みフェンシングを実装している場合に `true` を返します。フェンシング非対応のカスタムストアのデフォルトは `false`（初期フェンス 1 のみを許可し、`fence > 1` を拒否します）です。 |
+| `raise_fence(owner_scope, run_id, min_fence)` / `_async` | `(owner_scope, run_id)` の保存された書き込みフェンスを単調増加で少なくとも `min_fence`（`std::max(stored_fence, min_fence)`）まで引き上げ、結果の保存されたフェンスを返します。`min_fence == 0` または空のキーに対しては `std::invalid_argument` を送出します。 |
+| `load_fence(owner_scope, run_id)` / `_async` | `(owner_scope, run_id)` の保存された書き込みフェンスを読み込み、行がまだ存在しない場合は初期ベースライン `kInitialCheckpointWriteFence`（`1`）を返します。 |
+
+`FencedCheckpointStore` は基底の `std::shared_ptr<CheckpointStore>` をラップし、すべての変更操作（`save`、`put_writes`、`clear_writes`、`delete_thread`、`acquire_managed_budget_lease`、`commit_step_with_managed_budget` およびそれぞれの `_async` 対応メソッド）に固定の `(owner_scope, run_id, fence)` をバインドします。一部のみ設定された `CheckpointWriteFence` や、バインドされたフェンスと異なる明示的なアクティブフェンスを渡すと `std::invalid_argument` を送出します。
+
 ### InMemoryCheckpointStore
 テストや単一プロセスのアプリケーションに適した、スレッドセーフなインメモリ実装です。
 ```cpp
 class InMemoryCheckpointStore : public CheckpointStore {
 public:
+    bool supports_write_fence() const override { return true; }
+    std::uint64_t raise_fence(const std::string& owner_scope,
+                              const std::string& run_id,
+                              std::uint64_t min_fence) override;
+    std::uint64_t load_fence(const std::string& owner_scope,
+                             const std::string& run_id) override;
+
     void save(const Checkpoint& cp) override;
+    void save(const Checkpoint& cp, const CheckpointWriteFence& fence) override;
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;
     std::optional<Checkpoint> load_by_id(const std::string& id) override;
     std::vector<Checkpoint> list(const std::string& thread_id,
                                   int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
+    void delete_thread(const std::string& thread_id,
+                       const CheckpointWriteFence& fence) override;
 
     size_t size() const;  // Total number of stored checkpoints
 };

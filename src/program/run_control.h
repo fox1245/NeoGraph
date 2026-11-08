@@ -315,7 +315,7 @@ public:
                std::shared_ptr<ProgramTransitionStore>    transitions,
                std::optional<ProgramExecutionLease>       execution_lease = std::nullopt,
                std::string                                logical_run_id  = {},
-               std::uint64_t                              fence           = 1);
+               std::uint64_t                              fence           = graph::kInitialCheckpointWriteFence);
     /// A control for a run read back from the store; `events` are the run's events, which the caller has loaded.
     RunControl(ProgramRunRecord record,
                std::vector<ProgramEvent> events,
@@ -342,6 +342,31 @@ public:
     asio::awaitable<void>       retire_to(std::shared_ptr<RunControl> successor,
                                           std::shared_ptr<ReentrantOperationLock> held = {});
     std::shared_ptr<RunControl> following_successor() const;
+    bool                        has_successor() const noexcept;
+    const std::shared_ptr<graph::CheckpointStore>& fenced_checkpoints() const noexcept {
+        return fenced_checkpoints_;
+    }
+    bool                        refusal_claimed() const noexcept {
+        return refusal_claimed_fence_.load(std::memory_order_acquire) != 0;
+    }
+    bool                        try_claim_refusal(std::uint64_t attempt_fence) noexcept {
+        std::uint64_t expected = 0;
+        return refusal_claimed_fence_.compare_exchange_strong(
+            expected, attempt_fence, std::memory_order_acq_rel);
+    }
+    void                        begin_attempt_op() noexcept;
+    void                        end_attempt_op() noexcept;
+    asio::awaitable<void>       drain_attempt_ops_async(std::size_t own_op_tokens = 0) const;
+    void                        cancel_attempt_for_refusal() noexcept;
+    asio::awaitable<void>       complete_taken_over(std::uint64_t stored_fence);
+    asio::awaitable<void>       complete_recovery_failed(std::string message);
+    asio::awaitable<void>       complete_from_durable(ProgramResult result);
+    using SelfTakeoverCallback = std::function<asio::awaitable<void>(
+        const graph::CheckpointWriteFenceRefusal&, std::size_t own_op_tokens)>;
+    void                        set_self_takeover_callback(SelfTakeoverCallback callback) noexcept;
+    asio::awaitable<void>       handle_write_fence_refusal(
+        const graph::CheckpointWriteFenceRefusal& refusal,
+        std::size_t                               own_op_tokens);
     /**
      * Registers the host-owned policy/store boundary used by
      * expand_task_graph.  The callback is consulted only after the proposal
@@ -418,7 +443,7 @@ public:
     const std::string                                binding_fingerprint;
     std::string                                       operation_id{"root"};
     const std::uint64_t                              attempt;
-    const std::uint64_t                              fence = 1;
+    const std::uint64_t                              fence = graph::kInitialCheckpointWriteFence;
     const std::shared_ptr<const MaterializedProgram> materialized;
     const ProgramPersistedInvocation                 persisted_invocation;
     const RunInvocation                              invocation;
@@ -716,6 +741,11 @@ private:
     mutable std::optional<ProgramExecutionLease> execution_lease_;
     std::string                              graph_migration_error_;
     std::weak_ptr<async::HostTimer>         graph_migration_release_waiter_;
+    std::shared_ptr<graph::CheckpointStore> fenced_checkpoints_;
+    std::atomic<std::uint64_t>              refusal_claimed_fence_{0};
+    mutable std::size_t                     active_attempt_ops_ = 0;
+    mutable std::vector<AsyncWaiter>        attempt_ops_waiters_;
+    SelfTakeoverCallback                    self_takeover_callback_;
 
     /// Wakes the blocked thread and takes the coroutines that wait for a graph migration state change; the caller
     /// passes them to wake_async_waiters after it unlocks mutex_.
@@ -737,6 +767,33 @@ private:
     /// What request_handoff and request_graph_migration do once the coordination lock is held.
     std::uint64_t arm_handoff(const std::function<bool(const RunControl*)>& admission);
     std::uint64_t arm_graph_migration(const std::function<bool(const RunControl*)>& admission);
+};
+struct AttemptOpGuard {
+    std::shared_ptr<RunControl> control;
+    bool                        active = false;
+
+    explicit AttemptOpGuard(std::shared_ptr<RunControl> c) noexcept
+        : control(std::move(c)), active(static_cast<bool>(control)) {
+        if (active) {
+            control->begin_attempt_op();
+        }
+    }
+    AttemptOpGuard(const AttemptOpGuard&) = delete;
+    AttemptOpGuard& operator=(const AttemptOpGuard&) = delete;
+    AttemptOpGuard(AttemptOpGuard&& other) noexcept
+        : control(std::move(other.control)), active(other.active) {
+        other.active = false;
+    }
+    AttemptOpGuard& operator=(AttemptOpGuard&&) = delete;
+    ~AttemptOpGuard() {
+        release();
+    }
+    void release() noexcept {
+        if (active && control) {
+            control->end_attempt_op();
+            active = false;
+        }
+    }
 };
 struct CommandBudgetReservation {
     RunBudget remaining;
@@ -787,6 +844,50 @@ void set_join_member_launch_observer_for_testing(JoinMemberLaunchObserver observ
 using AttemptFinishedObserver = void (*)(std::string_view run_id, std::uint64_t attempt);
 void set_attempt_finished_observer_for_testing(AttemptFinishedObserver observer) noexcept;
 void notify_attempt_finished(std::string_view run_id, std::uint64_t attempt) noexcept;
+
+/// Test seam: when set, called when the single-flight refusal winner parks in
+/// `drain_attempt_ops_async` while other attempt operations are still active,
+/// with the run id, attempt, active operation count, and own operation tokens.
+/// Null outside tests.
+/// @note The observer runs while the control's lock (`mutex_`) is held and must
+///       not call back into the control.
+using RefusalDrainParkedObserver = void (*)(std::string_view run_id,
+                                            std::uint64_t    attempt,
+                                            std::size_t      active_ops,
+                                            std::size_t      own_op_tokens);
+void set_refusal_drain_parked_observer_for_testing(RefusalDrainParkedObserver observer) noexcept;
+void notify_refusal_drain_parked(std::string_view run_id,
+                                 std::uint64_t    attempt,
+                                 std::size_t      active_ops,
+                                 std::size_t      own_op_tokens) noexcept;
+
+/// Test seam: when set, called when a refusal handler enters `self_takeover`,
+/// with the run id, attempt, attempt fence, and whether the runtime's
+/// process-wide transition lock is currently held. Returns false only when a
+/// test aborts `self_takeover` before acquiring `transition_mutex` to prevent a
+/// deadlock under a simulated lock-held bug. Null outside tests.
+using SelfTakeoverEnteredObserver = bool (*)(std::string_view run_id,
+                                             std::uint64_t    attempt,
+                                             std::uint64_t    fence,
+                                             bool             transition_mutex_locked);
+void set_self_takeover_entered_observer_for_testing(SelfTakeoverEnteredObserver observer) noexcept;
+bool notify_self_takeover_entered(std::string_view run_id,
+                                  std::uint64_t    attempt,
+                                  std::uint64_t    fence,
+                                  bool             transition_mutex_locked) noexcept;
+
+/// Test seam: when set, called when a coroutine parks in `RunControl::wait_async`
+/// on an unfinished control, with the run id, attempt, and whether the runtime's
+/// process-wide transition lock is held. Null outside tests.
+/// @note The observer runs while the control's lock (`mutex_`) is held and must
+///       not call back into the control.
+using ControlWaitParkedObserver = void (*)(std::string_view run_id,
+                                           std::uint64_t    attempt,
+                                           bool             transition_mutex_locked);
+void set_control_wait_parked_observer_for_testing(ControlWaitParkedObserver observer) noexcept;
+void notify_control_wait_parked(std::string_view run_id,
+                                std::uint64_t    attempt,
+                                bool             transition_mutex_locked) noexcept;
 
 /// Test seam: when set, called with the run id and the cause once a
 /// cancellation has stopped an executing run, after its cause is set, so a test

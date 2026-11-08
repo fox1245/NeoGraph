@@ -4,6 +4,7 @@
 // in-memory stores' own: nothing here decides what a store does.
 #pragma once
 
+#include <neograph/graph/checkpoint.h>
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/module.h>
 #include <neograph/program/store.h>
@@ -22,6 +23,7 @@ struct MemoryStoreSet {
     std::shared_ptr<program::SyncProgramCoreToolGrantStore>  grants;
     std::shared_ptr<program::InMemoryTaskGraphFragmentStore> fragments;
     std::shared_ptr<program::InMemoryModuleStore>            modules;
+    std::shared_ptr<graph::InMemoryCheckpointStore>          checkpoints;
 };
 
 /// A new set of empty stores; the returned id names it.

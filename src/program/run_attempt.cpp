@@ -121,6 +121,33 @@ public:
         validate(checkpoint);
         inner_->save(checkpoint);
     }
+    void save(const graph::Checkpoint& checkpoint,
+              const graph::CheckpointWriteFence& fence) override {
+        validate(checkpoint);
+        inner_->save(checkpoint, fence);
+    }
+    bool supports_write_fence() const override {
+        return inner_->supports_write_fence();
+    }
+    std::uint64_t raise_fence(const std::string& owner_scope,
+                              const std::string& run_id,
+                              std::uint64_t min_fence) override {
+        return inner_->raise_fence(owner_scope, run_id, min_fence);
+    }
+    asio::awaitable<std::uint64_t> raise_fence_async(std::string owner_scope,
+                                                     std::string run_id,
+                                                     std::uint64_t min_fence) override {
+        co_return co_await inner_->raise_fence_async(std::move(owner_scope), std::move(run_id),
+                                                     min_fence);
+    }
+    std::uint64_t load_fence(const std::string& owner_scope,
+                             const std::string& run_id) override {
+        return inner_->load_fence(owner_scope, run_id);
+    }
+    asio::awaitable<std::uint64_t> load_fence_async(std::string owner_scope,
+                                                    std::string run_id) override {
+        co_return co_await inner_->load_fence_async(std::move(owner_scope), std::move(run_id));
+    }
     std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
         auto checkpoint = inner_->load_latest(thread_id);
         validate(checkpoint);
@@ -142,6 +169,10 @@ public:
     void delete_thread(const std::string& thread_id) override {
         inner_->delete_thread(thread_id);
     }
+    void delete_thread(const std::string& thread_id,
+                       const graph::CheckpointWriteFence& fence) override {
+        inner_->delete_thread(thread_id, fence);
+    }
     bool requires_managed_budget(const std::string& thread_id) override {
         return inner_->requires_managed_budget(thread_id);
     }
@@ -149,6 +180,11 @@ public:
     asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
         validate(checkpoint);
         co_await inner_->save_async(checkpoint);
+    }
+    asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint,
+                                     graph::CheckpointWriteFence fence) override {
+        validate(checkpoint);
+        co_await inner_->save_async(checkpoint, std::move(fence));
     }
     asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(
         const std::string& thread_id) override {
@@ -175,6 +211,10 @@ public:
     asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
         co_await inner_->delete_thread_async(thread_id);
     }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id,
+                                              graph::CheckpointWriteFence fence) override {
+        co_await inner_->delete_thread_async(thread_id, std::move(fence));
+    }
     asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
         co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
     }
@@ -189,6 +229,17 @@ public:
         return inner_->acquire_managed_budget_lease(
             scope, expected_checkpoint_id, expected_checkpoint_commitment);
     }
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment,
+        const graph::CheckpointWriteFence& fence) override {
+        if (!expected_checkpoint_id.empty()) {
+            validate_source(load_by_id(expected_checkpoint_id), expected_checkpoint_id,
+                            expected_checkpoint_commitment);
+        }
+        return inner_->acquire_managed_budget_lease(
+            scope, expected_checkpoint_id, expected_checkpoint_commitment, fence);
+    }
     asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>>
     acquire_managed_budget_lease_async(graph::ManagedBudgetLeaseScope scope,
         std::string expected_checkpoint_id, std::string expected_checkpoint_commitment) override {
@@ -200,11 +251,30 @@ public:
             std::move(scope), std::move(expected_checkpoint_id),
             std::move(expected_checkpoint_commitment));
     }
+    asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>>
+    acquire_managed_budget_lease_async(graph::ManagedBudgetLeaseScope scope,
+        std::string expected_checkpoint_id, std::string expected_checkpoint_commitment,
+        graph::CheckpointWriteFence fence) override {
+        if (!expected_checkpoint_id.empty()) {
+            auto source = co_await load_by_id_async(expected_checkpoint_id);
+            validate_source(source, expected_checkpoint_id, expected_checkpoint_commitment);
+        }
+        co_return co_await inner_->acquire_managed_budget_lease_async(
+            std::move(scope), std::move(expected_checkpoint_id),
+            std::move(expected_checkpoint_commitment), std::move(fence));
+    }
     graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
         const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
         std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override {
         return inner_->begin_managed_budget_effect(
             lease, effect_id, exact_claim_amount, prepared_request_digest);
+    }
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+        const graph::CheckpointWriteFence& fence) override {
+        return inner_->begin_managed_budget_effect(
+            lease, effect_id, exact_claim_amount, prepared_request_digest, fence);
     }
     asio::awaitable<graph::ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
         std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
@@ -213,10 +283,25 @@ public:
             std::move(lease), std::move(effect_id), exact_claim_amount,
             std::move(prepared_request_digest));
     }
+    asio::awaitable<graph::ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest,
+        graph::CheckpointWriteFence fence) override {
+        co_return co_await inner_->begin_managed_budget_effect_async(
+            std::move(lease), std::move(effect_id), exact_claim_amount,
+            std::move(prepared_request_digest), std::move(fence));
+    }
     void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
         const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
         const UsageAccumulator::AuthoritySnapshot& authority) override {
         inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority,
+        const graph::CheckpointWriteFence& fence) override {
+        inner_->settle_managed_budget_effect(
+            lease, effect, std::move(genuine_outcome), authority, fence);
     }
     asio::awaitable<void> settle_managed_budget_effect_async(
         std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::ManagedBudgetEffectReceipt effect,
@@ -224,23 +309,54 @@ public:
         co_await inner_->settle_managed_budget_effect_async(
             std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
     }
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+        graph::CheckpointWriteFence fence) override {
+        co_await inner_->settle_managed_budget_effect_async(
+            std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority),
+            std::move(fence));
+    }
     void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
         const graph::Checkpoint& checkpoint) override {
         validate(checkpoint);
         inner_->publish_managed_budget_checkpoint(lease, checkpoint);
+    }
+    void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::Checkpoint& checkpoint,
+        const graph::CheckpointWriteFence& fence) override {
+        validate(checkpoint);
+        inner_->publish_managed_budget_checkpoint(lease, checkpoint, fence);
     }
     asio::awaitable<void> publish_managed_budget_checkpoint_async(
         std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint) override {
         validate(checkpoint);
         co_await inner_->publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
     }
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint,
+        graph::CheckpointWriteFence fence) override {
+        validate(checkpoint);
+        co_await inner_->publish_managed_budget_checkpoint_async(
+            std::move(lease), std::move(checkpoint), std::move(fence));
+    }
     void release_managed_budget_lease(
         const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override {
         inner_->release_managed_budget_lease(lease);
     }
+    void release_managed_budget_lease(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::CheckpointWriteFence& fence) override {
+        inner_->release_managed_budget_lease(lease, fence);
+    }
     asio::awaitable<void> release_managed_budget_lease_async(
         std::shared_ptr<graph::OwnedManagedBudgetLease> lease) override {
         co_await inner_->release_managed_budget_lease_async(std::move(lease));
+    }
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<graph::OwnedManagedBudgetLease> lease,
+        graph::CheckpointWriteFence fence) override {
+        co_await inner_->release_managed_budget_lease_async(std::move(lease), std::move(fence));
     }
     bool retains_native_checkpoint() const noexcept override {
         return inner_->retains_native_checkpoint();
@@ -251,17 +367,38 @@ public:
         validate(forked);
         inner_->publish_managed_budget_fork(source, forked);
     }
+    void publish_managed_budget_fork(const graph::Checkpoint& source,
+                                    const graph::Checkpoint& forked,
+                                    const graph::CheckpointWriteFence& fence) override {
+        validate(source);
+        validate(forked);
+        inner_->publish_managed_budget_fork(source, forked, fence);
+    }
     asio::awaitable<void> publish_managed_budget_fork_async(
         graph::Checkpoint source, graph::Checkpoint forked) override {
         validate(source);
         validate(forked);
         co_await inner_->publish_managed_budget_fork_async(std::move(source), std::move(forked));
     }
+    asio::awaitable<void> publish_managed_budget_fork_async(
+        graph::Checkpoint source, graph::Checkpoint forked,
+        graph::CheckpointWriteFence fence) override {
+        validate(source);
+        validate(forked);
+        co_await inner_->publish_managed_budget_fork_async(
+            std::move(source), std::move(forked), std::move(fence));
+    }
 
     void put_writes(const std::string& thread_id,
                     const std::string& parent_checkpoint_id,
                     const graph::PendingWrite& write) override {
         inner_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const graph::PendingWrite& write,
+                    const graph::CheckpointWriteFence& fence) override {
+        inner_->put_writes(thread_id, parent_checkpoint_id, write, fence);
     }
     std::vector<graph::PendingWrite> get_writes(
         const std::string& thread_id,
@@ -272,11 +409,23 @@ public:
                       const std::string& parent_checkpoint_id) override {
         inner_->clear_writes(thread_id, parent_checkpoint_id);
     }
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id,
+                      const graph::CheckpointWriteFence& fence) override {
+        inner_->clear_writes(thread_id, parent_checkpoint_id, fence);
+    }
     asio::awaitable<void> put_writes_async(
         const std::string& thread_id,
         const std::string& parent_checkpoint_id,
         const graph::PendingWrite& write) override {
         co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write);
+    }
+    asio::awaitable<void> put_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        const graph::PendingWrite& write,
+        graph::CheckpointWriteFence fence) override {
+        co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write, std::move(fence));
     }
     asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
         const std::string& thread_id,
@@ -287,6 +436,12 @@ public:
         const std::string& thread_id,
         const std::string& parent_checkpoint_id) override {
         co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id,
+        graph::CheckpointWriteFence fence) override {
+        co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id, std::move(fence));
     }
 
 private:
@@ -313,175 +468,6 @@ private:
     std::shared_ptr<graph::CheckpointStore> inner_;
     std::string checkpoint_id_;
     std::string content_id_;
-};
-
-// The checkpoint store of one Core call of a live attempt. A run that another process recovered moved its fence on,
-// and the attempt that still runs here learns of it at its Core checkpoint saves: the store compares the stored run's
-// fence with the attempt's before and after every save. On a mismatch before the save it saves nothing; on one after
-// it (the takeover committed while the save was on its way, so the save stays) it goes no further. Either way it marks
-// the run taken over (which cancels it) and fails the save as a cancellation, so the Core run unwinds as a cancelled
-// one before the next super-step and keeps the pending writes of the step it was in. A read that fails or finds no
-// run is not a mismatch: the publications of the run compare the fence themselves.
-class FenceCheckedCheckpointStore final : public graph::CheckpointStore {
-public:
-    FenceCheckedCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner,
-                                std::shared_ptr<RunControl>             control)
-        : inner_(std::move(inner)), control_(std::move(control)) {
-        if (!inner_ || !control_ || !control_->transitions)
-            throw std::invalid_argument("Fence-checked checkpoint store requires a live attempt");
-    }
-
-    void save(const graph::Checkpoint& checkpoint) override {
-        refuse_if_taken_over(stored_fence_blocking());
-        inner_->save(checkpoint);
-        refuse_if_taken_over(stored_fence_blocking());
-    }
-    asio::awaitable<void> save_async(const graph::Checkpoint& checkpoint) override {
-        refuse_if_taken_over(co_await stored_fence());
-        co_await inner_->save_async(checkpoint);
-        refuse_if_taken_over(co_await stored_fence());
-    }
-    void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
-                                           const graph::Checkpoint& checkpoint) override {
-        refuse_if_taken_over(stored_fence_blocking());
-        inner_->publish_managed_budget_checkpoint(lease, checkpoint);
-        refuse_if_taken_over(stored_fence_blocking());
-    }
-    asio::awaitable<void> publish_managed_budget_checkpoint_async(
-        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::Checkpoint checkpoint) override {
-        refuse_if_taken_over(co_await stored_fence());
-        co_await inner_->publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
-        refuse_if_taken_over(co_await stored_fence());
-    }
-
-    std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
-        return inner_->load_latest(thread_id);
-    }
-    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override { return inner_->load_by_id(id); }
-    std::vector<graph::Checkpoint> list(const std::string& thread_id, int limit) override {
-        return inner_->list(thread_id, limit);
-    }
-    void delete_thread(const std::string& thread_id) override { inner_->delete_thread(thread_id); }
-    asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(const std::string& thread_id) override {
-        co_return co_await inner_->load_latest_async(thread_id);
-    }
-    asio::awaitable<std::optional<graph::Checkpoint>> load_by_id_async(const std::string& id) override {
-        co_return co_await inner_->load_by_id_async(id);
-    }
-    asio::awaitable<std::vector<graph::Checkpoint>> list_async(const std::string& thread_id, int limit) override {
-        co_return co_await inner_->list_async(thread_id, limit);
-    }
-    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
-        co_await inner_->delete_thread_async(thread_id);
-    }
-
-    void put_writes(const std::string& thread_id, const std::string& parent_checkpoint_id,
-                    const graph::PendingWrite& write) override {
-        inner_->put_writes(thread_id, parent_checkpoint_id, write);
-    }
-    std::vector<graph::PendingWrite> get_writes(const std::string& thread_id,
-                                                const std::string& parent_checkpoint_id) override {
-        return inner_->get_writes(thread_id, parent_checkpoint_id);
-    }
-    void clear_writes(const std::string& thread_id, const std::string& parent_checkpoint_id) override {
-        inner_->clear_writes(thread_id, parent_checkpoint_id);
-    }
-    asio::awaitable<void> put_writes_async(const std::string& thread_id, const std::string& parent_checkpoint_id,
-                                           const graph::PendingWrite& write) override {
-        co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write);
-    }
-    asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
-        const std::string& thread_id, const std::string& parent_checkpoint_id) override {
-        co_return co_await inner_->get_writes_async(thread_id, parent_checkpoint_id);
-    }
-    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
-                                             const std::string& parent_checkpoint_id) override {
-        co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id);
-    }
-
-    bool requires_managed_budget(const std::string& thread_id) override {
-        return inner_->requires_managed_budget(thread_id);
-    }
-    asio::awaitable<bool> requires_managed_budget_async(std::string thread_id) override {
-        co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
-    }
-    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
-        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
-        const std::string& expected_checkpoint_commitment) override {
-        return inner_->acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment);
-    }
-    asio::awaitable<std::shared_ptr<graph::OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
-        graph::ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
-        std::string expected_checkpoint_commitment) override {
-        co_return co_await inner_->acquire_managed_budget_lease_async(
-            std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment));
-    }
-    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
-        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
-        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override {
-        return inner_->begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest);
-    }
-    asio::awaitable<graph::ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
-        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, std::string effect_id,
-        std::uint64_t exact_claim_amount, std::string prepared_request_digest) override {
-        co_return co_await inner_->begin_managed_budget_effect_async(
-            std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest));
-    }
-    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
-                                      const graph::ManagedBudgetEffectReceipt& effect,
-                                      sp::runtime::Result genuine_outcome,
-                                      const UsageAccumulator::AuthoritySnapshot& authority) override {
-        inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
-    }
-    asio::awaitable<void> settle_managed_budget_effect_async(
-        std::shared_ptr<graph::OwnedManagedBudgetLease> lease, graph::ManagedBudgetEffectReceipt effect,
-        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override {
-        co_await inner_->settle_managed_budget_effect_async(
-            std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
-    }
-    void release_managed_budget_lease(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override {
-        inner_->release_managed_budget_lease(lease);
-    }
-    asio::awaitable<void> release_managed_budget_lease_async(
-        std::shared_ptr<graph::OwnedManagedBudgetLease> lease) override {
-        co_await inner_->release_managed_budget_lease_async(std::move(lease));
-    }
-    bool retains_native_checkpoint() const noexcept override { return inner_->retains_native_checkpoint(); }
-    void publish_managed_budget_fork(const graph::Checkpoint& source, const graph::Checkpoint& forked) override {
-        inner_->publish_managed_budget_fork(source, forked);
-    }
-    asio::awaitable<void> publish_managed_budget_fork_async(graph::Checkpoint source,
-                                                            graph::Checkpoint forked) override {
-        co_await inner_->publish_managed_budget_fork_async(std::move(source), std::move(forked));
-    }
-
-private:
-    // The fence of the stored run, or nothing when the read fails or finds no run.
-    asio::awaitable<std::optional<std::uint64_t>> stored_fence() const {
-        std::optional<std::uint64_t> fence;
-        try {
-            const auto stored = co_await control_->transitions->load(control_->owner_scope, control_->run_id);
-            if (stored) fence = stored->continuation().fence;
-        } catch (...) {
-            fence.reset();
-        }
-        co_return fence;
-    }
-    std::optional<std::uint64_t> stored_fence_blocking() const {
-        try {
-            return neograph::async::run_sync(stored_fence());
-        } catch (...) {
-            return std::nullopt;
-        }
-    }
-    void refuse_if_taken_over(std::optional<std::uint64_t> stored) const {
-        if (!stored || *stored == control_->fence) return;
-        control_->mark_taken_over(*stored);
-        throw graph::CancelledException("Program run was taken over by another recovery");
-    }
-
-    std::shared_ptr<graph::CheckpointStore> inner_;
-    std::shared_ptr<RunControl>             control_;
 };
 
 bool has_resource_reservation(const RunBudget& reservation) noexcept {
@@ -2256,6 +2242,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
     std::optional<std::string>            checkpoint_availability_owed_message;
     // #443: the plan completed over a budget, and `outcome` has the record of it.
     bool                                  completed_over_budget = false;
+    std::optional<graph::CheckpointWriteFenceRefusal> outer_refusal;
     try {
         const auto control_source = control->materialized->bundle.control_source();
         // A resume of an interrupted callCore reserves the capacity of the call in the journal, and the call settles
@@ -2849,153 +2836,190 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                              std::optional<std::string> resume, std::string thread_id,
                              std::shared_ptr<graph::CancelToken> operation_token)
             -> asio::awaitable<CoreInvocation> {
+            AttemptOpGuard op_guard(control);
+            if (control->refusal_claimed()) {
+                op_guard.release();
+                co_return CoreInvocation{};
+            }
             auto next_resume = std::move(resume);
             auto next_input = std::move(core_input);
-            for (;;) {
-                const auto withheld = core_withheld();
-                apply_core_ceiling();
-                graph::RunConfig config;
-                config.thread_id          = thread_id;
-                config.input              = next_resume ? json::object() : next_input;
-                config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
-                    subtract_saturated(
-                        subtract_saturated(control->granted_budget.max_core_steps, withheld.max_core_steps),
-                        core_progress->steps()),
-                    static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
-                config.stream_mode        = graph::StreamMode::ALL;
-                config.cancel_token       = operation_token;
-                config.usage              = usage;
-                config.model_token_budget = control->recorded_replay
-                    ? control->invocation.budget.model_tokens
-                    : subtract_saturated(control->granted_budget.model_tokens, withheld.model_tokens);
-                // A grant is an amount, and 0 grants nothing: Core holds every model call against the ceiling,
-                // 0 included, and sends none under it. A recorded replay sends none, so its ceiling is only read.
-                config.model_token_budget_bounded = !control->recorded_replay;
-                config.budget_exhausted   = control->budget_exhausted;
-                config.native_history_archive = control->native_history_archive;
-
-                graph::RunMetadata metadata;
-                metadata.deadline    = deadline;
-                metadata.run_id      = control->run_id;
-                metadata.owner_scope = control->owner_scope;
-                metadata.trace_id    = control->trace_id;
-                // Join members and await timers share this scheduler.
-                metadata.shared_scheduler = true;
-                // #557: with a host's executor there is no process-wide attempt pool to dispatch node attempts to.
-                if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts();
-                metadata.node_retry_ceiling = node_retry_ceiling;
-                // Concurrent branches add recovery checkpoints, so the set is read under the same mutex.
-                bool resumes_recovery_checkpoint = false;
-                if (next_resume) {
-                    std::lock_guard lock(plan_mutex);
-                    if (resume_core_interrupt && resume_core_interrupt->first == *next_resume) {
-                        metadata.resume_interrupt_id = std::move(resume_core_interrupt->second);
-                        resume_core_interrupt.reset();
+            std::optional<graph::CheckpointWriteFenceRefusal> refusal_to_handle;
+            try {
+                for (;;) {
+                    if (control->refusal_claimed()) {
+                        op_guard.release();
+                        co_return CoreInvocation{};
                     }
-                    resumes_recovery_checkpoint = recovery_checkpoint_ids.count(*next_resume) != 0;
-                }
-                auto operation_checkpoints = control->checkpoints;
-                if (next_resume && resume_checkpoint_content_id && !resumes_recovery_checkpoint) {
-                    operation_checkpoints =
-                        std::make_shared<ExactCheckpointContentStore>(
-                            control->checkpoints, *next_resume,
-                            *resume_checkpoint_content_id);
-                }
-                operation_checkpoints = std::make_shared<FenceCheckedCheckpointStore>(
-                    std::move(operation_checkpoints), control);
-                graph::RunResources resources{operation_checkpoints, control->state_store};
-                resources.provider_call_broker =
-                    control->resolve_core_provider_call_broker(operation_id);
-                // Core tool calls cross the host's tool Hooks like any other.
-                resources.hook_runtime = control->hook_runtime();
-                const auto grant = (co_await control->resolve_core_tool_grant(operation_id));
-                if (grant && grant->owner_scope == control->owner_scope &&
-                    grant->program_version_id == control->program_version_id &&
-                    grant->run_id == control->run_id &&
-                    grant->operation_id == operation_id &&
-                    grant->attempt == control->attempt && !grant->grant_id.empty() &&
-                    grant->binding_fingerprint == control->binding_fingerprint &&
-                    grant->gate && grant->controller && grant->effect_broker) {
-                    resources.tool_gate = grant->gate;
-                    resources.tool_execution_controller = grant->controller;
-                    resources.tool_effect_broker = grant->effect_broker;
-                    resources.tool_effect_grant = {
-                        grant->program_version_id, grant->operation_id,
-                        grant->grant_id, grant->attempt};
-                    resources.tool_effect_grant.binding_fingerprint = grant->binding_fingerprint;
-                } else {
-                    // A capability receipt binds code, not authority for an effect.
-                    // Native nodes calling Tool::execute directly remain a separate
-                    // trusted-code boundary; this gate covers mediated dispatch.
-                    resources.tool_gate = [](ToolCall, ToolGateContext)
-                        -> asio::awaitable<ToolDecision> {
-                        co_return ToolDecision::deny("Program Core tool grant is absent or stale");
-                    };
-                }
-                graph::GraphStreamCallback callback =
-                    [control, core_progress, operation_id](const graph::GraphEvent& event) {
-                        core_progress->observe(event);
-                        control->emit(operation_id, ProgramEventKind::Core,
-                                      graph::to_typed_event(event));
-                    };
-                auto safe_point_request = control->graph_safe_point_request();
-                graph::RunResult result;
-                if (next_resume) {
-                    if (safe_point_request) {
+                    const auto withheld = core_withheld();
+                    apply_core_ceiling();
+                    graph::RunConfig config;
+                    config.thread_id          = thread_id;
+                    config.input              = next_resume ? json::object() : next_input;
+                    config.max_steps          = static_cast<int>(std::min<std::uint64_t>(
+                        subtract_saturated(
+                            subtract_saturated(control->granted_budget.max_core_steps, withheld.max_core_steps),
+                            core_progress->steps()),
+                        static_cast<std::uint64_t>(std::numeric_limits<int>::max())));
+                    config.stream_mode        = graph::StreamMode::ALL;
+                    config.cancel_token       = operation_token;
+                    config.usage              = usage;
+                    config.model_token_budget = control->recorded_replay
+                        ? control->invocation.budget.model_tokens
+                        : subtract_saturated(control->granted_budget.model_tokens, withheld.model_tokens);
+                    // A grant is an amount, and 0 grants nothing: Core holds every model call against the ceiling,
+                    // 0 included, and sends none under it. A recorded replay sends none, so its ceiling is only read.
+                    config.model_token_budget_bounded = !control->recorded_replay;
+                    config.budget_exhausted   = control->budget_exhausted;
+                    config.native_history_archive = control->native_history_archive;
+
+                    graph::RunMetadata metadata;
+                    metadata.deadline    = deadline;
+                    metadata.run_id      = control->run_id;
+                    metadata.owner_scope = control->owner_scope;
+                    metadata.trace_id    = control->trace_id;
+                    // Join members and await timers share this scheduler.
+                    metadata.shared_scheduler = true;
+                    // #557: with a host's executor there is no process-wide attempt pool to dispatch node attempts to.
+                    if (control->scheduler->injected) metadata.dispatch_executor = control->scheduler->attempts();
+                    metadata.node_retry_ceiling = node_retry_ceiling;
+                    // Concurrent branches add recovery checkpoints, so the set is read under the same mutex.
+                    bool resumes_recovery_checkpoint = false;
+                    if (next_resume) {
+                        std::lock_guard lock(plan_mutex);
+                        if (resume_core_interrupt && resume_core_interrupt->first == *next_resume) {
+                            metadata.resume_interrupt_id = std::move(resume_core_interrupt->second);
+                            resume_core_interrupt.reset();
+                        }
+                        resumes_recovery_checkpoint = recovery_checkpoint_ids.count(*next_resume) != 0;
+                    }
+                    auto operation_checkpoints = control->fenced_checkpoints();
+                    if (next_resume && resume_checkpoint_content_id && !resumes_recovery_checkpoint) {
+                        operation_checkpoints = std::make_shared<graph::FencedCheckpointStore>(
+                            std::make_shared<ExactCheckpointContentStore>(
+                                control->checkpoints, *next_resume,
+                                *resume_checkpoint_content_id),
+                            control->owner_scope, control->run_id, control->fence);
+                    }
+                    graph::RunResources resources{operation_checkpoints, control->state_store};
+                    resources.provider_call_broker =
+                        control->resolve_core_provider_call_broker(operation_id);
+                    // Core tool calls cross the host's tool Hooks like any other.
+                    resources.hook_runtime = control->hook_runtime();
+                    const auto grant = (co_await control->resolve_core_tool_grant(operation_id));
+                    if (grant && grant->owner_scope == control->owner_scope &&
+                        grant->program_version_id == control->program_version_id &&
+                        grant->run_id == control->run_id &&
+                        grant->operation_id == operation_id &&
+                        grant->attempt == control->attempt && !grant->grant_id.empty() &&
+                        grant->binding_fingerprint == control->binding_fingerprint &&
+                        grant->gate && grant->controller && grant->effect_broker) {
+                        resources.tool_gate = grant->gate;
+                        resources.tool_execution_controller = grant->controller;
+                        resources.tool_effect_broker = grant->effect_broker;
+                        resources.tool_effect_grant = {
+                            grant->program_version_id, grant->operation_id,
+                            grant->grant_id, grant->attempt};
+                        resources.tool_effect_grant.binding_fingerprint = grant->binding_fingerprint;
+                    } else {
+                        // A capability receipt binds code, not authority for an effect.
+                        // Native nodes calling Tool::execute directly remain a separate
+                        // trusted-code boundary; this gate covers mediated dispatch.
+                        resources.tool_gate = [](ToolCall, ToolGateContext)
+                            -> asio::awaitable<ToolDecision> {
+                            co_return ToolDecision::deny("Program Core tool grant is absent or stale");
+                        };
+                    }
+                    graph::GraphStreamCallback callback =
+                        [control, core_progress, operation_id](const graph::GraphEvent& event) {
+                            core_progress->observe(event);
+                            control->emit(operation_id, ProgramEventKind::Core,
+                                          graph::to_typed_event(event));
+                        };
+                    auto safe_point_request = control->graph_safe_point_request();
+                    graph::RunResult result;
+                    if (next_resume) {
+                        if (safe_point_request) {
+                            result = co_await control->materialized->root->engine
+                                         ->resume_from_until_safe_point_async(
+                                             std::move(config), *next_resume,
+                                             safe_point_request, std::move(next_input),
+                                             std::move(callback), std::move(metadata),
+                                             std::move(resources));
+                        } else {
+                            result = co_await control->materialized->root->engine->resume_from_async(
+                                std::move(config), *next_resume, std::move(next_input),
+                                std::move(callback), std::move(metadata), std::move(resources));
+                        }
+                    } else if (safe_point_request) {
                         result = co_await control->materialized->root->engine
-                                     ->resume_from_until_safe_point_async(
-                                         std::move(config), *next_resume,
-                                         safe_point_request, std::move(next_input),
+                                     ->run_until_safe_point_async(
+                                         std::move(config), safe_point_request,
                                          std::move(callback), std::move(metadata),
                                          std::move(resources));
                     } else {
-                        result = co_await control->materialized->root->engine->resume_from_async(
-                            std::move(config), *next_resume, std::move(next_input),
-                            std::move(callback), std::move(metadata), std::move(resources));
+                        result = co_await control->materialized->root->engine->run_stream_async(
+                            std::move(config), std::move(callback), std::move(metadata),
+                            std::move(resources));
                     }
-                } else if (safe_point_request) {
-                    result = co_await control->materialized->root->engine
-                                 ->run_until_safe_point_async(
-                                     std::move(config), safe_point_request,
-                                     std::move(callback), std::move(metadata),
-                                     std::move(resources));
-                } else {
-                    result = co_await control->materialized->root->engine->run_stream_async(
-                        std::move(config), std::move(callback), std::move(metadata),
-                        std::move(resources));
-                }
 
-                auto checkpoint = co_await inspect_checkpoint_for(control, result.checkpoint_id, thread_id);
-                if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
-                if (result.status() != graph::RunStatus::SafePoint) {
-                    co_return CoreInvocation{std::move(result), std::move(checkpoint)};
-                }
-                const auto captured = safe_point_request
-                    ? safe_point_request->safe_point()
-                    : std::nullopt;
-                if (!captured || !checkpoint ||
-                    checkpoint->checkpoint_id != captured->checkpoint().id) {
-                    throw std::runtime_error(
-                        "Graph safe point did not retain its exact durable checkpoint");
-                }
+                    auto checkpoint = co_await inspect_checkpoint_for(control, result.checkpoint_id, thread_id);
+                    if (checkpoint && checkpoint->core_thread_id != thread_id) checkpoint.reset();
+                    if (result.status() != graph::RunStatus::SafePoint) {
+                        op_guard.release();
+                        co_return CoreInvocation{std::move(result), std::move(checkpoint)};
+                    }
+                    const auto captured = safe_point_request
+                        ? safe_point_request->safe_point()
+                        : std::nullopt;
+                    if (!captured || !checkpoint ||
+                        checkpoint->checkpoint_id != captured->checkpoint().id) {
+                        throw std::runtime_error(
+                            "Graph safe point did not retain its exact durable checkpoint");
+                    }
 
-                ProgramUsage consumed;
-                consumed.wall_time_ms = elapsed_ms(started_at);
-                consumed.model_tokens = model_tokens(usage);
-                consumed.monetary_microunits = monetary_used();
-                consumed.program_operations = operation_count;
-                consumed.core_steps = core_progress->steps();
-                consumed.peak_concurrency =
-                    peak_concurrency.load(std::memory_order_relaxed);
-                consumed.node_retries = node_retries_used();
-                co_await control->hold_graph_migration(
-                    *captured, settle_budget(control->granted_budget, consumed));
-                operation_token->throw_if_cancelled("graph migration safe point");
-                next_resume = captured->checkpoint().id;
-                resume_checkpoint_content_id =
-                    graph_migration_checkpoint_content_id(captured->checkpoint());
-                next_input = json::object();
+                    ProgramUsage consumed;
+                    consumed.wall_time_ms = elapsed_ms(started_at);
+                    consumed.model_tokens = model_tokens(usage);
+                    consumed.monetary_microunits = monetary_used();
+                    consumed.program_operations = operation_count;
+                    consumed.core_steps = core_progress->steps();
+                    consumed.peak_concurrency =
+                        peak_concurrency.load(std::memory_order_relaxed);
+                    consumed.node_retries = node_retries_used();
+                    co_await control->hold_graph_migration(
+                        *captured, settle_budget(control->granted_budget, consumed));
+                    operation_token->throw_if_cancelled("graph migration safe point");
+                    next_resume = captured->checkpoint().id;
+                    resume_checkpoint_content_id =
+                        graph_migration_checkpoint_content_id(captured->checkpoint());
+                    next_input = json::object();
+                }
+            } catch (const graph::CheckpointWriteFenceError& err) {
+                if (err.refusal().writer_fence != control->fence) {
+                    op_guard.release();
+                    throw;
+                }
+                refusal_to_handle = err.refusal();
+            } catch (...) {
+                if (control->refusal_claimed()) {
+                    op_guard.release();
+                    co_return CoreInvocation{};
+                }
+                op_guard.release();
+                throw;
             }
+            if (refusal_to_handle) {
+                try {
+                    co_await control->handle_write_fence_refusal(*refusal_to_handle, 1);
+                } catch (...) {
+                    op_guard.release();
+                    throw;
+                }
+                op_guard.release();
+                co_return CoreInvocation{};
+            }
+            op_guard.release();
+            co_return CoreInvocation{};
         };
 
         struct ExpansionTaskRun {
@@ -3897,6 +3921,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             const auto& operation = *found;
             const auto& dispatch  = operation.dispatch();
             const auto  op        = dispatch.operation;
+            if (control->refusal_claimed()) {
+                co_return PlanExecution{};
+            }
             if (operation_token->is_cancelled()) {
                 co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                        "Program operation cancelled before dispatch", operation_id);
@@ -4032,6 +4059,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     }
                 }
                 active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                if (control->refusal_claimed()) {
+                    co_return PlanExecution{};
+                }
 
                 const auto    core_status = invocation.result.status();
                 const auto    stalls      = stalled_barriers_of(invocation.result);
@@ -4082,6 +4112,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 for (std::size_t index = first; index < children.size(); ++index) {
                     auto child_result = co_await execute(children[index], result.output, thread_id,
                                                          child_depth, operation_token);
+                    if (control->refusal_claimed()) {
+                        co_return PlanExecution{};
+                    }
                     std::optional<json> reentry;
                     if (child_result.status == ProgramTerminalStatus::Interrupted) {
                         reentry = json{{"next", index}};
@@ -4128,6 +4161,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         break;
                     auto body = co_await execute(*dispatch.body, result.output, thread_id,
                                                  child_depth, operation_token);
+                    if (control->refusal_claimed()) {
+                        co_return PlanExecution{};
+                    }
                     std::optional<json> reentry;
                     if (body.status == ProgramTerminalStatus::Interrupted) {
                         reentry = json{{"iteration", iteration}};
@@ -4162,6 +4198,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                     try {
                         auto attempt_result = co_await execute(*dispatch.body, state, thread_id,
                                                                child_depth, operation_token);
+                        if (control->refusal_claimed()) {
+                            co_return PlanExecution{};
+                        }
                         if (attempt_result.status == ProgramTerminalStatus::Completed)
                             co_return attempt_result;
                         if (attempt_result.status == ProgramTerminalStatus::Interrupted && attempt > 0)
@@ -4332,6 +4371,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         (void)ignored;
                     },
                     asio::use_awaitable);
+                if (control->refusal_claimed()) {
+                    co_return PlanExecution{};
+                }
 
                 std::exception_ptr                        parallel_error;
                 std::optional<std::size_t>                error_index;
@@ -4460,6 +4502,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         branches[winner], std::move(state),
                         winner == 0 ? thread_id : operation_thread_id(*control, branches[winner]),
                         child_depth, operation_token);
+                    if (control->refusal_claimed()) co_return PlanExecution{};
                     if (result.status == ProgramTerminalStatus::Interrupted)
                         result.reentry = json{{"winner", winner}};
                     co_return result;
@@ -4582,6 +4625,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         (void)ignored;
                     },
                     asio::use_awaitable);
+                if (control->refusal_claimed()) co_return PlanExecution{};
 
                 std::optional<std::size_t>                  winner;
                 std::array<std::optional<PlanExecution>, 2> results;
@@ -4637,7 +4681,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             child_depth, operation_token);
                     } catch (const NestedOperationFailure&) {
                         branch_error = std::current_exception();
+                    } catch (...) {
+                        if (!control->refusal_claimed()) throw;
                     }
+                    if (control->refusal_claimed()) co_return PlanExecution{};
                     if (branch_error) {
                         auto failed = failed_branch_of(branch_error);
                         if (!failed || operation_token->is_cancelled())
@@ -4709,6 +4756,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                                    detail::owned_json_copy(items[index]),
                                                    operation_thread_id(*control, operation_id),
                                                    child_depth, operation_token);
+                    if (control->refusal_claimed()) co_return PlanExecution{};
                     result.execution_trace.insert(
                         result.execution_trace.end(),
                         std::make_move_iterator(mapped.execution_trace.begin()),
@@ -5014,6 +5062,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         co_await parallel_map->join.wait();
                     },
                     asio::use_awaitable);
+                if (control->refusal_claimed()) co_return PlanExecution{};
 
                 std::exception_ptr                        parallel_error;
                 std::vector<std::optional<PlanExecution>> map_results;
@@ -5642,6 +5691,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                                        "Unknown Core failure");
                     }
                     active_concurrency.fetch_sub(1, std::memory_order_relaxed);
+                    if (control->refusal_claimed()) co_return PlanExecution{};
                     if (invocation.checkpoint) {
                         {
                             std::lock_guard lock(plan_mutex);
@@ -6344,6 +6394,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                         (void)ignored;
                     },
                     asio::use_awaitable);
+                if (control->refusal_claimed()) co_return PlanExecution{};
 
                 PlanExecution joined;
                 joined.output = json::array();
@@ -6547,6 +6598,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
             std::uint64_t       command_sequence = 0;
             const auto          root_scope       = std::make_shared<JavaScriptScopeState>();
             for (;;) {
+                if (control->refusal_claimed()) co_return PlanExecution{};
                 if (control->cancel_token->is_cancelled()) {
                     co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                            "JavaScript control command cancelled before dispatch",
@@ -6557,7 +6609,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 // JS turn starts on a fresh scheduler continuation; members
                 // remain C++-only and can still overlap on the pool.
                 co_await   asio::post(executor, asio::use_awaitable);
+                if (control->refusal_claimed()) co_return PlanExecution{};
                 const auto step = session.next(std::move(response));
+                if (control->refusal_claimed()) co_return PlanExecution{};
                 if (control->cancel_token->is_cancelled()) {
                     co_return plan_failure(ProgramTerminalStatus::Cancelled, "P_RUNTIME_CANCELLED",
                                            "JavaScript control command cancelled before dispatch",
@@ -7108,6 +7162,7 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                             control->owner_scope, control->run_id))
                         unreconciled_javascript_remaining = pending->remaining_budget();
                 }
+                if (control->refusal_claimed()) co_return PlanExecution{};
                 resumed_join_members = json::object();
                 existing_child_operations.clear();
                 {
@@ -7336,6 +7391,10 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
                 control->set_settled_branches(std::move(plan_result.settled_members));
             }
         }
+        if (control->refusal_claimed()) {
+            cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
+            co_return;
+        }
 
         const auto terminal_cause        = terminal_cause_at_deadline(control, deadline);
         outcome.output                   = std::move(plan_result.output);
@@ -7492,6 +7551,8 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              diagnostic.message);
         needs_durable_disposition = true;
+    } catch (const graph::CheckpointWriteFenceError& error) {
+        outer_refusal = error.refusal();
     } catch (const std::exception& error) {
         outcome = failed_outcome(control, "P_RUNTIME_CORE_FAILURE", error.what());
         retain_provider_failure(*outcome.failure, std::current_exception());
@@ -7520,6 +7581,17 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         apply_terminal_cause(control, outcome, terminal_cause_at_deadline(control, deadline),
                              "Unknown Core failure");
         needs_durable_disposition = true;
+    }
+
+    if (outer_refusal) {
+        co_await control->handle_write_fence_refusal(*outer_refusal, 0);
+        cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
+        co_return;
+    }
+
+    if (control->refusal_claimed()) {
+        cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
+        co_return;
     }
 
     if (checkpoint_availability_owed_message && checkpoint_id &&
@@ -7639,6 +7711,9 @@ asio::awaitable<void> execute_run_attempt(std::shared_ptr<RunControl> control,
         }
     }
     cancel_deadline_timer(control->scheduler->deadlines(), std::move(timer));
+    if (control->refusal_claimed()) {
+        co_return;
+    }
     (co_await control->complete_async(std::move(outcome)));
     co_return;
 }

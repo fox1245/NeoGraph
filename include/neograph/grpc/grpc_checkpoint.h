@@ -66,7 +66,16 @@ public:
     /// a run. Throws std::invalid_argument for a non-positive value.
     void set_rpc_timeout(std::chrono::milliseconds timeout);
 
+    bool supports_write_fence() const override;
+    std::uint64_t raise_fence(const std::string& owner_scope,
+                              const std::string& run_id,
+                              std::uint64_t min_fence) override;
+    std::uint64_t load_fence(
+        const std::string& owner_scope, const std::string& run_id) override;
+
     void save(const neograph::graph::Checkpoint& cp) override;
+    void save(const neograph::graph::Checkpoint& cp,
+              const neograph::graph::CheckpointWriteFence& write_fence) override;
     std::optional<neograph::graph::Checkpoint>
         load_latest(const std::string& thread_id) override;
     std::optional<neograph::graph::Checkpoint>
@@ -74,25 +83,65 @@ public:
     std::vector<neograph::graph::Checkpoint>
         list(const std::string& thread_id, int limit = 100) override;
     void delete_thread(const std::string& thread_id) override;
+    void delete_thread(const std::string& thread_id,
+                       const neograph::graph::CheckpointWriteFence& write_fence) override;
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const neograph::graph::PendingWrite& write) override;
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const neograph::graph::PendingWrite& write,
+                    const neograph::graph::CheckpointWriteFence& write_fence) override;
+    std::vector<neograph::graph::PendingWrite> get_writes(
+        const std::string& thread_id,
+        const std::string& parent_checkpoint_id) override;
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id) override;
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id,
+                      const neograph::graph::CheckpointWriteFence& write_fence) override;
     bool requires_managed_budget(const std::string& thread_id) override;
     std::shared_ptr<neograph::graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
         const neograph::graph::ManagedBudgetLeaseScope& scope,
         const std::string& expected_checkpoint_id,
         const std::string& expected_checkpoint_commitment) override;
+    std::shared_ptr<neograph::graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const neograph::graph::ManagedBudgetLeaseScope& scope,
+        const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment,
+        const neograph::graph::CheckpointWriteFence& write_fence) override;
     neograph::graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
         const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
         const std::string& effect_id, std::uint64_t exact_claim_amount,
         const std::string& prepared_request_digest) override;
+    neograph::graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const std::string& effect_id, std::uint64_t exact_claim_amount,
+        const std::string& prepared_request_digest,
+        const neograph::graph::CheckpointWriteFence& write_fence) override;
     void settle_managed_budget_effect(
         const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
         const neograph::graph::ManagedBudgetEffectReceipt& effect,
         sp::runtime::Result genuine_outcome,
         const neograph::UsageAccumulator::AuthoritySnapshot& authority) override;
+    void settle_managed_budget_effect(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const neograph::graph::ManagedBudgetEffectReceipt& effect,
+        sp::runtime::Result genuine_outcome,
+        const neograph::UsageAccumulator::AuthoritySnapshot& authority,
+        const neograph::graph::CheckpointWriteFence& write_fence) override;
     void publish_managed_budget_checkpoint(
         const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
         const neograph::graph::Checkpoint& checkpoint) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const neograph::graph::Checkpoint& checkpoint,
+        const neograph::graph::CheckpointWriteFence& write_fence) override;
     void release_managed_budget_lease(
         const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease) override;
+    void release_managed_budget_lease(
+        const std::shared_ptr<neograph::graph::OwnedManagedBudgetLease>& lease,
+        const neograph::graph::CheckpointWriteFence& write_fence) override;
 
 private:
     struct Impl;

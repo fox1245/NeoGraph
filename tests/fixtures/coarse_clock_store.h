@@ -22,9 +22,15 @@ public:
     using Store::Store;
 
     void save(const Checkpoint& cp) override { Store::save(pinned(cp)); }
+    void save(const Checkpoint& cp, const CheckpointWriteFence& fence) override {
+        Store::save(pinned(cp), fence);
+    }
 
     asio::awaitable<void> save_async(const Checkpoint& cp) override {
         co_await Store::save_async(pinned(cp));
+    }
+    asio::awaitable<void> save_async(const Checkpoint& cp, CheckpointWriteFence fence) override {
+        co_await Store::save_async(pinned(cp), std::move(fence));
     }
 
 private:

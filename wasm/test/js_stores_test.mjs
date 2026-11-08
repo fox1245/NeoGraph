@@ -13,7 +13,7 @@ import { pathToFileURL } from 'node:url';
 
 const directory = path.resolve(process.argv[2] ?? '.');
 const { default: createModule } = await import(pathToFileURL(path.join(directory, 'store_checks.mjs')).href);
-const { installStoreBridge, registerStores, releaseStores, memoryStores } = await import(
+const { installStoreBridge, registerStores, releaseStores, memoryStores, MemoryCheckpointStore } = await import(
   pathToFileURL(path.join(directory, 'stores.mjs')).href);
 
 const module = await createModule({ print: (text) => console.log(text), printErr: (text) => console.log(text) });
@@ -531,6 +531,166 @@ await check('a Program whose store loses a publication in the middle of the run 
   } finally {
     end();
   }
+});
+
+await check('T5: MemoryCheckpointStore accepts fence >= stored_fence and refuses strictly lower fence', async () => {
+  const store = new MemoryCheckpointStore();
+  assert.equal(store.supportsWriteFence, true);
+  assert.equal(store.raiseFence('owner-a', 'run-1', 2), 2n);
+  assert.equal(store.loadFence('owner-a', 'run-1'), 2n);
+
+  store.save(
+    { id: 'cp-2', thread_id: 'thread-1', step: 1, channel_values: { v: 2 } },
+    { ownerScope: 'owner-a', runId: 'run-1', fence: 2 }
+  );
+  store.putWrites(
+    'thread-1',
+    'cp-2',
+    { task_id: 't1', node_name: 'n', writes: [], step: 1 },
+    { ownerScope: 'owner-a', runId: 'run-1', fence: 2 }
+  );
+  assert.equal(store.loadLatest('thread-1')?.id, 'cp-2');
+  assert.equal(store.getWrites('thread-1', 'cp-2').length, 1);
+
+  assert.throws(
+    () => store.save(
+      { id: 'cp-stale', thread_id: 'thread-1', step: 1, channel_values: { v: 1 } },
+      { ownerScope: 'owner-a', runId: 'run-1', fence: 1 }
+    ),
+    (err) => err.code === 'G_CHECKPOINT_WRITE_FENCE' && err.storedFence === '2' && err.writerFence === '1'
+  );
+  assert.equal(store.loadById('cp-stale'), null);
+
+  assert.throws(
+    () => store.putWrites(
+      'thread-1',
+      'cp-2',
+      { task_id: 't-stale', node_name: 'n', writes: [], step: 1 },
+      { ownerScope: 'owner-a', runId: 'run-1', fence: 1 }
+    ),
+    (err) => err.code === 'G_CHECKPOINT_WRITE_FENCE' && err.storedFence === '2' && err.writerFence === '1'
+  );
+  assert.equal(store.getWrites('thread-1', 'cp-2').length, 1);
+
+  assert.throws(
+    () => store.save(
+      { id: 'cp-half-1', thread_id: 'thread-1', step: 1 },
+      { ownerScope: 'owner-a', runId: 'run-1', fence: 0 }
+    ),
+    (err) => err.kind === 'invalid_argument'
+  );
+  assert.throws(
+    () => store.save(
+      { id: 'cp-half-2', thread_id: 'thread-1', step: 1 },
+      { ownerScope: 'owner-a', runId: '', fence: 2 }
+    ),
+    (err) => err.kind === 'invalid_argument'
+  );
+});
+
+await check('memoryError reports a refusal missing either fence or run_id as runtime_error protocol error', async () => {
+  const base = memoryStores(module);
+  try {
+    let replyPayload = null;
+    const proxyModule = Object.create(module);
+    proxyModule._ng_memory_call = (set, memberPtr, methodPtr, argsPtr) => {
+      if (replyPayload !== null) return 1;
+      return module._ng_memory_call(set, memberPtr, methodPtr, argsPtr);
+    };
+    proxyModule._ng_memory_reply = () => (replyPayload !== null ? -1 : module._ng_memory_reply());
+    proxyModule.UTF8ToString = (ptr) => (ptr === -1 ? JSON.stringify(replyPayload) : module.UTF8ToString(ptr));
+
+    const wrapped = memoryStores(proxyModule, { set: base.set });
+    // Any member call goes through the same reply decoding; the proxy answers every call with replyPayload.
+    const [anyMethod] = Object.keys(wrapped.transitions);
+    const callAny = () => wrapped.transitions[anyMethod]('owner-a', 'run-1');
+
+    replyPayload = {
+      kind: 'G_CHECKPOINT_WRITE_FENCE',
+      message: 'refusal missing stored_fence',
+      owner_scope: 'owner-a',
+      run_id: 'run-1',
+      writer_fence: '1',
+    };
+    assert.throws(
+      callAny,
+      (err) => err.kind === 'runtime_error' && err.code !== 'G_CHECKPOINT_WRITE_FENCE'
+    );
+
+    replyPayload = {
+      kind: 'G_CHECKPOINT_WRITE_FENCE',
+      message: 'refusal missing writer_fence',
+      owner_scope: 'owner-a',
+      run_id: 'run-1',
+      stored_fence: '2',
+    };
+    assert.throws(
+      callAny,
+      (err) => err.kind === 'runtime_error' && err.code !== 'G_CHECKPOINT_WRITE_FENCE'
+    );
+
+    replyPayload = {
+      kind: 'G_CHECKPOINT_WRITE_FENCE',
+      message: 'complete refusal',
+      owner_scope: 'owner-a',
+      run_id: 'run-1',
+      writer_fence: '1',
+      stored_fence: '2',
+    };
+    assert.throws(
+      callAny,
+      (err) => err.kind === 'G_CHECKPOINT_WRITE_FENCE' &&
+        err.code === 'G_CHECKPOINT_WRITE_FENCE' &&
+        err.writerFence === '1' &&
+        err.storedFence === '2'
+    );
+  } finally {
+    base.release();
+  }
+});
+
+await check('T8c: MemoryCheckpointStore compares BigInt fences above 2^53 - 1 numerically', async () => {
+  const store = new MemoryCheckpointStore();
+  // Number(9007199254740993n) === Number(9007199254740992n) === 9007199254740992, so Number coercion would accept writer 9007199254740992n against stored 9007199254740993n.
+  const fCoerceWriter = 9007199254740992n;
+  const fLow = 9007199254740993n;
+  const fHigh = 10000000000000000n;
+  assert.equal(store.raiseFence('owner-a', 'run-bigint', fLow.toString()), fLow);
+  assert.throws(
+    () => store.save(
+      { id: 'cp-bigint-coerce', thread_id: 'thread-bigint', step: 1 },
+      { ownerScope: 'owner-a', runId: 'run-bigint', fence: fCoerceWriter.toString() }
+    ),
+    (err) => err.code === 'G_CHECKPOINT_WRITE_FENCE' &&
+      err.storedFence === fLow.toString() &&
+      err.writerFence === fCoerceWriter.toString()
+  );
+  assert.equal(store.loadById('cp-bigint-coerce'), null);
+
+  // Lexicographically '9007199254740993' > '10000000000000000', but numerically 10000000000000000n > 9007199254740993n.
+  assert.equal(store.raiseFence('owner-a', 'run-bigint', fHigh.toString()), fHigh);
+  assert.equal(store.loadFence('owner-a', 'run-bigint'), fHigh);
+
+  // Saving with fLow (< fHigh) must be refused even though fLow.toString() > fHigh.toString() lexicographically.
+  assert.throws(
+    () => store.save(
+      { id: 'cp-bigint-stale', thread_id: 'thread-bigint', step: 1 },
+      { ownerScope: 'owner-a', runId: 'run-bigint', fence: fLow.toString() }
+    ),
+    (err) => err.code === 'G_CHECKPOINT_WRITE_FENCE' &&
+      err.storedFence === fHigh.toString() &&
+      err.writerFence === fLow.toString()
+  );
+  assert.equal(store.loadById('cp-bigint-stale'), null);
+
+  // Saving with fHigh + 1n succeeds and advances stored fence.
+  const fNext = fHigh + 1n;
+  store.save(
+    { id: 'cp-bigint-ok', thread_id: 'thread-bigint', step: 2 },
+    { ownerScope: 'owner-a', runId: 'run-bigint', fence: fNext.toString() }
+  );
+  assert.equal(store.loadById('cp-bigint-ok')?.id, 'cp-bigint-ok');
+  assert.equal(store.loadFence('owner-a', 'run-bigint'), fNext);
 });
 
 if (failures > 0) {

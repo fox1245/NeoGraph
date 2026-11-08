@@ -12,6 +12,7 @@
 // the others.
 
 #include "fixtures/coarse_clock_store.h"
+#include "../src/core/managed_budget_journal.h"
 
 #include <gtest/gtest.h>
 #include <neograph/graph/engine.h>
@@ -2182,4 +2183,323 @@ TEST_F(PostgresCheckpointTest, ThirdStoreConstructionDoesNotBlockOnActiveTableLo
     ASSERT_EQ(status, std::future_status::ready)
         << "Constructing a third and fourth store hung behind active table locks";
     EXPECT_NO_THROW(task.get());
+}
+
+TEST_F(PostgresCheckpointTest, T5_EqualFenceSucceedsAndLowerFenceThrows) {
+    const std::string suffix = Checkpoint::generate_id();
+    const std::string owner = "scope-pg-t5-" + suffix;
+    const std::string run_id = "run-pg-t5-" + suffix;
+    const std::string tid = "t-pg-t5-" + suffix;
+    EXPECT_EQ(store->load_fence(owner, run_id), 0u);
+    EXPECT_EQ(store->raise_fence(owner, run_id, 2), 2u);
+    EXPECT_EQ(store->load_fence(owner, run_id), 2u);
+
+    const CheckpointWriteFence f2{owner, run_id, 2};
+    const CheckpointWriteFence f1{owner, run_id, 1};
+
+    auto cp = make_state_cp(tid, 1, {{"v", {10, 1}}});
+    EXPECT_NO_THROW(store->save(cp, f2));
+
+    PendingWrite pw;
+    pw.task_id = "task-pg-t5";
+    pw.node_name = "node";
+    pw.writes = json::array();
+    pw.step = 1;
+    EXPECT_NO_THROW(store->put_writes(tid, cp.id, pw, f2));
+
+    auto stale_cp = make_state_cp(tid, 2, {{"v", {20, 2}}});
+    try {
+        store->save(stale_cp, f1);
+        FAIL() << "Expected CheckpointWriteFenceError for wf=1 < sf=2";
+    } catch (const CheckpointWriteFenceError& err) {
+        EXPECT_EQ(err.refusal().owner_scope, owner);
+        EXPECT_EQ(err.refusal().run_id, run_id);
+        EXPECT_EQ(err.refusal().writer_fence, 1u);
+        EXPECT_EQ(err.refusal().stored_fence, 2u);
+    }
+    const auto latest_after_stale = store->load_latest(tid);
+    ASSERT_TRUE(latest_after_stale.has_value());
+    EXPECT_EQ(latest_after_stale->id, cp.id);
+
+    PendingWrite stale_pw = pw;
+    stale_pw.task_id = "stale-task";
+    EXPECT_THROW(store->put_writes(tid, cp.id, stale_pw, f1), CheckpointWriteFenceError);
+    EXPECT_EQ(store->get_writes(tid, cp.id).size(), 1u);
+
+    // wf > sf advances stored_fence to wf; raise_fence with lower min_fence is a no-op max.
+    const CheckpointWriteFence f3{owner, run_id, 3};
+    auto cp3 = make_state_cp(tid, 3, {{"v", {30, 3}}});
+    EXPECT_NO_THROW(store->save(cp3, f3));
+    EXPECT_EQ(store->load_fence(owner, run_id), 3u);
+    EXPECT_EQ(store->raise_fence(owner, run_id, 2), 3u);
+    EXPECT_EQ(store->load_fence(owner, run_id), 3u);
+
+    // clear_writes and delete_thread are fenced for both refusal (wf < sf) and acceptance (wf >= sf).
+    EXPECT_THROW(store->clear_writes(tid, cp.id, f2), CheckpointWriteFenceError);
+    EXPECT_EQ(store->get_writes(tid, cp.id).size(), 1u);
+    EXPECT_NO_THROW(store->clear_writes(tid, cp.id, f3));
+    EXPECT_TRUE(store->get_writes(tid, cp.id).empty());
+
+    EXPECT_THROW(store->delete_thread(tid, f2), CheckpointWriteFenceError);
+    EXPECT_TRUE(store->load_latest(tid).has_value());
+    EXPECT_NO_THROW(store->delete_thread(tid, f3));
+    EXPECT_FALSE(store->load_latest(tid).has_value());
+
+    // Managed-budget mutations are fenced for both refusal (wf < sf) and acceptance (wf >= sf).
+    ManagedBudgetLeaseScope mb_scope;
+    mb_scope.owner_scope = owner;
+    mb_scope.thread_id = "mb-pg-t5-" + Checkpoint::generate_id();
+    mb_scope.graph_identity = "mb-graph-pg-t5";
+    mb_scope.original_ceiling = 100;
+
+    EXPECT_THROW((void)store->acquire_managed_budget_lease(mb_scope, "", "", f2),
+                 CheckpointWriteFenceError);
+    auto mb_lease = store->acquire_managed_budget_lease(mb_scope, "", "", f3);
+    ASSERT_NE(mb_lease, nullptr);
+
+    const json owned_head = {
+        {"schema", "neograph.managed-bank-head/v1"},
+        {"scope", {
+            {"owner_scope", mb_scope.owner_scope},
+            {"thread_id", mb_scope.thread_id},
+            {"storage_thread_id", mb_scope.thread_id},
+            {"graph_identity", mb_scope.graph_identity},
+            {"original_ceiling", mb_scope.original_ceiling},
+            {"original_deadline_ticks", nullptr},
+            {"deadline_clock_identity", ""},
+        }},
+        {"bank_generation", mb_lease->bank_generation()},
+        {"head_checkpoint_id", ""},
+        {"head_commitment", ""},
+        {"revision", mb_lease->revision()},
+        {"actor", mb_lease->actor_id()},
+        {"state", "owned"},
+        {"charged", std::uint64_t{0}},
+        {"reserved", std::uint64_t{0}},
+        {"pending_count", std::uint64_t{0}},
+        {"effect_dedup", json::object()},
+        {"provider_effects", json::array()},
+        {"reports", neograph::provider_codec::encode_usage(sp::Usage{})},
+        {"has_report", false},
+        {"report_effects", json::array()},
+        {"source_consumed", false},
+        {"publication_count", std::uint64_t{0}},
+    };
+    detail::ManagedBudgetJournalAccess::bind_cpp_native_retention(mb_lease, owned_head);
+
+    const std::string req_digest = "sha256:" + std::string(64, 'a');
+    EXPECT_THROW((void)store->begin_managed_budget_effect(mb_lease, "eff-1", 10, req_digest, f2),
+                 CheckpointWriteFenceError);
+    auto mb_receipt = store->begin_managed_budget_effect(mb_lease, "eff-1", 10, req_digest, f3);
+    ASSERT_TRUE(mb_receipt.active());
+
+    sp::Usage usage;
+    usage.stage = sp::UsageStage::Final;
+    usage.quality = sp::UsageQuality::Consistent;
+    usage.input_total = sp::Count{3, sp::Evidence::Derived};
+    usage.output_total = sp::Count{2, sp::Evidence::Derived};
+    usage.total = sp::Count{5, sp::Evidence::Derived};
+
+    neograph::UsageAccumulator acc;
+    ASSERT_TRUE(acc.try_reserve(10, mb_scope.original_ceiling));
+    ASSERT_TRUE(acc.remember_provider_effect("eff-1"));
+    acc.settle_reservation(10, usage);
+    const auto authority = acc.authority_snapshot();
+
+    sp::Completion comp;
+    comp.usage = usage;
+    auto outcome = std::make_shared<const sp::Outcome>(std::move(comp));
+
+    EXPECT_THROW(store->settle_managed_budget_effect(mb_lease, mb_receipt, outcome, authority, f2),
+                 CheckpointWriteFenceError);
+    EXPECT_NO_THROW(
+        store->settle_managed_budget_effect(mb_lease, mb_receipt, outcome, authority, f3));
+
+    Checkpoint mb_cp = make_state_cp(mb_scope.thread_id, 1, {{"v", {1, 1}}});
+    mb_cp.parent_id = "";
+    mb_cp.channel_values["provider_managed_budget"] = json{
+        {"data", json{
+            {"schema", "neograph.graph-managed-bank/v1"},
+            {"charged", authority.charged},
+            {"reserved", authority.reserved},
+            {"provider_effects", json(authority.provider_effects)},
+            {"reports", neograph::provider_codec::encode_usage(authority.reports)},
+            {"has_report", authority.has_report},
+            {"ceiling", mb_scope.original_ceiling},
+            {"owner_scope", mb_scope.owner_scope},
+            {"thread_id", mb_scope.thread_id},
+            {"graph_identity", mb_scope.graph_identity},
+        }},
+    };
+
+    EXPECT_THROW(store->publish_managed_budget_checkpoint(mb_lease, mb_cp, f2),
+                 CheckpointWriteFenceError);
+    EXPECT_NO_THROW(store->publish_managed_budget_checkpoint(mb_lease, mb_cp, f3));
+
+    EXPECT_THROW(store->release_managed_budget_lease(mb_lease, f2), CheckpointWriteFenceError);
+    EXPECT_NO_THROW(store->release_managed_budget_lease(mb_lease, f3));
+}
+
+TEST_F(PostgresCheckpointTest, T3a_WriteGuardHoldsFenceLockUntilReleasedBeforeRaiseCommits) {
+    for (const char* op_kind : {"save", "put_writes", "managed_budget"}) {
+        SCOPED_TRACE(op_kind);
+        store->drop_schema();
+        const std::string suffix = Checkpoint::generate_id();
+        const std::string owner = std::string("scope-pg-t3a-") + op_kind + "-" + suffix;
+        const std::string run_id = std::string("run-pg-t3a-") + op_kind + "-" + suffix;
+        const std::string tid = std::string("t-pg-t3a-") + op_kind + "-" + suffix;
+        const CheckpointWriteFence f1{owner, run_id, 1};
+
+        std::promise<void> at_write_guard;
+        std::promise<void> release_promise;
+        auto release_write_guard = release_promise.get_future().share();
+        std::atomic<bool> guard_active{false};
+
+        PostgresCheckpointStore conn1(
+            pg_url(), 1,
+            [&](PGconn*, const std::string&) {
+                if (guard_active.exchange(false)) {
+                    at_write_guard.set_value();
+                    release_write_guard.wait();
+                }
+            });
+        PostgresCheckpointStore conn2(pg_url(), 1);
+
+        ManagedBudgetLeaseScope mb_scope;
+        mb_scope.owner_scope = owner;
+        mb_scope.thread_id = tid;
+        mb_scope.graph_identity = "g";
+        mb_scope.original_ceiling = 100;
+
+        guard_active.store(true);
+        auto writer_fut = std::async(std::launch::async, [&] {
+            if (std::string(op_kind) == "save") {
+                conn1.save(make_state_cp(tid, 1, {{"v", {1, 1}}}), f1);
+            } else if (std::string(op_kind) == "put_writes") {
+                PendingWrite pw;
+                pw.task_id = "task-1";
+                pw.node_name = "n";
+                pw.writes = json::array();
+                conn1.put_writes(tid, "p0", pw, f1);
+            } else {
+                (void)conn1.acquire_managed_budget_lease(mb_scope, "", "", f1);
+            }
+        });
+
+        at_write_guard.get_future().wait();
+
+        std::promise<void> c2_started;
+        auto raiser_fut = std::async(std::launch::async, [&] {
+            c2_started.set_value();
+            return conn2.raise_fence(owner, run_id, 2);
+        });
+        c2_started.get_future().wait();
+        EXPECT_EQ(raiser_fut.wait_for(std::chrono::milliseconds(50)),
+                  std::future_status::timeout);
+        release_promise.set_value();
+
+        EXPECT_NO_THROW(writer_fut.get());
+        EXPECT_EQ(raiser_fut.get(), 2u);
+        EXPECT_EQ(conn2.load_fence(owner, run_id), 2u);
+        EXPECT_THROW(conn1.save(make_state_cp(tid, 2, {{"v", {2, 2}}}), f1),
+                     CheckpointWriteFenceError);
+    }
+}
+
+TEST_F(PostgresCheckpointTest, T3b_RaiseGuardBeforeCommitRefusesConcurrentStaleWriter) {
+    for (const char* op_kind : {"save", "put_writes", "managed_budget"}) {
+        SCOPED_TRACE(op_kind);
+        store->drop_schema();
+        const std::string suffix = Checkpoint::generate_id();
+        const std::string owner = std::string("scope-pg-t3b-") + op_kind + "-" + suffix;
+        const std::string run_id = std::string("run-pg-t3b-") + op_kind + "-" + suffix;
+        const std::string tid = std::string("t-pg-t3b-") + op_kind + "-" + suffix;
+        const CheckpointWriteFence f1{owner, run_id, 1};
+
+        PostgresCheckpointStore conn1(pg_url(), 1);
+        PostgresCheckpointStore conn2(pg_url(), 1);
+
+        ManagedBudgetLeaseScope mb_scope;
+        mb_scope.owner_scope = owner;
+        mb_scope.thread_id = tid;
+        mb_scope.graph_identity = "g";
+        mb_scope.original_ceiling = 100;
+
+        std::promise<void> at_raise_guard;
+        std::promise<void> release_raise_promise;
+        auto release_raise = release_raise_promise.get_future().share();
+        std::atomic<bool> raise_guard_fired{false};
+        conn1.set_raise_guard([&](const std::string&, const std::string&, std::uint64_t) {
+            if (!raise_guard_fired.exchange(true)) {
+                at_raise_guard.set_value();
+                release_raise.wait();
+            }
+        });
+
+        std::promise<void> c2_entering_write;
+        std::atomic<bool> before_write_fired{false};
+        conn2.set_before_write_hook([&](const std::string&, const CheckpointWriteFence&) {
+            if (!before_write_fired.exchange(true)) {
+                c2_entering_write.set_value();
+            }
+        });
+
+        auto raiser_fut = std::async(std::launch::async, [&] {
+            return conn1.raise_fence(owner, run_id, 2);
+        });
+        at_raise_guard.get_future().wait();
+
+        auto writer_fut = std::async(std::launch::async, [&] {
+            if (std::string(op_kind) == "save") {
+                conn2.save(make_state_cp(tid, 1, {{"v", {1, 1}}}), f1);
+            } else if (std::string(op_kind) == "put_writes") {
+                PendingWrite pw;
+                pw.task_id = "task-1";
+                pw.node_name = "n";
+                pw.writes = json::array();
+                conn2.put_writes(tid, "p0", pw, f1);
+            } else {
+                (void)conn2.acquire_managed_budget_lease(mb_scope, "", "", f1);
+            }
+        });
+
+        c2_entering_write.get_future().wait();
+        release_raise_promise.set_value();
+
+        EXPECT_EQ(raiser_fut.get(), 2u);
+        try {
+            writer_fut.get();
+            FAIL() << "Expected CheckpointWriteFenceError";
+        } catch (const CheckpointWriteFenceError& err) {
+            EXPECT_EQ(err.refusal().owner_scope, owner);
+            EXPECT_EQ(err.refusal().run_id, run_id);
+            EXPECT_EQ(err.refusal().writer_fence, 1u);
+            EXPECT_EQ(err.refusal().stored_fence, 2u);
+        }
+        conn1.set_raise_guard({});
+        conn2.set_before_write_hook({});
+        EXPECT_FALSE(conn1.load_latest(tid).has_value());
+        EXPECT_TRUE(conn1.get_writes(tid, "p0").empty());
+        EXPECT_FALSE(conn1.requires_managed_budget(tid));
+        if (std::string(op_kind) == "managed_budget") {
+            auto fresh_lease = conn1.acquire_managed_budget_lease(
+                mb_scope, "", "", CheckpointWriteFence{owner, run_id, 2});
+            ASSERT_NE(fresh_lease, nullptr);
+            EXPECT_FALSE(fresh_lease->bank_generation().empty());
+            EXPECT_EQ(fresh_lease->revision(), 1u);
+        }
+    }
+}
+
+TEST_F(PostgresCheckpointTest, FenceTableSurvivesDropAndEnsureSchema) {
+    const std::string owner = "scope-pg-survive-" + Checkpoint::generate_id();
+    const std::string run_id = "run-pg-survive-" + Checkpoint::generate_id();
+    EXPECT_EQ(store->raise_fence(owner, run_id, 2), 2u);
+    store->drop_schema();
+    PostgresCheckpointStore reopened(pg_url(), 1);
+    EXPECT_EQ(reopened.load_fence(owner, run_id), 2u);
+    EXPECT_THROW(
+        reopened.save(make_state_cp("t-pg-survive", 1, {{"v", {1, 1}}}),
+                      CheckpointWriteFence{owner, run_id, 1}),
+        CheckpointWriteFenceError);
 }

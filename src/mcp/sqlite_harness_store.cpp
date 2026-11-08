@@ -1712,8 +1712,9 @@ public:
             if (current_run.journal_head() != expected_journal_head ||
                 current_run.run_id() != run_id ||
                 current_journal.id != expected_journal_head ||
-                current_run.continuation().state != program::ContinuationState::Running ||
-                current_journal.continuation.state != program::ContinuationState::Running ||
+                (current_run.continuation().state != program::ContinuationState::Running &&
+                 current_run.continuation().state != program::ContinuationState::Interrupted) ||
+                current_journal.continuation.state != current_run.continuation().state ||
                 current_run.continuation().fence != expected_fence ||
                 current_journal.continuation.fence != expected_fence ||
                 current_journal.sequence >= static_cast<std::uint64_t>(INT64_MAX)) {

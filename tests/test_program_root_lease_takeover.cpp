@@ -10,7 +10,10 @@
 // records that it ran in the world of its run.
 #include "program_resume_fixture.h"
 
+#include <neograph/graph/engine.h>
+
 #include "../src/core/runtime_clock.h"
+#include "../src/program/run_control.h"
 #include "fixtures/relation_forwarding.h"
 
 #include <gtest/gtest.h>
@@ -48,6 +51,20 @@ public:
         changed_.notify_all();
         changed_.wait(lock, [this] { return released_; });
     }
+    template <class Done>
+    void pass_or(Done done) {
+        struct ActiveRegistration {
+            Gate* self;
+            explicit ActiveRegistration(Gate* g) : self(g) { register_active_gate(g); }
+            ~ActiveRegistration() { unregister_active_gate(self); }
+        } reg(this);
+        std::unique_lock lock(mutex_);
+        if (!armed_) return;
+        armed_   = false;
+        entered_ = true;
+        changed_.notify_all();
+        changed_.wait(lock, [&] { return released_ || done(); });
+    }
     void release() {
         std::lock_guard lock(mutex_);
         armed_    = false;
@@ -61,6 +78,11 @@ public:
     /// Waits until the gate is entered or `done` holds, and says whether it was entered.
     template <class Done>
     bool wait_entered_or(Done done) {
+        struct ActiveRegistration {
+            Gate* self;
+            explicit ActiveRegistration(Gate* g) : self(g) { register_active_gate(g); }
+            ~ActiveRegistration() { unregister_active_gate(self); }
+        } reg(this);
         std::unique_lock lock(mutex_);
         changed_.wait(lock, [&] { return entered_ || done(); });
         return entered_;
@@ -72,6 +94,39 @@ public:
     }
 
 private:
+    static std::mutex& active_gates_mutex() {
+        static std::mutex m;
+        return m;
+    }
+    static std::set<Gate*>& active_gates() {
+        static std::set<Gate*> s;
+        return s;
+    }
+    static void on_any_attempt_finished(std::string_view, std::uint64_t) noexcept {
+        std::vector<Gate*> snapshot;
+        {
+            std::lock_guard lock(active_gates_mutex());
+            snapshot.assign(active_gates().begin(), active_gates().end());
+        }
+        for (auto* gate : snapshot) {
+            if (gate) gate->notify();
+        }
+    }
+    static void register_active_gate(Gate* gate) {
+        std::lock_guard lock(active_gates_mutex());
+        if (active_gates().empty()) {
+            program::detail::set_attempt_finished_observer_for_testing(&Gate::on_any_attempt_finished);
+        }
+        active_gates().insert(gate);
+    }
+    static void unregister_active_gate(Gate* gate) {
+        std::lock_guard lock(active_gates_mutex());
+        active_gates().erase(gate);
+        if (active_gates().empty()) {
+            program::detail::set_attempt_finished_observer_for_testing(nullptr);
+        }
+    }
+
     mutable std::mutex      mutex_;
     std::condition_variable changed_;
     bool                    armed_ = false, entered_ = false, released_ = false;
@@ -97,9 +152,15 @@ struct LeaseWorld final : World {
     Gate        head_gate, fan_gate, work_gate, tail_gate, last_gate;
     /// The head step fails once it passed its gate.
     std::atomic<bool> fail_head{false};
+    /// The tail step throws NodeInterrupt until resumed with a resume_value.
+    std::atomic<bool> interrupt_tail{false};
+    /// The last step throws NodeInterrupt until resumed with a resume_value.
+    std::atomic<bool> interrupt_last{false};
     std::string gated_work;  // the work value work_gate holds
     /// Runs in the fan node's body, after it is recorded.
     std::function<void()> on_fan;
+    /// Runs in the tail node's body, after it is recorded.
+    std::function<asio::awaitable<void>(const std::string&)> on_tail_async;
 };
 
 LeaseWorld& lease_world_of(std::string_view run_id) { return static_cast<LeaseWorld&>(world_of(run_id)); }
@@ -166,8 +227,15 @@ public:
     asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
         auto& world = lease_world_of(in.ctx.run_id);
         world.journal.record({in.ctx.thread_id, {}, label_, {}});
+        if (label_ == "tail" && world.on_tail_async) co_await world.on_tail_async(in.ctx.thread_id);
         if (gate_) (world.*gate_).pass();
         if (fail_ && (world.*fail_).load()) throw std::runtime_error("step " + label_ + " failed");
+        if (label_ == "tail" && world.interrupt_tail.load() && !in.ctx.resume_value) {
+            throw graph::NodeInterrupt("approve tail", json{{"ask", "tail"}});
+        }
+        if (label_ == "last" && world.interrupt_last.load() && !in.ctx.resume_value) {
+            throw graph::NodeInterrupt("approve last", json{{"ask", "last"}});
+        }
         graph::NodeOutput output;
         output.writes.push_back(graph::ChannelWrite{channel_, json(true)});
         co_return output;
@@ -194,10 +262,22 @@ public:
 
     /// Runs before and after the safe point publication reaches the shared store.
     std::function<void()> before_safe_point, after_safe_point;
+    /// Runs before compare_publish / compare_publish_execution reaches the shared store.
+    std::function<void(const ProgramTransitionPublication&)> before_compare_publish;
+    /// Runs before compare_publish_takeover / compare_publish_takeover_execution reaches the shared store.
+    std::function<void()> before_takeover;
     /// Runs when a lineage is read by run id.
     std::function<void()> on_run_lineage_read;
+    /// Runs when effective runtime state is read by run id.
+    std::function<void()> on_effective_runtime_state_read;
     /// While set, reading a run record fails.
     std::atomic<bool> fail_run_reads{false};
+    /// While set, takeover CAS returns Conflict without mutating the shared store.
+    std::atomic<bool> force_takeover_conflict{false};
+    std::atomic<int>         published_transitions{0};
+    std::atomic<int>         takeover_attempts{0};
+    std::atomic<int>         published_takeovers{0};
+    mutable std::atomic<int> publication_head_loads{0};
 
     std::optional<ProgramRunRecord> load_sync(std::string_view owner, std::string_view run) const override {
         if (fail_run_reads.load()) throw std::runtime_error("injected run record read failure");
@@ -208,6 +288,7 @@ public:
     }
     std::optional<ProgramRunPublicationHead> load_run_publication_head_sync(std::string_view owner,
                                                                             std::string_view run) const override {
+        publication_head_loads.fetch_add(1);
         return inner_->load_run_publication_head(owner, run);
     }
     std::vector<ProgramEvent> load_events_sync(std::string_view owner, std::string_view run,
@@ -240,7 +321,9 @@ public:
     }
     ProgramEffectiveRuntimeState load_effective_runtime_state_sync(std::string_view owner,
                                                                    std::string_view run) const override {
-        return inner_->load_effective_runtime_state(owner, run);
+        auto state = inner_->load_effective_runtime_state(owner, run);
+        if (on_effective_runtime_state_read) on_effective_runtime_state_read();
+        return state;
     }
     std::vector<ProgramChildSynthesisRecord> load_child_syntheses_sync(std::string_view owner,
                                                                        std::string_view run) const override {
@@ -283,15 +366,21 @@ public:
     ProgramTransitionPublishResult compare_publish_sync(std::string_view owner, std::string_view head,
                                                         std::uint64_t expected_fence,
                                                         ProgramTransitionPublication publication) override {
-        return inner_->compare_publish(owner, head, expected_fence, std::move(publication));
+        if (before_compare_publish) before_compare_publish(publication);
+        const auto res = inner_->compare_publish(owner, head, expected_fence, std::move(publication));
+        if (res == ProgramTransitionPublishResult::Published) ++published_transitions;
+        return res;
     }
     ProgramTransitionPublishResult compare_publish_execution_sync(std::string_view owner, std::string_view head,
                                                                   std::uint64_t expected_fence,
                                                                   ProgramTransitionPublication publication,
                                                                   std::optional<ProgramExecutionLease> expected,
                                                                   std::optional<ProgramExecutionLease> next) override {
-        return inner_->compare_publish_execution(owner, head, expected_fence, std::move(publication),
-                                                 std::move(expected), std::move(next));
+        if (before_compare_publish) before_compare_publish(publication);
+        const auto res = inner_->compare_publish_execution(owner, head, expected_fence, std::move(publication),
+                                                           std::move(expected), std::move(next));
+        if (res == ProgramTransitionPublishResult::Published) ++published_transitions;
+        return res;
     }
     ProgramTransitionPublishResult compare_publish_graph_safe_point_sync(
         std::string_view owner, std::string_view head, std::uint64_t expected_fence,
@@ -307,13 +396,23 @@ public:
     ProgramTransitionPublishResult compare_publish_takeover_sync(std::string_view owner, std::string_view run_id,
                                                                  std::string_view head,
                                                                  std::uint64_t expected_fence) override {
-        return inner_->compare_publish_takeover(owner, run_id, head, expected_fence);
+        ++takeover_attempts;
+        if (before_takeover) before_takeover();
+        if (force_takeover_conflict.load()) return ProgramTransitionPublishResult::Conflict;
+        const auto res = inner_->compare_publish_takeover(owner, run_id, head, expected_fence);
+        if (res == ProgramTransitionPublishResult::Published) ++published_takeovers;
+        return res;
     }
     ProgramTransitionPublishResult compare_publish_takeover_execution_sync(
         std::string_view owner, std::string_view run_id, std::string_view head, std::uint64_t expected_fence,
         ProgramExecutionLease expected_lease) override {
-        return inner_->compare_publish_takeover_execution(owner, run_id, head, expected_fence,
-                                                          std::move(expected_lease));
+        ++takeover_attempts;
+        if (before_takeover) before_takeover();
+        if (force_takeover_conflict.load()) return ProgramTransitionPublishResult::Conflict;
+        const auto res = inner_->compare_publish_takeover_execution(owner, run_id, head, expected_fence,
+                                                                    std::move(expected_lease));
+        if (res == ProgramTransitionPublishResult::Published) ++published_takeovers;
+        return res;
     }
 
 private:
@@ -327,41 +426,110 @@ class SaveCountingCheckpointStore final : public graph::CheckpointStore {
 public:
     explicit SaveCountingCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner) : inner_(std::move(inner)) {}
     std::atomic<int>                              saves{0};
+    std::atomic<int>                              put_writes_calls{0};
+    std::atomic<int>                              clear_writes_calls{0};
+    std::atomic<int>                              delete_thread_calls{0};
+    std::atomic<std::uint64_t>                    inject_refusal_stored_fence{0};
     std::function<bool(const graph::Checkpoint&)> hold_when;
     Gate                                          save_gate;
+    std::function<void(const graph::PendingWrite&)> before_put_writes;
+    std::function<void(std::uint64_t)>            before_raise_fence;
+    std::function<void(std::uint64_t)>            after_raise_fence;
+    std::function<void()>                         on_load_checkpoint;
 
     std::string saved_thread() const {
         std::lock_guard lock(mutex_);
         return saved_thread_;
     }
+    std::uint64_t last_saved_fence() const {
+        std::lock_guard lock(mutex_);
+        return last_saved_fence_;
+    }
+    std::vector<std::uint64_t> raised_fences() const {
+        std::lock_guard lock(mutex_);
+        return raised_fences_;
+    }
+
+    bool supports_write_fence() const override { return inner_->supports_write_fence(); }
 
     void save(const graph::Checkpoint& checkpoint) override {
+        save(checkpoint, {});
+    }
+    void save(const graph::Checkpoint& checkpoint, const graph::CheckpointWriteFence& fence) override {
         hold(checkpoint);
-        inner_->save(checkpoint);
-        saved(checkpoint);
+        if (const auto injected = inject_refusal_stored_fence.exchange(0); injected > 0 && fence.active()) {
+            throw graph::CheckpointWriteFenceError(
+                graph::CheckpointWriteFenceRefusal{fence.owner_scope, fence.run_id, fence.fence, injected});
+        }
+        inner_->save(checkpoint, fence);
+        saved(checkpoint, fence);
     }
     void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
                                            const graph::Checkpoint& checkpoint) override {
+        publish_managed_budget_checkpoint(lease, checkpoint, {});
+    }
+    void publish_managed_budget_checkpoint(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+                                           const graph::Checkpoint& checkpoint,
+                                           const graph::CheckpointWriteFence& fence) override {
         hold(checkpoint);
-        inner_->publish_managed_budget_checkpoint(lease, checkpoint);
-        saved(checkpoint);
+        inner_->publish_managed_budget_checkpoint(lease, checkpoint, fence);
+        saved(checkpoint, fence);
     }
     void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write) override {
-        inner_->put_writes(thread, parent, write);
+        put_writes(thread, parent, write, {});
+    }
+    void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write,
+                    const graph::CheckpointWriteFence& fence) override {
+        if (before_put_writes) before_put_writes(write);
+        if (const auto injected = inject_refusal_stored_fence.exchange(0); injected > 0 && fence.active()) {
+            throw graph::CheckpointWriteFenceError(
+                graph::CheckpointWriteFenceRefusal{fence.owner_scope, fence.run_id, fence.fence, injected});
+        }
+        inner_->put_writes(thread, parent, write, fence);
+        ++put_writes_calls;
     }
     std::optional<graph::Checkpoint> load_latest(const std::string& thread) override {
+        if (on_load_checkpoint) on_load_checkpoint();
         return inner_->load_latest(thread);
     }
-    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override { return inner_->load_by_id(id); }
+    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+        if (on_load_checkpoint) on_load_checkpoint();
+        return inner_->load_by_id(id);
+    }
     std::vector<graph::Checkpoint> list(const std::string& thread, int limit) override {
         return inner_->list(thread, limit);
     }
-    void delete_thread(const std::string& thread) override { inner_->delete_thread(thread); }
+    void delete_thread(const std::string& thread) override {
+        delete_thread(thread, {});
+    }
+    void delete_thread(const std::string& thread, const graph::CheckpointWriteFence& fence) override {
+        if (!fence.active() || fence.fence <= 1) ++delete_thread_calls;
+        inner_->delete_thread(thread, fence);
+    }
     std::vector<graph::PendingWrite> get_writes(const std::string& thread, const std::string& parent) override {
         return inner_->get_writes(thread, parent);
     }
     void clear_writes(const std::string& thread, const std::string& parent) override {
-        inner_->clear_writes(thread, parent);
+        clear_writes(thread, parent, {});
+    }
+    void clear_writes(const std::string& thread, const std::string& parent,
+                      const graph::CheckpointWriteFence& fence) override {
+        if (!fence.active() || fence.fence <= 1) ++clear_writes_calls;
+        inner_->clear_writes(thread, parent, fence);
+    }
+    std::uint64_t raise_fence(const std::string& owner_scope, const std::string& run_id,
+                              std::uint64_t min_fence) override {
+        if (before_raise_fence) before_raise_fence(min_fence);
+        {
+            std::lock_guard lock(mutex_);
+            raised_fences_.push_back(min_fence);
+        }
+        const auto result = inner_->raise_fence(owner_scope, run_id, min_fence);
+        if (after_raise_fence) after_raise_fence(result);
+        return result;
+    }
+    std::uint64_t load_fence(const std::string& owner_scope, const std::string& run_id) override {
+        return inner_->load_fence(owner_scope, run_id);
     }
     bool requires_managed_budget(const std::string& thread) override {
         return inner_->requires_managed_budget(thread);
@@ -371,10 +539,23 @@ public:
         const std::string& expected_checkpoint_commitment) override {
         return inner_->acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment);
     }
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment, const graph::CheckpointWriteFence& fence) override {
+        return inner_->acquire_managed_budget_lease(
+            scope, expected_checkpoint_id, expected_checkpoint_commitment, fence);
+    }
     graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
         const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
         std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override {
         return inner_->begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest);
+    }
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+        const graph::CheckpointWriteFence& fence) override {
+        return inner_->begin_managed_budget_effect(
+            lease, effect_id, exact_claim_amount, prepared_request_digest, fence);
     }
     void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
                                       const graph::ManagedBudgetEffectReceipt& effect,
@@ -382,22 +563,38 @@ public:
                                       const UsageAccumulator::AuthoritySnapshot& authority) override {
         inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
     }
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+                                      const graph::ManagedBudgetEffectReceipt& effect,
+                                      sp::runtime::Result genuine_outcome,
+                                      const UsageAccumulator::AuthoritySnapshot& authority,
+                                      const graph::CheckpointWriteFence& fence) override {
+        inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority, fence);
+    }
     void release_managed_budget_lease(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override {
         inner_->release_managed_budget_lease(lease);
+    }
+    void release_managed_budget_lease(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+                                      const graph::CheckpointWriteFence& fence) override {
+        inner_->release_managed_budget_lease(lease, fence);
     }
     bool retains_native_checkpoint() const noexcept override { return inner_->retains_native_checkpoint(); }
     void publish_managed_budget_fork(const graph::Checkpoint& source, const graph::Checkpoint& forked) override {
         inner_->publish_managed_budget_fork(source, forked);
+    }
+    void publish_managed_budget_fork(const graph::Checkpoint& source, const graph::Checkpoint& forked,
+                                     const graph::CheckpointWriteFence& fence) override {
+        inner_->publish_managed_budget_fork(source, forked, fence);
     }
 
 private:
     void hold(const graph::Checkpoint& checkpoint) {
         if (hold_when && hold_when(checkpoint)) save_gate.pass();
     }
-    void saved(const graph::Checkpoint& checkpoint) {
+    void saved(const graph::Checkpoint& checkpoint, const graph::CheckpointWriteFence& fence) {
         {
             std::lock_guard lock(mutex_);
-            saved_thread_ = checkpoint.thread_id;
+            saved_thread_     = checkpoint.thread_id;
+            last_saved_fence_ = fence.fence;
         }
         ++saves;
     }
@@ -405,6 +602,8 @@ private:
     std::shared_ptr<graph::CheckpointStore> inner_;
     mutable std::mutex                      mutex_;
     std::string                             saved_thread_;
+    std::uint64_t                           last_saved_fence_{0};
+    std::vector<std::uint64_t>              raised_fences_;
 };
 
 // ---------------------------------------------------------------------------
@@ -511,7 +710,7 @@ public:
         runtime.catalog           = catalog_;
         runtime.checkpoints       = stores_.checkpoints;
         runtime.transitions       = stores_.transitions;
-        runtime.scheduler_threads = 2;
+        runtime.scheduler_threads = 4;
         runtime_                  = std::make_unique<ProgramRuntime>(std::move(runtime));
     }
     ~LeaseHost() {
@@ -544,8 +743,46 @@ public:
         return catalog_->admit(bundle, ProgramAdmission{kOwner, *profile_, std::move(policy).build(), {}});
     }
 
+    ProgramVersion admit_parallel_three() {
+        const auto branch = [] {
+            return json{{"op", "call_core"}, {"core", "main"}};
+        };
+        json document{
+            {"program_schema_version", 2U},
+            {"input_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+            {"output_contract", {{"schema_version", 1}, {"schema", json::object()}}},
+            {"root",
+             {{"op", "parallel"},
+              {"name", "main"},
+              {"definition", fan_out_core()},
+              {"branches", json::array({branch(), branch(), branch()})}}},
+            {"declared_budget_requirements",
+             json::array({json{{"resource", "wall_time_ms"}, {"minimum", 1}, {"maximum", 100000}},
+                          json{{"resource", "model_tokens"}, {"minimum", 0}, {"maximum", 10000}},
+                          json{{"resource", "monetary_microunits"}, {"minimum", 0}, {"maximum", 10000}},
+                          json{{"resource", "max_concurrency"}, {"minimum", 1}, {"maximum", 4}},
+                          json{{"resource", "max_program_operations"}, {"minimum", 1}, {"maximum", 4}},
+                          json{{"resource", "max_core_steps"}, {"minimum", 1}, {"maximum", 60}},
+                          json{{"resource", "max_dynamic_compiles"}, {"minimum", 0}, {"maximum", 0}},
+                          json{{"resource", "max_child_depth"}, {"minimum", 0}, {"maximum", 0}},
+                          json{{"resource", "max_total_children"}, {"minimum", 0}, {"maximum", 0}}})}};
+        ProgramCompiler compiler(registry_, {"root-lease/v1"});
+        const auto bundle =
+            compiler.compile(ProgramSource::from_cpp_builder("root-lease-par3", 2, std::move(document)));
+        PolicySnapshotBuilder policy;
+        policy.id("root-lease-par3-policy").semantic_version("1.0.0").owner_scope(kOwner).admission_profile(*profile_)
+            .budget_ceiling(BudgetLimits{100000, 10000, 10000, 4, 4, 60, 1, 0, 0});
+        return catalog_->admit(bundle, ProgramAdmission{kOwner, *profile_, std::move(policy).build(), {}});
+    }
+
     ProgramHandle start(const ProgramVersion& version, const std::string& run_id) {
         ProgramInvocation invocation{json::object(), lease_budget(), "trace-" + run_id, {}};
+        invocation.requested_run_id = run_id;
+        return runtime_->start(kOwner, version, std::move(invocation));
+    }
+    ProgramHandle start_parallel_three(const ProgramVersion& version, const std::string& run_id) {
+        ProgramInvocation invocation{
+            json::object(), RunBudget{kWallMs, 1'000, 1'000, 3, 4, 60, 0, 0, 0}, "trace-" + run_id, {}};
         invocation.requested_run_id = run_id;
         return runtime_->start(kOwner, version, std::move(invocation));
     }
@@ -952,9 +1189,10 @@ TEST(ProgramRootLeaseTakeover, AProcessThatWasTakenOverSavesNoFurtherCheckpointA
     LeaseWorld    world(next_world_id());
     const auto    version = original.host.admit();
     world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
 
     auto source = original.host.start(version, world.run_id());
-    world.tail_gate.wait_entered_or([] { return false; });
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
     ASSERT_TRUE(backend.transitions->load_execution_lease_sync(kOwner, world.run_id()));
 
     // Another process recovers the run while the original one is inside the tail's step.
@@ -995,9 +1233,10 @@ TEST(ProgramRootLeaseTakeover, ASaveThatATakeoverOvertookStopsTheProcessBeforeIt
                channel_is_set(checkpoint.channel_values["channels"], "done");
     };
     original.checkpoints->save_gate.arm();
+    const ReleaseOnExit release_save{[&] { original.checkpoints->save_gate.release(); }};
 
     auto source = original.host.start(version, world.run_id());
-    original.checkpoints->save_gate.wait_entered_or([] { return false; });
+    ASSERT_TRUE(original.checkpoints->save_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
     const auto saves_before = original.checkpoints->saves.load();
 
     // Another process takes the run over and finishes it; the tail's pending write is replayed, not run again.
@@ -1006,13 +1245,14 @@ TEST(ProgramRootLeaseTakeover, ASaveThatATakeoverOvertookStopsTheProcessBeforeIt
     ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_of(recovered) << "; " << before;
     EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
 
-    // The held save lands after the takeover; the original process then stops before the next step.
+    // The held save is refused by the checkpoint store fence after the takeover; the original process stops before the next step.
     original.checkpoints->save_gate.release();
     const auto stale = source.wait();
     EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
     ASSERT_TRUE(stale.failure());
     EXPECT_EQ(stale.failure()->code, "P_RUN_TAKEN_OVER");
-    EXPECT_EQ(original.checkpoints->saves.load(), saves_before + 1) << "the overtaken save lands, and only it";
+    EXPECT_EQ(original.checkpoints->saves.load(), saves_before)
+        << "the overtaken save is refused by the checkpoint store fence";
     const auto runs = take_runs(world);
     EXPECT_EQ(runs_of(runs, "tail"), 1U);
     EXPECT_EQ(runs_of(runs, "last"), 1U) << "the original process ran the step after its overtaken save";
@@ -1026,9 +1266,10 @@ TEST(ProgramRootLeaseTakeover, AnAttemptThatEndsAfterATakeoverWithoutACheckpoint
     const auto    version = original.host.admit();
     world.fail_head = true;
     world.head_gate.arm();
+    const ReleaseOnExit release_head{[&] { world.head_gate.release(); }};
 
     auto source = original.host.start(version, world.run_id());
-    world.head_gate.wait_entered_or([] { return false; });
+    ASSERT_TRUE(world.head_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
     // Nothing is saved yet: the recovering process stops for the host to reconcile the Core call.
     const auto recovered = recovering.host.reconnect(world.run_id()).wait();
     EXPECT_EQ(recovered.status(), ProgramTerminalStatus::Interrupted) << failure_of(recovered);
@@ -1193,8 +1434,9 @@ TEST(ProgramRootLeaseTakeover, TheStoreTakesOverALeasedRunOnlyWithItsLeaseAndDel
     LeaseWorld    world(next_world_id());
     const auto    version = process.host.admit();
     world.fan_gate.arm();
+    const ReleaseOnExit release_fan{[&] { world.fan_gate.release(); }};
     auto source = process.host.start(version, world.run_id());
-    world.fan_gate.wait_entered_or([] { return false; });
+    ASSERT_TRUE(world.fan_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
 
     auto&      store  = *backend.transitions;
     const auto record = store.load_sync(kOwner, world.run_id());
@@ -1229,6 +1471,1058 @@ TEST(ProgramRootLeaseTakeover, TheStoreTakesOverALeasedRunOnlyWithItsLeaseAndDel
     world.fan_gate.release();
     const auto stale = source.wait();
     EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+}
+
+// ---------------------------------------------------------------------------
+// Checkpoint-store fencing tokens (T0, T1, T2, T4, T6a, T6b, T7a, T7b, T7c, T8a)
+// ---------------------------------------------------------------------------
+
+TEST(ProgramRootLeaseTakeover, T0_StaleSavePausedBeforeWriteTransactionIsRefusedAndDoesNotRedoCompletedStep) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend), third(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+
+    // Pause Attempt 1 (fence = 1) right before its write transaction for the tail step's checkpoint (holding no store lock).
+    original.checkpoints->hold_when = [](const graph::Checkpoint& checkpoint) {
+        return checkpoint.channel_values.contains("channels") &&
+               channel_is_set(checkpoint.channel_values["channels"], "done") &&
+               !channel_is_set(checkpoint.channel_values["channels"], "finished");
+    };
+    original.checkpoints->save_gate.arm();
+    const ReleaseOnExit release_save{[&] { original.checkpoints->save_gate.release(); }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(original.checkpoints->save_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+    const auto saves_before = original.checkpoints->saves.load();
+
+    // Owner B (recovering) takes over at fence = 2, runs tail/last (saving last's checkpoint), and crashes before
+    // its terminal transition publication commits (leaving the run record in Running at fence = 2).
+    std::atomic<bool> block_recovering_publications{false};
+    recovering.view->before_compare_publish = [&](const ProgramTransitionPublication& publication) {
+        if (block_recovering_publications.load() || publication.run_record.terminal_result().has_value()) {
+            block_recovering_publications.store(true);
+            throw std::runtime_error("simulated crash before terminal publication");
+        }
+    };
+    auto recovering_handle = recovering.host.reconnect(world.run_id());
+    (void)recovering_handle.wait();
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U);
+    const auto latest_after_b = backend.checkpoints->load_latest(original.checkpoints->saved_thread());
+    ASSERT_TRUE(latest_after_b);
+    ASSERT_TRUE(latest_after_b->channel_values.contains("channels"));
+    EXPECT_TRUE(channel_is_set(latest_after_b->channel_values["channels"], "finished"));
+
+    // Release Attempt 1 to begin its write transaction: its stale tail save (wf = 1) is refused by stored_fence = 2.
+    original.checkpoints->save_gate.release();
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+    ASSERT_TRUE(stale.failure());
+    EXPECT_EQ(stale.failure()->code, "P_RUN_TAKEN_OVER");
+    EXPECT_EQ(original.checkpoints->saves.load(), saves_before) << "stale save must be refused by checkpoint fence";
+
+    // Owner C (third) reconnects: it loads Owner B's last checkpoint (finished = true) and does NOT re-execute last.
+    const auto final_result = third.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(final_result.status(), ProgramTerminalStatus::Completed) << failure_of(final_result);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 3U);
+    const auto runs = take_runs(world);
+    EXPECT_EQ(runs_of(runs, "last"), 1U) << "last must not be re-executed after Attempt 1's stale save is refused";
+}
+
+TEST(ProgramRootLeaseTakeover, T1_RaiseFenceCommitsBeforeTakeoverCasClosingMutantM1) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    bool observed_fence_at_cas = false;
+    recovering.view->before_takeover = [&] {
+        observed_fence_at_cas = true;
+        EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U)
+            << "raise_fence(2) must commit before compare_publish_takeover";
+        graph::Checkpoint stale_cp;
+        stale_cp.id             = graph::Checkpoint::generate_id();
+        stale_cp.thread_id      = original.checkpoints->saved_thread();
+        stale_cp.channel_values = json::object();
+        stale_cp.step           = 99;
+        stale_cp.timestamp      = 1;
+        EXPECT_THROW(
+            backend.checkpoints->save(stale_cp, graph::CheckpointWriteFence{kOwner, world.run_id(), 1}),
+            graph::CheckpointWriteFenceError);
+    };
+
+    const auto recovered = recovering.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_of(recovered);
+    EXPECT_TRUE(observed_fence_at_cas);
+    world.tail_gate.release();
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+}
+
+TEST(ProgramRootLeaseTakeover, T2_ReconnectReadsResumeCheckpointOnlyAfterRaiseAndCasClosingMutantM2) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    world.last_gate.arm();
+    const ReleaseOnExit release_gates{[&] {
+        world.tail_gate.release();
+        world.last_gate.release();
+    }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    std::vector<std::string> sequence;
+    std::mutex               seq_mutex;
+    recovering.checkpoints->before_raise_fence = [&](std::uint64_t) {
+        {
+            std::lock_guard lock(seq_mutex);
+            sequence.push_back("before_raise");
+        }
+        // Attempt 1 finishes tail and saves tail's checkpoint (wf = 1) after reconnect_core started but before raise_fence(2) commits.
+        world.tail_gate.release();
+        ASSERT_TRUE(world.last_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+    };
+    recovering.checkpoints->after_raise_fence = [&](std::uint64_t) {
+        std::lock_guard lock(seq_mutex);
+        sequence.push_back("after_raise");
+    };
+    recovering.view->before_takeover = [&] {
+        std::lock_guard lock(seq_mutex);
+        sequence.push_back("takeover_cas");
+    };
+    recovering.checkpoints->on_load_checkpoint = [&] {
+        std::lock_guard lock(seq_mutex);
+        sequence.push_back("load_checkpoint");
+    };
+
+    const auto recovered = recovering.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_of(recovered);
+    world.last_gate.release();
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+
+    const auto runs = take_runs(world);
+    EXPECT_EQ(runs_of(runs, "tail"), 1U)
+        << "recovering must read the resume checkpoint after raise_fence and takeover CAS, observing tail's checkpoint";
+    ASSERT_GE(sequence.size(), 4U);
+    EXPECT_EQ(sequence[0], "before_raise");
+    EXPECT_EQ(sequence[1], "after_raise");
+    EXPECT_EQ(sequence[2], "takeover_cas");
+    EXPECT_EQ(sequence[3], "load_checkpoint");
+}
+
+TEST(ProgramRootLeaseTakeover, T4_SubgraphCheckpointWritesShareRunFenceKeyClosingMutantM4) {
+    auto        store  = std::make_shared<graph::InMemoryCheckpointStore>();
+    const auto  run_id = std::string("run-subgraph-fence");
+    auto        fenced = std::make_shared<graph::FencedCheckpointStore>(store, kOwner, run_id, 1);
+
+    class SubFenceNode final : public graph::GraphNode {
+    public:
+        SubFenceNode(std::string name, std::shared_ptr<graph::InMemoryCheckpointStore> store, std::string run_id)
+            : name_(std::move(name)), store_(std::move(store)), run_id_(std::move(run_id)) {}
+        std::string get_name() const override { return name_; }
+        asio::awaitable<graph::NodeOutput> run(graph::NodeInput in) override {
+            EXPECT_NE(in.ctx.thread_id.find("subgraph/"), std::string::npos);
+            // Raise the run fence (owner_scope, run_id) to 2 while inside the subgraph thread.
+            store_->raise_fence(kOwner, run_id_, 2);
+            graph::NodeOutput out;
+            out.writes.push_back(graph::ChannelWrite{"val", json("from-sub")});
+            co_return out;
+        }
+
+    private:
+        std::string                                     name_;
+        std::shared_ptr<graph::InMemoryCheckpointStore> store_;
+        std::string                                     run_id_;
+    };
+
+    graph::GraphRegistry registry;
+    registry.register_type("t4.sub_step",
+                           [store, run_id](const std::string& name, const json&, const graph::NodeContext&) {
+                               return std::make_unique<SubFenceNode>(name, store, run_id);
+                           });
+
+    const json child_def{
+        {"name", "child"},
+        {"channels", json{{"val", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+        {"nodes", json{{"sub_step", json{{"type", "t4.sub_step"}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "sub_step"}},
+                               json{{"from", "sub_step"}, {"to", "__end__"}}})},
+        {"conditional_edges", json::array()}};
+
+    const json parent_def{
+        {"name", "parent"},
+        {"channels", json{{"val", json{{"reducer", "overwrite"}, {"initial", ""}}}}},
+        {"nodes", json{{"sub", json{{"type", "subgraph"}, {"definition", child_def}}}}},
+        {"edges", json::array({json{{"from", "__start__"}, {"to", "sub"}},
+                               json{{"from", "sub"}, {"to", "__end__"}}})},
+        {"conditional_edges", json::array()}};
+
+    graph::EngineConfig engine_cfg;
+    engine_cfg.checkpoint_store = fenced;
+    engine_cfg.stderr_notices   = false;
+    graph::EngineResources resources;
+    resources.registry = registry.snapshot();
+    auto parent_engine = graph::GraphEngine::build(parent_def, std::move(engine_cfg), std::move(resources));
+
+    graph::RunConfig run_cfg;
+    run_cfg.thread_id = "root-thread-1";
+    graph::RunMetadata meta;
+    meta.owner_scope = kOwner;
+    meta.run_id      = run_id;
+    try {
+        (void)parent_engine->run(run_cfg, meta);
+        FAIL() << "subgraph write with stale run fence wf = 1 must throw CheckpointWriteFenceError";
+    } catch (const graph::CheckpointWriteFenceError& err) {
+        EXPECT_EQ(err.refusal().owner_scope, kOwner);
+        EXPECT_EQ(err.refusal().run_id, run_id);
+        EXPECT_EQ(err.refusal().writer_fence, 1U);
+        EXPECT_EQ(err.refusal().stored_fence, 2U);
+    }
+}
+
+TEST(ProgramRootLeaseTakeover, T6a_AbortedTakeoverFenceRaiseTriggersSelfTakeoverAndCompletesRun) {
+    SharedBackend backend;
+    Process       original(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    // Keep the shared checkpoint store at fence = 1 and inject a single CheckpointWriteFenceError(writer=1, stored=2)
+    // on Attempt 1's next checkpoint write, so that self_takeover itself must raise the checkpoint store fence from 1 to 2
+    // before its takeover CAS and before the successor attempt starts.
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 1U);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
+    bool observed_raised_fence_before_cas = false;
+    original.view->before_takeover = [&] {
+        observed_raised_fence_before_cas = true;
+        EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U)
+            << "self_takeover must raise the checkpoint store fence to 2 before the takeover CAS";
+    };
+    original.checkpoints->inject_refusal_stored_fence.store(2U);
+
+    // Release Attempt 1: its next checkpoint write gets CheckpointWriteFenceError(writer=1, stored=2),
+    // triggers self-takeover to fence = 2, and completes the original ProgramHandle as Completed!
+    world.tail_gate.release();
+    const auto result = source.wait();
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_of(result);
+    EXPECT_TRUE(observed_raised_fence_before_cas);
+    EXPECT_EQ(original.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}));
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U);
+    EXPECT_EQ(items_of(result.output()), std::set<std::string>(kSends.begin(), kSends.end()));
+    const auto runs = take_runs(world);
+    EXPECT_EQ(runs_of(runs, "last"), 1U);
+}
+
+TEST(ProgramRootLeaseTakeover, T6b_ConcurrentRefusalsInFanOutSingleFlightOneSelfTakeoverAndNoCleanupWrites) {
+    SharedBackend backend;
+    Process       original(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit_parallel_three();
+
+    // Three parallel call_core branches run concurrently, each holding its own AttemptOpGuard (active_attempt_ops_ == 3).
+    // In "tail" (after each branch has already saved its "head", "fan", and "work" checkpoints at wf = 1):
+    // - the 1st branch to enter "tail" is held at a gate inside the node body (world.on_tail_async);
+    // - the 2nd and 3rd branches enter put_writes for "tail" together, where the store fence is raised to 2 so both
+    //   fail with CheckpointWriteFenceError while in flight at once;
+    // - the single-flight winner parks in drain_attempt_ops_async(1), the loser returns without an error the join records
+    //   and drops its AttemptOpGuard, and the 3rd op stays at its gate until the RunControl drain seam reports that the
+    //   winner is parked in the drain with only the 3rd op remaining (active_ops == 2, own_op_tokens == 1).
+    std::mutex              coord_mutex;
+    std::condition_variable coord_cv;
+    int                     tail_entered        = 0;
+    int                     arrived_tail_writes = 0;
+    bool                    barrier_released    = false;
+    bool                    winner_parked       = false;
+    bool                    abort_waits         = false;
+    std::atomic<bool>       source_done{false};
+    std::atomic<bool>       third_op_released{false};
+    std::atomic<bool>       successor_started_before_third_op{false};
+    std::atomic<int>        self_takeover_fence_raises{0};
+    std::atomic<int>        self_takeover_entries{0};
+    std::atomic<int>        successor_tail_runs{0};
+
+    struct ScopedSelfTakeoverObserver {
+        static std::mutex& mutex() {
+            static std::mutex m;
+            return m;
+        }
+        static std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)>& callback() {
+            static std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> cb;
+            return cb;
+        }
+        static bool dispatch(std::string_view run_id,
+                             std::uint64_t    attempt,
+                             std::uint64_t    fence,
+                             bool             transition_mutex_locked) noexcept {
+            std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> fn;
+            {
+                std::lock_guard lock(mutex());
+                fn = callback();
+            }
+            return fn ? fn(run_id, attempt, fence, transition_mutex_locked) : true;
+        }
+        explicit ScopedSelfTakeoverObserver(
+            std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> fn) {
+            {
+                std::lock_guard lock(mutex());
+                callback() = std::move(fn);
+            }
+            program::detail::set_self_takeover_entered_observer_for_testing(&ScopedSelfTakeoverObserver::dispatch);
+        }
+        ~ScopedSelfTakeoverObserver() {
+            program::detail::set_self_takeover_entered_observer_for_testing(nullptr);
+            std::lock_guard lock(mutex());
+            callback() = nullptr;
+        }
+    };
+
+    ScopedSelfTakeoverObserver self_takeover_observer(
+        [&](std::string_view run_id, std::uint64_t, std::uint64_t, bool) {
+            if (run_id == world.run_id()) {
+                self_takeover_entries.fetch_add(1);
+            }
+            return true;
+        });
+
+    struct ScopedDrainObserver {
+        static std::mutex& mutex() {
+            static std::mutex m;
+            return m;
+        }
+        static std::function<void(std::string_view, std::uint64_t, std::size_t, std::size_t)>& callback() {
+            static std::function<void(std::string_view, std::uint64_t, std::size_t, std::size_t)> cb;
+            return cb;
+        }
+        static void dispatch(std::string_view run_id,
+                             std::uint64_t    attempt,
+                             std::size_t      active_ops,
+                             std::size_t      own_op_tokens) noexcept {
+            std::function<void(std::string_view, std::uint64_t, std::size_t, std::size_t)> fn;
+            {
+                std::lock_guard lock(mutex());
+                fn = callback();
+            }
+            if (fn) fn(run_id, attempt, active_ops, own_op_tokens);
+        }
+        explicit ScopedDrainObserver(
+            std::function<void(std::string_view, std::uint64_t, std::size_t, std::size_t)> fn) {
+            {
+                std::lock_guard lock(mutex());
+                callback() = std::move(fn);
+            }
+            program::detail::set_refusal_drain_parked_observer_for_testing(&ScopedDrainObserver::dispatch);
+        }
+        ~ScopedDrainObserver() {
+            program::detail::set_refusal_drain_parked_observer_for_testing(nullptr);
+            std::lock_guard lock(mutex());
+            callback() = nullptr;
+        }
+    };
+
+    ScopedDrainObserver drain_observer(
+        [&](std::string_view run_id, std::uint64_t attempt, std::size_t active_ops, std::size_t own_op_tokens) {
+            if (run_id == world.run_id() && attempt == 1U && own_op_tokens == 1U && active_ops <= 2U) {
+                {
+                    std::lock_guard lock(coord_mutex);
+                    winner_parked = true;
+                }
+                coord_cv.notify_all();
+            }
+        });
+
+    const ReleaseOnExit release_coord{[&] {
+        {
+            std::lock_guard lock(coord_mutex);
+            barrier_released = true;
+            winner_parked    = true;
+            abort_waits      = true;
+        }
+        coord_cv.notify_all();
+    }};
+
+    world.on_tail_async = [&](const std::string&) -> asio::awaitable<void> {
+        if (self_takeover_fence_raises.load() > 0) {
+            successor_tail_runs.fetch_add(1);
+        }
+        bool hold_this_branch = false;
+        {
+            std::lock_guard lock(coord_mutex);
+            if (++tail_entered == 1) {
+                hold_this_branch = true;
+            }
+        }
+        if (!hold_this_branch) co_return;
+        // Hold the 3rd op until the RunControl seam reports the single-flight winner is parked in the drain
+        // with only this op still active (or the run has ended).
+        {
+            std::unique_lock lock(coord_mutex);
+            coord_cv.wait(lock, [&] { return winner_parked || source_done.load() || abort_waits; });
+            EXPECT_TRUE(winner_parked);
+        }
+        EXPECT_EQ(self_takeover_fence_raises.load(), 0)
+            << "successor control / self_takeover must not start while the 3rd op is still active";
+        EXPECT_EQ(original.view->takeover_attempts.load(), 0)
+            << "successor takeover must not start while the 3rd op is still active";
+        EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
+        third_op_released.store(true);
+        co_return;
+    };
+
+    original.checkpoints->before_put_writes = [&](const graph::PendingWrite& write) {
+        if (write.node_name != "tail") return;
+        std::unique_lock lock(coord_mutex);
+        if (barrier_released) return;
+        ++arrived_tail_writes;
+        if (arrived_tail_writes == 2) {
+            original.checkpoints->clear_writes_calls.store(0);
+            original.checkpoints->delete_thread_calls.store(0);
+            backend.checkpoints->raise_fence(kOwner, world.run_id(), 2);
+            barrier_released = true;
+            coord_cv.notify_all();
+        } else {
+            coord_cv.wait(lock, [&] { return barrier_released || source_done.load() || abort_waits; });
+        }
+    };
+
+    original.checkpoints->before_raise_fence = [&](std::uint64_t) {
+        self_takeover_fence_raises.fetch_add(1);
+        if (!third_op_released.load()) {
+            successor_started_before_third_op.store(true);
+        }
+    };
+
+    auto       source = original.host.start_parallel_three(version, world.run_id());
+    const auto result = source.wait();
+    source_done.store(true);
+    coord_cv.notify_all();
+
+    EXPECT_EQ(result.status(), ProgramTerminalStatus::Completed) << failure_of(result);
+    EXPECT_EQ(result.attempt(), 1U);
+    EXPECT_EQ(successor_tail_runs.load(), 3)
+        << "successor control at fence 2 must start after drain and execute all 3 branches";
+    EXPECT_TRUE(third_op_released.load());
+    EXPECT_FALSE(successor_started_before_third_op.load())
+        << "drain_attempt_ops_async(1) must wait until the 3rd op releases its AttemptOpGuard before self_takeover runs";
+    EXPECT_EQ(self_takeover_entries.load(), 1)
+        << "single-flight refusal claim must allow only one refusal handler into self_takeover";
+    EXPECT_EQ(self_takeover_fence_raises.load(), 1)
+        << "single-flight refusal claim must allow only one winner into self_takeover";
+    EXPECT_EQ(items_of(result.output()), std::set<std::string>(kSends.begin(), kSends.end()));
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+    EXPECT_EQ(original.view->published_takeovers.load(), 1)
+        << "single-flight winner performs exactly one self-takeover while loser drops its op cleanly";
+    EXPECT_EQ(original.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}));
+    EXPECT_EQ(original.checkpoints->clear_writes_calls.load(), 0);
+    EXPECT_EQ(original.checkpoints->delete_thread_calls.load(), 0);
+
+    // A late wf = 1 write after retire_to is refused by the store without triggering a second takeover.
+    graph::FencedCheckpointStore stale_writer(backend.checkpoints, kOwner, world.run_id(), 1);
+    graph::Checkpoint            late_cp;
+    late_cp.id             = graph::Checkpoint::generate_id();
+    late_cp.thread_id      = original.checkpoints->saved_thread();
+    late_cp.channel_values = json::object();
+    late_cp.step           = 77;
+    late_cp.timestamp      = 1;
+    EXPECT_THROW(stale_writer.save(late_cp), graph::CheckpointWriteFenceError);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+}
+
+TEST(ProgramRootLeaseTakeover, T7a_TakeoverRetriesCasOnJournalHeadConflictAtSameFence) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    Gate          before_sp, after_sp;
+    before_sp.arm();
+    after_sp.arm();
+    original.view->before_safe_point = [&] { before_sp.pass(); };
+    original.view->after_safe_point  = [&] { after_sp.pass(); };
+    world.fan_gate.arm();
+
+    auto              source = original.host.start(version, world.run_id());
+    std::atomic<bool> source_done{false};
+    auto              source_end = std::async(std::launch::async, [&] {
+        const auto result = source.wait();
+        source_done.store(true);
+        before_sp.notify();
+        after_sp.notify();
+        return result;
+    });
+    std::optional<MigrationRace> race;
+    race.emplace(original, world, version, source);
+    const ReleaseOnExit release_all{[&] {
+        before_sp.release();
+        after_sp.release();
+        world.fan_gate.release();
+    }};
+    ASSERT_TRUE(before_sp.wait_entered_or([&] { return source_done.load(); }))
+        << "the source ended before the migration reached a safe point";
+
+    const auto initial_record = backend.transitions->load_sync(kOwner, world.run_id());
+    ASSERT_TRUE(initial_record.has_value());
+    const auto initial_head = initial_record->journal_head();
+
+    // Between recovering's single raise_fence(2) and its first takeover CAS, release original's safe-point
+    // publication so the stored run record's journal_head genuinely advances at fence = 1 in the shared store.
+    recovering.view->before_takeover = [&] {
+        if (recovering.view->takeover_attempts.load() == 1) {
+            EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U);
+            EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
+            before_sp.release();
+            ASSERT_TRUE(after_sp.wait_entered_or([&] { return source_done.load(); }));
+            const auto advanced = backend.transitions->load_sync(kOwner, world.run_id());
+            ASSERT_TRUE(advanced.has_value());
+            EXPECT_EQ(advanced->continuation().fence, 1U);
+            EXPECT_NE(advanced->journal_head(), initial_head);
+        }
+    };
+
+    const auto recovered = recovering.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_of(recovered);
+    EXPECT_EQ(recovering.view->takeover_attempts.load(), 2)
+        << "reconnect_core must retry takeover CAS after a same-fence journal_head conflict";
+    EXPECT_EQ(recovering.view->published_takeovers.load(), 1);
+    EXPECT_EQ(recovering.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}))
+        << "reconnect_core must not call raise_fence a second time on CAS retry";
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+
+    after_sp.release();
+    EXPECT_FALSE(race->migration.get()) << "a migration of a source that was taken over published a successor";
+    const auto stale = source_end.get();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+    ASSERT_TRUE(stale.failure());
+    EXPECT_EQ(stale.failure()->code, "P_RUN_TAKEN_OVER");
+    race.reset();
+    const auto runs = take_runs(world);
+    EXPECT_EQ(runs_of(runs, "tail"), 1U);
+    EXPECT_EQ(runs_of(runs, "last"), 1U);
+}
+
+TEST(ProgramRootLeaseTakeover, T7a_ProgressGuardRefusesWhenConflictReloadShowsSameHeadAndFence) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    // Force the takeover CAS to return Conflict without advancing journal_head or fence in the shared store.
+    // The progress guard in reconnect_core must refuse with P_RUN_RECOVERY_CONFLICT after 1 attempt without looping.
+    recovering.view->force_takeover_conflict.store(true);
+    try {
+        (void)recovering.host.reconnect(world.run_id());
+        FAIL() << "reconnect_core must refuse with P_RUN_RECOVERY_CONFLICT when reload shows unchanged head and fence";
+    } catch (const ProgramDiagnosticError& err) {
+        EXPECT_EQ(err.diagnostic().code, "P_RUN_RECOVERY_CONFLICT");
+    }
+    EXPECT_EQ(recovering.view->takeover_attempts.load(), 1);
+    EXPECT_EQ(recovering.view->published_takeovers.load(), 0);
+    EXPECT_EQ(recovering.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}));
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
+
+    // Clear the injected conflict; a subsequent reconnect takes over to fence = 2 and finishes the run.
+    recovering.view->force_takeover_conflict.store(false);
+    const auto recovered = recovering.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(recovered.status(), ProgramTerminalStatus::Completed) << failure_of(recovered);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+
+    world.tail_gate.release();
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+    ASSERT_TRUE(stale.failure());
+    EXPECT_EQ(stale.failure()->code, "P_RUN_TAKEN_OVER");
+}
+
+TEST(ProgramRootLeaseTakeover, T7b_ConcurrentForeignReconnectLoserDoesNotRaiseTwiceOrPublish) {
+    SharedBackend backend;
+    Process       original(backend), winner(backend), loser(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    // Hold loser right before its compare_publish_takeover_execution (after loser has called raise_fence(2) once).
+    Gate loser_at_cas;
+    loser_at_cas.arm();
+    const ReleaseOnExit release_loser{[&] { loser_at_cas.release(); }};
+    loser.view->before_takeover = [&] {
+        loser_at_cas.pass();
+    };
+
+    std::atomic<bool> loser_done{false};
+    auto loser_future = std::async(std::launch::async, [&] {
+        const auto res = loser.host.reconnect(world.run_id()).wait();
+        loser_done.store(true);
+        loser_at_cas.notify();
+        return res;
+    });
+    ASSERT_TRUE(loser_at_cas.wait_entered_or([&] { return loser_done.load(); }));
+
+    // Winner completes takeover to fence = 2 and finishes the run.
+    const auto won = winner.host.reconnect(world.run_id()).wait();
+    ASSERT_EQ(won.status(), ProgramTerminalStatus::Completed) << failure_of(won);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+
+    // Release loser: its CAS conflicts, it reloads r_fence = 2 > expected_fence = 1, and exits without a second raise.
+    loser_at_cas.release();
+    const auto lost = loser_future.get();
+    EXPECT_EQ(lost.status(), ProgramTerminalStatus::Failed) << failure_of(lost);
+    ASSERT_TRUE(lost.failure());
+    EXPECT_EQ(lost.failure()->code, "P_RUN_TAKEN_OVER");
+
+    // Binding Correction #3: allow the loser's one pre-loop fence upsert to expected_fence + 1 (2);
+    // assert no second raise, no transition publish, and no checkpoint rows from the loser.
+    EXPECT_EQ(loser.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}));
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+    EXPECT_EQ(loser.view->published_takeovers.load(), 0);
+    EXPECT_EQ(loser.view->published_transitions.load(), 0);
+    EXPECT_EQ(loser.checkpoints->saves.load(), 0);
+    EXPECT_EQ(loser.checkpoints->put_writes_calls.load(), 0);
+
+    world.tail_gate.release();
+    const auto stale = source.wait();
+    EXPECT_EQ(stale.status(), ProgramTerminalStatus::Failed) << failure_of(stale);
+}
+
+TEST(ProgramRootLeaseTakeover, T7c_RaiseThenOwnerPublishesInterruptedAdvancesInterruptedFenceBeforeResume) {
+    SharedBackend backend;
+    Process       original(backend), recovering(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.interrupt_tail.store(true);
+
+    // Hold original right before it publishes ContinuationState::Interrupted at fence = 1
+    // (after original has already saved the NodeInterrupt checkpoint at wf = 1).
+    Gate original_at_interrupt_pub;
+    original_at_interrupt_pub.arm();
+    const ReleaseOnExit release_interrupt_pub{[&] { original_at_interrupt_pub.release(); }};
+    original.view->before_compare_publish = [&](const ProgramTransitionPublication& pub) {
+        if (pub.run_record.continuation().state == ContinuationState::Interrupted) {
+            original_at_interrupt_pub.pass();
+        }
+    };
+
+    auto source = original.host.start(version, world.run_id());
+    ASSERT_TRUE(original_at_interrupt_pub.wait_entered_or([&] { return static_cast<bool>(source.try_result()); }));
+
+    // Recovering starts reconnect: right after raise_fence(2) commits, let original publish Interrupted at fence = 1.
+    std::atomic<bool> let_original_publish{false};
+    recovering.checkpoints->after_raise_fence = [&](std::uint64_t raised) {
+        EXPECT_EQ(raised, 2U);
+        if (!let_original_publish.exchange(true)) {
+            original_at_interrupt_pub.release();
+            const auto paused = source.wait();
+            EXPECT_EQ(paused.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused);
+            EXPECT_EQ(stored_fence(backend, world.run_id()), 1U);
+        }
+    };
+
+    // Recovering's first takeover CAS conflicts (head moved to Interrupted at fence = 1);
+    // it reloads Interrupted at fence = 1, CASes the Interrupted record's fence to 2, and returns the Interrupted handle.
+    auto reconnected = recovering.host.reconnect(world.run_id());
+    const auto paused_after_takeover = reconnected.wait();
+    EXPECT_EQ(paused_after_takeover.status(), ProgramTerminalStatus::Interrupted)
+        << failure_of(paused_after_takeover);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U)
+        << "reconnect_core must advance the Interrupted record's fence to 2 before returning the handle (G3)";
+    EXPECT_EQ(recovering.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}));
+
+    // Resume on recovering: the resumed attempt is pinned to fence = 2, so its later saves (wf = 2 >= K.sf = 2) succeed!
+    ASSERT_TRUE(paused_after_takeover.interrupt().has_value());
+    ASSERT_TRUE(paused_after_takeover.interrupt()->pending_input.has_value());
+    const auto pending_call_id = paused_after_takeover.interrupt()->pending_input->call_id();
+    const auto resumed =
+        recovering.host.runtime().resume(
+            kOwner, world.run_id(),
+            ProgramResume{json{{"decision", "approved"}}, "trace-resume", {}, pending_call_id}).wait();
+    EXPECT_EQ(resumed.status(), ProgramTerminalStatus::Completed) << failure_of(resumed);
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 2U);
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world.run_id()), 2U);
+    EXPECT_EQ(recovering.checkpoints->last_saved_fence(), 2U)
+        << "resumed attempt must save its checkpoints with writer fence = 2";
+    const auto latest = backend.checkpoints->load_latest(original.checkpoints->saved_thread());
+    ASSERT_TRUE(latest.has_value());
+    ASSERT_TRUE(latest->channel_values.contains("channels"));
+    EXPECT_TRUE(channel_is_set(latest->channel_values["channels"], "finished"))
+        << "checkpoint written by the resumed attempt at fence 2 must be readable from the store";
+    const auto runs = take_runs(world);
+    EXPECT_EQ(runs_of(runs, "last"), 1U);
+
+    // Also verify direct resume() (without calling reconnect() first) after an aborted raise_fence(2) left the
+    // checkpoint store at fence = 2 while the Interrupted transition record remained at fence = 1.
+    LeaseWorld world_direct(next_world_id());
+    world_direct.interrupt_tail.store(true);
+    const auto paused_direct = original.host.start(version, world_direct.run_id()).wait();
+    ASSERT_EQ(paused_direct.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused_direct);
+    ASSERT_TRUE(paused_direct.interrupt().has_value());
+    ASSERT_TRUE(paused_direct.interrupt()->pending_input.has_value());
+    EXPECT_EQ(stored_fence(backend, world_direct.run_id()), 1U);
+    EXPECT_EQ(backend.checkpoints->raise_fence(kOwner, world_direct.run_id(), 2), 2U);
+
+    // Clear the pre-pause step journal and observe any takeover published after the resumed step starts.
+    (void)take_runs(world_direct);
+    std::atomic<bool> resumed_tail_started{false};
+    std::atomic<int>  takeovers_after_resumed_step{0};
+    world_direct.on_tail_async = [&](const std::string&) -> asio::awaitable<void> {
+        resumed_tail_started.store(true);
+        co_return;
+    };
+    recovering.view->before_takeover = [&] {
+        if (resumed_tail_started.load()) {
+            takeovers_after_resumed_step.fetch_add(1);
+        }
+    };
+
+    const auto direct_call_id = paused_direct.interrupt()->pending_input->call_id();
+    const auto resumed_direct =
+        recovering.host.runtime().resume(
+            kOwner, world_direct.run_id(),
+            ProgramResume{json{{"decision", "approved"}}, "trace-resume-direct", {}, direct_call_id}).wait();
+    EXPECT_EQ(resumed_direct.status(), ProgramTerminalStatus::Completed) << failure_of(resumed_direct);
+    EXPECT_EQ(resumed_direct.attempt(), 2U)
+        << "direct resume must advance the Interrupted fence before starting attempt 2 rather than failing a write into attempt 3";
+    const auto runs_direct = take_runs(world_direct);
+    EXPECT_EQ(runs_of(runs_direct, "tail"), 1U)
+        << "the resumed step after the pause must run exactly once without failing its write and replaying via self-takeover";
+    EXPECT_EQ(runs_of(runs_direct, "last"), 1U);
+    EXPECT_EQ(takeovers_after_resumed_step.load(), 0)
+        << "no self-takeover may be published after the resumed attempt starts";
+    EXPECT_EQ(recovering.checkpoints->raised_fences(), (std::vector<std::uint64_t>{2U}))
+        << "direct resume must not trigger a self-takeover raise_fence on recovering";
+    EXPECT_EQ(stored_fence(backend, world_direct.run_id()), 2U);
+    EXPECT_EQ(backend.checkpoints->load_fence(kOwner, world_direct.run_id()), 2U);
+    EXPECT_EQ(recovering.checkpoints->last_saved_fence(), 2U);
+    const auto latest_direct = backend.checkpoints->load_latest(recovering.checkpoints->saved_thread());
+    ASSERT_TRUE(latest_direct.has_value());
+    ASSERT_TRUE(latest_direct->channel_values.contains("channels"));
+    EXPECT_TRUE(channel_is_set(latest_direct->channel_values["channels"], "finished"));
+}
+
+TEST(ProgramRootLeaseTakeover, T8a_UnfencedCustomCheckpointStoreAllowsInitialRunAndRefusesTakeover) {
+    class UnfencedCheckpointStore final : public graph::CheckpointStore {
+    public:
+        explicit UnfencedCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner)
+            : inner_(std::move(inner)) {}
+        bool supports_write_fence() const override { return false; }
+        bool requires_managed_budget(const std::string& t) override {
+            return inner_->requires_managed_budget(t);
+        }
+        void save(const graph::Checkpoint& cp) override { inner_->save(cp); }
+        std::optional<graph::Checkpoint> load_latest(const std::string& t) override {
+            return inner_->load_latest(t);
+        }
+        std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+            return inner_->load_by_id(id);
+        }
+        std::vector<graph::Checkpoint> list(const std::string& t, int limit) override {
+            return inner_->list(t, limit);
+        }
+        void delete_thread(const std::string& t) override { inner_->delete_thread(t); }
+        void put_writes(const std::string& t, const std::string& p, const graph::PendingWrite& w) override {
+            inner_->put_writes(t, p, w);
+        }
+        std::vector<graph::PendingWrite> get_writes(const std::string& t, const std::string& p) override {
+            return inner_->get_writes(t, p);
+        }
+        void clear_writes(const std::string& t, const std::string& p) override {
+            inner_->clear_writes(t, p);
+        }
+
+    private:
+        std::shared_ptr<graph::CheckpointStore> inner_;
+    };
+
+    SharedBackend backend;
+    auto          unfenced = std::make_shared<UnfencedCheckpointStore>(backend.checkpoints);
+    LeaseHost     host1(ProcessStores{backend.programs, std::make_shared<ProcessView>(backend.transitions), unfenced});
+    LeaseHost     host2(ProcessStores{backend.programs, std::make_shared<ProcessView>(backend.transitions), unfenced});
+
+    // 1. Initial run (fence = 1) succeeds on an unfenced store (R4).
+    LeaseWorld world1(next_world_id());
+    const auto version = host1.admit();
+    const auto initial = host1.run(version, world1.run_id());
+    EXPECT_EQ(initial.status(), ProgramTerminalStatus::Completed) << failure_of(initial);
+
+    // 2. Takeover on an unfenced store fails closed with P_RUN_TAKEOVER_FENCE_UNSUPPORTED.
+    LeaseWorld world2(next_world_id());
+    world2.tail_gate.arm();
+    const ReleaseOnExit release_tail2{[&] { world2.tail_gate.release(); }};
+    auto running = host1.start(version, world2.run_id());
+    ASSERT_TRUE(world2.tail_gate.wait_entered_or([&] { return static_cast<bool>(running.try_result()); }));
+
+    try {
+        (void)host2.reconnect(world2.run_id());
+        FAIL() << "reconnect on a CheckpointStore with supports_write_fence() == false must fail closed";
+    } catch (const ProgramDiagnosticError& err) {
+        EXPECT_EQ(err.diagnostic().code, "P_RUN_TAKEOVER_FENCE_UNSUPPORTED");
+    }
+
+    world2.tail_gate.release();
+    const auto finished = running.wait();
+    EXPECT_EQ(finished.status(), ProgramTerminalStatus::Completed) << failure_of(finished);
+}
+
+TEST(ProgramRootLeaseTakeover, ReconnectDoesNotHangWhileControlIsInRefusal) {
+    struct ScopedControlWaitObserver {
+        static std::mutex& mutex() {
+            static std::mutex m;
+            return m;
+        }
+        static std::function<void(std::string_view, std::uint64_t, bool)>& callback() {
+            static std::function<void(std::string_view, std::uint64_t, bool)> cb;
+            return cb;
+        }
+        static void dispatch(std::string_view run_id,
+                             std::uint64_t    attempt,
+                             bool             transition_mutex_locked) noexcept {
+            std::function<void(std::string_view, std::uint64_t, bool)> fn;
+            {
+                std::lock_guard lock(mutex());
+                fn = callback();
+            }
+            if (fn) fn(run_id, attempt, transition_mutex_locked);
+        }
+        explicit ScopedControlWaitObserver(
+            std::function<void(std::string_view, std::uint64_t, bool)> fn) {
+            {
+                std::lock_guard lock(mutex());
+                callback() = std::move(fn);
+            }
+            program::detail::set_control_wait_parked_observer_for_testing(&ScopedControlWaitObserver::dispatch);
+        }
+        ~ScopedControlWaitObserver() {
+            program::detail::set_control_wait_parked_observer_for_testing(nullptr);
+            std::lock_guard lock(mutex());
+            callback() = nullptr;
+        }
+    };
+
+    struct ScopedSelfTakeoverGuard {
+        static std::mutex& mutex() {
+            static std::mutex m;
+            return m;
+        }
+        static std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)>& callback() {
+            static std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> cb;
+            return cb;
+        }
+        static bool dispatch(std::string_view run_id,
+                             std::uint64_t    attempt,
+                             std::uint64_t    fence,
+                             bool             transition_mutex_locked) noexcept {
+            std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> fn;
+            {
+                std::lock_guard lock(mutex());
+                fn = callback();
+            }
+            return fn ? fn(run_id, attempt, fence, transition_mutex_locked) : true;
+        }
+        explicit ScopedSelfTakeoverGuard(
+            std::function<bool(std::string_view, std::uint64_t, std::uint64_t, bool)> fn) {
+            {
+                std::lock_guard lock(mutex());
+                callback() = std::move(fn);
+            }
+            program::detail::set_self_takeover_entered_observer_for_testing(&ScopedSelfTakeoverGuard::dispatch);
+        }
+        ~ScopedSelfTakeoverGuard() {
+            program::detail::set_self_takeover_entered_observer_for_testing(nullptr);
+            std::lock_guard lock(mutex());
+            callback() = nullptr;
+        }
+    };
+
+    SharedBackend backend;
+    Process       original(backend), pausing(backend);
+    LeaseWorld    world(next_world_id());
+    const auto    version = original.host.admit();
+    world.tail_gate.arm();
+    const ReleaseOnExit release_tail{[&] { world.tail_gate.release(); }};
+
+    // Part 1: self_takeover -> reconnect_core(..., transition_lock_held=true) waiting on an existing unfinished control.
+    // Start control_a (attempt = 1, fence = 1) on original and hold it in "tail".
+    auto source_a = original.host.start(version, world.run_id());
+    ASSERT_TRUE(world.tail_gate.wait_entered_or([&] { return static_cast<bool>(source_a.try_result()); }));
+
+    Gate                         tail_b_entered;
+    tail_b_entered.arm();
+    std::optional<ProgramHandle> resumed_b;
+    std::atomic<bool>            lineage_hook_ran{false};
+    std::atomic<bool>            b_entered_put_writes{false};
+    std::atomic<bool>            b_wait_parked{false};
+    std::atomic<bool>            b_wait_parked_while_locked{false};
+    std::atomic<bool>            b_self_takeover_locked{false};
+    const ReleaseOnExit          release_b_gates{[&] {
+        tail_b_entered.release();
+    }};
+
+    ScopedControlWaitObserver wait_observer_b(
+        [&](std::string_view run_id, std::uint64_t attempt, bool transition_mutex_locked) {
+            if (run_id == world.run_id() && attempt == 2U) {
+                b_wait_parked.store(true);
+                b_wait_parked_while_locked.store(transition_mutex_locked);
+                tail_b_entered.release();
+            }
+        });
+
+    ScopedSelfTakeoverGuard takeover_guard_b(
+        [&](std::string_view run_id, std::uint64_t attempt, std::uint64_t, bool transition_mutex_locked) {
+            if (run_id == world.run_id() && attempt == 2U) {
+                b_self_takeover_locked.store(transition_mutex_locked);
+                return !transition_mutex_locked && b_wait_parked.load() && !b_wait_parked_while_locked.load();
+            }
+            return true;
+        });
+
+    original.checkpoints->before_put_writes = [&](const graph::PendingWrite& write) {
+        if (write.node_name == "tail" && lineage_hook_ran.load() && !b_entered_put_writes.exchange(true)) {
+            tail_b_entered.pass_or([&] {
+                return static_cast<bool>(source_a.try_result()) ||
+                       (resumed_b.has_value() && static_cast<bool>(resumed_b->try_result()));
+            });
+        }
+    };
+
+    original.view->on_run_lineage_read = [&] {
+        if (lineage_hook_ran.exchange(true)) return;
+        world.interrupt_tail.store(true);
+        const auto paused_2 = pausing.host.reconnect(world.run_id()).wait();
+        ASSERT_EQ(paused_2.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused_2);
+        ASSERT_TRUE(paused_2.interrupt().has_value());
+        ASSERT_TRUE(paused_2.interrupt()->pending_input.has_value());
+
+        world.interrupt_tail.store(false);
+        const auto call_id_2 = paused_2.interrupt()->pending_input->call_id();
+        resumed_b.emplace(original.host.runtime().resume(
+            kOwner, world.run_id(),
+            ProgramResume{json{{"decision", "approved"}}, "trace-resume-b", {}, call_id_2}));
+        ASSERT_TRUE(tail_b_entered.wait_entered_or([&] {
+            return static_cast<bool>(resumed_b->try_result()) || static_cast<bool>(source_a.try_result());
+        }));
+
+        // Advance the durable record to ContinuationState::Interrupted at fence = 3 while control_b (fence = 2) is
+        // still live, unfinished, and has not claimed a write-fence refusal yet. Because resume persisted an
+        // attempt_resume for "tail", pausing's takeover replays "tail" with that resume value and then interrupts
+        // at "last".
+        world.interrupt_last.store(true);
+        const auto paused_3 = pausing.host.reconnect(world.run_id()).wait();
+        ASSERT_EQ(paused_3.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused_3);
+        EXPECT_EQ(stored_fence(backend, world.run_id()), 3U);
+    };
+
+    original.checkpoints->inject_refusal_stored_fence.store(2U);
+    world.tail_gate.release();
+
+    const auto result_a = source_a.wait();
+    tail_b_entered.release();
+    ASSERT_TRUE(resumed_b.has_value());
+    const auto result_b = resumed_b->wait();
+    EXPECT_TRUE(b_wait_parked.load());
+    EXPECT_FALSE(b_wait_parked_while_locked.load());
+    EXPECT_FALSE(b_self_takeover_locked.load());
+    EXPECT_EQ(result_a.status(), ProgramTerminalStatus::Failed) << failure_of(result_a);
+    ASSERT_TRUE(result_a.failure().has_value());
+    EXPECT_EQ(result_a.failure()->code, "P_RUN_TAKEN_OVER");
+    EXPECT_EQ(result_b.status(), ProgramTerminalStatus::Failed) << failure_of(result_b);
+    ASSERT_TRUE(result_b.failure().has_value());
+    EXPECT_EQ(result_b.failure()->code, "P_RUN_TAKEN_OVER");
+    EXPECT_EQ(stored_fence(backend, world.run_id()), 3U);
+
+    // Part 2: Public top-level reconnect(run_id) wrapper path (transition_lock_held=false) on an Interrupted run
+    // with a live, unfinished control on the same process.
+    original.view->on_run_lineage_read = nullptr;
+    original.checkpoints->inject_refusal_stored_fence.store(0U);
+    LeaseWorld world_top(next_world_id());
+    Gate       tail_top_entered;
+    tail_top_entered.arm();
+    std::atomic<bool> top_entered_put_writes{false};
+    std::atomic<bool> top_wait_parked{false};
+    std::atomic<bool> top_wait_parked_while_locked{false};
+    std::atomic<bool> top_self_takeover_locked{false};
+    std::atomic<bool> top_reconnect_done{false};
+    const ReleaseOnExit release_top_gates{[&] {
+        tail_top_entered.release();
+    }};
+
+    ScopedControlWaitObserver wait_observer_top(
+        [&](std::string_view run_id, std::uint64_t attempt, bool transition_mutex_locked) {
+            if (run_id == world_top.run_id() && attempt == 1U) {
+                top_wait_parked.store(true);
+                top_wait_parked_while_locked.store(transition_mutex_locked);
+                tail_top_entered.release();
+            }
+        });
+
+    ScopedSelfTakeoverGuard takeover_guard_top(
+        [&](std::string_view run_id, std::uint64_t attempt, std::uint64_t, bool transition_mutex_locked) {
+            if (run_id == world_top.run_id() && attempt == 1U) {
+                top_self_takeover_locked.store(transition_mutex_locked);
+                return !transition_mutex_locked && top_wait_parked.load() && !top_wait_parked_while_locked.load();
+            }
+            return true;
+        });
+
+    std::optional<ProgramHandle> source_top;
+    original.checkpoints->before_put_writes = [&](const graph::PendingWrite& write) {
+        if (write.node_name == "tail" && !top_entered_put_writes.exchange(true)) {
+            tail_top_entered.pass_or([&] {
+                return top_reconnect_done.load() ||
+                       (source_top.has_value() && static_cast<bool>(source_top->try_result()));
+            });
+        }
+    };
+
+    source_top.emplace(original.host.start(version, world_top.run_id()));
+    ASSERT_TRUE(tail_top_entered.wait_entered_or([&] { return static_cast<bool>(source_top->try_result()); }));
+
+    // pausing takes over to fence = 2 and publishes ContinuationState::Interrupted while source_top (fence = 1) is
+    // still live, unfinished, and parked in before_put_writes on original.
+    world_top.interrupt_tail.store(true);
+    const auto paused_top = pausing.host.reconnect(world_top.run_id()).wait();
+    ASSERT_EQ(paused_top.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused_top);
+    EXPECT_EQ(stored_fence(backend, world_top.run_id()), 2U);
+
+    // Calling the public top-level original.host.reconnect(world_top.run_id()) finds the Interrupted record at fence = 2
+    // and the live, unfinished source_top control on original, unlocks reconnect_lock before awaiting
+    // handle.control_->wait_async(), and lets source_top finish its refusal self_takeover without deadlocking.
+    ProgramHandle reconnected_top = original.host.reconnect(world_top.run_id());
+    top_reconnect_done.store(true);
+    tail_top_entered.release();
+
+    const auto result_reconnected_top = reconnected_top.wait();
+    const auto result_source_top      = source_top->wait();
+    EXPECT_TRUE(top_wait_parked.load());
+    EXPECT_FALSE(top_wait_parked_while_locked.load());
+    EXPECT_FALSE(top_self_takeover_locked.load());
+    EXPECT_EQ(result_reconnected_top.status(), ProgramTerminalStatus::Failed) << failure_of(result_reconnected_top);
+    ASSERT_TRUE(result_reconnected_top.failure().has_value());
+    EXPECT_EQ(result_reconnected_top.failure()->code, "P_RUN_TAKEN_OVER");
+    EXPECT_EQ(result_source_top.status(), ProgramTerminalStatus::Failed) << failure_of(result_source_top);
+    ASSERT_TRUE(result_source_top.failure().has_value());
+    EXPECT_EQ(result_source_top.failure()->code, "P_RUN_TAKEN_OVER");
+    EXPECT_EQ(stored_fence(backend, world_top.run_id()), 2U);
 }
 
 }  // namespace

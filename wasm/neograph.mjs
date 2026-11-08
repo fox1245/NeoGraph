@@ -607,7 +607,7 @@ export async function load(options = {}) {
 
   // The members of the host's stores object, and the methods of the transition store that a run needs besides the ones
   // the C++ interface requires: without them a run, a fork or a resume fails.
-  const STORE_MEMBERS = ['transitions', 'programs', 'grants', 'fragments', 'modules'];
+  const STORE_MEMBERS = ['transitions', 'programs', 'grants', 'fragments', 'modules', 'checkpoints'];
   const REQUIRED_READERS = ['loadJavascriptCommands', 'loadMigrationPlan', 'loadRunLineage', 'loadGeneration'];
 
   return {

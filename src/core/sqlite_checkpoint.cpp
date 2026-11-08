@@ -365,7 +365,51 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_effects (
 CREATE TABLE IF NOT EXISTS neograph_checkpoint_schema_migrations (
     migration_id TEXT PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS checkpoint_run_fences (
+    owner_scope TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    fence       INTEGER NOT NULL CHECK (fence > 0),
+    PRIMARY KEY (owner_scope, run_id)
+);
 )SQL";
+
+void check_and_upsert_fence_in_tx(sqlite3* db, const CheckpointWriteFence& fence) {
+    fence.validate();
+    if (!fence.active()) return;
+    if (fence.fence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        throw std::invalid_argument("SqliteCheckpointStore: fence exceeds SQLite INTEGER range");
+    }
+    Stmt sel(db,
+        "SELECT fence FROM checkpoint_run_fences "
+        "WHERE owner_scope = ?1 AND run_id = ?2");
+    sel.bind_text(1, fence.owner_scope);
+    sel.bind_text(2, fence.run_id);
+    std::uint64_t stored = 0;
+    const int step_rc = sel.step();
+    if (step_rc == SQLITE_ROW) {
+        stored = static_cast<std::uint64_t>(sel.column_int64(0));
+    } else if (step_rc != SQLITE_DONE) {
+        throw_sqlite_error(db, "fence select failed");
+    }
+    if (stored > fence.fence) {
+        throw CheckpointWriteFenceError(CheckpointWriteFenceRefusal{
+            fence.owner_scope, fence.run_id, fence.fence, stored});
+    }
+    if (fence.fence > stored) {
+        Stmt ups(db,
+            "INSERT INTO checkpoint_run_fences (owner_scope, run_id, fence) "
+            "VALUES (?1, ?2, ?3) "
+            "ON CONFLICT (owner_scope, run_id) DO UPDATE SET fence = excluded.fence "
+            "WHERE checkpoint_run_fences.fence <= excluded.fence");
+        ups.bind_text(1, fence.owner_scope);
+        ups.bind_text(2, fence.run_id);
+        ups.bind_int64(3, static_cast<std::int64_t>(fence.fence));
+        if (ups.step() != SQLITE_DONE) {
+            throw_sqlite_error(db, "fence upsert failed");
+        }
+    }
+}
 
 // A thread's latest checkpoint is the one saved last, as in the in-memory
 // store: save_seq numbers a thread's saves, and a re-save of an ID takes the
@@ -419,7 +463,14 @@ SqliteCheckpointStore::SqliteCheckpointStore(
 
 SqliteCheckpointStore::SqliteCheckpointStore(
     const std::string& db_path, std::chrono::milliseconds busy_timeout,
-    WriteGuard write_guard) : write_guard_(std::move(write_guard)) {
+    WriteGuard write_guard)
+    : SqliteCheckpointStore(db_path, busy_timeout, std::move(write_guard), {}) {}
+
+SqliteCheckpointStore::SqliteCheckpointStore(
+    const std::string& db_path, std::chrono::milliseconds busy_timeout,
+    WriteGuard write_guard, RaiseGuard raise_guard)
+    : write_guard_(std::move(write_guard)),
+      raise_guard_(std::move(raise_guard)) {
     if (busy_timeout.count() < 0 ||
         busy_timeout.count() > std::numeric_limits<int>::max()) {
         throw std::invalid_argument("SqliteCheckpointStore: busy timeout is out of range");
@@ -554,11 +605,110 @@ void SqliteCheckpointStore::drop_schema() {
     exec_ddl(kSaveOrderDDL);
 }
 
+void SqliteCheckpointStore::set_raise_guard(RaiseGuard raise_guard) {
+    std::lock_guard lock(hook_mutex_);
+    raise_guard_ = std::move(raise_guard);
+}
+
+void SqliteCheckpointStore::set_before_write_hook(BeforeWriteHook before_write_hook) {
+    std::lock_guard lock(hook_mutex_);
+    before_write_hook_ = std::move(before_write_hook);
+}
+
+void SqliteCheckpointStore::invoke_before_write_hook(
+    const std::string& thread_id, const CheckpointWriteFence& fence) {
+    fence.validate();
+    BeforeWriteHook hook;
+    {
+        std::lock_guard lock(hook_mutex_);
+        hook = before_write_hook_;
+    }
+    if (hook) hook(thread_id, fence);
+}
+
+void SqliteCheckpointStore::invoke_raise_guard(
+    const std::string& owner_scope, const std::string& run_id, std::uint64_t min_fence) {
+    RaiseGuard guard;
+    {
+        std::lock_guard lock(hook_mutex_);
+        guard = raise_guard_;
+    }
+    if (guard) guard(owner_scope, run_id, min_fence);
+}
+
+std::uint64_t SqliteCheckpointStore::raise_fence(
+    const std::string& owner_scope, const std::string& run_id, std::uint64_t min_fence) {
+    if (run_id.empty() || min_fence == 0) {
+        throw std::invalid_argument(
+            "SqliteCheckpointStore::raise_fence requires non-empty run_id and min_fence > 0");
+    }
+    if (min_fence > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        throw std::invalid_argument("SqliteCheckpointStore: fence exceeds SQLite INTEGER range");
+    }
+    std::lock_guard lock(db_mutex_);
+    WriteTransaction transaction(db_);
+    Stmt sel(db_,
+        "SELECT fence FROM checkpoint_run_fences "
+        "WHERE owner_scope = ?1 AND run_id = ?2");
+    sel.bind_text(1, owner_scope);
+    sel.bind_text(2, run_id);
+    std::uint64_t stored = 0;
+    const int step_rc = sel.step();
+    if (step_rc == SQLITE_ROW) {
+        stored = static_cast<std::uint64_t>(sel.column_int64(0));
+    } else if (step_rc != SQLITE_DONE) {
+        throw_sqlite_error(db_, "raise_fence select failed");
+    }
+    if (min_fence > stored) {
+        Stmt ups(db_,
+            "INSERT INTO checkpoint_run_fences (owner_scope, run_id, fence) "
+            "VALUES (?1, ?2, ?3) "
+            "ON CONFLICT (owner_scope, run_id) DO UPDATE SET fence = excluded.fence "
+            "WHERE checkpoint_run_fences.fence <= excluded.fence");
+        ups.bind_text(1, owner_scope);
+        ups.bind_text(2, run_id);
+        ups.bind_int64(3, static_cast<std::int64_t>(min_fence));
+        if (ups.step() != SQLITE_DONE) {
+            throw_sqlite_error(db_, "raise_fence upsert failed");
+        }
+        stored = min_fence;
+    }
+    invoke_raise_guard(owner_scope, run_id, min_fence);
+    transaction.commit();
+    return stored;
+}
+
+std::uint64_t SqliteCheckpointStore::load_fence(
+    const std::string& owner_scope, const std::string& run_id) {
+    if (run_id.empty()) return 0;
+    std::lock_guard lock(db_mutex_);
+    Stmt sel(db_,
+        "SELECT fence FROM checkpoint_run_fences "
+        "WHERE owner_scope = ?1 AND run_id = ?2");
+    sel.bind_text(1, owner_scope);
+    sel.bind_text(2, run_id);
+    const int step_rc = sel.step();
+    if (step_rc == SQLITE_ROW) {
+        return static_cast<std::uint64_t>(sel.column_int64(0));
+    }
+    if (step_rc != SQLITE_DONE) {
+        throw_sqlite_error(db_, "load_fence select failed");
+    }
+    return 0;
+}
+
 // ── save() ────────────────────────────────────────────────────────────
 
 void SqliteCheckpointStore::save(const Checkpoint& cp) {
+    save(cp, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::save(const Checkpoint& cp,
+                                 const CheckpointWriteFence& fence) {
+    invoke_before_write_hook(cp.thread_id, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, cp.thread_id);
     save_locked(cp);
     transaction.commit();
@@ -756,8 +906,15 @@ std::vector<Checkpoint> SqliteCheckpointStore::list(
 }
 
 void SqliteCheckpointStore::delete_thread(const std::string& thread_id) {
+    delete_thread(thread_id, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::delete_thread(const std::string& thread_id,
+                                          const CheckpointWriteFence& fence) {
+    invoke_before_write_hook(thread_id, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, thread_id);
     for (const char* sql : {
         "DELETE FROM neograph_checkpoint_writes WHERE thread_id = ?",
@@ -786,9 +943,18 @@ asio::awaitable<bool> SqliteCheckpointStore::requires_managed_budget_async(
 std::shared_ptr<OwnedManagedBudgetLease> SqliteCheckpointStore::acquire_managed_budget_lease(
     const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
     const std::string& expected_checkpoint_commitment) {
+    return acquire_managed_budget_lease(
+        scope, expected_checkpoint_id, expected_checkpoint_commitment, CheckpointWriteFence{});
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> SqliteCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment, const CheckpointWriteFence& fence) {
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(scope);
+    invoke_before_write_hook(key, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, key);
     auto head = load_managed_budget_head(db_, key);
     const bool prior_obligation = has_managed_budget_obligation(db_, key);
@@ -825,12 +991,31 @@ SqliteCheckpointStore::acquire_managed_budget_lease_async(
         std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment));
 }
 
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+SqliteCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment, CheckpointWriteFence fence) {
+    co_return co_await CheckpointStore::acquire_managed_budget_lease_async(
+        std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment),
+        std::move(fence));
+}
+
 ManagedBudgetEffectReceipt SqliteCheckpointStore::begin_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
     std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    return begin_managed_budget_effect(
+        lease, effect_id, exact_claim_amount, prepared_request_digest, CheckpointWriteFence{});
+}
+
+ManagedBudgetEffectReceipt SqliteCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+    const CheckpointWriteFence& fence) {
     const auto key = managed_budget_lease_key(lease);
+    invoke_before_write_hook(key, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, key);
     auto head = load_managed_budget_head(db_, key);
     auto effect = load_managed_budget_effect(db_, key, lease->bank_generation(), effect_id);
@@ -850,14 +1035,33 @@ asio::awaitable<ManagedBudgetEffectReceipt> SqliteCheckpointStore::begin_managed
         std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest));
 }
 
+asio::awaitable<ManagedBudgetEffectReceipt> SqliteCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest,
+    CheckpointWriteFence fence) {
+    co_return co_await CheckpointStore::begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest),
+        std::move(fence));
+}
+
 void SqliteCheckpointStore::settle_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
     sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    settle_managed_budget_effect(
+        lease, effect, std::move(genuine_outcome), authority, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
+    sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority,
+    const CheckpointWriteFence& fence) {
     const auto key = managed_budget_lease_key(lease);
     if (!effect.active())
         throw std::invalid_argument("SqliteCheckpointStore: missing managed budget effect receipt");
+    invoke_before_write_hook(key, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, key);
     auto head = load_managed_budget_head(db_, key);
     auto stored_effect = load_managed_budget_effect(db_, key, lease->bank_generation(), effect.effect_id());
@@ -876,13 +1080,30 @@ asio::awaitable<void> SqliteCheckpointStore::settle_managed_budget_effect_async(
         std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority));
 }
 
+asio::awaitable<void> SqliteCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence fence) {
+    co_await CheckpointStore::settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority),
+        std::move(fence));
+}
+
 void SqliteCheckpointStore::publish_managed_budget_checkpoint(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    publish_managed_budget_checkpoint(lease, checkpoint, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& fence) {
     const auto key = managed_budget_lease_key(lease);
     if (checkpoint.thread_id != key)
         throw std::invalid_argument("SqliteCheckpointStore: managed checkpoint storage scope mismatch");
+    invoke_before_write_hook(key, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, key);
     {
         Stmt existing(db_,
@@ -919,11 +1140,26 @@ asio::awaitable<void> SqliteCheckpointStore::publish_managed_budget_checkpoint_a
         std::move(lease), std::move(checkpoint));
 }
 
+asio::awaitable<void> SqliteCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence fence) {
+    co_await CheckpointStore::publish_managed_budget_checkpoint_async(
+        std::move(lease), std::move(checkpoint), std::move(fence));
+}
+
 void SqliteCheckpointStore::release_managed_budget_lease(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    release_managed_budget_lease(lease, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const CheckpointWriteFence& fence) {
     const auto key = managed_budget_lease_key(lease);
+    invoke_before_write_hook(key, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, key);
     auto head = load_managed_budget_head(db_, key);
     detail::ManagedBudgetJournalAccess::release(head, lease);
@@ -937,18 +1173,35 @@ asio::awaitable<void> SqliteCheckpointStore::release_managed_budget_lease_async(
     co_await CheckpointStore::release_managed_budget_lease_async(std::move(lease));
 }
 
+asio::awaitable<void> SqliteCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease,
+    CheckpointWriteFence fence) {
+    co_await CheckpointStore::release_managed_budget_lease_async(
+        std::move(lease), std::move(fence));
+}
+
 // ── Pending writes ────────────────────────────────────────────────────
 
 void SqliteCheckpointStore::put_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id,
     const PendingWrite& write) {
+    put_writes(thread_id, parent_checkpoint_id, write, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::put_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write,
+    const CheckpointWriteFence& fence) {
     if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
+    invoke_before_write_hook(thread_id, fence);
     std::lock_guard lock(db_mutex_);
     // Acquire the writer before reading seq. A deferred read transaction cannot
     // upgrade its WAL snapshot after a different connection commits, even with
     // busy_timeout; shared Program/chat databases exercise this path frequently.
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, thread_id);
     // Allocate next seq inside the transaction so concurrent puts
     // (well, serialised by db_mutex_, but matching PG semantics
@@ -1022,8 +1275,17 @@ std::vector<PendingWrite> SqliteCheckpointStore::get_writes(
 void SqliteCheckpointStore::clear_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id) {
+    clear_writes(thread_id, parent_checkpoint_id, CheckpointWriteFence{});
+}
+
+void SqliteCheckpointStore::clear_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const CheckpointWriteFence& fence) {
+    invoke_before_write_hook(thread_id, fence);
     std::lock_guard lock(db_mutex_);
     WriteTransaction transaction(db_);
+    check_and_upsert_fence_in_tx(db_, fence);
     if (write_guard_) write_guard_(db_, thread_id);
     Stmt q(db_,
         "DELETE FROM neograph_checkpoint_writes "

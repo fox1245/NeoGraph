@@ -161,6 +161,28 @@ const Handlers<program::SyncModuleStore>& module_handlers() {
     return handlers;
 }
 
+#define NEOGRAPH_MEMORY_CHECKPOINT_HANDLER(row, cxx, js, required, R, ...)                                           \
+    table.emplace(std::pair<std::string_view, std::size_t>{js, ::neograph::wasm::Op<R, __VA_ARGS__>::arity},       \
+                  +[](Store& store, const json& arguments) -> std::string {                                       \
+                      return run<R, __VA_ARGS__>(arguments, [&store](auto&... argument) -> R {                    \
+                          if constexpr (std::is_void_v<R>) {                                                       \
+                              store.cxx(argument...);                                                              \
+                          } else {                                                                                 \
+                              return static_cast<R>(store.cxx(argument...));                                       \
+                          }                                                                                        \
+                      });                                                                                          \
+                  });
+
+const Handlers<graph::InMemoryCheckpointStore>& checkpoint_handlers() {
+    using Store = graph::InMemoryCheckpointStore;
+    static const auto handlers = [] {
+        Handlers<Store> table;
+        NEOGRAPH_JS_CHECKPOINT_OPS(NEOGRAPH_MEMORY_CHECKPOINT_HANDLER)
+        return table;
+    }();
+    return handlers;
+}
+
 template <class Store>
 std::string dispatch(const Handlers<Store>& handlers, std::type_identity_t<Store>& store, std::string_view member,
                      std::string_view method,
@@ -179,6 +201,7 @@ std::span<const OpInfo> rows_of(std::string_view member) {
     if (member == "grants") return grant_ops::all;
     if (member == "fragments") return fragment_ops::all;
     if (member == "modules") return module_ops::all;
+    if (member == "checkpoints") return checkpoint_ops::all;
     throw std::invalid_argument("no store named '" + std::string(member) + "'");
 }
 
@@ -197,6 +220,7 @@ int create_memory_stores() {
     set->grants      = std::make_shared<MemoryCoreToolGrantStore>();
     set->fragments   = std::make_shared<program::InMemoryTaskGraphFragmentStore>();
     set->modules     = std::make_shared<program::InMemoryModuleStore>();
+    set->checkpoints = std::make_shared<graph::InMemoryCheckpointStore>();
     sets().emplace(++last, std::move(set));
     return last;
 }
@@ -224,6 +248,7 @@ std::string call_memory_store(MemoryStoreSet& set, std::string_view member, std:
     if (member == "grants") return dispatch(grant_handlers(), *set.grants, member, method, parsed);
     if (member == "fragments") return dispatch(fragment_handlers(), *set.fragments, member, method, parsed);
     if (member == "modules") return dispatch(module_handlers(), *set.modules, member, method, parsed);
+    if (member == "checkpoints") return dispatch(checkpoint_handlers(), *set.checkpoints, member, method, parsed);
     throw std::invalid_argument("no store named '" + std::string(member) + "'");
 }
 
@@ -269,6 +294,16 @@ EMSCRIPTEN_KEEPALIVE int ng_memory_call(int set, const char* member, const char*
         if (!stores) throw std::invalid_argument("no in-memory stores under id " + std::to_string(set));
         reply() = neograph::wasm::call_memory_store(*stores, member, method, arguments);
         return 0;
+    } catch (const neograph::graph::CheckpointWriteFenceError& error) {
+        neograph::json out = neograph::json::object();
+        out["kind"]         = neograph::json(neograph::graph::CheckpointWriteFenceError::kErrorCode);
+        out["code"]         = neograph::json(neograph::graph::CheckpointWriteFenceError::kErrorCode);
+        out["message"]      = neograph::json(error.what());
+        out["owner_scope"]  = neograph::json(error.refusal().owner_scope);
+        out["run_id"]       = neograph::json(error.refusal().run_id);
+        out["stored_fence"] = neograph::json(std::to_string(error.refusal().stored_fence));
+        out["writer_fence"] = neograph::json(std::to_string(error.refusal().writer_fence));
+        reply()             = out.dump();
     } catch (const std::exception& error) {
         fail(kind_of(error), error.what());
     } catch (...) {
@@ -282,6 +317,16 @@ EMSCRIPTEN_KEEPALIVE int ng_memory_methods(const char* member) {
     try {
         reply() = neograph::wasm::memory_store_methods(member);
         return 0;
+    } catch (const neograph::graph::CheckpointWriteFenceError& error) {
+        neograph::json out = neograph::json::object();
+        out["kind"]         = neograph::json(neograph::graph::CheckpointWriteFenceError::kErrorCode);
+        out["code"]         = neograph::json(neograph::graph::CheckpointWriteFenceError::kErrorCode);
+        out["message"]      = neograph::json(error.what());
+        out["owner_scope"]  = neograph::json(error.refusal().owner_scope);
+        out["run_id"]       = neograph::json(error.refusal().run_id);
+        out["stored_fence"] = neograph::json(std::to_string(error.refusal().stored_fence));
+        out["writer_fence"] = neograph::json(std::to_string(error.refusal().writer_fence));
+        reply()             = out.dump();
     } catch (const std::exception& error) {
         fail(kind_of(error), error.what());
     }
