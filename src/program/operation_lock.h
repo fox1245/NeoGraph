@@ -87,6 +87,11 @@ public:
         return Guard(this);
     }
 
+    /// True while the lock is held.
+    bool is_locked() const noexcept {
+        return locked_.load(std::memory_order_acquire);
+    }
+
     /// Blocks the calling thread until the lock is its. Do not call it from a coroutine that must not block its
     /// thread; use lock_async there.
     Guard lock_blocking() {
@@ -171,8 +176,8 @@ private:
             next->ready.notify_one();
     }
 
-    std::mutex                         state_;
-    bool                               locked_ = false;
+    mutable std::mutex                  state_;
+    std::atomic<bool>                   locked_{false};
     std::deque<std::shared_ptr<Waiter>> queue_;
 };
 
@@ -226,6 +231,8 @@ public:
         depth_ = 1;
         co_return Guard(this);
     }
+
+    bool is_locked() const noexcept { return lock_.is_locked(); }
 
 private:
     void release() noexcept {

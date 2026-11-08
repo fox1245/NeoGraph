@@ -554,6 +554,7 @@ EMSCRIPTEN_KEEPALIVE const char* ng_check_adapt(int handle) {
         if (set.grants) members.push_back(json("grants"));
         if (set.fragments) members.push_back(json("fragments"));
         if (set.modules) members.push_back(json("modules"));
+        if (set.checkpoints) members.push_back(json("checkpoints"));
         out["ok"]      = true;
         out["members"] = members;
     } catch (...) {

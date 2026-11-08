@@ -142,6 +142,18 @@ struct PgConn {
  */
 class NEOGRAPH_API PostgresCheckpointStore : public CheckpointStore {
 public:
+    // Runs while the store's write lock (`write_mutex_`) and database
+    // transaction are held; may inspect the passed `pg_conn*` connection
+    // directly, and must not call back into the store.
+    using WriteGuard = std::function<void(pg_conn*, const std::string& thread_id)>;
+    // Runs while the store's write lock (`write_mutex_`) and database
+    // transaction are held; must not call back into the store.
+    using RaiseGuard = std::function<void(const std::string& owner_scope,
+                                          const std::string& run_id,
+                                          std::uint64_t min_fence)>;
+    using BeforeWriteHook = std::function<void(const std::string& thread_id,
+                                               const CheckpointWriteFence& fence)>;
+
     /// @param conn_str libpq connection string. Anything libpq accepts.
     /// @param pool_size Number of connections to open eagerly. Defaults
     ///        to 8 — a sensible match for typical small server worker
@@ -149,6 +161,20 @@ public:
     ///        one PG backend per store. Must be >= 1.
     /// @throws std::runtime_error on connection or DDL failure.
     explicit PostgresCheckpointStore(const std::string& conn_str, size_t pool_size = 8);
+    PostgresCheckpointStore(const std::string& conn_str,
+                            size_t pool_size,
+                            WriteGuard write_guard,
+                            RaiseGuard raise_guard = {});
+
+    bool supports_write_fence() const override { return true; }
+
+    /// @note The guard runs while the store's write lock (`write_mutex_`) and
+    ///       write transaction are held and must not call back into the store.
+    void set_write_guard(WriteGuard write_guard);
+    /// @note The guard runs while the store's write lock (`write_mutex_`) and
+    ///       write transaction are held and must not call back into the store.
+    void set_raise_guard(RaiseGuard raise_guard);
+    void set_before_write_hook(BeforeWriteHook before_write_hook);
 
     /// Number of times a pool slot's connection was replaced after a
     /// broken connection or an interrupted async exchange. Cumulative;
@@ -168,18 +194,41 @@ public:
     PostgresCheckpointStore& operator=(const PostgresCheckpointStore&) = delete;
 
     void                      save(const Checkpoint& cp) override;
+    void                      save(const Checkpoint& cp, const CheckpointWriteFence& fence) override;
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override;
     std::optional<Checkpoint> load_by_id(const std::string& id) override;
     std::vector<Checkpoint>   list(const std::string& thread_id, int limit = 100) override;
     void                      delete_thread(const std::string& thread_id) override;
+    void                      delete_thread(const std::string& thread_id,
+                                            const CheckpointWriteFence& fence) override;
 
     void                      put_writes(const std::string&  thread_id,
                                          const std::string&  parent_checkpoint_id,
                                          const PendingWrite& write) override;
+    void                      put_writes(const std::string&  thread_id,
+                                         const std::string&  parent_checkpoint_id,
+                                         const PendingWrite& write,
+                                         const CheckpointWriteFence& fence) override;
     std::vector<PendingWrite> get_writes(const std::string& thread_id,
                                          const std::string& parent_checkpoint_id) override;
     void                      clear_writes(const std::string& thread_id,
                                            const std::string& parent_checkpoint_id) override;
+    void                      clear_writes(const std::string& thread_id,
+                                           const std::string& parent_checkpoint_id,
+                                           const CheckpointWriteFence& fence) override;
+
+    std::uint64_t raise_fence(const std::string& owner_scope,
+                              const std::string& run_id,
+                              std::uint64_t min_fence) override;
+    asio::awaitable<std::uint64_t> raise_fence_async(
+        std::string owner_scope,
+        std::string run_id,
+        std::uint64_t min_fence) override;
+    std::uint64_t load_fence(const std::string& owner_scope,
+                             const std::string& run_id) override;
+    asio::awaitable<std::uint64_t> load_fence_async(
+        std::string owner_scope,
+        std::string run_id) override;
 
     // ── Async peers (Sem 4 follow-up) ───────────────────────────────────
     //
@@ -194,20 +243,31 @@ public:
     // the global deadline policy documented on this class.
 
     asio::awaitable<void>                      save_async(const Checkpoint& cp) override;
+    asio::awaitable<void>                      save_async(const Checkpoint& cp,
+                                                          CheckpointWriteFence fence) override;
     asio::awaitable<std::optional<Checkpoint>> load_latest_async(
         const std::string& thread_id) override;
     asio::awaitable<std::optional<Checkpoint>> load_by_id_async(const std::string& id) override;
     asio::awaitable<std::vector<Checkpoint>>   list_async(const std::string& thread_id,
                                                           int                limit = 100) override;
     asio::awaitable<void> delete_thread_async(const std::string& thread_id) override;
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id,
+                                              CheckpointWriteFence fence) override;
 
     asio::awaitable<void>                      put_writes_async(const std::string&  thread_id,
                                                                 const std::string&  parent_checkpoint_id,
                                                                 const PendingWrite& write) override;
+    asio::awaitable<void>                      put_writes_async(const std::string&  thread_id,
+                                                                const std::string&  parent_checkpoint_id,
+                                                                const PendingWrite& write,
+                                                                CheckpointWriteFence fence) override;
     asio::awaitable<std::vector<PendingWrite>> get_writes_async(
         const std::string& thread_id, const std::string& parent_checkpoint_id) override;
     asio::awaitable<void> clear_writes_async(const std::string& thread_id,
                                              const std::string& parent_checkpoint_id) override;
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id,
+                                             CheckpointWriteFence fence) override;
 
     /// Indexed denial obligation; does not authenticate or authorize a bank.
     bool requires_managed_budget(const std::string& thread_id) override;
@@ -216,28 +276,61 @@ public:
     std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
         const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
         const std::string& expected_checkpoint_commitment) override;
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment, const CheckpointWriteFence& fence) override;
     asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
         ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
         std::string expected_checkpoint_commitment) override;
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+        std::string expected_checkpoint_commitment, CheckpointWriteFence fence) override;
     ManagedBudgetEffectReceipt begin_managed_budget_effect(
         const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
         std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override;
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+        const CheckpointWriteFence& fence) override;
     asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
         std::uint64_t exact_claim_amount, std::string prepared_request_digest) override;
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+        std::uint64_t exact_claim_amount, std::string prepared_request_digest,
+        CheckpointWriteFence fence) override;
     void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
         const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
         const UsageAccumulator::AuthoritySnapshot& authority) override;
+    void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority,
+        const CheckpointWriteFence& fence) override;
     asio::awaitable<void> settle_managed_budget_effect_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
         sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) override;
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+        CheckpointWriteFence fence) override;
     void publish_managed_budget_checkpoint(
         const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) override;
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+        const CheckpointWriteFence& fence) override;
     asio::awaitable<void> publish_managed_budget_checkpoint_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override;
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+        CheckpointWriteFence fence) override;
     void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease) override;
+    void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const CheckpointWriteFence& fence) override;
     asio::awaitable<void> release_managed_budget_lease_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease) override;
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease,
+        CheckpointWriteFence fence) override;
 
     /// Drop checkpoint data tables, retaining obligations, migration markers,
     /// currency heads and write-ahead effects. No bank is reset by this utility.

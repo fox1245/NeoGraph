@@ -1128,8 +1128,9 @@ inline std::optional<TakeoverPublication> prepare_takeover(
         current_journal.id != expected_journal_head ||
         current_run.run_id() != run_id ||
         current_run.run_id() != current_journal.run_id ||
-        current_run.continuation().state != ContinuationState::Running ||
-        current_journal.continuation.state != ContinuationState::Running ||
+        (current_run.continuation().state != ContinuationState::Running &&
+         current_run.continuation().state != ContinuationState::Interrupted) ||
+        current_journal.continuation.state != current_run.continuation().state ||
         current_run.continuation().fence != expected_fence ||
         current_journal.continuation.fence != expected_fence ||
         current_journal.sequence == std::numeric_limits<std::uint64_t>::max()) {

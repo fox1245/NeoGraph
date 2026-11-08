@@ -2702,6 +2702,7 @@ GraphEngine::execute_graph_async(
         catch (const ProviderOutcomeError&) { throw; }
         catch (const ProviderFailure&) { throw; }
         catch (const NodeExecutionError&) { throw; }
+        catch (const CheckpointWriteFenceError&) { throw; }
         catch (...) {
             if (owned_lease && owned_outcomes) {
                 std::lock_guard lock(owned_outcomes->mutex);

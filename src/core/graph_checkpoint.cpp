@@ -70,6 +70,22 @@ SynchronousCheckpointStoreUnavailable::SynchronousCheckpointStoreUnavailable()
                          "implement AsyncCheckpointStore") {}
 
 namespace {
+std::string format_fence_refusal_message(const CheckpointWriteFenceRefusal& refusal) {
+    return "Checkpoint write fence refused for run '" + refusal.run_id + "' in scope '" +
+           refusal.owner_scope + "': attempted fence " + std::to_string(refusal.writer_fence) +
+           " < stored fence " + std::to_string(refusal.stored_fence);
+}
+}  // namespace
+
+CheckpointWriteFenceError::CheckpointWriteFenceError(CheckpointWriteFenceRefusal refusal)
+    : CheckpointException(format_fence_refusal_message(refusal)),
+      refusal_(std::move(refusal)) {}
+
+CheckpointWriteFenceError::CheckpointWriteFenceError(CheckpointWriteFenceRefusal refusal, std::string message)
+    : CheckpointException(message.empty() ? format_fence_refusal_message(refusal) : std::move(message)),
+      refusal_(std::move(refusal)) {}
+
+namespace {
 
 asio::thread_pool& blocking_checkpoint_pool() {
     // A process-lifetime bounded pool prevents legacy synchronous stores from
@@ -221,9 +237,17 @@ public:
         : async_(std::move(async)),
           pending_(std::dynamic_pointer_cast<PendingWritesCheckpointStore>(async_)) {}
 
+    bool supports_write_fence() const override {
+        return core_ ? core_->supports_write_fence() : async_->supports_write_fence();
+    }
+
     void save(const Checkpoint& cp) override {
         if (core_) core_->save(cp);
         else neograph::async::run_sync(async_->save_async(cp));
+    }
+    void save(const Checkpoint& cp, const CheckpointWriteFence& fence) override {
+        if (core_) core_->save(cp, fence);
+        else neograph::async::run_sync(async_->save_async(cp, fence));
     }
     std::optional<Checkpoint> load_latest(const std::string& thread_id) override {
         return core_ ? core_->load_latest(thread_id)
@@ -241,6 +265,51 @@ public:
         if (core_) core_->delete_thread(thread_id);
         else neograph::async::run_sync(async_->delete_thread_async(thread_id));
     }
+    void delete_thread(const std::string& thread_id,
+                       const CheckpointWriteFence& fence) override {
+        if (core_) core_->delete_thread(thread_id, fence);
+        else neograph::async::run_sync(async_->delete_thread_async(thread_id, fence));
+    }
+
+    std::uint64_t raise_fence(const std::string& owner_scope,
+                              const std::string& run_id,
+                              std::uint64_t min_fence) override {
+        return core_ ? core_->raise_fence(owner_scope, run_id, min_fence)
+                     : neograph::async::run_sync(
+                           async_->raise_fence_async(owner_scope, run_id, min_fence));
+    }
+    asio::awaitable<std::uint64_t> raise_fence_async(
+        std::string owner_scope, std::string run_id, std::uint64_t min_fence) override {
+        if (async_) {
+            co_return co_await async_->raise_fence_async(
+                std::move(owner_scope), std::move(run_id), min_fence);
+        }
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<std::uint64_t>(
+            [core = std::move(core), owner_scope = std::move(owner_scope),
+             run_id = std::move(run_id), min_fence] {
+                return core->raise_fence(owner_scope, run_id, min_fence);
+            });
+    }
+    std::uint64_t load_fence(const std::string& owner_scope,
+                             const std::string& run_id) override {
+        return core_ ? core_->load_fence(owner_scope, run_id)
+                     : neograph::async::run_sync(
+                           async_->load_fence_async(owner_scope, run_id));
+    }
+    asio::awaitable<std::uint64_t> load_fence_async(
+        std::string owner_scope, std::string run_id) override {
+        if (async_) {
+            co_return co_await async_->load_fence_async(
+                std::move(owner_scope), std::move(run_id));
+        }
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<std::uint64_t>(
+            [core = std::move(core), owner_scope = std::move(owner_scope),
+             run_id = std::move(run_id)] {
+                return core->load_fence(owner_scope, run_id);
+            });
+    }
 
     asio::awaitable<void> save_async(const Checkpoint& cp) override {
         if (async_) {
@@ -249,6 +318,18 @@ public:
             auto core = core_;
             co_await run_blocking_checkpoint(
                 [core = std::move(core), cp] { core->save(cp); });
+        }
+    }
+    asio::awaitable<void> save_async(const Checkpoint& cp,
+                                     CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->save_async(cp, std::move(fence));
+        } else {
+            auto core = core_;
+            co_await run_blocking_checkpoint(
+                [core = std::move(core), cp, fence = std::move(fence)] {
+                    core->save(cp, fence);
+                });
         }
     }
     asio::awaitable<std::optional<Checkpoint>>
@@ -281,6 +362,18 @@ public:
                 [core = std::move(core), thread_id] { core->delete_thread(thread_id); });
         }
     }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id,
+                                              CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->delete_thread_async(thread_id, std::move(fence));
+        } else {
+            auto core = core_;
+            co_await run_blocking_checkpoint(
+                [core = std::move(core), thread_id, fence = std::move(fence)] {
+                    core->delete_thread(thread_id, fence);
+                });
+        }
+    }
 
     bool requires_managed_budget(const std::string& thread_id) override {
         return core_ ? core_->requires_managed_budget(thread_id)
@@ -300,6 +393,12 @@ public:
         return core_ ? core_->acquire_managed_budget_lease(scope, id, commitment)
             : neograph::async::run_sync(async_->acquire_managed_budget_lease_async(scope, id, commitment));
     }
+    std::shared_ptr<OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment,
+        const CheckpointWriteFence& fence) override {
+        return core_ ? core_->acquire_managed_budget_lease(scope, id, commitment, fence)
+            : neograph::async::run_sync(async_->acquire_managed_budget_lease_async(scope, id, commitment, fence));
+    }
     asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
         ManagedBudgetLeaseScope scope, std::string id, std::string commitment) override {
         if (async_) co_return co_await async_->acquire_managed_budget_lease_async(
@@ -311,11 +410,30 @@ public:
                 return core->acquire_managed_budget_lease(scope, id, commitment);
             });
     }
+    asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> acquire_managed_budget_lease_async(
+        ManagedBudgetLeaseScope scope, std::string id, std::string commitment,
+        CheckpointWriteFence fence) override {
+        if (async_) co_return co_await async_->acquire_managed_budget_lease_async(
+            std::move(scope), std::move(id), std::move(commitment), std::move(fence));
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<std::shared_ptr<OwnedManagedBudgetLease>>(
+            [core = std::move(core), scope = std::move(scope), id = std::move(id),
+             commitment = std::move(commitment), fence = std::move(fence)] {
+                return core->acquire_managed_budget_lease(scope, id, commitment, fence);
+            });
+    }
     ManagedBudgetEffectReceipt begin_managed_budget_effect(
         const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
         std::uint64_t amount, const std::string& digest) override {
         return core_ ? core_->begin_managed_budget_effect(lease, id, amount, digest)
             : neograph::async::run_sync(async_->begin_managed_budget_effect_async(lease, id, amount, digest));
+    }
+    ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+        std::uint64_t amount, const std::string& digest,
+        const CheckpointWriteFence& fence) override {
+        return core_ ? core_->begin_managed_budget_effect(lease, id, amount, digest, fence)
+            : neograph::async::run_sync(async_->begin_managed_budget_effect_async(lease, id, amount, digest, fence));
     }
     asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id,
@@ -329,12 +447,33 @@ public:
                 return core->begin_managed_budget_effect(lease, id, amount, digest);
             });
     }
+    asio::awaitable<ManagedBudgetEffectReceipt> begin_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id,
+        std::uint64_t amount, std::string digest,
+        CheckpointWriteFence fence) override {
+        if (async_) co_return co_await async_->begin_managed_budget_effect_async(
+            std::move(lease), std::move(id), amount, std::move(digest), std::move(fence));
+        auto core = core_;
+        co_return co_await run_blocking_checkpoint<ManagedBudgetEffectReceipt>(
+            [core = std::move(core), lease = std::move(lease), id = std::move(id),
+             amount, digest = std::move(digest), fence = std::move(fence)] {
+                return core->begin_managed_budget_effect(lease, id, amount, digest, fence);
+            });
+    }
     void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
         const ManagedBudgetEffectReceipt& effect, sp::runtime::Result outcome,
         const UsageAccumulator::AuthoritySnapshot& authority) override {
         if (core_) core_->settle_managed_budget_effect(lease, effect, std::move(outcome), authority);
         else neograph::async::run_sync(async_->settle_managed_budget_effect_async(
             lease, effect, std::move(outcome), authority));
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const ManagedBudgetEffectReceipt& effect, sp::runtime::Result outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority,
+        const CheckpointWriteFence& fence) override {
+        if (core_) core_->settle_managed_budget_effect(lease, effect, std::move(outcome), authority, fence);
+        else neograph::async::run_sync(async_->settle_managed_budget_effect_async(
+            lease, effect, std::move(outcome), authority, fence));
     }
     asio::awaitable<void> settle_managed_budget_effect_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
@@ -350,10 +489,32 @@ public:
                 core->settle_managed_budget_effect(lease, effect, outcome, authority);
             });
     }
+    asio::awaitable<void> settle_managed_budget_effect_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+        sp::runtime::Result outcome, UsageAccumulator::AuthoritySnapshot authority,
+        CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->settle_managed_budget_effect_async(
+                std::move(lease), std::move(effect), std::move(outcome), std::move(authority),
+                std::move(fence));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease),
+            effect = std::move(effect), outcome = std::move(outcome),
+            authority = std::move(authority), fence = std::move(fence)] {
+                core->settle_managed_budget_effect(lease, effect, outcome, authority, fence);
+            });
+    }
     void publish_managed_budget_checkpoint(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
         const Checkpoint& checkpoint) override {
         if (core_) core_->publish_managed_budget_checkpoint(lease, checkpoint);
         else neograph::async::run_sync(async_->publish_managed_budget_checkpoint_async(lease, checkpoint));
+    }
+    void publish_managed_budget_checkpoint(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const Checkpoint& checkpoint, const CheckpointWriteFence& fence) override {
+        if (core_) core_->publish_managed_budget_checkpoint(lease, checkpoint, fence);
+        else neograph::async::run_sync(async_->publish_managed_budget_checkpoint_async(lease, checkpoint, fence));
     }
     asio::awaitable<void> publish_managed_budget_checkpoint_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) override {
@@ -367,9 +528,28 @@ public:
                 core->publish_managed_budget_checkpoint(lease, checkpoint);
             });
     }
+    asio::awaitable<void> publish_managed_budget_checkpoint_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+        CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->publish_managed_budget_checkpoint_async(
+                std::move(lease), std::move(checkpoint), std::move(fence));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease),
+            checkpoint = std::move(checkpoint), fence = std::move(fence)] {
+                core->publish_managed_budget_checkpoint(lease, checkpoint, fence);
+            });
+    }
     void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease) override {
         if (core_) core_->release_managed_budget_lease(lease);
         else neograph::async::run_sync(async_->release_managed_budget_lease_async(lease));
+    }
+    void release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+        const CheckpointWriteFence& fence) override {
+        if (core_) core_->release_managed_budget_lease(lease, fence);
+        else neograph::async::run_sync(async_->release_managed_budget_lease_async(lease, fence));
     }
     asio::awaitable<void> release_managed_budget_lease_async(
         std::shared_ptr<OwnedManagedBudgetLease> lease) override {
@@ -382,12 +562,29 @@ public:
             core->release_managed_budget_lease(lease);
         });
     }
+    asio::awaitable<void> release_managed_budget_lease_async(
+        std::shared_ptr<OwnedManagedBudgetLease> lease, CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->release_managed_budget_lease_async(std::move(lease), std::move(fence));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), lease = std::move(lease),
+                                          fence = std::move(fence)] {
+            core->release_managed_budget_lease(lease, fence);
+        });
+    }
     bool retains_native_checkpoint() const noexcept override {
         return core_ ? core_->retains_native_checkpoint() : async_->retains_native_checkpoint();
     }
     void publish_managed_budget_fork(const Checkpoint& source, const Checkpoint& forked) override {
         if (core_) core_->publish_managed_budget_fork(source, forked);
         else neograph::async::run_sync(async_->publish_managed_budget_fork_async(source, forked));
+    }
+    void publish_managed_budget_fork(const Checkpoint& source, const Checkpoint& forked,
+                                     const CheckpointWriteFence& fence) override {
+        if (core_) core_->publish_managed_budget_fork(source, forked, fence);
+        else neograph::async::run_sync(async_->publish_managed_budget_fork_async(source, forked, fence));
     }
     asio::awaitable<void> publish_managed_budget_fork_async(Checkpoint source, Checkpoint forked) override {
         if (async_) {
@@ -400,11 +597,34 @@ public:
             core->publish_managed_budget_fork(source, forked);
         });
     }
+    asio::awaitable<void> publish_managed_budget_fork_async(Checkpoint source, Checkpoint forked,
+                                                            CheckpointWriteFence fence) override {
+        if (async_) {
+            co_await async_->publish_managed_budget_fork_async(
+                std::move(source), std::move(forked), std::move(fence));
+            co_return;
+        }
+        auto core = core_;
+        co_await run_blocking_checkpoint([core = std::move(core), source = std::move(source),
+                                         forked = std::move(forked), fence = std::move(fence)] {
+            core->publish_managed_budget_fork(source, forked, fence);
+        });
+    }
 
     void put_writes(const std::string& thread_id,
                     const std::string& parent_checkpoint_id,
                     const PendingWrite& write) override {
         if (pending_) pending_->put_writes(thread_id, parent_checkpoint_id, write);
+    }
+    void put_writes(const std::string& thread_id,
+                    const std::string& parent_checkpoint_id,
+                    const PendingWrite& write,
+                    const CheckpointWriteFence& fence) override {
+        if (pending_) {
+            pending_->put_writes(thread_id, parent_checkpoint_id, write, fence);
+        } else if (resolve_store_write_fence(supports_write_fence(), fence).active()) {
+            throw CheckpointException("CheckpointStore does not support write fencing");
+        }
     }
     std::vector<PendingWrite> get_writes(
         const std::string& thread_id,
@@ -415,6 +635,15 @@ public:
     void clear_writes(const std::string& thread_id,
                       const std::string& parent_checkpoint_id) override {
         if (pending_) pending_->clear_writes(thread_id, parent_checkpoint_id);
+    }
+    void clear_writes(const std::string& thread_id,
+                      const std::string& parent_checkpoint_id,
+                      const CheckpointWriteFence& fence) override {
+        if (pending_) {
+            pending_->clear_writes(thread_id, parent_checkpoint_id, fence);
+        } else if (resolve_store_write_fence(supports_write_fence(), fence).active()) {
+            throw CheckpointException("CheckpointStore does not support write fencing");
+        }
     }
 
 private:
@@ -456,11 +685,94 @@ adapt_async_checkpoint_store(std::shared_ptr<AsyncCheckpointStore> backend) {
 // The base sync facade never calls an async method, so an omitted backend
 // operation reports a capability error instead of recursing.
 
+[[noreturn]] static void unsupported_write_fence() {
+    throw CheckpointException("CheckpointStore does not support write fencing");
+}
+
+CheckpointWriteFence resolve_store_write_fence(
+    bool supports_fence, const CheckpointWriteFence& fence) {
+    fence.validate();
+    if (!fence.active()) {
+        return {};
+    }
+    if (supports_fence) {
+        return fence;
+    }
+    if (fence.fence <= kInitialCheckpointWriteFence) {
+        return {};
+    }
+    unsupported_write_fence();
+}
+
+void CheckpointStoreCore::save(const Checkpoint& cp, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    save(cp);
+}
+void CheckpointStoreCore::delete_thread(const std::string& thread_id,
+                                        const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    delete_thread(thread_id);
+}
+std::uint64_t CheckpointStoreCore::raise_fence(const std::string&, const std::string&, std::uint64_t) {
+    unsupported_write_fence();
+}
+std::uint64_t CheckpointStoreCore::load_fence(const std::string&, const std::string&) {
+    unsupported_write_fence();
+}
+
+asio::awaitable<void> AsyncCheckpointStore::save_async(const Checkpoint& cp,
+                                                       CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await save_async(cp);
+}
+asio::awaitable<void> AsyncCheckpointStore::delete_thread_async(const std::string& thread_id,
+                                                                CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await delete_thread_async(thread_id);
+}
+asio::awaitable<std::uint64_t> AsyncCheckpointStore::raise_fence_async(
+    std::string, std::string, std::uint64_t) {
+    unsupported_write_fence();
+    co_return 0;
+}
+asio::awaitable<std::uint64_t> AsyncCheckpointStore::load_fence_async(
+    std::string, std::string) {
+    unsupported_write_fence();
+    co_return 0;
+}
+
+void PendingWritesCheckpointStore::put_writes(const std::string& thread_id,
+                                              const std::string& parent_checkpoint_id,
+                                              const PendingWrite& write,
+                                              const CheckpointWriteFence& fence) {
+    (void)resolve_store_write_fence(false, fence);
+    put_writes(thread_id, parent_checkpoint_id, write);
+}
+void PendingWritesCheckpointStore::clear_writes(const std::string& thread_id,
+                                                const std::string& parent_checkpoint_id,
+                                                const CheckpointWriteFence& fence) {
+    (void)resolve_store_write_fence(false, fence);
+    clear_writes(thread_id, parent_checkpoint_id);
+}
+
 void CheckpointStore::save(const Checkpoint&) {
     throw std::logic_error("CheckpointStore::save requires a synchronous backend");
 }
+void CheckpointStore::save(const Checkpoint& cp, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    save(cp);
+}
 asio::awaitable<void> CheckpointStore::save_async(const Checkpoint& cp) {
     co_await run_blocking_checkpoint([this, cp] { save(cp); });
+}
+asio::awaitable<void> CheckpointStore::save_async(const Checkpoint& cp,
+                                                  CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await save_async(cp);
+        co_return;
+    }
+    co_await run_blocking_checkpoint([this, cp, resolved] { save(cp, resolved); });
 }
 
 std::optional<Checkpoint>
@@ -496,10 +808,40 @@ CheckpointStore::list_async(const std::string& thread_id, int limit) {
 void CheckpointStore::delete_thread(const std::string&) {
     throw std::logic_error("CheckpointStore::delete_thread requires a synchronous backend");
 }
+void CheckpointStore::delete_thread(const std::string& thread_id,
+                                    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    delete_thread(thread_id);
+}
 asio::awaitable<void>
 CheckpointStore::delete_thread_async(const std::string& thread_id) {
     co_await run_blocking_checkpoint(
         [this, thread_id] { delete_thread(thread_id); });
+}
+asio::awaitable<void>
+CheckpointStore::delete_thread_async(const std::string& thread_id,
+                                     CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await delete_thread_async(thread_id);
+        co_return;
+    }
+    co_await run_blocking_checkpoint(
+        [this, thread_id, resolved] { delete_thread(thread_id, resolved); });
+}
+
+void CheckpointStore::put_writes(const std::string& thread_id,
+                                 const std::string& parent_checkpoint_id,
+                                 const PendingWrite& write,
+                                 const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    put_writes(thread_id, parent_checkpoint_id, write);
+}
+void CheckpointStore::clear_writes(const std::string& thread_id,
+                                   const std::string& parent_checkpoint_id,
+                                   const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    clear_writes(thread_id, parent_checkpoint_id);
 }
 
 asio::awaitable<void> CheckpointStore::put_writes_async(
@@ -509,6 +851,21 @@ asio::awaitable<void> CheckpointStore::put_writes_async(
     co_await run_blocking_checkpoint(
         [this, thread_id, parent_checkpoint_id, write] {
             put_writes(thread_id, parent_checkpoint_id, write);
+        });
+}
+asio::awaitable<void> CheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write,
+    CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await put_writes_async(thread_id, parent_checkpoint_id, write);
+        co_return;
+    }
+    co_await run_blocking_checkpoint(
+        [this, thread_id, parent_checkpoint_id, write, resolved] {
+            put_writes(thread_id, parent_checkpoint_id, write, resolved);
         });
 }
 asio::awaitable<std::vector<PendingWrite>> CheckpointStore::get_writes_async(
@@ -525,6 +882,41 @@ asio::awaitable<void> CheckpointStore::clear_writes_async(
     co_await run_blocking_checkpoint(
         [this, thread_id, parent_checkpoint_id] {
             clear_writes(thread_id, parent_checkpoint_id);
+        });
+}
+asio::awaitable<void> CheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await clear_writes_async(thread_id, parent_checkpoint_id);
+        co_return;
+    }
+    co_await run_blocking_checkpoint(
+        [this, thread_id, parent_checkpoint_id, resolved] {
+            clear_writes(thread_id, parent_checkpoint_id, resolved);
+        });
+}
+
+std::uint64_t CheckpointStore::raise_fence(const std::string&, const std::string&, std::uint64_t) {
+    unsupported_write_fence();
+}
+asio::awaitable<std::uint64_t> CheckpointStore::raise_fence_async(
+    std::string owner_scope, std::string run_id, std::uint64_t min_fence) {
+    co_return co_await run_blocking_checkpoint<std::uint64_t>(
+        [this, owner_scope = std::move(owner_scope), run_id = std::move(run_id), min_fence] {
+            return raise_fence(owner_scope, run_id, min_fence);
+        });
+}
+std::uint64_t CheckpointStore::load_fence(const std::string&, const std::string&) {
+    unsupported_write_fence();
+}
+asio::awaitable<std::uint64_t> CheckpointStore::load_fence_async(
+    std::string owner_scope, std::string run_id) {
+    co_return co_await run_blocking_checkpoint<std::uint64_t>(
+        [this, owner_scope = std::move(owner_scope), run_id = std::move(run_id)] {
+            return load_fence(owner_scope, run_id);
         });
 }
 
@@ -555,45 +947,111 @@ std::shared_ptr<OwnedManagedBudgetLease> CheckpointStoreCore::acquire_managed_bu
     const ManagedBudgetLeaseScope&, const std::string&, const std::string&) {
     return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
 }
+std::shared_ptr<OwnedManagedBudgetLease> CheckpointStoreCore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    return acquire_managed_budget_lease(scope, id, commitment);
+}
 ManagedBudgetEffectReceipt CheckpointStoreCore::begin_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>&, const std::string&, std::uint64_t, const std::string&) {
     return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+ManagedBudgetEffectReceipt CheckpointStoreCore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+    std::uint64_t amount, const std::string& digest, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    return begin_managed_budget_effect(lease, id, amount, digest);
 }
 void CheckpointStoreCore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>&,
     const ManagedBudgetEffectReceipt&, sp::runtime::Result, const UsageAccumulator::AuthoritySnapshot&) {
     unsupported_managed_budget_journal<void>();
 }
+void CheckpointStoreCore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const ManagedBudgetEffectReceipt& effect, sp::runtime::Result outcome,
+    const UsageAccumulator::AuthoritySnapshot& authority, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    settle_managed_budget_effect(lease, effect, std::move(outcome), authority);
+}
 void CheckpointStoreCore::publish_managed_budget_checkpoint(
     const std::shared_ptr<OwnedManagedBudgetLease>&, const Checkpoint&) {
     unsupported_managed_budget_journal<void>();
 }
+void CheckpointStoreCore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    publish_managed_budget_checkpoint(lease, checkpoint);
+}
 void CheckpointStoreCore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>&) {
     unsupported_managed_budget_journal<void>();
+}
+void CheckpointStoreCore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    release_managed_budget_lease(lease);
 }
 asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> AsyncCheckpointStore::acquire_managed_budget_lease_async(
     ManagedBudgetLeaseScope, std::string, std::string) {
     co_return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
 }
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> AsyncCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string id, std::string commitment, CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_return co_await acquire_managed_budget_lease_async(std::move(scope), std::move(id), std::move(commitment));
+}
 asio::awaitable<ManagedBudgetEffectReceipt> AsyncCheckpointStore::begin_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease>, std::string, std::uint64_t, std::string) {
     co_return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+asio::awaitable<ManagedBudgetEffectReceipt> AsyncCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id, std::uint64_t amount,
+    std::string digest, CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_return co_await begin_managed_budget_effect_async(
+        std::move(lease), std::move(id), amount, std::move(digest));
 }
 asio::awaitable<void> AsyncCheckpointStore::settle_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease>, ManagedBudgetEffectReceipt, sp::runtime::Result,
     UsageAccumulator::AuthoritySnapshot) {
     co_return unsupported_managed_budget_journal<void>();
 }
+asio::awaitable<void> AsyncCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(outcome), std::move(authority));
+}
 asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_checkpoint_async(
     std::shared_ptr<OwnedManagedBudgetLease>, Checkpoint) {
     co_return unsupported_managed_budget_journal<void>();
+}
+asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
 }
 asio::awaitable<void> AsyncCheckpointStore::release_managed_budget_lease_async(
     std::shared_ptr<OwnedManagedBudgetLease>) {
     co_return unsupported_managed_budget_journal<void>();
 }
+asio::awaitable<void> AsyncCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await release_managed_budget_lease_async(std::move(lease));
+}
 std::shared_ptr<OwnedManagedBudgetLease> CheckpointStore::acquire_managed_budget_lease(
     const ManagedBudgetLeaseScope&, const std::string&, const std::string&) {
     return unsupported_managed_budget_journal<std::shared_ptr<OwnedManagedBudgetLease>>();
+}
+std::shared_ptr<OwnedManagedBudgetLease> CheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    return acquire_managed_budget_lease(scope, id, commitment);
 }
 asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> CheckpointStore::acquire_managed_budget_lease_async(
     ManagedBudgetLeaseScope scope, std::string id, std::string commitment) {
@@ -602,9 +1060,28 @@ asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> CheckpointStore::acqui
             return acquire_managed_budget_lease(scope, id, commitment);
         });
 }
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> CheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string id, std::string commitment, CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_return co_await acquire_managed_budget_lease_async(
+            std::move(scope), std::move(id), std::move(commitment));
+    }
+    co_return co_await run_blocking_checkpoint<std::shared_ptr<OwnedManagedBudgetLease>>(
+        [this, scope = std::move(scope), id = std::move(id), commitment = std::move(commitment),
+         resolved] {
+            return acquire_managed_budget_lease(scope, id, commitment, resolved);
+        });
+}
 ManagedBudgetEffectReceipt CheckpointStore::begin_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>&, const std::string&, std::uint64_t, const std::string&) {
     return unsupported_managed_budget_journal<ManagedBudgetEffectReceipt>();
+}
+ManagedBudgetEffectReceipt CheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+    std::uint64_t amount, const std::string& digest, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    return begin_managed_budget_effect(lease, id, amount, digest);
 }
 asio::awaitable<ManagedBudgetEffectReceipt> CheckpointStore::begin_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id, std::uint64_t amount, std::string digest) {
@@ -613,9 +1090,29 @@ asio::awaitable<ManagedBudgetEffectReceipt> CheckpointStore::begin_managed_budge
             return begin_managed_budget_effect(lease, id, amount, digest);
         });
 }
+asio::awaitable<ManagedBudgetEffectReceipt> CheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string id, std::uint64_t amount,
+    std::string digest, CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_return co_await begin_managed_budget_effect_async(
+            std::move(lease), std::move(id), amount, std::move(digest));
+    }
+    co_return co_await run_blocking_checkpoint<ManagedBudgetEffectReceipt>(
+        [this, lease = std::move(lease), id = std::move(id), amount, digest = std::move(digest),
+         resolved] {
+            return begin_managed_budget_effect(lease, id, amount, digest, resolved);
+        });
+}
 void CheckpointStore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>&,
     const ManagedBudgetEffectReceipt&, sp::runtime::Result, const UsageAccumulator::AuthoritySnapshot&) {
     unsupported_managed_budget_journal<void>();
+}
+void CheckpointStore::settle_managed_budget_effect(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const ManagedBudgetEffectReceipt& effect, sp::runtime::Result outcome,
+    const UsageAccumulator::AuthoritySnapshot& authority, const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    settle_managed_budget_effect(lease, effect, std::move(outcome), authority);
 }
 asio::awaitable<void> CheckpointStore::settle_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
@@ -625,9 +1122,30 @@ asio::awaitable<void> CheckpointStore::settle_managed_budget_effect_async(
             settle_managed_budget_effect(lease, effect, outcome, authority);
         });
 }
+asio::awaitable<void> CheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await settle_managed_budget_effect_async(
+            std::move(lease), std::move(effect), std::move(outcome), std::move(authority));
+        co_return;
+    }
+    co_await run_blocking_checkpoint([this, lease = std::move(lease), effect = std::move(effect),
+        outcome = std::move(outcome), authority = std::move(authority), resolved] {
+            settle_managed_budget_effect(lease, effect, outcome, authority, resolved);
+        });
+}
 void CheckpointStore::publish_managed_budget_checkpoint(
     const std::shared_ptr<OwnedManagedBudgetLease>&, const Checkpoint&) {
     unsupported_managed_budget_journal<void>();
+}
+void CheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    publish_managed_budget_checkpoint(lease, checkpoint);
 }
 asio::awaitable<void> CheckpointStore::publish_managed_budget_checkpoint_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
@@ -635,8 +1153,26 @@ asio::awaitable<void> CheckpointStore::publish_managed_budget_checkpoint_async(
         publish_managed_budget_checkpoint(lease, checkpoint);
     });
 }
+asio::awaitable<void> CheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await publish_managed_budget_checkpoint_async(std::move(lease), std::move(checkpoint));
+        co_return;
+    }
+    co_await run_blocking_checkpoint([this, lease = std::move(lease), checkpoint = std::move(checkpoint),
+                                      resolved] {
+        publish_managed_budget_checkpoint(lease, checkpoint, resolved);
+    });
+}
 void CheckpointStore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>&) {
     unsupported_managed_budget_journal<void>();
+}
+void CheckpointStore::release_managed_budget_lease(const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    release_managed_budget_lease(lease);
 }
 asio::awaitable<void> CheckpointStore::release_managed_budget_lease_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease) {
@@ -644,21 +1180,378 @@ asio::awaitable<void> CheckpointStore::release_managed_budget_lease_async(
         release_managed_budget_lease(lease);
     });
 }
+asio::awaitable<void> CheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await release_managed_budget_lease_async(std::move(lease));
+        co_return;
+    }
+    co_await run_blocking_checkpoint([this, lease = std::move(lease), resolved] {
+        release_managed_budget_lease(lease, resolved);
+    });
+}
 
 void CheckpointStoreCore::publish_managed_budget_fork(const Checkpoint&, const Checkpoint&) {
     throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
+}
+void CheckpointStoreCore::publish_managed_budget_fork(const Checkpoint& source, const Checkpoint& forked,
+                                                      const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    publish_managed_budget_fork(source, forked);
 }
 asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_fork_async(Checkpoint, Checkpoint) {
     throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
     co_return;
 }
+asio::awaitable<void> AsyncCheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint source, Checkpoint forked, CheckpointWriteFence fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    co_await publish_managed_budget_fork_async(std::move(source), std::move(forked));
+}
 void CheckpointStore::publish_managed_budget_fork(const Checkpoint&, const Checkpoint&) {
     throw std::logic_error("Checkpoint backend does not support original C++ shared-bank forks");
+}
+void CheckpointStore::publish_managed_budget_fork(const Checkpoint& source, const Checkpoint& forked,
+                                                  const CheckpointWriteFence& fence) {
+    if (resolve_store_write_fence(supports_write_fence(), fence).active()) unsupported_write_fence();
+    publish_managed_budget_fork(source, forked);
 }
 asio::awaitable<void> CheckpointStore::publish_managed_budget_fork_async(Checkpoint source, Checkpoint forked) {
     co_await run_blocking_checkpoint([this, source = std::move(source), forked = std::move(forked)] {
         publish_managed_budget_fork(source, forked);
     });
+}
+asio::awaitable<void> CheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint source, Checkpoint forked, CheckpointWriteFence fence) {
+    const auto resolved = resolve_store_write_fence(supports_write_fence(), fence);
+    if (!resolved.active()) {
+        co_await publish_managed_budget_fork_async(std::move(source), std::move(forked));
+        co_return;
+    }
+    co_await run_blocking_checkpoint([this, source = std::move(source), forked = std::move(forked),
+                                      resolved] {
+        publish_managed_budget_fork(source, forked, resolved);
+    });
+}
+
+// =========================================================================
+// FencedCheckpointStore
+// =========================================================================
+
+FencedCheckpointStore::FencedCheckpointStore(std::shared_ptr<CheckpointStore> inner,
+                                             std::string owner_scope,
+                                             std::string run_id,
+                                             std::uint64_t fence)
+    : FencedCheckpointStore(
+          std::move(inner),
+          CheckpointWriteFence{std::move(owner_scope), std::move(run_id), fence}) {}
+
+FencedCheckpointStore::FencedCheckpointStore(std::shared_ptr<CheckpointStore> inner,
+                                             CheckpointWriteFence fence)
+    : inner_(std::move(inner)), fence_(std::move(fence)) {
+    if (!inner_) {
+        throw std::invalid_argument("FencedCheckpointStore requires a non-null inner store");
+    }
+    fence_.validate();
+}
+
+bool FencedCheckpointStore::supports_write_fence() const {
+    return inner_->supports_write_fence();
+}
+
+CheckpointWriteFence FencedCheckpointStore::effective_fence(
+    const CheckpointWriteFence& explicit_fence) const {
+    explicit_fence.validate();
+    if (explicit_fence.active() && explicit_fence != fence_) {
+        throw std::invalid_argument(
+            "FencedCheckpointStore explicit write fence does not match the bound run fence");
+    }
+    const CheckpointWriteFence& chosen = explicit_fence.active() ? explicit_fence : fence_;
+    return resolve_store_write_fence(inner_->supports_write_fence(), chosen);
+}
+
+void FencedCheckpointStore::save(const Checkpoint& cp) {
+    inner_->save(cp, effective_fence());
+}
+void FencedCheckpointStore::save(const Checkpoint& cp, const CheckpointWriteFence& fence) {
+    inner_->save(cp, effective_fence(fence));
+}
+std::optional<Checkpoint> FencedCheckpointStore::load_latest(const std::string& thread_id) {
+    return inner_->load_latest(thread_id);
+}
+std::optional<Checkpoint> FencedCheckpointStore::load_by_id(const std::string& id) {
+    return inner_->load_by_id(id);
+}
+std::vector<Checkpoint> FencedCheckpointStore::list(const std::string& thread_id, int limit) {
+    return inner_->list(thread_id, limit);
+}
+void FencedCheckpointStore::delete_thread(const std::string& thread_id) {
+    inner_->delete_thread(thread_id, effective_fence());
+}
+void FencedCheckpointStore::delete_thread(const std::string& thread_id,
+                                          const CheckpointWriteFence& fence) {
+    inner_->delete_thread(thread_id, effective_fence(fence));
+}
+
+asio::awaitable<void> FencedCheckpointStore::save_async(const Checkpoint& cp) {
+    co_await inner_->save_async(cp, effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::save_async(const Checkpoint& cp,
+                                                        CheckpointWriteFence fence) {
+    co_await inner_->save_async(cp, effective_fence(fence));
+}
+asio::awaitable<std::optional<Checkpoint>>
+FencedCheckpointStore::load_latest_async(const std::string& thread_id) {
+    co_return co_await inner_->load_latest_async(thread_id);
+}
+asio::awaitable<std::optional<Checkpoint>>
+FencedCheckpointStore::load_by_id_async(const std::string& id) {
+    co_return co_await inner_->load_by_id_async(id);
+}
+asio::awaitable<std::vector<Checkpoint>>
+FencedCheckpointStore::list_async(const std::string& thread_id, int limit) {
+    co_return co_await inner_->list_async(thread_id, limit);
+}
+asio::awaitable<void> FencedCheckpointStore::delete_thread_async(const std::string& thread_id) {
+    co_await inner_->delete_thread_async(thread_id, effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::delete_thread_async(const std::string& thread_id,
+                                                                 CheckpointWriteFence fence) {
+    co_await inner_->delete_thread_async(thread_id, effective_fence(fence));
+}
+
+void FencedCheckpointStore::put_writes(const std::string& thread_id,
+                                       const std::string& parent_checkpoint_id,
+                                       const PendingWrite& write) {
+    inner_->put_writes(thread_id, parent_checkpoint_id, write, effective_fence());
+}
+void FencedCheckpointStore::put_writes(const std::string& thread_id,
+                                       const std::string& parent_checkpoint_id,
+                                       const PendingWrite& write,
+                                       const CheckpointWriteFence& fence) {
+    inner_->put_writes(thread_id, parent_checkpoint_id, write, effective_fence(fence));
+}
+std::vector<PendingWrite> FencedCheckpointStore::get_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    return inner_->get_writes(thread_id, parent_checkpoint_id);
+}
+void FencedCheckpointStore::clear_writes(const std::string& thread_id,
+                                         const std::string& parent_checkpoint_id) {
+    inner_->clear_writes(thread_id, parent_checkpoint_id, effective_fence());
+}
+void FencedCheckpointStore::clear_writes(const std::string& thread_id,
+                                         const std::string& parent_checkpoint_id,
+                                         const CheckpointWriteFence& fence) {
+    inner_->clear_writes(thread_id, parent_checkpoint_id, effective_fence(fence));
+}
+
+asio::awaitable<void> FencedCheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write) {
+    co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write, effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write,
+    CheckpointWriteFence fence) {
+    co_await inner_->put_writes_async(thread_id, parent_checkpoint_id, write, effective_fence(fence));
+}
+asio::awaitable<std::vector<PendingWrite>> FencedCheckpointStore::get_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    co_return co_await inner_->get_writes_async(thread_id, parent_checkpoint_id);
+}
+asio::awaitable<void> FencedCheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id) {
+    co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id, effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    CheckpointWriteFence fence) {
+    co_await inner_->clear_writes_async(thread_id, parent_checkpoint_id, effective_fence(fence));
+}
+
+std::uint64_t FencedCheckpointStore::raise_fence(const std::string& owner_scope,
+                                                 const std::string& run_id,
+                                                 std::uint64_t min_fence) {
+    return inner_->raise_fence(owner_scope, run_id, min_fence);
+}
+asio::awaitable<std::uint64_t> FencedCheckpointStore::raise_fence_async(
+    std::string owner_scope, std::string run_id, std::uint64_t min_fence) {
+    co_return co_await inner_->raise_fence_async(
+        std::move(owner_scope), std::move(run_id), min_fence);
+}
+std::uint64_t FencedCheckpointStore::load_fence(const std::string& owner_scope,
+                                                const std::string& run_id) {
+    return inner_->load_fence(owner_scope, run_id);
+}
+asio::awaitable<std::uint64_t> FencedCheckpointStore::load_fence_async(
+    std::string owner_scope, std::string run_id) {
+    co_return co_await inner_->load_fence_async(
+        std::move(owner_scope), std::move(run_id));
+}
+
+bool FencedCheckpointStore::requires_managed_budget(const std::string& thread_id) {
+    return inner_->requires_managed_budget(thread_id);
+}
+asio::awaitable<bool> FencedCheckpointStore::requires_managed_budget_async(std::string thread_id) {
+    co_return co_await inner_->requires_managed_budget_async(std::move(thread_id));
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> FencedCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment) {
+    return inner_->acquire_managed_budget_lease(
+        scope, expected_checkpoint_id, expected_checkpoint_commitment, effective_fence());
+}
+std::shared_ptr<OwnedManagedBudgetLease> FencedCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment, const CheckpointWriteFence& fence) {
+    return inner_->acquire_managed_budget_lease(
+        scope, expected_checkpoint_id, expected_checkpoint_commitment, effective_fence(fence));
+}
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+FencedCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment) {
+    co_return co_await inner_->acquire_managed_budget_lease_async(
+        std::move(scope), std::move(expected_checkpoint_id),
+        std::move(expected_checkpoint_commitment), effective_fence());
+}
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+FencedCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment, CheckpointWriteFence fence) {
+    co_return co_await inner_->acquire_managed_budget_lease_async(
+        std::move(scope), std::move(expected_checkpoint_id),
+        std::move(expected_checkpoint_commitment), effective_fence(fence));
+}
+ManagedBudgetEffectReceipt FencedCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    return inner_->begin_managed_budget_effect(
+        lease, effect_id, exact_claim_amount, prepared_request_digest, effective_fence());
+}
+ManagedBudgetEffectReceipt FencedCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+    const CheckpointWriteFence& fence) {
+    return inner_->begin_managed_budget_effect(
+        lease, effect_id, exact_claim_amount, prepared_request_digest, effective_fence(fence));
+}
+asio::awaitable<ManagedBudgetEffectReceipt>
+FencedCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest) {
+    co_return co_await inner_->begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount,
+        std::move(prepared_request_digest), effective_fence());
+}
+asio::awaitable<ManagedBudgetEffectReceipt>
+FencedCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest,
+    CheckpointWriteFence fence) {
+    co_return co_await inner_->begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount,
+        std::move(prepared_request_digest), effective_fence(fence));
+}
+void FencedCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+    const UsageAccumulator::AuthoritySnapshot& authority) {
+    inner_->settle_managed_budget_effect(
+        lease, effect, std::move(genuine_outcome), authority, effective_fence());
+}
+void FencedCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+    const UsageAccumulator::AuthoritySnapshot& authority, const CheckpointWriteFence& fence) {
+    inner_->settle_managed_budget_effect(
+        lease, effect, std::move(genuine_outcome), authority, effective_fence(fence));
+}
+asio::awaitable<void> FencedCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    co_await inner_->settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome),
+        std::move(authority), effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence fence) {
+    co_await inner_->settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome),
+        std::move(authority), effective_fence(fence));
+}
+void FencedCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    inner_->publish_managed_budget_checkpoint(lease, checkpoint, effective_fence());
+}
+void FencedCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& fence) {
+    inner_->publish_managed_budget_checkpoint(lease, checkpoint, effective_fence(fence));
+}
+asio::awaitable<void> FencedCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    co_await inner_->publish_managed_budget_checkpoint_async(
+        std::move(lease), std::move(checkpoint), effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence fence) {
+    co_await inner_->publish_managed_budget_checkpoint_async(
+        std::move(lease), std::move(checkpoint), effective_fence(fence));
+}
+void FencedCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    inner_->release_managed_budget_lease(lease, effective_fence());
+}
+void FencedCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const CheckpointWriteFence& fence) {
+    inner_->release_managed_budget_lease(lease, effective_fence(fence));
+}
+asio::awaitable<void> FencedCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    co_await inner_->release_managed_budget_lease_async(std::move(lease), effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, CheckpointWriteFence fence) {
+    co_await inner_->release_managed_budget_lease_async(
+        std::move(lease), effective_fence(fence));
+}
+bool FencedCheckpointStore::retains_native_checkpoint() const noexcept {
+    return inner_->retains_native_checkpoint();
+}
+void FencedCheckpointStore::publish_managed_budget_fork(
+    const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork) {
+    inner_->publish_managed_budget_fork(
+        authenticated_source, genuine_shared_bank_fork, effective_fence());
+}
+void FencedCheckpointStore::publish_managed_budget_fork(
+    const Checkpoint& authenticated_source, const Checkpoint& genuine_shared_bank_fork,
+    const CheckpointWriteFence& fence) {
+    inner_->publish_managed_budget_fork(
+        authenticated_source, genuine_shared_bank_fork, effective_fence(fence));
+}
+asio::awaitable<void> FencedCheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork) {
+    co_await inner_->publish_managed_budget_fork_async(
+        std::move(authenticated_source), std::move(genuine_shared_bank_fork), effective_fence());
+}
+asio::awaitable<void> FencedCheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork,
+    CheckpointWriteFence fence) {
+    co_await inner_->publish_managed_budget_fork_async(
+        std::move(authenticated_source), std::move(genuine_shared_bank_fork), effective_fence(fence));
 }
 
 // =========================================================================
@@ -802,6 +1695,105 @@ Checkpoint InMemoryCheckpointStore::join_blobs_locked(Checkpoint cp) const {
     return cp;
 }
 
+void InMemoryCheckpointStore::set_write_guard(WriteGuard write_guard) {
+    std::lock_guard lock(hook_mutex_);
+    write_guard_ = std::move(write_guard);
+}
+
+void InMemoryCheckpointStore::set_raise_guard(RaiseGuard raise_guard) {
+    std::lock_guard lock(hook_mutex_);
+    raise_guard_ = std::move(raise_guard);
+}
+
+void InMemoryCheckpointStore::set_before_write_hook(BeforeWriteHook before_write_hook) {
+    std::lock_guard lock(hook_mutex_);
+    before_write_hook_ = std::move(before_write_hook);
+}
+
+void InMemoryCheckpointStore::invoke_before_write_hook(const CheckpointWriteFence& fence) {
+    if (!fence.active()) return;
+    BeforeWriteHook hook;
+    {
+        std::lock_guard hook_lock(hook_mutex_);
+        hook = before_write_hook_;
+    }
+    if (hook) hook(fence);
+}
+
+void InMemoryCheckpointStore::check_and_upsert_fence_locked(
+    const CheckpointWriteFence& fence) {
+    fence.validate();
+    if (!fence.active()) return;
+    auto& stored = fences_[{fence.owner_scope, fence.run_id}];
+    if (stored > fence.fence) {
+        throw CheckpointWriteFenceError(CheckpointWriteFenceRefusal{
+            fence.owner_scope, fence.run_id, fence.fence, stored});
+    }
+    if (fence.fence > stored) {
+        stored = fence.fence;
+    }
+    WriteGuard guard;
+    {
+        std::lock_guard hook_lock(hook_mutex_);
+        guard = write_guard_;
+    }
+    if (guard) guard(fence);
+}
+
+std::uint64_t InMemoryCheckpointStore::raise_fence(
+    const std::string& owner_scope,
+    const std::string& run_id,
+    std::uint64_t min_fence) {
+    if (run_id.empty() || min_fence == 0) {
+        throw std::invalid_argument(
+            "InMemoryCheckpointStore::raise_fence requires non-empty run_id and min_fence > 0");
+    }
+    std::lock_guard write_lock(write_mutex_);
+    std::uint64_t result = 0;
+    {
+        std::lock_guard lock(mutex_);
+        auto& stored = fences_[{owner_scope, run_id}];
+        if (min_fence > stored) {
+            stored = min_fence;
+        }
+        result = stored;
+    }
+    RaiseGuard guard;
+    {
+        std::lock_guard hook_lock(hook_mutex_);
+        guard = raise_guard_;
+    }
+    if (guard) guard(owner_scope, run_id, result);
+    return result;
+}
+
+asio::awaitable<std::uint64_t> InMemoryCheckpointStore::raise_fence_async(
+    std::string owner_scope, std::string run_id, std::uint64_t min_fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::raise_fence_async(
+            std::move(owner_scope), std::move(run_id), min_fence);
+    }
+    co_return raise_fence(owner_scope, run_id, min_fence);
+}
+
+std::uint64_t InMemoryCheckpointStore::load_fence(
+    const std::string& owner_scope,
+    const std::string& run_id) {
+    if (run_id.empty()) return 0;
+    std::lock_guard lock(mutex_);
+    auto it = fences_.find({owner_scope, run_id});
+    return it == fences_.end() ? 0 : it->second;
+}
+
+asio::awaitable<std::uint64_t> InMemoryCheckpointStore::load_fence_async(
+    std::string owner_scope, std::string run_id) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_return co_await CheckpointStore::load_fence_async(
+            std::move(owner_scope), std::move(run_id));
+    }
+    co_return load_fence(owner_scope, run_id);
+}
+
 void InMemoryCheckpointStore::save(const Checkpoint& cp) {
     std::lock_guard lock(mutex_);
     // Ordinary new rows never advance the trusted current branch. Replacing
@@ -822,6 +1814,47 @@ void InMemoryCheckpointStore::save(const Checkpoint& cp) {
     // A thread's history is its save order, newest last, one entry per ID:
     // load_latest returns the checkpoint saved last, and a re-saved ID moves
     // to the newest position, as in the SQLite and PostgreSQL stores.
+    auto& history = by_thread_[shell.thread_id];
+    if (resaved) {
+        const auto stale = std::find_if(history.begin(), history.end(),
+            [&](const Checkpoint& saved) { return saved.id == shell.id; });
+        if (stale != history.end()) {
+            *stale = std::move(shell);
+            std::rotate(stale, stale + 1, history.end());
+            return;
+        }
+    }
+    history.push_back(std::move(shell));
+}
+
+void InMemoryCheckpointStore::save(const Checkpoint& cp,
+                                   const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
+    if (!is_exact_in_memory_store(*this)) {
+        {
+            std::lock_guard lock(mutex_);
+            check_and_upsert_fence_locked(fence);
+        }
+        this->save(cp);
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
+    const auto previous = by_id_.find(cp.id);
+    const bool resaved  = previous != by_id_.end();
+    if (resaved) {
+        if (const auto branch = managed_budget_branch_heads_.find(previous->second.thread_id);
+            branch != managed_budget_branch_heads_.end() && branch->second.checkpoint_id == cp.id &&
+            (branch->second.commitment != managed_budget_checkpoint_commitment(cp) ||
+             branch->second.native_history != cp.native_history))
+            branch->second.valid = false;
+    }
+    if (detail::ManagedBudgetJournalAccess::checkpoint_requires_obligation(cp))
+        managed_budget_obligations_.insert(cp.thread_id);
+    Checkpoint shell = split_blobs_locked(cp);
+    by_id_[shell.id] = shell;
     auto& history = by_thread_[shell.thread_id];
     if (resaved) {
         const auto stale = std::find_if(history.begin(), history.end(),
@@ -892,12 +1925,54 @@ void InMemoryCheckpointStore::delete_thread(const std::string& thread_id) {
     }
 }
 
+void InMemoryCheckpointStore::delete_thread(const std::string& thread_id,
+                                            const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
+    if (!is_exact_in_memory_store(*this)) {
+        {
+            std::lock_guard lock(mutex_);
+            check_and_upsert_fence_locked(fence);
+        }
+        this->delete_thread(thread_id);
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
+    if (const auto branch = managed_budget_branch_heads_.find(thread_id);
+        branch != managed_budget_branch_heads_.end()) branch->second.valid = false;
+    auto it = by_thread_.find(thread_id);
+    if (it != by_thread_.end()) {
+        for (const auto& cp : it->second) {
+            by_id_.erase(cp.id);
+        }
+        by_thread_.erase(it);
+    }
+    for (auto bit = blobs_.begin(); bit != blobs_.end(); ) {
+        if (std::get<0>(bit->first) == thread_id) {
+            bit = blobs_.erase(bit);
+        } else {
+            ++bit;
+        }
+    }
+}
+
 asio::awaitable<void> InMemoryCheckpointStore::save_async(const Checkpoint& cp) {
     if (!is_exact_in_memory_store(*this)) {
         co_await CheckpointStore::save_async(cp);
         co_return;
     }
     save(cp);
+}
+
+asio::awaitable<void> InMemoryCheckpointStore::save_async(
+    const Checkpoint& cp, CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::save_async(cp, std::move(fence));
+        co_return;
+    }
+    save(cp, fence);
 }
 
 asio::awaitable<std::optional<Checkpoint>>
@@ -933,6 +2008,16 @@ InMemoryCheckpointStore::delete_thread_async(const std::string& thread_id) {
     delete_thread(thread_id);
 }
 
+asio::awaitable<void>
+InMemoryCheckpointStore::delete_thread_async(const std::string& thread_id,
+                                             CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::delete_thread_async(thread_id, std::move(fence));
+        co_return;
+    }
+    delete_thread(thread_id, fence);
+}
+
 asio::awaitable<void> InMemoryCheckpointStore::put_writes_async(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id,
@@ -943,6 +2028,19 @@ asio::awaitable<void> InMemoryCheckpointStore::put_writes_async(
         co_return;
     }
     put_writes(thread_id, parent_checkpoint_id, write);
+}
+
+asio::awaitable<void> InMemoryCheckpointStore::put_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::put_writes_async(
+            thread_id, parent_checkpoint_id, write, std::move(fence));
+        co_return;
+    }
+    put_writes(thread_id, parent_checkpoint_id, write, fence);
 }
 
 asio::awaitable<std::vector<PendingWrite>>
@@ -967,6 +2065,18 @@ asio::awaitable<void> InMemoryCheckpointStore::clear_writes_async(
     clear_writes(thread_id, parent_checkpoint_id);
 }
 
+asio::awaitable<void> InMemoryCheckpointStore::clear_writes_async(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::clear_writes_async(
+            thread_id, parent_checkpoint_id, std::move(fence));
+        co_return;
+    }
+    clear_writes(thread_id, parent_checkpoint_id, fence);
+}
+
 bool InMemoryCheckpointStore::requires_managed_budget(const std::string& thread_id) {
     std::lock_guard lock(mutex_);
     return managed_budget_obligations_.contains(thread_id);
@@ -986,6 +2096,15 @@ asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> InMemoryCheckpointStor
             std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment));
     co_return acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment);
 }
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>> InMemoryCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id, std::string expected_checkpoint_commitment,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this))
+        co_return co_await CheckpointStore::acquire_managed_budget_lease_async(
+            std::move(scope), std::move(expected_checkpoint_id), std::move(expected_checkpoint_commitment),
+            std::move(fence));
+    co_return acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment, fence);
+}
 asio::awaitable<ManagedBudgetEffectReceipt> InMemoryCheckpointStore::begin_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id, std::uint64_t exact_claim_amount,
     std::string prepared_request_digest) {
@@ -993,6 +2112,15 @@ asio::awaitable<ManagedBudgetEffectReceipt> InMemoryCheckpointStore::begin_manag
         co_return co_await CheckpointStore::begin_managed_budget_effect_async(
             std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest));
     co_return begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest);
+}
+asio::awaitable<ManagedBudgetEffectReceipt> InMemoryCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id, std::uint64_t exact_claim_amount,
+    std::string prepared_request_digest, CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this))
+        co_return co_await CheckpointStore::begin_managed_budget_effect_async(
+            std::move(lease), std::move(effect_id), exact_claim_amount, std::move(prepared_request_digest),
+            std::move(fence));
+    co_return begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest, fence);
 }
 asio::awaitable<void> InMemoryCheckpointStore::settle_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
@@ -1004,6 +2132,18 @@ asio::awaitable<void> InMemoryCheckpointStore::settle_managed_budget_effect_asyn
     }
     settle_managed_budget_effect(lease, effect, genuine_outcome, authority);
 }
+asio::awaitable<void> InMemoryCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::settle_managed_budget_effect_async(
+            std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority),
+            std::move(fence));
+        co_return;
+    }
+    settle_managed_budget_effect(lease, effect, genuine_outcome, authority, fence);
+}
 asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_checkpoint_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
     if (!is_exact_in_memory_store(*this)) {
@@ -1011,6 +2151,16 @@ asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_checkpoint
         co_return;
     }
     publish_managed_budget_checkpoint(lease, checkpoint);
+}
+asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::publish_managed_budget_checkpoint_async(
+            std::move(lease), std::move(checkpoint), std::move(fence));
+        co_return;
+    }
+    publish_managed_budget_checkpoint(lease, checkpoint, fence);
 }
 asio::awaitable<void> InMemoryCheckpointStore::release_managed_budget_lease_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease) {
@@ -1020,6 +2170,15 @@ asio::awaitable<void> InMemoryCheckpointStore::release_managed_budget_lease_asyn
     }
     release_managed_budget_lease(lease);
 }
+asio::awaitable<void> InMemoryCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::release_managed_budget_lease_async(
+            std::move(lease), std::move(fence));
+        co_return;
+    }
+    release_managed_budget_lease(lease, fence);
+}
 asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_fork_async(
     Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork) {
     if (!is_exact_in_memory_store(*this)) {
@@ -1028,6 +2187,16 @@ asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_fork_async
         co_return;
     }
     publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork);
+}
+asio::awaitable<void> InMemoryCheckpointStore::publish_managed_budget_fork_async(
+    Checkpoint authenticated_source, Checkpoint genuine_shared_bank_fork,
+    CheckpointWriteFence fence) {
+    if (!is_exact_in_memory_store(*this)) {
+        co_await CheckpointStore::publish_managed_budget_fork_async(
+            std::move(authenticated_source), std::move(genuine_shared_bank_fork), std::move(fence));
+        co_return;
+    }
+    publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork, fence);
 }
 
 const InMemoryCheckpointStore::ManagedBudgetBranchHead&
@@ -1066,7 +2235,16 @@ void InMemoryCheckpointStore::validate_managed_budget_execution_locked(
 
 std::shared_ptr<OwnedManagedBudgetLease> InMemoryCheckpointStore::acquire_managed_budget_lease(
     const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment) {
+    return acquire_managed_budget_lease(scope, id, commitment, CheckpointWriteFence{});
+}
+std::shared_ptr<OwnedManagedBudgetLease> InMemoryCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& id, const std::string& commitment,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(scope);
     std::string execution_key = key;
     std::string execution_thread = scope.thread_id;
@@ -1095,8 +2273,17 @@ std::shared_ptr<OwnedManagedBudgetLease> InMemoryCheckpointStore::acquire_manage
 ManagedBudgetEffectReceipt InMemoryCheckpointStore::begin_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
     std::uint64_t amount, const std::string& digest) {
+    return begin_managed_budget_effect(lease, id, amount, digest, CheckpointWriteFence{});
+}
+ManagedBudgetEffectReceipt InMemoryCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& id,
+    std::uint64_t amount, const std::string& digest, const CheckpointWriteFence& fence) {
+    fence.validate();
     if (!lease) throw std::invalid_argument("Managed-bank effect requires an owned lease");
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
     const auto head = managed_budget_journals_.find(key);
     if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
@@ -1115,8 +2302,18 @@ ManagedBudgetEffectReceipt InMemoryCheckpointStore::begin_managed_budget_effect(
 void InMemoryCheckpointStore::settle_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& receipt,
     sp::runtime::Result outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    settle_managed_budget_effect(lease, receipt, std::move(outcome), authority, CheckpointWriteFence{});
+}
+void InMemoryCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& receipt,
+    sp::runtime::Result outcome, const UsageAccumulator::AuthoritySnapshot& authority,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
     if (!lease || !receipt.active()) throw std::invalid_argument("Managed-bank settlement requires owned custody");
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
     const auto head = managed_budget_journals_.find(key);
     const auto effect_key = std::make_tuple(key, lease->bank_generation(), receipt.effect_id());
@@ -1136,8 +2333,17 @@ void InMemoryCheckpointStore::settle_managed_budget_effect(
 }
 void InMemoryCheckpointStore::publish_managed_budget_checkpoint(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    publish_managed_budget_checkpoint(lease, checkpoint, CheckpointWriteFence{});
+}
+void InMemoryCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
     if (!lease) throw std::invalid_argument("Managed-bank checkpoint requires an owned lease");
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
     const auto head = managed_budget_journals_.find(key);
     if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
@@ -1193,7 +2399,16 @@ void InMemoryCheckpointStore::publish_managed_budget_checkpoint(
 
 void InMemoryCheckpointStore::publish_managed_budget_fork(
     const Checkpoint& source, const Checkpoint& forked) {
+    publish_managed_budget_fork(source, forked, CheckpointWriteFence{});
+}
+void InMemoryCheckpointStore::publish_managed_budget_fork(
+    const Checkpoint& source, const Checkpoint& forked,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto commitment = managed_budget_checkpoint_commitment(source);
     const auto& source_branch = authenticate_managed_budget_branch_locked(source, commitment);
     const auto head = managed_budget_journals_.find(source_branch.financial_storage_thread_id);
@@ -1236,8 +2451,17 @@ void InMemoryCheckpointStore::publish_managed_budget_fork(
 }
 void InMemoryCheckpointStore::release_managed_budget_lease(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    release_managed_budget_lease(lease, CheckpointWriteFence{});
+}
+void InMemoryCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
     if (!lease) throw std::invalid_argument("Managed-bank release requires an owned lease");
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
     std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     const auto key = detail::ManagedBudgetJournalAccess::storage_key(lease->scope());
     const auto head = managed_budget_journals_.find(key);
     if (head == managed_budget_journals_.end()) throw std::invalid_argument("Managed-bank journal is missing");
@@ -1269,6 +2493,26 @@ void InMemoryCheckpointStore::put_writes(
     std::lock_guard lock(mutex_);
     pending_[{thread_id, parent_checkpoint_id}].push_back(write);
 }
+void InMemoryCheckpointStore::put_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const PendingWrite& write,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
+    if (!is_exact_in_memory_store(*this)) {
+        {
+            std::lock_guard lock(mutex_);
+            check_and_upsert_fence_locked(fence);
+        }
+        this->put_writes(thread_id, parent_checkpoint_id, write);
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
+    pending_[{thread_id, parent_checkpoint_id}].push_back(write);
+}
 
 std::vector<PendingWrite> InMemoryCheckpointStore::get_writes(
     const std::string& thread_id,
@@ -1283,6 +2527,25 @@ void InMemoryCheckpointStore::clear_writes(
     const std::string& thread_id,
     const std::string& parent_checkpoint_id) {
     std::lock_guard lock(mutex_);
+    pending_.erase({thread_id, parent_checkpoint_id});
+}
+void InMemoryCheckpointStore::clear_writes(
+    const std::string& thread_id,
+    const std::string& parent_checkpoint_id,
+    const CheckpointWriteFence& fence) {
+    fence.validate();
+    invoke_before_write_hook(fence);
+    std::lock_guard write_lock(write_mutex_);
+    if (!is_exact_in_memory_store(*this)) {
+        {
+            std::lock_guard lock(mutex_);
+            check_and_upsert_fence_locked(fence);
+        }
+        this->clear_writes(thread_id, parent_checkpoint_id);
+        return;
+    }
+    std::lock_guard lock(mutex_);
+    check_and_upsert_fence_locked(fence);
     pending_.erase({thread_id, parent_checkpoint_id});
 }
 

@@ -544,7 +544,8 @@ private:
     /// `transition_lock_held`: the caller holds the process-wide transition lock (a replacement or a graph migration
     /// reconnecting to the run it publishes), which is not recursive for a coroutine.
     asio::awaitable<ProgramHandle> reconnect_core(std::string owner_scope, std::string run_id,
-                                                  bool transition_lock_held = false);
+                                                  bool transition_lock_held = false,
+                                                  bool* wait_for_control = nullptr);
     /// `child_answered`: the continuation of a run paused on a child that has since been answered (#658). It
     /// submits no value: the run's pending await or spawn command rejoins the child.
     asio::awaitable<ProgramHandle> resume_core(std::string owner_scope, std::string run_id, ProgramResume resume,

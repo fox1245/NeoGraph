@@ -674,6 +674,10 @@ TEST(GraphHostGRPCContract, CheckpointServerRefusesRecordsItCannotStoreWhole) {
         request.mutable_checkpoint()->set_id(id);
         request.mutable_checkpoint()->set_thread_id("thread");
         request.mutable_checkpoint()->set_checkpoint_json(record.dump());
+        auto* wf = request.mutable_write_fence();
+        wf->set_owner_scope("owner");
+        wf->set_run_id("run-whole");
+        wf->set_fence(1);
         pb::StatusResponse response;
         return stub->SaveCheckpoint(&context, request, &response);
     };
@@ -1248,6 +1252,297 @@ TEST(GraphHostGRPCContract, RefusedRemoteRequestsAreFailuresNotReconciliations) 
     EXPECT_EQ(refused.status, ToolTerminalStatus::Failed) << refused.error;
     EXPECT_FALSE(refused.effect_uncertain) << refused.error;
     EXPECT_NE(refused.error.find("NG.InvalidRequest"), std::string::npos) << refused.error;
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+TEST(GraphHostGRPCContract, T5_FenceGreaterOrEqualAcceptedAndStrictlyLowerRefused) {
+    auto backend = std::make_shared<InMemoryCheckpointStore>();
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+
+    neograph::grpc::GrpcCheckpointStore store("127.0.0.1:" + std::to_string(port));
+    store.set_rpc_timeout(5s);
+
+    ASSERT_TRUE(store.supports_write_fence());
+    EXPECT_EQ(store.raise_fence("owner-a", "run-1", 2), 2u);
+    EXPECT_EQ(store.load_fence("owner-a", "run-1"), 2u);
+
+    Checkpoint cp_ok;
+    cp_ok.id = "cp-f2";
+    cp_ok.thread_id = "thread-t5";
+    cp_ok.channel_values = json{{"v", 2}};
+    cp_ok.step = 1;
+    cp_ok.timestamp = 100;
+    EXPECT_NO_THROW(store.save(cp_ok, CheckpointWriteFence{"owner-a", "run-1", 2}));
+
+    PendingWrite pw_ok;
+    pw_ok.task_id = "task-ok";
+    pw_ok.task_path = "s1:node";
+    pw_ok.node_name = "node";
+    pw_ok.writes = json::array({json{{"channel", "v"}, {"value", 2}}});
+    pw_ok.command = nullptr;
+    pw_ok.sends = json::array();
+    pw_ok.step = 1;
+    pw_ok.timestamp = 101;
+    EXPECT_NO_THROW(
+        store.put_writes("thread-t5", "cp-f2", pw_ok, CheckpointWriteFence{"owner-a", "run-1", 2}));
+
+    Checkpoint cp_stale = cp_ok;
+    cp_stale.id = "cp-f1";
+    cp_stale.channel_values = json{{"v", 1}};
+    try {
+        store.save(cp_stale, CheckpointWriteFence{"owner-a", "run-1", 1});
+        FAIL() << "Expected CheckpointWriteFenceError on stale save";
+    } catch (const CheckpointWriteFenceError& err) {
+        EXPECT_EQ(err.refusal().owner_scope, "owner-a");
+        EXPECT_EQ(err.refusal().run_id, "run-1");
+        EXPECT_EQ(err.refusal().writer_fence, 1u);
+        EXPECT_EQ(err.refusal().stored_fence, 2u);
+    }
+    EXPECT_FALSE(store.load_by_id("cp-f1").has_value());
+
+    PendingWrite pw_stale = pw_ok;
+    pw_stale.task_id = "task-stale";
+    EXPECT_THROW(
+        store.put_writes("thread-t5", "cp-f2", pw_stale, CheckpointWriteFence{"owner-a", "run-1", 1}),
+        CheckpointWriteFenceError);
+    const auto writes = store.get_writes("thread-t5", "cp-f2");
+    ASSERT_EQ(writes.size(), 1u);
+    EXPECT_EQ(writes[0].task_id, "task-ok");
+
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+namespace {
+class FlakyCapabilityCheckpointStore final : public InMemoryCheckpointStore {
+public:
+    std::atomic<bool> fail_capabilities{true};
+    std::atomic<bool> advertise_fence_support{false};
+
+    bool supports_write_fence() const override {
+        if (fail_capabilities.load()) {
+            throw std::runtime_error("transient backend capability outage");
+        }
+        return advertise_fence_support.load();
+    }
+};
+}  // namespace
+
+TEST(GraphHostGRPCContract, T8b_CapabilityProbeTransportFailureIsNotCachedAsUnsupported) {
+    auto backend = std::make_shared<FlakyCapabilityCheckpointStore>();
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+
+    neograph::grpc::GrpcCheckpointStore store("127.0.0.1:" + std::to_string(port));
+    store.set_rpc_timeout(5s);
+
+    // First probe fails with UNAVAILABLE -> throws retryable std::runtime_error, never returns false.
+    EXPECT_THROW((void)store.supports_write_fence(), std::runtime_error);
+
+    // Server recovers and authoritatively answers supports_write_fence = false.
+    backend->fail_capabilities.store(false);
+    backend->advertise_fence_support.store(false);
+    EXPECT_FALSE(store.supports_write_fence());
+
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+TEST(GraphHostGRPCContract, T8c_FencingCheckpointServiceRejectsRawSaveMissingWriteFence) {
+    auto backend = std::make_shared<InMemoryCheckpointStore>();
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+
+    auto stub = pb::CheckpointService::NewStub(::grpc::CreateChannel(
+        "127.0.0.1:" + std::to_string(port), ::grpc::InsecureChannelCredentials()));
+
+    Checkpoint cp;
+    cp.id = "cp-unfenced";
+    cp.thread_id = "thread-t8c";
+    cp.channel_values = json{{"v", 1}};
+    cp.step = 1;
+    cp.timestamp = 1;
+
+    ::grpc::ClientContext context;
+    context.set_deadline(std::chrono::system_clock::now() + 5s);
+    pb::SaveCheckpointRequest request;
+    request.mutable_checkpoint()->set_id(cp.id);
+    request.mutable_checkpoint()->set_thread_id(cp.thread_id);
+    request.mutable_checkpoint()->set_checkpoint_json(neograph::grpc::checkpoint_to_json(cp));
+    pb::StatusResponse response;
+    const auto status = stub->SaveCheckpoint(&context, request, &response);
+    EXPECT_EQ(status.error_code(), ::grpc::StatusCode::INVALID_ARGUMENT) << status.error_message();
+    EXPECT_FALSE(backend->load_by_id("cp-unfenced").has_value());
+
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+namespace {
+class CustomStatusCheckpointService final : public pb::CheckpointService::Service {
+public:
+    ::grpc::Status next_save_status = ::grpc::Status::OK;
+
+    ::grpc::Status GetCheckpointCapabilities(
+        ::grpc::ServerContext*,
+        const pb::GetCheckpointCapabilitiesRequest*,
+        pb::GetCheckpointCapabilitiesResponse* resp) override {
+        resp->set_supports_write_fence(true);
+        return ::grpc::Status::OK;
+    }
+
+    ::grpc::Status SaveCheckpoint(
+        ::grpc::ServerContext*,
+        const pb::SaveCheckpointRequest*,
+        pb::StatusResponse* resp) override {
+        if (!next_save_status.ok()) {
+            return next_save_status;
+        }
+        resp->set_ok(true);
+        return ::grpc::Status::OK;
+    }
+};
+}  // namespace
+
+TEST(GraphHostGRPCContract, FailedPreconditionWithNonRefusalDetailsPreservesOriginalStatus) {
+    CustomStatusCheckpointService service;
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&service);
+    auto server = builder.BuildAndStart();
+
+    neograph::grpc::GrpcCheckpointStore store("127.0.0.1:" + std::to_string(port));
+    store.set_rpc_timeout(5s);
+
+    Checkpoint cp;
+    cp.id = "cp-precond";
+    cp.thread_id = "thread-precond";
+    cp.channel_values = json{{"v", 1}};
+    cp.step = 1;
+    cp.timestamp = 1;
+
+    service.next_save_status = ::grpc::Status(
+        ::grpc::StatusCode::FAILED_PRECONDITION,
+        "database is in read-only mode",
+        "plain-text error details");
+    try {
+        store.save(cp, CheckpointWriteFence{"owner-a", "run-1", 1});
+        FAIL() << "Expected std::runtime_error for plain-text FAILED_PRECONDITION";
+    } catch (const CheckpointWriteFenceError&) {
+        FAIL() << "Plain-text FAILED_PRECONDITION must not be classified as fence refusal";
+    } catch (const std::runtime_error& err) {
+        EXPECT_NE(std::string(err.what()).find("SaveCheckpoint RPC failed: database is in read-only mode"),
+                  std::string::npos)
+            << err.what();
+        EXPECT_EQ(std::string(err.what()).find("Malformed checkpoint write fence refusal"),
+                  std::string::npos)
+            << err.what();
+    }
+
+    service.next_save_status = ::grpc::Status(
+        ::grpc::StatusCode::FAILED_PRECONDITION,
+        "non-string code precondition failure",
+        R"({"code":1})");
+    try {
+        store.save(cp, CheckpointWriteFence{"owner-a", "run-1", 1});
+        FAIL() << "Expected std::runtime_error for non-string code FAILED_PRECONDITION";
+    } catch (const CheckpointWriteFenceError&) {
+        FAIL() << "Numeric code FAILED_PRECONDITION must not be classified as fence refusal";
+    } catch (const std::runtime_error& err) {
+        EXPECT_NE(std::string(err.what()).find("SaveCheckpoint RPC failed: non-string code precondition failure"),
+                  std::string::npos)
+            << err.what();
+        EXPECT_EQ(std::string(err.what()).find("Malformed checkpoint write fence refusal"),
+                  std::string::npos)
+            << err.what();
+    }
+
+    service.next_save_status = ::grpc::Status(
+        ::grpc::StatusCode::FAILED_PRECONDITION,
+        "refusal missing fences",
+        R"({"code":"G_CHECKPOINT_WRITE_FENCE","run_id":"run-1"})");
+    try {
+        store.save(cp, CheckpointWriteFence{"owner-a", "run-1", 1});
+        FAIL() << "Expected protocol error for refusal missing fences";
+    } catch (const CheckpointWriteFenceError&) {
+        FAIL() << "Incomplete refusal must throw protocol error, not CheckpointWriteFenceError";
+    } catch (const std::runtime_error& err) {
+        EXPECT_NE(std::string(err.what()).find("Malformed checkpoint write fence refusal"),
+                  std::string::npos)
+            << err.what();
+    }
+
+    server->Shutdown(std::chrono::system_clock::now() + 2s);
+    server->Wait();
+}
+
+TEST(GraphHostGRPCContract, NonFencingPeerAllowsInitialFenceUnfencedAndRejectsHigherFence) {
+    auto backend = std::make_shared<FlakyCapabilityCheckpointStore>();
+    backend->fail_capabilities.store(false);
+    backend->advertise_fence_support.store(false);
+    auto service = neograph::grpc::make_checkpoint_service(backend);
+    ::grpc::ServerBuilder builder;
+    int port = 0;
+    builder.AddListeningPort("127.0.0.1:0", ::grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(service.get());
+    auto server = builder.BuildAndStart();
+
+    neograph::grpc::GrpcCheckpointStore store("127.0.0.1:" + std::to_string(port));
+    store.set_rpc_timeout(5s);
+    EXPECT_FALSE(store.supports_write_fence());
+
+    Checkpoint cp;
+    cp.id = "cp-initial-fence";
+    cp.thread_id = "thread-non-fencing";
+    cp.channel_values = json{{"v", 1}};
+    cp.step = 1;
+    cp.timestamp = 1;
+
+    EXPECT_NO_THROW(store.save(
+        cp, CheckpointWriteFence{"owner-a", "run-1", kInitialCheckpointWriteFence}));
+    EXPECT_TRUE(store.load_by_id("cp-initial-fence").has_value());
+
+    PendingWrite pw;
+    pw.task_id = "task-initial";
+    pw.node_name = "node";
+    pw.channel = "v";
+    pw.value = json(2);
+    EXPECT_NO_THROW(store.put_writes(
+        "thread-non-fencing",
+        "cp-initial-fence",
+        pw,
+        CheckpointWriteFence{"owner-a", "run-1", kInitialCheckpointWriteFence}));
+
+    Checkpoint cp2 = cp;
+    cp2.id = "cp-fence-2";
+    EXPECT_THROW(
+        store.save(cp2, CheckpointWriteFence{"owner-a", "run-1", kInitialCheckpointWriteFence + 1}),
+        CheckpointException);
+    EXPECT_FALSE(store.load_by_id("cp-fence-2").has_value());
+
+    EXPECT_THROW(
+        store.put_writes(
+            "thread-non-fencing",
+            "cp-initial-fence",
+            pw,
+            CheckpointWriteFence{"owner-a", "run-1", kInitialCheckpointWriteFence + 1}),
+        CheckpointException);
+
     server->Shutdown(std::chrono::system_clock::now() + 2s);
     server->Wait();
 }

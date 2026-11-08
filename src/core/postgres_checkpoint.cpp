@@ -458,9 +458,66 @@ CREATE TABLE IF NOT EXISTS neograph_checkpoint_managed_budget_effects (
     PRIMARY KEY (thread_id, bank_generation, effect_id)
 );
 
+CREATE TABLE IF NOT EXISTS checkpoint_run_fences (
+    owner_scope TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    fence       NUMERIC(20, 0) NOT NULL CHECK (fence > 0),
+    PRIMARY KEY (owner_scope, run_id)
+);
+
 )SQL";
 
-// Obligations, migration markers, heads and effects outlive drop_schema.
+constexpr const char* kSqlFenceRaise = R"SQL(
+INSERT INTO checkpoint_run_fences (owner_scope, run_id, fence)
+VALUES ($1, $2, $3::numeric)
+ON CONFLICT (owner_scope, run_id) DO UPDATE
+    SET fence = GREATEST(checkpoint_run_fences.fence, EXCLUDED.fence)
+RETURNING fence
+)SQL";
+
+constexpr const char* kSqlFenceUpsert = R"SQL(
+INSERT INTO checkpoint_run_fences (owner_scope, run_id, fence)
+VALUES ($1, $2, $3::numeric)
+ON CONFLICT (owner_scope, run_id) DO UPDATE
+    SET fence = EXCLUDED.fence
+    WHERE checkpoint_run_fences.fence <= EXCLUDED.fence
+RETURNING fence
+)SQL";
+
+constexpr const char* kSqlFenceSelect = R"SQL(
+SELECT fence FROM checkpoint_run_fences
+WHERE owner_scope = $1 AND run_id = $2
+)SQL";
+
+std::uint64_t raise_fence_on_conn(pg_conn* conn,
+                                  const std::string& owner_scope,
+                                  const std::string& run_id,
+                                  std::uint64_t min_fence) {
+    auto res = exec_params(conn, kSqlFenceRaise, {owner_scope, run_id, std::to_string(min_fence)});
+    if (PQntuples(res) != 1) {
+        throw std::runtime_error("PostgresCheckpointStore: raise_fence returned no row");
+    }
+    return std::stoull(col_text(res, 0, 0));
+}
+
+std::uint64_t check_fence_on_conn(pg_conn* conn, const CheckpointWriteFence& fence) {
+    fence.validate();
+    if (!fence.active()) return 0;
+    const std::string fence_str = std::to_string(fence.fence);
+    auto up = exec_params(conn, kSqlFenceUpsert, {fence.owner_scope, fence.run_id, fence_str});
+    if (PQntuples(up) == 1) {
+        return std::stoull(col_text(up, 0, 0));
+    }
+    auto sel = exec_params(conn, kSqlFenceSelect, {fence.owner_scope, fence.run_id});
+    if (PQntuples(sel) != 1) {
+        throw std::runtime_error("PostgresCheckpointStore: fence upsert lost row");
+    }
+    const std::uint64_t stored = std::stoull(col_text(sel, 0, 0));
+    throw CheckpointWriteFenceError(CheckpointWriteFenceRefusal{
+        fence.owner_scope, fence.run_id, fence.fence, stored});
+}
+
+// Fences, obligations, migration markers, heads and effects outlive drop_schema.
 constexpr const char* kDropDDL = R"SQL(
 DROP TABLE IF EXISTS neograph_checkpoint_writes;
 DROP TABLE IF EXISTS neograph_checkpoint_blobs;
@@ -797,6 +854,10 @@ struct PoolSlotWaiter {
 
 struct PoolWaitState {
     std::deque<std::shared_ptr<PoolSlotWaiter>> waiters;
+    std::mutex                                  hook_mutex;
+    PostgresCheckpointStore::WriteGuard         write_guard;
+    PostgresCheckpointStore::RaiseGuard         raise_guard;
+    PostgresCheckpointStore::BeforeWriteHook    before_write_hook;
 };
 
 struct PoolWaitRegistry {
@@ -835,11 +896,55 @@ void unregister_pool_wait_state(const PostgresCheckpointStore* store) {
     registry.states.erase(store);
 }
 
+void invoke_pg_before_write(const PostgresCheckpointStore* store,
+                            const std::string& thread_id,
+                            const CheckpointWriteFence& fence) {
+    fence.validate();
+    auto state = pool_wait_state(store);
+    PostgresCheckpointStore::BeforeWriteHook hook;
+    {
+        std::lock_guard lock(state->hook_mutex);
+        hook = state->before_write_hook;
+    }
+    if (hook) hook(thread_id, fence);
+}
+
+void invoke_pg_write_guard(const PostgresCheckpointStore* store,
+                           pg_conn* conn,
+                           const std::string& thread_id) {
+    auto state = pool_wait_state(store);
+    PostgresCheckpointStore::WriteGuard guard;
+    {
+        std::lock_guard lock(state->hook_mutex);
+        guard = state->write_guard;
+    }
+    if (guard) guard(conn, thread_id);
+}
+
+void invoke_pg_raise_guard(const PostgresCheckpointStore* store,
+                           const std::string& owner_scope,
+                           const std::string& run_id,
+                           std::uint64_t min_fence) {
+    auto state = pool_wait_state(store);
+    PostgresCheckpointStore::RaiseGuard guard;
+    {
+        std::lock_guard lock(state->hook_mutex);
+        guard = state->raise_guard;
+    }
+    if (guard) guard(owner_scope, run_id, min_fence);
+}
+
 }  // namespace
 
 // ── Construction / lifetime ───────────────────────────────────────────
 
 PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str, size_t pool_size)
+    : PostgresCheckpointStore(conn_str, pool_size, {}, {}) {}
+
+PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str,
+                                                 size_t pool_size,
+                                                 WriteGuard write_guard,
+                                                 RaiseGuard raise_guard)
     : conn_str_(conn_str) {
     if (pool_size == 0) {
         throw std::invalid_argument("PostgresCheckpointStore: pool_size must be >= 1");
@@ -851,6 +956,27 @@ PostgresCheckpointStore::PostgresCheckpointStore(const std::string& conn_str, si
     }
     ensure_schema();
     register_pool_wait_state(this);
+    auto state         = pool_wait_state(this);
+    state->write_guard = std::move(write_guard);
+    state->raise_guard = std::move(raise_guard);
+}
+
+void PostgresCheckpointStore::set_write_guard(WriteGuard write_guard) {
+    auto state = pool_wait_state(this);
+    std::lock_guard lock(state->hook_mutex);
+    state->write_guard = std::move(write_guard);
+}
+
+void PostgresCheckpointStore::set_raise_guard(RaiseGuard raise_guard) {
+    auto state = pool_wait_state(this);
+    std::lock_guard lock(state->hook_mutex);
+    state->raise_guard = std::move(raise_guard);
+}
+
+void PostgresCheckpointStore::set_before_write_hook(BeforeWriteHook before_write_hook) {
+    auto state = pool_wait_state(this);
+    std::lock_guard lock(state->hook_mutex);
+    state->before_write_hook = std::move(before_write_hook);
 }
 
 PostgresCheckpointStore::PostgresCheckpointStore(PoolOnlyTag, size_t pool_size) : pool_(pool_size) {
@@ -1025,12 +1151,53 @@ auto PostgresCheckpointStore::with_conn(Fn&& fn) {
     }
 }
 
-// ── save() ────────────────────────────────────────────────────────────
+// ── save() / raise_fence() / load_fence() ─────────────────────────────
+
+std::uint64_t PostgresCheckpointStore::raise_fence(
+    const std::string& owner_scope,
+    const std::string& run_id,
+    std::uint64_t min_fence) {
+    if (run_id.empty() || min_fence == 0) {
+        throw std::invalid_argument(
+            "PostgresCheckpointStore::raise_fence requires non-empty run_id and min_fence > 0");
+    }
+    return with_conn([&](pg_conn* c) -> std::uint64_t {
+        (void)exec_sql(c, "BEGIN");
+        try {
+            const std::uint64_t stored = raise_fence_on_conn(c, owner_scope, run_id, min_fence);
+            invoke_pg_raise_guard(this, owner_scope, run_id, min_fence);
+            (void)exec_sql(c, "COMMIT");
+            return stored;
+        } catch (...) {
+            PGresult* r = PQexec(c, "ROLLBACK");
+            if (r) PQclear(r);
+            throw;
+        }
+    });
+}
+
+std::uint64_t PostgresCheckpointStore::load_fence(
+    const std::string& owner_scope, const std::string& run_id) {
+    if (run_id.empty()) return 0;
+    return with_conn([&](pg_conn* c) -> std::uint64_t {
+        auto res = exec_params(c, kSqlFenceSelect, {owner_scope, run_id});
+        if (PQntuples(res) == 0) return 0;
+        return std::stoull(col_text(res, 0, 0));
+    });
+}
 
 void PostgresCheckpointStore::save(const Checkpoint& cp) {
+    save(cp, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::save(const Checkpoint& cp,
+                                   const CheckpointWriteFence& write_fence) {
+    invoke_pg_before_write(this, cp.thread_id, write_fence);
     const auto params = checkpoint_save_params(cp);
     with_conn([&](pg_conn* c) {
         journal_transaction(c, cp.thread_id, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, cp.thread_id);
             (void)exec_params(c, kSqlSaveAll, params);
             return true;
         });
@@ -1078,8 +1245,16 @@ std::vector<Checkpoint> PostgresCheckpointStore::list(const std::string& thread_
 }
 
 void PostgresCheckpointStore::delete_thread(const std::string& thread_id) {
+    delete_thread(thread_id, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::delete_thread(const std::string& thread_id,
+                                            const CheckpointWriteFence& write_fence) {
+    invoke_pg_before_write(this, thread_id, write_fence);
     with_conn([&](pg_conn* c) {
         journal_transaction(c, thread_id, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
             (void)exec_params(c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1",
                               {thread_id});
             (void)exec_params(c, "DELETE FROM neograph_checkpoint_blobs WHERE thread_id = $1",
@@ -1100,9 +1275,20 @@ bool PostgresCheckpointStore::requires_managed_budget(const std::string& thread_
 std::shared_ptr<OwnedManagedBudgetLease> PostgresCheckpointStore::acquire_managed_budget_lease(
     const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
     const std::string& expected_checkpoint_commitment) {
+    return acquire_managed_budget_lease(scope, expected_checkpoint_id,
+                                        expected_checkpoint_commitment, CheckpointWriteFence{});
+}
+
+std::shared_ptr<OwnedManagedBudgetLease> PostgresCheckpointStore::acquire_managed_budget_lease(
+    const ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+    const std::string& expected_checkpoint_commitment,
+    const CheckpointWriteFence& write_fence) {
     const auto key = Journal::storage_key(scope);
+    invoke_pg_before_write(this, key, write_fence);
     auto committed = with_conn([&](pg_conn* c) {
         return journal_transaction(c, key, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = journal_row(exec_params(c, kSqlJournalHead, {key}));
             auto obligation = exec_params(c, kSqlRequiresManagedBudget, {key});
             journal_check_source(c, key, expected_checkpoint_id, expected_checkpoint_commitment);
@@ -1119,9 +1305,20 @@ std::shared_ptr<OwnedManagedBudgetLease> PostgresCheckpointStore::acquire_manage
 ManagedBudgetEffectReceipt PostgresCheckpointStore::begin_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
     std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) {
+    return begin_managed_budget_effect(lease, effect_id, exact_claim_amount,
+                                       prepared_request_digest, CheckpointWriteFence{});
+}
+
+ManagedBudgetEffectReceipt PostgresCheckpointStore::begin_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+    std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+    const CheckpointWriteFence& write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto committed = with_conn([&](pg_conn* c) {
         return journal_transaction(c, key, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = journal_row(exec_params(c, kSqlJournalHead, {key}));
             auto effect = journal_row(exec_params(c, kSqlJournalEffect,
                 {key, lease->bank_generation(), effect_id}));
@@ -1140,9 +1337,20 @@ ManagedBudgetEffectReceipt PostgresCheckpointStore::begin_managed_budget_effect(
 void PostgresCheckpointStore::settle_managed_budget_effect(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
     sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority) {
+    settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority,
+                                 CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::settle_managed_budget_effect(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const ManagedBudgetEffectReceipt& effect,
+    sp::runtime::Result genuine_outcome, const UsageAccumulator::AuthoritySnapshot& authority,
+    const CheckpointWriteFence& write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto head = with_conn([&](pg_conn* c) {
         return journal_transaction(c, key, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
             auto stored = journal_row(exec_params(c, kSqlJournalEffect,
                 {key, lease->bank_generation(), effect.effect_id()}));
@@ -1158,10 +1366,19 @@ void PostgresCheckpointStore::settle_managed_budget_effect(
 
 void PostgresCheckpointStore::publish_managed_budget_checkpoint(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint) {
+    publish_managed_budget_checkpoint(lease, checkpoint, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::publish_managed_budget_checkpoint(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease, const Checkpoint& checkpoint,
+    const CheckpointWriteFence& write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     const auto params = checkpoint_save_params(checkpoint);
     auto head = with_conn([&](pg_conn* c) {
         return journal_transaction(c, key, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, checkpoint.thread_id);
             auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
             journal_check_source(c, key, lease->head_checkpoint_id(), lease->head_commitment());
             Journal::publish(candidate, lease, checkpoint);
@@ -1176,9 +1393,18 @@ void PostgresCheckpointStore::publish_managed_budget_checkpoint(
 
 void PostgresCheckpointStore::release_managed_budget_lease(
     const std::shared_ptr<OwnedManagedBudgetLease>& lease) {
+    release_managed_budget_lease(lease, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::release_managed_budget_lease(
+    const std::shared_ptr<OwnedManagedBudgetLease>& lease,
+    const CheckpointWriteFence& write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto head = with_conn([&](pg_conn* c) {
         return journal_transaction(c, key, [&] {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto candidate = journal_row(exec_params(c, kSqlJournalHead, {key}));
             Journal::release(candidate, lease);
             journal_write_head(c, key, candidate);
@@ -1193,12 +1419,22 @@ void PostgresCheckpointStore::release_managed_budget_lease(
 void PostgresCheckpointStore::put_writes(const std::string&  thread_id,
                                          const std::string&  parent_checkpoint_id,
                                          const PendingWrite& write) {
+    put_writes(thread_id, parent_checkpoint_id, write, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::put_writes(const std::string&  thread_id,
+                                         const std::string&  parent_checkpoint_id,
+                                         const PendingWrite& write,
+                                         const CheckpointWriteFence& write_fence) {
     if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
+    invoke_pg_before_write(this, thread_id, write_fence);
     with_conn([&](pg_conn* c) {
         // seq allocation + INSERT must be in one transaction so
         // concurrent puts on the same parent don't collide on seq.
         (void)exec_sql(c, "BEGIN");
         try {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
             auto seq_res  = exec_params(c,
                                         "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
                                          "FROM neograph_checkpoint_writes "
@@ -1268,11 +1504,28 @@ std::vector<PendingWrite> PostgresCheckpointStore::get_writes(
 
 void PostgresCheckpointStore::clear_writes(const std::string& thread_id,
                                            const std::string& parent_checkpoint_id) {
+    clear_writes(thread_id, parent_checkpoint_id, CheckpointWriteFence{});
+}
+
+void PostgresCheckpointStore::clear_writes(const std::string& thread_id,
+                                           const std::string& parent_checkpoint_id,
+                                           const CheckpointWriteFence& write_fence) {
+    invoke_pg_before_write(this, thread_id, write_fence);
     with_conn([&](pg_conn* c) {
-        (void)exec_params(c,
-                          "DELETE FROM neograph_checkpoint_writes "
-                          "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
-                          {thread_id, parent_checkpoint_id});
+        (void)exec_sql(c, "BEGIN");
+        try {
+            check_fence_on_conn(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
+            (void)exec_params(c,
+                              "DELETE FROM neograph_checkpoint_writes "
+                              "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
+                              {thread_id, parent_checkpoint_id});
+            (void)exec_sql(c, "COMMIT");
+        } catch (...) {
+            PGresult* r = PQexec(c, "ROLLBACK");
+            if (r) PQclear(r);
+            throw;
+        }
     });
 }
 
@@ -1859,6 +2112,51 @@ asio::awaitable<void> journal_check_source_async(pg_conn* c, const std::string& 
         throw std::runtime_error("Managed budget source checkpoint is missing or changed");
 }
 
+std::vector<std::string> make_fence_upsert_params(const CheckpointWriteFence& f) {
+    std::vector<std::string> p;
+    p.reserve(3);
+    p.push_back(f.owner_scope);
+    p.push_back(f.run_id);
+    p.push_back(std::to_string(f.fence));
+    return p;
+}
+
+std::vector<std::string> make_fence_select_params(const std::string& owner_scope,
+                                                  const std::string& run_id) {
+    std::vector<std::string> p;
+    p.reserve(2);
+    p.push_back(owner_scope);
+    p.push_back(run_id);
+    return p;
+}
+
+[[noreturn]] void throw_fence_error_from_result(const CheckpointWriteFence& wf,
+                                                const PgResult& cur) {
+    std::uint64_t stored = 0;
+    if (PQntuples(cur) > 0) {
+        stored = std::stoull(col_text(cur, 0, 0));
+    }
+    CheckpointWriteFenceRefusal refusal;
+    refusal.owner_scope = wf.owner_scope;
+    refusal.run_id = wf.run_id;
+    refusal.writer_fence = wf.fence;
+    refusal.stored_fence = stored;
+    throw CheckpointWriteFenceError(std::move(refusal));
+}
+
+asio::awaitable<void> check_fence_on_conn_async(
+    pg_conn* c, const CheckpointWriteFence& write_fence) {
+    write_fence.validate();
+    if (!write_fence.active()) co_return;
+    const auto upsert_params = make_fence_upsert_params(write_fence);
+    auto res = co_await exec_params_async(c, kSqlFenceUpsert, upsert_params);
+    if (PQntuples(res) == 1) co_return;
+
+    const auto select_params = make_fence_select_params(write_fence.owner_scope, write_fence.run_id);
+    auto cur = co_await exec_params_async(c, kSqlFenceSelect, select_params);
+    throw_fence_error_from_result(write_fence, cur);
+}
+
 }  // namespace
 
 asio::awaitable<bool> PostgresCheckpointStore::wait_socket_either_for_test(int fd) {
@@ -1987,11 +2285,69 @@ auto PostgresCheckpointStore::with_conn_async(Fn& fn) -> decltype(fn(std::declva
 
 // ── Async method overrides ────────────────────────────────────────────
 
+asio::awaitable<std::uint64_t> PostgresCheckpointStore::raise_fence_async(
+    std::string owner_scope, std::string run_id, std::uint64_t min_fence) {
+    if (run_id.empty() || min_fence == 0) {
+        throw std::invalid_argument(
+            "PostgresCheckpointStore::raise_fence_async requires non-empty run_id and min_fence > 0");
+    }
+    const CheckpointWriteFence fence{owner_scope, run_id, min_fence};
+    const auto params = make_fence_upsert_params(fence);
+    const std::vector<std::string> empty_params{};
+    auto operation = [&](pg_conn* c) -> asio::awaitable<std::uint64_t> {
+        std::exception_ptr error;
+        try {
+            (void)co_await exec_params_async(c, "BEGIN", empty_params);
+            auto res = co_await exec_params_async(c, kSqlFenceRaise, params);
+            if (PQntuples(res) != 1) {
+                throw std::runtime_error("PostgresCheckpointStore: raise_fence_async returned no row");
+            }
+            const std::uint64_t stored = std::stoull(col_text(res, 0, 0));
+            invoke_pg_raise_guard(this, owner_scope, run_id, min_fence);
+            (void)co_await exec_params_async(c, "COMMIT", empty_params);
+            co_return stored;
+        } catch (const QueryNotDrained&) {
+            throw;
+        } catch (const BrokenConnection&) {
+            throw;
+        } catch (...) {
+            error = std::current_exception();
+        }
+        try {
+            (void)co_await exec_params_async(c, "ROLLBACK", empty_params);
+        } catch (...) {
+            throw QueryNotDrained{error, false};
+        }
+        std::rethrow_exception(error);
+    };
+    co_return co_await with_conn_async(operation);
+}
+
+asio::awaitable<std::uint64_t> PostgresCheckpointStore::load_fence_async(
+    std::string owner_scope, std::string run_id) {
+    if (run_id.empty()) co_return 0;
+    const auto params = make_fence_select_params(owner_scope, run_id);
+    auto operation = [&](pg_conn* c) -> asio::awaitable<std::uint64_t> {
+        auto res = co_await exec_params_async(c, kSqlFenceSelect, params);
+        if (PQntuples(res) == 0) co_return 0;
+        co_return std::stoull(col_text(res, 0, 0));
+    };
+    co_return co_await with_conn_async(operation);
+}
+
 asio::awaitable<void> PostgresCheckpointStore::save_async(const Checkpoint& cp) {
+    co_await save_async(cp, CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::save_async(
+    const Checkpoint& cp, CheckpointWriteFence write_fence) {
+    invoke_pg_before_write(this, cp.thread_id, write_fence);
     const auto params = checkpoint_save_params(cp);
 
     auto operation = [&](pg_conn* c) -> asio::awaitable<void> {
         auto mutation = [&]() -> asio::awaitable<bool> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, cp.thread_id);
             (void)co_await exec_params_async(c, kSqlSaveAll, params);
             co_return true;
         };
@@ -2051,9 +2407,17 @@ asio::awaitable<std::vector<Checkpoint>> PostgresCheckpointStore::list_async(
 }
 
 asio::awaitable<void> PostgresCheckpointStore::delete_thread_async(const std::string& thread_id) {
+    co_await delete_thread_async(thread_id, CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::delete_thread_async(
+    const std::string& thread_id, CheckpointWriteFence write_fence) {
+    invoke_pg_before_write(this, thread_id, write_fence);
     std::vector<std::string> params{thread_id};
     auto                     operation = [&, params](pg_conn* c) -> asio::awaitable<void> {
         auto mutation = [&]() -> asio::awaitable<bool> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
             (void)co_await exec_params_async(
                 c, "DELETE FROM neograph_checkpoint_writes WHERE thread_id = $1", params);
             (void)co_await exec_params_async(
@@ -2080,11 +2444,23 @@ asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
 PostgresCheckpointStore::acquire_managed_budget_lease_async(
     ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
     std::string expected_checkpoint_commitment) {
+    co_return co_await acquire_managed_budget_lease_async(
+        std::move(scope), std::move(expected_checkpoint_id),
+        std::move(expected_checkpoint_commitment), CheckpointWriteFence{});
+}
+
+asio::awaitable<std::shared_ptr<OwnedManagedBudgetLease>>
+PostgresCheckpointStore::acquire_managed_budget_lease_async(
+    ManagedBudgetLeaseScope scope, std::string expected_checkpoint_id,
+    std::string expected_checkpoint_commitment, CheckpointWriteFence write_fence) {
     using Acquired = std::pair<std::shared_ptr<OwnedManagedBudgetLease>, json>;
     const auto key = Journal::storage_key(scope);
+    invoke_pg_before_write(this, key, write_fence);
     const std::vector<std::string> params{key};
     auto operation = [&](pg_conn* c) -> asio::awaitable<Acquired> {
         auto mutation = [&]() -> asio::awaitable<Acquired> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = co_await journal_read_head_async(c, key);
             auto obligation = co_await exec_params_async(c, kSqlRequiresManagedBudget, params);
             co_await journal_check_source_async(c, key, expected_checkpoint_id,
@@ -2104,10 +2480,22 @@ PostgresCheckpointStore::acquire_managed_budget_lease_async(
 asio::awaitable<ManagedBudgetEffectReceipt> PostgresCheckpointStore::begin_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
     std::uint64_t exact_claim_amount, std::string prepared_request_digest) {
+    co_return co_await begin_managed_budget_effect_async(
+        std::move(lease), std::move(effect_id), exact_claim_amount,
+        std::move(prepared_request_digest), CheckpointWriteFence{});
+}
+
+asio::awaitable<ManagedBudgetEffectReceipt> PostgresCheckpointStore::begin_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, std::string effect_id,
+    std::uint64_t exact_claim_amount, std::string prepared_request_digest,
+    CheckpointWriteFence write_fence) {
     using Begun = std::pair<ManagedBudgetEffectReceipt, json>;
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto operation = [&](pg_conn* c) -> asio::awaitable<Begun> {
         auto mutation = [&]() -> asio::awaitable<Begun> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = co_await journal_read_head_async(c, key);
             auto effect = co_await journal_read_effect_async(c, key, lease->bank_generation(), effect_id);
             auto receipt = Journal::begin(head, effect, lease, effect_id,
@@ -2126,9 +2514,21 @@ asio::awaitable<ManagedBudgetEffectReceipt> PostgresCheckpointStore::begin_manag
 asio::awaitable<void> PostgresCheckpointStore::settle_managed_budget_effect_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
     sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority) {
+    co_await settle_managed_budget_effect_async(
+        std::move(lease), std::move(effect), std::move(genuine_outcome), std::move(authority),
+        CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::settle_managed_budget_effect_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, ManagedBudgetEffectReceipt effect,
+    sp::runtime::Result genuine_outcome, UsageAccumulator::AuthoritySnapshot authority,
+    CheckpointWriteFence write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
         auto mutation = [&]() -> asio::awaitable<json> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = co_await journal_read_head_async(c, key);
             auto stored = co_await journal_read_effect_async(c, key, lease->bank_generation(),
                                                            effect.effect_id());
@@ -2145,11 +2545,21 @@ asio::awaitable<void> PostgresCheckpointStore::settle_managed_budget_effect_asyn
 
 asio::awaitable<void> PostgresCheckpointStore::publish_managed_budget_checkpoint_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint) {
+    co_await publish_managed_budget_checkpoint_async(
+        std::move(lease), std::move(checkpoint), CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::publish_managed_budget_checkpoint_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease, Checkpoint checkpoint,
+    CheckpointWriteFence write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     const auto params = checkpoint_save_params(checkpoint);
     const auto commitment = managed_budget_checkpoint_commitment(checkpoint);
     auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
         auto mutation = [&]() -> asio::awaitable<json> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, checkpoint.thread_id);
             auto head = co_await journal_read_head_async(c, key);
             const auto source_id = lease->head_checkpoint_id();
             const auto source_commitment = lease->head_commitment();
@@ -2168,9 +2578,18 @@ asio::awaitable<void> PostgresCheckpointStore::publish_managed_budget_checkpoint
 
 asio::awaitable<void> PostgresCheckpointStore::release_managed_budget_lease_async(
     std::shared_ptr<OwnedManagedBudgetLease> lease) {
+    co_await release_managed_budget_lease_async(std::move(lease), CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::release_managed_budget_lease_async(
+    std::shared_ptr<OwnedManagedBudgetLease> lease,
+    CheckpointWriteFence write_fence) {
     const auto key = journal_key(lease);
+    invoke_pg_before_write(this, key, write_fence);
     auto operation = [&](pg_conn* c) -> asio::awaitable<json> {
         auto mutation = [&]() -> asio::awaitable<json> {
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, key);
             auto head = co_await journal_read_head_async(c, key);
             Journal::release(head, lease);
             co_await journal_write_head_async(c, key, head);
@@ -2186,7 +2605,16 @@ asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
     const std::string&  thread_id,
     const std::string&  parent_checkpoint_id,
     const PendingWrite& write) {
+    co_await put_writes_async(thread_id, parent_checkpoint_id, write, CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
+    const std::string&  thread_id,
+    const std::string&  parent_checkpoint_id,
+    const PendingWrite& write,
+    CheckpointWriteFence write_fence) {
     if (write.native_result) throw std::invalid_argument("Native pending writes require explicit archive serialization");
+    invoke_pg_before_write(this, thread_id, write_fence);
     // Build params outside the coroutine lambda (GCC 13 ICE avoidance).
     std::vector<std::string> insert_params{
         thread_id,
@@ -2209,8 +2637,11 @@ asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
         // Async BEGIN/COMMIT — matches sync put_writes's seq+INSERT
         // transactionality so concurrent puts on the same parent
         // don't collide.
-        (void)co_await exec_params_async(c, "BEGIN", empty_params);
+        std::exception_ptr error;
         try {
+            (void)co_await exec_params_async(c, "BEGIN", empty_params);
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
             auto         seq_res =
                 co_await exec_params_async(c,
                                                                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq "
@@ -2231,18 +2662,20 @@ asio::awaitable<void> PostgresCheckpointStore::put_writes_async(
                 insert_params);
 
             (void)co_await exec_params_async(c, "COMMIT", empty_params);
+            co_return;
         } catch (const QueryNotDrained&) {
             throw;
         } catch (const BrokenConnection&) {
             throw;
         } catch (...) {
-            // A cancellation may land between transaction statements, and
-            // an operation exception may mean unread protocol data remains.
-            // Never issue a blocking rollback on that uncertain connection;
-            // force with_conn_async to close it and preserve the cause.
-            throw QueryNotDrained{std::current_exception(), false};
+            error = std::current_exception();
         }
-        co_return;
+        try {
+            (void)co_await exec_params_async(c, "ROLLBACK", empty_params);
+        } catch (...) {
+            throw QueryNotDrained{error, false};
+        }
+        std::rethrow_exception(error);
     };
     co_await with_conn_async(operation);
 }
@@ -2289,13 +2722,40 @@ asio::awaitable<std::vector<PendingWrite>> PostgresCheckpointStore::get_writes_a
 
 asio::awaitable<void> PostgresCheckpointStore::clear_writes_async(
     const std::string& thread_id, const std::string& parent_checkpoint_id) {
+    co_await clear_writes_async(thread_id, parent_checkpoint_id, CheckpointWriteFence{});
+}
+
+asio::awaitable<void> PostgresCheckpointStore::clear_writes_async(
+    const std::string& thread_id, const std::string& parent_checkpoint_id,
+    CheckpointWriteFence write_fence) {
+    invoke_pg_before_write(this, thread_id, write_fence);
     std::vector<std::string> params{thread_id, parent_checkpoint_id};
-    auto                     operation = [&, params](pg_conn* c) -> asio::awaitable<void> {
-        (void)co_await exec_params_async(c,
-                                                             "DELETE FROM neograph_checkpoint_writes "
-                                                                                 "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
-                                                             params);
-        co_return;
+    std::vector<std::string> empty_params{};
+    auto                     operation = [&, params, empty_params](pg_conn* c) -> asio::awaitable<void> {
+        std::exception_ptr error;
+        try {
+            (void)co_await exec_params_async(c, "BEGIN", empty_params);
+            co_await check_fence_on_conn_async(c, write_fence);
+            invoke_pg_write_guard(this, c, thread_id);
+            (void)co_await exec_params_async(c,
+                                                                 "DELETE FROM neograph_checkpoint_writes "
+                                                                                     "WHERE thread_id = $1 AND parent_checkpoint_id = $2",
+                                                                 params);
+            (void)co_await exec_params_async(c, "COMMIT", empty_params);
+            co_return;
+        } catch (const QueryNotDrained&) {
+            throw;
+        } catch (const BrokenConnection&) {
+            throw;
+        } catch (...) {
+            error = std::current_exception();
+        }
+        try {
+            (void)co_await exec_params_async(c, "ROLLBACK", empty_params);
+        } catch (...) {
+            throw QueryNotDrained{error, false};
+        }
+        std::rethrow_exception(error);
     };
     co_await with_conn_async(operation);
 }

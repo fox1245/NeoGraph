@@ -11,6 +11,7 @@
 // The stores keep their semantics in C++: the adapters move values and decisions and re-implement nothing.
 #pragma once
 
+#include <neograph/graph/checkpoint.h>
 #include <neograph/program/core_tool_grant_store.h>
 #include <neograph/program/module.h>
 #include <neograph/program/store.h>
@@ -33,6 +34,7 @@ struct JsStoreSet {
     std::shared_ptr<program::ProgramCoreToolGrantStore> grants;
     std::shared_ptr<program::TaskGraphFragmentStore>    fragments;
     std::shared_ptr<program::ModuleStore>               modules;
+    std::shared_ptr<graph::CheckpointStore>             checkpoints;
 };
 
 /// Adapts the stores object that `registerStores` (wasm/stores.mjs) returned `handle` for. Each call makes new adapters

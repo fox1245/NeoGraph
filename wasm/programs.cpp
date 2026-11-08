@@ -458,6 +458,7 @@ struct Host {
 
         std::shared_ptr<const ModuleStore>      modules;
         std::shared_ptr<TaskGraphFragmentStore> fragments;
+        std::shared_ptr<graph::CheckpointStore> checkpoints;
 #ifdef NEOGRAPH_JS_STORES
         if (stores_handle != 0) {
             // The registration lasts as long as an adapter does, so a run that is cancelled when the object is released can
@@ -466,11 +467,12 @@ struct Host {
                 ng_js_stores_free(*static_cast<const int*>(held));
                 delete static_cast<const int*>(held);
             });
-            auto set  = neograph::wasm::adapt_js_stores(stores_handle, std::move(lease));
-            programs  = std::move(set.programs);
-            modules   = std::move(set.modules);
-            fragments = std::move(set.fragments);
+            auto set    = neograph::wasm::adapt_js_stores(stores_handle, std::move(lease));
+            programs    = std::move(set.programs);
+            modules     = std::move(set.modules);
+            fragments   = std::move(set.fragments);
             transitions = std::move(set.transitions);
+            checkpoints = std::move(set.checkpoints);
         }
 #else
         if (stores_handle != 0) throw std::invalid_argument("this module was built without JavaScript stores");
@@ -479,6 +481,7 @@ struct Host {
         if (!modules) modules = std::make_shared<InMemoryModuleStore>();
         if (!fragments) fragments = std::make_shared<InMemoryTaskGraphFragmentStore>();
         if (!transitions) transitions = std::make_shared<InMemoryProgramTransitionStore>();
+        if (!checkpoints) checkpoints = std::make_shared<graph::InMemoryCheckpointStore>();
 
         auto context = neograph::wasm::node_context_from(config.at("provider"));
         // A control source runs in QuickJS on the one thread of the host's loop, so a source that never ends holds the loop
@@ -517,7 +520,7 @@ struct Host {
 
         RuntimeConfig runtime_config;
         runtime_config.catalog             = catalog;
-        runtime_config.checkpoints         = std::make_shared<graph::InMemoryCheckpointStore>();
+        runtime_config.checkpoints         = checkpoints;
         runtime_config.transitions         = transitions;
         runtime_config.task_graph_fragments = fragments;
         runtime_config.executor            = loop().executor();

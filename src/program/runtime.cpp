@@ -597,6 +597,11 @@ asio::awaitable<std::optional<json>> continued_replay_records(
     std::shared_ptr<sp::NativeArchive>       archive) {
     const auto records = source.settled_branches();
     if (!records) co_return std::nullopt;
+    const auto fenced_checkpoints =
+        checkpoints
+            ? std::make_shared<graph::FencedCheckpointStore>(checkpoints, source.owner_scope(),
+                                                             run_id, 1)
+            : nullptr;
     const RecordCustody source_custody{source.run_id(), source.program_version_id(),
                                        source.bundle_id()};
     const RecordCustody target_custody{run_id, target.version.id(),
@@ -625,9 +630,9 @@ asio::awaitable<std::optional<json>> continued_replay_records(
             copy.metadata["forked_from"] =
                 json{{"thread_id", loaded->thread_id}, {"checkpoint_id", loaded->id}};
             copy.timestamp = std::max<std::int64_t>(now_ms(), loaded->timestamp + 1);
-            co_await checkpoints->save_async(copy);
+            co_await fenced_checkpoints->save_async(copy);
             // #390: the copy replays what the call's paused step finished.
-            co_await graph::copy_resume_pending_writes_async(checkpoints, *loaded, copy);
+            co_await graph::copy_resume_pending_writes_async(fenced_checkpoints, *loaded, copy);
             record["checkpoint"] = json{{"core_name", target.root->core_name},
                                         {"core_generation_id", target.root->compiled_plan_identity},
                                         {"core_thread_id", copy.thread_id},
@@ -2603,7 +2608,11 @@ RunControl::RunControl(std::string                                owner,
       cancel_token(std::make_shared<graph::CancelToken>()),
       sink_(std::move(sink)),
       next_sequence_(event_sequence + 1),
-      execution_lease_(std::move(execution_lease)) {
+      execution_lease_(std::move(execution_lease)),
+      fenced_checkpoints_(checkpoints
+                              ? std::make_shared<graph::FencedCheckpointStore>(
+                                    checkpoints, owner_scope, run_id, fence)
+                              : nullptr) {
     if (invocation.owner_scope != owner_scope || invocation.run_id != run_id ||
         invocation.program_version_id != program_version_id ||
         invocation.input != persisted_invocation.input ||
@@ -2702,12 +2711,17 @@ std::shared_ptr<RunControl> RunControl::following_successor() const {
     std::lock_guard lock(mutex_);
     return follow_successor_ ? successor_ : nullptr;
 }
+bool RunControl::has_successor() const noexcept {
+    std::lock_guard lock(mutex_);
+    return static_cast<bool>(successor_);
+}
 asio::awaitable<void> RunControl::retire_to(std::shared_ptr<RunControl> successor,
                                             std::shared_ptr<ReentrantOperationLock> held) {
     if (!successor || successor.get() == this || successor->owner_scope != owner_scope ||
         successor->logical_run_id != logical_run_id)
         throw std::invalid_argument("Invalid Program successor control");
     std::vector<std::shared_ptr<RunControl>> children;
+    std::vector<TerminalCleanup>             terminal_cleanups;
     std::vector<TerminalCleanup>             cleanups;
     CompletionCallback                       callback;
     std::vector<AsyncWaiter>                 waiters;
@@ -2715,25 +2729,308 @@ asio::awaitable<void> RunControl::retire_to(std::shared_ptr<RunControl> successo
         std::lock_guard lock(mutex_);
         if (successor_) co_return;
         successor_        = successor;
-        follow_successor_ = !invocation.parent_run_id.empty();
+        follow_successor_ = !invocation.parent_run_id.empty() || successor->run_id == run_id;
         for (const auto& weak : children_)
             if (auto child = weak.lock()) children.push_back(child);
         children_.clear();
+        terminal_cleanups.swap(terminal_cleanups_);
         cleanups.swap(logical_cleanups_);
         callback            = std::move(completion_callback_);
         cancellation_cause_ = CancellationCause::ParentTerminal;
         if (follow_successor_) waiters.swap(waiters_);
     }
+    for (auto& cleanup : terminal_cleanups) {
+        if (cleanup) cleanup();
+    }
     for (const auto& child : children)
         co_await successor->attach_child(child, held);
     for (auto& cleanup : cleanups)
         successor->add_logical_cleanup(std::move(cleanup));
-    if (callback) successor->set_completion_callback(std::move(callback));
+    if ( callback && !successor->completion_callback_)
+        successor->set_completion_callback(std::move(callback));
+    {
+        std::lock_guard lock(mutex_);
+        if (successor->run_id == run_id) {
+            std::lock_guard next_lock(successor->mutex_);
+            if (!successor->sink_ && sink_) {
+                successor->sink_ = std::move(sink_);
+            }
+        }
+    }
     cancel_token->cancel();
     abort_handoff();
     co_await abort_graph_migration_async();
     cv_.notify_all();
     wake_async_waiters(std::move(waiters));
+}
+
+void RunControl::begin_attempt_op() noexcept {
+    std::lock_guard lock(mutex_);
+    ++active_attempt_ops_;
+}
+
+void RunControl::end_attempt_op() noexcept {
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (active_attempt_ops_ > 0) --active_attempt_ops_;
+        waiters.swap(attempt_ops_waiters_);
+        cv_.notify_all();
+    }
+    wake_async_waiters(std::move(waiters));
+}
+
+namespace {
+std::atomic<RefusalDrainParkedObserver>  refusal_drain_parked_observer{nullptr};
+std::atomic<SelfTakeoverEnteredObserver> self_takeover_entered_observer{nullptr};
+std::atomic<ControlWaitParkedObserver>   control_wait_parked_observer{nullptr};
+}  // namespace
+
+void set_refusal_drain_parked_observer_for_testing(RefusalDrainParkedObserver observer) noexcept {
+    refusal_drain_parked_observer.store(observer, std::memory_order_release);
+}
+
+void notify_refusal_drain_parked(std::string_view run_id,
+                                 std::uint64_t    attempt,
+                                 std::size_t      active_ops,
+                                 std::size_t      own_op_tokens) noexcept {
+    if (const auto observer = refusal_drain_parked_observer.load(std::memory_order_acquire)) {
+        observer(run_id, attempt, active_ops, own_op_tokens);
+    }
+}
+
+void set_self_takeover_entered_observer_for_testing(SelfTakeoverEnteredObserver observer) noexcept {
+    self_takeover_entered_observer.store(observer, std::memory_order_release);
+}
+
+bool notify_self_takeover_entered(std::string_view run_id,
+                                  std::uint64_t    attempt,
+                                  std::uint64_t    fence,
+                                  bool             transition_mutex_locked) noexcept {
+    if (const auto observer = self_takeover_entered_observer.load(std::memory_order_acquire)) {
+        return observer(run_id, attempt, fence, transition_mutex_locked);
+    }
+    return true;
+}
+
+void set_control_wait_parked_observer_for_testing(ControlWaitParkedObserver observer) noexcept {
+    control_wait_parked_observer.store(observer, std::memory_order_release);
+}
+
+void notify_control_wait_parked(std::string_view run_id,
+                                std::uint64_t    attempt,
+                                bool             transition_mutex_locked) noexcept {
+    if (const auto observer = control_wait_parked_observer.load(std::memory_order_acquire)) {
+        observer(run_id, attempt, transition_mutex_locked);
+    }
+}
+
+asio::awaitable<void> RunControl::drain_attempt_ops_async(std::size_t own_op_tokens) const {
+    const auto self = shared_from_this();
+    struct DiscountOwnTokens {
+        const RunControl* control;
+        std::size_t       subtracted = 0;
+        DiscountOwnTokens(const RunControl* c, std::size_t t) noexcept : control(c) {
+            if (t == 0) return;
+            std::vector<AsyncWaiter> waiters;
+            {
+                std::lock_guard lock(control->mutex_);
+                subtracted = std::min(control->active_attempt_ops_, t);
+                control->active_attempt_ops_ -= subtracted;
+                if (control->active_attempt_ops_ == 0 && subtracted > 0) {
+                    waiters.swap(control->attempt_ops_waiters_);
+                    control->cv_.notify_all();
+                }
+            }
+            control->wake_async_waiters(std::move(waiters));
+        }
+        ~DiscountOwnTokens() {
+            if (subtracted == 0) return;
+            std::lock_guard lock(control->mutex_);
+            control->active_attempt_ops_ += subtracted;
+        }
+    } discount(this, own_op_tokens);
+    const std::size_t discounted = discount.subtracted;
+    for (;;) {
+        {
+            std::lock_guard lock(mutex_);
+            if (active_attempt_ops_ == 0) co_return;
+        }
+        co_await park_until_woken(
+            [this] { return active_attempt_ops_ > 0; },
+            [this, discounted, own_op_tokens](std::shared_ptr<async::HostTimer> timer) {
+                attempt_ops_waiters_.push_back(AsyncWaiter{std::move(timer)});
+                notify_refusal_drain_parked(
+                    run_id, attempt, active_attempt_ops_ + discounted, own_op_tokens);
+            });
+    }
+}
+
+void RunControl::cancel_attempt_for_refusal() noexcept {
+    {
+        std::lock_guard lock(mutex_);
+        if (cancellation_cause_ == CancellationCause::None)
+            cancellation_cause_ = CancellationCause::ParentTerminal;
+    }
+    cancel_token->cancel();
+    abort_handoff();
+    abort_graph_migration();
+    cancel_children_in_background(CancellationCause::ParentTerminal);
+}
+
+void RunControl::set_self_takeover_callback(SelfTakeoverCallback callback) noexcept {
+    std::lock_guard lock(mutex_);
+    self_takeover_callback_ = std::move(callback);
+}
+
+asio::awaitable<void> RunControl::complete_taken_over(std::uint64_t stored_fence) {
+    mark_taken_over(stored_fence);
+    std::vector<TerminalCleanup> cleanups;
+    {
+        std::lock_guard lock(mutex_);
+        if ((result_ && materialized) || successor_) co_return;
+        result_.reset();
+        completion_claimed_ = true;
+        terminal_decided_   = true;
+        children_cancelled_ = true;
+        cleanups.swap(terminal_cleanups_);
+        cleanups.insert(cleanups.end(),
+                        std::make_move_iterator(logical_cleanups_.begin()),
+                        std::make_move_iterator(logical_cleanups_.end()));
+        logical_cleanups_.clear();
+    }
+    abort_handoff();
+    co_await abort_graph_migration_async();
+    for (auto& cleanup : cleanups) {
+        if (cleanup) cleanup();
+    }
+    co_await cancel_children_async(CancellationCause::ParentTerminal);
+    RunOutcome failed;
+    failed.status           = ProgramTerminalStatus::Failed;
+    failed.remaining_budget = granted_budget;
+    failed.checkpoint       = latest_checkpoint();
+    failed.failure          = ProgramFailure{"P_RUN_TAKEN_OVER",
+                                             "Program run was taken over by another recovery",
+                                             "root", "", 0, json::object()};
+    auto                     result = make_result(std::move(failed));
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (!result_ && !successor_) {
+            result_ = std::move(result);
+            sink_.reset();
+            waiters.swap(waiters_);
+            cv_.notify_all();
+        }
+    }
+    wake_async_waiters(std::move(waiters));
+}
+
+asio::awaitable<void> RunControl::complete_recovery_failed(std::string message) {
+    std::vector<TerminalCleanup> cleanups;
+    {
+        std::lock_guard lock(mutex_);
+        if ((result_ && materialized) || successor_) co_return;
+        result_.reset();
+        completion_claimed_ = true;
+        terminal_decided_   = true;
+        children_cancelled_ = true;
+        cleanups.swap(terminal_cleanups_);
+        cleanups.insert(cleanups.end(),
+                        std::make_move_iterator(logical_cleanups_.begin()),
+                        std::make_move_iterator(logical_cleanups_.end()));
+        logical_cleanups_.clear();
+    }
+    abort_handoff();
+    co_await abort_graph_migration_async();
+    for (auto& cleanup : cleanups) {
+        if (cleanup) cleanup();
+    }
+    co_await cancel_children_async(CancellationCause::ParentTerminal);
+    RunOutcome failed;
+    failed.status           = ProgramTerminalStatus::Failed;
+    failed.remaining_budget = granted_budget;
+    failed.checkpoint       = latest_checkpoint();
+    failed.failure          = ProgramFailure{
+        "P_RUN_RECOVERY_FAILED",
+        "Program self-takeover recovery failed and remains recoverable by reconnect: " +
+            std::move(message),
+        "root",
+        "",
+        0,
+        json::object()};
+    auto                     result = make_result(std::move(failed));
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (!result_ && !successor_) {
+            result_ = std::move(result);
+            sink_.reset();
+            waiters.swap(waiters_);
+            cv_.notify_all();
+        }
+    }
+    wake_async_waiters(std::move(waiters));
+}
+
+asio::awaitable<void> RunControl::complete_from_durable(ProgramResult durable) {
+    std::vector<TerminalCleanup> cleanups;
+    const bool cancel_kids = durable.status() != ProgramTerminalStatus::Interrupted &&
+                             durable.status() != ProgramTerminalStatus::AmbiguousEffect;
+    {
+        std::lock_guard lock(mutex_);
+        if (result_ || successor_) co_return;
+        completion_claimed_ = true;
+        terminal_decided_   = true;
+        if (cancel_kids) children_cancelled_ = true;
+        cleanups.swap(terminal_cleanups_);
+        cleanups.insert(cleanups.end(),
+                        std::make_move_iterator(logical_cleanups_.begin()),
+                        std::make_move_iterator(logical_cleanups_.end()));
+        logical_cleanups_.clear();
+    }
+    abort_handoff();
+    co_await abort_graph_migration_async();
+    for (auto& cleanup : cleanups) {
+        if (cleanup) cleanup();
+    }
+    if (cancel_kids) co_await cancel_children_async(CancellationCause::ParentTerminal);
+    std::vector<AsyncWaiter> waiters;
+    {
+        std::lock_guard lock(mutex_);
+        if (!result_ && !successor_) {
+            if (durable.checkpoint()) latest_checkpoint_ = durable.checkpoint();
+            result_ = std::move(durable);
+            sink_.reset();
+            waiters.swap(waiters_);
+            cv_.notify_all();
+        }
+    }
+    wake_async_waiters(std::move(waiters));
+}
+
+asio::awaitable<void> RunControl::handle_write_fence_refusal(
+    const graph::CheckpointWriteFenceRefusal& refusal,
+    std::size_t                               own_op_tokens) {
+    if (refusal.writer_fence != fence) co_return;
+    if (!try_claim_refusal(fence)) co_return;
+    cancel_attempt_for_refusal();
+    co_await drain_attempt_ops_async(own_op_tokens);
+    std::vector<TerminalCleanup> cleanups;
+    SelfTakeoverCallback         callback;
+    {
+        std::lock_guard lock(mutex_);
+        cleanups.swap(logical_cleanups_);
+        callback = self_takeover_callback_;
+    }
+    for (auto& cleanup : cleanups) {
+        if (cleanup) cleanup();
+    }
+    if (callback) {
+        co_await callback(refusal, own_op_tokens);
+        co_return;
+    }
+    co_await complete_taken_over(refusal.stored_fence);
 }
 
 void RunControl::add_terminal_cleanup(TerminalCleanup cleanup) {
@@ -3809,24 +4106,8 @@ ProgramResult RunControl::make_result(RunOutcome outcome) const {
 }
 
 asio::awaitable<void> ensure_terminal_checkpoint(const RunControl& control, RunOutcome& outcome) {
-    if (outcome.checkpoint || !control.checkpoints || !control.materialized) co_return;
-    // An attempt whose run another process took over publishes no terminal state, and leaves no checkpoint on the
-    // run's Core thread for it. The stored fence is read as before a Core checkpoint save: a read that fails or finds
-    // no run is not a takeover.
+    if (outcome.checkpoint || !control.fenced_checkpoints() || !control.materialized) co_return;
     if (control.taken_over()) co_return;
-    if (control.transitions) {
-        std::optional<std::uint64_t> stored_fence;
-        try {
-            const auto stored = co_await control.transitions->load(control.owner_scope, control.run_id);
-            if (stored) stored_fence = stored->continuation().fence;
-        } catch (...) {
-            stored_fence.reset();
-        }
-        if (stored_fence && *stored_fence != control.fence) {
-            const_cast<RunControl&>(control).mark_taken_over(*stored_fence);
-            co_return;
-        }
-    }
 
     graph::Checkpoint checkpoint;
     checkpoint.id               = graph::Checkpoint::generate_id();
@@ -3841,7 +4122,7 @@ asio::awaitable<void> ensure_terminal_checkpoint(const RunControl& control, RunO
     checkpoint.step             = 0;
     checkpoint.timestamp        = now_ms();
     checkpoint.schema_version   = graph::CHECKPOINT_SCHEMA_VERSION;
-    co_await control.checkpoints->save_async(checkpoint);
+    co_await control.fenced_checkpoints()->save_async(checkpoint);
     outcome.checkpoint = CoreCheckpointIdentity{
         control.materialized->root->core_name, control.materialized->root->compiled_plan_identity,
         control.core_thread_id, checkpoint.id, checkpoint.schema_version};
@@ -3849,10 +4130,27 @@ asio::awaitable<void> ensure_terminal_checkpoint(const RunControl& control, RunO
 
 asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
     try {
+        if (refusal_claimed()) co_return;
+        if (!has_successor()) {
+            std::optional<graph::CheckpointWriteFenceRefusal> terminal_refusal;
+            try {
+                co_await ensure_terminal_checkpoint(*this, outcome);
+            } catch (const graph::CheckpointWriteFenceError& err) {
+                if (err.refusal().writer_fence != fence) {
+                    throw;
+                }
+                terminal_refusal = err.refusal();
+            }
+            if (terminal_refusal) {
+                co_await handle_write_fence_refusal(*terminal_refusal, 0);
+                co_return;
+            }
+            if (refusal_claimed()) co_return;
+        }
         std::vector<TerminalCleanup> terminal_cleanups;
         {
             std::lock_guard lock(mutex_);
-            if (completion_claimed_) co_return;
+            if (completion_claimed_ || refusal_claimed()) co_return;
             completion_claimed_ = true;
             terminal_decided_   = true;
             if (cancellation_cause_ != CancellationCause::None ||
@@ -3901,7 +4199,6 @@ asio::awaitable<void> RunControl::complete_async(RunOutcome outcome) {
         if (!retained_children)
             co_await cancel_children_async(current_cause == CancellationCause::None
                                                ? CancellationCause::ParentTerminal : current_cause);
-        co_await ensure_terminal_checkpoint(*this, outcome);
 
         std::vector<ProgramEvent> terminal_events;
         bool                      checkpoint_already_published = false;
@@ -4179,7 +4476,12 @@ asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
     const auto* waited = control.get();
     co_await control->park_until_woken(
         [waited] { return !(waited->result_ || (waited->follow_successor_ && waited->successor_)); },
-        [waited](std::shared_ptr<async::HostTimer> timer) { waited->waiters_.push_back(AsyncWaiter{std::move(timer)}); });
+        [waited](std::shared_ptr<async::HostTimer> timer) {
+            waited->waiters_.push_back(AsyncWaiter{std::move(timer)});
+            const bool transition_mutex_locked =
+                waited->handoff_coordination_mutex_ && waited->handoff_coordination_mutex_->is_locked();
+            notify_control_wait_parked(waited->run_id, waited->attempt, transition_mutex_locked);
+        });
     std::shared_ptr<RunControl>  next;
     std::optional<ProgramResult> result;
     {
@@ -4202,18 +4504,36 @@ std::optional<ProgramResult> RunControl::try_result() const {
 }
 
 std::vector<ProgramEvent> RunControl::events_after(std::uint64_t sequence) const {
-    std::lock_guard           lock(mutex_);
-    std::vector<ProgramEvent> result;
-    const auto                first = std::upper_bound(
-        events_.begin(), events_.end(), sequence,
-        [](std::uint64_t value, const ProgramEvent& event) { return value < event.sequence; });
-    result.assign(first, events_.end());
-    return result;
+    std::shared_ptr<RunControl> next;
+    {
+        std::lock_guard lock(mutex_);
+        if (follow_successor_ && successor_ && successor_->run_id == run_id) {
+            next = successor_;
+        } else {
+            std::vector<ProgramEvent> result;
+            const auto                first = std::upper_bound(
+                events_.begin(), events_.end(), sequence,
+                [](std::uint64_t value, const ProgramEvent& event) {
+                    return value < event.sequence;
+                });
+            result.assign(first, events_.end());
+            return result;
+        }
+    }
+    return next->events_after(sequence);
 }
 
 std::optional<CoreCheckpointIdentity> RunControl::latest_checkpoint() const {
-    std::lock_guard lock(mutex_);
-    return latest_checkpoint_;
+    std::shared_ptr<RunControl> next;
+    {
+        std::lock_guard lock(mutex_);
+        if (follow_successor_ && successor_ && successor_->run_id == run_id) {
+            next = successor_;
+        } else {
+            return latest_checkpoint_;
+        }
+    }
+    return next->latest_checkpoint();
 }
 
 void RunControl::set_settled_branches(json branches) {
@@ -5198,9 +5518,13 @@ ProgramRunRecord RunControl::snapshot() const {
 }
 
 asio::awaitable<bool> RunControl::consume_dynamic_compile() {
+    AttemptOpGuard op_guard(shared_from_this());
+    if (refusal_claimed()) co_return false;
     for (int retry = 0; retry < 3; ++retry) {
+        if (refusal_claimed()) co_return false;
         const auto previous         = co_await async_transitions().load(owner_scope, run_id);
         const auto previous_journal = co_await async_transitions().latest(owner_scope, run_id);
+        if (refusal_claimed()) co_return false;
         if (previous && previous->continuation().fence != fence) {
             mark_taken_over(previous->continuation().fence);
             co_return false;
@@ -5275,10 +5599,12 @@ asio::awaitable<bool> RunControl::consume_dynamic_compile() {
 
 asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_command_reservation(
     RunBudget remaining_budget, RunBudget inflight_reservation) {
+    AttemptOpGuard op_guard(shared_from_this());
+    if (refusal_claimed()) co_return ProgramTransitionPublishResult::Conflict;
     remaining_budget.max_dynamic_compiles = std::min<std::uint64_t>(
         remaining_budget.max_dynamic_compiles, dynamic_compile_ceiling.load());
     const auto head = co_await async_transitions().load_run_publication_head(owner_scope, run_id);
-    if (!head) co_return ProgramTransitionPublishResult::Conflict;
+    if (!head || refusal_claimed()) co_return ProgramTransitionPublishResult::Conflict;
     const auto& previous         = head->run_record;
     const auto& previous_journal = head->journal_record;
     if (previous.continuation().fence != fence) {
@@ -5352,6 +5678,8 @@ asio::awaitable<ProgramTransitionPublishResult> RunControl::publish_javascript_c
     std::optional<json>        settled_members,
     std::optional<json>        await_started_at,
     std::vector<ProgramJavaScriptCommandJournalEntry>* attempt_commands) {
+    AttemptOpGuard op_guard(shared_from_this());
+    if (refusal_claimed()) co_return ProgramTransitionPublishResult::Conflict;
     if (remaining_budget)
         remaining_budget->max_dynamic_compiles = std::min<std::uint64_t>(
             remaining_budget->max_dynamic_compiles, dynamic_compile_ceiling.load());
@@ -6904,7 +7232,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                 std::lock_guard process_lock(state->controls_mutex);
                 std::erase_if(state->controls, [](const auto& entry) {
                     const auto live = entry.control.lock();
-                    return !live || live->try_result().has_value();
+                    return !live || live->has_successor() || live->try_result().has_value();
                 });
                 for (const auto& entry : state->controls) {
                     if (entry.owner_scope != requester->owner_scope ||
@@ -6912,7 +7240,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                         continue;
                     }
                     if (const auto live = entry.control.lock();
-                        live && live.get() != requester) {
+                        live && !live->has_successor() && !live->refusal_claimed() &&
+                        live.get() != requester) {
                         return false;
                     }
                 }
@@ -6934,6 +7263,21 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
                         asio::detached);
                     co_return;
                 });
+            control->set_self_takeover_callback(
+                [weak_impl    = weak_from_this(),
+                 weak_control = std::weak_ptr<detail::RunControl>(control)](
+                    const graph::CheckpointWriteFenceRefusal& refusal,
+                    std::size_t                               own_op_tokens) -> asio::awaitable<void> {
+                    (void)own_op_tokens;
+                    const auto keep = weak_impl.lock();
+                    const auto live = weak_control.lock();
+                    if (!live) co_return;
+                    if (!keep || keep->is_stopping()) {
+                        co_await live->complete_taken_over(refusal.stored_fence);
+                        co_return;
+                    }
+                    co_await keep->self_takeover(live, refusal);
+                });
         }
         std::lock_guard lock(mutex);
         if (stopping) throw std::runtime_error("ProgramRuntime is stopping");
@@ -6941,13 +7285,15 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             std::lock_guard process_lock(process_state->controls_mutex);
             std::erase_if(process_state->controls, [](const auto& entry) {
                 const auto live = entry.control.lock();
-                return !live || live->try_result().has_value();
+                return !live || live->has_successor() || live->refusal_claimed() ||
+                       live->try_result().has_value();
             });
             if (process_unique) {
                 for (auto& entry : process_state->controls) {
                     if (entry.owner_scope == control->owner_scope &&
                         entry.run_id == control->run_id) {
-                        if (auto existing = entry.control.lock()) {
+                        if (auto existing = entry.control.lock();
+                            existing && !existing->has_successor() && !existing->refusal_claimed()) {
                             co_return ControlRegistration{std::move(existing), false};
                         }
                     }
@@ -6966,7 +7312,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         }
         std::erase_if(controls, [](const std::weak_ptr<detail::RunControl>& weak) {
             const auto live = weak.lock();
-            return !live || live->try_result().has_value();
+            return !live || live->has_successor() || live->refusal_claimed() ||
+                   live->try_result().has_value();
         });
         controls.push_back(control);
         co_return ControlRegistration{control, true};
@@ -7027,7 +7374,8 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         std::lock_guard lock(mutex);
         for (auto& weak : controls) {
             auto control = weak.lock();
-            if (control && control->owner_scope == owner_scope && control->run_id == run_id) {
+            if (control && !control->has_successor() && !control->refusal_claimed() &&
+                control->owner_scope == owner_scope && control->run_id == run_id) {
                 return control;
             }
         }
@@ -7039,14 +7387,159 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
         std::lock_guard lock(process_state->controls_mutex);
         std::erase_if(process_state->controls, [](const auto& entry) {
             const auto live = entry.control.lock();
-            return !live || live->try_result().has_value();
+            return !live || live->has_successor() || live->try_result().has_value();
         });
         for (auto& entry : process_state->controls) {
             if (entry.owner_scope == owner_scope && entry.run_id == run_id) {
-                if (auto control = entry.control.lock()) return control;
+                if (auto control = entry.control.lock();
+                    control && !control->has_successor() && !control->refusal_claimed()) {
+                    return control;
+                }
             }
         }
         return {};
+    }
+
+    asio::awaitable<std::shared_ptr<detail::RunControl>> make_taken_over_control(
+        ProgramRunRecord record, std::uint64_t stored_fence) {
+        auto events  = co_await transitions->load_events(record.owner_scope(), record.run_id(), 0);
+        auto control = std::make_shared<detail::RunControl>(
+            std::move(record), std::move(events), transitions, config.native_history_archive, scheduler);
+        co_await control->complete_taken_over(stored_fence);
+        co_return control;
+    }
+
+    asio::awaitable<void> self_takeover(std::shared_ptr<detail::RunControl>         control,
+                                        const graph::CheckpointWriteFenceRefusal& refusal) {
+        if (!detail::notify_self_takeover_entered(
+                control->run_id,
+                control->attempt,
+                control->fence,
+                process_state->transition_mutex->is_locked())) {
+            co_await control->complete_recovery_failed(
+                "transition_mutex held when entering self_takeover");
+            co_return;
+        }
+        std::optional<std::uint64_t> taken_over_fence;
+        std::optional<std::string>   recovery_failed_message;
+        try {
+            auto transition_lock = co_await process_state->transition_mutex->lock_async();
+            auto head = co_await transitions->load_run_publication_head(
+                control->owner_scope, control->run_id);
+            if (!head) {
+                co_await control->complete_taken_over(refusal.stored_fence);
+                co_return;
+            }
+            const auto& record  = head->run_record;
+            const auto  r_state = record.continuation().state;
+            const auto  r_fence = record.continuation().fence;
+            if (r_fence > control->fence) {
+                co_await control->complete_taken_over(r_fence);
+                co_return;
+            }
+            if (detail::transition::is_final(r_state) ||
+                r_state == ContinuationState::AmbiguousEffect) {
+                if (record.terminal_result()) {
+                    co_await control->complete_from_durable(*record.terminal_result());
+                } else {
+                    auto durable = co_await make_record_control(record);
+                    co_await control->retire_to(durable, process_state->transition_mutex);
+                }
+                co_return;
+            }
+            if (r_state == ContinuationState::Interrupted) {
+                const std::uint64_t expected_fence = control->fence;
+                const std::uint64_t target_fence   = expected_fence + 1;
+                if (config.checkpoints->supports_write_fence()) {
+                    co_await config.checkpoints->raise_fence_async(
+                        control->owner_scope, control->run_id, target_fence);
+                }
+                auto current_head = record.journal_head();
+                for (int attempt = 0; attempt < detail::kRunPublicationAttempts; ++attempt) {
+                    const auto published = co_await transitions->compare_publish_takeover(
+                        control->owner_scope, control->run_id, current_head, expected_fence);
+                    if (published == ProgramTransitionPublishResult::Published) break;
+                    const auto reloaded = co_await transitions->load_run_publication_head(
+                        control->owner_scope, control->run_id);
+                    if (!reloaded) {
+                        throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                                 "Interrupted Program recovery lost the transition CAS");
+                    }
+                    if (reloaded->run_record.continuation().fence > expected_fence) {
+                        co_await control->complete_taken_over(
+                            reloaded->run_record.continuation().fence);
+                        co_return;
+                    }
+                    if (detail::transition::is_final(reloaded->run_record.continuation().state) ||
+                        reloaded->run_record.continuation().state ==
+                            ContinuationState::AmbiguousEffect) {
+                        if (reloaded->run_record.terminal_result()) {
+                            co_await control->complete_from_durable(
+                                *reloaded->run_record.terminal_result());
+                            co_return;
+                        }
+                        break;
+                    }
+                    if (reloaded->run_record.journal_head() == current_head &&
+                        reloaded->run_record.continuation().fence == expected_fence) {
+                        throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                                 "Interrupted Program recovery lost the transition CAS");
+                    }
+                    current_head = reloaded->run_record.journal_head();
+                }
+            }
+            bool wait_for_control = false;
+            auto recovered = co_await ProgramRuntime(shared_from_this(), ProgramRuntime::Borrowed{})
+                                 .reconnect_core(control->owner_scope, control->run_id, true, &wait_for_control);
+            if (wait_for_control && !recovered.control_->try_result()) {
+                transition_lock.unlock();
+                (void)co_await recovered.control_->wait_async();
+            }
+            if (recovered.control_->taken_over()) {
+                if (transition_lock.owns()) transition_lock.unlock();
+                co_await control->complete_taken_over(
+                    std::max(recovered.control_->fence, refusal.stored_fence));
+                co_return;
+            }
+            co_await control->retire_to(
+                recovered.control_,
+                transition_lock.owns() ? process_state->transition_mutex : nullptr);
+        } catch (const graph::CheckpointWriteFenceError& err) {
+            taken_over_fence = std::max(err.refusal().stored_fence, refusal.stored_fence);
+        } catch (const ProgramDiagnosticError& err) {
+            if (err.diagnostic().code == "P_RUN_TAKEN_OVER" || control->taken_over()) {
+                taken_over_fence = refusal.stored_fence;
+            } else {
+                recovery_failed_message = err.what();
+            }
+        } catch (const std::exception& err) {
+            if (control->taken_over()) {
+                taken_over_fence = refusal.stored_fence;
+            } else {
+                recovery_failed_message = err.what();
+            }
+        } catch (...) {
+            if (control->taken_over()) {
+                taken_over_fence = refusal.stored_fence;
+            } else {
+                recovery_failed_message = "unknown self-takeover error";
+            }
+        }
+        if (recovery_failed_message && !taken_over_fence) {
+            try {
+                const auto latest = co_await transitions->load_run_publication_head(
+                    control->owner_scope, control->run_id);
+                if (latest && latest->run_record.continuation().fence > control->fence) {
+                    taken_over_fence = latest->run_record.continuation().fence;
+                }
+            } catch (...) {
+            }
+        }
+        if (taken_over_fence) {
+            co_await control->complete_taken_over(*taken_over_fence);
+        } else if (recovery_failed_message) {
+            co_await control->complete_recovery_failed(std::move(*recovery_failed_message));
+        }
     }
 
     // `held` is the coordination lock when the caller holds it (a replacement or a migration fencing its source).
@@ -7057,11 +7550,14 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
             std::lock_guard lock(process_state->controls_mutex);
             std::erase_if(process_state->controls, [](const auto& entry) {
                 const auto live = entry.control.lock();
-                return !live || live->try_result().has_value();
+                return !live || live->has_successor() || live->try_result().has_value();
             });
             for (auto& entry : process_state->controls) {
                 if (entry.owner_scope == owner_scope && entry.run_id == run_id) {
-                    if (auto control = entry.control.lock()) matches.push_back(std::move(control));
+                    if (auto control = entry.control.lock();
+                        control && !control->has_successor()) {
+                        matches.push_back(std::move(control));
+                    }
                 }
             }
         }
@@ -7077,7 +7573,7 @@ struct ProgramRuntime::Impl : std::enable_shared_from_this<ProgramRuntime::Impl>
     struct ParentChildBudget {
         RunBudget     parent;
         RunBudget     child;
-        std::uint64_t parent_fence = 1;
+        std::uint64_t parent_fence = graph::kInitialCheckpointWriteFence;
     };
 
     static bool child_execution_active(const ProgramChildRecord& child) noexcept {
@@ -7958,7 +8454,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::start_child_core(std::string     
 
     std::shared_ptr<detail::RunControl> control;
     try {
-        const std::uint64_t child_fence = 1;
+        const std::uint64_t child_fence = graph::kInitialCheckpointWriteFence;
         const auto core_thread_id =
             core_thread_identity(run_id, pinned->root->compiled_plan_identity);
         const auto binding_fingerprint = capability_binding_receipt_root(
@@ -8566,10 +9062,13 @@ asio::awaitable<ProgramHandle> ProgramRuntime::fork_core(std::string            
              {"checkpoint_id", checkpoint_identity.checkpoint_id}};
     cloned_checkpoint.timestamp =
         std::max<std::int64_t>(now_ms(), loaded_checkpoint->timestamp + 1);
-    co_await impl_->config.checkpoints->save_async(cloned_checkpoint);
+    const auto fenced_fork_checkpoints = std::make_shared<graph::FencedCheckpointStore>(
+        impl_->config.checkpoints, std::string(owner_scope), run_id,
+        graph::kInitialCheckpointWriteFence);
+    co_await fenced_fork_checkpoints->save_async(cloned_checkpoint);
     // #390: the fork replays the work the paused step finished, as a resume
     // of the source would, instead of running and charging it again.
-    co_await graph::copy_resume_pending_writes_async(impl_->config.checkpoints, *loaded_checkpoint,
+    co_await graph::copy_resume_pending_writes_async(fenced_fork_checkpoints, *loaded_checkpoint,
                                                      cloned_checkpoint);
     const auto                   cloned_checkpoint_id = cloned_checkpoint.id;
     const CoreCheckpointIdentity target_checkpoint{
@@ -9119,11 +9618,11 @@ asio::awaitable<ProgramHandle> ProgramRuntime::replace_core(std::string         
     try {
         if (execution_lease)
             published = (co_await control->transitions->compare_publish_execution(
-                  owner_scope, "", 1, std::move(publication), std::nullopt,
+                  owner_scope, "", control->fence, std::move(publication), std::nullopt,
                   execution_lease));
         else
             published = (co_await control->transitions->compare_publish(
-                  owner_scope, "", 1, std::move(publication)));
+                  owner_scope, "", control->fence, std::move(publication)));
     } catch (...) {
         publish_failure = std::current_exception();
     }
@@ -9466,7 +9965,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::migrate_graph_core(
             target.semantic_adapter->id();
     }
     target_snapshot.timestamp = snapshot_time;
-    co_await impl_->config.checkpoints->save_async(target_snapshot);
+    co_await impl_->config.checkpoints->save_async(
+        target_snapshot,
+        graph::CheckpointWriteFence{owner_scope, target_run_id, graph::kInitialCheckpointWriteFence});
     const auto durable_target_checkpoint =
         co_await impl_->config.checkpoints->load_by_id_async(target_snapshot.id);
     const auto target_checkpoint_content_id =
@@ -10026,7 +10527,8 @@ asio::awaitable<ProgramChildSynthesisRecord> ProgramRuntime::recover_child_synth
 }
 
 asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_scope, std::string run_id,
-                                                              bool transition_lock_held) {
+                                                              bool transition_lock_held,
+                                                              bool* wait_for_control) {
     if (owner_scope.empty()) throw std::invalid_argument("Program owner scope must not be empty");
     if (run_id.empty()) throw std::invalid_argument("Program reconnect run_id must not be empty");
     // A run paused on a child that was answered, whose continuation a lost process never started (#658).
@@ -10034,11 +10536,14 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
         // A continuation that cannot start leaves the run as it was and reconnect reports why; it does not
         // return a paused run as if nothing had happened.
         if (auto continued = (co_await wake_paused_parent(owner_scope, run_id))) co_return std::move(*continued);
-    }
-    detail::ReentrantOperationLock::Guard reconnect_lock;
-    if (!transition_lock_held) {
-        auto held      = co_await impl_->process_state->transition_mutex->lock_async();
-        reconnect_lock = std::move(held);
+        auto reconnect_lock = co_await impl_->process_state->transition_mutex->lock_async();
+        bool wait_after_unlock = false;
+        auto handle = co_await reconnect_core(std::move(owner_scope), std::move(run_id), true, &wait_after_unlock);
+        reconnect_lock.unlock();
+        if (wait_after_unlock && !handle.control_->try_result()) {
+            (void)co_await handle.control_->wait_async();
+        }
+        co_return handle;
     }
     std::string resolved_run_id(run_id);
     bool        successor_generation = false;
@@ -10155,8 +10660,9 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
     }
     if (existing_control) {
         auto control = std::move(existing_control);
-        if (record->continuation().state != ContinuationState::Running && !control->try_result())
-            (void)co_await control->wait_async();
+        if (record->continuation().state != ContinuationState::Running && !control->try_result()) {
+            if (wait_for_control) *wait_for_control = true;
+        }
         co_return ProgramHandle(std::move(control));
     }
     if (const auto relation_head =
@@ -10302,7 +10808,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                      {"expected_plan_id", expected_plan.id()}});
         }
     }
-    const auto state = record->continuation().state;
+    auto state = record->continuation().state;
     if (state == ContinuationState::Running) {
         // #655, #636: a child that was published and never dispatched, whose parent has closed its relation with it,
         // has no parent to dispatch it. Recovering it would run a child of a cancelled parent, so it is ended
@@ -10314,7 +10820,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
                 if (ending != Impl::UnstartedChildEnding::NotUnstarted) {
                     // The lock stays held (by this call, or by the caller that passed it in): the lock is not
                     // reentrant for a coroutine, so the retry does not take it again.
-                    co_return (co_await reconnect_core(owner_scope, run_id, true));
+                    co_return (co_await reconnect_core(owner_scope, run_id, true, wait_for_control));
                 }
             }
         }
@@ -10444,7 +10950,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
             }
             // The lock stays held (by this call, or by the caller that passed it in): the lock is not reentrant for a
             // coroutine, so the retry does not take it again.
-            co_return (co_await reconnect_core(owner_scope, run_id, true));
+            co_return (co_await reconnect_core(owner_scope, run_id, true, wait_for_control));
         }
         const auto version =
             (co_await impl_->config.catalog->resolve_version_async(owner_scope, record->program_version_id()));
@@ -10598,182 +11104,243 @@ asio::awaitable<ProgramHandle> ProgramRuntime::reconnect_core(std::string owner_
             }
         }
 
-        const auto                 checkpoint = record->exact_checkpoint();
-        std::string                recovered_thread_id;
-        std::optional<std::string> resume_checkpoint_id;
-        bool                       recover_plan_without_checkpoint = false;
-        if (checkpoint) {
-            if (pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
-                pinned->root->core_name != checkpoint->core_name) {
-                throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
-                                         "Running Program recovery identity is incompatible");
-            }
-            const auto stored_checkpoint =
-                co_await impl_->config.checkpoints->load_by_id_async(checkpoint->checkpoint_id);
-            if (!stored_checkpoint || stored_checkpoint->id != checkpoint->checkpoint_id ||
-                stored_checkpoint->thread_id != checkpoint->core_thread_id ||
-                stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
-                stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION ||
-                (record->exact_checkpoint_content_id() &&
-                 graph_migration_checkpoint_content_id(*stored_checkpoint) !=
-                     *record->exact_checkpoint_content_id())) {
-                throw_runtime_diagnostic(
-                    "P_CHECKPOINT_INCOMPATIBLE",
-                    "Running Program recovery checkpoint is absent or invalid");
-            }
-            recovered_thread_id  = checkpoint->core_thread_id;
-            resume_checkpoint_id = checkpoint->checkpoint_id;
-        } else {
-            // JavaScript control sessions are replayed from their durable
-            // yielded-command journal.  They intentionally do not require a
-            // Core checkpoint: every prior command result is fed back into a
-            // fresh generator, and a pending head is surfaced as an external
-            // effect instead of being redispatched.
-            // #404: a typed plan that is not replay-safe stopped before its
-            // first Core checkpoint. Like a JavaScript callCore in that state,
-            // the operation it may have started is reconciled, not dispatched
-            // again.
-            recover_plan_without_checkpoint =
-                !pinned->bundle.control_source() &&
-                !checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan());
-            recovered_thread_id =
-                core_thread_identity(run_id, pinned->root->compiled_plan_identity);
+        const std::uint64_t expected_fence = record->continuation().fence;
+        if (expected_fence == 0 || expected_fence == std::numeric_limits<std::uint64_t>::max()) {
+            throw_runtime_diagnostic("P_RUN_INVALID", "Stored Program run fence is invalid");
         }
-        if (recovery_head)
-            (co_await impl_->hydrate_child_reservations(*record, recovery_head->journal_record));
-        std::shared_ptr<ChildQuotaReservation> global_quota;
-        Impl::ChildConcurrencyLease            child_concurrency;
-        if (!record->invocation().parent_run_id.empty()) {
-            const auto parent_child = (co_await impl_->hydrate_parent_child_budget(
-                owner_scope, record->invocation().parent_run_id, record->logical_run_id()));
-            global_quota = impl_->reserve_active_child(owner_scope);
-            if (!impl_->activate_child_concurrency(record->invocation().parent_run_id,
-                                                   record->logical_run_id(), parent_child.parent,
-                                                   parent_child.child)) {
-                throw_runtime_diagnostic(
-                    "P_CHILD_CONCURRENCY",
-                    "Recovered child exceeds the parent's active concurrency budget",
-                    json{{"parent_run_id", record->invocation().parent_run_id},
-                         {"child_run_id", std::string(run_id)}});
+        const std::uint64_t target_fence = expected_fence + 1;
+        const std::string   fenced_key   = record->run_id();
+        if (!impl_->config.checkpoints->supports_write_fence()) {
+            throw_runtime_diagnostic(
+                "P_RUN_TAKEOVER_FENCE_UNSUPPORTED",
+                "CheckpointStore does not support write fencing required for run takeover");
+        }
+        (co_await impl_->config.checkpoints->raise_fence_async(owner_scope, fenced_key, target_fence));
+
+        for (;;) {
+            const auto attempted_head = record->journal_head();
+            ProgramTransitionPublishResult taken_over;
+            if (record->continuation().state == ContinuationState::Running && recovered_lease) {
+                taken_over = (co_await impl_->transitions->compare_publish_takeover_execution(
+                    owner_scope, run_id, attempted_head, expected_fence, *recovered_lease));
+            } else {
+                taken_over = (co_await impl_->transitions->compare_publish_takeover(
+                    owner_scope, run_id, attempted_head, expected_fence));
             }
-            child_concurrency.owner         = impl_.get();
-            child_concurrency.parent_run_id = record->invocation().parent_run_id;
-            child_concurrency.child_run_id  = record->logical_run_id();
-            child_concurrency.amount        = parent_child.child.max_concurrency;
+            if (taken_over == ProgramTransitionPublishResult::Published) {
+                const auto taken_over_head =
+                    (co_await impl_->transitions->load_run_publication_head(owner_scope, run_id));
+                if (taken_over_head &&
+                    taken_over_head->run_record.continuation().fence == target_fence) {
+                    record        = taken_over_head->run_record;
+                    state         = record->continuation().state;
+                    recovery_head = taken_over_head;
+                    break;
+                }
+            }
+            const auto reloaded =
+                (co_await impl_->transitions->load_run_publication_head(owner_scope, run_id));
+            if (!reloaded) {
+                throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                         "Running Program recovery lost the transition CAS");
+            }
+            const auto& r_run   = reloaded->run_record;
+            const auto  r_state = r_run.continuation().state;
+            const auto  r_fence = r_run.continuation().fence;
+
+            if (r_fence > expected_fence) {
+                auto live = impl_->find_control(owner_scope, run_id);
+                if (!live) live = impl_->find_process_control(owner_scope, run_id);
+                if (live && live->fence == r_fence &&
+                    live->attempt == r_run.continuation().attempt) {
+                    co_return ProgramHandle(std::move(live));
+                }
+                co_return ProgramHandle(co_await impl_->make_taken_over_control(r_run, r_fence));
+            }
+
+            if (detail::transition::is_final(r_state) ||
+                r_state == ContinuationState::AmbiguousEffect) {
+                record        = r_run;
+                state         = r_state;
+                recovery_head = reloaded;
+                break;
+            }
+
+            if (r_fence != expected_fence ||
+                r_run.journal_head() == attempted_head ||
+                (r_state != ContinuationState::Running &&
+                 r_state != ContinuationState::Interrupted)) {
+                throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                         "Running Program recovery lost the transition CAS");
+            }
+            record        = r_run;
+            state         = r_state;
+            recovery_head = reloaded;
+            if (r_state == ContinuationState::Running && keeps_root_deadline) {
+                recovered_lease =
+                    (co_await impl_->transitions->load_execution_lease(owner_scope, run_id));
+            } else {
+                recovered_lease.reset();
+            }
         }
 
-        std::optional<ProgramJournalRecord> loaded_journal;
-        if (!recovery_head) loaded_journal = co_await impl_->transitions->latest(owner_scope, run_id);
-        const auto* recovery_journal = recovery_head
-            ? &recovery_head->journal_record : (loaded_journal ? &*loaded_journal : nullptr);
-        if (!recovery_journal || recovery_journal->id != record->journal_head())
-            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
-                                     "Running Program recovery lost the transition CAS");
-        ProgramPersistedInvocation invocation{
-            record->invocation().input,
-            restore_reserved_resources(record->remaining_budget(),
-                                       recovery_journal->inflight_reservation),
-            record->invocation().correlation_id, record->invocation().parent_run_id,
-            record->child_depth()};
-        if (!record->invocation().parent_run_id.empty() && record->continuation().attempt == 1) {
-            const auto granted = record->invocation().budget.wall_time_ms;
-            if (granted > static_cast<std::uint64_t>(INT64_MAX - record->created_at_ms()))
-                throw_runtime_diagnostic("P_CHILD_BUDGET", "Child deadline is out of range");
-            const auto deadline = record->created_at_ms() + static_cast<std::int64_t>(granted);
-            const auto now      = now_ms();
-            if (now >= deadline)
-                throw_runtime_diagnostic("P_CHILD_BUDGET",
-                                         "Child deadline expired before recovery");
-            invocation.granted_budget.wall_time_ms = std::min(
-                invocation.granted_budget.wall_time_ms, static_cast<std::uint64_t>(deadline - now));
+        if (state == ContinuationState::Running) {
+            const auto                 checkpoint = record->exact_checkpoint();
+            std::string                recovered_thread_id;
+            std::optional<std::string> resume_checkpoint_id;
+            bool                       recover_plan_without_checkpoint = false;
+            if (checkpoint) {
+                if (pinned->root->compiled_plan_identity != checkpoint->core_generation_id ||
+                    pinned->root->core_name != checkpoint->core_name) {
+                    throw_runtime_diagnostic("P_CHECKPOINT_INCOMPATIBLE",
+                                             "Running Program recovery identity is incompatible");
+                }
+                const auto stored_checkpoint =
+                    co_await impl_->config.checkpoints->load_by_id_async(checkpoint->checkpoint_id);
+                if (!stored_checkpoint || stored_checkpoint->id != checkpoint->checkpoint_id ||
+                    stored_checkpoint->thread_id != checkpoint->core_thread_id ||
+                    stored_checkpoint->schema_version != checkpoint->checkpoint_schema_version ||
+                    stored_checkpoint->schema_version != graph::CHECKPOINT_SCHEMA_VERSION ||
+                    (record->exact_checkpoint_content_id() &&
+                     graph_migration_checkpoint_content_id(*stored_checkpoint) !=
+                         *record->exact_checkpoint_content_id())) {
+                    throw_runtime_diagnostic(
+                        "P_CHECKPOINT_INCOMPATIBLE",
+                        "Running Program recovery checkpoint is absent or invalid");
+                }
+                recovered_thread_id  = checkpoint->core_thread_id;
+                resume_checkpoint_id = checkpoint->checkpoint_id;
+            } else {
+                // JavaScript control sessions are replayed from their durable
+                // yielded-command journal.  They intentionally do not require a
+                // Core checkpoint: every prior command result is fed back into a
+                // fresh generator, and a pending head is surfaced as an external
+                // effect instead of being redispatched.
+                // #404: a typed plan that is not replay-safe stopped before its
+                // first Core checkpoint. Like a JavaScript callCore in that state,
+                // the operation it may have started is reconciled, not dispatched
+                // again.
+                recover_plan_without_checkpoint =
+                    !pinned->bundle.control_source() &&
+                    !checkpointless_replay_safe(pinned->bundle.typed_orchestration_plan());
+                recovered_thread_id =
+                    core_thread_identity(run_id, pinned->root->compiled_plan_identity);
+            }
+            if (recovery_head)
+                (co_await impl_->hydrate_child_reservations(*record, recovery_head->journal_record));
+            std::shared_ptr<ChildQuotaReservation> global_quota;
+            Impl::ChildConcurrencyLease            child_concurrency;
+            if (!record->invocation().parent_run_id.empty()) {
+                const auto parent_child = (co_await impl_->hydrate_parent_child_budget(
+                    owner_scope, record->invocation().parent_run_id, record->logical_run_id()));
+                global_quota = impl_->reserve_active_child(owner_scope);
+                if (!impl_->activate_child_concurrency(record->invocation().parent_run_id,
+                                                       record->logical_run_id(), parent_child.parent,
+                                                       parent_child.child)) {
+                    throw_runtime_diagnostic(
+                        "P_CHILD_CONCURRENCY",
+                        "Recovered child exceeds the parent's active concurrency budget",
+                        json{{"parent_run_id", record->invocation().parent_run_id},
+                             {"child_run_id", std::string(run_id)}});
+                }
+                child_concurrency.owner         = impl_.get();
+                child_concurrency.parent_run_id = record->invocation().parent_run_id;
+                child_concurrency.child_run_id  = record->logical_run_id();
+                child_concurrency.amount        = parent_child.child.max_concurrency;
+            }
+
+            std::optional<ProgramJournalRecord> loaded_journal;
+            if (!recovery_head) loaded_journal = co_await impl_->transitions->latest(owner_scope, run_id);
+            const auto* recovery_journal = recovery_head
+                ? &recovery_head->journal_record : (loaded_journal ? &*loaded_journal : nullptr);
+            if (!recovery_journal || recovery_journal->id != record->journal_head())
+                throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
+                                         "Running Program recovery lost the transition CAS");
+            ProgramPersistedInvocation invocation{
+                record->invocation().input,
+                restore_reserved_resources(record->remaining_budget(),
+                                           recovery_journal->inflight_reservation),
+                record->invocation().correlation_id, record->invocation().parent_run_id,
+                record->child_depth()};
+            if (!record->invocation().parent_run_id.empty() && record->continuation().attempt == 1) {
+                const auto granted = record->invocation().budget.wall_time_ms;
+                if (granted > static_cast<std::uint64_t>(INT64_MAX - record->created_at_ms()))
+                    throw_runtime_diagnostic("P_CHILD_BUDGET", "Child deadline is out of range");
+                const auto deadline = record->created_at_ms() + static_cast<std::int64_t>(granted);
+                const auto now      = now_ms();
+                if (now >= deadline)
+                    throw_runtime_diagnostic("P_CHILD_BUDGET",
+                                             "Child deadline expired before recovery");
+                invocation.granted_budget.wall_time_ms = std::min(
+                    invocation.granted_budget.wall_time_ms, static_cast<std::uint64_t>(deadline - now));
+            }
+            if (synthesis_deadline) {
+                const auto now = now_ms();
+                if (now >= *synthesis_deadline)
+                    throw_runtime_diagnostic("P_CHILD_SYNTHESIS_BUDGET",
+                                             "Parent synthesis deadline expired before recovery");
+                invocation.granted_budget.wall_time_ms =
+                    std::min(invocation.granted_budget.wall_time_ms,
+                             static_cast<std::uint64_t>(*synthesis_deadline - now));
+            }
+            if (keeps_root_deadline) {
+                // A recovered root keeps the absolute deadline it was started with, which the takeover kept: the attempt
+                // is granted only the wall time left before it, read after the takeover. A deadline that passed while
+                // the run was taken over ends the run TimedOut, as a reconnect after it does.
+                const auto deadline =
+                    record->updated_at_ms() + static_cast<std::int64_t>(record->remaining_budget().wall_time_ms);
+                const auto now = std::max(now_ms(), record->updated_at_ms());
+                if (now >= deadline) co_return (co_await reconnect_core(owner_scope, run_id, true, wait_for_control));
+                invocation.granted_budget.wall_time_ms = std::min(invocation.granted_budget.wall_time_ms,
+                                                                  static_cast<std::uint64_t>(deadline - now));
+            }
+            child_concurrency.commit();
+            auto control = std::make_shared<detail::RunControl>(
+                std::string(owner_scope), std::string(run_id), record->continuation().attempt,
+                std::move(pinned), record->binding_fingerprint(), std::move(invocation),
+                record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
+                std::shared_ptr<ProgramEventSink>{}, impl_->scheduler,
+                impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
+                std::nullopt, record->logical_run_id(), record->continuation().fence);
+            control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
+            const auto recovered_relation_head =
+                (co_await impl_->transitions->load_child_relation_head(owner_scope, record->logical_run_id()));
+            control->rejoin_paused_children =
+                record->continuation().attempt > 1 && !record->attempt_resume() &&
+                !record->pending_input() && !record->pending_effect() &&
+                recovered_relation_head && recovered_relation_head->count() != 0;
+            control->fork_provider_replay =
+                (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *record));
+            impl_->commit_active_child(control, global_quota);
+            if (!record->invocation().parent_run_id.empty()) {
+                auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id);
+                impl_->bind_budgeted_child_completion(
+                    control, owner_scope, record->invocation().parent_run_id, record->logical_run_id(),parent);
+                if (parent)
+                    co_await parent->attach_child(control, impl_->process_state->transition_mutex);
+            }
+            auto registration = (co_await impl_->register_control(control, successor_generation));
+            if (!registration.inserted) co_return ProgramHandle(std::move(registration.control));
+            // A resumed attempt resumes its checkpoint with the value it was
+            // resumed with, never with the run input (#377).
+            const auto& attempt_resume = record->attempt_resume();
+            const bool  resumed_attempt = attempt_resume && resume_checkpoint_id &&
+                                         attempt_resume->checkpoint_id == *resume_checkpoint_id;
+            const bool  control_source = control->materialized->bundle.control_source().has_value();
+            spawn_run_attempt(impl_->scheduler, impl_, control,
+                              !resume_checkpoint_id || control_source || control->rejoin_paused_children
+                                  ? record->invocation().input
+                                  : (resumed_attempt ? attempt_resume->value : json()),
+                              control->rejoin_paused_children && !control_source
+                                  ? std::nullopt
+                                  : std::move(resume_checkpoint_id),
+                              impl_->config.host_admission,
+                              impl_->config.host_admission_resolver,
+                              resumed_attempt && control_source
+                                  ? std::optional<json>{attempt_resume->value}
+                                  : std::nullopt);
+            co_return ProgramHandle(std::move(control));
         }
-        if (synthesis_deadline) {
-            const auto now = now_ms();
-            if (now >= *synthesis_deadline)
-                throw_runtime_diagnostic("P_CHILD_SYNTHESIS_BUDGET",
-                                         "Parent synthesis deadline expired before recovery");
-            invocation.granted_budget.wall_time_ms =
-                std::min(invocation.granted_budget.wall_time_ms,
-                         static_cast<std::uint64_t>(*synthesis_deadline - now));
-        }
-        const auto expected_fence = record->continuation().fence;
-        ProgramTransitionPublishResult taken_over;
-        if (recovered_lease)
-            taken_over = (co_await impl_->transitions->compare_publish_takeover_execution(
-                owner_scope, run_id, record->journal_head(), expected_fence, *recovered_lease));
-        else
-            taken_over = (co_await impl_->transitions->compare_publish_takeover(
-                owner_scope, run_id, record->journal_head(), expected_fence));
-        if (taken_over != ProgramTransitionPublishResult::Published) {
-            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
-                                     "Running Program recovery lost the transition CAS");
-        }
-        const auto taken_over_head =
-            (co_await impl_->transitions->load_run_publication_head(owner_scope, run_id));
-        if (!taken_over_head ||
-            taken_over_head->run_record.continuation().state != ContinuationState::Running ||
-            taken_over_head->run_record.continuation().fence != expected_fence + 1) {
-            throw_runtime_diagnostic("P_RUN_RECOVERY_CONFLICT",
-                                     "Running Program recovery lost the transition CAS");
-        }
-        record = taken_over_head->run_record;
-        if (keeps_root_deadline) {
-            // A recovered root keeps the absolute deadline it was started with, which the takeover kept: the attempt
-            // is granted only the wall time left before it, read after the takeover. A deadline that passed while
-            // the run was taken over ends the run TimedOut, as a reconnect after it does.
-            const auto deadline =
-                record->updated_at_ms() + static_cast<std::int64_t>(record->remaining_budget().wall_time_ms);
-            const auto now = std::max(now_ms(), record->updated_at_ms());
-            if (now >= deadline) co_return (co_await reconnect_core(owner_scope, run_id, true));
-            invocation.granted_budget.wall_time_ms = std::min(invocation.granted_budget.wall_time_ms,
-                                                              static_cast<std::uint64_t>(deadline - now));
-        }
-        child_concurrency.commit();
-        auto control = std::make_shared<detail::RunControl>(
-            std::string(owner_scope), std::string(run_id), record->continuation().attempt,
-            std::move(pinned), record->binding_fingerprint(), std::move(invocation),
-            record->invocation(), std::move(recovered_thread_id), record->event_sequence(),
-            std::shared_ptr<ProgramEventSink>{}, impl_->scheduler,
-            impl_->config.checkpoints, impl_->config.state_store, impl_->transitions,
-            std::nullopt, record->logical_run_id(), record->continuation().fence);
-        control->recover_plan_without_checkpoint = recover_plan_without_checkpoint;
-        const auto recovered_relation_head =
-            (co_await impl_->transitions->load_child_relation_head(owner_scope, record->logical_run_id()));
-        control->rejoin_paused_children =
-            record->continuation().attempt > 1 && !record->attempt_resume() &&
-            !record->pending_input() && !record->pending_effect() &&
-            recovered_relation_head && recovered_relation_head->count() != 0;
-        control->fork_provider_replay =
-            (co_await fork_provider_replay_of(*impl_->transitions, *impl_->config.checkpoints, owner_scope, *record));
-        impl_->commit_active_child(control, global_quota);
-        if (!record->invocation().parent_run_id.empty()) {
-            auto parent = impl_->find_control(owner_scope, record->invocation().parent_run_id);
-            impl_->bind_budgeted_child_completion(
-                control, owner_scope, record->invocation().parent_run_id, record->logical_run_id(),parent);
-            if (parent)
-                co_await parent->attach_child(control, impl_->process_state->transition_mutex);
-        }
-        auto registration = (co_await impl_->register_control(control, successor_generation));
-        if (!registration.inserted) co_return ProgramHandle(std::move(registration.control));
-        // A resumed attempt resumes its checkpoint with the value it was
-        // resumed with, never with the run input (#377).
-        const auto& attempt_resume = record->attempt_resume();
-        const bool  resumed_attempt = attempt_resume && resume_checkpoint_id &&
-                                     attempt_resume->checkpoint_id == *resume_checkpoint_id;
-        const bool  control_source = control->materialized->bundle.control_source().has_value();
-        spawn_run_attempt(impl_->scheduler, impl_, control,
-                          !resume_checkpoint_id || control_source || control->rejoin_paused_children
-                              ? record->invocation().input
-                              : (resumed_attempt ? attempt_resume->value : json()),
-                          control->rejoin_paused_children && !control_source
-                              ? std::nullopt
-                              : std::move(resume_checkpoint_id),
-                          impl_->config.host_admission,
-                          impl_->config.host_admission_resolver,
-                          resumed_attempt && control_source
-                              ? std::optional<json>{attempt_resume->value}
-                              : std::nullopt);
-        co_return ProgramHandle(std::move(control));
     }
     const bool requires_result =
         state != ContinuationState::Interrupted && state != ContinuationState::AmbiguousEffect;
@@ -10806,7 +11373,7 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
     if (impl_->process_state->pending_cancellations->pending(owner_scope, run_id))
         throw_runtime_diagnostic("P_RESUME_CONFLICT", "Program run has a cancellation that is not recorded yet");
 
-    const auto previous = (co_await impl_->transitions->load(owner_scope, run_id));
+    auto previous = (co_await impl_->transitions->load(owner_scope, run_id));
     if (!previous) {
         throw_runtime_diagnostic("P_RUN_NOT_FOUND", "Program run was not found");
     }
@@ -10839,6 +11406,30 @@ asio::awaitable<ProgramHandle> ProgramRuntime::resume_core(std::string   owner_s
                                       *pending_effect->reconciled_result() == resume_value.value;
         if (duplicate_input || duplicate_effect) co_return (co_await reconnect_core(owner_scope, run_id));
         throw_runtime_diagnostic("P_RESUME_STATE", "Only an interrupted Program run may resume");
+    }
+    if (impl_->config.checkpoints->supports_write_fence()) {
+        const auto stored_ckpt_fence =
+            co_await impl_->config.checkpoints->load_fence_async(owner_scope, run_id);
+        while (previous->continuation().fence < stored_ckpt_fence) {
+            const auto current_head  = previous->journal_head();
+            const auto current_fence = previous->continuation().fence;
+            const auto published     = co_await impl_->transitions->compare_publish_takeover(
+                owner_scope, run_id, current_head, current_fence);
+            previous = co_await impl_->transitions->load(owner_scope, run_id);
+            if (!previous || previous->continuation().state != ContinuationState::Interrupted ||
+                !previous->exact_checkpoint()) {
+                throw_runtime_diagnostic("P_RESUME_CONFLICT",
+                                         "Program resume lost the transition CAS");
+            }
+            if (published != ProgramTransitionPublishResult::Published &&
+                previous->journal_head() == current_head &&
+                previous->continuation().fence == current_fence) {
+                throw_runtime_diagnostic("P_RESUME_CONFLICT",
+                                         "Program resume lost the transition CAS");
+            }
+            pending_input  = previous->pending_input();
+            pending_effect = previous->pending_effect();
+        }
     }
     // A run that waits on children that paused holds no question of its own: the question is the child's, and
     // the child is the run to resume (#658).

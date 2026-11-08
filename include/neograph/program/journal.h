@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <neograph/graph/checkpoint.h>
 #include <neograph/program/result.h>
 
 #include <cstdint>
@@ -30,10 +31,12 @@ NEOGRAPH_PROGRAM_API std::string_view  to_string(ContinuationState state) noexce
 NEOGRAPH_PROGRAM_API ContinuationState continuation_state_from_string(std::string_view value);
 
 struct ProgramContinuation {
+    static constexpr std::uint64_t kInitialFence = graph::kInitialCheckpointWriteFence;
+
     std::string       operation_id;
     ContinuationState state   = ContinuationState::Running;
     std::uint64_t     attempt = 0;
-    std::uint64_t     fence   = 1;
+    std::uint64_t     fence   = kInitialFence;
 
     bool operator==(const ProgramContinuation&) const = default;
 };

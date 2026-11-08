@@ -505,23 +505,104 @@ class CountingCheckpointStore final : public graph::CheckpointStore {
 public:
     CountingCheckpointStore(std::shared_ptr<graph::CheckpointStore> inner, CrashPoints& crash)
         : inner_(std::move(inner)), crash_(crash) {}
+    bool supports_write_fence() const override { return inner_->supports_write_fence(); }
     void save(const graph::Checkpoint& checkpoint) override {
+        save(checkpoint, {});
+    }
+    void save(const graph::Checkpoint& checkpoint, const graph::CheckpointWriteFence& fence) override {
         const bool anchor = checkpoint.current_node == graph::kFirstStepAnchorNode;
-        crash_.durable(to_string(checkpoint.interrupt_phase), [&] { inner_->save(checkpoint); },
+        crash_.durable(to_string(checkpoint.interrupt_phase), [&] { inner_->save(checkpoint, fence); },
                        anchor ? std::string() : checkpoint.thread_id, first_note(checkpoint));
     }
     void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write) override {
-        crash_.durable("put_writes", [&] { inner_->put_writes(thread, parent, write); });
+        put_writes(thread, parent, write, {});
+    }
+    void put_writes(const std::string& thread, const std::string& parent, const graph::PendingWrite& write,
+                    const graph::CheckpointWriteFence& fence) override {
+        crash_.durable("put_writes", [&] { inner_->put_writes(thread, parent, write, fence); });
     }
     std::optional<graph::Checkpoint> load_latest(const std::string& thread) override { return inner_->load_latest(thread); }
     std::optional<graph::Checkpoint> load_by_id(const std::string& id) override { return inner_->load_by_id(id); }
     std::vector<graph::Checkpoint> list(const std::string& thread, int limit) override { return inner_->list(thread, limit); }
     void delete_thread(const std::string& thread) override { inner_->delete_thread(thread); }
+    void delete_thread(const std::string& thread, const graph::CheckpointWriteFence& fence) override {
+        inner_->delete_thread(thread, fence);
+    }
     std::vector<graph::PendingWrite> get_writes(const std::string& thread, const std::string& parent) override {
         return inner_->get_writes(thread, parent);
     }
     void clear_writes(const std::string& thread, const std::string& parent) override { inner_->clear_writes(thread, parent); }
+    void clear_writes(const std::string& thread, const std::string& parent,
+                      const graph::CheckpointWriteFence& fence) override {
+        inner_->clear_writes(thread, parent, fence);
+    }
+    std::uint64_t raise_fence(const std::string& owner_scope, const std::string& run_id,
+                              std::uint64_t min_fence) override {
+        return inner_->raise_fence(owner_scope, run_id, min_fence);
+    }
+    std::uint64_t load_fence(const std::string& owner_scope, const std::string& run_id) override {
+        return inner_->load_fence(owner_scope, run_id);
+    }
     bool requires_managed_budget(const std::string& thread) override { return inner_->requires_managed_budget(thread); }
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment) override {
+        return inner_->acquire_managed_budget_lease(scope, expected_checkpoint_id, expected_checkpoint_commitment);
+    }
+    std::shared_ptr<graph::OwnedManagedBudgetLease> acquire_managed_budget_lease(
+        const graph::ManagedBudgetLeaseScope& scope, const std::string& expected_checkpoint_id,
+        const std::string& expected_checkpoint_commitment, const graph::CheckpointWriteFence& fence) override {
+        return inner_->acquire_managed_budget_lease(
+            scope, expected_checkpoint_id, expected_checkpoint_commitment, fence);
+    }
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest) override {
+        return inner_->begin_managed_budget_effect(lease, effect_id, exact_claim_amount, prepared_request_digest);
+    }
+    graph::ManagedBudgetEffectReceipt begin_managed_budget_effect(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const std::string& effect_id,
+        std::uint64_t exact_claim_amount, const std::string& prepared_request_digest,
+        const graph::CheckpointWriteFence& fence) override {
+        return inner_->begin_managed_budget_effect(
+            lease, effect_id, exact_claim_amount, prepared_request_digest, fence);
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority) override {
+        inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority);
+    }
+    void settle_managed_budget_effect(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+        const graph::ManagedBudgetEffectReceipt& effect, sp::runtime::Result genuine_outcome,
+        const UsageAccumulator::AuthoritySnapshot& authority, const graph::CheckpointWriteFence& fence) override {
+        inner_->settle_managed_budget_effect(lease, effect, std::move(genuine_outcome), authority, fence);
+    }
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const graph::Checkpoint& checkpoint) override {
+        inner_->publish_managed_budget_checkpoint(lease, checkpoint);
+    }
+    void publish_managed_budget_checkpoint(
+        const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease, const graph::Checkpoint& checkpoint,
+        const graph::CheckpointWriteFence& fence) override {
+        inner_->publish_managed_budget_checkpoint(lease, checkpoint, fence);
+    }
+    void release_managed_budget_lease(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease) override {
+        inner_->release_managed_budget_lease(lease);
+    }
+    void release_managed_budget_lease(const std::shared_ptr<graph::OwnedManagedBudgetLease>& lease,
+                                      const graph::CheckpointWriteFence& fence) override {
+        inner_->release_managed_budget_lease(lease, fence);
+    }
+    bool retains_native_checkpoint() const noexcept override { return inner_->retains_native_checkpoint(); }
+    void publish_managed_budget_fork(
+        const graph::Checkpoint& authenticated_source, const graph::Checkpoint& genuine_shared_bank_fork) override {
+        inner_->publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork);
+    }
+    void publish_managed_budget_fork(
+        const graph::Checkpoint& authenticated_source, const graph::Checkpoint& genuine_shared_bank_fork,
+        const graph::CheckpointWriteFence& fence) override {
+        inner_->publish_managed_budget_fork(authenticated_source, genuine_shared_bank_fork, fence);
+    }
 
 private:
     /// "first" for the first checkpoint a Core run continues from. The anchor a

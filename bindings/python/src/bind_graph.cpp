@@ -102,6 +102,10 @@ sp::runtime::SteadyTime metadata_deadline(py::handle timeout_ms) {
 class PyCheckpointStore : public neograph::graph::CheckpointStore {
 public:
     using CheckpointStore::CheckpointStore;
+    using CheckpointStore::save;
+    using CheckpointStore::delete_thread;
+    using CheckpointStore::put_writes;
+    using CheckpointStore::clear_writes;
 
     void save(const neograph::graph::Checkpoint& cp) override {
         PYBIND11_OVERRIDE_PURE(void, CheckpointStore, save, cp);
@@ -696,24 +700,30 @@ void init_graph(py::module_& m) {
         "concrete subclass like InMemoryCheckpointStore and pass it "
         "to engine.set_checkpoint_store().")
         .def(py::init<>())
-        .def("save", &CheckpointStore::save, py::arg("checkpoint"))
+        .def("save", py::overload_cast<const Checkpoint&>(&CheckpointStore::save),
+             py::arg("checkpoint"))
         .def("load_latest", &CheckpointStore::load_latest,
              py::arg("thread_id"))
         .def("load_by_id", &CheckpointStore::load_by_id,
              py::arg("checkpoint_id"))
         .def("list", &CheckpointStore::list,
              py::arg("thread_id"), py::arg("limit") = 100)
-        .def("delete_thread", &CheckpointStore::delete_thread,
+        .def("delete_thread",
+             py::overload_cast<const std::string&>(&CheckpointStore::delete_thread),
              py::arg("thread_id"))
         .def("requires_managed_budget", &CheckpointStore::requires_managed_budget,
              py::arg("thread_id"),
              "Read persisted managed-bank denial obligations; absent support fails explicitly. This does not grant spending authority.")
-        .def("put_writes", &CheckpointStore::put_writes,
+        .def("put_writes",
+             py::overload_cast<const std::string&, const std::string&, const PendingWrite&>(
+                 &CheckpointStore::put_writes),
              py::arg("thread_id"), py::arg("parent_checkpoint_id"),
              py::arg("write"))
         .def("get_writes", &CheckpointStore::get_writes,
              py::arg("thread_id"), py::arg("parent_checkpoint_id"))
-        .def("clear_writes", &CheckpointStore::clear_writes,
+        .def("clear_writes",
+             py::overload_cast<const std::string&, const std::string&>(
+                 &CheckpointStore::clear_writes),
              py::arg("thread_id"), py::arg("parent_checkpoint_id"));
 
     py::class_<InMemoryCheckpointStore, CheckpointStore,

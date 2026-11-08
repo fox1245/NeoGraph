@@ -103,6 +103,30 @@ Bridge& bridge() {
 
 // The C++ exception class that a JavaScript failure names. A host's own errors name none, and are runtime errors.
 [[noreturn]] void throw_failure(const std::string& kind, const std::string& message) {
+    if (kind == graph::CheckpointWriteFenceError::kErrorCode) {
+        graph::CheckpointWriteFenceRefusal refusal;
+        try {
+            const auto parsed = json::parse(message);
+            if (!parsed.is_object() ||
+                !parsed.contains("run_id") || !parsed["run_id"].is_string() ||
+                !parsed.contains("stored_fence") || !parsed.contains("writer_fence")) {
+                throw std::runtime_error("missing required fields");
+            }
+            refusal.owner_scope  = parsed.value("owner_scope", std::string{});
+            refusal.run_id       = parsed["run_id"].get<std::string>();
+            refusal.stored_fence = Codec<FenceToken>::decode(parsed["stored_fence"]).value;
+            refusal.writer_fence = Codec<FenceToken>::decode(parsed["writer_fence"]).value;
+        } catch (const std::exception& error) {
+            throw std::runtime_error(
+                "Malformed checkpoint write fence refusal from JavaScript store: " +
+                std::string(error.what()));
+        }
+        if (refusal.run_id.empty() || refusal.stored_fence == 0 || refusal.writer_fence == 0) {
+            throw std::runtime_error(
+                "Malformed checkpoint write fence refusal from JavaScript store: empty run_id or zero fence");
+        }
+        throw graph::CheckpointWriteFenceError(std::move(refusal));
+    }
     if (kind == "invalid_argument") throw std::invalid_argument(message);
     if (kind == "out_of_range") throw std::out_of_range(message);
     if (kind == "domain_error") throw std::domain_error(message);
@@ -236,6 +260,7 @@ namespace pr = program_ops;
 namespace gr = grant_ops;
 namespace fr = fragment_ops;
 namespace mo = module_ops;
+namespace ck = checkpoint_ops;
 
 // ---------------------------------------------------------------------------------------------------------------
 // The adapters. An operation that the interface does not require and the object lacks keeps the interface's default.
@@ -568,6 +593,179 @@ private:
     Member member_;
 };
 
+class JsCheckpointStore final : public graph::CheckpointStore {
+public:
+    JsCheckpointStore(Member member, bool supports_write_fence)
+        : member_(std::move(member)), supports_write_fence_(supports_write_fence) {}
+
+    bool supports_write_fence() const override { return supports_write_fence_; }
+
+    void save(const graph::Checkpoint& cp) override {
+        program::detail::block_on_store(save_async(cp), {}, "CheckpointStore::save");
+    }
+    void save(const graph::Checkpoint& cp, const graph::CheckpointWriteFence& fence) override {
+        program::detail::block_on_store(save_async(cp, fence), {}, "CheckpointStore::save");
+    }
+    std::optional<graph::Checkpoint> load_latest(const std::string& thread_id) override {
+        return program::detail::block_on_store(load_latest_async(thread_id), {}, "CheckpointStore::load_latest");
+    }
+    std::optional<graph::Checkpoint> load_by_id(const std::string& id) override {
+        return program::detail::block_on_store(load_by_id_async(id), {}, "CheckpointStore::load_by_id");
+    }
+    std::vector<graph::Checkpoint> list(const std::string& thread_id, int limit) override {
+        return program::detail::block_on_store(list_async(thread_id, limit), {}, "CheckpointStore::list");
+    }
+    void delete_thread(const std::string& thread_id) override {
+        program::detail::block_on_store(delete_thread_async(thread_id), {}, "CheckpointStore::delete_thread");
+    }
+    void delete_thread(const std::string& thread_id, const graph::CheckpointWriteFence& fence) override {
+        program::detail::block_on_store(delete_thread_async(thread_id, fence), {}, "CheckpointStore::delete_thread");
+    }
+    void put_writes(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                    const graph::PendingWrite& write) override {
+        program::detail::block_on_store(put_writes_async(thread_id, parent_checkpoint_id, write), {},
+                                        "CheckpointStore::put_writes");
+    }
+    void put_writes(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                    const graph::PendingWrite& write, const graph::CheckpointWriteFence& fence) override {
+        program::detail::block_on_store(put_writes_async(thread_id, parent_checkpoint_id, write, fence), {},
+                                        "CheckpointStore::put_writes");
+    }
+    std::vector<graph::PendingWrite> get_writes(const std::string& thread_id,
+                                                const std::string& parent_checkpoint_id) override {
+        return program::detail::block_on_store(get_writes_async(thread_id, parent_checkpoint_id), {},
+                                               "CheckpointStore::get_writes");
+    }
+    void clear_writes(const std::string& thread_id, const std::string& parent_checkpoint_id) override {
+        program::detail::block_on_store(clear_writes_async(thread_id, parent_checkpoint_id), {},
+                                        "CheckpointStore::clear_writes");
+    }
+    void clear_writes(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                      const graph::CheckpointWriteFence& fence) override {
+        program::detail::block_on_store(clear_writes_async(thread_id, parent_checkpoint_id, fence), {},
+                                        "CheckpointStore::clear_writes");
+    }
+    std::uint64_t raise_fence(const std::string& owner_scope, const std::string& run_id,
+                              std::uint64_t min_fence) override {
+        return program::detail::block_on_store(raise_fence_async(owner_scope, run_id, min_fence), {},
+                                               "CheckpointStore::raise_fence");
+    }
+    std::uint64_t load_fence(const std::string& owner_scope, const std::string& run_id) override {
+        return program::detail::block_on_store(load_fence_async(owner_scope, run_id), {},
+                                               "CheckpointStore::load_fence");
+    }
+
+    asio::awaitable<void> save_async(const graph::Checkpoint& cp) override {
+        return member_.call(ck::save, cp);
+    }
+    asio::awaitable<void> save_async(const graph::Checkpoint& cp, graph::CheckpointWriteFence fence) override {
+        fence.validate();
+        if (!fence.active()) return save_async(cp);
+        if (!supports_write_fence_) {
+            if (fence.fence > graph::kInitialCheckpointWriteFence) {
+                throw graph::CheckpointException("CheckpointStore does not support write fencing");
+            }
+            return save_async(cp);
+        }
+        return member_.call(ck::save_fenced, cp, fence);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_latest_async(const std::string& thread_id) override {
+        return member_.call(ck::load_latest, thread_id);
+    }
+    asio::awaitable<std::optional<graph::Checkpoint>> load_by_id_async(const std::string& id) override {
+        return member_.call(ck::load_by_id, id);
+    }
+    asio::awaitable<std::vector<graph::Checkpoint>> list_async(const std::string& thread_id, int limit) override {
+        return member_.call(ck::list, thread_id, limit);
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id) override {
+        return member_.call(ck::delete_thread, thread_id);
+    }
+    asio::awaitable<void> delete_thread_async(const std::string& thread_id,
+                                              graph::CheckpointWriteFence fence) override {
+        fence.validate();
+        if (!fence.active()) return delete_thread_async(thread_id);
+        if (!supports_write_fence_) {
+            if (fence.fence > graph::kInitialCheckpointWriteFence) {
+                throw graph::CheckpointException("CheckpointStore does not support write fencing");
+            }
+            return delete_thread_async(thread_id);
+        }
+        return member_.call(ck::delete_thread_fenced, thread_id, fence);
+    }
+    asio::awaitable<void> put_writes_async(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                                           const graph::PendingWrite& write) override {
+        if (!member_.has(ck::put_writes)) co_return;
+        co_await member_.call(ck::put_writes, thread_id, parent_checkpoint_id, write);
+    }
+    asio::awaitable<void> put_writes_async(const std::string& thread_id, const std::string& parent_checkpoint_id,
+                                           const graph::PendingWrite& write,
+                                           graph::CheckpointWriteFence fence) override {
+        fence.validate();
+        if (!fence.active()) {
+            co_await put_writes_async(thread_id, parent_checkpoint_id, write);
+            co_return;
+        }
+        if (!supports_write_fence_) {
+            if (fence.fence > graph::kInitialCheckpointWriteFence) {
+                throw graph::CheckpointException("CheckpointStore does not support write fencing");
+            }
+            co_await put_writes_async(thread_id, parent_checkpoint_id, write);
+            co_return;
+        }
+        if (!member_.has(ck::put_writes_fenced)) co_return;
+        co_await member_.call(ck::put_writes_fenced, thread_id, parent_checkpoint_id, write, fence);
+    }
+    asio::awaitable<std::vector<graph::PendingWrite>> get_writes_async(
+        const std::string& thread_id, const std::string& parent_checkpoint_id) override {
+        if (!member_.has(ck::get_writes)) co_return std::vector<graph::PendingWrite>{};
+        co_return co_await member_.call(ck::get_writes, thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id) override {
+        if (!member_.has(ck::clear_writes)) co_return;
+        co_await member_.call(ck::clear_writes, thread_id, parent_checkpoint_id);
+    }
+    asio::awaitable<void> clear_writes_async(const std::string& thread_id,
+                                             const std::string& parent_checkpoint_id,
+                                             graph::CheckpointWriteFence fence) override {
+        fence.validate();
+        if (!fence.active()) {
+            co_await clear_writes_async(thread_id, parent_checkpoint_id);
+            co_return;
+        }
+        if (!supports_write_fence_) {
+            if (fence.fence > graph::kInitialCheckpointWriteFence) {
+                throw graph::CheckpointException("CheckpointStore does not support write fencing");
+            }
+            co_await clear_writes_async(thread_id, parent_checkpoint_id);
+            co_return;
+        }
+        if (!member_.has(ck::clear_writes_fenced)) co_return;
+        co_await member_.call(ck::clear_writes_fenced, thread_id, parent_checkpoint_id, fence);
+    }
+    asio::awaitable<std::uint64_t> raise_fence_async(std::string owner_scope, std::string run_id,
+                                                     std::uint64_t min_fence) override {
+        if (run_id.empty() || min_fence == 0) {
+            throw std::invalid_argument(
+                "CheckpointStore::raise_fence requires a non-empty run_id and positive min_fence");
+        }
+        if (!supports_write_fence_)
+            throw std::logic_error("CheckpointStore::raise_fence is not supported by this backend");
+        const auto token = co_await member_.call(ck::raise_fence, owner_scope, run_id, FenceToken{min_fence});
+        co_return token.value;
+    }
+    asio::awaitable<std::uint64_t> load_fence_async(std::string owner_scope, std::string run_id) override {
+        if (!supports_write_fence_ || !member_.has(ck::load_fence)) co_return 0;
+        const auto token = co_await member_.call(ck::load_fence, owner_scope, run_id);
+        co_return token.value;
+    }
+
+private:
+    Member member_;
+    bool   supports_write_fence_ = false;
+};
+
 // The member `name` of the host's object, or nothing when the object has none.
 std::optional<Member> member_of(int handle, const char* name, std::span<const OpInfo> rows,
                                 const std::shared_ptr<const void>& lease) {
@@ -673,6 +871,12 @@ JsStoreSet adapt_js_stores(int handle, std::shared_ptr<const void> lease) {
         set.fragments = std::make_shared<JsFragmentStore>(std::move(*member));
     if (auto member = member_of(handle, "modules", module_ops::all, lease))
         set.modules = std::make_shared<JsModuleStore>(std::move(*member));
+    if (auto member = member_of(handle, "checkpoints", checkpoint_ops::all, lease)) {
+        const bool supports_write_fence =
+            ng_js_store_has(handle, "checkpoints", "supportsWriteFence") == 3 &&
+            member->has(ck::raise_fence);
+        set.checkpoints = std::make_shared<JsCheckpointStore>(std::move(*member), supports_write_fence);
+    }
     return set;
 }
 
