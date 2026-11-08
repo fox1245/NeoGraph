@@ -847,6 +847,13 @@ using AttemptFinishedObserver = void (*)(std::string_view run_id, std::uint64_t 
 void set_attempt_finished_observer_for_testing(AttemptFinishedObserver observer) noexcept;
 void notify_attempt_finished(std::string_view run_id, std::uint64_t attempt) noexcept;
 
+/// Test seam: when set, called with the run id once a graph migration request is registered on a control (the
+/// request that holds the run at its next safe point), outside the control's locks, so a test can let the run go on
+/// only after the request exists. Null outside tests.
+using GraphMigrationRequestedObserver = void (*)(std::string_view run_id);
+void set_graph_migration_requested_observer_for_testing(GraphMigrationRequestedObserver observer) noexcept;
+void notify_graph_migration_requested(std::string_view run_id) noexcept;
+
 /// Test seam: when set, called when the single-flight refusal winner parks in
 /// `drain_attempt_ops_async` while other attempt operations are still active,
 /// with the run id, attempt, active operation count, and own operation tokens.
