@@ -2393,7 +2393,9 @@ TEST(ProgramRootLeaseTakeover, ReconnectDoesNotHangWhileControlIsInRefusal) {
     };
 
     SharedBackend backend;
-    Process       original(backend), pausing(backend);
+    // The second takeover comes from a process of its own: `pausing` may still hold the control of its first
+    // takeover, whose old result a reconnect there would return without taking the run over again.
+    Process       original(backend), pausing(backend), pausing_again(backend);
     LeaseWorld    world(next_world_id());
     const auto    version = original.host.admit();
     world.tail_gate.arm();
@@ -2465,7 +2467,7 @@ TEST(ProgramRootLeaseTakeover, ReconnectDoesNotHangWhileControlIsInRefusal) {
         // attempt_resume for "tail", pausing's takeover replays "tail" with that resume value and then interrupts
         // at "last".
         world.interrupt_last.store(true);
-        const auto paused_3 = pausing.host.reconnect(world.run_id()).wait();
+        const auto paused_3 = pausing_again.host.reconnect(world.run_id()).wait();
         ASSERT_EQ(paused_3.status(), ProgramTerminalStatus::Interrupted) << failure_of(paused_3);
         EXPECT_EQ(stored_fence(backend, world.run_id()), 3U);
     };
