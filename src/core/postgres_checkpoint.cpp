@@ -475,18 +475,36 @@ ON CONFLICT (owner_scope, run_id) DO UPDATE
 RETURNING fence
 )SQL";
 
-constexpr const char* kSqlFenceUpsert = R"SQL(
+// A writer's compare: a share lock on the run's fence row, held until the write transaction ends. Writers of one run
+// at the same fence do not wait for each other; a raise (kSqlFenceRaise updates the row) waits until they commit, and
+// a writer that comes after a raise reads the raised fence.
+constexpr const char* kSqlFenceShare = R"SQL(
+SELECT fence FROM checkpoint_run_fences
+WHERE owner_scope = $1 AND run_id = $2
+FOR SHARE
+)SQL";
+
+// A run without a fence row yet: the first writer creates it at its fence. A concurrent raise wins the conflict or
+// waits for this transaction; either way the row returned is the stored fence the writer is compared with.
+constexpr const char* kSqlFenceCreate = R"SQL(
 INSERT INTO checkpoint_run_fences (owner_scope, run_id, fence)
 VALUES ($1, $2, $3::numeric)
 ON CONFLICT (owner_scope, run_id) DO UPDATE
-    SET fence = EXCLUDED.fence
-    WHERE checkpoint_run_fences.fence <= EXCLUDED.fence
+    SET fence = GREATEST(checkpoint_run_fences.fence, EXCLUDED.fence)
 RETURNING fence
 )SQL";
 
+// load_fence: the stored fence, without a lock.
 constexpr const char* kSqlFenceSelect = R"SQL(
 SELECT fence FROM checkpoint_run_fences
 WHERE owner_scope = $1 AND run_id = $2
+)SQL";
+
+// A writer whose fence is above the stored one moves the row up to it.
+constexpr const char* kSqlFenceAdvance = R"SQL(
+UPDATE checkpoint_run_fences SET fence = $3::numeric
+WHERE owner_scope = $1 AND run_id = $2 AND fence < $3::numeric
+RETURNING fence
 )SQL";
 
 std::uint64_t raise_fence_on_conn(pg_conn* conn,
@@ -504,17 +522,28 @@ std::uint64_t check_fence_on_conn(pg_conn* conn, const CheckpointWriteFence& fen
     fence.validate();
     if (!fence.active()) return 0;
     const std::string fence_str = std::to_string(fence.fence);
-    auto up = exec_params(conn, kSqlFenceUpsert, {fence.owner_scope, fence.run_id, fence_str});
-    if (PQntuples(up) == 1) {
-        return std::stoull(col_text(up, 0, 0));
+    const auto refuse = [&fence](std::uint64_t stored) {
+        throw CheckpointWriteFenceError(CheckpointWriteFenceRefusal{
+            fence.owner_scope, fence.run_id, fence.fence, stored});
+    };
+    auto shared = exec_params(conn, kSqlFenceShare, {fence.owner_scope, fence.run_id});
+    if (PQntuples(shared) == 0) {
+        auto created = exec_params(conn, kSqlFenceCreate, {fence.owner_scope, fence.run_id, fence_str});
+        if (PQntuples(created) != 1) {
+            throw std::runtime_error("PostgresCheckpointStore: fence row was not created");
+        }
+        const std::uint64_t stored = std::stoull(col_text(created, 0, 0));
+        if (stored > fence.fence) refuse(stored);
+        return stored;
     }
-    auto sel = exec_params(conn, kSqlFenceSelect, {fence.owner_scope, fence.run_id});
-    if (PQntuples(sel) != 1) {
-        throw std::runtime_error("PostgresCheckpointStore: fence upsert lost row");
+    const std::uint64_t stored = std::stoull(col_text(shared, 0, 0));
+    if (stored > fence.fence) refuse(stored);
+    if (stored == fence.fence) return stored;
+    auto advanced = exec_params(conn, kSqlFenceAdvance, {fence.owner_scope, fence.run_id, fence_str});
+    if (PQntuples(advanced) != 1) {
+        throw std::runtime_error("PostgresCheckpointStore: fence row did not advance");
     }
-    const std::uint64_t stored = std::stoull(col_text(sel, 0, 0));
-    throw CheckpointWriteFenceError(CheckpointWriteFenceRefusal{
-        fence.owner_scope, fence.run_id, fence.fence, stored});
+    return std::stoull(col_text(advanced, 0, 0));
 }
 
 // Fences, obligations, migration markers, heads and effects outlive drop_schema.
@@ -2148,13 +2177,26 @@ asio::awaitable<void> check_fence_on_conn_async(
     pg_conn* c, const CheckpointWriteFence& write_fence) {
     write_fence.validate();
     if (!write_fence.active()) co_return;
-    const auto upsert_params = make_fence_upsert_params(write_fence);
-    auto res = co_await exec_params_async(c, kSqlFenceUpsert, upsert_params);
-    if (PQntuples(res) == 1) co_return;
-
+    // The same compare as check_fence_on_conn: a share lock in the common case.
     const auto select_params = make_fence_select_params(write_fence.owner_scope, write_fence.run_id);
-    auto cur = co_await exec_params_async(c, kSqlFenceSelect, select_params);
-    throw_fence_error_from_result(write_fence, cur);
+    const auto write_params  = make_fence_upsert_params(write_fence);
+    auto shared = co_await exec_params_async(c, kSqlFenceShare, select_params);
+    if (PQntuples(shared) == 0) {
+        auto created = co_await exec_params_async(c, kSqlFenceCreate, write_params);
+        if (PQntuples(created) != 1) {
+            throw std::runtime_error("PostgresCheckpointStore: fence row was not created");
+        }
+        if (std::stoull(col_text(created, 0, 0)) > write_fence.fence)
+            throw_fence_error_from_result(write_fence, created);
+        co_return;
+    }
+    const std::uint64_t stored = std::stoull(col_text(shared, 0, 0));
+    if (stored > write_fence.fence) throw_fence_error_from_result(write_fence, shared);
+    if (stored == write_fence.fence) co_return;
+    auto advanced = co_await exec_params_async(c, kSqlFenceAdvance, write_params);
+    if (PQntuples(advanced) != 1) {
+        throw std::runtime_error("PostgresCheckpointStore: fence row did not advance");
+    }
 }
 
 }  // namespace

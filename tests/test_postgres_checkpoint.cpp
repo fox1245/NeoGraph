@@ -2340,6 +2340,63 @@ TEST_F(PostgresCheckpointTest, T5_EqualFenceSucceedsAndLowerFenceThrows) {
     EXPECT_NO_THROW(store->release_managed_budget_lease(mb_lease, f3));
 }
 
+// Two writers of one run at the same fence: the second commits while the first still holds its write transaction
+// open, so concurrent writes of a run (a fan-out) do not queue on the run's fence row. A raise still waits for the
+// open writer (T3a).
+TEST_F(PostgresCheckpointTest, WritersOfOneRunAtTheSameFenceDoNotWaitForEachOther) {
+    store->drop_schema();
+    const std::string suffix = Checkpoint::generate_id();
+    const std::string owner  = "scope-pg-shared-" + suffix;
+    const std::string run_id = "run-pg-shared-" + suffix;
+    const CheckpointWriteFence f1{owner, run_id, 1};
+
+    std::promise<void> at_write_guard;
+    std::promise<void> release_promise;
+    auto               release_write_guard = release_promise.get_future().share();
+    std::atomic<bool>  guard_active{false};
+    PostgresCheckpointStore held(
+        pg_url(), 1,
+        [&](PGconn*, const std::string&) {
+            if (guard_active.exchange(false)) {
+                at_write_guard.set_value();
+                release_write_guard.wait();
+            }
+        });
+    PostgresCheckpointStore other(pg_url(), 1);
+    struct ReleaseOnExit {
+        std::promise<void>& promise;
+        bool                released = false;
+        void release() {
+            if (!released) promise.set_value();
+            released = true;
+        }
+        ~ReleaseOnExit() { release(); }
+    } release_held{release_promise};
+
+    // The run's fence row exists before the two writers start.
+    other.save(make_state_cp("t-shared-0-" + suffix, 1, {{"v", {1, 1}}}), f1);
+
+    guard_active.store(true);
+    auto held_write = std::async(std::launch::async, [&] {
+        held.save(make_state_cp("t-shared-a-" + suffix, 1, {{"v", {1, 1}}}), f1);
+    });
+    at_write_guard.get_future().wait();
+
+    // The held writer is inside its write transaction, after its fence compare.
+    auto other_write = std::async(std::launch::async, [&] {
+        other.save(make_state_cp("t-shared-b-" + suffix, 1, {{"v", {1, 1}}}), f1);
+    });
+    // A bound at the boundary only: a writer that queues behind the held one never gets here before the release.
+    EXPECT_EQ(other_write.wait_for(std::chrono::seconds(30)), std::future_status::ready)
+        << "a writer at the same fence waited for another writer's open transaction";
+    release_held.release();
+    EXPECT_NO_THROW(held_write.get());
+    EXPECT_NO_THROW(other_write.get());
+    EXPECT_TRUE(other.load_latest("t-shared-a-" + suffix).has_value());
+    EXPECT_TRUE(other.load_latest("t-shared-b-" + suffix).has_value());
+    EXPECT_EQ(other.load_fence(owner, run_id), 1u);
+}
+
 TEST_F(PostgresCheckpointTest, T3a_WriteGuardHoldsFenceLockUntilReleasedBeforeRaiseCommits) {
     for (const char* op_kind : {"save", "put_writes", "managed_budget"}) {
         SCOPED_TRACE(op_kind);
