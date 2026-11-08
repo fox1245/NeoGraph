@@ -758,8 +758,10 @@ private:
     /// timer where the waker finds it. When there is nothing to wait for, it returns at once and touches no executor;
     /// otherwise the wait runs on a strand of the scheduler's waiter executor made for it, where the timer is created,
     /// registered, waited on and destroyed. Throws P_EXECUTOR_DESTROYED when it has to wait and the scheduler is closed.
+    /// `parked`, when given, runs once the timer is enlisted and the control's lock is released, before the wait.
     asio::awaitable<void> park_until_woken(std::function<bool()> waiting,
-                                           std::function<void(std::shared_ptr<async::HostTimer>)> enlist) const;
+                                           std::function<void(std::shared_ptr<async::HostTimer>)> enlist,
+                                           std::function<void()> parked = {}) const;
     void abort_handoff() noexcept;
     void abort_graph_migration() noexcept;
     asio::awaitable<void> abort_graph_migration_async();
@@ -849,8 +851,8 @@ void notify_attempt_finished(std::string_view run_id, std::uint64_t attempt) noe
 /// `drain_attempt_ops_async` while other attempt operations are still active,
 /// with the run id, attempt, active operation count, and own operation tokens.
 /// Null outside tests.
-/// @note The observer runs while the control's lock (`mutex_`) is held and must
-///       not call back into the control.
+/// @note The observer runs once the wait is registered and the control's lock
+///       (`mutex_`) is released, so it may take other locks.
 using RefusalDrainParkedObserver = void (*)(std::string_view run_id,
                                             std::uint64_t    attempt,
                                             std::size_t      active_ops,
@@ -879,8 +881,8 @@ bool notify_self_takeover_entered(std::string_view run_id,
 /// Test seam: when set, called when a coroutine parks in `RunControl::wait_async`
 /// on an unfinished control, with the run id, attempt, and whether the runtime's
 /// process-wide transition lock is held. Null outside tests.
-/// @note The observer runs while the control's lock (`mutex_`) is held and must
-///       not call back into the control.
+/// @note The observer runs once the wait is registered and the control's lock
+///       (`mutex_`) is released, so it may take other locks.
 using ControlWaitParkedObserver = void (*)(std::string_view run_id,
                                            std::uint64_t    attempt,
                                            bool             transition_mutex_locked);
