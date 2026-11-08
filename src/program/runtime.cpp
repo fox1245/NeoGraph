@@ -2851,6 +2851,8 @@ asio::awaitable<void> RunControl::drain_attempt_ops_async(std::size_t own_op_tok
         }
     } discount(this, own_op_tokens);
     const std::size_t discounted = discount.subtracted;
+    // The count seen when the drain parked, for the test seam, which is called outside the lock.
+    const auto active_at_park = std::make_shared<std::size_t>(0);
     for (;;) {
         {
             std::lock_guard lock(mutex_);
@@ -2858,10 +2860,12 @@ asio::awaitable<void> RunControl::drain_attempt_ops_async(std::size_t own_op_tok
         }
         co_await park_until_woken(
             [this] { return active_attempt_ops_ > 0; },
-            [this, discounted, own_op_tokens](std::shared_ptr<async::HostTimer> timer) {
+            [this, discounted, active_at_park](std::shared_ptr<async::HostTimer> timer) {
                 attempt_ops_waiters_.push_back(AsyncWaiter{std::move(timer)});
-                notify_refusal_drain_parked(
-                    run_id, attempt, active_attempt_ops_ + discounted, own_op_tokens);
+                *active_at_park = active_attempt_ops_ + discounted;
+            },
+            [this, own_op_tokens, active_at_park] {
+                notify_refusal_drain_parked(run_id, attempt, *active_at_park, own_op_tokens);
             });
     }
 }
@@ -4478,6 +4482,8 @@ asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
         [waited] { return !(waited->result_ || (waited->follow_successor_ && waited->successor_)); },
         [waited](std::shared_ptr<async::HostTimer> timer) {
             waited->waiters_.push_back(AsyncWaiter{std::move(timer)});
+        },
+        [waited] {
             const bool transition_mutex_locked =
                 waited->handoff_coordination_mutex_ && waited->handoff_coordination_mutex_->is_locked();
             notify_control_wait_parked(waited->run_id, waited->attempt, transition_mutex_locked);
@@ -4904,7 +4910,8 @@ void RunControl::wake_async_waiters(std::vector<AsyncWaiter> waiters) const {
 }
 
 asio::awaitable<void> RunControl::park_until_woken(
-    std::function<bool()> waiting, std::function<void(std::shared_ptr<async::HostTimer>)> enlist) const {
+    std::function<bool()> waiting, std::function<void(std::shared_ptr<async::HostTimer>)> enlist,
+    std::function<void()> parked) const {
     {
         std::lock_guard lock(mutex_);
         if (!waiting()) co_return;
@@ -4928,8 +4935,8 @@ asio::awaitable<void> RunControl::park_until_woken(
     }
     co_await asio::co_spawn(
         *std::move(strand),
-        [control = shared_from_this(), waiting = std::move(waiting),
-         enlist = std::move(enlist)]() -> asio::awaitable<void> {
+        [control = shared_from_this(), waiting = std::move(waiting), enlist = std::move(enlist),
+         parked = std::move(parked)]() -> asio::awaitable<void> {
             auto timer = std::make_shared<async::HostTimer>(co_await asio::this_coro::executor);
             timer->arm_never();
             {
@@ -4937,6 +4944,8 @@ asio::awaitable<void> RunControl::park_until_woken(
                 if (!waiting()) co_return;
                 enlist(timer);
             }
+            // Outside the control's lock: what `parked` calls may take other locks.
+            if (parked) parked();
             asio::error_code error;
             co_await timer->async_wait(asio::redirect_error(asio::use_awaitable, error));
         },
