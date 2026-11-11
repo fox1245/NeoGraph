@@ -1399,8 +1399,8 @@ public:
 
     ::grpc::Status GetCheckpointCapabilities(
         ::grpc::ServerContext*,
-        const pb::GetCheckpointCapabilitiesRequest*,
-        pb::GetCheckpointCapabilitiesResponse* resp) override {
+        const pb::CheckpointCapabilitiesRequest*,
+        pb::CheckpointCapabilitiesResponse* resp) override {
         resp->set_supports_write_fence(true);
         return ::grpc::Status::OK;
     }
@@ -1520,8 +1520,7 @@ TEST(GraphHostGRPCContract, NonFencingPeerAllowsInitialFenceUnfencedAndRejectsHi
     PendingWrite pw;
     pw.task_id = "task-initial";
     pw.node_name = "node";
-    pw.channel = "v";
-    pw.value = json(2);
+    pw.writes = json::array({{{"channel", "v"}, {"value", 2}}});
     EXPECT_NO_THROW(store.put_writes(
         "thread-non-fencing",
         "cp-initial-fence",
