@@ -208,19 +208,24 @@ ProgramChildSynthesisRecord ProgramChildSynthesisRecord::parse(std::string_view 
     require(state != names.end());
     require(v.at("revision").is_number_unsigned() ||
             (v.at("revision").is_number_integer() && v.at("revision").get<std::int64_t>() > 0));
-    auto result = create({ProgramSynthesisProposal::parse(encoded(v.at("proposal"))),
-                          ProgramChildSynthesisGrant::parse(encoded(v.at("grant"))),
-                          {ProgramVersion::parse(encoded(v.at("parent_version"))),
-                           ProgramRunRecord::parse(encoded(v.at("parent_run"))),
-                           ProgramRunLineage::parse(encoded(v.at("parent_lineage"))),
-                           ProgramRunGeneration::parse(encoded(v.at("parent_generation")))},
-                          ProgramSynthesisReservation::parse(encoded(v.at("reservation"))),
-                          v.at("binding_name").get<std::string>(),
-                          v.at("revision").get<std::uint64_t>(),
-                          v.at("previous_id").get<std::string>(),
-                          static_cast<State>(state - names.begin()),
-                          v.at("artifacts"),
-                          v.at("error_code").get<std::string>()});
+    // Each part is built on its own, in member order, before the record data is made from them.
+    auto proposal = ProgramSynthesisProposal::parse(encoded(v.at("proposal")));
+    auto grant    = ProgramChildSynthesisGrant::parse(encoded(v.at("grant")));
+    ProgramChildSynthesisParent parent{
+        ProgramVersion::parse(encoded(v.at("parent_version"))),
+        ProgramRunRecord::parse(encoded(v.at("parent_run"))),
+        ProgramRunLineage::parse(encoded(v.at("parent_lineage"))),
+        ProgramRunGeneration::parse(encoded(v.at("parent_generation")))};
+    auto       reservation  = ProgramSynthesisReservation::parse(encoded(v.at("reservation")));
+    auto       binding_name = v.at("binding_name").get<std::string>();
+    const auto revision     = v.at("revision").get<std::uint64_t>();
+    auto       previous_id  = v.at("previous_id").get<std::string>();
+    json       artifacts    = v.at("artifacts");
+    auto       error_code   = v.at("error_code").get<std::string>();
+    auto result = create({std::move(proposal), std::move(grant), std::move(parent),
+                          std::move(reservation), std::move(binding_name), revision,
+                          std::move(previous_id), static_cast<State>(state - names.begin()),
+                          std::move(artifacts), std::move(error_code)});
     // Exact canonical comparison also rejects unknown fields and numeric normalization.
     require(result.serialize_canonical() == encoded(v));
     return result;

@@ -21320,6 +21320,20 @@ TEST_P(ProgramChildSynthesisPersistence, RejectsMutatedStageArtifactsAndRecordId
     data.binding_name = "foreign-child";
     EXPECT_THROW(ProgramChildSynthesisRecord::create(data), std::invalid_argument);
 }
+TEST_P(ProgramChildSynthesisPersistence, ARecordWithoutAnyOfItsMembersIsRefused) {
+    ChildSynthesisFixture test(backend(), true);
+    const auto            proposal = ProgramSynthesisProposal::create(test.proposal_data());
+    const auto            bound    = test.fixture.runtime->prepare_child_synthesis(
+        "tenant:runtime", *test.handle, *test.hold, proposal, *test.trusted_grant,
+        "generated-child");
+    const auto stored = json::parse(bound.serialize_canonical());
+    ASSERT_EQ(ProgramChildSynthesisRecord::parse(stored.dump()).id(), bound.id());
+    for (const auto& [member, ignored] : stored.items()) {
+        auto value = stored;
+        ASSERT_EQ(value.erase(member), 1U) << member;
+        EXPECT_ANY_THROW(ProgramChildSynthesisRecord::parse(value.dump())) << member;
+    }
+}
 #endif
 #if defined(NEOGRAPH_PROGRAM_TESTS_HAVE_QUICKJS)
 TEST_P(ProgramChildSynthesisPersistence,
