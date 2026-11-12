@@ -671,7 +671,9 @@ program::ExecutableManifest builtin_reducer_manifest(std::string name) {
         "neograph-harness-installed-reducer/v1",
         program::detail::canonical_json_bytes(
             {{"component", "harness-reducer/v1"}, {"name", name}, {"semantic_version", "1.0.0"}}));
-    return {{program::ExecutableKind::Reducer, std::move(name), "1.0.0", identity},
+    program::ExecutableIdentity reducer{program::ExecutableKind::Reducer, std::move(name), "1.0.0",
+                                        identity};
+    return {std::move(reducer),
             program::EffectMode::Brokered,
             "neograph:harness:reducer-v1",
             {},
