@@ -15,6 +15,10 @@
 using namespace neograph;
 using namespace neograph::graph;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 class ENoopNode : public GraphNode {
@@ -175,8 +179,7 @@ TEST(Upgrade, CorpusUpgradesLosslessly) {
     // Every corpus fixture stripped to legacy form, upgraded, and both
     // compiled — IR must match (fixture set from M3, all built-ins).
     ensure_etypes();
-    std::filesystem::path here(__FILE__);
-    const auto dir = here.parent_path() / "fixtures" / "topology_corpus";
+    const auto dir = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "topology_corpus";
     size_t checked = 0;
     for (const auto& entry : std::filesystem::directory_iterator(dir)) {
         const auto fname = entry.path().filename().string();

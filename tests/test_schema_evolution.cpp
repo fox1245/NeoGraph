@@ -32,11 +32,14 @@
 using namespace neograph;
 using namespace neograph::graph;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 json load_snapshot() {
-    std::filesystem::path here(__FILE__);
-    std::ifstream f(here.parent_path() / "fixtures" / "schema_snapshot.json");
+    std::ifstream f(std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "schema_snapshot.json");
     EXPECT_TRUE(f.is_open());
     std::string content((std::istreambuf_iterator<char>(f)),
                         std::istreambuf_iterator<char>());

@@ -16,6 +16,10 @@
 
 using neograph::program::test_support::OwnedFragmentStore;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 using neograph::json;
@@ -103,7 +107,7 @@ json valid_proposal_v2() {
 }
 
 std::filesystem::path proposal_corpus_dir() {
-    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "task_graph_proposal";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "task_graph_proposal";
 }
 
 json load_json(const std::filesystem::path& path) {
@@ -770,8 +774,8 @@ TEST(TaskGraphFragmentTest, RejectsRecordTaskSetOrOperationMismatches) {
 TEST(TaskGraphFragmentTest, SchemaOneFragmentKeepsItsStoredBytesAndIdentity) {
     // tests/fixtures/task_graph_fragment/v1_fragment.json was derived independently of the
     // library (sorted-key compact JSON and the identity digests), not captured from compile().
-    const auto stored = read_text_file(std::filesystem::path(__FILE__).parent_path() /
-                                       "fixtures" / "task_graph_fragment" / "v1_fragment.json");
+    const auto stored = read_text_file(std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) /
+                                       "task_graph_fragment" / "v1_fragment.json");
     const auto parsed = CompiledTaskGraphFragment::parse(stored);
     const auto fragment = compiled_fragment();
 

@@ -16,6 +16,10 @@
 #include <utility>
 #include <vector>
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 using neograph::json;
@@ -97,7 +101,7 @@ StepPlanIntakeOptions variant_options(std::string_view name) {
 }
 
 std::filesystem::path corpus_dir() {
-    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "step_plan";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "step_plan";
 }
 
 std::string read_text(const std::filesystem::path& path) {

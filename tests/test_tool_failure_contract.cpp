@@ -58,6 +58,10 @@ using namespace neograph;
 using namespace neograph::graph;
 using namespace std::chrono_literals;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 constexpr const char* kTargetCall = "call-target";
@@ -1138,7 +1142,7 @@ TEST(ToolFailureContract, NodeRetryPolicyDoesNotRetryAHookBlock) {
 // MCP-backed tools follow the same contract: a tool-level isError result and a
 // JSON-RPC error are ordinary failures the model sees, in one call or a batch.
 TEST(ToolFailureContract, McpErrorsAreToolResults) {
-    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_failures.py";
+    const auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_failures.py";
 #ifdef _WIN32
     const std::string python = "python";
 #else
@@ -1180,7 +1184,7 @@ TEST(ToolFailureContract, McpErrorsAreToolResults) {
 // an effect out: an isError result, and a JSON-RPC error that is not a refusal
 // of the request (-32603, a server error).
 TEST(ToolFailureContract, McpRefusedRequestsAreFailures) {
-    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_failures.py";
+    const auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_failures.py";
 #ifdef _WIN32
     const std::string python = "python";
 #else
