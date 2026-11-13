@@ -4492,8 +4492,15 @@ asio::awaitable<ProgramResult> RunControl::wait_async_with_control(
             waited->waiters_.push_back(AsyncWaiter{std::move(timer)});
         },
         [waited] {
-            const bool transition_mutex_locked =
-                waited->handoff_coordination_mutex_ && waited->handoff_coordination_mutex_->is_locked();
+            // A successor control can be waited on before its runtime registers it, which is when the handoff
+            // coordination is set: the member is read under the control's lock, like every other reader, and the
+            // lock is released before the observer runs. A control without coordination yet reports it unlocked.
+            std::shared_ptr<ReentrantOperationLock> coordination_mutex;
+            {
+                std::lock_guard lock(waited->mutex_);
+                coordination_mutex = waited->handoff_coordination_mutex_;
+            }
+            const bool transition_mutex_locked = coordination_mutex && coordination_mutex->is_locked();
             notify_control_wait_parked(waited->run_id, waited->attempt, transition_mutex_locked);
         });
     std::shared_ptr<RunControl>  next;
