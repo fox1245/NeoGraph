@@ -17,8 +17,12 @@ namespace {
 // a message after 30 s instead of timing out CTest after 10 minutes.
 [[maybe_unused]] const bool kWatched =
     neograph::graph::test_support::watch_tests({"McpHookRpcTransport"});
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 std::filesystem::path fixture_path() {
-    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_slow.py";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_slow.py";
 }
 
 const char* python_cmd() {
