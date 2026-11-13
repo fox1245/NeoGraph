@@ -8,6 +8,10 @@
 #include <filesystem>
 #include <memory>
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 // These tests talk to a real subprocess; one that hangs ends the process with
@@ -24,8 +28,7 @@ const char* python_cmd() {
 }
 
 TEST(HarnessMcpBackendTest, CallsConfiguredDownstreamServer) {
-    auto fixture = std::filesystem::path(__FILE__).parent_path()
-        / "fixtures" / "mcp_stdio_echo.py";
+    auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_echo.py";
     auto client = std::make_shared<neograph::mcp::MCPClient>(
         std::vector<std::string>{python_cmd(), fixture.string()});
     ASSERT_TRUE(client->initialize("harness-mcp-backend-test"));

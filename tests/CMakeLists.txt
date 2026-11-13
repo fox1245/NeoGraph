@@ -325,6 +325,9 @@ if(NEOGRAPH_BUILD_MCP_CLIENT)
     add_executable(neograph_mcp_hook_rpc_tests
         test_hook_rpc_mcp.cpp
     )
+    # The fixture is found from the source folder named at configure time, not from the path the compiler saw.
+    target_compile_definitions(neograph_mcp_hook_rpc_tests PRIVATE
+        NEOGRAPH_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
     target_link_libraries(neograph_mcp_hook_rpc_tests PRIVATE
         neograph::mcp
         GTest::gtest_main
@@ -384,6 +387,9 @@ endif()
 
 if(NEOGRAPH_BUILD_MCP_CLIENT AND TARGET neograph_harness)
     target_sources(neograph_tests PRIVATE test_harness_mcp_backend.cpp)
+    # The fixture is found from the source folder named at configure time, not from the path the compiler saw.
+    set_source_files_properties(test_harness_mcp_backend.cpp PROPERTIES
+        COMPILE_DEFINITIONS NEOGRAPH_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 endif()
 
 if(NEOGRAPH_BUILD_A2A)
