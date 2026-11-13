@@ -44,6 +44,10 @@
 
 using namespace neograph;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 // These tests talk to a real subprocess; one that hangs ends the process with
@@ -52,10 +56,8 @@ namespace {
     neograph::graph::test_support::watch_tests({"MCPStdioAsync"});
 
 std::filesystem::path fixture_path() {
-    // Tests run from the build dir; the source tree is two levels up
-    // from build-nopg/. We can't rely on cwd so derive from __FILE__.
-    std::filesystem::path here(__FILE__);
-    return here.parent_path() / "fixtures" / "mcp_stdio_echo.py";
+    // Tests run from a build subfolder, so the fixtures folder comes from the definition set at configure time.
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_echo.py";
 }
 
 // Locate a usable Python interpreter — `python3` on POSIX, `python`
@@ -86,7 +88,7 @@ struct BoundaryDirectory {
 };
 
 std::filesystem::path noise_fixture() {
-    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "mcp_stdio_noise.py";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_noise.py";
 }
 
 mcp::StdioClientConfig noise_config(const std::string& mode, int count = 0) {
@@ -246,8 +248,7 @@ TEST(MCPStdioAsync, ConcurrentStdioCallsOverlapIO) {
     if (!python3_available()) {
         GTEST_SKIP() << "python3 not available";
     }
-    std::filesystem::path here(__FILE__);
-    auto fixture = here.parent_path() / "fixtures" / "mcp_stdio_slow.py";
+    auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_slow.py";
     ASSERT_TRUE(std::filesystem::exists(fixture))
         << "fixture missing: " << fixture;
 

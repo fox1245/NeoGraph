@@ -51,6 +51,10 @@
 using namespace neograph;
 using namespace neograph::graph;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 // These tests talk to a real subprocess; one that hangs ends the process with
@@ -59,8 +63,7 @@ namespace {
     neograph::graph::test_support::watch_tests({"MCPStdioInGraph"});
 
 std::filesystem::path fixture_path() {
-    std::filesystem::path here(__FILE__);
-    return here.parent_path() / "fixtures" / "mcp_stdio_echo.py";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_echo.py";
 }
 
 const char* python_cmd() {

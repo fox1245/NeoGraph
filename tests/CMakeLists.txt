@@ -392,6 +392,21 @@ if(NEOGRAPH_BUILD_MCP_CLIENT AND TARGET neograph_harness)
         COMPILE_DEFINITIONS NEOGRAPH_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
 endif()
 
+# The other tests that read a file under tests/fixtures/ get the same folder, set on their own source file so that
+# no other source of their target depends on this source folder's path.
+set_source_files_properties(
+    test_mcp_stdio_async.cpp
+    test_mcp_stdio_in_graph.cpp
+    test_tool_failure_contract.cpp
+    test_acp_server.cpp
+    test_program_step_plan.cpp
+    test_program_plan_intake.cpp
+    test_program_task_graph_proposal.cpp
+    test_corpus.cpp
+    test_graph_upgrade.cpp
+    test_schema_evolution.cpp
+    PROPERTIES COMPILE_DEFINITIONS NEOGRAPH_TEST_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures")
+
 if(NEOGRAPH_BUILD_A2A)
     target_compile_definitions(neograph_tests PRIVATE NEOGRAPH_A2A_TESTING)
     target_sources(neograph_tests PRIVATE

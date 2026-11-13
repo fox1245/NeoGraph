@@ -23,11 +23,14 @@
 using namespace neograph;
 using namespace neograph::graph;
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 std::filesystem::path corpus_dir() {
-    std::filesystem::path here(__FILE__);
-    return here.parent_path() / "fixtures" / "topology_corpus";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "topology_corpus";
 }
 
 json load_json(const std::filesystem::path& p) {

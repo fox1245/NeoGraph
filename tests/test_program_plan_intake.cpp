@@ -23,6 +23,10 @@
 #include <string>
 #include <vector>
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 using neograph::json;
@@ -35,7 +39,7 @@ const std::string kPrompt =
     "text.upper/v1 (input text; output upper). Answer with one step-plan/v1 JSON object.";
 
 std::filesystem::path fixture_dir() {
-    return std::filesystem::path(__FILE__).parent_path() / "fixtures" / "plan_intake";
+    return std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "plan_intake";
 }
 
 std::string read_text(const std::filesystem::path& path) {

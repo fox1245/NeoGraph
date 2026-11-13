@@ -61,6 +61,10 @@ struct ACPServerTestAccess {
 
 }  // namespace neograph::acp
 
+#ifndef NEOGRAPH_TEST_FIXTURES_DIR
+#error "NEOGRAPH_TEST_FIXTURES_DIR must name the directory of the test fixtures"
+#endif
+
 namespace {
 
 class EchoNode : public GraphNode {
@@ -2842,8 +2846,7 @@ const char* acp_test_python() {
 TEST(ACPServer, StdioMcpServerToolsAreAvailableToTheSession) {
     const char* python = acp_test_python();
     if (!python) GTEST_SKIP() << "python3 not available";
-    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures"
-                         / "mcp_stdio_echo.py";
+    const auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_echo.py";
     CapturingSink cap;
     auto server = make_server();
     initialize_server(server);
@@ -2876,8 +2879,7 @@ TEST(ACPServer, ClientMcpServersDoNotInheritTheAgentEnvironment) {
 #else
     ASSERT_EQ(setenv(kSecret, "sk-test-fake-0000", 1), 0);
 #endif
-    const auto fixture = std::filesystem::path(__FILE__).parent_path() / "fixtures"
-                         / "mcp_stdio_env_probe.py";
+    const auto fixture = std::filesystem::path(NEOGRAPH_TEST_FIXTURES_DIR) / "mcp_stdio_env_probe.py";
     auto server = make_server();
     initialize_server(server);
     auto created = server.handle_message(make_request(1, "session/new",
