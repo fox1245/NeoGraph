@@ -1,10 +1,20 @@
+<div align="center">
+
+<img src="docs/images/logo.svg" alt="NeoGraph" width="160">
+
 # NeoGraph
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**A C++20 library for running workflows that you describe as graphs**
 
 [![CI](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/neograph-engine)](https://pypi.org/project/neograph-engine/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+---
 
 NeoGraph is a C++20 library for running workflows that you describe as graphs. Nodes do the work, named state channels hold the data, and edges decide what runs next. The runtime schedules the nodes, merges their writes into state, saves a checkpoint after each step when a checkpoint store is configured, and can pause a run for human input and resume it later.
 

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">NeoGraph</title>
+  <rect x="2" y="2" width="252" height="252" rx="54" fill="#0f172a" stroke="#334155" stroke-width="4"/>
+  <polyline points="76,180 76,76 180,180 180,76" fill="none" stroke="#e2e8f0" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#22d3ee" stroke="#0f172a" stroke-width="6">
+    <circle cx="76" cy="180" r="21"/><circle cx="76" cy="76" r="21"/><circle cx="180" cy="180" r="21"/><circle cx="180" cy="76" r="21"/>
+  </g>
+</svg>
