@@ -1,11 +1,21 @@
-<!-- neograph-i18n: source=README.md locale=ja source_sha256=963aa7f780c30a59f4b03400c237eaff080704a9a32e79e033900de7c89ef513 -->
+<!-- neograph-i18n: source=README.md locale=ja source_sha256=04e167ec7e9f4be955d3537cbbf689b1ebc7379648ec9a19c9f85b059afb69df -->
+<div align="center">
+
+<img src="docs/images/logo.svg" alt="NeoGraph" width="160">
+
 # NeoGraph
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**グラフとして記述したワークフローを実行する C++20 ライブラリ**
 
 [![CI](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/neograph-engine)](https://pypi.org/project/neograph-engine/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+---
 
 NeoGraph は、グラフとして記述したワークフローを実行する C++20 ライブラリです。ノードが仕事をし、名前の付いた状態チャネルがデータを保持し、エッジが次に何を実行するかを決めます。ランタイムはノードをスケジュールし、ノードの書き込みを状態にマージします。チェックポイントストアを設定していればステップごとにチェックポイントを保存し、人の入力を待つために実行を止めて、あとで再開することもできます。
 

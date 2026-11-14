@@ -1,11 +1,21 @@
-<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=963aa7f780c30a59f4b03400c237eaff080704a9a32e79e033900de7c89ef513 -->
+<!-- neograph-i18n: source=README.md locale=zh-CN source_sha256=04e167ec7e9f4be955d3537cbbf689b1ebc7379648ec9a19c9f85b059afb69df -->
+<div align="center">
+
+<img src="docs/images/logo.svg" alt="NeoGraph" width="160">
+
 # NeoGraph
 
-**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+**运行以图描述的工作流的 C++20 库**
 
 [![CI](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml/badge.svg)](https://github.com/fox1245/NeoGraph/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/neograph-engine)](https://pypi.org/project/neograph-engine/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+**Languages:** [English](README.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
+
+</div>
+
+---
 
 NeoGraph 是一个 C++20 库，用来运行以图描述的工作流。节点负责干活，具名的状态通道保存数据，边决定接下来运行什么。运行时负责调度节点，把节点的写入合并进状态；配置了检查点存储时，每一步之后都会保存检查点；也可以暂停运行去等待人工输入，之后再恢复。
 
