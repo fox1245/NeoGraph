@@ -504,7 +504,7 @@ void init_provider_values(py::module_& m) {
         .def_readwrite("max_store_bytes", &sp::NativeArchiveLimits::max_store_bytes);
     py::class_<sp::NativeArchive, std::shared_ptr<sp::NativeArchive>>(m, "NativeArchive")
         .def_static("provision", &sp::NativeArchive::provision, py::arg("directory"), py::arg("independent_key_file"), py::arg("owner_scope"), py::arg("descriptor"), py::arg("limits") = sp::NativeArchiveLimits{}, py::call_guard<py::gil_scoped_release>())
-        .def_static("open", &sp::NativeArchive::open, py::arg("directory"), py::arg("independent_key_file"), py::arg("owner_scope"), py::arg("descriptor"), py::arg("limits") = sp::NativeArchiveLimits{}, py::call_guard<py::gil_scoped_release>())
+        .def_static("open", static_cast<decltype(&sp::NativeArchive::provision)>(&sp::NativeArchive::open), py::arg("directory"), py::arg("independent_key_file"), py::arg("owner_scope"), py::arg("descriptor"), py::arg("limits") = sp::NativeArchiveLimits{}, py::call_guard<py::gil_scoped_release>())
         .def("save", &sp::NativeArchive::save, py::arg("messages"), py::arg("binding") = "", py::call_guard<py::gil_scoped_release>())
         .def("load", &sp::NativeArchive::load, py::arg("reference"), py::arg("binding") = "", py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("owner_scope", [](const sp::NativeArchive& v) { return std::string(v.owner_scope()); })
