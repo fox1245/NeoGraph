@@ -215,6 +215,24 @@ TEST(SchemaProviderInterface, LinkedAbiGateAdmitsRealPreparedDispatch) {
         EXPECT_NE(sp::runtime::interface_contract().capabilities & bit, 0U);
         EXPECT_NE(sp::capability::RequiredProvider & bit, 0U);
     }
+    // The bits of the headers' later layouts: the transport's connection cache, the model-control facts and typed tool
+    // choice of a chat request, the realtime defaults and response bound, the voice id of a chat request, the priced
+    // extensions, and the endpoint tier and pin. A library built before any of them has smaller structs than these
+    // headers read, so NeoGraph requires every one and refuses it.
+    for (const auto bit : {sp::capability::TransportConnectionCache, sp::capability::ModelControlFacts,
+                           sp::capability::TypedToolChoice, sp::capability::RealtimeRuntimeDefaults,
+                           sp::capability::ChatVoiceId, sp::capability::PricedExtensions,
+                           sp::capability::EndpointTierAndPin, sp::capability::RealtimeResponseBound}) {
+        EXPECT_NE(sp::runtime::interface_contract().capabilities & bit, 0U);
+        EXPECT_NE(sp::capability::RequiredProvider & bit, 0U);
+    }
+    // The linked library bounds endpoint calls by their cost, but NeoGraph does not admit an endpoint call by bound,
+    // so the bit stays out of what it requires, as do the host seam and the host archive custody it never needs.
+    EXPECT_NE(sp::runtime::interface_contract().capabilities & sp::capability::EndpointCostBounds, 0U);
+    for (const auto bit : {sp::capability::HostSeam, sp::capability::HostArchiveCustody,
+                           sp::capability::EndpointCostBounds}) {
+        EXPECT_EQ(sp::capability::RequiredProvider & bit, 0U);
+    }
     wire::Peer peer(wire::chat_response());
     auto provider = wire::provider("openai.chat", peer.origin());
     const auto result = prepared_run(*provider, "openai.chat");
