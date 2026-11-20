@@ -14,6 +14,7 @@
 
 #include <array>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -136,10 +137,41 @@ PreparedProviderRequest prepared(Provider& provider, const std::string& model, s
 // 1 and 2 USD per million input and output tokens: 1,000 and 2,000 nano-USD per token.
 const json kListed{{"input", "0.000001"}, {"output", "0.000002"}};
 
-program::detail::MonetaryRequestFacts with_tools(std::vector<std::string> types, std::optional<std::uint64_t> uses) {
-    program::detail::MonetaryRequestFacts facts;
-    facts.tools.push_back({std::move(types), uses});
-    return facts;
+// A chat request for `model`, edited by `edit` before it is prepared.
+PreparedProviderRequest prepared_chat(Provider& provider, const std::string& model,
+                                      const std::function<void(sp::chat::Request&)>& edit) {
+    auto request = make_provider_request(provider, model, {neograph::test::message("q", sp::Role::User)});
+    auto& payload = std::get<sp::chat::Request>(request.payload);
+    payload.max_output_tokens = 100;
+    edit(payload);
+    return provider.prepare(std::move(request));
+}
+
+// A Responses call to `model` with a web search capped at `uses` (none: uncapped), as both pricing brokers prepare it.
+program::detail::PricedPreparation priced_search(Provider& provider, const std::string& model,
+                                                 std::optional<std::uint64_t> uses) {
+    auto request = make_provider_request(provider, model, {neograph::test::message("q", sp::Role::User)});
+    auto& payload          = std::get<sp::responses::Request>(request.payload);
+    payload.max_output_tokens = 100;
+    payload.hosted_tools   = {sp::responses::WebSearchTool{}};
+    payload.max_tool_calls = uses;
+    return program::detail::prepare_priced_call(provider, std::move(request), true);
+}
+
+// A Responses provider at kDirect whose catalogue lists web search at 0.01 USD for "fees", at zero for "free" and not
+// at all for "unlisted".
+std::shared_ptr<Provider> responses_provider() {
+    auto fees = kListed;
+    fees["tool:web_search"] = "0.01";
+    auto free = kListed;
+    free["tool:web_search"] = "0";
+    const auto model = [](std::string id, json pricing) {
+        neograph::test::FixtureModel fixture{"openai.responses", std::move(id), 1'000};
+        fixture.pricing = std::move(pricing);
+        return fixture;
+    };
+    return provider_at("openai.responses", std::string(kDirect),
+                       {model("fees", std::move(fees)), model("free", std::move(free)), model("unlisted", kListed)});
 }
 
 constexpr std::string_view kMessagesOrigin = "https://api.anthropic.com";
@@ -179,23 +211,6 @@ std::vector<sp::descriptor::ServerToolFact> messages_tool_facts(bool client) {
     for (const auto& fact : sp::descriptor::builtin_policy()->family("anthropic.messages")->server_tools)
         if (fact.client == client) facts.push_back(fact);
     return facts;
-}
-
-// Every alternative of `Variant`, default-constructed.
-template <class Variant, std::size_t... I>
-std::vector<Variant> alternatives(std::index_sequence<I...>) {
-    return {Variant{std::in_place_index<I>}...};
-}
-template <class Variant>
-std::vector<Variant> alternatives() {
-    return alternatives<Variant>(std::make_index_sequence<std::variant_size_v<Variant>>{});
-}
-
-// The tool type each alternative bills under, one cap per request member.
-std::vector<std::string> billed_types(const program::detail::MonetaryRequestFacts& facts) {
-    std::vector<std::string> types;
-    for (const auto& cap : facts.tools) types.insert(types.end(), cap.types.begin(), cap.types.end());
-    return types;
 }
 
 }  // namespace
@@ -363,37 +378,42 @@ TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
                                model_with("fees", 1'000, fees)});
     EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*direct, "unpriced")).blocker, "P_MONEY_UNKNOWN_MODEL");
 
-    // A service tier the entry does not price, and one it does.
-    program::detail::MonetaryRequestFacts flex;
-    flex.service_tier = "flex";
-    EXPECT_EQ(program::detail::assess_monetary_call(flex, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
-    const auto tier = program::detail::assess_monetary_call(flex, prepared(*direct, "tiered"));
+    // A service tier the entry does not price, and one it does. The tier is the request's own.
+    const auto flex = [](sp::chat::Request& request) { request.service_tier = "flex"; };
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared_chat(*direct, "fees", flex)).blocker, "P_MONEY_UNMODELED");
+    const auto tier = program::detail::assess_monetary_call({}, prepared_chat(*direct, "tiered", flex));
     ASSERT_TRUE(tier.blocker.empty()) << tier.blocker_message;
     EXPECT_EQ(tier.hold, 500U + 100);
     EXPECT_EQ(tier.service_tier, "flex");
     EXPECT_EQ(tier.pricing.at("service_tier"), "flex");
-    program::detail::MonetaryRequestFacts standard;
-    standard.service_tier = "default";
-    EXPECT_EQ(program::detail::assess_monetary_call(standard, prepared(*direct, "tiered")).hold, 1'000U + 200);
+    const auto standard = [](sp::chat::Request& request) { request.service_tier = "default"; };
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared_chat(*direct, "tiered", standard)).hold, 1'000U + 200);
 
-    // A server tool without a use cap, without a fee, and with both. Tools that
-    // share one cap are bounded at the dearest fee; zero is a declared fee.
-    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"web_search"}, std::nullopt), prepared(*direct, "fees")).blocker,
-              "P_MONEY_NO_UPPER_BOUND");
-    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"code_interpreter"}, 2), prepared(*direct, "fees")).blocker,
-              "P_MONEY_UNMODELED");
-    const auto tools = program::detail::assess_monetary_call(with_tools({"file_search", "web_search"}, 3), prepared(*direct, "fees"));
-    ASSERT_TRUE(tools.blocker.empty()) << tools.blocker_message;
-    // Three uses at 0.01 USD on top of the tokens.
-    EXPECT_EQ(tools.hold, 1'000U + 200 + 30'000);
-    EXPECT_EQ(tools.tool_fees_nano_usd, 30'000'000U);
-    EXPECT_EQ(tools.pricing.at("tool_uses"), (json{{"web_search", 3}}));
-    EXPECT_EQ(program::detail::assess_monetary_call(with_tools({"free_tool"}, 5), prepared(*direct, "fees")).hold, 1'000U + 200);
+    // A server tool without a use cap, without a fee, and with both; zero is a declared fee. Responses' max_tool_calls
+    // caps the hosted tools, and each use is one more model invocation (4 for 3 uses), the fees billed once.
+    auto responses = responses_provider();
+    const auto uncapped = priced_search(*responses, "fees", std::nullopt);
+    ASSERT_TRUE(uncapped.quote);
+    EXPECT_EQ(uncapped.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
+    const auto unlisted = priced_search(*responses, "unlisted", 3);
+    ASSERT_TRUE(unlisted.quote);
+    EXPECT_EQ(unlisted.quote->blocker, "P_MONEY_UNMODELED");
+    const auto tools = priced_search(*responses, "fees", 3);
+    ASSERT_TRUE(tools.prepared.valid()) << (tools.prepared.error() ? tools.prepared.error()->safe_message : std::string());
+    ASSERT_TRUE(tools.quote);
+    ASSERT_TRUE(tools.quote->blocker.empty()) << tools.quote->blocker_message;
+    EXPECT_EQ(Provider::invocation_upper_bound(tools.prepared), 4U);
+    EXPECT_EQ(tools.quote->hold, 4U * (1'000 + 200) + 30'000);
+    EXPECT_EQ(tools.quote->tool_fees_nano_usd, 30'000'000U);
+    EXPECT_EQ(tools.quote->pricing.at("tool_uses"), (json{{"web_search", 3}}));
+    const auto free = priced_search(*responses, "free", 3);
+    ASSERT_TRUE(free.quote);
+    EXPECT_EQ(free.quote->hold, 4U * (1'000 + 200));
 
-    // A feature the catalogue cannot price.
-    program::detail::MonetaryRequestFacts plugins;
-    plugins.unpriced = "OpenRouter plugins";
-    EXPECT_EQ(program::detail::assess_monetary_call(plugins, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
+    // A call the hold does not price yet.
+    program::detail::MonetaryRequestFacts endpoint;
+    endpoint.unpriced = "SchemaProvider endpoint calls";
+    EXPECT_EQ(program::detail::assess_monetary_call(endpoint, prepared(*direct, "fees")).blocker, "P_MONEY_UNMODELED");
 
     // A routing gateway needs a route ceiling, and a ceiling needs a gateway.
     auto routed = provider_at("openai.chat", std::string(kOpenRouter),
@@ -411,14 +431,13 @@ TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
     auto misplaced = provider_at("openai.chat", std::string(kDirect), {model_with("vendor/ceiling", 1'000, ceiling)});
     EXPECT_EQ(program::detail::assess_monetary_call({}, prepared(*misplaced, "vendor/ceiling")).blocker, "P_MONEY_NO_UPPER_BOUND");
 
-    // OpenRouter fallbacks: every candidate is priced, the pin covers the
-    // dearest ceiling, and the hold is the dearest candidate's bound at it.
-    program::detail::MonetaryRequestFacts fallbacks;
-    fallbacks.fallback_models = {"vendor/unlisted"};
-    EXPECT_EQ(program::detail::assess_monetary_call(fallbacks, prepared(*routed, "vendor/ceiling")).blocker,
+    // OpenRouter fallbacks (the request's `models`): every candidate is priced, the pin covers the dearest ceiling,
+    // and the hold is the dearest candidate's bound at it.
+    const auto unlisted_fallback = [](sp::chat::Request& request) { request.models = {"vendor/unlisted"}; };
+    EXPECT_EQ(program::detail::assess_monetary_call({}, prepared_chat(*routed, "vendor/ceiling", unlisted_fallback)).blocker,
               "P_MONEY_UNKNOWN_MODEL");
-    fallbacks.fallback_models = {"vendor/dearer"};
-    const auto fallback = program::detail::assess_monetary_call(fallbacks, prepared(*routed, "vendor/ceiling"));
+    const auto dearer_fallback = [](sp::chat::Request& request) { request.models = {"vendor/dearer"}; };
+    const auto fallback = program::detail::assess_monetary_call({}, prepared_chat(*routed, "vendor/ceiling", dearer_fallback));
     ASSERT_TRUE(fallback.blocker.empty()) << fallback.blocker_message;
     ASSERT_TRUE(fallback.pin);
     EXPECT_EQ(fallback.pin->prompt_nano_usd, 5'000'000'000U);
@@ -428,85 +447,22 @@ TEST(PricingAssess, RefusalsAreDataAndAddingTheFactAdmitsTheCall) {
     EXPECT_EQ(fallback.pricing.at("entry"), "vendor/dearer");
 }
 
-TEST(PricingAssess, RequestFactsComeFromTheTypedRequest) {
+TEST(PricingAssess, OnlyAnEndpointCallIsLeftUnpricedBeforeItIsPrepared) {
+    // What decides a chat call's price is read by the SDK from the prepared request; before it is prepared only an
+    // endpoint call is set apart.
     ProviderRequest chat;
     sp::chat::Request chat_payload;
     chat_payload.models       = {"vendor/a", "vendor/b"};
     chat_payload.service_tier = "flex";
+    chat_payload.plugins.emplace_back();
     chat.payload              = chat_payload;
-    auto facts                = program::detail::monetary_request_facts(chat);
-    EXPECT_EQ(facts.fallback_models, (std::vector<std::string>{"vendor/a", "vendor/b"}));
-    EXPECT_EQ(facts.service_tier, "flex");
-    EXPECT_FALSE(facts.unpriced);
-    std::get<sp::chat::Request>(chat.payload).plugins.emplace_back();
-    EXPECT_TRUE(program::detail::monetary_request_facts(chat).unpriced);
-
-    ProviderRequest responses;
-    sp::responses::Request responses_payload;
-    responses_payload.hosted_tools   = {sp::responses::WebSearchTool{}, sp::responses::FileSearchTool{}};
-    responses_payload.max_tool_calls = 4;
-    responses.payload                = responses_payload;
-    facts                            = program::detail::monetary_request_facts(responses);
-    ASSERT_EQ(facts.tools.size(), 1U);
-    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search", "file_search"}));
-    EXPECT_EQ(facts.tools[0].uses, 4U);
-    EXPECT_EQ(facts.tools[0].member, "max_tool_calls");
-
-    ProviderRequest messages;
-    sp::messages::Request messages_payload;
-    sp::messages::ToolDefinition search;
-    search.type     = "web_search_20250305";
-    search.name     = "web_search";
-    search.max_uses = 2;
-    sp::messages::ToolDefinition client;
-    client.name = "lookup";
-    messages_payload.tools = {search, client};
-    messages.payload       = messages_payload;
-    facts                  = program::detail::monetary_request_facts(messages);
-    ASSERT_EQ(facts.tools.size(), 1U) << "a client tool bills only tokens";
-    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"web_search_20250305"}));
-    EXPECT_EQ(facts.tools[0].uses, 2U);
-    EXPECT_EQ(facts.tools[0].member, "max_uses");
-
-    ProviderRequest generate;
-    sp::gemini::Request generate_payload;
-    generate_payload.builtin_tools = {sp::gemini::GoogleSearchTool{}};
-    generate.payload               = generate_payload;
-    facts                          = program::detail::monetary_request_facts(generate);
-    ASSERT_EQ(facts.tools.size(), 1U);
-    EXPECT_EQ(facts.tools[0].types, (std::vector<std::string>{"google_search"}));
-    EXPECT_FALSE(facts.tools[0].uses) << "Gemini's built-in tools take no use cap";
-    EXPECT_TRUE(facts.tools[0].member.empty());
-}
-
-TEST(PricingAssess, EveryToolVariantIsPricedUnderItsOwnWireType) {
-    // monetary.cpp matches each alternative of these variants without a default, so one SchemaProvider adds
-    // later does not build until it is mapped; this pins what the current ones bill under.
-    ProviderRequest generate;
-    sp::gemini::Request generate_payload;
-    generate_payload.builtin_tools = alternatives<sp::gemini::BuiltinTool>();
-    generate.payload               = generate_payload;
-    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(generate)),
-              (std::vector<std::string>{"google_search", "url_context", "code_execution", "google_maps", "computer_use",
-                                        "file_search"}));
-
-    ProviderRequest interactions;
-    sp::interactions::Request interactions_payload;
-    interactions_payload.builtin_tools = alternatives<sp::interactions::BuiltinTool>();
-    interactions.payload               = interactions_payload;
-    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(interactions)),
-              (std::vector<std::string>{"google_search", "url_context", "code_execution"}));
-
-    ProviderRequest responses;
-    sp::responses::Request responses_payload;
-    responses_payload.hosted_tools = alternatives<sp::responses::HostedTool>();
-    std::get<sp::responses::OpenRouterServerTool>(responses_payload.hosted_tools[9]).type = "openrouter:web_search";
-    std::get<sp::responses::GenericHostedTool>(responses_payload.hosted_tools[10]).type   = "generic_tool";
-    responses.payload = responses_payload;
-    EXPECT_EQ(billed_types(program::detail::monetary_request_facts(responses)),
-              (std::vector<std::string>{"web_search", "image_generation", "file_search", "tool_search", "shell",
-                                        "code_interpreter", "mcp", "computer", "computer_use_preview",
-                                        "openrouter:web_search", "generic_tool"}));
+    EXPECT_FALSE(program::detail::monetary_request_facts(chat).unpriced);
+    sp::embeddings::Request embed;
+    embed.model = "embed";
+    embed.inputs.push_back({"hello"});
+    const auto endpoint = program::detail::monetary_request_facts(make_endpoint_request(std::move(embed)));
+    ASSERT_TRUE(endpoint.unpriced);
+    EXPECT_EQ(*endpoint.unpriced, "SchemaProvider endpoint calls");
 }
 
 TEST(PricingAssess, AMessagesClientToolBillsOnlyTokens) {
@@ -828,10 +784,10 @@ TEST(PricingWorstCase, TheHoldIsTheSdkBoundAndCountsServerToolFeesOncePerAttempt
 }
 
 TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
-    auto fees               = kListed;
-    fees["tool:web_search"] = "0.01";
-    auto provider = provider_at("openai.chat", std::string(kDirect), {model_with("vendor/model", 1'000, fees)});
-    const auto quote = program::detail::assess_monetary_call(with_tools({"web_search"}, 2), prepared(*provider, "vendor/model"));
+    auto       provider = responses_provider();
+    const auto searched = priced_search(*provider, "fees", 2);
+    ASSERT_TRUE(searched.quote);
+    const auto& quote = *searched.quote;
     ASSERT_TRUE(quote.blocker.empty()) << quote.blocker_message;
     const program::detail::MonetaryCallSite site{"call", "operation", "node"};
     auto usage    = neograph::test::usage(300, 40, 340);
@@ -845,7 +801,7 @@ TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
     EXPECT_TRUE(record->conservative) << "tool uses are charged at their cap";
     EXPECT_EQ(record->basis, "list_rates");
     EXPECT_EQ(record->catalog_digest, quote.catalog_digest);
-    EXPECT_EQ(record->pricing.at("entry"), "vendor/model");
+    EXPECT_EQ(record->pricing.at("entry"), "fees");
     EXPECT_EQ(record->pricing.at("tool_uses"), (json{{"web_search", 2}}));
 
     // A reported cost settles without the catalogue.

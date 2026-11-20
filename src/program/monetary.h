@@ -16,15 +16,15 @@
  *  1. Assess. Prices come only from the SchemaProvider model catalogue of the
  *     provider's admitted descriptor policy: the embedded catalogue and the
  *     layers the host merged over it (sp::descriptor::merge_catalogues,
- *     DescriptorPolicy::with_catalogue). The entry is the one the policy
- *     matches for the family, the base URL and the admitted model, priced in
- *     the request's service tier (sp::pricing::dearest_price_of). The hold is
- *     the catalogue bound (sp::pricing::upper_bound) for the request's input
- *     bound and output cap, its server tools at their use caps, and on an
- *     OpenRouter origin the entry's route ceiling, times the invocations one
- *     dispatch can bill. The input bound is the smallest input limit the
- *     catalogue knows for the model: its input limit or its context window.
- *     OpenRouter model fallbacks reserve the dearest candidate. On an
+ *     DescriptorPolicy::with_catalogue). The hold is the SDK's worst case of
+ *     the prepared request over that catalogue (Provider::worst_case_cost,
+ *     sp::runtime::worst_case_cost): every model invocation and transport
+ *     attempt the request may bill, the service tier it bills under (its
+ *     priced extensions, such as Messages' speed, included), its fallback
+ *     models, its server tools at their use caps, what it carries (an image)
+ *     and, on an OpenRouter origin, the route ceiling, rounded up once to
+ *     whole microunits. Every reason the SDK gives for no bound refuses the
+ *     call with a P_MONEY_* code. On an
  *     OpenRouter origin the request is pinned before it is prepared to be
  *     sent: its provider.max_price becomes the route ceiling, or the host's
  *     own cap where that is lower, so the request that is digested, journaled
@@ -148,25 +148,14 @@ struct MonetaryCallSite {
 /** The scheme of catalog_version for amounts priced from a SchemaProvider model catalogue. */
 inline constexpr std::string_view kCatalogueScheme = "sp-model-catalogue/1";
 
-/** What a typed request adds to its price beyond its tokens. */
+/**
+ * What a typed request needs before it is priced. Everything that decides the
+ * amount (service tier, priced extensions, fallback models, server tools and
+ * their caps, routing, image input) is read by the SDK from the prepared
+ * request (Provider::request_facts()).
+ */
 struct MonetaryRequestFacts {
-    /// The request's own service tier; unset, the provider's default applies.
-    std::optional<std::string> service_tier;
-    /// OpenRouter Chat model fallbacks (`models`): any of them may serve the call.
-    std::vector<std::string> fallback_models;
-    /// Server and hosted tool types that share one per-request use cap:
-    /// Messages' max_uses per tool, Responses' max_tool_calls for all its
-    /// hosted tools. No cap leaves the call without an upper bound. A type
-    /// the family policy marks as a client tool (Messages' memory, bash and
-    /// toolsets) is run by the caller; assess_monetary_call() prices none of it.
-    struct ToolCap {
-        std::vector<std::string>     types;
-        std::optional<std::uint64_t> uses;
-        /// The request member that states `uses`; empty where the family has none.
-        std::string                  member;
-    };
-    std::vector<ToolCap> tools;
-    /// A feature the catalogue cannot price at all (OpenRouter plugins).
+    /// A call the hold does not price at all yet (a SchemaProvider endpoint call).
     std::optional<std::string> unpriced;
 };
 
@@ -178,7 +167,9 @@ struct MonetaryQuote {
     /// The provider's base URL, the origin the catalogue entry matched at.
     std::string   origin;
     std::string   model;
-    /// Reservation for one dispatch; 0 when none can be computed.
+    /// Reservation for one dispatch: the SDK's worst case of the prepared
+    /// request (its model invocations and attempts included), rounded up once
+    /// to whole microunits. 0 when it is refused (`blocker` is then set).
     std::uint64_t hold = 0;
     std::string   hold_basis;
     std::string   catalog_version;
@@ -189,6 +180,8 @@ struct MonetaryQuote {
     /// OpenRouter's provider.max_price for a routed request: the route
     /// ceiling, lowered field by field to any cap the host already sends.
     std::optional<sp::OpenRouterMaxPrice> pin;
+    /// The prepared request already carries `pin` as its provider.max_price.
+    bool          pinned = false;
     json          witness = json::object();
     /// What settles the call: the catalogue snapshot the hold was priced
     /// from, the family, the service tier ("" for the standard tier), whether
@@ -235,11 +228,12 @@ struct PricedPreparation {
  * included, so a later turn prepared without the pin would be refused as
  * ReplayIneligible.
  *
- * The assessment reads the provider, the model, the request's caps and its
- * routing, never its conversation, so it prices a probe of the request whose
- * conversation is one user message; the probe is released unsent. A request
- * whose probe the provider does not admit is priced from its own preparation
- * and prepared again when that has to be pinned.
+ * The pin comes from a probe of the request whose conversation is one user
+ * message; the probe is released unsent. The hold is then the bound of the
+ * request that is sent, whose images and continuation the bound reads, and it
+ * is refused when that request does not carry the pin. A request whose probe
+ * the provider does not admit is priced from its own preparation and prepared
+ * again when that has to be pinned.
  *
  * `prepared` may be invalid: the broker returns preparation_failure_outcome().
  * `quote` is empty when the call is not priced or could not be prepared.
