@@ -5,7 +5,7 @@ option(NEOGRAPH_FETCH_SCHEMAPROVIDER
 
 # Pin the SDK source, not a moving branch or release tag.
 set(NEOGRAPH_SCHEMAPROVIDER_REVISION
-    "76afa3cf69b9ac81180217dfcc489572b9a59f4b")
+    "9819a0d2abf49fe1bd38c9a146c20c0c78c03a1d")
 
 # What NeoGraph needs of the SDK: the runtime, and the libcurl transport wherever the SDK can have one. The
 # transport runs its own I/O threads, so a single-thread build has none, and neither has a WebAssembly host.
@@ -29,10 +29,14 @@ endif()
 set(SP_THREADS ${NEOGRAPH_THREADS} CACHE BOOL "Build SchemaProvider with OS threads (follows NEOGRAPH_THREADS)" FORCE)
 set(SP_BUILD_TRANSPORT ${_neograph_sp_transport} CACHE STRING
     "Build the libcurl transport (follows NEOGRAPH_THREADS)" FORCE)
+# NeoGraph uses none of the SDK's key custody API. The SDK's own default looks for libsodium and links it when the
+# host has it, so the static exports, the SDK libraries in the Python wheel and the installed consumers would differ
+# by the host that built them. A build that fetches the SDK fixes the dependency set instead.
+set(SP_WITH_SODIUM OFF CACHE STRING "Build SchemaProvider without libsodium (NeoGraph uses no key custody)" FORCE)
 unset(_neograph_sp_transport)
 
 if(NOT NEOGRAPH_SCHEMAPROVIDER_SOURCE_DIR)
-    find_package(SchemaProvider 0.4.0 EXACT CONFIG QUIET COMPONENTS ${_neograph_sp_required_components})
+    find_package(SchemaProvider 0.4.4 EXACT CONFIG QUIET COMPONENTS ${_neograph_sp_required_components})
     if(NOT SchemaProvider_FOUND)
         if(NOT NEOGRAPH_FETCH_SCHEMAPROVIDER)
             message(FATAL_ERROR
