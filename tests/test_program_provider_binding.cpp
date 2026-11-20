@@ -159,6 +159,10 @@ json prices_of(std::string_view model) {
     if (model == "vendor/limitless")
         return json{{"input", "0.000001"}, {"output", "0.000002"},
                     {"ceiling_input", "0.000003"}, {"ceiling_output", "0.000004"}};
+    // A route ceiling below the input price the entry lists: it bounds nothing.
+    if (model == "vendor/stale-ceiling")
+        return json{{"input", "0.000002"}, {"output", "0.000004"},
+                    {"ceiling_input", "0.000001"}, {"ceiling_output", "0.000004"}};
     return json::object();
 }
 
@@ -1411,6 +1415,9 @@ TEST_P(Priced, ARunWithACeilingRefusesWhatItCannotBound) {
         {"router alias without a route ceiling",
          [](HostOptions& o) { o.model = "~deepseek/deepseek-v4-flash-latest"; },
          "P_MONEY_NO_UPPER_BOUND", ProgramTerminalStatus::Failed},
+        {"a route ceiling below the listed price",
+         [](HostOptions& o) { o.model = "vendor/stale-ceiling"; },
+         "P_MONEY_NO_UPPER_BOUND", ProgramTerminalStatus::Failed},
         {"no output cap", [](HostOptions& o) { o.output_cap.reset(); }, "P_MONEY_NO_OUTPUT_CAP",
          ProgramTerminalStatus::Failed},
         {"unmodeled service tier", [](HostOptions& o) { o.service_tier = "flex"; },
@@ -1468,6 +1475,10 @@ TEST(ProgramProviderBinding, TheRouteCeilingIsTheReservationAndThePinnedPrice) {
     // 100,000 input tokens at 440 and 64 output tokens at 1,320 nano-USD.
     EXPECT_EQ(quote.hold, (100'000U * 440 + 64 * 1'320 + 999) / 1000);
     EXPECT_EQ(quote.hold, expected_hold());
+    ASSERT_TRUE(quote.catalogue);
+    const auto bound = Provider::worst_case_cost(provider->prepare(request), *quote.catalogue);
+    ASSERT_TRUE(bound.total);
+    EXPECT_EQ(quote.hold, (bound.total->nano_usd + 999) / 1000) << "the hold is the SDK's bound of the request";
     EXPECT_EQ(quote.hold_basis, "route_ceiling");
     EXPECT_EQ(quote.origin, kOpenRouter);
     EXPECT_EQ(quote.catalog_version, "sp-model-catalogue/1");
@@ -1605,6 +1616,10 @@ TEST(ProgramProviderBinding, OnlyAnOpenRouterOriginIsPinned) {
     EXPECT_EQ(quote.hold_basis, "list_rates");
     EXPECT_FALSE(quote.pin);
     EXPECT_EQ(prepared.encoded_body().find("max_price"), std::string_view::npos);
+    ASSERT_TRUE(quote.catalogue);
+    const auto bound = Provider::worst_case_cost(prepared, *quote.catalogue);
+    ASSERT_TRUE(bound.total);
+    EXPECT_EQ(quote.hold, (bound.total->nano_usd + 999) / 1000) << "the hold is the SDK's bound of the request";
 
     // An OpenRouter URL whose SDK policy admits no OpenRouter routing cannot
     // be pinned, so its route ceiling bounds nothing and the call is refused.

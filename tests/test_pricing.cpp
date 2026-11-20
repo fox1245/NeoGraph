@@ -14,11 +14,14 @@
 
 #include <array>
 #include <fstream>
+#include <iostream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <random>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -597,6 +600,231 @@ TEST(PricingAssess, AMessagesServerToolThatAdmitsNoMaxUsesCannotBeBoundedAndSays
     EXPECT_EQ(mcp.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
     EXPECT_NE(mcp.quote->blocker_message.find("'mcp_toolset' admits no max_uses"), std::string::npos)
         << mcp.quote->blocker_message;
+}
+
+// ------------------------------------------------- the SDK's worst case
+
+namespace {
+
+// The standard rows of kListed, and fast rows at 2 and 8 USD per million input and output tokens.
+const json kFastRows{{"input", "0.000001"}, {"output", "0.000002"}, {"input/fast", "0.000002"}, {"output/fast", "0.000008"}};
+
+neograph::test::FixtureModel family_model(std::string family, std::string model, std::uint64_t input_limit, json pricing) {
+    neograph::test::FixtureModel fixture{std::move(family), std::move(model), input_limit};
+    fixture.pricing = std::move(pricing);
+    return fixture;
+}
+
+// Anthropic Messages at its own origin, where the policy admits `speed` and `inference_geo`.
+std::shared_ptr<Provider> fast_messages_provider() {
+    return provider_at("anthropic.messages", std::string(kMessagesOrigin),
+                       {family_model("anthropic.messages", "with-fast", 1'000, kFastRows),
+                        family_model("anthropic.messages", "without-fast", 1'000, kListed)});
+}
+
+ProviderRequest messages_request(const Provider& provider, const std::string& model, const json& extensions) {
+    ProviderControls controls;
+    controls.max_output_tokens = 100;
+    if (!extensions.is_null()) controls.messages.extensions = extensions;
+    return make_provider_request(provider, model, {neograph::test::message("q", sp::Role::User)}, {}, std::move(controls));
+}
+
+program::detail::PricedPreparation priced(Provider& provider, ProviderRequest request) {
+    return program::detail::prepare_priced_call(provider, std::move(request), true);
+}
+
+// A user message with text and, for `image`, an image by URL.
+sp::Message question(bool image) {
+    sp::Message message = neograph::test::message("q", sp::Role::User);
+    if (image) {
+        sp::Media media;
+        media.kind      = sp::MediaKind::Image;
+        media.mime      = "image/png";
+        media.source    = sp::MediaSource::Url;
+        media.reference = "https://media.example.test/picture.png";
+        message.parts.emplace_back(std::move(media));
+    }
+    return message;
+}
+
+ProviderRequest chat_request(const Provider& provider, const std::string& model, bool image) {
+    auto request = make_provider_request(provider, model, {question(image)});
+    std::get<sp::chat::Request>(request.payload).max_output_tokens = 100;
+    return request;
+}
+
+// What the SDK's worst case of `prepared` is over the catalogue the quote holds, rounded up once to whole microunits;
+// the largest value when it has none, which no hold equals.
+std::uint64_t sdk_hold(const PreparedProviderRequest& prepared, const program::detail::MonetaryQuote& quote) {
+    if (!quote.catalogue) return std::numeric_limits<std::uint64_t>::max();
+    const auto bound = Provider::worst_case_cost(prepared, *quote.catalogue);
+    if (!bound.total) return std::numeric_limits<std::uint64_t>::max();
+    return microunits(*bound.total);
+}
+
+// The SDK reason a refused quote names first (UnboundedBy's name), and its subject.
+std::string first_unbounded(const program::detail::MonetaryQuote& quote, const char* field = "by") {
+    if (!quote.witness.contains("unbounded") || quote.witness.at("unbounded").size() == 0) return {};
+    return quote.witness.at("unbounded").at(0).value(field, std::string());
+}
+
+}  // namespace
+
+TEST(PricingWorstCase, AFastMessagesCallIsHeldAtTheFastRowsAndRefusedWithoutThem) {
+    auto provider = fast_messages_provider();
+    const auto standard = priced(*provider, messages_request(*provider, "with-fast", json()));
+    ASSERT_TRUE(standard.prepared.valid());
+    ASSERT_TRUE(standard.quote);
+    ASSERT_TRUE(standard.quote->blocker.empty()) << standard.quote->blocker_message;
+    // 1,000 input tokens at 1,000 and 100 output tokens at 2,000 nano-USD.
+    EXPECT_EQ(standard.quote->hold, 1'000U + 200);
+    const auto named = priced(*provider, messages_request(*provider, "with-fast", json{{"speed", "standard"}}));
+    ASSERT_TRUE(named.quote);
+    EXPECT_EQ(named.quote->hold, 1'000U + 200) << "speed standard bills the standard rates";
+
+    // speed fast: 1,000 input tokens at 2,000 and 100 output tokens at 8,000 nano-USD.
+    const auto fast = priced(*provider, messages_request(*provider, "with-fast", json{{"speed", "fast"}}));
+    ASSERT_TRUE(fast.prepared.valid());
+    ASSERT_TRUE(fast.quote);
+    ASSERT_TRUE(fast.quote->blocker.empty()) << fast.quote->blocker_message;
+    EXPECT_EQ(fast.quote->hold, 2'000U + 800);
+    EXPECT_EQ(fast.quote->hold, sdk_hold(fast.prepared, *fast.quote));
+
+    // An entry without fast rows has no price for a fast call: refused, never held at the standard rates.
+    const auto refused = priced(*provider, messages_request(*provider, "without-fast", json{{"speed", "fast"}}));
+    ASSERT_TRUE(refused.quote);
+    EXPECT_EQ(refused.quote->blocker, "P_MONEY_UNMODELED");
+    EXPECT_EQ(refused.quote->hold, 0U);
+    EXPECT_EQ(first_unbounded(*refused.quote), "TierPrice");
+}
+
+TEST(PricingWorstCase, AnInferenceGeoOtherThanGlobalIsRefusedAsUnmodeled) {
+    auto provider = fast_messages_provider();
+    const auto regional = priced(*provider, messages_request(*provider, "with-fast", json{{"inference_geo", "us"}}));
+    ASSERT_TRUE(regional.prepared.valid());
+    ASSERT_TRUE(regional.quote);
+    EXPECT_EQ(regional.quote->blocker, "P_MONEY_UNMODELED");
+    EXPECT_EQ(regional.quote->hold, 0U);
+    EXPECT_EQ(first_unbounded(*regional.quote), "Unmodeled");
+    EXPECT_EQ(first_unbounded(*regional.quote, "subject"), "inference_geo");
+    const auto global = priced(*provider, messages_request(*provider, "with-fast", json{{"inference_geo", "global"}}));
+    ASSERT_TRUE(global.quote);
+    ASSERT_TRUE(global.quote->blocker.empty()) << global.quote->blocker_message;
+    EXPECT_EQ(global.quote->hold, 1'000U + 200);
+}
+
+TEST(PricingWorstCase, AListedImagePriceRefusesARequestThatCarriesAnImage) {
+    // `image` is a per-image price of a models listing, which no token rate holds. The probe a pricing broker prices
+    // carries no image, so the bound must be read from the request that is sent.
+    auto with_image          = kListed;
+    with_image["image"]      = "0.001";
+    auto provider = provider_at("openai.chat", "https://api.openai.com",
+                                {model_with("listed-image", 1'000, with_image), model_with("plain", 1'000, kListed)});
+    const auto text = priced(*provider, chat_request(*provider, "listed-image", false));
+    ASSERT_TRUE(text.quote);
+    ASSERT_TRUE(text.quote->blocker.empty()) << text.quote->blocker_message;
+    EXPECT_EQ(text.quote->hold, 1'000U + 200) << "a request without an image is not billed the image price";
+
+    const auto picture = priced(*provider, chat_request(*provider, "listed-image", true));
+    ASSERT_TRUE(picture.prepared.valid())
+        << (picture.prepared.error() ? picture.prepared.error()->safe_message : std::string());
+    ASSERT_TRUE(picture.quote);
+    EXPECT_EQ(picture.quote->blocker, "P_MONEY_NO_UPPER_BOUND");
+    EXPECT_EQ(picture.quote->hold, 0U);
+    EXPECT_EQ(first_unbounded(*picture.quote), "ModelPrice");
+    // The same request is refused when it is assessed directly.
+    const auto direct = program::detail::assess_monetary_call({}, provider->prepare(chat_request(*provider, "listed-image", true)));
+    EXPECT_EQ(direct.blocker, "P_MONEY_NO_UPPER_BOUND");
+
+    const auto plain = priced(*provider, chat_request(*provider, "plain", true));
+    ASSERT_TRUE(plain.quote);
+    ASSERT_TRUE(plain.quote->blocker.empty()) << plain.quote->blocker_message;
+    EXPECT_EQ(plain.quote->hold, 1'000U + 200);
+}
+
+TEST(PricingWorstCase, AStaleRouteCeilingIsRefusedAsStale) {
+    // vendor/stale lists a ceiling_input below its input price; vendor/image-stale one below its input_image price,
+    // which a ceiling also has to cover on the input side.
+    auto provider = provider_at(
+        "openai.chat", std::string(kOpenRouter),
+        {model_with("vendor/stale", 1'000,
+                    json{{"input", "0.000002"}, {"output", "0.000004"}, {"ceiling_input", "0.000001"},
+                         {"ceiling_output", "0.000004"}}),
+         model_with("vendor/image-stale", 1'000,
+                    json{{"input", "0.000001"}, {"output", "0.000002"}, {"input_image", "0.000009"},
+                         {"ceiling_input", "0.000003"}, {"ceiling_output", "0.000004"}}),
+         model_with("vendor/fresh", 1'000,
+                    json{{"input", "0.000001"}, {"output", "0.000002"}, {"ceiling_input", "0.000003"},
+                         {"ceiling_output", "0.000004"}})});
+    for (const auto* model : {"vendor/stale", "vendor/image-stale"}) {
+        SCOPED_TRACE(model);
+        const auto quote = program::detail::assess_monetary_call({}, prepared(*provider, model));
+        EXPECT_EQ(quote.blocker, "P_MONEY_NO_UPPER_BOUND");
+        EXPECT_EQ(quote.hold, 0U);
+        EXPECT_FALSE(quote.pin);
+        EXPECT_EQ(first_unbounded(quote), "RouteCeiling");
+        EXPECT_EQ(first_unbounded(quote, "subject"), model);
+    }
+    const auto fresh = program::detail::assess_monetary_call({}, prepared(*provider, "vendor/fresh"));
+    ASSERT_TRUE(fresh.blocker.empty()) << fresh.blocker_message;
+    // 1,000 input tokens at 3,000 and 100 output tokens at 4,000 nano-USD.
+    EXPECT_EQ(fresh.hold, 3'000U + 400);
+    ASSERT_TRUE(fresh.pin);
+    EXPECT_EQ(fresh.pin->prompt_nano_usd, 3'000'000'000U);
+}
+
+TEST(PricingWorstCase, AnInputImageRateAtTheListedRatesIsHeldAsTheSdkBoundsIt) {
+    // Recorded, not decided here: what the SDK's chat bound does with an input_image rate above the input rate for a
+    // request that carries an image. The hold is the SDK's bound, whatever it is.
+    auto rows           = kListed;
+    rows["input_image"] = "0.000009";
+    auto provider = provider_at("openai.chat", "https://api.openai.com", {model_with("image-rate", 1'000, rows)});
+    const auto picture = priced(*provider, chat_request(*provider, "image-rate", true));
+    ASSERT_TRUE(picture.quote);
+    std::cout << "INPUT-IMAGE: blocker '" << picture.quote->blocker << "' hold " << picture.quote->hold << " sdk "
+              << sdk_hold(picture.prepared, *picture.quote) << "\n";
+    if (picture.quote->blocker.empty()) EXPECT_EQ(picture.quote->hold, sdk_hold(picture.prepared, *picture.quote));
+}
+
+TEST(PricingWorstCase, TheHoldIsTheSdkBoundAndCountsServerToolFeesOncePerAttempt) {
+    // Where the old hand-built bound and the SDK's agree (one invocation, one attempt), the hold is unchanged.
+    auto prices             = kListed;
+    prices["input+200000"]  = "0.000002";
+    prices["output+200000"] = "0.000003";
+    auto ceiling            = kListed;
+    ceiling["ceiling_input"]  = "0.000003";
+    ceiling["ceiling_output"] = "0.000004";
+    auto direct = provider_at("openai.chat", std::string(kDirect),
+                              {model_with("vendor/model", 1'000, kListed), model_with("short", 200'000, prices),
+                               model_with("long", 1'000'000, prices)});
+    auto routed = provider_at("openai.chat", std::string(kOpenRouter), {model_with("vendor/ceiling", 1'000, ceiling)});
+    const std::vector<std::tuple<Provider*, const char*, std::uint64_t>> agreed{
+        {direct.get(), "vendor/model", 1'000U + 200},
+        {direct.get(), "short", 200'000U + 200},
+        {direct.get(), "long", 2'000'000U + 300},
+        {routed.get(), "vendor/ceiling", 3'000U + 400}};
+    for (const auto& [provider, model, hold] : agreed) {
+        SCOPED_TRACE(model);
+        const auto call  = prepared(*provider, model);
+        const auto quote = program::detail::assess_monetary_call({}, call);
+        ASSERT_TRUE(quote.blocker.empty()) << quote.blocker_message;
+        EXPECT_EQ(quote.hold, hold);
+        EXPECT_EQ(quote.hold, sdk_hold(call, quote));
+    }
+
+    // A Messages server tool with three uses: one invocation and one more for each use, the uses' fees once per
+    // attempt. 4 x (100,000 input tokens at 1,000 + 100 output tokens at 2,000 nano-USD) + 3 x 0.01 USD.
+    auto provider = messages_provider();
+    const auto capped = priced_messages(*provider, {typed_tool("web_search_20250305", "web_search", 3)});
+    ASSERT_TRUE(capped.prepared.valid());
+    ASSERT_TRUE(capped.quote);
+    ASSERT_TRUE(capped.quote->blocker.empty()) << capped.quote->blocker_message;
+    const auto invocations = Provider::invocation_upper_bound(capped.prepared);
+    ASSERT_TRUE(invocations);
+    ASSERT_EQ(*invocations, 4U);
+    EXPECT_EQ(capped.quote->hold, (4U * (100'000 * 1'000 + 100 * 2'000) + 30'000'000) / 1'000);
+    EXPECT_EQ(capped.quote->hold, sdk_hold(capped.prepared, *capped.quote));
+    EXPECT_EQ(capped.quote->tool_fees_nano_usd, 30'000'000U);
 }
 
 TEST(PricingSettle, AnEstimateUsesTheHoldsSnapshotAndChargesReservedToolFees) {
