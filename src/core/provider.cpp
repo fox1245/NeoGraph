@@ -246,6 +246,11 @@ void observe_hooks(const std::shared_ptr<DispatchHooks>& hooks, Function&& invok
         try { invoke(*current); } catch (...) {}
     }
 }
+// The handle the SDK's cost functions answer "did not prepare" for.
+const sp::runtime::PreparedRequest& unprepared() noexcept {
+    static const sp::runtime::PreparedRequest none;
+    return none;
+}
 }
 
 struct PreparedProviderRequest::Impl {
@@ -1168,6 +1173,31 @@ std::optional<std::uint64_t> Provider::conservative_token_upper_bound(const Prep
     const auto per_invocation = *input + *output;
     if (per_invocation > std::numeric_limits<std::uint64_t>::max() / *possible) return {};
     return per_invocation * *possible;
+}
+sp::pricing::WorstCase Provider::worst_case_cost(const PreparedProviderRequest& request,
+                                                  const sp::runtime::WorstCaseOptions& options) {
+    return sp::runtime::worst_case_cost(request.valid() ? request.impl_->prepared : unprepared(), options);
+}
+sp::pricing::WorstCase Provider::worst_case_cost(const PreparedProviderRequest& request,
+                                                 const sp::descriptor::ModelCatalogue& catalogue,
+                                                 const sp::runtime::WorstCaseOptions& options) {
+    return sp::runtime::worst_case_cost(request.valid() ? request.impl_->prepared : unprepared(), catalogue, options);
+}
+sp::pricing::EndpointBound Provider::endpoint_worst_case_cost(const PreparedProviderRequest& request,
+                                                              const sp::runtime::EndpointCostOptions& options) {
+    return sp::runtime::endpoint_worst_case_cost(request.valid() ? request.impl_->prepared : unprepared(), options);
+}
+sp::pricing::EndpointBound Provider::endpoint_worst_case_cost(const PreparedProviderRequest& request,
+                                                              const sp::descriptor::ModelCatalogue& catalogue,
+                                                              const sp::runtime::EndpointCostOptions& options) {
+    return sp::runtime::endpoint_worst_case_cost(request.valid() ? request.impl_->prepared : unprepared(), catalogue,
+                                                 options);
+}
+const sp::RequestFacts& Provider::request_facts(const PreparedProviderRequest& request) noexcept {
+    return (request.valid() ? request.impl_->prepared : unprepared()).facts();
+}
+const sp::EndpointFacts& Provider::endpoint_facts(const PreparedProviderRequest& request) noexcept {
+    return (request.valid() ? request.impl_->prepared : unprepared()).endpoint_facts();
 }
 ProviderBudgetClaim::ProviderBudgetClaim() = default;
 ProviderBudgetClaim::ProviderBudgetClaim(ProviderDispatchBudget budget, std::uint64_t amount)
