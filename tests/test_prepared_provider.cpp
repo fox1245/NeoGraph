@@ -7,6 +7,7 @@
 #include <asio/this_coro.hpp>
 #include <asio/use_awaitable.hpp>
 #include "fixtures/typed_provider.h"
+#include <limits>
 
 using namespace neograph;
 using namespace std::chrono_literals;
@@ -258,13 +259,13 @@ TEST(PreparedProviderCost, AnInferenceGeoThatIsNotGlobalIsUnmodeledAndGlobalIsNo
 }
 
 TEST(PreparedProviderCost, AListedPriceTheCatalogueCannotReadLeavesNoTotal) {
-    // A listed member that no price unit reads and the SDK's table does not know prices something the request may carry.
-    auto unread = kListedRates;
-    unread["unread_surcharge"] = "0.5";
+    // A listed request fee at a variable price (a negative row) is no amount a bound can hold.
+    auto variable = kListedRates;
+    variable["request"] = "-1";
     auto provider = provider_with("openai.chat", kDirectOrigin,
-        {model_priced("openai.chat", "readable", 1'000, kListedRates), model_priced("openai.chat", "unreadable", 1'000, unread)});
+        {model_priced("openai.chat", "readable", 1'000, kListedRates), model_priced("openai.chat", "variable", 1'000, variable)});
     EXPECT_TRUE(Provider::worst_case_cost(chat_call(*provider, "readable")).total);
-    const auto bound = Provider::worst_case_cost(chat_call(*provider, "unreadable"));
+    const auto bound = Provider::worst_case_cost(chat_call(*provider, "variable"));
     EXPECT_FALSE(bound.total);
     EXPECT_TRUE(has_reason(bound.unbounded, sp::pricing::UnboundedBy::ModelPrice)) << bound.unbounded.size();
 }
@@ -396,4 +397,13 @@ TEST(PreparedProviderCost, ARequestThatDidNotPrepareHasNoTotalAndNoFacts) {
     ASSERT_FALSE(refused.valid());
     EXPECT_FALSE(Provider::worst_case_cost(refused).total);
     EXPECT_TRUE(Provider::endpoint_facts(refused).endpoint.empty());
+    // A preparation the SDK accepted and this layer refused afterwards (an observer limit beyond the admitted resources)
+    // is as unbounded as one the SDK refused.
+    auto over_limit = make_provider_request(*provider, "with-fast", {test::message("q", sp::Role::User)});
+    over_limit.observer_limits.max_events = std::numeric_limits<std::size_t>::max();
+    const auto beyond = provider->prepare(std::move(over_limit));
+    ASSERT_FALSE(beyond.valid());
+    EXPECT_FALSE(Provider::worst_case_cost(beyond).total);
+    EXPECT_FALSE(Provider::endpoint_worst_case_cost(beyond).total);
+    EXPECT_TRUE(Provider::request_facts(beyond).priced_extensions.empty());
 }
