@@ -51,6 +51,27 @@ TEST(SchemaProviderTypedControls, RoutingDefaultsAndPerCallReplacementRemainExpl
     EXPECT_EQ(body.at("provider").at("allow_fallbacks"), false);
 }
 
+// The SDK no longer installs the routing check that the provider ran on its defaults when it was created. The
+// encoder runs the same check on the merged routing of every request, so a default that no request could carry is
+// refused when a request is prepared, with nothing sent.
+TEST(SchemaProviderTypedControls, RoutingDefaultsTheSdkRefusesAreRefusedWhenARequestIsPrepared) {
+    sp::OpenRouterRouting defaults; defaults.only = {"default-provider"}; defaults.ignore = {"default-provider"};
+    llm::SchemaProvider::Defaults controls; controls.provider = defaults;
+    const auto source = json{{"descriptor_version", 1}, {"revision", 1},
+        {"id", "router-bad-defaults"}, {"family", "openai.chat"},
+        {"connection", {{"base_url", "https://openrouter.ai"},
+            {"paths", {{"buffered", "/api/v1/chat/completions"},
+                       {"streaming", "/api/v1/chat/completions"}}}}}}.dump();
+    auto admitted = sp::descriptor::load(source);
+    ASSERT_TRUE(std::holds_alternative<sp::descriptor::ValidatedDescriptor>(admitted));
+    std::unique_ptr<llm::SchemaProvider> provider;
+    ASSERT_NO_THROW(provider = llm::SchemaProvider::create(
+        std::get<sp::descriptor::ValidatedDescriptor>(std::move(admitted)), {}, controls));
+    auto prepared = provider->prepare(wire::request());
+    ASSERT_FALSE(prepared.valid()); ASSERT_NE(prepared.error(), nullptr);
+    EXPECT_EQ(prepared.error()->kind, sp::ErrorKind::InvalidRequest);
+}
+
 TEST(SchemaProviderTypedControls, RoutingOnUnadmittedOriginNeverLeaksToWire) {
     wire::Peer peer(wire::chat_response()); auto provider = wire::provider("openai.chat", peer.origin());
     auto request = wire::request(); sp::OpenRouterRouting routing; routing.zdr = true;

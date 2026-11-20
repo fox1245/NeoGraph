@@ -21,13 +21,13 @@ std::string checked_family(const sp::descriptor::ValidatedDescriptor& descriptor
     sp::runtime::require_interface_contract(sp::EXPECTED_INTERFACE_REVISION, sp::capability::RequiredProvider);
     return std::string(descriptor.family());
 }
-void check_defaults(const sp::descriptor::ValidatedDescriptor& descriptor, const std::string& family,
-                    const SchemaProvider::Defaults& defaults) {
+// The SDK checks the content of a routing (its origin, lists and price caps) on every request it encodes and keeps
+// that check private, so the defaults are checked here only for the family and are merged into each request, which
+// the encoder then refuses before anything is sent if they cannot be carried.
+void check_defaults(const std::string& family, const SchemaProvider::Defaults& defaults) {
     if (defaults.provider) {
         if (family != "openai.chat" && family != "openai.responses")
             throw std::invalid_argument("Routing defaults are unsupported by this family");
-        if (const auto error = sp::request_controls::validate_routing(descriptor, *defaults.provider))
-            throw std::invalid_argument(*error);
     }
     if (defaults.responses_store && family != "openai.responses")
         throw std::invalid_argument("Responses retention defaults require Responses family");
@@ -36,7 +36,7 @@ void check_defaults(const sp::descriptor::ValidatedDescriptor& descriptor, const
 SchemaProvider::SchemaProvider(sp::descriptor::ValidatedDescriptor descriptor,
                                sp::runtime::Options options, Defaults defaults)
     : family_(checked_family(descriptor)), name_(descriptor.id()), defaults_(std::move(defaults)) {
-    check_defaults(descriptor, family_, defaults_);
+    check_defaults(family_, defaults_);
 #ifdef NEOGRAPH_HAVE_SP_TRANSPORT
     client_ = std::make_shared<sp::runtime::Client>(std::move(descriptor), std::move(options));
 #else
@@ -49,7 +49,7 @@ SchemaProvider::SchemaProvider(sp::descriptor::ValidatedDescriptor descriptor, s
                                std::shared_ptr<sp::runtime::HostTransport> transport, Defaults defaults)
     : family_(checked_family(descriptor)), name_(descriptor.id()), defaults_(std::move(defaults)),
       host_pumped_(executor && executor->host_pumped()) {
-    check_defaults(descriptor, family_, defaults_);
+    check_defaults(family_, defaults_);
     client_ = std::make_shared<sp::runtime::Client>(std::move(descriptor), std::move(options),
                                                     std::move(executor), std::move(transport));
 }
