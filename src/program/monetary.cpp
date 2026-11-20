@@ -8,7 +8,6 @@
 #include <descriptor/descriptor.h>
 #include <descriptor/policy.h>
 
-#include <yyjson.h>
 
 #include <algorithm>
 #include <limits>
@@ -118,12 +117,6 @@ std::optional<detail::MonetaryRefusal> ProgramMonetaryAccount::refusal_for(
 namespace detail {
 namespace {
 
-// Service tier names that mean the standard tier, priced by the catalogue
-// units that name no tier.
-bool standard_service_tier(std::string_view tier) {
-    return tier == "default" || tier == "standard" || tier == "standard_only";
-}
-
 // Catalogue amounts are exact nano-USD; a charge rounds up once to a whole microunit.
 std::uint64_t ceil_microunits(std::uint64_t nano_usd) noexcept {
     return nano_usd / 1000 + (nano_usd % 1000 != 0 ? 1 : 0);
@@ -141,133 +134,10 @@ std::string joined(const std::vector<std::string>& values) {
     return out;
 }
 
-// False for every T: a tool variant without a branch below fails to compile
-// instead of being priced as another tool.
-template <class>
-inline constexpr bool kUnpricedToolVariant = false;
-
-// The wire type of a Responses hosted tool, the `tool:<type>` its fee is listed under.
-std::string hosted_tool_type(const sp::responses::HostedTool& tool) {
-    return std::visit(
-        [](const auto& item) -> std::string {
-            using T = std::decay_t<decltype(item)>;
-            if constexpr (std::is_same_v<T, sp::responses::WebSearchTool>) return "web_search";
-            else if constexpr (std::is_same_v<T, sp::responses::ImageGenerationTool>) return "image_generation";
-            else if constexpr (std::is_same_v<T, sp::responses::FileSearchTool>) return "file_search";
-            else if constexpr (std::is_same_v<T, sp::responses::ToolSearchTool>) return "tool_search";
-            else if constexpr (std::is_same_v<T, sp::responses::ShellTool>) return "shell";
-            else if constexpr (std::is_same_v<T, sp::responses::CodeInterpreterTool>) return "code_interpreter";
-            else if constexpr (std::is_same_v<T, sp::responses::McpTool>) return "mcp";
-            else if constexpr (std::is_same_v<T, sp::responses::ComputerTool>) return "computer";
-            else if constexpr (std::is_same_v<T, sp::responses::ComputerUsePreviewTool>) return "computer_use_preview";
-            else if constexpr (std::is_same_v<T, sp::responses::OpenRouterServerTool> ||
-                               std::is_same_v<T, sp::responses::GenericHostedTool>) return item.type;
-            else static_assert(kUnpricedToolVariant<T>, "a Responses hosted tool has no wire type here");
-        },
-        tool);
-}
-
-// The wire type of a Gemini built-in tool (Generate or Interactions).
-template <class Tool>
-std::string builtin_tool_type(const Tool& tool) {
-    return std::visit(
-        [](const auto& item) -> std::string {
-            using T = std::decay_t<decltype(item)>;
-            if constexpr (std::is_same_v<T, sp::gemini::GoogleSearchTool> ||
-                          std::is_same_v<T, sp::interactions::GoogleSearchTool>) return "google_search";
-            else if constexpr (std::is_same_v<T, sp::gemini::UrlContextTool> ||
-                               std::is_same_v<T, sp::interactions::UrlContextTool>) return "url_context";
-            else if constexpr (std::is_same_v<T, sp::gemini::CodeExecutionTool> ||
-                               std::is_same_v<T, sp::interactions::CodeExecutionTool>) return "code_execution";
-            else if constexpr (std::is_same_v<T, sp::gemini::GoogleMapsTool>) return "google_maps";
-            else if constexpr (std::is_same_v<T, sp::gemini::ComputerUseTool>) return "computer_use";
-            else if constexpr (std::is_same_v<T, sp::gemini::FileSearchTool>) return "file_search";
-            else static_assert(kUnpricedToolVariant<T>, "a Gemini built-in tool has no wire type here");
-        },
-        tool);
-}
-
-// The policy's fact for a server tool type of the family, if it lists one.
-const sp::descriptor::ServerToolFact* server_tool_fact(const sp::descriptor::FamilyPolicy* family,
-                                                       std::string_view                    type) {
-    if (!family) return nullptr;
-    const auto found = std::find_if(family->server_tools.begin(), family->server_tools.end(),
-                                    [&](const auto& fact) { return fact.type == type; });
-    return found == family->server_tools.end() ? nullptr : &*found;
-}
-
 json price_rows(const sp::descriptor::CatalogueEntry& entry) {
     json units = json::object();
     for (const auto& [unit, text] : entry.pricing) units[unit] = text;
     return units;
-}
-
-// The largest amount OpenRouter's provider.max_price admits, in nanoUSD.
-constexpr std::uint64_t kMaxPriceNanoUsd = std::uint64_t{1} << 53;
-
-// nanoUSD from the exact decimal USD number the SDK writes for max_price:
-// whole dollars, then at most nine fractional digits, no sign or exponent.
-std::optional<std::uint64_t> exact_nano_usd(std::string_view text) {
-    const auto dot      = text.find('.');
-    const auto whole    = text.substr(0, dot);
-    const auto fraction = dot == std::string_view::npos ? std::string_view{} : text.substr(dot + 1);
-    if (whole.empty() || whole.size() > 10 || fraction.size() > 9 ||
-        (dot != std::string_view::npos && fraction.empty()))
-        return std::nullopt;
-    std::uint64_t value = 0;
-    for (const char c : whole) {
-        if (c < '0' || c > '9') return std::nullopt;
-        value = value * 10 + static_cast<std::uint64_t>(c - '0');
-    }
-    for (std::size_t i = 0; i < 9; ++i) {
-        const char c = i < fraction.size() ? fraction[i] : '0';
-        if (c < '0' || c > '9') return std::nullopt;
-        value = value * 10 + static_cast<std::uint64_t>(c - '0');
-    }
-    if (value > kMaxPriceNanoUsd) return std::nullopt;
-    return value;
-}
-
-// The provider.max_price a prepared request already sends: the host's own cap
-// from its request controls or its provider defaults, as the provider merged
-// them. Read from the encoded body because the defaults live in the provider.
-struct SentMaxPrice {
-    std::optional<sp::OpenRouterMaxPrice> price;
-    bool                                  malformed = false;
-};
-
-SentMaxPrice sent_max_price(std::string_view body) {
-    if (body.find("\"max_price\"") == std::string_view::npos) return {};
-    std::unique_ptr<yyjson_doc, decltype(&yyjson_doc_free)> document(
-        yyjson_read_opts(const_cast<char*>(body.data()), body.size(), YYJSON_READ_NUMBER_AS_RAW,
-                         nullptr, nullptr),
-        &yyjson_doc_free);
-    if (!document) return {std::nullopt, true};
-    auto* price = yyjson_obj_get(yyjson_obj_get(yyjson_doc_get_root(document.get()), "provider"),
-                                 "max_price");
-    if (!price) return {};
-    if (!yyjson_is_obj(price)) return {std::nullopt, true};
-    SentMaxPrice sent{sp::OpenRouterMaxPrice{}, false};
-    const std::pair<const char*, std::optional<std::uint64_t> sp::OpenRouterMaxPrice::*> fields[] = {
-        {"prompt", &sp::OpenRouterMaxPrice::prompt_nano_usd},
-        {"completion", &sp::OpenRouterMaxPrice::completion_nano_usd},
-        {"image", &sp::OpenRouterMaxPrice::image_nano_usd},
-        {"audio", &sp::OpenRouterMaxPrice::audio_nano_usd},
-        {"request", &sp::OpenRouterMaxPrice::request_nano_usd}};
-    std::size_t known = 0;
-    for (const auto& [key, member] : fields) {
-        auto* amount = yyjson_obj_get(price, key);
-        if (!amount) continue;
-        ++known;
-        const auto nano = yyjson_is_raw(amount)
-                              ? exact_nano_usd(std::string_view(yyjson_get_raw(amount),
-                                                                yyjson_get_len(amount)))
-                              : std::nullopt;
-        if (!nano) return {std::nullopt, true};
-        (*sent.price).*member = nano;
-    }
-    if (known == 0 || known != yyjson_obj_size(price)) return {std::nullopt, true};
-    return sent;
 }
 
 constexpr std::optional<std::uint64_t> sp::OpenRouterMaxPrice::* kMaxPriceFields[] = {
@@ -275,30 +145,10 @@ constexpr std::optional<std::uint64_t> sp::OpenRouterMaxPrice::* kMaxPriceFields
     &sp::OpenRouterMaxPrice::image_nano_usd, &sp::OpenRouterMaxPrice::audio_nano_usd,
     &sp::OpenRouterMaxPrice::request_nano_usd};
 
-// Field by field, the lower of the route ceiling and the host's own cap. A
-// field only the host caps keeps the host's amount.
-sp::OpenRouterMaxPrice lower_max_price(sp::OpenRouterMaxPrice                       ceiling,
-                                       const std::optional<sp::OpenRouterMaxPrice>& own) {
-    if (!own) return ceiling;
-    for (const auto member : kMaxPriceFields) {
-        const auto& host   = (*own).*member;
-        auto&       pinned = ceiling.*member;
-        if (host && (!pinned || *host < *pinned)) pinned = host;
-    }
-    return ceiling;
-}
-
 bool same_max_price(const sp::OpenRouterMaxPrice& left, const sp::OpenRouterMaxPrice& right) {
     for (const auto member : kMaxPriceFields)
         if (left.*member != right.*member) return false;
     return true;
-}
-
-std::optional<std::uint64_t> min_known(std::initializer_list<std::optional<std::uint64_t>> values) {
-    std::optional<std::uint64_t> result;
-    for (const auto& value : values)
-        if (value && *value > 0 && (!result || *value < *result)) result = value;
-    return result;
 }
 
 void block(MonetaryQuote& quote, std::string code, std::string message) {
@@ -403,47 +253,78 @@ void bounded_text(const std::string& value, std::string_view field, bool may_be_
 
 MonetaryRequestFacts monetary_request_facts(const ProviderRequest& request) {
     MonetaryRequestFacts facts;
-    // The catalogue prices chat tokens only; nothing bounds an endpoint request yet (SchemaProvider#124).
-    if (request.endpoint) {
-        facts.unpriced = "SchemaProvider endpoint calls";
-        return facts;
-    }
-    std::visit(
-        [&](const auto& payload) {
-            using T = std::decay_t<decltype(payload)>;
-            if constexpr (requires { payload.service_tier; }) facts.service_tier = payload.service_tier;
-            if constexpr (requires { payload.plugins; }) {
-                if (!payload.plugins.empty()) facts.unpriced = "OpenRouter plugins";
-            }
-            if constexpr (std::is_same_v<T, sp::chat::Request>) facts.fallback_models = payload.models;
-            if constexpr (std::is_same_v<T, sp::responses::Request>) {
-                if (!payload.hosted_tools.empty()) {
-                    MonetaryRequestFacts::ToolCap cap;
-                    cap.uses   = payload.max_tool_calls;
-                    cap.member = "max_tool_calls";
-                    for (const auto& tool : payload.hosted_tools) cap.types.push_back(hosted_tool_type(tool));
-                    facts.tools.push_back(std::move(cap));
-                }
-            }
-            if constexpr (std::is_same_v<T, sp::messages::Request>) {
-                // A typed tool is a server tool unless the family policy marks it a client tool;
-                // assess_monetary_call() reads that fact, as the request is not prepared yet.
-                for (const auto& tool : payload.tools)
-                    if (!tool.type.empty()) facts.tools.push_back({{tool.type}, tool.max_uses, "max_uses"});
-            }
-            if constexpr (std::is_same_v<T, sp::gemini::Request> || std::is_same_v<T, sp::interactions::Request>) {
-                // Gemini's built-in tools take no use cap.
-                for (const auto& tool : payload.builtin_tools)
-                    facts.tools.push_back({{builtin_tool_type(tool)}, std::nullopt, {}});
-            }
-            if constexpr (std::is_same_v<T, sp::gemini::Request>) {
-                for (const auto& server : payload.mcp_servers)
-                    facts.tools.push_back({{"mcp:" + server.name}, std::nullopt, {}});
-            }
-        },
-        request.payload);
+    // The hold prices chat calls only; an endpoint request is not held by its bound yet (SchemaProvider#124).
+    if (request.endpoint) facts.unpriced = "SchemaProvider endpoint calls";
     return facts;
 }
+
+namespace {
+
+// The refusal code for the SDK's reason a prepared request has no cost bound.
+std::string refusal_code(sp::pricing::UnboundedBy by) {
+    using sp::pricing::UnboundedBy;
+    switch (by) {
+        case UnboundedBy::OutputCap: return "P_MONEY_NO_OUTPUT_CAP";
+        case UnboundedBy::InputBound: return "P_MONEY_NO_INPUT_BOUND";
+        case UnboundedBy::Invocations:
+        case UnboundedBy::ModelPrice:
+        case UnboundedBy::ToolCap:
+        case UnboundedBy::RouteCeiling:
+        case UnboundedBy::Overflow: return "P_MONEY_NO_UPPER_BOUND";
+        case UnboundedBy::TierPrice:
+        case UnboundedBy::ToolFee:
+        case UnboundedBy::Unmodeled:
+        case UnboundedBy::Billing:
+        case UnboundedBy::Quantity: return "P_MONEY_UNMODELED";
+    }
+    return "P_MONEY_NO_UPPER_BOUND";
+}
+
+// Refuses `quote` by the first of the SDK's reasons. The witness keeps every reason as the SDK states it; the message
+// is built from the reason's kind and subject and, for a server tool, from the cap the request facts describe.
+void refuse(MonetaryQuote& quote, const sp::pricing::WorstCase& bound, const sp::RequestFacts& facts) {
+    using sp::pricing::UnboundedBy;
+    quote.hold    = 0;
+    auto reasons  = json::array();
+    std::vector<std::string> stated;
+    for (const auto& reason : bound.unbounded) {
+        const auto by = std::string(sp::pricing::to_string(reason.by));
+        reasons.push_back(json{{"by", by}, {"subject", reason.subject}, {"detail", reason.detail}});
+        stated.push_back(by + (reason.subject.empty() ? "" : " '" + reason.subject + "'") + ": " + reason.detail);
+    }
+    quote.witness["unbounded"] = std::move(reasons);
+    if (bound.unbounded.empty()) {
+        // No total and no reason: refused all the same.
+        block(quote, "P_MONEY_NO_UPPER_BOUND", "the SDK gives the request no cost bound");
+        return;
+    }
+    const auto& reason = bound.unbounded.front();
+    const auto  code   = refusal_code(reason.by);
+    if (reason.by == UnboundedBy::ModelPrice) {
+        const auto* entry = quote.catalogue->find(quote.family, quote.origin, reason.subject).entry;
+        if (!entry || entry->pricing.empty()) {
+            block(quote, "P_MONEY_UNKNOWN_MODEL",
+                  "the model catalogue has no price for model '" + reason.subject + "' at " + quote.origin);
+            return;
+        }
+    }
+    if (reason.by == UnboundedBy::ToolCap || reason.by == UnboundedBy::ToolFee)
+        quote.witness["unmodeled"] = "server tool '" + reason.subject + "'";
+    if (reason.by == UnboundedBy::Unmodeled) quote.witness["unmodeled"] = reason.subject;
+    if (reason.by == UnboundedBy::ToolCap) {
+        for (const auto& group : facts.tools) {
+            if (group.uses || group.types.empty() || group.types.front() != reason.subject) continue;
+            const auto why = group.member.empty()   ? std::string("takes no use cap")
+                             : !group.cap_admitted ? "admits no " + group.member
+                                                   : "has no use cap (" + group.member + ")";
+            block(quote, code, "server tool '" + reason.subject + "' " + why + ", so its fees have no upper bound");
+            return;
+        }
+    }
+    block(quote, code, "the SDK gives the request no cost bound (" + joined(stated) + ")");
+}
+
+}  // namespace
 
 MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
                                    const PreparedProviderRequest& prepared) {
@@ -462,7 +343,6 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
     quote.origin            = std::string(descriptor->base_url());
     quote.catalog_version   = std::string(kCatalogueScheme);
     quote.catalog_digest    = quote.catalogue->digest_hex();
-    quote.route_ceiling     = sp::descriptor::routed_gateway(*descriptor);
     quote.witness["origin"]          = quote.origin;
     quote.witness["catalog_version"] = quote.catalog_version;
     quote.witness["catalog_digest"]  = quote.catalog_digest;
@@ -472,187 +352,44 @@ MonetaryQuote assess_monetary_call(const MonetaryRequestFacts&    facts,
               "the request uses " + *facts.unpriced + ", which the model catalogue cannot price");
         return quote;
     }
-    auto tier = facts.service_tier;
-    if (!tier) {
-        const auto defaults = sp::descriptor::effective_defaults(*descriptor, quote.model);
-        if (defaults.service_tier) tier = std::string(*defaults.service_tier);
-    }
-    if (tier && !standard_service_tier(*tier)) {
-        quote.service_tier             = *tier;
-        quote.witness["service_tier"] = quote.service_tier;
-    }
-    const auto output = prepared.max_output_tokens();
-    if (!output) {
-        block(quote, "P_MONEY_NO_OUTPUT_CAP",
-              "the request has no output token cap, so its cost has no upper bound");
-        return quote;
-    }
-    // The tools the service runs. The family policy marks the ones the caller runs
-    // (Messages' memory, bash and toolsets): they bill only tokens, and take no cap.
-    const auto* family_policy = policy.family(quote.family);
-    std::vector<MonetaryRequestFacts::ToolCap> server_tools;
-    for (const auto& cap : facts.tools) {
-        MonetaryRequestFacts::ToolCap kept{{}, cap.uses, cap.member};
-        for (const auto& type : cap.types) {
-            const auto* fact = server_tool_fact(family_policy, type);
-            if (!fact || !fact->client) kept.types.push_back(type);
-        }
-        if (!kept.types.empty()) server_tools.push_back(std::move(kept));
-    }
-    for (const auto& cap : server_tools) {
-        if (cap.uses) continue;
-        const auto& type = cap.types.front();
-        const auto* fact = server_tool_fact(family_policy, type);
-        quote.witness["unmodeled"] = "server tool '" + type + "'";
-        std::string reason;
-        if (cap.member.empty())
-            reason = "takes no use cap";
-        else if (cap.member == "max_uses" && fact && !fact->max_uses)
-            reason = "admits no max_uses";
-        else
-            reason = "has no use cap (" + cap.member + ")";
-        block(quote, "P_MONEY_NO_UPPER_BOUND",
-              "server tool '" + type + "' " + reason + ", so its fees have no upper bound");
-        return quote;
-    }
-    const auto invocations = Provider::invocation_upper_bound(prepared);
-    if (!invocations) {
-        block(quote, "P_MONEY_NO_UPPER_BOUND",
-              "the prepared request does not state how many invocations it can bill");
-        return quote;
-    }
+    // The request's service tier as the policy maps it ("" for the standard rates). Settlement prices the usage under
+    // it (settle_amount).
+    const auto& request = Provider::request_facts(prepared);
+    quote.service_tier  = std::string(policy.billing_tier(quote.family, request.service_tier));
+    if (!quote.service_tier.empty()) quote.witness["service_tier"] = quote.service_tier;
 
-    // Every model that may serve the call: the admitted one, then OpenRouter's fallbacks.
-    struct Candidate {
-        std::string                           model;
-        const sp::descriptor::CatalogueEntry* entry = nullptr;
-        std::uint64_t                         input = 0;
-        sp::pricing::ModelPrice               price;
-    };
-    std::vector<Candidate> candidates;
-    std::vector<std::string> models{quote.model};
-    for (const auto& model : facts.fallback_models)
-        if (std::find(models.begin(), models.end(), model) == models.end()) models.push_back(model);
-    for (const auto& model : models) {
-        const auto* entry = policy.model(quote.family, quote.origin, model).entry;
-        if (!entry || entry->pricing.empty()) {
-            block(quote, "P_MONEY_UNKNOWN_MODEL",
-                  "the model catalogue has no price for model '" + model + "' at " + quote.origin);
-            return quote;
-        }
-        const auto input = min_known({policy.input_limit(quote.family, quote.origin, model), entry->context_window});
-        if (!input) {
-            block(quote, "P_MONEY_NO_INPUT_BOUND",
-                  "no input token limit is known for model '" + model + "', so its cost has no upper bound");
-            return quote;
-        }
-        auto price = sp::pricing::dearest_price_of(*entry, quote.service_tier, *input);
-        if (price.empty()) {
-            block(quote, "P_MONEY_UNMODELED",
-                  "catalogue entry '" + entry->id + "' prices no service tier '" + quote.service_tier + "'");
-            return quote;
-        }
-        const bool has_ceiling = price.ceiling_input || price.ceiling_output || price.ceiling_request;
-        if (!quote.route_ceiling && has_ceiling) {
-            // The bound holds only if the router cannot pick a dearer endpoint,
-            // so the ceiling must be pinned as OpenRouter's provider.max_price.
-            block(quote, "P_MONEY_NO_UPPER_BOUND",
-                  "the catalogue gives model '" + model + "' a route ceiling, but the SDK policy does not admit "
-                  "OpenRouter routing at " + quote.origin + ", so it cannot be pinned as provider.max_price");
-            return quote;
-        }
-        if (quote.route_ceiling && (!price.ceiling_input || !price.ceiling_output)) {
-            block(quote, "P_MONEY_NO_UPPER_BOUND",
-                  "model '" + model + "' at routing gateway " + quote.origin +
-                      " has no route ceiling (ceiling_input, ceiling_output), so the router may pick any price");
-            return quote;
-        }
-        candidates.push_back({model, entry, *input, std::move(price)});
-    }
-
-    if (quote.route_ceiling) {
-        // One pin covers every candidate, so each is bounded at the dearest ceiling.
-        sp::OpenRouterMaxPrice ceiling;
-        for (const auto& candidate : candidates) {
-            ceiling.prompt_nano_usd = (std::max)(ceiling.prompt_nano_usd.value_or(0), *candidate.price.ceiling_input);
-            ceiling.completion_nano_usd =
-                (std::max)(ceiling.completion_nano_usd.value_or(0), *candidate.price.ceiling_output);
-        }
-        if (*ceiling.prompt_nano_usd > kMaxPriceNanoUsd || *ceiling.completion_nano_usd > kMaxPriceNanoUsd) {
-            block(quote, "P_MONEY_NO_UPPER_BOUND",
-                  "the route ceiling of model '" + quote.model + "' exceeds the largest provider.max_price amount");
-            return quote;
-        }
-        const auto own = sent_max_price(prepared.encoded_body());
-        if (own.malformed) {
-            block(quote, "P_MONEY_NO_UPPER_BOUND", "the request's provider.max_price is not an exact USD amount");
-            return quote;
-        }
-        quote.pin = lower_max_price(ceiling, own.price);
-        for (auto& candidate : candidates) {
-            candidate.price.ceiling_input  = ceiling.prompt_nano_usd;
-            candidate.price.ceiling_output = ceiling.completion_nano_usd;
-        }
-    }
-
-    const Candidate*                                    dearest = nullptr;
-    std::uint64_t                                       bound   = 0;
-    std::vector<std::pair<std::string, std::uint64_t>>  reserved_tools;
-    for (const auto& candidate : candidates) {
-        // Each group of tools that shares a cap is bounded at its dearest fee.
-        std::vector<std::pair<std::string, std::uint64_t>> uses;
-        sp::pricing::ModelPrice                            fees;
-        for (const auto& cap : server_tools) {
-            std::optional<std::pair<std::string, std::uint64_t>> group;
-            for (const auto& type : cap.types) {
-                const auto found = std::find_if(candidate.price.tool_fees.begin(), candidate.price.tool_fees.end(),
-                                                [&](const auto& fee) { return fee.first == type; });
-                if (found == candidate.price.tool_fees.end()) {
-                    quote.witness["unmodeled"] = "server tool '" + type + "'";
-                    block(quote, "P_MONEY_UNMODELED",
-                          "catalogue entry '" + candidate.entry->id + "' lists no fee for server tool '" + type +
-                              "' (unit tool:" + type + ")");
-                    return quote;
-                }
-                if (!group || found->second > group->second) group = *found;
-            }
-            uses.emplace_back(group->first, *cap.uses);
-            fees.tool_fees.push_back(*group);
-        }
-        std::sort(fees.tool_fees.begin(), fees.tool_fees.end());
-        const auto total = sp::pricing::upper_bound(
-            candidate.price, {candidate.input, *output, quote.route_ceiling, uses});
-        if (!total.total) {
-            block(quote, "P_MONEY_NO_UPPER_BOUND",
-                  "the bound for model '" + candidate.model + "' has no price for " + joined(total.unpriced));
-            return quote;
-        }
-        if (dearest && total.total->nano_usd <= bound) continue;
-        const auto tools = sp::pricing::upper_bound(fees, {0, 0, false, uses});
-        dearest                  = &candidate;
-        bound                    = total.total->nano_usd;
-        reserved_tools           = uses;
-        quote.tool_fees_nano_usd = tools.total ? tools.total->nano_usd : bound;
-    }
-    const auto per_dispatch = ceil_microunits(bound);
-    if (per_dispatch > kMax / *invocations) {
-        block(quote, "P_MONEY_NO_UPPER_BOUND",
-              "the reservation for model '" + quote.model + "' does not fit 64-bit microunits");
+    // The SDK's worst case of the prepared request over the catalogue the hold names: every model invocation and
+    // transport attempt the request may bill, the tier it bills under (its priced extensions included), its fallback
+    // models, server tools and their caps, its routing and what it carries (an image).
+    const auto bound    = Provider::worst_case_cost(prepared, *quote.catalogue);
+    quote.route_ceiling = bound.route_ceiling;
+    if (!bound.total || !bound.unbounded.empty()) {
+        refuse(quote, bound, request);
         return quote;
     }
-    quote.hold       = per_dispatch * *invocations;
-    quote.hold_basis = quote.route_ceiling ? "route_ceiling" : "list_rates";
-    quote.pricing    = json{{"entry", dearest->entry->id}, {"units", price_rows(*dearest->entry)}};
+    const auto* entry = quote.catalogue->find(quote.family, quote.origin, bound.model).entry;
+    if (!entry || entry->id != bound.entry || (bound.route_ceiling && !bound.pin)) {
+        block(quote, "P_MONEY_NO_UPPER_BOUND",
+              "the cost bound of model '" + quote.model + "' names no catalogue entry or route ceiling pin to hold it by");
+        return quote;
+    }
+    quote.hold               = ceil_microunits(bound.total->nano_usd);
+    quote.hold_basis         = bound.route_ceiling ? "route_ceiling" : "list_rates";
+    quote.pin                = bound.pin;
+    quote.pinned             = bound.pinned;
+    quote.tool_fees_nano_usd = bound.tool_fees_nano_usd;
+    quote.pricing            = json{{"entry", entry->id}, {"units", price_rows(*entry)}};
     if (!quote.service_tier.empty()) quote.pricing["service_tier"] = quote.service_tier;
-    if (!reserved_tools.empty()) {
+    if (!bound.tool_uses.empty()) {
         auto tools = json::object();
-        for (const auto& [type, uses] : reserved_tools) tools[type] = uses;
+        for (const auto& [type, uses] : bound.tool_uses) tools[type] = uses;
         quote.pricing["tool_uses"] = std::move(tools);
     }
-    quote.witness["entry"]               = dearest->entry->id;
-    quote.witness["input_tokens_bound"]  = dearest->input;
-    quote.witness["output_tokens_bound"] = *output;
-    quote.witness["invocations"]         = *invocations;
+    quote.witness["entry"]               = entry->id;
+    quote.witness["input_tokens_bound"]  = bound.input_tokens;
+    quote.witness["output_tokens_bound"] = bound.output_tokens;
+    quote.witness["invocations"]         = bound.invocations;
+    quote.witness["attempts"]            = bound.attempts;
     quote.witness["reserved_microunits"] = quote.hold;
     quote.witness["basis"]               = quote.hold_basis;
     return quote;
@@ -682,14 +419,29 @@ bool pin_route_max_price(ProviderRequest& request, const sp::OpenRouterMaxPrice&
         request.payload);
 }
 
+namespace {
+
+// The quote of a request about to be sent. A bound at the route ceiling holds only when the request carries its pin.
+MonetaryQuote sent_quote(const MonetaryRequestFacts& facts, const PreparedProviderRequest& prepared) {
+    auto quote = assess_monetary_call(facts, prepared);
+    if (quote.blocker.empty() && quote.pin && !quote.pinned) {
+        quote.hold = 0;
+        block(quote, "P_MONEY_NO_UPPER_BOUND",
+              "the request does not carry the route ceiling it is held at as provider.max_price");
+    }
+    return quote;
+}
+
+}  // namespace
+
 PricedPreparation prepare_priced_call(Provider& provider, ProviderRequest request, bool priced) {
     if (!priced) return {provider.prepare(std::move(request)), std::nullopt};
     const auto facts = monetary_request_facts(request);
-    std::optional<MonetaryQuote> quote;
+    std::optional<MonetaryQuote> probed_quote;
     {
-        // The quote never reads the conversation, so a probe with a one-message
-        // conversation prices the call. It carries no native history, whose
-        // routing binding would refuse an unpinned turn after a pinned one.
+        // A probe with a one-message conversation gives the route ceiling pin. It carries no native history, whose
+        // routing binding would refuse an unpinned turn after a pinned one. It carries no image and no continuation
+        // either, so the hold is the bound of the request that is sent, not the probe's.
         sp::Message question;
         question.role = sp::Role::User;
         question.parts.emplace_back(sp::Text{"."});
@@ -704,21 +456,26 @@ PricedPreparation prepare_priced_call(Provider& provider, ProviderRequest reques
             },
             probe.payload);
         const auto probed = provider.prepare(std::move(probe));
-        if (probed.valid()) quote = assess_monetary_call(facts, probed);
+        if (probed.valid()) probed_quote = assess_monetary_call(facts, probed);
     }  // The probe's operation slot is released here, unsent.
-    if (quote) {
-        if (quote->pin) (void)pin_route_max_price(request, *quote->pin);
-        return {provider.prepare(std::move(request)), std::move(quote)};
+    if (probed_quote) {
+        if (probed_quote->pin) (void)pin_route_max_price(request, *probed_quote->pin);
+        auto prepared = provider.prepare(std::move(request));
+        if (!prepared.valid()) return {std::move(prepared), std::move(probed_quote)};
+        auto quote = sent_quote(facts, prepared);
+        return {std::move(prepared), std::move(quote)};
     }
     // The provider does not admit the probe: price the request's own preparation.
     auto pinnable = request;
     auto prepared = provider.prepare(std::move(request));
     if (!prepared.valid()) return {std::move(prepared), std::nullopt};
-    quote = assess_monetary_call(facts, prepared);
-    if (quote->pin && pin_route_max_price(pinnable, *quote->pin)) {
+    auto quote = assess_monetary_call(facts, prepared);
+    if (quote.pin && pin_route_max_price(pinnable, *quote.pin)) {
         prepared = PreparedProviderRequest{};  // release its operation slot first
         prepared = provider.prepare(std::move(pinnable));
+        if (!prepared.valid()) return {std::move(prepared), std::move(quote)};
     }
+    quote = sent_quote(facts, prepared);
     return {std::move(prepared), std::move(quote)};
 }
 
