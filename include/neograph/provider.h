@@ -3,6 +3,7 @@
 #include <neograph/api.h>
 #include <neograph/types.h>
 #include <runtime/client.h>
+#include <runtime/cost.h>
 #include <core/request_controls.h>
 #include <asio/any_io_executor.hpp>
 #include <asio/awaitable.hpp>
@@ -434,6 +435,34 @@ public:
     /// request's model invocations times the transport attempts its retry
     /// policy allows. Empty when the prepared request does not state them.
     static std::optional<std::uint64_t> invocation_upper_bound(const PreparedProviderRequest& request);
+
+    /// The most a prepared chat request can bill, by the SDK's cost bound over the catalogue of the descriptor
+    /// policy that admitted it (the second form: over `catalogue`, a host's merged layers for instance). The result
+    /// is the SDK's: a total that already counts the request's invocations and transport attempts, or no total and
+    /// the typed reasons (`unbounded`) it has none. A request that did not prepare, or has no admitted descriptor,
+    /// has no total (`Unmodeled`). Nothing is held, reserved or recorded. A prepared endpoint call is answered with
+    /// the SDK's projection of its endpoint bound.
+    static sp::pricing::WorstCase worst_case_cost(const PreparedProviderRequest& request,
+                                                  const sp::runtime::WorstCaseOptions& options = {});
+    static sp::pricing::WorstCase worst_case_cost(const PreparedProviderRequest& request,
+                                                  const sp::descriptor::ModelCatalogue& catalogue,
+                                                  const sp::runtime::WorstCaseOptions& options = {});
+    /// The most a prepared SchemaProvider endpoint call can bill, with its lines, attempts and (at a routing
+    /// gateway) the pin the request must carry, or the typed reasons it has no total. A chat request and a request
+    /// that did not prepare have no total (`Unmodeled`).
+    static sp::pricing::EndpointBound endpoint_worst_case_cost(const PreparedProviderRequest& request,
+                                                               const sp::runtime::EndpointCostOptions& options = {});
+    static sp::pricing::EndpointBound endpoint_worst_case_cost(const PreparedProviderRequest& request,
+                                                               const sp::descriptor::ModelCatalogue& catalogue,
+                                                               const sp::runtime::EndpointCostOptions& options = {});
+    /// What the SDK derived from a prepared chat request beyond its body: the tier it bills under, the extension
+    /// members that change the price (or have no catalogue row that states it), fallback models, routing, the tools
+    /// the service runs with their caps. Empty for an endpoint call and for a request that did not prepare.
+    static const sp::RequestFacts& request_facts(const PreparedProviderRequest& request) noexcept;
+    /// What the SDK derived from a prepared endpoint call: the policy fact and operation it reaches, how the policy
+    /// says the provider bills it, the model, quantities and dimensions of the request, and a gateway cap on the
+    /// price. Empty for a chat request and for a request that did not prepare.
+    static const sp::EndpointFacts& endpoint_facts(const PreparedProviderRequest& request) noexcept;
 
     /// Whether this provider forwards SchemaProvider endpoint calls.
     bool has_endpoints() const { return endpoint_runtime() != nullptr; }
